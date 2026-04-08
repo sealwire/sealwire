@@ -1154,6 +1154,9 @@ dependencies = [
 [[package]]
 name = "relay-util"
 version = "0.1.0"
+dependencies = [
+ "sha2",
+]
 
 [[package]]
 name = "reqwest"

@@ -100,7 +100,8 @@ function createIndexedDbStub() {
   };
 }
 
-function installBrowserStubs() {
+function installBrowserStubs(options = {}) {
+  const { protectedCrypto = true } = options;
   const storage = new Map();
   const localStorage = {
     getItem(key) {
@@ -114,6 +115,8 @@ function installBrowserStubs() {
     },
   };
 
+  const cryptoValue = protectedCrypto ? webcrypto : { getRandomValues: webcrypto.getRandomValues.bind(webcrypto) };
+
   globalThis.window = {
     localStorage,
     location: { href: "https://remote.example.test/" },
@@ -126,7 +129,7 @@ function installBrowserStubs() {
     btoa(value) {
       return Buffer.from(value, "binary").toString("base64");
     },
-    crypto: webcrypto,
+    crypto: cryptoValue,
     indexedDB: createIndexedDbStub(),
   };
   Object.defineProperty(globalThis, "navigator", {
@@ -135,7 +138,7 @@ function installBrowserStubs() {
   });
   Object.defineProperty(globalThis, "crypto", {
     configurable: true,
-    value: webcrypto,
+    value: cryptoValue,
   });
   Object.defineProperty(globalThis, "indexedDB", {
     configurable: true,
@@ -207,6 +210,46 @@ test("remote auth storage keeps durable metadata while payload secrets move to p
   assert.ok(state.deviceKeypair);
   assert.match(state.requestedDeviceId, /^mobile-/);
   assert.equal(browser.localStorage.getItem("agent-relay.remote-device-keypair"), null);
+});
+
+test("remote auth storage can persist and hydrate payload secrets without protected crypto", async () => {
+  const browser = installBrowserStubs({ protectedCrypto: false });
+
+  const { loadStoredPayloadSecret } = await import(`./secret-store.js?software-${Date.now()}`);
+  const { hydrateStoredRemoteSecrets, saveRemoteAuth, state } = await import(
+    `./state.js?software-${Date.now()}`
+  );
+
+  state.remoteAuth = {
+    relayId: "relay-http",
+    brokerUrl: "ws://192.168.1.10:8788",
+    brokerChannelId: "room-http",
+    relayPeerId: "relay-http",
+    securityMode: "private",
+    deviceId: "device-http",
+    deviceLabel: "Phone",
+    payloadSecret: "payload-secret-http",
+    deviceRefreshMode: null,
+    deviceRefreshToken: null,
+    deviceJoinTicket: "join-ticket-http",
+    deviceJoinTicketExpiresAt: 123,
+    sessionClaim: null,
+    sessionClaimExpiresAt: null,
+  };
+  saveRemoteAuth(state.remoteAuth);
+
+  await waitFor(() => {
+    const stored = JSON.parse(browser.localStorage.getItem("agent-relay.remote-state-v2"));
+    return stored?.remoteProfiles?.["relay-http"]?.hasStoredPayloadSecret === true;
+  });
+  await waitFor(async () => {
+    return (await loadStoredPayloadSecret("relay-http")) === "payload-secret-http";
+  });
+
+  const reloaded = await import(`./state.js?software-reload-${Date.now()}`);
+  assert.equal(reloaded.state.remoteAuth?.payloadSecret, null);
+  await reloaded.hydrateStoredRemoteSecrets();
+  assert.equal(reloaded.state.remoteAuth?.payloadSecret, "payload-secret-http");
 });
 
 test("legacy localStorage secrets are discarded on load", async () => {

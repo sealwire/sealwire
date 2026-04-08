@@ -145,7 +145,16 @@ async function main() {
     await sendPromptAndWaitForReply(remotePage, BEFORE_REFRESH_PROMPT);
 
     const authBeforeExpiry = await readStoredRemoteAuth(remotePage);
-    assert.ok(authBeforeExpiry?.payloadSecret, "paired remote should persist a payload secret");
+    assert.equal(
+      authBeforeExpiry?.hasStoredPayloadSecret,
+      true,
+      "paired remote should persist payload-secret availability metadata"
+    );
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(authBeforeExpiry || {}, "payloadSecret"),
+      false,
+      "paired remote should not store payload secrets in localStorage"
+    );
     assert.equal(authBeforeExpiry?.deviceRefreshMode, "cookie");
     assert.equal(authBeforeExpiry?.deviceRefreshToken, undefined);
     assert.equal(authBeforeExpiry?.deviceJoinTicket, undefined);
@@ -171,7 +180,11 @@ async function main() {
 
     await sendPromptAndWaitForReply(remotePage, AFTER_REFRESH_PROMPT);
     const authAfterRefresh = await readStoredRemoteAuth(remotePage);
-    assert.equal(authAfterRefresh?.payloadSecret, authBeforeExpiry?.payloadSecret);
+    assert.equal(authAfterRefresh?.hasStoredPayloadSecret, true);
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(authAfterRefresh || {}, "payloadSecret"),
+      false
+    );
     assert.equal(authAfterRefresh?.deviceRefreshMode, "cookie");
     assert.equal(authAfterRefresh?.deviceRefreshToken, undefined);
     assert.equal(authAfterRefresh?.deviceJoinTicket, undefined);

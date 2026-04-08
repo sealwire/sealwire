@@ -4,6 +4,8 @@ const REMOTE_SECRET_DB_NAME = "agent-relay-secrets";
 const REMOTE_SECRET_STORE_NAME = "payload-secrets";
 const REMOTE_SECRET_KEY_STORE_NAME = "secret-keys";
 const REMOTE_SECRET_KEY_RECORD_ID = "payload-secret-key-v1";
+const REMOTE_SECRET_KIND_PROTECTED = "protected";
+const REMOTE_SECRET_KIND_SOFTWARE = "software";
 
 let secretKeyPromise = null;
 
@@ -11,15 +13,19 @@ export async function loadStoredPayloadSecret(relayId) {
   if (!relayId) {
     return null;
   }
-  const key = await readOrCreateSecretKey();
-  if (!key) {
-    return null;
-  }
-
   const record = await withSecretStore(REMOTE_SECRET_STORE_NAME, "readonly", (store) => {
     return wrapRequest(store.get(relayId));
   });
-  if (!record?.ciphertext || !record?.iv) {
+  if (!record) {
+    return null;
+  }
+
+  if (record.kind === REMOTE_SECRET_KIND_SOFTWARE && typeof record.payloadSecret === "string") {
+    return record.payloadSecret;
+  }
+
+  const key = await readOrCreateSecretKey();
+  if (!key || !record?.ciphertext || !record?.iv) {
     return null;
   }
 
@@ -38,6 +44,24 @@ export async function storePayloadSecret(relayId, payloadSecret) {
   if (!relayId || !payloadSecret) {
     throw new Error("relayId and payloadSecret are required");
   }
+
+  if (!supportsProtectedPayloadSecretStorage()) {
+    if (!supportsSoftwarePayloadSecretStorage()) {
+      throw new Error("payload secret storage is unavailable");
+    }
+
+    await withSecretStore(REMOTE_SECRET_STORE_NAME, "readwrite", (store) => {
+      return wrapRequest(
+        store.put({
+          id: relayId,
+          kind: REMOTE_SECRET_KIND_SOFTWARE,
+          payloadSecret,
+        })
+      );
+    });
+    return;
+  }
+
   const key = await readOrCreateSecretKey();
   if (!key) {
     throw new Error("protected payload secret storage is unavailable");
@@ -58,6 +82,7 @@ export async function storePayloadSecret(relayId, payloadSecret) {
     return wrapRequest(
       store.put({
         id: relayId,
+        kind: REMOTE_SECRET_KIND_PROTECTED,
         iv: bytesToBase64(iv),
         ciphertext: bytesToBase64(new Uint8Array(ciphertext)),
       })
@@ -76,6 +101,10 @@ export async function deleteStoredPayloadSecret(relayId) {
 
 export function supportsProtectedPayloadSecretStorage() {
   return Boolean(getWebCrypto()?.subtle && getIndexedDb());
+}
+
+function supportsSoftwarePayloadSecretStorage() {
+  return Boolean(getIndexedDb());
 }
 
 async function readOrCreateSecretKey() {

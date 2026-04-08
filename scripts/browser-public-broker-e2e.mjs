@@ -133,7 +133,16 @@ async function main() {
 
     await sendPromptAndWaitForReply(remotePage, BEFORE_RESTART_PROMPT);
     const authBeforeRestart = await readStoredRemoteAuth(remotePage);
-    assert.ok(authBeforeRestart?.payloadSecret, "paired remote should persist a payload secret");
+    assert.equal(
+      authBeforeRestart?.hasStoredPayloadSecret,
+      true,
+      "paired remote should persist payload-secret availability metadata"
+    );
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(authBeforeRestart || {}, "payloadSecret"),
+      false,
+      "paired remote should not store payload secrets in localStorage"
+    );
     assert.equal(authBeforeRestart?.deviceRefreshMode, "cookie");
     assert.equal(authBeforeRestart?.deviceRefreshToken, undefined);
     assert.equal(authBeforeRestart?.deviceJoinTicket, undefined);

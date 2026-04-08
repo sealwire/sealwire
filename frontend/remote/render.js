@@ -1,6 +1,7 @@
 import * as dom from "./dom.js";
 import {
   canCurrentDeviceWrite as canRemoteDeviceWrite,
+  isCurrentDeviceActiveController as isRemoteController,
   renderDeviceMeta as renderDeviceChrome,
   renderSessionChrome,
   resetRemoteSurfaceChrome,

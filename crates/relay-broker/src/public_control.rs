@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     net::IpAddr,
     path::{Path, PathBuf},
     sync::Arc,
@@ -8,9 +8,8 @@ use std::{
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use rand::{distributions::Alphanumeric, Rng};
-use relay_util::trimmed_option_string;
+use relay_util::{sha256_hex, trimmed_option_string};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tokio::{fs, sync::Mutex};
 
 use crate::join_ticket::{unix_now, JoinTicketClaims, JoinTicketKey};
@@ -744,32 +743,31 @@ impl PublicControlPlane {
         relay_id: &str,
         broker_room_id: &str,
     ) -> Result<PersistedRelayRegistration, String> {
-        let token_hash = sha256_hex(bearer_token.trim());
         let store = self.inner.state.lock().await;
-        let registration = store
-            .relay_registrations_by_hash
-            .get(&token_hash)
-            .ok_or_else(|| "relay refresh token is invalid".to_string())?;
+        let registration = clone_entry_from_bearer_token(
+            &store.relay_registrations_by_hash,
+            bearer_token,
+            "relay refresh token is invalid",
+        )?;
         if registration.relay_id != relay_id {
             return Err("relay refresh token does not match relay_id".to_string());
         }
         if registration.broker_room_id != broker_room_id {
             return Err("relay refresh token does not match broker_room_id".to_string());
         }
-        Ok(registration.clone())
+        Ok(registration)
     }
 
     async fn authenticate_client(
         &self,
         bearer_token: &str,
     ) -> Result<PersistedClientIdentity, String> {
-        let token_hash = sha256_hex(bearer_token.trim());
         let store = self.inner.state.lock().await;
-        store
-            .client_registrations_by_hash
-            .get(&token_hash)
-            .cloned()
-            .ok_or_else(|| "client refresh token is invalid".to_string())
+        clone_entry_from_bearer_token(
+            &store.client_registrations_by_hash,
+            bearer_token,
+            "client refresh token is invalid",
+        )
     }
 
     fn issue_device_ws_token_for_registration(
@@ -797,13 +795,12 @@ impl PublicControlPlane {
         &self,
         bearer_token: &str,
     ) -> Result<PersistedDeviceGrant, String> {
-        let token_hash = sha256_hex(bearer_token.trim());
         let store = self.inner.state.lock().await;
-        store
-            .grants_by_hash
-            .get(&token_hash)
-            .cloned()
-            .ok_or_else(|| "device refresh token is invalid".to_string())
+        clone_entry_from_bearer_token(
+            &store.grants_by_hash,
+            bearer_token,
+            "device refresh token is invalid",
+        )
     }
 
     async fn issue_relay_registration_for_verify_key(
@@ -953,21 +950,16 @@ impl PublicControlStateStore {
         broker_room_id: Option<&str>,
         device_id: Option<&str>,
     ) -> usize {
-        let mut removed = 0;
-        self.grants_by_hash.retain(|_, grant| {
-            let matches = grant.relay_id == relay_id
-                && broker_room_id
-                    .map(|value| value == grant.broker_room_id)
-                    .unwrap_or(true)
-                && device_id
-                    .map(|value| value == grant.device_id)
-                    .unwrap_or(true);
-            if matches {
-                removed += 1;
-            }
-            !matches
-        });
-        removed
+        remove_matching_entries(&mut self.grants_by_hash, |grant| {
+            matches_optional_relay_target(
+                grant.relay_id.as_str(),
+                grant.broker_room_id.as_str(),
+                grant.device_id.as_str(),
+                relay_id,
+                broker_room_id,
+                device_id,
+            )
+        })
     }
 
     fn remove_client_relay_grants(
@@ -976,33 +968,22 @@ impl PublicControlStateStore {
         broker_room_id: Option<&str>,
         device_id: Option<&str>,
     ) -> usize {
-        let mut removed = 0;
-        self.client_relay_grants_by_key.retain(|_, grant| {
-            let matches = grant.relay_id == relay_id
-                && broker_room_id
-                    .map(|value| value == grant.broker_room_id)
-                    .unwrap_or(true)
-                && device_id
-                    .map(|value| value == grant.device_id)
-                    .unwrap_or(true);
-            if matches {
-                removed += 1;
-            }
-            !matches
-        });
-        removed
+        remove_matching_entries(&mut self.client_relay_grants_by_key, |grant| {
+            matches_optional_relay_target(
+                grant.relay_id.as_str(),
+                grant.broker_room_id.as_str(),
+                grant.device_id.as_str(),
+                relay_id,
+                broker_room_id,
+                device_id,
+            )
+        })
     }
 
     fn remove_client_relay_grants_by_client_id(&mut self, client_id: &str) -> usize {
-        let mut removed = 0;
-        self.client_relay_grants_by_key.retain(|_, grant| {
-            let matches = grant.client_id == client_id;
-            if matches {
-                removed += 1;
-            }
-            !matches
-        });
-        removed
+        remove_matching_entries(&mut self.client_relay_grants_by_key, |grant| {
+            grant.client_id == client_id
+        })
     }
 
     fn remove_all_other_device_grants(
@@ -1011,18 +992,12 @@ impl PublicControlStateStore {
         broker_room_id: &str,
         keep_device_id: &str,
     ) -> Vec<String> {
-        let mut revoked_device_ids = Vec::new();
-        self.grants_by_hash.retain(|_, grant| {
-            let revoke = grant.relay_id == relay_id
+        collect_removed_device_ids(&mut self.grants_by_hash, |grant| {
+            (grant.relay_id == relay_id
                 && grant.broker_room_id == broker_room_id
-                && grant.device_id != keep_device_id;
-            if revoke && !revoked_device_ids.iter().any(|id| id == &grant.device_id) {
-                revoked_device_ids.push(grant.device_id.clone());
-            }
-            !revoke
-        });
-        revoked_device_ids.sort();
-        revoked_device_ids
+                && grant.device_id != keep_device_id)
+                .then(|| grant.device_id.as_str())
+        })
     }
 
     fn remove_all_other_client_relay_grants(
@@ -1031,18 +1006,12 @@ impl PublicControlStateStore {
         broker_room_id: &str,
         keep_device_id: &str,
     ) -> Vec<String> {
-        let mut revoked_device_ids = Vec::new();
-        self.client_relay_grants_by_key.retain(|_, grant| {
-            let revoke = grant.relay_id == relay_id
+        collect_removed_device_ids(&mut self.client_relay_grants_by_key, |grant| {
+            (grant.relay_id == relay_id
                 && grant.broker_room_id == broker_room_id
-                && grant.device_id != keep_device_id;
-            if revoke && !revoked_device_ids.iter().any(|id| id == &grant.device_id) {
-                revoked_device_ids.push(grant.device_id.clone());
-            }
-            !revoke
-        });
-        revoked_device_ids.sort();
-        revoked_device_ids
+                && grant.device_id != keep_device_id)
+                .then(|| grant.device_id.as_str())
+        })
     }
 
     fn issue_or_rotate_client_identity(
@@ -1228,6 +1197,65 @@ fn parse_relay_registrations(
     Ok(parsed)
 }
 
+fn clone_entry_from_bearer_token<T: Clone>(
+    entries: &HashMap<String, T>,
+    bearer_token: &str,
+    invalid_message: &str,
+) -> Result<T, String> {
+    let token_hash = sha256_hex(bearer_token.trim());
+    entries
+        .get(&token_hash)
+        .cloned()
+        .ok_or_else(|| invalid_message.to_string())
+}
+
+fn remove_matching_entries<T>(
+    entries: &mut HashMap<String, T>,
+    mut matches: impl FnMut(&T) -> bool,
+) -> usize {
+    let mut removed = 0;
+    entries.retain(|_, entry| {
+        let should_remove = matches(entry);
+        if should_remove {
+            removed += 1;
+        }
+        !should_remove
+    });
+    removed
+}
+
+fn collect_removed_device_ids<T>(
+    entries: &mut HashMap<String, T>,
+    mut removed_device_id: impl FnMut(&T) -> Option<&str>,
+) -> Vec<String> {
+    let mut device_ids = BTreeSet::new();
+    entries.retain(|_, entry| match removed_device_id(entry) {
+        Some(device_id) => {
+            device_ids.insert(device_id.to_string());
+            false
+        }
+        None => true,
+    });
+    device_ids.into_iter().collect()
+}
+
+fn matches_optional_relay_target(
+    actual_relay_id: &str,
+    actual_broker_room_id: &str,
+    actual_device_id: &str,
+    relay_id: &str,
+    broker_room_id: Option<&str>,
+    device_id: Option<&str>,
+) -> bool {
+    actual_relay_id == relay_id
+        && broker_room_id
+            .map(|value| value == actual_broker_room_id)
+            .unwrap_or(true)
+        && device_id
+            .map(|value| value == actual_device_id)
+            .unwrap_or(true)
+}
+
 fn parse_optional_u64(name: &str, value: Option<String>) -> Result<Option<u64>, String> {
     let Some(value) = trimmed_option_string(value) else {
         return Ok(None);
@@ -1244,16 +1272,6 @@ fn random_token(length: usize) -> String {
         .take(length)
         .map(char::from)
         .collect()
-}
-
-fn sha256_hex(value: &str) -> String {
-    let digest = Sha256::digest(value.as_bytes());
-    let mut hex = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(hex, "{byte:02x}");
-    }
-    hex
 }
 
 fn client_relay_grant_key(client_id: &str, relay_id: &str) -> String {
@@ -1274,14 +1292,7 @@ fn public_mode_requires_persistent_state() -> bool {
 }
 
 fn validate_relay_verify_key(verify_key_b64: &str) -> Result<(), String> {
-    let verify_key_bytes: [u8; 32] = STANDARD
-        .decode(verify_key_b64)
-        .map_err(|_| "relay verify key is invalid".to_string())?
-        .try_into()
-        .map_err(|_| "relay verify key is invalid".to_string())?;
-    VerifyingKey::from_bytes(&verify_key_bytes)
-        .map(|_| ())
-        .map_err(|_| "relay verify key is invalid".to_string())
+    parse_relay_verifying_key(verify_key_b64).map(|_| ())
 }
 
 fn verify_relay_enrollment_challenge_signature(
@@ -1290,18 +1301,9 @@ fn verify_relay_enrollment_challenge_signature(
     challenge: &str,
     signature_b64: &str,
 ) -> Result<(), String> {
-    let verify_key_bytes: [u8; 32] = STANDARD
-        .decode(verify_key_b64)
-        .map_err(|_| "relay verify key is invalid".to_string())?
-        .try_into()
-        .map_err(|_| "relay verify key is invalid".to_string())?;
-    let signature_bytes: [u8; 64] = STANDARD
-        .decode(signature_b64)
-        .map_err(|_| "relay enrollment signature is invalid".to_string())?
-        .try_into()
-        .map_err(|_| "relay enrollment signature is invalid".to_string())?;
-    let verify_key = VerifyingKey::from_bytes(&verify_key_bytes)
-        .map_err(|_| "relay verify key is invalid".to_string())?;
+    let signature_bytes =
+        decode_base64_array::<64>(signature_b64, "relay enrollment signature is invalid")?;
+    let verify_key = parse_relay_verifying_key(verify_key_b64)?;
     let signature = Signature::from_bytes(&signature_bytes);
     verify_key
         .verify(
@@ -1309,6 +1311,24 @@ fn verify_relay_enrollment_challenge_signature(
             &signature,
         )
         .map_err(|_| "relay enrollment signature is invalid".to_string())
+}
+
+fn parse_relay_verifying_key(verify_key_b64: &str) -> Result<VerifyingKey, String> {
+    let verify_key_bytes =
+        decode_base64_array::<32>(verify_key_b64, "relay verify key is invalid")?;
+    VerifyingKey::from_bytes(&verify_key_bytes)
+        .map_err(|_| "relay verify key is invalid".to_string())
+}
+
+fn decode_base64_array<const N: usize>(
+    value: &str,
+    invalid_message: &str,
+) -> Result<[u8; N], String> {
+    STANDARD
+        .decode(value)
+        .map_err(|_| invalid_message.to_string())?
+        .try_into()
+        .map_err(|_| invalid_message.to_string())
 }
 
 fn relay_enrollment_challenge_message(challenge_id: &str, challenge: &str) -> String {

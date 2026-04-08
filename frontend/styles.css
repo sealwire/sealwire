@@ -723,6 +723,7 @@ input:focus, textarea:focus, select:focus {
   border: 1px dashed var(--border-prominent);
 }
 .pairing-qr { background: #FFFFFF; padding: 12px; border-radius: var(--radius-sm); text-align: center; }
+.pairing-qr-image { display: block; width: 100%; height: auto; max-width: 240px; margin: 0 auto; }
 .paired-device-card {
   padding: 16px;
   border-radius: var(--radius-md);

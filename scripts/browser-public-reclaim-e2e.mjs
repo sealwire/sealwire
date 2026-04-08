@@ -67,6 +67,8 @@ async function main() {
   let createdThreadId = null;
   let authBeforeRestart = null;
   let authAfterRestart = null;
+  let payloadSecretBeforeRestart = null;
+  let payloadSecretAfterRestart = null;
 
   try {
     browser = await chromium.launch({ headless: true });
@@ -114,12 +116,23 @@ async function main() {
     createdThreadId = relaySessionBeforeRestart.active_thread_id;
     assert.ok(createdThreadId, "remote start should create an active thread before relay restart");
     authBeforeRestart = await readStoredRemoteAuth(remotePage);
-    assert.ok(authBeforeRestart?.payloadSecret, "paired remote should persist a payload secret");
+    assert.equal(
+      authBeforeRestart?.hasStoredPayloadSecret,
+      true,
+      "paired remote should persist payload-secret availability metadata"
+    );
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(authBeforeRestart || {}, "payloadSecret"),
+      false,
+      "paired remote should not store payload secrets in localStorage"
+    );
+    payloadSecretBeforeRestart = await readPersistedPayloadSecret(remotePage);
+    assert.ok(payloadSecretBeforeRestart, "paired remote should persist a payload secret");
     await waitForPersistedRelayState(relayStatePath, createdThreadId);
     await waitForPersistedPayloadSecret(
       relayStatePath,
       authBeforeRestart.deviceId,
-      authBeforeRestart.payloadSecret
+      payloadSecretBeforeRestart
     );
 
     await stopManagedProcess(relay);
@@ -163,19 +176,22 @@ async function main() {
       "relay restart should restore the active session cwd"
     );
     authAfterRestart = await readStoredRemoteAuth(remotePage);
-    assert.ok(
-      authAfterRestart?.payloadSecret,
-      "remote auth should still contain a payload secret after reclaim"
-    );
+    assert.equal(authAfterRestart?.hasStoredPayloadSecret, true);
     assert.equal(
-      authAfterRestart.payloadSecret,
-      authBeforeRestart.payloadSecret,
+      Object.prototype.hasOwnProperty.call(authAfterRestart || {}, "payloadSecret"),
+      false
+    );
+    payloadSecretAfterRestart = await readPersistedPayloadSecret(remotePage);
+    assert.ok(payloadSecretAfterRestart, "payload secret should still be persisted after reclaim");
+    assert.equal(
+      payloadSecretAfterRestart,
+      payloadSecretBeforeRestart,
       "reclaim should not rotate the payload secret"
     );
     await waitForPersistedPayloadSecret(
       relayStatePath,
       authAfterRestart.deviceId,
-      authAfterRestart.payloadSecret
+      payloadSecretAfterRestart
     );
 
     await sendPromptAndWaitForReply(remotePage, AFTER_RESTART_PROMPT);
@@ -207,16 +223,16 @@ async function main() {
       )
     );
   } catch (error) {
-    if (authBeforeRestart?.payloadSecret || authAfterRestart?.payloadSecret) {
+    const authBeforeRestartHash =
+      typeof payloadSecretBeforeRestart === "string" ? sha256Hex(payloadSecretBeforeRestart) : null;
+    const authAfterRestartHash =
+      typeof payloadSecretAfterRestart === "string" ? sha256Hex(payloadSecretAfterRestart) : null;
+    if (authBeforeRestartHash || authAfterRestartHash) {
       console.error(
         JSON.stringify(
           {
-            authBeforeRestartHash: authBeforeRestart?.payloadSecret
-              ? sha256Hex(authBeforeRestart.payloadSecret)
-              : null,
-            authAfterRestartHash: authAfterRestart?.payloadSecret
-              ? sha256Hex(authAfterRestart.payloadSecret)
-              : null,
+            authBeforeRestartHash,
+            authAfterRestartHash,
             authBeforeRestartDeviceId: authBeforeRestart?.deviceId || null,
             authAfterRestartDeviceId: authAfterRestart?.deviceId || null,
           },
@@ -565,6 +581,80 @@ async function readStoredRemoteAuth(page) {
     const activeRelayId =
       parsed.activeRelayId || Object.keys(parsed.remoteProfiles)[0] || null;
     return activeRelayId ? parsed.remoteProfiles[activeRelayId] || null : null;
+  });
+}
+
+async function readPersistedPayloadSecret(page) {
+  return page.evaluate(async () => {
+    const parsed = JSON.parse(window.localStorage.getItem("agent-relay.remote-state-v2") || "null");
+    if (!parsed?.remoteProfiles) {
+      return null;
+    }
+    const activeRelayId =
+      parsed.activeRelayId || Object.keys(parsed.remoteProfiles)[0] || null;
+    if (!activeRelayId || !window.indexedDB) {
+      return null;
+    }
+
+    const database = await new Promise((resolve, reject) => {
+      const request = window.indexedDB.open("agent-relay-secrets", 1);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () =>
+        reject(request.error || new Error("failed to open payload-secret database"));
+    });
+
+    try {
+      const record = await new Promise((resolve, reject) => {
+        const transaction = database.transaction("payload-secrets", "readonly");
+        const store = transaction.objectStore("payload-secrets");
+        const request = store.get(activeRelayId);
+        request.onsuccess = () => resolve(request.result || null);
+        request.onerror = () =>
+          reject(request.error || new Error("failed to read payload secret record"));
+      });
+
+      if (!record) {
+        return null;
+      }
+
+      if (record.kind === "software" && typeof record.payloadSecret === "string") {
+        return record.payloadSecret;
+      }
+
+      if (!record.iv || !record.ciphertext || !window.crypto?.subtle) {
+        return null;
+      }
+
+      const keyRecord = await new Promise((resolve, reject) => {
+        const transaction = database.transaction("secret-keys", "readonly");
+        const store = transaction.objectStore("secret-keys");
+        const request = store.get("payload-secret-key-v1");
+        request.onsuccess = () => resolve(request.result || null);
+        request.onerror = () =>
+          reject(request.error || new Error("failed to read payload-secret key"));
+      });
+
+      if (!keyRecord?.key) {
+        return null;
+      }
+
+      const base64ToBytes = (value) => {
+        const binary = window.atob(value);
+        return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+      };
+
+      const plaintext = await window.crypto.subtle.decrypt(
+        {
+          name: "AES-GCM",
+          iv: base64ToBytes(record.iv),
+        },
+        keyRecord.key,
+        base64ToBytes(record.ciphertext)
+      );
+      return new TextDecoder().decode(plaintext);
+    } finally {
+      database.close();
+    }
   });
 }
 

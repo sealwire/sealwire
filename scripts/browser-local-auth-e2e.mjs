@@ -90,7 +90,11 @@ async function main() {
     const sessionCookie = issuedCookies.find((cookie) => cookie.name === "agent_relay_session");
     assert.ok(sessionCookie, "sign-in should mint a relay session cookie");
     assert.equal(sessionCookie.httpOnly, true, "relay session cookie should be HttpOnly");
-    assert.equal(sessionCookie.sameSite, "Lax", "relay session cookie should be SameSite=Lax");
+    assert.equal(
+      sessionCookie.sameSite,
+      "Strict",
+      "relay session cookie should be SameSite=Strict"
+    );
     assert.equal(sessionCookie.secure, false, "HTTP local e2e should not mark cookie Secure");
     assert.equal(
       await page.evaluate(() => document.cookie.includes("agent_relay_session")),

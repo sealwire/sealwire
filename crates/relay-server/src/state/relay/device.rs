@@ -4,6 +4,7 @@ use base64::{
 };
 use qrcode::{render::svg, QrCode};
 use rand::{distributions::Alphanumeric, Rng};
+use relay_util::sha256_hex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -871,16 +872,6 @@ fn random_token(length: usize) -> String {
         .take(length)
         .map(char::from)
         .collect()
-}
-
-fn sha256_hex(value: &str) -> String {
-    let digest = Sha256::digest(value.as_bytes());
-    let mut hex = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(hex, "{byte:02x}");
-    }
-    hex
 }
 
 fn device_fingerprint(verify_key_b64: Option<&str>) -> Option<String> {

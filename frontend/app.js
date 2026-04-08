@@ -1,4 +1,5 @@
 import { openSessionStream, sessionStreamUrl } from "./session-stream.js";
+import { svgDataUrl } from "./svg.js";
 
 const DEVICE_STORAGE_KEY = "agent-relay.device-id";
 const API_TOKEN_STORAGE_KEY = "agent-relay.api-token";
@@ -957,13 +958,17 @@ function renderPairingPanel() {
   pairingPanel.hidden = !pairing;
 
   if (!pairing) {
-    pairingQr.innerHTML = "";
+    pairingQr.replaceChildren();
     pairingLinkInput.value = "";
     pairingExpiry.textContent = "Pairing ticket not created yet.";
     return;
   }
 
-  pairingQr.innerHTML = pairing.pairing_qr_svg;
+  const qrImage = document.createElement("img");
+  qrImage.alt = "Pairing QR code";
+  qrImage.className = "pairing-qr-image";
+  qrImage.src = svgDataUrl(pairing.pairing_qr_svg);
+  pairingQr.replaceChildren(qrImage);
   pairingLinkInput.value = pairing.pairing_url;
   pairingExpiry.textContent = `Expires ${formatTimestamp(pairing.expires_at)}`;
 }
