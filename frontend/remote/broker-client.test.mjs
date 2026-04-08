@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { webcrypto } from "node:crypto";
 
 function createElementStub() {
   return {
@@ -62,6 +63,103 @@ class FakeWebSocket {
   }
 }
 
+function createRequest() {
+  return {
+    result: undefined,
+    error: null,
+    onsuccess: null,
+    onerror: null,
+  };
+}
+
+function createIndexedDbStub() {
+  const databases = new Map();
+
+  function createDatabase() {
+    const stores = new Map();
+
+    return {
+      objectStoreNames: {
+        contains(name) {
+          return stores.has(name);
+        },
+      },
+      createObjectStore(name, options = {}) {
+        if (!stores.has(name)) {
+          stores.set(name, {
+            keyPath: options.keyPath || "id",
+            records: new Map(),
+          });
+        }
+        return {};
+      },
+      transaction(name) {
+        const storeState = stores.get(name);
+        const transaction = {
+          error: null,
+          oncomplete: null,
+          onabort: null,
+          onerror: null,
+          objectStore() {
+            return {
+              get(key) {
+                const request = createRequest();
+                queueMicrotask(() => {
+                  request.result = storeState.records.get(key);
+                  request.onsuccess?.();
+                  queueMicrotask(() => transaction.oncomplete?.());
+                });
+                return request;
+              },
+              put(value) {
+                const request = createRequest();
+                queueMicrotask(() => {
+                  storeState.records.set(value[storeState.keyPath], value);
+                  request.result = value[storeState.keyPath];
+                  request.onsuccess?.();
+                  queueMicrotask(() => transaction.oncomplete?.());
+                });
+                return request;
+              },
+              delete(key) {
+                const request = createRequest();
+                queueMicrotask(() => {
+                  storeState.records.delete(key);
+                  request.onsuccess?.();
+                  queueMicrotask(() => transaction.oncomplete?.());
+                });
+                return request;
+              },
+            };
+          },
+        };
+        return transaction;
+      },
+      close() {},
+    };
+  }
+
+  return {
+    open(name) {
+      const request = createRequest();
+      queueMicrotask(() => {
+        let database = databases.get(name);
+        const isNew = !database;
+        if (!database) {
+          database = createDatabase();
+          databases.set(name, database);
+        }
+        request.result = database;
+        if (isNew) {
+          request.onupgradeneeded?.();
+        }
+        queueMicrotask(() => request.onsuccess?.());
+      });
+      return request;
+    },
+  };
+}
+
 async function waitFor(predicate, timeoutMs = 1000) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
@@ -108,6 +206,8 @@ function installBrowserStubs() {
     btoa(value) {
       return Buffer.from(value, "binary").toString("base64");
     },
+    crypto: webcrypto,
+    indexedDB: createIndexedDbStub(),
     setTimeout(callback) {
       pendingTimers.push(callback);
       return pendingTimers.length;
@@ -122,6 +222,14 @@ function installBrowserStubs() {
   Object.defineProperty(globalThis, "navigator", {
     configurable: true,
     value: { platform: "Test Browser" },
+  });
+  Object.defineProperty(globalThis, "crypto", {
+    configurable: true,
+    value: webcrypto,
+  });
+  Object.defineProperty(globalThis, "indexedDB", {
+    configurable: true,
+    value: windowObject.indexedDB,
   });
   globalThis.WebSocket = FakeWebSocket;
 

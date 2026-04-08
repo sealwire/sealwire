@@ -17,11 +17,11 @@ use super::*;
 use crate::auth::BrokerAuthMode;
 use crate::join_ticket::{JoinTicketClaims, JoinTicketKey};
 use crate::public_control::{
-    ClientGrantRequest, ClientGrantResponse, ClientRelaysResponse, DeviceGrantBulkRevokeRequest,
-    DeviceGrantBulkRevokeResponse, DeviceGrantRequest, DeviceGrantResponse,
-    DeviceGrantRevokeRequest, DeviceGrantRevokeResponse, DeviceSessionResponse,
-    DeviceWsTokenResponse, PairingWsTokenRequest, PairingWsTokenResponse, PublicControlPlane,
-    RelayEnrollmentChallengeRequest, RelayEnrollmentChallengeResponse,
+    ClientGrantRequest, ClientGrantResponse, ClientRelaysResponse, ClientSessionResponse,
+    DeviceGrantBulkRevokeRequest, DeviceGrantBulkRevokeResponse, DeviceGrantRequest,
+    DeviceGrantResponse, DeviceGrantRevokeRequest, DeviceGrantRevokeResponse,
+    DeviceSessionResponse, DeviceWsTokenResponse, PairingWsTokenRequest, PairingWsTokenResponse,
+    PublicControlPlane, RelayEnrollmentChallengeRequest, RelayEnrollmentChallengeResponse,
     RelayEnrollmentCompleteRequest, RelayEnrollmentResponse, RelayWsTokenRequest,
     RelayWsTokenResponse,
 };
@@ -1104,6 +1104,59 @@ async fn public_client_grants_list_relays_and_track_revoke() {
     let relays_after_revoke: ClientRelaysResponse =
         public_get(address, "/api/public/relays", &grant.client_refresh_token).await;
     assert!(relays_after_revoke.relays.is_empty());
+}
+
+#[tokio::test]
+async fn public_client_session_cookie_can_list_relays() {
+    let address = spawn_public_mode_app().await;
+    let signing_key = SigningKey::from_bytes(&[8_u8; 32]);
+
+    let grant: ClientGrantResponse = public_post(
+        address,
+        "/api/public/clients/grants",
+        "relay-refresh-1",
+        &ClientGrantRequest {
+            relay_id: "relay-1".to_string(),
+            broker_room_id: "room-a".to_string(),
+            device_id: "device-client-cookie".to_string(),
+            client_verify_key: STANDARD.encode(signing_key.verifying_key().to_bytes()),
+            client_label: Some("Tablet".to_string()),
+            device_label: Some("Tablet".to_string()),
+        },
+    )
+    .await;
+
+    let session_response = public_post_response(
+        address,
+        "/api/public/client/session",
+        &grant.client_refresh_token,
+        &serde_json::json!({}),
+    )
+    .await
+    .error_for_status()
+    .expect("client session request should succeed");
+    let cookie = set_cookie_name_value(&session_response);
+    let session: ClientSessionResponse = session_response
+        .json()
+        .await
+        .expect("client session response should decode");
+    assert_eq!(session.client_id, grant.client_id);
+
+    let response = reqwest::Client::new()
+        .get(format!("http://{address}/api/public/relays"))
+        .header(reqwest::header::COOKIE, cookie)
+        .send()
+        .await
+        .expect("cookie relay directory request should complete")
+        .error_for_status()
+        .expect("cookie relay directory request should succeed");
+    let relays: ClientRelaysResponse = response
+        .json()
+        .await
+        .expect("relay directory response should decode");
+    assert_eq!(relays.client_id, grant.client_id);
+    assert_eq!(relays.relays.len(), 1);
+    assert_eq!(relays.relays[0].relay_id, "relay-1");
 }
 
 #[tokio::test]

@@ -171,6 +171,27 @@ export async function establishDeviceRefreshSession(refreshToken, brokerUrl) {
   return payload;
 }
 
+export async function establishClientRefreshSession(refreshToken, brokerUrl) {
+  const url = new URL("/api/public/client/session", brokerControlUrl(brokerUrl));
+  const response = await fetch(url, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: {
+      Authorization: `Bearer ${refreshToken}`,
+    },
+  });
+  let payload = null;
+  try {
+    payload = await response.json();
+  } catch {
+    payload = null;
+  }
+  if (!response.ok) {
+    throw new Error(payload?.message || payload?.error || "client session setup failed");
+  }
+  return payload;
+}
+
 export async function clearDeviceRefreshSession(brokerUrl) {
   if (!brokerUrl) {
     return;
@@ -183,8 +204,20 @@ export async function clearDeviceRefreshSession(brokerUrl) {
   }).catch(() => {});
 }
 
+export async function clearClientRefreshSession(brokerUrl) {
+  if (!brokerUrl) {
+    return;
+  }
+
+  const url = new URL("/api/public/client/session", brokerControlUrl(brokerUrl));
+  await fetch(url, {
+    method: "DELETE",
+    credentials: "same-origin",
+  }).catch(() => {});
+}
+
 export async function refreshRelayDirectory(reason, { silent = false } = {}) {
-  if (!state.clientAuth?.clientRefreshToken) {
+  if (!state.clientAuth?.brokerControlUrl) {
     setRelayDirectory([]);
     return [];
   }
@@ -195,9 +228,7 @@ export async function refreshRelayDirectory(reason, { silent = false } = {}) {
 
   const url = new URL("/api/public/relays", currentClientControlUrl());
   const response = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${state.clientAuth.clientRefreshToken}`,
-    },
+    credentials: "same-origin",
   });
   let payload = null;
   try {

@@ -11,6 +11,7 @@ import {
   clearDeviceRefreshSession,
   closeBrokerSocket,
   connectBroker,
+  establishClientRefreshSession,
   establishDeviceRefreshSession,
   sendBrokerFrame,
 } from "./broker-client.js";
@@ -201,11 +202,18 @@ export async function handleEncryptedPairingResult(payload) {
     }
   }
   if (result.client_refresh_token && result.client_id) {
-    saveClientAuth({
-      clientId: result.client_id,
-      clientRefreshToken: result.client_refresh_token,
-      brokerControlUrl: brokerControlUrl(state.pairingTicket.broker_url),
-    });
+    try {
+      await establishClientRefreshSession(
+        result.client_refresh_token,
+        state.pairingTicket.broker_url
+      );
+      saveClientAuth({
+        clientId: result.client_id,
+        brokerControlUrl: brokerControlUrl(state.pairingTicket.broker_url),
+      });
+    } catch (error) {
+      renderLog(`Broker client session cookie could not be established yet: ${error.message}`);
+    }
   }
   saveRemoteAuth(state.remoteAuth);
   state.pairingTicket = null;

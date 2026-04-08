@@ -171,6 +171,12 @@ pub struct DeviceSessionResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientSessionResponse {
+    pub client_id: String,
+    pub cookie_session: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceGrantRevokeRequest {
     pub relay_id: String,
     pub broker_room_id: String,
@@ -586,6 +592,17 @@ impl PublicControlPlane {
         Ok(DeviceSessionResponse {
             broker_room_id: grant.broker_room_id,
             device_id: grant.device_id,
+            cookie_session: true,
+        })
+    }
+
+    pub async fn issue_client_session(
+        &self,
+        bearer_token: &str,
+    ) -> Result<ClientSessionResponse, String> {
+        let client = self.authenticate_client(bearer_token).await?;
+        Ok(ClientSessionResponse {
+            client_id: client.client_id,
             cookie_session: true,
         })
     }

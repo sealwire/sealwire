@@ -66,11 +66,11 @@ function installBrowserStubs() {
   return { elements };
 }
 
-test("device meta renders without old key-storage warnings", async () => {
-  const browser = installBrowserStubs();
-  const { renderDeviceMeta } = await import("./render-chrome.js");
-  const { state } = await import("./state.js");
+const browser = installBrowserStubs();
+const { renderDeviceMeta } = await import("./render-chrome.js");
+const { state } = await import("./state.js");
 
+test("device meta renders without old key-storage warnings", async () => {
   state.remoteAuth = null;
   state.pairingTicket = null;
   state.relayDirectory = [];
@@ -114,4 +114,48 @@ test("device meta renders without old key-storage warnings", async () => {
   assert.doesNotMatch(pairedMarkup, /legacy localStorage/);
   assert.match(pairedMarkup, /Primary Phone/);
   assert.equal(browser.elements.get("#remote-home-button").hidden, false);
+});
+
+test("device meta calls out relays that need local credential recovery", async () => {
+  state.session = null;
+  state.remoteAuth = {
+    relayId: "relay-1",
+    relayLabel: "Work Mac",
+    brokerUrl: "ws://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "private",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: null,
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: null,
+    deviceJoinTicketExpiresAt: null,
+    sessionClaim: null,
+    sessionClaimExpiresAt: null,
+  };
+  state.pairingTicket = null;
+  state.relayDirectory = [
+    {
+      relayId: "relay-1",
+      relayLabel: "Work Mac",
+      brokerRoomId: "room-a",
+      deviceId: "device-1",
+      deviceLabel: "Primary Phone",
+      hasLocalProfile: false,
+      needsLocalRePairing: true,
+      grantedAt: null,
+    },
+  ];
+
+  renderDeviceMeta();
+
+  const markup = browser.elements.get("#device-meta").innerHTML;
+  assert.match(markup, /Re-pair required/);
+  assert.match(markup, /local encrypted credentials are unavailable/i);
+  assert.equal(
+    browser.elements.get("#remote-workspace-subtitle").textContent,
+    "Local encrypted credentials are unavailable in this browser. Pair this relay again on this device to restore remote access."
+  );
 });

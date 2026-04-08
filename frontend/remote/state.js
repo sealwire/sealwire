@@ -1,4 +1,9 @@
 import { ensureDeviceKeypair } from "./crypto.js";
+import {
+  deleteStoredPayloadSecret,
+  loadStoredPayloadSecret,
+  storePayloadSecret,
+} from "./secret-store.js";
 
 const REMOTE_STATE_STORAGE_KEY = "agent-relay.remote-state-v2";
 const REMOTE_DEVICE_LABEL_STORAGE_KEY = "agent-relay.remote-device-label";
@@ -211,6 +216,9 @@ export function saveRemoteAuth(value) {
   state.remoteAuth = normalized;
   state.relayDirectory = deriveRelayDirectory(state.remoteProfiles, state.relayDirectory);
   persistRemoteStore();
+  if (normalized.payloadSecret) {
+    void persistProtectedPayloadSecret(relayId, normalized.payloadSecret);
+  }
 }
 
 export function selectRelayProfile(relayId) {
@@ -243,18 +251,19 @@ export function forgetCurrentRemoteProfile() {
     return;
   }
 
+  const relayId = state.activeRelayId;
   delete state.remoteProfiles[state.activeRelayId];
   state.activeRelayId = null;
   state.remoteAuth = null;
   state.relayDirectory = deriveRelayDirectory(state.remoteProfiles, []);
   persistRemoteStore();
+  void deleteStoredPayloadSecret(relayId);
 }
 
 export function saveClientAuth(value) {
   state.clientAuth = value
     ? {
         clientId: value.clientId,
-        clientRefreshToken: value.clientRefreshToken,
         brokerControlUrl: value.brokerControlUrl,
       }
     : null;
@@ -279,6 +288,34 @@ export function brokerControlUrl(brokerUrl) {
 
 export function currentClientControlUrl() {
   return state.clientAuth?.brokerControlUrl || brokerControlUrl(state.remoteAuth?.brokerUrl || state.pairingTicket?.broker_url || window.location.origin);
+}
+
+export async function hydrateStoredRemoteSecrets() {
+  const entries = Object.entries(state.remoteProfiles);
+
+  for (const [relayId, profile] of entries) {
+    if (!profile?.hasStoredPayloadSecret) {
+      continue;
+    }
+
+    try {
+      const payloadSecret = await loadStoredPayloadSecret(relayId);
+      if (!payloadSecret) {
+        profile.payloadSecret = null;
+        profile.hasStoredPayloadSecret = false;
+        continue;
+      }
+      profile.payloadSecret = payloadSecret;
+    } catch (error) {
+      profile.payloadSecret = null;
+      profile.hasStoredPayloadSecret = false;
+      console.warn("[agent-relay] failed to hydrate protected payload secret", error);
+    }
+  }
+
+  state.relayDirectory = deriveRelayDirectory(state.remoteProfiles, state.relayDirectory);
+  syncCurrentRemoteAuth();
+  persistRemoteStore();
 }
 
 function loadOrCreateRequestedDeviceId(verifyKey) {
@@ -309,6 +346,14 @@ function loadRemoteStore() {
 
   try {
     const parsed = JSON.parse(raw);
+    if (containsLegacySensitiveState(parsed)) {
+      window.localStorage.removeItem(REMOTE_STATE_STORAGE_KEY);
+      return {
+        clientAuth: null,
+        activeRelayId: null,
+        remoteProfiles: {},
+      };
+    }
     const remoteProfiles = Object.fromEntries(
       Object.entries(parsed?.remoteProfiles || {})
         .map(([relayId, profile]) => [
@@ -346,13 +391,15 @@ function normalizeRemoteProfile(profile, options = {}) {
     !profile?.relayId ||
     !profile?.brokerUrl ||
     !profile?.brokerChannelId ||
-    !profile?.deviceId ||
-    !profile?.payloadSecret
+    !profile?.deviceId
   ) {
     return null;
   }
 
   const usesBrokerCookieRefresh = profile.deviceRefreshMode === "cookie";
+  const hasStoredPayloadSecret = fromStorage
+    ? profile.hasStoredPayloadSecret === true
+    : profile.hasStoredPayloadSecret === true;
 
   return {
     relayId: profile.relayId,
@@ -363,9 +410,10 @@ function normalizeRemoteProfile(profile, options = {}) {
     securityMode: profile.securityMode || "private",
     deviceId: profile.deviceId,
     deviceLabel: profile.deviceLabel || defaultDeviceLabel(),
-    payloadSecret: profile.payloadSecret,
+    payloadSecret: fromStorage ? null : profile.payloadSecret ?? null,
+    hasStoredPayloadSecret,
     deviceRefreshMode: usesBrokerCookieRefresh ? "cookie" : null,
-    deviceRefreshToken: fromStorage ? profile.deviceRefreshToken || null : profile.deviceRefreshToken ?? null,
+    deviceRefreshToken: fromStorage ? null : profile.deviceRefreshToken ?? null,
     deviceJoinTicket:
       fromStorage && usesBrokerCookieRefresh ? null : profile.deviceJoinTicket ?? null,
     deviceJoinTicketExpiresAt:
@@ -376,13 +424,12 @@ function normalizeRemoteProfile(profile, options = {}) {
 }
 
 function normalizeClientAuth(value) {
-  if (!value?.clientId || !value?.clientRefreshToken || !value?.brokerControlUrl) {
+  if (!value?.clientId || !value?.brokerControlUrl) {
     return null;
   }
 
   return {
     clientId: value.clientId,
-    clientRefreshToken: value.clientRefreshToken,
     brokerControlUrl: value.brokerControlUrl,
   };
 }
@@ -400,7 +447,6 @@ function persistRemoteStore() {
     clientAuth: state.clientAuth
       ? {
           clientId: state.clientAuth.clientId,
-          clientRefreshToken: state.clientAuth.clientRefreshToken,
           brokerControlUrl: state.clientAuth.brokerControlUrl,
         }
       : null,
@@ -416,12 +462,8 @@ function persistRemoteStore() {
           securityMode: profile.securityMode || "private",
           deviceId: profile.deviceId,
           deviceLabel: profile.deviceLabel || null,
-          payloadSecret: profile.payloadSecret,
+          hasStoredPayloadSecret: profile.hasStoredPayloadSecret === true,
           deviceRefreshMode: profile.deviceRefreshMode === "cookie" ? "cookie" : null,
-          deviceRefreshToken:
-            profile.deviceRefreshMode === "cookie"
-              ? null
-              : profile.deviceRefreshToken || null,
           deviceJoinTicket:
             profile.deviceRefreshMode === "cookie"
               ? null
@@ -438,17 +480,47 @@ function persistRemoteStore() {
   window.localStorage.setItem(REMOTE_STATE_STORAGE_KEY, JSON.stringify(payload));
 }
 
+function containsLegacySensitiveState(parsed) {
+  if (parsed?.clientAuth?.clientRefreshToken) {
+    return true;
+  }
+
+  return Object.values(parsed?.remoteProfiles || {}).some((profile) => {
+    return Boolean(profile?.payloadSecret || profile?.deviceRefreshToken);
+  });
+}
+
+async function persistProtectedPayloadSecret(relayId, payloadSecret) {
+  try {
+    await storePayloadSecret(relayId, payloadSecret);
+    const profile = state.remoteProfiles[relayId];
+    if (profile && profile.hasStoredPayloadSecret !== true) {
+      profile.hasStoredPayloadSecret = true;
+      persistRemoteStore();
+    }
+  } catch (error) {
+    const profile = state.remoteProfiles[relayId];
+    if (profile) {
+      profile.hasStoredPayloadSecret = false;
+      persistRemoteStore();
+    }
+    console.warn("[agent-relay] failed to persist protected payload secret", error);
+  }
+}
+
 function deriveRelayDirectory(remoteProfiles, serverEntries) {
   const entriesByRelayId = new Map();
 
   for (const profile of Object.values(remoteProfiles)) {
+    const hasLocalProfile = Boolean(profile.payloadSecret);
     entriesByRelayId.set(profile.relayId, {
       relayId: profile.relayId,
       relayLabel: profile.relayLabel || null,
       brokerRoomId: profile.brokerChannelId,
       deviceId: profile.deviceId,
       deviceLabel: profile.deviceLabel,
-      hasLocalProfile: true,
+      hasLocalProfile,
+      needsLocalRePairing: !hasLocalProfile,
       grantedAt: null,
     });
   }
@@ -461,6 +533,7 @@ function deriveRelayDirectory(remoteProfiles, serverEntries) {
       deviceId: entry.device_id,
       deviceLabel: null,
       hasLocalProfile: false,
+      needsLocalRePairing: false,
       grantedAt: null,
     };
     entriesByRelayId.set(entry.relay_id, {

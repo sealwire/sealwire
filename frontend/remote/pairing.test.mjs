@@ -143,3 +143,71 @@ test("expired pairing result from relay is translated into a clear QR renewal me
     /QR code or pairing link has expired.*Generate a new QR code/i
   );
 });
+
+test("forgeting one relay does not clear the broker-wide client session cookie", async () => {
+  installBrowserStubs();
+  const fetchCalls = [];
+  globalThis.fetch = async (url, options) => {
+    fetchCalls.push({
+      url: String(url),
+      options,
+    });
+    return {
+      ok: true,
+      async json() {
+        return {};
+      },
+    };
+  };
+
+  const { forgetCurrentDevice } = await import(`./pairing.js?forget-${Date.now()}`);
+  const { state } = await import("./state.js");
+
+  state.clientAuth = {
+    clientId: "client-1",
+    brokerControlUrl: "https://broker.example.test",
+  };
+  state.remoteProfiles = {
+    "relay-1": {
+      relayId: "relay-1",
+      brokerUrl: "wss://broker.example.test",
+      brokerChannelId: "room-a",
+      relayPeerId: "relay-1",
+      securityMode: "private",
+      deviceId: "device-1",
+      deviceLabel: "Primary Phone",
+      payloadSecret: "payload-secret-1",
+      hasStoredPayloadSecret: true,
+      deviceRefreshMode: "cookie",
+      deviceJoinTicket: null,
+      deviceJoinTicketExpiresAt: null,
+      sessionClaim: null,
+      sessionClaimExpiresAt: null,
+    },
+    "relay-2": {
+      relayId: "relay-2",
+      brokerUrl: "wss://broker.example.test",
+      brokerChannelId: "room-b",
+      relayPeerId: "relay-2",
+      securityMode: "private",
+      deviceId: "device-2",
+      deviceLabel: "Tablet",
+      payloadSecret: "payload-secret-2",
+      hasStoredPayloadSecret: true,
+      deviceRefreshMode: "cookie",
+      deviceJoinTicket: null,
+      deviceJoinTicketExpiresAt: null,
+      sessionClaim: null,
+      sessionClaimExpiresAt: null,
+    },
+  };
+  state.activeRelayId = "relay-1";
+  state.remoteAuth = state.remoteProfiles["relay-1"];
+
+  forgetCurrentDevice();
+
+  assert.equal(fetchCalls.length, 1);
+  assert.match(fetchCalls[0].url, /\/api\/public\/device\/session$/);
+  assert.equal(state.clientAuth?.clientId, "client-1");
+  assert.equal(state.remoteProfiles["relay-2"]?.relayId, "relay-2");
+});

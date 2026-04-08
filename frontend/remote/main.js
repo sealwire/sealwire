@@ -42,6 +42,7 @@ import {
 import {
   clearActiveRelaySelection,
   ensureDeviceIdentity,
+  hydrateStoredRemoteSecrets,
   loadDeviceLabel,
   selectRelayProfile,
   state,
@@ -166,6 +167,11 @@ async function boot() {
     await ensureDeviceIdentity();
   } catch (error) {
     renderLog(`Device identity could not be initialized: ${error.message}`);
+  }
+  try {
+    await hydrateStoredRemoteSecrets();
+  } catch (error) {
+    renderLog(`Stored relay secrets could not be restored: ${error.message}`);
   }
   void registerRemotePwa();
 

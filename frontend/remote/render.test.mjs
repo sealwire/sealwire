@@ -114,3 +114,50 @@ test("renderEmptyState shows first-pair copy when no relay grants exist", async 
     /Pair this browser before sending messages/
   );
 });
+
+test("renderEmptyState shows re-pair guidance when local credentials are missing", async () => {
+  state.clientAuth = {
+    clientId: "client-1",
+    brokerControlUrl: "https://broker.example.test",
+  };
+  state.remoteAuth = {
+    relayId: "relay-1",
+    relayLabel: "Work Mac",
+    brokerUrl: "ws://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "private",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: null,
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: null,
+    deviceJoinTicketExpiresAt: null,
+    sessionClaim: null,
+    sessionClaimExpiresAt: null,
+  };
+  state.pairingTicket = null;
+  state.relayDirectory = [
+    {
+      relayId: "relay-1",
+      relayLabel: "Work Mac",
+      brokerRoomId: "room-a",
+      deviceId: "device-1",
+      deviceLabel: "Primary Phone",
+      hasLocalProfile: false,
+      needsLocalRePairing: true,
+      grantedAt: null,
+    },
+  ];
+
+  renderEmptyState();
+
+  assert.match(browser.elements.get("#remote-transcript").innerHTML, /Local credentials missing/);
+  assert.match(browser.elements.get("#remote-transcript").innerHTML, /Pair this relay again on this device/);
+  assert.equal(browser.elements.get("#remote-session-toggle").disabled, true);
+  assert.match(
+    browser.elements.get("#remote-message-input").placeholder,
+    /Local credentials are unavailable/
+  );
+});

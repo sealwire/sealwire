@@ -108,11 +108,13 @@ export function renderRelayDirectory() {
   dom.remoteRelaysList.innerHTML = relays
     .map((relay) => {
       const title = relay.relayLabel || relay.relayId;
-      const subtitle = relay.hasLocalProfile
-        ? relay.deviceLabel || relay.deviceId
-        : "Grant exists, but this browser does not have local encrypted access yet.";
+      const subtitle = relaySubtitle(relay);
       const activeClass = state.remoteAuth?.relayId === relay.relayId ? " is-active" : "";
-      const actionLabel = relay.hasLocalProfile ? "Open relay" : "Pair again";
+      const actionLabel = relay.hasLocalProfile
+        ? "Open relay"
+        : relay.needsLocalRePairing
+          ? "Re-pair relay"
+          : "Pair again";
       return `
         <button class="conversation-item${activeClass}" type="button" data-relay-id="${escapeHtml(relay.relayId)}" ${relay.hasLocalProfile ? "" : "disabled"}>
           <span class="conversation-title">${escapeHtml(title)}</span>
@@ -140,6 +142,11 @@ export function renderEmptyState() {
 
   if (!state.remoteAuth && !state.pairingTicket) {
     renderRelayHome();
+    return;
+  }
+
+  if (state.remoteAuth && !state.remoteAuth.payloadSecret && !state.pairingTicket) {
+    renderMissingCredentialsState();
     return;
   }
 
@@ -239,11 +246,17 @@ function renderRelayHomeCard(relay) {
   const title = relay.relayLabel || relay.relayId;
   const subtitle = relay.hasLocalProfile
     ? relay.deviceLabel || relay.deviceId
-    : "This browser can see the grant, but it does not have local encrypted access for this relay yet.";
+    : relay.needsLocalRePairing
+      ? "Local credentials are missing in this browser. Pair this relay again to restore remote access."
+      : "This browser can see the grant, but it does not have local encrypted access for this relay yet.";
   const meta = relay.grantedAt
     ? `Granted ${formatTimestamp(relay.grantedAt)}`
     : relay.brokerRoomId || relay.relayId;
-  const cta = relay.hasLocalProfile ? "Open relay" : "Pair again in this browser";
+  const cta = relay.hasLocalProfile
+    ? "Open relay"
+    : relay.needsLocalRePairing
+      ? "Re-pair in this browser"
+      : "Pair again in this browser";
 
   return `
     <button class="relay-home-card" type="button" data-relay-home-id="${escapeHtml(relay.relayId)}" ${relay.hasLocalProfile ? "" : "disabled"}>
@@ -262,12 +275,13 @@ function renderRelayHomeCard(relay) {
 
 function syncIdleSurfaceControls() {
   const hasRelay = Boolean(state.remoteAuth);
-  dom.remoteSessionToggle.disabled = !hasRelay;
-  dom.remoteThreadsRefreshButton.disabled = !hasRelay;
-  dom.remoteThreadsCwdInput.disabled = !hasRelay;
-  dom.remoteStartSessionButton.disabled = !hasRelay;
+  const hasUsableRelay = Boolean(state.remoteAuth?.payloadSecret);
+  dom.remoteSessionToggle.disabled = !hasUsableRelay;
+  dom.remoteThreadsRefreshButton.disabled = !hasUsableRelay;
+  dom.remoteThreadsCwdInput.disabled = !hasUsableRelay;
+  dom.remoteStartSessionButton.disabled = !hasUsableRelay;
 
-  if (!hasRelay) {
+  if (!hasUsableRelay) {
     setRemoteSessionPanelOpen(false);
   }
 
@@ -277,7 +291,33 @@ function syncIdleSurfaceControls() {
     ? state.relayDirectory?.length
       ? "Open a relay before sending messages."
       : "Pair this browser before sending messages."
-    : "Start or resume a remote session first.";
+    : hasUsableRelay
+      ? "Start or resume a remote session first."
+      : "Local credentials are unavailable. Pair this relay again in this browser.";
   dom.remoteHomeButton.hidden = !hasRelay;
   dom.remoteHomeButton.disabled = !hasRelay;
+}
+
+function relaySubtitle(relay) {
+  if (relay.hasLocalProfile) {
+    return relay.deviceLabel || relay.deviceId;
+  }
+
+  if (relay.needsLocalRePairing) {
+    return "Local credentials are missing in this browser. Pair this relay again to restore encrypted access.";
+  }
+
+  return "Grant exists, but this browser does not have local encrypted access yet.";
+}
+
+function renderMissingCredentialsState() {
+  const relayLabel = state.remoteAuth?.relayLabel || state.remoteAuth?.deviceLabel || "This relay";
+  dom.remoteTranscript.innerHTML = `
+    <div class="thread-empty relay-home-empty">
+      <span class="thread-empty-badge">Re-pair required</span>
+      <h2>Local credentials missing</h2>
+      <p>${escapeHtml(relayLabel)} is still known to this browser, but its local encrypted credentials are unavailable.</p>
+      <p>Pair this relay again on this device to restore remote access.</p>
+    </div>
+  `;
 }

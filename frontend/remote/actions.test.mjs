@@ -191,6 +191,17 @@ function nextTick() {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
+async function waitFor(predicate, timeoutMs = 1000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (await predicate()) {
+      return;
+    }
+    await nextTick();
+  }
+  throw new Error("timed out waiting for async browser state");
+}
+
 test("ensureRemoteClaim performs challenge-response without rotating payload secrets", async () => {
   const browser = installBrowserStubs();
   const sentPayloads = [];
@@ -277,7 +288,8 @@ test("ensureRemoteClaim performs challenge-response without rotating payload sec
 
   const storedAuth = JSON.parse(browser.localStorage.getItem("agent-relay.remote-state-v2"));
   const storedProfile = storedAuth.remoteProfiles["relay-1"];
-  assert.equal(storedProfile.payloadSecret, "payload-secret-1");
+  assert.equal("payloadSecret" in storedProfile, false);
+  assert.equal(storedProfile.hasStoredPayloadSecret, true);
   assert.equal(storedProfile.deviceRefreshToken, undefined);
   assert.equal(storedProfile.deviceJoinTicket, undefined);
 });
@@ -323,12 +335,19 @@ test("encrypted remote action results decrypt with the persisted payload secret"
     device_id: "device-1",
     envelope,
   });
+  await nextTick();
 
   assert.equal(state.remoteAuth.payloadSecret, "payload-secret-1");
   assert.equal(state.remoteAuth.sessionClaim, "session-claim-3");
 
+  await waitFor(() => {
+    const storedAuth = JSON.parse(browser.localStorage.getItem("agent-relay.remote-state-v2"));
+    return storedAuth?.remoteProfiles?.["relay-1"]?.hasStoredPayloadSecret === true;
+  });
+
   const storedAuth = JSON.parse(browser.localStorage.getItem("agent-relay.remote-state-v2"));
-  assert.equal(storedAuth.remoteProfiles["relay-1"].payloadSecret, "payload-secret-1");
+  assert.equal("payloadSecret" in storedAuth.remoteProfiles["relay-1"], false);
+  assert.equal(storedAuth.remoteProfiles["relay-1"].hasStoredPayloadSecret, true);
 });
 
 test("list_threads uses device access without pre-claiming control", async () => {

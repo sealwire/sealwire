@@ -69,7 +69,7 @@ export function renderDeviceMeta() {
         <div class="paired-device-copy">
           <strong>${escapeHtml(state.remoteAuth.deviceLabel)}</strong>
           <div class="paired-device-badges">
-            ${statusBadgeMarkup("Paired", "ready")}
+            ${statusBadgeMarkup(selectedRelayNeedsRepair() ? "Re-pair required" : "Paired", selectedRelayNeedsRepair() ? "alert" : "ready")}
             ${statusBadgeMarkup(securityModeLabel(state.session), state.remoteAuth.securityMode === "managed" ? "alert" : "ready")}
             ${statusBadgeMarkup(remoteAccessStatusText(), remoteAccessBadgeTone())}
           </div>
@@ -127,6 +127,13 @@ export function updateStatusBadge() {
   if (!state.remoteAuth && state.relayDirectory?.length) {
     dom.remoteStatusBadge.textContent = "Home";
     dom.remoteStatusBadge.className = "status-badge status-badge-ready";
+    renderOverviewCards();
+    return;
+  }
+
+  if (selectedRelayNeedsRepair()) {
+    dom.remoteStatusBadge.textContent = "Re-pair required";
+    dom.remoteStatusBadge.className = "status-badge status-badge-alert";
     renderOverviewCards();
     return;
   }
@@ -256,6 +263,10 @@ function remoteAccessLabel() {
     return "Unpaired";
   }
 
+  if (selectedRelayNeedsRepair()) {
+    return "This browser still knows this relay, but its local encrypted credentials are unavailable. Pair it again on this device to restore remote access.";
+  }
+
   if (!state.session?.active_thread_id) {
     return "Standby until you start or resume a session";
   }
@@ -284,6 +295,10 @@ function remoteAccessStatusText() {
     return "Unpaired";
   }
 
+  if (selectedRelayNeedsRepair()) {
+    return "Re-pair required";
+  }
+
   if (!state.session?.active_thread_id) {
     return "Standby";
   }
@@ -302,6 +317,10 @@ function remoteAccessStatusText() {
 function remoteAccessBadgeTone() {
   if (!state.remoteAuth) {
     return "offline";
+  }
+
+  if (selectedRelayNeedsRepair()) {
+    return "alert";
   }
 
   if (
@@ -387,6 +406,9 @@ function workspaceTitle() {
 
 function workspaceSubtitle() {
   if (state.remoteAuth) {
+    if (selectedRelayNeedsRepair()) {
+      return "Local encrypted credentials are unavailable in this browser. Pair this relay again on this device to restore remote access.";
+    }
     return "Remote device paired. Start a session, resume one from history, or wait for a live thread.";
   }
   if (state.pairingTicket) {
@@ -445,4 +467,8 @@ function pairingButtonLabel() {
     return "Waiting...";
   }
   return "Pairing...";
+}
+
+function selectedRelayNeedsRepair() {
+  return Boolean(state.remoteAuth && !state.remoteAuth.payloadSecret);
 }

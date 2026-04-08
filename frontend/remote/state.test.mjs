@@ -60,6 +60,16 @@ function createIndexedDbStub() {
                 });
                 return request;
               },
+              delete(key) {
+                const request = createRequest();
+                queueMicrotask(() => {
+                  storeState.records.delete(key);
+                  request.result = undefined;
+                  request.onsuccess?.();
+                  queueMicrotask(() => transaction.oncomplete?.());
+                });
+                return request;
+              },
             };
           },
         };
@@ -135,52 +145,63 @@ function installBrowserStubs() {
   return { localStorage };
 }
 
-test("remote auth storage keeps durable metadata but drops refresh and session secrets", async () => {
-  const browser = installBrowserStubs();
-  browser.localStorage.setItem(
-    "agent-relay.remote-state-v2",
-    JSON.stringify({
-      activeRelayId: "relay-1",
-      remoteProfiles: {
-        "relay-1": {
-          relayId: "relay-1",
-          brokerUrl: "ws://broker.example.test",
-          brokerChannelId: "room-a",
-          relayPeerId: "relay-1",
-          securityMode: "private",
-          deviceId: "device-1",
-          deviceLabel: "Primary Phone",
-          payloadSecret: "payload-secret-1",
-          deviceRefreshMode: "cookie",
-          deviceRefreshToken: "refresh-token-1",
-          deviceJoinTicket: "join-ticket-1",
-          deviceJoinTicketExpiresAt: 123,
-          sessionClaim: "session-claim-1",
-          sessionClaimExpiresAt: 456,
-        },
-      },
-    })
-  );
+async function waitFor(predicate, timeoutMs = 1000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (await predicate()) {
+      return;
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  throw new Error("timed out waiting for async browser state");
+}
 
+test("remote auth storage keeps durable metadata while payload secrets move to protected storage", async () => {
+  const browser = installBrowserStubs();
+
+  const { loadStoredPayloadSecret } = await import("./secret-store.js");
   const { ensureDeviceIdentity, saveRemoteAuth, state } = await import("./state.js");
+
+  state.remoteAuth = {
+    relayId: "relay-1",
+    brokerUrl: "ws://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "private",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceJoinTicket: "join-ticket-1",
+    deviceJoinTicketExpiresAt: 123,
+    sessionClaim: "session-claim-1",
+    sessionClaimExpiresAt: 456,
+  };
+  saveRemoteAuth(state.remoteAuth);
+  await waitFor(() => {
+    const stored = JSON.parse(browser.localStorage.getItem("agent-relay.remote-state-v2"));
+    return stored?.remoteProfiles?.["relay-1"]?.hasStoredPayloadSecret === true;
+  });
+  await waitFor(async () => {
+    return (await loadStoredPayloadSecret("relay-1")) === "payload-secret-1";
+  });
 
   assert.equal(state.remoteAuth.deviceId, "device-1");
   assert.equal(state.remoteAuth.payloadSecret, "payload-secret-1");
-  assert.equal(state.remoteAuth.deviceRefreshToken, "refresh-token-1");
-  assert.equal(state.remoteAuth.deviceJoinTicket, null);
-  assert.equal(state.remoteAuth.sessionClaim, null);
-
-  state.remoteAuth.deviceRefreshMode = "cookie";
-  saveRemoteAuth(state.remoteAuth);
 
   const stored = JSON.parse(browser.localStorage.getItem("agent-relay.remote-state-v2"));
   const profile = stored.remoteProfiles["relay-1"];
   assert.equal(profile.deviceId, "device-1");
-  assert.equal(profile.payloadSecret, "payload-secret-1");
+  assert.equal("payloadSecret" in profile, false);
   assert.equal(profile.deviceRefreshMode, "cookie");
-  assert.equal("deviceRefreshToken" in profile, false);
+  assert.equal(profile.hasStoredPayloadSecret, true);
   assert.equal("deviceJoinTicket" in profile, false);
   assert.equal("sessionClaim" in profile, false);
+
+  const reloaded = await import(`./state.js?reload-${Date.now()}`);
+  assert.equal(reloaded.state.remoteAuth?.payloadSecret, null);
+  await reloaded.hydrateStoredRemoteSecrets();
+  assert.equal(reloaded.state.remoteAuth?.payloadSecret, "payload-secret-1");
 
   await ensureDeviceIdentity();
   assert.ok(state.deviceKeypair);
@@ -188,7 +209,7 @@ test("remote auth storage keeps durable metadata but drops refresh and session s
   assert.equal(browser.localStorage.getItem("agent-relay.remote-device-keypair"), null);
 });
 
-test("self-hosted remote auth keeps the saved device join ticket across reloads", async () => {
+test("legacy localStorage secrets are discarded on load", async () => {
   const browser = installBrowserStubs();
   browser.localStorage.setItem(
     "agent-relay.remote-state-v2",
@@ -204,21 +225,60 @@ test("self-hosted remote auth keeps the saved device join ticket across reloads"
           deviceId: "device-1",
           deviceLabel: "Primary Phone",
           payloadSecret: "payload-secret-1",
+          deviceRefreshToken: "refresh-token-1",
           deviceJoinTicket: "self-hosted-join-ticket",
           deviceJoinTicketExpiresAt: 123456,
+        },
+      },
+      clientAuth: {
+        clientId: "client-1",
+        clientRefreshToken: "client-refresh-1",
+        brokerControlUrl: "https://broker.example.test",
+      },
+    })
+  );
+
+  const { state } = await import(`./state.js?legacy-${Date.now()}`);
+
+  assert.equal(state.remoteAuth, null);
+  assert.equal(browser.localStorage.getItem("agent-relay.remote-state-v2"), null);
+});
+
+test("missing protected payload secret keeps relay metadata but disables auto-recovery", async () => {
+  const browser = installBrowserStubs();
+  browser.localStorage.setItem(
+    "agent-relay.remote-state-v2",
+    JSON.stringify({
+      activeRelayId: "relay-1",
+      remoteProfiles: {
+        "relay-1": {
+          relayId: "relay-1",
+          brokerUrl: "ws://broker.example.test",
+          brokerChannelId: "room-a",
+          relayPeerId: "relay-1",
+          securityMode: "private",
+          deviceId: "device-1",
+          deviceLabel: "Primary Phone",
+          hasStoredPayloadSecret: true,
         },
       },
     })
   );
 
-  const { state } = await import("./state.js?self-hosted-join-ticket");
+  const { hydrateStoredRemoteSecrets, state } = await import(`./state.js?missing-secret-${Date.now()}`);
 
-  assert.equal(state.remoteAuth?.deviceJoinTicket, "self-hosted-join-ticket");
-  assert.equal(state.remoteAuth?.deviceJoinTicketExpiresAt, 123456);
+  assert.equal(state.remoteAuth?.relayId, "relay-1");
+  assert.equal(state.remoteAuth?.payloadSecret, null);
+
+  await hydrateStoredRemoteSecrets();
+
+  assert.equal(state.remoteAuth?.relayId, "relay-1");
+  assert.equal(state.remoteAuth?.payloadSecret, null);
+  assert.equal(state.remoteAuth?.hasStoredPayloadSecret, false);
 
   const stored = JSON.parse(browser.localStorage.getItem("agent-relay.remote-state-v2"));
-  assert.equal(stored.remoteProfiles["relay-1"].deviceJoinTicket, "self-hosted-join-ticket");
-  assert.equal(stored.remoteProfiles["relay-1"].deviceJoinTicketExpiresAt, 123456);
+  assert.equal(stored.remoteProfiles["relay-1"].relayId, "relay-1");
+  assert.equal(stored.remoteProfiles["relay-1"].hasStoredPayloadSecret, false);
 });
 
 test("explicit relay home selection persists without auto-opening a stored relay", async () => {
@@ -236,7 +296,7 @@ test("explicit relay home selection persists without auto-opening a stored relay
           securityMode: "private",
           deviceId: "device-1",
           deviceLabel: "Primary Phone",
-          payloadSecret: "payload-secret-1",
+          hasStoredPayloadSecret: true,
         },
       },
     })
