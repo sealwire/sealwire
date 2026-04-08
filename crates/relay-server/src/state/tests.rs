@@ -460,16 +460,24 @@ fn filter_threads_matches_tilde_scoped_workspace() {
 #[test]
 fn normalize_allowed_roots_expands_home_and_deduplicates() {
     let home = env::var("HOME").expect("HOME should be set for tests");
-    let root = PathBuf::from(home).join("git/agent-relay");
+    let unique = format!(
+        "agent-relay-allowed-roots-{}-{}",
+        std::process::id(),
+        unix_now()
+    );
+    let root = PathBuf::from(home).join(unique);
+    std::fs::create_dir_all(&root).expect("allowed root should be creatable");
 
     let normalized = normalize_allowed_roots(vec![
-        "~/git/agent-relay".to_string(),
+        format!("~/{}", root.file_name().unwrap().to_string_lossy()),
         root.display().to_string(),
         "  ".to_string(),
     ])
     .expect("allowed roots should normalize");
 
     assert_eq!(normalized, vec![root.display().to_string()]);
+
+    std::fs::remove_dir_all(&root).expect("temp allowed root should be removable");
 }
 
 #[test]

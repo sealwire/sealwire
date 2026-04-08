@@ -31,7 +31,8 @@ use futures_util::{sink::SinkExt, StreamExt};
 use join_ticket::{JoinTicketClaims, JoinTicketKey, JoinTicketKind, JOIN_TICKET_SECRET_ENV};
 use protocol::{ClientMessage, ConnectQuery, HealthResponse, ServerMessage};
 use public_control::{
-    ClientGrantRequest, ClientGrantResponse, ClientRelaysResponse, ClientSessionResponse,
+    ClientGrantRequest, ClientGrantResponse, ClientIdentityRevokeResponse,
+    ClientIdentityRotateResponse, ClientRelaysResponse, ClientSessionResponse,
     DeviceGrantBulkRevokeRequest, DeviceGrantBulkRevokeResponse, DeviceGrantRequest,
     DeviceGrantResponse, DeviceGrantRevokeRequest, DeviceGrantRevokeResponse,
     DeviceSessionResponse, DeviceWsTokenResponse, PairingWsTokenRequest, PairingWsTokenResponse,
@@ -448,6 +449,14 @@ fn app_with_web_root_and_verifier_and_hardening(
             post(public_issue_client_session).delete(public_clear_client_session),
         )
         .route(
+            "/api/public/client/rotate",
+            post(public_rotate_client_identity),
+        )
+        .route(
+            "/api/public/client",
+            axum::routing::delete(public_revoke_client_identity),
+        )
+        .route(
             "/api/public/device/session",
             post(public_issue_device_session).delete(public_clear_device_session),
         )
@@ -647,6 +656,77 @@ async fn public_clear_client_session(
         response_headers,
         Json(DeviceSessionClearResponse { cleared: true }),
     ))
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ClientRefreshAuth<'a> {
+    Cookie(&'a str),
+    Bearer(&'a str),
+}
+
+impl<'a> ClientRefreshAuth<'a> {
+    fn token(self) -> &'a str {
+        match self {
+            Self::Cookie(token) | Self::Bearer(token) => token,
+        }
+    }
+
+    fn used_cookie(self) -> bool {
+        matches!(self, Self::Cookie(_))
+    }
+}
+
+async fn public_rotate_client_identity(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    State(state): State<BrokerAppState>,
+    headers: HeaderMap,
+) -> Result<(HeaderMap, Json<ClientIdentityRotateResponse>), (StatusCode, Json<ApiErrorBody>)> {
+    enforce_public_api_rate_limit(&state, remote_addr, "rotate_client_identity").await?;
+    let control_plane = require_public_control_plane(&state)?;
+    let auth = client_refresh_auth(&headers)?;
+    let secure = request_uses_https(&headers);
+    let (client_id, refreshed_token) = control_plane
+        .rotate_client_identity(auth.token())
+        .await
+        .map_err(public_api_error)?;
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(
+        header::SET_COOKIE,
+        build_client_session_cookie(&refreshed_token, secure)?,
+    );
+    Ok((
+        response_headers,
+        Json(ClientIdentityRotateResponse {
+            client_id,
+            rotated: true,
+            cookie_session: true,
+            client_refresh_token: if auth.used_cookie() {
+                None
+            } else {
+                Some(refreshed_token)
+            },
+        }),
+    ))
+}
+
+async fn public_revoke_client_identity(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    State(state): State<BrokerAppState>,
+    headers: HeaderMap,
+) -> Result<(HeaderMap, Json<ClientIdentityRevokeResponse>), (StatusCode, Json<ApiErrorBody>)> {
+    enforce_public_api_rate_limit(&state, remote_addr, "revoke_client_identity").await?;
+    let control_plane = require_public_control_plane(&state)?;
+    let auth = client_refresh_auth(&headers)?;
+    let response = control_plane
+        .revoke_client_identity(auth.token())
+        .await
+        .map_err(public_api_error)?;
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(
+        header::SET_COOKIE,
+        clear_client_session_cookie(request_uses_https(&headers)),
+    );
+    Ok((response_headers, Json(response)))
 }
 
 async fn public_issue_device_session(
@@ -1116,11 +1196,17 @@ fn device_refresh_token(headers: &HeaderMap) -> Result<&str, (StatusCode, Json<A
 }
 
 fn client_refresh_token(headers: &HeaderMap) -> Result<&str, (StatusCode, Json<ApiErrorBody>)> {
+    client_refresh_auth(headers).map(ClientRefreshAuth::token)
+}
+
+fn client_refresh_auth<'a>(
+    headers: &'a HeaderMap,
+) -> Result<ClientRefreshAuth<'a>, (StatusCode, Json<ApiErrorBody>)> {
     if let Some(cookie) = client_session_cookie(headers) {
-        return Ok(cookie);
+        return Ok(ClientRefreshAuth::Cookie(cookie));
     }
 
-    bearer_token(headers)
+    bearer_token(headers).map(ClientRefreshAuth::Bearer)
 }
 
 fn bearer_token(headers: &HeaderMap) -> Result<&str, (StatusCode, Json<ApiErrorBody>)> {

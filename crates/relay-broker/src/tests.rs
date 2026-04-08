@@ -17,7 +17,8 @@ use super::*;
 use crate::auth::BrokerAuthMode;
 use crate::join_ticket::{JoinTicketClaims, JoinTicketKey};
 use crate::public_control::{
-    ClientGrantRequest, ClientGrantResponse, ClientRelaysResponse, ClientSessionResponse,
+    ClientGrantRequest, ClientGrantResponse, ClientIdentityRevokeResponse,
+    ClientIdentityRotateResponse, ClientRelaysResponse, ClientSessionResponse,
     DeviceGrantBulkRevokeRequest, DeviceGrantBulkRevokeResponse, DeviceGrantRequest,
     DeviceGrantResponse, DeviceGrantRevokeRequest, DeviceGrantRevokeResponse,
     DeviceSessionResponse, DeviceWsTokenResponse, PairingWsTokenRequest, PairingWsTokenResponse,
@@ -1157,6 +1158,211 @@ async fn public_client_session_cookie_can_list_relays() {
     assert_eq!(relays.client_id, grant.client_id);
     assert_eq!(relays.relays.len(), 1);
     assert_eq!(relays.relays[0].relay_id, "relay-1");
+}
+
+#[tokio::test]
+async fn public_client_refresh_token_can_rotate() {
+    let address = spawn_public_mode_app().await;
+    let signing_key = SigningKey::from_bytes(&[9_u8; 32]);
+
+    let grant: ClientGrantResponse = public_post(
+        address,
+        "/api/public/clients/grants",
+        "relay-refresh-1",
+        &ClientGrantRequest {
+            relay_id: "relay-1".to_string(),
+            broker_room_id: "room-a".to_string(),
+            device_id: "device-client-rotate".to_string(),
+            client_verify_key: STANDARD.encode(signing_key.verifying_key().to_bytes()),
+            client_label: Some("Laptop".to_string()),
+            device_label: Some("Laptop".to_string()),
+        },
+    )
+    .await;
+
+    let rotate_response = public_post_response(
+        address,
+        "/api/public/client/rotate",
+        &grant.client_refresh_token,
+        &serde_json::json!({}),
+    )
+    .await
+    .error_for_status()
+    .expect("client rotate request should succeed");
+    let rotated: ClientIdentityRotateResponse = rotate_response
+        .json()
+        .await
+        .expect("rotate response should decode");
+    assert_eq!(rotated.client_id, grant.client_id);
+    assert!(rotated.rotated);
+    let new_refresh_token = rotated
+        .client_refresh_token
+        .expect("bearer-auth rotate should return a fresh refresh token");
+    assert_ne!(new_refresh_token, grant.client_refresh_token);
+
+    let old_error = reqwest::Client::new()
+        .get(format!("http://{address}/api/public/relays"))
+        .bearer_auth(&grant.client_refresh_token)
+        .send()
+        .await
+        .expect("old token request should complete");
+    assert_eq!(old_error.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    let relays: ClientRelaysResponse =
+        public_get(address, "/api/public/relays", &new_refresh_token).await;
+    assert_eq!(relays.client_id, grant.client_id);
+    assert_eq!(relays.relays.len(), 1);
+    assert_eq!(relays.relays[0].relay_id, "relay-1");
+}
+
+#[tokio::test]
+async fn public_client_session_cookie_can_rotate() {
+    let address = spawn_public_mode_app().await;
+    let signing_key = SigningKey::from_bytes(&[11_u8; 32]);
+
+    let grant: ClientGrantResponse = public_post(
+        address,
+        "/api/public/clients/grants",
+        "relay-refresh-1",
+        &ClientGrantRequest {
+            relay_id: "relay-1".to_string(),
+            broker_room_id: "room-a".to_string(),
+            device_id: "device-client-cookie-rotate".to_string(),
+            client_verify_key: STANDARD.encode(signing_key.verifying_key().to_bytes()),
+            client_label: Some("Browser".to_string()),
+            device_label: Some("Browser".to_string()),
+        },
+    )
+    .await;
+
+    let session_response = public_post_response(
+        address,
+        "/api/public/client/session",
+        &grant.client_refresh_token,
+        &serde_json::json!({}),
+    )
+    .await
+    .error_for_status()
+    .expect("client session request should succeed");
+    let original_cookie = set_cookie_name_value(&session_response);
+
+    let rotate_response = reqwest::Client::new()
+        .post(format!("http://{address}/api/public/client/rotate"))
+        .header(reqwest::header::COOKIE, original_cookie.clone())
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("cookie rotate request should complete")
+        .error_for_status()
+        .expect("cookie rotate request should succeed");
+    let rotated_cookie = set_cookie_name_value(&rotate_response);
+    let rotated: ClientIdentityRotateResponse = rotate_response
+        .json()
+        .await
+        .expect("cookie rotate response should decode");
+    assert_eq!(rotated.client_id, grant.client_id);
+    assert!(rotated.rotated);
+    assert!(rotated.cookie_session);
+    assert_eq!(rotated.client_refresh_token, None);
+    assert_ne!(rotated_cookie, original_cookie);
+
+    let old_cookie_response = reqwest::Client::new()
+        .get(format!("http://{address}/api/public/relays"))
+        .header(reqwest::header::COOKIE, original_cookie)
+        .send()
+        .await
+        .expect("old cookie request should complete");
+    assert_eq!(
+        old_cookie_response.status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+
+    let new_cookie_response = reqwest::Client::new()
+        .get(format!("http://{address}/api/public/relays"))
+        .header(reqwest::header::COOKIE, rotated_cookie)
+        .send()
+        .await
+        .expect("rotated cookie request should complete")
+        .error_for_status()
+        .expect("rotated cookie request should succeed");
+    let relays: ClientRelaysResponse = new_cookie_response
+        .json()
+        .await
+        .expect("relay directory response should decode");
+    assert_eq!(relays.client_id, grant.client_id);
+    assert_eq!(relays.relays.len(), 1);
+    assert_eq!(relays.relays[0].relay_id, "relay-1");
+}
+
+#[tokio::test]
+async fn public_client_session_cookie_fails_after_revoke() {
+    let address = spawn_public_mode_app().await;
+    let signing_key = SigningKey::from_bytes(&[10_u8; 32]);
+
+    let grant: ClientGrantResponse = public_post(
+        address,
+        "/api/public/clients/grants",
+        "relay-refresh-1",
+        &ClientGrantRequest {
+            relay_id: "relay-1".to_string(),
+            broker_room_id: "room-a".to_string(),
+            device_id: "device-client-revoke".to_string(),
+            client_verify_key: STANDARD.encode(signing_key.verifying_key().to_bytes()),
+            client_label: Some("Desktop".to_string()),
+            device_label: Some("Desktop".to_string()),
+        },
+    )
+    .await;
+
+    let session_response = public_post_response(
+        address,
+        "/api/public/client/session",
+        &grant.client_refresh_token,
+        &serde_json::json!({}),
+    )
+    .await
+    .error_for_status()
+    .expect("client session request should succeed");
+    let cookie = set_cookie_name_value(&session_response);
+
+    let revoke_response = reqwest::Client::new()
+        .delete(format!("http://{address}/api/public/client"))
+        .header(reqwest::header::COOKIE, cookie.clone())
+        .send()
+        .await
+        .expect("client revoke request should complete")
+        .error_for_status()
+        .expect("client revoke request should succeed");
+    let revoke: ClientIdentityRevokeResponse = revoke_response
+        .json()
+        .await
+        .expect("client revoke response should decode");
+    assert_eq!(revoke.client_id, grant.client_id);
+    assert!(revoke.revoked);
+    assert_eq!(revoke.revoked_identity_count, 1);
+    assert_eq!(revoke.revoked_grant_count, 1);
+
+    let old_token_response = reqwest::Client::new()
+        .get(format!("http://{address}/api/public/relays"))
+        .bearer_auth(&grant.client_refresh_token)
+        .send()
+        .await
+        .expect("old token request should complete");
+    assert_eq!(
+        old_token_response.status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+
+    let old_cookie_response = reqwest::Client::new()
+        .get(format!("http://{address}/api/public/relays"))
+        .header(reqwest::header::COOKIE, cookie)
+        .send()
+        .await
+        .expect("old cookie request should complete");
+    assert_eq!(
+        old_cookie_response.status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
 }
 
 #[tokio::test]

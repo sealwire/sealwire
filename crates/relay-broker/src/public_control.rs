@@ -177,6 +177,23 @@ pub struct ClientSessionResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientIdentityRotateResponse {
+    pub client_id: String,
+    pub rotated: bool,
+    pub cookie_session: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_refresh_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientIdentityRevokeResponse {
+    pub client_id: String,
+    pub revoked: bool,
+    pub revoked_identity_count: usize,
+    pub revoked_grant_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceGrantRevokeRequest {
     pub relay_id: String,
     pub broker_room_id: String,
@@ -607,6 +624,36 @@ impl PublicControlPlane {
         })
     }
 
+    pub async fn rotate_client_identity(
+        &self,
+        bearer_token: &str,
+    ) -> Result<(String, String), String> {
+        let client = self.authenticate_client(bearer_token).await?;
+        let mut store = self.inner.state.lock().await;
+        let refreshed_token = store.rotate_client_identity(&client);
+        store.save(self.inner.state_path.as_deref()).await?;
+        Ok((client.client_id, refreshed_token))
+    }
+
+    pub async fn revoke_client_identity(
+        &self,
+        bearer_token: &str,
+    ) -> Result<ClientIdentityRevokeResponse, String> {
+        let client = self.authenticate_client(bearer_token).await?;
+        let mut store = self.inner.state.lock().await;
+        let revoked_identity_count = store.remove_client_identity_by_client_id(&client.client_id);
+        let revoked_grant_count = store.remove_client_relay_grants_by_client_id(&client.client_id);
+        if revoked_identity_count > 0 || revoked_grant_count > 0 {
+            store.save(self.inner.state_path.as_deref()).await?;
+        }
+        Ok(ClientIdentityRevokeResponse {
+            client_id: client.client_id,
+            revoked: revoked_identity_count > 0,
+            revoked_identity_count,
+            revoked_grant_count,
+        })
+    }
+
     pub async fn issue_device_ws_token(
         &self,
         bearer_token: &str,
@@ -941,6 +988,18 @@ impl PublicControlStateStore {
         removed
     }
 
+    fn remove_client_relay_grants_by_client_id(&mut self, client_id: &str) -> usize {
+        let mut removed = 0;
+        self.client_relay_grants_by_key.retain(|_, grant| {
+            let matches = grant.client_id == client_id;
+            if matches {
+                removed += 1;
+            }
+            !matches
+        });
+        removed
+    }
+
     fn remove_all_other_device_grants(
         &mut self,
         relay_id: &str,
@@ -1008,6 +1067,23 @@ impl PublicControlStateStore {
             },
         );
         (client_id, client_refresh_token)
+    }
+
+    fn rotate_client_identity(&mut self, client: &PersistedClientIdentity) -> String {
+        self.remove_client_identity_by_client_id(&client.client_id);
+        let client_refresh_token = format!("cref-{}", random_token(40).to_ascii_lowercase());
+        let refresh_token_hash = sha256_hex(&client_refresh_token);
+        self.client_registrations_by_hash.insert(
+            refresh_token_hash.clone(),
+            PersistedClientIdentity {
+                client_id: client.client_id.clone(),
+                client_verify_key: client.client_verify_key.clone(),
+                refresh_token_hash,
+                created_at: client.created_at,
+                client_label: client.client_label.clone(),
+            },
+        );
+        client_refresh_token
     }
 
     fn upsert_client_relay_grant(&mut self, grant: PersistedClientRelayGrant) {
