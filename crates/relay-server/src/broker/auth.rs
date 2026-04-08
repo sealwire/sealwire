@@ -10,6 +10,7 @@ use relay_broker::{
         RelayWsTokenResponse,
     },
 };
+use relay_util::trimmed_option_string;
 use reqwest::Client;
 use serde::de::DeserializeOwned;
 use url::Url;
@@ -72,9 +73,12 @@ impl BrokerAuthConfig {
     ) -> Result<Self, String> {
         match BrokerAuthMode::parse(auth_mode)? {
             BrokerAuthMode::SelfHostedSharedSecret => {
-                let join_ticket_secret = trimmed(join_ticket_secret).ok_or_else(|| {
-                    format!("{JOIN_TICKET_SECRET_ENV} is required in self-hosted broker auth mode")
-                })?;
+                let join_ticket_secret =
+                    trimmed_option_string(join_ticket_secret).ok_or_else(|| {
+                        format!(
+                            "{JOIN_TICKET_SECRET_ENV} is required in self-hosted broker auth mode"
+                        )
+                    })?;
                 let join_ticket_key = JoinTicketKey::from_secret(join_ticket_secret.as_bytes())?;
                 Ok(Self::SelfHostedSharedSecret {
                     join_ticket_key,
@@ -85,13 +89,14 @@ impl BrokerAuthConfig {
                 })
             }
             BrokerAuthMode::PublicControlPlane => {
-                let control_url = trimmed(control_url).ok_or_else(|| {
+                let control_url = trimmed_option_string(control_url).ok_or_else(|| {
                     format!("{RELAY_BROKER_CONTROL_URL_ENV} is required in public broker auth mode")
                 })?;
-                let relay_id = trimmed(relay_id).ok_or_else(|| {
+                let relay_id = trimmed_option_string(relay_id).ok_or_else(|| {
                     format!("{RELAY_BROKER_RELAY_ID_ENV} is required in public broker auth mode")
                 })?;
-                let relay_refresh_token = trimmed(relay_refresh_token).ok_or_else(|| {
+                let relay_refresh_token =
+                    trimmed_option_string(relay_refresh_token).ok_or_else(|| {
                     format!(
                         "{RELAY_BROKER_RELAY_REFRESH_TOKEN_ENV} is required in public broker auth mode"
                     )
@@ -561,19 +566,8 @@ fn ensure_device_binding(expected: &str, actual: &str) -> Result<(), String> {
     ))
 }
 
-fn trimmed(value: Option<String>) -> Option<String> {
-    value.and_then(|value| {
-        let trimmed = value.trim().to_string();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed)
-        }
-    })
-}
-
 fn parse_optional_u64_env(name: &str, value: Option<String>) -> Result<Option<u64>, String> {
-    let Some(value) = trimmed(value) else {
+    let Some(value) = trimmed_option_string(value) else {
         return Ok(None);
     };
     value

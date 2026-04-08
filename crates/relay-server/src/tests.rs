@@ -1,6 +1,10 @@
 use super::*;
 use crate::auth::AuthConfig;
-use axum::http::{header, Method};
+use axum::http::{header, header::HeaderName, Method};
+use relay_http::{
+    apply_standard_security_headers, build_content_security_policy, DEFAULT_CONNECT_SRC,
+    PERMISSIONS_POLICY, REFERRER_POLICY, X_CONTENT_TYPE_OPTIONS,
+};
 
 fn test_auth() -> AuthConfig {
     AuthConfig::from_parts(
@@ -33,7 +37,14 @@ fn cookie_headers() -> HeaderMap {
 #[test]
 fn security_headers_are_applied() {
     let mut headers = HeaderMap::new();
-    apply_security_headers(&mut headers, &SecurityHeadersConfig::default(), false);
+    let config = SecurityHeadersConfig::default();
+    apply_standard_security_headers(
+        &mut headers,
+        &config.content_security_policy,
+        &config.strict_transport_security,
+        config.enable_hsts,
+        false,
+    );
 
     assert_eq!(
         headers
@@ -65,10 +76,19 @@ fn security_headers_are_applied() {
 #[test]
 fn strict_transport_security_only_applies_when_enabled_for_https_requests() {
     let mut secure_headers = HeaderMap::new();
-    apply_security_headers(
+    let secure_config = SecurityHeadersConfig::from_parts(
+        true,
+        None,
+        Some("max-age=86400".to_string()),
+        CSP_CONNECT_SRC_ENV,
+        HSTS_VALUE_ENV,
+    )
+    .expect("custom HSTS config should parse");
+    apply_standard_security_headers(
         &mut secure_headers,
-        &SecurityHeadersConfig::from_parts(true, None, Some("max-age=86400".to_string()))
-            .expect("custom HSTS config should parse"),
+        &secure_config.content_security_policy,
+        &secure_config.strict_transport_security,
+        secure_config.enable_hsts,
         true,
     );
     assert_eq!(
@@ -79,10 +99,19 @@ fn strict_transport_security_only_applies_when_enabled_for_https_requests() {
     );
 
     let mut insecure_headers = HeaderMap::new();
-    apply_security_headers(
+    let insecure_config = SecurityHeadersConfig::from_parts(
+        true,
+        None,
+        Some("max-age=86400".to_string()),
+        CSP_CONNECT_SRC_ENV,
+        HSTS_VALUE_ENV,
+    )
+    .expect("custom HSTS config should parse");
+    apply_standard_security_headers(
         &mut insecure_headers,
-        &SecurityHeadersConfig::from_parts(true, None, Some("max-age=86400".to_string()))
-            .expect("custom HSTS config should parse"),
+        &insecure_config.content_security_policy,
+        &insecure_config.strict_transport_security,
+        insecure_config.enable_hsts,
         false,
     );
     assert!(!insecure_headers.contains_key("strict-transport-security"));
@@ -92,10 +121,19 @@ fn strict_transport_security_only_applies_when_enabled_for_https_requests() {
 fn content_security_policy_can_override_connect_src() {
     let mut headers = HeaderMap::new();
     let connect_src = "'self' https://relay.example.com wss://broker.example.com";
-    apply_security_headers(
+    let config = SecurityHeadersConfig::from_parts(
+        false,
+        Some(connect_src.to_string()),
+        None,
+        CSP_CONNECT_SRC_ENV,
+        HSTS_VALUE_ENV,
+    )
+    .expect("custom CSP config should parse");
+    apply_standard_security_headers(
         &mut headers,
-        &SecurityHeadersConfig::from_parts(false, Some(connect_src.to_string()), None)
-            .expect("custom CSP config should parse"),
+        &config.content_security_policy,
+        &config.strict_transport_security,
+        config.enable_hsts,
         false,
     );
 
@@ -115,10 +153,10 @@ fn forwarded_https_is_treated_as_secure() {
         HeaderValue::from_static("https"),
     );
 
-    assert!(request_uses_https(&headers, &Uri::from_static("/")));
+    assert!(request_uses_https(&headers, Some(&Uri::from_static("/"))));
     assert!(!request_uses_https(
         &HeaderMap::new(),
-        &Uri::from_static("/")
+        Some(&Uri::from_static("/"))
     ));
 }
 
@@ -131,7 +169,7 @@ fn forwarded_and_forwarded_ssl_headers_are_treated_as_secure() {
     );
     assert!(request_uses_https(
         &forwarded_headers,
-        &Uri::from_static("/")
+        Some(&Uri::from_static("/"))
     ));
 
     let mut forwarded_ssl_headers = HeaderMap::new();
@@ -141,7 +179,7 @@ fn forwarded_and_forwarded_ssl_headers_are_treated_as_secure() {
     );
     assert!(request_uses_https(
         &forwarded_ssl_headers,
-        &Uri::from_static("/")
+        Some(&Uri::from_static("/"))
     ));
 }
 
@@ -151,13 +189,20 @@ fn invalid_security_header_overrides_are_rejected() {
         false,
         Some("https://relay.example.com\r\nx".to_string()),
         None,
+        CSP_CONNECT_SRC_ENV,
+        HSTS_VALUE_ENV,
     )
     .expect_err("invalid CSP override should fail");
     assert!(csp_error.contains(CSP_CONNECT_SRC_ENV));
 
-    let hsts_error =
-        SecurityHeadersConfig::from_parts(true, None, Some("max-age=86400\r\nx".to_string()))
-            .expect_err("invalid HSTS override should fail");
+    let hsts_error = SecurityHeadersConfig::from_parts(
+        true,
+        None,
+        Some("max-age=86400\r\nx".to_string()),
+        CSP_CONNECT_SRC_ENV,
+        HSTS_VALUE_ENV,
+    )
+    .expect_err("invalid HSTS override should fail");
     assert!(hsts_error.contains(HSTS_VALUE_ENV));
 }
 

@@ -33,6 +33,10 @@ use protocol::{
     StartSessionInput, TakeOverInput, ThreadArchiveReceipt, ThreadDeleteReceipt, ThreadsQuery,
     ThreadsResponse,
 };
+use relay_http::{
+    apply_standard_security_headers, header_origin, parse_optional_string_env, request_origin,
+    request_uses_https, SecurityHeadersConfig,
+};
 use state::{AppState, ApprovalError};
 use tower_http::{
     services::{ServeDir, ServeFile},
@@ -40,11 +44,6 @@ use tower_http::{
 };
 use tracing::{info, warn};
 
-const PERMISSIONS_POLICY: &str = "accelerometer=(), ambient-light-sensor=(), autoplay=(), bluetooth=(), camera=(), display-capture=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), publickey-credentials-get=(), usb=(), web-share=(), xr-spatial-tracking=()";
-const REFERRER_POLICY: &str = "no-referrer";
-const X_CONTENT_TYPE_OPTIONS: &str = "nosniff";
-const DEFAULT_CONNECT_SRC: &str = "'self' http: https: ws: wss:";
-const DEFAULT_HSTS_VALUE: &str = "max-age=31536000; includeSubDomains";
 const CSP_CONNECT_SRC_ENV: &str = "RELAY_CSP_CONNECT_SRC";
 const ENABLE_HSTS_ENV: &str = "RELAY_ENABLE_HSTS";
 const HSTS_VALUE_ENV: &str = "RELAY_HSTS_VALUE";
@@ -56,53 +55,6 @@ struct AppContext {
     app: AppState,
     auth: AuthConfig,
     security_headers: SecurityHeadersConfig,
-}
-
-#[derive(Clone, Debug)]
-struct SecurityHeadersConfig {
-    enable_hsts: bool,
-    content_security_policy: HeaderValue,
-    strict_transport_security: HeaderValue,
-}
-
-impl Default for SecurityHeadersConfig {
-    fn default() -> Self {
-        Self::from_parts(false, None, None)
-            .expect("default relay security headers config should be valid")
-    }
-}
-
-impl SecurityHeadersConfig {
-    fn from_env() -> Result<Self, String> {
-        Self::from_parts(
-            parse_optional_bool_env(ENABLE_HSTS_ENV)?,
-            parse_optional_string_env(CSP_CONNECT_SRC_ENV)?,
-            parse_optional_string_env(HSTS_VALUE_ENV)?,
-        )
-    }
-
-    fn from_parts(
-        enable_hsts: bool,
-        connect_src: Option<String>,
-        hsts_value: Option<String>,
-    ) -> Result<Self, String> {
-        let content_security_policy =
-            build_content_security_policy(connect_src.as_deref().unwrap_or(DEFAULT_CONNECT_SRC));
-        let content_security_policy =
-            HeaderValue::from_str(&content_security_policy).map_err(|error| {
-                format!("{CSP_CONNECT_SRC_ENV} produces an invalid CSP header: {error}")
-            })?;
-        let strict_transport_security = HeaderValue::from_str(
-            hsts_value.as_deref().unwrap_or(DEFAULT_HSTS_VALUE),
-        )
-        .map_err(|error| format!("{HSTS_VALUE_ENV} must be a valid HSTS header value: {error}"))?;
-
-        Ok(Self {
-            enable_hsts,
-            content_security_policy,
-            strict_transport_security,
-        })
-    }
 }
 
 #[tokio::main]
@@ -124,7 +76,7 @@ async fn main() {
         .unwrap_or(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
     let auth = AuthConfig::from_env_for_bind_host(host)
         .unwrap_or_else(|error| panic!("relay-server auth config is invalid: {error}"));
-    let security_headers = SecurityHeadersConfig::from_env()
+    let security_headers = security_headers_from_env()
         .unwrap_or_else(|error| panic!("relay-server security header config is invalid: {error}"));
     if auth.enabled() {
         info!("relay-server API token auth is enabled for protected /api routes");
@@ -213,6 +165,16 @@ fn build_router(context: AppContext, web_root: PathBuf) -> Router {
         .layer(TraceLayer::new_for_http())
 }
 
+fn security_headers_from_env() -> Result<SecurityHeadersConfig, String> {
+    SecurityHeadersConfig::from_parts(
+        parse_optional_bool_env(ENABLE_HSTS_ENV)?,
+        parse_optional_string_env(CSP_CONNECT_SRC_ENV)?,
+        parse_optional_string_env(HSTS_VALUE_ENV)?,
+        CSP_CONNECT_SRC_ENV,
+        HSTS_VALUE_ENV,
+    )
+}
+
 async fn health() -> Json<ApiEnvelope<HealthResponse>> {
     Json(ApiEnvelope::ok(HealthResponse {
         status: "ok",
@@ -237,7 +199,7 @@ async fn auth_session_login(
     let mut response_headers = HeaderMap::new();
     if let Some(cookie) = context
         .auth
-        .issue_session_cookie(&input.token, request_uses_https(&headers, &uri))?
+        .issue_session_cookie(&input.token, request_uses_https(&headers, Some(&uri)))?
     {
         response_headers.insert(HeaderName::from_static("set-cookie"), cookie);
     }
@@ -262,7 +224,7 @@ async fn auth_session_logout(
         HeaderName::from_static("set-cookie"),
         context
             .auth
-            .clear_session_cookie(request_uses_https(&headers, &uri)),
+            .clear_session_cookie(request_uses_https(&headers, Some(&uri))),
     );
 
     (
@@ -612,33 +574,20 @@ fn is_path_policy_error(message: &str) -> bool {
 }
 
 fn snapshot_event(snapshot: SessionSnapshot) -> Event {
-    match Event::default().event("session").json_data(snapshot) {
-        Ok(event) => event,
-        Err(error) => Event::default().event("session").data(format!(
-            "{{\"ok\":false,\"error\":\"failed_to_encode_snapshot:{error}\"}}"
-        )),
-    }
+    Event::default()
+        .event("session")
+        .json_data(snapshot)
+        .unwrap_or_else(|error| {
+            Event::default().event("session").data(format!(
+                "{{\"ok\":false,\"error\":\"failed_to_encode_snapshot:{error}\"}}"
+            ))
+        })
 }
 
 fn parse_optional_bool_env(name: &str) -> Result<bool, String> {
     match std::env::var(name) {
         Ok(value) => parse_bool(name, value.trim()),
         Err(std::env::VarError::NotPresent) => Ok(false),
-        Err(std::env::VarError::NotUnicode(_)) => Err(format!("{name} must be valid utf-8")),
-    }
-}
-
-fn parse_optional_string_env(name: &str) -> Result<Option<String>, String> {
-    match std::env::var(name) {
-        Ok(value) => {
-            let trimmed = value.trim();
-            if trimmed.is_empty() {
-                Ok(None)
-            } else {
-                Ok(Some(trimmed.to_string()))
-            }
-        }
-        Err(std::env::VarError::NotPresent) => Ok(None),
         Err(std::env::VarError::NotUnicode(_)) => Err(format!("{name} must be valid utf-8")),
     }
 }
@@ -659,9 +608,15 @@ async fn with_security_headers(
     request: Request,
     next: Next,
 ) -> Response {
-    let is_https = request_uses_https(request.headers(), request.uri());
+    let is_https = request_uses_https(request.headers(), Some(request.uri()));
     let mut response = next.run(request).await;
-    apply_security_headers(response.headers_mut(), &context.security_headers, is_https);
+    apply_standard_security_headers(
+        response.headers_mut(),
+        &context.security_headers.content_security_policy,
+        &context.security_headers.strict_transport_security,
+        context.security_headers.enable_hsts,
+        is_https,
+    );
     response
 }
 
@@ -711,37 +666,6 @@ fn authorize_csrf_protection(
     ))
 }
 
-fn request_uses_https(headers: &HeaderMap, uri: &Uri) -> bool {
-    uri.scheme_str() == Some("https")
-        || forwarded_proto_is_https(headers)
-        || header_equals_ignore_ascii_case(headers, "x-forwarded-ssl", "on")
-}
-
-fn forwarded_proto_is_https(headers: &HeaderMap) -> bool {
-    if let Some(value) = headers
-        .get("x-forwarded-proto")
-        .and_then(|value| value.to_str().ok())
-    {
-        return value
-            .split(',')
-            .any(|entry| entry.trim().eq_ignore_ascii_case("https"));
-    }
-
-    headers
-        .get("forwarded")
-        .and_then(|value| value.to_str().ok())
-        .map(|value| value.to_ascii_lowercase().contains("proto=https"))
-        .unwrap_or(false)
-}
-
-fn header_equals_ignore_ascii_case(headers: &HeaderMap, name: &str, expected: &str) -> bool {
-    headers
-        .get(name)
-        .and_then(|value| value.to_str().ok())
-        .map(|value| value.eq_ignore_ascii_case(expected))
-        .unwrap_or(false)
-}
-
 fn method_is_safe(method: &Method) -> bool {
     matches!(
         *method,
@@ -757,7 +681,7 @@ fn has_valid_csrf_header(headers: &HeaderMap) -> bool {
 }
 
 fn request_is_same_origin(headers: &HeaderMap, uri: &Uri) -> bool {
-    let Some(expected_origin) = request_origin(headers, uri) else {
+    let Some(expected_origin) = request_origin(headers, Some(uri)) else {
         return false;
     };
 
@@ -769,67 +693,11 @@ fn request_is_same_origin(headers: &HeaderMap, uri: &Uri) -> bool {
     header_origin(headers, header::REFERER).is_some_and(|origin| origin == expected_origin)
 }
 
-fn request_origin(headers: &HeaderMap, uri: &Uri) -> Option<String> {
-    let scheme = if request_uses_https(headers, uri) {
-        "https"
-    } else {
-        uri.scheme_str().unwrap_or("http")
-    };
-    let authority = headers
-        .get(header::HOST)
-        .and_then(|value| value.to_str().ok())
-        .or_else(|| uri.authority().map(|value| value.as_str()))?;
-    Some(format!("{scheme}://{authority}"))
-}
-
-fn header_origin(headers: &HeaderMap, name: HeaderName) -> Option<String> {
-    let raw = headers.get(name)?.to_str().ok()?.trim();
-    if raw.is_empty() || raw.eq_ignore_ascii_case("null") {
-        return None;
-    }
-
-    let parsed = raw.parse::<Uri>().ok()?;
-    let scheme = parsed.scheme_str()?;
-    let authority = parsed.authority()?;
-    Some(format!("{scheme}://{authority}"))
-}
-
 fn forbidden_csrf(message: impl Into<String>) -> (StatusCode, Json<ApiError>) {
     (
         StatusCode::FORBIDDEN,
         Json(ApiError::new("csrf_rejected", message.into())),
     )
-}
-
-fn build_content_security_policy(connect_src: &str) -> String {
-    format!(
-        "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; object-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src {connect_src}; manifest-src 'self'; worker-src 'self' blob:"
-    )
-}
-
-fn apply_security_headers(headers: &mut HeaderMap, config: &SecurityHeadersConfig, is_https: bool) {
-    headers.insert(
-        HeaderName::from_static("content-security-policy"),
-        config.content_security_policy.clone(),
-    );
-    headers.insert(
-        HeaderName::from_static("permissions-policy"),
-        HeaderValue::from_static(PERMISSIONS_POLICY),
-    );
-    headers.insert(
-        HeaderName::from_static("referrer-policy"),
-        HeaderValue::from_static(REFERRER_POLICY),
-    );
-    headers.insert(
-        HeaderName::from_static("x-content-type-options"),
-        HeaderValue::from_static(X_CONTENT_TYPE_OPTIONS),
-    );
-    if config.enable_hsts && is_https {
-        headers.insert(
-            HeaderName::from_static("strict-transport-security"),
-            config.strict_transport_security.clone(),
-        );
-    }
 }
 
 #[cfg(test)]

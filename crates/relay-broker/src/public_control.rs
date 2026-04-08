@@ -8,6 +8,7 @@ use std::{
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use rand::{distributions::Alphanumeric, Rng};
+use relay_util::trimmed_option_string;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::{fs, sync::Mutex};
@@ -260,6 +261,10 @@ struct PersistedRelayRegistration {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedPublicControlState {
+    // TODO: Keeping public control-plane persistence in a single JSON file is
+    // fine for early testing and single-broker deployments, but it will not
+    // scale cleanly to multiple broker instances. Move this state to a shared
+    // database before we support multi-broker/public HA deployments.
     schema_version: u32,
     #[serde(default)]
     relay_registrations: Vec<PersistedRelayRegistration>,
@@ -330,11 +335,11 @@ impl PublicControlPlane {
         relay_ws_ttl_secs: Option<String>,
         device_ws_ttl_secs: Option<String>,
     ) -> Result<Self, String> {
-        let issuer_secret = trimmed(issuer_secret).ok_or_else(|| {
+        let issuer_secret = trimmed_option_string(issuer_secret).ok_or_else(|| {
             format!("{PUBLIC_ISSUER_SECRET_ENV} is required in public broker auth mode")
         })?;
         let issuer_key = JoinTicketKey::from_secret(issuer_secret.as_bytes())?;
-        let state_path = trimmed(state_path).map(PathBuf::from);
+        let state_path = trimmed_option_string(state_path).map(PathBuf::from);
         if state_path.is_none() && public_mode_requires_persistent_state() {
             return Err(format!(
                 "{PUBLIC_STATE_PATH_ENV} is required when {}=public and BIND_HOST is not loopback",
@@ -388,12 +393,12 @@ impl PublicControlPlane {
     ) -> Result<RelayEnrollmentChallengeResponse, String> {
         self.prune_expired_relay_enrollment_challenges().await;
 
-        let relay_verify_key = trimmed(Some(request.relay_verify_key))
+        let relay_verify_key = trimmed_option_string(Some(request.relay_verify_key))
             .ok_or_else(|| "relay verify key is required".to_string())?;
         validate_relay_verify_key(&relay_verify_key)?;
         let relay_label = request
             .relay_label
-            .and_then(|label| trimmed(Some(label)))
+            .and_then(|label| trimmed_option_string(Some(label)))
             .filter(|label| !label.is_empty());
         let challenge_id = format!("rch-{}", random_token(24).to_ascii_lowercase());
         let challenge = format!("rc-{}", random_token(40).to_ascii_lowercase());
@@ -421,12 +426,12 @@ impl PublicControlPlane {
     ) -> Result<RelayEnrollmentResponse, String> {
         self.prune_expired_relay_enrollment_challenges().await;
 
-        let relay_verify_key = trimmed(Some(request.relay_verify_key))
+        let relay_verify_key = trimmed_option_string(Some(request.relay_verify_key))
             .ok_or_else(|| "relay verify key is required".to_string())?;
         validate_relay_verify_key(&relay_verify_key)?;
-        let challenge_id = trimmed(Some(request.challenge_id))
+        let challenge_id = trimmed_option_string(Some(request.challenge_id))
             .ok_or_else(|| "relay enrollment challenge id is required".to_string())?;
-        let challenge_signature = trimmed(Some(request.challenge_signature))
+        let challenge_signature = trimmed_option_string(Some(request.challenge_signature))
             .ok_or_else(|| "relay enrollment challenge signature is required".to_string())?;
 
         let pending = {
@@ -449,7 +454,7 @@ impl PublicControlPlane {
         )?;
         let relay_label = request
             .relay_label
-            .and_then(|label| trimmed(Some(label)))
+            .and_then(|label| trimmed_option_string(Some(label)))
             .filter(|label| !label.is_empty())
             .or(pending.relay_label);
         self.issue_relay_registration_for_verify_key(&relay_verify_key, relay_label)
@@ -547,16 +552,16 @@ impl PublicControlPlane {
         let registration = self
             .authenticate_relay(bearer_token, &request.relay_id, &request.broker_room_id)
             .await?;
-        let client_verify_key = trimmed(Some(request.client_verify_key))
+        let client_verify_key = trimmed_option_string(Some(request.client_verify_key))
             .ok_or_else(|| "client verify key is required".to_string())?;
         validate_relay_verify_key(&client_verify_key)?;
         let client_label = request
             .client_label
-            .and_then(|label| trimmed(Some(label)))
+            .and_then(|label| trimmed_option_string(Some(label)))
             .filter(|label| !label.is_empty());
         let device_label = request
             .device_label
-            .and_then(|label| trimmed(Some(label)))
+            .and_then(|label| trimmed_option_string(Some(label)))
             .filter(|label| !label.is_empty());
         let created_at = unix_now();
         let mut store = self.inner.state.lock().await;
@@ -1198,7 +1203,7 @@ impl PublicControlStateStore {
 fn parse_relay_registrations(
     value: Option<String>,
 ) -> Result<Vec<RelayRegistrationConfig>, String> {
-    let Some(raw) = trimmed(value) else {
+    let Some(raw) = trimmed_option_string(value) else {
         return Ok(Vec::new());
     };
     let parsed: Vec<RelayRegistrationConfig> = serde_json::from_str(&raw)
@@ -1224,7 +1229,7 @@ fn parse_relay_registrations(
 }
 
 fn parse_optional_u64(name: &str, value: Option<String>) -> Result<Option<u64>, String> {
-    let Some(value) = trimmed(value) else {
+    let Some(value) = trimmed_option_string(value) else {
         return Ok(None);
     };
     value
@@ -1258,17 +1263,6 @@ fn client_relay_grant_key(client_id: &str, relay_id: &str) -> String {
 fn issue_client_id(client_verify_key: &str) -> String {
     let digest = sha256_hex(client_verify_key);
     format!("client-{}", &digest[..16])
-}
-
-fn trimmed(value: Option<String>) -> Option<String> {
-    value.and_then(|value| {
-        let trimmed = value.trim().to_string();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed)
-        }
-    })
 }
 
 fn public_mode_requires_persistent_state() -> bool {

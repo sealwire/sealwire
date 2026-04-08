@@ -11,6 +11,8 @@ ed25519-dalek.workspace = true
 futures-util.workspace = true
 hmac.workspace = true
 rand.workspace = true
+relay-http = { path = "../relay-http" }
+relay-util = { path = "../relay-util" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

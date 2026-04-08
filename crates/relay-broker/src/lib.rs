@@ -21,7 +21,7 @@ use axum::{
         ws::{Message, WebSocket},
         Path, Query, Request, State, WebSocketUpgrade,
     },
-    http::{header, header::HeaderName, HeaderMap, HeaderValue, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -41,6 +41,11 @@ use public_control::{
     RelayWsTokenResponse,
 };
 use rand::{distributions::Alphanumeric, Rng};
+use relay_http::{
+    apply_standard_security_headers, header_origin, parse_optional_string_env, request_origin,
+    request_uses_https, SecurityHeadersConfig,
+};
+use relay_util::trimmed_option_string;
 use tokio::{sync::Mutex, time::Instant};
 use tower_http::{
     services::{ServeDir, ServeFile},
@@ -58,12 +63,6 @@ const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 120;
 const DEVICE_SESSION_COOKIE_NAME: &str = "agent_relay_device_session";
 const CLIENT_SESSION_COOKIE_NAME: &str = "agent_relay_client_session";
 const DEVICE_SESSION_COOKIE_MAX_AGE_SECS: u64 = 60 * 60 * 24 * 400;
-const PERMISSIONS_POLICY: &str = "accelerometer=(), ambient-light-sensor=(), autoplay=(), bluetooth=(), camera=(), display-capture=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), publickey-credentials-get=(), usb=(), web-share=(), xr-spatial-tracking=()";
-const REFERRER_POLICY: &str = "no-referrer";
-const X_CONTENT_TYPE_OPTIONS: &str = "nosniff";
-const DEFAULT_CONNECT_SRC: &str = "'self' http: https: ws: wss:";
-const DEFAULT_HSTS_VALUE: &str = "max-age=31536000; includeSubDomains";
-
 const PUBLIC_API_RATE_LIMIT_ENV: &str = "RELAY_BROKER_PUBLIC_API_RATE_LIMIT_PER_MINUTE";
 const JOIN_RATE_LIMIT_ENV: &str = "RELAY_BROKER_JOIN_RATE_LIMIT_PER_MINUTE";
 const PUBLISH_RATE_LIMIT_ENV: &str = "RELAY_BROKER_PUBLISH_RATE_LIMIT_PER_MINUTE";
@@ -76,20 +75,14 @@ const HSTS_VALUE_ENV: &str = "RELAY_BROKER_HSTS_VALUE";
 
 pub async fn app(state: BrokerState) -> Router {
     let join_verifier = BrokerJoinVerifier::from_env().await;
-    let hardening = match BrokerHardeningConfig::from_env() {
-        Ok(config) => config,
-        Err(error) => {
-            warn!(%error, "invalid broker hardening config; using safe defaults");
-            BrokerHardeningConfig::default()
-        }
-    };
-    let security_headers = match SecurityHeadersConfig::from_env() {
-        Ok(config) => config,
-        Err(error) => {
-            warn!(%error, "invalid broker security header config; HSTS will stay disabled");
-            SecurityHeadersConfig::default()
-        }
-    };
+    let hardening = BrokerHardeningConfig::from_env().unwrap_or_else(|error| {
+        warn!(%error, "invalid broker hardening config; using safe defaults");
+        BrokerHardeningConfig::default()
+    });
+    let security_headers = security_headers_from_env().unwrap_or_else(|error| {
+        warn!(%error, "invalid broker security header config; HSTS will stay disabled");
+        SecurityHeadersConfig::default()
+    });
     app_with_web_root_and_verifier_and_hardening(
         state,
         default_web_root(),
@@ -123,20 +116,6 @@ struct BrokerHardeningState {
     config: BrokerHardeningConfig,
     rate_limiter: SlidingWindowRateLimiter,
     connection_tracker: ActiveConnectionTracker,
-}
-
-#[derive(Clone, Debug)]
-struct SecurityHeadersConfig {
-    enable_hsts: bool,
-    content_security_policy: HeaderValue,
-    strict_transport_security: HeaderValue,
-}
-
-impl Default for SecurityHeadersConfig {
-    fn default() -> Self {
-        Self::from_parts(false, None, None)
-            .expect("default broker security headers config should be valid")
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -204,39 +183,6 @@ impl BrokerHardeningConfig {
                 IDLE_TIMEOUT_SECS_ENV,
                 DEFAULT_IDLE_TIMEOUT_SECS,
             )?),
-        })
-    }
-}
-
-impl SecurityHeadersConfig {
-    fn from_env() -> Result<Self, String> {
-        Self::from_parts(
-            parse_bool_env(ENABLE_HSTS_ENV, false)?,
-            parse_optional_string_env(CSP_CONNECT_SRC_ENV)?,
-            parse_optional_string_env(HSTS_VALUE_ENV)?,
-        )
-    }
-
-    fn from_parts(
-        enable_hsts: bool,
-        connect_src: Option<String>,
-        hsts_value: Option<String>,
-    ) -> Result<Self, String> {
-        let content_security_policy =
-            build_content_security_policy(connect_src.as_deref().unwrap_or(DEFAULT_CONNECT_SRC));
-        let content_security_policy =
-            HeaderValue::from_str(&content_security_policy).map_err(|error| {
-                format!("{CSP_CONNECT_SRC_ENV} produces an invalid CSP header: {error}")
-            })?;
-        let strict_transport_security = HeaderValue::from_str(
-            hsts_value.as_deref().unwrap_or(DEFAULT_HSTS_VALUE),
-        )
-        .map_err(|error| format!("{HSTS_VALUE_ENV} must be a valid HSTS header value: {error}"))?;
-
-        Ok(Self {
-            enable_hsts,
-            content_security_policy,
-            strict_transport_security,
         })
     }
 }
@@ -631,7 +577,7 @@ async fn public_issue_client_session(
     let mut response_headers = HeaderMap::new();
     response_headers.insert(
         header::SET_COOKIE,
-        build_client_session_cookie(bearer, request_uses_https(&headers))?,
+        build_client_session_cookie(bearer, request_uses_https(&headers, None))?,
     );
     control_plane
         .issue_client_session(bearer)
@@ -650,7 +596,7 @@ async fn public_clear_client_session(
     let mut response_headers = HeaderMap::new();
     response_headers.insert(
         header::SET_COOKIE,
-        clear_client_session_cookie(request_uses_https(&headers)),
+        clear_client_session_cookie(request_uses_https(&headers, None)),
     );
     Ok((
         response_headers,
@@ -684,7 +630,7 @@ async fn public_rotate_client_identity(
     enforce_public_api_rate_limit(&state, remote_addr, "rotate_client_identity").await?;
     let control_plane = require_public_control_plane(&state)?;
     let auth = client_refresh_auth(&headers)?;
-    let secure = request_uses_https(&headers);
+    let secure = request_uses_https(&headers, None);
     let (client_id, refreshed_token) = control_plane
         .rotate_client_identity(auth.token())
         .await
@@ -724,7 +670,7 @@ async fn public_revoke_client_identity(
     let mut response_headers = HeaderMap::new();
     response_headers.insert(
         header::SET_COOKIE,
-        clear_client_session_cookie(request_uses_https(&headers)),
+        clear_client_session_cookie(request_uses_https(&headers, None)),
     );
     Ok((response_headers, Json(response)))
 }
@@ -740,7 +686,7 @@ async fn public_issue_device_session(
     let mut response_headers = HeaderMap::new();
     response_headers.insert(
         header::SET_COOKIE,
-        build_device_session_cookie(bearer, request_uses_https(&headers))?,
+        build_device_session_cookie(bearer, request_uses_https(&headers, None))?,
     );
     control_plane
         .issue_device_session(bearer)
@@ -759,7 +705,7 @@ async fn public_clear_device_session(
     let mut response_headers = HeaderMap::new();
     response_headers.insert(
         header::SET_COOKIE,
-        clear_device_session_cookie(request_uses_https(&headers)),
+        clear_device_session_cookie(request_uses_https(&headers, None)),
     );
     Ok((
         response_headers,
@@ -779,7 +725,7 @@ async fn public_issue_device_ws_token(
     if let Some(cookie) = device_session_cookie(&headers) {
         response_headers.insert(
             header::SET_COOKIE,
-            build_device_session_cookie(cookie, request_uses_https(&headers))?,
+            build_device_session_cookie(cookie, request_uses_https(&headers, None))?,
         );
     }
     control_plane
@@ -826,9 +772,14 @@ async fn websocket(
     ws: WebSocketUpgrade,
     ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
     Path(channel_id): Path<String>,
+    headers: HeaderMap,
     Query(query): Query<ConnectQuery>,
     State(state): State<BrokerAppState>,
 ) -> impl IntoResponse {
+    if let Err(error) = authorize_websocket_origin(&headers) {
+        return error.into_response();
+    }
+
     ws.on_upgrade(move |socket| handle_socket(state, socket, remote_addr, channel_id, query))
 }
 
@@ -897,7 +848,8 @@ async fn handle_socket(
         }
     };
 
-    let mut peer_id = trimmed(query.peer_id).or_else(|| verified_join.peer_id.clone());
+    let mut peer_id =
+        trimmed_option_string(query.peer_id).or_else(|| verified_join.peer_id.clone());
     let join = loop {
         let candidate = peer_id
             .clone()
@@ -1108,17 +1060,6 @@ fn workspace_root() -> PathBuf {
         .expect("workspace root should resolve")
 }
 
-fn trimmed(value: Option<String>) -> Option<String> {
-    value.and_then(|value| {
-        let trimmed = value.trim().to_string();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed)
-        }
-    })
-}
-
 fn generated_peer_id(role: protocol::PeerRole) -> String {
     let prefix = match role {
         protocol::PeerRole::Relay => "relay",
@@ -1199,9 +1140,9 @@ fn client_refresh_token(headers: &HeaderMap) -> Result<&str, (StatusCode, Json<A
     client_refresh_auth(headers).map(ClientRefreshAuth::token)
 }
 
-fn client_refresh_auth<'a>(
-    headers: &'a HeaderMap,
-) -> Result<ClientRefreshAuth<'a>, (StatusCode, Json<ApiErrorBody>)> {
+fn client_refresh_auth(
+    headers: &HeaderMap,
+) -> Result<ClientRefreshAuth<'_>, (StatusCode, Json<ApiErrorBody>)> {
     if let Some(cookie) = client_session_cookie(headers) {
         return Ok(ClientRefreshAuth::Cookie(cookie));
     }
@@ -1430,19 +1371,14 @@ fn parse_bool_env(name: &str, default: bool) -> Result<bool, String> {
     }
 }
 
-fn parse_optional_string_env(name: &str) -> Result<Option<String>, String> {
-    match std::env::var(name) {
-        Ok(value) => {
-            let trimmed = value.trim();
-            if trimmed.is_empty() {
-                Ok(None)
-            } else {
-                Ok(Some(trimmed.to_string()))
-            }
-        }
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(std::env::VarError::NotUnicode(_)) => Err(format!("{name} must be valid utf-8")),
-    }
+fn security_headers_from_env() -> Result<SecurityHeadersConfig, String> {
+    SecurityHeadersConfig::from_parts(
+        parse_bool_env(ENABLE_HSTS_ENV, false)?,
+        parse_optional_string_env(CSP_CONNECT_SRC_ENV)?,
+        parse_optional_string_env(HSTS_VALUE_ENV)?,
+        CSP_CONNECT_SRC_ENV,
+        HSTS_VALUE_ENV,
+    )
 }
 
 async fn with_security_headers(
@@ -1450,62 +1386,31 @@ async fn with_security_headers(
     request: Request,
     next: Next,
 ) -> Response {
-    let is_https = request_uses_https(request.headers());
+    let is_https = request_uses_https(request.headers(), None);
     let mut response = next.run(request).await;
-    apply_security_headers(response.headers_mut(), &config, is_https);
+    apply_standard_security_headers(
+        response.headers_mut(),
+        &config.content_security_policy,
+        &config.strict_transport_security,
+        config.enable_hsts,
+        is_https,
+    );
     response
 }
 
-fn request_uses_https(headers: &HeaderMap) -> bool {
-    if let Some(value) = headers
-        .get("x-forwarded-proto")
-        .and_then(|value| value.to_str().ok())
-    {
-        return value
-            .split(',')
-            .any(|entry| entry.trim().eq_ignore_ascii_case("https"));
-    }
-
-    headers
-        .get("forwarded")
-        .and_then(|value| value.to_str().ok())
-        .map(|value| value.to_ascii_lowercase().contains("proto=https"))
-        .unwrap_or(false)
-        || headers
-            .get("x-forwarded-ssl")
-            .and_then(|value| value.to_str().ok())
-            .map(|value| value.eq_ignore_ascii_case("on"))
-            .unwrap_or(false)
-}
-
-fn build_content_security_policy(connect_src: &str) -> String {
-    format!(
-        "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; object-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src {connect_src}; manifest-src 'self'; worker-src 'self' blob:"
-    )
-}
-
-fn apply_security_headers(headers: &mut HeaderMap, config: &SecurityHeadersConfig, is_https: bool) {
-    headers.insert(
-        HeaderName::from_static("content-security-policy"),
-        config.content_security_policy.clone(),
-    );
-    headers.insert(
-        HeaderName::from_static("permissions-policy"),
-        HeaderValue::from_static(PERMISSIONS_POLICY),
-    );
-    headers.insert(
-        HeaderName::from_static("referrer-policy"),
-        HeaderValue::from_static(REFERRER_POLICY),
-    );
-    headers.insert(
-        HeaderName::from_static("x-content-type-options"),
-        HeaderValue::from_static(X_CONTENT_TYPE_OPTIONS),
-    );
-    if config.enable_hsts && is_https {
-        headers.insert(
-            HeaderName::from_static("strict-transport-security"),
-            config.strict_transport_security.clone(),
-        );
+fn authorize_websocket_origin(headers: &HeaderMap) -> Result<(), StatusCode> {
+    // TODO: Split websocket browser/native policies more explicitly. For now, only
+    // reject requests that explicitly present a mismatched browser Origin.
+    let Some(origin) = header_origin(headers, header::ORIGIN) else {
+        return Ok(());
+    };
+    let Some(expected_origin) = request_origin(headers, None) else {
+        return Err(StatusCode::FORBIDDEN);
+    };
+    if origin == expected_origin {
+        Ok(())
+    } else {
+        Err(StatusCode::FORBIDDEN)
     }
 }
 

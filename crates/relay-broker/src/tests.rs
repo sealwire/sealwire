@@ -8,10 +8,14 @@ use std::{
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use ed25519_dalek::{Signer, SigningKey};
 use futures_util::{SinkExt, StreamExt};
+use relay_http::build_content_security_policy;
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{client::IntoClientRequest, Message},
+};
 
 use super::*;
 use crate::auth::BrokerAuthMode;
@@ -385,6 +389,63 @@ async fn service_worker_route_serves_remote_cache_script() {
 }
 
 #[tokio::test]
+async fn websocket_rejects_mismatched_origin_when_present() {
+    let address = spawn_app().await;
+    let url = websocket_url(
+        address,
+        "room-a",
+        protocol::PeerRole::Surface,
+        None,
+        JoinTicketClaims::pairing_surface_join("room-a", "pair-origin", u64::MAX),
+    );
+    let mut request = url
+        .into_client_request()
+        .expect("websocket request should build");
+    request.headers_mut().insert(
+        header::ORIGIN,
+        HeaderValue::from_static("http://evil.example"),
+    );
+
+    let error = connect_async(request)
+        .await
+        .expect_err("mismatched origin should fail the websocket handshake");
+    match error {
+        tokio_tungstenite::tungstenite::Error::Http(response) => {
+            assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+        }
+        other => panic!("unexpected websocket error: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn websocket_allows_same_origin_when_origin_is_present() {
+    let address = spawn_app().await;
+    let url = websocket_url(
+        address,
+        "room-a",
+        protocol::PeerRole::Surface,
+        None,
+        JoinTicketClaims::pairing_surface_join("room-a", "pair-origin-ok", u64::MAX),
+    );
+    let mut request = url
+        .into_client_request()
+        .expect("websocket request should build");
+    request.headers_mut().insert(
+        header::ORIGIN,
+        HeaderValue::from_str(&format!("http://{address}")).expect("origin header should build"),
+    );
+
+    let (mut socket, _) = connect_async(request)
+        .await
+        .expect("same-origin websocket should connect");
+    let welcome = next_server_message(&mut socket).await;
+    match welcome {
+        ServerMessage::Welcome { peer_id, .. } => assert!(peer_id.starts_with("surface-")),
+        other => panic!("unexpected welcome frame: {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn websocket_relays_messages_between_peers() {
     let address = spawn_app().await;
     let relay_url = websocket_url(
@@ -685,8 +746,14 @@ async fn strict_transport_security_is_only_sent_for_secure_requests_when_enabled
     let address = spawn_app_with(
         BrokerJoinVerifier::SelfHosted(test_join_ticket_key()),
         BrokerHardeningConfig::default(),
-        SecurityHeadersConfig::from_parts(true, None, Some("max-age=86400".to_string()))
-            .expect("custom broker HSTS config should parse"),
+        SecurityHeadersConfig::from_parts(
+            true,
+            None,
+            Some("max-age=86400".to_string()),
+            CSP_CONNECT_SRC_ENV,
+            HSTS_VALUE_ENV,
+        )
+        .expect("custom broker HSTS config should parse"),
     )
     .await;
 
@@ -705,8 +772,14 @@ async fn content_security_policy_can_override_connect_src() {
     let address = spawn_app_with(
         BrokerJoinVerifier::SelfHosted(test_join_ticket_key()),
         BrokerHardeningConfig::default(),
-        SecurityHeadersConfig::from_parts(false, Some(connect_src.to_string()), None)
-            .expect("custom broker CSP config should parse"),
+        SecurityHeadersConfig::from_parts(
+            false,
+            Some(connect_src.to_string()),
+            None,
+            CSP_CONNECT_SRC_ENV,
+            HSTS_VALUE_ENV,
+        )
+        .expect("custom broker CSP config should parse"),
     )
     .await;
 
@@ -722,8 +795,14 @@ async fn forwarded_and_forwarded_ssl_headers_are_treated_as_secure() {
     let address = spawn_app_with(
         BrokerJoinVerifier::SelfHosted(test_join_ticket_key()),
         BrokerHardeningConfig::default(),
-        SecurityHeadersConfig::from_parts(true, None, Some("max-age=86400".to_string()))
-            .expect("custom broker HSTS config should parse"),
+        SecurityHeadersConfig::from_parts(
+            true,
+            None,
+            Some("max-age=86400".to_string()),
+            CSP_CONNECT_SRC_ENV,
+            HSTS_VALUE_ENV,
+        )
+        .expect("custom broker HSTS config should parse"),
     )
     .await;
 
@@ -748,13 +827,20 @@ fn invalid_security_header_overrides_are_rejected() {
         false,
         Some("https://broker.example.com\r\nx".to_string()),
         None,
+        CSP_CONNECT_SRC_ENV,
+        HSTS_VALUE_ENV,
     )
     .expect_err("invalid broker CSP override should fail");
     assert!(csp_error.contains(CSP_CONNECT_SRC_ENV));
 
-    let hsts_error =
-        SecurityHeadersConfig::from_parts(true, None, Some("max-age=86400\r\nx".to_string()))
-            .expect_err("invalid broker HSTS override should fail");
+    let hsts_error = SecurityHeadersConfig::from_parts(
+        true,
+        None,
+        Some("max-age=86400\r\nx".to_string()),
+        CSP_CONNECT_SRC_ENV,
+        HSTS_VALUE_ENV,
+    )
+    .expect_err("invalid broker HSTS override should fail");
     assert!(hsts_error.contains(HSTS_VALUE_ENV));
 }
 

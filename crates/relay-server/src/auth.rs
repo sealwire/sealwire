@@ -4,6 +4,7 @@ use axum::{
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use hmac::{Hmac, Mac};
+use relay_util::trimmed_option_string;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::net::IpAddr;
@@ -28,7 +29,7 @@ pub struct AuthConfig {
 impl AuthConfig {
     pub fn from_env_for_bind_host(bind_host: IpAddr) -> Result<Self, String> {
         Self::from_parts(
-            normalized(std::env::var(API_TOKEN_ENV).ok()),
+            trimmed_option_string(std::env::var(API_TOKEN_ENV).ok()),
             std::env::var(ALLOW_INSECURE_NO_AUTH_ENV).ok(),
             bind_host,
         )
@@ -143,17 +144,6 @@ impl AuthConfig {
     }
 }
 
-fn normalized(value: Option<String>) -> Option<String> {
-    value.and_then(|value| {
-        let trimmed = value.trim().to_string();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed)
-        }
-    })
-}
-
 fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     let header_value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     header_value.strip_prefix("Bearer ")
@@ -260,7 +250,7 @@ struct SessionCookieClaims {
 }
 
 fn parse_bool_env(name: &str, value: Option<String>) -> Result<bool, String> {
-    let Some(value) = normalized(value) else {
+    let Some(value) = trimmed_option_string(value) else {
         return Ok(false);
     };
     match value.to_ascii_lowercase().as_str() {

@@ -13,6 +13,7 @@ use rand::RngCore;
 use relay_broker::auth::{BrokerAuthMode, BROKER_AUTH_MODE_ENV};
 use relay_broker::join_ticket::unix_now;
 use relay_broker::protocol::{ClientMessage, PeerRole, PresenceKind, ServerMessage};
+use relay_util::{trimmed_option_string, trimmed_string};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::watch;
@@ -258,7 +259,8 @@ impl BrokerConfig {
         let Some(url) = url.and_then(trimmed_string) else {
             return Ok(BrokerConfigResolution::Disabled);
         };
-        let relay_peer_id = trimmed(relay_peer_id).unwrap_or_else(|| "local-relay".to_string());
+        let relay_peer_id =
+            trimmed_option_string(relay_peer_id).unwrap_or_else(|| "local-relay".to_string());
         let public_url = public_url
             .and_then(trimmed_string)
             .unwrap_or_else(|| url.clone());
@@ -294,20 +296,21 @@ impl BrokerConfig {
         let (broker_room_id, relay_id, relay_refresh_token, pending_public_enrollment) =
             match auth_mode {
                 BrokerAuthMode::SelfHostedSharedSecret => (
-                    trimmed(broker_room_id).ok_or_else(|| {
+                    trimmed_option_string(broker_room_id).ok_or_else(|| {
                         "RELAY_BROKER_CHANNEL_ID is required when RELAY_BROKER_URL is set"
                             .to_string()
                     })?,
-                    trimmed(relay_id),
-                    trimmed(relay_refresh_token),
+                    trimmed_option_string(relay_id),
+                    trimmed_option_string(relay_refresh_token),
                     None,
                 ),
                 BrokerAuthMode::PublicControlPlane => {
-                    let control_url_string = trimmed(control_url.clone()).ok_or_else(|| {
-                        format!(
+                    let control_url_string = trimmed_option_string(control_url.clone())
+                        .ok_or_else(|| {
+                            format!(
                             "{RELAY_BROKER_CONTROL_URL_ENV} is required in public broker auth mode"
                         )
-                    })?;
+                        })?;
                     let control_url = Url::parse(&control_url_string).map_err(|error| {
                         format!(
                         "invalid {RELAY_BROKER_CONTROL_URL_ENV} `{control_url_string}`: {error}"
@@ -321,9 +324,9 @@ impl BrokerConfig {
                     }
 
                     if let (Some(broker_room_id), Some(relay_id), Some(relay_refresh_token)) = (
-                        trimmed(broker_room_id.clone()),
-                        trimmed(relay_id.clone()),
-                        trimmed(relay_refresh_token.clone()),
+                        trimmed_option_string(broker_room_id.clone()),
+                        trimmed_option_string(relay_id.clone()),
+                        trimmed_option_string(relay_refresh_token.clone()),
                     ) {
                         (
                             broker_room_id,
@@ -1258,19 +1261,6 @@ async fn save_public_relay_identity(
         .await
         .map_err(|error| format!("failed to replace {}: {error}", path.display()))?;
     Ok(())
-}
-
-fn trimmed(value: Option<String>) -> Option<String> {
-    value.and_then(|value| trimmed_string(value))
-}
-
-fn trimmed_string(value: String) -> Option<String> {
-    let trimmed = value.trim().to_string();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed)
-    }
 }
 
 fn http_control_url(broker_ws_url: &str) -> String {

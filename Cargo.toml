@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/relay-broker", "crates/relay-server"]
+members = ["crates/relay-broker", "crates/relay-http", "crates/relay-server", "crates/relay-util"]
 resolver = "2"
 
 [workspace.package]
