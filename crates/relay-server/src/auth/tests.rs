@@ -91,7 +91,7 @@ fn session_cookie_uses_secure_attribute_for_https() {
 
     assert!(header.contains("Secure"));
     assert!(header.contains("HttpOnly"));
-    assert!(header.contains("SameSite=Lax"));
+    assert!(header.contains("SameSite=Strict"));
 }
 
 #[test]
@@ -130,6 +130,8 @@ fn bearer_header_marks_session_as_authenticated_without_cookie_session() {
     assert!(view.auth_required);
     assert!(view.authenticated);
     assert!(!view.cookie_session);
+    assert!(auth.authenticates_with_bearer(&headers));
+    assert!(!auth.authenticates_with_cookie(&headers));
 }
 
 #[test]
@@ -151,6 +153,7 @@ fn expired_session_cookie_is_rejected() {
         .expect_err("expired cookie should be rejected");
 
     assert_eq!(error.0, StatusCode::UNAUTHORIZED);
+    assert!(!auth.authenticates_with_cookie(&headers));
 }
 
 #[test]
@@ -164,6 +167,30 @@ fn clear_session_cookie_expires_immediately() {
 
     assert!(header.contains("Max-Age=0"));
     assert!(header.contains("HttpOnly"));
+}
+
+#[test]
+fn valid_session_cookie_marks_cookie_authenticated_transport() {
+    let auth = AuthConfig {
+        token: Some("secret".to_string()),
+        insecure_no_auth_override: false,
+    };
+    let set_cookie = auth
+        .issue_session_cookie("secret", false)
+        .expect("cookie issuance should succeed")
+        .expect("auth-enabled config should issue a cookie");
+    let cookie = set_cookie
+        .to_str()
+        .expect("cookie header should be utf-8")
+        .split(';')
+        .next()
+        .expect("set-cookie should include name=value");
+
+    let mut headers = HeaderMap::new();
+    headers.insert(header::COOKIE, HeaderValue::from_str(cookie).unwrap());
+
+    assert!(auth.authenticates_with_cookie(&headers));
+    assert!(!auth.authenticates_with_bearer(&headers));
 }
 
 #[test]

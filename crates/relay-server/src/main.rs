@@ -14,8 +14,8 @@ use std::{
 use auth::AuthConfig;
 use axum::{
     extract::{Path, Query, Request, State},
-    http::StatusCode,
-    http::{header::HeaderName, HeaderMap, HeaderValue, Uri},
+    http::header::HeaderName,
+    http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri},
     middleware::{self, Next},
     response::{
         sse::{Event, KeepAlive, Sse},
@@ -48,6 +48,8 @@ const DEFAULT_HSTS_VALUE: &str = "max-age=31536000; includeSubDomains";
 const CSP_CONNECT_SRC_ENV: &str = "RELAY_CSP_CONNECT_SRC";
 const ENABLE_HSTS_ENV: &str = "RELAY_ENABLE_HSTS";
 const HSTS_VALUE_ENV: &str = "RELAY_HSTS_VALUE";
+const CSRF_HEADER_NAME: &str = "x-agent-relay-csrf";
+const CSRF_HEADER_VALUE: &str = "1";
 
 #[derive(Clone)]
 struct AppContext {
@@ -200,6 +202,10 @@ fn build_router(context: AppContext, web_root: PathBuf) -> Router {
         .route_service("/", ServeFile::new(web_root.join("index.html")))
         .nest_service("/static", ServeDir::new(web_root))
         .with_state(context.clone())
+        .layer(middleware::from_fn_with_state(
+            context.clone(),
+            with_csrf_protection,
+        ))
         .layer(middleware::from_fn_with_state(
             context,
             with_security_headers,
@@ -659,6 +665,52 @@ async fn with_security_headers(
     response
 }
 
+async fn with_csrf_protection(
+    State(context): State<AppContext>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if let Err(error) = authorize_csrf_protection(
+        &context.auth,
+        request.method(),
+        request.headers(),
+        request.uri(),
+    ) {
+        return error.into_response();
+    }
+
+    next.run(request).await
+}
+
+fn authorize_csrf_protection(
+    auth: &AuthConfig,
+    method: &Method,
+    headers: &HeaderMap,
+    uri: &Uri,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    if !uri.path().starts_with("/api/") || method_is_safe(method) || !auth.enabled() {
+        return Ok(());
+    }
+
+    if auth.authenticates_with_bearer(headers) || !auth.authenticates_with_cookie(headers) {
+        return Ok(());
+    }
+
+    if !has_valid_csrf_header(headers) {
+        return Err(forbidden_csrf(
+            "Cookie-authenticated requests must include X-Agent-Relay-CSRF.",
+        ));
+    }
+
+    if request_is_same_origin(headers, uri) {
+        return Ok(());
+    }
+
+    Err(forbidden_csrf(
+        "Cookie-authenticated requests must come from the same Origin or Referer.",
+    ))
+}
+
 fn request_uses_https(headers: &HeaderMap, uri: &Uri) -> bool {
     uri.scheme_str() == Some("https")
         || forwarded_proto_is_https(headers)
@@ -688,6 +740,65 @@ fn header_equals_ignore_ascii_case(headers: &HeaderMap, name: &str, expected: &s
         .and_then(|value| value.to_str().ok())
         .map(|value| value.eq_ignore_ascii_case(expected))
         .unwrap_or(false)
+}
+
+fn method_is_safe(method: &Method) -> bool {
+    matches!(
+        *method,
+        Method::GET | Method::HEAD | Method::OPTIONS | Method::TRACE
+    )
+}
+
+fn has_valid_csrf_header(headers: &HeaderMap) -> bool {
+    headers
+        .get(CSRF_HEADER_NAME)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value == CSRF_HEADER_VALUE)
+}
+
+fn request_is_same_origin(headers: &HeaderMap, uri: &Uri) -> bool {
+    let Some(expected_origin) = request_origin(headers, uri) else {
+        return false;
+    };
+
+    if headers.contains_key(header::ORIGIN) {
+        return header_origin(headers, header::ORIGIN)
+            .is_some_and(|origin| origin == expected_origin);
+    }
+
+    header_origin(headers, header::REFERER).is_some_and(|origin| origin == expected_origin)
+}
+
+fn request_origin(headers: &HeaderMap, uri: &Uri) -> Option<String> {
+    let scheme = if request_uses_https(headers, uri) {
+        "https"
+    } else {
+        uri.scheme_str().unwrap_or("http")
+    };
+    let authority = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .or_else(|| uri.authority().map(|value| value.as_str()))?;
+    Some(format!("{scheme}://{authority}"))
+}
+
+fn header_origin(headers: &HeaderMap, name: HeaderName) -> Option<String> {
+    let raw = headers.get(name)?.to_str().ok()?.trim();
+    if raw.is_empty() || raw.eq_ignore_ascii_case("null") {
+        return None;
+    }
+
+    let parsed = raw.parse::<Uri>().ok()?;
+    let scheme = parsed.scheme_str()?;
+    let authority = parsed.authority()?;
+    Some(format!("{scheme}://{authority}"))
+}
+
+fn forbidden_csrf(message: impl Into<String>) -> (StatusCode, Json<ApiError>) {
+    (
+        StatusCode::FORBIDDEN,
+        Json(ApiError::new("csrf_rejected", message.into())),
+    )
 }
 
 fn build_content_security_policy(connect_src: &str) -> String {

@@ -108,10 +108,22 @@ impl AuthConfig {
             Err(unauthorized())
         }
     }
+
+    pub fn authenticates_with_bearer(&self, headers: &HeaderMap) -> bool {
+        self.token
+            .as_deref()
+            .is_some_and(|expected| bearer_token(headers) == Some(expected))
+    }
+
+    pub fn authenticates_with_cookie(&self, headers: &HeaderMap) -> bool {
+        self.token
+            .as_deref()
+            .is_some_and(|expected| has_valid_session_cookie(headers, expected))
+    }
 }
 
 impl AuthConfig {
-    fn from_parts(
+    pub(crate) fn from_parts(
         token: Option<String>,
         allow_insecure_no_auth: Option<String>,
         bind_host: IpAddr,
@@ -170,7 +182,7 @@ fn session_cookie(headers: &HeaderMap) -> Option<&str> {
 fn build_set_cookie_value(cookie_value: &str, secure: bool, max_age: u64) -> String {
     let secure_attr = if secure { "; Secure" } else { "" };
     format!(
-        "{SESSION_COOKIE_NAME}={cookie_value}; HttpOnly; Path=/; SameSite=Lax; Max-Age={max_age}{secure_attr}"
+        "{SESSION_COOKIE_NAME}={cookie_value}; HttpOnly; Path=/; SameSite=Strict; Max-Age={max_age}{secure_attr}"
     )
 }
 

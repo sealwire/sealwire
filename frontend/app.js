@@ -307,12 +307,14 @@ async function signInWithApiToken(token, reason) {
   setConnectionFormBusy(true);
 
   try {
+    const headers = new Headers({
+      "Content-Type": "application/json",
+    });
+    applyCsrfHeader(headers, "POST");
     const response = await fetch("/api/auth/session", {
       method: "POST",
       credentials: "same-origin",
-      headers: {
-        "Content-Type": "application/json",
-      },
+      headers,
       body: JSON.stringify({ token }),
     });
     const payload = await response.json();
@@ -340,9 +342,12 @@ async function signOutAuthSession(reason) {
   setConnectionFormBusy(true);
 
   try {
+    const headers = new Headers();
+    applyCsrfHeader(headers, "DELETE");
     const response = await fetch("/api/auth/session", {
       method: "DELETE",
       credentials: "same-origin",
+      headers,
     });
     const payload = await response.json();
 
@@ -1844,13 +1849,16 @@ function cancelSessionPoll() {
 }
 
 async function apiFetch(input, init = {}) {
+  const method = (init.method || "GET").toUpperCase();
   const headers = new Headers(init.headers || {});
   if (state.apiToken) {
     headers.set("Authorization", `Bearer ${state.apiToken}`);
   }
+  applyCsrfHeader(headers, method);
 
   const response = await fetch(input, {
     ...init,
+    method,
     credentials: "same-origin",
     headers,
   });
@@ -1860,6 +1868,14 @@ async function apiFetch(input, init = {}) {
   }
 
   return response;
+}
+
+function applyCsrfHeader(headers, method) {
+  if (method === "GET" || method === "HEAD") {
+    return;
+  }
+
+  headers.set("X-Agent-Relay-CSRF", "1");
 }
 
 function openThreadContextMenu(threadId, clientX, clientY) {
