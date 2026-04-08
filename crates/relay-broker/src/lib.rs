@@ -29,7 +29,9 @@ use axum::{
 };
 use futures_util::{sink::SinkExt, StreamExt};
 use join_ticket::{JoinTicketClaims, JoinTicketKey, JoinTicketKind, JOIN_TICKET_SECRET_ENV};
-use protocol::{ClientMessage, ConnectQuery, HealthResponse, ServerMessage};
+use protocol::{
+    ClientMessage, ConnectQuery, HealthResponse, PublicBrokerMonitoring, ServerMessage,
+};
 use public_control::{
     ClientGrantRequest, ClientGrantResponse, ClientIdentityRevokeResponse,
     ClientIdentityRotateResponse, ClientRelaysResponse, ClientSessionResponse,
@@ -45,7 +47,7 @@ use relay_http::{
     apply_standard_security_headers, header_origin, parse_optional_string_env, request_origin,
     request_uses_https, SecurityHeadersConfig,
 };
-use relay_util::trimmed_option_string;
+use relay_util::{sha256_hex, trimmed_option_string};
 use tokio::{sync::Mutex, time::Instant};
 use tower_http::{
     services::{ServeDir, ServeFile},
@@ -97,6 +99,7 @@ struct BrokerAppState {
     broker: BrokerState,
     join_verifier: BrokerJoinVerifier,
     hardening: BrokerHardeningState,
+    public_monitoring: PublicMonitoringState,
 }
 
 #[derive(Clone)]
@@ -136,6 +139,37 @@ struct SlidingWindowRateLimiter {
 #[derive(Clone, Default)]
 struct ActiveConnectionTracker {
     counts: Arc<StdMutex<HashMap<IpAddr, usize>>>,
+}
+
+#[derive(Clone, Default)]
+struct PublicMonitoringState {
+    inner: Arc<Mutex<PublicMonitoringInner>>,
+}
+
+#[derive(Default)]
+struct PublicMonitoringInner {
+    relay_ws_token_refresh_successes: u64,
+    relay_ws_token_refresh_failures: u64,
+    device_ws_token_refresh_successes: u64,
+    device_ws_token_refresh_failures: u64,
+    invalid_refresh_token_uses: u64,
+    repeated_invalid_refresh_token_uses: u64,
+    environment_mutation_events: u64,
+    invalid_refresh_token_counts: HashMap<String, u64>,
+    observed_chain_environments: HashMap<String, RequestEnvironment>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RequestEnvironment {
+    origin: Option<String>,
+    user_agent_hash: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RefreshChainKind {
+    RelayWsToken,
+    DeviceWsToken,
+    ClientIdentity,
 }
 
 struct ActiveConnectionPermit {
@@ -238,6 +272,101 @@ impl ActiveConnectionTracker {
     }
 }
 
+impl RefreshChainKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::RelayWsToken => "relay_ws_token",
+            Self::DeviceWsToken => "device_ws_token",
+            Self::ClientIdentity => "client_identity",
+        }
+    }
+}
+
+impl RequestEnvironment {
+    fn summary(&self) -> String {
+        let origin = self.origin.as_deref().unwrap_or("origin:none");
+        let user_agent = self.user_agent_hash.as_deref().unwrap_or("ua:none");
+        format!("{origin}|{user_agent}")
+    }
+}
+
+impl PublicMonitoringState {
+    async fn snapshot(&self) -> PublicBrokerMonitoring {
+        let inner = self.inner.lock().await;
+        PublicBrokerMonitoring {
+            relay_ws_token_refresh_successes: inner.relay_ws_token_refresh_successes,
+            relay_ws_token_refresh_failures: inner.relay_ws_token_refresh_failures,
+            device_ws_token_refresh_successes: inner.device_ws_token_refresh_successes,
+            device_ws_token_refresh_failures: inner.device_ws_token_refresh_failures,
+            invalid_refresh_token_uses: inner.invalid_refresh_token_uses,
+            repeated_invalid_refresh_token_uses: inner.repeated_invalid_refresh_token_uses,
+            environment_mutation_events: inner.environment_mutation_events,
+        }
+    }
+
+    async fn record_refresh_success(&self, kind: RefreshChainKind) {
+        let mut inner = self.inner.lock().await;
+        match kind {
+            RefreshChainKind::RelayWsToken => inner.relay_ws_token_refresh_successes += 1,
+            RefreshChainKind::DeviceWsToken => inner.device_ws_token_refresh_successes += 1,
+            RefreshChainKind::ClientIdentity => {}
+        }
+    }
+
+    async fn record_refresh_failure(&self, kind: RefreshChainKind, token: &str, error: &str) {
+        let mut inner = self.inner.lock().await;
+        match kind {
+            RefreshChainKind::RelayWsToken => inner.relay_ws_token_refresh_failures += 1,
+            RefreshChainKind::DeviceWsToken => inner.device_ws_token_refresh_failures += 1,
+            RefreshChainKind::ClientIdentity => {}
+        }
+        if !error.contains("refresh token is invalid") {
+            return;
+        }
+        inner.invalid_refresh_token_uses += 1;
+        let token_hash = sha256_hex(token.trim());
+        let attempts = {
+            let entry = inner
+                .invalid_refresh_token_counts
+                .entry(token_hash.clone())
+                .or_insert(0);
+            *entry += 1;
+            *entry
+        };
+        if attempts > 1 {
+            inner.repeated_invalid_refresh_token_uses += 1;
+            let short_hash = &token_hash[..12];
+            warn!(
+                chain = %kind.as_str(),
+                token_hash = short_hash,
+                attempts,
+                "invalid refresh token was reused"
+            );
+        }
+    }
+
+    async fn observe_chain_environment(&self, chain_key: String, headers: &HeaderMap) {
+        let Some(environment) = request_environment(headers) else {
+            return;
+        };
+        let mut inner = self.inner.lock().await;
+        if let Some(previous) = inner
+            .observed_chain_environments
+            .insert(chain_key.clone(), environment.clone())
+        {
+            if previous != environment {
+                inner.environment_mutation_events += 1;
+                warn!(
+                    chain = %chain_key,
+                    previous = %previous.summary(),
+                    current = %environment.summary(),
+                    "public broker observed an environment change on the same chain"
+                );
+            }
+        }
+    }
+}
+
 impl Drop for ActiveConnectionPermit {
     fn drop(&mut self) {
         self.tracker.release(self.remote_ip);
@@ -308,7 +437,10 @@ impl BrokerJoinVerifier {
         }
     }
 
-    fn health_response(&self) -> (StatusCode, HealthResponse) {
+    fn health_response(
+        &self,
+        public_monitoring: Option<PublicBrokerMonitoring>,
+    ) -> (StatusCode, HealthResponse) {
         match self {
             Self::SelfHosted(_) => (
                 StatusCode::OK,
@@ -318,6 +450,7 @@ impl BrokerJoinVerifier {
                     broker_auth_mode: BrokerAuthMode::SelfHostedSharedSecret.as_str().to_string(),
                     join_auth_ready: true,
                     message: None,
+                    public_monitoring: None,
                 },
             ),
             Self::PublicControlPlane(_) => (
@@ -330,6 +463,7 @@ impl BrokerJoinVerifier {
                     message: self
                         .public_control_plane()
                         .and_then(|control_plane| control_plane.health_message()),
+                    public_monitoring,
                 },
             ),
             Self::Misconfigured(error) => (
@@ -340,6 +474,7 @@ impl BrokerJoinVerifier {
                     broker_auth_mode: "unknown".to_string(),
                     join_auth_ready: false,
                     message: Some(error.clone()),
+                    public_monitoring: None,
                 },
             ),
         }
@@ -435,6 +570,7 @@ fn app_with_web_root_and_verifier_and_hardening(
                 rate_limiter: SlidingWindowRateLimiter::default(),
                 connection_tracker: ActiveConnectionTracker::default(),
             },
+            public_monitoring: PublicMonitoringState::default(),
         })
         .layer(middleware::from_fn_with_state(
             security_headers,
@@ -444,7 +580,15 @@ fn app_with_web_root_and_verifier_and_hardening(
 }
 
 async fn health(State(state): State<BrokerAppState>) -> impl IntoResponse {
-    let (status, payload) = state.join_verifier.health_response();
+    let public_monitoring = if matches!(
+        state.join_verifier,
+        BrokerJoinVerifier::PublicControlPlane(_)
+    ) {
+        Some(state.public_monitoring.snapshot().await)
+    } else {
+        None
+    };
+    let (status, payload) = state.join_verifier.health_response(public_monitoring);
     (status, Json(payload))
 }
 
@@ -496,11 +640,22 @@ async fn public_issue_relay_ws_token(
     enforce_public_api_rate_limit(&state, remote_addr, "relay_ws_token").await?;
     let control_plane = require_public_control_plane(&state)?;
     let bearer = bearer_token(&headers)?;
-    control_plane
-        .issue_relay_ws_token(bearer, input)
-        .await
-        .map(Json)
-        .map_err(public_api_error)
+    match control_plane.issue_relay_ws_token(bearer, input).await {
+        Ok(response) => {
+            state
+                .public_monitoring
+                .record_refresh_success(RefreshChainKind::RelayWsToken)
+                .await;
+            Ok(Json(response))
+        }
+        Err(error) => {
+            state
+                .public_monitoring
+                .record_refresh_failure(RefreshChainKind::RelayWsToken, bearer, &error)
+                .await;
+            Err(public_api_error(error))
+        }
+    }
 }
 
 async fn public_issue_pairing_ws_token(
@@ -559,11 +714,22 @@ async fn public_list_client_relays(
     enforce_public_api_rate_limit(&state, remote_addr, "client_relays").await?;
     let control_plane = require_public_control_plane(&state)?;
     let bearer = client_refresh_token(&headers)?;
-    control_plane
-        .list_client_relays(bearer)
-        .await
-        .map(Json)
-        .map_err(public_api_error)
+    match control_plane.list_client_relays(bearer).await {
+        Ok(response) => {
+            state
+                .public_monitoring
+                .observe_chain_environment(format!("client:{}", response.client_id), &headers)
+                .await;
+            Ok(Json(response))
+        }
+        Err(error) => {
+            state
+                .public_monitoring
+                .record_refresh_failure(RefreshChainKind::ClientIdentity, bearer, &error)
+                .await;
+            Err(public_api_error(error))
+        }
+    }
 }
 
 async fn public_issue_client_session(
@@ -631,10 +797,21 @@ async fn public_rotate_client_identity(
     let control_plane = require_public_control_plane(&state)?;
     let auth = client_refresh_auth(&headers)?;
     let secure = request_uses_https(&headers, None);
-    let (client_id, refreshed_token) = control_plane
-        .rotate_client_identity(auth.token())
-        .await
-        .map_err(public_api_error)?;
+    let (client_id, refreshed_token) =
+        match control_plane.rotate_client_identity(auth.token()).await {
+            Ok(result) => result,
+            Err(error) => {
+                state
+                    .public_monitoring
+                    .record_refresh_failure(RefreshChainKind::ClientIdentity, auth.token(), &error)
+                    .await;
+                return Err(public_api_error(error));
+            }
+        };
+    state
+        .public_monitoring
+        .observe_chain_environment(format!("client:{client_id}"), &headers)
+        .await;
     let mut response_headers = HeaderMap::new();
     response_headers.insert(
         header::SET_COOKIE,
@@ -663,10 +840,20 @@ async fn public_revoke_client_identity(
     enforce_public_api_rate_limit(&state, remote_addr, "revoke_client_identity").await?;
     let control_plane = require_public_control_plane(&state)?;
     let auth = client_refresh_auth(&headers)?;
-    let response = control_plane
-        .revoke_client_identity(auth.token())
-        .await
-        .map_err(public_api_error)?;
+    let response = match control_plane.revoke_client_identity(auth.token()).await {
+        Ok(response) => response,
+        Err(error) => {
+            state
+                .public_monitoring
+                .record_refresh_failure(RefreshChainKind::ClientIdentity, auth.token(), &error)
+                .await;
+            return Err(public_api_error(error));
+        }
+    };
+    state
+        .public_monitoring
+        .observe_chain_environment(format!("client:{}", response.client_id), &headers)
+        .await;
     let mut response_headers = HeaderMap::new();
     response_headers.insert(
         header::SET_COOKIE,
@@ -728,11 +915,29 @@ async fn public_issue_device_ws_token(
             build_device_session_cookie(cookie, request_uses_https(&headers, None))?,
         );
     }
-    control_plane
-        .issue_device_ws_token(bearer)
-        .await
-        .map(|response| (response_headers, Json(response)))
-        .map_err(public_api_error)
+    match control_plane.issue_device_ws_token(bearer).await {
+        Ok(response) => {
+            state
+                .public_monitoring
+                .record_refresh_success(RefreshChainKind::DeviceWsToken)
+                .await;
+            state
+                .public_monitoring
+                .observe_chain_environment(
+                    format!("device:{}:{}", response.broker_room_id, response.device_id),
+                    &headers,
+                )
+                .await;
+            Ok((response_headers, Json(response)))
+        }
+        Err(error) => {
+            state
+                .public_monitoring
+                .record_refresh_failure(RefreshChainKind::DeviceWsToken, bearer, &error)
+                .await;
+            Err(public_api_error(error))
+        }
+    }
 }
 
 async fn public_revoke_device_grant(
@@ -1412,6 +1617,26 @@ fn authorize_websocket_origin(headers: &HeaderMap) -> Result<(), StatusCode> {
     } else {
         Err(StatusCode::FORBIDDEN)
     }
+}
+
+fn request_environment(headers: &HeaderMap) -> Option<RequestEnvironment> {
+    let origin = header_origin(headers, header::ORIGIN);
+    let user_agent_hash = headers
+        .get(header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            let digest = sha256_hex(value);
+            format!("ua:{}", &digest[..12])
+        });
+    if origin.is_none() && user_agent_hash.is_none() {
+        return None;
+    }
+    Some(RequestEnvironment {
+        origin,
+        user_agent_hash,
+    })
 }
 
 #[cfg(test)]

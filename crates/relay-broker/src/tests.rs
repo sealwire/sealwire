@@ -121,6 +121,14 @@ async fn http_get(address: SocketAddr, path: &str) -> String {
     http_get_with_headers(address, path, &[]).await
 }
 
+async fn broker_health(address: SocketAddr) -> HealthResponse {
+    let response = http_get(address, "/api/health").await;
+    let (_, body) = response
+        .split_once("\r\n\r\n")
+        .expect("response should contain body");
+    serde_json::from_str(body.trim()).expect("health body should parse")
+}
+
 async fn http_get_with_headers(
     address: SocketAddr,
     path: &str,
@@ -220,6 +228,32 @@ where
     reqwest::Client::new()
         .get(format!("http://{address}{path}"))
         .bearer_auth(bearer_token)
+        .send()
+        .await
+        .expect("request should succeed")
+        .error_for_status()
+        .expect("response should be successful")
+        .json::<TResp>()
+        .await
+        .expect("response should decode")
+}
+
+async fn public_get_with_headers<TResp>(
+    address: SocketAddr,
+    path: &str,
+    bearer_token: &str,
+    headers: &[(&str, &str)],
+) -> TResp
+where
+    TResp: serde::de::DeserializeOwned,
+{
+    let mut request = reqwest::Client::new()
+        .get(format!("http://{address}{path}"))
+        .bearer_auth(bearer_token);
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    request
         .send()
         .await
         .expect("request should succeed")
@@ -712,11 +746,7 @@ async fn public_auth_plane_health_reports_ready() {
     let response = http_get(address, "/api/health").await;
 
     assert!(response.contains("200 OK"));
-    let (_, body) = response
-        .split_once("\r\n\r\n")
-        .expect("response should contain body");
-    let parsed: HealthResponse =
-        serde_json::from_str(body.trim()).expect("health body should parse");
+    let parsed = broker_health(address).await;
     assert_eq!(parsed.status, "ok");
     assert_eq!(parsed.broker_auth_mode, "public");
     assert!(parsed.join_auth_ready);
@@ -724,6 +754,10 @@ async fn public_auth_plane_health_reports_ready() {
         .message
         .as_deref()
         .is_some_and(|message| message.contains("RELAY_BROKER_PUBLIC_STATE_PATH")));
+    assert_eq!(
+        parsed.public_monitoring,
+        Some(PublicBrokerMonitoring::default())
+    );
 }
 
 #[tokio::test]
@@ -1639,6 +1673,102 @@ async fn public_device_refresh_tokens_fail_after_revoke() {
     )
     .await;
     assert!(error_body.contains("request failed"));
+
+    let health = broker_health(address).await;
+    let monitoring = health
+        .public_monitoring
+        .expect("public health should expose monitoring");
+    assert_eq!(monitoring.device_ws_token_refresh_failures, 1);
+    assert_eq!(monitoring.invalid_refresh_token_uses, 1);
+    assert_eq!(monitoring.repeated_invalid_refresh_token_uses, 0);
+}
+
+#[tokio::test]
+async fn repeated_invalid_device_refresh_token_use_is_tracked() {
+    let address = spawn_public_mode_app().await;
+    let revoked: DeviceGrantResponse = public_post(
+        address,
+        "/api/public/devices",
+        "relay-refresh-1",
+        &DeviceGrantRequest {
+            relay_id: "relay-1".to_string(),
+            broker_room_id: "room-a".to_string(),
+            device_id: "device-reused-invalid-token".to_string(),
+        },
+    )
+    .await;
+
+    let _: DeviceGrantRevokeResponse = public_post(
+        address,
+        "/api/public/devices/device-reused-invalid-token/revoke",
+        "relay-refresh-1",
+        &DeviceGrantRevokeRequest {
+            relay_id: "relay-1".to_string(),
+            broker_room_id: "room-a".to_string(),
+        },
+    )
+    .await;
+
+    for _ in 0..2 {
+        let response = reqwest::Client::new()
+            .post(format!("http://{address}/api/public/device/ws-token"))
+            .bearer_auth(&revoked.device_refresh_token)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .expect("invalid refresh request should complete");
+        assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+    }
+
+    let health = broker_health(address).await;
+    let monitoring = health
+        .public_monitoring
+        .expect("public health should expose monitoring");
+    assert_eq!(monitoring.device_ws_token_refresh_failures, 2);
+    assert_eq!(monitoring.invalid_refresh_token_uses, 2);
+    assert_eq!(monitoring.repeated_invalid_refresh_token_uses, 1);
+}
+
+#[tokio::test]
+async fn client_environment_mutations_are_tracked() {
+    let address = spawn_public_mode_app().await;
+    let signing_key = SigningKey::from_bytes(&[12_u8; 32]);
+
+    let grant: ClientGrantResponse = public_post(
+        address,
+        "/api/public/clients/grants",
+        "relay-refresh-1",
+        &ClientGrantRequest {
+            relay_id: "relay-1".to_string(),
+            broker_room_id: "room-a".to_string(),
+            device_id: "device-env-mutation".to_string(),
+            client_verify_key: STANDARD.encode(signing_key.verifying_key().to_bytes()),
+            client_label: Some("Env Watcher".to_string()),
+            device_label: Some("Env Watcher".to_string()),
+        },
+    )
+    .await;
+
+    let _: ClientRelaysResponse = public_get_with_headers(
+        address,
+        "/api/public/relays",
+        &grant.client_refresh_token,
+        &[("User-Agent", "EnvProbe/1.0")],
+    )
+    .await;
+    let _: ClientRelaysResponse = public_get_with_headers(
+        address,
+        "/api/public/relays",
+        &grant.client_refresh_token,
+        &[("User-Agent", "EnvProbe/2.0")],
+    )
+    .await;
+
+    let health = broker_health(address).await;
+    let monitoring = health
+        .public_monitoring
+        .expect("public health should expose monitoring");
+    assert_eq!(monitoring.environment_mutation_events, 1);
 }
 
 #[tokio::test]

@@ -67,4 +67,17 @@ pub struct HealthResponse {
     pub join_auth_ready: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_monitoring: Option<PublicBrokerMonitoring>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct PublicBrokerMonitoring {
+    pub relay_ws_token_refresh_successes: u64,
+    pub relay_ws_token_refresh_failures: u64,
+    pub device_ws_token_refresh_successes: u64,
+    pub device_ws_token_refresh_failures: u64,
+    pub invalid_refresh_token_uses: u64,
+    pub repeated_invalid_refresh_token_uses: u64,
+    pub environment_mutation_events: u64,
 }
