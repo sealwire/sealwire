@@ -9,7 +9,7 @@
   <body>
     <div class="app-shell">
       <aside class="sidebar">
-        <form id="connection-form" class="workspace-form">
+        <form id="connection-form" class="workspace-form auth-form" hidden>
           <label class="sidebar-label" for="api-token-input">API Token</label>
           <div class="workspace-picker">
             <input id="api-token-input" type="password" placeholder="Enter RELAY_API_TOKEN to sign in" autocomplete="off">
@@ -17,15 +17,15 @@
           </div>
         </form>
 
-        <button id="open-security-modal" class="new-chat-button" type="button">
-          Security & Devices
-        </button>
+        <section class="launch-panel">
+          <div class="launch-copy">
+            <p class="sidebar-caption">Relay console</p>
+            <h2 class="launch-title">Load a workspace</h2>
+            <p class="launch-body">
+              Point this relay at the project you care about, then start or resume a session when you need local control.
+            </p>
+          </div>
 
-        <button id="new-session-toggle" class="new-chat-button" type="button" aria-expanded="false">
-          Launch Session
-        </button>
-
-        <section id="new-session-panel" class="new-session-panel" hidden>
           <form id="directory-form" class="workspace-form">
             <label class="sidebar-label" for="cwd-input">Workspace</label>
             <div class="workspace-picker">
@@ -34,61 +34,51 @@
             </div>
           </form>
 
-          <button id="start-session-button" class="start-session-button" type="button">
-            Start Session
-          </button>
+          <div class="launch-actions">
+            <button id="start-session-button" class="start-session-button" type="button">
+              Start Session
+            </button>
+            <button id="resume-latest-button" class="secondary-button" type="button">
+              Continue Latest
+            </button>
+          </div>
 
-          <details class="sidebar-settings">
-            <summary>Launch settings</summary>
-            <div class="settings-grid">
-              <label class="field">
-                <span>Model</span>
-                <select id="model-input">
-                  <option value="gpt-5.4">gpt-5.4</option>
-                </select>
-              </label>
-              <label class="field">
-                <span>Approval</span>
-                <select id="approval-policy-input">
-                  <option value="untrusted">untrusted</option>
-                  <option value="on-request">on-request</option>
-                  <option value="never">never</option>
-                </select>
-              </label>
-              <label class="field">
-                <span>Sandbox</span>
-                <select id="sandbox-input">
-                  <option value="workspace-write">workspace-write</option>
-                  <option value="read-only">read-only</option>
-                  <option value="danger-full-access">danger-full-access</option>
-                </select>
-              </label>
-              <label class="field">
-                <span>Default Effort</span>
-                <select id="start-effort">
-                  <option value="medium">medium</option>
-                  <option value="low">low</option>
-                  <option value="high">high</option>
-                </select>
-              </label>
-              <label class="field field-full">
-                <span>Initial Prompt</span>
-                <textarea id="start-prompt" rows="4" placeholder="Optional first task for the new session."></textarea>
-              </label>
-            </div>
-          </details>
+          <div class="launch-footer">
+            <button id="open-launch-settings" class="sidebar-link-button" type="button">
+              Launch options
+            </button>
+            <button id="open-security-modal" class="sidebar-link-button" type="button">
+              Remote devices
+            </button>
+          </div>
         </section>
 
-        <div class="sidebar-row">
-          <p id="threads-count" class="sidebar-caption">Choose a directory</p>
-          <button id="threads-refresh-button" class="sidebar-link-button" type="button">
-            Refresh
-          </button>
-        </div>
+        <details class="sidebar-drawer">
+          <summary class="sidebar-drawer-summary">
+            <div>
+              <p class="sidebar-caption">Session History</p>
+              <p id="threads-count" class="sidebar-hint">Choose a workspace to load history.</p>
+            </div>
+          </summary>
 
-        <div id="threads-list" class="conversation-list">
-          <p class="sidebar-empty">Choose a directory to load history sessions.</p>
-        </div>
+          <div class="sidebar-drawer-body">
+            <button id="go-console-home-sidebar" class="secondary-button sidebar-home-button" type="button" hidden>
+              Back to console
+            </button>
+            <div class="sidebar-row">
+              <div>
+                <p class="sidebar-caption">Recent Sessions</p>
+              </div>
+              <button id="threads-refresh-button" class="sidebar-link-button" type="button">
+                Refresh
+              </button>
+            </div>
+
+            <div id="threads-list" class="conversation-list">
+              <p class="sidebar-empty">Choose a directory to load history sessions.</p>
+            </div>
+          </div>
+        </details>
 
         <div id="thread-context-menu" class="context-menu" hidden>
           <button id="archive-thread-button" class="context-menu-button" type="button">
@@ -103,74 +93,103 @@
       <main class="chat-shell">
         <header class="chat-header">
           <div class="chat-heading">
-            <span class="chat-heading-label">Codex</span>
-            <h1 id="workspace-title">New session</h1>
+            <span class="chat-heading-label">Relay</span>
+            <h1 id="workspace-title">Relay console</h1>
             <p id="workspace-subtitle" class="chat-subtitle">
-              Pick a workspace on the left and start or resume a session.
+              Monitor live control, trusted devices, and the active session from here.
             </p>
           </div>
           <div class="chat-header-actions">
             <span id="status-badge" class="status-badge">Idle</span>
+            <button id="go-console-home" class="header-button" type="button" hidden>Back to console</button>
+            <button id="open-session-details" class="header-button" type="button">Relay details</button>
             <button id="refresh-button" class="header-button" type="button">Refresh</button>
           </div>
         </header>
 
-        <details class="meta-drawer">
-          <summary>Dashboard & Details</summary>
-          <section id="session-meta" class="session-meta">
-            <span class="meta-empty">Session details will appear here.</span>
-          </section>
-
-          <section id="overview-strip" class="overview-strip" aria-label="Relay overview">
-            <article class="overview-card overview-card-primary">
-              <p class="overview-label">Session Pulse</p>
-              <div class="overview-body">
-                <div>
-                  <h2 id="overview-session-title" class="overview-title">Pick a workspace to launch</h2>
-                  <p id="overview-session-copy" class="overview-copy">
-                    Load a workspace, review prior threads, and start a fresh relay session.
-                  </p>
-                </div>
-                <div id="overview-session-badges" class="overview-badges"></div>
+        <section id="overview-strip" class="overview-strip" aria-label="Relay overview">
+          <article class="overview-card overview-card-primary">
+            <p class="overview-label">Live Session</p>
+            <div class="overview-body">
+              <div>
+                <h2 id="overview-session-title" class="overview-title">Pick a workspace to launch</h2>
+                <p id="overview-session-copy" class="overview-copy">
+                  Load a workspace, inspect relay state, and start or resume a session when you need it.
+                </p>
               </div>
-            </article>
-
-            <article class="overview-card overview-card-secondary">
-              <p class="overview-label">Relay Posture</p>
-              <div class="overview-body">
-                <div>
-                  <h2 id="overview-security-title" class="overview-title">Private by default</h2>
-                  <p id="overview-security-copy" class="overview-copy">
-                    Pair devices only when you need remote access. Broker visibility and trust
-                    state stay visible here.
-                  </p>
-                </div>
-                <div id="overview-security-badges" class="overview-badges"></div>
-              </div>
-            </article>
-          </section>
-        </details>
-
-        <section id="control-banner" class="control-banner" hidden>
-          <div>
-            <p id="control-summary" class="control-summary">This device has control</p>
-            <p id="control-hint" class="control-hint">Only the active device can type, but any owner device can approve.</p>
-          </div>
-          <button id="take-over-button" class="header-button control-button" type="button">
-            Take over
-          </button>
-        </section>
-
-        <section class="thread-shell">
-          <div id="transcript" class="chat-thread">
-            <div class="thread-empty">
-              <h2>No active conversation yet</h2>
-              <p>Start a new session or resume one from the sidebar.</p>
+              <div id="overview-session-badges" class="overview-badges"></div>
             </div>
-          </div>
+          </article>
+
+          <article class="overview-card overview-card-secondary">
+            <p class="overview-label">Trust & Privacy</p>
+            <div class="overview-body">
+              <div>
+                <h2 id="overview-security-title" class="overview-title">Private by default</h2>
+                <p id="overview-security-copy" class="overview-copy">
+                  Watch broker posture, paired devices, and visibility guarantees without leaving the live console.
+                </p>
+              </div>
+              <div id="overview-security-badges" class="overview-badges"></div>
+            </div>
+          </article>
         </section>
 
-        <form id="message-form" class="composer-shell">
+        <section class="console-grid">
+          <section class="console-card console-card-surfaces">
+            <div class="console-card-header">
+              <div>
+                <p class="sidebar-caption">Live Surfaces</p>
+                <p id="live-surfaces-summary" class="sidebar-hint">
+                  See which devices are trusted, pending, or currently controlling the active session.
+                </p>
+              </div>
+              <button id="open-security-console" class="sidebar-link-button" type="button">
+                Manage
+              </button>
+            </div>
+            <div id="live-surfaces-list" class="surface-list">
+              <p class="sidebar-empty">No relay surfaces are active yet.</p>
+            </div>
+          </section>
+
+          <section class="console-card console-card-audit">
+            <div class="console-card-header">
+              <div>
+                <p class="sidebar-caption">Audit Timeline</p>
+                <p id="audit-summary" class="sidebar-hint">
+                  Recent relay, control, and security events will appear here.
+                </p>
+              </div>
+            </div>
+            <div id="audit-timeline" class="audit-list">
+              <p class="sidebar-empty">No relay events yet.</p>
+            </div>
+          </section>
+
+          <section class="thread-panel">
+            <section id="control-banner" class="control-banner" hidden>
+              <div>
+                <p id="control-summary" class="control-summary">This device has control</p>
+                <p id="control-hint" class="control-hint">Only the active device can type, but any owner device can approve.</p>
+              </div>
+              <button id="take-over-button" class="header-button control-button" type="button">
+                Take over
+              </button>
+            </section>
+
+            <section class="thread-shell">
+              <div id="transcript" class="chat-thread">
+                <div class="thread-empty">
+                  <h2>Relay standing by</h2>
+                  <p>Load a workspace, then use this console to watch the live session, control state, and trusted devices.</p>
+                </div>
+              </div>
+            </section>
+          </section>
+        </section>
+
+        <form id="message-form" class="composer-shell" hidden>
           <div class="composer-inner">
             <textarea
               id="message-input"
@@ -179,7 +198,7 @@
             ></textarea>
             <div class="composer-actions">
               <label class="composer-select" for="message-effort">
-                <span>Effort</span>
+                <span>Response mode</span>
                 <select id="message-effort">
                   <option value="medium">medium</option>
                   <option value="low">low</option>
@@ -191,16 +210,80 @@
           </div>
         </form>
 
-        <details class="log-drawer">
-          <summary>Relay log</summary>
-          <pre id="client-log" class="client-log">Booting web client...</pre>
-        </details>
       </main>
     </div>
 
+    <dialog id="launch-settings-modal" class="panel-modal">
+      <div class="modal-header">
+        <h2>Launch options</h2>
+        <button id="close-launch-settings-modal" class="header-button close-modal-btn" type="button">&times;</button>
+      </div>
+      <section class="panel-modal-body">
+        <p class="panel-modal-copy">
+          Most people can leave these alone. Change them only if you need a different startup behavior.
+        </p>
+        <div class="settings-grid">
+          <label class="field">
+            <span>Model</span>
+            <select id="model-input">
+              <option value="gpt-5.4">gpt-5.4</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Permission mode</span>
+            <select id="approval-policy-input">
+              <option value="untrusted">untrusted</option>
+              <option value="on-request">on-request</option>
+              <option value="never">never</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>File access</span>
+            <select id="sandbox-input">
+              <option value="workspace-write">workspace-write</option>
+              <option value="read-only">read-only</option>
+              <option value="danger-full-access">danger-full-access</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Default effort</span>
+            <select id="start-effort">
+              <option value="medium">medium</option>
+              <option value="low">low</option>
+              <option value="high">high</option>
+            </select>
+          </label>
+          <label class="field field-full">
+            <span>Initial prompt</span>
+            <textarea id="start-prompt" rows="4" placeholder="Optional first task for the new session."></textarea>
+          </label>
+        </div>
+      </section>
+    </dialog>
+
+    <dialog id="session-details-modal" class="panel-modal panel-modal-wide">
+      <div class="modal-header">
+        <h2>Relay details</h2>
+        <button id="close-session-details-modal" class="header-button close-modal-btn" type="button">&times;</button>
+      </div>
+      <section class="panel-modal-body session-details-shell">
+        <section class="details-section">
+          <h3 class="details-heading">Environment</h3>
+          <section id="session-meta" class="session-meta">
+            <span class="meta-empty">Session details will appear here.</span>
+          </section>
+        </section>
+
+        <section class="details-section">
+          <h3 class="details-heading">Relay log</h3>
+          <pre id="client-log" class="client-log">Booting web client...</pre>
+        </section>
+      </section>
+    </dialog>
+
     <dialog id="security-modal" class="security-modal">
       <div class="modal-header">
-        <h2>Security & Devices</h2>
+        <h2>Remote devices</h2>
         <button id="close-security-modal" class="header-button close-modal-btn" type="button">&times;</button>
       </div>
       <section class="remote-access-shell">

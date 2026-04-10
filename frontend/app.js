@@ -18,10 +18,10 @@ const state = {
   currentPairing: null,
   deviceId: loadOrCreateDeviceId(),
   defaultsSeeded: false,
-  newSessionPanelOpen: false,
   pendingPairingIds: [],
   selectedCwd: "",
   session: null,
+  viewThreadId: readThreadIdFromUrl(),
   sessionStream: null,
   streamConnected: false,
   streamReconnectTimer: null,
@@ -31,6 +31,7 @@ const state = {
   threadsPollTimer: null,
 };
 
+const appShell = document.querySelector(".app-shell");
 const transcript = document.querySelector("#transcript");
 const clientLog = document.querySelector("#client-log");
 const connectionForm = document.querySelector("#connection-form");
@@ -39,6 +40,7 @@ const apiTokenInput = document.querySelector("#api-token-input");
 const applyTokenButton = document.querySelector("#apply-token-button");
 const startPairingButton = document.querySelector("#start-pairing-button");
 const openSecurityModalBtn = document.querySelector("#open-security-modal");
+const openSecurityConsoleButton = document.querySelector("#open-security-console");
 const closeSecurityModalBtn = document.querySelector("#close-security-modal");
 const securityModal = document.querySelector("#security-modal");
 const pairingPanel = document.querySelector("#pairing-panel");
@@ -54,15 +56,19 @@ const allowedRootsList = document.querySelector("#allowed-roots-list");
 const pendingPairingsList = document.querySelector("#pending-pairings-list");
 const refreshButton = document.querySelector("#refresh-button");
 const threadsRefreshButton = document.querySelector("#threads-refresh-button");
+const sessionHistoryDrawer = document.querySelector(".sidebar-drawer");
+const goConsoleHomeSidebarButton = document.querySelector("#go-console-home-sidebar");
 const sendButton = document.querySelector("#send-button");
 const messageForm = document.querySelector("#message-form");
 const messageInput = document.querySelector("#message-input");
 const messageEffort = document.querySelector("#message-effort");
 const directoryForm = document.querySelector("#directory-form");
 const loadDirectoryButton = document.querySelector("#load-directory-button");
-const newSessionToggleButton = document.querySelector("#new-session-toggle");
-const newSessionPanel = document.querySelector("#new-session-panel");
 const startSessionButton = document.querySelector("#start-session-button");
+const resumeLatestButton = document.querySelector("#resume-latest-button");
+const openLaunchSettingsButton = document.querySelector("#open-launch-settings");
+const launchSettingsModal = document.querySelector("#launch-settings-modal");
+const closeLaunchSettingsModalButton = document.querySelector("#close-launch-settings-modal");
 const cwdInput = document.querySelector("#cwd-input");
 const startPromptInput = document.querySelector("#start-prompt");
 const modelInput = document.querySelector("#model-input");
@@ -75,9 +81,14 @@ const threadContextMenu = document.querySelector("#thread-context-menu");
 const archiveThreadButton = document.querySelector("#archive-thread-button");
 const deleteThreadButton = document.querySelector("#delete-thread-button");
 const pairedDevicesList = document.querySelector("#paired-devices-list");
+const chatShell = document.querySelector(".chat-shell");
 const workspaceTitle = document.querySelector("#workspace-title");
 const workspaceSubtitle = document.querySelector("#workspace-subtitle");
 const statusBadge = document.querySelector("#status-badge");
+const goConsoleHomeButton = document.querySelector("#go-console-home");
+const openSessionDetailsButton = document.querySelector("#open-session-details");
+const sessionDetailsModal = document.querySelector("#session-details-modal");
+const closeSessionDetailsModalButton = document.querySelector("#close-session-details-modal");
 const sessionMeta = document.querySelector("#session-meta");
 const overviewSessionTitle = document.querySelector("#overview-session-title");
 const overviewSessionCopy = document.querySelector("#overview-session-copy");
@@ -85,6 +96,10 @@ const overviewSessionBadges = document.querySelector("#overview-session-badges")
 const overviewSecurityTitle = document.querySelector("#overview-security-title");
 const overviewSecurityCopy = document.querySelector("#overview-security-copy");
 const overviewSecurityBadges = document.querySelector("#overview-security-badges");
+const liveSurfacesList = document.querySelector("#live-surfaces-list");
+const liveSurfacesSummary = document.querySelector("#live-surfaces-summary");
+const auditTimeline = document.querySelector("#audit-timeline");
+const auditSummary = document.querySelector("#audit-summary");
 const controlBanner = document.querySelector("#control-banner");
 const controlSummary = document.querySelector("#control-summary");
 const controlHint = document.querySelector("#control-hint");
@@ -99,11 +114,14 @@ startPairingButton.addEventListener("click", () => {
   void startPairing();
 });
 
-openSecurityModalBtn?.addEventListener("click", () => {
+function openSecurityModal() {
   state.allowedRootsDraftDirty = false;
   renderAllowedRoots(state.session?.allowed_roots || []);
   securityModal?.showModal();
-});
+}
+
+openSecurityModalBtn?.addEventListener("click", openSecurityModal);
+openSecurityConsoleButton?.addEventListener("click", openSecurityModal);
 
 closeSecurityModalBtn?.addEventListener("click", () => {
   securityModal?.close();
@@ -112,6 +130,34 @@ closeSecurityModalBtn?.addEventListener("click", () => {
 securityModal?.addEventListener("click", (event) => {
   if (event.target === securityModal) {
     securityModal.close();
+  }
+});
+
+openLaunchSettingsButton?.addEventListener("click", () => {
+  launchSettingsModal?.showModal();
+});
+
+closeLaunchSettingsModalButton?.addEventListener("click", () => {
+  launchSettingsModal?.close();
+});
+
+launchSettingsModal?.addEventListener("click", (event) => {
+  if (event.target === launchSettingsModal) {
+    launchSettingsModal.close();
+  }
+});
+
+openSessionDetailsButton?.addEventListener("click", () => {
+  sessionDetailsModal?.showModal();
+});
+
+closeSessionDetailsModalButton?.addEventListener("click", () => {
+  sessionDetailsModal?.close();
+});
+
+sessionDetailsModal?.addEventListener("click", (event) => {
+  if (event.target === sessionDetailsModal) {
+    sessionDetailsModal.close();
   }
 });
 
@@ -130,6 +176,22 @@ allowedRootsForm?.addEventListener("submit", (event) => {
 
 refreshButton.addEventListener("click", () => {
   void loadSession("manual refresh");
+});
+
+goConsoleHomeButton?.addEventListener("click", () => {
+  clearThreadRoute();
+  if (state.session) {
+    renderSession(state.session);
+  }
+  renderThreads(state.threads);
+});
+
+goConsoleHomeSidebarButton?.addEventListener("click", () => {
+  clearThreadRoute();
+  if (state.session) {
+    renderSession(state.session);
+  }
+  renderThreads(state.threads);
 });
 
 threadsRefreshButton.addEventListener("click", () => {
@@ -168,20 +230,30 @@ window.addEventListener("blur", () => {
 
 window.addEventListener("resize", () => {
   closeThreadContextMenu();
+  syncThreadHistoryScroll();
+});
+
+window.addEventListener("popstate", () => {
+  state.viewThreadId = readThreadIdFromUrl();
+  if (state.session) {
+    renderSession(state.session);
+  }
+  renderThreads(state.threads);
 });
 
 directoryForm.addEventListener("submit", (event) => {
   event.preventDefault();
+  clearThreadRoute();
   setSelectedCwd(cwdInput.value.trim());
   void loadThreads("directory change");
 });
 
-newSessionToggleButton.addEventListener("click", () => {
-  setNewSessionPanelOpen(!state.newSessionPanelOpen);
-});
-
 startSessionButton.addEventListener("click", () => {
   void startSession();
+});
+
+resumeLatestButton?.addEventListener("click", () => {
+  void resumeLatestSession();
 });
 
 takeOverButton.addEventListener("click", () => {
@@ -195,14 +267,51 @@ messageForm.addEventListener("submit", (event) => {
 
 transcript.addEventListener("click", (event) => {
   const approvalButton = event.target.closest("[data-approval-decision]");
-  if (!approvalButton) {
+  if (approvalButton) {
+    void submitDecision(
+      approvalButton.dataset.approvalDecision,
+      approvalButton.dataset.approvalScope || "once"
+    );
     return;
   }
 
-  void submitDecision(
-    approvalButton.dataset.approvalDecision,
-    approvalButton.dataset.approvalScope || "once"
-  );
+  const suggestionButton = event.target.closest("[data-suggestion]");
+  if (suggestionButton) {
+    messageInput.value = suggestionButton.dataset.suggestion || "";
+    messageInput.focus();
+    return;
+  }
+
+  const openThreadButton = event.target.closest("[data-open-thread-id]");
+  if (openThreadButton) {
+    const threadId = openThreadButton.dataset.openThreadId;
+    if (threadId) {
+      setThreadRoute(threadId);
+      if (state.session) {
+        renderSession(state.session);
+      }
+      renderThreads(state.threads);
+    }
+    return;
+  }
+
+  const goHomeButton = event.target.closest("[data-go-console-home]");
+  if (goHomeButton) {
+    clearThreadRoute();
+    if (state.session) {
+      renderSession(state.session);
+    }
+    renderThreads(state.threads);
+    return;
+  }
+
+  const resumeThreadButton = event.target.closest("[data-resume-thread-id]");
+  if (resumeThreadButton) {
+    const threadId = resumeThreadButton.dataset.resumeThreadId;
+    if (threadId) {
+      void resumeSession(threadId);
+    }
+  }
 });
 
 pairedDevicesList.addEventListener("click", (event) => {
@@ -237,7 +346,6 @@ void boot();
 async function boot() {
   apiTokenInput.value = state.apiToken;
   updateConnectionForm();
-  setNewSessionPanelOpen(false);
 
   await refreshAuthSession("initial boot");
   if (state.apiToken && state.authRequired && !state.authenticated) {
@@ -384,6 +492,8 @@ function updateConnectionForm() {
   if (!apiTokenLabel || !applyTokenButton) {
     return;
   }
+
+  connectionForm.hidden = !state.authRequired;
 
   if (!state.authRequired) {
     apiTokenLabel.textContent = "Local Access";
@@ -587,13 +697,13 @@ async function startSession() {
 
     state.defaultsSeeded = false;
     setSelectedCwd(payload.data.current_cwd || cwd);
+    setThreadRoute(payload.data.active_thread_id || null);
     seedDefaults(payload.data);
     renderSession(payload.data);
     if (canCurrentDeviceWrite(payload.data)) {
       messageInput.focus();
     }
     await loadThreads("post-start refresh");
-    setNewSessionPanelOpen(false);
     logLine("Started a new Codex thread");
   } catch (error) {
     logLine(`Session start failed: ${error.message}`);
@@ -624,17 +734,42 @@ async function resumeSession(threadId) {
 
     state.defaultsSeeded = false;
     setSelectedCwd(payload.data.current_cwd || state.selectedCwd);
+    setThreadRoute(payload.data.active_thread_id || threadId);
     seedDefaults(payload.data);
     renderSession(payload.data);
     if (canCurrentDeviceWrite(payload.data)) {
       messageInput.focus();
     }
     await loadThreads("post-resume refresh");
-    setNewSessionPanelOpen(false);
     logLine(`Resumed thread ${threadId}`);
   } catch (error) {
     logLine(`Resume failed: ${error.message}`);
   }
+}
+
+async function resumeLatestSession() {
+  const cwd = cwdInput.value.trim();
+
+  if (!cwd && !state.selectedCwd) {
+    logLine("Choose a workspace before continuing a recent session.");
+    cwdInput.focus();
+    return;
+  }
+
+  if (cwd && cwd !== state.selectedCwd) {
+    setSelectedCwd(cwd);
+    await loadThreads("continue latest");
+  } else if (!state.threads.length && state.selectedCwd) {
+    await loadThreads("continue latest");
+  }
+
+  const latestThread = state.threads[0] || null;
+  if (!latestThread) {
+    logLine("No recent sessions were found for this workspace.");
+    return;
+  }
+
+  await resumeSession(latestThread.id);
 }
 
 async function sendMessage() {
@@ -890,15 +1025,38 @@ function renderSession(session) {
   const pendingPairings = session.pending_pairing_requests || [];
   const activeThread = resolveActiveThread(session.active_thread_id);
   const hasActiveSession = Boolean(session.active_thread_id);
+  const viewingConversation = isViewingConversation(session);
   const canWrite = canCurrentDeviceWrite(session);
+  const workspace = session.current_cwd || state.selectedCwd || "";
+  const workspaceName = workspace ? workspaceBasename(workspace) : "";
   state.currentApprovalId = approval?.request_id || null;
 
-  workspaceTitle.textContent = session.active_thread_id
-    ? activeThread?.name || activeThread?.preview || shortId(session.active_thread_id)
-    : "New session";
-  workspaceSubtitle.textContent = session.active_thread_id
-    ? session.current_cwd
-    : "Pick a workspace on the left and start or resume a session.";
+  workspaceTitle.textContent = workspaceName || "Relay console";
+  if (viewingConversation && session.active_thread_id) {
+    const threadLabel = activeThread?.name || activeThread?.preview || shortId(session.active_thread_id);
+    workspaceSubtitle.textContent = `Live thread: ${threadLabel}`;
+  } else if (session.active_thread_id) {
+    const threadLabel = activeThread?.name || activeThread?.preview || shortId(session.active_thread_id);
+    workspaceSubtitle.textContent = `A live session is running in ${workspaceName || "this workspace"}. Open ${threadLabel} only when you want the conversation view.`;
+  } else if (workspace) {
+    workspaceSubtitle.textContent =
+      "Relay is standing by in this workspace. Watch control, trust, and audit state here before starting or resuming.";
+  } else {
+    workspaceSubtitle.textContent =
+      "Choose a workspace to bring the relay into focus, then use this page as the local control console.";
+  }
+
+  if (chatShell) {
+    chatShell.dataset.view = viewingConversation ? "conversation" : "console";
+  }
+  if (appShell) {
+    appShell.dataset.view = viewingConversation ? "conversation" : "console";
+  }
+  if (sessionHistoryDrawer) {
+    sessionHistoryDrawer.open = viewingConversation;
+  }
+
+  syncThreadHistoryScroll();
 
   if (approval) {
     statusBadge.textContent = "Approval required";
@@ -911,11 +1069,13 @@ function renderSession(session) {
     statusBadge.textContent = "Offline";
     statusBadge.className = "status-badge status-badge-offline";
   } else {
-    statusBadge.textContent = session.current_status || "Ready";
+    statusBadge.textContent = sessionStatusLabel(session, approval);
     statusBadge.className = "status-badge status-badge-ready";
   }
 
   renderOverview(session, activeThread, approval);
+  renderLiveSurfaces(session, activeThread);
+  renderAuditTimeline(session.logs || []);
   renderSessionMeta(session);
   renderAllowedRoots(session.allowed_roots || []);
   renderPairingPanel();
@@ -926,13 +1086,24 @@ function renderSession(session) {
   renderTranscript(session, approval);
   renderLogs(session.logs);
   renderThreads(state.threads);
+  syncThreadHistoryScroll();
   scheduleControllerHeartbeat(session);
   scheduleControllerLeaseRefresh(session);
 
-  sendButton.disabled = !hasActiveSession || !canWrite;
-  messageInput.disabled = !hasActiveSession || !canWrite;
+  openSessionDetailsButton.disabled = false;
+  if (goConsoleHomeButton) {
+    goConsoleHomeButton.hidden = !viewingConversation;
+  }
+  if (goConsoleHomeSidebarButton) {
+    goConsoleHomeSidebarButton.hidden = !viewingConversation;
+  }
+  messageForm.hidden = !viewingConversation;
+  sendButton.disabled = !hasActiveSession || !canWrite || !viewingConversation;
+  messageInput.disabled = !hasActiveSession || !canWrite || !viewingConversation;
   messageInput.placeholder = !hasActiveSession
     ? "Start or resume a session first."
+    : !viewingConversation
+      ? "Open the thread page to send a message."
     : canWrite
       ? "Message Codex..."
       : "Another device has control. Take over to reply.";
@@ -1151,14 +1322,175 @@ function renderPendingPairingRequests(requests) {
     .join("");
 }
 
+function renderLiveSurfaces(session, activeThread) {
+  if (!liveSurfacesList || !liveSurfacesSummary) {
+    return;
+  }
+
+  const records = Array.isArray(session?.device_records) ? session.device_records : [];
+  const visibleRecords = records.filter((record) => record.lifecycle_state !== "revoked");
+  const revokedCount = records.length - visibleRecords.length;
+  const surfaces = [
+    buildLocalSurface(session, activeThread),
+    ...visibleRecords.map((record) => buildDeviceSurface(session, activeThread, record)),
+  ];
+
+  const approvedCount = approvedDeviceCount(session);
+  const pendingCount = session?.pending_pairing_requests?.length || 0;
+  const activeController = controllerStateLabel(session);
+
+  liveSurfacesSummary.textContent =
+    `${surfaces.length} active surface${surfaces.length === 1 ? "" : "s"} · ${approvedCount} trusted · ${pendingCount} pending · controller ${activeController}${revokedCount > 0 ? ` · ${revokedCount} revoked hidden` : ""}`;
+
+  liveSurfacesList.innerHTML = surfaces
+    .map(
+      (surface) => `
+        <article class="surface-card">
+          <div class="surface-card-heading">
+            <div>
+              <h3 class="surface-card-title">${escapeHtml(surface.title)}</h3>
+              <p class="surface-card-copy">${escapeHtml(surface.copy)}</p>
+            </div>
+            <span class="device-state-badge ${escapeHtml(surface.badgeClass)}">${escapeHtml(surface.badgeLabel)}</span>
+          </div>
+          <div class="surface-card-meta">
+            ${surface.chips
+              .map(
+                (chip) => `
+                  <span class="surface-chip"><strong>${escapeHtml(chip.label)}</strong>${escapeHtml(chip.value)}</span>
+                `
+              )
+              .join("")}
+          </div>
+        </article>
+      `
+    )
+    .join("");
+}
+
+function buildLocalSurface(session, activeThread) {
+  const controllerState = sessionControllerState(session);
+  const hasControl = controllerState === "this_device";
+  const canClaim = Boolean(session?.active_thread_id) && controllerState === "unclaimed";
+  const status = hasControl ? "Controller" : canClaim ? "Open" : "Local";
+  const badgeClass = hasControl
+    ? "device-state-approved"
+    : canClaim
+      ? "device-state-pending"
+      : "device-state-approved";
+
+  return {
+    title: "This browser",
+    copy: hasControl
+      ? "You currently control the live session from this surface."
+      : canClaim
+        ? "No device currently owns typing control. This surface can open the thread and claim it."
+        : session?.active_thread_id
+          ? "This surface can review the live session and take over when needed."
+        : "This surface is ready to launch or resume a session locally.",
+    badgeLabel: status,
+    badgeClass,
+    chips: [
+      { label: "Role", value: hasControl ? "Typing + approvals" : "Local console" },
+      {
+        label: "Workspace",
+        value: session?.current_cwd ? workspaceBasename(session.current_cwd) : state.selectedCwd ? workspaceBasename(state.selectedCwd) : "Unset",
+      },
+      {
+        label: "Thread",
+        value: activeThread?.name || activeThread?.preview || (session?.active_thread_id ? shortId(session.active_thread_id) : "Standby"),
+      },
+    ],
+  };
+}
+
+function buildDeviceSurface(session, activeThread, record) {
+  const isController = session?.active_controller_device_id === record.device_id;
+  const lifecycle = record.lifecycle_state || "approved";
+  const badgeLabel = isController ? "Controller" : humanizeLabel(lifecycle);
+  const badgeClass = isController
+    ? "device-state-approved"
+    : lifecycle === "pending"
+      ? "device-state-pending"
+      : lifecycle === "rejected" || lifecycle === "revoked"
+        ? "device-state-rejected"
+        : "device-state-approved";
+
+  let copy = "Trusted remote surface remembered by this relay.";
+  if (lifecycle === "pending") {
+    copy = "Waiting for local approval before it can join the relay.";
+  } else if (lifecycle === "revoked") {
+    copy = "Revoked from this relay. It can no longer reconnect without pairing again.";
+  } else if (isController) {
+    copy = activeThread
+      ? `Currently controlling ${activeThread.name || activeThread.preview || shortId(session.active_thread_id)}.`
+      : "Currently owns control of the active relay session.";
+  }
+
+  return {
+    title: record.label,
+    copy,
+    badgeLabel,
+    badgeClass,
+    chips: [
+      { label: "Device", value: shortId(record.device_id) },
+      { label: "Seen", value: record.last_seen_at ? formatTimestamp(record.last_seen_at) : "Never" },
+      { label: "Peer", value: record.last_peer_id ? shortId(record.last_peer_id) : "None" },
+    ],
+  };
+}
+
+function renderAuditTimeline(entries) {
+  if (!auditTimeline || !auditSummary) {
+    return;
+  }
+
+  if (!entries.length) {
+    auditSummary.textContent = "Recent relay, control, and security events will appear here.";
+    auditTimeline.innerHTML = `<p class="sidebar-empty">No relay events yet.</p>`;
+    return;
+  }
+
+  const filteredEntries = entries.filter((entry) => shouldShowAuditEntry(entry));
+  const visibleEntries = filteredEntries.slice(0, 8);
+  const hiddenDebugCount = entries.length - filteredEntries.length;
+  const significantCount = visibleEntries.filter((entry) => classifyAuditEntry(entry) !== "neutral").length;
+  auditSummary.textContent =
+    significantCount > 0
+      ? `${visibleEntries.length} recent events · ${significantCount} notable${hiddenDebugCount > 0 ? ` · ${hiddenDebugCount} debug hidden` : ""}`
+      : `${visibleEntries.length} recent relay events${hiddenDebugCount > 0 ? ` · ${hiddenDebugCount} debug hidden` : ""}`;
+
+  if (!visibleEntries.length) {
+    auditTimeline.innerHTML = `<p class="sidebar-empty">No relay-level audit events yet.</p>`;
+    return;
+  }
+
+  auditTimeline.innerHTML = visibleEntries
+    .map((entry) => {
+      const tone = classifyAuditEntry(entry);
+      const toneClass =
+        tone === "alert" ? " is-alert" : tone === "ready" ? " is-ready" : "";
+      return `
+        <article class="audit-item${toneClass}">
+          <div class="audit-item-header">
+            <span class="audit-item-kind">${escapeHtml(humanizeLabel(entry.kind || "relay"))}</span>
+            <time class="audit-item-time">${escapeHtml(formatTimestamp(entry.created_at))}</time>
+          </div>
+          <p class="audit-item-message">${escapeHtml(entry.message || "")}</p>
+        </article>
+      `;
+    })
+    .join("");
+}
+
 function renderSessionMeta(session) {
   const securityChips = [
-    metaChip("Security", securityModeLabel(session)),
-    metaChip("Visibility", contentVisibilityLabel(session)),
-    metaChip("Broker", brokerStatusLabel(session)),
+    metaChip("Access", securityModeLabel(session)),
+    metaChip("Sharing", contentVisibilityLabel(session)),
+    metaChip("Remote", brokerStatusLabel(session)),
     metaChip("Devices", pairedDeviceCountLabel(session)),
     metaChip(
-      "Roots",
+      "Workspace access",
       session.allowed_roots?.length
         ? `${session.allowed_roots.length} configured`
         : "Unrestricted"
@@ -1175,17 +1507,12 @@ function renderSessionMeta(session) {
 
   sessionMeta.innerHTML = [
     ...securityChips,
-    metaChip("Directory", session.current_cwd || "None"),
+    metaChip("Workspace", session.current_cwd || "None"),
     metaChip("Model", session.model),
-    metaChip("Approval", session.approval_policy),
-    metaChip("Sandbox", session.sandbox),
+    metaChip("Permissions", session.approval_policy),
+    metaChip("File access", session.sandbox),
     metaChip("Effort", session.reasoning_effort),
-    metaChip(
-      "Control",
-      session.active_controller_device_id
-        ? controllerLabel(session.active_controller_device_id)
-        : "Unclaimed"
-    ),
+    metaChip("Control", controllerStateLabel(session)),
     metaChip("Thread", shortId(session.active_thread_id)),
   ].join("");
 }
@@ -1196,11 +1523,13 @@ function renderOverview(session, activeThread, approval, errorMessage = null) {
   const historyCount = state.threads.length;
   const pendingPairings = session?.pending_pairing_requests?.length || 0;
   const approvedDevices = approvedDeviceCount(session);
+  const controllerState = sessionControllerState(session);
+  const viewingConversation = isViewingConversation(session);
 
-  let sessionTitle = workspace ? `Launch from ${workspaceName}` : "Pick a workspace to launch";
+  let sessionTitle = workspace ? `Ready in ${workspaceName}` : "Pick a workspace";
   let sessionCopy = workspace
-    ? "History is scoped to this workspace. Start a fresh session or reopen a previous thread."
-    : "Load a workspace, review prior threads, and start a fresh Codex relay session.";
+    ? "This relay is pointed at the current workspace. Use the live console to watch control, trust state, and the current thread."
+    : "Choose a workspace, then use this page as the local relay console for the active session.";
   let sessionBadges = [];
 
   if (errorMessage) {
@@ -1216,25 +1545,24 @@ function renderOverview(session, activeThread, approval, errorMessage = null) {
     if (approval) {
       sessionTitle = workspace ? `Approval needed in ${workspaceName}` : "Approval required";
       sessionCopy = approval.summary || "Codex is blocked on a decision before it can continue.";
-    } else if (canCurrentDeviceWrite(session)) {
+    } else if (controllerState === "this_device") {
       sessionTitle = workspace ? `Ready in ${workspaceName}` : "Session ready";
-      sessionCopy = `This device controls ${threadTitle}. Use the composer below to continue the live thread.`;
+      sessionCopy = viewingConversation
+        ? `This device controls ${threadTitle}. Use the composer below to continue the live thread.`
+        : `This device controls ${threadTitle}. Open the thread page only when you want the conversation view.`;
+    } else if (controllerState === "unclaimed") {
+      sessionTitle = workspace ? `Live in ${workspaceName}` : "Live session";
+      sessionCopy = `${threadTitle} is live, but no device currently holds typing control. Open the thread only when you want to claim it.`;
     } else {
       sessionTitle = workspace ? `Watching ${workspaceName}` : "Session active elsewhere";
-      sessionCopy = `Another paired device controls ${threadTitle}. Review context here or take over when you want to continue.`;
+      sessionCopy = `Another paired device controls ${threadTitle}. Use the console to monitor trust and activity until you want to take over.`;
     }
 
     sessionBadges = [
       overviewBadge("Status", sessionStatusLabel(session, approval)),
-      overviewBadge("Thread", shortId(session.active_thread_id)),
       overviewBadge("Model", session.model || "Unknown"),
-      overviewBadge("Approval", session.approval_policy || "Unknown"),
-      overviewBadge(
-        "Control",
-        session.active_controller_device_id
-          ? controllerLabel(session.active_controller_device_id)
-          : "Open"
-      ),
+      overviewBadge("Permissions", session.approval_policy || "Unknown"),
+      overviewBadge("Control", controllerStateLabel(session)),
     ];
 
     if (session.reasoning_effort) {
@@ -1245,7 +1573,7 @@ function renderOverview(session, activeThread, approval, errorMessage = null) {
       ...(workspace ? [overviewBadge("Workspace", workspaceName)] : []),
       overviewBadge(
         "History",
-        historyCount > 0 ? `${historyCount} saved thread${historyCount === 1 ? "" : "s"}` : "No saved threads"
+        historyCount > 0 ? `${historyCount} saved session${historyCount === 1 ? "" : "s"}` : "No saved sessions"
       ),
       overviewBadge("Status", sessionStatusLabel(session, approval)),
     ];
@@ -1277,9 +1605,9 @@ function renderOverview(session, activeThread, approval, errorMessage = null) {
 
   const securityBadges = [
     ...(pendingPairings > 0 ? [overviewBadge("Pending", String(pendingPairings))] : []),
-    overviewBadge("Security", securityModeLabel(session)),
-    overviewBadge("Visibility", contentVisibilityLabel(session)),
-    overviewBadge("Broker", brokerStatusLabel(session)),
+    overviewBadge("Access", securityModeLabel(session)),
+    overviewBadge("Sharing", contentVisibilityLabel(session)),
+    overviewBadge("Remote", brokerStatusLabel(session)),
     overviewBadge("Devices", pairedDeviceCountLabel(session)),
   ];
 
@@ -1292,7 +1620,7 @@ function renderOverview(session, activeThread, approval, errorMessage = null) {
 }
 
 function renderControlBanner(session) {
-  if (!session.active_thread_id) {
+  if (!session.active_thread_id || !isViewingConversation(session)) {
     controlBanner.hidden = true;
     takeOverButton.hidden = true;
     return;
@@ -1322,7 +1650,49 @@ function renderControlBanner(session) {
 }
 
 function renderTranscript(session, approval) {
+  const viewingConversation = isViewingConversation(session);
   const entries = session.transcript || [];
+
+  if (!viewingConversation) {
+    const activeThread = resolveActiveThread(session.active_thread_id);
+    const requestedThread =
+      resolveActiveThread(state.viewThreadId) || state.threads.find((thread) => thread.id === state.viewThreadId);
+
+    if (state.viewThreadId && state.viewThreadId !== session.active_thread_id) {
+      transcript.innerHTML = `
+        <div class="thread-empty">
+          <h2>Thread page not active yet</h2>
+          <p>This URL points at a saved thread, but the relay is currently attached to a different session.</p>
+          ${
+            requestedThread
+              ? `<p class="thread-empty-detail">Requested thread: ${escapeHtml(requestedThread.name || requestedThread.preview || shortId(requestedThread.id))}</p>`
+              : `<p class="thread-empty-detail">Requested thread: ${escapeHtml(shortId(state.viewThreadId))}</p>`
+          }
+          <div class="suggestion-row">
+            <button class="suggestion-button" type="button" data-resume-thread-id="${escapeHtml(state.viewThreadId)}">Resume this thread</button>
+            <button class="suggestion-button" type="button" data-go-console-home="true">Back to console</button>
+          </div>
+        </div>
+      `;
+      return;
+    }
+
+    if (session.active_thread_id) {
+      const threadLabel = activeThread?.name || activeThread?.preview || shortId(session.active_thread_id);
+      transcript.innerHTML = `
+        <div class="thread-empty thread-empty-ready">
+          <span class="thread-empty-badge">Live</span>
+          <h2>Relay console home</h2>
+          <p>A live session is running, but the conversation stays behind its own thread page so the local home does not default into chat.</p>
+          <p class="thread-empty-detail">Current thread: ${escapeHtml(threadLabel)}</p>
+          <div class="suggestion-row">
+            <button class="suggestion-button" type="button" data-open-thread-id="${escapeHtml(session.active_thread_id)}">Open live conversation</button>
+          </div>
+        </div>
+      `;
+      return;
+    }
+  }
 
   if (!entries.length && !approval) {
     if (session.active_thread_id) {
@@ -1357,13 +1727,18 @@ function renderTranscript(session, approval) {
 
     transcript.innerHTML = `
       <div class="thread-empty">
-        <h2>No active conversation yet</h2>
-        <p>Start a new session or resume one from the sidebar.</p>
+        <h2>Relay standing by</h2>
+        <p>Pick a workspace, then use this console to launch or resume a session while keeping an eye on control, trust, and audit state.</p>
         ${
           state.selectedCwd
             ? `<p class="thread-empty-detail">Selected workspace: ${escapeHtml(state.selectedCwd)}</p>`
             : ""
         }
+        <div class="suggestion-row">
+          <button class="suggestion-button" type="button" data-suggestion="Summarize the structure of this repo and point out the important entry points.">Summarize this repo</button>
+          <button class="suggestion-button" type="button" data-suggestion="Find the bug in this project and explain the likely root cause before changing code.">Find the bug</button>
+          <button class="suggestion-button" type="button" data-suggestion="Review this codebase for areas that feel too complex and suggest a cleanup plan.">Suggest a cleanup</button>
+        </div>
       </div>
     `;
     return;
@@ -1480,28 +1855,32 @@ function renderApprovalCard(approval) {
 
 function renderThreads(threads) {
   const selectedCwd = state.selectedCwd;
-  const activeThreadId = state.session?.active_thread_id || null;
+  const viewedThreadId = state.viewThreadId || null;
   closeThreadContextMenu();
 
   if (!selectedCwd) {
-    threadsCount.textContent = "Choose a directory";
+    threadsCount.textContent = "Choose a workspace to load history.";
     threadsCount.title = "";
     threadsList.innerHTML = `<p class="sidebar-empty">Choose a directory to load history sessions.</p>`;
+    resumeLatestButton.disabled = true;
+    syncThreadHistoryScroll();
     return;
   }
 
-  threadsCount.textContent = `${threads.length} ${threads.length === 1 ? "session" : "sessions"}`;
+  threadsCount.textContent = `${threads.length} ${threads.length === 1 ? "recent session" : "recent sessions"}`;
   threadsCount.title = selectedCwd;
+  resumeLatestButton.disabled = threads.length === 0;
 
   if (!threads.length) {
-    threadsList.innerHTML = `<p class="sidebar-empty">No saved sessions found for this workspace.</p>`;
+    threadsList.innerHTML = `<p class="sidebar-empty">No saved sessions found for this workspace yet.</p>`;
+    syncThreadHistoryScroll();
     return;
   }
 
   threadsList.innerHTML = threads
     .map((thread) => {
       const title = thread.name || thread.preview || shortId(thread.id);
-      const activeClass = activeThreadId === thread.id ? " is-active" : "";
+      const activeClass = viewedThreadId === thread.id ? " is-active" : "";
 
       return `
         <button
@@ -1526,6 +1905,31 @@ function renderThreads(threads) {
       event.preventDefault();
       openThreadContextMenu(button.dataset.threadId, event.clientX, event.clientY);
     });
+  });
+
+  syncThreadHistoryScroll();
+}
+
+function syncThreadHistoryScroll() {
+  if (!threadsList || !sessionHistoryDrawer || !appShell) {
+    return;
+  }
+
+  if (appShell.dataset.view !== "conversation") {
+    threadsList.style.height = "";
+    threadsList.style.maxHeight = "";
+    return;
+  }
+
+  window.requestAnimationFrame(() => {
+    const listRect = threadsList.getBoundingClientRect();
+    const drawerRect = sessionHistoryDrawer.getBoundingClientRect();
+    const availableHeight = Math.floor(drawerRect.bottom - listRect.top - 12);
+
+    if (availableHeight > 120) {
+      threadsList.style.height = `${availableHeight}px`;
+      threadsList.style.maxHeight = `${availableHeight}px`;
+    }
   });
 }
 
@@ -1594,6 +1998,8 @@ function setStartControlsBusy(busy) {
   [
     loadDirectoryButton,
     startSessionButton,
+    resumeLatestButton,
+    openLaunchSettingsButton,
     cwdInput,
     startPromptInput,
     modelInput,
@@ -1603,13 +2009,6 @@ function setStartControlsBusy(busy) {
   ].forEach((element) => {
     element.disabled = busy;
   });
-}
-
-function setNewSessionPanelOpen(open) {
-  state.newSessionPanelOpen = open;
-  newSessionPanel.hidden = !open;
-  newSessionToggleButton.setAttribute("aria-expanded", String(open));
-  newSessionToggleButton.textContent = open ? "Hide Launch Pad" : "Launch Session";
 }
 
 function scheduleSessionPoll() {
@@ -2067,21 +2466,25 @@ function sessionStatusLabel(session, approval) {
     return "Standby";
   }
 
+  if (!session.active_controller_device_id && (session.current_status || "idle") === "idle") {
+    return "Live";
+  }
+
   return humanizeLabel(session.current_status || "ready");
 }
 
 function securityModeLabel(session) {
   if (session?.security_mode === "managed") {
-    return "Managed";
+    return "Managed policy";
   }
   return "Private";
 }
 
 function contentVisibilityLabel(session) {
   if (session?.broker_can_read_content) {
-    return session.audit_enabled ? "Org-readable + audit" : "Readable";
+    return session.audit_enabled ? "Broker-readable with audit" : "Broker-readable";
   }
-  return session?.e2ee_enabled ? "E2EE broker-blind" : "Broker-blind";
+  return session?.e2ee_enabled ? "End-to-end encrypted" : "Broker cannot read content";
 }
 
 function brokerStatusLabel(session) {
@@ -2181,6 +2584,45 @@ function humanizeLabel(value) {
     .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
+function classifyAuditEntry(entry) {
+  const text = `${entry?.kind || ""} ${entry?.message || ""}`.toLowerCase();
+
+  if (
+    text.includes("failed") ||
+    text.includes("denied") ||
+    text.includes("rejected") ||
+    text.includes("revoked") ||
+    text.includes("offline") ||
+    text.includes("disconnected")
+  ) {
+    return "alert";
+  }
+
+  if (
+    text.includes("approved") ||
+    text.includes("accepted") ||
+    text.includes("started") ||
+    text.includes("resumed") ||
+    text.includes("connected") ||
+    text.includes("saved")
+  ) {
+    return "ready";
+  }
+
+  return "neutral";
+}
+
+function shouldShowAuditEntry(entry) {
+  const kind = String(entry?.kind || "").toLowerCase();
+  const message = String(entry?.message || "");
+
+  if (kind !== "codex") {
+    return true;
+  }
+
+  return /approval|pair|revoke|connected|disconnected|take over|control|broker|session/i.test(message);
+}
+
 function isCurrentDeviceActiveController(session) {
   if (!session?.active_thread_id || !session.active_controller_device_id) {
     return false;
@@ -2197,6 +2639,18 @@ function canCurrentDeviceWrite(session) {
   return !session.active_controller_device_id || session.active_controller_device_id === state.deviceId;
 }
 
+function sessionControllerState(session) {
+  if (!session?.active_thread_id) {
+    return "none";
+  }
+
+  if (!session.active_controller_device_id) {
+    return "unclaimed";
+  }
+
+  return session.active_controller_device_id === state.deviceId ? "this_device" : "other_device";
+}
+
 function controllerLabel(deviceId) {
   if (!deviceId) {
     return "Unclaimed";
@@ -2207,6 +2661,49 @@ function controllerLabel(deviceId) {
   }
 
   return shortId(deviceId);
+}
+
+function controllerStateLabel(session) {
+  switch (sessionControllerState(session)) {
+    case "this_device":
+      return "This device";
+    case "other_device":
+      return controllerLabel(session.active_controller_device_id);
+    case "unclaimed":
+      return "Unclaimed";
+    default:
+      return "None";
+  }
+}
+
+function readThreadIdFromUrl() {
+  const url = new URL(window.location.href);
+  return url.searchParams.get("thread") || null;
+}
+
+function setThreadRoute(threadId, options = {}) {
+  const url = new URL(window.location.href);
+  if (threadId) {
+    url.searchParams.set("thread", threadId);
+  } else {
+    url.searchParams.delete("thread");
+  }
+
+  const next = url.pathname + url.search + url.hash;
+  if (options.replace) {
+    window.history.replaceState({}, "", next);
+  } else {
+    window.history.pushState({}, "", next);
+  }
+  state.viewThreadId = threadId || null;
+}
+
+function clearThreadRoute(options = {}) {
+  setThreadRoute(null, options);
+}
+
+function isViewingConversation(session) {
+  return Boolean(session?.active_thread_id && state.viewThreadId === session.active_thread_id);
 }
 
 function workspaceBasename(cwd) {
@@ -2249,6 +2746,7 @@ function renderAuthRequiredState(message) {
   state.threads = [];
   cancelControllerHeartbeat();
   cancelControllerLeaseRefresh();
+  openSessionDetailsButton.disabled = true;
   renderOverview(null, null, null, message);
   threadsCount.textContent = "Sign in";
   threadsList.innerHTML = `<p class="sidebar-empty">Enter RELAY_API_TOKEN to load threads.</p>`;
