@@ -24,6 +24,9 @@ const state = {
   viewThreadId: readThreadIdFromUrl(),
   sessionStream: null,
   streamConnected: false,
+  pendingThreadHistoryScrollTop: null,
+  threadGroups: [],
+  threadHistoryScrollTop: 0,
   streamReconnectTimer: null,
   sessionPollTimer: null,
   threadContextMenuThreadId: null,
@@ -105,6 +108,10 @@ const controlSummary = document.querySelector("#control-summary");
 const controlHint = document.querySelector("#control-hint");
 const takeOverButton = document.querySelector("#take-over-button");
 
+threadsList?.addEventListener("scroll", () => {
+  state.threadHistoryScrollTop = threadsList.scrollTop;
+});
+
 connectionForm.addEventListener("submit", (event) => {
   event.preventDefault();
   void submitAuthSession();
@@ -117,6 +124,9 @@ startPairingButton.addEventListener("click", () => {
 function openSecurityModal() {
   state.allowedRootsDraftDirty = false;
   renderAllowedRoots(state.session?.allowed_roots || []);
+  renderPairingPanel();
+  renderDeviceRecords(state.session?.device_records || []);
+  renderPendingPairingRequests(state.session?.pending_pairing_requests || []);
   securityModal?.showModal();
 }
 
@@ -148,6 +158,9 @@ launchSettingsModal?.addEventListener("click", (event) => {
 });
 
 openSessionDetailsButton?.addEventListener("click", () => {
+  if (state.session) {
+    renderSessionMeta(state.session);
+  }
   sessionDetailsModal?.showModal();
 });
 
@@ -183,7 +196,7 @@ goConsoleHomeButton?.addEventListener("click", () => {
   if (state.session) {
     renderSession(state.session);
   }
-  renderThreads(state.threads);
+  renderThreads();
 });
 
 goConsoleHomeSidebarButton?.addEventListener("click", () => {
@@ -191,7 +204,7 @@ goConsoleHomeSidebarButton?.addEventListener("click", () => {
   if (state.session) {
     renderSession(state.session);
   }
-  renderThreads(state.threads);
+  renderThreads();
 });
 
 threadsRefreshButton.addEventListener("click", () => {
@@ -238,7 +251,7 @@ window.addEventListener("popstate", () => {
   if (state.session) {
     renderSession(state.session);
   }
-  renderThreads(state.threads);
+  renderThreads();
 });
 
 directoryForm.addEventListener("submit", (event) => {
@@ -286,22 +299,26 @@ transcript.addEventListener("click", (event) => {
   if (openThreadButton) {
     const threadId = openThreadButton.dataset.openThreadId;
     if (threadId) {
-      setThreadRoute(threadId);
-      if (state.session) {
-        renderSession(state.session);
-      }
-      renderThreads(state.threads);
+      void runViewTransition(() => {
+        setThreadRoute(threadId);
+        if (state.session) {
+          renderSession(state.session);
+        }
+        syncThreadSelection();
+      });
     }
     return;
   }
 
   const goHomeButton = event.target.closest("[data-go-console-home]");
   if (goHomeButton) {
-    clearThreadRoute();
-    if (state.session) {
-      renderSession(state.session);
-    }
-    renderThreads(state.threads);
+    void runViewTransition(() => {
+      clearThreadRoute();
+      if (state.session) {
+        renderSession(state.session);
+      }
+      syncThreadSelection();
+    });
     return;
   }
 
@@ -361,11 +378,7 @@ async function boot() {
   }
 
   await loadSession("initial boot");
-  if (state.selectedCwd) {
-    await loadThreads("initial boot");
-  } else {
-    renderThreads([]);
-  }
+  await loadThreads("initial boot");
   connectSessionStream();
   scheduleThreadsPoll();
 }
@@ -539,9 +552,7 @@ async function resumeAfterAuthChange(reason) {
   }
 
   await loadSession(reason);
-  if (state.selectedCwd) {
-    await loadThreads(reason);
-  }
+  await loadThreads(reason);
   connectSessionStream();
 }
 
@@ -609,26 +620,13 @@ async function loadSession(reason) {
 }
 
 async function loadThreads(reason) {
-  if (!state.selectedCwd) {
-    state.threads = [];
-    renderThreads([]);
-    renderOverview(
-      state.session,
-      resolveActiveThread(state.session?.active_thread_id),
-      state.session?.pending_approvals?.[0] || null
-    );
-    logLine("History skipped because no directory is selected.");
-    return;
-  }
-
   threadsCount.textContent = "Loading...";
-  threadsCount.title = state.selectedCwd;
-  logLine(`Fetching thread list for ${state.selectedCwd} (${reason})`);
+  threadsCount.title = "";
+  logLine(`Fetching thread list across saved workspaces (${reason})`);
 
   try {
     const url = new URL("/api/threads", window.location.origin);
-    url.searchParams.set("cwd", state.selectedCwd);
-    url.searchParams.set("limit", "80");
+    url.searchParams.set("limit", "120");
 
     const response = await apiFetch(url);
     const payload = await response.json();
@@ -637,8 +635,9 @@ async function loadThreads(reason) {
       throw new Error(payload?.error?.message || "Failed to load threads");
     }
 
-    state.threads = payload.data.threads;
-    renderThreads(payload.data.threads);
+    state.threadGroups = groupThreadsByWorkspace(payload.data.threads || []);
+    state.threads = state.threadGroups.flatMap((group) => group.threads);
+    renderThreads();
     renderOverview(
       state.session,
       resolveActiveThread(state.session?.active_thread_id),
@@ -646,12 +645,16 @@ async function loadThreads(reason) {
     );
   } catch (error) {
     if (state.authRequired && !state.authenticated) {
+      state.threadGroups = [];
+      state.threads = [];
       threadsCount.textContent = "Sign in";
       threadsList.innerHTML = `<p class="sidebar-empty">Enter RELAY_API_TOKEN to load threads.</p>`;
       logLine(`Thread fetch blocked by local auth: ${error.message}`);
       return;
     }
 
+    state.threadGroups = [];
+    state.threads = [];
     threadsCount.textContent = "Error";
     threadsList.innerHTML = `<p class="sidebar-empty">${escapeHtml(error.message)}</p>`;
     logLine(`Thread fetch failed: ${error.message}`);
@@ -696,10 +699,12 @@ async function startSession() {
     }
 
     state.defaultsSeeded = false;
-    setSelectedCwd(payload.data.current_cwd || cwd);
-    setThreadRoute(payload.data.active_thread_id || null);
-    seedDefaults(payload.data);
-    renderSession(payload.data);
+    await runViewTransition(() => {
+      setSelectedCwd(payload.data.current_cwd || cwd);
+      setThreadRoute(payload.data.active_thread_id || null);
+      seedDefaults(payload.data);
+      renderSession(payload.data);
+    });
     if (canCurrentDeviceWrite(payload.data)) {
       messageInput.focus();
     }
@@ -714,6 +719,7 @@ async function startSession() {
 
 async function resumeSession(threadId) {
   logLine(`Resuming thread ${threadId}`);
+  state.pendingThreadHistoryScrollTop = threadsList?.scrollTop || state.threadHistoryScrollTop || 0;
 
   try {
     const response = await apiFetch("/api/session/resume", {
@@ -733,39 +739,40 @@ async function resumeSession(threadId) {
     }
 
     state.defaultsSeeded = false;
-    setSelectedCwd(payload.data.current_cwd || state.selectedCwd);
-    setThreadRoute(payload.data.active_thread_id || threadId);
-    seedDefaults(payload.data);
-    renderSession(payload.data);
+    await runViewTransition(() => {
+      setSelectedCwd(payload.data.current_cwd || state.selectedCwd);
+      setThreadRoute(payload.data.active_thread_id || threadId);
+      seedDefaults(payload.data);
+      renderSession(payload.data);
+    });
     if (canCurrentDeviceWrite(payload.data)) {
       messageInput.focus();
     }
-    await loadThreads("post-resume refresh");
     logLine(`Resumed thread ${threadId}`);
   } catch (error) {
     logLine(`Resume failed: ${error.message}`);
+  } finally {
+    state.pendingThreadHistoryScrollTop = null;
   }
 }
 
 async function resumeLatestSession() {
   const cwd = cwdInput.value.trim();
 
-  if (!cwd && !state.selectedCwd) {
-    logLine("Choose a workspace before continuing a recent session.");
-    cwdInput.focus();
-    return;
-  }
-
   if (cwd && cwd !== state.selectedCwd) {
     setSelectedCwd(cwd);
     await loadThreads("continue latest");
-  } else if (!state.threads.length && state.selectedCwd) {
+  } else if (!state.threads.length) {
     await loadThreads("continue latest");
   }
 
-  const latestThread = state.threads[0] || null;
+  const latestThread = findLatestThread(cwd || state.selectedCwd);
   if (!latestThread) {
-    logLine("No recent sessions were found for this workspace.");
+    logLine(
+      cwd || state.selectedCwd
+        ? "No recent sessions were found for this workspace."
+        : "No recent sessions were found."
+    );
     return;
   }
 
@@ -1029,6 +1036,8 @@ function renderSession(session) {
   const canWrite = canCurrentDeviceWrite(session);
   const workspace = session.current_cwd || state.selectedCwd || "";
   const workspaceName = workspace ? workspaceBasename(workspace) : "";
+  const viewingSessionDetails = Boolean(sessionDetailsModal?.open);
+  const viewingSecurityDetails = Boolean(securityModal?.open);
   state.currentApprovalId = approval?.request_id || null;
 
   workspaceTitle.textContent = workspaceName || "Relay console";
@@ -1073,20 +1082,27 @@ function renderSession(session) {
     statusBadge.className = "status-badge status-badge-ready";
   }
 
-  renderOverview(session, activeThread, approval);
-  renderLiveSurfaces(session, activeThread);
-  renderAuditTimeline(session.logs || []);
-  renderSessionMeta(session);
-  renderAllowedRoots(session.allowed_roots || []);
-  renderPairingPanel();
-  renderDeviceRecords(session.device_records || []);
-  renderPendingPairingRequests(pendingPairings);
+  if (!viewingConversation) {
+    renderOverview(session, activeThread, approval);
+    renderLiveSurfaces(session, activeThread);
+    renderAuditTimeline(session.logs || []);
+  }
+  if (!viewingConversation || viewingSessionDetails) {
+    renderSessionMeta(session);
+  }
+  if (!viewingConversation || viewingSecurityDetails) {
+    renderAllowedRoots(session.allowed_roots || []);
+    renderPairingPanel();
+    renderDeviceRecords(session.device_records || []);
+    renderPendingPairingRequests(pendingPairings);
+  }
   announceNewPendingPairings(pendingPairings);
   renderControlBanner(session);
   renderTranscript(session, approval);
   renderLogs(session.logs);
-  renderThreads(state.threads);
+  syncThreadSelection();
   syncThreadHistoryScroll();
+  restoreThreadHistoryScroll();
   scheduleControllerHeartbeat(session);
   scheduleControllerLeaseRefresh(session);
 
@@ -1853,49 +1869,91 @@ function renderApprovalCard(approval) {
   `;
 }
 
-function renderThreads(threads) {
-  const selectedCwd = state.selectedCwd;
+function renderThreads() {
+  const selectedCwd = canonicalizeWorkspace(state.selectedCwd);
   const viewedThreadId = state.viewThreadId || null;
+  const previousScrollTop =
+    appShell?.dataset.view === "conversation"
+      ? state.pendingThreadHistoryScrollTop ?? Math.max(state.threadHistoryScrollTop, threadsList?.scrollTop || 0)
+      : 0;
   closeThreadContextMenu();
 
-  if (!selectedCwd) {
-    threadsCount.textContent = "Choose a workspace to load history.";
-    threadsCount.title = "";
-    threadsList.innerHTML = `<p class="sidebar-empty">Choose a directory to load history sessions.</p>`;
-    resumeLatestButton.disabled = true;
+  const groups = state.threadGroups || [];
+  const totalThreads = state.threads.length;
+
+  threadsCount.textContent =
+    totalThreads > 0
+      ? `${groups.length} ${groups.length === 1 ? "folder" : "folders"} · ${totalThreads} ${
+          totalThreads === 1 ? "thread" : "threads"
+        }`
+      : "No saved threads yet.";
+  threadsCount.title = groups.map((group) => group.cwd).join("\n");
+  resumeLatestButton.disabled = totalThreads === 0;
+
+  if (!groups.length) {
+    threadsList.innerHTML = `<p class="sidebar-empty">Start or resume a session to build workspace groups.</p>`;
     syncThreadHistoryScroll();
     return;
   }
 
-  threadsCount.textContent = `${threads.length} ${threads.length === 1 ? "recent session" : "recent sessions"}`;
-  threadsCount.title = selectedCwd;
-  resumeLatestButton.disabled = threads.length === 0;
+  threadsList.innerHTML = groups
+    .map((group) => {
+      const selectedWorkspaceClass =
+        selectedCwd && canonicalizeWorkspace(group.cwd) === selectedCwd
+          ? " is-selected-workspace"
+          : "";
 
-  if (!threads.length) {
-    threadsList.innerHTML = `<p class="sidebar-empty">No saved sessions found for this workspace yet.</p>`;
-    syncThreadHistoryScroll();
-    return;
-  }
+      const threadItems = group.threads
+        .map((thread) => {
+          const title = thread.name || thread.preview || shortId(thread.id);
+          const activeClass = viewedThreadId === thread.id ? " is-active" : "";
 
-  threadsList.innerHTML = threads
-    .map((thread) => {
-      const title = thread.name || thread.preview || shortId(thread.id);
-      const activeClass = viewedThreadId === thread.id ? " is-active" : "";
+          return `
+            <button
+              class="conversation-item${activeClass}"
+              type="button"
+              data-thread-id="${escapeHtml(thread.id)}"
+              data-thread-cwd="${escapeHtml(group.cwd)}"
+              data-thread-title="${escapeHtml(title)}"
+              title="${escapeHtml(title)}"
+            >
+              <span class="conversation-title">${escapeHtml(title)}</span>
+              <span class="conversation-meta">${escapeHtml(formatRelativeTime(thread.updated_at))}</span>
+            </button>
+          `;
+        })
+        .join("");
 
       return `
-        <button
-          class="conversation-item${activeClass}"
-          type="button"
-          data-thread-id="${escapeHtml(thread.id)}"
-          data-thread-title="${escapeHtml(title)}"
-        >
-          <span class="conversation-title">${escapeHtml(title)}</span>
-          <span class="conversation-preview">${escapeHtml(thread.preview || "No preview yet.")}</span>
-          <span class="conversation-meta">${escapeHtml(formatTimestamp(thread.updated_at))}</span>
-        </button>
+        <section class="thread-group${selectedWorkspaceClass}" data-thread-group-cwd="${escapeHtml(group.cwd)}">
+          <button
+            class="thread-group-header"
+            type="button"
+            data-select-workspace="${escapeHtml(group.cwd)}"
+            title="${escapeHtml(group.cwd)}"
+          >
+            <span class="thread-group-icon" aria-hidden="true"></span>
+            <span class="thread-group-name">${escapeHtml(group.label)}</span>
+          </button>
+          <div class="thread-group-list">
+            ${threadItems}
+          </div>
+        </section>
       `;
     })
     .join("");
+
+  threadsList.querySelectorAll("[data-select-workspace]").forEach((button) => {
+    button.addEventListener("click", () => {
+      setSelectedCwd(button.dataset.selectWorkspace || "");
+      renderThreads();
+      renderOverview(
+        state.session,
+        resolveActiveThread(state.session?.active_thread_id),
+        state.session?.pending_approvals?.[0] || null
+      );
+    });
+  });
 
   threadsList.querySelectorAll("[data-thread-id]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -1907,7 +1965,25 @@ function renderThreads(threads) {
     });
   });
 
-  syncThreadHistoryScroll();
+  window.requestAnimationFrame(() => {
+    syncThreadHistoryScroll();
+    if (appShell?.dataset.view === "conversation" && previousScrollTop > 0) {
+      const maxScrollTop = Math.max(0, threadsList.scrollHeight - threadsList.clientHeight);
+      threadsList.scrollTop = Math.min(previousScrollTop, maxScrollTop);
+      state.threadHistoryScrollTop = threadsList.scrollTop;
+    }
+  });
+}
+
+function syncThreadSelection() {
+  if (!threadsList) {
+    return;
+  }
+
+  const viewedThreadId = state.viewThreadId || null;
+  threadsList.querySelectorAll("[data-thread-id]").forEach((button) => {
+    button.classList.toggle("is-active", button.dataset.threadId === viewedThreadId);
+  });
 }
 
 function syncThreadHistoryScroll() {
@@ -1931,6 +2007,49 @@ function syncThreadHistoryScroll() {
       threadsList.style.maxHeight = `${availableHeight}px`;
     }
   });
+}
+
+function restoreThreadHistoryScroll() {
+  if (!threadsList || !appShell || appShell.dataset.view !== "conversation") {
+    return;
+  }
+
+  const desiredScrollTop = state.pendingThreadHistoryScrollTop ?? state.threadHistoryScrollTop ?? 0;
+  if (desiredScrollTop <= 0) {
+    return;
+  }
+
+  const applyScrollPosition = () => {
+    const maxScrollTop = Math.max(0, threadsList.scrollHeight - threadsList.clientHeight);
+    threadsList.scrollTop = Math.min(desiredScrollTop, maxScrollTop);
+    state.threadHistoryScrollTop = threadsList.scrollTop;
+  };
+
+  window.requestAnimationFrame(() => {
+    window.requestAnimationFrame(() => {
+      applyScrollPosition();
+    });
+  });
+
+  window.setTimeout(() => {
+    if (appShell?.dataset.view === "conversation") {
+      applyScrollPosition();
+    }
+  }, 160);
+}
+
+function runViewTransition(update) {
+  const startViewTransition = document.startViewTransition?.bind(document);
+  if (typeof startViewTransition !== "function") {
+    update();
+    return Promise.resolve();
+  }
+
+  const transition = startViewTransition(() => {
+    update();
+  });
+
+  return transition.finished.catch(() => {});
 }
 
 function renderLogs(entries) {
@@ -1984,6 +2103,62 @@ function syncModelSuggestions(select, models, selectedModel) {
 function setSelectedCwd(cwd) {
   state.selectedCwd = cwd;
   cwdInput.value = cwd;
+}
+
+function canonicalizeWorkspace(cwd) {
+  return String(cwd || "").trim().replace(/[\\/]+$/, "");
+}
+
+function groupThreadsByWorkspace(threads) {
+  const groups = new Map();
+
+  for (const thread of threads || []) {
+    const cwd = canonicalizeWorkspace(thread.cwd);
+    if (!cwd) {
+      continue;
+    }
+
+    if (!groups.has(cwd)) {
+      groups.set(cwd, {
+        cwd,
+        label: workspaceBasename(cwd),
+        latestUpdatedAt: 0,
+        threads: [],
+      });
+    }
+
+    const group = groups.get(cwd);
+    group.threads.push(thread);
+    group.latestUpdatedAt = Math.max(group.latestUpdatedAt, Number(thread.updated_at) || 0);
+  }
+
+  return [...groups.values()]
+    .map((group) => ({
+      ...group,
+      threads: [...group.threads].sort((left, right) => (right.updated_at || 0) - (left.updated_at || 0)),
+    }))
+    .sort((left, right) => {
+      if (right.latestUpdatedAt !== left.latestUpdatedAt) {
+        return right.latestUpdatedAt - left.latestUpdatedAt;
+      }
+      return left.label.localeCompare(right.label);
+    });
+}
+
+function findLatestThread(preferredCwd) {
+  if (!state.threads.length) {
+    return null;
+  }
+
+  const normalizedCwd = canonicalizeWorkspace(preferredCwd);
+  if (!normalizedCwd) {
+    return state.threads[0] || null;
+  }
+
+  return (
+    state.threads.find((thread) => canonicalizeWorkspace(thread.cwd) === normalizedCwd) ||
+    null
+  );
 }
 
 function resolveActiveThread(threadId) {
@@ -2128,9 +2303,7 @@ async function saveAllowedRoots() {
     state.allowedRootsDraftDirty = false;
     renderAllowedRoots(payload.data.allowed_roots || []);
     await loadSession("post-allowed-roots refresh");
-    if (state.selectedCwd) {
-      await loadThreads("post-allowed-roots refresh");
-    }
+    await loadThreads("post-allowed-roots refresh");
     logLine(payload.data?.message || "Relay workspace restrictions saved.");
   } catch (error) {
     logLine(`Allowed roots update failed: ${error.message}`);
@@ -2353,7 +2526,8 @@ async function archiveThreadFromContextMenu() {
     }
 
     state.threads = state.threads.filter((entry) => entry.id !== threadId);
-    renderThreads(state.threads);
+    state.threadGroups = groupThreadsByWorkspace(state.threads);
+    renderThreads();
     await loadSession("post-archive refresh");
     await loadThreads("post-archive refresh");
     logLine(payload.data?.message || `Archived local session ${shortId(threadId)}.`);
@@ -2389,7 +2563,8 @@ async function deleteThreadFromContextMenu() {
     }
 
     state.threads = state.threads.filter((entry) => entry.id !== threadId);
-    renderThreads(state.threads);
+    state.threadGroups = groupThreadsByWorkspace(state.threads);
+    renderThreads();
     await loadSession("post-delete refresh");
     await loadThreads("post-delete refresh");
     logLine(payload.data?.message || `Deleted local session ${shortId(threadId)} permanently.`);
@@ -2571,6 +2746,33 @@ function formatTimestamp(seconds) {
   });
 }
 
+function formatRelativeTime(seconds) {
+  if (!seconds) {
+    return "now";
+  }
+
+  const diffSeconds = Math.max(0, Math.floor(Date.now() / 1000) - Number(seconds));
+  if (diffSeconds < 60) {
+    return "now";
+  }
+  if (diffSeconds < 3600) {
+    return `${Math.floor(diffSeconds / 60)}m`;
+  }
+  if (diffSeconds < 86400) {
+    return `${Math.floor(diffSeconds / 3600)}h`;
+  }
+  if (diffSeconds < 604800) {
+    return `${Math.floor(diffSeconds / 86400)}d`;
+  }
+  if (diffSeconds < 2592000) {
+    return `${Math.floor(diffSeconds / 604800)}w`;
+  }
+  if (diffSeconds < 31536000) {
+    return `${Math.floor(diffSeconds / 2592000)}mo`;
+  }
+  return `${Math.floor(diffSeconds / 31536000)}y`;
+}
+
 function roleLabel(role) {
   if (role === "command") {
     return "Command";
@@ -2744,6 +2946,7 @@ function clearStoredApiToken() {
 function renderAuthRequiredState(message) {
   state.session = null;
   state.threads = [];
+  state.threadGroups = [];
   cancelControllerHeartbeat();
   cancelControllerLeaseRefresh();
   openSessionDetailsButton.disabled = true;

@@ -43,7 +43,7 @@ async function main() {
   let browser;
   let context;
   let page;
-  let threadId = null;
+  const threadIds = [];
 
   try {
     browser = await chromium.launch({ headless: true });
@@ -61,40 +61,20 @@ async function main() {
     );
     assert.ok(deviceId, "page should persist a local device id");
 
-    const startResult = await page.evaluate(
-      async ({ cwd, deviceId }) => {
-        const response = await fetch("/api/session/start", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            cwd,
-            device_id: deviceId,
-            approval_policy: "never",
-            sandbox: "workspace-write",
-            effort: "medium",
-          }),
-        });
+    for (let index = 0; index < 10; index += 1) {
+      threadIds.push(
+        await startThread(relayPort, {
+          cwd: ROOT,
+          deviceId,
+          initialPrompt: `history-scroll-${index}`,
+        })
+      );
+    }
 
-        return {
-          status: response.status,
-          payload: await response.json(),
-        };
-      },
-      {
-        cwd: ROOT,
-        deviceId,
-      }
-    );
+    const activeThreadId = threadIds.at(-1);
+    assert.ok(activeThreadId, "scroll e2e should create an active thread");
 
-    assert.equal(startResult.status, 200, "local scroll e2e should start a session");
-    assert.equal(startResult.payload?.ok, true, "session start payload should succeed");
-
-    threadId = startResult.payload?.data?.active_thread_id || null;
-    assert.ok(threadId, "session start should return an active thread id");
-
-    await page.goto(`http://127.0.0.1:${relayPort}/?thread=${threadId}`, {
+    await page.goto(`http://127.0.0.1:${relayPort}/?thread=${activeThreadId}`, {
       waitUntil: "domcontentloaded",
     });
 
@@ -106,40 +86,13 @@ async function main() {
       { timeout: LOCAL_TIMEOUT_MS }
     );
 
-    await page.evaluate(() => {
-      const drawer = document.querySelector(".sidebar-drawer");
-      const homeButton = document.querySelector("#go-console-home-sidebar");
-      const list = document.querySelector("#threads-list");
-
-      if (!drawer || !list) {
-        throw new Error("history drawer is missing");
-      }
-
-      drawer.open = true;
-      if (homeButton) {
-        homeButton.hidden = false;
-      }
-
-      list.innerHTML = Array.from({ length: 40 }, (_, index) => {
-        const label = `Thread ${index + 1}`;
-        return `
-          <button class="conversation-item${index === 0 ? " is-active" : ""}" type="button" data-thread-id="fake-${index}">
-            <span class="conversation-title">${label}</span>
-            <span class="conversation-preview">Preview ${label} with enough copy to wrap visually.</span>
-            <span class="conversation-meta">2026-04-10 15:${String(index).padStart(2, "0")}</span>
-          </button>
-        `;
-      }).join("");
-
-      window.dispatchEvent(new Event("resize"));
-    });
-
     await page.waitForFunction(() => {
       const list = document.querySelector("#threads-list");
-      return Boolean(list && list.scrollHeight > list.clientHeight);
+      const items = document.querySelectorAll("#threads-list [data-thread-id]");
+      return Boolean(list && items.length >= 10 && list.scrollHeight > list.clientHeight);
     }, null, { timeout: LOCAL_TIMEOUT_MS });
 
-    const metrics = await page.evaluate(() => {
+    const initialMetrics = await page.evaluate(() => {
       const list = document.querySelector("#threads-list");
       if (!list) {
         throw new Error("thread list missing");
@@ -147,6 +100,7 @@ async function main() {
 
       const before = list.scrollTop;
       list.scrollTop = 480;
+      list.dispatchEvent(new Event("scroll"));
 
       return {
         before,
@@ -158,22 +112,91 @@ async function main() {
       };
     });
 
-    assert.equal(metrics.overflowY, "auto", "thread history should remain an overflow container");
+    assert.equal(initialMetrics.overflowY, "auto", "thread history should remain an overflow container");
     assert(
-      metrics.scrollHeight > metrics.clientHeight,
-      `thread history should overflow in thread mode (client=${metrics.clientHeight}, scroll=${metrics.scrollHeight})`
+      initialMetrics.scrollHeight > initialMetrics.clientHeight,
+      `thread history should overflow in thread mode (client=${initialMetrics.clientHeight}, scroll=${initialMetrics.scrollHeight})`
     );
     assert(
-      metrics.after > metrics.before,
-      `thread history should be programmatically scrollable (before=${metrics.before}, after=${metrics.after})`
+      initialMetrics.after > initialMetrics.before,
+      `thread history should be programmatically scrollable (before=${initialMetrics.before}, after=${initialMetrics.after})`
+    );
+
+    const targetThreadId = await page.evaluate(() => {
+      const list = document.querySelector("#threads-list");
+      if (!list) {
+        return null;
+      }
+
+      const listRect = list.getBoundingClientRect();
+      const buttons = [...list.querySelectorAll("[data-thread-id]")];
+      const candidate = buttons.find((button) => {
+        const rect = button.getBoundingClientRect();
+        return (
+          !button.classList.contains("is-active") &&
+          rect.top >= listRect.top &&
+          rect.bottom <= listRect.bottom
+        );
+      });
+
+      return candidate?.dataset.threadId || null;
+    });
+
+    assert.ok(targetThreadId, "scroll e2e should find a visible thread to switch to");
+    await page.evaluate((threadId) => {
+      const button = document.querySelector(`#threads-list [data-thread-id="${threadId}"]`);
+      if (!(button instanceof HTMLButtonElement)) {
+        throw new Error(`missing thread button ${threadId}`);
+      }
+      button.click();
+    }, targetThreadId);
+
+    await page.waitForFunction(
+      (expectedThreadId) => {
+        const activeButton = document.querySelector(
+          `#threads-list [data-thread-id="${expectedThreadId}"]`
+        );
+        return (
+          window.location.search.includes(expectedThreadId) &&
+          activeButton?.classList.contains("is-active")
+        );
+      },
+      targetThreadId,
+      { timeout: LOCAL_TIMEOUT_MS }
+    );
+
+    const postSwitchMetrics = await page.evaluate(() => {
+      const list = document.querySelector("#threads-list");
+      if (!list) {
+        throw new Error("thread list missing after switch");
+      }
+
+      return {
+        scrollTop: list.scrollTop,
+        clientHeight: list.clientHeight,
+        scrollHeight: list.scrollHeight,
+        overflowY: getComputedStyle(list).overflowY,
+      };
+    });
+
+    assert(
+      postSwitchMetrics.scrollHeight > postSwitchMetrics.clientHeight,
+      `thread list should remain scrollable after switching threads (client=${postSwitchMetrics.clientHeight}, scroll=${postSwitchMetrics.scrollHeight})`
+    );
+    assert.equal(
+      postSwitchMetrics.overflowY,
+      "auto",
+      "thread list should stay an overflow container after switching threads"
     );
 
     console.log(
       JSON.stringify(
         {
           relayPort,
-          threadId,
-          metrics,
+          activeThreadId,
+          targetThreadId,
+          initialMetrics,
+          postSwitchMetrics,
         },
         null,
         2
@@ -184,7 +207,7 @@ async function main() {
     dumpProcessLogs(relay);
     throw error;
   } finally {
-    if (threadId) {
+    for (const threadId of threadIds.reverse()) {
       await deleteThreadAndWait(relayPort, threadId, { cwd: ROOT }).catch((error) => {
         if (!error.message.includes("not found")) {
           console.error(
@@ -198,6 +221,29 @@ async function main() {
     await stopManagedProcess(relay);
     await fs.rm(stateDir, { recursive: true, force: true }).catch(() => {});
   }
+}
+
+async function startThread(relayPort, { cwd, deviceId, initialPrompt }) {
+  const response = await fetch(`http://127.0.0.1:${relayPort}/api/session/start`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      cwd,
+      device_id: deviceId,
+      initial_prompt: initialPrompt,
+      approval_policy: "never",
+      sandbox: "workspace-write",
+      effort: "medium",
+    }),
+  });
+
+  const payload = await response.json();
+  assert.equal(response.status, 200, `failed to start thread ${initialPrompt}`);
+  assert.equal(payload?.ok, true, `thread start payload should succeed for ${initialPrompt}`);
+  assert.ok(payload?.data?.active_thread_id, `thread id missing for ${initialPrompt}`);
+  return payload.data.active_thread_id;
 }
 
 function spawnManagedProcess(name, command, args, extraEnv) {

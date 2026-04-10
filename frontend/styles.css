@@ -87,6 +87,13 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   to { opacity: 1; transform: translateY(0); }
 }
 
+@supports (view-transition-name: none) {
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation-duration: 140ms;
+  }
+}
+
 /* LAYOUT */
 .app-shell {
   min-height: 100dvh;
@@ -328,29 +335,86 @@ input:focus, textarea:focus, select:focus {
   overflow-y: auto;
   display: grid;
   align-content: start;
-  gap: 4px;
+  gap: 14px;
+}
+
+.thread-group {
+  display: grid;
+  gap: 6px;
+}
+
+.thread-group-header {
+  width: 100%;
+  padding: 6px 0;
+  border: 0;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  color: var(--text-primary);
+}
+
+.thread-group-header:hover,
+.thread-group-header:focus-visible {
+  background: transparent;
+  border-color: transparent;
+}
+
+.thread-group-icon {
+  position: relative;
+  width: 16px;
+  height: 11px;
+  border: 1.5px solid var(--text-tertiary);
+  border-radius: 3px;
+  flex: 0 0 auto;
+  opacity: 0.9;
+}
+
+.thread-group-icon::before {
+  content: "";
+  position: absolute;
+  top: -4px;
+  left: 1px;
+  width: 7px;
+  height: 4px;
+  border: 1.5px solid var(--text-tertiary);
+  border-bottom: 0;
+  border-radius: 3px 3px 0 0;
+  background: var(--bg-surface);
+}
+
+.thread-group-name {
+  min-width: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.thread-group-list {
+  display: grid;
+  gap: 2px;
+  padding-left: 26px;
+}
+
+.thread-group.is-selected-workspace .thread-group-name,
+.thread-group.is-selected-workspace .thread-group-icon,
+.thread-group.is-selected-workspace .thread-group-icon::before {
+  color: var(--accent-primary);
+  border-color: var(--accent-primary);
 }
 
 .conversation-item {
   width: 100%;
   text-align: left;
-  padding: 10px 12px;
+  padding: 8px 10px;
   border-radius: var(--radius-sm);
   background: transparent;
   border: 1px solid transparent;
-  display: block;
-  justify-content: flex-start;
-  align-items: flex-start;
-}
-
-.conversation-item > span {
-  display: block;
-  width: 100%;
-  text-align: left;
-}
-
-.conversation-item > span + span {
-  margin-top: 4px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
 }
 .conversation-item:hover {
   background: var(--bg-elevated);
@@ -368,16 +432,19 @@ input:focus, textarea:focus, select:focus {
   color: var(--text-primary);
   font-weight: 500;
   font-size: 14px;
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.conversation-preview, .conversation-meta {
+.conversation-preview {
+  display: none;
+}
+.conversation-meta {
   font-size: 12px;
   color: var(--text-tertiary);
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  justify-self: end;
 }
 
 .context-menu {

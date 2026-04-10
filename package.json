@@ -17,6 +17,7 @@
     "test:browser:pairing": "npm run build && node scripts/browser-pairing-e2e.mjs",
     "test:browser:local-delete": "npm run build && node scripts/browser-local-delete-e2e.mjs",
     "test:browser:local-session": "npm run build && node scripts/browser-local-session-e2e.mjs",
+    "test:browser:local-thread-groups": "npm run build && node scripts/browser-local-thread-groups-e2e.mjs",
     "test:browser:local-history-scroll": "npm run build && node scripts/browser-local-history-scroll-e2e.mjs",
     "test:browser:local-allowed-roots": "npm run build && node scripts/browser-local-allowed-roots-e2e.mjs",
     "test:browser:local-auth": "npm run build && node scripts/browser-local-auth-e2e.mjs",
