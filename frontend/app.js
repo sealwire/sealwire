@@ -1,3 +1,88 @@
+import {
+  allowedRootsForm,
+  allowedRootsInput,
+  allowedRootsList,
+  allowedRootsSummary,
+  approvalPolicyInput,
+  apiTokenInput,
+  apiTokenLabel,
+  appShell,
+  applyTokenButton,
+  archiveThreadButton,
+  auditSummary,
+  auditTimeline,
+  chatShell,
+  clientLog,
+  closeLaunchSettingsModalButton,
+  closeSecurityModalBtn,
+  closeSessionDetailsModalButton,
+  connectionForm,
+  controlBanner,
+  controlHint,
+  controlSummary,
+  copyPairingLinkButton,
+  cwdInput,
+  deleteThreadButton,
+  directoryForm,
+  goConsoleHomeButton,
+  goConsoleHomeSidebarButton,
+  launchSettingsModal,
+  liveSurfacesList,
+  liveSurfacesSummary,
+  loadDirectoryButton,
+  messageEffort,
+  messageForm,
+  messageInput,
+  modelInput,
+  openLaunchSettingsButton,
+  openSecurityConsoleButton,
+  openSecurityHeaderButton,
+  openSecurityModalBtn,
+  openSessionDetailsButton,
+  overviewSecurityBadges,
+  overviewSecurityCopy,
+  overviewSecurityTitle,
+  overviewSessionBadges,
+  overviewSessionCopy,
+  overviewSessionTitle,
+  pairedDevicesList,
+  pendingPairingsList,
+  refreshButton,
+  resumeLatestButton,
+  sandboxInput,
+  saveAllowedRootsButton,
+  securityModal,
+  sendButton,
+  sessionDetailsModal,
+  sessionHistoryDrawer,
+  sessionMeta,
+  startEffortInput,
+  startPairingButton,
+  startPromptInput,
+  startSessionButton,
+  statusBadge,
+  takeOverButton,
+  threadContextMenu,
+  threadsCount,
+  threadsList,
+  threadsRefreshButton,
+  transcript,
+  workspaceTitle,
+  workspaceSubtitle,
+} from "./local/dom.js";
+import {
+  createApiFetch,
+  createAuthSession,
+  deleteAuthSession,
+  fetchAuthSession,
+} from "./local/api.js";
+import {
+  configureSecurityRenderers,
+  renderAllowedRoots,
+  renderDeviceRecords,
+  renderPairingPanel,
+  renderPendingPairingRequests,
+} from "./local/render-security.js";
 import { openSessionStream, sessionStreamUrl } from "./session-stream.js";
 import {
   buildThreadGroups,
@@ -7,7 +92,6 @@ import {
   summarizeThreadGroups,
 } from "./shared/thread-groups.js";
 import { renderTranscriptMarkup } from "./shared/transcript-render.js";
-import { svgDataUrl } from "./svg.js";
 
 const DEVICE_STORAGE_KEY = "agent-relay.device-id";
 const API_TOKEN_STORAGE_KEY = "agent-relay.api-token";
@@ -42,79 +126,21 @@ const state = {
   threadsPollTimer: null,
 };
 
-const appShell = document.querySelector(".app-shell");
-const transcript = document.querySelector("#transcript");
-const clientLog = document.querySelector("#client-log");
-const connectionForm = document.querySelector("#connection-form");
-const apiTokenLabel = connectionForm.querySelector("label[for='api-token-input']");
-const apiTokenInput = document.querySelector("#api-token-input");
-const applyTokenButton = document.querySelector("#apply-token-button");
-const startPairingButton = document.querySelector("#start-pairing-button");
-const openSecurityModalBtn = document.querySelector("#open-security-modal");
-const openSecurityConsoleButton = document.querySelector("#open-security-console");
-const closeSecurityModalBtn = document.querySelector("#close-security-modal");
-const securityModal = document.querySelector("#security-modal");
-const pairingPanel = document.querySelector("#pairing-panel");
-const pairingQr = document.querySelector("#pairing-qr");
-const pairingExpiry = document.querySelector("#pairing-expiry");
-const pairingLinkInput = document.querySelector("#pairing-link-input");
-const copyPairingLinkButton = document.querySelector("#copy-pairing-link-button");
-const allowedRootsForm = document.querySelector("#allowed-roots-form");
-const allowedRootsInput = document.querySelector("#allowed-roots-input");
-const saveAllowedRootsButton = document.querySelector("#save-allowed-roots-button");
-const allowedRootsSummary = document.querySelector("#allowed-roots-summary");
-const allowedRootsList = document.querySelector("#allowed-roots-list");
-const pendingPairingsList = document.querySelector("#pending-pairings-list");
-const refreshButton = document.querySelector("#refresh-button");
-const threadsRefreshButton = document.querySelector("#threads-refresh-button");
-const sessionHistoryDrawer = document.querySelector(".sidebar-drawer");
-const goConsoleHomeSidebarButton = document.querySelector("#go-console-home-sidebar");
-const sendButton = document.querySelector("#send-button");
-const messageForm = document.querySelector("#message-form");
-const messageInput = document.querySelector("#message-input");
-const messageEffort = document.querySelector("#message-effort");
-const directoryForm = document.querySelector("#directory-form");
-const loadDirectoryButton = document.querySelector("#load-directory-button");
-const startSessionButton = document.querySelector("#start-session-button");
-const resumeLatestButton = document.querySelector("#resume-latest-button");
-const openLaunchSettingsButton = document.querySelector("#open-launch-settings");
-const launchSettingsModal = document.querySelector("#launch-settings-modal");
-const closeLaunchSettingsModalButton = document.querySelector("#close-launch-settings-modal");
-const cwdInput = document.querySelector("#cwd-input");
-const startPromptInput = document.querySelector("#start-prompt");
-const modelInput = document.querySelector("#model-input");
-const approvalPolicyInput = document.querySelector("#approval-policy-input");
-const sandboxInput = document.querySelector("#sandbox-input");
-const startEffortInput = document.querySelector("#start-effort");
-const threadsList = document.querySelector("#threads-list");
-const threadsCount = document.querySelector("#threads-count");
-const threadContextMenu = document.querySelector("#thread-context-menu");
-const archiveThreadButton = document.querySelector("#archive-thread-button");
-const deleteThreadButton = document.querySelector("#delete-thread-button");
-const pairedDevicesList = document.querySelector("#paired-devices-list");
-const chatShell = document.querySelector(".chat-shell");
-const workspaceTitle = document.querySelector("#workspace-title");
-const workspaceSubtitle = document.querySelector("#workspace-subtitle");
-const statusBadge = document.querySelector("#status-badge");
-const goConsoleHomeButton = document.querySelector("#go-console-home");
-const openSessionDetailsButton = document.querySelector("#open-session-details");
-const sessionDetailsModal = document.querySelector("#session-details-modal");
-const closeSessionDetailsModalButton = document.querySelector("#close-session-details-modal");
-const sessionMeta = document.querySelector("#session-meta");
-const overviewSessionTitle = document.querySelector("#overview-session-title");
-const overviewSessionCopy = document.querySelector("#overview-session-copy");
-const overviewSessionBadges = document.querySelector("#overview-session-badges");
-const overviewSecurityTitle = document.querySelector("#overview-security-title");
-const overviewSecurityCopy = document.querySelector("#overview-security-copy");
-const overviewSecurityBadges = document.querySelector("#overview-security-badges");
-const liveSurfacesList = document.querySelector("#live-surfaces-list");
-const liveSurfacesSummary = document.querySelector("#live-surfaces-summary");
-const auditTimeline = document.querySelector("#audit-timeline");
-const auditSummary = document.querySelector("#audit-summary");
-const controlBanner = document.querySelector("#control-banner");
-const controlSummary = document.querySelector("#control-summary");
-const controlHint = document.querySelector("#control-hint");
-const takeOverButton = document.querySelector("#take-over-button");
+const apiFetch = createApiFetch({
+  getApiToken() {
+    return state.apiToken;
+  },
+  onUnauthorized(message) {
+    handleUnauthorized(message);
+  },
+});
+
+configureSecurityRenderers({
+  escapeHtml,
+  formatTimestamp,
+  shortId,
+  workspaceBasename,
+});
 
 threadsList?.addEventListener("scroll", () => {
   state.threadHistoryScrollTop = threadsList.scrollTop;
@@ -131,8 +157,10 @@ startPairingButton.addEventListener("click", () => {
 
 function openSecurityModal() {
   state.allowedRootsDraftDirty = false;
-  renderAllowedRoots(state.session?.allowed_roots || []);
-  renderPairingPanel();
+  renderAllowedRoots(state.session?.allowed_roots || [], {
+    draftDirty: state.allowedRootsDraftDirty,
+  });
+  renderPairingPanel(state.currentPairing);
   renderDeviceRecords(state.session?.device_records || []);
   renderPendingPairingRequests(state.session?.pending_pairing_requests || []);
   securityModal?.showModal();
@@ -140,6 +168,7 @@ function openSecurityModal() {
 
 openSecurityModalBtn?.addEventListener("click", openSecurityModal);
 openSecurityConsoleButton?.addEventListener("click", openSecurityModal);
+openSecurityHeaderButton?.addEventListener("click", openSecurityModal);
 
 closeSecurityModalBtn?.addEventListener("click", () => {
   securityModal?.close();
@@ -393,19 +422,9 @@ async function boot() {
 
 async function refreshAuthSession(reason) {
   try {
-    const response = await fetch("/api/auth/session", {
-      method: "GET",
-      cache: "no-store",
-      credentials: "same-origin",
-    });
-    const payload = await response.json();
-
-    if (!response.ok || !payload.ok) {
-      throw new Error(payload?.error?.message || "Failed to check local auth session");
-    }
-
-    applyAuthSessionState(payload.data);
-    return payload.data;
+    const data = await fetchAuthSession();
+    applyAuthSessionState(data);
+    return data;
   } catch (error) {
     logLine(`Auth session check failed (${reason}): ${error.message}`);
     return null;
@@ -437,26 +456,11 @@ async function signInWithApiToken(token, reason) {
   setConnectionFormBusy(true);
 
   try {
-    const headers = new Headers({
-      "Content-Type": "application/json",
-    });
-    applyCsrfHeader(headers, "POST");
-    const response = await fetch("/api/auth/session", {
-      method: "POST",
-      credentials: "same-origin",
-      headers,
-      body: JSON.stringify({ token }),
-    });
-    const payload = await response.json();
-
-    if (!response.ok || !payload.ok) {
-      throw new Error(payload?.error?.message || "Failed to create local auth session");
-    }
-
+    const data = await createAuthSession(token);
     clearStoredApiToken();
     state.apiToken = "";
     apiTokenInput.value = "";
-    applyAuthSessionState(payload.data);
+    applyAuthSessionState(data);
     logLine(`Local relay sign-in succeeded (${reason}).`);
     await resumeAfterAuthChange("sign-in");
   } catch (error) {
@@ -472,23 +476,11 @@ async function signOutAuthSession(reason) {
   setConnectionFormBusy(true);
 
   try {
-    const headers = new Headers();
-    applyCsrfHeader(headers, "DELETE");
-    const response = await fetch("/api/auth/session", {
-      method: "DELETE",
-      credentials: "same-origin",
-      headers,
-    });
-    const payload = await response.json();
-
-    if (!response.ok || !payload.ok) {
-      throw new Error(payload?.error?.message || "Failed to clear local auth session");
-    }
-
+    const data = await deleteAuthSession();
     clearStoredApiToken();
     state.apiToken = "";
     apiTokenInput.value = "";
-    applyAuthSessionState(payload.data);
+    applyAuthSessionState(data);
     logLine(`Local relay sign-out succeeded (${reason}).`);
     await resumeAfterAuthChange("sign-out");
   } catch (error) {
@@ -845,7 +837,7 @@ async function startPairing() {
     }
 
     state.currentPairing = payload.data;
-    renderPairingPanel();
+    renderPairingPanel(state.currentPairing);
     logLine(`Pairing ticket ${payload.data.pairing_id} is ready.`);
   } catch (error) {
     logLine(`Pairing failed: ${error.message}`);
@@ -1099,8 +1091,10 @@ function renderSession(session) {
     renderSessionMeta(session);
   }
   if (!viewingConversation || viewingSecurityDetails) {
-    renderAllowedRoots(session.allowed_roots || []);
-    renderPairingPanel();
+    renderAllowedRoots(session.allowed_roots || [], {
+      draftDirty: state.allowedRootsDraftDirty,
+    });
+    renderPairingPanel(state.currentPairing);
     renderDeviceRecords(session.device_records || []);
     renderPendingPairingRequests(pendingPairings);
   }
@@ -1148,203 +1142,6 @@ function announceNewPendingPairings(requests) {
   logLine(`Local pairing approval required for ${summary}.`);
 }
 
-function renderPairingPanel() {
-  const pairing = state.currentPairing;
-  pairingPanel.hidden = !pairing;
-
-  if (!pairing) {
-    pairingQr.replaceChildren();
-    pairingLinkInput.value = "";
-    pairingExpiry.textContent = "Pairing ticket not created yet.";
-    return;
-  }
-
-  const qrImage = document.createElement("img");
-  qrImage.alt = "Pairing QR code";
-  qrImage.className = "pairing-qr-image";
-  qrImage.src = svgDataUrl(pairing.pairing_qr_svg);
-  pairingQr.replaceChildren(qrImage);
-  pairingLinkInput.value = pairing.pairing_url;
-  pairingExpiry.textContent = `Expires ${formatTimestamp(pairing.expires_at)}`;
-}
-
-function renderAllowedRoots(roots) {
-  const configuredRoots = Array.isArray(roots) ? roots : [];
-
-  if (!state.allowedRootsDraftDirty && allowedRootsInput) {
-    allowedRootsInput.value = configuredRoots.join("\n");
-  }
-
-  if (!configuredRoots.length) {
-    allowedRootsSummary.textContent =
-      "This relay is currently unrestricted. Any device can start or resume sessions in any workspace.";
-    allowedRootsList.innerHTML =
-      `<p class="sidebar-empty">No workspace restrictions are configured.</p>`;
-    return;
-  }
-
-  allowedRootsSummary.textContent =
-    configuredRoots.length === 1
-      ? "Every device on this relay is limited to one root directory."
-      : `Every device on this relay is limited to ${configuredRoots.length} root directories.`;
-  allowedRootsList.innerHTML = configuredRoots
-    .map((root) => {
-      const name = workspaceBasename(root) || root;
-      return `
-        <article class="paired-device-card">
-          <div class="paired-device-copy">
-            <div class="paired-device-heading">
-              <strong>${escapeHtml(name)}</strong>
-              <span class="device-state-badge device-state-approved">Allowed root</span>
-            </div>
-            <p class="paired-device-meta paired-device-id">${escapeHtml(root)}</p>
-          </div>
-        </article>
-      `;
-    })
-    .join("");
-}
-
-function renderDeviceRecords(records) {
-  if (!records.length) {
-    pairedDevicesList.innerHTML = `<p class="sidebar-empty">No remote devices have touched this relay yet.</p>`;
-    return;
-  }
-
-  const activeRecords = records.filter((r) => r.lifecycle_state !== "revoked");
-  const revokedRecords = records.filter((r) => r.lifecycle_state === "revoked");
-
-  const renderCard = (record) => {
-    const lastSeen = record.last_seen_at ? formatTimestamp(record.last_seen_at) : "Never";
-    const lastPeer = record.last_peer_id ? shortId(record.last_peer_id) : "None";
-    const fingerprint = record.fingerprint || "Unavailable";
-    const canManage = record.lifecycle_state === "approved";
-    const ticketExpiry = formatBrokerJoinTicketExpiry(
-      record.lifecycle_state,
-      record.broker_join_ticket_expires_at
-    );
-
-    return `
-      <article class="paired-device-card">
-        <div class="paired-device-copy">
-          <div class="paired-device-heading">
-            <strong>${escapeHtml(record.label)}</strong>
-            <span class="device-state-badge ${deviceLifecycleBadgeClass(record.lifecycle_state)}">${escapeHtml(deviceLifecycleLabel(record.lifecycle_state))}</span>
-          </div>
-          <p class="paired-device-meta paired-device-id">${escapeHtml(record.device_id)}</p>
-          <dl class="paired-device-fields">
-            <div class="paired-device-field">
-              <dt>Last Seen</dt>
-              <dd>${escapeHtml(lastSeen)}</dd>
-            </div>
-            <div class="paired-device-field">
-              <dt>Last Peer</dt>
-              <dd>${escapeHtml(lastPeer)}</dd>
-            </div>
-            <div class="paired-device-field">
-              <dt>Broker Ticket</dt>
-              <dd>${escapeHtml(ticketExpiry)}</dd>
-            </div>
-            <div class="paired-device-field">
-              <dt>Fingerprint</dt>
-              <dd class="paired-device-fingerprint">${escapeHtml(fingerprint)}</dd>
-            </div>
-            <div class="paired-device-field">
-              <dt>State Updated</dt>
-              <dd>${escapeHtml(formatTimestamp(record.state_changed_at))}</dd>
-            </div>
-          </dl>
-        </div>
-        ${
-          canManage
-            ? `
-              <div class="paired-device-actions">
-                <button
-                  class="approval-button"
-                  type="button"
-                  data-revoke-others-except-device-id="${escapeHtml(record.device_id)}"
-                >
-                  Keep Only This
-                </button>
-                <button
-                  class="approval-button approval-button-danger"
-                  type="button"
-                  data-revoke-device-id="${escapeHtml(record.device_id)}"
-                >
-                  Revoke
-                </button>
-              </div>
-            `
-            : ""
-        }
-      </article>
-    `;
-  };
-
-  let html = "";
-  if (activeRecords.length) {
-    html += activeRecords.map(renderCard).join("");
-  } else if (!revokedRecords.length) {
-    html += `<p class="sidebar-empty">No active devices.</p>`;
-  }
-
-  if (revokedRecords.length) {
-    html += `
-      <details class="revoked-drawer">
-        <summary>${revokedRecords.length} Revoked Device${revokedRecords.length === 1 ? "" : "s"}</summary>
-        <div class="revoked-devices-nested">
-          ${revokedRecords.map(renderCard).join("")}
-        </div>
-      </details>
-    `;
-  }
-
-  pairedDevicesList.innerHTML = html;
-}
-
-function renderPendingPairingRequests(requests) {
-  if (!requests.length) {
-    pendingPairingsList.innerHTML =
-      `<p class="sidebar-empty">No devices are waiting for local approval.</p>`;
-    return;
-  }
-
-  pendingPairingsList.innerHTML = requests
-    .map((request) => {
-      return `
-        <article class="paired-device-card">
-          <div class="paired-device-copy">
-            <div class="paired-device-heading">
-              <strong>${escapeHtml(request.label)}</strong>
-              <span class="device-state-badge ${deviceLifecycleBadgeClass(request.lifecycle_state)}">${escapeHtml(deviceLifecycleLabel(request.lifecycle_state))}</span>
-            </div>
-            <p class="paired-device-meta">${escapeHtml(shortId(request.device_id))} · requested ${escapeHtml(formatTimestamp(request.requested_at))}</p>
-            <p class="paired-device-meta">Broker peer ${escapeHtml(shortId(request.broker_peer_id))}</p>
-            <p class="paired-device-meta">Fingerprint ${escapeHtml(request.fingerprint || "Unavailable")}</p>
-          </div>
-          <div class="paired-device-actions">
-            <button
-              class="approval-button approval-button-primary"
-              type="button"
-              data-pairing-id="${escapeHtml(request.pairing_id)}"
-              data-pairing-decision="approve"
-            >
-              Approve
-            </button>
-            <button
-              class="approval-button approval-button-danger"
-              type="button"
-              data-pairing-id="${escapeHtml(request.pairing_id)}"
-              data-pairing-decision="reject"
-            >
-              Reject
-            </button>
-          </div>
-        </article>
-      `;
-    })
-    .join("");
-}
 
 function renderLiveSurfaces(session, activeThread) {
   if (!liveSurfacesList || !liveSurfacesSummary) {
@@ -2105,7 +1902,9 @@ async function saveAllowedRoots() {
     }
 
     state.allowedRootsDraftDirty = false;
-    renderAllowedRoots(payload.data.allowed_roots || []);
+    renderAllowedRoots(payload.data.allowed_roots || [], {
+      draftDirty: state.allowedRootsDraftDirty,
+    });
     await loadSession("post-allowed-roots refresh");
     await loadThreads("post-allowed-roots refresh");
     logLine(payload.data?.message || "Relay workspace restrictions saved.");
@@ -2227,36 +2026,6 @@ function cancelSessionPoll() {
 
   window.clearTimeout(state.sessionPollTimer);
   state.sessionPollTimer = null;
-}
-
-async function apiFetch(input, init = {}) {
-  const method = (init.method || "GET").toUpperCase();
-  const headers = new Headers(init.headers || {});
-  if (state.apiToken) {
-    headers.set("Authorization", `Bearer ${state.apiToken}`);
-  }
-  applyCsrfHeader(headers, method);
-
-  const response = await fetch(input, {
-    ...init,
-    method,
-    credentials: "same-origin",
-    headers,
-  });
-
-  if (response.status === 401) {
-    handleUnauthorized("Local authentication is required. Sign in with RELAY_API_TOKEN.");
-  }
-
-  return response;
-}
-
-function applyCsrfHeader(headers, method) {
-  if (method === "GET" || method === "HEAD") {
-    return;
-  }
-
-  headers.set("X-Agent-Relay-CSRF", "1");
 }
 
 function openThreadContextMenu(threadId, clientX, clientY) {
@@ -2493,48 +2262,6 @@ function approvedDeviceCount(session) {
   }
 
   return session.device_records.filter((record) => record.lifecycle_state === "approved").length;
-}
-
-function deviceLifecycleLabel(state) {
-  switch (state) {
-    case "pending":
-      return "Pending";
-    case "approved":
-      return "Approved";
-    case "rejected":
-      return "Rejected";
-    case "revoked":
-      return "Revoked";
-    default:
-      return "Unknown";
-  }
-}
-
-function deviceLifecycleBadgeClass(state) {
-  switch (state) {
-    case "pending":
-      return "device-state-pending";
-    case "approved":
-      return "device-state-approved";
-    case "rejected":
-      return "device-state-rejected";
-    case "revoked":
-      return "device-state-revoked";
-    default:
-      return "device-state-neutral";
-  }
-}
-
-function formatBrokerJoinTicketExpiry(state, expiresAt) {
-  if (state !== "approved") {
-    return "Not active";
-  }
-
-  if (!expiresAt) {
-    return "Until revoked";
-  }
-
-  return formatTimestamp(expiresAt);
 }
 
 function formatTimestamp(seconds) {

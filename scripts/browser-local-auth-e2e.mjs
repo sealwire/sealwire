@@ -83,7 +83,7 @@ async function main() {
     await page.waitForFunction(() => {
       const button = document.querySelector("#apply-token-button")?.textContent || "";
       const title = document.querySelector("#overview-session-title")?.textContent || "";
-      return button.includes("Sign Out") && /^(Pick a workspace to launch|Launch from .+)$/.test(title);
+      return button.includes("Sign Out") && /^(Pick a workspace|Ready in .+)$/.test(title);
     }, null, { timeout: LOCAL_TIMEOUT_MS });
 
     const issuedCookies = await context.cookies(baseUrl);
@@ -107,18 +107,14 @@ async function main() {
       "raw API token should be cleared after cookie sign-in"
     );
 
-    await page.click("#new-session-toggle");
-    await page.waitForFunction(() => {
-      const panel = document.querySelector("#new-session-panel");
-      return Boolean(panel && !panel.hidden);
-    });
     await page.fill("#cwd-input", cwdInput);
-    await page.click("#new-session-panel summary");
+    await page.click("#open-launch-settings");
     await page.waitForFunction(() => {
-      const details = document.querySelector("#new-session-panel details");
-      return Boolean(details && details.open);
+      const modal = document.querySelector("#launch-settings-modal");
+      return Boolean(modal?.open);
     });
     await page.selectOption("#approval-policy-input", "never");
+    await page.click("#close-launch-settings-modal");
     await page.click("#start-session-button");
 
     await page.waitForFunction(() => {

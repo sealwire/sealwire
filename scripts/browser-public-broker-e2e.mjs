@@ -258,7 +258,7 @@ async function openSecurityModal(page) {
     return;
   }
 
-  await page.click("#open-security-modal");
+  await page.click("#open-security-header");
   await page.waitForFunction(() => {
     const dialog = document.querySelector("#security-modal");
     return Boolean(dialog?.open);

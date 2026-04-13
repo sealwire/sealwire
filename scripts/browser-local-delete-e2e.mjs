@@ -48,18 +48,14 @@ async function main() {
     page = await context.newPage();
 
     await page.goto(`http://127.0.0.1:${relayPort}`, { waitUntil: "domcontentloaded" });
-    await page.click("#new-session-toggle");
-    await page.waitForFunction(() => {
-      const panel = document.querySelector("#new-session-panel");
-      return Boolean(panel && !panel.hidden);
-    });
     await page.fill("#cwd-input", cwdInput);
-    await page.click("#new-session-panel summary");
+    await page.click("#open-launch-settings");
     await page.waitForFunction(() => {
-      const details = document.querySelector("#new-session-panel details");
-      return Boolean(details && details.open);
+      const modal = document.querySelector("#launch-settings-modal");
+      return Boolean(modal?.open);
     });
     await page.selectOption("#approval-policy-input", "never");
+    await page.click("#close-launch-settings-modal");
     await page.click("#start-session-button");
 
     await page.waitForFunction(() => {

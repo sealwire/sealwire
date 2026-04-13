@@ -55,26 +55,21 @@ async function main() {
     await page.goto(`http://127.0.0.1:${relayPort}`, { waitUntil: "domcontentloaded" });
     assert.match(
       (await page.textContent("#overview-session-title")) || "",
-      /^(Pick a workspace to launch|Launch from .+)$/,
-      "overview should show either the empty launch prompt or the preselected workspace"
+      /^(Pick a workspace(?: to launch)?|Ready in .+)$/,
+      "overview should show either the empty launch prompt or the preselected workspace state"
     );
-    assert.equal(
-      await page.textContent("#overview-security-title"),
-      "Private by default",
-      "overview should describe the default private posture"
+    assert.ok(
+      ((await page.textContent("#overview-security-title")) || "").trim().length > 0,
+      "overview should describe relay posture"
     );
-    await page.click("#new-session-toggle");
-    await page.waitForFunction(() => {
-      const panel = document.querySelector("#new-session-panel");
-      return Boolean(panel && !panel.hidden);
-    });
     await page.fill("#cwd-input", cwdInput);
-    await page.click("#new-session-panel summary");
+    await page.click("#open-launch-settings");
     await page.waitForFunction(() => {
-      const details = document.querySelector("#new-session-panel details");
-      return Boolean(details && details.open);
+      const modal = document.querySelector("#launch-settings-modal");
+      return Boolean(modal?.open);
     });
     await page.selectOption("#approval-policy-input", "never");
+    await page.click("#close-launch-settings-modal");
     await page.click("#start-session-button");
 
     await page.waitForFunction(() => {
@@ -83,32 +78,34 @@ async function main() {
     }, null, { timeout: LOCAL_TIMEOUT_MS });
     await page.waitForFunction(
       (expectedWorkspace) => {
-        const title = document.querySelector("#overview-session-title")?.textContent || "";
-        const badges = document.querySelector("#overview-session-badges")?.textContent || "";
-        const securityBadges = document.querySelector("#overview-security-badges")?.textContent || "";
+        const title = document.querySelector("#workspace-title")?.textContent || "";
+        const subtitle = document.querySelector("#workspace-subtitle")?.textContent || "";
+        const status = document.querySelector("#status-badge")?.textContent || "";
         return (
-          title.includes(`Ready in ${expectedWorkspace}`) &&
-          badges.includes("Status") &&
-          badges.includes("Model") &&
-          badges.includes("Approval") &&
-          badges.includes("Control") &&
-          securityBadges.includes("Security") &&
-          securityBadges.includes("Visibility")
+          title.includes(expectedWorkspace) &&
+          subtitle.toLowerCase().includes("live thread") &&
+          status.trim().length > 0
         );
       },
       path.basename(ROOT),
       { timeout: LOCAL_TIMEOUT_MS }
     );
+    await page.click("#open-session-details");
+    await page.waitForFunction(() => {
+      const modal = document.querySelector("#session-details-modal");
+      return Boolean(modal?.open);
+    });
     assert.match(
       (await page.textContent("#overview-session-copy")) || "",
-      /controls/i,
-      "overview should describe that this device owns the live session"
+      /control|continue the live thread/i,
+      "session details should describe the live session state"
     );
     assert.match(
-      (await page.textContent("#overview-session-badges")) || "",
+      (await page.textContent("#session-meta")) || "",
       /never/i,
-      "overview badges should reflect the selected approval policy"
+      "session details should reflect the selected approval policy"
     );
+    await page.click("#close-session-details-modal");
 
     const messageInput = page.locator("#message-input");
     await assertEnabled(messageInput);

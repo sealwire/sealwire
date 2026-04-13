@@ -170,7 +170,7 @@ async function main() {
 async function openSecurityModal(page) {
   const isOpen = await page.evaluate(() => Boolean(document.querySelector("#security-modal")?.open));
   if (isOpen) return;
-  await page.click("#open-security-modal");
+  await page.click("#open-security-header");
   await page.waitForFunction(() => Boolean(document.querySelector("#security-modal")?.open));
 }
 

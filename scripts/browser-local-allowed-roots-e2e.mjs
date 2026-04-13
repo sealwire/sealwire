@@ -55,7 +55,6 @@ async function main() {
     page = await context.newPage();
 
     await page.goto(`http://127.0.0.1:${relayPort}`, { waitUntil: "domcontentloaded" });
-    await page.click("#new-session-toggle");
     await page.fill("#cwd-input", outsideWorkspace);
     await page.click("#start-session-button");
 
@@ -84,7 +83,7 @@ async function main() {
       "outside session should start before restrictions are configured"
     );
 
-    await page.click("#open-security-modal");
+    await page.click("#open-security-header");
     await page.fill("#allowed-roots-input", toTildePath(ROOT));
     await page.click("#save-allowed-roots-button");
 
@@ -100,8 +99,8 @@ async function main() {
     await page.click("#close-security-modal");
 
     await page.waitForFunction(() => {
-      const threads = document.querySelector("#threads-list")?.textContent || "";
-      return threads.includes("outside this relay's allowed roots");
+      const log = document.querySelector("#client-log")?.textContent || "";
+      return log.includes("outside the configured allowed roots");
     }, null, { timeout: LOCAL_TIMEOUT_MS });
 
     const messageInput = page.locator("#message-input");
@@ -138,7 +137,12 @@ async function main() {
       "resume rejection should mention allowed roots"
     );
 
-    await page.click("#new-session-toggle");
+    await page.click("#go-console-home");
+    await page.waitForFunction(() => {
+      const input = document.querySelector("#cwd-input");
+      return Boolean(input && input.offsetParent !== null);
+    }, null, { timeout: LOCAL_TIMEOUT_MS });
+
     await page.fill("#cwd-input", outsideWorkspace);
     await page.click("#start-session-button");
     await waitForLogLine(
@@ -152,8 +156,8 @@ async function main() {
     await page.waitForFunction(
       (expectedWorkspace) => {
         const transcript = document.querySelector("#transcript")?.textContent || "";
-        const title = document.querySelector("#overview-session-title")?.textContent || "";
-        return transcript.includes("Session ready") && title.includes(`Ready in ${expectedWorkspace}`);
+        const title = document.querySelector("#workspace-title")?.textContent || "";
+        return transcript.includes("Session ready") && title.includes(expectedWorkspace);
       },
       path.basename(ROOT),
       { timeout: LOCAL_TIMEOUT_MS }
