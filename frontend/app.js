@@ -1,4 +1,12 @@
 import { openSessionStream, sessionStreamUrl } from "./session-stream.js";
+import {
+  buildThreadGroups,
+  canonicalizeWorkspace,
+  findLatestThread,
+  renderThreadGroupsMarkup,
+  summarizeThreadGroups,
+} from "./shared/thread-groups.js";
+import { renderTranscriptMarkup } from "./shared/transcript-render.js";
 import { svgDataUrl } from "./svg.js";
 
 const DEVICE_STORAGE_KEY = "agent-relay.device-id";
@@ -635,7 +643,7 @@ async function loadThreads(reason) {
       throw new Error(payload?.error?.message || "Failed to load threads");
     }
 
-    state.threadGroups = groupThreadsByWorkspace(payload.data.threads || []);
+    state.threadGroups = buildThreadGroups(payload.data.threads || []);
     state.threads = state.threadGroups.flatMap((group) => group.threads);
     renderThreads();
     renderOverview(
@@ -766,7 +774,7 @@ async function resumeLatestSession() {
     await loadThreads("continue latest");
   }
 
-  const latestThread = findLatestThread(cwd || state.selectedCwd);
+  const latestThread = findLatestThread(state.threads, cwd || state.selectedCwd);
   if (!latestThread) {
     logLine(
       cwd || state.selectedCwd
@@ -1760,113 +1768,8 @@ function renderTranscript(session, approval) {
     return;
   }
 
-  const items = entries.map(renderEntry);
-  if (approval) {
-    items.push(renderApprovalCard(approval));
-  }
-
-  transcript.innerHTML = `<div class="thread-content">${items.join("")}</div>`;
+  transcript.innerHTML = renderTranscriptMarkup(entries, approval);
   transcript.scrollTop = transcript.scrollHeight;
-}
-
-function renderEntry(entry) {
-  const role = entry.role || "system";
-
-  if (role === "user") {
-    return `
-      <article class="chat-message chat-message-user">
-        <div class="message-card">
-          <div class="message-meta">
-            <strong>You</strong>
-            <span>${escapeHtml(entry.status || "completed")}</span>
-          </div>
-          <div class="message-body">${escapeHtml(entry.text || "(empty)")}</div>
-        </div>
-      </article>
-    `;
-  }
-
-  if (role === "assistant") {
-    return `
-      <article class="chat-message chat-message-assistant">
-        <div class="message-avatar">C</div>
-        <div class="message-card">
-          <div class="message-meta">
-            <strong>Codex</strong>
-            <span>${escapeHtml(entry.status || "completed")}</span>
-            <span>${escapeHtml(shortId(entry.turn_id || ""))}</span>
-          </div>
-          <div class="message-body">${escapeHtml(entry.text || "(empty)")}</div>
-        </div>
-      </article>
-    `;
-  }
-
-  return `
-    <article class="chat-message chat-message-system">
-      <div class="message-card message-card-system">
-        <div class="message-meta">
-          <strong>${escapeHtml(roleLabel(role))}</strong>
-          <span>${escapeHtml(entry.status || "completed")}</span>
-        </div>
-        <pre class="message-pre">${escapeHtml(entry.text || "(empty)")}</pre>
-      </div>
-    </article>
-  `;
-}
-
-function renderApprovalCard(approval) {
-  return `
-    <article class="chat-message chat-message-system">
-      <div class="message-card message-card-approval">
-        <div class="message-meta">
-          <strong>Approval required</strong>
-          <span>${escapeHtml(approval.kind)}</span>
-        </div>
-        <h3 class="approval-title">${escapeHtml(approval.summary)}</h3>
-        <p class="approval-copy">${escapeHtml(approval.detail || "Codex is waiting for a remote approval.")}</p>
-        ${approval.cwd ? `<p class="approval-copy">cwd: ${escapeHtml(approval.cwd)}</p>` : ""}
-        ${approval.command ? `<pre class="message-pre">${escapeHtml(approval.command)}</pre>` : ""}
-        ${
-          approval.requested_permissions
-            ? `<pre class="message-pre">${escapeHtml(JSON.stringify(approval.requested_permissions, null, 2))}</pre>`
-            : ""
-        }
-        <div class="approval-actions">
-          <button
-            class="approval-button approval-button-primary"
-            type="button"
-            data-approval-decision="approve"
-            data-approval-scope="once"
-          >
-            Approve
-          </button>
-          ${
-            approval.supports_session_scope
-              ? `
-                <button
-                  class="approval-button"
-                  type="button"
-                  data-approval-decision="approve"
-                  data-approval-scope="session"
-                >
-                  Approve Session
-                </button>
-              `
-              : ""
-          }
-          <button
-            class="approval-button approval-button-danger"
-            type="button"
-            data-approval-decision="deny"
-            data-approval-scope="once"
-          >
-            Deny
-          </button>
-        </div>
-      </div>
-    </article>
-  `;
 }
 
 function renderThreads() {
@@ -1881,12 +1784,7 @@ function renderThreads() {
   const groups = state.threadGroups || [];
   const totalThreads = state.threads.length;
 
-  threadsCount.textContent =
-    totalThreads > 0
-      ? `${groups.length} ${groups.length === 1 ? "folder" : "folders"} · ${totalThreads} ${
-          totalThreads === 1 ? "thread" : "threads"
-        }`
-      : "No saved threads yet.";
+  threadsCount.textContent = summarizeThreadGroups(groups);
   threadsCount.title = groups.map((group) => group.cwd).join("\n");
   resumeLatestButton.disabled = totalThreads === 0;
 
@@ -1896,52 +1794,14 @@ function renderThreads() {
     return;
   }
 
-  threadsList.innerHTML = groups
-    .map((group) => {
-      const selectedWorkspaceClass =
-        selectedCwd && canonicalizeWorkspace(group.cwd) === selectedCwd
-          ? " is-selected-workspace"
-          : "";
-
-      const threadItems = group.threads
-        .map((thread) => {
-          const title = thread.name || thread.preview || shortId(thread.id);
-          const activeClass = viewedThreadId === thread.id ? " is-active" : "";
-
-          return `
-            <button
-              class="conversation-item${activeClass}"
-              type="button"
-              data-thread-id="${escapeHtml(thread.id)}"
-              data-thread-cwd="${escapeHtml(group.cwd)}"
-              data-thread-title="${escapeHtml(title)}"
-              title="${escapeHtml(title)}"
-            >
-              <span class="conversation-title">${escapeHtml(title)}</span>
-              <span class="conversation-meta">${escapeHtml(formatRelativeTime(thread.updated_at))}</span>
-            </button>
-          `;
-        })
-        .join("");
-
-      return `
-        <section class="thread-group${selectedWorkspaceClass}" data-thread-group-cwd="${escapeHtml(group.cwd)}">
-          <button
-            class="thread-group-header"
-            type="button"
-            data-select-workspace="${escapeHtml(group.cwd)}"
-            title="${escapeHtml(group.cwd)}"
-          >
-            <span class="thread-group-icon" aria-hidden="true"></span>
-            <span class="thread-group-name">${escapeHtml(group.label)}</span>
-          </button>
-          <div class="thread-group-list">
-            ${threadItems}
-          </div>
-        </section>
-      `;
-    })
-    .join("");
+  threadsList.innerHTML = renderThreadGroupsMarkup(groups, {
+    activeThreadId: viewedThreadId,
+    selectedCwd,
+    selectWorkspaceAttrName: "data-select-workspace",
+    formatThreadMeta(thread) {
+      return formatRelativeTime(thread.updated_at);
+    },
+  });
 
   threadsList.querySelectorAll("[data-select-workspace]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -2103,62 +1963,6 @@ function syncModelSuggestions(select, models, selectedModel) {
 function setSelectedCwd(cwd) {
   state.selectedCwd = cwd;
   cwdInput.value = cwd;
-}
-
-function canonicalizeWorkspace(cwd) {
-  return String(cwd || "").trim().replace(/[\\/]+$/, "");
-}
-
-function groupThreadsByWorkspace(threads) {
-  const groups = new Map();
-
-  for (const thread of threads || []) {
-    const cwd = canonicalizeWorkspace(thread.cwd);
-    if (!cwd) {
-      continue;
-    }
-
-    if (!groups.has(cwd)) {
-      groups.set(cwd, {
-        cwd,
-        label: workspaceBasename(cwd),
-        latestUpdatedAt: 0,
-        threads: [],
-      });
-    }
-
-    const group = groups.get(cwd);
-    group.threads.push(thread);
-    group.latestUpdatedAt = Math.max(group.latestUpdatedAt, Number(thread.updated_at) || 0);
-  }
-
-  return [...groups.values()]
-    .map((group) => ({
-      ...group,
-      threads: [...group.threads].sort((left, right) => (right.updated_at || 0) - (left.updated_at || 0)),
-    }))
-    .sort((left, right) => {
-      if (right.latestUpdatedAt !== left.latestUpdatedAt) {
-        return right.latestUpdatedAt - left.latestUpdatedAt;
-      }
-      return left.label.localeCompare(right.label);
-    });
-}
-
-function findLatestThread(preferredCwd) {
-  if (!state.threads.length) {
-    return null;
-  }
-
-  const normalizedCwd = canonicalizeWorkspace(preferredCwd);
-  if (!normalizedCwd) {
-    return state.threads[0] || null;
-  }
-
-  return (
-    state.threads.find((thread) => canonicalizeWorkspace(thread.cwd) === normalizedCwd) ||
-    null
-  );
 }
 
 function resolveActiveThread(threadId) {
@@ -2526,7 +2330,7 @@ async function archiveThreadFromContextMenu() {
     }
 
     state.threads = state.threads.filter((entry) => entry.id !== threadId);
-    state.threadGroups = groupThreadsByWorkspace(state.threads);
+    state.threadGroups = buildThreadGroups(state.threads);
     renderThreads();
     await loadSession("post-archive refresh");
     await loadThreads("post-archive refresh");
@@ -2563,7 +2367,7 @@ async function deleteThreadFromContextMenu() {
     }
 
     state.threads = state.threads.filter((entry) => entry.id !== threadId);
-    state.threadGroups = groupThreadsByWorkspace(state.threads);
+    state.threadGroups = buildThreadGroups(state.threads);
     renderThreads();
     await loadSession("post-delete refresh");
     await loadThreads("post-delete refresh");
@@ -2771,13 +2575,6 @@ function formatRelativeTime(seconds) {
     return `${Math.floor(diffSeconds / 2592000)}mo`;
   }
   return `${Math.floor(diffSeconds / 31536000)}y`;
-}
-
-function roleLabel(role) {
-  if (role === "command") {
-    return "Command";
-  }
-  return role;
 }
 
 function humanizeLabel(value) {

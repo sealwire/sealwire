@@ -1,5 +1,11 @@
 import * as dom from "./dom.js";
 import {
+  buildThreadGroups,
+  renderThreadGroupsMarkup,
+  summarizeThreadGroups,
+} from "../shared/thread-groups.js";
+import { renderTranscriptMarkup } from "../shared/transcript-render.js";
+import {
   canCurrentDeviceWrite as canRemoteDeviceWrite,
   isCurrentDeviceActiveController as isRemoteController,
   renderDeviceMeta as renderDeviceChrome,
@@ -11,7 +17,6 @@ import {
   renderEmptyState as renderTranscriptEmptyState,
   renderLog as appendClientLog,
   renderLogs,
-  renderTranscriptPanel,
 } from "./render-transcript.js";
 import { state } from "./state.js";
 import { escapeHtml, formatTimestamp, shortId } from "./utils.js";
@@ -55,6 +60,7 @@ export function renderSession(session) {
 export function renderThreads(threads) {
   const filterValue = dom.remoteThreadsCwdInput.value.trim();
   const activeThreadId = state.session?.active_thread_id || null;
+  const groups = buildThreadGroups(threads);
 
   if (!state.remoteAuth) {
     dom.remoteThreadsCount.textContent = "Remote session history";
@@ -66,29 +72,22 @@ export function renderThreads(threads) {
     return;
   }
 
-  dom.remoteThreadsCount.textContent = `${threads.length} ${threads.length === 1 ? "session" : "sessions"}`;
+  dom.remoteThreadsCount.textContent = summarizeThreadGroups(groups);
 
-  if (!threads.length) {
+  if (!groups.length) {
     dom.remoteThreadsList.innerHTML = filterValue
       ? `<p class="sidebar-empty">No remote sessions found for this workspace filter.</p>`
       : `<p class="sidebar-empty">No remote sessions found yet.</p>`;
     return;
   }
 
-  dom.remoteThreadsList.innerHTML = threads
-    .map((thread) => {
-      const title = thread.name || thread.preview || shortId(thread.id);
-      const activeClass = activeThreadId === thread.id ? " is-active" : "";
-
-      return `
-        <button class="conversation-item${activeClass}" type="button" data-thread-id="${escapeHtml(thread.id)}">
-          <span class="conversation-title">${escapeHtml(title)}</span>
-          <span class="conversation-preview">${escapeHtml(thread.preview || "No preview yet.")}</span>
-          <span class="conversation-meta">${escapeHtml(formatTimestamp(thread.updated_at))}</span>
-        </button>
-      `;
-    })
-    .join("");
+  dom.remoteThreadsList.innerHTML = renderThreadGroupsMarkup(groups, {
+    activeThreadId,
+    includePreview: true,
+    formatThreadMeta(thread) {
+      return formatTimestamp(thread.updated_at);
+    },
+  });
 
   dom.remoteThreadsList.querySelectorAll("[data-thread-id]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -152,6 +151,47 @@ export function renderEmptyState() {
   }
 
   renderTranscriptEmptyState();
+}
+
+function renderTranscriptPanel(session, approval, canWrite) {
+  const entries = session.transcript || [];
+
+  if (!entries.length && !approval) {
+    if (session.active_thread_id) {
+      const title = canWrite ? "Session ready" : "Session active on another device";
+      const copy = canWrite
+        ? "The remote session is live. Send the first prompt below when you're ready."
+        : "This thread is already open, but another device currently has control. Take over to send the first prompt from here.";
+      const detailParts = [];
+
+      if (session.current_cwd) {
+        detailParts.push(`Workspace: ${escapeHtml(session.current_cwd)}`);
+      }
+      if (session.active_thread_id) {
+        detailParts.push(`Thread: ${escapeHtml(shortId(session.active_thread_id))}`);
+      }
+
+      dom.remoteTranscript.innerHTML = `
+        <div class="thread-empty thread-empty-ready">
+          <span class="thread-empty-badge">${canWrite ? "Ready" : "Waiting"}</span>
+          <h2>${title}</h2>
+          <p>${copy}</p>
+          ${
+            detailParts.length
+              ? `<p class="thread-empty-detail">${detailParts.join(" · ")}</p>`
+              : ""
+          }
+        </div>
+      `;
+      return;
+    }
+
+    renderTranscriptEmptyState();
+    return;
+  }
+
+  dom.remoteTranscript.innerHTML = renderTranscriptMarkup(entries, approval);
+  dom.remoteTranscript.scrollTop = dom.remoteTranscript.scrollHeight;
 }
 
 export function setRemoteSessionPanelOpen(open) {

@@ -361,6 +361,10 @@ input:focus, textarea:focus, select:focus {
   border-color: transparent;
 }
 
+.thread-group-header-static {
+  cursor: default;
+}
+
 .thread-group-icon {
   position: relative;
   width: 16px;
