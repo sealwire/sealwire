@@ -1,0 +1,808 @@
+import {
+  allowedRootsInput,
+  approvalPolicyInput,
+  cwdInput,
+  loadDirectoryButton,
+  messageEffort,
+  messageInput,
+  modelInput,
+  openLaunchSettingsButton,
+  pairingLinkInput,
+  resumeLatestButton,
+  saveAllowedRootsButton,
+  sandboxInput,
+  sendButton,
+  startEffortInput,
+  startPairingButton,
+  startPromptInput,
+  startSessionButton,
+  takeOverButton,
+  threadsCount,
+  threadsList,
+} from "./dom.js";
+import { renderAllowedRoots, renderPairingPanel } from "./render-security.js";
+import { openSessionStream, sessionStreamUrl } from "../session-stream.js";
+import { buildThreadGroups, findLatestThread } from "../shared/thread-groups.js";
+
+const CONTROL_HEARTBEAT_MS = 5000;
+const LEASE_EXPIRY_REFRESH_SKEW_MS = 250;
+
+export function createSessionController({
+  state,
+  apiFetch,
+  escapeHtml,
+  shortId,
+  logLine,
+  seedDefaults,
+  setSelectedCwd,
+  setThreadRoute,
+  canCurrentDeviceWrite,
+  renderSession,
+  renderOverviewState,
+  renderSessionUnavailable,
+  renderThreads,
+  renderAuthRequiredState,
+  runViewTransition,
+  handleUnauthorized,
+}) {
+  function setStartControlsBusy(busy) {
+    [
+      loadDirectoryButton,
+      startSessionButton,
+      resumeLatestButton,
+      openLaunchSettingsButton,
+      cwdInput,
+      startPromptInput,
+      modelInput,
+      approvalPolicyInput,
+      sandboxInput,
+      startEffortInput,
+    ].forEach((element) => {
+      element.disabled = busy;
+    });
+  }
+
+  function scheduleSessionPoll() {
+    if (state.streamConnected || (state.authRequired && !state.authenticated)) {
+      return;
+    }
+
+    if (state.sessionPollTimer) {
+      window.clearTimeout(state.sessionPollTimer);
+    }
+
+    state.sessionPollTimer = window.setTimeout(() => {
+      void loadSession("poll");
+    }, nextSessionPollDelay());
+  }
+
+  function scheduleThreadsPoll() {
+    if (state.authRequired && !state.authenticated) {
+      cancelThreadsPoll();
+      return;
+    }
+
+    if (state.threadsPollTimer) {
+      window.clearTimeout(state.threadsPollTimer);
+    }
+
+    state.threadsPollTimer = window.setTimeout(() => {
+      void loadThreads("poll");
+    }, 12000);
+  }
+
+  function cancelThreadsPoll() {
+    if (!state.threadsPollTimer) {
+      return;
+    }
+
+    window.clearTimeout(state.threadsPollTimer);
+    state.threadsPollTimer = null;
+  }
+
+  function scheduleControllerHeartbeat(session) {
+    cancelControllerHeartbeat();
+
+    if (!session?.active_thread_id || !isCurrentDeviceActiveController(session)) {
+      return;
+    }
+
+    state.controllerHeartbeatTimer = window.setTimeout(() => {
+      void sendSessionHeartbeat();
+    }, CONTROL_HEARTBEAT_MS);
+  }
+
+  async function sendSessionHeartbeat() {
+    if (!state.session?.active_thread_id || !isCurrentDeviceActiveController(state.session)) {
+      return;
+    }
+
+    try {
+      const response = await apiFetch("/api/session/heartbeat", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          device_id: state.deviceId,
+        }),
+      });
+      const payload = await response.json();
+
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload?.error?.message || "Failed to refresh control lease");
+      }
+    } catch (error) {
+      logLine(`Control heartbeat failed: ${error.message}`);
+    } finally {
+      if (state.session?.active_thread_id && isCurrentDeviceActiveController(state.session)) {
+        scheduleControllerHeartbeat(state.session);
+      }
+    }
+  }
+
+  async function saveAllowedRoots() {
+    const allowed_roots = (allowedRootsInput?.value || "")
+      .split(/\r?\n/)
+      .map((value) => value.trim())
+      .filter(Boolean);
+
+    if (saveAllowedRootsButton) {
+      saveAllowedRootsButton.disabled = true;
+    }
+    if (allowedRootsInput) {
+      allowedRootsInput.disabled = true;
+    }
+
+    logLine(
+      allowed_roots.length
+        ? `Saving ${allowed_roots.length} allowed workspace root${allowed_roots.length === 1 ? "" : "s"}.`
+        : "Clearing relay workspace restrictions."
+    );
+
+    try {
+      const response = await apiFetch("/api/allowed-roots", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          allowed_roots,
+        }),
+      });
+      const payload = await response.json();
+
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload?.error?.message || "Failed to save allowed roots");
+      }
+
+      state.allowedRootsDraftDirty = false;
+      renderAllowedRoots(payload.data.allowed_roots || [], {
+        draftDirty: state.allowedRootsDraftDirty,
+      });
+      await loadSession("post-allowed-roots refresh");
+      await loadThreads("post-allowed-roots refresh");
+      logLine(payload.data?.message || "Relay workspace restrictions saved.");
+    } catch (error) {
+      logLine(`Allowed roots update failed: ${error.message}`);
+    } finally {
+      if (saveAllowedRootsButton) {
+        saveAllowedRootsButton.disabled = false;
+      }
+      if (allowedRootsInput) {
+        allowedRootsInput.disabled = false;
+      }
+    }
+  }
+
+  function cancelControllerHeartbeat() {
+    if (!state.controllerHeartbeatTimer) {
+      return;
+    }
+
+    window.clearTimeout(state.controllerHeartbeatTimer);
+    state.controllerHeartbeatTimer = null;
+  }
+
+  function scheduleControllerLeaseRefresh(session) {
+    cancelControllerLeaseRefresh();
+
+    if (
+      !session?.active_thread_id ||
+      !session.active_controller_device_id ||
+      isCurrentDeviceActiveController(session) ||
+      !session.controller_lease_expires_at
+    ) {
+      return;
+    }
+
+    const delayMs = Math.max(
+      LEASE_EXPIRY_REFRESH_SKEW_MS,
+      session.controller_lease_expires_at * 1000 - Date.now() + LEASE_EXPIRY_REFRESH_SKEW_MS
+    );
+
+    state.controllerLeaseRefreshTimer = window.setTimeout(() => {
+      void loadSession("controller lease expiry");
+    }, delayMs);
+  }
+
+  function cancelControllerLeaseRefresh() {
+    if (!state.controllerLeaseRefreshTimer) {
+      return;
+    }
+
+    window.clearTimeout(state.controllerLeaseRefreshTimer);
+    state.controllerLeaseRefreshTimer = null;
+  }
+
+  function connectSessionStream() {
+    if (state.authRequired && !state.authenticated) {
+      return;
+    }
+
+    if (typeof fetch !== "function" || typeof AbortController === "undefined") {
+      logLine("Fetch streaming is unavailable. Falling back to polling.");
+      state.streamConnected = false;
+      scheduleSessionPoll();
+      return;
+    }
+
+    if (state.sessionStream) {
+      state.sessionStream.close();
+    }
+
+    const stream = openSessionStream({
+      url: sessionStreamUrl(window.location.origin),
+      apiToken: state.apiToken,
+      onSession(data) {
+        try {
+          const snapshot = JSON.parse(data);
+          state.streamConnected = true;
+          cancelSessionPoll();
+          seedDefaults(snapshot);
+          renderSession(snapshot);
+        } catch (error) {
+          logLine(`Stream payload failed: ${error.message}`);
+        }
+      },
+      onOpen() {
+        if (!state.streamConnected) {
+          logLine("Session stream connected.");
+        }
+        state.streamConnected = true;
+        cancelSessionPoll();
+        cancelStreamReconnect();
+      },
+      onError(error) {
+        if (state.sessionStream !== stream) {
+          return;
+        }
+
+        if (error?.code === "unauthorized") {
+          state.sessionStream = null;
+          handleUnauthorized("Local auth session expired. Sign in again.");
+          return;
+        }
+
+        logLine("Session stream disconnected. Falling back to polling.");
+        state.streamConnected = false;
+        state.sessionStream = null;
+        scheduleSessionPoll();
+        scheduleStreamReconnect();
+      },
+    });
+    state.sessionStream = stream;
+  }
+
+  function cancelSessionPoll() {
+    if (!state.sessionPollTimer) {
+      return;
+    }
+
+    window.clearTimeout(state.sessionPollTimer);
+    state.sessionPollTimer = null;
+  }
+
+  function scheduleStreamReconnect() {
+    cancelStreamReconnect();
+    state.streamReconnectTimer = window.setTimeout(() => {
+      connectSessionStream();
+    }, 1500);
+  }
+
+  function cancelStreamReconnect() {
+    if (!state.streamReconnectTimer) {
+      return;
+    }
+
+    window.clearTimeout(state.streamReconnectTimer);
+    state.streamReconnectTimer = null;
+  }
+
+  function nextSessionPollDelay() {
+    const session = state.session;
+    if (!session || !session.active_thread_id) {
+      return 2200;
+    }
+
+    if (session.pending_approvals?.length) {
+      return 700;
+    }
+
+    if (session.active_turn_id) {
+      return 700;
+    }
+
+    if (session.current_status && session.current_status !== "idle") {
+      return 1100;
+    }
+
+    return 2200;
+  }
+
+  function isCurrentDeviceActiveController(session) {
+    if (!session?.active_thread_id || !session.active_controller_device_id) {
+      return false;
+    }
+
+    return session.active_controller_device_id === state.deviceId;
+  }
+
+  async function loadSession(reason) {
+    logLine(`Fetching session snapshot (${reason})`);
+
+    try {
+      const response = await apiFetch("/api/session");
+      const payload = await response.json();
+
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload?.error?.message || "Failed to load session");
+      }
+
+      seedDefaults(payload.data);
+      renderSession(payload.data);
+    } catch (error) {
+      if (state.authRequired && !state.authenticated) {
+        renderAuthRequiredState("Enter RELAY_API_TOKEN to access the local relay.");
+        logLine(`Session fetch blocked by local auth: ${error.message}`);
+        return;
+      }
+
+      state.session = null;
+      cancelControllerHeartbeat();
+      cancelControllerLeaseRefresh();
+      renderSessionUnavailable(error.message);
+      logLine(`Session fetch failed: ${error.message}`);
+    } finally {
+      if (!state.streamConnected) {
+        scheduleSessionPoll();
+      }
+    }
+  }
+
+  async function loadThreads(reason) {
+    threadsCount.textContent = "Loading...";
+    threadsCount.title = "";
+    logLine(`Fetching thread list across saved workspaces (${reason})`);
+
+    try {
+      const url = new URL("/api/threads", window.location.origin);
+      url.searchParams.set("limit", "120");
+
+      const response = await apiFetch(url);
+      const payload = await response.json();
+
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload?.error?.message || "Failed to load threads");
+      }
+
+      state.threadGroups = buildThreadGroups(payload.data.threads || []);
+      state.threads = state.threadGroups.flatMap((group) => group.threads);
+      renderThreads();
+      renderOverviewState(state.session);
+    } catch (error) {
+      if (state.authRequired && !state.authenticated) {
+        state.threadGroups = [];
+        state.threads = [];
+        threadsCount.textContent = "Sign in";
+        threadsList.innerHTML = `<p class="sidebar-empty">Enter RELAY_API_TOKEN to load threads.</p>`;
+        logLine(`Thread fetch blocked by local auth: ${error.message}`);
+        return;
+      }
+
+      state.threadGroups = [];
+      state.threads = [];
+      threadsCount.textContent = "Error";
+      threadsList.innerHTML = `<p class="sidebar-empty">${escapeHtml(error.message)}</p>`;
+      logLine(`Thread fetch failed: ${error.message}`);
+    } finally {
+      scheduleThreadsPoll();
+    }
+  }
+
+  async function startSession() {
+    const cwd = cwdInput.value.trim();
+
+    if (!cwd) {
+      logLine("Choose a directory before starting a session.");
+      cwdInput.focus();
+      return;
+    }
+
+    setSelectedCwd(cwd);
+    setStartControlsBusy(true);
+    logLine(`Starting a new Codex thread in ${cwd}`);
+
+    try {
+      const response = await apiFetch("/api/session/start", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          cwd,
+          initial_prompt: startPromptInput.value.trim() || null,
+          model: modelInput.value.trim() || null,
+          approval_policy: approvalPolicyInput.value,
+          sandbox: sandboxInput.value,
+          effort: startEffortInput.value,
+          device_id: state.deviceId,
+        }),
+      });
+      const payload = await response.json();
+
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload?.error?.message || "Failed to start session");
+      }
+
+      state.defaultsSeeded = false;
+      await runViewTransition(() => {
+        setSelectedCwd(payload.data.current_cwd || cwd);
+        setThreadRoute(payload.data.active_thread_id || null);
+        seedDefaults(payload.data);
+        renderSession(payload.data);
+      });
+      if (canCurrentDeviceWrite(payload.data)) {
+        messageInput.focus();
+      }
+      await loadThreads("post-start refresh");
+      logLine("Started a new Codex thread");
+    } catch (error) {
+      logLine(`Session start failed: ${error.message}`);
+    } finally {
+      setStartControlsBusy(false);
+    }
+  }
+
+  async function resumeSession(threadId) {
+    logLine(`Resuming thread ${threadId}`);
+    state.pendingThreadHistoryScrollTop = threadsList?.scrollTop || state.threadHistoryScrollTop || 0;
+
+    try {
+      const response = await apiFetch("/api/session/resume", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          thread_id: threadId,
+          device_id: state.deviceId,
+        }),
+      });
+      const payload = await response.json();
+
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload?.error?.message || "Failed to resume session");
+      }
+
+      state.defaultsSeeded = false;
+      await runViewTransition(() => {
+        setSelectedCwd(payload.data.current_cwd || state.selectedCwd);
+        setThreadRoute(payload.data.active_thread_id || threadId);
+        seedDefaults(payload.data);
+        renderSession(payload.data);
+      });
+      if (canCurrentDeviceWrite(payload.data)) {
+        messageInput.focus();
+      }
+      logLine(`Resumed thread ${threadId}`);
+    } catch (error) {
+      logLine(`Resume failed: ${error.message}`);
+    } finally {
+      state.pendingThreadHistoryScrollTop = null;
+    }
+  }
+
+  async function resumeLatestSession() {
+    const cwd = cwdInput.value.trim();
+
+    if (cwd && cwd !== state.selectedCwd) {
+      setSelectedCwd(cwd);
+      await loadThreads("continue latest");
+    } else if (!state.threads.length) {
+      await loadThreads("continue latest");
+    }
+
+    const latestThread = findLatestThread(state.threads, cwd || state.selectedCwd);
+    if (!latestThread) {
+      logLine(
+        cwd || state.selectedCwd
+          ? "No recent sessions were found for this workspace."
+          : "No recent sessions were found."
+      );
+      return;
+    }
+
+    await resumeSession(latestThread.id);
+  }
+
+  async function sendMessage() {
+    const text = messageInput.value.trim();
+
+    if (!text) {
+      logLine("Message is empty.");
+      return;
+    }
+
+    sendButton.disabled = true;
+    logLine("Sending prompt to Codex");
+
+    try {
+      const response = await apiFetch("/api/session/message", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          text,
+          effort: messageEffort.value,
+          device_id: state.deviceId,
+        }),
+      });
+      const payload = await response.json();
+
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload?.error?.message || "Failed to send prompt");
+      }
+
+      messageInput.value = "";
+      renderSession(payload.data);
+      logLine("Prompt accepted by relay");
+    } catch (error) {
+      logLine(`Prompt failed: ${error.message}`);
+    } finally {
+      sendButton.disabled = false;
+    }
+  }
+
+  async function startPairing() {
+    startPairingButton.disabled = true;
+    logLine("Creating a broker pairing ticket.");
+
+    try {
+      const response = await apiFetch("/api/pairing/start", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({}),
+      });
+      const payload = await response.json();
+
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload?.error?.message || "Failed to start pairing");
+      }
+
+      state.currentPairing = payload.data;
+      renderPairingPanel(state.currentPairing);
+      logLine(`Pairing ticket ${payload.data.pairing_id} is ready.`);
+    } catch (error) {
+      logLine(`Pairing failed: ${error.message}`);
+    } finally {
+      startPairingButton.disabled = false;
+    }
+  }
+
+  async function copyPairingLink() {
+    const pairingUrl = state.currentPairing?.pairing_url;
+    if (!pairingUrl) {
+      logLine("No pairing link is available yet.");
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(pairingUrl);
+      logLine("Copied pairing link to clipboard.");
+    } catch (error) {
+      pairingLinkInput.focus();
+      pairingLinkInput.select();
+      logLine(`Clipboard copy failed: ${error.message}`);
+    }
+  }
+
+  async function revokePairedDevice(deviceId) {
+    if (!deviceId) {
+      return;
+    }
+
+    if (!window.confirm(`Revoke paired device ${deviceId}?`)) {
+      return;
+    }
+
+    logLine(`Revoking paired device ${shortId(deviceId)}.`);
+
+    try {
+      const response = await apiFetch(`/api/devices/${encodeURIComponent(deviceId)}/revoke`, {
+        method: "POST",
+      });
+      const payload = await response.json();
+
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload?.error?.message || "Failed to revoke paired device");
+      }
+
+      await loadSession("post-device-revoke refresh");
+      logLine(`Revoked paired device ${shortId(deviceId)}.`);
+    } catch (error) {
+      logLine(`Revoke failed: ${error.message}`);
+    }
+  }
+
+  async function revokeOtherDevices(keepDeviceId) {
+    if (!keepDeviceId) {
+      return;
+    }
+
+    if (!window.confirm(`Keep ${keepDeviceId} and revoke every other paired device?`)) {
+      return;
+    }
+
+    logLine(`Keeping ${shortId(keepDeviceId)} and revoking every other paired device.`);
+
+    try {
+      const response = await apiFetch(
+        `/api/devices/${encodeURIComponent(keepDeviceId)}/revoke-others`,
+        {
+          method: "POST",
+        }
+      );
+      const payload = await response.json();
+
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload?.error?.message || "Failed to revoke other paired devices");
+      }
+
+      await loadSession("post-bulk-device-revoke refresh");
+      logLine(
+        payload.data.revoked_count > 0
+          ? `Revoked ${payload.data.revoked_count} other device(s); kept ${shortId(keepDeviceId)}.`
+          : `No other paired devices were active; kept ${shortId(keepDeviceId)}.`
+      );
+    } catch (error) {
+      logLine(`Bulk revoke failed: ${error.message}`);
+    }
+  }
+
+  async function decidePairingRequest(pairingId, decision) {
+    if (!pairingId || !decision) {
+      return;
+    }
+
+    logLine(`Submitting ${decision} for pairing ${shortId(pairingId)}.`);
+
+    try {
+      const response = await apiFetch(`/api/pairings/${encodeURIComponent(pairingId)}/decision`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ decision }),
+      });
+      const payload = await response.json();
+
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload?.error?.message || "Pairing decision failed");
+      }
+
+      logLine(payload.data.message);
+      await loadSession("post-pairing-decision refresh");
+    } catch (error) {
+      logLine(`Pairing decision failed: ${error.message}`);
+    }
+  }
+
+  async function takeOverControl() {
+    if (!state.session?.active_thread_id) {
+      logLine("There is no active session to take over.");
+      return;
+    }
+
+    takeOverButton.disabled = true;
+    logLine(`Taking control from device ${shortId(state.deviceId)}`);
+
+    try {
+      const response = await apiFetch("/api/session/take-over", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          device_id: state.deviceId,
+        }),
+      });
+      const payload = await response.json();
+
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload?.error?.message || "Failed to take control");
+      }
+
+      renderSession(payload.data);
+      messageInput.focus();
+      logLine("This device now has control.");
+    } catch (error) {
+      logLine(`Take over failed: ${error.message}`);
+    } finally {
+      takeOverButton.disabled = false;
+    }
+  }
+
+  async function submitDecision(decision, scope) {
+    if (!state.currentApprovalId) {
+      logLine("No pending approval to submit.");
+      return;
+    }
+
+    logLine(`Submitting ${decision} for ${state.currentApprovalId}`);
+
+    try {
+      const response = await apiFetch(`/api/approvals/${encodeURIComponent(state.currentApprovalId)}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          decision,
+          scope,
+          device_id: state.deviceId,
+        }),
+      });
+      const payload = await response.json();
+
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload?.error?.message || "Approval submission failed");
+      }
+
+      logLine(payload.data.message);
+      await loadSession("post-decision refresh");
+    } catch (error) {
+      logLine(`Approval failed: ${error.message}`);
+    }
+  }
+
+  return {
+    cancelControllerHeartbeat,
+    cancelControllerLeaseRefresh,
+    cancelSessionPoll,
+    cancelStreamReconnect,
+    cancelThreadsPoll,
+    connectSessionStream,
+    copyPairingLink,
+    decidePairingRequest,
+    loadSession,
+    loadThreads,
+    resumeLatestSession,
+    resumeSession,
+    revokeOtherDevices,
+    revokePairedDevice,
+    saveAllowedRoots,
+    scheduleControllerHeartbeat,
+    scheduleControllerLeaseRefresh,
+    scheduleSessionPoll,
+    scheduleThreadsPoll,
+    sendMessage,
+    startPairing,
+    startSession,
+    submitDecision,
+    takeOverControl,
+  };
+}

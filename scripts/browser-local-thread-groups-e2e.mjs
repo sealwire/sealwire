@@ -8,7 +8,7 @@ import process from "node:process";
 import { setTimeout as delay } from "node:timers/promises";
 
 import { chromium } from "playwright";
-import { deleteThreadAndWait } from "./e2e-thread-cleanup.mjs";
+import { deleteThreadAndWait, fetchSession } from "./e2e-thread-cleanup.mjs";
 
 const ROOT = process.cwd();
 const LOCAL_TIMEOUT_MS = Number(process.env.BROWSER_E2E_TIMEOUT_MS || 45000);
@@ -65,6 +65,7 @@ async function main() {
       }),
       cwd: requestedWorkspaces.root,
     });
+    await waitForActiveThreadIdle(relayPort, threadFixtures[0].id);
 
     await delay(1100);
 
@@ -76,6 +77,7 @@ async function main() {
       }),
       cwd: requestedWorkspaces.nested,
     });
+    await waitForActiveThreadIdle(relayPort, threadFixtures[1].id);
 
     const listedThreads = await waitForThreads(relayPort, threadFixtures.map((fixture) => fixture.id));
     workspaces.root =
@@ -202,7 +204,10 @@ async function main() {
     throw error;
   } finally {
     for (const fixture of threadFixtures.reverse()) {
-      await deleteThreadAndWait(relayPort, fixture.id, { cwd: fixture.cwd }).catch((error) => {
+      await deleteThreadAndWait(relayPort, fixture.id, {
+        cwd: fixture.cwd,
+        timeoutMs: LOCAL_TIMEOUT_MS,
+      }).catch((error) => {
         if (!error.message.includes("not found")) {
           console.error(
             `[cleanup] failed to delete grouped thread ${fixture.id}: ${error.message}`
@@ -265,6 +270,20 @@ async function waitForThreads(relayPort, threadIds, timeoutMs = LOCAL_TIMEOUT_MS
   }
 
   throw new Error(`timed out waiting for grouped fixture threads: ${[...pending].join(", ")}`);
+}
+
+async function waitForActiveThreadIdle(relayPort, expectedThreadId, timeoutMs = LOCAL_TIMEOUT_MS) {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const session = await fetchSession(relayPort);
+    if (session.active_thread_id === expectedThreadId && !session.active_turn_id) {
+      return;
+    }
+    await delay(250);
+  }
+
+  throw new Error(`timed out waiting for thread ${expectedThreadId} to become idle`);
 }
 
 async function fetchLatestWorkspaceTimes(relayPort, workspaces) {
