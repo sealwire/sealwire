@@ -15,11 +15,12 @@ import {
 import { escapeHtml } from "./utils.js";
 
 export function applySessionSnapshot(snapshot) {
-  renderSession(snapshot);
-  scheduleControllerHeartbeat(snapshot);
-  scheduleControllerLeaseRefresh(snapshot);
+  const effectiveSnapshot = restoreHydratedTranscript(snapshot);
+  renderSession(effectiveSnapshot);
+  scheduleControllerHeartbeat(effectiveSnapshot);
+  scheduleControllerLeaseRefresh(effectiveSnapshot);
   scheduleClaimRefresh();
-  void hydrateActiveTranscript(snapshot);
+  void hydrateActiveTranscript(effectiveSnapshot);
 }
 
 export async function syncRemoteSnapshot(reason, silent = false) {
@@ -378,4 +379,28 @@ function transcriptHydrationSignature(snapshot) {
   }
 
   return parts.join("|");
+}
+
+function restoreHydratedTranscript(snapshot) {
+  if (!snapshot?.active_thread_id || !snapshot.transcript_truncated) {
+    return snapshot;
+  }
+
+  const signature = transcriptHydrationSignature(snapshot);
+  if (state.transcriptHydrationResolvedSignature !== signature) {
+    return snapshot;
+  }
+  if (
+    state.session?.active_thread_id !== snapshot.active_thread_id ||
+    state.session?.transcript_truncated !== false ||
+    !Array.isArray(state.session?.transcript)
+  ) {
+    return snapshot;
+  }
+
+  return {
+    ...snapshot,
+    transcript: state.session.transcript,
+    transcript_truncated: false,
+  };
 }

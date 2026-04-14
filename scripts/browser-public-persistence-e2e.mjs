@@ -86,6 +86,7 @@ async function main() {
     await remotePage.goto(pairingUrl, { waitUntil: "domcontentloaded" });
     await approvePendingPairing(localPage);
     await waitForPairedRemote(remotePage);
+    await waitForStoredPayloadSecretMetadata(remotePage);
 
     const authBeforeRestart = await readStoredRemoteAuth(remotePage);
     assert.equal(
@@ -111,6 +112,7 @@ async function main() {
     await waitForPersistedDeviceGrant(brokerStatePath, authBeforeRestart.deviceId);
     await remotePage.reload({ waitUntil: "domcontentloaded" });
     await waitForPairedRemote(remotePage);
+    await waitForStoredPayloadSecretMetadata(remotePage);
 
     await stopManagedProcess(broker);
     broker = startPublicBroker({
@@ -226,6 +228,18 @@ async function waitForPairedRemote(remotePage) {
   await remotePage.waitForFunction(() => {
     const stored = JSON.parse(window.localStorage.getItem("agent-relay.remote-state-v2") || "null");
     return Boolean(stored?.clientAuth?.clientId && Object.keys(stored?.remoteProfiles || {}).length);
+  }, null, { timeout: TIMEOUT_MS });
+}
+
+async function waitForStoredPayloadSecretMetadata(remotePage) {
+  await remotePage.waitForFunction(() => {
+    const parsed = JSON.parse(window.localStorage.getItem("agent-relay.remote-state-v2") || "null");
+    if (!parsed?.remoteProfiles) {
+      return false;
+    }
+    const activeRelayId = parsed.activeRelayId || Object.keys(parsed.remoteProfiles)[0] || null;
+    const profile = activeRelayId ? parsed.remoteProfiles[activeRelayId] || null : null;
+    return profile?.hasStoredPayloadSecret === true;
   }, null, { timeout: TIMEOUT_MS });
 }
 

@@ -27,7 +27,8 @@
     "test:browser:public-refresh": "npm run build && node scripts/browser-public-refresh-e2e.mjs",
     "test:browser:public-persistence": "npm run build && node scripts/browser-public-persistence-e2e.mjs",
     "test:browser:public-revoke": "npm run build && node scripts/browser-public-revoke-e2e.mjs",
-    "test:browser:public": "npm run build && node scripts/browser-public-enrollment-e2e.mjs && node scripts/browser-public-refresh-e2e.mjs && node scripts/browser-public-persistence-e2e.mjs && node scripts/browser-public-revoke-e2e.mjs && node scripts/browser-public-reclaim-e2e.mjs && node scripts/browser-public-broker-e2e.mjs"
+    "test:browser:public-long-transcript": "npm run build && node scripts/browser-public-long-transcript-e2e.mjs",
+    "test:browser:public": "npm run build && node scripts/browser-public-enrollment-e2e.mjs && node scripts/browser-public-refresh-e2e.mjs && node scripts/browser-public-persistence-e2e.mjs && node scripts/browser-public-revoke-e2e.mjs && node scripts/browser-public-reclaim-e2e.mjs && node scripts/browser-public-broker-e2e.mjs && node scripts/browser-public-long-transcript-e2e.mjs"
   },
   "dependencies": {
     "@noble/hashes": "^2.0.1",

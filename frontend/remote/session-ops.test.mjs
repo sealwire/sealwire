@@ -349,4 +349,21 @@ test("applySessionSnapshot hydrates truncated transcript with chunked remote fet
   );
   assert.equal(sentPayloads[0].request.input.thread_id, "thread-1");
   assert.equal(sentPayloads[0].session_claim, undefined);
+
+  applySessionSnapshot({
+    ...state.session,
+    transcript_truncated: true,
+    transcript: [
+      {
+        item_id: "item-1",
+        role: "assistant",
+        text: `${"A".repeat(1200)}...`,
+        status: "completed",
+        turn_id: "turn-1",
+      },
+    ],
+  });
+
+  assert.equal(state.session.transcript_truncated, false);
+  assert.equal(state.session.transcript[0].text, fullText);
 });
