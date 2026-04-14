@@ -1,6 +1,6 @@
 use crate::protocol::{
     truncate_with_ellipsis, LogEntryView, SecurityMode, SessionSnapshot, ThreadSummaryView,
-    ThreadsResponse, TranscriptEntryView,
+    ThreadTranscriptResponse, ThreadsResponse, TranscriptEntryView,
 };
 
 const MAX_BROKER_LOGS: usize = 8;
@@ -42,8 +42,10 @@ fn make_snapshot() -> SessionSnapshot {
         paired_devices: vec![],
         pending_pairing_requests: vec![],
         pending_approvals: vec![],
+        transcript_truncated: false,
         transcript: (0..30)
             .map(|index| TranscriptEntryView {
+                item_id: Some(format!("item-{index}")),
                 role: "assistant".to_string(),
                 text: "x".repeat(4500 + index),
                 status: "completed".to_string(),
@@ -64,6 +66,7 @@ fn make_snapshot() -> SessionSnapshot {
 fn compact_for_broker_limits_logs_and_transcript() {
     let compacted = make_snapshot().compact_for_broker();
 
+    assert!(compacted.transcript_truncated);
     assert!(compacted.logs.len() <= MAX_BROKER_LOGS);
     assert!(compacted.transcript.len() <= MAX_BROKER_TRANSCRIPT_ENTRIES);
     assert_eq!(
@@ -111,7 +114,7 @@ fn threads_response_compact_for_broker_limits_serialized_size() {
 fn truncate_with_ellipsis_preserves_utf8_boundaries() {
     let mut value = "你好世界alpha".to_string();
 
-    truncate_with_ellipsis(&mut value, 5);
+    assert!(truncate_with_ellipsis(&mut value, 5));
 
     assert_eq!(value, "你好...");
     assert_eq!(value.chars().count(), 5);
@@ -130,6 +133,7 @@ fn compact_for_broker_drops_logs_and_transcript_as_last_resort() {
         .collect();
     snapshot.transcript = (0..3)
         .map(|index| TranscriptEntryView {
+            item_id: Some(format!("item-{index}")),
             role: "assistant".to_string(),
             text: format!("{}-{index}", "内容".repeat(1_500)),
             status: "completed".to_string(),
@@ -141,5 +145,63 @@ fn compact_for_broker_drops_logs_and_transcript_as_last_resort() {
 
     assert!(compacted.logs.is_empty());
     assert!(compacted.transcript.is_empty());
+    assert!(compacted.transcript_truncated);
     assert!(compacted.current_cwd.starts_with("/tmp/"));
+}
+
+#[test]
+fn thread_transcript_response_chunks_large_transcripts() {
+    let transcript = vec![
+        TranscriptEntryView {
+            item_id: Some("item-1".to_string()),
+            role: "assistant".to_string(),
+            text: "长".repeat(9_500),
+            status: "completed".to_string(),
+            turn_id: Some("turn-1".to_string()),
+        },
+        TranscriptEntryView {
+            item_id: Some("item-2".to_string()),
+            role: "user".to_string(),
+            text: "next".to_string(),
+            status: "completed".to_string(),
+            turn_id: Some("turn-2".to_string()),
+        },
+    ];
+
+    let mut cursor = 0;
+    let mut pages = Vec::new();
+    loop {
+        let page = ThreadTranscriptResponse::from_transcript(
+            "thread-1".to_string(),
+            transcript.clone(),
+            cursor,
+        );
+        assert!(serde_json::to_vec(&page).unwrap().len() <= THREADS_RESPONSE_TARGET_BYTES);
+        assert!(!page.chunks.is_empty());
+        cursor = match page.next_cursor {
+            Some(next_cursor) => {
+                pages.push(page);
+                next_cursor
+            }
+            None => {
+                pages.push(page);
+                break;
+            }
+        };
+    }
+
+    assert!(pages.len() >= 2);
+
+    let rebuilt = pages
+        .into_iter()
+        .flat_map(|page| page.chunks.into_iter())
+        .fold(std::collections::BTreeMap::new(), |mut acc, chunk| {
+            acc.entry(chunk.entry_index)
+                .or_insert_with(String::new)
+                .push_str(&chunk.text);
+            acc
+        });
+
+    assert_eq!(rebuilt.get(&0).unwrap(), &"长".repeat(9_500));
+    assert_eq!(rebuilt.get(&1).unwrap(), "next");
 }

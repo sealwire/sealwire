@@ -10,7 +10,7 @@ use crate::{
     codex::ThreadSyncData,
     protocol::{
         ApprovalReceipt, LogEntryView, ModelOptionView, SessionSnapshot, ThreadSummaryView,
-        ThreadsResponse,
+        ThreadTranscriptResponse, ThreadsResponse,
     },
 };
 
@@ -37,6 +37,7 @@ pub(crate) struct CachedRemoteActionResult {
     pub(crate) snapshot: SessionSnapshot,
     pub(crate) receipt: Option<ApprovalReceipt>,
     pub(crate) threads: Option<ThreadsResponse>,
+    pub(crate) thread_transcript: Option<ThreadTranscriptResponse>,
     pub(crate) session_claim: Option<String>,
     pub(crate) session_claim_expires_at: Option<u64>,
     pub(crate) claim_challenge_id: Option<String>,
@@ -230,6 +231,7 @@ impl RelayState {
                 .cloned()
                 .map(|approval| approval.to_view())
                 .collect(),
+            transcript_truncated: false,
             transcript: self
                 .transcript
                 .iter()

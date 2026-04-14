@@ -710,6 +710,7 @@ fn parse_transcript(thread: &Value) -> Vec<TranscriptEntryView> {
                 Some("userMessage") => {
                     if let Some(text) = parse_user_text(Some(item)) {
                         transcript.push(TranscriptEntryView {
+                            item_id: string_at(item, &["id"]),
                             role: "user".to_string(),
                             text,
                             status: "completed".to_string(),
@@ -720,6 +721,7 @@ fn parse_transcript(thread: &Value) -> Vec<TranscriptEntryView> {
                 Some("agentMessage") => {
                     if let Some(text) = string_at(item, &["text"]) {
                         transcript.push(TranscriptEntryView {
+                            item_id: string_at(item, &["id"]),
                             role: "assistant".to_string(),
                             text,
                             status: "completed".to_string(),

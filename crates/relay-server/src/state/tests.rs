@@ -198,6 +198,7 @@ fn test_cached_remote_action_result(action_kind: &str, ok: bool) -> CachedRemote
             paired_devices: Vec::new(),
             pending_pairing_requests: Vec::new(),
             pending_approvals: Vec::new(),
+            transcript_truncated: false,
             transcript: Vec::new(),
             logs: Vec::new(),
         },
@@ -210,6 +211,7 @@ fn test_cached_remote_action_result(action_kind: &str, ok: bool) -> CachedRemote
         threads: Some(ThreadsResponse {
             threads: vec![test_thread("thread-1", "/tmp/project")],
         }),
+        thread_transcript: None,
         session_claim: Some("claim-1".to_string()),
         session_claim_expires_at: Some(120),
         claim_challenge_id: None,
@@ -641,6 +643,7 @@ fn restore_thread_data_keeps_persisted_controller_and_settings() {
             status: "running".to_string(),
             active_flags: vec!["busy".to_string()],
             transcript: vec![TranscriptEntryView {
+                item_id: Some("history-1".to_string()),
                 role: "user".to_string(),
                 text: "ping".to_string(),
                 status: "completed".to_string(),

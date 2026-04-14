@@ -10,9 +10,9 @@ use crate::{
         AllowedRootsInput, AllowedRootsReceipt, ApprovalDecision, ApprovalDecisionInput,
         ApprovalReceipt, BulkRevokeDevicesReceipt, HeartbeatInput, PairingDecision,
         PairingDecisionInput, PairingDecisionReceipt, PairingStartInput, PairingTicketView,
-        ResumeSessionInput, RevokeDeviceReceipt, SendMessageInput, SessionSnapshot,
-        StartSessionInput, TakeOverInput, ThreadArchiveReceipt, ThreadDeleteReceipt,
-        ThreadsResponse,
+        ReadThreadTranscriptInput, ResumeSessionInput, RevokeDeviceReceipt, SendMessageInput,
+        SessionSnapshot, StartSessionInput, TakeOverInput, ThreadArchiveReceipt,
+        ThreadDeleteReceipt, ThreadTranscriptResponse, ThreadsResponse,
     },
 };
 
@@ -349,6 +349,24 @@ impl AppState {
 
         let _ = self.list_threads(20, None).await;
         Ok(self.snapshot().await)
+    }
+
+    pub async fn read_thread_transcript(
+        &self,
+        input: ReadThreadTranscriptInput,
+    ) -> Result<ThreadTranscriptResponse, String> {
+        let cursor = input.cursor.unwrap_or(0);
+        let thread_data = self.codex.read_thread(&input.thread_id).await?;
+        {
+            let relay = self.relay.read().await;
+            ensure_path_within_allowed_roots(&thread_data.thread.cwd, &relay.allowed_roots)?;
+        }
+
+        Ok(ThreadTranscriptResponse::from_transcript(
+            input.thread_id,
+            thread_data.transcript,
+            cursor,
+        ))
     }
 
     pub async fn send_message(&self, input: SendMessageInput) -> Result<SessionSnapshot, String> {

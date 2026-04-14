@@ -41,6 +41,9 @@ export const state = {
   socketPeerId: null,
   socketConnected: false,
   socketReconnectTimer: null,
+  transcriptHydrationPromise: null,
+  transcriptHydrationResolvedSignature: null,
+  transcriptHydrationSignature: null,
   threads: [],
 };
 

@@ -19,6 +19,7 @@ export function applySessionSnapshot(snapshot) {
   scheduleControllerHeartbeat(snapshot);
   scheduleControllerLeaseRefresh(snapshot);
   scheduleClaimRefresh();
+  void hydrateActiveTranscript(snapshot);
 }
 
 export async function syncRemoteSnapshot(reason, silent = false) {
@@ -182,6 +183,9 @@ export async function submitDecision(decision, scope) {
 export function clearSessionRuntime() {
   cancelControllerHeartbeat();
   cancelControllerLeaseRefresh();
+  state.transcriptHydrationPromise = null;
+  state.transcriptHydrationSignature = null;
+  state.transcriptHydrationResolvedSignature = null;
 }
 
 function scheduleControllerHeartbeat(session) {
@@ -259,4 +263,119 @@ function cancelControllerLeaseRefresh() {
 
   window.clearTimeout(state.controllerLeaseRefreshTimer);
   state.controllerLeaseRefreshTimer = null;
+}
+
+async function hydrateActiveTranscript(snapshot) {
+  if (!snapshot?.active_thread_id || !snapshot.transcript_truncated) {
+    return;
+  }
+
+  const signature = transcriptHydrationSignature(snapshot);
+  if (state.transcriptHydrationResolvedSignature === signature) {
+    return;
+  }
+  if (
+    state.transcriptHydrationPromise &&
+    state.transcriptHydrationSignature === signature
+  ) {
+    return state.transcriptHydrationPromise;
+  }
+
+  state.transcriptHydrationSignature = signature;
+  state.transcriptHydrationPromise = (async () => {
+    try {
+      const transcript = await fetchFullRemoteTranscript(snapshot.active_thread_id);
+      if (state.session?.active_thread_id !== snapshot.active_thread_id) {
+        return;
+      }
+      state.transcriptHydrationResolvedSignature = signature;
+      applySessionSnapshot({
+        ...state.session,
+        transcript,
+        transcript_truncated: false,
+      });
+    } catch (error) {
+      renderLog(`Remote full transcript sync failed: ${error.message}`);
+    } finally {
+      if (state.transcriptHydrationSignature === signature) {
+        state.transcriptHydrationPromise = null;
+      }
+    }
+  })();
+
+  return state.transcriptHydrationPromise;
+}
+
+export async function fetchFullRemoteTranscript(threadId) {
+  const assembledEntries = new Map();
+  let cursor = 0;
+
+  while (true) {
+    const result = await dispatchOrRecover("fetch_thread_transcript", {
+      input: {
+        thread_id: threadId,
+        cursor,
+      },
+    });
+    const page = result.thread_transcript;
+    if (!page || page.thread_id !== threadId) {
+      throw new Error("remote transcript response is incomplete");
+    }
+
+    for (const chunk of page.chunks || []) {
+      if (!assembledEntries.has(chunk.entry_index)) {
+        assembledEntries.set(chunk.entry_index, {
+          item_id: chunk.item_id,
+          role: chunk.role,
+          status: chunk.status,
+          turn_id: chunk.turn_id || null,
+          parts: new Array(chunk.chunk_count).fill(""),
+        });
+      }
+
+      const entry = assembledEntries.get(chunk.entry_index);
+      entry.item_id = chunk.item_id;
+      entry.role = chunk.role;
+      entry.status = chunk.status;
+      entry.turn_id = chunk.turn_id || null;
+      if (chunk.chunk_index >= entry.parts.length) {
+        entry.parts.length = chunk.chunk_count;
+      }
+      entry.parts[chunk.chunk_index] = chunk.text || "";
+    }
+
+    if (page.next_cursor == null) {
+      break;
+    }
+    cursor = page.next_cursor;
+  }
+
+  return [...assembledEntries.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([, entry]) => ({
+      item_id: entry.item_id,
+      role: entry.role,
+      text: entry.parts.join(""),
+      status: entry.status,
+      turn_id: entry.turn_id,
+    }));
+}
+
+function transcriptHydrationSignature(snapshot) {
+  const parts = [
+    snapshot.active_thread_id || "",
+    snapshot.active_turn_id || "",
+    String(snapshot.transcript?.length || 0),
+  ];
+
+  for (const entry of snapshot.transcript || []) {
+    parts.push(
+      entry.item_id || "",
+      entry.role || "",
+      entry.status || "",
+      String((entry.text || "").length)
+    );
+  }
+
+  return parts.join("|");
 }

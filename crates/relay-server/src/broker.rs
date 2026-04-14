@@ -22,7 +22,10 @@ use tracing::{debug, info, warn};
 use url::Url;
 
 use crate::{
-    protocol::{ApprovalReceipt, PairedDeviceView, SessionSnapshot, ThreadsResponse},
+    protocol::{
+        ApprovalReceipt, PairedDeviceView, SessionSnapshot, ThreadTranscriptResponse,
+        ThreadsResponse,
+    },
     state::{AppState, BrokerPendingMessage},
 };
 
@@ -133,6 +136,7 @@ enum OutboundBrokerPayload {
         snapshot: SessionSnapshot,
         receipt: Option<ApprovalReceipt>,
         threads: Option<ThreadsResponse>,
+        thread_transcript: Option<ThreadTranscriptResponse>,
         session_claim: Option<String>,
         session_claim_expires_at: Option<u64>,
         claim_challenge_id: Option<String>,

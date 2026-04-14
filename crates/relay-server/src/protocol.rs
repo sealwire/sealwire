@@ -103,6 +103,7 @@ pub struct SessionSnapshot {
     pub paired_devices: Vec<PairedDeviceView>,
     pub pending_pairing_requests: Vec<PendingPairingRequestView>,
     pub pending_approvals: Vec<ApprovalRequestView>,
+    pub transcript_truncated: bool,
     pub transcript: Vec<TranscriptEntryView>,
     pub logs: Vec<LogEntryView>,
 }
@@ -198,6 +199,7 @@ struct ThreadsResponseBrokerBudget {
 impl SessionSnapshot {
     pub fn compact_for_broker(mut self) -> Self {
         let budget = SESSION_SNAPSHOT_BROKER_BUDGET;
+        let mut transcript_truncated = false;
 
         if self.logs.len() > budget.max_logs {
             self.logs.truncate(budget.max_logs);
@@ -206,6 +208,7 @@ impl SessionSnapshot {
         if self.transcript.len() > budget.max_transcript_entries {
             let keep_from = self.transcript.len() - budget.max_transcript_entries;
             self.transcript = self.transcript.split_off(keep_from);
+            transcript_truncated = true;
         }
 
         for entry in &mut self.logs {
@@ -213,12 +216,14 @@ impl SessionSnapshot {
         }
 
         for entry in &mut self.transcript {
-            truncate_with_ellipsis(&mut entry.text, budget.max_transcript_chars);
+            transcript_truncated |=
+                truncate_with_ellipsis(&mut entry.text, budget.max_transcript_chars);
         }
 
         while serialized_len(&self) > budget.target_bytes {
             if self.transcript.len() > budget.min_transcript_entries_before_text_shrink {
                 self.transcript.remove(0);
+                transcript_truncated = true;
                 continue;
             }
             if self.logs.len() > budget.min_logs_before_text_shrink {
@@ -231,7 +236,8 @@ impl SessionSnapshot {
                 .any(|entry| entry.text.chars().count() > budget.fallback_transcript_chars)
             {
                 for entry in &mut self.transcript {
-                    truncate_with_ellipsis(&mut entry.text, budget.fallback_transcript_chars);
+                    transcript_truncated |=
+                        truncate_with_ellipsis(&mut entry.text, budget.fallback_transcript_chars);
                 }
                 continue;
             }
@@ -246,10 +252,14 @@ impl SessionSnapshot {
                 continue;
             }
             self.logs.clear();
-            self.transcript.clear();
+            if !self.transcript.is_empty() {
+                transcript_truncated = true;
+                self.transcript.clear();
+            }
             break;
         }
 
+        self.transcript_truncated = transcript_truncated;
         self
     }
 }
@@ -324,13 +334,13 @@ fn serialized_len<T: Serialize>(value: &T) -> usize {
         .unwrap_or(usize::MAX)
 }
 
-pub(crate) fn truncate_with_ellipsis(value: &mut String, max_chars: usize) {
+pub(crate) fn truncate_with_ellipsis(value: &mut String, max_chars: usize) -> bool {
     if value.chars().count() <= max_chars {
-        return;
+        return false;
     }
     if max_chars <= ELLIPSIS_LEN {
         *value = ".".repeat(max_chars);
-        return;
+        return true;
     }
     let mut truncated = value
         .chars()
@@ -338,6 +348,7 @@ pub(crate) fn truncate_with_ellipsis(value: &mut String, max_chars: usize) {
         .collect::<String>();
     truncated.push_str("...");
     *value = truncated;
+    true
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -421,10 +432,36 @@ pub struct ApprovalReceipt {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TranscriptEntryView {
+    pub item_id: Option<String>,
     pub role: String,
     pub text: String,
     pub status: String,
     pub turn_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadThreadTranscriptInput {
+    pub thread_id: String,
+    pub cursor: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TranscriptChunkView {
+    pub entry_index: usize,
+    pub item_id: String,
+    pub role: String,
+    pub text: String,
+    pub status: String,
+    pub turn_id: Option<String>,
+    pub chunk_index: usize,
+    pub chunk_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ThreadTranscriptResponse {
+    pub thread_id: String,
+    pub chunks: Vec<TranscriptChunkView>,
+    pub next_cursor: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -568,4 +605,90 @@ pub struct TakeOverInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeartbeatInput {
     pub device_id: Option<String>,
+}
+
+const TRANSCRIPT_CHUNK_MAX_CHARS: usize = 4_000;
+const THREAD_TRANSCRIPT_RESPONSE_TARGET_BYTES: usize = 20_000;
+
+impl ThreadTranscriptResponse {
+    pub fn from_transcript(
+        thread_id: String,
+        transcript: Vec<TranscriptEntryView>,
+        cursor: usize,
+    ) -> Self {
+        let chunks = flatten_transcript_chunks(transcript);
+        let mut selected = Vec::new();
+        let mut index = cursor.min(chunks.len());
+
+        while index < chunks.len() {
+            selected.push(chunks[index].clone());
+            let candidate = Self {
+                thread_id: thread_id.clone(),
+                chunks: selected.clone(),
+                next_cursor: None,
+            };
+            if serialized_len(&candidate) > THREAD_TRANSCRIPT_RESPONSE_TARGET_BYTES
+                && selected.len() > 1
+            {
+                selected.pop();
+                break;
+            }
+            index += 1;
+        }
+
+        if selected.is_empty() && index < chunks.len() {
+            selected.push(chunks[index].clone());
+            index += 1;
+        }
+
+        Self {
+            thread_id,
+            chunks: selected,
+            next_cursor: (index < chunks.len()).then_some(index),
+        }
+    }
+}
+
+fn flatten_transcript_chunks(transcript: Vec<TranscriptEntryView>) -> Vec<TranscriptChunkView> {
+    let mut chunks = Vec::new();
+
+    for (entry_index, entry) in transcript.into_iter().enumerate() {
+        let TranscriptEntryView {
+            item_id,
+            role,
+            text,
+            status,
+            turn_id,
+        } = entry;
+        let item_id = item_id.unwrap_or_else(|| format!("entry-{entry_index}"));
+        let text_chunks = split_text_chunks(&text, TRANSCRIPT_CHUNK_MAX_CHARS);
+        let chunk_count = text_chunks.len();
+
+        for (chunk_index, text) in text_chunks.into_iter().enumerate() {
+            chunks.push(TranscriptChunkView {
+                entry_index,
+                item_id: item_id.clone(),
+                role: role.clone(),
+                text,
+                status: status.clone(),
+                turn_id: turn_id.clone(),
+                chunk_index,
+                chunk_count,
+            });
+        }
+    }
+
+    chunks
+}
+
+fn split_text_chunks(text: &str, max_chars: usize) -> Vec<String> {
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+
+    let chars = text.chars().collect::<Vec<_>>();
+    chars
+        .chunks(max_chars.max(1))
+        .map(|chunk| chunk.iter().collect())
+        .collect()
 }

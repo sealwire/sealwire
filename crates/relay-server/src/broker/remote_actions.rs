@@ -4,9 +4,9 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::{
     protocol::{
-        ApprovalDecisionInput, ApprovalReceipt, HeartbeatInput, ResumeSessionInput,
-        SendMessageInput, SessionSnapshot, StartSessionInput, TakeOverInput, ThreadsQuery,
-        ThreadsResponse,
+        ApprovalDecisionInput, ApprovalReceipt, HeartbeatInput, ReadThreadTranscriptInput,
+        ResumeSessionInput, SendMessageInput, SessionSnapshot, StartSessionInput, TakeOverInput,
+        ThreadTranscriptResponse, ThreadsQuery, ThreadsResponse,
     },
     state::{AppState, ApprovalError, CachedRemoteActionResult, RemoteActionReplayDecision},
 };
@@ -48,6 +48,9 @@ pub(super) enum RemoteActionRequest {
     ListThreads {
         query: ThreadsQuery,
     },
+    FetchThreadTranscript {
+        input: ReadThreadTranscriptInput,
+    },
     DecideApproval {
         request_id: String,
         input: ApprovalDecisionInput,
@@ -65,6 +68,7 @@ impl RemoteActionRequest {
             Self::TakeOver { .. } => RemoteActionKind::TakeOver,
             Self::Heartbeat { .. } => RemoteActionKind::Heartbeat,
             Self::ListThreads { .. } => RemoteActionKind::ListThreads,
+            Self::FetchThreadTranscript { .. } => RemoteActionKind::FetchThreadTranscript,
             Self::DecideApproval { .. } => RemoteActionKind::DecideApproval,
         }
     }
@@ -100,6 +104,7 @@ impl RemoteActionRequest {
                 Self::Heartbeat { input }
             }
             Self::ListThreads { query } => Self::ListThreads { query },
+            Self::FetchThreadTranscript { input } => Self::FetchThreadTranscript { input },
             Self::DecideApproval {
                 request_id,
                 mut input,
@@ -122,6 +127,7 @@ pub(super) enum RemoteActionKind {
     TakeOver,
     Heartbeat,
     ListThreads,
+    FetchThreadTranscript,
     DecideApproval,
 }
 
@@ -136,6 +142,7 @@ impl RemoteActionKind {
             Self::TakeOver => "take_over",
             Self::Heartbeat => "heartbeat",
             Self::ListThreads => "list_threads",
+            Self::FetchThreadTranscript => "fetch_thread_transcript",
             Self::DecideApproval => "decide_approval",
         }
     }
@@ -148,6 +155,7 @@ struct RemoteActionResultPlaintext {
     snapshot: SessionSnapshot,
     receipt: Option<ApprovalReceipt>,
     threads: Option<ThreadsResponse>,
+    thread_transcript: Option<ThreadTranscriptResponse>,
     session_claim: Option<String>,
     session_claim_expires_at: Option<u64>,
     claim_challenge_id: Option<String>,
@@ -160,6 +168,7 @@ struct RemoteActionResultPlaintext {
 pub(super) struct RemoteActionOutcome {
     pub(super) receipt: Option<ApprovalReceipt>,
     pub(super) threads: Option<ThreadsResponse>,
+    pub(super) thread_transcript: Option<ThreadTranscriptResponse>,
     pub(super) session_claim: Option<String>,
     pub(super) session_claim_expires_at: Option<u64>,
     pub(super) claim_challenge_id: Option<String>,
@@ -587,6 +596,18 @@ async fn execute_remote_action(
             .map(|threads| RemoteActionOutcome {
                 receipt: None,
                 threads: Some(threads),
+                thread_transcript: None,
+                session_claim: None,
+                session_claim_expires_at: None,
+                ..RemoteActionOutcome::default()
+            }),
+        RemoteActionRequest::FetchThreadTranscript { input } => state
+            .read_thread_transcript(input)
+            .await
+            .map(|thread_transcript| RemoteActionOutcome {
+                receipt: None,
+                threads: None,
+                thread_transcript: Some(thread_transcript),
                 session_claim: None,
                 session_claim_expires_at: None,
                 ..RemoteActionOutcome::default()
@@ -597,6 +618,7 @@ async fn execute_remote_action(
             .map(|receipt| RemoteActionOutcome {
                 receipt: Some(receipt),
                 threads: None,
+                thread_transcript: None,
                 session_claim: None,
                 session_claim_expires_at: None,
                 ..RemoteActionOutcome::default()
@@ -838,6 +860,7 @@ async fn publish_plain_remote_action_result(
             snapshot,
             receipt: outcome.receipt,
             threads,
+            thread_transcript: outcome.thread_transcript,
             session_claim: outcome.session_claim,
             session_claim_expires_at: outcome.session_claim_expires_at,
             claim_challenge_id: outcome.claim_challenge_id,
@@ -866,6 +889,7 @@ async fn replay_plain_remote_action_result(
         RemoteActionOutcome {
             receipt: cached.receipt,
             threads: cached.threads,
+            thread_transcript: cached.thread_transcript,
             session_claim: cached.session_claim,
             session_claim_expires_at: cached.session_claim_expires_at,
             claim_challenge_id: cached.claim_challenge_id,
@@ -906,6 +930,7 @@ async fn publish_remote_action_result_private(
             snapshot,
             receipt: outcome.receipt,
             threads,
+            thread_transcript: outcome.thread_transcript,
             session_claim: outcome.session_claim,
             session_claim_expires_at: outcome.session_claim_expires_at,
             claim_challenge_id: outcome.claim_challenge_id,
@@ -948,6 +973,7 @@ async fn replay_encrypted_remote_action_result(
         RemoteActionOutcome {
             receipt: cached.receipt,
             threads: cached.threads,
+            thread_transcript: cached.thread_transcript,
             session_claim: cached.session_claim,
             session_claim_expires_at: cached.session_claim_expires_at,
             claim_challenge_id: cached.claim_challenge_id,
@@ -975,6 +1001,7 @@ fn cached_remote_action_result(
         snapshot: snapshot.compact_for_broker(),
         receipt: outcome.receipt,
         threads: outcome.threads.map(ThreadsResponse::compact_for_broker),
+        thread_transcript: outcome.thread_transcript,
         session_claim: outcome.session_claim,
         session_claim_expires_at: outcome.session_claim_expires_at,
         claim_challenge_id: outcome.claim_challenge_id,

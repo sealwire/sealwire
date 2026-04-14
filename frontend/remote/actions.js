@@ -252,6 +252,7 @@ async function handleEncryptedRemoteActionResult(payload) {
 
 function handleRemoteActionResult(actionId, result) {
   settlePendingAction(actionId, result);
+  const isTranscriptFetch = result.action === "fetch_thread_transcript";
 
   try {
     if (result.session_claim && state.remoteAuth) {
@@ -260,7 +261,7 @@ function handleRemoteActionResult(actionId, result) {
       renderDeviceMeta();
     }
 
-    if (result.snapshot) {
+    if (result.snapshot && !isTranscriptFetch) {
       onApplySessionSnapshot(result.snapshot);
     }
 
@@ -273,6 +274,9 @@ function handleRemoteActionResult(actionId, result) {
   }
 
   if (result.ok) {
+    if (isTranscriptFetch) {
+      return;
+    }
     if (result.action === "claim_challenge") {
       return;
     }
