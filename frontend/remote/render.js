@@ -19,7 +19,7 @@ import {
   renderLogs,
 } from "./render-transcript.js";
 import { state } from "./state.js";
-import { escapeHtml, formatTimestamp, shortId } from "./utils.js";
+import { escapeHtml, formatTimestamp, shortId, workspaceBasename } from "./utils.js";
 
 let onResumeThread = () => {};
 let onSelectRelay = () => {};
@@ -38,7 +38,8 @@ export function renderSession(session) {
   state.currentApprovalId = approval?.request_id || null;
 
   if (session.current_cwd && !dom.remoteThreadsCwdInput.value.trim()) {
-    dom.remoteThreadsCwdInput.value = session.current_cwd;
+    dom.remoteThreadsCwdInput.placeholder = `Optional exact path filter (current: ${workspaceBasename(session.current_cwd)})`;
+    dom.remoteThreadsCwdInput.title = session.current_cwd;
   }
 
   syncRemoteModelSuggestions(session.available_models || [], session.model);

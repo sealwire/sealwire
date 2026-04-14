@@ -1,18 +1,21 @@
 import * as dom from "./dom.js";
 import { renderEmptyState } from "./render-transcript.js";
 import { state } from "./state.js";
-import { escapeHtml, formatTimestamp, shortId } from "./utils.js";
+import { escapeHtml, formatTimestamp, shortId, workspaceBasename } from "./utils.js";
 
 export function renderSessionChrome(session) {
   const approval = session.pending_approvals?.[0] || null;
   const hasActiveSession = Boolean(session.active_thread_id);
+  const workspaceName = session.current_cwd ? workspaceBasename(session.current_cwd) : workspaceTitle();
 
-  dom.remoteWorkspaceTitle.textContent = hasActiveSession
-    ? shortId(session.active_thread_id)
-    : workspaceTitle();
+  dom.remoteWorkspaceTitle.textContent = hasActiveSession ? workspaceName : workspaceTitle();
   dom.remoteWorkspaceSubtitle.textContent = hasActiveSession
-    ? session.current_cwd
+    ? `Live thread ${shortId(session.active_thread_id)}`
     : workspaceSubtitle();
+  dom.remoteWorkspaceTitle.title = session.current_cwd || "";
+  dom.remoteWorkspaceSubtitle.title = hasActiveSession
+    ? session.current_cwd || ""
+    : "";
 
   if (approval) {
     dom.remoteStatusBadge.textContent = "Approval required";
@@ -389,6 +392,8 @@ function syncWorkspaceHeading() {
 
   dom.remoteWorkspaceTitle.textContent = workspaceTitle();
   dom.remoteWorkspaceSubtitle.textContent = workspaceSubtitle();
+  dom.remoteWorkspaceTitle.title = "";
+  dom.remoteWorkspaceSubtitle.title = "";
 }
 
 function workspaceTitle() {
