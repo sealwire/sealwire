@@ -827,6 +827,7 @@ async fn publish_plain_remote_action_result(
     _device_id: String,
 ) -> Result<(), String> {
     let snapshot = snapshot.compact_for_broker();
+    let threads = outcome.threads.map(ThreadsResponse::compact_for_broker);
     publish_payload(
         sender,
         OutboundBrokerPayload::RemoteActionResult {
@@ -836,7 +837,7 @@ async fn publish_plain_remote_action_result(
             ok,
             snapshot,
             receipt: outcome.receipt,
-            threads: outcome.threads,
+            threads,
             session_claim: outcome.session_claim,
             session_claim_expires_at: outcome.session_claim_expires_at,
             claim_challenge_id: outcome.claim_challenge_id,
@@ -892,6 +893,7 @@ async fn publish_remote_action_result_private(
     response_secret: Option<&str>,
 ) -> Result<(), String> {
     let snapshot = snapshot.compact_for_broker();
+    let threads = outcome.threads.map(ThreadsResponse::compact_for_broker);
     let secret = match response_secret {
         Some(secret) => secret.to_string(),
         None => state.paired_device_payload_secret(&device_id).await?,
@@ -903,7 +905,7 @@ async fn publish_remote_action_result_private(
             ok,
             snapshot,
             receipt: outcome.receipt,
-            threads: outcome.threads,
+            threads,
             session_claim: outcome.session_claim,
             session_claim_expires_at: outcome.session_claim_expires_at,
             claim_challenge_id: outcome.claim_challenge_id,
@@ -970,9 +972,9 @@ fn cached_remote_action_result(
     CachedRemoteActionResult {
         action_kind: action.as_str().to_string(),
         ok,
-        snapshot,
+        snapshot: snapshot.compact_for_broker(),
         receipt: outcome.receipt,
-        threads: outcome.threads,
+        threads: outcome.threads.map(ThreadsResponse::compact_for_broker),
         session_claim: outcome.session_claim,
         session_claim_expires_at: outcome.session_claim_expires_at,
         claim_challenge_id: outcome.claim_challenge_id,

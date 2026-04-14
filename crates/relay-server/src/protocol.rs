@@ -117,107 +117,227 @@ pub struct ModelOptionView {
     pub is_default: bool,
 }
 
+const ELLIPSIS_LEN: usize = 3;
+
+const SESSION_SNAPSHOT_BROKER_BUDGET: SessionSnapshotBrokerBudget = SessionSnapshotBrokerBudget {
+    max_logs: 8,
+    max_log_chars: 180,
+    max_transcript_entries: 6,
+    max_transcript_chars: 1_200,
+    target_bytes: 8_000,
+    min_transcript_entries_before_text_shrink: 3,
+    min_logs_before_text_shrink: 4,
+    fallback_transcript_chars: 400,
+    fallback_log_chars: 96,
+};
+
+const THREAD_SUMMARY_BROKER_BUDGET: ThreadSummaryBrokerBudget = ThreadSummaryBrokerBudget {
+    max_name_chars: 96,
+    max_preview_chars: 160,
+};
+
+const THREADS_RESPONSE_BROKER_BUDGET: ThreadsResponseBrokerBudget = ThreadsResponseBrokerBudget {
+    max_threads: 80,
+    target_bytes: 20_000,
+    reduction_stages: &[
+        ThreadsResponseReductionStage {
+            max_threads: Some(40),
+            max_preview_chars: None,
+        },
+        ThreadsResponseReductionStage {
+            max_threads: None,
+            max_preview_chars: Some(96),
+        },
+        ThreadsResponseReductionStage {
+            max_threads: Some(20),
+            max_preview_chars: None,
+        },
+        ThreadsResponseReductionStage {
+            max_threads: None,
+            max_preview_chars: Some(48),
+        },
+        ThreadsResponseReductionStage {
+            max_threads: Some(10),
+            max_preview_chars: None,
+        },
+    ],
+};
+
+#[derive(Clone, Copy)]
+struct SessionSnapshotBrokerBudget {
+    max_logs: usize,
+    max_log_chars: usize,
+    max_transcript_entries: usize,
+    max_transcript_chars: usize,
+    target_bytes: usize,
+    min_transcript_entries_before_text_shrink: usize,
+    min_logs_before_text_shrink: usize,
+    fallback_transcript_chars: usize,
+    fallback_log_chars: usize,
+}
+
+#[derive(Clone, Copy)]
+struct ThreadSummaryBrokerBudget {
+    max_name_chars: usize,
+    max_preview_chars: usize,
+}
+
+#[derive(Clone, Copy)]
+struct ThreadsResponseReductionStage {
+    max_threads: Option<usize>,
+    max_preview_chars: Option<usize>,
+}
+
+#[derive(Clone, Copy)]
+struct ThreadsResponseBrokerBudget {
+    max_threads: usize,
+    target_bytes: usize,
+    reduction_stages: &'static [ThreadsResponseReductionStage],
+}
+
 impl SessionSnapshot {
     pub fn compact_for_broker(mut self) -> Self {
-        const BROKER_LOG_LIMIT: usize = 24;
-        const BROKER_TRANSCRIPT_LIMIT: usize = 24;
-        const BROKER_TEXT_LIMIT: usize = 4000;
+        let budget = SESSION_SNAPSHOT_BROKER_BUDGET;
 
-        if self.logs.len() > BROKER_LOG_LIMIT {
-            self.logs.truncate(BROKER_LOG_LIMIT);
+        if self.logs.len() > budget.max_logs {
+            self.logs.truncate(budget.max_logs);
         }
 
-        if self.transcript.len() > BROKER_TRANSCRIPT_LIMIT {
-            let keep_from = self.transcript.len() - BROKER_TRANSCRIPT_LIMIT;
+        if self.transcript.len() > budget.max_transcript_entries {
+            let keep_from = self.transcript.len() - budget.max_transcript_entries;
             self.transcript = self.transcript.split_off(keep_from);
         }
 
+        for entry in &mut self.logs {
+            truncate_with_ellipsis(&mut entry.message, budget.max_log_chars);
+        }
+
         for entry in &mut self.transcript {
-            if entry.text.len() > BROKER_TEXT_LIMIT {
-                entry.text.truncate(BROKER_TEXT_LIMIT);
-                entry.text.push_str("...");
+            truncate_with_ellipsis(&mut entry.text, budget.max_transcript_chars);
+        }
+
+        while serialized_len(&self) > budget.target_bytes {
+            if self.transcript.len() > budget.min_transcript_entries_before_text_shrink {
+                self.transcript.remove(0);
+                continue;
             }
+            if self.logs.len() > budget.min_logs_before_text_shrink {
+                self.logs.pop();
+                continue;
+            }
+            if self
+                .transcript
+                .iter()
+                .any(|entry| entry.text.chars().count() > budget.fallback_transcript_chars)
+            {
+                for entry in &mut self.transcript {
+                    truncate_with_ellipsis(&mut entry.text, budget.fallback_transcript_chars);
+                }
+                continue;
+            }
+            if self
+                .logs
+                .iter()
+                .any(|entry| entry.message.chars().count() > budget.fallback_log_chars)
+            {
+                for entry in &mut self.logs {
+                    truncate_with_ellipsis(&mut entry.message, budget.fallback_log_chars);
+                }
+                continue;
+            }
+            self.logs.clear();
+            self.transcript.clear();
+            break;
         }
 
         self
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{LogEntryView, SessionSnapshot, TranscriptEntryView};
+impl ThreadSummaryView {
+    fn compact_for_broker(mut self) -> Self {
+        let budget = THREAD_SUMMARY_BROKER_BUDGET;
 
-    fn make_snapshot() -> SessionSnapshot {
-        SessionSnapshot {
-            provider: "codex",
-            service_ready: true,
-            codex_connected: true,
-            broker_connected: true,
-            broker_channel_id: Some("room".to_string()),
-            broker_peer_id: Some("relay".to_string()),
-            security_mode: super::SecurityMode::Private,
-            e2ee_enabled: true,
-            broker_can_read_content: false,
-            audit_enabled: false,
-            active_thread_id: Some("thread-1".to_string()),
-            active_controller_device_id: Some("device-1".to_string()),
-            active_controller_last_seen_at: Some(1),
-            controller_lease_expires_at: Some(2),
-            controller_lease_seconds: 15,
-            active_turn_id: Some("turn-1".to_string()),
-            current_status: "idle".to_string(),
-            active_flags: vec![],
-            current_cwd: "/tmp/project".to_string(),
-            model: "gpt-5.4".to_string(),
-            available_models: vec![],
-            approval_policy: "untrusted".to_string(),
-            sandbox: "workspace-write".to_string(),
-            reasoning_effort: "medium".to_string(),
-            allowed_roots: vec![],
-            device_records: vec![],
-            paired_devices: vec![],
-            pending_pairing_requests: vec![],
-            pending_approvals: vec![],
-            transcript: (0..30)
-                .map(|index| TranscriptEntryView {
-                    role: "assistant".to_string(),
-                    text: "x".repeat(4500 + index),
-                    status: "completed".to_string(),
-                    turn_id: Some(format!("turn-{index}")),
-                })
-                .collect(),
-            logs: (0..30)
-                .map(|index| LogEntryView {
-                    kind: "info".to_string(),
-                    message: format!("log-{index}"),
-                    created_at: index,
-                })
-                .collect(),
+        if let Some(name) = &mut self.name {
+            truncate_with_ellipsis(name, budget.max_name_chars);
         }
+        truncate_with_ellipsis(&mut self.preview, budget.max_preview_chars);
+        self
     }
+}
 
-    #[test]
-    fn compact_for_broker_limits_logs_and_transcript() {
-        let compacted = make_snapshot().compact_for_broker();
+impl ThreadsResponse {
+    pub fn compact_for_broker(mut self) -> Self {
+        let budget = THREADS_RESPONSE_BROKER_BUDGET;
 
-        assert_eq!(compacted.logs.len(), 24);
-        assert_eq!(compacted.transcript.len(), 24);
-        assert_eq!(
-            compacted
-                .transcript
-                .first()
-                .and_then(|entry| entry.turn_id.as_deref()),
-            Some("turn-6")
-        );
-        assert!(compacted
-            .transcript
-            .iter()
-            .all(|entry| entry.text.len() <= 4003));
-        assert!(compacted
-            .transcript
-            .iter()
-            .all(|entry| entry.text.ends_with("...")));
+        if self.threads.len() > budget.max_threads {
+            self.threads.truncate(budget.max_threads);
+        }
+        self.threads = self
+            .threads
+            .into_iter()
+            .map(ThreadSummaryView::compact_for_broker)
+            .collect();
+
+        while serialized_len(&self) > budget.target_bytes {
+            let mut changed = false;
+            for stage in budget.reduction_stages {
+                if let Some(max_threads) = stage.max_threads {
+                    if self.threads.len() > max_threads {
+                        self.threads.truncate(max_threads);
+                        changed = true;
+                        break;
+                    }
+                }
+                if let Some(max_preview_chars) = stage.max_preview_chars {
+                    if self
+                        .threads
+                        .iter()
+                        .any(|thread| thread.preview.chars().count() > max_preview_chars)
+                    {
+                        for thread in &mut self.threads {
+                            truncate_with_ellipsis(&mut thread.preview, max_preview_chars);
+                        }
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+
+            if changed {
+                continue;
+            }
+
+            for thread in &mut self.threads {
+                thread.preview.clear();
+            }
+            break;
+        }
+
+        self
     }
+}
+
+fn serialized_len<T: Serialize>(value: &T) -> usize {
+    serde_json::to_vec(value)
+        .map(|payload| payload.len())
+        .unwrap_or(usize::MAX)
+}
+
+pub(crate) fn truncate_with_ellipsis(value: &mut String, max_chars: usize) {
+    if value.chars().count() <= max_chars {
+        return;
+    }
+    if max_chars <= ELLIPSIS_LEN {
+        *value = ".".repeat(max_chars);
+        return;
+    }
+    let mut truncated = value
+        .chars()
+        .take(max_chars.saturating_sub(ELLIPSIS_LEN))
+        .collect::<String>();
+    truncated.push_str("...");
+    *value = truncated;
 }
 
 #[derive(Debug, Clone, Serialize)]

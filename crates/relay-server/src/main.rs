@@ -3,6 +3,8 @@ mod broker;
 mod codex;
 mod codex_local;
 mod protocol;
+#[cfg(test)]
+mod protocol_tests;
 mod state;
 
 use std::{convert::Infallible, time::Duration};
