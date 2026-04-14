@@ -28,6 +28,20 @@ export async function fetchSession(relayPort, { bearerToken } = {}) {
   return payload.data;
 }
 
+export async function listThreads(relayPort, { bearerToken, cwd } = {}) {
+  const query = cwd ? `?cwd=${encodeURIComponent(cwd)}` : "";
+  const response = await fetch(`http://127.0.0.1:${relayPort}/api/threads${query}`, {
+    headers: authHeaders(bearerToken),
+  });
+  const payload = await response.json();
+  if (!response.ok || !payload?.ok) {
+    throw new Error(
+      extractErrorMessage(payload, `failed to list relay threads${cwd ? ` for ${cwd}` : ""}`)
+    );
+  }
+  return payload.data?.threads || [];
+}
+
 export async function deleteThreadAndWait(
   relayPort,
   threadId,
@@ -76,18 +90,7 @@ export async function deleteThreadAndWait(
   }
 
   while (Date.now() < deadline) {
-    const query = cwd ? `?cwd=${encodeURIComponent(cwd)}` : "";
-    const threadsResponse = await fetch(`http://127.0.0.1:${relayPort}/api/threads${query}`, {
-      headers: authHeaders(bearerToken),
-    });
-    const threadsPayload = await threadsResponse.json();
-    if (!threadsResponse.ok || !threadsPayload?.ok) {
-      throw new Error(extractErrorMessage(
-        threadsPayload,
-        `failed to list threads while waiting for ${threadId} to disappear`
-      ));
-    }
-    const threads = threadsPayload.data?.threads || [];
+    const threads = await listThreads(relayPort, { bearerToken, cwd });
     if (!threads.some((thread) => thread.id === threadId)) {
       return;
     }
@@ -95,4 +98,45 @@ export async function deleteThreadAndWait(
   }
 
   throw new Error(`timed out waiting for deleted thread ${threadId} to disappear from relay list`);
+}
+
+export async function deleteThreadsForCwdAndWait(
+  relayPort,
+  cwd,
+  { bearerToken, timeoutMs = 15000 } = {}
+) {
+  if (!cwd) {
+    return [];
+  }
+
+  const deletedThreadIds = [];
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const threads = await listThreads(relayPort, { bearerToken, cwd });
+    if (threads.length === 0) {
+      return deletedThreadIds;
+    }
+
+    for (const thread of threads) {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        break;
+      }
+
+      await deleteThreadAndWait(relayPort, thread.id, {
+        bearerToken,
+        cwd,
+        timeoutMs: remainingMs,
+      });
+      deletedThreadIds.push(thread.id);
+    }
+  }
+
+  const leftoverThreads = await listThreads(relayPort, { bearerToken, cwd });
+  if (leftoverThreads.length > 0) {
+    throw new Error(`timed out waiting to delete ${leftoverThreads.length} thread(s) for ${cwd}`);
+  }
+
+  return deletedThreadIds;
 }

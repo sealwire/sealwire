@@ -9,7 +9,7 @@ import process from "node:process";
 import { setTimeout as delay } from "node:timers/promises";
 
 import { chromium } from "playwright";
-import { deleteThreadAndWait, fetchSession } from "./e2e-thread-cleanup.mjs";
+import { deleteThreadsForCwdAndWait, fetchSession } from "./e2e-thread-cleanup.mjs";
 
 const ROOT = process.cwd();
 const TIMEOUT_MS = Number(process.env.BROWSER_E2E_TIMEOUT_MS || 60000);
@@ -246,15 +246,11 @@ async function main() {
     dumpProcessLogs(relay);
     throw error;
   } finally {
-    if (createdThreadId) {
-      await deleteThreadAndWait(relayPort, createdThreadId, { cwd: workspaceDir }).catch(
-        (error) => {
-          console.error(
-            `[cleanup] failed to delete public reclaim e2e thread ${createdThreadId}: ${error.message}`
-          );
-        }
+    await deleteThreadsForCwdAndWait(relayPort, workspaceDir).catch((error) => {
+      console.error(
+        `[cleanup] failed to delete public reclaim e2e threads for ${workspaceDir}: ${error.message}`
       );
-    }
+    });
     await context?.close().catch(() => {});
     await browser?.close().catch(() => {});
     await stopManagedProcess(relay);
