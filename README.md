@@ -1,9 +1,9 @@
 # agent-relay
 
-`agent-relay` is a local-first, privacy-first control plane for real coding
+`agent-relay` is a local-first, privacy-first control plane for coding
 agents.
 
-The goal is to keep one real agent session controllable, resumable, and
+The goal is to keep one agent session controllable, resumable, and
 trustworthy across browser, phone, and later other surfaces without turning a
 broker into the place where your workspace, prompts, and approvals have to
 live in plaintext.
@@ -11,7 +11,7 @@ live in plaintext.
 The product is currently Codex-first. The local machine remains the execution
 authority. The relay is the control layer around that execution:
 
-- start and resume a real coding session
+- start and resume a coding session
 - see whether it is running, blocked, or waiting
 - handle approvals away from the terminal
 - move control between devices without losing the session
@@ -24,7 +24,7 @@ privacy-first default.
 The recommended deployment shape today is:
 
 - keep `relay-server` on the workstation, VM, or jump host that already has the
-  real workspace and logged-in `codex` CLI
+  local workspace and logged-in `codex` CLI
 - deploy `relay-broker` separately when you want phones or remote browsers to
   attach over LAN or the public internet
 - treat the current product as a trustworthy control plane for one operator and
@@ -32,12 +32,12 @@ The recommended deployment shape today is:
 
 ## Use cases
 
-`agent-relay` is built for cases where one real coding session already exists
+`agent-relay` is built for cases where one coding session already exists
 and the problem is control, continuity, and trust rather than raw execution.
 
 Good fits today:
 
-- you want to start or resume a real Codex session from a browser without
+- you want to start or resume a Codex session from a browser without
   moving the workspace off the machine that already owns it
 - you want to review approval requests or take over a session from your phone
   while away from the terminal
@@ -58,7 +58,7 @@ Not the current target:
 
 The design is intentionally opinionated:
 
-- local-first authority: the machine with the real workspace and Codex session
+- local-first authority: the machine with the local workspace and Codex session
   remains the source of truth
 - privacy-first defaults: the safe path should be the obvious path for people
   who do not want their code, prompts, and approvals copied into a hosted
@@ -88,7 +88,7 @@ Security is a core part of the product, not a later add-on.
 - remote devices keep signing keys in browser-managed crypto storage when
   `WebCrypto` and `IndexedDB` are available, with a compatibility fallback for
   weaker browser contexts
-- the relay-server remains the execution authority near the real workspace; the
+- the relay-server remains the execution authority near the local workspace; the
   broker moves encrypted control traffic rather than hosting the agent itself
 
 ## Current focus
