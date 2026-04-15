@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { webcrypto } from "node:crypto";
 
+let activeBrowser = null;
+
 function createElementStub() {
   return {
     value: "",
@@ -177,7 +179,7 @@ function installBrowserStubs() {
     value: windowObject.indexedDB,
   });
 
-  return {
+  activeBrowser = {
     elements,
     runTimers() {
       while (pendingTimers.length) {
@@ -188,6 +190,8 @@ function installBrowserStubs() {
       }
     },
   };
+
+  return activeBrowser;
 }
 
 function nextTick() {
@@ -371,4 +375,50 @@ test("applySessionSnapshot hydrates truncated transcript with chunked remote fet
 
   assert.equal(state.session.transcript_truncated, false);
   assert.equal(state.session.transcript[0].text, fullText);
+});
+
+test("startRemoteSession re-enables the start button when the relay does not reply", async () => {
+  const browser = activeBrowser || installBrowserStubs();
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { startRemoteSession } = await import("./session-ops.js");
+
+  state.remoteAuth = {
+    relayId: "relay-1",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: null,
+    sessionClaimExpiresAt: null,
+  };
+  saveRemoteAuth(state.remoteAuth);
+  state.socketConnected = true;
+  state.socketPeerId = "surface-peer-1";
+  state.pendingActions.clear();
+  state.socket = {
+    readyState: 1,
+    send() {},
+  };
+
+  document.querySelector("#remote-cwd-input").value = "/tmp/demo";
+  document.querySelector("#remote-model-input").value = "gpt-5.4";
+  document.querySelector("#remote-approval-policy-input").value = "on-request";
+  document.querySelector("#remote-sandbox-input").value = "workspace-write";
+  document.querySelector("#remote-start-effort").value = "medium";
+
+  const pending = startRemoteSession();
+  assert.equal(document.querySelector("#remote-start-session-button").disabled, true);
+
+  browser.runTimers();
+  await pending;
+
+  assert.equal(document.querySelector("#remote-start-session-button").disabled, false);
 });

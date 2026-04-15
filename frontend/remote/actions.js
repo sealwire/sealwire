@@ -18,6 +18,8 @@ import {
 } from "./state.js";
 import { sendBrokerFrame } from "./broker-client.js";
 
+const REMOTE_ACTION_TIMEOUT_MS = 15_000;
+
 let onApplySessionSnapshot = () => {};
 let onSyncRemoteSnapshot = async () => {};
 
@@ -221,6 +223,7 @@ export function rejectPendingActions(message) {
 
   const error = new Error(message);
   for (const pending of state.pendingActions.values()) {
+    window.clearTimeout(pending.timeoutId);
     pending.reject(error);
   }
   state.pendingActions.clear();
@@ -342,7 +345,11 @@ async function dispatchRemoteAction(actionType, request) {
     );
     return await resultPromise;
   } catch (error) {
-    state.pendingActions.delete(actionId);
+    const pending = state.pendingActions.get(actionId);
+    if (pending) {
+      window.clearTimeout(pending.timeoutId);
+      state.pendingActions.delete(actionId);
+    }
     throw error;
   }
 }
@@ -476,8 +483,19 @@ async function buildDeviceActionPayload(actionId, actionType, request) {
 
 function registerPendingAction(actionId, actionType) {
   return new Promise((resolve, reject) => {
+    const timeoutId = window.setTimeout(() => {
+      const pending = state.pendingActions.get(actionId);
+      if (!pending) {
+        return;
+      }
+
+      state.pendingActions.delete(actionId);
+      reject(new Error(`remote ${actionType} timed out waiting for relay response`));
+    }, REMOTE_ACTION_TIMEOUT_MS);
+
     state.pendingActions.set(actionId, {
       actionType,
+      timeoutId,
       reject,
       resolve,
     });
@@ -495,6 +513,7 @@ function settlePendingAction(actionId, result) {
   }
 
   state.pendingActions.delete(actionId);
+  window.clearTimeout(pending.timeoutId);
   if (result.ok) {
     pending.resolve(result);
     return;

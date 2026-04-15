@@ -5,7 +5,8 @@ import {
   storePayloadSecret,
 } from "./secret-store.js";
 
-const REMOTE_STATE_STORAGE_KEY = "agent-relay.remote-state-v2";
+const REMOTE_STATE_STORAGE_KEY = "agent-relay.remote-state";
+const REMOTE_STATE_SCHEMA_VERSION = 1;
 const REMOTE_DEVICE_LABEL_STORAGE_KEY = "agent-relay.remote-device-label";
 const REMOTE_REQUESTED_DEVICE_ID_STORAGE_KEY = "agent-relay.remote-device-id";
 
@@ -340,22 +341,18 @@ function loadOrCreateRequestedDeviceId(verifyKey) {
 function loadRemoteStore() {
   const raw = window.localStorage.getItem(REMOTE_STATE_STORAGE_KEY);
   if (!raw) {
-    return {
-      clientAuth: null,
-      activeRelayId: null,
-      remoteProfiles: {},
-    };
+    return emptyRemoteStore();
   }
 
   try {
     const parsed = JSON.parse(raw);
+    if (parsed?.schemaVersion !== REMOTE_STATE_SCHEMA_VERSION) {
+      window.localStorage.removeItem(REMOTE_STATE_STORAGE_KEY);
+      return emptyRemoteStore();
+    }
     if (containsLegacySensitiveState(parsed)) {
       window.localStorage.removeItem(REMOTE_STATE_STORAGE_KEY);
-      return {
-        clientAuth: null,
-        activeRelayId: null,
-        remoteProfiles: {},
-      };
+      return emptyRemoteStore();
     }
     const remoteProfiles = Object.fromEntries(
       Object.entries(parsed?.remoteProfiles || {})
@@ -380,12 +377,16 @@ function loadRemoteStore() {
     };
   } catch {
     window.localStorage.removeItem(REMOTE_STATE_STORAGE_KEY);
-    return {
-      clientAuth: null,
-      activeRelayId: null,
-      remoteProfiles: {},
-    };
+    return emptyRemoteStore();
   }
+}
+
+function emptyRemoteStore() {
+  return {
+    clientAuth: null,
+    activeRelayId: null,
+    remoteProfiles: {},
+  };
 }
 
 function normalizeRemoteProfile(profile, options = {}) {
@@ -446,6 +447,7 @@ function syncCurrentRemoteAuth() {
 
 function persistRemoteStore() {
   const payload = {
+    schemaVersion: REMOTE_STATE_SCHEMA_VERSION,
     activeRelayId: state.activeRelayId,
     clientAuth: state.clientAuth
       ? {
@@ -529,6 +531,10 @@ function deriveRelayDirectory(remoteProfiles, serverEntries) {
   }
 
   for (const entry of serverEntries || []) {
+    if (!entry?.relay_id || !entry?.broker_room_id) {
+      continue;
+    }
+
     const current = entriesByRelayId.get(entry.relay_id) || {
       relayId: entry.relay_id,
       relayLabel: null,

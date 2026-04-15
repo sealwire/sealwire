@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { webcrypto } from "node:crypto";
 
+const REMOTE_STATE_STORAGE_KEY = "agent-relay.remote-state";
+
 function createElementStub() {
   return {
     value: "",
@@ -319,7 +321,7 @@ test("expired device broker access refreshes automatically during reconnect", as
   assert.equal(state.remoteAuth.deviceRefreshMode, "cookie");
   assert.equal(state.remoteAuth.deviceRefreshToken, null);
   assert.equal(state.remoteAuth.deviceJoinTicket, "fresh-device-ws-token");
-  const storedAuth = JSON.parse(browser.localStorage.getItem("agent-relay.remote-state-v2"));
+  const storedAuth = JSON.parse(browser.localStorage.getItem(REMOTE_STATE_STORAGE_KEY));
   const storedProfile = storedAuth.remoteProfiles["relay-1"];
   assert.equal(storedProfile.deviceRefreshToken, undefined);
   assert.equal(storedProfile.deviceJoinTicket, undefined);

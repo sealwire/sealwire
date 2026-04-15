@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { webcrypto } from "node:crypto";
 
+const REMOTE_STATE_STORAGE_KEY = "agent-relay.remote-state";
+
 function createElementStub() {
   return {
     value: "",
@@ -286,7 +288,7 @@ test("ensureRemoteClaim performs challenge-response without rotating payload sec
   assert.equal(state.remoteAuth.payloadSecret, "payload-secret-1");
   assert.equal(state.remoteAuth.sessionClaim, "session-claim-2");
 
-  const storedAuth = JSON.parse(browser.localStorage.getItem("agent-relay.remote-state-v2"));
+  const storedAuth = JSON.parse(browser.localStorage.getItem(REMOTE_STATE_STORAGE_KEY));
   const storedProfile = storedAuth.remoteProfiles["relay-1"];
   assert.equal("payloadSecret" in storedProfile, false);
   assert.equal(storedProfile.hasStoredPayloadSecret, true);
@@ -341,11 +343,11 @@ test("encrypted remote action results decrypt with the persisted payload secret"
   assert.equal(state.remoteAuth.sessionClaim, "session-claim-3");
 
   await waitFor(() => {
-    const storedAuth = JSON.parse(browser.localStorage.getItem("agent-relay.remote-state-v2"));
+    const storedAuth = JSON.parse(browser.localStorage.getItem(REMOTE_STATE_STORAGE_KEY));
     return storedAuth?.remoteProfiles?.["relay-1"]?.hasStoredPayloadSecret === true;
   });
 
-  const storedAuth = JSON.parse(browser.localStorage.getItem("agent-relay.remote-state-v2"));
+  const storedAuth = JSON.parse(browser.localStorage.getItem(REMOTE_STATE_STORAGE_KEY));
   assert.equal("payloadSecret" in storedAuth.remoteProfiles["relay-1"], false);
   assert.equal(storedAuth.remoteProfiles["relay-1"].hasStoredPayloadSecret, true);
 });
@@ -416,6 +418,52 @@ test("list_threads uses device access without pre-claiming control", async () =>
   assert.ok(listThreadsPayload);
   assert.equal(listThreadsPayload.session_claim, undefined);
   assert.equal(listThreadsPayload.device_id, "device-1");
+});
+
+test("remote actions time out when the relay never replies", async () => {
+  const browser = installBrowserStubs();
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { dispatchOrRecover } = await import("./actions.js");
+
+  state.remoteAuth = {
+    relayId: "relay-1",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: null,
+    sessionClaimExpiresAt: null,
+  };
+  saveRemoteAuth(state.remoteAuth);
+  state.socketConnected = true;
+  state.socketPeerId = "surface-peer-1";
+  state.pendingActions.clear();
+  state.socket = {
+    readyState: 1,
+    send() {},
+  };
+
+  const pending = dispatchOrRecover("start_session", {
+    input: {
+      cwd: "/tmp/demo",
+    },
+  });
+
+  browser.runTimers();
+
+  await assert.rejects(
+    pending,
+    /remote start_session timed out waiting for relay response/
+  );
+  assert.equal(state.pendingActions.size, 0);
 });
 
 test("recoverRemoteSession only auto-claims when this device still controls the thread", async () => {

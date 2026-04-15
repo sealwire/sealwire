@@ -108,7 +108,9 @@ export function renderRelayDirectory() {
 
   dom.remoteRelaysList.innerHTML = relays
     .map((relay) => {
-      const title = relay.relayLabel || relay.relayId;
+      const relayId = relay.relayId || relay.brokerRoomId || relay.deviceId || "";
+      const title =
+        relay.relayLabel || relay.relayId || relay.brokerRoomId || relay.deviceLabel || relay.deviceId || "Unknown relay";
       const subtitle = relaySubtitle(relay);
       const activeClass = state.remoteAuth?.relayId === relay.relayId ? " is-active" : "";
       const actionLabel = relay.hasLocalProfile
@@ -117,10 +119,10 @@ export function renderRelayDirectory() {
           ? "Re-pair relay"
           : "Pair again";
       return `
-        <button class="conversation-item${activeClass}" type="button" data-relay-id="${escapeHtml(relay.relayId)}" ${relay.hasLocalProfile ? "" : "disabled"}>
+        <button class="conversation-item${activeClass}" type="button" data-relay-id="${escapeHtml(relayId)}" ${relay.hasLocalProfile && relayId ? "" : "disabled"}>
           <span class="conversation-title">${escapeHtml(title)}</span>
           <span class="conversation-preview">${escapeHtml(subtitle)}</span>
-          <span class="conversation-meta">${escapeHtml(relay.brokerRoomId || relay.relayId)} · ${escapeHtml(actionLabel)}</span>
+          <span class="conversation-meta">${escapeHtml(relay.brokerRoomId || relayId)} · ${escapeHtml(actionLabel)}</span>
         </button>
       `;
     })
@@ -285,7 +287,9 @@ function renderRelayHome() {
 }
 
 function renderRelayHomeCard(relay) {
-  const title = relay.relayLabel || relay.relayId;
+  const relayId = relay.relayId || relay.brokerRoomId || relay.deviceId || "";
+  const title =
+    relay.relayLabel || relay.relayId || relay.brokerRoomId || relay.deviceLabel || relay.deviceId || "Unknown relay";
   const subtitle = relay.hasLocalProfile
     ? relay.deviceLabel || relay.deviceId
     : relay.needsLocalRePairing
@@ -293,7 +297,7 @@ function renderRelayHomeCard(relay) {
       : "This browser can see the grant, but it does not have local encrypted access for this relay yet.";
   const meta = relay.grantedAt
     ? `Granted ${formatTimestamp(relay.grantedAt)}`
-    : relay.brokerRoomId || relay.relayId;
+    : relay.brokerRoomId || relayId;
   const cta = relay.hasLocalProfile
     ? "Open relay"
     : relay.needsLocalRePairing
@@ -301,7 +305,7 @@ function renderRelayHomeCard(relay) {
       : "Pair again in this browser";
 
   return `
-    <button class="relay-home-card" type="button" data-relay-home-id="${escapeHtml(relay.relayId)}" ${relay.hasLocalProfile ? "" : "disabled"}>
+    <button class="relay-home-card" type="button" data-relay-home-id="${escapeHtml(relayId)}" ${relay.hasLocalProfile && relayId ? "" : "disabled"}>
       <div class="relay-home-card-copy">
         <span class="relay-home-card-label">${escapeHtml(title)}</span>
         <strong class="relay-home-card-title">${escapeHtml(title)}</strong>

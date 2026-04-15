@@ -2,6 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { webcrypto } from "node:crypto";
 
+const REMOTE_STATE_STORAGE_KEY = "agent-relay.remote-state";
+const REMOTE_STATE_SCHEMA_VERSION = 1;
+const DEPRECATED_REMOTE_STATE_STORAGE_KEY_V2 = "agent-relay.remote-state-v2";
+const DEPRECATED_REMOTE_STATE_STORAGE_KEY_V3 = "agent-relay.remote-state-v3";
+
 function createRequest() {
   return {
     result: undefined,
@@ -182,7 +187,7 @@ test("remote auth storage keeps durable metadata while payload secrets move to p
   };
   saveRemoteAuth(state.remoteAuth);
   await waitFor(() => {
-    const stored = JSON.parse(browser.localStorage.getItem("agent-relay.remote-state-v2"));
+    const stored = JSON.parse(browser.localStorage.getItem(REMOTE_STATE_STORAGE_KEY));
     return stored?.remoteProfiles?.["relay-1"]?.hasStoredPayloadSecret === true;
   });
   await waitFor(async () => {
@@ -192,7 +197,8 @@ test("remote auth storage keeps durable metadata while payload secrets move to p
   assert.equal(state.remoteAuth.deviceId, "device-1");
   assert.equal(state.remoteAuth.payloadSecret, "payload-secret-1");
 
-  const stored = JSON.parse(browser.localStorage.getItem("agent-relay.remote-state-v2"));
+  const stored = JSON.parse(browser.localStorage.getItem(REMOTE_STATE_STORAGE_KEY));
+  assert.equal(stored.schemaVersion, REMOTE_STATE_SCHEMA_VERSION);
   const profile = stored.remoteProfiles["relay-1"];
   assert.equal(profile.deviceId, "device-1");
   assert.equal("payloadSecret" in profile, false);
@@ -239,7 +245,7 @@ test("remote auth storage can persist and hydrate payload secrets without protec
   saveRemoteAuth(state.remoteAuth);
 
   await waitFor(() => {
-    const stored = JSON.parse(browser.localStorage.getItem("agent-relay.remote-state-v2"));
+    const stored = JSON.parse(browser.localStorage.getItem(REMOTE_STATE_STORAGE_KEY));
     return stored?.remoteProfiles?.["relay-http"]?.hasStoredPayloadSecret === true;
   });
   await waitFor(async () => {
@@ -252,10 +258,10 @@ test("remote auth storage can persist and hydrate payload secrets without protec
   assert.equal(reloaded.state.remoteAuth?.payloadSecret, "payload-secret-http");
 });
 
-test("legacy localStorage secrets are discarded on load", async () => {
+test("deprecated storage keys are ignored on load", async () => {
   const browser = installBrowserStubs();
   browser.localStorage.setItem(
-    "agent-relay.remote-state-v2",
+    DEPRECATED_REMOTE_STATE_STORAGE_KEY_V2,
     JSON.stringify({
       activeRelayId: "relay-1",
       remoteProfiles: {
@@ -280,18 +286,55 @@ test("legacy localStorage secrets are discarded on load", async () => {
       },
     })
   );
+  browser.localStorage.setItem(
+    DEPRECATED_REMOTE_STATE_STORAGE_KEY_V3,
+    JSON.stringify({
+      activeRelayId: "relay-legacy-v3",
+    })
+  );
 
   const { state } = await import(`./state.js?legacy-${Date.now()}`);
 
   assert.equal(state.remoteAuth, null);
-  assert.equal(browser.localStorage.getItem("agent-relay.remote-state-v2"), null);
+  assert.notEqual(browser.localStorage.getItem(DEPRECATED_REMOTE_STATE_STORAGE_KEY_V2), null);
+  assert.notEqual(browser.localStorage.getItem(DEPRECATED_REMOTE_STATE_STORAGE_KEY_V3), null);
+  assert.equal(browser.localStorage.getItem(REMOTE_STATE_STORAGE_KEY), null);
+});
+
+test("unsupported browser storage schema version is discarded on load", async () => {
+  const browser = installBrowserStubs();
+  browser.localStorage.setItem(
+    REMOTE_STATE_STORAGE_KEY,
+    JSON.stringify({
+      schemaVersion: 999,
+      activeRelayId: "relay-1",
+      remoteProfiles: {
+        "relay-1": {
+          relayId: "relay-1",
+          brokerUrl: "ws://broker.example.test",
+          brokerChannelId: "room-a",
+          relayPeerId: "relay-1",
+          securityMode: "private",
+          deviceId: "device-1",
+          deviceLabel: "Primary Phone",
+          hasStoredPayloadSecret: true,
+        },
+      },
+    })
+  );
+
+  const { state } = await import(`./state.js?old-schema-${Date.now()}`);
+
+  assert.equal(state.remoteAuth, null);
+  assert.equal(browser.localStorage.getItem(REMOTE_STATE_STORAGE_KEY), null);
 });
 
 test("missing protected payload secret keeps relay metadata but disables auto-recovery", async () => {
   const browser = installBrowserStubs();
   browser.localStorage.setItem(
-    "agent-relay.remote-state-v2",
+    REMOTE_STATE_STORAGE_KEY,
     JSON.stringify({
+      schemaVersion: REMOTE_STATE_SCHEMA_VERSION,
       activeRelayId: "relay-1",
       remoteProfiles: {
         "relay-1": {
@@ -319,7 +362,7 @@ test("missing protected payload secret keeps relay metadata but disables auto-re
   assert.equal(state.remoteAuth?.payloadSecret, null);
   assert.equal(state.remoteAuth?.hasStoredPayloadSecret, false);
 
-  const stored = JSON.parse(browser.localStorage.getItem("agent-relay.remote-state-v2"));
+  const stored = JSON.parse(browser.localStorage.getItem(REMOTE_STATE_STORAGE_KEY));
   assert.equal(stored.remoteProfiles["relay-1"].relayId, "relay-1");
   assert.equal(stored.remoteProfiles["relay-1"].hasStoredPayloadSecret, false);
 });
@@ -327,8 +370,9 @@ test("missing protected payload secret keeps relay metadata but disables auto-re
 test("explicit relay home selection persists without auto-opening a stored relay", async () => {
   const browser = installBrowserStubs();
   browser.localStorage.setItem(
-    "agent-relay.remote-state-v2",
+    REMOTE_STATE_STORAGE_KEY,
     JSON.stringify({
+      schemaVersion: REMOTE_STATE_SCHEMA_VERSION,
       activeRelayId: null,
       remoteProfiles: {
         "relay-1": {
@@ -358,7 +402,23 @@ test("explicit relay home selection persists without auto-opening a stored relay
   assert.equal(state.activeRelayId, null);
   assert.equal(state.remoteAuth, null);
 
-  const stored = JSON.parse(browser.localStorage.getItem("agent-relay.remote-state-v2"));
+  const stored = JSON.parse(browser.localStorage.getItem(REMOTE_STATE_STORAGE_KEY));
   assert.equal(stored.activeRelayId, null);
   assert.equal(stored.remoteProfiles["relay-1"].relayId, "relay-1");
+});
+
+test("relay directory ignores malformed server entries without relay ids", async () => {
+  installBrowserStubs();
+
+  const { setRelayDirectory, state } = await import(`./state.js?directory-${Date.now()}`);
+
+  setRelayDirectory([
+    {
+      broker_room_id: "room-bad",
+      device_id: "device-bad",
+      relay_label: "Broken Relay",
+    },
+  ]);
+
+  assert.deepEqual(state.relayDirectory, []);
 });
