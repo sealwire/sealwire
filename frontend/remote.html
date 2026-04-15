@@ -116,7 +116,7 @@
       </aside>
       <div id="remote-nav-backdrop" class="remote-nav-backdrop" hidden></div>
 
-      <main class="chat-shell">
+      <main class="chat-shell remote-chat-shell">
         <header class="chat-header">
           <div class="chat-header-main">
             <button id="remote-nav-toggle-button" class="header-button remote-nav-toggle-button" type="button" aria-expanded="false" aria-label="Open sidebar" hidden>
@@ -148,45 +148,47 @@
           </div>
         </header>
 
-        <section id="remote-control-banner" class="control-banner" hidden>
-          <div>
-            <p id="remote-control-summary" class="control-summary">This device has control</p>
-            <p id="remote-control-hint" class="control-hint">Only the active device can type, but any paired owner device can approve.</p>
-          </div>
-          <button id="remote-take-over-button" class="header-button control-button" type="button">
-            Take over
-          </button>
-        </section>
-
-        <section class="thread-shell">
-          <div id="remote-transcript" class="chat-thread">
-            <div class="thread-empty">
-              <h2>No remote session yet</h2>
-              <p>After pairing, this page will stream the live relay transcript through the broker.</p>
+        <section class="remote-thread-panel">
+          <section id="remote-control-banner" class="control-banner" hidden>
+            <div>
+              <p id="remote-control-summary" class="control-summary">This device has control</p>
+              <p id="remote-control-hint" class="control-hint">Only the active device can type, but any paired owner device can approve.</p>
             </div>
-          </div>
-        </section>
+            <button id="remote-take-over-button" class="header-button control-button" type="button">
+              Take over
+            </button>
+          </section>
 
-        <form id="remote-message-form" class="composer-shell">
-          <div class="composer-inner">
-            <textarea
-              id="remote-message-input"
-              rows="3"
-              placeholder="Pair this browser and take control before sending messages."
-            ></textarea>
-            <div class="composer-actions">
-              <label class="composer-select" for="remote-message-effort">
-                <span>Effort</span>
-                <select id="remote-message-effort">
-                  <option value="medium">medium</option>
-                  <option value="low">low</option>
-                  <option value="high">high</option>
-                </select>
-              </label>
-              <button id="remote-send-button" class="send-button" type="submit">Send</button>
+          <section class="thread-shell">
+            <div id="remote-transcript" class="chat-thread">
+              <div class="thread-empty">
+                <h2>No remote session yet</h2>
+                <p>After pairing, this page will stream the live relay transcript through the broker.</p>
+              </div>
             </div>
-          </div>
-        </form>
+          </section>
+
+          <form id="remote-message-form" class="composer-shell">
+            <div class="composer-inner">
+              <textarea
+                id="remote-message-input"
+                rows="3"
+                placeholder="Pair this browser and take control before sending messages."
+              ></textarea>
+              <div class="composer-actions">
+                <label class="composer-select" for="remote-message-effort">
+                  <span>Effort</span>
+                  <select id="remote-message-effort">
+                    <option value="medium">medium</option>
+                    <option value="low">low</option>
+                    <option value="high">high</option>
+                  </select>
+                </label>
+                <button id="remote-send-button" class="send-button" type="submit">Send</button>
+              </div>
+            </div>
+          </form>
+        </section>
 
         <details class="log-drawer">
           <summary>Remote log</summary>

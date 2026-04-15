@@ -67,7 +67,7 @@ function installBrowserStubs() {
 }
 
 const browser = installBrowserStubs();
-const { renderEmptyState } = await import("./render.js");
+const { renderEmptyState, renderSession } = await import("./render.js");
 const { state } = await import("./state.js");
 
 test("renderEmptyState shows relay directory home when no relay is selected", async () => {
@@ -160,4 +160,35 @@ test("renderEmptyState shows re-pair guidance when local credentials are missing
     browser.elements.get("#remote-message-input").placeholder,
     /Local credentials are unavailable/
   );
+});
+
+test("renderSession opts the remote surface into the shared conversation layout", async () => {
+  state.remoteAuth = {
+    relayId: "relay-1",
+    deviceId: "device-1",
+    payloadSecret: "payload-secret-1",
+  };
+  state.threads = [];
+
+  renderSession({
+    active_thread_id: "thread-1",
+    current_cwd: "/Users/luchi/git/agent-relay",
+    current_status: "idle",
+    codex_connected: true,
+    broker_connected: true,
+    broker_channel_id: "room-a",
+    broker_peer_id: "relay-peer-1",
+    security_mode: "private",
+    e2ee_enabled: true,
+    broker_can_read_content: false,
+    audit_enabled: false,
+    active_controller_device_id: "device-1",
+    pending_approvals: [],
+    transcript: [],
+    logs: [],
+    available_models: [],
+  });
+
+  assert.equal(browser.elements.get(".chat-shell").dataset.view, "conversation");
+  assert.equal(browser.elements.get(".app-shell").dataset.view, "conversation");
 });

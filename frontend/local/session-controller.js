@@ -17,6 +17,7 @@ import {
   startPromptInput,
   startSessionButton,
   takeOverButton,
+  transcript,
   threadsCount,
   threadsList,
 } from "./dom.js";
@@ -235,6 +236,210 @@ export function createSessionController({
     state.controllerLeaseRefreshTimer = null;
   }
 
+  function isViewingConversation(session) {
+    return Boolean(session?.active_thread_id && state.viewThreadId === session.active_thread_id);
+  }
+
+  function transcriptSignature(snapshot) {
+    return JSON.stringify({
+      threadId: snapshot?.active_thread_id || null,
+      turnId: snapshot?.active_turn_id || null,
+      status: snapshot?.current_status || null,
+      transcript: (snapshot?.transcript || []).map((entry) => ({
+        item_id: entry.item_id || null,
+        kind: entry.kind || null,
+        status: entry.status || null,
+        text: entry.text || null,
+      })),
+    });
+  }
+
+  function resetTranscriptPaging(threadId = null) {
+    state.transcriptChunkMap = new Map();
+    state.transcriptChunkThreadId = threadId;
+    state.transcriptDesiredSignature = null;
+    state.transcriptHydratedSignature = null;
+    state.transcriptOlderCursor = null;
+    state.transcriptTailPromise = null;
+    state.transcriptOlderPromise = null;
+  }
+
+  function mergeSnapshotWithLoadedTranscript(snapshot) {
+    if (
+      !snapshot?.active_thread_id ||
+      state.transcriptChunkThreadId !== snapshot.active_thread_id ||
+      !state.transcriptChunkMap.size
+    ) {
+      return snapshot;
+    }
+
+    const grouped = new Map();
+    for (const chunk of state.transcriptChunkMap.values()) {
+      if (!grouped.has(chunk.entry_index)) {
+        grouped.set(chunk.entry_index, {
+          item_id: chunk.item_id,
+          kind: chunk.kind,
+          status: chunk.status,
+          turn_id: chunk.turn_id || null,
+          tool: chunk.tool || null,
+          parts: new Array(chunk.chunk_count).fill(""),
+        });
+      }
+      const entry = grouped.get(chunk.entry_index);
+      entry.item_id = chunk.item_id;
+      entry.kind = chunk.kind;
+      entry.status = chunk.status;
+      entry.turn_id = chunk.turn_id || null;
+      entry.tool = chunk.tool || null;
+      if (chunk.chunk_index >= entry.parts.length) {
+        entry.parts.length = chunk.chunk_count;
+      }
+      entry.parts[chunk.chunk_index] = chunk.text || "";
+    }
+
+    const transcript = [...grouped.entries()]
+      .sort(([left], [right]) => left - right)
+      .map(([, entry]) => ({
+        item_id: entry.item_id,
+        kind: entry.kind,
+        text: entry.parts.join("") || null,
+        status: entry.status,
+        turn_id: entry.turn_id,
+        tool: entry.tool,
+      }));
+
+    return {
+      ...snapshot,
+      transcript,
+      transcript_truncated: state.transcriptOlderCursor != null,
+    };
+  }
+
+  function applySessionSnapshot(snapshot) {
+    if (snapshot?.active_thread_id !== state.transcriptChunkThreadId) {
+      resetTranscriptPaging(snapshot?.active_thread_id || null);
+    }
+
+    state.transcriptDesiredSignature = transcriptSignature(snapshot);
+    const merged = mergeSnapshotWithLoadedTranscript(snapshot);
+    renderSession(merged);
+  }
+
+  async function fetchTranscriptPage(threadId, { before = null } = {}) {
+    const url = new URL(
+      `/api/threads/${encodeURIComponent(threadId)}/transcript`,
+      window.location.origin
+    );
+    if (before != null) {
+      url.searchParams.set("before", String(before));
+    }
+
+    const response = await apiFetch(url);
+    const payload = await response.json();
+
+    if (!response.ok || !payload.ok) {
+      throw new Error(payload?.error?.message || "Failed to load transcript history");
+    }
+
+    return payload.data;
+  }
+
+  function storeTranscriptPage(page) {
+    for (const chunk of page?.chunks || []) {
+      state.transcriptChunkMap.set(`${chunk.entry_index}:${chunk.chunk_index}`, chunk);
+    }
+    state.transcriptOlderCursor = page?.prev_cursor ?? null;
+  }
+
+  async function ensureConversationTranscript(session = state.session) {
+    if (!session?.active_thread_id || !isViewingConversation(session)) {
+      return;
+    }
+
+    const threadId = session.active_thread_id;
+    const desiredSignature = state.transcriptDesiredSignature || transcriptSignature(session);
+    if (
+      state.transcriptChunkThreadId === threadId &&
+      state.transcriptHydratedSignature === desiredSignature
+    ) {
+      return;
+    }
+    if (state.transcriptTailPromise) {
+      return state.transcriptTailPromise;
+    }
+
+    state.transcriptTailPromise = (async () => {
+      const page = await fetchTranscriptPage(threadId);
+      if (state.session?.active_thread_id !== threadId) {
+        return;
+      }
+      if (state.transcriptChunkThreadId !== threadId) {
+        resetTranscriptPaging(threadId);
+      }
+      storeTranscriptPage(page);
+      state.transcriptHydratedSignature = desiredSignature;
+      renderSession(
+        mergeSnapshotWithLoadedTranscript({
+          ...state.session,
+          active_thread_id: threadId,
+        })
+      );
+    })()
+      .catch((error) => {
+        logLine(`Transcript sync failed: ${error.message}`);
+      })
+      .finally(() => {
+        state.transcriptTailPromise = null;
+      });
+
+    return state.transcriptTailPromise;
+  }
+
+  async function maybeLoadOlderTranscript() {
+    if (
+      !transcript ||
+      transcript.scrollTop > 80 ||
+      !state.session?.active_thread_id ||
+      !isViewingConversation(state.session) ||
+      state.transcriptOlderCursor == null
+    ) {
+      return;
+    }
+    if (state.transcriptOlderPromise) {
+      return state.transcriptOlderPromise;
+    }
+
+    const threadId = state.session.active_thread_id;
+    const previousScrollHeight = transcript.scrollHeight;
+    const previousScrollTop = transcript.scrollTop;
+
+    state.transcriptOlderPromise = (async () => {
+      const page = await fetchTranscriptPage(threadId, {
+        before: state.transcriptOlderCursor,
+      });
+      if (state.session?.active_thread_id !== threadId) {
+        return;
+      }
+      storeTranscriptPage(page);
+      renderSession(mergeSnapshotWithLoadedTranscript(state.session));
+      window.requestAnimationFrame(() => {
+        const nextScrollHeight = transcript.scrollHeight;
+        transcript.scrollTop = Math.max(
+          0,
+          nextScrollHeight - previousScrollHeight + previousScrollTop
+        );
+      });
+    })()
+      .catch((error) => {
+        logLine(`Older transcript load failed: ${error.message}`);
+      })
+      .finally(() => {
+        state.transcriptOlderPromise = null;
+      });
+
+    return state.transcriptOlderPromise;
+  }
+
   function connectSessionStream() {
     if (state.authRequired && !state.authenticated) {
       return;
@@ -260,7 +465,7 @@ export function createSessionController({
           state.streamConnected = true;
           cancelSessionPoll();
           seedDefaults(snapshot);
-          renderSession(snapshot);
+          applySessionSnapshot(snapshot);
         } catch (error) {
           logLine(`Stream payload failed: ${error.message}`);
         }
@@ -360,15 +565,17 @@ export function createSessionController({
       }
 
       seedDefaults(payload.data);
-      renderSession(payload.data);
+      applySessionSnapshot(payload.data);
     } catch (error) {
       if (state.authRequired && !state.authenticated) {
+        resetTranscriptPaging(null);
         renderAuthRequiredState("Enter RELAY_API_TOKEN to access the local relay.");
         logLine(`Session fetch blocked by local auth: ${error.message}`);
         return;
       }
 
       state.session = null;
+      resetTranscriptPaging(null);
       cancelControllerHeartbeat();
       cancelControllerLeaseRefresh();
       renderSessionUnavailable(error.message);
@@ -460,7 +667,7 @@ export function createSessionController({
         setSelectedCwd(payload.data.current_cwd || cwd);
         setThreadRoute(payload.data.active_thread_id || null);
         seedDefaults(payload.data);
-        renderSession(payload.data);
+        applySessionSnapshot(payload.data);
       });
       if (canCurrentDeviceWrite(payload.data)) {
         messageInput.focus();
@@ -500,7 +707,7 @@ export function createSessionController({
         setSelectedCwd(payload.data.current_cwd || state.selectedCwd);
         setThreadRoute(payload.data.active_thread_id || threadId);
         seedDefaults(payload.data);
-        renderSession(payload.data);
+        applySessionSnapshot(payload.data);
       });
       if (canCurrentDeviceWrite(payload.data)) {
         messageInput.focus();
@@ -566,7 +773,7 @@ export function createSessionController({
       }
 
       messageInput.value = "";
-      renderSession(payload.data);
+      applySessionSnapshot(payload.data);
       logLine("Prompt accepted by relay");
     } catch (error) {
       logLine(`Prompt failed: ${error.message}`);
@@ -736,7 +943,7 @@ export function createSessionController({
         throw new Error(payload?.error?.message || "Failed to take control");
       }
 
-      renderSession(payload.data);
+      applySessionSnapshot(payload.data);
       messageInput.focus();
       logLine("This device now has control.");
     } catch (error) {
@@ -788,8 +995,10 @@ export function createSessionController({
     connectSessionStream,
     copyPairingLink,
     decidePairingRequest,
+    ensureConversationTranscript,
     loadSession,
     loadThreads,
+    maybeLoadOlderTranscript,
     resumeLatestSession,
     resumeSession,
     revokeOtherDevices,

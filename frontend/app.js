@@ -118,6 +118,13 @@ const state = {
   viewThreadId: readThreadIdFromUrl(),
   sessionStream: null,
   streamConnected: false,
+  transcriptChunkMap: new Map(),
+  transcriptChunkThreadId: null,
+  transcriptDesiredSignature: null,
+  transcriptHydratedSignature: null,
+  transcriptOlderCursor: null,
+  transcriptTailPromise: null,
+  transcriptOlderPromise: null,
   pendingThreadHistoryScrollTop: null,
   threadGroups: [],
   threadHistoryScrollTop: 0,
@@ -189,6 +196,9 @@ const renderer = createSessionRenderer({
   contentVisibilityLabel,
   brokerStatusLabel,
   pairedDeviceCountLabel,
+  ensureConversationTranscript(session) {
+    return controller?.ensureConversationTranscript(session);
+  },
 });
 
 controller = createSessionController({
@@ -468,6 +478,10 @@ transcript.addEventListener("click", (event) => {
       void resumeSession(threadId);
     }
   }
+});
+
+transcript.addEventListener("scroll", () => {
+  void controller?.maybeLoadOlderTranscript();
 });
 
 pairedDevicesList.addEventListener("click", (event) => {

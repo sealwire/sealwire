@@ -355,17 +355,24 @@ impl AppState {
         &self,
         input: ReadThreadTranscriptInput,
     ) -> Result<ThreadTranscriptResponse, String> {
-        let cursor = input.cursor.unwrap_or(0);
         let thread_data = self.codex.read_thread(&input.thread_id).await?;
         {
             let relay = self.relay.read().await;
             ensure_path_within_allowed_roots(&thread_data.thread.cwd, &relay.allowed_roots)?;
         }
 
+        if input.before.is_some() {
+            return Ok(ThreadTranscriptResponse::from_transcript_before(
+                input.thread_id,
+                thread_data.transcript,
+                input.before,
+            ));
+        }
+
         Ok(ThreadTranscriptResponse::from_transcript(
             input.thread_id,
             thread_data.transcript,
-            cursor,
+            input.cursor.unwrap_or(0),
         ))
     }
 

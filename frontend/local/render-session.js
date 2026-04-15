@@ -71,6 +71,7 @@ export function createSessionRenderer({
   contentVisibilityLabel,
   brokerStatusLabel,
   pairedDeviceCountLabel,
+  ensureConversationTranscript,
 }) {
   function renderSession(session) {
     state.session = session;
@@ -158,6 +159,7 @@ export function createSessionRenderer({
     syncThreadSelection();
     syncThreadHistoryScroll();
     restoreThreadHistoryScroll();
+    ensureConversationTranscript?.(session);
     scheduleControllerHeartbeat(session);
     scheduleControllerLeaseRefresh(session);
 

@@ -295,6 +295,42 @@ async function main() {
 
       const transcriptText = (await page.textContent("#remote-transcript")) || "";
       assert.ok(transcriptText.includes(LONG_PROMPT_TAIL));
+      const layout = await page.evaluate(() => {
+        const composer = document.querySelector("#remote-message-form");
+        const transcript = document.querySelector("#remote-transcript");
+        const shell = document.querySelector(".remote-chat-shell");
+        const composerRect = composer?.getBoundingClientRect();
+        const transcriptRect = transcript?.getBoundingClientRect();
+        const shellRect = shell?.getBoundingClientRect();
+        return {
+          viewportHeight: window.innerHeight,
+          composerTop: composerRect?.top ?? null,
+          composerBottom: composerRect?.bottom ?? null,
+          transcriptTop: transcriptRect?.top ?? null,
+          transcriptBottom: transcriptRect?.bottom ?? null,
+          transcriptClientHeight: transcript?.clientHeight ?? null,
+          transcriptScrollHeight: transcript?.scrollHeight ?? null,
+          shellBottom: shellRect?.bottom ?? null,
+        };
+      });
+      assert.ok(
+        layout.composerBottom != null &&
+          layout.viewportHeight != null &&
+          layout.composerBottom <= layout.viewportHeight + 2,
+        `expected remote composer to stay inside the viewport, got ${JSON.stringify(layout)}`
+      );
+      assert.ok(
+        layout.composerTop != null &&
+          layout.transcriptBottom != null &&
+          layout.composerTop >= layout.transcriptBottom - 2,
+        `expected transcript to end above the remote composer, got ${JSON.stringify(layout)}`
+      );
+      assert.ok(
+        layout.transcriptScrollHeight != null &&
+          layout.transcriptClientHeight != null &&
+          layout.transcriptScrollHeight > layout.transcriptClientHeight,
+        `expected transcript to scroll independently when long, got ${JSON.stringify(layout)}`
+      );
 
       console.log(
         JSON.stringify(
@@ -305,6 +341,7 @@ async function main() {
             fakeSnapshotCount: await page.evaluate(
               () => window.__agentRelayFakeSnapshotCount || 0
             ),
+            layout,
             transcriptTail: transcriptText.slice(-160),
           },
           null,

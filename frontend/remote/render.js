@@ -31,6 +31,7 @@ export function configureRenderHandlers(handlers) {
 
 export function renderSession(session) {
   state.session = session;
+  syncRemoteChatView();
   const approval = session.pending_approvals?.[0] || null;
   const hasActiveSession = Boolean(session.active_thread_id);
   const hasControllerLease = canCurrentDeviceWrite(session);
@@ -141,6 +142,7 @@ export function renderDeviceMeta() {
 }
 
 export function renderEmptyState() {
+  syncRemoteChatView();
   syncIdleSurfaceControls();
 
   if (!state.remoteAuth && !state.pairingTicket) {
@@ -218,6 +220,7 @@ export function renderLog(message) {
 }
 
 export function resetRemoteSurface() {
+  syncRemoteChatView();
   renderThreads([]);
   resetRemoteSurfaceChrome();
 }
@@ -248,6 +251,15 @@ function syncRemoteModelSuggestions(models, selectedModel) {
     .map((model) => `<option value="${escapeHtml(model.model)}">${escapeHtml(model.display_name)}</option>`)
     .join("");
   dom.remoteModelInput.value = currentValue;
+}
+
+function syncRemoteChatView() {
+  if (dom.appShell) {
+    dom.appShell.dataset.view = "conversation";
+  }
+  if (dom.chatShell) {
+    dom.chatShell.dataset.view = "conversation";
+  }
 }
 
 function renderRelayHome() {

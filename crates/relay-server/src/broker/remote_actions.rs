@@ -848,8 +848,11 @@ async fn publish_plain_remote_action_result(
     ok: bool,
     _device_id: String,
 ) -> Result<(), String> {
-    let snapshot = snapshot.compact_for_broker();
-    let threads = outcome.threads.map(ThreadsResponse::compact_for_broker);
+    let snapshot =
+        snapshot.compact_for(crate::protocol::SessionSnapshotCompactProfile::RemoteSurface);
+    let threads = outcome.threads.map(|threads| {
+        threads.compact_for(crate::protocol::ThreadsResponseCompactProfile::RemoteSurface)
+    });
     publish_payload(
         sender,
         OutboundBrokerPayload::RemoteActionResult {
@@ -916,8 +919,11 @@ async fn publish_remote_action_result_private(
     ok: bool,
     response_secret: Option<&str>,
 ) -> Result<(), String> {
-    let snapshot = snapshot.compact_for_broker();
-    let threads = outcome.threads.map(ThreadsResponse::compact_for_broker);
+    let snapshot =
+        snapshot.compact_for(crate::protocol::SessionSnapshotCompactProfile::RemoteSurface);
+    let threads = outcome.threads.map(|threads| {
+        threads.compact_for(crate::protocol::ThreadsResponseCompactProfile::RemoteSurface)
+    });
     let secret = match response_secret {
         Some(secret) => secret.to_string(),
         None => state.paired_device_payload_secret(&device_id).await?,
@@ -998,9 +1004,12 @@ fn cached_remote_action_result(
     CachedRemoteActionResult {
         action_kind: action.as_str().to_string(),
         ok,
-        snapshot: snapshot.compact_for_broker(),
+        snapshot: snapshot
+            .compact_for(crate::protocol::SessionSnapshotCompactProfile::RemoteSurface),
         receipt: outcome.receipt,
-        threads: outcome.threads.map(ThreadsResponse::compact_for_broker),
+        threads: outcome.threads.map(|threads| {
+            threads.compact_for(crate::protocol::ThreadsResponseCompactProfile::RemoteSurface)
+        }),
         thread_transcript: outcome.thread_transcript,
         session_claim: outcome.session_claim,
         session_claim_expires_at: outcome.session_claim_expires_at,

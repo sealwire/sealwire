@@ -1,6 +1,7 @@
 use crate::protocol::{
-    truncate_with_ellipsis, LogEntryView, SecurityMode, SessionSnapshot, ThreadSummaryView,
-    ThreadTranscriptResponse, ThreadsResponse, TranscriptEntryKind, TranscriptEntryView,
+    truncate_with_ellipsis, LogEntryView, SecurityMode, SessionSnapshot,
+    SessionSnapshotCompactProfile, ThreadSummaryView, ThreadTranscriptResponse, ThreadsResponse,
+    ThreadsResponseCompactProfile, TranscriptEntryKind, TranscriptEntryView,
 };
 
 const MAX_BROKER_LOGS: usize = 8;
@@ -9,6 +10,7 @@ const MAX_BROKER_TRANSCRIPT_CHARS: usize = 1_200;
 const MAX_BROKER_THREADS: usize = 80;
 const MAX_BROKER_THREAD_PREVIEW_CHARS: usize = 160;
 const SESSION_SNAPSHOT_TARGET_BYTES: usize = 8_000;
+const LOCAL_SESSION_SNAPSHOT_TARGET_BYTES: usize = 16_000;
 const THREADS_RESPONSE_TARGET_BYTES: usize = 20_000;
 
 fn make_snapshot() -> SessionSnapshot {
@@ -65,7 +67,7 @@ fn make_snapshot() -> SessionSnapshot {
 
 #[test]
 fn compact_for_broker_limits_logs_and_transcript() {
-    let compacted = make_snapshot().compact_for_broker();
+    let compacted = make_snapshot().compact_for(SessionSnapshotCompactProfile::RemoteSurface);
 
     assert!(compacted.transcript_truncated);
     assert!(compacted.logs.len() <= MAX_BROKER_LOGS);
@@ -88,6 +90,29 @@ fn compact_for_broker_limits_logs_and_transcript() {
 }
 
 #[test]
+fn compact_for_local_web_limits_snapshot_size() {
+    let compacted = make_snapshot().compact_for(SessionSnapshotCompactProfile::LocalWeb);
+
+    assert!(compacted.transcript_truncated);
+    assert!(compacted.transcript.len() <= 8);
+    assert!(serde_json::to_vec(&compacted).unwrap().len() <= LOCAL_SESSION_SNAPSHOT_TARGET_BYTES);
+}
+
+#[test]
+fn compact_for_ios_surface_currently_reuses_remote_budget() {
+    let ios = make_snapshot().compact_for(SessionSnapshotCompactProfile::IosSurface);
+    let remote = make_snapshot().compact_for(SessionSnapshotCompactProfile::RemoteSurface);
+
+    assert_eq!(ios.transcript.len(), remote.transcript.len());
+    assert_eq!(ios.logs.len(), remote.logs.len());
+    assert_eq!(ios.transcript_truncated, remote.transcript_truncated);
+    assert_eq!(
+        serde_json::to_vec(&ios).unwrap().len(),
+        serde_json::to_vec(&remote).unwrap().len()
+    );
+}
+
+#[test]
 fn threads_response_compact_for_broker_limits_serialized_size() {
     let response = ThreadsResponse {
         threads: (0..120)
@@ -104,7 +129,7 @@ fn threads_response_compact_for_broker_limits_serialized_size() {
             .collect(),
     };
 
-    let compacted = response.compact_for_broker();
+    let compacted = response.compact_for(ThreadsResponseCompactProfile::RemoteSurface);
 
     assert!(compacted.threads.len() <= MAX_BROKER_THREADS);
     assert!(compacted
@@ -112,6 +137,64 @@ fn threads_response_compact_for_broker_limits_serialized_size() {
         .iter()
         .all(|thread| thread.preview.chars().count() <= MAX_BROKER_THREAD_PREVIEW_CHARS));
     assert!(serde_json::to_vec(&compacted).unwrap().len() <= THREADS_RESPONSE_TARGET_BYTES);
+}
+
+#[test]
+fn threads_response_compact_for_local_web_is_less_aggressive() {
+    let response = ThreadsResponse {
+        threads: (0..120)
+            .map(|index| ThreadSummaryView {
+                id: format!("thread-{index}"),
+                name: Some(format!("{}{}", "名".repeat(80), index)),
+                preview: format!("{}{}", "预览".repeat(300), index),
+                cwd: format!("/tmp/project-{index}"),
+                updated_at: index as u64,
+                source: "cli".to_string(),
+                status: "idle".to_string(),
+                model_provider: "openai".to_string(),
+            })
+            .collect(),
+    };
+
+    let local = response
+        .clone()
+        .compact_for(ThreadsResponseCompactProfile::LocalWeb);
+    let remote = response.compact_for(ThreadsResponseCompactProfile::RemoteSurface);
+
+    assert!(local.threads.len() >= remote.threads.len());
+    assert!(local
+        .threads
+        .iter()
+        .all(|thread| thread.preview.chars().count() <= 220));
+}
+
+#[test]
+fn threads_response_compact_for_ios_surface_currently_reuses_remote_budget() {
+    let response = ThreadsResponse {
+        threads: (0..120)
+            .map(|index| ThreadSummaryView {
+                id: format!("thread-{index}"),
+                name: Some(format!("{}{}", "名".repeat(80), index)),
+                preview: format!("{}{}", "预览".repeat(300), index),
+                cwd: format!("/tmp/project-{index}"),
+                updated_at: index as u64,
+                source: "cli".to_string(),
+                status: "idle".to_string(),
+                model_provider: "openai".to_string(),
+            })
+            .collect(),
+    };
+
+    let ios = response
+        .clone()
+        .compact_for(ThreadsResponseCompactProfile::IosSurface);
+    let remote = response.compact_for(ThreadsResponseCompactProfile::RemoteSurface);
+
+    assert_eq!(ios.threads.len(), remote.threads.len());
+    assert_eq!(
+        serde_json::to_vec(&ios).unwrap().len(),
+        serde_json::to_vec(&remote).unwrap().len()
+    );
 }
 
 #[test]
@@ -146,7 +229,7 @@ fn compact_for_broker_drops_logs_and_transcript_as_last_resort() {
         })
         .collect();
 
-    let compacted = snapshot.compact_for_broker();
+    let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::RemoteSurface);
 
     assert!(compacted.logs.is_empty());
     assert!(compacted.transcript.is_empty());
@@ -211,4 +294,51 @@ fn thread_transcript_response_chunks_large_transcripts() {
 
     assert_eq!(rebuilt.get(&0).unwrap(), &"长".repeat(9_500));
     assert_eq!(rebuilt.get(&1).unwrap(), "next");
+}
+
+#[test]
+fn thread_transcript_response_can_page_backwards_from_tail() {
+    let transcript = (0..12)
+        .map(|index| TranscriptEntryView {
+            item_id: Some(format!("item-{index}")),
+            kind: TranscriptEntryKind::AgentText,
+            text: Some(format!("entry-{index}-{}", "z".repeat(1500))),
+            status: "completed".to_string(),
+            turn_id: Some(format!("turn-{index}")),
+            tool: None,
+        })
+        .collect::<Vec<_>>();
+
+    let mut before = None;
+    let mut pages = Vec::new();
+
+    loop {
+        let page = ThreadTranscriptResponse::from_transcript_before(
+            "thread-1".to_string(),
+            transcript.clone(),
+            before,
+        );
+        assert!(!page.chunks.is_empty());
+        assert!(serde_json::to_vec(&page).unwrap().len() <= THREADS_RESPONSE_TARGET_BYTES);
+        before = page.prev_cursor;
+        pages.push(page);
+        if before.is_none() {
+            break;
+        }
+    }
+
+    let rebuilt = pages
+        .into_iter()
+        .rev()
+        .flat_map(|page| page.chunks.into_iter())
+        .fold(std::collections::BTreeMap::new(), |mut acc, chunk| {
+            acc.entry(chunk.entry_index)
+                .or_insert_with(String::new)
+                .push_str(&chunk.text);
+            acc
+        });
+
+    assert_eq!(rebuilt.len(), transcript.len());
+    assert!(rebuilt.get(&0).unwrap().starts_with("entry-0-"));
+    assert!(rebuilt.get(&11).unwrap().starts_with("entry-11-"));
 }

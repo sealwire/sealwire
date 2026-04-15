@@ -514,6 +514,14 @@ input:focus, textarea:focus, select:focus {
   background: var(--bg-base);
 }
 
+.remote-chat-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
 .chat-header {
   position: sticky;
   top: 0;
@@ -782,8 +790,24 @@ input:focus, textarea:focus, select:focus {
 
 /* THREAD SHELL */
 .thread-shell {
+  min-height: 0;
   height: 100%;
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
+}
+
+.remote-thread-panel {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.remote-chat-shell .thread-shell {
+  flex: 1 1 auto;
+  height: auto;
 }
 
 .console-grid {
@@ -940,6 +964,14 @@ input:focus, textarea:focus, select:focus {
   display: none;
 }
 
+.chat-shell[data-view="conversation"] {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
 .chat-shell[data-view="conversation"] .console-card-audit {
   display: none;
 }
@@ -949,8 +981,23 @@ input:focus, textarea:focus, select:focus {
 }
 
 .chat-shell[data-view="conversation"] .console-grid {
-  grid-template-columns: minmax(0, 1fr);
+  flex: 1 1 auto;
+  min-height: 0;
+  display: block;
   padding-top: 16px;
+  overflow: hidden;
+}
+
+.chat-shell[data-view="conversation"] .thread-panel {
+  min-height: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.chat-shell[data-view="conversation"] .thread-shell {
+  flex: 1 1 auto;
+  height: auto;
 }
 
 .app-shell[data-view="conversation"] .launch-panel {
@@ -993,6 +1040,10 @@ input:focus, textarea:focus, select:focus {
   padding: 20px 24px 140px;
 }
 
+.remote-chat-shell[data-view="conversation"] .chat-thread {
+  padding: 20px 24px 28px;
+}
+
 .chat-shell[data-view="conversation"] .thread-content {
   max-width: 980px;
   margin: 0;
@@ -1003,6 +1054,8 @@ input:focus, textarea:focus, select:focus {
   max-height: min(52vh, 620px);
 }
 .chat-thread {
+  min-height: 0;
+  flex: 1 1 auto;
   height: 100%;
   overflow-y: auto;
   padding: 24px 32px 140px;
@@ -1134,7 +1187,10 @@ input:focus, textarea:focus, select:focus {
   color: var(--text-secondary);
 }
 
-.message-card { max-width: 85%; }
+.message-card {
+  min-width: 0;
+  max-width: 85%;
+}
 .chat-message-user .message-card {
   padding: 16px;
   border-radius: var(--radius-md) var(--radius-xs) var(--radius-md) var(--radius-md);
@@ -1225,6 +1281,12 @@ input:focus, textarea:focus, select:focus {
   z-index: 2;
 }
 
+.remote-chat-shell .composer-shell {
+  position: static;
+  bottom: auto;
+  flex: 0 0 auto;
+}
+
 .composer-inner {
   max-width: 800px;
   margin: 0 auto;
@@ -1239,6 +1301,9 @@ input:focus, textarea:focus, select:focus {
 
 .chat-shell[data-view="conversation"] .composer-shell {
   padding: 12px 20px 20px;
+  position: static;
+  bottom: auto;
+  flex: 0 0 auto;
 }
 
 .chat-shell[data-view="conversation"] .composer-inner {
@@ -1295,6 +1360,10 @@ input:focus, textarea:focus, select:focus {
   color: var(--text-secondary);
   max-height: 220px;
   overflow-y: auto;
+}
+
+.log-drawer {
+  display: none;
 }
 
 /* DEVICES & PAIRING */
@@ -1391,9 +1460,28 @@ input:focus, textarea:focus, select:focus {
   text-transform: uppercase;
 }
 .thread-empty-detail { font-size: 13px; color: var(--text-tertiary); margin-top: 8px; }
-.message-body { margin: 0; font-size: 15px; color: var(--text-primary); white-space: pre-wrap; line-height: 1.6; }
+.message-body {
+  margin: 0;
+  font-size: 15px;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
 .message-meta { font-size: 12px; color: var(--text-tertiary); margin-bottom: 8px; }
-.message-pre { background: var(--bg-base); padding: 12px; border-radius: var(--radius-sm); font-family: monospace; font-size: 13px; overflow-x: auto; border: 1px solid var(--border-subtle); }
+.message-pre {
+  background: var(--bg-base);
+  padding: 12px;
+  border-radius: var(--radius-sm);
+  font-family: monospace;
+  font-size: 13px;
+  white-space: pre-wrap;
+  overflow-x: auto;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  border: 1px solid var(--border-subtle);
+}
 
 /* MODAL */
 .panel-modal,
@@ -1524,6 +1612,11 @@ input:focus, textarea:focus, select:focus {
   }
   .sidebar { border-right: 0; border-bottom: 1px solid var(--border-subtle); height: auto; overflow: visible; padding: 16px; }
   .chat-shell { height: auto; overflow: visible; }
+  .remote-chat-shell {
+    min-height: 100dvh;
+    height: 100dvh;
+    overflow: hidden;
+  }
   .chat-header {
     grid-template-columns: minmax(0, 1fr) auto;
     padding: 14px 16px 12px;
@@ -1570,8 +1663,15 @@ input:focus, textarea:focus, select:focus {
   .control-banner { flex-direction: column; align-items: flex-start; }
   .control-button { width: 100%; margin-top: 12px; }
   .chat-thread { padding: 16px 16px 40px; }
+  .remote-chat-shell .chat-thread,
+  .remote-chat-shell[data-view="conversation"] .chat-thread {
+    padding: 16px 16px 20px;
+  }
   .message-card { max-width: 100%; }
   .composer-shell { padding: 12px; }
+  .remote-chat-shell .composer-shell {
+    padding: 12px 12px calc(12px + env(safe-area-inset-bottom, 0px));
+  }
   .panel-modal-body, .security-modal .remote-access-shell { padding: 16px; }
   .settings-grid { grid-template-columns: 1fr; }
   .suggestion-row { justify-content: stretch; }

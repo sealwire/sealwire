@@ -31,14 +31,16 @@ use protocol::{
     AllowedRootsInput, AllowedRootsReceipt, ApiEnvelope, ApiError, ApprovalDecisionInput,
     ApprovalReceipt, AuthSessionInput, AuthSessionView, BulkRevokeDevicesReceipt, HealthResponse,
     HeartbeatInput, PairingDecisionInput, PairingDecisionReceipt, PairingStartInput,
-    PairingTicketView, ResumeSessionInput, RevokeDeviceReceipt, SendMessageInput, SessionSnapshot,
-    StartSessionInput, TakeOverInput, ThreadArchiveReceipt, ThreadDeleteReceipt, ThreadsQuery,
-    ThreadsResponse,
+    PairingTicketView, ReadThreadTranscriptInput, ResumeSessionInput, RevokeDeviceReceipt,
+    SendMessageInput, SessionSnapshot, SessionSnapshotCompactProfile, StartSessionInput,
+    TakeOverInput, ThreadArchiveReceipt, ThreadDeleteReceipt, ThreadTranscriptResponse,
+    ThreadsQuery, ThreadsResponse,
 };
 use relay_http::{
     apply_standard_security_headers, header_origin, parse_optional_string_env, request_origin,
     request_uses_https, SecurityHeadersConfig,
 };
+use serde::Deserialize;
 use state::{AppState, ApprovalError};
 use tower_http::{
     services::{ServeDir, ServeFile},
@@ -57,6 +59,12 @@ struct AppContext {
     app: AppState,
     auth: AuthConfig,
     security_headers: SecurityHeadersConfig,
+}
+
+#[derive(Debug, Deserialize)]
+struct ThreadTranscriptQuery {
+    cursor: Option<usize>,
+    before: Option<usize>,
 }
 
 #[tokio::main]
@@ -131,6 +139,7 @@ fn build_router(context: AppContext, web_root: PathBuf) -> Router {
         .route("/api/session", get(session_snapshot))
         .route("/api/stream", get(session_stream))
         .route("/api/threads", get(list_threads))
+        .route("/api/threads/:thread_id/transcript", get(thread_transcript))
         .route("/api/allowed-roots", post(update_allowed_roots))
         .route("/api/threads/:thread_id/archive", post(archive_thread))
         .route(
@@ -245,7 +254,9 @@ async fn session_snapshot(
     uri: Uri,
 ) -> Result<Json<ApiEnvelope<SessionSnapshot>>, (StatusCode, Json<ApiError>)> {
     authorize_api(&context, &headers, &uri)?;
-    Ok(Json(ApiEnvelope::ok(context.app.snapshot().await)))
+    Ok(Json(ApiEnvelope::ok(compact_local_snapshot(
+        context.app.snapshot().await,
+    ))))
 }
 
 async fn session_stream(
@@ -262,7 +273,9 @@ async fn session_stream(
     let receiver = context.app.subscribe();
 
     let initial = stream::once(async move {
-        Ok::<Event, Infallible>(snapshot_event(initial_state.snapshot().await))
+        Ok::<Event, Infallible>(snapshot_event(compact_local_snapshot(
+            initial_state.snapshot().await,
+        )))
     });
 
     let updates = stream::unfold(
@@ -273,7 +286,9 @@ async fn session_stream(
             }
 
             Some((
-                Ok::<Event, Infallible>(snapshot_event(state.snapshot().await)),
+                Ok::<Event, Infallible>(snapshot_event(compact_local_snapshot(
+                    state.snapshot().await,
+                ))),
                 (state, receiver),
             ))
         },
@@ -299,6 +314,32 @@ async fn list_threads(
         .list_threads(limit, query.cwd)
         .await
         .map(|threads| Json(ApiEnvelope::ok(threads)))
+        .map_err(|error| {
+            if is_path_policy_error(&error) {
+                bad_request(error)
+            } else {
+                bad_gateway(error)
+            }
+        })
+}
+
+async fn thread_transcript(
+    Path(thread_id): Path<String>,
+    State(context): State<AppContext>,
+    headers: HeaderMap,
+    uri: Uri,
+    Query(query): Query<ThreadTranscriptQuery>,
+) -> Result<Json<ApiEnvelope<ThreadTranscriptResponse>>, (StatusCode, Json<ApiError>)> {
+    authorize_api(&context, &headers, &uri)?;
+    context
+        .app
+        .read_thread_transcript(ReadThreadTranscriptInput {
+            thread_id,
+            cursor: query.cursor,
+            before: query.before,
+        })
+        .await
+        .map(|transcript| Json(ApiEnvelope::ok(transcript)))
         .map_err(|error| {
             if is_path_policy_error(&error) {
                 bad_request(error)
@@ -376,7 +417,7 @@ async fn start_session(
         .app
         .start_session(input)
         .await
-        .map(|snapshot| Json(ApiEnvelope::ok(snapshot)))
+        .map(|snapshot| Json(ApiEnvelope::ok(compact_local_snapshot(snapshot))))
         .map_err(|error| {
             if is_path_policy_error(&error) {
                 bad_request(error)
@@ -397,7 +438,7 @@ async fn resume_session(
         .app
         .resume_session(input)
         .await
-        .map(|snapshot| Json(ApiEnvelope::ok(snapshot)))
+        .map(|snapshot| Json(ApiEnvelope::ok(compact_local_snapshot(snapshot))))
         .map_err(|error| {
             if is_path_policy_error(&error) {
                 bad_request(error)
@@ -418,7 +459,7 @@ async fn send_message(
         .app
         .send_message(input)
         .await
-        .map(|snapshot| Json(ApiEnvelope::ok(snapshot)))
+        .map(|snapshot| Json(ApiEnvelope::ok(compact_local_snapshot(snapshot))))
         .map_err(bad_request)
 }
 
@@ -433,7 +474,7 @@ async fn session_heartbeat(
         .app
         .heartbeat_session(input)
         .await
-        .map(|snapshot| Json(ApiEnvelope::ok(snapshot)))
+        .map(|snapshot| Json(ApiEnvelope::ok(compact_local_snapshot(snapshot))))
         .map_err(bad_request)
 }
 
@@ -448,7 +489,7 @@ async fn take_over_session(
         .app
         .take_over_control(input)
         .await
-        .map(|snapshot| Json(ApiEnvelope::ok(snapshot)))
+        .map(|snapshot| Json(ApiEnvelope::ok(compact_local_snapshot(snapshot))))
         .map_err(bad_request)
 }
 
@@ -584,6 +625,10 @@ fn snapshot_event(snapshot: SessionSnapshot) -> Event {
                 "{{\"ok\":false,\"error\":\"failed_to_encode_snapshot:{error}\"}}"
             ))
         })
+}
+
+fn compact_local_snapshot(snapshot: SessionSnapshot) -> SessionSnapshot {
+    snapshot.compact_for(SessionSnapshotCompactProfile::LocalWeb)
 }
 
 fn parse_optional_bool_env(name: &str) -> Result<bool, String> {

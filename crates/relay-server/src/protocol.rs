@@ -120,52 +120,105 @@ pub struct ModelOptionView {
 
 const ELLIPSIS_LEN: usize = 3;
 
-const SESSION_SNAPSHOT_BROKER_BUDGET: SessionSnapshotBrokerBudget = SessionSnapshotBrokerBudget {
-    max_logs: 8,
-    max_log_chars: 180,
-    max_transcript_entries: 6,
-    max_transcript_chars: 1_200,
-    target_bytes: 8_000,
-    min_transcript_entries_before_text_shrink: 3,
-    min_logs_before_text_shrink: 4,
-    fallback_transcript_chars: 400,
-    fallback_log_chars: 96,
-};
+const SESSION_SNAPSHOT_REMOTE_SURFACE_BUDGET: SessionSnapshotCompactBudget =
+    SessionSnapshotCompactBudget {
+        max_logs: 8,
+        max_log_chars: 180,
+        max_transcript_entries: 6,
+        max_transcript_chars: 1_200,
+        target_bytes: 8_000,
+        min_transcript_entries_before_text_shrink: 3,
+        min_logs_before_text_shrink: 4,
+        fallback_transcript_chars: 400,
+        fallback_log_chars: 96,
+    };
 
-const THREAD_SUMMARY_BROKER_BUDGET: ThreadSummaryBrokerBudget = ThreadSummaryBrokerBudget {
+const SESSION_SNAPSHOT_LOCAL_WEB_BUDGET: SessionSnapshotCompactBudget =
+    SessionSnapshotCompactBudget {
+        max_logs: 16,
+        max_log_chars: 280,
+        max_transcript_entries: 8,
+        max_transcript_chars: 1_600,
+        target_bytes: 16_000,
+        min_transcript_entries_before_text_shrink: 4,
+        min_logs_before_text_shrink: 8,
+        fallback_transcript_chars: 640,
+        fallback_log_chars: 160,
+    };
+
+const SESSION_SNAPSHOT_IOS_SURFACE_BUDGET: SessionSnapshotCompactBudget =
+    SESSION_SNAPSHOT_REMOTE_SURFACE_BUDGET;
+
+const THREAD_SUMMARY_BROKER_BUDGET: ThreadSummaryCompactBudget = ThreadSummaryCompactBudget {
     max_name_chars: 96,
     max_preview_chars: 160,
 };
 
-const THREADS_RESPONSE_BROKER_BUDGET: ThreadsResponseBrokerBudget = ThreadsResponseBrokerBudget {
-    max_threads: 80,
-    target_bytes: 20_000,
-    reduction_stages: &[
-        ThreadsResponseReductionStage {
-            max_threads: Some(40),
-            max_preview_chars: None,
+const THREADS_RESPONSE_REMOTE_SURFACE_BUDGET: ThreadsResponseCompactBudget =
+    ThreadsResponseCompactBudget {
+        summary_budget: THREAD_SUMMARY_BROKER_BUDGET,
+        max_threads: 80,
+        target_bytes: 20_000,
+        reduction_stages: &[
+            ThreadsResponseReductionStage {
+                max_threads: Some(40),
+                max_preview_chars: None,
+            },
+            ThreadsResponseReductionStage {
+                max_threads: None,
+                max_preview_chars: Some(96),
+            },
+            ThreadsResponseReductionStage {
+                max_threads: Some(20),
+                max_preview_chars: None,
+            },
+            ThreadsResponseReductionStage {
+                max_threads: None,
+                max_preview_chars: Some(48),
+            },
+            ThreadsResponseReductionStage {
+                max_threads: Some(10),
+                max_preview_chars: None,
+            },
+        ],
+    };
+
+const THREADS_RESPONSE_LOCAL_WEB_BUDGET: ThreadsResponseCompactBudget =
+    ThreadsResponseCompactBudget {
+        summary_budget: ThreadSummaryCompactBudget {
+            max_name_chars: 120,
+            max_preview_chars: 220,
         },
-        ThreadsResponseReductionStage {
-            max_threads: None,
-            max_preview_chars: Some(96),
-        },
-        ThreadsResponseReductionStage {
-            max_threads: Some(20),
-            max_preview_chars: None,
-        },
-        ThreadsResponseReductionStage {
-            max_threads: None,
-            max_preview_chars: Some(48),
-        },
-        ThreadsResponseReductionStage {
-            max_threads: Some(10),
-            max_preview_chars: None,
-        },
-    ],
-};
+        max_threads: 120,
+        target_bytes: 36_000,
+        reduction_stages: &[
+            ThreadsResponseReductionStage {
+                max_threads: Some(80),
+                max_preview_chars: None,
+            },
+            ThreadsResponseReductionStage {
+                max_threads: None,
+                max_preview_chars: Some(160),
+            },
+            ThreadsResponseReductionStage {
+                max_threads: Some(50),
+                max_preview_chars: None,
+            },
+        ],
+    };
+
+const THREADS_RESPONSE_IOS_SURFACE_BUDGET: ThreadsResponseCompactBudget =
+    THREADS_RESPONSE_REMOTE_SURFACE_BUDGET;
 
 #[derive(Clone, Copy)]
-struct SessionSnapshotBrokerBudget {
+pub enum SessionSnapshotCompactProfile {
+    LocalWeb,
+    RemoteSurface,
+    IosSurface,
+}
+
+#[derive(Clone, Copy)]
+struct SessionSnapshotCompactBudget {
     max_logs: usize,
     max_log_chars: usize,
     max_transcript_entries: usize,
@@ -178,7 +231,7 @@ struct SessionSnapshotBrokerBudget {
 }
 
 #[derive(Clone, Copy)]
-struct ThreadSummaryBrokerBudget {
+struct ThreadSummaryCompactBudget {
     max_name_chars: usize,
     max_preview_chars: usize,
 }
@@ -190,15 +243,26 @@ struct ThreadsResponseReductionStage {
 }
 
 #[derive(Clone, Copy)]
-struct ThreadsResponseBrokerBudget {
+pub enum ThreadsResponseCompactProfile {
+    LocalWeb,
+    RemoteSurface,
+    IosSurface,
+}
+
+#[derive(Clone, Copy)]
+struct ThreadsResponseCompactBudget {
+    summary_budget: ThreadSummaryCompactBudget,
     max_threads: usize,
     target_bytes: usize,
     reduction_stages: &'static [ThreadsResponseReductionStage],
 }
 
 impl SessionSnapshot {
-    pub fn compact_for_broker(mut self) -> Self {
-        let budget = SESSION_SNAPSHOT_BROKER_BUDGET;
+    pub fn compact_for(self, profile: SessionSnapshotCompactProfile) -> Self {
+        self.compact_for_budget(profile.budget())
+    }
+
+    fn compact_for_budget(mut self, budget: SessionSnapshotCompactBudget) -> Self {
         let mut transcript_truncated = false;
 
         if self.logs.len() > budget.max_logs {
@@ -269,10 +333,18 @@ impl SessionSnapshot {
     }
 }
 
-impl ThreadSummaryView {
-    fn compact_for_broker(mut self) -> Self {
-        let budget = THREAD_SUMMARY_BROKER_BUDGET;
+impl SessionSnapshotCompactProfile {
+    fn budget(self) -> SessionSnapshotCompactBudget {
+        match self {
+            Self::LocalWeb => SESSION_SNAPSHOT_LOCAL_WEB_BUDGET,
+            Self::RemoteSurface => SESSION_SNAPSHOT_REMOTE_SURFACE_BUDGET,
+            Self::IosSurface => SESSION_SNAPSHOT_IOS_SURFACE_BUDGET,
+        }
+    }
+}
 
+impl ThreadSummaryView {
+    fn compact_for_budget(mut self, budget: ThreadSummaryCompactBudget) -> Self {
         if let Some(name) = &mut self.name {
             truncate_with_ellipsis(name, budget.max_name_chars);
         }
@@ -282,8 +354,8 @@ impl ThreadSummaryView {
 }
 
 impl ThreadsResponse {
-    pub fn compact_for_broker(mut self) -> Self {
-        let budget = THREADS_RESPONSE_BROKER_BUDGET;
+    pub fn compact_for(mut self, profile: ThreadsResponseCompactProfile) -> Self {
+        let budget = profile.budget();
 
         if self.threads.len() > budget.max_threads {
             self.threads.truncate(budget.max_threads);
@@ -291,7 +363,7 @@ impl ThreadsResponse {
         self.threads = self
             .threads
             .into_iter()
-            .map(ThreadSummaryView::compact_for_broker)
+            .map(|thread| thread.compact_for_budget(budget.summary_budget))
             .collect();
 
         while serialized_len(&self) > budget.target_bytes {
@@ -330,6 +402,16 @@ impl ThreadsResponse {
         }
 
         self
+    }
+}
+
+impl ThreadsResponseCompactProfile {
+    fn budget(self) -> ThreadsResponseCompactBudget {
+        match self {
+            Self::LocalWeb => THREADS_RESPONSE_LOCAL_WEB_BUDGET,
+            Self::RemoteSurface => THREADS_RESPONSE_REMOTE_SURFACE_BUDGET,
+            Self::IosSurface => THREADS_RESPONSE_IOS_SURFACE_BUDGET,
+        }
     }
 }
 
@@ -473,6 +555,7 @@ pub struct TranscriptEntryView {
 pub struct ReadThreadTranscriptInput {
     pub thread_id: String,
     pub cursor: Option<usize>,
+    pub before: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -493,6 +576,7 @@ pub struct ThreadTranscriptResponse {
     pub thread_id: String,
     pub chunks: Vec<TranscriptChunkView>,
     pub next_cursor: Option<usize>,
+    pub prev_cursor: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -657,6 +741,7 @@ impl ThreadTranscriptResponse {
                 thread_id: thread_id.clone(),
                 chunks: selected.clone(),
                 next_cursor: None,
+                prev_cursor: None,
             };
             if serialized_len(&candidate) > THREAD_TRANSCRIPT_RESPONSE_TARGET_BYTES
                 && selected.len() > 1
@@ -676,6 +761,47 @@ impl ThreadTranscriptResponse {
             thread_id,
             chunks: selected,
             next_cursor: (index < chunks.len()).then_some(index),
+            prev_cursor: None,
+        }
+    }
+
+    pub fn from_transcript_before(
+        thread_id: String,
+        transcript: Vec<TranscriptEntryView>,
+        before: Option<usize>,
+    ) -> Self {
+        let chunks = flatten_transcript_chunks(transcript);
+        let upper_bound = before.unwrap_or(chunks.len()).min(chunks.len());
+        let mut selected = Vec::new();
+        let mut index = upper_bound;
+
+        while index > 0 {
+            selected.push(chunks[index - 1].clone());
+            let candidate = Self {
+                thread_id: thread_id.clone(),
+                chunks: selected.iter().rev().cloned().collect(),
+                next_cursor: None,
+                prev_cursor: None,
+            };
+            if serialized_len(&candidate) > THREAD_TRANSCRIPT_RESPONSE_TARGET_BYTES
+                && selected.len() > 1
+            {
+                selected.pop();
+                break;
+            }
+            index -= 1;
+        }
+
+        if selected.is_empty() && upper_bound > 0 {
+            selected.push(chunks[upper_bound - 1].clone());
+            index = upper_bound - 1;
+        }
+
+        Self {
+            thread_id,
+            chunks: selected.into_iter().rev().collect(),
+            next_cursor: (upper_bound < chunks.len()).then_some(upper_bound),
+            prev_cursor: (index > 0).then_some(index),
         }
     }
 }

@@ -42,6 +42,7 @@ export const remoteControlBanner = document.querySelector("#remote-control-banne
 export const remoteControlSummary = document.querySelector("#remote-control-summary");
 export const remoteControlHint = document.querySelector("#remote-control-hint");
 export const remoteTakeOverButton = document.querySelector("#remote-take-over-button");
+export const chatShell = document.querySelector(".chat-shell");
 export const remoteTranscript = document.querySelector("#remote-transcript");
 export const remoteMessageForm = document.querySelector("#remote-message-form");
 export const remoteMessageInput = document.querySelector("#remote-message-input");

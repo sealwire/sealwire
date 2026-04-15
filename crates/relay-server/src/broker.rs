@@ -1004,7 +1004,10 @@ async fn publish_snapshot(
     sender: &mut futures_util::stream::SplitSink<BrokerSocket, Message>,
     state: &AppState,
 ) -> Result<(), String> {
-    let snapshot = state.snapshot().await.compact_for_broker();
+    let snapshot = state
+        .snapshot()
+        .await
+        .compact_for(crate::protocol::SessionSnapshotCompactProfile::RemoteSurface);
     if state.broker_can_read_content().await {
         publish_payload(sender, OutboundBrokerPayload::SessionSnapshot { snapshot })
             .await
