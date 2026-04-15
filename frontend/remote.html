@@ -114,30 +114,39 @@
           </div>
         </section>
       </aside>
+      <div id="remote-nav-backdrop" class="remote-nav-backdrop" hidden></div>
 
       <main class="chat-shell">
         <header class="chat-header">
-          <div class="chat-heading">
-            <span class="chat-heading-label">Remote Broker Surface</span>
-            <h1 id="remote-workspace-title">Pair this browser</h1>
-            <p id="remote-workspace-subtitle" class="chat-subtitle">
-              Open a pairing QR from your local relay to control Codex remotely.
-            </p>
+          <div class="chat-header-main">
+            <button id="remote-nav-toggle-button" class="header-button remote-nav-toggle-button" type="button" aria-expanded="false" aria-label="Open sidebar" hidden>
+              <span class="remote-nav-toggle-icon" aria-hidden="true">
+                <span></span>
+                <span></span>
+                <span></span>
+              </span>
+              <span class="sr-only">Toggle sidebar</span>
+            </button>
+            <div class="chat-heading">
+              <div class="chat-heading-title-row">
+                <h1 id="remote-workspace-title">Pair this browser</h1>
+                <span id="remote-status-badge" class="status-badge status-badge-offline">Offline</span>
+              </div>
+              <p id="remote-workspace-subtitle" class="chat-subtitle">
+                Open a pairing QR from your local relay to control Codex remotely.
+              </p>
+            </div>
           </div>
           <div class="chat-header-actions">
             <button id="remote-home-button" class="header-button" type="button" hidden>
               All relays
             </button>
-            <span id="remote-status-badge" class="status-badge status-badge-offline">Offline</span>
+            <button id="remote-info-button" class="header-button remote-info-button" type="button" aria-label="Open session details" title="Open session details">
+              <span class="remote-info-icon" aria-hidden="true">i</span>
+              <span class="sr-only">Open session details</span>
+            </button>
           </div>
         </header>
-
-        <details class="meta-drawer">
-          <summary>Dashboard & Details</summary>
-          <section id="remote-session-meta" class="session-meta">
-            <span class="meta-empty">Pair a remote device to start streaming session details.</span>
-          </section>
-        </details>
 
         <section id="remote-control-banner" class="control-banner" hidden>
           <div>
@@ -214,6 +223,25 @@
           <p class="sidebar-empty">No paired remote device stored in this browser.</p>
         </div>
       </section>
+    </dialog>
+
+    <dialog id="remote-info-modal" class="panel-modal">
+      <div class="modal-header">
+        <h2>Session details</h2>
+        <button id="close-remote-info-modal" class="header-button close-modal-btn" type="button">&times;</button>
+      </div>
+      <div class="panel-modal-body">
+        <section class="details-section">
+          <h3 class="details-heading">Workspace</h3>
+          <p id="remote-session-path" class="details-path">No workspace path yet.</p>
+        </section>
+        <section class="details-section">
+          <h3 class="details-heading">Session</h3>
+          <section id="remote-session-meta" class="session-meta">
+            <span class="meta-empty">Pair a remote device to start streaming session details.</span>
+          </section>
+        </section>
+      </div>
     </dialog>
 
     <script src="/remote.js" type="module"></script>

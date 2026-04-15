@@ -7,25 +7,22 @@ export function renderSessionChrome(session) {
   const approval = session.pending_approvals?.[0] || null;
   const hasActiveSession = Boolean(session.active_thread_id);
   const workspaceName = session.current_cwd ? workspaceBasename(session.current_cwd) : workspaceTitle();
+  const headerPath = currentHeaderPath(session);
+  const headerSubtitle = headerPath || workspaceSubtitle();
 
   dom.remoteWorkspaceTitle.textContent = hasActiveSession ? workspaceName : workspaceTitle();
-  dom.remoteWorkspaceSubtitle.textContent = hasActiveSession
-    ? `Live thread ${shortId(session.active_thread_id)}`
-    : workspaceSubtitle();
+  dom.remoteWorkspaceSubtitle.textContent = headerSubtitle;
+  dom.remoteWorkspaceSubtitle.hidden = !headerSubtitle;
   dom.remoteWorkspaceTitle.title = session.current_cwd || "";
-  dom.remoteWorkspaceSubtitle.title = hasActiveSession
-    ? session.current_cwd || ""
-    : "";
+  dom.remoteWorkspaceSubtitle.title = headerPath || headerSubtitle;
+  renderSessionPath(headerPath);
 
   if (approval) {
-    dom.remoteStatusBadge.textContent = "Approval required";
-    dom.remoteStatusBadge.className = "status-badge status-badge-alert";
+    setStatusBadge("alert", "Approval required");
   } else if (!state.socketConnected || !session.codex_connected) {
-    dom.remoteStatusBadge.textContent = "Offline";
-    dom.remoteStatusBadge.className = "status-badge status-badge-offline";
+    setStatusBadge("offline", "Offline");
   } else {
-    dom.remoteStatusBadge.textContent = session.current_status || "Ready";
-    dom.remoteStatusBadge.className = "status-badge status-badge-ready";
+    setStatusBadge("ready", session.current_status || "Ready");
   }
 
   renderSessionMeta(session);
@@ -94,65 +91,60 @@ export function renderDeviceMeta() {
 export function updateStatusBadge() {
   if (state.session) {
     if (state.session.pending_approvals?.length) {
-      dom.remoteStatusBadge.textContent = "Approval required";
-      dom.remoteStatusBadge.className = "status-badge status-badge-alert";
+      setStatusBadge("alert", "Approval required");
       renderOverviewCards();
       return;
     }
 
     if (!state.socketConnected || !state.session.codex_connected) {
-      dom.remoteStatusBadge.textContent = "Offline";
-      dom.remoteStatusBadge.className = "status-badge status-badge-offline";
+      setStatusBadge("offline", "Offline");
       renderOverviewCards();
       return;
     }
 
-    dom.remoteStatusBadge.textContent = state.session.current_status || "Ready";
-    dom.remoteStatusBadge.className = "status-badge status-badge-ready";
+    setStatusBadge("ready", state.session.current_status || "Ready");
     renderOverviewCards();
     return;
   }
 
   if (state.socketConnected) {
-    dom.remoteStatusBadge.textContent = "Connected";
-    dom.remoteStatusBadge.className = "status-badge status-badge-ready";
+    setStatusBadge("ready", "Connected");
     renderOverviewCards();
     return;
   }
 
   if (state.pairingTicket) {
-    dom.remoteStatusBadge.textContent = pairingBadgeText();
-    dom.remoteStatusBadge.className = `status-badge status-badge-${pairingBadgeTone()}`;
+    setStatusBadge(pairingBadgeTone(), pairingBadgeText());
     renderOverviewCards();
     return;
   }
 
   if (!state.remoteAuth && state.relayDirectory?.length) {
-    dom.remoteStatusBadge.textContent = "Home";
-    dom.remoteStatusBadge.className = "status-badge status-badge-ready";
+    setStatusBadge("ready", "Home");
     renderOverviewCards();
     return;
   }
 
   if (selectedRelayNeedsRepair()) {
-    dom.remoteStatusBadge.textContent = "Re-pair required";
-    dom.remoteStatusBadge.className = "status-badge status-badge-alert";
+    setStatusBadge("alert", "Re-pair required");
     renderOverviewCards();
     return;
   }
 
-  dom.remoteStatusBadge.textContent = state.remoteAuth ? "Connecting" : "Offline";
-  dom.remoteStatusBadge.className = "status-badge status-badge-offline";
+  setStatusBadge("offline", state.remoteAuth ? "Connecting" : "Offline");
   renderOverviewCards();
 }
 
 export function resetRemoteSurfaceChrome() {
   renderDeviceMeta();
   renderOverviewCards();
+  renderSessionPath("");
   dom.remoteSessionMeta.innerHTML = `<span class="meta-empty">Pair a remote device to start streaming session details.</span>`;
   dom.remoteControlBanner.hidden = true;
   dom.remoteWorkspaceTitle.textContent = workspaceTitle();
   dom.remoteWorkspaceSubtitle.textContent = workspaceSubtitle();
+  dom.remoteWorkspaceSubtitle.hidden = !dom.remoteWorkspaceSubtitle.textContent;
+  dom.remoteWorkspaceSubtitle.title = dom.remoteWorkspaceSubtitle.textContent;
   renderEmptyState();
   updateHomeButton();
   updateStatusBadge();
@@ -179,6 +171,7 @@ export function canCurrentDeviceWrite(session) {
 
 function renderSessionMeta(session) {
   dom.remoteSessionMeta.innerHTML = [
+    metaChip("Status", currentStatusLabel(session)),
     metaChip("Security", securityModeLabel(session)),
     metaChip("Visibility", contentVisibilityLabel(session)),
     metaChip("Broker", brokerStatusLabel(session)),
@@ -196,29 +189,19 @@ function renderSessionMeta(session) {
 }
 
 function renderControlBanner(session) {
-  if (!session.active_thread_id) {
+  if (!session.active_thread_id || !session.active_controller_device_id) {
+    dom.remoteControlBanner.hidden = true;
+    return;
+  }
+
+  if (isCurrentDeviceActiveController(session)) {
     dom.remoteControlBanner.hidden = true;
     return;
   }
 
   dom.remoteControlBanner.hidden = false;
-
-  if (!session.active_controller_device_id) {
-    dom.remoteControlSummary.textContent = "No device currently has control";
-    dom.remoteControlHint.textContent = "The first device to send a message from here will take control automatically.";
-    dom.remoteTakeOverButton.hidden = true;
-    return;
-  }
-
-  if (isCurrentDeviceActiveController(session)) {
-    dom.remoteControlSummary.textContent = "This remote device has control";
-    dom.remoteControlHint.textContent = "You can type here. Other paired devices can still approve pending actions.";
-    dom.remoteTakeOverButton.hidden = true;
-    return;
-  }
-
-  dom.remoteControlSummary.textContent = `Another device has control (${controllerLabel(session.active_controller_device_id)})`;
-  dom.remoteControlHint.textContent = "You can still approve from this browser. Take over when you want to type.";
+  dom.remoteControlSummary.textContent = `Controlled by ${controllerLabel(session.active_controller_device_id)}`;
+  dom.remoteControlHint.textContent = "Read-only here until you take over.";
   dom.remoteTakeOverButton.hidden = false;
 }
 
@@ -392,8 +375,10 @@ function syncWorkspaceHeading() {
 
   dom.remoteWorkspaceTitle.textContent = workspaceTitle();
   dom.remoteWorkspaceSubtitle.textContent = workspaceSubtitle();
+  dom.remoteWorkspaceSubtitle.hidden = !dom.remoteWorkspaceSubtitle.textContent;
   dom.remoteWorkspaceTitle.title = "";
-  dom.remoteWorkspaceSubtitle.title = "";
+  dom.remoteWorkspaceSubtitle.title = dom.remoteWorkspaceSubtitle.textContent;
+  renderSessionPath("");
 }
 
 function workspaceTitle() {
@@ -425,6 +410,103 @@ function workspaceSubtitle() {
   return state.clientAuth
     ? "This browser has a client identity but no relay grants yet. Pair a relay from your local machine to add one here."
     : "Open a pairing QR from your local relay to control Codex remotely.";
+}
+
+function currentHeaderPath(session = state.session) {
+  if (session?.current_cwd) {
+    return session.current_cwd;
+  }
+
+  if (selectedRelayNeedsRepair()) {
+    return "Re-pair this relay on this device to restore access.";
+  }
+
+  return "";
+}
+
+function currentStatusLabel(session = state.session) {
+  if (session?.pending_approvals?.length) {
+    return "Approval required";
+  }
+
+  if (selectedRelayNeedsRepair()) {
+    return "Re-pair required";
+  }
+
+  if (session) {
+    if (!state.socketConnected || !session.codex_connected) {
+      return "Offline";
+    }
+
+    return session.current_status || "Ready";
+  }
+
+  if (state.socketConnected) {
+    return "Connected";
+  }
+
+  if (state.pairingTicket) {
+    return pairingBadgeText();
+  }
+
+  if (!state.remoteAuth && state.relayDirectory?.length) {
+    return "Home";
+  }
+
+  return state.remoteAuth ? "Connecting" : "Offline";
+}
+
+function setStatusBadge(tone, label) {
+  const compactLabel = compactStatusLabel(label);
+  dom.remoteStatusBadge.textContent = compactLabel;
+  dom.remoteStatusBadge.className = `status-badge status-badge-${tone} status-badge-compact`;
+  dom.remoteStatusBadge.title = label;
+  dom.remoteStatusBadge.setAttribute("aria-label", label);
+}
+
+function renderSessionPath(path) {
+  if (!dom.remoteSessionPath) {
+    return;
+  }
+
+  if (!path) {
+    dom.remoteSessionPath.textContent = "No workspace path yet.";
+    return;
+  }
+
+  dom.remoteSessionPath.textContent = path;
+}
+
+function compactStatusLabel(label) {
+  const normalized = String(label || "").trim().toLowerCase();
+
+  switch (normalized) {
+    case "idle":
+    case "ready":
+      return "Ready";
+    case "connected":
+      return "Connected";
+    case "home":
+      return "Home";
+    case "offline":
+      return "Offline";
+    case "connecting":
+      return "Connecting";
+    case "approval required":
+      return "Approval";
+    case "re-pair required":
+      return "Re-pair";
+    case "pairing failed":
+      return "Failed";
+    case "approval pending":
+      return "Pending";
+    default:
+      return label
+        ? String(label)
+            .trim()
+            .replace(/\b\w/g, (char) => char.toUpperCase())
+        : "Ready";
+  }
 }
 
 function pairingHeading() {

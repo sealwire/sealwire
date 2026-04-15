@@ -1,5 +1,6 @@
 import * as dom from "./dom.js";
 import { dispatchOrRecover, scheduleClaimRefresh } from "./actions.js";
+import { closeRemoteNavigation } from "./navigation.js";
 import {
   isCurrentDeviceActiveController,
   renderLog,
@@ -65,6 +66,7 @@ export async function startRemoteSession() {
         effort: dom.remoteStartEffortInput.value,
       },
     });
+    closeRemoteNavigation();
     setRemoteSessionPanelOpen(false);
     await refreshRemoteThreads("post-start refresh", { silent: true });
   } catch (error) {

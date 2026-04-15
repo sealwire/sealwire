@@ -72,9 +72,25 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+body[data-remote-nav-open="true"] {
+  overflow: hidden;
+}
+
 button, input, textarea, select {
   font: inherit;
   color: inherit;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, summary:focus-visible {
@@ -501,40 +517,159 @@ input:focus, textarea:focus, select:focus {
 .chat-header {
   position: sticky;
   top: 0;
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 16px;
   padding: 24px 32px 16px;
   background: var(--bg-base);
   border-bottom: 1px solid var(--border-subtle);
   z-index: 3;
 }
 
-.chat-heading-label {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-tertiary);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+.chat-header-main {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.chat-heading {
+  min-width: 0;
+}
+
+.chat-heading-title-row {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .chat-heading h1 {
-  margin: 4px 0 0;
-  font-size: 20px;
-  font-weight: 600;
+  margin: 0;
+  font-size: 18px;
+  font-weight: 550;
   color: var(--text-primary);
+  line-height: 1.25;
 }
 
 .chat-subtitle {
-  margin: 4px 0 0;
-  font-size: 14px;
+  margin: 6px 0 0;
+  font-size: 13px;
   color: var(--text-secondary);
+  max-width: min(70vw, 760px);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .chat-header-actions {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 12px;
+}
+
+.remote-info-button {
+  width: 36px;
+  min-width: 36px;
+  height: 36px;
+  padding: 0;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bg-elevated) 82%, white 18%);
+  border-color: var(--border-subtle);
+  color: var(--text-primary);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.remote-info-button:hover {
+  background: color-mix(in srgb, var(--bg-hover) 88%, white 12%);
+}
+
+.remote-info-icon {
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.05);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.remote-nav-backdrop {
+  display: none;
+}
+
+.remote-nav-toggle-button {
+  display: none;
+  position: relative;
+  width: 40px;
+  min-width: 40px;
+  height: 40px;
+  padding: 0;
+  border-radius: 999px;
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-primary);
+}
+
+.remote-nav-toggle-button:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-subtle);
+}
+
+.remote-nav-toggle-icon {
+  position: relative;
+  width: 18px;
+  height: 14px;
+  display: inline-flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.remote-nav-toggle-icon span {
+  display: block;
+  width: 18px;
+  height: 2px;
+  border-radius: 999px;
+  background: currentColor;
+  transition: transform 140ms ease, opacity 140ms ease;
+}
+
+.remote-nav-toggle-button[data-nav-state="open"] .remote-nav-toggle-icon span:nth-child(1) {
+  transform: translateY(6px) rotate(45deg);
+}
+
+.remote-nav-toggle-button[data-nav-state="open"] .remote-nav-toggle-icon span:nth-child(2) {
+  opacity: 0;
+}
+
+.remote-nav-toggle-button[data-nav-state="open"] .remote-nav-toggle-icon span:nth-child(3) {
+  transform: translateY(-6px) rotate(-45deg);
+}
+
+.status-badge-compact {
+  gap: 7px;
+  padding: 4px 10px 4px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  line-height: 1;
+}
+
+.status-badge-compact::before {
+  content: "";
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  flex: 0 0 auto;
+  background: currentColor;
+  box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 18%, transparent);
 }
 
 /* STATUS BADGES */
@@ -553,8 +688,8 @@ input:focus, textarea:focus, select:focus {
   border: 1px solid var(--border-subtle);
 }
 .status-badge-ready, .device-state-approved {
-  background: var(--status-ready-bg);
-  color: var(--status-ready-text);
+  background: rgba(34, 197, 94, 0.12);
+  color: #22c55e;
   border-color: transparent;
 }
 .status-badge-alert, .device-state-pending {
@@ -633,7 +768,7 @@ input:focus, textarea:focus, select:focus {
 /* CONTROL BANNER */
 .control-banner {
   margin: 0;
-  padding: 16px 24px;
+  padding: 14px 24px;
   border-radius: var(--radius-md);
   border: 1px solid var(--border-prominent);
   background: var(--bg-surface);
@@ -642,8 +777,8 @@ input:focus, textarea:focus, select:focus {
   justify-content: space-between;
   animation: surface-enter 300ms ease both;
 }
-.control-summary { margin: 0; font-weight: 600; font-size: 15px; }
-.control-hint { margin: 4px 0 0; font-size: 13px; color: var(--text-secondary); }
+.control-summary { margin: 0; font-weight: 600; font-size: 14px; }
+.control-hint { margin: 4px 0 0; font-size: 12px; color: var(--text-secondary); }
 
 /* THREAD SHELL */
 .thread-shell {
@@ -1172,6 +1307,19 @@ input:focus, textarea:focus, select:focus {
   gap: 8px;
   margin-top: 12px;
 }
+
+.details-path {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-base);
+  color: var(--text-secondary);
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  word-break: break-word;
+}
 .meta-chip {
   padding: 4px 12px;
   border-radius: var(--radius-xs);
@@ -1286,10 +1434,86 @@ input:focus, textarea:focus, select:focus {
 
 @media (max-width: 960px) {
   .app-shell { grid-template-columns: 1fr; height: auto; overflow: visible; }
+  .app-shell[data-remote-nav-mode="drawer"] {
+    position: relative;
+    min-height: 100dvh;
+  }
+  .app-shell[data-remote-nav-mode="drawer"] .sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 20;
+    width: min(360px, calc(100vw - 48px));
+    max-width: 88vw;
+    height: 100dvh;
+    border-right: 1px solid var(--border-subtle);
+    border-bottom: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 16px;
+    box-shadow: var(--shadow-lg);
+    transform: translateX(-100%);
+    transition: transform 140ms ease;
+  }
+  .app-shell[data-remote-nav-mode="drawer"][data-remote-nav-state="open"] .sidebar {
+    transform: translateX(0);
+  }
+  .app-shell[data-remote-nav-mode="drawer"] .remote-nav-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 10;
+    background: rgba(15, 23, 42, 0.58);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 140ms ease;
+  }
+  .app-shell[data-remote-nav-mode="drawer"][data-remote-nav-state="open"] .remote-nav-backdrop {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .app-shell[data-remote-nav-mode="drawer"] .chat-shell {
+    min-width: 0;
+  }
   .sidebar { border-right: 0; border-bottom: 1px solid var(--border-subtle); height: auto; overflow: visible; padding: 16px; }
   .chat-shell { height: auto; overflow: visible; }
-  .chat-header { flex-direction: column; align-items: stretch; padding: 16px; }
-  .chat-header-actions { margin-top: 12px; }
+  .chat-header {
+    grid-template-columns: minmax(0, 1fr) auto;
+    padding: 14px 16px 12px;
+    gap: 12px;
+  }
+  .chat-header-main {
+    align-items: center;
+    gap: 10px;
+  }
+  .chat-heading h1 {
+    font-size: 17px;
+  }
+  .chat-heading-title-row {
+    gap: 8px;
+  }
+  .chat-subtitle {
+    display: none;
+  }
+  .status-badge-compact {
+    padding: 4px 8px 4px 7px;
+    font-size: 10px;
+  }
+  .chat-header-actions {
+    margin-top: 0;
+    align-self: center;
+    flex-wrap: nowrap;
+    gap: 10px;
+  }
+  .remote-info-button {
+    width: 34px;
+    min-width: 34px;
+    height: 34px;
+  }
+  .remote-nav-toggle-button {
+    display: inline-flex;
+  }
+  #remote-home-button { display: none; }
+  .remote-info-button { display: inline-flex; }
   .overview-strip { grid-template-columns: 1fr; padding: 16px 16px 0; }
   .console-grid { grid-template-columns: 1fr; padding: 16px 16px 0; overflow: visible; }
   .thread-panel { overflow: visible; }

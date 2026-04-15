@@ -103,6 +103,7 @@ async function main() {
     );
 
     remotePage = await context.newPage();
+    await remotePage.setViewportSize({ width: 390, height: 844 });
     remotePage.on("console", (message) => {
       remoteConsoleMessages.push(`[${message.type()}] ${message.text()}`);
     });
@@ -112,6 +113,14 @@ async function main() {
       }
     });
     await remotePage.goto(`http://${lanIp}:${brokerPort}`, { waitUntil: "domcontentloaded" });
+    await remotePage.waitForFunction(() => {
+      const button = document.querySelector("#remote-nav-toggle-button");
+      return Boolean(button && !button.hidden);
+    }, null, { timeout: TIMEOUT_MS });
+    await remotePage.click("#remote-nav-toggle-button");
+    await remotePage.waitForFunction(() => {
+      return document.querySelector(".app-shell")?.dataset.remoteNavState === "open";
+    }, null, { timeout: TIMEOUT_MS });
     await installSocketLifecycleHook(remotePage);
     await openPairingModal(remotePage);
     await remotePage.fill("#pairing-input", pairingUrl);
@@ -139,6 +148,20 @@ async function main() {
     await remotePage.waitForFunction(() => {
       const input = document.querySelector("#remote-message-input");
       return Boolean(input && !input.disabled);
+    }, null, { timeout: TIMEOUT_MS });
+    await remotePage.waitForFunction(() => {
+      return document.querySelector(".app-shell")?.dataset.remoteNavState === "closed";
+    }, null, { timeout: TIMEOUT_MS });
+    await remotePage.click("#remote-nav-toggle-button");
+    await remotePage.waitForFunction(() => {
+      return document.querySelector(".app-shell")?.dataset.remoteNavState === "open";
+    }, null, { timeout: TIMEOUT_MS });
+    await remotePage.waitForFunction(() => {
+      return Boolean(document.querySelector("[data-thread-id]"));
+    }, null, { timeout: TIMEOUT_MS });
+    await remotePage.click("[data-thread-id]");
+    await remotePage.waitForFunction(() => {
+      return document.querySelector(".app-shell")?.dataset.remoteNavState === "closed";
     }, null, { timeout: TIMEOUT_MS });
 
     await sendPromptAndWaitForReply(remotePage, BEFORE_REFRESH_PROMPT);
@@ -197,6 +220,9 @@ async function main() {
           relayPort,
           pairingOrigin: new URL(pairingUrl).origin,
           workspaceDir,
+          remoteNavState: await remotePage.evaluate(
+            () => document.querySelector(".app-shell")?.dataset.remoteNavState || null
+          ),
           activeThreadId: relaySession.active_thread_id,
           refreshRequestCount: refreshRequests.length,
           remoteClientLog: await safeText(remotePage, "#remote-client-log"),

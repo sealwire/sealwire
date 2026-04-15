@@ -1,6 +1,13 @@
 import * as dom from "./dom.js";
 import {
+  closeRemoteNavigation,
+  initializeRemoteNavigation,
+  openRemoteNavigation,
+  toggleRemoteNavigation,
+} from "./navigation.js";
+import {
   configureBrokerClient,
+  closeBrokerSocket,
   connectBroker,
   refreshRelayDirectory,
 } from "./broker-client.js";
@@ -50,9 +57,11 @@ import {
 
 configureRenderHandlers({
   onResumeThread(threadId) {
+    closeRemoteNavigation();
     void resumeRemoteSession(threadId);
   },
   onSelectRelay(relayId) {
+    closeRemoteNavigation();
     void switchRelay(relayId);
   },
 });
@@ -120,6 +129,28 @@ dom.remoteSessionToggle.addEventListener("click", () => {
   setRemoteSessionPanelOpen(dom.remoteSessionPanel.hidden);
 });
 
+dom.remoteNavToggleButton?.addEventListener("click", () => {
+  toggleRemoteNavigation();
+});
+
+dom.remoteNavBackdrop?.addEventListener("click", () => {
+  closeRemoteNavigation();
+});
+
+dom.remoteInfoButton?.addEventListener("click", () => {
+  dom.remoteInfoModal?.showModal();
+});
+
+dom.closeRemoteInfoModalBtn?.addEventListener("click", () => {
+  dom.remoteInfoModal?.close();
+});
+
+dom.remoteInfoModal?.addEventListener("click", (event) => {
+  if (event.target === dom.remoteInfoModal) {
+    dom.remoteInfoModal.close();
+  }
+});
+
 dom.remoteStartSessionButton.addEventListener("click", () => {
   void startRemoteSession();
 });
@@ -176,6 +207,7 @@ async function boot() {
   void registerRemotePwa();
 
   dom.deviceLabelInput.value = loadDeviceLabel();
+  initializeRemoteNavigation();
   setRemoteSessionPanelOpen(false);
   const pairingQuery = applyPairingQuery();
   renderDeviceMeta();
@@ -247,6 +279,7 @@ function returnToRelayHome() {
   state.currentApprovalId = null;
   clearActiveRelaySelection();
   closeBrokerSocket();
+  openRemoteNavigation();
   setRemoteSessionPanelOpen(false);
   renderDeviceMeta();
   renderEmptyState();
