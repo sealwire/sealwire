@@ -326,10 +326,11 @@ impl RelayState {
             .enumerate()
             .map(|(index, entry)| TranscriptRecord {
                 item_id: format!("history-{index}"),
-                role: entry.role,
+                kind: entry.kind,
                 text: entry.text,
                 status: entry.status,
                 turn_id: entry.turn_id,
+                tool: entry.tool,
             })
             .collect();
         self.upsert_thread(data.thread);
@@ -369,10 +370,11 @@ impl RelayState {
             .enumerate()
             .map(|(index, entry)| TranscriptRecord {
                 item_id: format!("history-{index}"),
-                role: entry.role,
+                kind: entry.kind,
                 text: entry.text,
                 status: entry.status,
                 turn_id: entry.turn_id,
+                tool: entry.tool,
             })
             .collect();
         self.upsert_thread(data.thread);

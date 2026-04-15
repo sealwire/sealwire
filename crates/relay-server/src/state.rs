@@ -29,7 +29,7 @@ pub const DEFAULT_EFFORT: &str = "medium";
 pub const CONTROLLER_LEASE_SECS: u64 = 15;
 const MAX_LOG_LINES: usize = 200;
 const THREAD_SCAN_LIMIT: usize = 200;
-const PERSISTED_STATE_VERSION: u32 = 1;
+const PERSISTED_STATE_VERSION: u32 = 2;
 const DEFAULT_STATE_FILE: &str = ".agent-relay/session.json";
 
 fn non_empty(value: Option<String>) -> Option<String> {

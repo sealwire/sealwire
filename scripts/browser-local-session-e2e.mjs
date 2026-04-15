@@ -134,7 +134,7 @@ async function main() {
           currentCwd: relaySession.current_cwd,
           lastAssistant: [...relaySession.transcript]
             .reverse()
-            .find((entry) => entry.role === "assistant")?.text,
+            .find((entry) => entry.kind === "agent_text")?.text,
         },
         null,
         2

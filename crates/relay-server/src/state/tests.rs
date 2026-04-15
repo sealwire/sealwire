@@ -7,7 +7,7 @@ use crate::{
     codex::ThreadSyncData,
     protocol::{
         ApprovalReceipt, DeviceLifecycleState, LogEntryView, ModelOptionView, SessionSnapshot,
-        ThreadSummaryView, ThreadsResponse, TranscriptEntryView,
+        ThreadSummaryView, ThreadsResponse, TranscriptEntryKind, TranscriptEntryView,
     },
 };
 
@@ -65,10 +65,11 @@ fn test_persisted_state() -> PersistedRelayState {
         paired_devices,
         transcript: vec![TranscriptRecord {
             item_id: "history-0".to_string(),
-            role: "assistant".to_string(),
-            text: "hello".to_string(),
+            kind: TranscriptEntryKind::AgentText,
+            text: Some("hello".to_string()),
             status: "completed".to_string(),
             turn_id: Some("turn-1".to_string()),
+            tool: None,
         }],
         logs: vec![LogEntryView {
             kind: "info".to_string(),
@@ -596,10 +597,11 @@ fn persisted_state_round_trip_drops_ephemeral_fields() {
     relay.allowed_roots = vec!["/tmp/project".to_string()];
     relay.transcript.push(TranscriptRecord {
         item_id: "history-0".to_string(),
-        role: "assistant".to_string(),
-        text: "hello".to_string(),
+        kind: TranscriptEntryKind::AgentText,
+        text: Some("hello".to_string()),
         status: "completed".to_string(),
         turn_id: Some("turn-1".to_string()),
+        tool: None,
     });
     relay
         .pending_approvals
@@ -644,10 +646,11 @@ fn restore_thread_data_keeps_persisted_controller_and_settings() {
             active_flags: vec!["busy".to_string()],
             transcript: vec![TranscriptEntryView {
                 item_id: Some("history-1".to_string()),
-                role: "user".to_string(),
-                text: "ping".to_string(),
+                kind: TranscriptEntryKind::UserText,
+                text: Some("ping".to_string()),
                 status: "completed".to_string(),
                 turn_id: Some("turn-2".to_string()),
+                tool: None,
             }],
         },
         &persisted,
@@ -666,7 +669,7 @@ fn restore_thread_data_keeps_persisted_controller_and_settings() {
     assert_eq!(relay.paired_devices.len(), 1);
     assert_eq!(relay.pending_approvals.len(), 0);
     assert_eq!(relay.transcript.len(), 1);
-    assert_eq!(relay.transcript[0].text, "ping");
+    assert_eq!(relay.transcript[0].text.as_deref(), Some("ping"));
 }
 
 #[test]
@@ -1055,10 +1058,17 @@ fn filter_deleted_threads_hides_locally_purged_threads() {
 
 #[tokio::test]
 async fn persistence_store_round_trips_to_disk() {
-    let unique = format!("agent-relay-test-{}-{}", std::process::id(), unix_now());
+    let unique = format!(
+        "agent-relay-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time should move forward")
+            .as_nanos()
+    );
     let directory = std::env::temp_dir().join(unique);
     let path = directory.join("session.json");
-    let store = PersistenceStore::from_path(path);
+    let store = PersistenceStore::from_path(path.clone());
     let persisted = test_persisted_state();
 
     store.save(&persisted).await.expect("state should save");
@@ -1074,6 +1084,60 @@ async fn persistence_store_round_trips_to_disk() {
         persisted.active_controller_device_id
     );
     assert_eq!(loaded.transcript.len(), 1);
+
+    tokio::fs::remove_dir_all(&directory)
+        .await
+        .expect("temp persisted state directory should be removable");
+}
+
+#[tokio::test]
+async fn persistence_store_rejects_old_schema_version() {
+    let unique = format!(
+        "agent-relay-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time should move forward")
+            .as_nanos()
+    );
+    let directory = std::env::temp_dir().join(unique);
+    let path = directory.join("session.json");
+    let store = PersistenceStore::from_path(path.clone());
+
+    tokio::fs::create_dir_all(&directory)
+        .await
+        .expect("temp persisted state directory should exist");
+    tokio::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "active_thread_id": null,
+            "active_controller_device_id": null,
+            "active_controller_last_seen_at": null,
+            "current_status": "idle",
+            "active_flags": [],
+            "current_cwd": "/tmp/project",
+            "model": DEFAULT_MODEL,
+            "approval_policy": DEFAULT_APPROVAL_POLICY,
+            "sandbox": DEFAULT_SANDBOX,
+            "reasoning_effort": DEFAULT_EFFORT,
+            "allowed_roots": [],
+            "device_records": {},
+            "paired_devices": {},
+            "transcript": [],
+            "logs": []
+        }))
+        .expect("json should serialize"),
+    )
+    .await
+    .expect("old state file should write");
+
+    let error = store
+        .load()
+        .await
+        .expect_err("old schema version should be rejected");
+
+    assert!(error.contains("unsupported persisted state version: 1"));
 
     tokio::fs::remove_dir_all(&directory)
         .await

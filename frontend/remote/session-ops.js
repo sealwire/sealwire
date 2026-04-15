@@ -329,18 +329,20 @@ export async function fetchFullRemoteTranscript(threadId) {
       if (!assembledEntries.has(chunk.entry_index)) {
         assembledEntries.set(chunk.entry_index, {
           item_id: chunk.item_id,
-          role: chunk.role,
+          kind: chunk.kind,
           status: chunk.status,
           turn_id: chunk.turn_id || null,
+          tool: chunk.tool || null,
           parts: new Array(chunk.chunk_count).fill(""),
         });
       }
 
       const entry = assembledEntries.get(chunk.entry_index);
       entry.item_id = chunk.item_id;
-      entry.role = chunk.role;
+      entry.kind = chunk.kind;
       entry.status = chunk.status;
       entry.turn_id = chunk.turn_id || null;
+      entry.tool = chunk.tool || null;
       if (chunk.chunk_index >= entry.parts.length) {
         entry.parts.length = chunk.chunk_count;
       }
@@ -357,10 +359,11 @@ export async function fetchFullRemoteTranscript(threadId) {
     .sort(([left], [right]) => left - right)
     .map(([, entry]) => ({
       item_id: entry.item_id,
-      role: entry.role,
-      text: entry.parts.join(""),
+      kind: entry.kind,
+      text: entry.parts.join("") || null,
       status: entry.status,
       turn_id: entry.turn_id,
+      tool: entry.tool,
     }));
 }
 
@@ -374,9 +377,11 @@ function transcriptHydrationSignature(snapshot) {
   for (const entry of snapshot.transcript || []) {
     parts.push(
       entry.item_id || "",
-      entry.role || "",
+      entry.kind || "",
       entry.status || "",
-      String((entry.text || "").length)
+      String((entry.text || "").length),
+      entry.tool?.name || "",
+      entry.tool?.title || ""
     );
   }
 

@@ -18,11 +18,25 @@ use crate::{
     codex_local::{
         delete_thread_permanently as delete_thread_permanently_local, LocalThreadDeleteSummary,
     },
-    protocol::{ApprovalDecisionInput, ModelOptionView, ThreadSummaryView, TranscriptEntryView},
+    protocol::{
+        truncate_with_ellipsis, ApprovalDecisionInput, ModelOptionView, ThreadSummaryView,
+        ToolCallView, TranscriptEntryKind, TranscriptEntryView,
+    },
     state::{ApprovalKind, PendingApproval, RelayState},
 };
 
+#[cfg(test)]
+mod tests;
+
 type PendingResponses = Arc<Mutex<HashMap<String, oneshot::Sender<Result<Value, String>>>>>;
+
+const MAX_COMMAND_TEXT_CHARS: usize = 240;
+const MAX_COMMAND_OUTPUT_CHARS: usize = 1_024;
+const MAX_COMMAND_ENTRY_CHARS: usize = 1_400;
+const MAX_TOOL_SUMMARY_CHARS: usize = 240;
+const MAX_TOOL_FIELD_CHARS: usize = 240;
+const MAX_TOOL_JSON_CHARS: usize = 512;
+const MAX_TOOL_ENTRY_CHARS: usize = 1_400;
 
 pub struct CodexBridge {
     _child: Arc<Mutex<Child>>,
@@ -556,7 +570,14 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
                     changed = true;
                 }
             }
-            _ => {}
+            _ => {
+                changed |= upsert_transcript_item_from_value(
+                    &mut relay,
+                    value_at(&params, &["item"]),
+                    string_at(&params, &["turnId"]),
+                    "running",
+                );
+            }
         },
         "item/agentMessage/delta" => {
             if let (Some(item_id), Some(turn_id), Some(delta)) = (
@@ -606,7 +627,14 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
                     changed = true;
                 }
             }
-            _ => {}
+            _ => {
+                changed |= upsert_transcript_item_from_value(
+                    &mut relay,
+                    value_at(&params, &["item"]),
+                    string_at(&params, &["turnId"]),
+                    "completed",
+                );
+            }
         },
         "serverRequest/resolved" => {
             if let Some(request_id) = params.get("requestId") {
@@ -706,35 +734,221 @@ fn parse_transcript(thread: &Value) -> Vec<TranscriptEntryView> {
         };
 
         for item in items {
-            match string_at(item, &["type"]).as_deref() {
-                Some("userMessage") => {
-                    if let Some(text) = parse_user_text(Some(item)) {
-                        transcript.push(TranscriptEntryView {
-                            item_id: string_at(item, &["id"]),
-                            role: "user".to_string(),
-                            text,
-                            status: "completed".to_string(),
-                            turn_id: turn_id.clone(),
-                        });
-                    }
-                }
-                Some("agentMessage") => {
-                    if let Some(text) = string_at(item, &["text"]) {
-                        transcript.push(TranscriptEntryView {
-                            item_id: string_at(item, &["id"]),
-                            role: "assistant".to_string(),
-                            text,
-                            status: "completed".to_string(),
-                            turn_id: turn_id.clone(),
-                        });
-                    }
-                }
-                _ => {}
+            if let Some(entry) = parse_transcript_item(item, turn_id.clone(), "completed") {
+                transcript.push(entry);
             }
         }
     }
 
     transcript
+}
+
+fn upsert_transcript_item_from_value(
+    relay: &mut RelayState,
+    item: Option<&Value>,
+    turn_id: Option<String>,
+    default_status: &str,
+) -> bool {
+    let Some(item) = item else {
+        return false;
+    };
+    let Some(entry) = parse_transcript_item(item, turn_id, default_status) else {
+        return false;
+    };
+    let Some(item_id) = entry.item_id else {
+        return false;
+    };
+
+    relay.upsert_transcript_item(
+        item_id,
+        entry.kind,
+        entry.text,
+        entry.status,
+        entry.turn_id,
+        entry.tool,
+    );
+    true
+}
+
+fn parse_transcript_item(
+    item: &Value,
+    turn_id: Option<String>,
+    default_status: &str,
+) -> Option<TranscriptEntryView> {
+    let item_id = string_at(item, &["id"])?;
+    let item_type = string_at(item, &["type"])?;
+    let status = transcript_item_status(item, default_status);
+    let kind = transcript_item_kind(&item_type);
+    let tool =
+        (kind == TranscriptEntryKind::ToolCall).then(|| build_tool_call_view(item, &item_type));
+    let text = transcript_item_text(item, &item_type, tool.as_ref());
+
+    Some(TranscriptEntryView {
+        item_id: Some(item_id),
+        kind,
+        text,
+        status,
+        turn_id,
+        tool,
+    })
+}
+
+fn transcript_item_kind(item_type: &str) -> TranscriptEntryKind {
+    match item_type {
+        "userMessage" => TranscriptEntryKind::UserText,
+        "agentMessage" => TranscriptEntryKind::AgentText,
+        "commandExecution" => TranscriptEntryKind::Command,
+        _ if is_reasoning_item_type(item_type) => TranscriptEntryKind::Reasoning,
+        _ => TranscriptEntryKind::ToolCall,
+    }
+}
+
+fn transcript_item_status(item: &Value, default_status: &str) -> String {
+    match value_at(item, &["status"]) {
+        Some(Value::String(status)) => status.clone(),
+        Some(status) => parse_status(Some(status)).0,
+        None => default_status.to_string(),
+    }
+}
+
+fn transcript_item_text(
+    item: &Value,
+    item_type: &str,
+    tool: Option<&ToolCallView>,
+) -> Option<String> {
+    match item_type {
+        "userMessage" => parse_user_text(Some(item)),
+        "agentMessage" => string_at(item, &["text"])
+            .or_else(|| parse_text_content(item))
+            .map(|text| truncate_owned(text, MAX_COMMAND_ENTRY_CHARS)),
+        "commandExecution" => Some(command_execution_text(item)),
+        _ if is_reasoning_item_type(item_type) => string_at(item, &["text"])
+            .or_else(|| parse_text_content(item))
+            .map(|text| truncate_owned(text, MAX_TOOL_ENTRY_CHARS)),
+        _ => tool
+            .map(tool_preview_text)
+            .or_else(|| Some(fallback_item_type_label(item_type))),
+    }
+}
+
+fn command_execution_text(item: &Value) -> String {
+    let mut text = truncate_owned(
+        string_at(item, &["command"]).unwrap_or_else(|| "Command".to_string()),
+        MAX_COMMAND_TEXT_CHARS,
+    );
+    if let Some(output) = non_empty_string(string_at(item, &["aggregatedOutput"])) {
+        text.push('\n');
+        text.push_str(&truncate_owned(output, MAX_COMMAND_OUTPUT_CHARS));
+    }
+    truncate_owned(text, MAX_COMMAND_ENTRY_CHARS)
+}
+
+fn build_tool_call_view(item: &Value, item_type: &str) -> ToolCallView {
+    let name = truncate_owned(
+        string_at(item, &["name"])
+            .or_else(|| string_at(item, &["toolName"]))
+            .or_else(|| string_at(item, &["tool"]))
+            .or_else(|| string_at(item, &["label"]))
+            .unwrap_or_else(|| fallback_item_type_label(item_type)),
+        MAX_TOOL_SUMMARY_CHARS,
+    );
+    let title = truncate_owned(
+        string_at(item, &["title"])
+            .or_else(|| string_at(item, &["summary"]))
+            .or_else(|| string_at(item, &["text"]))
+            .or_else(|| parse_text_content(item))
+            .unwrap_or_else(|| format!("{name} call")),
+        MAX_TOOL_SUMMARY_CHARS,
+    );
+    let detail = string_at(item, &["description"])
+        .or_else(|| string_at(item, &["detail"]))
+        .map(|value| truncate_owned(value, MAX_TOOL_SUMMARY_CHARS));
+
+    ToolCallView {
+        item_type: item_type.to_string(),
+        name,
+        title,
+        detail,
+        query: preview_string_field(item, "query"),
+        path: preview_string_field(item, "path"),
+        url: preview_string_field(item, "url"),
+        command: preview_string_field(item, "command"),
+        input_preview: preview_json_field(item, "input")
+            .or_else(|| preview_json_field(item, "arguments")),
+        result_preview: preview_json_field(item, "result")
+            .or_else(|| preview_json_field(item, "output")),
+    }
+}
+
+fn tool_preview_text(tool: &ToolCallView) -> String {
+    let mut lines = vec![tool.title.clone()];
+    if let Some(detail) = &tool.detail {
+        if detail != &tool.title {
+            lines.push(detail.clone());
+        }
+    }
+
+    for value in [&tool.query, &tool.path, &tool.url, &tool.command] {
+        if let Some(value) = value {
+            lines.push(value.clone());
+        }
+    }
+
+    truncate_owned(lines.join("\n"), MAX_TOOL_ENTRY_CHARS)
+}
+
+fn preview_string_field(item: &Value, key: &str) -> Option<String> {
+    non_empty_string(string_at(item, &[key]))
+        .map(|value| truncate_owned(value, MAX_TOOL_FIELD_CHARS))
+}
+
+fn preview_json_field(item: &Value, key: &str) -> Option<String> {
+    value_at(item, &[key]).and_then(|value| compact_json_value(value, MAX_TOOL_JSON_CHARS))
+}
+
+fn parse_text_content(item: &Value) -> Option<String> {
+    let content = value_at(item, &["content"]).and_then(Value::as_array)?;
+    let parts = content
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .as_str()
+                .map(ToOwned::to_owned)
+                .or_else(|| string_at(entry, &["text"]))
+        })
+        .collect::<Vec<_>>();
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n"))
+    }
+}
+
+fn compact_json_value(value: &Value, max_chars: usize) -> Option<String> {
+    if value.is_null() {
+        return None;
+    }
+
+    match value {
+        Value::String(text) => non_empty_string(Some(truncate_owned(text.clone(), max_chars))),
+        _ => serde_json::to_string_pretty(value)
+            .ok()
+            .map(|text| truncate_owned(text, max_chars)),
+    }
+}
+
+fn fallback_item_type_label(item_type: &str) -> String {
+    match item_type {
+        "mcpToolCall" => "MCP tool call".to_string(),
+        "webSearch" => "Web search".to_string(),
+        "fileSearch" => "File search".to_string(),
+        _ => item_type.to_string(),
+    }
+}
+
+fn is_reasoning_item_type(item_type: &str) -> bool {
+    item_type.contains("reasoning") || item_type.contains("thinking")
 }
 
 fn parse_available_decisions(params: &Value) -> Vec<String> {
@@ -773,6 +987,22 @@ fn parse_user_text(item: Option<&Value>) -> Option<String> {
     } else {
         Some(parts.join("\n"))
     }
+}
+
+fn non_empty_string(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    })
+}
+
+fn truncate_owned(mut value: String, max_chars: usize) -> String {
+    truncate_with_ellipsis(&mut value, max_chars);
+    value
 }
 
 fn parse_status(status: Option<&Value>) -> (String, Vec<String>) {

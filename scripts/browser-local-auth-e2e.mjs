@@ -186,7 +186,7 @@ async function main() {
           cookieIssued: Boolean(sessionCookie),
           lastAssistant: [...relaySession.transcript]
             .reverse()
-            .find((entry) => entry.role === "assistant")?.text,
+            .find((entry) => entry.kind === "agent_text")?.text,
         },
         null,
         2

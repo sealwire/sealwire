@@ -298,7 +298,7 @@ async function main() {
     .then((response) => response.data);
   const lastAssistant = [...sessionSnapshot.transcript]
     .reverse()
-    .find((entry) => entry.role === "assistant");
+    .find((entry) => entry.kind === "agent_text");
 
   console.log(
     JSON.stringify(

@@ -188,7 +188,7 @@ async function main() {
           })),
           lastAssistant: [...relaySession.transcript]
             .reverse()
-            .find((entry) => entry.role === "assistant")?.text,
+            .find((entry) => entry.kind === "agent_text")?.text,
         },
         null,
         2

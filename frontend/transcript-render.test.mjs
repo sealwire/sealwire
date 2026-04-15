@@ -7,30 +7,44 @@ import {
   renderTranscriptMarkup,
 } from "./shared/transcript-render.js";
 
-test("renderTranscriptEntry renders user, assistant, and system roles safely", () => {
+test("renderTranscriptEntry renders typed session items safely", () => {
   const userMarkup = renderTranscriptEntry({
-    role: "user",
+    kind: "user_text",
     status: "completed",
     text: "<script>alert(1)</script>",
   });
   const assistantMarkup = renderTranscriptEntry({
-    role: "assistant",
+    kind: "agent_text",
     status: "running",
     turn_id: "turn-123456789",
     text: "Hello from Codex",
   });
-  const systemMarkup = renderTranscriptEntry({
-    role: "command",
+  const commandMarkup = renderTranscriptEntry({
+    kind: "command",
     status: "completed",
     text: "npm test",
+  });
+  const toolMarkup = renderTranscriptEntry({
+    kind: "tool_call",
+    status: "running",
+    tool: {
+      name: "Read",
+      title: "Read frontend/remote/main.js",
+      item_type: "mcpToolCall",
+      path: "frontend/remote/main.js",
+      input_preview: "{\"path\":\"frontend/remote/main.js\"}",
+    },
   });
 
   assert.match(userMarkup, /You/);
   assert.match(userMarkup, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
   assert.match(assistantMarkup, /Codex/);
   assert.match(assistantMarkup, /turn-123/);
-  assert.match(systemMarkup, /Command/);
-  assert.match(systemMarkup, /<pre class="message-pre">npm test<\/pre>/);
+  assert.match(commandMarkup, /Command/);
+  assert.match(commandMarkup, /<pre class="message-pre">npm test<\/pre>/);
+  assert.match(toolMarkup, /Read frontend\/remote\/main\.js/);
+  assert.match(toolMarkup, /message-card-tool/);
+  assert.match(toolMarkup, /frontend\/remote\/main\.js/);
 });
 
 test("renderApprovalCard includes session-scope actions and escapes requested permissions", () => {
@@ -53,11 +67,11 @@ test("renderApprovalCard includes session-scope actions and escapes requested pe
   assert.match(markup, /cwd: \/tmp\/project/);
 });
 
-test("renderTranscriptMarkup combines entries and pending approval into one thread content block", () => {
+test("renderTranscriptMarkup combines typed entries and pending approval into one thread content block", () => {
   const markup = renderTranscriptMarkup(
     [
-      { role: "user", text: "Investigate this bug", status: "completed" },
-      { role: "assistant", text: "Looking into it", status: "running", turn_id: "turn-abcdefghi" },
+      { kind: "user_text", text: "Investigate this bug", status: "completed" },
+      { kind: "agent_text", text: "Looking into it", status: "running", turn_id: "turn-abcdefghi" },
     ],
     {
       kind: "command",

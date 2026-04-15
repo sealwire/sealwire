@@ -259,9 +259,10 @@ test("applySessionSnapshot hydrates truncated transcript with chunked remote fet
                     {
                       entry_index: 0,
                       item_id: "item-1",
-                      role: "assistant",
+                      kind: "agent_text",
                       status: "completed",
                       turn_id: "turn-1",
+                      tool: null,
                       chunk_index: 0,
                       chunk_count: 2,
                       text: fullText.slice(0, 4000),
@@ -271,9 +272,10 @@ test("applySessionSnapshot hydrates truncated transcript with chunked remote fet
                     {
                       entry_index: 0,
                       item_id: "item-1",
-                      role: "assistant",
+                      kind: "agent_text",
                       status: "completed",
                       turn_id: "turn-1",
+                      tool: null,
                       chunk_index: 1,
                       chunk_count: 2,
                       text: fullText.slice(4000),
@@ -281,9 +283,10 @@ test("applySessionSnapshot hydrates truncated transcript with chunked remote fet
                     {
                       entry_index: 1,
                       item_id: "item-2",
-                      role: "user",
+                      kind: "user_text",
                       status: "completed",
                       turn_id: "turn-2",
+                      tool: null,
                       chunk_index: 0,
                       chunk_count: 1,
                       text: "thanks",
@@ -331,10 +334,11 @@ test("applySessionSnapshot hydrates truncated transcript with chunked remote fet
     transcript: [
       {
         item_id: "item-1",
-        role: "assistant",
+        kind: "agent_text",
         text: `${"A".repeat(1200)}...`,
         status: "completed",
         turn_id: "turn-1",
+        tool: null,
       },
     ],
   });
@@ -356,10 +360,11 @@ test("applySessionSnapshot hydrates truncated transcript with chunked remote fet
     transcript: [
       {
         item_id: "item-1",
-        role: "assistant",
+        kind: "agent_text",
         text: `${"A".repeat(1200)}...`,
         status: "completed",
         turn_id: "turn-1",
+        tool: null,
       },
     ],
   });

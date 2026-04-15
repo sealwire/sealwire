@@ -216,8 +216,9 @@ impl SessionSnapshot {
         }
 
         for entry in &mut self.transcript {
-            transcript_truncated |=
-                truncate_with_ellipsis(&mut entry.text, budget.max_transcript_chars);
+            if let Some(text) = &mut entry.text {
+                transcript_truncated |= truncate_with_ellipsis(text, budget.max_transcript_chars);
+            }
         }
 
         while serialized_len(&self) > budget.target_bytes {
@@ -230,14 +231,18 @@ impl SessionSnapshot {
                 self.logs.pop();
                 continue;
             }
-            if self
-                .transcript
-                .iter()
-                .any(|entry| entry.text.chars().count() > budget.fallback_transcript_chars)
-            {
+            if self.transcript.iter().any(|entry| {
+                entry
+                    .text
+                    .as_ref()
+                    .map(|text| text.chars().count() > budget.fallback_transcript_chars)
+                    .unwrap_or(false)
+            }) {
                 for entry in &mut self.transcript {
-                    transcript_truncated |=
-                        truncate_with_ellipsis(&mut entry.text, budget.fallback_transcript_chars);
+                    if let Some(text) = &mut entry.text {
+                        transcript_truncated |=
+                            truncate_with_ellipsis(text, budget.fallback_transcript_chars);
+                    }
                 }
                 continue;
             }
@@ -430,13 +435,38 @@ pub struct ApprovalReceipt {
     pub message: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptEntryKind {
+    UserText,
+    AgentText,
+    ToolCall,
+    Command,
+    Reasoning,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolCallView {
+    pub item_type: String,
+    pub name: String,
+    pub title: String,
+    pub detail: Option<String>,
+    pub query: Option<String>,
+    pub path: Option<String>,
+    pub url: Option<String>,
+    pub command: Option<String>,
+    pub input_preview: Option<String>,
+    pub result_preview: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscriptEntryView {
     pub item_id: Option<String>,
-    pub role: String,
-    pub text: String,
+    pub kind: TranscriptEntryKind,
+    pub text: Option<String>,
     pub status: String,
     pub turn_id: Option<String>,
+    pub tool: Option<ToolCallView>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -449,10 +479,11 @@ pub struct ReadThreadTranscriptInput {
 pub struct TranscriptChunkView {
     pub entry_index: usize,
     pub item_id: String,
-    pub role: String,
+    pub kind: TranscriptEntryKind,
     pub text: String,
     pub status: String,
     pub turn_id: Option<String>,
+    pub tool: Option<ToolCallView>,
     pub chunk_index: usize,
     pub chunk_count: usize,
 }
@@ -655,23 +686,28 @@ fn flatten_transcript_chunks(transcript: Vec<TranscriptEntryView>) -> Vec<Transc
     for (entry_index, entry) in transcript.into_iter().enumerate() {
         let TranscriptEntryView {
             item_id,
-            role,
+            kind,
             text,
             status,
             turn_id,
+            tool,
         } = entry;
         let item_id = item_id.unwrap_or_else(|| format!("entry-{entry_index}"));
-        let text_chunks = split_text_chunks(&text, TRANSCRIPT_CHUNK_MAX_CHARS);
+        let text_chunks = split_text_chunks(
+            text.as_deref().unwrap_or_default(),
+            TRANSCRIPT_CHUNK_MAX_CHARS,
+        );
         let chunk_count = text_chunks.len();
 
         for (chunk_index, text) in text_chunks.into_iter().enumerate() {
             chunks.push(TranscriptChunkView {
                 entry_index,
                 item_id: item_id.clone(),
-                role: role.clone(),
+                kind,
                 text,
                 status: status.clone(),
                 turn_id: turn_id.clone(),
+                tool: tool.clone(),
                 chunk_index,
                 chunk_count,
             });

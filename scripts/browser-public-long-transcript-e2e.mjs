@@ -86,10 +86,11 @@ async function main() {
           transcript: [
             {
               item_id: "item-long-1",
-              role: "user",
+              kind: "user_text",
               text: truncatedText,
               status: "completed",
               turn_id: "turn-e2e",
+              tool: null,
             },
           ],
           logs: [],
@@ -198,10 +199,11 @@ async function main() {
                           {
                             entry_index: 0,
                             item_id: "item-long-1",
-                            role: "user",
+                            kind: "user_text",
                             text: fullText.slice(0, 4000),
                             status: "completed",
                             turn_id: "turn-e2e",
+                            tool: null,
                             chunk_index: 0,
                             chunk_count: 2,
                           },
@@ -210,10 +212,11 @@ async function main() {
                           {
                             entry_index: 0,
                             item_id: "item-long-1",
-                            role: "user",
+                            kind: "user_text",
                             text: fullText.slice(4000),
                             status: "completed",
                             turn_id: "turn-e2e",
+                            tool: null,
                             chunk_index: 1,
                             chunk_count: 2,
                           },

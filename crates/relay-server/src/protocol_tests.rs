@@ -1,6 +1,6 @@
 use crate::protocol::{
     truncate_with_ellipsis, LogEntryView, SecurityMode, SessionSnapshot, ThreadSummaryView,
-    ThreadTranscriptResponse, ThreadsResponse, TranscriptEntryView,
+    ThreadTranscriptResponse, ThreadsResponse, TranscriptEntryKind, TranscriptEntryView,
 };
 
 const MAX_BROKER_LOGS: usize = 8;
@@ -46,10 +46,11 @@ fn make_snapshot() -> SessionSnapshot {
         transcript: (0..30)
             .map(|index| TranscriptEntryView {
                 item_id: Some(format!("item-{index}")),
-                role: "assistant".to_string(),
-                text: "x".repeat(4500 + index),
+                kind: TranscriptEntryKind::AgentText,
+                text: Some("x".repeat(4500 + index)),
                 status: "completed".to_string(),
                 turn_id: Some(format!("turn-{index}")),
+                tool: None,
             })
             .collect(),
         logs: (0..30)
@@ -76,10 +77,13 @@ fn compact_for_broker_limits_logs_and_transcript() {
             .and_then(|entry| entry.turn_id.as_deref()),
         Some("turn-25")
     );
-    assert!(compacted
-        .transcript
-        .iter()
-        .all(|entry| entry.text.chars().count() <= MAX_BROKER_TRANSCRIPT_CHARS));
+    assert!(compacted.transcript.iter().all(|entry| {
+        entry
+            .text
+            .as_ref()
+            .map(|text| text.chars().count() <= MAX_BROKER_TRANSCRIPT_CHARS)
+            .unwrap_or(true)
+    }));
     assert!(serde_json::to_vec(&compacted).unwrap().len() <= SESSION_SNAPSHOT_TARGET_BYTES);
 }
 
@@ -134,10 +138,11 @@ fn compact_for_broker_drops_logs_and_transcript_as_last_resort() {
     snapshot.transcript = (0..3)
         .map(|index| TranscriptEntryView {
             item_id: Some(format!("item-{index}")),
-            role: "assistant".to_string(),
-            text: format!("{}-{index}", "内容".repeat(1_500)),
+            kind: TranscriptEntryKind::AgentText,
+            text: Some(format!("{}-{index}", "内容".repeat(1_500))),
             status: "completed".to_string(),
             turn_id: Some(format!("turn-{index}")),
+            tool: None,
         })
         .collect();
 
@@ -154,17 +159,19 @@ fn thread_transcript_response_chunks_large_transcripts() {
     let transcript = vec![
         TranscriptEntryView {
             item_id: Some("item-1".to_string()),
-            role: "assistant".to_string(),
-            text: "长".repeat(9_500),
+            kind: TranscriptEntryKind::AgentText,
+            text: Some("长".repeat(9_500)),
             status: "completed".to_string(),
             turn_id: Some("turn-1".to_string()),
+            tool: None,
         },
         TranscriptEntryView {
             item_id: Some("item-2".to_string()),
-            role: "user".to_string(),
-            text: "next".to_string(),
+            kind: TranscriptEntryKind::UserText,
+            text: Some("next".to_string()),
             status: "completed".to_string(),
             turn_id: Some("turn-2".to_string()),
+            tool: None,
         },
     ];
 
