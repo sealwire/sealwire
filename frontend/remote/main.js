@@ -28,6 +28,7 @@ import {
 import { registerRemotePwa } from "./pwa.js";
 import {
   configureRenderHandlers,
+  handleTranscriptScroll,
   renderDeviceMeta,
   renderEmptyState,
   renderLog,
@@ -186,6 +187,10 @@ dom.remoteTranscript.addEventListener("click", (event) => {
     approvalButton.dataset.approvalDecision,
     approvalButton.dataset.approvalScope || "once"
   );
+});
+
+dom.remoteTranscript.addEventListener("scroll", () => {
+  handleTranscriptScroll();
 });
 
 void boot();

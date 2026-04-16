@@ -37,6 +37,7 @@ export function configureRenderHandlers(handlers) {
 export function renderSession(session) {
   const previousSession = state.session;
   state.session = session;
+  updateTranscriptScrollModeForSession(session, previousSession);
   syncRemoteChatView();
   const approval = session.pending_approvals?.[0] || null;
   const hasActiveSession = Boolean(session.active_thread_id);
@@ -215,7 +216,11 @@ function renderTranscriptPanel(session, approval, canWrite, previousSession = nu
 
   const previousScrollTop = dom.remoteTranscript.scrollTop || 0;
   const previousScrollHeight = dom.remoteTranscript.scrollHeight || 0;
-  const shouldAutoScroll = shouldStickTranscriptToBottom(dom.remoteTranscript, previousSession);
+  const shouldAutoScroll = shouldStickTranscriptToBottom(
+    dom.remoteTranscript,
+    previousSession,
+    session
+  );
   const prependedOlderTranscript = didPrependOlderTranscript(
     previousSession?.transcript || [],
     entries
@@ -236,7 +241,10 @@ function renderTranscriptPanel(session, approval, canWrite, previousSession = nu
   dom.remoteTranscript.innerHTML = `${loadingBanner}${renderTranscriptMarkup(entries, approval)}`;
   let nextScrollTop = previousScrollTop;
   if (shouldAutoScroll) {
-    nextScrollTop = dom.remoteTranscript.scrollHeight;
+    nextScrollTop = Math.max(
+      0,
+      (dom.remoteTranscript.scrollHeight || 0) - (dom.remoteTranscript.clientHeight || 0)
+    );
     applyTranscriptScrollPosition(nextScrollTop, "stick-bottom");
     return;
   }
@@ -262,8 +270,14 @@ function renderTranscriptPanel(session, approval, canWrite, previousSession = nu
   applyTranscriptScrollPosition(nextScrollTop, "preserve");
 }
 
-function shouldStickTranscriptToBottom(transcript, previousSession) {
+function shouldStickTranscriptToBottom(transcript, previousSession, session) {
+  if (state.transcriptScrollMode === "follow-latest") {
+    return true;
+  }
   if (!previousSession?.active_thread_id) {
+    return true;
+  }
+  if (previousSession.active_thread_id !== session?.active_thread_id) {
     return true;
   }
 
@@ -271,6 +285,36 @@ function shouldStickTranscriptToBottom(transcript, previousSession) {
   const clientHeight = transcript.clientHeight || 0;
   const scrollTop = transcript.scrollTop || 0;
   return scrollHeight - clientHeight - scrollTop <= AUTO_SCROLL_BOTTOM_THRESHOLD_PX;
+}
+
+function updateTranscriptScrollModeForSession(session, previousSession) {
+  const nextThreadId = session?.active_thread_id || null;
+  const previousThreadId = previousSession?.active_thread_id || null;
+
+  if (!nextThreadId) {
+    state.transcriptScrollMode = "follow-latest";
+    return;
+  }
+
+  if (nextThreadId !== previousThreadId) {
+    state.transcriptScrollMode = "follow-latest";
+  }
+}
+
+export function handleTranscriptScroll() {
+  if (!state.session?.active_thread_id || !dom.remoteTranscript) {
+    return;
+  }
+
+  const scrollHeight = dom.remoteTranscript.scrollHeight || 0;
+  const clientHeight = dom.remoteTranscript.clientHeight || 0;
+  const scrollTop = dom.remoteTranscript.scrollTop || 0;
+  const isNearBottom =
+    scrollHeight - clientHeight - scrollTop <= AUTO_SCROLL_BOTTOM_THRESHOLD_PX;
+  state.transcriptScrollMode = isNearBottom ? "follow-latest" : "preserve";
+  debugScrollEvent("handleTranscriptScroll", {
+    mode: state.transcriptScrollMode,
+  });
 }
 
 function didPrependOlderTranscript(previousEntries, nextEntries) {

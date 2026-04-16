@@ -14,7 +14,16 @@ function createElementStub() {
     scrollTop: 0,
     scrollHeight: 0,
     clientHeight: 0,
-    addEventListener() {},
+    _listeners: new Map(),
+    addEventListener(type, listener) {
+      this._listeners.set(type, listener);
+    },
+    dispatchEvent(event) {
+      const listener = this._listeners.get(event?.type);
+      if (listener) {
+        listener(event);
+      }
+    },
     setAttribute() {},
     querySelectorAll() {
       return [];
@@ -70,7 +79,7 @@ function installBrowserStubs() {
 }
 
 const browser = installBrowserStubs();
-const { renderEmptyState, renderSession } = await import("./render.js");
+const { handleTranscriptScroll, renderEmptyState, renderSession } = await import("./render.js");
 const { state } = await import("./state.js");
 
 test("renderEmptyState shows relay directory home when no relay is selected", async () => {
@@ -250,6 +259,7 @@ test("renderSession preserves scroll position when the user is reading older tra
   renderSession(session);
   transcript.scrollTop = 240;
   transcript.scrollHeight = 2000;
+  handleTranscriptScroll();
 
   renderSession({
     ...session,
@@ -313,6 +323,7 @@ test("renderSession keeps the viewport anchored when older transcript is prepend
   renderSession(tailSession);
   transcript.scrollTop = 180;
   transcript.scrollHeight = 1200;
+  handleTranscriptScroll();
 
   const prependedHeight = 500;
   Object.defineProperty(transcript, "innerHTML", {
@@ -342,6 +353,227 @@ test("renderSession keeps the viewport anchored when older transcript is prepend
   });
 
   assert.equal(transcript.scrollTop, 180 + prependedHeight);
+});
+
+test("renderSession scrolls to the bottom when switching to a different thread", async () => {
+  state.remoteAuth = {
+    relayId: "relay-1",
+    deviceId: "device-1",
+    payloadSecret: "payload-secret-1",
+  };
+  state.session = null;
+  state.threads = [];
+  const transcript = browser.elements.get("#remote-transcript");
+  transcript.clientHeight = 400;
+  transcript.scrollHeight = 1200;
+  transcript.scrollTop = 0;
+
+  const firstSession = {
+    active_thread_id: "thread-1",
+    active_turn_id: "turn-1",
+    current_cwd: "/Users/luchi/git/agent-relay",
+    current_status: "idle",
+    codex_connected: true,
+    broker_connected: true,
+    broker_channel_id: "room-a",
+    broker_peer_id: "relay-peer-1",
+    security_mode: "private",
+    e2ee_enabled: true,
+    broker_can_read_content: false,
+    audit_enabled: false,
+    active_controller_device_id: "device-1",
+    pending_approvals: [],
+    transcript_truncated: false,
+    transcript: [
+      {
+        item_id: "item-1",
+        kind: "agent_text",
+        text: "first thread",
+        status: "completed",
+        turn_id: "turn-1",
+        tool: null,
+      },
+    ],
+    logs: [],
+    available_models: [],
+  };
+
+  renderSession(firstSession);
+  transcript.scrollTop = 120;
+  transcript.scrollHeight = 1200;
+  transcript.clientHeight = 400;
+
+  const originalInnerHtmlDescriptor = Object.getOwnPropertyDescriptor(transcript, "innerHTML");
+  Object.defineProperty(transcript, "innerHTML", {
+    configurable: true,
+    get() {
+      return this._innerHTML || "";
+    },
+    set(value) {
+      this._innerHTML = value;
+      this.scrollHeight = 1700;
+    },
+  });
+
+  renderSession({
+    ...firstSession,
+    active_thread_id: "thread-2",
+    transcript: [
+      {
+        item_id: "item-9",
+        kind: "agent_text",
+        text: "second thread latest",
+        status: "completed",
+        turn_id: "turn-9",
+        tool: null,
+      },
+    ],
+  });
+
+  assert.equal(transcript.scrollTop, 1700 - transcript.clientHeight);
+
+  if (originalInnerHtmlDescriptor) {
+    Object.defineProperty(transcript, "innerHTML", originalInnerHtmlDescriptor);
+  } else {
+    delete transcript.innerHTML;
+  }
+});
+
+test("renderSession stays pinned to bottom across async updates after switching threads", async () => {
+  state.remoteAuth = {
+    relayId: "relay-1",
+    deviceId: "device-1",
+    payloadSecret: "payload-secret-1",
+  };
+  state.session = null;
+  state.threads = [];
+  state.transcriptScrollMode = "follow-latest";
+  const transcript = browser.elements.get("#remote-transcript");
+  transcript.clientHeight = 400;
+  transcript.scrollHeight = 1200;
+  transcript.scrollTop = 0;
+
+  const originalInnerHtmlDescriptor = Object.getOwnPropertyDescriptor(transcript, "innerHTML");
+  let currentHeight = 1700;
+  Object.defineProperty(transcript, "innerHTML", {
+    configurable: true,
+    get() {
+      return this._innerHTML || "";
+    },
+    set(value) {
+      this._innerHTML = value;
+      this.scrollHeight = currentHeight;
+    },
+  });
+
+  const firstSession = {
+    active_thread_id: "thread-1",
+    active_turn_id: "turn-1",
+    current_cwd: "/Users/luchi/git/agent-relay",
+    current_status: "idle",
+    codex_connected: true,
+    broker_connected: true,
+    broker_channel_id: "room-a",
+    broker_peer_id: "relay-peer-1",
+    security_mode: "private",
+    e2ee_enabled: true,
+    broker_can_read_content: false,
+    audit_enabled: false,
+    active_controller_device_id: "device-1",
+    pending_approvals: [],
+    transcript_truncated: false,
+    transcript: [
+      {
+        item_id: "item-1",
+        kind: "agent_text",
+        text: "first thread",
+        status: "completed",
+        turn_id: "turn-1",
+        tool: null,
+      },
+    ],
+    logs: [],
+    available_models: [],
+  };
+
+  renderSession(firstSession);
+  transcript.scrollTop = 120;
+
+  renderSession({
+    ...firstSession,
+    active_thread_id: "thread-2",
+    transcript: [
+      {
+        item_id: "item-9",
+        kind: "agent_text",
+        text: "second thread latest",
+        status: "completed",
+        turn_id: "turn-9",
+        tool: null,
+      },
+    ],
+  });
+
+  assert.equal(transcript.scrollTop, currentHeight - transcript.clientHeight);
+  assert.equal(state.transcriptScrollMode, "follow-latest");
+
+  transcript.scrollTop = 0;
+  currentHeight = 2100;
+  renderSession({
+    ...firstSession,
+    active_thread_id: "thread-2",
+    transcript_truncated: true,
+    transcript: [
+      {
+        item_id: "item-7",
+        kind: "agent_text",
+        text: "older loaded later",
+        status: "completed",
+        turn_id: "turn-7",
+        tool: null,
+      },
+      {
+        item_id: "item-9",
+        kind: "agent_text",
+        text: "second thread latest",
+        status: "completed",
+        turn_id: "turn-9",
+        tool: null,
+      },
+    ],
+  });
+
+  assert.equal(transcript.scrollTop, currentHeight - transcript.clientHeight);
+
+  if (originalInnerHtmlDescriptor) {
+    Object.defineProperty(transcript, "innerHTML", originalInnerHtmlDescriptor);
+  } else {
+    delete transcript.innerHTML;
+  }
+});
+
+test("handleTranscriptScroll exits follow-latest mode when the user reads history", async () => {
+  state.remoteAuth = {
+    relayId: "relay-1",
+    deviceId: "device-1",
+    payloadSecret: "payload-secret-1",
+  };
+  state.session = {
+    active_thread_id: "thread-1",
+    transcript: [],
+  };
+  state.transcriptScrollMode = "follow-latest";
+  const transcript = browser.elements.get("#remote-transcript");
+  transcript.clientHeight = 400;
+  transcript.scrollHeight = 2000;
+  transcript.scrollTop = 600;
+
+  handleTranscriptScroll();
+  assert.equal(state.transcriptScrollMode, "preserve");
+
+  transcript.scrollTop = 1600;
+  handleTranscriptScroll();
+  assert.equal(state.transcriptScrollMode, "follow-latest");
 });
 
 test("renderSession keeps the user pinned at the top when older transcript is prepended during hydration", async () => {
@@ -410,6 +642,7 @@ test("renderSession keeps the user pinned at the top when older transcript is pr
   renderSession(tailSession);
   transcript.scrollTop = 0;
   transcript.scrollHeight = 1200;
+  handleTranscriptScroll();
 
   renderSession({
     ...tailSession,

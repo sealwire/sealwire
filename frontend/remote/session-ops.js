@@ -208,6 +208,7 @@ export function clearSessionRuntime() {
   state.transcriptHydrationEntries = new Map();
   state.transcriptHydrationStatus = "idle";
   state.transcriptHydrationLastFetchAt = 0;
+  state.transcriptScrollMode = "follow-latest";
 }
 
 function scheduleControllerHeartbeat(session) {
