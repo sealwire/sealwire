@@ -274,27 +274,27 @@ export function createSessionController({
     }
 
     const grouped = new Map();
-    for (const chunk of state.transcriptChunkMap.values()) {
-      if (!grouped.has(chunk.entry_index)) {
-        grouped.set(chunk.entry_index, {
-          item_id: chunk.item_id,
-          kind: chunk.kind,
-          status: chunk.status,
-          turn_id: chunk.turn_id || null,
-          tool: chunk.tool || null,
-          parts: new Array(chunk.chunk_count).fill(""),
+    for (const part of state.transcriptChunkMap.values()) {
+      if (!grouped.has(part.entry_index)) {
+        grouped.set(part.entry_index, {
+          item_id: part.item_id,
+          kind: part.kind,
+          status: part.status,
+          turn_id: part.turn_id || null,
+          tool: part.tool || null,
+          parts: new Array(part.part_count).fill(""),
         });
       }
-      const entry = grouped.get(chunk.entry_index);
-      entry.item_id = chunk.item_id;
-      entry.kind = chunk.kind;
-      entry.status = chunk.status;
-      entry.turn_id = chunk.turn_id || null;
-      entry.tool = chunk.tool || null;
-      if (chunk.chunk_index >= entry.parts.length) {
-        entry.parts.length = chunk.chunk_count;
+      const entry = grouped.get(part.entry_index);
+      entry.item_id = part.item_id;
+      entry.kind = part.kind;
+      entry.status = part.status;
+      entry.turn_id = part.turn_id || null;
+      entry.tool = part.tool || null;
+      if (part.part_index >= entry.parts.length) {
+        entry.parts.length = part.part_count;
       }
-      entry.parts[chunk.chunk_index] = chunk.text || "";
+      entry.parts[part.part_index] = part.text || "";
     }
 
     const transcript = [...grouped.entries()]
@@ -345,8 +345,20 @@ export function createSessionController({
   }
 
   function storeTranscriptPage(page) {
-    for (const chunk of page?.chunks || []) {
-      state.transcriptChunkMap.set(`${chunk.entry_index}:${chunk.chunk_index}`, chunk);
+    for (const entry of page?.entries || []) {
+      for (const part of entry.parts || []) {
+        state.transcriptChunkMap.set(`${entry.entry_index}:${part.part_index}`, {
+          entry_index: entry.entry_index,
+          item_id: entry.item_id,
+          kind: entry.kind,
+          status: entry.status,
+          turn_id: entry.turn_id || null,
+          tool: entry.tool || null,
+          part_index: part.part_index,
+          part_count: entry.part_count,
+          text: part.text || "",
+        });
+      }
     }
     state.transcriptOlderCursor = page?.prev_cursor ?? null;
   }

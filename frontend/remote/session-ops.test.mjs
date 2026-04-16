@@ -181,6 +181,15 @@ function installBrowserStubs() {
 
   activeBrowser = {
     elements,
+    runNextTimer() {
+      while (pendingTimers.length) {
+        const callback = pendingTimers.shift();
+        if (callback) {
+          callback();
+          break;
+        }
+      }
+    },
     runTimers() {
       while (pendingTimers.length) {
         const callback = pendingTimers.shift();
@@ -210,7 +219,7 @@ async function waitFor(predicate, timeoutMs = 1000) {
 }
 
 test("applySessionSnapshot hydrates truncated transcript with chunked remote fetches", async () => {
-  installBrowserStubs();
+  const browser = activeBrowser || installBrowserStubs();
 
   const fullText = "A".repeat(9000);
   const sentPayloads = [];
@@ -241,13 +250,18 @@ test("applySessionSnapshot hydrates truncated transcript with chunked remote fet
   state.pendingActions.clear();
   state.transcriptHydrationPromise = null;
   state.transcriptHydrationSignature = null;
-  state.transcriptHydrationResolvedSignature = null;
+  state.transcriptHydrationThreadId = null;
+  state.transcriptHydrationBaseSnapshot = null;
+  state.transcriptHydrationOlderCursor = null;
+  state.transcriptHydrationEntries = new Map();
+  state.transcriptHydrationStatus = "idle";
+  state.transcriptHydrationLastFetchAt = 0;
   state.socket = {
     readyState: 1,
     send(frameText) {
       const frame = JSON.parse(frameText);
       sentPayloads.push(frame.payload);
-      const cursor = frame.payload.request?.input?.cursor || 0;
+      const before = frame.payload.request?.input?.before ?? null;
       setImmediate(async () => {
         await handleRemoteBrokerPayload({
           kind: "remote_action_result",
@@ -257,8 +271,8 @@ test("applySessionSnapshot hydrates truncated transcript with chunked remote fet
           snapshot: {},
           thread_transcript: {
             thread_id: "thread-1",
-            chunks:
-              cursor === 0
+            entries:
+              before == null
                 ? [
                     {
                       entry_index: 0,
@@ -267,9 +281,28 @@ test("applySessionSnapshot hydrates truncated transcript with chunked remote fet
                       status: "completed",
                       turn_id: "turn-1",
                       tool: null,
-                      chunk_index: 0,
-                      chunk_count: 2,
-                      text: fullText.slice(0, 4000),
+                      part_count: 2,
+                      parts: [
+                        {
+                          part_index: 1,
+                          text: fullText.slice(4000),
+                        },
+                      ],
+                    },
+                    {
+                      entry_index: 1,
+                      item_id: "item-2",
+                      kind: "user_text",
+                      status: "completed",
+                      turn_id: "turn-2",
+                      tool: null,
+                      part_count: 1,
+                      parts: [
+                        {
+                          part_index: 0,
+                          text: "thanks",
+                        },
+                      ],
                     },
                   ]
                 : [
@@ -280,23 +313,397 @@ test("applySessionSnapshot hydrates truncated transcript with chunked remote fet
                       status: "completed",
                       turn_id: "turn-1",
                       tool: null,
-                      chunk_index: 1,
-                      chunk_count: 2,
-                      text: fullText.slice(4000),
-                    },
-                    {
-                      entry_index: 1,
-                      item_id: "item-2",
-                      kind: "user_text",
-                      status: "completed",
-                      turn_id: "turn-2",
-                      tool: null,
-                      chunk_index: 0,
-                      chunk_count: 1,
-                      text: "thanks",
+                      part_count: 2,
+                      parts: [
+                        {
+                          part_index: 0,
+                          text: fullText.slice(0, 4000),
+                        },
+                      ],
                     },
                   ],
-            next_cursor: cursor === 0 ? 1 : null,
+            prev_cursor: before == null ? 1 : null,
+          },
+        });
+      });
+    },
+  };
+
+  applySessionSnapshot({
+    active_thread_id: "thread-1",
+    active_controller_device_id: null,
+    active_controller_last_seen_at: null,
+    active_flags: [],
+    active_turn_id: "turn-1",
+    allowed_roots: [],
+    approval_policy: "untrusted",
+    audit_enabled: false,
+    available_models: [],
+    broker_can_read_content: true,
+    broker_channel_id: "room-a",
+    broker_connected: true,
+    broker_peer_id: "relay-1",
+    codex_connected: true,
+    controller_lease_expires_at: null,
+    controller_lease_seconds: 15,
+    current_cwd: "/tmp/project",
+    current_status: "idle",
+    device_records: [],
+    e2ee_enabled: false,
+    logs: [],
+    model: "gpt-5.4",
+    paired_devices: [],
+    pending_approvals: [],
+    pending_pairing_requests: [],
+    provider: "codex",
+    reasoning_effort: "medium",
+    sandbox: "workspace-write",
+    security_mode: "managed",
+    service_ready: true,
+    transcript_truncated: true,
+    transcript: [
+      {
+        item_id: "item-1",
+        kind: "agent_text",
+        text: `${"A".repeat(1200)}...`,
+        status: "completed",
+        turn_id: "turn-1",
+        tool: null,
+      },
+      {
+        item_id: "item-2",
+        kind: "user_text",
+        text: "thanks",
+        status: "completed",
+        turn_id: "turn-2",
+        tool: null,
+      },
+    ],
+  });
+
+  await waitFor(() => state.transcriptHydrationOlderCursor === 1);
+  assert.equal(state.session.transcript_truncated, true);
+  assert.equal(state.session.transcript[0].text, `${"A".repeat(1200)}...`);
+  assert.equal(state.session.transcript[1].text, "thanks");
+  assert.match(
+    document.querySelector("#remote-transcript").innerHTML,
+    /Loading earlier transcript/
+  );
+
+  browser.runNextTimer();
+  await waitFor(() => state.session?.transcript_truncated === false);
+
+  assert.equal(state.session.transcript[0].text, fullText);
+  assert.equal(state.session.transcript[1].text, "thanks");
+  assert.equal(
+    sentPayloads.filter((payload) => payload.request?.type === "fetch_thread_transcript").length,
+    2
+  );
+  assert.equal(sentPayloads[0].request.input.thread_id, "thread-1");
+  assert.equal(sentPayloads[0].request.input.before ?? null, null);
+  assert.equal(sentPayloads[1].request.input.before, 1);
+  assert.equal(sentPayloads[0].session_claim, undefined);
+
+  const resumedSnapshot = {
+    ...state.transcriptHydrationBaseSnapshot,
+    transcript_truncated: true,
+    transcript: [
+      {
+        item_id: "item-1",
+        kind: "agent_text",
+        text: `${"A".repeat(1200)}...`,
+        status: "completed",
+        turn_id: "turn-1",
+        tool: null,
+      },
+      {
+        item_id: "item-2",
+        kind: "user_text",
+        text: "thanks",
+        status: "completed",
+        turn_id: "turn-2",
+        tool: null,
+      },
+    ],
+  };
+  applySessionSnapshot(resumedSnapshot);
+
+  assert.equal(state.session.transcript_truncated, false);
+  assert.equal(state.session.transcript[0].text, fullText);
+});
+
+test("transcript hydration resumes from the saved cursor after a broker interruption", async () => {
+  const browser = activeBrowser || installBrowserStubs();
+  const sentPayloads = [];
+  let allowSecondPage = false;
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { handleRemoteBrokerPayload } = await import("./actions.js");
+  const { applySessionSnapshot } = await import("./session-ops.js");
+
+  state.remoteAuth = {
+    relayId: "relay-1",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: null,
+    sessionClaimExpiresAt: null,
+  };
+  saveRemoteAuth(state.remoteAuth);
+  state.socketConnected = true;
+  state.socketPeerId = "surface-peer-1";
+  state.pendingActions.clear();
+  state.transcriptHydrationPromise = null;
+  state.transcriptHydrationSignature = null;
+  state.transcriptHydrationThreadId = null;
+  state.transcriptHydrationBaseSnapshot = null;
+  state.transcriptHydrationOlderCursor = null;
+  state.transcriptHydrationEntries = new Map();
+  state.transcriptHydrationStatus = "idle";
+  state.transcriptHydrationLastFetchAt = 0;
+  state.socket = {
+    readyState: 1,
+    send(frameText) {
+      const frame = JSON.parse(frameText);
+      sentPayloads.push(frame.payload);
+      const before = frame.payload.request?.input?.before ?? null;
+
+      if (before == null) {
+        setImmediate(async () => {
+          await handleRemoteBrokerPayload({
+            kind: "remote_action_result",
+            action_id: frame.payload.action_id,
+            action: "fetch_thread_transcript",
+            ok: true,
+            snapshot: {},
+            thread_transcript: {
+              thread_id: "thread-1",
+              entries: [
+                {
+                  entry_index: 0,
+                  item_id: "item-1",
+                  kind: "agent_text",
+                  status: "completed",
+                  turn_id: "turn-1",
+                  tool: null,
+                  part_count: 2,
+                  parts: [
+                    {
+                      part_index: 1,
+                      text: "world",
+                    },
+                  ],
+                },
+              ],
+              prev_cursor: 1,
+            },
+          });
+        });
+        return;
+      }
+
+      if (!allowSecondPage) {
+        return;
+      }
+
+      setImmediate(async () => {
+        await handleRemoteBrokerPayload({
+          kind: "remote_action_result",
+          action_id: frame.payload.action_id,
+          action: "fetch_thread_transcript",
+          ok: true,
+          snapshot: {},
+          thread_transcript: {
+            thread_id: "thread-1",
+            entries: [
+              {
+                entry_index: 0,
+                item_id: "item-1",
+                kind: "agent_text",
+                status: "completed",
+                turn_id: "turn-1",
+                tool: null,
+                part_count: 2,
+                parts: [
+                  {
+                    part_index: 0,
+                    text: "hello ".repeat(600),
+                  },
+                ],
+              },
+            ],
+            prev_cursor: null,
+          },
+        });
+      });
+    },
+  };
+
+  const snapshot = {
+    active_thread_id: "thread-1",
+    active_controller_device_id: null,
+    active_controller_last_seen_at: null,
+    active_flags: [],
+    active_turn_id: "turn-1",
+    allowed_roots: [],
+    approval_policy: "untrusted",
+    audit_enabled: false,
+    available_models: [],
+    broker_can_read_content: true,
+    broker_channel_id: "room-a",
+    broker_connected: true,
+    broker_peer_id: "relay-1",
+    codex_connected: true,
+    controller_lease_expires_at: null,
+    controller_lease_seconds: 15,
+    current_cwd: "/tmp/project",
+    current_status: "idle",
+    device_records: [],
+    e2ee_enabled: false,
+    logs: [],
+    model: "gpt-5.4",
+    paired_devices: [],
+    pending_approvals: [],
+    pending_pairing_requests: [],
+    provider: "codex",
+    reasoning_effort: "medium",
+    sandbox: "workspace-write",
+    security_mode: "managed",
+    service_ready: true,
+    transcript_truncated: true,
+    transcript: [
+      {
+        item_id: "item-1",
+        kind: "agent_text",
+        text: "hello...",
+        status: "completed",
+        turn_id: "turn-1",
+        tool: null,
+      },
+    ],
+  };
+
+  applySessionSnapshot(snapshot);
+  await waitFor(() => state.transcriptHydrationOlderCursor === 1);
+  assert.equal(state.transcriptHydrationOlderCursor, 1);
+
+  browser.runNextTimer();
+  await nextTick();
+  browser.runTimers();
+  await waitFor(() => state.transcriptHydrationPromise === null);
+
+  assert.equal(state.transcriptHydrationOlderCursor, 1);
+  assert.equal(state.transcriptHydrationStatus, "idle");
+
+  allowSecondPage = true;
+  applySessionSnapshot(snapshot);
+  browser.runNextTimer();
+  await waitFor(() => state.session?.transcript_truncated === false);
+
+  const fetchCursors = sentPayloads
+    .filter((payload) => payload.request?.type === "fetch_thread_transcript")
+    .map((payload) => payload.request.input.before ?? null);
+  assert.deepEqual(fetchCursors, [null, 1, 1]);
+  assert.equal(state.session.transcript[0].text, `${"hello ".repeat(600)}world`);
+});
+
+test("hydrated transcript stays expanded when a later snapshot changes only the tail preview text", async () => {
+  const browser = activeBrowser || installBrowserStubs();
+  const sentPayloads = [];
+  const fullText = `${"A".repeat(4000)}${"B".repeat(4000)}`;
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { handleRemoteBrokerPayload } = await import("./actions.js");
+  const { applySessionSnapshot } = await import("./session-ops.js");
+
+  state.remoteAuth = {
+    relayId: "relay-1",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: null,
+    sessionClaimExpiresAt: null,
+  };
+  saveRemoteAuth(state.remoteAuth);
+  state.socketConnected = true;
+  state.socketPeerId = "surface-peer-1";
+  state.pendingActions.clear();
+  state.transcriptHydrationPromise = null;
+  state.transcriptHydrationSignature = null;
+  state.transcriptHydrationThreadId = null;
+  state.transcriptHydrationBaseSnapshot = null;
+  state.transcriptHydrationOlderCursor = null;
+  state.transcriptHydrationEntries = new Map();
+  state.transcriptHydrationStatus = "idle";
+  state.transcriptHydrationLastFetchAt = 0;
+  state.socket = {
+    readyState: 1,
+    send(frameText) {
+      const frame = JSON.parse(frameText);
+      sentPayloads.push(frame.payload);
+      const before = frame.payload.request?.input?.before ?? null;
+      setImmediate(async () => {
+        await handleRemoteBrokerPayload({
+          kind: "remote_action_result",
+          action_id: frame.payload.action_id,
+          action: "fetch_thread_transcript",
+          ok: true,
+          snapshot: {},
+          thread_transcript: {
+            thread_id: "thread-1",
+            entries:
+              before == null
+                ? [
+                    {
+                      entry_index: 0,
+                      item_id: "item-1",
+                      kind: "agent_text",
+                      status: "completed",
+                      turn_id: "turn-1",
+                      tool: null,
+                      part_count: 2,
+                      parts: [
+                        {
+                          part_index: 1,
+                          text: fullText.slice(4000),
+                        },
+                      ],
+                    },
+                  ]
+                : [
+                    {
+                      entry_index: 0,
+                      item_id: "item-1",
+                      kind: "agent_text",
+                      status: "completed",
+                      turn_id: "turn-1",
+                      tool: null,
+                      part_count: 2,
+                      parts: [
+                        {
+                          part_index: 0,
+                          text: fullText.slice(0, 4000),
+                        },
+                      ],
+                    },
+                  ],
+            prev_cursor: before == null ? 1 : null,
           },
         });
       });
@@ -347,25 +754,49 @@ test("applySessionSnapshot hydrates truncated transcript with chunked remote fet
     ],
   });
 
+  await waitFor(() => state.transcriptHydrationOlderCursor === 1);
+  browser.runNextTimer();
   await waitFor(() => state.session?.transcript_truncated === false);
-
   assert.equal(state.session.transcript[0].text, fullText);
-  assert.equal(state.session.transcript[1].text, "thanks");
-  assert.equal(
-    sentPayloads.filter((payload) => payload.request?.type === "fetch_thread_transcript").length,
-    2
-  );
-  assert.equal(sentPayloads[0].request.input.thread_id, "thread-1");
-  assert.equal(sentPayloads[0].session_claim, undefined);
+  assert.equal(sentPayloads.filter((payload) => payload.request?.type === "fetch_thread_transcript").length, 2);
 
   applySessionSnapshot({
-    ...state.session,
+    active_thread_id: "thread-1",
+    active_controller_device_id: null,
+    active_controller_last_seen_at: null,
+    active_flags: [],
+    active_turn_id: "turn-1",
+    allowed_roots: [],
+    approval_policy: "untrusted",
+    audit_enabled: false,
+    available_models: [],
+    broker_can_read_content: true,
+    broker_channel_id: "room-a",
+    broker_connected: true,
+    broker_peer_id: "relay-1",
+    codex_connected: true,
+    controller_lease_expires_at: null,
+    controller_lease_seconds: 15,
+    current_cwd: "/tmp/project",
+    current_status: "idle",
+    device_records: [],
+    e2ee_enabled: false,
+    logs: [],
+    model: "gpt-5.4",
+    paired_devices: [],
+    pending_approvals: [],
+    pending_pairing_requests: [],
+    provider: "codex",
+    reasoning_effort: "medium",
+    sandbox: "workspace-write",
+    security_mode: "managed",
+    service_ready: true,
     transcript_truncated: true,
     transcript: [
       {
         item_id: "item-1",
         kind: "agent_text",
-        text: `${"A".repeat(1200)}...`,
+        text: `${"A".repeat(900)}...`,
         status: "completed",
         turn_id: "turn-1",
         tool: null,
@@ -375,6 +806,10 @@ test("applySessionSnapshot hydrates truncated transcript with chunked remote fet
 
   assert.equal(state.session.transcript_truncated, false);
   assert.equal(state.session.transcript[0].text, fullText);
+  assert.equal(
+    sentPayloads.filter((payload) => payload.request?.type === "fetch_thread_transcript").length,
+    2
+  );
 });
 
 test("startRemoteSession re-enables the start button when the relay does not reply", async () => {

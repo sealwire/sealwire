@@ -42,6 +42,9 @@ export async function handleRemoteBrokerPayload(payload) {
   }
 
   if (kind === "session_snapshot") {
+    const message = `[scroll-source] kind=session_snapshot entries=${payload.snapshot?.transcript?.length || 0} truncated=${payload.snapshot?.transcript_truncated ? "1" : "0"} has_truncated=${Object.prototype.hasOwnProperty.call(payload.snapshot || {}, "transcript_truncated") ? "1" : "0"} thread=${payload.snapshot?.active_thread_id || "-"} status=${payload.snapshot?.current_status || "-"}`;
+    renderLog(message);
+    console.log(message);
     onApplySessionSnapshot(payload.snapshot);
     renderLog("Received managed-mode session snapshot from broker.");
     return;
@@ -265,6 +268,9 @@ function handleRemoteActionResult(actionId, result) {
     }
 
     if (result.snapshot && !isTranscriptFetch) {
+      const message = `[scroll-source] kind=remote_action_result action=${result.action || "-"} entries=${result.snapshot?.transcript?.length || 0} truncated=${result.snapshot?.transcript_truncated ? "1" : "0"} has_truncated=${Object.prototype.hasOwnProperty.call(result.snapshot || {}, "transcript_truncated") ? "1" : "0"} thread=${result.snapshot?.active_thread_id || "-"} status=${result.snapshot?.current_status || "-"}`;
+      renderLog(message);
+      console.log(message);
       onApplySessionSnapshot(result.snapshot);
     }
 

@@ -1,4 +1,4 @@
-const CACHE_NAME = "agent-relay-remote-v1";
+const CACHE_NAME = "agent-relay-remote-v2";
 const APP_SHELL = [
   "/",
   "/manifest.webmanifest",
@@ -45,16 +45,13 @@ self.addEventListener("fetch", (event) => {
 
   if (APP_SHELL.includes(url.pathname) || url.pathname.startsWith("/static/")) {
     event.respondWith(
-      caches.match(request).then((cached) => {
-        const networkFetch = fetch(request)
-          .then(async (response) => {
-            const cache = await caches.open(CACHE_NAME);
-            cache.put(request, response.clone());
-            return response;
-          })
-          .catch(() => cached);
-        return cached || networkFetch;
-      })
+      fetch(request)
+        .then(async (response) => {
+          const cache = await caches.open(CACHE_NAME);
+          cache.put(request, response.clone());
+          return response;
+        })
+        .catch(() => caches.match(request).then((cached) => cached || Response.error()))
     );
   }
 });

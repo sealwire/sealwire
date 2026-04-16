@@ -6,7 +6,6 @@ import process from "node:process";
 const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
 const relayPort = process.env.RELAY_DEV_SERVER_PORT || "8787";
 const brokerPort = process.env.RELAY_DEV_BROKER_PORT || "8788";
-const vitePort = process.env.RELAY_DEV_VITE_PORT || "5173";
 const localhostOnly =
   process.env.RELAY_DEV_LOCALHOST_ONLY === "1" ||
   process.env.RELAY_DEV_LOCALHOST_ONLY === "true";
@@ -21,7 +20,6 @@ const sharedEnv = {
   ...process.env,
   RELAY_DEV_SERVER_PORT: relayPort,
   RELAY_DEV_BROKER_PORT: brokerPort,
-  RELAY_DEV_VITE_PORT: vitePort,
 };
 
 const brokerEnv = {
@@ -89,13 +87,14 @@ process.on("SIGINT", () => shutdown(0));
 process.on("SIGTERM", () => shutdown(0));
 
 await ensurePortsAreAvailable([
-  { name: "Vite", port: vitePort },
   { name: "relay-server", port: relayPort },
   { name: "relay-broker", port: brokerPort },
 ]);
 
-console.log("[dev:full] Starting Vite, relay-broker, and relay-server...");
-console.log(`[dev:full] Vite:   http://127.0.0.1:${vitePort}/static/`);
+console.log("[dev:full] Building frontend assets for relay-server and relay-broker...");
+await runCommand(npmCommand, ["run", "build"], sharedEnv);
+
+console.log("[dev:full] Starting frontend build watcher, relay-broker, and relay-server...");
 console.log(`[dev:full] Relay:  http://127.0.0.1:${relayPort}`);
 console.log(`[dev:full] Broker: http://127.0.0.1:${brokerPort}`);
 if (detectedLanIp && !localhostOnly) {
@@ -106,15 +105,36 @@ if (brokerPublicUrl !== defaultBrokerUrl) {
 } else {
   console.log(`[dev:full] Pairing links default to ${brokerPublicUrl}`);
 }
+console.log("[dev:full] Static frontend assets are served from ./web and rebuilt on change.");
 
 spawnManaged(
-  "vite",
+  "frontend-build",
   npmCommand,
-  ["run", "dev", "--", "--port", vitePort, "--strictPort"],
+  ["run", "build", "--", "--watch"],
   sharedEnv
 );
 spawnManaged("relay-broker", "cargo", ["run", "-p", "relay-broker"], brokerEnv);
 spawnManaged("relay-server", "cargo", ["run", "-p", "relay-server"], relayEnv);
+
+function runCommand(command, args, env) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      env,
+      stdio: "inherit",
+    });
+    child.on("exit", (code, signal) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(
+        new Error(
+          `${command} ${args.join(" ")} exited with ${signal ? `signal ${signal}` : `code ${code ?? 0}`}`
+        )
+      );
+    });
+  });
+}
 
 async function ensurePortsAreAvailable(ports) {
   for (const { name, port } of ports) {

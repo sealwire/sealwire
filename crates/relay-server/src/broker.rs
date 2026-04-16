@@ -991,6 +991,85 @@ fn parse_inbound_payload(payload: Value) -> Result<Option<InboundBrokerPayload>,
         .map_err(|error| format!("invalid broker payload: {error}"))
 }
 
+fn summarize_thread_transcript_response(page: &ThreadTranscriptResponse) -> String {
+    let part_count = page
+        .entries
+        .iter()
+        .map(|entry| entry.parts.len())
+        .sum::<usize>();
+    format!(
+        "thread_id={} entries={} parts={} next_cursor={} prev_cursor={}",
+        page.thread_id,
+        page.entries.len(),
+        part_count,
+        page.next_cursor
+            .map(|cursor| cursor.to_string())
+            .unwrap_or_else(|| "-".to_string()),
+        page.prev_cursor
+            .map(|cursor| cursor.to_string())
+            .unwrap_or_else(|| "-".to_string()),
+    )
+}
+
+fn summarize_outbound_payload(payload: &OutboundBrokerPayload) -> String {
+    match payload {
+        OutboundBrokerPayload::SessionSnapshot { snapshot } => format!(
+            "kind=session_snapshot active_thread_id={} transcript_entries={} logs={} status={}",
+            snapshot.active_thread_id.as_deref().unwrap_or("-"),
+            snapshot.transcript.len(),
+            snapshot.logs.len(),
+            snapshot.current_status,
+        ),
+        OutboundBrokerPayload::RemoteActionResult {
+            action_id,
+            target_peer_id,
+            action,
+            ok,
+            threads,
+            thread_transcript,
+            error,
+            ..
+        } => format!(
+            "kind=remote_action_result action={} action_id={} target_peer_id={} ok={} threads={} {} error={}",
+            action.as_str(),
+            action_id,
+            target_peer_id,
+            ok,
+            threads.as_ref().map(|response| response.threads.len()).unwrap_or(0),
+            thread_transcript
+                .as_ref()
+                .map(summarize_thread_transcript_response)
+                .unwrap_or_else(|| "thread_transcript=-".to_string()),
+            error.as_deref().unwrap_or("-"),
+        ),
+        OutboundBrokerPayload::EncryptedSessionSnapshot {
+            target_peer_id,
+            device_id,
+            ..
+        } => format!(
+            "kind=encrypted_session_snapshot target_peer_id={} device_id={}",
+            target_peer_id, device_id
+        ),
+        OutboundBrokerPayload::EncryptedRemoteActionResult {
+            action_id,
+            target_peer_id,
+            device_id,
+            ..
+        } => format!(
+            "kind=encrypted_remote_action_result action_id={} target_peer_id={} device_id={}",
+            action_id, target_peer_id, device_id
+        ),
+        OutboundBrokerPayload::EncryptedPairingResult {
+            pairing_id,
+            target_peer_id,
+            ..
+        } => format!(
+            "kind=encrypted_pairing_result pairing_id={} target_peer_id={}",
+            pairing_id, target_peer_id
+        ),
+    }
+}
+
 fn server_message_name(message: &ServerMessage) -> &'static str {
     match message {
         ServerMessage::Welcome { .. } => "welcome",
@@ -1004,20 +1083,36 @@ async fn publish_snapshot(
     sender: &mut futures_util::stream::SplitSink<BrokerSocket, Message>,
     state: &AppState,
 ) -> Result<(), String> {
-    let snapshot = state
-        .snapshot()
-        .await
+    let snapshot = state.snapshot().await;
+    let compacted = snapshot
+        .clone()
         .compact_for(crate::protocol::SessionSnapshotCompactProfile::RemoteSurface);
+    info!(
+        active_thread_id = snapshot.active_thread_id.as_deref().unwrap_or("-"),
+        active_turn_id = snapshot.active_turn_id.as_deref().unwrap_or("-"),
+        raw_transcript_entries = snapshot.transcript.len(),
+        raw_transcript_truncated = snapshot.transcript_truncated,
+        compacted_transcript_entries = compacted.transcript.len(),
+        compacted_transcript_truncated = compacted.transcript_truncated,
+        raw_logs = snapshot.logs.len(),
+        compacted_logs = compacted.logs.len(),
+        "publishing broker session snapshot"
+    );
     if state.broker_can_read_content().await {
-        publish_payload(sender, OutboundBrokerPayload::SessionSnapshot { snapshot })
-            .await
-            .map_err(|error| error.to_string())?;
+        publish_payload(
+            sender,
+            OutboundBrokerPayload::SessionSnapshot {
+                snapshot: compacted,
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())?;
         return Ok(());
     }
 
     let targets = state.broker_targets().await;
     for target in targets {
-        let envelope = encrypt_json(&target.payload_secret, &snapshot)?;
+        let envelope = encrypt_json(&target.payload_secret, &compacted)?;
         publish_payload(
             sender,
             OutboundBrokerPayload::EncryptedSessionSnapshot {
@@ -1083,14 +1178,17 @@ async fn publish_payload(
     sender: &mut futures_util::stream::SplitSink<BrokerSocket, Message>,
     payload: OutboundBrokerPayload,
 ) -> Result<(), tokio_tungstenite::tungstenite::Error> {
+    let summary = summarize_outbound_payload(&payload);
     let frame = ClientMessage::Publish {
         payload: serde_json::to_value(payload).expect("broker payload should serialize"),
     };
-    sender
-        .send(Message::Text(
-            serde_json::to_string(&frame).expect("broker client frame should serialize"),
-        ))
-        .await
+    let frame_text = serde_json::to_string(&frame).expect("broker client frame should serialize");
+    info!(
+        broker_payload = %summary,
+        frame_bytes = frame_text.len(),
+        "publishing broker payload"
+    );
+    sender.send(Message::Text(frame_text)).await
 }
 
 fn resolve_public_relay_registration_path(cwd: &Path, configured: Option<String>) -> PathBuf {

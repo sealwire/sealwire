@@ -14,6 +14,7 @@ export const CONTROL_HEARTBEAT_MS = 5000;
 export const LEASE_EXPIRY_REFRESH_SKEW_MS = 250;
 export const CLAIM_REFRESH_SKEW_MS = 60_000;
 export const CLAIM_REFRESH_FLOOR_MS = 5000;
+export const TRANSCRIPT_PAGE_FETCH_INTERVAL_MS = 300;
 
 const loadedStore = loadRemoteStore();
 
@@ -43,8 +44,13 @@ export const state = {
   socketConnected: false,
   socketReconnectTimer: null,
   transcriptHydrationPromise: null,
-  transcriptHydrationResolvedSignature: null,
   transcriptHydrationSignature: null,
+  transcriptHydrationThreadId: null,
+  transcriptHydrationBaseSnapshot: null,
+  transcriptHydrationOlderCursor: null,
+  transcriptHydrationEntries: new Map(),
+  transcriptHydrationStatus: "idle",
+  transcriptHydrationLastFetchAt: 0,
   threads: [],
 };
 

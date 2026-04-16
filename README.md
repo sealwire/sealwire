@@ -131,7 +131,7 @@ The current implementation supports:
 - broker message compaction so large session snapshots fit websocket frame limits
 - browser-managed remote device keys with `WebCrypto` + `IndexedDB` when available,
   with a compatibility fallback for weaker browser contexts
-- broker-served remote PWA shell with installable manifest and service worker
+- broker-served remote shell with installable manifest; the live control surface avoids service worker caching
 
 The current web UI is intentionally simple:
 
@@ -204,13 +204,13 @@ Notes:
 - set `RELAY_SECURITY_MODE=private` or `RELAY_SECURITY_MODE=managed` to switch visibility mode
 - use `npm run dev` when iterating on the web UI, then `npm run build` to refresh the
   Rust-served assets under `web/`
-- use `npm run dev:full` to launch Vite on `5173`, relay-server on `8787`, and
-  relay-broker on `8788` together for local development; when a private LAN IP
-  is available, pairing links default to that LAN address
+- use `npm run dev:full` to build the Rust-served frontend once, keep `web/`
+  rebuilding on change, and launch relay-server on `8787` plus relay-broker on
+  `8788`; when a private LAN IP is available, pairing links default to that LAN address
 - use `npm run dev:full:local` if you want localhost-only pairing links and a
   localhost-only broker
-- override `RELAY_DEV_VITE_PORT`, `RELAY_DEV_SERVER_PORT`, or
-  `RELAY_DEV_BROKER_PORT` if those defaults are already in use
+- override `RELAY_DEV_SERVER_PORT` or `RELAY_DEV_BROKER_PORT` if those defaults
+  are already in use
 - if you want to override the detected LAN address, set
   `RELAY_BROKER_PUBLIC_URL=ws://<your-lan-ip>:8788`
 

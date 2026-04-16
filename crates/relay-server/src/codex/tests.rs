@@ -234,3 +234,61 @@ async fn handle_notification_preserves_existing_tool_metadata_on_sparse_completi
     assert_eq!(tool.path.as_deref(), Some("frontend/remote/main.js"));
     assert_eq!(tool.query.as_deref(), Some("closeBrokerSocket"));
 }
+
+#[tokio::test]
+async fn handle_notification_ignores_session_updates_for_other_threads() {
+    let (change_tx, _) = watch::channel(0_u64);
+    let state = std::sync::Arc::new(RwLock::new(RelayState::new(
+        "/tmp/project".to_string(),
+        change_tx,
+        SecurityProfile::private(),
+    )));
+
+    {
+        let mut relay = state.write().await;
+        relay.active_thread_id = Some("thread-active".to_string());
+        relay.active_turn_id = Some("turn-active".to_string());
+        relay.upsert_user_message(
+            "item-existing".to_string(),
+            "keep me".to_string(),
+            "turn-active".to_string(),
+        );
+    }
+
+    handle_notification(
+        json!({
+            "method": "item/started",
+            "params": {
+                "threadId": "thread-other",
+                "turnId": "turn-other",
+                "item": {
+                    "id": "item-other",
+                    "type": "agentMessage"
+                }
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    handle_notification(
+        json!({
+            "method": "turn/completed",
+            "params": {
+                "turn": {
+                    "id": "turn-other",
+                    "threadId": "thread-other"
+                }
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    let relay = state.read().await;
+    let snapshot = relay.snapshot();
+    assert_eq!(snapshot.active_thread_id.as_deref(), Some("thread-active"));
+    assert_eq!(snapshot.active_turn_id.as_deref(), Some("turn-active"));
+    assert_eq!(snapshot.transcript.len(), 1);
+    assert_eq!(snapshot.transcript[0].text.as_deref(), Some("keep me"));
+}

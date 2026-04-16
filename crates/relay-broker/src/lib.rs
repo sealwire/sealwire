@@ -94,6 +94,124 @@ pub async fn app(state: BrokerState) -> Router {
     )
 }
 
+fn summarize_published_payload(payload: &serde_json::Value) -> String {
+    let kind = payload
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    match kind {
+        "session_snapshot" => format!(
+            "kind=session_snapshot active_thread_id={} transcript_entries={} logs={}",
+            payload
+                .get("snapshot")
+                .and_then(|snapshot| snapshot.get("active_thread_id"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("-"),
+            payload
+                .get("snapshot")
+                .and_then(|snapshot| snapshot.get("transcript"))
+                .and_then(serde_json::Value::as_array)
+                .map(|items| items.len())
+                .unwrap_or(0),
+            payload
+                .get("snapshot")
+                .and_then(|snapshot| snapshot.get("logs"))
+                .and_then(serde_json::Value::as_array)
+                .map(|items| items.len())
+                .unwrap_or(0),
+        ),
+        "remote_action_result" => {
+            let entry_count = payload
+                .get("thread_transcript")
+                .and_then(|page| page.get("entries"))
+                .and_then(serde_json::Value::as_array)
+                .map(|entries| entries.len())
+                .unwrap_or(0);
+            let part_count = payload
+                .get("thread_transcript")
+                .and_then(|page| page.get("entries"))
+                .and_then(serde_json::Value::as_array)
+                .map(|entries| {
+                    entries
+                        .iter()
+                        .map(|entry| {
+                            entry
+                                .get("parts")
+                                .and_then(serde_json::Value::as_array)
+                                .map(|parts| parts.len())
+                                .unwrap_or(0)
+                        })
+                        .sum::<usize>()
+                })
+                .unwrap_or(0);
+            format!(
+                "kind=remote_action_result action={} ok={} entries={} parts={} next_cursor={} prev_cursor={}",
+                payload
+                    .get("action")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("-"),
+                payload
+                    .get("ok")
+                    .and_then(serde_json::Value::as_bool)
+                    .map(|ok| ok.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+                entry_count,
+                part_count,
+                payload
+                    .get("thread_transcript")
+                    .and_then(|page| page.get("next_cursor"))
+                    .and_then(serde_json::Value::as_u64)
+                    .map(|cursor| cursor.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+                payload
+                    .get("thread_transcript")
+                    .and_then(|page| page.get("prev_cursor"))
+                    .and_then(serde_json::Value::as_u64)
+                    .map(|cursor| cursor.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+            )
+        }
+        "encrypted_session_snapshot" => format!(
+            "kind=encrypted_session_snapshot target_peer_id={} device_id={}",
+            payload
+                .get("target_peer_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("-"),
+            payload
+                .get("device_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("-"),
+        ),
+        "encrypted_remote_action_result" => format!(
+            "kind=encrypted_remote_action_result action_id={} target_peer_id={} device_id={}",
+            payload
+                .get("action_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("-"),
+            payload
+                .get("target_peer_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("-"),
+            payload
+                .get("device_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("-"),
+        ),
+        "encrypted_pairing_result" => format!(
+            "kind=encrypted_pairing_result pairing_id={} target_peer_id={}",
+            payload
+                .get("pairing_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("-"),
+            payload
+                .get("target_peer_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("-"),
+        ),
+        other => format!("kind={other}"),
+    }
+}
+
 #[derive(Clone)]
 struct BrokerAppState {
     broker: BrokerState,
@@ -1169,6 +1287,7 @@ async fn handle_socket(
                         let parsed = serde_json::from_str::<ClientMessage>(&text);
                         match parsed {
                             Ok(ClientMessage::Publish { payload }) => {
+                                let payload_summary = summarize_published_payload(&payload);
                                 if !state
                                     .hardening
                                     .rate_limiter
@@ -1178,6 +1297,13 @@ async fn handle_socket(
                                     )
                                     .await
                                 {
+                                    warn!(
+                                        channel_id,
+                                        peer_id,
+                                        frame_bytes = text.len(),
+                                        payload = %payload_summary,
+                                        "broker publish rate limit exceeded"
+                                    );
                                     let _ = send_message(
                                         &mut sender,
                                         &ServerMessage::Error {
@@ -1191,7 +1317,13 @@ async fn handle_socket(
                                 if let Err(error) =
                                     state.broker.publish(&channel_id, &peer_id, payload).await
                                 {
-                                    warn!(channel_id, peer_id, %error, "failed to publish message");
+                                    warn!(
+                                        channel_id,
+                                        peer_id,
+                                        %error,
+                                        payload = %payload_summary,
+                                        "failed to publish message"
+                                    );
                                 }
                             }
                             Err(error) => {

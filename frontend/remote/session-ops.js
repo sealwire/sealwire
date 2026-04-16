@@ -11,17 +11,31 @@ import {
 import {
   CONTROL_HEARTBEAT_MS,
   LEASE_EXPIRY_REFRESH_SKEW_MS,
+  TRANSCRIPT_PAGE_FETCH_INTERVAL_MS,
   state,
 } from "./state.js";
 import { escapeHtml } from "./utils.js";
 
 export function applySessionSnapshot(snapshot) {
   const effectiveSnapshot = restoreHydratedTranscript(snapshot);
-  renderSession(effectiveSnapshot);
-  scheduleControllerHeartbeat(effectiveSnapshot);
-  scheduleControllerLeaseRefresh(effectiveSnapshot);
-  scheduleClaimRefresh();
-  void hydrateActiveTranscript(effectiveSnapshot);
+  applyRenderedSession(effectiveSnapshot);
+  const scrollTop = dom.remoteTranscript?.scrollTop || 0;
+  const scrollHeight = dom.remoteTranscript?.scrollHeight || 0;
+  const clientHeight = dom.remoteTranscript?.clientHeight || 0;
+  const windowY =
+    typeof window.scrollY === "number"
+      ? window.scrollY
+      : typeof window.pageYOffset === "number"
+        ? window.pageYOffset
+        : 0;
+  const restored =
+    effectiveSnapshot !== snapshot
+      || (snapshot?.transcript_truncated && !effectiveSnapshot?.transcript_truncated)
+      ? "1"
+      : "0";
+  const message = `[scroll] applySessionSnapshot thread=${snapshot?.active_thread_id || "-"} in_truncated=${snapshot?.transcript_truncated ? "1" : "0"} out_truncated=${effectiveSnapshot?.transcript_truncated ? "1" : "0"} restored=${restored} hydration=${state.transcriptHydrationStatus} older_cursor=${state.transcriptHydrationOlderCursor ?? "-"} entries=${effectiveSnapshot?.transcript?.length || 0} top=${scrollTop} height=${scrollHeight} client=${clientHeight} winY=${windowY}`;
+  renderLog(message);
+  console.log(message);
 }
 
 export async function syncRemoteSnapshot(reason, silent = false) {
@@ -188,7 +202,12 @@ export function clearSessionRuntime() {
   cancelControllerLeaseRefresh();
   state.transcriptHydrationPromise = null;
   state.transcriptHydrationSignature = null;
-  state.transcriptHydrationResolvedSignature = null;
+  state.transcriptHydrationThreadId = null;
+  state.transcriptHydrationBaseSnapshot = null;
+  state.transcriptHydrationOlderCursor = null;
+  state.transcriptHydrationEntries = new Map();
+  state.transcriptHydrationStatus = "idle";
+  state.transcriptHydrationLastFetchAt = 0;
 }
 
 function scheduleControllerHeartbeat(session) {
@@ -274,30 +293,29 @@ async function hydrateActiveTranscript(snapshot) {
   }
 
   const signature = transcriptHydrationSignature(snapshot);
-  if (state.transcriptHydrationResolvedSignature === signature) {
+  if (
+    state.transcriptHydrationThreadId !== snapshot.active_thread_id
+    || state.transcriptHydrationSignature !== signature
+  ) {
+    resetTranscriptHydration(snapshot, signature);
+  } else {
+    state.transcriptHydrationBaseSnapshot = snapshot;
+  }
+
+  if (state.transcriptHydrationStatus === "complete") {
     return;
   }
-  if (
-    state.transcriptHydrationPromise &&
-    state.transcriptHydrationSignature === signature
-  ) {
+  if (state.transcriptHydrationPromise) {
     return state.transcriptHydrationPromise;
   }
 
-  state.transcriptHydrationSignature = signature;
+  state.transcriptHydrationStatus = "loading";
+  applyTranscriptHydrationProgress();
   state.transcriptHydrationPromise = (async () => {
     try {
-      const transcript = await fetchFullRemoteTranscript(snapshot.active_thread_id);
-      if (state.session?.active_thread_id !== snapshot.active_thread_id) {
-        return;
-      }
-      state.transcriptHydrationResolvedSignature = signature;
-      applySessionSnapshot({
-        ...state.session,
-        transcript,
-        transcript_truncated: false,
-      });
+      await hydrateRemoteTranscriptPages(snapshot.active_thread_id, signature);
     } catch (error) {
+      state.transcriptHydrationStatus = "idle";
       renderLog(`Remote full transcript sync failed: ${error.message}`);
     } finally {
       if (state.transcriptHydrationSignature === signature) {
@@ -307,64 +325,6 @@ async function hydrateActiveTranscript(snapshot) {
   })();
 
   return state.transcriptHydrationPromise;
-}
-
-export async function fetchFullRemoteTranscript(threadId) {
-  const assembledEntries = new Map();
-  let cursor = 0;
-
-  while (true) {
-    const result = await dispatchOrRecover("fetch_thread_transcript", {
-      input: {
-        thread_id: threadId,
-        cursor,
-      },
-    });
-    const page = result.thread_transcript;
-    if (!page || page.thread_id !== threadId) {
-      throw new Error("remote transcript response is incomplete");
-    }
-
-    for (const chunk of page.chunks || []) {
-      if (!assembledEntries.has(chunk.entry_index)) {
-        assembledEntries.set(chunk.entry_index, {
-          item_id: chunk.item_id,
-          kind: chunk.kind,
-          status: chunk.status,
-          turn_id: chunk.turn_id || null,
-          tool: chunk.tool || null,
-          parts: new Array(chunk.chunk_count).fill(""),
-        });
-      }
-
-      const entry = assembledEntries.get(chunk.entry_index);
-      entry.item_id = chunk.item_id;
-      entry.kind = chunk.kind;
-      entry.status = chunk.status;
-      entry.turn_id = chunk.turn_id || null;
-      entry.tool = chunk.tool || null;
-      if (chunk.chunk_index >= entry.parts.length) {
-        entry.parts.length = chunk.chunk_count;
-      }
-      entry.parts[chunk.chunk_index] = chunk.text || "";
-    }
-
-    if (page.next_cursor == null) {
-      break;
-    }
-    cursor = page.next_cursor;
-  }
-
-  return [...assembledEntries.entries()]
-    .sort(([left], [right]) => left - right)
-    .map(([, entry]) => ({
-      item_id: entry.item_id,
-      kind: entry.kind,
-      text: entry.parts.join("") || null,
-      status: entry.status,
-      turn_id: entry.turn_id,
-      tool: entry.tool,
-    }));
 }
 
 function transcriptHydrationSignature(snapshot) {
@@ -379,9 +339,12 @@ function transcriptHydrationSignature(snapshot) {
       entry.item_id || "",
       entry.kind || "",
       entry.status || "",
-      String((entry.text || "").length),
+      entry.turn_id || "",
+      entry.tool?.item_type || "",
       entry.tool?.name || "",
-      entry.tool?.title || ""
+      entry.tool?.path || "",
+      entry.tool?.url || "",
+      entry.tool?.command || ""
     );
   }
 
@@ -394,20 +357,177 @@ function restoreHydratedTranscript(snapshot) {
   }
 
   const signature = transcriptHydrationSignature(snapshot);
-  if (state.transcriptHydrationResolvedSignature !== signature) {
-    return snapshot;
-  }
   if (
-    state.session?.active_thread_id !== snapshot.active_thread_id ||
-    state.session?.transcript_truncated !== false ||
-    !Array.isArray(state.session?.transcript)
+    state.transcriptHydrationThreadId !== snapshot.active_thread_id
+    || state.transcriptHydrationSignature !== signature
+    || !state.transcriptHydrationEntries.size
   ) {
     return snapshot;
   }
 
+  return buildHydratedTranscriptSnapshot(snapshot);
+}
+
+function applyRenderedSession(session, { hydrateTranscript = true } = {}) {
+  renderSession(session);
+  scheduleControllerHeartbeat(session);
+  scheduleControllerLeaseRefresh(session);
+  scheduleClaimRefresh();
+  if (hydrateTranscript) {
+    void hydrateActiveTranscript(session);
+  }
+}
+
+function resetTranscriptHydration(snapshot, signature) {
+  state.transcriptHydrationSignature = signature;
+  state.transcriptHydrationThreadId = snapshot.active_thread_id;
+  state.transcriptHydrationBaseSnapshot = snapshot;
+  state.transcriptHydrationOlderCursor = null;
+  state.transcriptHydrationEntries = new Map();
+  state.transcriptHydrationStatus = "idle";
+  state.transcriptHydrationLastFetchAt = 0;
+}
+
+async function hydrateRemoteTranscriptPages(threadId, signature) {
+  while (state.transcriptHydrationThreadId === threadId) {
+    if (state.transcriptHydrationStatus === "complete") {
+      state.transcriptHydrationStatus = "complete";
+      applyTranscriptHydrationProgress();
+      return;
+    }
+
+    await waitForTranscriptFetchWindow();
+
+    const result = await dispatchOrRecover("fetch_thread_transcript", {
+      input: {
+        thread_id: threadId,
+        before: state.transcriptHydrationOlderCursor,
+      },
+    });
+    state.transcriptHydrationLastFetchAt = Date.now();
+
+    const page = result.thread_transcript;
+    if (!page || page.thread_id !== threadId) {
+      throw new Error("remote transcript response is incomplete");
+    }
+
+    mergeTranscriptHydrationPage(page);
+    state.transcriptHydrationOlderCursor = page.prev_cursor ?? null;
+    state.transcriptHydrationStatus =
+      page.prev_cursor == null ? "complete" : "loading";
+    applyTranscriptHydrationProgress();
+
+    if (state.transcriptHydrationSignature !== signature) {
+      return;
+    }
+  }
+}
+
+function mergeTranscriptHydrationPage(page) {
+  for (const entryPage of page.entries || []) {
+    if (!state.transcriptHydrationEntries.has(entryPage.entry_index)) {
+      state.transcriptHydrationEntries.set(entryPage.entry_index, {
+        item_id: entryPage.item_id,
+        kind: entryPage.kind,
+        status: entryPage.status,
+        turn_id: entryPage.turn_id || null,
+        tool: entryPage.tool || null,
+        parts: new Array(entryPage.part_count),
+      });
+    }
+
+    const entry = state.transcriptHydrationEntries.get(entryPage.entry_index);
+    entry.item_id = entryPage.item_id;
+    entry.kind = entryPage.kind;
+    entry.status = entryPage.status;
+    entry.turn_id = entryPage.turn_id || null;
+    entry.tool = entryPage.tool || null;
+    if (entryPage.part_count > entry.parts.length) {
+      entry.parts.length = entryPage.part_count;
+    }
+
+    for (const part of entryPage.parts || []) {
+      if (part.part_index >= entry.parts.length) {
+        entry.parts.length = entryPage.part_count;
+      }
+      entry.parts[part.part_index] = part.text || "";
+    }
+  }
+}
+
+function applyTranscriptHydrationProgress() {
+  const snapshot = state.transcriptHydrationBaseSnapshot;
+  if (!snapshot || state.session?.active_thread_id !== snapshot.active_thread_id) {
+    return;
+  }
+
+  applyRenderedSession(buildHydratedTranscriptSnapshot(snapshot), {
+    hydrateTranscript: false,
+  });
+}
+
+function buildHydratedTranscriptSnapshot(snapshot) {
+  const loadedEntries = buildHydratedTranscriptEntries();
+  const resolvedTailEntries = new Map(
+    loadedEntries
+      .filter((entry) => entry.complete && entry.item_id)
+      .map((entry) => [entry.item_id, entry])
+  );
+  const tailEntries = (snapshot.transcript || []).map((entry) => {
+    const resolved = entry.item_id ? resolvedTailEntries.get(entry.item_id) : null;
+    if (!resolved) {
+      return entry;
+    }
+
+    const { complete, ...nextEntry } = resolved;
+    return nextEntry;
+  });
+  const tailItemIds = new Set((snapshot.transcript || []).map((entry) => entry.item_id).filter(Boolean));
+  const olderLoadedEntries = loadedEntries
+    .filter((entry) => !tailItemIds.has(entry.item_id))
+    .map(({ complete, ...entry }) => entry);
+
   return {
     ...snapshot,
-    transcript: state.session.transcript,
-    transcript_truncated: false,
+    transcript: [...olderLoadedEntries, ...tailEntries],
+    transcript_truncated: state.transcriptHydrationStatus !== "complete",
   };
+}
+
+function buildHydratedTranscriptEntries() {
+  return [...state.transcriptHydrationEntries.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([, entry]) => {
+      let complete = true;
+      let text = "";
+      for (const part of entry.parts) {
+        if (typeof part !== "string") {
+          complete = false;
+          continue;
+        }
+        text += part;
+      }
+
+      return {
+        item_id: entry.item_id,
+        kind: entry.kind,
+        text: text || null,
+        status: entry.status,
+        turn_id: entry.turn_id,
+        tool: entry.tool,
+        complete,
+      };
+    });
+}
+
+async function waitForTranscriptFetchWindow() {
+  const elapsedMs = Date.now() - state.transcriptHydrationLastFetchAt;
+  const delayMs = Math.max(0, TRANSCRIPT_PAGE_FETCH_INTERVAL_MS - elapsedMs);
+  if (delayMs <= 0) {
+    return;
+  }
+
+  await new Promise((resolve) => {
+    window.setTimeout(resolve, delayMs);
+  });
 }

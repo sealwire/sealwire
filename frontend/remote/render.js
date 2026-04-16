@@ -23,6 +23,11 @@ import { escapeHtml, formatTimestamp, shortId, workspaceBasename } from "./utils
 
 let onResumeThread = () => {};
 let onSelectRelay = () => {};
+const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 80;
+const TOP_SCROLL_PRESERVE_THRESHOLD_PX = 80;
+const REMOTE_SCROLL_DEBUG_BANNER = "remote-scroll-debug-2026-04-16b";
+let pendingTranscriptScrollFrame = null;
+let transcriptScrollOperationId = 0;
 
 export function configureRenderHandlers(handlers) {
   onResumeThread = handlers.onResumeThread || onResumeThread;
@@ -30,6 +35,7 @@ export function configureRenderHandlers(handlers) {
 }
 
 export function renderSession(session) {
+  const previousSession = state.session;
   state.session = session;
   syncRemoteChatView();
   const approval = session.pending_approvals?.[0] || null;
@@ -46,8 +52,15 @@ export function renderSession(session) {
   syncRemoteModelSuggestions(session.available_models || [], session.model);
 
   renderSessionChrome(session);
-  renderTranscriptPanel(session, approval, canWrite);
+  renderTranscriptPanel(session, approval, canWrite, previousSession);
   renderLogs(session.logs || []);
+  debugScrollEvent("renderSession", {
+    thread: session.active_thread_id || "-",
+    prevThread: previousSession?.active_thread_id || "-",
+    entries: session.transcript?.length || 0,
+    truncated: session.transcript_truncated ? "1" : "0",
+    status: session.current_status || "-",
+  });
   renderThreads(state.threads);
 
   dom.remoteSendButton.disabled = !hasActiveSession || !hasControllerLease;
@@ -158,8 +171,13 @@ export function renderEmptyState() {
   renderTranscriptEmptyState();
 }
 
-function renderTranscriptPanel(session, approval, canWrite) {
+function renderTranscriptPanel(session, approval, canWrite, previousSession = null) {
   const entries = session.transcript || [];
+  const hydrationLoading =
+    session.transcript_truncated
+    && Boolean(state.transcriptHydrationBaseSnapshot)
+    && state.transcriptHydrationThreadId === session.active_thread_id
+    && state.transcriptHydrationStatus === "loading";
 
   if (!entries.length && !approval) {
     if (session.active_thread_id) {
@@ -195,9 +213,153 @@ function renderTranscriptPanel(session, approval, canWrite) {
     return;
   }
 
-  dom.remoteTranscript.innerHTML = renderTranscriptMarkup(entries, approval);
-  dom.remoteTranscript.scrollTop = dom.remoteTranscript.scrollHeight;
+  const previousScrollTop = dom.remoteTranscript.scrollTop || 0;
+  const previousScrollHeight = dom.remoteTranscript.scrollHeight || 0;
+  const shouldAutoScroll = shouldStickTranscriptToBottom(dom.remoteTranscript, previousSession);
+  const prependedOlderTranscript = didPrependOlderTranscript(
+    previousSession?.transcript || [],
+    entries
+  );
+  debugScrollEvent("renderTranscriptPanel:before", {
+    thread: session.active_thread_id || "-",
+    entries: entries.length,
+    truncated: session.transcript_truncated ? "1" : "0",
+    loading: hydrationLoading ? "1" : "0",
+    auto: shouldAutoScroll ? "1" : "0",
+    prepended: prependedOlderTranscript ? "1" : "0",
+    prevTop: previousScrollTop,
+    prevHeight: previousScrollHeight,
+  });
+  const loadingBanner = hydrationLoading
+    ? `<div class="transcript-loading-banner">Loading earlier transcript…</div>`
+    : "";
+  dom.remoteTranscript.innerHTML = `${loadingBanner}${renderTranscriptMarkup(entries, approval)}`;
+  let nextScrollTop = previousScrollTop;
+  if (shouldAutoScroll) {
+    nextScrollTop = dom.remoteTranscript.scrollHeight;
+    applyTranscriptScrollPosition(nextScrollTop, "stick-bottom");
+    return;
+  }
+
+  if (prependedOlderTranscript) {
+    if (previousScrollTop <= TOP_SCROLL_PRESERVE_THRESHOLD_PX) {
+      applyTranscriptScrollPosition(0, "prepended-keep-top");
+      return;
+    }
+    nextScrollTop = Math.max(
+      0,
+      dom.remoteTranscript.scrollHeight - previousScrollHeight + previousScrollTop
+    );
+    applyTranscriptScrollPosition(nextScrollTop, "prepended-anchor");
+    return;
+  }
+
+  const maxScrollTop = Math.max(
+    0,
+    (dom.remoteTranscript.scrollHeight || 0) - (dom.remoteTranscript.clientHeight || 0)
+  );
+  nextScrollTop = Math.min(previousScrollTop, maxScrollTop);
+  applyTranscriptScrollPosition(nextScrollTop, "preserve");
 }
+
+function shouldStickTranscriptToBottom(transcript, previousSession) {
+  if (!previousSession?.active_thread_id) {
+    return true;
+  }
+
+  const scrollHeight = transcript.scrollHeight || 0;
+  const clientHeight = transcript.clientHeight || 0;
+  const scrollTop = transcript.scrollTop || 0;
+  return scrollHeight - clientHeight - scrollTop <= AUTO_SCROLL_BOTTOM_THRESHOLD_PX;
+}
+
+function didPrependOlderTranscript(previousEntries, nextEntries) {
+  if (!previousEntries.length || nextEntries.length <= previousEntries.length) {
+    return false;
+  }
+
+  const offset = nextEntries.length - previousEntries.length;
+  return previousEntries.every((entry, index) => {
+    return transcriptEntryIdentity(entry) === transcriptEntryIdentity(nextEntries[index + offset]);
+  });
+}
+
+function transcriptEntryIdentity(entry) {
+  return [
+    entry?.item_id || "",
+    entry?.kind || "",
+    entry?.status || "",
+    entry?.turn_id || "",
+    entry?.tool?.item_type || "",
+    entry?.tool?.name || "",
+  ].join("|");
+}
+
+function applyTranscriptScrollPosition(scrollTop, reason) {
+  const before = collectScrollMetrics();
+  const operationId = ++transcriptScrollOperationId;
+  const apply = () => {
+    pendingTranscriptScrollFrame = null;
+    if (!dom.remoteTranscript) {
+      return;
+    }
+    dom.remoteTranscript.scrollTop = scrollTop;
+    debugScrollEvent("applyTranscriptScrollPosition", {
+      operationId,
+      reason,
+      targetTop: scrollTop,
+      beforeTop: before.top,
+      beforeHeight: before.height,
+      beforeClient: before.client,
+      afterTop: dom.remoteTranscript.scrollTop || 0,
+      afterHeight: dom.remoteTranscript.scrollHeight || 0,
+      afterClient: dom.remoteTranscript.clientHeight || 0,
+    });
+  };
+
+  if (typeof window.requestAnimationFrame === "function") {
+    if (pendingTranscriptScrollFrame != null && typeof window.cancelAnimationFrame === "function") {
+      window.cancelAnimationFrame(pendingTranscriptScrollFrame);
+    }
+    pendingTranscriptScrollFrame = window.requestAnimationFrame(apply);
+    debugScrollEvent("scheduleTranscriptScrollPosition", {
+      operationId,
+      reason,
+      targetTop: scrollTop,
+    });
+    return;
+  }
+
+  apply();
+}
+
+function collectScrollMetrics() {
+  return {
+    top: dom.remoteTranscript?.scrollTop || 0,
+    height: dom.remoteTranscript?.scrollHeight || 0,
+    client: dom.remoteTranscript?.clientHeight || 0,
+  };
+}
+
+function debugScrollEvent(event, details = {}) {
+  const transcript = collectScrollMetrics();
+  const activeTag = document.activeElement?.tagName || "-";
+  const activeId = document.activeElement?.id || "-";
+  const windowY =
+    typeof window.scrollY === "number"
+      ? window.scrollY
+      : typeof window.pageYOffset === "number"
+        ? window.pageYOffset
+        : 0;
+  const detailText = Object.entries(details)
+    .map(([key, value]) => `${key}=${String(value)}`)
+    .join(" ");
+  const message = `[scroll] ${event} top=${transcript.top} height=${transcript.height} client=${transcript.client} winY=${windowY} active=${activeTag}#${activeId}${detailText ? ` ${detailText}` : ""}`;
+  appendClientLog(message);
+  console.log(message);
+}
+
+console.log(`[remote] loaded ${REMOTE_SCROLL_DEBUG_BANNER}`);
 
 export function setRemoteSessionPanelOpen(open) {
   if (!state.remoteAuth) {

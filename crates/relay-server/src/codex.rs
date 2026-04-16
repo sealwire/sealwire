@@ -13,6 +13,7 @@ use tokio::{
     process::{Child, ChildStderr, ChildStdin, ChildStdout, Command},
     sync::{oneshot, Mutex, RwLock},
 };
+use tracing::info;
 
 use crate::{
     codex_local::{
@@ -522,6 +523,7 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
     let params = payload.get("params").cloned().unwrap_or(Value::Null);
     let mut relay = state.write().await;
     let mut changed = false;
+    let notification_thread_id = notification_thread_id(&params);
 
     match method {
         "thread/started" => {
@@ -539,12 +541,20 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
             changed = true;
         }
         "turn/started" => {
+            if !should_apply_session_notification(&relay, notification_thread_id.as_deref()) {
+                log_ignored_session_notification(method, notification_thread_id.as_deref(), &relay);
+                return;
+            }
             if let Some(turn_id) = string_at(&params, &["turn", "id"]) {
                 relay.set_active_turn(Some(turn_id));
                 changed = true;
             }
         }
         "turn/completed" => {
+            if !should_apply_session_notification(&relay, notification_thread_id.as_deref()) {
+                log_ignored_session_notification(method, notification_thread_id.as_deref(), &relay);
+                return;
+            }
             relay.set_active_turn(None);
             changed = true;
             if let Some(turn_error) =
@@ -556,6 +566,14 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
         }
         "item/started" => match string_at(&params, &["item", "type"]).as_deref() {
             Some("agentMessage") => {
+                if !should_apply_session_notification(&relay, notification_thread_id.as_deref()) {
+                    log_ignored_session_notification(
+                        method,
+                        notification_thread_id.as_deref(),
+                        &relay,
+                    );
+                    return;
+                }
                 if let (Some(item_id), Some(turn_id)) = (
                     string_at(&params, &["item", "id"]),
                     string_at(&params, &["turnId"]),
@@ -571,6 +589,14 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
                 }
             }
             _ => {
+                if !should_apply_session_notification(&relay, notification_thread_id.as_deref()) {
+                    log_ignored_session_notification(
+                        method,
+                        notification_thread_id.as_deref(),
+                        &relay,
+                    );
+                    return;
+                }
                 changed |= upsert_transcript_item_from_value(
                     &mut relay,
                     value_at(&params, &["item"]),
@@ -580,6 +606,10 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
             }
         },
         "item/agentMessage/delta" => {
+            if !should_apply_session_notification(&relay, notification_thread_id.as_deref()) {
+                log_ignored_session_notification(method, notification_thread_id.as_deref(), &relay);
+                return;
+            }
             if let (Some(item_id), Some(turn_id), Some(delta)) = (
                 string_at(&params, &["itemId"]),
                 string_at(&params, &["turnId"]),
@@ -591,6 +621,14 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
         }
         "item/completed" => match string_at(&params, &["item", "type"]).as_deref() {
             Some("userMessage") => {
+                if !should_apply_session_notification(&relay, notification_thread_id.as_deref()) {
+                    log_ignored_session_notification(
+                        method,
+                        notification_thread_id.as_deref(),
+                        &relay,
+                    );
+                    return;
+                }
                 if let (Some(item_id), Some(turn_id), Some(text)) = (
                     string_at(&params, &["item", "id"]),
                     string_at(&params, &["turnId"]),
@@ -601,6 +639,14 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
                 }
             }
             Some("agentMessage") => {
+                if !should_apply_session_notification(&relay, notification_thread_id.as_deref()) {
+                    log_ignored_session_notification(
+                        method,
+                        notification_thread_id.as_deref(),
+                        &relay,
+                    );
+                    return;
+                }
                 if let (Some(item_id), Some(turn_id), Some(text)) = (
                     string_at(&params, &["item", "id"]),
                     string_at(&params, &["turnId"]),
@@ -611,6 +657,14 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
                 }
             }
             Some("commandExecution") => {
+                if !should_apply_session_notification(&relay, notification_thread_id.as_deref()) {
+                    log_ignored_session_notification(
+                        method,
+                        notification_thread_id.as_deref(),
+                        &relay,
+                    );
+                    return;
+                }
                 if let (Some(item_id), Some(turn_id), Some(command)) = (
                     string_at(&params, &["item", "id"]),
                     string_at(&params, &["turnId"]),
@@ -628,6 +682,14 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
                 }
             }
             _ => {
+                if !should_apply_session_notification(&relay, notification_thread_id.as_deref()) {
+                    log_ignored_session_notification(
+                        method,
+                        notification_thread_id.as_deref(),
+                        &relay,
+                    );
+                    return;
+                }
                 changed |= upsert_transcript_item_from_value(
                     &mut relay,
                     value_at(&params, &["item"]),
@@ -676,6 +738,32 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
     if changed {
         relay.notify();
     }
+}
+
+fn notification_thread_id(params: &Value) -> Option<String> {
+    string_at(params, &["threadId"])
+        .or_else(|| string_at(params, &["turn", "threadId"]))
+        .or_else(|| string_at(params, &["item", "threadId"]))
+}
+
+fn should_apply_session_notification(relay: &RelayState, thread_id: Option<&str>) -> bool {
+    match (relay.active_thread_id.as_deref(), thread_id) {
+        (_, None) => true,
+        (None, Some(_)) => false,
+        (Some(active_thread_id), Some(thread_id)) => active_thread_id == thread_id,
+    }
+}
+
+fn log_ignored_session_notification(method: &str, thread_id: Option<&str>, relay: &RelayState) {
+    let transcript_entries = relay.snapshot().transcript.len();
+    info!(
+        method,
+        notification_thread_id = thread_id.unwrap_or("-"),
+        active_thread_id = relay.active_thread_id.as_deref().unwrap_or("-"),
+        active_turn_id = relay.active_turn_id.as_deref().unwrap_or("-"),
+        transcript_entries,
+        "ignored codex notification for non-active thread"
+    );
 }
 
 fn parse_thread_summary(thread: &Value) -> Result<ThreadSummaryView, String> {

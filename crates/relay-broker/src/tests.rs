@@ -2016,3 +2016,40 @@ async fn idle_connections_are_closed() {
         other => panic!("unexpected idle-timeout response: {other:?}"),
     }
 }
+
+#[test]
+fn summarize_published_payload_reports_transcript_page_stats() {
+    let summary = summarize_published_payload(&json!({
+        "kind": "remote_action_result",
+        "action": "fetch_thread_transcript",
+        "ok": true,
+        "thread_transcript": {
+            "thread_id": "thread-1",
+            "entries": [
+                {
+                    "entry_index": 0,
+                    "parts": [
+                        {"part_index": 0, "text": "a"},
+                        {"part_index": 1, "text": "b"}
+                    ]
+                },
+                {
+                    "entry_index": 1,
+                    "parts": [
+                        {"part_index": 0, "text": "c"}
+                    ]
+                }
+            ],
+            "next_cursor": 12,
+            "prev_cursor": 4
+        }
+    }));
+
+    assert!(summary.contains("kind=remote_action_result"));
+    assert!(summary.contains("action=fetch_thread_transcript"));
+    assert!(summary.contains("ok=true"));
+    assert!(summary.contains("entries=2"));
+    assert!(summary.contains("parts=3"));
+    assert!(summary.contains("next_cursor=12"));
+    assert!(summary.contains("prev_cursor=4"));
+}

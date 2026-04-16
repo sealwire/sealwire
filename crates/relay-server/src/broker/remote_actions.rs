@@ -1,6 +1,7 @@
 use futures_util::stream::SplitSink;
 use serde::{Deserialize, Serialize};
 use tokio_tungstenite::tungstenite::Message;
+use tracing::info;
 
 use crate::{
     protocol::{
@@ -315,6 +316,15 @@ pub(super) async fn handle_remote_action(
         ),
     };
     let snapshot = state.snapshot().await;
+    info!(
+        action = action_kind.as_str(),
+        active_thread_id = snapshot.active_thread_id.as_deref().unwrap_or("-"),
+        active_turn_id = snapshot.active_turn_id.as_deref().unwrap_or("-"),
+        transcript_entries = snapshot.transcript.len(),
+        transcript_truncated = snapshot.transcript_truncated,
+        logs = snapshot.logs.len(),
+        "publishing plaintext remote action result snapshot"
+    );
 
     let (ok, outcome, error) = match result {
         Ok(outcome) => (true, outcome, None),
@@ -501,6 +511,15 @@ pub(super) async fn handle_encrypted_remote_action(
     };
 
     let snapshot = state.snapshot().await;
+    info!(
+        action = action_kind.as_str(),
+        active_thread_id = snapshot.active_thread_id.as_deref().unwrap_or("-"),
+        active_turn_id = snapshot.active_turn_id.as_deref().unwrap_or("-"),
+        transcript_entries = snapshot.transcript.len(),
+        transcript_truncated = snapshot.transcript_truncated,
+        logs = snapshot.logs.len(),
+        "publishing encrypted remote action result snapshot"
+    );
     let (ok, outcome, error) = match result {
         Ok(outcome) => (true, outcome, None),
         Err(error) => {
@@ -601,17 +620,25 @@ async fn execute_remote_action(
                 session_claim_expires_at: None,
                 ..RemoteActionOutcome::default()
             }),
-        RemoteActionRequest::FetchThreadTranscript { input } => state
-            .read_thread_transcript(input)
-            .await
-            .map(|thread_transcript| RemoteActionOutcome {
-                receipt: None,
-                threads: None,
-                thread_transcript: Some(thread_transcript),
-                session_claim: None,
-                session_claim_expires_at: None,
-                ..RemoteActionOutcome::default()
-            }),
+        RemoteActionRequest::FetchThreadTranscript { input } => {
+            info!(
+                thread_id = %input.thread_id,
+                cursor = ?input.cursor,
+                before = ?input.before,
+                "executing remote transcript fetch"
+            );
+            state
+                .read_thread_transcript(input)
+                .await
+                .map(|thread_transcript| RemoteActionOutcome {
+                    receipt: None,
+                    threads: None,
+                    thread_transcript: Some(thread_transcript),
+                    session_claim: None,
+                    session_claim_expires_at: None,
+                    ..RemoteActionOutcome::default()
+                })
+        }
         RemoteActionRequest::DecideApproval { request_id, input } => state
             .decide_approval(&request_id, input)
             .await
@@ -848,8 +875,18 @@ async fn publish_plain_remote_action_result(
     ok: bool,
     _device_id: String,
 ) -> Result<(), String> {
+    let raw_transcript_entries = snapshot.transcript.len();
+    let raw_transcript_truncated = snapshot.transcript_truncated;
     let snapshot =
         snapshot.compact_for(crate::protocol::SessionSnapshotCompactProfile::RemoteSurface);
+    info!(
+        action = action.as_str(),
+        raw_transcript_entries,
+        raw_transcript_truncated,
+        compacted_transcript_entries = snapshot.transcript.len(),
+        compacted_transcript_truncated = snapshot.transcript_truncated,
+        "publishing plaintext remote action result compacted snapshot"
+    );
     let threads = outcome.threads.map(|threads| {
         threads.compact_for(crate::protocol::ThreadsResponseCompactProfile::RemoteSurface)
     });
@@ -919,8 +956,18 @@ async fn publish_remote_action_result_private(
     ok: bool,
     response_secret: Option<&str>,
 ) -> Result<(), String> {
+    let raw_transcript_entries = snapshot.transcript.len();
+    let raw_transcript_truncated = snapshot.transcript_truncated;
     let snapshot =
         snapshot.compact_for(crate::protocol::SessionSnapshotCompactProfile::RemoteSurface);
+    info!(
+        action = action.as_str(),
+        raw_transcript_entries,
+        raw_transcript_truncated,
+        compacted_transcript_entries = snapshot.transcript.len(),
+        compacted_transcript_truncated = snapshot.transcript_truncated,
+        "publishing encrypted remote action result compacted snapshot"
+    );
     let threads = outcome.threads.map(|threads| {
         threads.compact_for(crate::protocol::ThreadsResponseCompactProfile::RemoteSurface)
     });
@@ -1004,8 +1051,7 @@ fn cached_remote_action_result(
     CachedRemoteActionResult {
         action_kind: action.as_str().to_string(),
         ok,
-        snapshot: snapshot
-            .compact_for(crate::protocol::SessionSnapshotCompactProfile::RemoteSurface),
+        snapshot,
         receipt: outcome.receipt,
         threads: outcome.threads.map(|threads| {
             threads.compact_for(crate::protocol::ThreadsResponseCompactProfile::RemoteSurface)
@@ -1018,5 +1064,77 @@ fn cached_remote_action_result(
         claim_challenge_expires_at: outcome.claim_challenge_expires_at,
         response_secret,
         error,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::{SecurityMode, TranscriptEntryKind, TranscriptEntryView};
+
+    fn make_snapshot() -> SessionSnapshot {
+        SessionSnapshot {
+            provider: "codex",
+            service_ready: true,
+            codex_connected: true,
+            broker_connected: true,
+            broker_channel_id: Some("room".to_string()),
+            broker_peer_id: Some("relay".to_string()),
+            security_mode: SecurityMode::Private,
+            e2ee_enabled: true,
+            broker_can_read_content: false,
+            audit_enabled: false,
+            active_thread_id: Some("thread-1".to_string()),
+            active_controller_device_id: Some("device-1".to_string()),
+            active_controller_last_seen_at: Some(1),
+            controller_lease_expires_at: Some(2),
+            controller_lease_seconds: 15,
+            active_turn_id: Some("turn-1".to_string()),
+            current_status: "idle".to_string(),
+            active_flags: vec![],
+            current_cwd: "/tmp/project".to_string(),
+            model: "gpt-5.4".to_string(),
+            available_models: vec![],
+            approval_policy: "untrusted".to_string(),
+            sandbox: "workspace-write".to_string(),
+            reasoning_effort: "medium".to_string(),
+            allowed_roots: vec![],
+            device_records: vec![],
+            paired_devices: vec![],
+            pending_pairing_requests: vec![],
+            pending_approvals: vec![],
+            transcript_truncated: false,
+            transcript: (0..12)
+                .map(|index| TranscriptEntryView {
+                    item_id: Some(format!("item-{index}")),
+                    kind: TranscriptEntryKind::AgentText,
+                    text: Some("x".repeat(2_000)),
+                    status: "completed".to_string(),
+                    turn_id: Some(format!("turn-{index}")),
+                    tool: None,
+                })
+                .collect(),
+            logs: vec![],
+        }
+    }
+
+    #[test]
+    fn cached_remote_action_result_keeps_canonical_snapshot() {
+        let snapshot = make_snapshot();
+
+        let cached = cached_remote_action_result(
+            RemoteActionKind::Heartbeat,
+            snapshot.clone(),
+            RemoteActionOutcome::default(),
+            None,
+            true,
+            None,
+        );
+
+        assert_eq!(cached.snapshot.transcript.len(), snapshot.transcript.len());
+        assert_eq!(
+            cached.snapshot.transcript_truncated,
+            snapshot.transcript_truncated
+        );
     }
 }

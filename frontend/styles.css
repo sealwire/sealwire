@@ -1058,6 +1058,7 @@ input:focus, textarea:focus, select:focus {
   flex: 1 1 auto;
   height: 100%;
   overflow-y: auto;
+  overflow-anchor: none;
   padding: 24px 32px 140px;
   scroll-padding-bottom: 140px;
 }
@@ -1078,6 +1079,16 @@ input:focus, textarea:focus, select:focus {
 }
 .thread-empty h2 { margin: 0; font-size: 18px; font-weight: 500; }
 .thread-empty p { margin: 8px 0 0; font-size: 14px; color: var(--text-secondary); }
+.transcript-loading-banner {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  background: color-mix(in srgb, var(--bg-elevated) 84%, white 16%);
+  color: var(--text-secondary);
+  font-size: 12px;
+  letter-spacing: 0.01em;
+}
 
 .suggestion-row {
   display: flex;

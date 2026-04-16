@@ -238,6 +238,28 @@ fn compact_for_broker_drops_logs_and_transcript_as_last_resort() {
 }
 
 #[test]
+fn compact_for_broker_preserves_existing_transcript_truncated_flag() {
+    let mut snapshot = make_snapshot();
+    snapshot.transcript_truncated = true;
+    snapshot.logs.clear();
+    snapshot.transcript = (0..4)
+        .map(|index| TranscriptEntryView {
+            item_id: Some(format!("item-{index}")),
+            kind: TranscriptEntryKind::AgentText,
+            text: Some(format!("entry-{index}")),
+            status: "completed".to_string(),
+            turn_id: Some(format!("turn-{index}")),
+            tool: None,
+        })
+        .collect();
+
+    let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::RemoteSurface);
+
+    assert!(compacted.transcript_truncated);
+    assert_eq!(compacted.transcript.len(), 4);
+}
+
+#[test]
 fn thread_transcript_response_chunks_large_transcripts() {
     let transcript = vec![
         TranscriptEntryView {
@@ -267,7 +289,7 @@ fn thread_transcript_response_chunks_large_transcripts() {
             cursor,
         );
         assert!(serde_json::to_vec(&page).unwrap().len() <= THREADS_RESPONSE_TARGET_BYTES);
-        assert!(!page.chunks.is_empty());
+        assert!(!page.entries.is_empty());
         cursor = match page.next_cursor {
             Some(next_cursor) => {
                 pages.push(page);
@@ -284,16 +306,41 @@ fn thread_transcript_response_chunks_large_transcripts() {
 
     let rebuilt = pages
         .into_iter()
-        .flat_map(|page| page.chunks.into_iter())
-        .fold(std::collections::BTreeMap::new(), |mut acc, chunk| {
-            acc.entry(chunk.entry_index)
-                .or_insert_with(String::new)
-                .push_str(&chunk.text);
+        .flat_map(|page| page.entries.into_iter())
+        .fold(std::collections::BTreeMap::new(), |mut acc, entry| {
+            let buffer = acc.entry(entry.entry_index).or_insert_with(String::new);
+            for part in entry.parts {
+                buffer.push_str(&part.text);
+            }
             acc
         });
 
     assert_eq!(rebuilt.get(&0).unwrap(), &"长".repeat(9_500));
     assert_eq!(rebuilt.get(&1).unwrap(), "next");
+}
+
+#[test]
+fn thread_transcript_response_groups_parts_under_one_entry() {
+    let transcript = vec![TranscriptEntryView {
+        item_id: Some("item-1".to_string()),
+        kind: TranscriptEntryKind::AgentText,
+        text: Some("a".repeat(4_500)),
+        status: "completed".to_string(),
+        turn_id: Some("turn-1".to_string()),
+        tool: None,
+    }];
+
+    let page = ThreadTranscriptResponse::from_transcript("thread-1".to_string(), transcript, 0);
+
+    assert_eq!(page.entries.len(), 1);
+    assert_eq!(page.entries[0].entry_index, 0);
+    assert_eq!(page.entries[0].item_id, "item-1");
+    assert_eq!(page.entries[0].part_count, 2);
+    assert_eq!(page.entries[0].parts.len(), 2);
+    assert_eq!(page.entries[0].parts[0].part_index, 0);
+    assert_eq!(page.entries[0].parts[0].text, "a".repeat(4_000));
+    assert_eq!(page.entries[0].parts[1].part_index, 1);
+    assert_eq!(page.entries[0].parts[1].text, "a".repeat(500));
 }
 
 #[test]
@@ -318,7 +365,7 @@ fn thread_transcript_response_can_page_backwards_from_tail() {
             transcript.clone(),
             before,
         );
-        assert!(!page.chunks.is_empty());
+        assert!(!page.entries.is_empty());
         assert!(serde_json::to_vec(&page).unwrap().len() <= THREADS_RESPONSE_TARGET_BYTES);
         before = page.prev_cursor;
         pages.push(page);
@@ -330,11 +377,12 @@ fn thread_transcript_response_can_page_backwards_from_tail() {
     let rebuilt = pages
         .into_iter()
         .rev()
-        .flat_map(|page| page.chunks.into_iter())
-        .fold(std::collections::BTreeMap::new(), |mut acc, chunk| {
-            acc.entry(chunk.entry_index)
-                .or_insert_with(String::new)
-                .push_str(&chunk.text);
+        .flat_map(|page| page.entries.into_iter())
+        .fold(std::collections::BTreeMap::new(), |mut acc, entry| {
+            let buffer = acc.entry(entry.entry_index).or_insert_with(String::new);
+            for part in entry.parts {
+                buffer.push_str(&part.text);
+            }
             acc
         });
 
