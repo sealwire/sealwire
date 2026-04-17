@@ -57,6 +57,14 @@ export const state = {
 
 syncCurrentRemoteAuth();
 
+function applyStatePatch(patch, { persist = false } = {}) {
+  Object.assign(state, patch);
+  if (persist) {
+    persistRemoteStore();
+  }
+  return state;
+}
+
 export function connectionTarget() {
   if (state.pairingTicket) {
     return {
@@ -108,9 +116,15 @@ export function clearSessionClaim() {
     return;
   }
 
-  state.remoteAuth.sessionClaim = null;
-  state.remoteAuth.sessionClaimExpiresAt = null;
-  persistRemoteStore();
+  const patch = createRemoteProfileUpdatePatch(state, state.remoteAuth.relayId, {
+    sessionClaim: null,
+    sessionClaimExpiresAt: null,
+  });
+  if (!patch) {
+    return;
+  }
+
+  applyStatePatch(patch, { persist: true });
 }
 
 export function clearRecoveredSocketPeerId() {
@@ -126,9 +140,15 @@ export function setSessionClaim(claim, expiresAt) {
     return;
   }
 
-  state.remoteAuth.sessionClaim = claim;
-  state.remoteAuth.sessionClaimExpiresAt = expiresAt || null;
-  persistRemoteStore();
+  const patch = createRemoteProfileUpdatePatch(state, state.remoteAuth.relayId, {
+    sessionClaim: claim,
+    sessionClaimExpiresAt: expiresAt || null,
+  });
+  if (!patch) {
+    return;
+  }
+
+  applyStatePatch(patch, { persist: true });
 }
 
 export function setSocketPeerId(value) {
@@ -207,13 +227,42 @@ export function candidateDeviceTokens() {
   return state.remoteAuth?.payloadSecret ? [state.remoteAuth.payloadSecret] : [];
 }
 
-export function saveRemoteAuth(value) {
-  if (!value) {
-    forgetCurrentRemoteProfile();
-    return;
+function createRemoteProfileUpdatePatch(currentState, relayId, updates) {
+  const profile = currentState.remoteProfiles[relayId];
+  if (!profile) {
+    return null;
   }
 
-  const relayId = value.relayId || state.activeRelayId || value.brokerChannelId;
+  const nextProfile = {
+    ...profile,
+    ...updates,
+  };
+  const remoteProfiles = {
+    ...currentState.remoteProfiles,
+    [relayId]: nextProfile,
+  };
+
+  return {
+    relayDirectory: deriveRelayDirectory(remoteProfiles, currentState.relayDirectory),
+    remoteAuth: currentState.activeRelayId === relayId ? nextProfile : currentState.remoteAuth,
+    remoteProfiles,
+  };
+}
+
+function createSyncedRemoteAuthPatch(currentState, remoteProfiles = currentState.remoteProfiles) {
+  const activeRelayId =
+    currentState.activeRelayId && !remoteProfiles[currentState.activeRelayId]
+      ? nextRelaySelection(remoteProfiles, null)
+      : currentState.activeRelayId;
+
+  return {
+    activeRelayId,
+    remoteAuth: activeRelayId ? remoteProfiles[activeRelayId] : null,
+  };
+}
+
+function createSavedRemoteAuthPatch(currentState, value) {
+  const relayId = value.relayId || currentState.activeRelayId || value.brokerChannelId;
   if (!relayId) {
     throw new Error("remote relay id is required");
   }
@@ -222,32 +271,103 @@ export function saveRemoteAuth(value) {
     ...value,
     relayId,
   });
-  state.remoteProfiles[relayId] = normalized;
-  state.activeRelayId = relayId;
-  state.remoteAuth = normalized;
-  state.relayDirectory = deriveRelayDirectory(state.remoteProfiles, state.relayDirectory);
-  persistRemoteStore();
-  if (normalized.payloadSecret) {
-    void persistProtectedPayloadSecret(relayId, normalized.payloadSecret);
+  const remoteProfiles = {
+    ...currentState.remoteProfiles,
+    [relayId]: normalized,
+  };
+
+  return {
+    activeRelayId: relayId,
+    relayDirectory: deriveRelayDirectory(remoteProfiles, currentState.relayDirectory),
+    remoteAuth: normalized,
+    remoteProfiles,
+  };
+}
+
+function createSelectedRelayProfilePatch(currentState, relayId) {
+  const profile = currentState.remoteProfiles[relayId];
+  if (!profile) {
+    return null;
+  }
+
+  return {
+    activeRelayId: relayId,
+    remoteAuth: profile,
+  };
+}
+
+function createClearedActiveRelaySelectionPatch() {
+  return {
+    activeRelayId: null,
+    remoteAuth: null,
+  };
+}
+
+function createForgottenRemoteProfilePatch(currentState) {
+  if (!currentState.activeRelayId) {
+    return {
+      remoteAuth: null,
+    };
+  }
+
+  const remoteProfiles = {
+    ...currentState.remoteProfiles,
+  };
+  delete remoteProfiles[currentState.activeRelayId];
+
+  return {
+    activeRelayId: null,
+    relayDirectory: deriveRelayDirectory(remoteProfiles, []),
+    remoteAuth: null,
+    remoteProfiles,
+  };
+}
+
+function createClientAuthPatch(value) {
+  return {
+    clientAuth: normalizeClientAuth(value),
+  };
+}
+
+function createRelayDirectoryPatch(currentState, entries) {
+  return {
+    relayDirectory: deriveRelayDirectory(currentState.remoteProfiles, entries),
+  };
+}
+
+function createHydratedRemoteSecretsPatch(currentState, remoteProfiles) {
+  return {
+    ...createSyncedRemoteAuthPatch(currentState, remoteProfiles),
+    relayDirectory: deriveRelayDirectory(remoteProfiles, currentState.relayDirectory),
+    remoteProfiles,
+  };
+}
+
+export function saveRemoteAuth(value) {
+  if (!value) {
+    forgetCurrentRemoteProfile();
+    return;
+  }
+
+  const patch = createSavedRemoteAuthPatch(state, value);
+  applyStatePatch(patch, { persist: true });
+  if (patch.remoteAuth?.payloadSecret) {
+    void persistProtectedPayloadSecret(patch.remoteAuth.relayId, patch.remoteAuth.payloadSecret);
   }
 }
 
 export function selectRelayProfile(relayId) {
-  const profile = state.remoteProfiles[relayId];
-  if (!profile) {
+  const patch = createSelectedRelayProfilePatch(state, relayId);
+  if (!patch) {
     return false;
   }
 
-  state.activeRelayId = relayId;
-  state.remoteAuth = profile;
-  persistRemoteStore();
+  applyStatePatch(patch, { persist: true });
   return true;
 }
 
 export function clearActiveRelaySelection() {
-  state.activeRelayId = null;
-  state.remoteAuth = null;
-  persistRemoteStore();
+  applyStatePatch(createClearedActiveRelaySelectionPatch(), { persist: true });
 }
 
 export function listRelayProfiles() {
@@ -258,31 +378,23 @@ export function listRelayProfiles() {
 
 export function forgetCurrentRemoteProfile() {
   if (!state.activeRelayId) {
-    state.remoteAuth = null;
+    applyStatePatch({
+      remoteAuth: null,
+    });
     return;
   }
 
   const relayId = state.activeRelayId;
-  delete state.remoteProfiles[state.activeRelayId];
-  state.activeRelayId = null;
-  state.remoteAuth = null;
-  state.relayDirectory = deriveRelayDirectory(state.remoteProfiles, []);
-  persistRemoteStore();
+  applyStatePatch(createForgottenRemoteProfilePatch(state), { persist: true });
   void deleteStoredPayloadSecret(relayId);
 }
 
 export function saveClientAuth(value) {
-  state.clientAuth = value
-    ? {
-        clientId: value.clientId,
-        brokerControlUrl: value.brokerControlUrl,
-      }
-    : null;
-  persistRemoteStore();
+  applyStatePatch(createClientAuthPatch(value), { persist: true });
 }
 
 export function setRelayDirectory(entries) {
-  state.relayDirectory = deriveRelayDirectory(state.remoteProfiles, entries);
+  applyStatePatch(createRelayDirectoryPatch(state, entries));
 }
 
 export function hasAnyStoredRelayProfiles() {
@@ -302,7 +414,10 @@ export function currentClientControlUrl() {
 }
 
 export async function hydrateStoredRemoteSecrets() {
-  const entries = Object.entries(state.remoteProfiles);
+  const remoteProfiles = {
+    ...state.remoteProfiles,
+  };
+  const entries = Object.entries(remoteProfiles);
 
   for (const [relayId, profile] of entries) {
     if (!profile?.hasStoredPayloadSecret) {
@@ -312,21 +427,28 @@ export async function hydrateStoredRemoteSecrets() {
     try {
       const payloadSecret = await loadStoredPayloadSecret(relayId);
       if (!payloadSecret) {
-        profile.payloadSecret = null;
-        profile.hasStoredPayloadSecret = false;
+        remoteProfiles[relayId] = {
+          ...profile,
+          payloadSecret: null,
+          hasStoredPayloadSecret: false,
+        };
         continue;
       }
-      profile.payloadSecret = payloadSecret;
+      remoteProfiles[relayId] = {
+        ...profile,
+        payloadSecret,
+      };
     } catch (error) {
-      profile.payloadSecret = null;
-      profile.hasStoredPayloadSecret = false;
+      remoteProfiles[relayId] = {
+        ...profile,
+        payloadSecret: null,
+        hasStoredPayloadSecret: false,
+      };
       console.warn("[agent-relay] failed to hydrate protected payload secret", error);
     }
   }
 
-  state.relayDirectory = deriveRelayDirectory(state.remoteProfiles, state.relayDirectory);
-  syncCurrentRemoteAuth();
-  persistRemoteStore();
+  applyStatePatch(createHydratedRemoteSecretsPatch(state, remoteProfiles), { persist: true });
 }
 
 function loadOrCreateRequestedDeviceId(verifyKey) {
@@ -446,10 +568,7 @@ function normalizeClientAuth(value) {
 }
 
 function syncCurrentRemoteAuth() {
-  if (state.activeRelayId && !state.remoteProfiles[state.activeRelayId]) {
-    state.activeRelayId = nextRelaySelection(state.remoteProfiles, null);
-  }
-  state.remoteAuth = state.activeRelayId ? state.remoteProfiles[state.activeRelayId] : null;
+  applyStatePatch(createSyncedRemoteAuthPatch(state));
 }
 
 function persistRemoteStore() {
@@ -507,14 +626,22 @@ async function persistProtectedPayloadSecret(relayId, payloadSecret) {
     await storePayloadSecret(relayId, payloadSecret);
     const profile = state.remoteProfiles[relayId];
     if (profile && profile.hasStoredPayloadSecret !== true) {
-      profile.hasStoredPayloadSecret = true;
-      persistRemoteStore();
+      const patch = createRemoteProfileUpdatePatch(state, relayId, {
+        hasStoredPayloadSecret: true,
+      });
+      if (patch) {
+        applyStatePatch(patch, { persist: true });
+      }
     }
   } catch (error) {
     const profile = state.remoteProfiles[relayId];
     if (profile) {
-      profile.hasStoredPayloadSecret = false;
-      persistRemoteStore();
+      const patch = createRemoteProfileUpdatePatch(state, relayId, {
+        hasStoredPayloadSecret: false,
+      });
+      if (patch) {
+        applyStatePatch(patch, { persist: true });
+      }
     }
     console.warn("[agent-relay] failed to persist protected payload secret", error);
   }

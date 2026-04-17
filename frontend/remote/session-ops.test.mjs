@@ -1,6 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { webcrypto } from "node:crypto";
+import {
+  seedRemoteAuth,
+  seedSocketState,
+  seedTranscriptHydrationState,
+} from "./test-support/state-fixtures.mjs";
 
 let activeBrowser = null;
 
@@ -228,7 +233,7 @@ test("applySessionSnapshot hydrates truncated transcript with chunked remote fet
   const { handleRemoteBrokerPayload } = await import("./actions.js");
   const { applySessionSnapshot } = await import("./session-ops.js");
 
-  state.remoteAuth = {
+  seedRemoteAuth(state, saveRemoteAuth, {
     relayId: "relay-1",
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
@@ -243,19 +248,13 @@ test("applySessionSnapshot hydrates truncated transcript with chunked remote fet
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
     sessionClaim: null,
     sessionClaimExpiresAt: null,
-  };
-  saveRemoteAuth(state.remoteAuth);
-  state.socketConnected = true;
-  state.socketPeerId = "surface-peer-1";
+  });
+  seedSocketState(state, {
+    socketConnected: true,
+    socketPeerId: "surface-peer-1",
+  });
   state.pendingActions.clear();
-  state.transcriptHydrationPromise = null;
-  state.transcriptHydrationSignature = null;
-  state.transcriptHydrationThreadId = null;
-  state.transcriptHydrationBaseSnapshot = null;
-  state.transcriptHydrationOlderCursor = null;
-  state.transcriptHydrationEntries = new Map();
-  state.transcriptHydrationStatus = "idle";
-  state.transcriptHydrationLastFetchAt = 0;
+  seedTranscriptHydrationState(state);
   state.socket = {
     readyState: 1,
     send(frameText) {
@@ -441,7 +440,7 @@ test("transcript hydration resumes from the saved cursor after a broker interrup
   const { handleRemoteBrokerPayload } = await import("./actions.js");
   const { applySessionSnapshot } = await import("./session-ops.js");
 
-  state.remoteAuth = {
+  seedRemoteAuth(state, saveRemoteAuth, {
     relayId: "relay-1",
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
@@ -456,19 +455,13 @@ test("transcript hydration resumes from the saved cursor after a broker interrup
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
     sessionClaim: null,
     sessionClaimExpiresAt: null,
-  };
-  saveRemoteAuth(state.remoteAuth);
-  state.socketConnected = true;
-  state.socketPeerId = "surface-peer-1";
+  });
+  seedSocketState(state, {
+    socketConnected: true,
+    socketPeerId: "surface-peer-1",
+  });
   state.pendingActions.clear();
-  state.transcriptHydrationPromise = null;
-  state.transcriptHydrationSignature = null;
-  state.transcriptHydrationThreadId = null;
-  state.transcriptHydrationBaseSnapshot = null;
-  state.transcriptHydrationOlderCursor = null;
-  state.transcriptHydrationEntries = new Map();
-  state.transcriptHydrationStatus = "idle";
-  state.transcriptHydrationLastFetchAt = 0;
+  seedTranscriptHydrationState(state);
   state.socket = {
     readyState: 1,
     send(frameText) {
@@ -624,7 +617,7 @@ test("hydrated transcript stays expanded when a later snapshot changes only the 
   const { handleRemoteBrokerPayload } = await import("./actions.js");
   const { applySessionSnapshot } = await import("./session-ops.js");
 
-  state.remoteAuth = {
+  seedRemoteAuth(state, saveRemoteAuth, {
     relayId: "relay-1",
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
@@ -639,19 +632,13 @@ test("hydrated transcript stays expanded when a later snapshot changes only the 
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
     sessionClaim: null,
     sessionClaimExpiresAt: null,
-  };
-  saveRemoteAuth(state.remoteAuth);
-  state.socketConnected = true;
-  state.socketPeerId = "surface-peer-1";
+  });
+  seedSocketState(state, {
+    socketConnected: true,
+    socketPeerId: "surface-peer-1",
+  });
   state.pendingActions.clear();
-  state.transcriptHydrationPromise = null;
-  state.transcriptHydrationSignature = null;
-  state.transcriptHydrationThreadId = null;
-  state.transcriptHydrationBaseSnapshot = null;
-  state.transcriptHydrationOlderCursor = null;
-  state.transcriptHydrationEntries = new Map();
-  state.transcriptHydrationStatus = "idle";
-  state.transcriptHydrationLastFetchAt = 0;
+  seedTranscriptHydrationState(state);
   state.socket = {
     readyState: 1,
     send(frameText) {
@@ -818,7 +805,7 @@ test("startRemoteSession re-enables the start button when the relay does not rep
   const { state, saveRemoteAuth } = await import("./state.js");
   const { startRemoteSession } = await import("./session-ops.js");
 
-  state.remoteAuth = {
+  seedRemoteAuth(state, saveRemoteAuth, {
     relayId: "relay-1",
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
@@ -833,10 +820,11 @@ test("startRemoteSession re-enables the start button when the relay does not rep
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
     sessionClaim: null,
     sessionClaimExpiresAt: null,
-  };
-  saveRemoteAuth(state.remoteAuth);
-  state.socketConnected = true;
-  state.socketPeerId = "surface-peer-1";
+  });
+  seedSocketState(state, {
+    socketConnected: true,
+    socketPeerId: "surface-peer-1",
+  });
   state.pendingActions.clear();
   state.socket = {
     readyState: 1,

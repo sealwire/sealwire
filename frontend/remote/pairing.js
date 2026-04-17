@@ -193,7 +193,7 @@ export async function handleEncryptedPairingResult(payload) {
     renderLog("Pairing failed: relay returned an incomplete device credential bundle.");
     return;
   }
-  state.remoteAuth = {
+  const remoteAuth = {
     relayId: result.relay_id || state.pairingTicket.broker_channel_id,
     relayLabel: result.relay_label || null,
     brokerUrl: state.pairingTicket.broker_url,
@@ -210,14 +210,14 @@ export async function handleEncryptedPairingResult(payload) {
     sessionClaim: null,
     sessionClaimExpiresAt: null,
   };
-  if (state.remoteAuth.deviceRefreshToken) {
+  if (remoteAuth.deviceRefreshToken) {
     try {
       await establishDeviceRefreshSession(
-        state.remoteAuth.deviceRefreshToken,
-        state.remoteAuth.brokerUrl
+        remoteAuth.deviceRefreshToken,
+        remoteAuth.brokerUrl
       );
-      state.remoteAuth.deviceRefreshMode = "cookie";
-      state.remoteAuth.deviceRefreshToken = null;
+      remoteAuth.deviceRefreshMode = "cookie";
+      remoteAuth.deviceRefreshToken = null;
     } catch (error) {
       renderLog(
         `Broker device session cookie could not be established yet: ${error.message}`
@@ -238,7 +238,7 @@ export async function handleEncryptedPairingResult(payload) {
       renderLog(`Broker client session cookie could not be established yet: ${error.message}`);
     }
   }
-  saveRemoteAuth(state.remoteAuth);
+  saveRemoteAuth(remoteAuth);
   applyRemoteSurfacePatch(createPairingStatePatch({
     pairingTicket: null,
     pairingPhase: null,

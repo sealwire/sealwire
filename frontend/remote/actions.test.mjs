@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { webcrypto } from "node:crypto";
+import {
+  seedRemoteAuth,
+  seedSocketState,
+} from "./test-support/state-fixtures.mjs";
 
 const REMOTE_STATE_STORAGE_KEY = "agent-relay.remote-state";
 
@@ -211,7 +215,7 @@ test("ensureRemoteClaim performs challenge-response without rotating payload sec
   const { state, saveRemoteAuth } = await import("./state.js");
   const { ensureRemoteClaim, handleRemoteBrokerPayload } = await import("./actions.js");
 
-  state.remoteAuth = {
+  seedRemoteAuth(state, saveRemoteAuth, {
     relayId: "relay-1",
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
@@ -226,10 +230,11 @@ test("ensureRemoteClaim performs challenge-response without rotating payload sec
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
     sessionClaim: null,
     sessionClaimExpiresAt: null,
-  };
-  saveRemoteAuth(state.remoteAuth);
-  state.socketConnected = true;
-  state.socketPeerId = "surface-peer-1";
+  });
+  seedSocketState(state, {
+    socketConnected: true,
+    socketPeerId: "surface-peer-1",
+  });
   state.pendingActions.clear();
   state.claimPromise = null;
   state.socket = {
@@ -303,7 +308,7 @@ test("encrypted remote action results decrypt with the persisted payload secret"
   const { state, saveRemoteAuth } = await import("./state.js");
   const { handleRemoteBrokerPayload } = await import("./actions.js");
 
-  state.remoteAuth = {
+  seedRemoteAuth(state, saveRemoteAuth, {
     relayId: "relay-1",
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
@@ -318,9 +323,10 @@ test("encrypted remote action results decrypt with the persisted payload secret"
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
     sessionClaim: null,
     sessionClaimExpiresAt: null,
-  };
-  saveRemoteAuth(state.remoteAuth);
-  state.socketPeerId = "surface-peer-1";
+  });
+  seedSocketState(state, {
+    socketPeerId: "surface-peer-1",
+  });
 
   const envelope = await encryptJson("payload-secret-1", {
     action: "claim_device",
@@ -359,7 +365,7 @@ test("list_threads uses device access without pre-claiming control", async () =>
   const { state, saveRemoteAuth } = await import("./state.js");
   const { dispatchOrRecover, handleRemoteBrokerPayload } = await import("./actions.js");
 
-  state.remoteAuth = {
+  seedRemoteAuth(state, saveRemoteAuth, {
     relayId: "relay-1",
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
@@ -374,10 +380,11 @@ test("list_threads uses device access without pre-claiming control", async () =>
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
     sessionClaim: null,
     sessionClaimExpiresAt: null,
-  };
-  saveRemoteAuth(state.remoteAuth);
-  state.socketConnected = true;
-  state.socketPeerId = "surface-peer-1";
+  });
+  seedSocketState(state, {
+    socketConnected: true,
+    socketPeerId: "surface-peer-1",
+  });
   state.socket = {
     readyState: 1,
     send(frameText) {
@@ -426,7 +433,7 @@ test("remote actions time out when the relay never replies", async () => {
   const { state, saveRemoteAuth } = await import("./state.js");
   const { dispatchOrRecover } = await import("./actions.js");
 
-  state.remoteAuth = {
+  seedRemoteAuth(state, saveRemoteAuth, {
     relayId: "relay-1",
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
@@ -441,10 +448,11 @@ test("remote actions time out when the relay never replies", async () => {
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
     sessionClaim: null,
     sessionClaimExpiresAt: null,
-  };
-  saveRemoteAuth(state.remoteAuth);
-  state.socketConnected = true;
-  state.socketPeerId = "surface-peer-1";
+  });
+  seedSocketState(state, {
+    socketConnected: true,
+    socketPeerId: "surface-peer-1",
+  });
   state.pendingActions.clear();
   state.socket = {
     readyState: 1,
@@ -469,13 +477,13 @@ test("remote actions time out when the relay never replies", async () => {
 test("recoverRemoteSession only auto-claims when this device still controls the thread", async () => {
   installBrowserStubs();
 
-  const { state } = await import("./state.js");
+  const { state, saveRemoteAuth } = await import("./state.js");
   const {
     configureRemoteActions,
     recoverRemoteSession,
   } = await import("./actions.js");
 
-  state.remoteAuth = {
+  seedRemoteAuth(state, saveRemoteAuth, {
     relayId: "relay-1",
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
@@ -490,9 +498,11 @@ test("recoverRemoteSession only auto-claims when this device still controls the 
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
     sessionClaim: "old-claim",
     sessionClaimExpiresAt: Math.floor(Date.now() / 1000) + 300,
-  };
-  state.socketConnected = true;
-  state.socketPeerId = "surface-peer-1";
+  });
+  seedSocketState(state, {
+    socketConnected: true,
+    socketPeerId: "surface-peer-1",
+  });
   state.session = {
     active_thread_id: "thread-1",
     active_controller_device_id: "device-2",

@@ -1,6 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { webcrypto } from "node:crypto";
+import {
+  seedPairingState,
+  seedRemoteAuth,
+  seedSocketState,
+} from "./test-support/state-fixtures.mjs";
 
 const REMOTE_STATE_STORAGE_KEY = "agent-relay.remote-state";
 
@@ -272,7 +277,7 @@ test("expired device broker access refreshes automatically during reconnect", as
   const { state, saveRemoteAuth } = await import("./state.js");
   const { connectBroker } = await import("./broker-client.js");
 
-  state.remoteAuth = {
+  seedRemoteAuth(state, saveRemoteAuth, {
     relayId: "relay-1",
     brokerUrl: "ws://broker.example.test",
     brokerChannelId: "room-a",
@@ -286,13 +291,9 @@ test("expired device broker access refreshes automatically during reconnect", as
     securityMode: "private",
     sessionClaim: null,
     sessionClaimExpiresAt: null,
-  };
-  state.pairingTicket = null;
-  state.socket = null;
-  state.socketConnected = false;
-  state.socketPeerId = null;
-  state.socketReconnectTimer = null;
-  saveRemoteAuth(state.remoteAuth);
+  });
+  seedPairingState(state);
+  seedSocketState(state);
 
   await connectBroker("initial boot");
   assert.equal(FakeWebSocket.instances.length, 1);
@@ -364,18 +365,17 @@ test("expired pairing join ticket surfaces a clear QR renewal message", async ()
   const { configureBrokerClient, connectBroker } = await import("./broker-client.js");
 
   state.remoteAuth = null;
-  state.socket = null;
-  state.socketConnected = false;
-  state.socketPeerId = null;
-  state.pairingTicket = {
-    broker_url: "ws://broker.example.test",
-    broker_channel_id: "dev-room",
-    pairing_id: "pair-expired-ticket",
-    pairing_join_ticket: "expired-join-ticket",
-    expires_at: Math.floor(Date.now() / 1000) - 10,
-  };
-  state.pairingPhase = "connecting";
-  state.pairingError = null;
+  seedSocketState(state);
+  seedPairingState(state, {
+    pairingPhase: "connecting",
+    pairingTicket: {
+      broker_url: "ws://broker.example.test",
+      broker_channel_id: "dev-room",
+      pairing_id: "pair-expired-ticket",
+      pairing_join_ticket: "expired-join-ticket",
+      expires_at: Math.floor(Date.now() / 1000) - 10,
+    },
+  });
 
   configureBrokerClient({});
   await connectBroker("expired pairing");
