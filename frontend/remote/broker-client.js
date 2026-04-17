@@ -13,6 +13,11 @@ import {
   saveRemoteAuth,
   state,
 } from "./state.js";
+import {
+  applyRemoteSurfacePatch,
+  createBrokerConnectionPatch,
+  createPairingStatePatch,
+} from "./surface-state.js";
 
 let onBrokerReady = () => {};
 let onBrokerPayload = async () => {};
@@ -70,7 +75,10 @@ export async function connectBroker(reason) {
 
   renderLog(`Connecting to broker (${reason}) via ${url.host}.`);
   const socket = new WebSocket(url.toString());
-  state.socket = socket;
+  applyRemoteSurfacePatch(createBrokerConnectionPatch({
+    socket,
+    socketPeerId: null,
+  }));
   clearSocketPeerId();
 
   socket.addEventListener("open", () => {
@@ -78,7 +86,9 @@ export async function connectBroker(reason) {
       return;
     }
 
-    state.socketConnected = true;
+    applyRemoteSurfacePatch(createBrokerConnectionPatch({
+      socketConnected: true,
+    }));
     updateStatusBadge();
     renderLog("Broker websocket connected.");
   });
@@ -96,8 +106,11 @@ export async function connectBroker(reason) {
       return;
     }
 
-    state.socket = null;
-    state.socketConnected = false;
+    applyRemoteSurfacePatch(createBrokerConnectionPatch({
+      socket: null,
+      socketConnected: false,
+      socketPeerId: null,
+    }));
     clearSocketPeerId();
     void onBrokerDisconnect();
     updateStatusBadge();
@@ -119,7 +132,10 @@ export async function connectBroker(reason) {
 export function closeBrokerSocket(resetConnectionState = true) {
   if (!state.socket) {
     if (resetConnectionState) {
-      state.socketConnected = false;
+      applyRemoteSurfacePatch(createBrokerConnectionPatch({
+        socketConnected: false,
+        socketPeerId: null,
+      }));
       clearSocketPeerId();
       updateStatusBadge();
     }
@@ -127,11 +143,16 @@ export function closeBrokerSocket(resetConnectionState = true) {
   }
 
   const socket = state.socket;
-  state.socket = null;
+  applyRemoteSurfacePatch(createBrokerConnectionPatch({
+    socket: null,
+  }));
   socket.close();
 
   if (resetConnectionState) {
-    state.socketConnected = false;
+    applyRemoteSurfacePatch(createBrokerConnectionPatch({
+      socketConnected: false,
+      socketPeerId: null,
+    }));
     clearSocketPeerId();
     updateStatusBadge();
   }
@@ -279,8 +300,10 @@ async function handleSocketMessage(rawData, connectReason) {
 
   if (frame.type === "error") {
     if (state.pairingTicket && isExpiredPairingError(frame.message)) {
-      state.pairingPhase = "error";
-      state.pairingError = normalizePairingError(frame.message);
+      applyRemoteSurfacePatch(createPairingStatePatch({
+        pairingPhase: "error",
+        pairingError: normalizePairingError(frame.message),
+      }));
       renderDeviceMeta();
       updateStatusBadge();
       renderLog(`Pairing failed: ${state.pairingError}`);
@@ -303,9 +326,12 @@ function scheduleSocketReconnect() {
   }
 
   cancelSocketReconnect();
-  state.socketReconnectTimer = window.setTimeout(() => {
+  const socketReconnectTimer = window.setTimeout(() => {
     void connectBroker("reconnect");
   }, 1500);
+  applyRemoteSurfacePatch(createBrokerConnectionPatch({
+    socketReconnectTimer,
+  }));
 }
 
 function cancelSocketReconnect() {
@@ -314,7 +340,9 @@ function cancelSocketReconnect() {
   }
 
   window.clearTimeout(state.socketReconnectTimer);
-  state.socketReconnectTimer = null;
+  applyRemoteSurfacePatch(createBrokerConnectionPatch({
+    socketReconnectTimer: null,
+  }));
 }
 
 async function refreshDeviceJoinTicket(reason) {

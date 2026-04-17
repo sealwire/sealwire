@@ -6,6 +6,10 @@ import {
 } from "../render-transcript.js";
 import { state } from "../state.js";
 import { escapeHtml, shortId } from "../utils.js";
+import {
+  applyRemoteSurfacePatch,
+  createTranscriptScrollModePatch,
+} from "../surface-state.js";
 
 const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 80;
 const TOP_SCROLL_PRESERVE_THRESHOLD_PX = 80;
@@ -18,12 +22,12 @@ export function syncTranscriptScrollModeForSession(session, previousSession) {
   const previousThreadId = previousSession?.active_thread_id || null;
 
   if (!nextThreadId) {
-    state.transcriptScrollMode = "follow-latest";
+    applyRemoteSurfacePatch(createTranscriptScrollModePatch("follow-latest"));
     return;
   }
 
   if (nextThreadId !== previousThreadId) {
-    state.transcriptScrollMode = "follow-latest";
+    applyRemoteSurfacePatch(createTranscriptScrollModePatch("follow-latest"));
   }
 }
 
@@ -111,7 +115,9 @@ export function handleTranscriptScroll() {
   const scrollTop = dom.remoteTranscript.scrollTop || 0;
   const isNearBottom =
     scrollHeight - clientHeight - scrollTop <= AUTO_SCROLL_BOTTOM_THRESHOLD_PX;
-  state.transcriptScrollMode = isNearBottom ? "follow-latest" : "preserve";
+  applyRemoteSurfacePatch(
+    createTranscriptScrollModePatch(isNearBottom ? "follow-latest" : "preserve")
+  );
   debugScrollEvent("handleTranscriptScroll", {
     mode: state.transcriptScrollMode,
   });

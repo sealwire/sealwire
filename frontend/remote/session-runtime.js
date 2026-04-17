@@ -1,15 +1,16 @@
-import * as dom from "./dom.js";
-
-export function applySessionRuntime(state, session, sessionView) {
-  state.session = session;
-  state.currentApprovalId = sessionView.currentApprovalId;
-
-  if (sessionView.cwdFilterHint && !dom.remoteThreadsCwdInput.value.trim()) {
-    dom.remoteThreadsCwdInput.placeholder = sessionView.cwdFilterHint.placeholder;
-    dom.remoteThreadsCwdInput.title = sessionView.cwdFilterHint.title;
-  }
-
-  dom.remoteSendButton.disabled = sessionView.composerDisabled;
-  dom.remoteMessageInput.disabled = sessionView.composerDisabled;
-  dom.remoteMessageInput.placeholder = sessionView.messagePlaceholder;
+export function deriveSessionRuntime({
+  session,
+  sessionView,
+  threadsFilterValue = "",
+}) {
+  return {
+    composerDisabled: sessionView.composerDisabled,
+    currentApprovalId: sessionView.currentApprovalId,
+    messagePlaceholder: sessionView.messagePlaceholder,
+    session,
+    threadsFilterHint:
+      sessionView.cwdFilterHint && !threadsFilterValue.trim()
+        ? sessionView.cwdFilterHint
+        : null,
+  };
 }

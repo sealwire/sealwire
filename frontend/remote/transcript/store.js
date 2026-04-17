@@ -1,12 +1,10 @@
+import {
+  applyRemoteSurfacePatch,
+  createClearedTranscriptHydrationPatch,
+} from "../surface-state.js";
+
 export function clearTranscriptHydration(state) {
-  state.transcriptHydrationPromise = null;
-  state.transcriptHydrationSignature = null;
-  state.transcriptHydrationThreadId = null;
-  state.transcriptHydrationBaseSnapshot = null;
-  state.transcriptHydrationOlderCursor = null;
-  state.transcriptHydrationEntries = new Map();
-  state.transcriptHydrationStatus = "idle";
-  state.transcriptHydrationLastFetchAt = 0;
+  applyRemoteSurfacePatch(createClearedTranscriptHydrationPatch());
 }
 
 export function restoreHydratedTranscript(state, snapshot) {
@@ -43,7 +41,9 @@ export function prepareTranscriptHydration(state, snapshot) {
   ) {
     resetTranscriptHydration(state, snapshot, signature);
   } else {
-    state.transcriptHydrationBaseSnapshot = snapshot;
+    applyRemoteSurfacePatch({
+      transcriptHydrationBaseSnapshot: snapshot,
+    });
   }
 
   return {
@@ -55,25 +55,35 @@ export function prepareTranscriptHydration(state, snapshot) {
 }
 
 export function beginTranscriptHydration(state) {
-  state.transcriptHydrationStatus = "loading";
+  applyRemoteSurfacePatch({
+    transcriptHydrationStatus: "loading",
+  });
 }
 
 export function setTranscriptHydrationPromise(state, promise) {
-  state.transcriptHydrationPromise = promise;
+  applyRemoteSurfacePatch({
+    transcriptHydrationPromise: promise,
+  });
 }
 
 export function clearTranscriptHydrationPromise(state, signature) {
   if (state.transcriptHydrationSignature === signature) {
-    state.transcriptHydrationPromise = null;
+    applyRemoteSurfacePatch({
+      transcriptHydrationPromise: null,
+    });
   }
 }
 
 export function setTranscriptHydrationIdle(state) {
-  state.transcriptHydrationStatus = "idle";
+  applyRemoteSurfacePatch({
+    transcriptHydrationStatus: "idle",
+  });
 }
 
 export function markTranscriptHydrationComplete(state) {
-  state.transcriptHydrationStatus = "complete";
+  applyRemoteSurfacePatch({
+    transcriptHydrationStatus: "complete",
+  });
 }
 
 export function getTranscriptHydrationThreadId(state) {
@@ -89,7 +99,9 @@ export function getTranscriptHydrationCursor(state) {
 }
 
 export function setTranscriptHydrationFetchAt(state, timestamp) {
-  state.transcriptHydrationLastFetchAt = timestamp;
+  applyRemoteSurfacePatch({
+    transcriptHydrationLastFetchAt: timestamp,
+  });
 }
 
 export function getTranscriptHydrationLastFetchAt(state) {
@@ -97,9 +109,10 @@ export function getTranscriptHydrationLastFetchAt(state) {
 }
 
 export function mergeTranscriptHydrationPage(state, page) {
+  const nextEntries = new Map(state.transcriptHydrationEntries);
   for (const entryPage of page.entries || []) {
-    if (!state.transcriptHydrationEntries.has(entryPage.entry_index)) {
-      state.transcriptHydrationEntries.set(entryPage.entry_index, {
+    if (!nextEntries.has(entryPage.entry_index)) {
+      nextEntries.set(entryPage.entry_index, {
         item_id: entryPage.item_id,
         kind: entryPage.kind,
         status: entryPage.status,
@@ -109,7 +122,7 @@ export function mergeTranscriptHydrationPage(state, page) {
       });
     }
 
-    const entry = state.transcriptHydrationEntries.get(entryPage.entry_index);
+    const entry = nextEntries.get(entryPage.entry_index);
     entry.item_id = entryPage.item_id;
     entry.kind = entryPage.kind;
     entry.status = entryPage.status;
@@ -127,9 +140,11 @@ export function mergeTranscriptHydrationPage(state, page) {
     }
   }
 
-  state.transcriptHydrationOlderCursor = page.prev_cursor ?? null;
-  state.transcriptHydrationStatus =
-    page.prev_cursor == null ? "complete" : "loading";
+  applyRemoteSurfacePatch({
+    transcriptHydrationEntries: nextEntries,
+    transcriptHydrationOlderCursor: page.prev_cursor ?? null,
+    transcriptHydrationStatus: page.prev_cursor == null ? "complete" : "loading",
+  });
 }
 
 export function buildHydratedTranscriptProgress(state) {
@@ -166,13 +181,12 @@ export function transcriptHydrationSignature(snapshot) {
 }
 
 function resetTranscriptHydration(state, snapshot, signature) {
-  state.transcriptHydrationSignature = signature;
-  state.transcriptHydrationThreadId = snapshot.active_thread_id;
-  state.transcriptHydrationBaseSnapshot = snapshot;
-  state.transcriptHydrationOlderCursor = null;
-  state.transcriptHydrationEntries = new Map();
-  state.transcriptHydrationStatus = "idle";
-  state.transcriptHydrationLastFetchAt = 0;
+  applyRemoteSurfacePatch({
+    ...createClearedTranscriptHydrationPatch(),
+    transcriptHydrationBaseSnapshot: snapshot,
+    transcriptHydrationSignature: signature,
+    transcriptHydrationThreadId: snapshot.active_thread_id,
+  });
 }
 
 function buildHydratedTranscriptSnapshot(state, snapshot) {

@@ -37,7 +37,11 @@ import {
   saveRemoteAuth,
   state,
 } from "./state.js";
-import { resetRemoteSurfaceState } from "./surface-state.js";
+import {
+  applyRemoteSurfacePatch,
+  createPairingStatePatch,
+  createResetRemoteSurfaceStatePatch,
+} from "./surface-state.js";
 import { clearSessionRuntime } from "./session-ops.js";
 import { shortId } from "./utils.js";
 
@@ -53,8 +57,10 @@ export function applyPairingQuery() {
     renderLog(`Loaded pairing ticket ${pairingTicket.pairing_id} from URL.`);
     return raw;
   } catch (error) {
-    state.pairingPhase = "error";
-    state.pairingError = error.message;
+    applyRemoteSurfacePatch(createPairingStatePatch({
+      pairingPhase: "error",
+      pairingError: error.message,
+    }));
     renderLog(`Invalid pairing URL: ${error.message}`);
     renderDeviceMeta();
     return null;
@@ -71,22 +77,28 @@ export async function beginPairing(rawValue, { auto = false } = {}) {
 
   try {
     const pairingTicket = parsePairingPayload(raw);
-    state.pairingTicket = pairingTicket;
+    applyRemoteSurfacePatch(createPairingStatePatch({
+      pairingTicket,
+    }));
     if (pairingTicket.expires_at * 1000 <= Date.now()) {
-      state.pairingPhase = "error";
-      state.pairingError = expiredPairingMessage();
+      applyRemoteSurfacePatch(createPairingStatePatch({
+        pairingPhase: "error",
+        pairingError: expiredPairingMessage(),
+      }));
       renderDeviceMeta();
       renderLog(`Pairing failed: ${state.pairingError}`);
       return;
     }
-    state.pairingPhase = "connecting";
-    state.pairingError = null;
-    resetRemoteSurfaceState(state, {
+    applyRemoteSurfacePatch(createPairingStatePatch({
+      pairingPhase: "connecting",
+      pairingError: null,
+    }));
+    applyRemoteSurfacePatch(createResetRemoteSurfaceStatePatch({
       clearClaimLifecycle,
       clearSessionRuntime,
       rejectPendingActions,
       reason: "pairing restarted before broker actions completed",
-    });
+    }));
     saveDeviceLabel(dom.deviceLabelInput.value);
     closePairingModalIfOpen();
     renderDeviceMeta();
@@ -98,8 +110,10 @@ export async function beginPairing(rawValue, { auto = false } = {}) {
     );
     void connectBroker("pairing request");
   } catch (error) {
-    state.pairingPhase = "error";
-    state.pairingError = error.message;
+    applyRemoteSurfacePatch(createPairingStatePatch({
+      pairingPhase: "error",
+      pairingError: error.message,
+    }));
     renderDeviceMeta();
     renderLog(`Pairing input is invalid: ${error.message}`);
   }
@@ -111,16 +125,20 @@ export async function sendPairingRequest() {
     return;
   }
   if (ticket.expires_at * 1000 <= Date.now()) {
-    state.pairingPhase = "error";
-    state.pairingError = expiredPairingMessage();
+    applyRemoteSurfacePatch(createPairingStatePatch({
+      pairingPhase: "error",
+      pairingError: expiredPairingMessage(),
+    }));
     renderDeviceMeta();
     renderLog(`Pairing failed: ${state.pairingError}`);
     return;
   }
   const deviceKeypair = await ensureDeviceIdentity();
 
-  state.pairingPhase = "requesting";
-  state.pairingError = null;
+  applyRemoteSurfacePatch(createPairingStatePatch({
+    pairingPhase: "requesting",
+    pairingError: null,
+  }));
   renderDeviceMeta();
 
   const payload = {
@@ -156,8 +174,10 @@ export async function handleEncryptedPairingResult(payload) {
 
   const result = await decryptJson(state.pairingTicket.pairing_secret, payload.envelope);
   if (!result.ok) {
-    state.pairingPhase = "error";
-    state.pairingError = normalizePairingError(result.error);
+    applyRemoteSurfacePatch(createPairingStatePatch({
+      pairingPhase: "error",
+      pairingError: normalizePairingError(result.error),
+    }));
     renderDeviceMeta();
     renderLog(`Pairing failed: ${state.pairingError}`);
     return;
@@ -165,8 +185,10 @@ export async function handleEncryptedPairingResult(payload) {
 
   const device = result.device;
   if (!device || !result.payload_secret || !result.device_join_ticket) {
-    state.pairingPhase = "error";
-    state.pairingError = "pairing result is incomplete";
+    applyRemoteSurfacePatch(createPairingStatePatch({
+      pairingPhase: "error",
+      pairingError: "pairing result is incomplete",
+    }));
     renderDeviceMeta();
     renderLog("Pairing failed: relay returned an incomplete device credential bundle.");
     return;
@@ -217,9 +239,11 @@ export async function handleEncryptedPairingResult(payload) {
     }
   }
   saveRemoteAuth(state.remoteAuth);
-  state.pairingTicket = null;
-  state.pairingPhase = null;
-  state.pairingError = null;
+  applyRemoteSurfacePatch(createPairingStatePatch({
+    pairingTicket: null,
+    pairingPhase: null,
+    pairingError: null,
+  }));
   dom.pairingInput.value = "";
   closePairingModalIfOpen();
   clearPairingQueryFromUrl();
@@ -235,16 +259,18 @@ export async function handleEncryptedPairingResult(payload) {
 
 export function forgetCurrentDevice() {
   const brokerUrl = state.remoteAuth?.brokerUrl || null;
-  state.pairingError = null;
-  state.pairingPhase = null;
-  state.pairingTicket = null;
+  applyRemoteSurfacePatch(createPairingStatePatch({
+    pairingError: null,
+    pairingPhase: null,
+    pairingTicket: null,
+  }));
   forgetCurrentRemoteProfile();
-  resetRemoteSurfaceState(state, {
+  applyRemoteSurfacePatch(createResetRemoteSurfaceStatePatch({
     clearClaimLifecycle,
     clearSessionRuntime,
     rejectPendingActions,
     reason: "device was forgotten before broker actions completed",
-  });
+  }));
   clearPairingQueryFromUrl();
   closeBrokerSocket();
   void clearDeviceRefreshSession(brokerUrl);

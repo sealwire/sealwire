@@ -16,7 +16,11 @@ import {
   setSessionClaim,
   state,
 } from "./state.js";
-import { setRemoteThreads } from "./surface-state.js";
+import {
+  applyRemoteSurfacePatch,
+  createClaimLifecyclePatch,
+  createRemoteThreadsPatch,
+} from "./surface-state.js";
 import { sendBrokerFrame } from "./broker-client.js";
 
 const REMOTE_ACTION_TIMEOUT_MS = 15_000;
@@ -98,9 +102,13 @@ export async function ensureRemoteClaim({
       throw error;
     }
   })().finally(() => {
-    state.claimPromise = null;
+    applyRemoteSurfacePatch(createClaimLifecyclePatch({
+      claimPromise: null,
+    }));
   });
-  state.claimPromise = claimPromise;
+  applyRemoteSurfacePatch(createClaimLifecyclePatch({
+    claimPromise,
+  }));
 
   const sessionClaim = await claimPromise;
   if (syncAfterClaim) {
@@ -126,7 +134,7 @@ export async function recoverRemoteSession(reason) {
     return state.recoverPromise;
   }
 
-  state.recoverPromise = (async () => {
+  const recoverPromise = (async () => {
     try {
       if (state.remoteAuth?.sessionClaim) {
         clearSessionClaim();
@@ -140,15 +148,23 @@ export async function recoverRemoteSession(reason) {
           syncAfterClaim: true,
         });
       }
+      applyRemoteSurfacePatch(createClaimLifecyclePatch({
+        recoveredSocketPeerId: state.socketPeerId,
+      }));
       setRecoveredSocketPeerId(state.socketPeerId);
     } catch (error) {
       renderLog(`Remote recovery failed: ${error.message}`);
     } finally {
-      state.recoverPromise = null;
+      applyRemoteSurfacePatch(createClaimLifecyclePatch({
+        recoverPromise: null,
+      }));
     }
   })();
+  applyRemoteSurfacePatch(createClaimLifecyclePatch({
+    recoverPromise,
+  }));
 
-  return state.recoverPromise;
+  return recoverPromise;
 }
 
 export async function dispatchOrRecover(actionType, request, options = {}) {
@@ -202,7 +218,7 @@ export function scheduleClaimRefresh() {
     CLAIM_REFRESH_FLOOR_MS,
     expiresAtMs - Date.now() - CLAIM_REFRESH_SKEW_MS
   );
-  state.claimRefreshTimer = window.setTimeout(() => {
+  const claimRefreshTimer = window.setTimeout(() => {
     void ensureRemoteClaim({
       force: true,
       reason: "scheduled refresh",
@@ -211,12 +227,18 @@ export function scheduleClaimRefresh() {
       renderLog(`Scheduled claim refresh failed: ${error.message}`);
     });
   }, delayMs);
+  applyRemoteSurfacePatch(createClaimLifecyclePatch({
+    claimRefreshTimer,
+  }));
 }
 
 export function clearClaimLifecycle() {
   cancelClaimRefresh();
-  state.claimPromise = null;
-  state.recoverPromise = null;
+  applyRemoteSurfacePatch(createClaimLifecyclePatch({
+    claimPromise: null,
+    recoverPromise: null,
+    recoveredSocketPeerId: null,
+  }));
   clearRecoveredSocketPeerId();
 }
 
@@ -276,7 +298,7 @@ function handleRemoteActionResult(actionId, result) {
     }
 
     if (result.threads?.threads) {
-      setRemoteThreads(state, result.threads.threads);
+      applyRemoteSurfacePatch(createRemoteThreadsPatch(result.threads.threads));
       renderThreads(state.threads);
     }
   } catch (error) {
@@ -535,7 +557,9 @@ function cancelClaimRefresh() {
   }
 
   window.clearTimeout(state.claimRefreshTimer);
-  state.claimRefreshTimer = null;
+  applyRemoteSurfacePatch(createClaimLifecyclePatch({
+    claimRefreshTimer: null,
+  }));
 }
 
 function isSessionClaimError(message) {

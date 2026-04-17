@@ -33,7 +33,11 @@ import {
   selectSessionRenderModel,
   selectThreadsRenderModel,
 } from "./view-model.js";
-import { applySessionRuntime } from "./session-runtime.js";
+import { deriveSessionRuntime } from "./session-runtime.js";
+import {
+  applyRemoteSurfacePatch,
+  createSessionRuntimeStatePatch,
+} from "./surface-state.js";
 
 let onResumeThread = () => {};
 let onSelectRelay = () => {};
@@ -52,7 +56,13 @@ export function renderSession(session) {
     previousSession,
     hasControllerLease: canCurrentDeviceWrite(session),
   });
-  applySessionRuntime(state, session, sessionView);
+  const sessionRuntime = deriveSessionRuntime({
+    session,
+    sessionView,
+    threadsFilterValue: dom.remoteThreadsCwdInput.value,
+  });
+  applySessionRuntimeView(sessionRuntime);
+  applyRemoteSurfacePatch(createSessionRuntimeStatePatch(sessionRuntime));
 
   syncRemoteModelSuggestions(session.available_models || [], session.model);
 
@@ -182,4 +192,15 @@ function syncRemoteChatView() {
   if (dom.chatShell) {
     dom.chatShell.dataset.view = "conversation";
   }
+}
+
+function applySessionRuntimeView(sessionRuntime) {
+  if (sessionRuntime.threadsFilterHint) {
+    dom.remoteThreadsCwdInput.placeholder = sessionRuntime.threadsFilterHint.placeholder;
+    dom.remoteThreadsCwdInput.title = sessionRuntime.threadsFilterHint.title;
+  }
+
+  dom.remoteSendButton.disabled = sessionRuntime.composerDisabled;
+  dom.remoteMessageInput.disabled = sessionRuntime.composerDisabled;
+  dom.remoteMessageInput.placeholder = sessionRuntime.messagePlaceholder;
 }

@@ -21,6 +21,10 @@ import {
 import { hydrateRemoteTranscript } from "./transcript/hydration.js";
 import { createTranscriptPageFetcher } from "./transcript/api.js";
 import { escapeHtml } from "./utils.js";
+import {
+  applyRemoteSurfacePatch,
+  createTranscriptScrollModePatch,
+} from "./surface-state.js";
 
 const fetchTranscriptPage = createTranscriptPageFetcher(dispatchOrRecover);
 
@@ -209,7 +213,7 @@ export function clearSessionRuntime() {
   cancelControllerHeartbeat();
   cancelControllerLeaseRefresh();
   clearTranscriptHydration(state);
-  state.transcriptScrollMode = "follow-latest";
+  applyRemoteSurfacePatch(createTranscriptScrollModePatch("follow-latest"));
 }
 
 function scheduleControllerHeartbeat(session) {
