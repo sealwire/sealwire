@@ -4,7 +4,7 @@ import { flushSync } from "react-dom";
 import * as dom from "./dom.js";
 import { relaySubtitle } from "./components/empty-state.js";
 import { canonicalizeWorkspace } from "../shared/thread-groups.js";
-import { escapeHtml, formatTimestamp, shortId } from "./utils.js";
+import { formatTimestamp, shortId } from "./utils.js";
 
 const h = React.createElement;
 
@@ -103,11 +103,11 @@ export function createRemoteReactUiRenderer() {
     renderSessionChrome(model) {
       applyHeaderToDom(model.header);
       applyStatusBadgeToDom(model.statusBadge);
-      applySessionMetaToDom(model.sessionMeta);
-      applyControlBannerToDom(model.controlBanner);
+      renderIntoRoot(dom.remoteSessionMeta, h(SessionMetaPanel, { model: model.sessionMeta }));
+      renderControlBanner(model.controlBanner);
     },
     renderDeviceChrome(model) {
-      applyDeviceMetaToDom(model.deviceMeta);
+      renderIntoRoot(dom.deviceMeta, h(DeviceMetaPanel, { model: model.deviceMeta }));
       if (model.workspaceHeading) {
         applyHeaderToDom(model.workspaceHeading);
       }
@@ -118,8 +118,8 @@ export function createRemoteReactUiRenderer() {
     },
     renderResetChrome(model) {
       applyHeaderToDom(model.header);
-      applySessionMetaToDom(model.sessionMeta);
-      applyControlBannerToDom(model.controlBanner);
+      renderIntoRoot(dom.remoteSessionMeta, h(SessionMetaPanel, { model: model.sessionMeta }));
+      renderControlBanner(model.controlBanner);
     },
     renderStatusBadge(model) {
       applyStatusBadgeToDom(model);
@@ -226,59 +226,13 @@ function applyHeaderToDom(model) {
   }
 }
 
-function applySessionMetaToDom(model) {
-  dom.remoteSessionMeta.innerHTML = [
-    ...model.chips.map(
-      (chip) => `
-        <span class="meta-chip">
-          <strong>${escapeHtml(chip.label)}:</strong>
-          <span>${escapeHtml(chip.value)}</span>
-        </span>
-      `
-    ),
-    ...(model.emptyMessage ? [`<span class="meta-empty">${escapeHtml(model.emptyMessage)}</span>`] : []),
-  ].join("");
-}
+function renderControlBanner(model) {
+  if (!dom.remoteControlBanner) {
+    return;
+  }
 
-function applyControlBannerToDom(model) {
   dom.remoteControlBanner.hidden = model.hidden;
-  if (model.hidden) {
-    return;
-  }
-
-  dom.remoteControlSummary.textContent = model.summary;
-  dom.remoteControlHint.textContent = model.hint;
-  dom.remoteTakeOverButton.hidden = model.takeOverHidden;
-}
-
-function applyDeviceMetaToDom(model) {
-  if (model.emptyMessage) {
-    dom.deviceMeta.innerHTML = `<p class="sidebar-empty">${escapeHtml(model.emptyMessage)}</p>`;
-    return;
-  }
-
-  dom.deviceMeta.innerHTML = model.cards
-    .map(
-      (card) => `
-        <article class="paired-device-card">
-          <div class="paired-device-copy">
-            <strong>${escapeHtml(card.title)}</strong>
-            <div class="paired-device-badges">
-              ${card.badges
-                .map(
-                  (badge) =>
-                    `<span class="status-badge status-badge-${escapeHtml(badge.tone)}">${escapeHtml(badge.label)}</span>`
-                )
-                .join("")}
-            </div>
-            ${card.metaLines
-              .map((line) => `<p class="paired-device-meta">${escapeHtml(line)}</p>`)
-              .join("")}
-          </div>
-        </article>
-      `
-    )
-    .join("");
+  renderIntoRoot(dom.remoteControlBanner, h(ControlBanner, { model }));
 }
 
 function applyStatusBadgeToDom(model) {
@@ -319,6 +273,88 @@ function compactStatusLabel(label) {
             .replace(/\b\w/g, (char) => char.toUpperCase())
         : "Ready";
   }
+}
+
+function SessionMetaPanel({ model }) {
+  return h(
+    React.Fragment,
+    null,
+    ...model.chips.map((chip) =>
+      h(
+        "span",
+        { className: "meta-chip", key: `${chip.label}:${chip.value}` },
+        h("strong", null, `${chip.label}:`),
+        h("span", null, chip.value)
+      )
+    ),
+    model.emptyMessage ? h("span", { className: "meta-empty" }, model.emptyMessage) : null
+  );
+}
+
+function DeviceMetaPanel({ model }) {
+  if (model.emptyMessage) {
+    return h("p", { className: "sidebar-empty" }, model.emptyMessage);
+  }
+
+  return h(
+    React.Fragment,
+    null,
+    ...model.cards.map((card, cardIndex) =>
+      h(
+        "article",
+        { className: "paired-device-card", key: `${card.title}:${cardIndex}` },
+        h(
+          "div",
+          { className: "paired-device-copy" },
+          h("strong", null, card.title),
+          h(
+            "div",
+            { className: "paired-device-badges" },
+            ...card.badges.map((badge, badgeIndex) =>
+              h(
+                "span",
+                {
+                  className: `status-badge status-badge-${badge.tone}`,
+                  key: `${badge.label}:${badgeIndex}`,
+                },
+                badge.label
+              )
+            )
+          ),
+          ...card.metaLines.map((line, lineIndex) =>
+            h("p", { className: "paired-device-meta", key: `${line}:${lineIndex}` }, line)
+          )
+        )
+      )
+    )
+  );
+}
+
+function ControlBanner({ model }) {
+  if (model.hidden) {
+    return null;
+  }
+
+  return h(
+    React.Fragment,
+    null,
+    h(
+      "div",
+      null,
+      h("p", { className: "control-summary" }, model.summary),
+      h("p", { className: "control-hint" }, model.hint)
+    ),
+    h(
+      "button",
+      {
+        className: "header-button control-button",
+        hidden: model.takeOverHidden,
+        id: "remote-take-over-button",
+        type: "button",
+      },
+      "Take over"
+    )
+  );
 }
 
 function renderIntoRoot(container, tree) {

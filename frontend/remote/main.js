@@ -177,7 +177,12 @@ dom.remoteHomeButton?.addEventListener("click", () => {
   returnToRelayHome();
 });
 
-dom.remoteTakeOverButton.addEventListener("click", () => {
+dom.remoteControlBanner?.addEventListener("click", (event) => {
+  const takeOverButton = event.target.closest("#remote-take-over-button");
+  if (!takeOverButton) {
+    return;
+  }
+
   void takeOverControl();
 });
 
