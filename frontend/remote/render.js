@@ -1,8 +1,5 @@
 import * as dom from "./dom.js";
 import {
-  renderThreadGroupsMarkup,
-} from "../shared/thread-groups.js";
-import {
   canCurrentDeviceWrite as canRemoteDeviceWrite,
   isCurrentDeviceActiveController as isRemoteController,
   renderDeviceMeta as renderDeviceChrome,
@@ -16,11 +13,12 @@ import {
   renderLogs,
 } from "./render-transcript.js";
 import {
-  relaySubtitle,
   renderMissingCredentialsState,
   renderRelayHome,
   syncIdleSurfaceControls,
 } from "./components/empty-state.js";
+import { renderRelayDirectoryList } from "./components/relay-directory.js";
+import { renderThreadList } from "./components/thread-list.js";
 import {
   debugScrollEvent,
   handleTranscriptScroll,
@@ -28,13 +26,14 @@ import {
   syncTranscriptScrollModeForSession,
 } from "./components/transcript-panel.js";
 import { state } from "./state.js";
-import { escapeHtml, formatTimestamp, workspaceBasename } from "./utils.js";
+import { escapeHtml } from "./utils.js";
 import {
   selectEmptyStateRenderModel,
   selectRelayDirectoryRenderModel,
   selectSessionRenderModel,
   selectThreadsRenderModel,
 } from "./view-model.js";
+import { applySessionRuntime } from "./session-runtime.js";
 
 let onResumeThread = () => {};
 let onSelectRelay = () => {};
@@ -46,7 +45,6 @@ export function configureRenderHandlers(handlers) {
 
 export function renderSession(session) {
   const previousSession = state.session;
-  state.session = session;
   syncTranscriptScrollModeForSession(session, previousSession);
   syncRemoteChatView();
   const sessionView = selectSessionRenderModel({
@@ -54,12 +52,7 @@ export function renderSession(session) {
     previousSession,
     hasControllerLease: canCurrentDeviceWrite(session),
   });
-  state.currentApprovalId = sessionView.approval?.request_id || null;
-
-  if (session.current_cwd && !dom.remoteThreadsCwdInput.value.trim()) {
-    dom.remoteThreadsCwdInput.placeholder = `Optional exact path filter (current: ${workspaceBasename(session.current_cwd)})`;
-    dom.remoteThreadsCwdInput.title = session.current_cwd;
-  }
+  applySessionRuntime(state, session, sessionView);
 
   syncRemoteModelSuggestions(session.available_models || [], session.model);
 
@@ -68,10 +61,6 @@ export function renderSession(session) {
   renderLogs(session.logs || []);
   debugScrollEvent("renderSession", sessionView.scrollDebug);
   renderThreads(state.threads);
-
-  dom.remoteSendButton.disabled = !sessionView.hasActiveSession || !sessionView.hasControllerLease;
-  dom.remoteMessageInput.disabled = !sessionView.hasActiveSession || !sessionView.hasControllerLease;
-  dom.remoteMessageInput.placeholder = sessionView.messagePlaceholder;
 }
 
 export function renderThreads(threads) {
@@ -83,27 +72,7 @@ export function renderThreads(threads) {
     remoteAuth: state.remoteAuth,
     relayDirectory: state.relayDirectory,
   });
-
-  dom.remoteThreadsCount.textContent = viewModel.countLabel;
-
-  if (viewModel.emptyMessage) {
-    dom.remoteThreadsList.innerHTML = `<p class="sidebar-empty">${viewModel.emptyMessage}</p>`;
-    return;
-  }
-
-  dom.remoteThreadsList.innerHTML = renderThreadGroupsMarkup(viewModel.groups, {
-    activeThreadId: viewModel.activeThreadId,
-    includePreview: true,
-    formatThreadMeta(thread) {
-      return formatTimestamp(thread.updated_at);
-    },
-  });
-
-  dom.remoteThreadsList.querySelectorAll("[data-thread-id]").forEach((button) => {
-    button.addEventListener("click", () => {
-      onResumeThread(button.dataset.threadId);
-    });
-  });
+  renderThreadList(viewModel, onResumeThread);
 }
 
 export function renderRelayDirectory() {
@@ -111,32 +80,7 @@ export function renderRelayDirectory() {
     relayDirectory: state.relayDirectory,
     activeRelayId: state.remoteAuth?.relayId || null,
   });
-  dom.remoteRelaysCount.textContent = viewModel.countLabel;
-
-  if (viewModel.emptyMessage) {
-    dom.remoteRelaysList.innerHTML = `<p class="sidebar-empty">${viewModel.emptyMessage}</p>`;
-    return;
-  }
-
-  dom.remoteRelaysList.innerHTML = viewModel.items
-    .map((item) => {
-      const subtitle = relaySubtitle(item.relay);
-      const activeClass = item.active ? " is-active" : "";
-      return `
-        <button class="conversation-item${activeClass}" type="button" data-relay-id="${escapeHtml(item.id)}" ${item.isEnabled ? "" : "disabled"}>
-          <span class="conversation-title">${escapeHtml(item.title)}</span>
-          <span class="conversation-preview">${escapeHtml(subtitle)}</span>
-          <span class="conversation-meta">${escapeHtml(item.meta)} · ${escapeHtml(item.actionLabel)}</span>
-        </button>
-      `;
-    })
-    .join("");
-
-  dom.remoteRelaysList.querySelectorAll("[data-relay-id]").forEach((button) => {
-    button.addEventListener("click", () => {
-      onSelectRelay(button.dataset.relayId);
-    });
-  });
+  renderRelayDirectoryList(viewModel, onSelectRelay);
 }
 
 export function renderDeviceMeta() {

@@ -37,6 +37,7 @@ import {
   saveRemoteAuth,
   state,
 } from "./state.js";
+import { resetRemoteSurfaceState } from "./surface-state.js";
 import { clearSessionRuntime } from "./session-ops.js";
 import { shortId } from "./utils.js";
 
@@ -80,12 +81,12 @@ export async function beginPairing(rawValue, { auto = false } = {}) {
     }
     state.pairingPhase = "connecting";
     state.pairingError = null;
-    state.session = null;
-    state.threads = [];
-    state.currentApprovalId = null;
-    clearClaimLifecycle();
-    clearSessionRuntime();
-    rejectPendingActions("pairing restarted before broker actions completed");
+    resetRemoteSurfaceState(state, {
+      clearClaimLifecycle,
+      clearSessionRuntime,
+      rejectPendingActions,
+      reason: "pairing restarted before broker actions completed",
+    });
     saveDeviceLabel(dom.deviceLabelInput.value);
     closePairingModalIfOpen();
     renderDeviceMeta();
@@ -238,12 +239,12 @@ export function forgetCurrentDevice() {
   state.pairingPhase = null;
   state.pairingTicket = null;
   forgetCurrentRemoteProfile();
-  state.session = null;
-  state.currentApprovalId = null;
-  state.threads = [];
-  clearClaimLifecycle();
-  clearSessionRuntime();
-  rejectPendingActions("device was forgotten before broker actions completed");
+  resetRemoteSurfaceState(state, {
+    clearClaimLifecycle,
+    clearSessionRuntime,
+    rejectPendingActions,
+    reason: "device was forgotten before broker actions completed",
+  });
   clearPairingQueryFromUrl();
   closeBrokerSocket();
   void clearDeviceRefreshSession(brokerUrl);

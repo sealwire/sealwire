@@ -2,6 +2,7 @@ import {
   buildThreadGroups,
   summarizeThreadGroups,
 } from "../shared/thread-groups.js";
+import { workspaceBasename } from "./utils.js";
 
 export function selectSessionRenderModel({ session, previousSession, hasControllerLease }) {
   const approval = session.pending_approvals?.[0] || null;
@@ -10,8 +11,16 @@ export function selectSessionRenderModel({ session, previousSession, hasControll
   return {
     approval,
     canWrite: hasControllerLease,
+    composerDisabled: !hasActiveSession || !hasControllerLease,
+    currentApprovalId: approval?.request_id || null,
     hasActiveSession,
     hasControllerLease,
+    cwdFilterHint: session.current_cwd
+      ? {
+          placeholder: `Optional exact path filter (current: ${workspaceBasename(session.current_cwd)})`,
+          title: session.current_cwd,
+        }
+      : null,
     messagePlaceholder: !hasActiveSession
       ? "Start a remote session first."
       : hasControllerLease

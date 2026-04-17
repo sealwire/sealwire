@@ -55,6 +55,7 @@ import {
   selectRelayProfile,
   state,
 } from "./state.js";
+import { resetRemoteSurfaceState } from "./surface-state.js";
 
 configureRenderHandlers({
   onResumeThread(threadId) {
@@ -258,12 +259,12 @@ async function switchRelay(relayId) {
     return;
   }
 
-  clearClaimLifecycle();
-  clearSessionRuntime();
-  rejectPendingActions("switched to a different relay profile");
-  state.session = null;
-  state.threads = [];
-  state.currentApprovalId = null;
+  resetRemoteSurfaceState(state, {
+    clearClaimLifecycle,
+    clearSessionRuntime,
+    rejectPendingActions,
+    reason: "switched to a different relay profile",
+  });
   renderDeviceMeta();
   renderEmptyState();
   renderThreads([]);
@@ -276,12 +277,12 @@ function returnToRelayHome() {
     return;
   }
 
-  clearClaimLifecycle();
-  clearSessionRuntime();
-  rejectPendingActions("returned to relay directory before broker actions completed");
-  state.session = null;
-  state.threads = [];
-  state.currentApprovalId = null;
+  resetRemoteSurfaceState(state, {
+    clearClaimLifecycle,
+    clearSessionRuntime,
+    rejectPendingActions,
+    reason: "returned to relay directory before broker actions completed",
+  });
   clearActiveRelaySelection();
   closeBrokerSocket();
   openRemoteNavigation();

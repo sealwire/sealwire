@@ -16,6 +16,7 @@ import {
   setSessionClaim,
   state,
 } from "./state.js";
+import { setRemoteThreads } from "./surface-state.js";
 import { sendBrokerFrame } from "./broker-client.js";
 
 const REMOTE_ACTION_TIMEOUT_MS = 15_000;
@@ -275,7 +276,7 @@ function handleRemoteActionResult(actionId, result) {
     }
 
     if (result.threads?.threads) {
-      state.threads = result.threads.threads;
+      setRemoteThreads(state, result.threads.threads);
       renderThreads(state.threads);
     }
   } catch (error) {

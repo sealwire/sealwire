@@ -12,6 +12,7 @@ test("selectSessionRenderModel derives composer state from controller/session fl
   const model = selectSessionRenderModel({
     session: {
       active_thread_id: "thread-1",
+      current_cwd: "/Users/luchi/git/agent-relay",
       current_status: "idle",
       pending_approvals: [{ request_id: "approval-1" }],
       transcript: [{ item_id: "item-1" }],
@@ -24,9 +25,15 @@ test("selectSessionRenderModel derives composer state from controller/session fl
   });
 
   assert.equal(model.approval?.request_id, "approval-1");
+  assert.equal(model.currentApprovalId, "approval-1");
   assert.equal(model.hasActiveSession, true);
   assert.equal(model.canWrite, false);
+  assert.equal(model.composerDisabled, true);
   assert.match(model.messagePlaceholder, /Another device has control/);
+  assert.deepEqual(model.cwdFilterHint, {
+    placeholder: "Optional exact path filter (current: agent-relay)",
+    title: "/Users/luchi/git/agent-relay",
+  });
   assert.deepEqual(model.scrollDebug, {
     thread: "thread-1",
     prevThread: "thread-0",
