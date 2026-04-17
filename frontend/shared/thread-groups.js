@@ -94,6 +94,8 @@ export function renderThreadGroupsMarkup(
   groups,
   {
     activeThreadId = null,
+    collapsedGroupCwds = new Set(),
+    collapsible = false,
     selectedCwd = "",
     selectWorkspaceAttrName = null,
     includePreview = false,
@@ -105,6 +107,10 @@ export function renderThreadGroupsMarkup(
 
   return (groups || [])
     .map((group) => {
+      const isCollapsed =
+        collapsible &&
+        collapsedGroupCwds instanceof Set &&
+        collapsedGroupCwds.has(canonicalizeWorkspace(group.cwd));
       const selectedWorkspaceClass =
         normalizedSelectedCwd && canonicalizeWorkspace(group.cwd) === normalizedSelectedCwd
           ? " is-selected-workspace"
@@ -146,6 +152,20 @@ export function renderThreadGroupsMarkup(
             <span class="thread-group-name">${escapeHtml(group.label)}</span>
           </button>
         `
+        : collapsible
+        ? `
+          <button
+            class="thread-group-header"
+            type="button"
+            data-toggle-thread-group="${escapeHtml(group.cwd)}"
+            aria-expanded="${isCollapsed ? "false" : "true"}"
+            title="${escapeHtml(group.cwd)}"
+          >
+            <span class="thread-group-icon" aria-hidden="true"></span>
+            <span class="thread-group-name">${escapeHtml(group.label)}</span>
+            <span class="thread-group-chevron" aria-hidden="true"></span>
+          </button>
+        `
         : `
           <div class="thread-group-header thread-group-header-static" title="${escapeHtml(group.cwd)}">
             <span class="thread-group-icon" aria-hidden="true"></span>
@@ -154,9 +174,9 @@ export function renderThreadGroupsMarkup(
         `;
 
       return `
-        <section class="thread-group${selectedWorkspaceClass}" data-thread-group-cwd="${escapeHtml(group.cwd)}">
+        <section class="thread-group${selectedWorkspaceClass}${isCollapsed ? " is-collapsed" : ""}" data-thread-group-cwd="${escapeHtml(group.cwd)}">
           ${headerMarkup}
-          <div class="thread-group-list">
+          <div class="thread-group-list" ${isCollapsed ? "hidden" : ""}>
             ${threadItems}
           </div>
         </section>

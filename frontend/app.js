@@ -93,6 +93,7 @@ import {
   renderThreadGroupsMarkup,
   summarizeThreadGroups,
 } from "./shared/thread-groups.js";
+import { mountBuildBadge } from "./shared/build-badge.js";
 import { renderTranscriptMarkup } from "./shared/transcript-render.js";
 
 const DEVICE_STORAGE_KEY = "agent-relay.device-id";
@@ -152,6 +153,10 @@ configureSecurityRenderers({
 });
 
 let controller;
+
+void mountBuildBadge({
+  surface: "relay",
+});
 
 const renderer = createSessionRenderer({
   state,

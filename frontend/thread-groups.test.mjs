@@ -81,6 +81,52 @@ test("renderThreadGroupsMarkup can render selectable groups and preview rows", (
   assert.match(markup, /just now/);
 });
 
+test("renderThreadGroupsMarkup can render collapsible groups", () => {
+  const groups = buildThreadGroups([
+    {
+      id: "thread-1",
+      cwd: "/tmp/demo",
+      name: "Primary thread",
+      preview: "Fix login flow",
+      updated_at: 100,
+    },
+  ]);
+
+  const markup = renderThreadGroupsMarkup(groups, {
+    activeThreadId: null,
+    collapsible: true,
+    collapsedGroupCwds: new Set(["/tmp/demo"]),
+  });
+
+  assert.match(markup, /data-toggle-thread-group="\/tmp\/demo"/);
+  assert.match(markup, /thread-group is-collapsed/);
+  assert.match(markup, /aria-expanded="false"/);
+  assert.match(markup, /thread-group-list" hidden/);
+});
+
+test("renderThreadGroupsMarkup allows collapsing the active thread group", () => {
+  const groups = buildThreadGroups([
+    {
+      id: "thread-1",
+      cwd: "/tmp/demo",
+      name: "Primary thread",
+      preview: "Fix login flow",
+      updated_at: 100,
+    },
+  ]);
+
+  const markup = renderThreadGroupsMarkup(groups, {
+    activeThreadId: "thread-1",
+    collapsible: true,
+    collapsedGroupCwds: new Set(["/tmp/demo"]),
+  });
+
+  assert.match(markup, /thread-group is-collapsed/);
+  assert.match(markup, /aria-expanded="false"/);
+  assert.match(markup, /conversation-item is-active/);
+  assert.match(markup, /thread-group-list" hidden/);
+});
+
 test("summarizeThreadGroups and canonicalizeWorkspace produce stable display values", () => {
   const groups = buildThreadGroups([
     { id: "thread-1", cwd: "/tmp/demo/", updated_at: 1 },

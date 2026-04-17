@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { readFileSync, unwatchFile, watchFile } from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import process from "node:process";
@@ -15,6 +16,7 @@ const defaultBrokerBindHost = localhostOnly || !detectedLanIp ? "127.0.0.1" : "0
 
 const defaultBrokerUrl = `ws://${defaultBrokerHost}:${brokerPort}`;
 const brokerPublicUrl = process.env.RELAY_BROKER_PUBLIC_URL || defaultBrokerUrl;
+const buildMetaPath = new URL("../web/build-meta.json", import.meta.url);
 
 const sharedEnv = {
   ...process.env,
@@ -68,6 +70,7 @@ function shutdown(exitCode = 0) {
     return;
   }
   shuttingDown = true;
+  unwatchFile(buildMetaPath);
   for (const child of children) {
     if (!child.killed && child.exitCode === null) {
       child.kill("SIGTERM");
@@ -93,6 +96,8 @@ await ensurePortsAreAvailable([
 
 console.log("[dev:full] Building frontend assets for relay-server and relay-broker...");
 await runCommand(npmCommand, ["run", "build"], sharedEnv);
+logCurrentBuildMeta("Initial frontend build");
+watchFrontendBuildMeta();
 
 console.log("[dev:full] Starting frontend build watcher, relay-broker, and relay-server...");
 console.log(`[dev:full] Relay:  http://127.0.0.1:${relayPort}`);
@@ -174,4 +179,22 @@ function resolvePrivateIpv4() {
     }
   }
   return null;
+}
+
+function watchFrontendBuildMeta() {
+  watchFile(buildMetaPath, { interval: 250 }, (current, previous) => {
+    if (!current.mtimeMs || current.mtimeMs === previous.mtimeMs) {
+      return;
+    }
+    logCurrentBuildMeta("Frontend rebuilt");
+  });
+}
+
+function logCurrentBuildMeta(prefix) {
+  try {
+    const meta = JSON.parse(readFileSync(buildMetaPath, "utf8"));
+    console.log(`[dev:full] ${prefix}: ${meta.buildId} (${meta.builtAtIso})`);
+  } catch (error) {
+    console.warn(`[dev:full] ${prefix}, but build metadata could not be read: ${error.message}`);
+  }
 }

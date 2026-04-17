@@ -76,6 +76,29 @@ body[data-remote-nav-open="true"] {
   overflow: hidden;
 }
 
+.build-badge {
+  position: fixed;
+  right: 14px;
+  bottom: 14px;
+  z-index: 80;
+  max-width: min(72vw, 420px);
+  padding: 7px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  background: rgba(10, 14, 20, 0.84);
+  color: rgba(241, 245, 249, 0.92);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.32);
+  backdrop-filter: blur(10px);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+  line-height: 1.2;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
 button, input, textarea, select {
   font: inherit;
   color: inherit;
@@ -409,6 +432,20 @@ input:focus, textarea:focus, select:focus {
   font-size: 15px;
   font-weight: 600;
   color: var(--text-primary);
+}
+
+.thread-group-chevron {
+  margin-left: auto;
+  width: 8px;
+  height: 8px;
+  border-right: 1.5px solid var(--text-tertiary);
+  border-bottom: 1.5px solid var(--text-tertiary);
+  transform: rotate(45deg);
+  transition: transform 120ms ease;
+}
+
+.thread-group.is-collapsed .thread-group-chevron {
+  transform: rotate(-45deg);
 }
 
 .thread-group-list {
@@ -1012,6 +1049,39 @@ input:focus, textarea:focus, select:focus {
 
 .remote-app-shell[data-view="conversation"] .sidebar {
   overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+.remote-app-shell .sidebar,
+.remote-app-shell .remote-access-shell,
+.remote-app-shell .sidebar-row,
+.remote-app-shell .sidebar-row > div {
+  touch-action: pan-y;
+}
+
+.remote-app-shell .sidebar-row > div {
+  pointer-events: none;
+}
+
+.remote-app-shell .sidebar-caption,
+.remote-app-shell .sidebar-hint,
+.remote-app-shell .sidebar-label {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.remote-app-shell .sidebar-caption,
+.remote-app-shell .sidebar-hint {
+  pointer-events: none;
+  -webkit-touch-callout: none;
+}
+
+.remote-app-shell[data-view="conversation"] .conversation-list {
+  overflow: visible;
+  overscroll-behavior: auto;
+  -webkit-overflow-scrolling: auto;
+  padding-right: 0;
 }
 
 .app-shell[data-view="conversation"] .sidebar-drawer {
@@ -1038,6 +1108,15 @@ input:focus, textarea:focus, select:focus {
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
   padding-right: 4px;
+}
+
+.remote-app-shell[data-view="conversation"] #remote-relays-list,
+.remote-app-shell[data-view="conversation"] #remote-threads-list {
+  flex: 0 0 auto;
+  overflow: visible;
+  overscroll-behavior: auto;
+  -webkit-overflow-scrolling: auto;
+  padding-right: 0;
 }
 
 .chat-shell[data-view="conversation"] .chat-thread {

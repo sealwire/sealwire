@@ -47,6 +47,7 @@ import {
   syncRemoteSnapshot,
   takeOverControl,
 } from "./session-ops.js";
+import { mountBuildBadge } from "../shared/build-badge.js";
 import {
   clearActiveRelaySelection,
   ensureDeviceIdentity,
@@ -194,7 +195,13 @@ dom.remoteTranscript.addEventListener("scroll", () => {
   handleTranscriptScroll();
 });
 
+void mountBuildBadge({
+  surface: "remote",
+});
+
 void boot();
+
+installSidebarGestureDebug();
 
 async function boot() {
   if (!window.crypto?.getRandomValues) {
@@ -237,6 +244,73 @@ async function boot() {
 
   if (state.remoteAuth) {
     void connectBroker("initial boot");
+  }
+}
+
+function installSidebarGestureDebug() {
+  const targets = [
+    ["sidebar", dom.sidebar],
+    ["relays", dom.remoteRelaysList],
+    ["threads", dom.remoteThreadsList],
+  ];
+
+  const describeNode = (node) => {
+    if (!(node instanceof Element)) {
+      return node?.nodeName || "-";
+    }
+
+    const tag = node.tagName || "-";
+    const id = node.id ? `#${node.id}` : "";
+    const classNames = typeof node.className === "string"
+      ? node.className.trim().split(/\s+/).filter(Boolean).slice(0, 3).join(".")
+      : "";
+    const classes = classNames ? `.${classNames}` : "";
+    return `${tag}${id}${classes}`;
+  };
+
+  const describeEventTarget = (event) => {
+    const path = typeof event.composedPath === "function" ? event.composedPath() : [];
+    const elements = path.filter((entry) => entry instanceof Element).slice(0, 4);
+    if (elements.length) {
+      return elements.map((entry) => describeNode(entry)).join(" -> ");
+    }
+    return describeNode(event.target);
+  };
+
+  const logGestureEvent = (scope, event) => {
+    const target = describeEventTarget(event);
+    const current = describeNode(event.currentTarget);
+    const sidebarTop = dom.sidebar?.scrollTop ?? -1;
+    const relaysTop = dom.remoteRelaysList?.scrollTop ?? -1;
+    const threadsTop = dom.remoteThreadsList?.scrollTop ?? -1;
+    const message = `[sidebar-debug] ${scope} type=${event.type} target=${target} current=${current} sidebarTop=${sidebarTop} relaysTop=${relaysTop} threadsTop=${threadsTop}`;
+    console.log(message);
+    renderLog(message);
+  };
+
+  const logScrollEvent = (scope, element) => {
+    const message = `[sidebar-debug] ${scope} type=scroll current=${describeNode(element)} top=${element.scrollTop} height=${element.scrollHeight} client=${element.clientHeight}`;
+    console.log(message);
+    renderLog(message);
+  };
+
+  for (const [name, element] of targets) {
+    if (!element) {
+      continue;
+    }
+
+    element.addEventListener("pointerdown", (event) => {
+      logGestureEvent(name, event);
+    }, { passive: true });
+    element.addEventListener("touchstart", (event) => {
+      logGestureEvent(name, event);
+    }, { passive: true });
+    element.addEventListener("wheel", (event) => {
+      logGestureEvent(name, event);
+    }, { passive: true });
+    element.addEventListener("scroll", () => {
+      logScrollEvent(name, element);
+    }, { passive: true });
   }
 }
 
