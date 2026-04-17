@@ -4,7 +4,7 @@ import { flushSync } from "react-dom";
 import * as dom from "./dom.js";
 import { relaySubtitle } from "./components/empty-state.js";
 import { canonicalizeWorkspace } from "../shared/thread-groups.js";
-import { formatTimestamp, shortId } from "./utils.js";
+import { escapeHtml, formatTimestamp, shortId } from "./utils.js";
 
 const h = React.createElement;
 
@@ -100,6 +100,30 @@ export function createRemoteReactUiRenderer() {
       });
       dom.remoteModelInput.value = currentValue;
     },
+    renderSessionChrome(model) {
+      applyHeaderToDom(model.header);
+      applyStatusBadgeToDom(model.statusBadge);
+      applySessionMetaToDom(model.sessionMeta);
+      applyControlBannerToDom(model.controlBanner);
+    },
+    renderDeviceChrome(model) {
+      applyDeviceMetaToDom(model.deviceMeta);
+      if (model.workspaceHeading) {
+        applyHeaderToDom(model.workspaceHeading);
+      }
+      dom.connectButton.disabled = model.pairingControls.connectDisabled;
+      dom.connectButton.textContent = model.pairingControls.connectLabel;
+      dom.pairingInput.readOnly = model.pairingControls.pairingInputReadOnly;
+      dom.remoteHomeButton.hidden = model.homeButton.hidden;
+    },
+    renderResetChrome(model) {
+      applyHeaderToDom(model.header);
+      applySessionMetaToDom(model.sessionMeta);
+      applyControlBannerToDom(model.controlBanner);
+    },
+    renderStatusBadge(model) {
+      applyStatusBadgeToDom(model);
+    },
     renderRelayDirectory(viewModel, onSelectRelay) {
       renderIntoRoot(
         dom.remoteRelaysList,
@@ -189,6 +213,112 @@ export function createRemoteReactUiRenderer() {
   };
 
   return renderer;
+}
+
+function applyHeaderToDom(model) {
+  dom.remoteWorkspaceTitle.textContent = model.title;
+  dom.remoteWorkspaceSubtitle.textContent = model.subtitle;
+  dom.remoteWorkspaceSubtitle.hidden = model.subtitleHidden;
+  dom.remoteWorkspaceTitle.title = model.titleTitle || "";
+  dom.remoteWorkspaceSubtitle.title = model.subtitleTitle || model.subtitle || "";
+  if (dom.remoteSessionPath) {
+    dom.remoteSessionPath.textContent = model.sessionPath || "No workspace path yet.";
+  }
+}
+
+function applySessionMetaToDom(model) {
+  dom.remoteSessionMeta.innerHTML = [
+    ...model.chips.map(
+      (chip) => `
+        <span class="meta-chip">
+          <strong>${escapeHtml(chip.label)}:</strong>
+          <span>${escapeHtml(chip.value)}</span>
+        </span>
+      `
+    ),
+    ...(model.emptyMessage ? [`<span class="meta-empty">${escapeHtml(model.emptyMessage)}</span>`] : []),
+  ].join("");
+}
+
+function applyControlBannerToDom(model) {
+  dom.remoteControlBanner.hidden = model.hidden;
+  if (model.hidden) {
+    return;
+  }
+
+  dom.remoteControlSummary.textContent = model.summary;
+  dom.remoteControlHint.textContent = model.hint;
+  dom.remoteTakeOverButton.hidden = model.takeOverHidden;
+}
+
+function applyDeviceMetaToDom(model) {
+  if (model.emptyMessage) {
+    dom.deviceMeta.innerHTML = `<p class="sidebar-empty">${escapeHtml(model.emptyMessage)}</p>`;
+    return;
+  }
+
+  dom.deviceMeta.innerHTML = model.cards
+    .map(
+      (card) => `
+        <article class="paired-device-card">
+          <div class="paired-device-copy">
+            <strong>${escapeHtml(card.title)}</strong>
+            <div class="paired-device-badges">
+              ${card.badges
+                .map(
+                  (badge) =>
+                    `<span class="status-badge status-badge-${escapeHtml(badge.tone)}">${escapeHtml(badge.label)}</span>`
+                )
+                .join("")}
+            </div>
+            ${card.metaLines
+              .map((line) => `<p class="paired-device-meta">${escapeHtml(line)}</p>`)
+              .join("")}
+          </div>
+        </article>
+      `
+    )
+    .join("");
+}
+
+function applyStatusBadgeToDom(model) {
+  const compactLabel = compactStatusLabel(model.label);
+  dom.remoteStatusBadge.textContent = compactLabel;
+  dom.remoteStatusBadge.className = `status-badge status-badge-${model.tone} status-badge-compact`;
+  dom.remoteStatusBadge.title = model.label;
+  dom.remoteStatusBadge.setAttribute("aria-label", model.label);
+}
+
+function compactStatusLabel(label) {
+  const normalized = String(label || "").trim().toLowerCase();
+
+  switch (normalized) {
+    case "idle":
+    case "ready":
+      return "Ready";
+    case "connected":
+      return "Connected";
+    case "home":
+      return "Home";
+    case "offline":
+      return "Offline";
+    case "connecting":
+      return "Connecting";
+    case "approval required":
+      return "Approval";
+    case "re-pair required":
+      return "Re-pair";
+    case "pairing failed":
+      return "Failed";
+    case "approval pending":
+      return "Pending";
+    default:
+      return label
+        ? String(label)
+            .trim()
+            .replace(/\b\w/g, (char) => char.toUpperCase())
+        : "Ready";
+  }
 }
 
 function renderIntoRoot(container, tree) {
