@@ -180,7 +180,7 @@ export async function establishDeviceRefreshSession(refreshToken, brokerUrl) {
       Authorization: `Bearer ${refreshToken}`,
     },
   });
-  let payload = null;
+  let payload;
   try {
     payload = await response.json();
   } catch {
@@ -201,7 +201,7 @@ export async function establishClientRefreshSession(refreshToken, brokerUrl) {
       Authorization: `Bearer ${refreshToken}`,
     },
   });
-  let payload = null;
+  let payload;
   try {
     payload = await response.json();
   } catch {

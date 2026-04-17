@@ -1,4 +1,3 @@
-import * as dom from "./dom.js";
 import {
   canCurrentDeviceWrite as canRemoteDeviceWrite,
   isCurrentDeviceActiveController as isRemoteController,
@@ -8,17 +7,9 @@ import {
   updateStatusBadge as updateChromeStatusBadge,
 } from "./render-chrome.js";
 import {
-  renderEmptyState as renderTranscriptEmptyState,
   renderLog as appendClientLog,
   renderLogs,
 } from "./render-transcript.js";
-import {
-  renderMissingCredentialsState,
-  renderRelayHome,
-  syncIdleSurfaceControls,
-} from "./components/empty-state.js";
-import { renderRelayDirectoryList } from "./components/relay-directory.js";
-import { renderThreadList } from "./components/thread-list.js";
 import {
   debugScrollEvent,
   handleTranscriptScroll,
@@ -38,6 +29,23 @@ import {
   applyRemoteSurfacePatch,
   createSessionRuntimeStatePatch,
 } from "./surface-state.js";
+import {
+  renderComposerUi,
+  renderMissingCredentialsUi,
+  readCurrentModelValue,
+  readSessionPanelOpen,
+  readThreadsFilterValue,
+  renderRelayDirectoryUi,
+  renderRelayHomeUi,
+  renderThreadListUi,
+  renderTranscriptEmptyUi,
+  syncConversationLayoutUi,
+  syncIdleSurfaceControlsUi,
+  syncRelayDirectoryChromeUi,
+  syncRemoteModelSuggestionsUi,
+  syncSessionPanelUi,
+  syncThreadListChromeUi,
+} from "./ui-renderer.js";
 
 let onResumeThread = () => {};
 let onSelectRelay = () => {};
@@ -50,21 +58,28 @@ export function configureRenderHandlers(handlers) {
 export function renderSession(session) {
   const previousSession = state.session;
   syncTranscriptScrollModeForSession(session, previousSession);
-  syncRemoteChatView();
   const sessionView = selectSessionRenderModel({
     session,
     previousSession,
     hasControllerLease: canCurrentDeviceWrite(session),
   });
+  syncConversationLayoutUi();
   const sessionRuntime = deriveSessionRuntime({
     session,
     sessionView,
-    threadsFilterValue: dom.remoteThreadsCwdInput.value,
+    threadsFilterValue: readThreadsFilterValue(),
   });
   applySessionRuntimeView(sessionRuntime);
   applyRemoteSurfacePatch(createSessionRuntimeStatePatch(sessionRuntime));
 
-  syncRemoteModelSuggestions(session.available_models || [], session.model);
+  syncRemoteModelSuggestionsUi({
+    currentValue:
+      session.model
+      || readCurrentModelValue()
+      || session.available_models?.find((model) => model.is_default)?.model
+      || "gpt-5.4",
+    models: session.available_models || [],
+  });
 
   renderSessionChrome(session);
   renderTranscriptPanel(session, sessionView.approval, sessionView.canWrite, previousSession);
@@ -74,7 +89,7 @@ export function renderSession(session) {
 }
 
 export function renderThreads(threads) {
-  const filterValue = dom.remoteThreadsCwdInput.value.trim();
+  const filterValue = readThreadsFilterValue();
   const viewModel = selectThreadsRenderModel({
     threads,
     filterValue,
@@ -82,7 +97,10 @@ export function renderThreads(threads) {
     remoteAuth: state.remoteAuth,
     relayDirectory: state.relayDirectory,
   });
-  renderThreadList(viewModel, onResumeThread);
+  syncThreadListChromeUi({
+    countLabel: viewModel.countLabel,
+  });
+  renderThreadListUi(viewModel, onResumeThread);
 }
 
 export function renderRelayDirectory() {
@@ -90,7 +108,10 @@ export function renderRelayDirectory() {
     relayDirectory: state.relayDirectory,
     activeRelayId: state.remoteAuth?.relayId || null,
   });
-  renderRelayDirectoryList(viewModel, onSelectRelay);
+  syncRelayDirectoryChromeUi({
+    countLabel: viewModel.countLabel,
+  });
+  renderRelayDirectoryUi(viewModel, onSelectRelay);
 }
 
 export function renderDeviceMeta() {
@@ -99,21 +120,21 @@ export function renderDeviceMeta() {
 }
 
 export function renderEmptyState() {
-  syncRemoteChatView();
+  syncConversationLayoutUi();
   const viewModel = selectEmptyStateRenderModel({
     clientAuth: state.clientAuth,
     pairingTicket: state.pairingTicket,
     relayDirectory: state.relayDirectory,
     remoteAuth: state.remoteAuth,
   });
-  syncIdleSurfaceControls({
+  syncIdleSurfaceControlsUi({
     remoteAuth: viewModel.remoteAuth,
     relayDirectory: viewModel.relayDirectory,
-    setRemoteSessionPanelOpen,
+    sessionPanelOpen: readSessionPanelOpen(),
   });
 
   if (viewModel.showRelayHome) {
-    renderRelayHome({
+    renderRelayHomeUi({
       clientAuth: viewModel.clientAuth,
       relayDirectory: viewModel.relayDirectory,
       onSelectRelay,
@@ -122,23 +143,18 @@ export function renderEmptyState() {
   }
 
   if (viewModel.showMissingCredentials) {
-    renderMissingCredentialsState(viewModel.remoteAuth);
+    renderMissingCredentialsUi(viewModel.remoteAuth);
     return;
   }
 
-  renderTranscriptEmptyState();
+  renderTranscriptEmptyUi();
 }
 
 export function setRemoteSessionPanelOpen(open) {
-  if (!state.remoteAuth) {
-    dom.remoteSessionPanel.hidden = true;
-    dom.remoteSessionToggle.setAttribute("aria-expanded", "false");
-    dom.remoteSessionToggle.textContent = "Select a relay first";
-    return;
-  }
-  dom.remoteSessionPanel.hidden = !open;
-  dom.remoteSessionToggle.setAttribute("aria-expanded", String(open));
-  dom.remoteSessionToggle.textContent = open ? "Close Remote Session Setup" : "Start Remote Session";
+  syncSessionPanelUi({
+    hasRemoteAuth: Boolean(state.remoteAuth),
+    open,
+  });
 }
 
 export function updateStatusBadge() {
@@ -150,7 +166,7 @@ export function renderLog(message) {
 }
 
 export function resetRemoteSurface() {
-  syncRemoteChatView();
+  syncConversationLayoutUi();
   renderThreads([]);
   resetRemoteSurfaceChrome();
 }
@@ -165,42 +181,10 @@ export function canCurrentDeviceWrite(session) {
 
 export { handleTranscriptScroll } from "./components/transcript-panel.js";
 
-function syncRemoteModelSuggestions(models, selectedModel) {
-  const currentValue =
-    selectedModel
-    || dom.remoteModelInput.value
-    || models.find((model) => model.is_default)?.model
-    || "gpt-5.4";
-  const options = [...models];
-  if (currentValue && !options.some((model) => model.model === currentValue)) {
-    options.unshift({
-      model: currentValue,
-      display_name: currentValue,
-    });
-  }
-
-  dom.remoteModelInput.innerHTML = options
-    .map((model) => `<option value="${escapeHtml(model.model)}">${escapeHtml(model.display_name)}</option>`)
-    .join("");
-  dom.remoteModelInput.value = currentValue;
-}
-
-function syncRemoteChatView() {
-  if (dom.appShell) {
-    dom.appShell.dataset.view = "conversation";
-  }
-  if (dom.chatShell) {
-    dom.chatShell.dataset.view = "conversation";
-  }
-}
-
 function applySessionRuntimeView(sessionRuntime) {
-  if (sessionRuntime.threadsFilterHint) {
-    dom.remoteThreadsCwdInput.placeholder = sessionRuntime.threadsFilterHint.placeholder;
-    dom.remoteThreadsCwdInput.title = sessionRuntime.threadsFilterHint.title;
-  }
+  syncThreadListChromeUi({
+    threadsFilterHint: sessionRuntime.threadsFilterHint,
+  });
 
-  dom.remoteSendButton.disabled = sessionRuntime.composerDisabled;
-  dom.remoteMessageInput.disabled = sessionRuntime.composerDisabled;
-  dom.remoteMessageInput.placeholder = sessionRuntime.messagePlaceholder;
+  renderComposerUi(sessionRuntime);
 }

@@ -45,7 +45,13 @@ export const remoteTakeOverButton = document.querySelector("#remote-take-over-bu
 export const chatShell = document.querySelector(".chat-shell");
 export const remoteTranscript = document.querySelector("#remote-transcript");
 export const remoteMessageForm = document.querySelector("#remote-message-form");
-export const remoteMessageInput = document.querySelector("#remote-message-input");
-export const remoteMessageEffort = document.querySelector("#remote-message-effort");
-export const remoteSendButton = document.querySelector("#remote-send-button");
+export let remoteMessageInput = document.querySelector("#remote-message-input");
+export let remoteMessageEffort = document.querySelector("#remote-message-effort");
+export let remoteSendButton = document.querySelector("#remote-send-button");
 export const remoteClientLog = document.querySelector("#remote-client-log");
+
+export function refreshDynamicDomReferences() {
+  remoteMessageInput = document.querySelector("#remote-message-input");
+  remoteMessageEffort = document.querySelector("#remote-message-effort");
+  remoteSendButton = document.querySelector("#remote-send-button");
+}

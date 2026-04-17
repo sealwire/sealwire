@@ -1,15 +1,16 @@
 import * as dom from "../dom.js";
 import { renderTranscriptMarkup } from "../../shared/transcript-render.js";
-import {
-  renderEmptyState as renderTranscriptEmptyState,
-  renderLog as appendClientLog,
-} from "../render-transcript.js";
+import { renderLog as appendClientLog } from "../render-transcript.js";
 import { state } from "../state.js";
-import { escapeHtml, shortId } from "../utils.js";
 import {
   applyRemoteSurfacePatch,
   createTranscriptScrollModePatch,
 } from "../surface-state.js";
+import {
+  renderReadyTranscriptUi,
+  renderTranscriptEmptyUi,
+  renderTranscriptMarkupUi,
+} from "../ui-renderer.js";
 
 const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 80;
 const TOP_SCROLL_PRESERVE_THRESHOLD_PX = 80;
@@ -41,11 +42,14 @@ export function renderTranscriptPanel(session, approval, canWrite, previousSessi
 
   if (!entries.length && !approval) {
     if (session.active_thread_id) {
-      renderReadyTranscriptState(session, canWrite);
+      renderReadyTranscriptUi({
+        canWrite,
+        session,
+      });
       return;
     }
 
-    renderTranscriptEmptyState();
+    renderTranscriptEmptyUi();
     return;
   }
 
@@ -70,10 +74,10 @@ export function renderTranscriptPanel(session, approval, canWrite, previousSessi
     prevTop: previousScrollTop,
     prevHeight: previousScrollHeight,
   });
-  const loadingBanner = hydrationLoading
-    ? `<div class="transcript-loading-banner">Loading earlier transcript…</div>`
-    : "";
-  dom.remoteTranscript.innerHTML = `${loadingBanner}${renderTranscriptMarkup(entries, approval)}`;
+  renderTranscriptMarkupUi({
+    hydrationLoading,
+    markup: renderTranscriptMarkup(entries, approval),
+  });
   let nextScrollTop = previousScrollTop;
   if (shouldAutoScroll) {
     nextScrollTop = Math.max(
@@ -121,34 +125,6 @@ export function handleTranscriptScroll() {
   debugScrollEvent("handleTranscriptScroll", {
     mode: state.transcriptScrollMode,
   });
-}
-
-function renderReadyTranscriptState(session, canWrite) {
-  const title = canWrite ? "Session ready" : "Session active on another device";
-  const copy = canWrite
-    ? "The remote session is live. Send the first prompt below when you're ready."
-    : "This thread is already open, but another device currently has control. Take over to send the first prompt from here.";
-  const detailParts = [];
-
-  if (session.current_cwd) {
-    detailParts.push(`Workspace: ${escapeHtml(session.current_cwd)}`);
-  }
-  if (session.active_thread_id) {
-    detailParts.push(`Thread: ${escapeHtml(shortId(session.active_thread_id))}`);
-  }
-
-  dom.remoteTranscript.innerHTML = `
-    <div class="thread-empty thread-empty-ready">
-      <span class="thread-empty-badge">${canWrite ? "Ready" : "Waiting"}</span>
-      <h2>${title}</h2>
-      <p>${copy}</p>
-      ${
-        detailParts.length
-          ? `<p class="thread-empty-detail">${detailParts.join(" · ")}</p>`
-          : ""
-      }
-    </div>
-  `;
 }
 
 function shouldStickTranscriptToBottom(transcript, previousSession, session) {

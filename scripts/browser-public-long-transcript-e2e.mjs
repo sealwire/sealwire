@@ -24,7 +24,8 @@ async function main() {
   try {
     await page.addInitScript(
       ({ relayId, threadId, fullText }) => {
-        const REMOTE_STATE_STORAGE_KEY = "agent-relay.remote-state-v2";
+        const REMOTE_STATE_STORAGE_KEY = "agent-relay.remote-state";
+        const REMOTE_STATE_SCHEMA_VERSION = 1;
         const REMOTE_SECRET_DB_NAME = "agent-relay-secrets";
         const REMOTE_SECRET_STORE_NAME = "payload-secrets";
         const REMOTE_SECRET_KEY_STORE_NAME = "secret-keys";
@@ -99,6 +100,7 @@ async function main() {
         window.localStorage.setItem(
           REMOTE_STATE_STORAGE_KEY,
           JSON.stringify({
+            schemaVersion: REMOTE_STATE_SCHEMA_VERSION,
             activeRelayId: relayId,
             clientAuth: null,
             remoteProfiles: {
@@ -359,7 +361,7 @@ async function main() {
               () => window.__agentRelayFakeSnapshotCount || 0
             ),
             remoteState: await page.evaluate(() =>
-              window.localStorage.getItem("agent-relay.remote-state-v2")
+              window.localStorage.getItem("agent-relay.remote-state")
             ),
             socketType: await page.evaluate(() => String(window.WebSocket)),
             secretReady: await page.evaluate(() => window.__agentRelaySecretReady === true),

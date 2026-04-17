@@ -60,6 +60,10 @@ import {
   applyRemoteSurfacePatch,
   createResetRemoteSurfaceStatePatch,
 } from "./surface-state.js";
+import { createRemoteReactUiRenderer } from "./react-renderer.js";
+import { installRemoteUiRenderer } from "./ui-renderer.js";
+
+installRemoteUiRenderer(createRemoteReactUiRenderer());
 
 configureRenderHandlers({
   onResumeThread(threadId) {
