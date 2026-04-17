@@ -1010,6 +1010,10 @@ input:focus, textarea:focus, select:focus {
   overflow-x: hidden;
 }
 
+.remote-app-shell[data-view="conversation"] .sidebar {
+  overflow-y: auto;
+}
+
 .app-shell[data-view="conversation"] .sidebar-drawer {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
