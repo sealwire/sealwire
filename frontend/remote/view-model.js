@@ -1,0 +1,105 @@
+import {
+  buildThreadGroups,
+  summarizeThreadGroups,
+} from "../shared/thread-groups.js";
+
+export function selectSessionRenderModel({ session, previousSession, hasControllerLease }) {
+  const approval = session.pending_approvals?.[0] || null;
+  const hasActiveSession = Boolean(session.active_thread_id);
+
+  return {
+    approval,
+    canWrite: hasControllerLease,
+    hasActiveSession,
+    hasControllerLease,
+    messagePlaceholder: !hasActiveSession
+      ? "Start a remote session first."
+      : hasControllerLease
+        ? "Message Codex remotely..."
+        : "Another device has control. Take over to reply.",
+    scrollDebug: {
+      thread: session.active_thread_id || "-",
+      prevThread: previousSession?.active_thread_id || "-",
+      entries: session.transcript?.length || 0,
+      truncated: session.transcript_truncated ? "1" : "0",
+      status: session.current_status || "-",
+    },
+  };
+}
+
+export function selectThreadsRenderModel({
+  threads,
+  filterValue,
+  activeThreadId,
+  remoteAuth,
+  relayDirectory,
+}) {
+  const groups = buildThreadGroups(threads);
+
+  if (!remoteAuth) {
+    return {
+      activeThreadId,
+      countLabel: "Remote session history",
+      emptyMessage: relayDirectory?.length
+        ? "Open a relay to view its session history."
+        : "Pair a relay, then refresh remote history.",
+      groups: [],
+    };
+  }
+
+  return {
+    activeThreadId,
+    countLabel: summarizeThreadGroups(groups),
+    emptyMessage: groups.length
+      ? null
+      : filterValue
+        ? "No remote sessions found for this workspace filter."
+        : "No remote sessions found yet.",
+    groups,
+  };
+}
+
+export function selectRelayDirectoryRenderModel({ relayDirectory, activeRelayId }) {
+  const relays = relayDirectory || [];
+
+  return {
+    countLabel: `${relays.length} ${relays.length === 1 ? "relay" : "relays"}`,
+    emptyMessage: relays.length
+      ? null
+      : "Pair a relay from your local machine to add it here.",
+    items: relays.map((relay) => ({
+      active: activeRelayId === relay.relayId,
+      actionLabel: relay.hasLocalProfile
+        ? "Open relay"
+        : relay.needsLocalRePairing
+          ? "Re-pair relay"
+          : "Pair again",
+      id: relay.relayId || relay.brokerRoomId || relay.deviceId || "",
+      isEnabled: Boolean(relay.hasLocalProfile && (relay.relayId || relay.brokerRoomId || relay.deviceId)),
+      meta: relay.brokerRoomId || relay.relayId || relay.deviceId || "",
+      relay,
+      title:
+        relay.relayLabel
+        || relay.relayId
+        || relay.brokerRoomId
+        || relay.deviceLabel
+        || relay.deviceId
+        || "Unknown relay",
+    })),
+  };
+}
+
+export function selectEmptyStateRenderModel({
+  clientAuth,
+  pairingTicket,
+  relayDirectory,
+  remoteAuth,
+}) {
+  return {
+    clientAuth,
+    relayDirectory,
+    remoteAuth,
+    showMissingCredentials: Boolean(remoteAuth && !remoteAuth.payloadSecret && !pairingTicket),
+    showRelayHome: Boolean(!remoteAuth && !pairingTicket),
+  };
+}
