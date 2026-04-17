@@ -1053,6 +1053,9 @@ fn cached_remote_action_result(
         ok,
         snapshot,
         receipt: outcome.receipt,
+        // Snapshots and thread lists are compacted at the remote-surface publish
+        // boundary. Thread transcript responses are already paginated and do not
+        // use ThreadsResponseCompactProfile.
         threads: outcome.threads,
         thread_transcript: outcome.thread_transcript,
         session_claim: outcome.session_claim,
