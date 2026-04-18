@@ -11,6 +11,8 @@ const h = React.createElement;
 const roots = new Map();
 const collapsedGroupCwds = new Set();
 let lastThreadListArgs = null;
+let lastHeaderModel = createDefaultHeaderModel();
+let lastStatusBadgeModel = createDefaultStatusBadgeModel();
 
 export function createRemoteReactUiRenderer() {
   const renderer = {
@@ -101,15 +103,19 @@ export function createRemoteReactUiRenderer() {
       dom.remoteModelInput.value = currentValue;
     },
     renderSessionChrome(model) {
-      applyHeaderToDom(model.header);
-      applyStatusBadgeToDom(model.statusBadge);
+      lastHeaderModel = model.header;
+      lastStatusBadgeModel = model.statusBadge;
+      renderWorkspaceHeading();
+      renderSessionPath();
       renderIntoRoot(dom.remoteSessionMeta, h(SessionMetaPanel, { model: model.sessionMeta }));
       renderControlBanner(model.controlBanner);
     },
     renderDeviceChrome(model) {
       renderIntoRoot(dom.deviceMeta, h(DeviceMetaPanel, { model: model.deviceMeta }));
       if (model.workspaceHeading) {
-        applyHeaderToDom(model.workspaceHeading);
+        lastHeaderModel = model.workspaceHeading;
+        renderWorkspaceHeading();
+        renderSessionPath();
       }
       dom.connectButton.disabled = model.pairingControls.connectDisabled;
       dom.connectButton.textContent = model.pairingControls.connectLabel;
@@ -117,12 +123,15 @@ export function createRemoteReactUiRenderer() {
       dom.remoteHomeButton.hidden = model.homeButton.hidden;
     },
     renderResetChrome(model) {
-      applyHeaderToDom(model.header);
+      lastHeaderModel = model.header;
+      renderWorkspaceHeading();
+      renderSessionPath();
       renderIntoRoot(dom.remoteSessionMeta, h(SessionMetaPanel, { model: model.sessionMeta }));
       renderControlBanner(model.controlBanner);
     },
     renderStatusBadge(model) {
-      applyStatusBadgeToDom(model);
+      lastStatusBadgeModel = model;
+      renderWorkspaceHeading();
     },
     renderRelayDirectory(viewModel, onSelectRelay) {
       renderIntoRoot(
@@ -215,17 +224,6 @@ export function createRemoteReactUiRenderer() {
   return renderer;
 }
 
-function applyHeaderToDom(model) {
-  dom.remoteWorkspaceTitle.textContent = model.title;
-  dom.remoteWorkspaceSubtitle.textContent = model.subtitle;
-  dom.remoteWorkspaceSubtitle.hidden = model.subtitleHidden;
-  dom.remoteWorkspaceTitle.title = model.titleTitle || "";
-  dom.remoteWorkspaceSubtitle.title = model.subtitleTitle || model.subtitle || "";
-  if (dom.remoteSessionPath) {
-    dom.remoteSessionPath.textContent = model.sessionPath || "No workspace path yet.";
-  }
-}
-
 function renderControlBanner(model) {
   if (!dom.remoteControlBanner) {
     return;
@@ -235,12 +233,29 @@ function renderControlBanner(model) {
   renderIntoRoot(dom.remoteControlBanner, h(ControlBanner, { model }));
 }
 
-function applyStatusBadgeToDom(model) {
-  const compactLabel = compactStatusLabel(model.label);
-  dom.remoteStatusBadge.textContent = compactLabel;
-  dom.remoteStatusBadge.className = `status-badge status-badge-${model.tone} status-badge-compact`;
-  dom.remoteStatusBadge.title = model.label;
-  dom.remoteStatusBadge.setAttribute("aria-label", model.label);
+function renderWorkspaceHeading() {
+  if (!dom.remoteChatHeading) {
+    return;
+  }
+
+  renderIntoRoot(
+    dom.remoteChatHeading,
+    h(WorkspaceHeading, {
+      header: lastHeaderModel,
+      statusBadge: lastStatusBadgeModel,
+    })
+  );
+}
+
+function renderSessionPath() {
+  if (!dom.remoteSessionPath) {
+    return;
+  }
+
+  renderIntoRoot(
+    dom.remoteSessionPath,
+    lastHeaderModel?.sessionPath || "No workspace path yet."
+  );
 }
 
 function compactStatusLabel(label) {
@@ -273,6 +288,75 @@ function compactStatusLabel(label) {
             .replace(/\b\w/g, (char) => char.toUpperCase())
         : "Ready";
   }
+}
+
+function createDefaultHeaderModel() {
+  return {
+    sessionPath: dom.remoteSessionPath?.textContent || "No workspace path yet.",
+    subtitle: dom.remoteWorkspaceSubtitle?.textContent || "",
+    subtitleHidden: dom.remoteWorkspaceSubtitle?.hidden ?? false,
+    subtitleTitle: dom.remoteWorkspaceSubtitle?.title || dom.remoteWorkspaceSubtitle?.textContent || "",
+    title: dom.remoteWorkspaceTitle?.textContent || "Pair this browser",
+    titleTitle: dom.remoteWorkspaceTitle?.title || "",
+  };
+}
+
+function createDefaultStatusBadgeModel() {
+  return {
+    label: dom.remoteStatusBadge?.title || dom.remoteStatusBadge?.textContent || "Offline",
+    tone: extractStatusBadgeTone(dom.remoteStatusBadge?.className) || "offline",
+  };
+}
+
+function extractStatusBadgeTone(className) {
+  const match = String(className || "").match(/status-badge-([a-z-]+)/);
+  if (!match) {
+    return null;
+  }
+  return match[1] === "compact" ? null : match[1];
+}
+
+function WorkspaceHeading({ header, statusBadge }) {
+  const statusTone = statusBadge?.tone || "offline";
+  const statusLabel = statusBadge?.label || "Offline";
+  const subtitle = header?.subtitle || "";
+
+  return h(
+    React.Fragment,
+    null,
+    h(
+      "div",
+      { className: "chat-heading-title-row" },
+      h(
+        "h1",
+        {
+          id: "remote-workspace-title",
+          title: header?.titleTitle || "",
+        },
+        header?.title || "Pair this browser"
+      ),
+      h(
+        "span",
+        {
+          "aria-label": statusLabel,
+          className: `status-badge status-badge-${statusTone} status-badge-compact`,
+          id: "remote-status-badge",
+          title: statusLabel,
+        },
+        compactStatusLabel(statusLabel)
+      )
+    ),
+    h(
+      "p",
+      {
+        className: "chat-subtitle",
+        hidden: header?.subtitleHidden ?? !subtitle,
+        id: "remote-workspace-subtitle",
+        title: header?.subtitleTitle || subtitle,
+      },
+      subtitle
+    )
+  );
 }
 
 function SessionMetaPanel({ model }) {
