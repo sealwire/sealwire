@@ -9,7 +9,6 @@ let lastOnResumeThread = () => {};
 export function renderThreadList(viewModel, onResumeThread) {
   lastViewModel = viewModel;
   lastOnResumeThread = onResumeThread;
-  dom.remoteThreadsCount.textContent = viewModel.countLabel;
 
   const nextMarkup = viewModel.emptyMessage
     ? `<p class="sidebar-empty">${viewModel.emptyMessage}</p>`

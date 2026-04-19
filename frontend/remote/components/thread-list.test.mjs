@@ -64,5 +64,5 @@ test("renderThreadList skips DOM rewrites when markup is unchanged", () => {
   renderThreadList(viewModel, () => {});
 
   assert.equal(dom.remoteThreadsList.innerHtmlWrites, 1);
-  assert.equal(dom.remoteThreadsCount.textContent, "1 folder · 1 thread");
+  assert.equal(dom.remoteThreadsCount.textContent, "");
 });

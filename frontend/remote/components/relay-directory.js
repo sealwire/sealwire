@@ -3,8 +3,6 @@ import { relaySubtitle } from "./empty-state.js";
 import { escapeHtml } from "../utils.js";
 
 export function renderRelayDirectoryList(viewModel, onSelectRelay) {
-  dom.remoteRelaysCount.textContent = viewModel.countLabel;
-
   const nextMarkup = viewModel.emptyMessage
     ? `<p class="sidebar-empty">${viewModel.emptyMessage}</p>`
     : viewModel.items

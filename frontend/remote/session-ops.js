@@ -20,6 +20,7 @@ import {
 } from "./transcript/store.js";
 import { hydrateRemoteTranscript } from "./transcript/hydration.js";
 import { createTranscriptPageFetcher } from "./transcript/api.js";
+import { syncSessionStartUi, syncThreadRefreshUi } from "./ui-renderer.js";
 import { escapeHtml } from "./utils.js";
 import {
   applyRemoteSurfacePatch,
@@ -78,7 +79,9 @@ export async function startRemoteSession() {
     return;
   }
 
-  dom.remoteStartSessionButton.disabled = true;
+  syncSessionStartUi({
+    startDisabled: true,
+  });
   renderLog(`Starting remote session in ${cwd}.`);
 
   try {
@@ -98,7 +101,9 @@ export async function startRemoteSession() {
   } catch (error) {
     renderLog(`Remote start failed: ${error.message}`);
   } finally {
-    dom.remoteStartSessionButton.disabled = false;
+    syncSessionStartUi({
+      startDisabled: false,
+    });
   }
 }
 
@@ -109,8 +114,10 @@ export async function refreshRemoteThreads(reason, options = {}) {
     return;
   }
 
-  dom.remoteThreadsRefreshButton.disabled = true;
-  dom.remoteThreadsCount.textContent = "Loading...";
+  syncThreadRefreshUi({
+    countLabel: "Loading...",
+    refreshDisabled: true,
+  });
   if (!silent) {
     renderLog(`Fetching remote thread list (${reason}).`);
   }
@@ -123,14 +130,18 @@ export async function refreshRemoteThreads(reason, options = {}) {
       },
     });
   } catch (error) {
-    dom.remoteThreadsCount.textContent = "Error";
+    syncThreadRefreshUi({
+      countLabel: "Error",
+    });
     dom.remoteThreadsList.innerHTML = `<p class="sidebar-empty">${escapeHtml(error.message)}</p>`;
     if (!silent) {
       renderLog(`Remote thread refresh failed: ${error.message}`);
     }
     throw error;
   } finally {
-    dom.remoteThreadsRefreshButton.disabled = false;
+    syncThreadRefreshUi({
+      refreshDisabled: false,
+    });
   }
 }
 

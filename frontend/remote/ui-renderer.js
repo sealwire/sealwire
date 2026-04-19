@@ -82,6 +82,14 @@ export function syncRemoteModelSuggestionsUi(model) {
   remoteUiRenderer.syncRemoteModelSuggestions(model);
 }
 
+export function syncSessionStartUi(model) {
+  remoteUiRenderer.syncSessionStart(model);
+}
+
+export function syncThreadRefreshUi(model) {
+  remoteUiRenderer.syncThreadRefresh(model);
+}
+
 export function renderSessionChromeUi(model) {
   remoteUiRenderer.renderSessionChrome(model);
 }
@@ -185,6 +193,19 @@ function createDomRemoteUiRenderer() {
         )
         .join("");
       dom.remoteModelInput.value = currentValue;
+    },
+    syncSessionStart({ startDisabled }) {
+      if (startDisabled !== undefined && dom.remoteStartSessionButton) {
+        dom.remoteStartSessionButton.disabled = startDisabled;
+      }
+    },
+    syncThreadRefresh({ countLabel, refreshDisabled }) {
+      if (countLabel !== undefined) {
+        dom.remoteThreadsCount.textContent = countLabel;
+      }
+      if (refreshDisabled !== undefined) {
+        dom.remoteThreadsRefreshButton.disabled = refreshDisabled;
+      }
     },
     renderSessionChrome(model) {
       applyHeaderToDom(model.header);

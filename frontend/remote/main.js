@@ -161,7 +161,12 @@ dom.remoteInfoModal?.addEventListener("click", (event) => {
   }
 });
 
-dom.remoteStartSessionButton.addEventListener("click", () => {
+dom.remoteSessionPanel?.addEventListener("click", (event) => {
+  const startButton = event.target.closest("#remote-start-session-button");
+  if (!startButton) {
+    return;
+  }
+
   void startRemoteSession();
 });
 

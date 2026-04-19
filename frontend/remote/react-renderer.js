@@ -11,8 +11,11 @@ const h = React.createElement;
 const roots = new Map();
 const collapsedGroupCwds = new Set();
 let lastThreadListArgs = null;
+let lastRelayDirectoryChromeModel = createDefaultRelayDirectoryChromeModel();
+let lastThreadHistoryChromeModel = createDefaultThreadHistoryChromeModel();
 let lastHeaderModel = createDefaultHeaderModel();
 let lastStatusBadgeModel = createDefaultStatusBadgeModel();
+let lastSessionPanelModel = createDefaultSessionPanelModel();
 
 export function createRemoteReactUiRenderer() {
   const renderer = {
@@ -35,7 +38,11 @@ export function createRemoteReactUiRenderer() {
     },
     syncThreadListChrome({ countLabel, threadsFilterHint }) {
       if (countLabel !== undefined) {
-        dom.remoteThreadsCount.textContent = countLabel;
+        lastThreadHistoryChromeModel = {
+          ...lastThreadHistoryChromeModel,
+          countLabel,
+        };
+        renderThreadHistoryCount();
       }
       if (threadsFilterHint) {
         dom.remoteThreadsCwdInput.placeholder = threadsFilterHint.placeholder;
@@ -44,28 +51,47 @@ export function createRemoteReactUiRenderer() {
     },
     syncRelayDirectoryChrome({ countLabel }) {
       if (countLabel !== undefined) {
-        dom.remoteRelaysCount.textContent = countLabel;
+        lastRelayDirectoryChromeModel = {
+          ...lastRelayDirectoryChromeModel,
+          countLabel,
+        };
+        renderRelayDirectoryCount();
       }
     },
     syncSessionPanel({ hasRemoteAuth, open }) {
+      lastSessionPanelModel = {
+        ...lastSessionPanelModel,
+        hasRemoteAuth,
+      };
+      captureSessionPanelFieldValues();
       if (!hasRemoteAuth) {
         dom.remoteSessionPanel.hidden = true;
         dom.remoteSessionToggle.setAttribute("aria-expanded", "false");
         dom.remoteSessionToggle.textContent = "Select a relay first";
+        renderSessionPanel();
         return;
       }
 
       dom.remoteSessionPanel.hidden = !open;
       dom.remoteSessionToggle.setAttribute("aria-expanded", String(open));
       dom.remoteSessionToggle.textContent = open ? "Close Remote Session Setup" : "Start Remote Session";
+      renderSessionPanel();
     },
     syncIdleSurfaceControls({ relayDirectory, remoteAuth, sessionPanelOpen }) {
       const hasRelay = Boolean(remoteAuth);
       const hasUsableRelay = Boolean(remoteAuth?.payloadSecret);
+      lastSessionPanelModel = {
+        ...lastSessionPanelModel,
+        hasUsableRelay,
+      };
+      lastThreadHistoryChromeModel = {
+        ...lastThreadHistoryChromeModel,
+        refreshDisabled: !hasUsableRelay,
+      };
+      captureSessionPanelFieldValues();
       dom.remoteSessionToggle.disabled = !hasUsableRelay;
       dom.remoteThreadsRefreshButton.disabled = !hasUsableRelay;
       dom.remoteThreadsCwdInput.disabled = !hasUsableRelay;
-      dom.remoteStartSessionButton.disabled = !hasUsableRelay;
       renderer.syncSessionPanel({
         hasRemoteAuth: hasRelay,
         open: hasUsableRelay ? sessionPanelOpen : false,
@@ -85,6 +111,7 @@ export function createRemoteReactUiRenderer() {
       });
     },
     syncRemoteModelSuggestions({ currentValue, models }) {
+      captureSessionPanelFieldValues();
       const options = [...models];
       if (currentValue && !options.some((model) => model.model === currentValue)) {
         options.unshift({
@@ -92,15 +119,43 @@ export function createRemoteReactUiRenderer() {
           display_name: currentValue,
         });
       }
+      lastSessionPanelModel = {
+        ...lastSessionPanelModel,
+        fields: {
+          ...lastSessionPanelModel.fields,
+          model: dom.remoteModelInput?.value || currentValue || "",
+        },
+        models: options,
+      };
+      renderSessionPanel();
+    },
+    syncSessionStart({ startDisabled }) {
+      if (startDisabled === undefined) {
+        return;
+      }
 
-      dom.remoteModelInput.innerHTML = "";
-      options.forEach((model) => {
-        const option = document.createElement("option");
-        option.value = model.model;
-        option.textContent = model.display_name;
-        dom.remoteModelInput.append(option);
-      });
-      dom.remoteModelInput.value = currentValue;
+      captureSessionPanelFieldValues();
+      lastSessionPanelModel = {
+        ...lastSessionPanelModel,
+        startPending: startDisabled,
+      };
+      renderSessionPanel();
+    },
+    syncThreadRefresh({ countLabel, refreshDisabled }) {
+      if (countLabel !== undefined) {
+        lastThreadHistoryChromeModel = {
+          ...lastThreadHistoryChromeModel,
+          countLabel,
+        };
+        renderThreadHistoryCount();
+      }
+      if (refreshDisabled !== undefined) {
+        lastThreadHistoryChromeModel = {
+          ...lastThreadHistoryChromeModel,
+          refreshDisabled,
+        };
+        dom.remoteThreadsRefreshButton.disabled = refreshDisabled;
+      }
     },
     renderSessionChrome(model) {
       lastHeaderModel = model.header;
@@ -224,6 +279,20 @@ export function createRemoteReactUiRenderer() {
   return renderer;
 }
 
+function renderSessionPanel() {
+  if (!dom.remoteSessionPanel) {
+    return;
+  }
+
+  renderIntoRoot(
+    dom.remoteSessionPanel,
+    h(SessionPanel, {
+      model: lastSessionPanelModel,
+    })
+  );
+  dom.refreshDynamicDomReferences();
+}
+
 function renderControlBanner(model) {
   if (!dom.remoteControlBanner) {
     return;
@@ -231,6 +300,22 @@ function renderControlBanner(model) {
 
   dom.remoteControlBanner.hidden = model.hidden;
   renderIntoRoot(dom.remoteControlBanner, h(ControlBanner, { model }));
+}
+
+function renderRelayDirectoryCount() {
+  if (!dom.remoteRelaysCount) {
+    return;
+  }
+
+  renderIntoRoot(dom.remoteRelaysCount, lastRelayDirectoryChromeModel.countLabel || "");
+}
+
+function renderThreadHistoryCount() {
+  if (!dom.remoteThreadsCount) {
+    return;
+  }
+
+  renderIntoRoot(dom.remoteThreadsCount, lastThreadHistoryChromeModel.countLabel || "");
 }
 
 function renderWorkspaceHeading() {
@@ -301,10 +386,69 @@ function createDefaultHeaderModel() {
   };
 }
 
+function createDefaultRelayDirectoryChromeModel() {
+  return {
+    countLabel: dom.remoteRelaysCount?.textContent || "",
+  };
+}
+
+function createDefaultThreadHistoryChromeModel() {
+  return {
+    countLabel: dom.remoteThreadsCount?.textContent || "",
+    refreshDisabled: dom.remoteThreadsRefreshButton?.disabled ?? false,
+  };
+}
+
 function createDefaultStatusBadgeModel() {
   return {
     label: dom.remoteStatusBadge?.title || dom.remoteStatusBadge?.textContent || "Offline",
     tone: extractStatusBadgeTone(dom.remoteStatusBadge?.className) || "offline",
+  };
+}
+
+function createDefaultSessionPanelModel() {
+  return {
+    fields: {
+      approvalPolicy: dom.remoteApprovalPolicyInput?.value || "untrusted",
+      cwd: dom.remoteCwdInput?.value || "",
+      effort: dom.remoteStartEffortInput?.value || "medium",
+      initialPrompt: dom.remoteStartPromptInput?.value || "",
+      model: dom.remoteModelInput?.value || "gpt-5.4",
+      sandbox: dom.remoteSandboxInput?.value || "workspace-write",
+    },
+    hasRemoteAuth: !dom.remoteSessionPanel?.hidden,
+    hasUsableRelay: !(dom.remoteStartSessionButton?.disabled ?? true),
+    startPending: false,
+    models: Array.from(dom.remoteModelInput?.options || []).map((option) => ({
+      display_name: option.textContent || option.value,
+      model: option.value,
+    })),
+  };
+}
+
+function captureSessionPanelFieldValues() {
+  lastSessionPanelModel = {
+    ...lastSessionPanelModel,
+    fields: {
+      approvalPolicy:
+        dom.remoteApprovalPolicyInput?.value || lastSessionPanelModel.fields.approvalPolicy,
+      cwd: dom.remoteCwdInput?.value ?? lastSessionPanelModel.fields.cwd,
+      effort: dom.remoteStartEffortInput?.value || lastSessionPanelModel.fields.effort,
+      initialPrompt:
+        dom.remoteStartPromptInput?.value ?? lastSessionPanelModel.fields.initialPrompt,
+      model: dom.remoteModelInput?.value || lastSessionPanelModel.fields.model,
+      sandbox: dom.remoteSandboxInput?.value || lastSessionPanelModel.fields.sandbox,
+    },
+  };
+}
+
+function updateSessionPanelField(field, value) {
+  lastSessionPanelModel = {
+    ...lastSessionPanelModel,
+    fields: {
+      ...lastSessionPanelModel.fields,
+      [field]: value,
+    },
   };
 }
 
@@ -355,6 +499,138 @@ function WorkspaceHeading({ header, statusBadge }) {
         title: header?.subtitleTitle || subtitle,
       },
       subtitle
+    )
+  );
+}
+
+function SessionPanel({ model }) {
+  if (!model.hasRemoteAuth) {
+    return null;
+  }
+
+  return h(
+    React.Fragment,
+    null,
+    h(
+      "label",
+      {
+        className: "sidebar-label",
+        htmlFor: "remote-cwd-input",
+      },
+      "Workspace"
+    ),
+    h(
+      "div",
+      { className: "workspace-picker" },
+      h("input", {
+        id: "remote-cwd-input",
+        onChange: (event) => updateSessionPanelField("cwd", event.target.value),
+        placeholder: "/path/to/project",
+        type: "text",
+        value: model.fields.cwd,
+      })
+    ),
+    h(
+      "button",
+      {
+        className: "start-session-button",
+        disabled: !model.hasUsableRelay || model.startPending,
+        id: "remote-start-session-button",
+        type: "button",
+      },
+      "Start Session"
+    ),
+    h(
+      "details",
+      { className: "sidebar-settings" },
+      h("summary", null, "Launch settings"),
+      h(
+        "div",
+        { className: "settings-grid" },
+        h(
+          "label",
+          { className: "field" },
+          h("span", null, "Model"),
+          h(
+            "select",
+            {
+              id: "remote-model-input",
+              onChange: (event) => updateSessionPanelField("model", event.target.value),
+              value: model.fields.model,
+            },
+            ...model.models.map((option) =>
+              h(
+                "option",
+                {
+                  key: option.model,
+                  value: option.model,
+                },
+                option.display_name
+              )
+            )
+          )
+        ),
+        h(
+          "label",
+          { className: "field" },
+          h("span", null, "Approval"),
+          h(
+            "select",
+            {
+              id: "remote-approval-policy-input",
+              onChange: (event) => updateSessionPanelField("approvalPolicy", event.target.value),
+              value: model.fields.approvalPolicy,
+            },
+            h("option", { value: "untrusted" }, "untrusted"),
+            h("option", { value: "on-request" }, "on-request"),
+            h("option", { value: "never" }, "never")
+          )
+        ),
+        h(
+          "label",
+          { className: "field" },
+          h("span", null, "Sandbox"),
+          h(
+            "select",
+            {
+              id: "remote-sandbox-input",
+              onChange: (event) => updateSessionPanelField("sandbox", event.target.value),
+              value: model.fields.sandbox,
+            },
+            h("option", { value: "workspace-write" }, "workspace-write"),
+            h("option", { value: "read-only" }, "read-only"),
+            h("option", { value: "danger-full-access" }, "danger-full-access")
+          )
+        ),
+        h(
+          "label",
+          { className: "field" },
+          h("span", null, "Default Effort"),
+          h(
+            "select",
+            {
+              id: "remote-start-effort",
+              onChange: (event) => updateSessionPanelField("effort", event.target.value),
+              value: model.fields.effort,
+            },
+            h("option", { value: "medium" }, "medium"),
+            h("option", { value: "low" }, "low"),
+            h("option", { value: "high" }, "high")
+          )
+        ),
+        h(
+          "label",
+          { className: "field field-full" },
+          h("span", null, "Initial Prompt"),
+          h("textarea", {
+            id: "remote-start-prompt",
+            onChange: (event) => updateSessionPanelField("initialPrompt", event.target.value),
+            placeholder: "Optional first task for the new remote session.",
+            rows: 4,
+            value: model.fields.initialPrompt,
+          })
+        )
+      )
     )
   );
 }
