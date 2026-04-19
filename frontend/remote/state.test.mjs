@@ -422,3 +422,37 @@ test("relay directory ignores malformed server entries without relay ids", async
 
   assert.deepEqual(state.relayDirectory, []);
 });
+
+test("remote store exposes patch and subscribe hooks for transient UI state", async () => {
+  installBrowserStubs();
+
+  const { patchRemoteState, readRemoteState, subscribeRemoteState } = await import(
+    `./state.js?store-${Date.now()}`
+  );
+
+  const updates = [];
+  const unsubscribe = subscribeRemoteState((currentState, patch) => {
+    updates.push({
+      patch,
+      socketPeerId: currentState.socketPeerId,
+    });
+  });
+
+  patchRemoteState({
+    socketPeerId: "surface-peer-1",
+  });
+  unsubscribe();
+  patchRemoteState({
+    socketPeerId: null,
+  });
+
+  assert.deepEqual(updates, [
+    {
+      patch: {
+        socketPeerId: "surface-peer-1",
+      },
+      socketPeerId: "surface-peer-1",
+    },
+  ]);
+  assert.equal(readRemoteState().socketPeerId, null);
+});

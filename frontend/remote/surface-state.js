@@ -1,8 +1,7 @@
-import { state } from "./state.js";
+import { patchRemoteState } from "./state.js";
 
 export function applyRemoteSurfacePatch(patch) {
-  Object.assign(state, patch);
-  return state;
+  return patchRemoteState(patch);
 }
 
 export function createClearedRemoteSurfaceSessionStatePatch() {

@@ -17,6 +17,7 @@ export const CLAIM_REFRESH_FLOOR_MS = 5000;
 export const TRANSCRIPT_PAGE_FETCH_INTERVAL_MS = 300;
 
 const loadedStore = loadRemoteStore();
+const remoteStoreListeners = new Set();
 
 export const state = {
   activeRelayId: loadedStore.activeRelayId,
@@ -57,10 +58,24 @@ export const state = {
 
 syncCurrentRemoteAuth();
 
-function applyStatePatch(patch, { persist = false } = {}) {
+export function readRemoteState() {
+  return state;
+}
+
+export function subscribeRemoteState(listener) {
+  remoteStoreListeners.add(listener);
+  return () => {
+    remoteStoreListeners.delete(listener);
+  };
+}
+
+export function patchRemoteState(patch, { persist = false } = {}) {
   Object.assign(state, patch);
   if (persist) {
     persistRemoteStore();
+  }
+  for (const listener of remoteStoreListeners) {
+    listener(state, patch);
   }
   return state;
 }
@@ -124,15 +139,19 @@ export function clearSessionClaim() {
     return;
   }
 
-  applyStatePatch(patch, { persist: true });
+  patchRemoteState(patch, { persist: true });
 }
 
 export function clearRecoveredSocketPeerId() {
-  state.recoveredSocketPeerId = null;
+  patchRemoteState({
+    recoveredSocketPeerId: null,
+  });
 }
 
 export function setRecoveredSocketPeerId(value) {
-  state.recoveredSocketPeerId = value || null;
+  patchRemoteState({
+    recoveredSocketPeerId: value || null,
+  });
 }
 
 export function setSessionClaim(claim, expiresAt) {
@@ -148,15 +167,19 @@ export function setSessionClaim(claim, expiresAt) {
     return;
   }
 
-  applyStatePatch(patch, { persist: true });
+  patchRemoteState(patch, { persist: true });
 }
 
 export function setSocketPeerId(value) {
-  state.socketPeerId = value || null;
+  patchRemoteState({
+    socketPeerId: value || null,
+  });
 }
 
 export function clearSocketPeerId() {
-  state.socketPeerId = null;
+  patchRemoteState({
+    socketPeerId: null,
+  });
 }
 
 export function hasUsableSessionClaim(skewMs = 0) {
@@ -209,17 +232,24 @@ export async function ensureDeviceIdentity() {
     return state.deviceIdentityPromise;
   }
 
-  state.deviceIdentityPromise = (async () => {
+  const deviceIdentityPromise = (async () => {
     const deviceKeypair = await ensureDeviceKeypair();
-    state.deviceKeypair = deviceKeypair;
-    state.requestedDeviceId = loadOrCreateRequestedDeviceId(deviceKeypair.verifyKey);
+    patchRemoteState({
+      deviceKeypair,
+      requestedDeviceId: loadOrCreateRequestedDeviceId(deviceKeypair.verifyKey),
+    });
     return deviceKeypair;
   })();
+  patchRemoteState({
+    deviceIdentityPromise,
+  });
 
   try {
-    return await state.deviceIdentityPromise;
+    return await deviceIdentityPromise;
   } finally {
-    state.deviceIdentityPromise = null;
+    patchRemoteState({
+      deviceIdentityPromise: null,
+    });
   }
 }
 
@@ -350,7 +380,7 @@ export function saveRemoteAuth(value) {
   }
 
   const patch = createSavedRemoteAuthPatch(state, value);
-  applyStatePatch(patch, { persist: true });
+  patchRemoteState(patch, { persist: true });
   if (patch.remoteAuth?.payloadSecret) {
     void persistProtectedPayloadSecret(patch.remoteAuth.relayId, patch.remoteAuth.payloadSecret);
   }
@@ -362,12 +392,12 @@ export function selectRelayProfile(relayId) {
     return false;
   }
 
-  applyStatePatch(patch, { persist: true });
+  patchRemoteState(patch, { persist: true });
   return true;
 }
 
 export function clearActiveRelaySelection() {
-  applyStatePatch(createClearedActiveRelaySelectionPatch(), { persist: true });
+  patchRemoteState(createClearedActiveRelaySelectionPatch(), { persist: true });
 }
 
 export function listRelayProfiles() {
@@ -378,23 +408,23 @@ export function listRelayProfiles() {
 
 export function forgetCurrentRemoteProfile() {
   if (!state.activeRelayId) {
-    applyStatePatch({
+    patchRemoteState({
       remoteAuth: null,
     });
     return;
   }
 
   const relayId = state.activeRelayId;
-  applyStatePatch(createForgottenRemoteProfilePatch(state), { persist: true });
+  patchRemoteState(createForgottenRemoteProfilePatch(state), { persist: true });
   void deleteStoredPayloadSecret(relayId);
 }
 
 export function saveClientAuth(value) {
-  applyStatePatch(createClientAuthPatch(value), { persist: true });
+  patchRemoteState(createClientAuthPatch(value), { persist: true });
 }
 
 export function setRelayDirectory(entries) {
-  applyStatePatch(createRelayDirectoryPatch(state, entries));
+  patchRemoteState(createRelayDirectoryPatch(state, entries));
 }
 
 export function hasAnyStoredRelayProfiles() {
@@ -448,7 +478,7 @@ export async function hydrateStoredRemoteSecrets() {
     }
   }
 
-  applyStatePatch(createHydratedRemoteSecretsPatch(state, remoteProfiles), { persist: true });
+  patchRemoteState(createHydratedRemoteSecretsPatch(state, remoteProfiles), { persist: true });
 }
 
 function loadOrCreateRequestedDeviceId(verifyKey) {
@@ -568,7 +598,7 @@ function normalizeClientAuth(value) {
 }
 
 function syncCurrentRemoteAuth() {
-  applyStatePatch(createSyncedRemoteAuthPatch(state));
+  patchRemoteState(createSyncedRemoteAuthPatch(state));
 }
 
 function persistRemoteStore() {
@@ -630,7 +660,7 @@ async function persistProtectedPayloadSecret(relayId, payloadSecret) {
         hasStoredPayloadSecret: true,
       });
       if (patch) {
-        applyStatePatch(patch, { persist: true });
+        patchRemoteState(patch, { persist: true });
       }
     }
   } catch (error) {
@@ -640,7 +670,7 @@ async function persistProtectedPayloadSecret(relayId, payloadSecret) {
         hasStoredPayloadSecret: false,
       });
       if (patch) {
-        applyStatePatch(patch, { persist: true });
+        patchRemoteState(patch, { persist: true });
       }
     }
     console.warn("[agent-relay] failed to persist protected payload secret", error);
