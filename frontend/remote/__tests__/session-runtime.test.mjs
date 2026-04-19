@@ -25,8 +25,11 @@ test("deriveSessionRuntime returns runtime state and cwd hint when no filter is 
 
   assert.deepEqual(runtime, {
     composerDisabled: true,
+    currentDraft: "",
     currentApprovalId: "approval-1",
+    currentEffortValue: "medium",
     messagePlaceholder: "Another device has control. Take over to reply.",
+    sendPending: false,
     session,
     threadsFilterHint: {
       placeholder: "Optional exact path filter (current: agent-relay)",
@@ -53,5 +56,6 @@ test("deriveSessionRuntime suppresses cwd hint when the user already typed a fil
   assert.equal(runtime.composerDisabled, false);
   assert.equal(runtime.currentApprovalId, null);
   assert.equal(runtime.messagePlaceholder, "Message Codex remotely...");
+  assert.equal(runtime.sendPending, false);
   assert.equal(runtime.threadsFilterHint, null);
 });

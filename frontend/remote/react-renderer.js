@@ -2,6 +2,7 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import { flushSync } from "react-dom";
 import * as dom from "./dom.js";
+import { patchRemoteState, readRemoteState } from "./state.js";
 import { relaySubtitle } from "./components/empty-state.js";
 import { canonicalizeWorkspace } from "../shared/thread-groups.js";
 import { formatTimestamp, shortId } from "./utils.js";
@@ -75,6 +76,16 @@ export function createRemoteReactUiRenderer() {
       dom.remoteSessionPanel.hidden = !open;
       dom.remoteSessionToggle.setAttribute("aria-expanded", String(open));
       dom.remoteSessionToggle.textContent = open ? "Close Remote Session Setup" : "Start Remote Session";
+      renderSessionPanel();
+    },
+    syncSessionDraft({ fields }) {
+      lastSessionPanelModel = {
+        ...lastSessionPanelModel,
+        fields: {
+          ...lastSessionPanelModel.fields,
+          ...fields,
+        },
+      };
       renderSessionPanel();
     },
     syncIdleSurfaceControls({ relayDirectory, remoteAuth, sessionPanelOpen }) {
@@ -263,13 +274,21 @@ export function createRemoteReactUiRenderer() {
         })
       );
     },
-    renderComposer({ composerDisabled, messagePlaceholder }) {
+    renderComposer({
+      composerDisabled,
+      currentDraft,
+      currentEffortValue,
+      messagePlaceholder,
+      sendPending,
+    }) {
       renderIntoRoot(
         dom.remoteMessageForm,
         h(Composer, {
           composerDisabled,
-          currentEffortValue: dom.remoteMessageEffort?.value || "medium",
+          currentDraft,
+          currentEffortValue,
           messagePlaceholder,
+          sendPending,
         })
       );
       dom.refreshDynamicDomReferences();
@@ -450,6 +469,17 @@ function updateSessionPanelField(field, value) {
       [field]: value,
     },
   };
+  patchRemoteState({
+    sessionDraft: {
+      ...readRemoteState().sessionDraft,
+      [field === "approvalPolicy"
+        ? "approvalPolicy"
+        : field === "initialPrompt"
+          ? "initialPrompt"
+          : field]:
+        value,
+    },
+  });
 }
 
 function extractStatusBadgeTone(className) {
@@ -538,7 +568,7 @@ function SessionPanel({ model }) {
         id: "remote-start-session-button",
         type: "button",
       },
-      "Start Session"
+      model.startPending ? "Starting..." : "Start Session"
     ),
     h(
       "details",
@@ -993,15 +1023,28 @@ function TranscriptMarkupState({ hydrationLoading, markup }) {
   );
 }
 
-function Composer({ composerDisabled, currentEffortValue, messagePlaceholder }) {
+function Composer({
+  composerDisabled,
+  currentDraft,
+  currentEffortValue,
+  messagePlaceholder,
+  sendPending,
+}) {
+  const submitDisabled = composerDisabled || sendPending;
   return h(
     "div",
     { className: "composer-inner" },
     h("textarea", {
-      disabled: composerDisabled,
+      disabled: submitDisabled,
       id: "remote-message-input",
+      onChange: (event) => {
+        patchRemoteState({
+          composerDraft: event.target.value,
+        });
+      },
       placeholder: messagePlaceholder,
       rows: 3,
+      value: currentDraft,
     }),
     h(
       "div",
@@ -1013,8 +1056,13 @@ function Composer({ composerDisabled, currentEffortValue, messagePlaceholder }) 
         h(
           "select",
           {
-            defaultValue: currentEffortValue,
             id: "remote-message-effort",
+            onChange: (event) => {
+              patchRemoteState({
+                composerEffort: event.target.value,
+              });
+            },
+            value: currentEffortValue,
           },
           h("option", { value: "medium" }, "medium"),
           h("option", { value: "low" }, "low"),
@@ -1025,11 +1073,11 @@ function Composer({ composerDisabled, currentEffortValue, messagePlaceholder }) 
         "button",
         {
           className: "send-button",
-          disabled: composerDisabled,
+          disabled: submitDisabled,
           id: "remote-send-button",
           type: "submit",
         },
-        "Send"
+        sendPending ? "Sending..." : "Send"
       )
     )
   );

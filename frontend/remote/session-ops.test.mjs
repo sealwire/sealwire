@@ -826,22 +826,116 @@ test("startRemoteSession re-enables the start button when the relay does not rep
     socketPeerId: "surface-peer-1",
   });
   state.pendingActions.clear();
+  state.sessionDraft = {
+    approvalPolicy: "on-request",
+    cwd: "/tmp/demo",
+    effort: "medium",
+    initialPrompt: "",
+    model: "gpt-5.4",
+    sandbox: "workspace-write",
+  };
   state.socket = {
     readyState: 1,
     send() {},
   };
 
-  document.querySelector("#remote-cwd-input").value = "/tmp/demo";
-  document.querySelector("#remote-model-input").value = "gpt-5.4";
-  document.querySelector("#remote-approval-policy-input").value = "on-request";
-  document.querySelector("#remote-sandbox-input").value = "workspace-write";
-  document.querySelector("#remote-start-effort").value = "medium";
-
   const pending = startRemoteSession();
-  assert.equal(document.querySelector("#remote-start-session-button").disabled, true);
+  assert.equal(state.sessionStartPending, true);
 
   browser.runTimers();
   await pending;
 
-  assert.equal(document.querySelector("#remote-start-session-button").disabled, false);
+  assert.equal(state.sessionStartPending, false);
+});
+
+test("refreshRemoteThreads clears loading state and records an error when the relay does not reply", async () => {
+  const browser = activeBrowser || installBrowserStubs();
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { refreshRemoteThreads } = await import("./session-ops.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-1",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: null,
+    sessionClaimExpiresAt: null,
+  });
+  seedSocketState(state, {
+    socketConnected: true,
+    socketPeerId: "surface-peer-1",
+  });
+  state.pendingActions.clear();
+  state.threads = [];
+  state.threadsError = null;
+  state.threadsFilterValue = "/tmp/demo";
+  state.socket = {
+    readyState: 1,
+    send() {},
+  };
+
+  const pending = refreshRemoteThreads("unit-test refresh").catch((error) => error);
+  assert.equal(state.threadsRefreshPending, true);
+  assert.equal(state.threadsError, null);
+
+  browser.runTimers();
+  const result = await pending;
+
+  assert.match(result.message, /timed out/i);
+  assert.equal(state.threadsRefreshPending, false);
+  assert.match(state.threadsError, /timed out/i);
+});
+
+test("sendMessage clears pending state when the relay does not reply", async () => {
+  activeBrowser || installBrowserStubs();
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { sendMessage } = await import("./session-ops.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-1",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: "claim-token-1",
+    sessionClaimExpiresAt: Math.floor(Date.now() / 1000) + 300,
+  });
+  seedSocketState(state, {
+    socketConnected: true,
+    socketPeerId: "surface-peer-1",
+  });
+  state.pendingActions.clear();
+  state.composerDraft = "hello remote";
+  state.composerEffort = "medium";
+  state.sendPending = false;
+  state.socket = {
+    readyState: 1,
+    send() {
+      throw new Error("socket write failed");
+    },
+  };
+
+  const pending = sendMessage();
+  assert.equal(state.sendPending, true);
+
+  await pending;
+
+  assert.equal(state.sendPending, false);
 });

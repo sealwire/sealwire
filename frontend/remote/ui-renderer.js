@@ -74,6 +74,10 @@ export function syncSessionPanelUi(model) {
   remoteUiRenderer.syncSessionPanel(model);
 }
 
+export function syncSessionDraftUi(model) {
+  remoteUiRenderer.syncSessionDraft(model);
+}
+
 export function syncIdleSurfaceControlsUi(model) {
   remoteUiRenderer.syncIdleSurfaceControls(model);
 }
@@ -150,6 +154,26 @@ function createDomRemoteUiRenderer() {
       dom.remoteSessionPanel.hidden = !open;
       dom.remoteSessionToggle.setAttribute("aria-expanded", String(open));
       dom.remoteSessionToggle.textContent = open ? "Close Remote Session Setup" : "Start Remote Session";
+    },
+    syncSessionDraft({ fields }) {
+      if (fields.cwd !== undefined && dom.remoteCwdInput) {
+        dom.remoteCwdInput.value = fields.cwd;
+      }
+      if (fields.initialPrompt !== undefined && dom.remoteStartPromptInput) {
+        dom.remoteStartPromptInput.value = fields.initialPrompt;
+      }
+      if (fields.model !== undefined && dom.remoteModelInput) {
+        dom.remoteModelInput.value = fields.model;
+      }
+      if (fields.approvalPolicy !== undefined && dom.remoteApprovalPolicyInput) {
+        dom.remoteApprovalPolicyInput.value = fields.approvalPolicy;
+      }
+      if (fields.sandbox !== undefined && dom.remoteSandboxInput) {
+        dom.remoteSandboxInput.value = fields.sandbox;
+      }
+      if (fields.effort !== undefined && dom.remoteStartEffortInput) {
+        dom.remoteStartEffortInput.value = fields.effort;
+      }
     },
     syncIdleSurfaceControls({ relayDirectory, remoteAuth, sessionPanelOpen }) {
       const hasRelay = Boolean(remoteAuth);
@@ -279,13 +303,27 @@ function createDomRemoteUiRenderer() {
         : "";
       dom.remoteTranscript.innerHTML = `${loadingBanner}${markup}`;
     },
-    renderComposer({ composerDisabled, messagePlaceholder }) {
+    renderComposer({
+      composerDisabled,
+      currentDraft,
+      currentEffortValue,
+      messagePlaceholder,
+      sendPending,
+    }) {
+      const submitDisabled = composerDisabled || sendPending;
       if (dom.remoteSendButton) {
-        dom.remoteSendButton.disabled = composerDisabled;
+        dom.remoteSendButton.disabled = submitDisabled;
+        dom.remoteSendButton.textContent = sendPending ? "Sending..." : "Send";
       }
       if (dom.remoteMessageInput) {
-        dom.remoteMessageInput.disabled = composerDisabled;
+        dom.remoteMessageInput.disabled = submitDisabled;
         dom.remoteMessageInput.placeholder = messagePlaceholder;
+        if (currentDraft !== undefined) {
+          dom.remoteMessageInput.value = currentDraft;
+        }
+      }
+      if (dom.remoteMessageEffort && currentEffortValue !== undefined) {
+        dom.remoteMessageEffort.value = currentEffortValue;
       }
     },
   };

@@ -61,9 +61,11 @@ import {
   createResetRemoteSurfaceStatePatch,
 } from "./surface-state.js";
 import { createRemoteReactUiRenderer } from "./react-renderer.js";
+import { mountRemoteReactSurface } from "./react-surface.js";
 import { installRemoteUiRenderer } from "./ui-renderer.js";
 
 installRemoteUiRenderer(createRemoteReactUiRenderer());
+mountRemoteReactSurface();
 
 configureRenderHandlers({
   onResumeThread(threadId) {
@@ -136,7 +138,7 @@ dom.forgetDeviceButton.addEventListener("click", () => {
 });
 
 dom.remoteSessionToggle.addEventListener("click", () => {
-  setRemoteSessionPanelOpen(dom.remoteSessionPanel.hidden);
+  setRemoteSessionPanelOpen(!state.sessionPanelOpen);
 });
 
 dom.remoteNavToggleButton?.addEventListener("click", () => {
@@ -172,6 +174,12 @@ dom.remoteSessionPanel?.addEventListener("click", (event) => {
 
 dom.remoteThreadsRefreshButton.addEventListener("click", () => {
   void refreshRemoteThreads("manual refresh");
+});
+
+dom.remoteThreadsCwdInput.addEventListener("input", (event) => {
+  applyRemoteSurfacePatch({
+    threadsFilterValue: event.target.value,
+  });
 });
 
 dom.remoteRelaysRefreshButton.addEventListener("click", () => {

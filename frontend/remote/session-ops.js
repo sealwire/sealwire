@@ -12,6 +12,7 @@ import {
   CONTROL_HEARTBEAT_MS,
   LEASE_EXPIRY_REFRESH_SKEW_MS,
   TRANSCRIPT_PAGE_FETCH_INTERVAL_MS,
+  patchRemoteState,
   state,
 } from "./state.js";
 import {
@@ -20,8 +21,6 @@ import {
 } from "./transcript/store.js";
 import { hydrateRemoteTranscript } from "./transcript/hydration.js";
 import { createTranscriptPageFetcher } from "./transcript/api.js";
-import { syncSessionStartUi, syncThreadRefreshUi } from "./ui-renderer.js";
-import { escapeHtml } from "./utils.js";
 import {
   applyRemoteSurfacePatch,
   createTranscriptScrollModePatch,
@@ -72,15 +71,15 @@ export async function syncRemoteSnapshot(reason, silent = false) {
 }
 
 export async function startRemoteSession() {
-  const cwd = dom.remoteCwdInput.value.trim();
+  const cwd = state.sessionDraft.cwd.trim();
   if (!cwd) {
     renderLog("Choose a workspace before starting a remote session.");
-    dom.remoteCwdInput.focus();
+    dom.remoteCwdInput?.focus();
     return;
   }
 
-  syncSessionStartUi({
-    startDisabled: true,
+  patchRemoteState({
+    sessionStartPending: true,
   });
   renderLog(`Starting remote session in ${cwd}.`);
 
@@ -88,11 +87,11 @@ export async function startRemoteSession() {
     await dispatchOrRecover("start_session", {
       input: {
         cwd,
-        initial_prompt: dom.remoteStartPromptInput.value.trim() || null,
-        model: dom.remoteModelInput.value.trim() || null,
-        approval_policy: dom.remoteApprovalPolicyInput.value,
-        sandbox: dom.remoteSandboxInput.value,
-        effort: dom.remoteStartEffortInput.value,
+        initial_prompt: state.sessionDraft.initialPrompt.trim() || null,
+        model: state.sessionDraft.model.trim() || null,
+        approval_policy: state.sessionDraft.approvalPolicy,
+        sandbox: state.sessionDraft.sandbox,
+        effort: state.sessionDraft.effort,
       },
     });
     closeRemoteNavigation();
@@ -101,8 +100,8 @@ export async function startRemoteSession() {
   } catch (error) {
     renderLog(`Remote start failed: ${error.message}`);
   } finally {
-    syncSessionStartUi({
-      startDisabled: false,
+    patchRemoteState({
+      sessionStartPending: false,
     });
   }
 }
@@ -114,9 +113,9 @@ export async function refreshRemoteThreads(reason, options = {}) {
     return;
   }
 
-  syncThreadRefreshUi({
-    countLabel: "Loading...",
-    refreshDisabled: true,
+  patchRemoteState({
+    threadsError: null,
+    threadsRefreshPending: true,
   });
   if (!silent) {
     renderLog(`Fetching remote thread list (${reason}).`);
@@ -125,22 +124,23 @@ export async function refreshRemoteThreads(reason, options = {}) {
   try {
     await dispatchOrRecover("list_threads", {
       query: {
-        cwd: dom.remoteThreadsCwdInput.value.trim() || null,
+        cwd: state.threadsFilterValue.trim() || null,
         limit: 80,
       },
     });
   } catch (error) {
-    syncThreadRefreshUi({
-      countLabel: "Error",
+    patchRemoteState({
+      threads: [],
+      threadsError: error.message,
     });
-    dom.remoteThreadsList.innerHTML = `<p class="sidebar-empty">${escapeHtml(error.message)}</p>`;
+    renderThreads([]);
     if (!silent) {
       renderLog(`Remote thread refresh failed: ${error.message}`);
     }
     throw error;
   } finally {
-    syncThreadRefreshUi({
-      refreshDisabled: false,
+    patchRemoteState({
+      threadsRefreshPending: false,
     });
   }
 }
@@ -156,9 +156,9 @@ export async function resumeRemoteSession(threadId) {
     await dispatchOrRecover("resume_session", {
       input: {
         thread_id: threadId,
-        approval_policy: dom.remoteApprovalPolicyInput.value,
-        sandbox: dom.remoteSandboxInput.value,
-        effort: dom.remoteStartEffortInput.value,
+        approval_policy: state.sessionDraft.approvalPolicy,
+        sandbox: state.sessionDraft.sandbox,
+        effort: state.sessionDraft.effort,
       },
     });
     await refreshRemoteThreads("post-resume refresh", { silent: true });
@@ -168,26 +168,32 @@ export async function resumeRemoteSession(threadId) {
 }
 
 export async function sendMessage() {
-  const text = dom.remoteMessageInput.value.trim();
+  const text = state.composerDraft.trim();
   if (!text) {
     renderLog("Message is empty.");
     return;
   }
 
-  dom.remoteSendButton.disabled = true;
+  patchRemoteState({
+    sendPending: true,
+  });
 
   try {
     await dispatchOrRecover("send_message", {
       input: {
         text,
-        effort: dom.remoteMessageEffort.value,
+        effort: state.composerEffort,
       },
     });
-    dom.remoteMessageInput.value = "";
+    patchRemoteState({
+      composerDraft: "",
+    });
   } catch (error) {
     renderLog(`Remote send failed: ${error.message}`);
   } finally {
-    dom.remoteSendButton.disabled = false;
+    patchRemoteState({
+      sendPending: false,
+    });
   }
 }
 

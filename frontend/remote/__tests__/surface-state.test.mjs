@@ -44,6 +44,7 @@ test("createClearedRemoteSurfaceSessionStatePatch clears session, threads, and c
   assert.deepEqual(createClearedRemoteSurfaceSessionStatePatch(), {
     currentApprovalId: null,
     session: null,
+    threadsError: null,
     threads: [],
   });
 });
@@ -68,6 +69,7 @@ test("createResetRemoteSurfaceStatePatch returns reset state and runs lifecycle 
   assert.deepEqual(patch, {
     currentApprovalId: null,
     session: null,
+    threadsError: null,
     threads: [],
   });
 });
@@ -76,6 +78,7 @@ test("createRemoteThreadsPatch returns the canonical thread list patch", () => {
   const nextThreads = [{ thread_id: "thread-2" }];
 
   assert.deepEqual(createRemoteThreadsPatch(nextThreads), {
+    threadsError: null,
     threads: nextThreads,
   });
 });

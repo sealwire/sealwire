@@ -1,51 +1,22 @@
 import {
-  canCurrentDeviceWrite as canRemoteDeviceWrite,
-  isCurrentDeviceActiveController as isRemoteController,
-  renderDeviceMeta as renderDeviceChrome,
-  renderSessionChrome,
-  resetRemoteSurfaceChrome,
-  updateStatusBadge as updateChromeStatusBadge,
-} from "./render-chrome.js";
-import {
   renderLog as appendClientLog,
-  renderLogs,
 } from "./render-transcript.js";
 import {
-  debugScrollEvent,
   handleTranscriptScroll,
-  renderTranscriptPanel,
   syncTranscriptScrollModeForSession,
 } from "./components/transcript-panel.js";
 import { state } from "./state.js";
-import { escapeHtml } from "./utils.js";
-import {
-  selectEmptyStateRenderModel,
-  selectRelayDirectoryRenderModel,
-  selectSessionRenderModel,
-  selectThreadsRenderModel,
-} from "./view-model.js";
-import { deriveSessionRuntime } from "./session-runtime.js";
 import {
   applyRemoteSurfacePatch,
-  createSessionRuntimeStatePatch,
 } from "./surface-state.js";
 import {
-  renderComposerUi,
-  renderMissingCredentialsUi,
-  readCurrentModelValue,
-  readSessionPanelOpen,
-  readThreadsFilterValue,
-  renderRelayDirectoryUi,
-  renderRelayHomeUi,
-  renderThreadListUi,
-  renderTranscriptEmptyUi,
-  syncConversationLayoutUi,
-  syncIdleSurfaceControlsUi,
-  syncRelayDirectoryChromeUi,
-  syncRemoteModelSuggestionsUi,
-  syncSessionPanelUi,
-  syncThreadListChromeUi,
-} from "./ui-renderer.js";
+  configureRemoteReactSurfaceHandlers,
+  renderRemoteReactSurface,
+} from "./react-surface.js";
+import {
+  canCurrentDeviceWrite as canRemoteDeviceWrite,
+  isCurrentDeviceActiveController as isRemoteController,
+} from "./chrome-view-model.js";
 
 let onResumeThread = () => {};
 let onSelectRelay = () => {};
@@ -53,112 +24,50 @@ let onSelectRelay = () => {};
 export function configureRenderHandlers(handlers) {
   onResumeThread = handlers.onResumeThread || onResumeThread;
   onSelectRelay = handlers.onSelectRelay || onSelectRelay;
+  configureRemoteReactSurfaceHandlers({
+    onResumeThread,
+    onSelectRelay,
+  });
 }
 
 export function renderSession(session) {
-  const previousSession = state.session;
-  syncTranscriptScrollModeForSession(session, previousSession);
-  const sessionView = selectSessionRenderModel({
+  syncTranscriptScrollModeForSession(session, state.session);
+  const approval = session.pending_approvals?.[0] || null;
+  applyRemoteSurfacePatch({
+    currentApprovalId: approval?.request_id || null,
     session,
-    previousSession,
-    hasControllerLease: canCurrentDeviceWrite(session),
   });
-  syncConversationLayoutUi();
-  const sessionRuntime = deriveSessionRuntime({
-    session,
-    sessionView,
-    threadsFilterValue: readThreadsFilterValue(),
-  });
-  applySessionRuntimeView(sessionRuntime);
-  applyRemoteSurfacePatch(createSessionRuntimeStatePatch(sessionRuntime));
-
-  syncRemoteModelSuggestionsUi({
-    currentValue:
-      session.model
-      || readCurrentModelValue()
-      || session.available_models?.find((model) => model.is_default)?.model
-      || "gpt-5.4",
-    models: session.available_models || [],
-  });
-
-  renderSessionChrome(session);
-  renderTranscriptPanel(session, sessionView.approval, sessionView.canWrite, previousSession);
-  renderLogs(session.logs || []);
-  debugScrollEvent("renderSession", sessionView.scrollDebug);
-  renderThreads(state.threads);
+  renderRemoteReactSurface();
 }
 
 export function renderThreads(threads) {
-  const filterValue = readThreadsFilterValue();
-  const viewModel = selectThreadsRenderModel({
+  applyRemoteSurfacePatch({
     threads,
-    filterValue,
-    activeThreadId: state.session?.active_thread_id || null,
-    remoteAuth: state.remoteAuth,
-    relayDirectory: state.relayDirectory,
   });
-  syncThreadListChromeUi({
-    countLabel: viewModel.countLabel,
-  });
-  renderThreadListUi(viewModel, onResumeThread);
+  renderRemoteReactSurface();
 }
 
 export function renderRelayDirectory() {
-  const viewModel = selectRelayDirectoryRenderModel({
-    relayDirectory: state.relayDirectory,
-    activeRelayId: state.remoteAuth?.relayId || null,
-  });
-  syncRelayDirectoryChromeUi({
-    countLabel: viewModel.countLabel,
-  });
-  renderRelayDirectoryUi(viewModel, onSelectRelay);
+  renderRemoteReactSurface();
 }
 
 export function renderDeviceMeta() {
-  renderDeviceChrome();
-  renderRelayDirectory();
+  renderRemoteReactSurface();
 }
 
 export function renderEmptyState() {
-  syncConversationLayoutUi();
-  const viewModel = selectEmptyStateRenderModel({
-    clientAuth: state.clientAuth,
-    pairingTicket: state.pairingTicket,
-    relayDirectory: state.relayDirectory,
-    remoteAuth: state.remoteAuth,
-  });
-  syncIdleSurfaceControlsUi({
-    remoteAuth: viewModel.remoteAuth,
-    relayDirectory: viewModel.relayDirectory,
-    sessionPanelOpen: readSessionPanelOpen(),
-  });
-
-  if (viewModel.showRelayHome) {
-    renderRelayHomeUi({
-      clientAuth: viewModel.clientAuth,
-      relayDirectory: viewModel.relayDirectory,
-      onSelectRelay,
-    });
-    return;
-  }
-
-  if (viewModel.showMissingCredentials) {
-    renderMissingCredentialsUi(viewModel.remoteAuth);
-    return;
-  }
-
-  renderTranscriptEmptyUi();
+  renderRemoteReactSurface();
 }
 
 export function setRemoteSessionPanelOpen(open) {
-  syncSessionPanelUi({
-    hasRemoteAuth: Boolean(state.remoteAuth),
-    open,
+  applyRemoteSurfacePatch({
+    sessionPanelOpen: open,
   });
+  renderRemoteReactSurface();
 }
 
 export function updateStatusBadge() {
-  updateChromeStatusBadge();
+  renderRemoteReactSurface();
 }
 
 export function renderLog(message) {
@@ -166,9 +75,7 @@ export function renderLog(message) {
 }
 
 export function resetRemoteSurface() {
-  syncConversationLayoutUi();
-  renderThreads([]);
-  resetRemoteSurfaceChrome();
+  renderRemoteReactSurface();
 }
 
 export function isCurrentDeviceActiveController(session) {
@@ -180,11 +87,3 @@ export function canCurrentDeviceWrite(session) {
 }
 
 export { handleTranscriptScroll } from "./components/transcript-panel.js";
-
-function applySessionRuntimeView(sessionRuntime) {
-  syncThreadListChromeUi({
-    threadsFilterHint: sessionRuntime.threadsFilterHint,
-  });
-
-  renderComposerUi(sessionRuntime);
-}

@@ -40,6 +40,8 @@ export function selectThreadsRenderModel({
   threads,
   filterValue,
   activeThreadId,
+  error,
+  loading,
   remoteAuth,
   relayDirectory,
 }) {
@@ -56,9 +58,18 @@ export function selectThreadsRenderModel({
     };
   }
 
+  if (error) {
+    return {
+      activeThreadId,
+      countLabel: "Error",
+      emptyMessage: error,
+      groups: [],
+    };
+  }
+
   return {
     activeThreadId,
-    countLabel: summarizeThreadGroups(groups),
+    countLabel: loading ? "Loading..." : summarizeThreadGroups(groups),
     emptyMessage: groups.length
       ? null
       : filterValue
