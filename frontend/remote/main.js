@@ -3,7 +3,6 @@ import {
   closeRemoteNavigation,
   initializeRemoteNavigation,
   openRemoteNavigation,
-  toggleRemoteNavigation,
 } from "./navigation.js";
 import {
   configureBrokerClient,
@@ -27,14 +26,13 @@ import {
 } from "./pairing.js";
 import { registerRemotePwa } from "./pwa.js";
 import {
-  configureRenderHandlers,
-  handleTranscriptScroll,
   renderDeviceMeta,
   renderEmptyState,
   renderLog,
   renderRelayDirectory,
   renderThreads,
   setRemoteSessionPanelOpen,
+  setLegacyRemoteRenderBridgeEnabled,
 } from "./render.js";
 import {
   applySessionSnapshot,
@@ -60,23 +58,38 @@ import {
   applyRemoteSurfacePatch,
   createResetRemoteSurfaceStatePatch,
 } from "./surface-state.js";
-import { createRemoteReactUiRenderer } from "./react-renderer.js";
-import { mountRemoteReactSurface } from "./react-surface.js";
-import { installRemoteUiRenderer } from "./ui-renderer.js";
+import { mountRemoteApp } from "./react-app.js";
 
-installRemoteUiRenderer(createRemoteReactUiRenderer());
-mountRemoteReactSurface();
-
-configureRenderHandlers({
+mountRemoteApp({
+  onRefreshRelayDirectory() {
+    void refreshRelayDirectoryFromUi();
+  },
+  onRefreshThreads() {
+    void refreshRemoteThreads("manual refresh");
+  },
   onResumeThread(threadId) {
-    closeRemoteNavigation();
     void resumeRemoteSession(threadId);
   },
+  onReturnHome() {
+    returnToRelayHome();
+  },
   onSelectRelay(relayId) {
-    closeRemoteNavigation();
     void switchRelay(relayId);
   },
+  onSendMessage() {
+    void sendMessage();
+  },
+  onStartSession() {
+    void startRemoteSession();
+  },
+  onSubmitDecision(decision, scope) {
+    void submitDecision(decision, scope);
+  },
+  onTakeOver() {
+    void takeOverControl();
+  },
 });
+setLegacyRemoteRenderBridgeEnabled(false);
 
 configureBrokerClient({
   onBrokerReady(frame, reason) {
@@ -137,14 +150,6 @@ dom.forgetDeviceButton.addEventListener("click", () => {
   forgetCurrentDevice();
 });
 
-dom.remoteSessionToggle.addEventListener("click", () => {
-  setRemoteSessionPanelOpen(!state.sessionPanelOpen);
-});
-
-dom.remoteNavToggleButton?.addEventListener("click", () => {
-  toggleRemoteNavigation();
-});
-
 dom.remoteNavBackdrop?.addEventListener("click", () => {
   closeRemoteNavigation();
 });
@@ -161,63 +166,6 @@ dom.remoteInfoModal?.addEventListener("click", (event) => {
   if (event.target === dom.remoteInfoModal) {
     dom.remoteInfoModal.close();
   }
-});
-
-dom.remoteSessionPanel?.addEventListener("click", (event) => {
-  const startButton = event.target.closest("#remote-start-session-button");
-  if (!startButton) {
-    return;
-  }
-
-  void startRemoteSession();
-});
-
-dom.remoteThreadsRefreshButton.addEventListener("click", () => {
-  void refreshRemoteThreads("manual refresh");
-});
-
-dom.remoteThreadsCwdInput.addEventListener("input", (event) => {
-  applyRemoteSurfacePatch({
-    threadsFilterValue: event.target.value,
-  });
-});
-
-dom.remoteRelaysRefreshButton.addEventListener("click", () => {
-  void refreshRelayDirectoryFromUi();
-});
-
-dom.remoteHomeButton?.addEventListener("click", () => {
-  returnToRelayHome();
-});
-
-dom.remoteControlBanner?.addEventListener("click", (event) => {
-  const takeOverButton = event.target.closest("#remote-take-over-button");
-  if (!takeOverButton) {
-    return;
-  }
-
-  void takeOverControl();
-});
-
-dom.remoteMessageForm.addEventListener("submit", (event) => {
-  event.preventDefault();
-  void sendMessage();
-});
-
-dom.remoteTranscript.addEventListener("click", (event) => {
-  const approvalButton = event.target.closest("[data-approval-decision]");
-  if (!approvalButton) {
-    return;
-  }
-
-  void submitDecision(
-    approvalButton.dataset.approvalDecision,
-    approvalButton.dataset.approvalScope || "once"
-  );
-});
-
-dom.remoteTranscript.addEventListener("scroll", () => {
-  handleTranscriptScroll();
 });
 
 void mountBuildBadge({

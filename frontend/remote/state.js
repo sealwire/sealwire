@@ -18,6 +18,8 @@ export const TRANSCRIPT_PAGE_FETCH_INTERVAL_MS = 300;
 
 const loadedStore = loadRemoteStore();
 const remoteStoreListeners = new Set();
+let remoteStoreVersion = 0;
+let remoteStateSnapshot = null;
 
 export const state = {
   activeRelayId: loadedStore.activeRelayId,
@@ -78,6 +80,16 @@ export function readRemoteState() {
   return state;
 }
 
+export function readRemoteStateSnapshot() {
+  if (!remoteStateSnapshot) {
+    remoteStateSnapshot = {
+      state,
+      version: remoteStoreVersion,
+    };
+  }
+  return remoteStateSnapshot;
+}
+
 export function subscribeRemoteState(listener) {
   remoteStoreListeners.add(listener);
   return () => {
@@ -87,6 +99,11 @@ export function subscribeRemoteState(listener) {
 
 export function patchRemoteState(patch, { persist = false } = {}) {
   Object.assign(state, patch);
+  remoteStoreVersion += 1;
+  remoteStateSnapshot = {
+    state,
+    version: remoteStoreVersion,
+  };
   if (persist) {
     persistRemoteStore();
   }

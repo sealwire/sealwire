@@ -20,6 +20,14 @@ import {
 
 let onResumeThread = () => {};
 let onSelectRelay = () => {};
+let legacyRemoteRenderBridgeEnabled = true;
+
+function renderLegacySurface() {
+  if (!legacyRemoteRenderBridgeEnabled) {
+    return;
+  }
+  renderRemoteReactSurface();
+}
 
 export function configureRenderHandlers(handlers) {
   onResumeThread = handlers.onResumeThread || onResumeThread;
@@ -37,37 +45,37 @@ export function renderSession(session) {
     currentApprovalId: approval?.request_id || null,
     session,
   });
-  renderRemoteReactSurface();
+  renderLegacySurface();
 }
 
 export function renderThreads(threads) {
   applyRemoteSurfacePatch({
     threads,
   });
-  renderRemoteReactSurface();
+  renderLegacySurface();
 }
 
 export function renderRelayDirectory() {
-  renderRemoteReactSurface();
+  renderLegacySurface();
 }
 
 export function renderDeviceMeta() {
-  renderRemoteReactSurface();
+  renderLegacySurface();
 }
 
 export function renderEmptyState() {
-  renderRemoteReactSurface();
+  renderLegacySurface();
 }
 
 export function setRemoteSessionPanelOpen(open) {
   applyRemoteSurfacePatch({
     sessionPanelOpen: open,
   });
-  renderRemoteReactSurface();
+  renderLegacySurface();
 }
 
 export function updateStatusBadge() {
-  renderRemoteReactSurface();
+  renderLegacySurface();
 }
 
 export function renderLog(message) {
@@ -75,7 +83,11 @@ export function renderLog(message) {
 }
 
 export function resetRemoteSurface() {
-  renderRemoteReactSurface();
+  renderLegacySurface();
+}
+
+export function setLegacyRemoteRenderBridgeEnabled(enabled) {
+  legacyRemoteRenderBridgeEnabled = Boolean(enabled);
 }
 
 export function isCurrentDeviceActiveController(session) {

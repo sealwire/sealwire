@@ -490,7 +490,7 @@ function extractStatusBadgeTone(className) {
   return match[1] === "compact" ? null : match[1];
 }
 
-function WorkspaceHeading({ header, statusBadge }) {
+export function WorkspaceHeading({ header, statusBadge }) {
   const statusTone = statusBadge?.tone || "offline";
   const statusLabel = statusBadge?.label || "Offline";
   const subtitle = header?.subtitle || "";
@@ -533,7 +533,7 @@ function WorkspaceHeading({ header, statusBadge }) {
   );
 }
 
-function SessionPanel({ model }) {
+export function SessionPanel({ model, onStartSession = null }) {
   if (!model.hasRemoteAuth) {
     return null;
   }
@@ -566,6 +566,7 @@ function SessionPanel({ model }) {
         className: "start-session-button",
         disabled: !model.hasUsableRelay || model.startPending,
         id: "remote-start-session-button",
+        onClick: onStartSession,
         type: "button",
       },
       model.startPending ? "Starting..." : "Start Session"
@@ -665,7 +666,7 @@ function SessionPanel({ model }) {
   );
 }
 
-function SessionMetaPanel({ model }) {
+export function SessionMetaPanel({ model }) {
   return h(
     React.Fragment,
     null,
@@ -681,7 +682,7 @@ function SessionMetaPanel({ model }) {
   );
 }
 
-function DeviceMetaPanel({ model }) {
+export function DeviceMetaPanel({ model }) {
   if (model.emptyMessage) {
     return h("p", { className: "sidebar-empty" }, model.emptyMessage);
   }
@@ -720,7 +721,7 @@ function DeviceMetaPanel({ model }) {
   );
 }
 
-function ControlBanner({ model }) {
+export function ControlBanner({ model, onTakeOver = null }) {
   if (model.hidden) {
     return null;
   }
@@ -740,6 +741,7 @@ function ControlBanner({ model }) {
         className: "header-button control-button",
         hidden: model.takeOverHidden,
         id: "remote-take-over-button",
+        onClick: onTakeOver,
         type: "button",
       },
       "Take over"
@@ -763,7 +765,7 @@ function renderIntoRoot(container, tree) {
   });
 }
 
-function RelayDirectoryList({ onSelectRelay, viewModel }) {
+export function RelayDirectoryList({ onSelectRelay, viewModel }) {
   if (viewModel.emptyMessage) {
     return h("p", { className: "sidebar-empty" }, viewModel.emptyMessage);
   }
@@ -789,7 +791,7 @@ function RelayDirectoryList({ onSelectRelay, viewModel }) {
   );
 }
 
-function ThreadList({
+export function ThreadList({
   collapsedGroupCwds,
   onResumeThread,
   onToggleGroup,
@@ -862,7 +864,7 @@ function ThreadList({
   );
 }
 
-function DefaultTranscriptEmpty() {
+export function DefaultTranscriptEmpty() {
   return h(
     "div",
     { className: "thread-empty" },
@@ -875,7 +877,7 @@ function DefaultTranscriptEmpty() {
   );
 }
 
-function RelayHomeState({ clientAuth, onSelectRelay, relayDirectory }) {
+export function RelayHomeState({ clientAuth, onSelectRelay, relayDirectory }) {
   if (!(relayDirectory || []).length) {
     return h(
       "div",
@@ -967,7 +969,7 @@ function RelayHomeCard({ onSelectRelay, relay }) {
   );
 }
 
-function MissingCredentialsState({ remoteAuth }) {
+export function MissingCredentialsState({ remoteAuth }) {
   const relayLabel = remoteAuth?.relayLabel || remoteAuth?.deviceLabel || "This relay";
   return h(
     "div",
@@ -983,7 +985,7 @@ function MissingCredentialsState({ remoteAuth }) {
   );
 }
 
-function ReadyTranscriptState({ canWrite, session }) {
+export function ReadyTranscriptState({ canWrite, session }) {
   const title = canWrite ? "Session ready" : "Session active on another device";
   const copy = canWrite
     ? "The remote session is live. Send the first prompt below when you're ready."
@@ -1009,7 +1011,7 @@ function ReadyTranscriptState({ canWrite, session }) {
   );
 }
 
-function TranscriptMarkupState({ hydrationLoading, markup }) {
+export function TranscriptMarkupState({ hydrationLoading, markup, onApprovalClick, onScroll }) {
   return h(
     React.Fragment,
     null,
@@ -1019,11 +1021,13 @@ function TranscriptMarkupState({ hydrationLoading, markup }) {
     h("div", {
       className: "transcript-react-root",
       dangerouslySetInnerHTML: { __html: markup },
+      onClick: onApprovalClick,
+      onScroll,
     })
   );
 }
 
-function Composer({
+export function Composer({
   composerDisabled,
   currentDraft,
   currentEffortValue,
