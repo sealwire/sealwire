@@ -1,4 +1,4 @@
-import { renderDeviceMeta, renderLog, updateStatusBadge } from "./render.js";
+import { renderLog } from "./render.js";
 import { isExpiredPairingError, normalizePairingError } from "./pairing-errors.js";
 import {
   brokerControlUrl,
@@ -89,7 +89,6 @@ export async function connectBroker(reason) {
     applyRemoteSurfacePatch(createBrokerConnectionPatch({
       socketConnected: true,
     }));
-    updateStatusBadge();
     renderLog("Broker websocket connected.");
   });
 
@@ -113,7 +112,6 @@ export async function connectBroker(reason) {
     }));
     clearSocketPeerId();
     void onBrokerDisconnect();
-    updateStatusBadge();
     renderLog(
       `Broker websocket closed${event.code ? ` (${event.code}${event.reason ? `: ${event.reason}` : ""})` : ""}.`
     );
@@ -137,7 +135,6 @@ export function closeBrokerSocket(resetConnectionState = true) {
         socketPeerId: null,
       }));
       clearSocketPeerId();
-      updateStatusBadge();
     }
     return;
   }
@@ -154,7 +151,6 @@ export function closeBrokerSocket(resetConnectionState = true) {
       socketPeerId: null,
     }));
     clearSocketPeerId();
-    updateStatusBadge();
   }
 }
 
@@ -304,8 +300,6 @@ async function handleSocketMessage(rawData, connectReason) {
         pairingPhase: "error",
         pairingError: normalizePairingError(frame.message),
       }));
-      renderDeviceMeta();
-      updateStatusBadge();
       renderLog(`Pairing failed: ${state.pairingError}`);
       return;
     }

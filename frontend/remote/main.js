@@ -26,13 +26,8 @@ import {
 } from "./pairing.js";
 import { registerRemotePwa } from "./pwa.js";
 import {
-  renderDeviceMeta,
-  renderEmptyState,
   renderLog,
-  renderRelayDirectory,
-  renderThreads,
   setRemoteSessionPanelOpen,
-  setLegacyRemoteRenderBridgeEnabled,
 } from "./render.js";
 import {
   applySessionSnapshot,
@@ -89,7 +84,6 @@ mountRemoteApp({
     void takeOverControl();
   },
 });
-setLegacyRemoteRenderBridgeEnabled(false);
 
 configureBrokerClient({
   onBrokerReady(frame, reason) {
@@ -196,10 +190,6 @@ async function boot() {
   initializeRemoteNavigation();
   setRemoteSessionPanelOpen(false);
   const pairingQuery = applyPairingQuery();
-  renderDeviceMeta();
-  renderRelayDirectory();
-  renderEmptyState();
-  renderThreads([]);
 
   if (pairingQuery) {
     await beginPairing(pairingQuery, { auto: true });
@@ -209,7 +199,6 @@ async function boot() {
   if (state.clientAuth) {
     try {
       await refreshRelayDirectory("initial boot", { silent: true });
-      renderRelayDirectory();
     } catch (error) {
       renderLog(`Relay directory refresh failed: ${error.message}`);
     }
@@ -312,9 +301,6 @@ async function switchRelay(relayId) {
     rejectPendingActions,
     reason: "switched to a different relay profile",
   }));
-  renderDeviceMeta();
-  renderEmptyState();
-  renderThreads([]);
   renderLog(`Switching to relay ${relayId}.`);
   void connectBroker("switch relay");
 }
@@ -334,16 +320,12 @@ function returnToRelayHome() {
   closeBrokerSocket();
   openRemoteNavigation();
   setRemoteSessionPanelOpen(false);
-  renderDeviceMeta();
-  renderEmptyState();
-  renderThreads([]);
   renderLog("Returned to relay directory.");
 }
 
 async function refreshRelayDirectoryFromUi() {
   try {
     await refreshRelayDirectory("manual refresh");
-    renderDeviceMeta();
   } catch (error) {
     renderLog(`Relay directory refresh failed: ${error.message}`);
   }

@@ -21,11 +21,8 @@ import {
   rejectPendingActions,
 } from "./actions.js";
 import {
-  renderDeviceMeta,
-  renderEmptyState,
   renderLog,
   renderThreads,
-  resetRemoteSurface,
 } from "./render.js";
 import {
   brokerControlUrl,
@@ -62,7 +59,6 @@ export function applyPairingQuery() {
       pairingError: error.message,
     }));
     renderLog(`Invalid pairing URL: ${error.message}`);
-    renderDeviceMeta();
     return null;
   }
 }
@@ -85,7 +81,6 @@ export async function beginPairing(rawValue, { auto = false } = {}) {
         pairingPhase: "error",
         pairingError: expiredPairingMessage(),
       }));
-      renderDeviceMeta();
       renderLog(`Pairing failed: ${state.pairingError}`);
       return;
     }
@@ -101,7 +96,6 @@ export async function beginPairing(rawValue, { auto = false } = {}) {
     }));
     saveDeviceLabel(dom.deviceLabelInput.value);
     closePairingModalIfOpen();
-    renderDeviceMeta();
     renderThreads([]);
     renderLog(
       auto
@@ -114,7 +108,6 @@ export async function beginPairing(rawValue, { auto = false } = {}) {
       pairingPhase: "error",
       pairingError: error.message,
     }));
-    renderDeviceMeta();
     renderLog(`Pairing input is invalid: ${error.message}`);
   }
 }
@@ -129,7 +122,6 @@ export async function sendPairingRequest() {
       pairingPhase: "error",
       pairingError: expiredPairingMessage(),
     }));
-    renderDeviceMeta();
     renderLog(`Pairing failed: ${state.pairingError}`);
     return;
   }
@@ -139,7 +131,6 @@ export async function sendPairingRequest() {
     pairingPhase: "requesting",
     pairingError: null,
   }));
-  renderDeviceMeta();
 
   const payload = {
     kind: "pairing_request",
@@ -178,7 +169,6 @@ export async function handleEncryptedPairingResult(payload) {
       pairingPhase: "error",
       pairingError: normalizePairingError(result.error),
     }));
-    renderDeviceMeta();
     renderLog(`Pairing failed: ${state.pairingError}`);
     return;
   }
@@ -189,7 +179,6 @@ export async function handleEncryptedPairingResult(payload) {
       pairingPhase: "error",
       pairingError: "pairing result is incomplete",
     }));
-    renderDeviceMeta();
     renderLog("Pairing failed: relay returned an incomplete device credential bundle.");
     return;
   }
@@ -247,8 +236,6 @@ export async function handleEncryptedPairingResult(payload) {
   dom.pairingInput.value = "";
   closePairingModalIfOpen();
   clearPairingQueryFromUrl();
-  renderDeviceMeta();
-  renderEmptyState();
   renderLog(`Paired remote device ${device.label} (${shortId(device.device_id)}).`);
   await ensureRemoteClaim({
     force: true,
@@ -275,7 +262,6 @@ export function forgetCurrentDevice() {
   closeBrokerSocket();
   void clearDeviceRefreshSession(brokerUrl);
   dom.pairingInput.value = "";
-  resetRemoteSurface();
   renderLog("Forgot the stored remote device for this browser.");
 }
 

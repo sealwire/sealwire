@@ -384,10 +384,7 @@ test("applySessionSnapshot hydrates truncated transcript with chunked remote fet
   assert.equal(state.session.transcript_truncated, true);
   assert.equal(state.session.transcript[0].text, `${"A".repeat(1200)}...`);
   assert.equal(state.session.transcript[1].text, "thanks");
-  assert.match(
-    document.querySelector("#remote-transcript").innerHTML,
-    /Loading earlier transcript/
-  );
+  assert.equal(state.transcriptHydrationStatus, "loading");
 
   browser.runNextTimer();
   await waitFor(() => state.session?.transcript_truncated === false);

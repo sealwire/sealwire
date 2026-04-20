@@ -4,7 +4,7 @@ import {
   signClaimChallengeProof,
   signClaimInitProof,
 } from "./crypto.js";
-import { renderDeviceMeta, renderLog, renderThreads } from "./render.js";
+import { renderLog } from "./render.js";
 import {
   CLAIM_REFRESH_FLOOR_MS,
   CLAIM_REFRESH_SKEW_MS,
@@ -138,7 +138,6 @@ export async function recoverRemoteSession(reason) {
     try {
       if (state.remoteAuth?.sessionClaim) {
         clearSessionClaim();
-        renderDeviceMeta();
       }
       await onSyncRemoteSnapshot(`recovery sync (${reason})`, true);
       if (shouldAutoReclaimSession()) {
@@ -188,7 +187,6 @@ export async function dispatchOrRecover(actionType, request, options = {}) {
       isSessionClaimError(error.message)
     ) {
       clearSessionClaim();
-      renderDeviceMeta();
       renderLog(`Session claim expired during ${actionType}; re-claiming and retrying once.`);
       await ensureRemoteClaim({
         force: true,
@@ -287,7 +285,6 @@ function handleRemoteActionResult(actionId, result) {
     if (result.session_claim && state.remoteAuth) {
       setSessionClaim(result.session_claim, result.session_claim_expires_at || null);
       scheduleClaimRefresh();
-      renderDeviceMeta();
     }
 
     if (result.snapshot && !isTranscriptFetch) {
@@ -299,7 +296,6 @@ function handleRemoteActionResult(actionId, result) {
 
     if (result.threads?.threads) {
       applyRemoteSurfacePatch(createRemoteThreadsPatch(result.threads.threads));
-      renderThreads(state.threads);
     }
   } catch (error) {
     console.error("[agent-relay] remote action result side effects failed", error);
@@ -327,7 +323,6 @@ function handleRemoteActionResult(actionId, result) {
   if (isSessionClaimError(result.error) && state.remoteAuth) {
     clearSessionClaim();
     scheduleClaimRefresh();
-    renderDeviceMeta();
   }
 
   renderLog(`Remote ${result.action} failed: ${result.error || "unknown error"}`);

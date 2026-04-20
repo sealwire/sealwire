@@ -38,6 +38,10 @@ import {
   createTranscriptScrollModePatch,
 } from "./surface-state.js";
 import {
+  computeTranscriptScrollPosition,
+  deriveTranscriptScrollMode,
+} from "./transcript-scroll.js";
+import {
   Composer,
   ControlBanner,
   DefaultTranscriptEmpty,
@@ -54,9 +58,6 @@ import {
 } from "./react-renderer.js";
 
 const h = React.createElement;
-
-const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 80;
-const TOP_SCROLL_PRESERVE_THRESHOLD_PX = 80;
 
 let remoteAppHost = null;
 let remoteAppRoot = null;
@@ -636,28 +637,18 @@ function RemoteTranscriptPanel({
     const previous = previousRenderRef.current;
     const previousScrollTop = transcript.scrollTop || 0;
     const previousScrollHeight = transcript.scrollHeight || 0;
-    const shouldAutoScroll =
-      currentState.transcriptScrollMode === "follow-latest"
-      || !previous.activeThreadId
-      || previous.activeThreadId !== session?.active_thread_id
-      || transcript.scrollHeight - transcript.clientHeight - transcript.scrollTop <= AUTO_SCROLL_BOTTOM_THRESHOLD_PX;
-    const prependedOlderTranscript = didPrependOlderTranscript(previous.entries, entries);
-
-    if (shouldAutoScroll) {
-      transcript.scrollTop = Math.max(0, transcript.scrollHeight - transcript.clientHeight);
-    } else if (prependedOlderTranscript) {
-      if (previousScrollTop <= TOP_SCROLL_PRESERVE_THRESHOLD_PX) {
-        transcript.scrollTop = 0;
-      } else {
-        transcript.scrollTop = Math.max(
-          0,
-          transcript.scrollHeight - previousScrollHeight + previousScrollTop
-        );
-      }
-    } else {
-      const maxScrollTop = Math.max(0, transcript.scrollHeight - transcript.clientHeight);
-      transcript.scrollTop = Math.min(previousScrollTop, maxScrollTop);
-    }
+    const nextPosition = computeTranscriptScrollPosition({
+      clientHeight: transcript.clientHeight || 0,
+      currentMode: currentState.transcriptScrollMode,
+      nextEntries: entries,
+      nextScrollHeight: transcript.scrollHeight || 0,
+      nextThreadId: session?.active_thread_id || null,
+      previousEntries: previous.entries,
+      previousScrollHeight,
+      previousScrollTop,
+      previousThreadId: previous.activeThreadId,
+    });
+    transcript.scrollTop = nextPosition.scrollTop;
 
     previousRenderRef.current = {
       activeThreadId: session?.active_thread_id || null,
@@ -715,39 +706,20 @@ function RemoteTranscriptPanel({
           return;
         }
 
-        const isNearBottom =
-          transcript.scrollHeight - transcript.clientHeight - transcript.scrollTop
-          <= AUTO_SCROLL_BOTTOM_THRESHOLD_PX;
         applyRemoteSurfacePatch(
-          createTranscriptScrollModePatch(isNearBottom ? "follow-latest" : "preserve")
+          createTranscriptScrollModePatch(
+            deriveTranscriptScrollMode({
+              clientHeight: transcript.clientHeight || 0,
+              scrollHeight: transcript.scrollHeight || 0,
+              scrollTop: transcript.scrollTop || 0,
+            })
+          )
         );
       },
       ref: transcriptRef,
     },
     body
   );
-}
-
-function didPrependOlderTranscript(previousEntries, nextEntries) {
-  if (!previousEntries.length || nextEntries.length <= previousEntries.length) {
-    return false;
-  }
-
-  const offset = nextEntries.length - previousEntries.length;
-  return previousEntries.every((entry, index) => {
-    return transcriptEntryIdentity(entry) === transcriptEntryIdentity(nextEntries[index + offset]);
-  });
-}
-
-function transcriptEntryIdentity(entry) {
-  return [
-    entry?.item_id || "",
-    entry?.kind || "",
-    entry?.status || "",
-    entry?.turn_id || "",
-    entry?.tool?.item_type || "",
-    entry?.tool?.name || "",
-  ].join("|");
 }
 
 function clearReactMountContainers() {
