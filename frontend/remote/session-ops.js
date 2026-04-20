@@ -25,7 +25,9 @@ const fetchTranscriptPage = createTranscriptPageFetcher(dispatchOrRecover);
 
 export function applySessionSnapshot(snapshot) {
   const effectiveSnapshot = restoreHydratedTranscript(state, snapshot);
-  applyRenderedSession(effectiveSnapshot);
+  applyRenderedSession(effectiveSnapshot, {
+    hydrationSnapshot: snapshot,
+  });
   const scrollTop = remoteUiRefs.remoteTranscript?.scrollTop || 0;
   const scrollHeight = remoteUiRefs.remoteTranscript?.scrollHeight || 0;
   const clientHeight = remoteUiRefs.remoteTranscript?.clientHeight || 0;
@@ -237,11 +239,14 @@ async function hydrateActiveTranscript(snapshot) {
   });
 }
 
-function applyRenderedSession(session, { hydrateTranscript = true } = {}) {
+function applyRenderedSession(
+  session,
+  { hydrateTranscript = true, hydrationSnapshot = session } = {}
+) {
   renderSession(session);
   scheduleClaimRefresh();
   if (hydrateTranscript) {
-    void hydrateActiveTranscript(session);
+    void hydrateActiveTranscript(hydrationSnapshot);
   }
 }
 

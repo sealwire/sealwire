@@ -39,6 +39,7 @@ export function seedTranscriptHydrationState(state, patch = {}) {
       transcriptHydrationOlderCursor: null,
       transcriptHydrationEntries: new Map(),
       transcriptHydrationStatus: "idle",
+      transcriptHydrationTailReady: false,
       transcriptHydrationLastFetchAt: 0,
     },
     patch

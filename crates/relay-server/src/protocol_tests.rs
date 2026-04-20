@@ -416,3 +416,34 @@ fn thread_transcript_response_can_page_backwards_from_tail() {
     assert!(rebuilt.get(&0).unwrap().starts_with("entry-0-"));
     assert!(rebuilt.get(&11).unwrap().starts_with("entry-11-"));
 }
+
+#[test]
+fn thread_transcript_response_tail_returns_latest_page_first() {
+    let transcript = (0..12)
+        .map(|index| TranscriptEntryView {
+            item_id: Some(format!("item-{index}")),
+            kind: TranscriptEntryKind::AgentText,
+            text: Some(format!("entry-{index}-{}", "z".repeat(1500))),
+            status: "completed".to_string(),
+            turn_id: Some(format!("turn-{index}")),
+            tool: None,
+        })
+        .collect::<Vec<_>>();
+
+    let page =
+        ThreadTranscriptResponse::from_transcript_tail("thread-1".to_string(), transcript.clone());
+
+    assert!(!page.entries.is_empty());
+    assert!(serde_json::to_vec(&page).unwrap().len() <= THREADS_RESPONSE_TARGET_BYTES);
+    assert_eq!(page.next_cursor, None);
+    assert!(page.prev_cursor.is_some());
+    assert!(page
+        .entries
+        .first()
+        .map(|entry| entry.entry_index > 0)
+        .unwrap_or(false));
+    assert_eq!(
+        page.entries.last().map(|entry| entry.entry_index),
+        Some(transcript.len() - 1)
+    );
+}

@@ -757,6 +757,7 @@ const TRANSCRIPT_CHUNK_MAX_CHARS: usize = 4_000;
 const THREAD_TRANSCRIPT_RESPONSE_TARGET_BYTES: usize = 20_000;
 
 impl ThreadTranscriptResponse {
+    #[cfg(test)]
     pub fn from_transcript(
         thread_id: String,
         transcript: Vec<TranscriptEntryView>,
@@ -791,6 +792,11 @@ impl ThreadTranscriptResponse {
         )
     }
 
+    pub fn from_transcript_tail(thread_id: String, transcript: Vec<TranscriptEntryView>) -> Self {
+        let fragments = flatten_transcript_fragments(transcript);
+        build_reverse_thread_transcript_page(&thread_id, &fragments, fragments.len())
+    }
+
     pub fn from_transcript_before(
         thread_id: String,
         transcript: Vec<TranscriptEntryView>,
@@ -798,37 +804,7 @@ impl ThreadTranscriptResponse {
     ) -> Self {
         let fragments = flatten_transcript_fragments(transcript);
         let upper_bound = before.unwrap_or(fragments.len()).min(fragments.len());
-        let mut selected = Vec::new();
-        let mut index = upper_bound;
-
-        while index > 0 {
-            selected.push(fragments[index - 1].clone());
-            let candidate = build_thread_transcript_page(
-                &thread_id,
-                &selected.iter().rev().cloned().collect::<Vec<_>>(),
-                None,
-                None,
-            );
-            if serialized_len(&candidate) > THREAD_TRANSCRIPT_RESPONSE_TARGET_BYTES
-                && selected.len() > 1
-            {
-                selected.pop();
-                break;
-            }
-            index -= 1;
-        }
-
-        if selected.is_empty() && upper_bound > 0 {
-            selected.push(fragments[upper_bound - 1].clone());
-            index = upper_bound - 1;
-        }
-
-        build_thread_transcript_page(
-            &thread_id,
-            &selected.into_iter().rev().collect::<Vec<_>>(),
-            (upper_bound < fragments.len()).then_some(upper_bound),
-            (index > 0).then_some(index),
-        )
+        build_reverse_thread_transcript_page(&thread_id, &fragments, upper_bound)
     }
 }
 
@@ -885,6 +861,44 @@ fn build_thread_transcript_page(
         next_cursor,
         prev_cursor,
     }
+}
+
+fn build_reverse_thread_transcript_page(
+    thread_id: &str,
+    fragments: &[TranscriptEntryFragment],
+    upper_bound: usize,
+) -> ThreadTranscriptResponse {
+    let mut selected = Vec::new();
+    let mut index = upper_bound;
+
+    while index > 0 {
+        selected.push(fragments[index - 1].clone());
+        let candidate = build_thread_transcript_page(
+            thread_id,
+            &selected.iter().rev().cloned().collect::<Vec<_>>(),
+            None,
+            None,
+        );
+        if serialized_len(&candidate) > THREAD_TRANSCRIPT_RESPONSE_TARGET_BYTES
+            && selected.len() > 1
+        {
+            selected.pop();
+            break;
+        }
+        index -= 1;
+    }
+
+    if selected.is_empty() && upper_bound > 0 {
+        selected.push(fragments[upper_bound - 1].clone());
+        index = upper_bound - 1;
+    }
+
+    build_thread_transcript_page(
+        thread_id,
+        &selected.into_iter().rev().collect::<Vec<_>>(),
+        (upper_bound < fragments.len()).then_some(upper_bound),
+        (index > 0).then_some(index),
+    )
 }
 
 fn flatten_transcript_fragments(

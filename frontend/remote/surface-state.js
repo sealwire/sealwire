@@ -70,6 +70,7 @@ export function createClearedTranscriptHydrationPatch() {
     transcriptHydrationPromise: null,
     transcriptHydrationSignature: null,
     transcriptHydrationStatus: "idle",
+    transcriptHydrationTailReady: false,
     transcriptHydrationThreadId: null,
   };
 }

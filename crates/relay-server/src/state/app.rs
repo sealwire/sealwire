@@ -369,10 +369,9 @@ impl AppState {
             ));
         }
 
-        Ok(ThreadTranscriptResponse::from_transcript(
+        Ok(ThreadTranscriptResponse::from_transcript_tail(
             input.thread_id,
             thread_data.transcript,
-            input.cursor.unwrap_or(0),
         ))
     }
 

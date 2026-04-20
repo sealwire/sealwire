@@ -48,7 +48,7 @@ export function prepareTranscriptHydration(state, snapshot) {
 
   return {
     signature,
-    shouldHydrate: true,
+    shouldHydrate: !state.transcriptHydrationTailReady,
     alreadyComplete: state.transcriptHydrationStatus === "complete",
     existingPromise: state.transcriptHydrationPromise,
   };
@@ -57,6 +57,13 @@ export function prepareTranscriptHydration(state, snapshot) {
 export function beginTranscriptHydration(state) {
   applyRemoteSurfacePatch({
     transcriptHydrationStatus: "loading",
+  });
+}
+
+export function pauseTranscriptHydrationAfterTailReady(state) {
+  applyRemoteSurfacePatch({
+    transcriptHydrationStatus: "idle",
+    transcriptHydrationTailReady: true,
   });
 }
 
@@ -83,6 +90,7 @@ export function setTranscriptHydrationIdle(state) {
 export function markTranscriptHydrationComplete(state) {
   applyRemoteSurfacePatch({
     transcriptHydrationStatus: "complete",
+    transcriptHydrationTailReady: true,
   });
 }
 
@@ -106,6 +114,25 @@ export function setTranscriptHydrationFetchAt(state, timestamp) {
 
 export function getTranscriptHydrationLastFetchAt(state) {
   return state.transcriptHydrationLastFetchAt;
+}
+
+export function hasIncompleteTailHydrationEntries(state) {
+  const snapshot = state.transcriptHydrationBaseSnapshot;
+  if (!snapshot?.transcript?.length) {
+    return false;
+  }
+
+  const loadedEntries = new Map(
+    buildHydratedTranscriptEntries(state).map((entry) => [entry.item_id, entry])
+  );
+
+  return (snapshot.transcript || []).some((entry) => {
+    const itemId = entry?.item_id;
+    if (!itemId) {
+      return false;
+    }
+    return !loadedEntries.get(itemId)?.complete;
+  });
 }
 
 export function mergeTranscriptHydrationPage(state, page) {

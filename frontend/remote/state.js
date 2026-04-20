@@ -54,6 +54,7 @@ export const state = {
   transcriptHydrationOlderCursor: null,
   transcriptHydrationEntries: new Map(),
   transcriptHydrationStatus: "idle",
+  transcriptHydrationTailReady: false,
   transcriptHydrationLastFetchAt: 0,
   transcriptScrollMode: "follow-latest",
   threads: [],

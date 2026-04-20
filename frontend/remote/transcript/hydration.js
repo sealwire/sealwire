@@ -6,8 +6,10 @@ import {
   getTranscriptHydrationLastFetchAt,
   getTranscriptHydrationSignature,
   getTranscriptHydrationThreadId,
+  hasIncompleteTailHydrationEntries,
   markTranscriptHydrationComplete,
   mergeTranscriptHydrationPage,
+  pauseTranscriptHydrationAfterTailReady,
   prepareTranscriptHydration,
   setTranscriptHydrationFetchAt,
   setTranscriptHydrationIdle,
@@ -77,7 +79,13 @@ async function hydrateRemoteTranscriptPages(
       return;
     }
 
-    await waitForTranscriptFetchWindow(state, fetchIntervalMs, now, wait);
+    await waitForTranscriptFetchWindow(
+      state,
+      fetchIntervalMs,
+      now,
+      wait,
+      hasIncompleteTailHydrationEntries(state)
+    );
 
     const page = await fetchPage({
       threadId,
@@ -91,6 +99,16 @@ async function hydrateRemoteTranscriptPages(
 
     mergeTranscriptHydrationPage(state, page);
     applyTranscriptHydrationProgress(state, onProgress);
+
+    if (!hasIncompleteTailHydrationEntries(state)) {
+      if (state.transcriptHydrationStatus === "complete") {
+        markTranscriptHydrationComplete(state);
+        applyTranscriptHydrationProgress(state, onProgress);
+        return;
+      }
+      pauseTranscriptHydrationAfterTailReady(state);
+      return;
+    }
 
     if (getTranscriptHydrationSignature(state) !== signature) {
       return;
@@ -107,7 +125,17 @@ function applyTranscriptHydrationProgress(state, onProgress) {
   onProgress(snapshot);
 }
 
-async function waitForTranscriptFetchWindow(state, fetchIntervalMs, now, wait) {
+async function waitForTranscriptFetchWindow(
+  state,
+  fetchIntervalMs,
+  now,
+  wait,
+  prioritizeTailCompletion = false
+) {
+  if (prioritizeTailCompletion) {
+    return;
+  }
+
   const elapsedMs = now() - getTranscriptHydrationLastFetchAt(state);
   const delayMs = Math.max(0, fetchIntervalMs - elapsedMs);
   if (delayMs <= 0) {
