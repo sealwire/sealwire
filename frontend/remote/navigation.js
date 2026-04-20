@@ -1,4 +1,4 @@
-import * as dom from "./dom.js";
+import { patchRemoteState, state } from "./state.js";
 
 const MOBILE_NAV_BREAKPOINT_PX = 960;
 const MOBILE_NAV_MEDIA_QUERY = `(max-width: ${MOBILE_NAV_BREAKPOINT_PX}px)`;
@@ -14,30 +14,28 @@ export function initializeRemoteNavigation() {
 
 export function syncRemoteNavigationForViewport() {
   const usesDrawer = usesMobileDrawerLayout();
-
-  if (dom.appShell?.dataset) {
-    dom.appShell.dataset.remoteNavMode = usesDrawer ? "drawer" : "desktop";
-  }
-
-  if (usesDrawer) {
-    const shouldOpen = dom.appShell?.dataset?.remoteNavState === "open";
-    applyRemoteNavigationState(shouldOpen);
-    return;
-  }
-
-  applyRemoteNavigationState(true);
+  const nextMode = usesDrawer ? "drawer" : "desktop";
+  const nextOpen = usesDrawer
+    ? state.remoteNavMode === "drawer"
+      ? state.remoteNavOpen
+      : false
+    : true;
+  patchRemoteState({
+    remoteNavMode: nextMode,
+    remoteNavOpen: nextOpen,
+  });
 }
 
 export function toggleRemoteNavigation() {
-  if (!usesMobileDrawerLayout()) {
+  if (state.remoteNavMode !== "drawer") {
     return;
   }
 
-  applyRemoteNavigationState(dom.appShell?.dataset?.remoteNavState !== "open");
+  applyRemoteNavigationState(!state.remoteNavOpen);
 }
 
 export function openRemoteNavigation() {
-  if (!usesMobileDrawerLayout()) {
+  if (state.remoteNavMode !== "drawer") {
     return;
   }
 
@@ -45,7 +43,7 @@ export function openRemoteNavigation() {
 }
 
 export function closeRemoteNavigation() {
-  if (!usesMobileDrawerLayout()) {
+  if (state.remoteNavMode !== "drawer") {
     return;
   }
 
@@ -53,36 +51,9 @@ export function closeRemoteNavigation() {
 }
 
 function applyRemoteNavigationState(open) {
-  const usesDrawer = usesMobileDrawerLayout();
-  const navOpen = !usesDrawer || open;
-
-  if (dom.appShell?.dataset) {
-    dom.appShell.dataset.remoteNavState = navOpen ? "open" : "closed";
-  }
-
-  dom.sidebar?.setAttribute("aria-hidden", String(!navOpen));
-
-  if (dom.remoteNavToggleButton) {
-    dom.remoteNavToggleButton.hidden = !usesDrawer;
-    dom.remoteNavToggleButton.dataset.navState = navOpen ? "open" : "closed";
-    dom.remoteNavToggleButton.setAttribute("aria-expanded", String(navOpen));
-    dom.remoteNavToggleButton.setAttribute(
-      "aria-label",
-      navOpen ? MOBILE_NAV_OPEN_LABEL : MOBILE_NAV_CLOSED_LABEL
-    );
-    dom.remoteNavToggleButton.title = navOpen
-      ? MOBILE_NAV_OPEN_LABEL
-      : MOBILE_NAV_CLOSED_LABEL;
-  }
-
-  if (dom.remoteNavBackdrop) {
-    dom.remoteNavBackdrop.hidden = !usesDrawer;
-    dom.remoteNavBackdrop.setAttribute("aria-hidden", String(!navOpen));
-  }
-
-  if (document.body?.dataset) {
-    document.body.dataset.remoteNavOpen = String(usesDrawer && navOpen);
-  }
+  patchRemoteState({
+    remoteNavOpen: state.remoteNavMode === "drawer" ? open : true,
+  });
 }
 
 function usesMobileDrawerLayout() {

@@ -1,24 +1,23 @@
-import * as dom from "./dom.js";
+import { patchRemoteState, state } from "./state.js";
 
 export function renderEmptyState() {
-  dom.remoteTranscript.innerHTML = `
-    <div class="thread-empty">
-      <h2>No remote session yet</h2>
-      <p>After pairing, this page will stream the live relay transcript through the broker.</p>
-    </div>
-  `;
+  patchRemoteState({
+    session: null,
+  });
 }
 
 export function renderLog(message) {
   const time = new Date().toLocaleTimeString();
-  dom.remoteClientLog.textContent = `${time}  ${message}\n${dom.remoteClientLog.textContent}`.trim();
+  patchRemoteState({
+    clientLogs: [`${time}  ${message}`, ...state.clientLogs].slice(0, 400),
+  });
 }
 
 export function renderLogs(entries) {
-  dom.remoteClientLog.textContent = entries
-    .map(
+  patchRemoteState({
+    clientLogs: entries.map(
       (entry) =>
         `${new Date(entry.created_at * 1000).toLocaleTimeString()}  [${entry.kind}] ${entry.message}`
-    )
-    .join("\n");
+    ),
+  });
 }

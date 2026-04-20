@@ -1,9 +1,9 @@
-import * as dom from "./dom.js";
 import { state } from "./state.js";
 import {
   applyRemoteSurfacePatch,
   createTranscriptScrollModePatch,
 } from "./surface-state.js";
+import { remoteUiRefs } from "./ui-refs.js";
 
 export const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 80;
 export const TOP_SCROLL_PRESERVE_THRESHOLD_PX = 80;
@@ -28,7 +28,7 @@ export function deriveTranscriptScrollMode({
 }
 
 export function handleTranscriptScroll(
-  transcript = dom.remoteTranscript,
+  transcript = remoteUiRefs.remoteTranscript,
   session = state.session
 ) {
   if (!session?.active_thread_id || !transcript) {

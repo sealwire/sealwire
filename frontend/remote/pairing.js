@@ -1,4 +1,3 @@
-import * as dom from "./dom.js";
 import {
   clearPairingQueryFromUrl,
   decryptJson,
@@ -29,6 +28,8 @@ import {
   normalizedDeviceLabel,
   ensureDeviceIdentity,
   forgetCurrentRemoteProfile,
+  loadDeviceLabel,
+  patchRemoteState,
   saveClientAuth,
   saveDeviceLabel,
   saveRemoteAuth,
@@ -49,7 +50,9 @@ export function applyPairingQuery() {
   }
 
   try {
-    dom.pairingInput.value = raw;
+    patchRemoteState({
+      pairingInputValue: raw,
+    });
     const pairingTicket = parsePairingPayload(raw);
     renderLog(`Loaded pairing ticket ${pairingTicket.pairing_id} from URL.`);
     return raw;
@@ -67,7 +70,6 @@ export async function beginPairing(rawValue, { auto = false } = {}) {
   const raw = rawValue.trim();
   if (!raw) {
     renderLog("Paste a pairing link or code first.");
-    dom.pairingInput.focus();
     return;
   }
 
@@ -94,8 +96,10 @@ export async function beginPairing(rawValue, { auto = false } = {}) {
       rejectPendingActions,
       reason: "pairing restarted before broker actions completed",
     }));
-    saveDeviceLabel(dom.deviceLabelInput.value);
-    closePairingModalIfOpen();
+    saveDeviceLabel(state.deviceLabelDraft || loadDeviceLabel());
+    patchRemoteState({
+      pairingModalOpen: false,
+    });
     renderThreads([]);
     renderLog(
       auto
@@ -137,7 +141,7 @@ export async function sendPairingRequest() {
     pairing_id: ticket.pairing_id,
     envelope: await encryptJson(ticket.pairing_secret, {
       device_id: state.requestedDeviceId,
-      device_label: normalizedDeviceLabel(dom.deviceLabelInput.value),
+      device_label: normalizedDeviceLabel(state.deviceLabelDraft || loadDeviceLabel()),
       device_verify_key: deviceKeypair.verifyKey,
       pairing_proof: await signPairingProof(
         ticket.pairing_id,
@@ -233,8 +237,10 @@ export async function handleEncryptedPairingResult(payload) {
     pairingPhase: null,
     pairingError: null,
   }));
-  dom.pairingInput.value = "";
-  closePairingModalIfOpen();
+  patchRemoteState({
+    pairingInputValue: "",
+    pairingModalOpen: false,
+  });
   clearPairingQueryFromUrl();
   renderLog(`Paired remote device ${device.label} (${shortId(device.device_id)}).`);
   await ensureRemoteClaim({
@@ -261,12 +267,9 @@ export function forgetCurrentDevice() {
   clearPairingQueryFromUrl();
   closeBrokerSocket();
   void clearDeviceRefreshSession(brokerUrl);
-  dom.pairingInput.value = "";
+  patchRemoteState({
+    pairingInputValue: "",
+    pairingModalOpen: false,
+  });
   renderLog("Forgot the stored remote device for this browser.");
-}
-
-function closePairingModalIfOpen() {
-  if (dom.pairingModal?.open) {
-    dom.pairingModal.close();
-  }
 }

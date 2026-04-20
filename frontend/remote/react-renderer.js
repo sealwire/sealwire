@@ -106,7 +106,7 @@ export function WorkspaceHeading({ header, statusBadge }) {
   );
 }
 
-export function SessionPanel({ model, onStartSession = null }) {
+export function SessionPanel({ cwdInputRef = null, model, onStartSession = null }) {
   if (!model.hasRemoteAuth) {
     return null;
   }
@@ -129,6 +129,7 @@ export function SessionPanel({ model, onStartSession = null }) {
         id: "remote-cwd-input",
         onChange: (event) => updateSessionPanelField("cwd", event.target.value),
         placeholder: "/path/to/project",
+        ref: cwdInputRef,
         type: "text",
         value: model.fields.cwd,
       })

@@ -5,9 +5,8 @@ import React, {
   useState,
   useSyncExternalStore,
 } from "react";
-import { createPortal } from "react-dom";
 import { createRoot } from "react-dom/client";
-import * as dom from "./dom.js";
+import { flushSync } from "react-dom";
 import {
   selectDeviceChromeRenderModel,
   selectResetChromeRenderModel,
@@ -18,12 +17,10 @@ import { renderTranscriptMarkup } from "../shared/transcript-render.js";
 import { deriveSessionRuntime } from "./session-runtime.js";
 import {
   closeRemoteNavigation,
-  syncRemoteNavigationForViewport,
   toggleRemoteNavigation,
 } from "./navigation.js";
 import {
   patchRemoteState,
-  readRemoteState,
   readRemoteStateSnapshot,
   subscribeRemoteState,
 } from "./state.js";
@@ -56,34 +53,38 @@ import {
   TranscriptMarkupState,
   WorkspaceHeading,
 } from "./react-renderer.js";
+import {
+  setRemoteCwdInputElement,
+  setRemoteTranscriptElement,
+} from "./ui-refs.js";
 
 const h = React.createElement;
 
-let remoteAppHost = null;
 let remoteAppRoot = null;
 
 export function mountRemoteApp(handlers) {
-  if (!remoteAppHost) {
-    dom.refreshDomReferences();
-    clearReactMountContainers();
-    remoteAppHost = document.createElement("div");
-    remoteAppHost.hidden = true;
-    remoteAppHost.dataset.remoteAppHost = "true";
-    document.body.append(remoteAppHost);
-    remoteAppRoot = createRoot(remoteAppHost);
+  const container = document.querySelector("#remote-root");
+  if (!container) {
+    throw new Error("remote root container is missing");
   }
 
-  remoteAppRoot.render(h(RemoteApp, handlers));
+  if (!remoteAppRoot) {
+    remoteAppRoot = createRoot(container);
+  }
+
+  flushSync(() => {
+    remoteAppRoot.render(h(RemoteApp, handlers));
+  });
 }
 
 export function unmountRemoteApp() {
   remoteAppRoot?.unmount();
   remoteAppRoot = null;
-  remoteAppHost?.remove();
-  remoteAppHost = null;
 }
 
 function RemoteApp({
+  onBeginPairing,
+  onForgetDevice,
   onRefreshRelayDirectory,
   onRefreshThreads,
   onResumeThread,
@@ -99,6 +100,7 @@ function RemoteApp({
     readRemoteStateSnapshot
   ).state;
   const previousSessionRef = useRef(null);
+  const remoteCwdInputRef = useRef(null);
   const [collapsedGroupCwds, setCollapsedGroupCwds] = useState(() => new Set());
 
   const session = currentState.session;
@@ -190,31 +192,36 @@ function RemoteApp({
   };
 
   useLayoutEffect(() => {
-    dom.refreshDomReferences();
-    if (dom.appShell) {
-      dom.appShell.dataset.view = "conversation";
+    setRemoteCwdInputElement(remoteCwdInputRef.current);
+    if (document.body?.dataset) {
+      document.body.dataset.remoteNavOpen = String(
+        currentState.remoteNavMode === "drawer" && currentState.remoteNavOpen
+      );
     }
-    if (dom.chatShell) {
-      dom.chatShell.dataset.view = "conversation";
-    }
-    syncRemoteNavigationForViewport();
   });
 
   useEffect(() => {
     previousSessionRef.current = session || null;
   }, [session]);
 
-  const portalTrees = [];
-
-  if (dom.sidebar) {
-    portalTrees.push(createPortal(
+  return h(
+    React.Fragment,
+    null,
+    h(
+      "div",
+      {
+        className: "app-shell remote-app-shell",
+        "data-remote-nav-mode": currentState.remoteNavMode,
+        "data-remote-nav-state": currentState.remoteNavOpen ? "open" : "closed",
+        "data-view": "conversation",
+      },
       h(RemoteSidebar, {
         collapsedGroupCwds,
         currentState,
         hasRelay,
         hasUsableRelay,
         onOpenPairing() {
-          dom.pairingModal?.showModal();
+          patchRemoteState({ pairingModalOpen: true });
         },
         onRefreshRelayDirectory,
         onRefreshThreads,
@@ -241,77 +248,90 @@ function RemoteApp({
           });
         },
         relayDirectoryModel,
+        remoteCwdInputRef,
         sessionPanelModel,
         sessionToggleLabel,
         threadsFilterHint: sessionRuntime?.threadsFilterHint || null,
         threadsModel,
       }),
-      dom.sidebar
-    ));
-  }
-
-  if (dom.chatHeader) {
-    portalTrees.push(createPortal(
-      h(RemoteHeader, {
-        deviceChromeModel,
-        headerModel,
-        onOpenInfo() {
-          dom.remoteInfoModal?.showModal();
-        },
-        onReturnHome() {
-          void onReturnHome();
-        },
-        onToggleNavigation() {
-          toggleRemoteNavigation();
-        },
-        statusBadgeModel,
-      }),
-      dom.chatHeader
-    ));
-  }
-
-  if (dom.remoteThreadPanel) {
-    portalTrees.push(createPortal(
-      h(RemoteThreadPanel, {
-        composerModel,
-        controlBannerModel,
-        currentState,
-        emptyStateModel,
-        onSelectRelay(relayId) {
+      h("div", {
+        className: "remote-nav-backdrop",
+        hidden: currentState.remoteNavMode !== "drawer",
+        "aria-hidden": String(!currentState.remoteNavOpen),
+        id: "remote-nav-backdrop",
+        onClick: () => {
           closeRemoteNavigation();
-          void onSelectRelay(relayId);
         },
-        onSendMessage() {
-          void onSendMessage();
-        },
-        onSubmitDecision(decision, scope) {
-          void onSubmitDecision(decision, scope);
-        },
-        onTakeOver() {
-          void onTakeOver();
-        },
-        session,
-        sessionView,
       }),
-      dom.remoteThreadPanel
-    ));
-  }
-
-  if (dom.deviceMeta) {
-    portalTrees.push(createPortal(
-      h(DeviceMetaPanel, { model: deviceChromeModel.deviceMeta }),
-      dom.deviceMeta
-    ));
-  }
-
-  if (dom.remoteSessionMeta) {
-    portalTrees.push(createPortal(
-      h(SessionMetaPanel, { model: sessionMetaModel }),
-      dom.remoteSessionMeta
-    ));
-  }
-
-  return h(React.Fragment, null, ...portalTrees);
+      h(
+        "main",
+        {
+          className: "chat-shell remote-chat-shell",
+          "data-view": "conversation",
+        },
+        h(RemoteHeader, {
+          currentState,
+          deviceChromeModel,
+          headerModel,
+          onOpenInfo() {
+            patchRemoteState({ remoteInfoModalOpen: true });
+          },
+          onReturnHome() {
+            void onReturnHome();
+          },
+          onToggleNavigation() {
+            toggleRemoteNavigation();
+          },
+          statusBadgeModel,
+        }),
+        h(RemoteThreadPanel, {
+          composerModel,
+          controlBannerModel,
+          currentState,
+          emptyStateModel,
+          onSelectRelay(relayId) {
+            closeRemoteNavigation();
+            void onSelectRelay(relayId);
+          },
+          onSendMessage() {
+            void onSendMessage();
+          },
+          onSubmitDecision(decision, scope) {
+            void onSubmitDecision(decision, scope);
+          },
+          onTakeOver() {
+            void onTakeOver();
+          },
+          session,
+          sessionView,
+        }),
+        h(RemoteClientLog, {
+          lines: currentState.clientLogs,
+        })
+      )
+    ),
+    h(PairingModal, {
+      deviceChromeModel,
+      deviceLabel: currentState.deviceLabelDraft,
+      pairingInputValue: currentState.pairingInputValue,
+      pairingModalOpen: currentState.pairingModalOpen,
+      onBeginPairing,
+      onClose() {
+        patchRemoteState({ pairingModalOpen: false });
+      },
+      onForgetDevice() {
+        onForgetDevice();
+      },
+    }),
+    h(RemoteInfoModal, {
+      open: currentState.remoteInfoModalOpen,
+      onClose() {
+        patchRemoteState({ remoteInfoModalOpen: false });
+      },
+      sessionMetaModel,
+      sessionPath: headerModel.sessionPath || "No workspace path yet.",
+    })
+  );
 }
 
 function RemoteSidebar({
@@ -327,14 +347,20 @@ function RemoteSidebar({
   onStartSession,
   onToggleGroup,
   relayDirectoryModel,
+  remoteCwdInputRef,
   sessionPanelModel,
   sessionToggleLabel,
   threadsFilterHint,
   threadsModel,
 }) {
+  const navOpen = currentState.remoteNavMode !== "drawer" || currentState.remoteNavOpen;
+
   return h(
-    React.Fragment,
-    null,
+    "aside",
+    {
+      "aria-hidden": String(!navOpen),
+      className: "sidebar",
+    },
     h(
       "div",
       { className: "sidebar-row" },
@@ -408,6 +434,7 @@ function RemoteSidebar({
         id: "remote-session-panel",
       },
       h(SessionPanel, {
+        cwdInputRef: remoteCwdInputRef,
         model: sessionPanelModel,
         onStartSession,
       })
@@ -477,6 +504,7 @@ function RemoteSidebar({
 }
 
 function RemoteHeader({
+  currentState,
   deviceChromeModel,
   headerModel,
   onOpenInfo,
@@ -484,18 +512,27 @@ function RemoteHeader({
   onToggleNavigation,
   statusBadgeModel,
 }) {
+  const usesDrawer = currentState.remoteNavMode === "drawer";
+  const navOpen = currentState.remoteNavOpen;
+  const navLabel = navOpen ? "Close sidebar" : "Open sidebar";
+
   return h(
-    React.Fragment,
-    null,
+    "header",
+    { className: "chat-header" },
     h(
       "div",
       { className: "chat-header-main" },
       h(
         "button",
         {
+          "aria-expanded": String(navOpen),
+          "aria-label": navLabel,
           className: "header-button remote-nav-toggle-button",
+          "data-nav-state": navOpen ? "open" : "closed",
+          hidden: !usesDrawer,
           id: "remote-nav-toggle-button",
           onClick: onToggleNavigation,
+          title: navLabel,
           type: "button",
         },
         h(
@@ -560,8 +597,8 @@ function RemoteThreadPanel({
   sessionView,
 }) {
   return h(
-    React.Fragment,
-    null,
+    "section",
+    { className: "remote-thread-panel" },
     h(
       "section",
       {
@@ -626,6 +663,7 @@ function RemoteTranscriptPanel({
 
   useLayoutEffect(() => {
     const transcript = transcriptRef.current;
+    setRemoteTranscriptElement(transcript);
     if (!transcript) {
       previousRenderRef.current = {
         activeThreadId: session?.active_thread_id || null,
@@ -653,6 +691,9 @@ function RemoteTranscriptPanel({
     previousRenderRef.current = {
       activeThreadId: session?.active_thread_id || null,
       entries,
+    };
+    return () => {
+      setRemoteTranscriptElement(null);
     };
   });
 
@@ -722,10 +763,248 @@ function RemoteTranscriptPanel({
   );
 }
 
-function clearReactMountContainers() {
-  dom.sidebar?.replaceChildren();
-  dom.chatHeader?.replaceChildren();
-  dom.remoteThreadPanel?.replaceChildren();
-  dom.deviceMeta?.replaceChildren();
-  dom.remoteSessionMeta?.replaceChildren();
+function PairingModal({
+  deviceChromeModel,
+  deviceLabel,
+  onBeginPairing,
+  onClose,
+  onForgetDevice,
+  pairingInputValue,
+  pairingModalOpen,
+}) {
+  return h(
+    ManagedDialog,
+    {
+      className: "security-modal",
+      id: "pairing-modal",
+      open: pairingModalOpen,
+      onRequestClose: onClose,
+    },
+    h(
+      "div",
+      { className: "modal-header" },
+      h("h2", null, "Remote Surface"),
+      h(
+        "button",
+        {
+          className: "header-button close-modal-btn",
+          id: "close-pairing-modal",
+          onClick: onClose,
+          type: "button",
+        },
+        "\u00d7"
+      )
+    ),
+    h(
+      "section",
+      { className: "remote-access-shell remote-surface-shell" },
+      h(
+        "form",
+        {
+          className: "workspace-form",
+          id: "pairing-form",
+          onSubmit: (event) => {
+            event.preventDefault();
+            onBeginPairing(pairingInputValue);
+          },
+        },
+        h(
+          "label",
+          { className: "sidebar-label", htmlFor: "pairing-input" },
+          "Pairing Link Or Code"
+        ),
+        h("textarea", {
+          id: "pairing-input",
+          onChange: (event) => {
+            patchRemoteState({
+              pairingInputValue: event.target.value,
+            });
+          },
+          placeholder: "Paste the full pairing URL, or only the pairing payload.",
+          readOnly: deviceChromeModel.pairingControls.pairingInputReadOnly,
+          rows: 4,
+          value: pairingInputValue,
+        }),
+        h(
+          "label",
+          { className: "sidebar-label", htmlFor: "device-label-input" },
+          "Device Label"
+        ),
+        h(
+          "div",
+          { className: "workspace-picker" },
+          h("input", {
+            id: "device-label-input",
+            onChange: (event) => {
+              patchRemoteState({
+                deviceLabelDraft: event.target.value,
+              });
+            },
+            placeholder: "iPhone, Pixel, Safari on iPad",
+            type: "text",
+            value: deviceLabel,
+          }),
+          h(
+            "button",
+            {
+              className: "load-button",
+              disabled: deviceChromeModel.pairingControls.connectDisabled,
+              id: "connect-button",
+              type: "submit",
+            },
+            deviceChromeModel.pairingControls.connectLabel
+          )
+        )
+      ),
+      h(
+        "div",
+        { className: "sidebar-row" },
+        h("p", { className: "sidebar-caption" }, "Current Device"),
+        h(
+          "button",
+          {
+            className: "sidebar-link-button",
+            id: "forget-device-button",
+            onClick: onForgetDevice,
+            type: "button",
+          },
+          "Forget"
+        )
+      ),
+      h(
+        "div",
+        { className: "paired-devices-list", id: "device-meta" },
+        h(DeviceMetaPanel, { model: deviceChromeModel.deviceMeta })
+      )
+    )
+  );
+}
+
+function RemoteInfoModal({
+  onClose,
+  open,
+  sessionMetaModel,
+  sessionPath,
+}) {
+  return h(
+    ManagedDialog,
+    {
+      className: "panel-modal",
+      id: "remote-info-modal",
+      open,
+      onRequestClose: onClose,
+    },
+    h(
+      "div",
+      { className: "modal-header" },
+      h("h2", null, "Session details"),
+      h(
+        "button",
+        {
+          className: "header-button close-modal-btn",
+          id: "close-remote-info-modal",
+          onClick: onClose,
+          type: "button",
+        },
+        "\u00d7"
+      )
+    ),
+    h(
+      "div",
+      { className: "panel-modal-body" },
+      h(
+        "section",
+        { className: "details-section" },
+        h("h3", { className: "details-heading" }, "Workspace"),
+        h("p", { className: "details-path", id: "remote-session-path" }, sessionPath)
+      ),
+      h(
+        "section",
+        { className: "details-section" },
+        h("h3", { className: "details-heading" }, "Session"),
+        h(
+          "section",
+          { className: "session-meta", id: "remote-session-meta" },
+          h(SessionMetaPanel, { model: sessionMetaModel })
+        )
+      )
+    )
+  );
+}
+
+function ManagedDialog({
+  children,
+  className,
+  id,
+  onRequestClose,
+  open,
+}) {
+  const dialogRef = useRef(null);
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) {
+      return;
+    }
+
+    if (open) {
+      if (!dialog.open) {
+        if (typeof dialog.showModal === "function") {
+          dialog.showModal();
+        } else {
+          dialog.setAttribute("open", "");
+        }
+      }
+      return;
+    }
+
+    if (dialog.open) {
+      if (typeof dialog.close === "function") {
+        dialog.close();
+      } else {
+        dialog.removeAttribute("open");
+      }
+    }
+  }, [open]);
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) {
+      return undefined;
+    }
+
+    const handleCancel = (event) => {
+      event.preventDefault();
+      onRequestClose?.();
+    };
+
+    dialog.addEventListener("cancel", handleCancel);
+    return () => {
+      dialog.removeEventListener("cancel", handleCancel);
+    };
+  }, [onRequestClose]);
+
+  return h(
+    "dialog",
+    {
+      className,
+      id,
+      onClick: (event) => {
+        if (event.target === event.currentTarget) {
+          onRequestClose?.();
+        }
+      },
+      ref: dialogRef,
+    },
+    children
+  );
+}
+
+function RemoteClientLog({ lines }) {
+  return h(
+    "details",
+    { className: "log-drawer" },
+    h("summary", null, "Remote log"),
+    h("pre", { className: "client-log", id: "remote-client-log" }, (lines || []).join("\n"))
+  );
 }

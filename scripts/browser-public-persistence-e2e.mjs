@@ -226,14 +226,22 @@ async function approvePendingPairing(localPage) {
 
 async function waitForPairedRemote(remotePage) {
   await remotePage.waitForFunction(() => {
-    const stored = JSON.parse(window.localStorage.getItem("agent-relay.remote-state-v2") || "null");
+    const stored = JSON.parse(
+      window.localStorage.getItem("agent-relay.remote-state")
+        || window.localStorage.getItem("agent-relay.remote-state-v2")
+        || "null"
+    );
     return Boolean(stored?.clientAuth?.clientId && Object.keys(stored?.remoteProfiles || {}).length);
   }, null, { timeout: TIMEOUT_MS });
 }
 
 async function waitForStoredPayloadSecretMetadata(remotePage) {
   await remotePage.waitForFunction(() => {
-    const parsed = JSON.parse(window.localStorage.getItem("agent-relay.remote-state-v2") || "null");
+    const parsed = JSON.parse(
+      window.localStorage.getItem("agent-relay.remote-state")
+        || window.localStorage.getItem("agent-relay.remote-state-v2")
+        || "null"
+    );
     if (!parsed?.remoteProfiles) {
       return false;
     }
@@ -277,7 +285,11 @@ async function issueDeviceWsTokenWithCookie(brokerPort, cookieHeader) {
 
 async function readStoredRemoteAuth(page) {
   return page.evaluate(() => {
-    const parsed = JSON.parse(window.localStorage.getItem("agent-relay.remote-state-v2") || "null");
+    const parsed = JSON.parse(
+      window.localStorage.getItem("agent-relay.remote-state")
+        || window.localStorage.getItem("agent-relay.remote-state-v2")
+        || "null"
+    );
     if (!parsed?.remoteProfiles) {
       return null;
     }

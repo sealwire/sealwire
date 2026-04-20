@@ -1,4 +1,3 @@
-import * as dom from "./dom.js";
 import { dispatchOrRecover, scheduleClaimRefresh } from "./actions.js";
 import { closeRemoteNavigation } from "./navigation.js";
 import {
@@ -21,6 +20,7 @@ import {
 } from "./transcript/store.js";
 import { hydrateRemoteTranscript } from "./transcript/hydration.js";
 import { createTranscriptPageFetcher } from "./transcript/api.js";
+import { remoteUiRefs } from "./ui-refs.js";
 import {
   applyRemoteSurfacePatch,
   createTranscriptScrollModePatch,
@@ -31,9 +31,9 @@ const fetchTranscriptPage = createTranscriptPageFetcher(dispatchOrRecover);
 export function applySessionSnapshot(snapshot) {
   const effectiveSnapshot = restoreHydratedTranscript(state, snapshot);
   applyRenderedSession(effectiveSnapshot);
-  const scrollTop = dom.remoteTranscript?.scrollTop || 0;
-  const scrollHeight = dom.remoteTranscript?.scrollHeight || 0;
-  const clientHeight = dom.remoteTranscript?.clientHeight || 0;
+  const scrollTop = remoteUiRefs.remoteTranscript?.scrollTop || 0;
+  const scrollHeight = remoteUiRefs.remoteTranscript?.scrollHeight || 0;
+  const clientHeight = remoteUiRefs.remoteTranscript?.clientHeight || 0;
   const windowY =
     typeof window.scrollY === "number"
       ? window.scrollY
@@ -74,7 +74,7 @@ export async function startRemoteSession() {
   const cwd = state.sessionDraft.cwd.trim();
   if (!cwd) {
     renderLog("Choose a workspace before starting a remote session.");
-    dom.remoteCwdInput?.focus();
+    remoteUiRefs.remoteCwdInput?.focus();
     return;
   }
 

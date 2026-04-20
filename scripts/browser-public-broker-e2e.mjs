@@ -110,7 +110,11 @@ async function main() {
     await localPage.click("[data-pairing-id][data-pairing-decision='approve']");
 
     await remotePage.waitForFunction(() => {
-      const stored = JSON.parse(window.localStorage.getItem("agent-relay.remote-state-v2") || "null");
+      const stored = JSON.parse(
+        window.localStorage.getItem("agent-relay.remote-state")
+          || window.localStorage.getItem("agent-relay.remote-state-v2")
+          || "null"
+      );
       return Boolean(stored?.clientAuth?.clientId && Object.keys(stored?.remoteProfiles || {}).length);
     }, null, { timeout: TIMEOUT_MS });
 
@@ -375,18 +379,22 @@ async function waitForRevokedDevice(relayPort, timeoutMs = TIMEOUT_MS) {
 
 async function waitForSingleStartedThread(relayPort, cwd, timeoutMs = TIMEOUT_MS) {
   const deadline = Date.now() + timeoutMs;
-  const startPrefix = `Started a new Codex thread in ${cwd}.`;
 
   while (Date.now() < deadline) {
     const session = await fetchSession(relayPort);
-    const startLogs = (session.logs || []).filter((entry) => entry.message.includes(startPrefix));
+    const threads = await fetchThreadsForCwd(relayPort, cwd);
 
     assert.ok(
-      startLogs.length <= 1,
+      threads.length <= 1,
       `duplicate start_session replay should not start more than one thread for ${cwd}`
     );
 
-    if (session.active_thread_id && startLogs.length === 1) {
+    if (
+      session.active_thread_id
+      && session.current_cwd === cwd
+      && threads.length === 1
+      && threads[0]?.id === session.active_thread_id
+    ) {
       return;
     }
 
@@ -396,9 +404,23 @@ async function waitForSingleStartedThread(relayPort, cwd, timeoutMs = TIMEOUT_MS
   throw new Error(`timed out waiting for a single started thread in ${cwd}`);
 }
 
+async function fetchThreadsForCwd(relayPort, cwd) {
+  const response = await fetch(
+    `http://127.0.0.1:${relayPort}/api/threads?cwd=${encodeURIComponent(cwd)}&limit=200`
+  );
+  const payload = await response.json();
+  assert.equal(response.status, 200, `thread list should load for ${cwd}`);
+  assert.equal(payload?.ok, true, `thread list payload should succeed for ${cwd}`);
+  return payload.data?.threads || [];
+}
+
 async function readStoredRemoteAuth(page) {
   return page.evaluate(() => {
-    const parsed = JSON.parse(window.localStorage.getItem("agent-relay.remote-state-v2") || "null");
+    const parsed = JSON.parse(
+      window.localStorage.getItem("agent-relay.remote-state")
+        || window.localStorage.getItem("agent-relay.remote-state-v2")
+        || "null"
+    );
     if (!parsed?.remoteProfiles) {
       return null;
     }

@@ -1,6 +1,4 @@
-import * as dom from "./dom.js";
 import {
-  closeRemoteNavigation,
   initializeRemoteNavigation,
   openRemoteNavigation,
 } from "./navigation.js";
@@ -45,7 +43,6 @@ import {
   clearActiveRelaySelection,
   ensureDeviceIdentity,
   hydrateStoredRemoteSecrets,
-  loadDeviceLabel,
   selectRelayProfile,
   state,
 } from "./state.js";
@@ -54,6 +51,8 @@ import {
   createResetRemoteSurfaceStatePatch,
 } from "./surface-state.js";
 import { mountRemoteApp } from "./react-app.js";
+
+initializeRemoteNavigation();
 
 mountRemoteApp({
   onRefreshRelayDirectory() {
@@ -70,6 +69,12 @@ mountRemoteApp({
   },
   onSelectRelay(relayId) {
     void switchRelay(relayId);
+  },
+  onBeginPairing(rawValue) {
+    void beginPairing(rawValue);
+  },
+  onForgetDevice() {
+    forgetCurrentDevice();
   },
   onSendMessage() {
     void sendMessage();
@@ -121,47 +126,6 @@ configureRemoteActions({
   onSyncRemoteSnapshot: syncRemoteSnapshot,
 });
 
-dom.pairingForm.addEventListener("submit", (event) => {
-  event.preventDefault();
-  void beginPairing(dom.pairingInput.value);
-});
-
-dom.openPairingModalBtn?.addEventListener("click", () => {
-  dom.pairingModal?.showModal();
-});
-
-dom.closePairingModalBtn?.addEventListener("click", () => {
-  dom.pairingModal?.close();
-});
-
-dom.pairingModal?.addEventListener("click", (event) => {
-  if (event.target === dom.pairingModal) {
-    dom.pairingModal.close();
-  }
-});
-
-dom.forgetDeviceButton.addEventListener("click", () => {
-  forgetCurrentDevice();
-});
-
-dom.remoteNavBackdrop?.addEventListener("click", () => {
-  closeRemoteNavigation();
-});
-
-dom.remoteInfoButton?.addEventListener("click", () => {
-  dom.remoteInfoModal?.showModal();
-});
-
-dom.closeRemoteInfoModalBtn?.addEventListener("click", () => {
-  dom.remoteInfoModal?.close();
-});
-
-dom.remoteInfoModal?.addEventListener("click", (event) => {
-  if (event.target === dom.remoteInfoModal) {
-    dom.remoteInfoModal.close();
-  }
-});
-
 void mountBuildBadge({
   surface: "remote",
 });
@@ -186,8 +150,6 @@ async function boot() {
   }
   void registerRemotePwa();
 
-  dom.deviceLabelInput.value = loadDeviceLabel();
-  initializeRemoteNavigation();
   setRemoteSessionPanelOpen(false);
   const pairingQuery = applyPairingQuery();
 
@@ -210,10 +172,13 @@ async function boot() {
 }
 
 function installSidebarGestureDebug() {
+  const sidebar = document.querySelector(".sidebar");
+  const remoteRelaysList = document.querySelector("#remote-relays-list");
+  const remoteThreadsList = document.querySelector("#remote-threads-list");
   const targets = [
-    ["sidebar", dom.sidebar],
-    ["relays", dom.remoteRelaysList],
-    ["threads", dom.remoteThreadsList],
+    ["sidebar", sidebar],
+    ["relays", remoteRelaysList],
+    ["threads", remoteThreadsList],
   ];
 
   const describeNode = (node) => {
@@ -242,9 +207,9 @@ function installSidebarGestureDebug() {
   const logGestureEvent = (scope, event) => {
     const target = describeEventTarget(event);
     const current = describeNode(event.currentTarget);
-    const sidebarTop = dom.sidebar?.scrollTop ?? -1;
-    const relaysTop = dom.remoteRelaysList?.scrollTop ?? -1;
-    const threadsTop = dom.remoteThreadsList?.scrollTop ?? -1;
+    const sidebarTop = sidebar?.scrollTop ?? -1;
+    const relaysTop = remoteRelaysList?.scrollTop ?? -1;
+    const threadsTop = remoteThreadsList?.scrollTop ?? -1;
     const message = `[sidebar-debug] ${scope} type=${event.type} target=${target} current=${current} sidebarTop=${sidebarTop} relaysTop=${relaysTop} threadsTop=${threadsTop}`;
     console.log(message);
     renderLog(message);
