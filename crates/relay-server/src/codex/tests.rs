@@ -292,3 +292,102 @@ async fn handle_notification_ignores_session_updates_for_other_threads() {
     assert_eq!(snapshot.transcript.len(), 1);
     assert_eq!(snapshot.transcript[0].text.as_deref(), Some("keep me"));
 }
+
+#[tokio::test]
+async fn handle_server_request_enriches_command_approval_preview() {
+    let (change_tx, _) = watch::channel(0_u64);
+    let state = std::sync::Arc::new(RwLock::new(RelayState::new(
+        "/tmp/project".to_string(),
+        change_tx,
+        SecurityProfile::private(),
+    )));
+
+    handle_server_request(
+        json!({
+            "id": 1,
+            "method": "item/commandExecution/requestApproval",
+            "params": {
+                "threadId": "thread-1",
+                "reason": "Need to verify the migration before continuing",
+                "command": "cargo test -p relay-server approval_roundtrip -- --nocapture",
+                "cwd": "/tmp/project",
+                "environment": {
+                    "RUST_LOG": "debug"
+                },
+                "availableDecisions": ["approve", "deny"]
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    let relay = state.read().await;
+    let approval = relay
+        .snapshot()
+        .pending_approvals
+        .into_iter()
+        .next()
+        .expect("approval should be present");
+
+    assert!(approval.summary.contains("cargo test -p relay-server"));
+    assert_eq!(
+        approval.detail.as_deref(),
+        Some("Need to verify the migration before continuing")
+    );
+    assert_eq!(
+        approval.command.as_deref(),
+        Some("cargo test -p relay-server approval_roundtrip -- --nocapture")
+    );
+    assert_eq!(approval.cwd.as_deref(), Some("/tmp/project"));
+    assert!(approval
+        .context_preview
+        .as_deref()
+        .unwrap_or_default()
+        .contains("RUST_LOG"));
+}
+
+#[tokio::test]
+async fn handle_server_request_enriches_file_change_approval_preview() {
+    let (change_tx, _) = watch::channel(0_u64);
+    let state = std::sync::Arc::new(RwLock::new(RelayState::new(
+        "/tmp/project".to_string(),
+        change_tx,
+        SecurityProfile::private(),
+    )));
+
+    handle_server_request(
+        json!({
+            "id": 2,
+            "method": "item/fileChange/requestApproval",
+            "params": {
+                "threadId": "thread-2",
+                "reason": "Need to patch the approval transport",
+                "cwd": "/tmp/project",
+                "changes": [
+                    { "path": "crates/relay-server/src/protocol.rs", "kind": "modify" },
+                    { "path": "frontend/shared/transcript-render.js", "kind": "modify" }
+                ],
+                "availableDecisions": ["approve", "deny"]
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    let relay = state.read().await;
+    let approval = relay
+        .snapshot()
+        .pending_approvals
+        .into_iter()
+        .next()
+        .expect("approval should be present");
+
+    assert_eq!(approval.summary, "Codex wants to edit 2 files.");
+    assert_eq!(
+        approval.detail.as_deref(),
+        Some("Need to patch the approval transport")
+    );
+    let context_preview = approval.context_preview.as_deref().unwrap_or_default();
+    assert!(context_preview.contains("crates/relay-server/src/protocol.rs"));
+    assert!(context_preview.contains("frontend/shared/transcript-render.js"));
+}

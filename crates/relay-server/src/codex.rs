@@ -38,6 +38,8 @@ const MAX_TOOL_SUMMARY_CHARS: usize = 240;
 const MAX_TOOL_FIELD_CHARS: usize = 240;
 const MAX_TOOL_JSON_CHARS: usize = 512;
 const MAX_TOOL_ENTRY_CHARS: usize = 1_400;
+const MAX_APPROVAL_SUMMARY_CHARS: usize = 120;
+const MAX_APPROVAL_CONTEXT_CHARS: usize = 1_200;
 
 pub struct CodexBridge {
     _child: Arc<Mutex<Child>>,
@@ -451,49 +453,21 @@ async fn handle_server_request(payload: Value, state: &Arc<RwLock<RelayState>>) 
     let request_id = normalize_id(&raw_request_id);
 
     let pending = match method {
-        "item/commandExecution/requestApproval" => Some(PendingApproval {
-            request_id: request_id.clone(),
+        "item/commandExecution/requestApproval" => Some(parse_command_approval(
+            request_id.clone(),
             raw_request_id,
-            kind: ApprovalKind::Command,
-            thread_id: string_at(&params, &["threadId"]).unwrap_or_default(),
-            summary: "Codex wants to run a command.".to_string(),
-            detail: string_at(&params, &["reason"]),
-            command: string_at(&params, &["command"]),
-            cwd: string_at(&params, &["cwd"]),
-            requested_permissions: None,
-            available_decisions: parse_available_decisions(&params),
-            supports_session_scope: true,
-        }),
-        "item/fileChange/requestApproval" => Some(PendingApproval {
-            request_id: request_id.clone(),
+            &params,
+        )),
+        "item/fileChange/requestApproval" => Some(parse_file_change_approval(
+            request_id.clone(),
             raw_request_id,
-            kind: ApprovalKind::FileChange,
-            thread_id: string_at(&params, &["threadId"]).unwrap_or_default(),
-            summary: "Codex wants to apply a file change.".to_string(),
-            detail: string_at(&params, &["reason"]),
-            command: None,
-            cwd: None,
-            requested_permissions: None,
-            available_decisions: parse_available_decisions(&params),
-            supports_session_scope: true,
-        }),
-        "item/permissions/requestApproval" => Some(PendingApproval {
-            request_id: request_id.clone(),
+            &params,
+        )),
+        "item/permissions/requestApproval" => Some(parse_permissions_approval(
+            request_id.clone(),
             raw_request_id,
-            kind: ApprovalKind::Permissions,
-            thread_id: string_at(&params, &["threadId"]).unwrap_or_default(),
-            summary: "Codex wants additional permissions.".to_string(),
-            detail: string_at(&params, &["reason"]),
-            command: None,
-            cwd: None,
-            requested_permissions: params.get("permissions").cloned(),
-            available_decisions: vec![
-                "approve".to_string(),
-                "approve_for_session".to_string(),
-                "deny".to_string(),
-            ],
-            supports_session_scope: true,
-        }),
+            &params,
+        )),
         _ => None,
     };
 
@@ -992,6 +966,289 @@ fn preview_string_field(item: &Value, key: &str) -> Option<String> {
 
 fn preview_json_field(item: &Value, key: &str) -> Option<String> {
     value_at(item, &[key]).and_then(|value| compact_json_value(value, MAX_TOOL_JSON_CHARS))
+}
+
+fn parse_command_approval(
+    request_id: String,
+    raw_request_id: Value,
+    params: &Value,
+) -> PendingApproval {
+    let command = string_at(params, &["command"]);
+    let cwd = string_at(params, &["cwd"]);
+    let summary = command
+        .as_ref()
+        .map(|value| {
+            format!(
+                "Codex wants to run {}.",
+                inline_snippet(value, MAX_APPROVAL_SUMMARY_CHARS)
+            )
+        })
+        .unwrap_or_else(|| "Codex wants to run a command.".to_string());
+
+    PendingApproval {
+        request_id,
+        raw_request_id,
+        kind: ApprovalKind::Command,
+        thread_id: string_at(params, &["threadId"]).unwrap_or_default(),
+        summary,
+        detail: string_at(params, &["reason"]),
+        command,
+        cwd,
+        context_preview: filtered_json_preview(
+            params,
+            &["threadId", "reason", "command", "cwd", "availableDecisions"],
+            MAX_APPROVAL_CONTEXT_CHARS,
+        ),
+        requested_permissions: None,
+        available_decisions: parse_available_decisions(params),
+        supports_session_scope: true,
+    }
+}
+
+fn parse_file_change_approval(
+    request_id: String,
+    raw_request_id: Value,
+    params: &Value,
+) -> PendingApproval {
+    let paths = collect_file_change_paths(params);
+    let summary = summarize_file_change(&paths);
+    let detail = string_at(params, &["reason"]).or_else(|| file_change_detail(&paths));
+    let context_preview = file_change_context_preview(params, &paths);
+
+    PendingApproval {
+        request_id,
+        raw_request_id,
+        kind: ApprovalKind::FileChange,
+        thread_id: string_at(params, &["threadId"]).unwrap_or_default(),
+        summary,
+        detail,
+        command: None,
+        cwd: string_at(params, &["cwd"]),
+        context_preview,
+        requested_permissions: None,
+        available_decisions: parse_available_decisions(params),
+        supports_session_scope: true,
+    }
+}
+
+fn parse_permissions_approval(
+    request_id: String,
+    raw_request_id: Value,
+    params: &Value,
+) -> PendingApproval {
+    let requested_permissions = params.get("permissions").cloned();
+    let summary = requested_permissions
+        .as_ref()
+        .and_then(permission_summary)
+        .unwrap_or_else(|| "Codex wants additional permissions.".to_string());
+
+    PendingApproval {
+        request_id,
+        raw_request_id,
+        kind: ApprovalKind::Permissions,
+        thread_id: string_at(params, &["threadId"]).unwrap_or_default(),
+        summary,
+        detail: string_at(params, &["reason"]),
+        command: None,
+        cwd: string_at(params, &["cwd"]),
+        context_preview: filtered_json_preview(
+            params,
+            &[
+                "threadId",
+                "reason",
+                "permissions",
+                "cwd",
+                "availableDecisions",
+            ],
+            MAX_APPROVAL_CONTEXT_CHARS,
+        ),
+        requested_permissions,
+        available_decisions: vec![
+            "approve".to_string(),
+            "approve_for_session".to_string(),
+            "deny".to_string(),
+        ],
+        supports_session_scope: true,
+    }
+}
+
+fn summarize_file_change(paths: &[String]) -> String {
+    match paths {
+        [] => "Codex wants to apply a file change.".to_string(),
+        [path] => format!(
+            "Codex wants to edit {}.",
+            inline_snippet(path, MAX_APPROVAL_SUMMARY_CHARS)
+        ),
+        _ => format!("Codex wants to edit {} files.", paths.len()),
+    }
+}
+
+fn file_change_detail(paths: &[String]) -> Option<String> {
+    match paths {
+        [] => None,
+        [path] => Some(format!("Target file: {path}")),
+        _ => Some(format!("Target files: {}", paths.join(", "))),
+    }
+}
+
+fn file_change_context_preview(params: &Value, paths: &[String]) -> Option<String> {
+    let path_preview = if paths.is_empty() {
+        None
+    } else {
+        Some(format!("Files:\n{}", paths.join("\n")))
+    };
+    let request_preview = filtered_json_preview(
+        params,
+        &["threadId", "reason", "cwd", "availableDecisions"],
+        MAX_APPROVAL_CONTEXT_CHARS,
+    );
+
+    join_preview_sections(
+        path_preview,
+        request_preview.map(|value| format!("Request:\n{value}")),
+    )
+    .map(|value| truncate_owned(value, MAX_APPROVAL_CONTEXT_CHARS))
+}
+
+fn filtered_json_preview(
+    params: &Value,
+    excluded_keys: &[&str],
+    max_chars: usize,
+) -> Option<String> {
+    match params {
+        Value::Object(map) => {
+            let filtered = map
+                .iter()
+                .filter(|(key, value)| !excluded_keys.contains(&key.as_str()) && !value.is_null())
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect::<serde_json::Map<String, Value>>();
+
+            if filtered.is_empty() {
+                None
+            } else {
+                compact_json_value(&Value::Object(filtered), max_chars)
+            }
+        }
+        _ => compact_json_value(params, max_chars),
+    }
+}
+
+fn join_preview_sections(first: Option<String>, second: Option<String>) -> Option<String> {
+    match (first, second) {
+        (None, None) => None,
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (Some(first), Some(second)) => Some(format!("{first}\n\n{second}")),
+    }
+}
+
+fn collect_file_change_paths(params: &Value) -> Vec<String> {
+    let mut paths = Vec::new();
+    collect_file_change_paths_inner(params, &mut paths, 0);
+    paths
+}
+
+fn collect_file_change_paths_inner(value: &Value, paths: &mut Vec<String>, depth: usize) {
+    if depth > 4 || paths.len() >= 6 {
+        return;
+    }
+
+    match value {
+        Value::Object(map) => {
+            for (key, nested) in map {
+                let key = key.as_str();
+                if is_file_path_key(key) {
+                    match nested {
+                        Value::String(text) => push_unique_path(paths, text),
+                        Value::Array(values) => {
+                            for entry in values {
+                                if let Some(text) = entry.as_str() {
+                                    push_unique_path(paths, text);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                collect_file_change_paths_inner(nested, paths, depth + 1);
+                if paths.len() >= 6 {
+                    break;
+                }
+            }
+        }
+        Value::Array(values) => {
+            for entry in values {
+                collect_file_change_paths_inner(entry, paths, depth + 1);
+                if paths.len() >= 6 {
+                    break;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_file_path_key(key: &str) -> bool {
+    matches!(
+        key,
+        "path"
+            | "paths"
+            | "file"
+            | "files"
+            | "filePath"
+            | "targetPath"
+            | "relativePath"
+            | "destinationPath"
+            | "sourcePath"
+    )
+}
+
+fn push_unique_path(paths: &mut Vec<String>, candidate: &str) {
+    let Some(candidate) = non_empty_string(Some(candidate.to_string())) else {
+        return;
+    };
+    if !looks_like_path(&candidate) || paths.iter().any(|path| path == &candidate) {
+        return;
+    }
+    paths.push(candidate);
+}
+
+fn looks_like_path(candidate: &str) -> bool {
+    candidate.contains('/') || candidate.contains('\\') || candidate.contains('.')
+}
+
+fn permission_summary(value: &Value) -> Option<String> {
+    let (labels, total_count) = match value {
+        Value::Object(map) => (map.keys().take(3).cloned().collect::<Vec<_>>(), map.len()),
+        Value::Array(values) => values
+            .iter()
+            .filter_map(|entry| entry.as_str().map(ToOwned::to_owned))
+            .fold((Vec::new(), 0_usize), |(mut labels, count), entry| {
+                if labels.len() < 3 {
+                    labels.push(entry);
+                }
+                (labels, count + 1)
+            }),
+        _ => (Vec::new(), 0),
+    };
+
+    if labels.is_empty() {
+        None
+    } else {
+        let label_text = if total_count > labels.len() {
+            format!("{}, ...", labels.join(", "))
+        } else {
+            labels.join(", ")
+        };
+        Some(format!(
+            "Codex wants additional permissions ({label_text})."
+        ))
+    }
+}
+
+fn inline_snippet(value: &str, max_chars: usize) -> String {
+    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let compact = truncate_owned(compact, max_chars);
+    format!("`{compact}`")
 }
 
 fn parse_text_content(item: &Value) -> Option<String> {

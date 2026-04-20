@@ -54,6 +54,7 @@ test("renderApprovalCard includes session-scope actions and escapes requested pe
     detail: "Need elevated access",
     cwd: "/tmp/project",
     command: "uv run migrate",
+    context_preview: "Files\nfrontend/shared/transcript-render.js",
     requested_permissions: {
       sandbox: "danger-full-access",
       note: "<unsafe>",
@@ -63,6 +64,7 @@ test("renderApprovalCard includes session-scope actions and escapes requested pe
 
   assert.match(markup, /Approve Session/);
   assert.match(markup, /uv run migrate/);
+  assert.match(markup, /frontend\/shared\/transcript-render\.js/);
   assert.match(markup, /&lt;unsafe&gt;/);
   assert.match(markup, /cwd: \/tmp\/project/);
 });

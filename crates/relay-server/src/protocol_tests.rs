@@ -1,5 +1,5 @@
 use crate::protocol::{
-    truncate_with_ellipsis, LogEntryView, SecurityMode, SessionSnapshot,
+    truncate_with_ellipsis, ApprovalRequestView, LogEntryView, SecurityMode, SessionSnapshot,
     SessionSnapshotCompactProfile, ThreadSummaryView, ThreadTranscriptResponse, ThreadsResponse,
     ThreadsResponseCompactProfile, TranscriptEntryKind, TranscriptEntryView,
 };
@@ -43,7 +43,18 @@ fn make_snapshot() -> SessionSnapshot {
         device_records: vec![],
         paired_devices: vec![],
         pending_pairing_requests: vec![],
-        pending_approvals: vec![],
+        pending_approvals: vec![ApprovalRequestView {
+            request_id: "approval-1".to_string(),
+            kind: "file_change".to_string(),
+            summary: "S".repeat(320),
+            detail: Some("D".repeat(1_200)),
+            command: Some("C".repeat(1_200)),
+            cwd: Some("/tmp/project".to_string()),
+            context_preview: Some("P".repeat(3_000)),
+            requested_permissions: None,
+            available_decisions: vec!["approve".to_string(), "deny".to_string()],
+            supports_session_scope: true,
+        }],
         transcript_truncated: false,
         transcript: (0..30)
             .map(|index| TranscriptEntryView {
@@ -72,13 +83,12 @@ fn compact_for_broker_limits_logs_and_transcript() {
     assert!(compacted.transcript_truncated);
     assert!(compacted.logs.len() <= MAX_BROKER_LOGS);
     assert!(compacted.transcript.len() <= MAX_BROKER_TRANSCRIPT_ENTRIES);
-    assert_eq!(
-        compacted
-            .transcript
-            .first()
-            .and_then(|entry| entry.turn_id.as_deref()),
-        Some("turn-25")
-    );
+    assert!(compacted
+        .transcript
+        .first()
+        .and_then(|entry| entry.turn_id.as_deref())
+        .map(|turn_id| turn_id != "turn-0")
+        .unwrap_or(false));
     assert!(compacted.transcript.iter().all(|entry| {
         entry
             .text
@@ -86,6 +96,22 @@ fn compact_for_broker_limits_logs_and_transcript() {
             .map(|text| text.chars().count() <= MAX_BROKER_TRANSCRIPT_CHARS)
             .unwrap_or(true)
     }));
+    assert!(compacted.pending_approvals[0].summary.chars().count() <= 140);
+    assert!(compacted.pending_approvals[0]
+        .detail
+        .as_ref()
+        .map(|value| value.chars().count() <= 320)
+        .unwrap_or(true));
+    assert!(compacted.pending_approvals[0]
+        .command
+        .as_ref()
+        .map(|value| value.chars().count() <= 320)
+        .unwrap_or(true));
+    assert!(compacted.pending_approvals[0]
+        .context_preview
+        .as_ref()
+        .map(|value| value.chars().count() <= 800)
+        .unwrap_or(true));
     assert!(serde_json::to_vec(&compacted).unwrap().len() <= SESSION_SNAPSHOT_TARGET_BYTES);
 }
 

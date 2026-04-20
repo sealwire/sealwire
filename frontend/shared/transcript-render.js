@@ -171,6 +171,7 @@ export function renderApprovalCard(approval) {
         <p class="approval-copy">${escapeHtml(approval.detail || "Codex is waiting for a remote approval.")}</p>
         ${approval.cwd ? `<p class="approval-copy">cwd: ${escapeHtml(approval.cwd)}</p>` : ""}
         ${approval.command ? `<pre class="message-pre">${escapeHtml(approval.command)}</pre>` : ""}
+        ${approval.context_preview ? `<pre class="message-pre">${escapeHtml(approval.context_preview)}</pre>` : ""}
         ${
           approval.requested_permissions
             ? `<pre class="message-pre">${escapeHtml(JSON.stringify(approval.requested_permissions, null, 2))}</pre>`

@@ -159,6 +159,7 @@ fn test_pending_approval(thread_id: &str) -> PendingApproval {
         detail: Some("Test command".to_string()),
         command: Some("ls".to_string()),
         cwd: Some("/tmp/project".to_string()),
+        context_preview: Some("cwd\n/tmp/project".to_string()),
         requested_permissions: None,
         available_decisions: vec!["approve".to_string(), "deny".to_string()],
         supports_session_scope: true,

@@ -126,6 +126,10 @@ const SESSION_SNAPSHOT_REMOTE_SURFACE_BUDGET: SessionSnapshotCompactBudget =
         max_log_chars: 180,
         max_transcript_entries: 6,
         max_transcript_chars: 1_200,
+        max_approval_summary_chars: 140,
+        max_approval_detail_chars: 320,
+        max_approval_command_chars: 320,
+        max_approval_context_chars: 800,
         target_bytes: 8_000,
         min_transcript_entries_before_text_shrink: 3,
         min_logs_before_text_shrink: 4,
@@ -139,6 +143,10 @@ const SESSION_SNAPSHOT_LOCAL_WEB_BUDGET: SessionSnapshotCompactBudget =
         max_log_chars: 280,
         max_transcript_entries: 8,
         max_transcript_chars: 1_600,
+        max_approval_summary_chars: 180,
+        max_approval_detail_chars: 640,
+        max_approval_command_chars: 640,
+        max_approval_context_chars: 1_600,
         target_bytes: 16_000,
         min_transcript_entries_before_text_shrink: 4,
         min_logs_before_text_shrink: 8,
@@ -223,6 +231,10 @@ struct SessionSnapshotCompactBudget {
     max_log_chars: usize,
     max_transcript_entries: usize,
     max_transcript_chars: usize,
+    max_approval_summary_chars: usize,
+    max_approval_detail_chars: usize,
+    max_approval_command_chars: usize,
+    max_approval_context_chars: usize,
     target_bytes: usize,
     min_transcript_entries_before_text_shrink: usize,
     min_logs_before_text_shrink: usize,
@@ -282,6 +294,19 @@ impl SessionSnapshot {
         for entry in &mut self.transcript {
             if let Some(text) = &mut entry.text {
                 transcript_truncated |= truncate_with_ellipsis(text, budget.max_transcript_chars);
+            }
+        }
+
+        for approval in &mut self.pending_approvals {
+            truncate_with_ellipsis(&mut approval.summary, budget.max_approval_summary_chars);
+            if let Some(detail) = &mut approval.detail {
+                truncate_with_ellipsis(detail, budget.max_approval_detail_chars);
+            }
+            if let Some(command) = &mut approval.command {
+                truncate_with_ellipsis(command, budget.max_approval_command_chars);
+            }
+            if let Some(context_preview) = &mut approval.context_preview {
+                truncate_with_ellipsis(context_preview, budget.max_approval_context_chars);
             }
         }
 
@@ -482,6 +507,7 @@ pub struct ApprovalRequestView {
     pub detail: Option<String>,
     pub command: Option<String>,
     pub cwd: Option<String>,
+    pub context_preview: Option<String>,
     pub requested_permissions: Option<Value>,
     pub available_decisions: Vec<String>,
     pub supports_session_scope: bool,
