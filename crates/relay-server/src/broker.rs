@@ -17,6 +17,7 @@ use relay_util::{trimmed_option_string, trimmed_string};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::watch;
+use tokio::time::{sleep_until, Instant};
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 use tracing::{debug, info, warn};
 use url::Url;
@@ -45,6 +46,7 @@ const RECONNECT_DELAY_SECS: u64 = 2;
 const PUBLIC_RELAY_AUTH_REQUEST_RETRY_SECS: u64 = 5;
 const PUBLIC_RELAY_REGISTRATION_SCHEMA_VERSION: u32 = 1;
 const PUBLIC_RELAY_IDENTITY_SCHEMA_VERSION: u32 = 1;
+const SNAPSHOT_PUBLISH_MIN_INTERVAL_MILLIS: u64 = 500;
 const DEFAULT_PUBLIC_RELAY_REGISTRATION_FILE: &str = ".agent-relay/public-broker-registration.json";
 const DEFAULT_PUBLIC_RELAY_IDENTITY_FILE: &str = ".agent-relay/public-broker-identity.json";
 pub(crate) const RELAY_BROKER_IDENTITY_PATH_ENV: &str = "RELAY_BROKER_IDENTITY_PATH";
@@ -70,6 +72,51 @@ struct PendingPublicEnrollment {
     control_url: Url,
     registration_path: PathBuf,
     identity_path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct SnapshotPublishGate {
+    min_interval: Duration,
+    last_published_at: Option<Instant>,
+    scheduled: bool,
+}
+
+impl SnapshotPublishGate {
+    fn new(min_interval: Duration) -> Self {
+        Self {
+            min_interval,
+            last_published_at: None,
+            scheduled: false,
+        }
+    }
+
+    fn has_pending_publish(&self) -> bool {
+        self.scheduled
+    }
+
+    fn mark_published(&mut self, now: Instant) {
+        self.last_published_at = Some(now);
+        self.scheduled = false;
+    }
+
+    fn ready_or_deadline(&mut self, now: Instant) -> Result<(), Instant> {
+        match self.last_published_at {
+            None => {
+                self.mark_published(now);
+                Ok(())
+            }
+            Some(last_published_at)
+                if now.duration_since(last_published_at) >= self.min_interval =>
+            {
+                self.mark_published(now);
+                Ok(())
+            }
+            Some(last_published_at) => {
+                self.scheduled = true;
+                Err(last_published_at + self.min_interval)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -728,6 +775,13 @@ async fn run_broker_session(
     publish_snapshot(&mut sender, state)
         .await
         .map_err(|error| format!("initial broker publish failed: {error}"))?;
+    let mut snapshot_publish_gate =
+        SnapshotPublishGate::new(Duration::from_millis(SNAPSHOT_PUBLISH_MIN_INTERVAL_MILLIS));
+    snapshot_publish_gate.mark_published(Instant::now());
+    let _ = change_rx.borrow_and_update();
+    let mut pending_snapshot_timer = Box::pin(sleep_until(
+        Instant::now() + Duration::from_secs(24 * 60 * 60),
+    ));
 
     loop {
         tokio::select! {
@@ -736,6 +790,19 @@ async fn run_broker_session(
                 publish_pending_broker_messages(&mut sender, state)
                     .await
                     .map_err(|error| format!("broker direct publish failed: {error}"))?;
+                match snapshot_publish_gate.ready_or_deadline(Instant::now()) {
+                    Ok(()) => {
+                        publish_snapshot(&mut sender, state)
+                            .await
+                            .map_err(|error| format!("broker publish failed: {error}"))?;
+                    }
+                    Err(deadline) => {
+                        pending_snapshot_timer.as_mut().reset(deadline);
+                    }
+                }
+            }
+            () = &mut pending_snapshot_timer, if snapshot_publish_gate.has_pending_publish() => {
+                snapshot_publish_gate.mark_published(Instant::now());
                 publish_snapshot(&mut sender, state)
                     .await
                     .map_err(|error| format!("broker publish failed: {error}"))?;

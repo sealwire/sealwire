@@ -25,7 +25,6 @@ import {
 import { registerRemotePwa } from "./pwa.js";
 import {
   renderLog,
-  setRemoteSessionPanelOpen,
 } from "./render.js";
 import {
   applySessionSnapshot,
@@ -51,6 +50,7 @@ import {
   createResetRemoteSurfaceStatePatch,
 } from "./surface-state.js";
 import { mountRemoteApp } from "./react-app.js";
+import { setSessionPanelOpen } from "./store-actions.js";
 
 initializeRemoteNavigation();
 
@@ -150,7 +150,7 @@ async function boot() {
   }
   void registerRemotePwa();
 
-  setRemoteSessionPanelOpen(false);
+  setSessionPanelOpen(false);
   const pairingQuery = applyPairingQuery();
 
   if (pairingQuery) {
@@ -284,7 +284,7 @@ function returnToRelayHome() {
   clearActiveRelaySelection();
   closeBrokerSocket();
   openRemoteNavigation();
-  setRemoteSessionPanelOpen(false);
+  setSessionPanelOpen(false);
   renderLog("Returned to relay directory.");
 }
 

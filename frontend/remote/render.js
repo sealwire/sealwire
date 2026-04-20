@@ -23,18 +23,6 @@ export function renderSession(session) {
   });
 }
 
-export function renderThreads(threads) {
-  applyRemoteSurfacePatch({
-    threads,
-  });
-}
-
-export function setRemoteSessionPanelOpen(open) {
-  applyRemoteSurfacePatch({
-    sessionPanelOpen: open,
-  });
-}
-
 export function renderLog(message) {
   appendClientLog(message);
 }

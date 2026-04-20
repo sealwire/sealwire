@@ -1,5 +1,4 @@
 import React from "react";
-import { patchRemoteState, readRemoteState } from "./state.js";
 import { canonicalizeWorkspace } from "../shared/thread-groups.js";
 import { formatTimestamp, shortId } from "./utils.js";
 
@@ -35,20 +34,6 @@ function compactStatusLabel(label) {
             .replace(/\b\w/g, (char) => char.toUpperCase())
         : "Ready";
   }
-}
-
-function updateSessionPanelField(field, value) {
-  patchRemoteState({
-    sessionDraft: {
-      ...readRemoteState().sessionDraft,
-      [field === "approvalPolicy"
-        ? "approvalPolicy"
-        : field === "initialPrompt"
-          ? "initialPrompt"
-          : field]:
-        value,
-    },
-  });
 }
 
 function relaySubtitle(relay) {
@@ -106,7 +91,12 @@ export function WorkspaceHeading({ header, statusBadge }) {
   );
 }
 
-export function SessionPanel({ cwdInputRef = null, model, onStartSession = null }) {
+export function SessionPanel({
+  cwdInputRef = null,
+  model,
+  onFieldChange = null,
+  onStartSession = null,
+}) {
   if (!model.hasRemoteAuth) {
     return null;
   }
@@ -123,14 +113,14 @@ export function SessionPanel({ cwdInputRef = null, model, onStartSession = null 
       "Workspace"
     ),
     h(
-      "div",
-      { className: "workspace-picker" },
-      h("input", {
-        id: "remote-cwd-input",
-        onChange: (event) => updateSessionPanelField("cwd", event.target.value),
-        placeholder: "/path/to/project",
-        ref: cwdInputRef,
-        type: "text",
+        "div",
+        { className: "workspace-picker" },
+        h("input", {
+          id: "remote-cwd-input",
+          onChange: (event) => onFieldChange?.("cwd", event.target.value),
+          placeholder: "/path/to/project",
+          ref: cwdInputRef,
+          type: "text",
         value: model.fields.cwd,
       })
     ),
@@ -160,7 +150,7 @@ export function SessionPanel({ cwdInputRef = null, model, onStartSession = null 
             "select",
             {
               id: "remote-model-input",
-              onChange: (event) => updateSessionPanelField("model", event.target.value),
+              onChange: (event) => onFieldChange?.("model", event.target.value),
               value: model.fields.model,
             },
             ...model.models.map((option) =>
@@ -183,7 +173,7 @@ export function SessionPanel({ cwdInputRef = null, model, onStartSession = null 
             "select",
             {
               id: "remote-approval-policy-input",
-              onChange: (event) => updateSessionPanelField("approvalPolicy", event.target.value),
+              onChange: (event) => onFieldChange?.("approvalPolicy", event.target.value),
               value: model.fields.approvalPolicy,
             },
             h("option", { value: "untrusted" }, "untrusted"),
@@ -199,7 +189,7 @@ export function SessionPanel({ cwdInputRef = null, model, onStartSession = null 
             "select",
             {
               id: "remote-sandbox-input",
-              onChange: (event) => updateSessionPanelField("sandbox", event.target.value),
+              onChange: (event) => onFieldChange?.("sandbox", event.target.value),
               value: model.fields.sandbox,
             },
             h("option", { value: "workspace-write" }, "workspace-write"),
@@ -215,7 +205,7 @@ export function SessionPanel({ cwdInputRef = null, model, onStartSession = null 
             "select",
             {
               id: "remote-start-effort",
-              onChange: (event) => updateSessionPanelField("effort", event.target.value),
+              onChange: (event) => onFieldChange?.("effort", event.target.value),
               value: model.fields.effort,
             },
             h("option", { value: "medium" }, "medium"),
@@ -229,7 +219,7 @@ export function SessionPanel({ cwdInputRef = null, model, onStartSession = null 
           h("span", null, "Initial Prompt"),
           h("textarea", {
             id: "remote-start-prompt",
-            onChange: (event) => updateSessionPanelField("initialPrompt", event.target.value),
+            onChange: (event) => onFieldChange?.("initialPrompt", event.target.value),
             placeholder: "Optional first task for the new remote session.",
             rows: 4,
             value: model.fields.initialPrompt,
@@ -590,6 +580,8 @@ export function Composer({
   currentDraft,
   currentEffortValue,
   messagePlaceholder,
+  onDraftChange = null,
+  onEffortChange = null,
   sendPending,
 }) {
   const submitDisabled = composerDisabled || sendPending;
@@ -599,11 +591,7 @@ export function Composer({
     h("textarea", {
       disabled: submitDisabled,
       id: "remote-message-input",
-      onChange: (event) => {
-        patchRemoteState({
-          composerDraft: event.target.value,
-        });
-      },
+      onChange: (event) => onDraftChange?.(event.target.value),
       placeholder: messagePlaceholder,
       rows: 3,
       value: currentDraft,
@@ -619,11 +607,7 @@ export function Composer({
           "select",
           {
             id: "remote-message-effort",
-            onChange: (event) => {
-              patchRemoteState({
-                composerEffort: event.target.value,
-              });
-            },
+            onChange: (event) => onEffortChange?.(event.target.value),
             value: currentEffortValue,
           },
           h("option", { value: "medium" }, "medium"),

@@ -1,4 +1,4 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::*;
 use crate::protocol::{
@@ -17,6 +17,7 @@ use relay_broker::public_control::{
     RelayWsTokenResponse,
 };
 use tokio::net::TcpListener;
+use tokio::time::Instant;
 
 use super::session_claim::{decode_and_verify_session_claim, unix_now};
 
@@ -424,6 +425,26 @@ async fn broker_config_public_mode_returns_pending_enrollment_until_cached_regis
         .await
         .expect("cached relay should reuse the saved registration");
     assert_eq!(cached_pairing.token, "pairing-token-pair-cached");
+}
+
+#[test]
+fn snapshot_publish_gate_throttles_burst_snapshot_updates() {
+    let mut gate = SnapshotPublishGate::new(Duration::from_millis(500));
+    let start = Instant::now();
+
+    assert!(gate.ready_or_deadline(start).is_ok());
+    assert!(!gate.has_pending_publish());
+
+    let delayed_until = gate
+        .ready_or_deadline(start + Duration::from_millis(100))
+        .expect_err("burst update should be delayed");
+    assert_eq!(delayed_until, start + Duration::from_millis(500));
+    assert!(gate.has_pending_publish());
+
+    assert!(gate
+        .ready_or_deadline(start + Duration::from_millis(500))
+        .is_ok());
+    assert!(!gate.has_pending_publish());
 }
 
 #[tokio::test]

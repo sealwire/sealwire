@@ -20,10 +20,20 @@ import {
   toggleRemoteNavigation,
 } from "./navigation.js";
 import {
-  patchRemoteState,
   readRemoteStateSnapshot,
   subscribeRemoteState,
 } from "./state.js";
+import {
+  setComposerDraft,
+  setComposerEffort,
+  setDeviceLabelDraft,
+  setPairingInputValue,
+  setPairingModalOpen,
+  setRemoteInfoModalOpen,
+  setSessionPanelOpen,
+  setThreadsFilterValue,
+  updateSessionDraftField,
+} from "./store-actions.js";
 import {
   selectEmptyStateRenderModel,
   selectRelayDirectoryRenderModel,
@@ -141,6 +151,7 @@ function RemoteApp({
     loading: currentState.threadsRefreshPending,
     relayDirectory: currentState.relayDirectory,
     remoteAuth: currentState.remoteAuth,
+    session,
     threads: currentState.threads,
   });
   const hasRelay = Boolean(currentState.remoteAuth);
@@ -221,12 +232,15 @@ function RemoteApp({
         hasRelay,
         hasUsableRelay,
         onOpenPairing() {
-          patchRemoteState({ pairingModalOpen: true });
+          setPairingModalOpen(true);
         },
         onRefreshRelayDirectory,
         onRefreshThreads,
         onResumeThread(threadId) {
           closeRemoteNavigation();
+          if (threadId === session?.active_thread_id) {
+            return;
+          }
           void onResumeThread(threadId);
         },
         onSelectRelay(relayId) {
@@ -274,7 +288,7 @@ function RemoteApp({
           deviceChromeModel,
           headerModel,
           onOpenInfo() {
-            patchRemoteState({ remoteInfoModalOpen: true });
+            setRemoteInfoModalOpen(true);
           },
           onReturnHome() {
             void onReturnHome();
@@ -317,16 +331,22 @@ function RemoteApp({
       pairingModalOpen: currentState.pairingModalOpen,
       onBeginPairing,
       onClose() {
-        patchRemoteState({ pairingModalOpen: false });
+        setPairingModalOpen(false);
+      },
+      onDeviceLabelChange(value) {
+        setDeviceLabelDraft(value);
       },
       onForgetDevice() {
         onForgetDevice();
+      },
+      onPairingInputChange(value) {
+        setPairingInputValue(value);
       },
     }),
     h(RemoteInfoModal, {
       open: currentState.remoteInfoModalOpen,
       onClose() {
-        patchRemoteState({ remoteInfoModalOpen: false });
+        setRemoteInfoModalOpen(false);
       },
       sessionMetaModel,
       sessionPath: headerModel.sessionPath || "No workspace path yet.",
@@ -389,9 +409,7 @@ function RemoteSidebar({
         disabled: !hasUsableRelay,
         id: "remote-session-toggle",
         onClick: () => {
-          patchRemoteState({
-            sessionPanelOpen: !currentState.sessionPanelOpen,
-          });
+          setSessionPanelOpen(!currentState.sessionPanelOpen);
         },
         type: "button",
       },
@@ -436,6 +454,9 @@ function RemoteSidebar({
       h(SessionPanel, {
         cwdInputRef: remoteCwdInputRef,
         model: sessionPanelModel,
+        onFieldChange(field, value) {
+          updateSessionDraftField(field, value);
+        },
         onStartSession,
       })
     ),
@@ -479,9 +500,7 @@ function RemoteSidebar({
           disabled: !hasUsableRelay,
           id: "remote-threads-cwd-input",
           onChange: (event) => {
-            patchRemoteState({
-              threadsFilterValue: event.target.value,
-            });
+            setThreadsFilterValue(event.target.value);
           },
           placeholder: threadsFilterHint?.placeholder || "Optional exact workspace path",
           title: threadsFilterHint?.title || "",
@@ -633,7 +652,15 @@ function RemoteThreadPanel({
           onSendMessage();
         },
       },
-      h(Composer, composerModel)
+      h(Composer, {
+        ...composerModel,
+        onDraftChange(value) {
+          setComposerDraft(value);
+        },
+        onEffortChange(value) {
+          setComposerEffort(value);
+        },
+      })
     )
   );
 }
@@ -768,7 +795,9 @@ function PairingModal({
   deviceLabel,
   onBeginPairing,
   onClose,
+  onDeviceLabelChange,
   onForgetDevice,
+  onPairingInputChange,
   pairingInputValue,
   pairingModalOpen,
 }) {
@@ -815,11 +844,7 @@ function PairingModal({
         ),
         h("textarea", {
           id: "pairing-input",
-          onChange: (event) => {
-            patchRemoteState({
-              pairingInputValue: event.target.value,
-            });
-          },
+          onChange: (event) => onPairingInputChange?.(event.target.value),
           placeholder: "Paste the full pairing URL, or only the pairing payload.",
           readOnly: deviceChromeModel.pairingControls.pairingInputReadOnly,
           rows: 4,
@@ -835,11 +860,7 @@ function PairingModal({
           { className: "workspace-picker" },
           h("input", {
             id: "device-label-input",
-            onChange: (event) => {
-              patchRemoteState({
-                deviceLabelDraft: event.target.value,
-              });
-            },
+            onChange: (event) => onDeviceLabelChange?.(event.target.value),
             placeholder: "iPhone, Pixel, Safari on iPad",
             type: "text",
             value: deviceLabel,

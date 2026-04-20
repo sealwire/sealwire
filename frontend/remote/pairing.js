@@ -21,7 +21,6 @@ import {
 } from "./actions.js";
 import {
   renderLog,
-  renderThreads,
 } from "./render.js";
 import {
   brokerControlUrl,
@@ -41,6 +40,7 @@ import {
   createResetRemoteSurfaceStatePatch,
 } from "./surface-state.js";
 import { clearSessionRuntime } from "./session-ops.js";
+import { setPairingModalOpen, setThreads } from "./store-actions.js";
 import { shortId } from "./utils.js";
 
 export function applyPairingQuery() {
@@ -97,10 +97,8 @@ export async function beginPairing(rawValue, { auto = false } = {}) {
       reason: "pairing restarted before broker actions completed",
     }));
     saveDeviceLabel(state.deviceLabelDraft || loadDeviceLabel());
-    patchRemoteState({
-      pairingModalOpen: false,
-    });
-    renderThreads([]);
+    setPairingModalOpen(false);
+    setThreads([]);
     renderLog(
       auto
         ? `Starting pairing for ${state.pairingTicket.pairing_id} from scanned link.`

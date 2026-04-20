@@ -64,6 +64,28 @@ test("selectThreadsRenderModel returns empty copy for unauthenticated and filter
   assert.match(filtered.emptyMessage, /workspace filter/);
 });
 
+test("selectThreadsRenderModel injects the active session thread until remote history catches up", () => {
+  const model = selectThreadsRenderModel({
+    threads: [],
+    filterValue: "",
+    activeThreadId: "thread-1",
+    remoteAuth: { relayId: "relay-1" },
+    relayDirectory: [],
+    session: {
+      active_thread_id: "thread-1",
+      current_cwd: "/tmp/project-alpha",
+      current_status: "idle",
+    },
+  });
+
+  assert.equal(model.emptyMessage, null);
+  assert.equal(model.groups.length, 1);
+  assert.equal(model.groups[0].cwd, "/tmp/project-alpha");
+  assert.equal(model.groups[0].threads.length, 1);
+  assert.equal(model.groups[0].threads[0].id, "thread-1");
+  assert.match(model.groups[0].threads[0].preview, /Current session/);
+});
+
 test("selectRelayDirectoryRenderModel builds action labels and active flags", () => {
   const model = selectRelayDirectoryRenderModel({
     activeRelayId: "relay-1",

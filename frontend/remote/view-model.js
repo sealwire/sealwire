@@ -4,6 +4,22 @@ import {
 } from "../shared/thread-groups.js";
 import { workspaceBasename } from "./utils.js";
 
+function createActiveSessionThread(session) {
+  if (!session?.active_thread_id || !session.current_cwd) {
+    return null;
+  }
+
+  return {
+    cwd: session.current_cwd,
+    id: session.active_thread_id,
+    name: workspaceBasename(session.current_cwd),
+    preview: session.current_status
+      ? `Current session · ${session.current_status}`
+      : "Current remote session",
+    updated_at: Math.floor(Date.now() / 1000),
+  };
+}
+
 export function selectSessionRenderModel({ session, previousSession, hasControllerLease }) {
   const approval = session.pending_approvals?.[0] || null;
   const hasActiveSession = Boolean(session.active_thread_id);
@@ -44,8 +60,20 @@ export function selectThreadsRenderModel({
   loading,
   remoteAuth,
   relayDirectory,
+  session,
 }) {
-  const groups = buildThreadGroups(threads);
+  let normalizedThreads = Array.isArray(threads) ? [...threads] : [];
+  if (
+    session?.active_thread_id
+    && !normalizedThreads.some((thread) => thread?.id === session.active_thread_id)
+  ) {
+    const activeSessionThread = createActiveSessionThread(session);
+    if (activeSessionThread) {
+      normalizedThreads = [activeSessionThread, ...normalizedThreads];
+    }
+  }
+
+  const groups = buildThreadGroups(normalizedThreads);
 
   if (!remoteAuth) {
     return {

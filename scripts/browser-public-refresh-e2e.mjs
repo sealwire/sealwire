@@ -48,6 +48,7 @@ async function main() {
   const relayStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-public-refresh-e2e-"));
   const relayStatePath = path.join(relayStateDir, "session.json");
   const brokerStatePath = path.join(relayStateDir, "public-control.json");
+  const codexHomeDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-public-refresh-codex-"));
   const workspaceDir = await fs.realpath(
     await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-public-refresh-workspace-"))
   );
@@ -73,6 +74,7 @@ async function main() {
       RELAY_BROKER_PEER_ID: "browser-public-refresh-relay",
       RELAY_BROKER_RELAY_ID: RELAY_ID,
       RELAY_BROKER_RELAY_REFRESH_TOKEN: RELAY_REFRESH_TOKEN,
+      CODEX_HOME: codexHomeDir,
     }
   );
   await waitForHealth(`http://127.0.0.1:${relayPort}/api/health`);
@@ -250,6 +252,7 @@ async function main() {
     await browser?.close().catch(() => {});
     await stopManagedProcess(relay);
     await stopManagedProcess(broker);
+    await fs.rm(codexHomeDir, { recursive: true, force: true }).catch(() => {});
     await fs.rm(relayStateDir, { recursive: true, force: true }).catch(() => {});
     await fs.rm(workspaceDir, { recursive: true, force: true }).catch(() => {});
   }
@@ -425,8 +428,10 @@ async function waitForSingleStartedThread(relayPort, cwd, timeoutMs = TIMEOUT_MS
     if (
       session.active_thread_id
       && session.current_cwd === cwd
-      && threads.length === 1
-      && threads[0]?.id === session.active_thread_id
+      && (
+        threads.length === 0
+        || (threads.length === 1 && threads[0]?.id === session.active_thread_id)
+      )
     ) {
       return;
     }

@@ -4,8 +4,6 @@ import {
   isCurrentDeviceActiveController,
   renderLog,
   renderSession,
-  renderThreads,
-  setRemoteSessionPanelOpen,
 } from "./render.js";
 import {
   CONTROL_HEARTBEAT_MS,
@@ -25,6 +23,10 @@ import {
   applyRemoteSurfacePatch,
   createTranscriptScrollModePatch,
 } from "./surface-state.js";
+import {
+  setSessionPanelOpen,
+  setThreads,
+} from "./store-actions.js";
 
 const fetchTranscriptPage = createTranscriptPageFetcher(dispatchOrRecover);
 
@@ -95,7 +97,7 @@ export async function startRemoteSession() {
       },
     });
     closeRemoteNavigation();
-    setRemoteSessionPanelOpen(false);
+    setSessionPanelOpen(false);
     await refreshRemoteThreads("post-start refresh", { silent: true });
   } catch (error) {
     renderLog(`Remote start failed: ${error.message}`);
@@ -109,7 +111,7 @@ export async function startRemoteSession() {
 export async function refreshRemoteThreads(reason, options = {}) {
   const { silent = false } = options;
   if (!state.remoteAuth) {
-    renderThreads([]);
+    setThreads([]);
     return;
   }
 
@@ -133,7 +135,7 @@ export async function refreshRemoteThreads(reason, options = {}) {
       threads: [],
       threadsError: error.message,
     });
-    renderThreads([]);
+    setThreads([]);
     if (!silent) {
       renderLog(`Remote thread refresh failed: ${error.message}`);
     }
