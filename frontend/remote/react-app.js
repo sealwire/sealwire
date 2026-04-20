@@ -38,6 +38,12 @@ import {
   applyRemoteSurfacePatch,
   createTranscriptScrollModePatch,
 } from "./surface-state.js";
+import {
+  bootRemoteRuntime,
+  createRemoteAppHandlers,
+  initializeRemoteSurface,
+  installSidebarGestureDebug,
+} from "./remote-runtime.js";
 import { sendHeartbeat } from "./session-ops.js";
 import {
   computeTranscriptScrollPosition,
@@ -68,18 +74,20 @@ const h = React.createElement;
 
 let remoteAppRoot = null;
 
-export function mountRemoteApp(handlers) {
+export function mountRemoteApp() {
   const container = document.querySelector("#remote-root");
   if (!container) {
     throw new Error("remote root container is missing");
   }
+
+  initializeRemoteSurface();
 
   if (!remoteAppRoot) {
     remoteAppRoot = createRoot(container);
   }
 
   flushSync(() => {
-    remoteAppRoot.render(h(RemoteApp, handlers));
+    remoteAppRoot.render(h(RemoteApp));
   });
 }
 
@@ -88,19 +96,7 @@ export function unmountRemoteApp() {
   remoteAppRoot = null;
 }
 
-function RemoteApp({
-  onBeginPairing,
-  onForgetDevice,
-  onRefreshRelayDirectory,
-  onRefreshThreads,
-  onResumeThread,
-  onReturnHome,
-  onSelectRelay,
-  onSendMessage,
-  onStartSession,
-  onSubmitDecision,
-  onTakeOver,
-}) {
+function RemoteApp() {
   const currentState = useSyncExternalStore(
     subscribeRemoteState,
     readRemoteStateSnapshot
@@ -113,6 +109,7 @@ function RemoteApp({
     undefined,
     createInitialRemoteUiState
   );
+  const handlers = createRemoteAppHandlers();
 
   const session = currentState.session;
   const previousSession = previousSessionRef.current;
@@ -228,6 +225,14 @@ function RemoteApp({
     session,
   });
 
+  useEffect(() => {
+    void bootRemoteRuntime();
+    const cleanupSidebarDebug = installSidebarGestureDebug();
+    return () => {
+      cleanupSidebarDebug?.();
+    };
+  }, []);
+
   async function runThreadRefresh(reason, { filterValue, silent = false } = {}) {
     let completed = false;
     if (!silent) {
@@ -237,7 +242,7 @@ function RemoteApp({
     }
 
     try {
-      await onRefreshThreads(filterValue, { reason, silent });
+      await handlers.onRefreshThreads(filterValue, { reason, silent });
       completed = true;
     } catch (error) {
       if (!silent) {
@@ -262,7 +267,7 @@ function RemoteApp({
       value: true,
     });
     try {
-      const started = await onStartSession(uiState.sessionDraft);
+      const started = await handlers.onStartSession(uiState.sessionDraft);
       if (started) {
         closeRemoteNavigation();
         dispatchUi({
@@ -288,7 +293,7 @@ function RemoteApp({
     if (threadId === session?.active_thread_id) {
       return;
     }
-    const resumed = await onResumeThread(threadId, uiState.sessionDraft);
+    const resumed = await handlers.onResumeThread(threadId, uiState.sessionDraft);
     if (resumed) {
       await runThreadRefresh("post-resume refresh", {
         filterValue: uiState.threadsFilterValue,
@@ -303,7 +308,7 @@ function RemoteApp({
       value: true,
     });
     try {
-      const sent = await onSendMessage(uiState.composerDraft, uiState.composerEffort);
+      const sent = await handlers.onSendMessage(uiState.composerDraft, uiState.composerEffort);
       if (sent) {
         dispatchUi({
           type: "composer/clearDraft",
@@ -319,7 +324,7 @@ function RemoteApp({
   }
 
   async function handleBeginPairing(rawValue) {
-    const started = await onBeginPairing(rawValue, uiState.deviceLabelDraft);
+    const started = await handlers.onBeginPairing(rawValue, uiState.deviceLabelDraft);
     if (started) {
       dispatchUi({
         type: "pairing/setModalOpen",
@@ -354,7 +359,9 @@ function RemoteApp({
             open: true,
           });
         },
-        onRefreshRelayDirectory,
+        onRefreshRelayDirectory() {
+          void handlers.onRefreshRelayDirectory();
+        },
         onRefreshThreads(filterValue) {
           void runThreadRefresh("manual refresh", {
             filterValue,
@@ -363,7 +370,7 @@ function RemoteApp({
         onResumeThread: handleResumeThread,
         onSelectRelay(relayId) {
           closeRemoteNavigation();
-          void onSelectRelay(relayId);
+          void handlers.onSelectRelay(relayId);
         },
         onStartSession() {
           void handleStartSession();
@@ -435,7 +442,7 @@ function RemoteApp({
             });
           },
           onReturnHome() {
-            void onReturnHome();
+            void handlers.onReturnHome();
           },
           onToggleNavigation() {
             toggleRemoteNavigation();
@@ -463,16 +470,16 @@ function RemoteApp({
           emptyStateModel,
           onSelectRelay(relayId) {
             closeRemoteNavigation();
-            void onSelectRelay(relayId);
+            void handlers.onSelectRelay(relayId);
           },
           onSendMessage() {
             void handleSendMessage();
           },
           onSubmitDecision(decision, scope) {
-            void onSubmitDecision(decision, scope);
+            void handlers.onSubmitDecision(decision, scope);
           },
           onTakeOver() {
-            void onTakeOver();
+            void handlers.onTakeOver();
           },
           session,
           sessionView,
@@ -503,7 +510,7 @@ function RemoteApp({
         });
       },
       onForgetDevice() {
-        onForgetDevice();
+        handlers.onForgetDevice();
       },
       onPairingInputChange(value) {
         dispatchUi({
