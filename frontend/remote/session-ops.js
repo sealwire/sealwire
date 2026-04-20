@@ -6,10 +6,7 @@ import {
   renderSession,
 } from "./render.js";
 import {
-  CONTROL_HEARTBEAT_MS,
-  LEASE_EXPIRY_REFRESH_SKEW_MS,
   TRANSCRIPT_PAGE_FETCH_INTERVAL_MS,
-  patchRemoteState,
   state,
 } from "./state.js";
 import {
@@ -25,8 +22,19 @@ import {
 } from "./surface-state.js";
 import {
   setSessionPanelOpen,
+  setSessionStartPending,
+  beginThreadsRefresh,
+  failThreadsRefresh,
+  finishThreadsRefresh,
+  clearComposerDraft,
+  setSendPending,
   setThreads,
 } from "./store-actions.js";
+import {
+  clearSessionRuntimeEffects,
+  scheduleControllerHeartbeat,
+  syncSessionRuntimeEffects,
+} from "./session-runtime-effects.js";
 
 const fetchTranscriptPage = createTranscriptPageFetcher(dispatchOrRecover);
 
@@ -80,9 +88,7 @@ export async function startRemoteSession() {
     return;
   }
 
-  patchRemoteState({
-    sessionStartPending: true,
-  });
+  setSessionStartPending(true);
   renderLog(`Starting remote session in ${cwd}.`);
 
   try {
@@ -102,9 +108,7 @@ export async function startRemoteSession() {
   } catch (error) {
     renderLog(`Remote start failed: ${error.message}`);
   } finally {
-    patchRemoteState({
-      sessionStartPending: false,
-    });
+    setSessionStartPending(false);
   }
 }
 
@@ -115,10 +119,7 @@ export async function refreshRemoteThreads(reason, options = {}) {
     return;
   }
 
-  patchRemoteState({
-    threadsError: null,
-    threadsRefreshPending: true,
-  });
+  beginThreadsRefresh();
   if (!silent) {
     renderLog(`Fetching remote thread list (${reason}).`);
   }
@@ -131,19 +132,13 @@ export async function refreshRemoteThreads(reason, options = {}) {
       },
     });
   } catch (error) {
-    patchRemoteState({
-      threads: [],
-      threadsError: error.message,
-    });
-    setThreads([]);
+    failThreadsRefresh(error.message);
     if (!silent) {
       renderLog(`Remote thread refresh failed: ${error.message}`);
     }
     throw error;
   } finally {
-    patchRemoteState({
-      threadsRefreshPending: false,
-    });
+    finishThreadsRefresh();
   }
 }
 
@@ -176,9 +171,7 @@ export async function sendMessage() {
     return;
   }
 
-  patchRemoteState({
-    sendPending: true,
-  });
+  setSendPending(true);
 
   try {
     await dispatchOrRecover("send_message", {
@@ -187,15 +180,11 @@ export async function sendMessage() {
         effort: state.composerEffort,
       },
     });
-    patchRemoteState({
-      composerDraft: "",
-    });
+    clearComposerDraft();
   } catch (error) {
     renderLog(`Remote send failed: ${error.message}`);
   } finally {
-    patchRemoteState({
-      sendPending: false,
-    });
+    setSendPending(false);
   }
 }
 
@@ -229,22 +218,9 @@ export async function submitDecision(decision, scope) {
 }
 
 export function clearSessionRuntime() {
-  cancelControllerHeartbeat();
-  cancelControllerLeaseRefresh();
+  clearSessionRuntimeEffects();
   clearTranscriptHydration(state);
   applyRemoteSurfacePatch(createTranscriptScrollModePatch("follow-latest"));
-}
-
-function scheduleControllerHeartbeat(session) {
-  cancelControllerHeartbeat();
-
-  if (!session?.active_thread_id || !isCurrentDeviceActiveController(session)) {
-    return;
-  }
-
-  state.controllerHeartbeatTimer = window.setTimeout(() => {
-    void sendHeartbeat();
-  }, CONTROL_HEARTBEAT_MS);
 }
 
 async function sendHeartbeat() {
@@ -260,56 +236,9 @@ async function sendHeartbeat() {
     renderLog(`Remote heartbeat failed: ${error.message}`);
   } finally {
     if (state.session?.active_thread_id && isCurrentDeviceActiveController(state.session)) {
-      scheduleControllerHeartbeat(state.session);
+      scheduleControllerHeartbeat(state.session, sendHeartbeat);
     }
   }
-}
-
-function cancelControllerHeartbeat() {
-  if (!state.controllerHeartbeatTimer) {
-    return;
-  }
-
-  window.clearTimeout(state.controllerHeartbeatTimer);
-  state.controllerHeartbeatTimer = null;
-}
-
-function scheduleControllerLeaseRefresh(session) {
-  cancelControllerLeaseRefresh();
-
-  if (
-    !session?.active_thread_id ||
-    !session.active_controller_device_id ||
-    isCurrentDeviceActiveController(session) ||
-    !session.controller_lease_expires_at
-  ) {
-    return;
-  }
-
-  const delayMs = Math.max(
-    LEASE_EXPIRY_REFRESH_SKEW_MS,
-    session.controller_lease_expires_at * 1000 - Date.now() + LEASE_EXPIRY_REFRESH_SKEW_MS
-  );
-
-  state.controllerLeaseRefreshTimer = window.setTimeout(() => {
-    const next = {
-      ...state.session,
-      active_controller_device_id: null,
-      active_controller_last_seen_at: null,
-      controller_lease_expires_at: null,
-    };
-    applySessionSnapshot(next);
-    renderLog("Remote control lease expired locally. The next sender can reclaim control.");
-  }, delayMs);
-}
-
-function cancelControllerLeaseRefresh() {
-  if (!state.controllerLeaseRefreshTimer) {
-    return;
-  }
-
-  window.clearTimeout(state.controllerLeaseRefreshTimer);
-  state.controllerLeaseRefreshTimer = null;
 }
 
 async function hydrateActiveTranscript(snapshot) {
@@ -329,8 +258,19 @@ async function hydrateActiveTranscript(snapshot) {
 
 function applyRenderedSession(session, { hydrateTranscript = true } = {}) {
   renderSession(session);
-  scheduleControllerHeartbeat(session);
-  scheduleControllerLeaseRefresh(session);
+  syncSessionRuntimeEffects(session, {
+    onHeartbeat: sendHeartbeat,
+    onLeaseExpired() {
+      const next = {
+        ...state.session,
+        active_controller_device_id: null,
+        active_controller_last_seen_at: null,
+        controller_lease_expires_at: null,
+      };
+      applySessionSnapshot(next);
+      renderLog("Remote control lease expired locally. The next sender can reclaim control.");
+    },
+  });
   scheduleClaimRefresh();
   if (hydrateTranscript) {
     void hydrateActiveTranscript(session);
