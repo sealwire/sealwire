@@ -5,14 +5,16 @@ import {
   renderSession,
 } from "./render.js";
 import {
-  TRANSCRIPT_PAGE_FETCH_INTERVAL_MS,
   state,
 } from "./state.js";
 import {
   clearTranscriptHydration,
   restoreHydratedTranscript,
 } from "./transcript/store.js";
-import { hydrateRemoteTranscript } from "./transcript/hydration.js";
+import {
+  hydrateRemoteTranscript,
+  loadOlderRemoteTranscript,
+} from "./transcript/hydration.js";
 import { createTranscriptPageFetcher } from "./transcript/api.js";
 import { remoteUiRefs } from "./ui-refs.js";
 import {
@@ -227,7 +229,6 @@ async function sendHeartbeat() {
 async function hydrateActiveTranscript(snapshot) {
   return hydrateRemoteTranscript(state, snapshot, {
     fetchPage: fetchTranscriptPage,
-    fetchIntervalMs: TRANSCRIPT_PAGE_FETCH_INTERVAL_MS,
     onProgress(hydratedSnapshot) {
       applyRenderedSession(hydratedSnapshot, {
         hydrateTranscript: false,
@@ -235,6 +236,25 @@ async function hydrateActiveTranscript(snapshot) {
     },
     onError(error) {
       renderLog(`Remote full transcript sync failed: ${error.message}`);
+    },
+  });
+}
+
+export async function maybeLoadOlderTranscriptHistory() {
+  const transcript = remoteUiRefs.remoteTranscript;
+  if (!transcript || transcript.scrollTop > 80) {
+    return null;
+  }
+
+  return loadOlderRemoteTranscript(state, {
+    fetchPage: fetchTranscriptPage,
+    onProgress(hydratedSnapshot) {
+      applyRenderedSession(hydratedSnapshot, {
+        hydrateTranscript: false,
+      });
+    },
+    onError(error) {
+      renderLog(`Remote older transcript sync failed: ${error.message}`);
     },
   });
 }

@@ -16,8 +16,15 @@ function normalizeThreadTranscriptPage(page) {
     return page;
   }
 
-  if (Array.isArray(page.entries)) {
-    return page;
+  if (
+    Array.isArray(page.entries)
+    && page.entries.every((entry) => !Array.isArray(entry?.parts))
+  ) {
+    return {
+      entries: page.entries,
+      prev_cursor: page.prev_cursor ?? page.next_cursor ?? null,
+      thread_id: page.thread_id,
+    };
   }
 
   if (!Array.isArray(page.chunks)) {

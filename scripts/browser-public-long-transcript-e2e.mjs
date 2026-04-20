@@ -187,7 +187,6 @@ async function main() {
             }
 
             if (request.type === "fetch_thread_transcript") {
-              const cursor = request.input?.cursor || 0;
               window.__agentRelayFetchThreadTranscriptCount += 1;
               this.#respond(payload.action_id, {
                 action: "fetch_thread_transcript",
@@ -195,50 +194,29 @@ async function main() {
                 snapshot: truncatedSnapshot,
                 thread_transcript: {
                   thread_id: threadId,
-                  chunks:
-                    cursor === 0
-                      ? [
-                          {
-                            entry_index: 0,
-                            item_id: "item-long-1",
-                            kind: "user_text",
-                            text: fullText.slice(0, 4000),
-                            status: "completed",
-                            turn_id: "turn-e2e",
-                            tool: null,
-                            chunk_index: 0,
-                            chunk_count: 2,
-                          },
-                        ]
-                      : [
-                          {
-                            entry_index: 0,
-                            item_id: "item-long-1",
-                            kind: "user_text",
-                            text: fullText.slice(4000),
-                            status: "completed",
-                            turn_id: "turn-e2e",
-                            tool: null,
-                            chunk_index: 1,
-                            chunk_count: 2,
-                          },
-                        ],
-                  next_cursor: cursor === 0 ? 1 : null,
+                  entries: [
+                    {
+                      item_id: "item-long-1",
+                      kind: "user_text",
+                      text: fullText,
+                      status: "completed",
+                      turn_id: "turn-e2e",
+                      tool: null,
+                    },
+                  ],
+                  prev_cursor: null,
                 },
               });
-
-              if (cursor !== 0) {
-                setTimeout(() => {
-                  window.__agentRelayFakeSnapshotCount += 1;
-                  this.#emit({
-                    type: "message",
-                    payload: {
-                      kind: "session_snapshot",
-                      snapshot: truncatedSnapshot,
-                    },
-                  });
-                }, 50);
-              }
+              setTimeout(() => {
+                window.__agentRelayFakeSnapshotCount += 1;
+                this.#emit({
+                  type: "message",
+                  payload: {
+                    kind: "session_snapshot",
+                    snapshot: truncatedSnapshot,
+                  },
+                });
+              }, 50);
             }
           }
 
@@ -290,8 +268,8 @@ async function main() {
 
       await page.waitForFunction(() => {
         return (
-          Number(window.__agentRelayFetchThreadTranscriptCount || 0) >= 2 &&
-          Number(window.__agentRelayFakeSnapshotCount || 0) >= 2
+          Number(window.__agentRelayFetchThreadTranscriptCount || 0) >= 1 &&
+          Number(window.__agentRelayFakeSnapshotCount || 0) >= 1
         );
       }, null, { timeout: TIMEOUT_MS });
 

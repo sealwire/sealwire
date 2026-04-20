@@ -3,15 +3,11 @@ import {
   buildHydratedTranscriptProgress,
   clearTranscriptHydrationPromise,
   getTranscriptHydrationCursor,
-  getTranscriptHydrationLastFetchAt,
   getTranscriptHydrationSignature,
   getTranscriptHydrationThreadId,
-  hasIncompleteTailHydrationEntries,
   markTranscriptHydrationComplete,
   mergeTranscriptHydrationPage,
-  pauseTranscriptHydrationAfterTailReady,
   prepareTranscriptHydration,
-  setTranscriptHydrationFetchAt,
   setTranscriptHydrationIdle,
   setTranscriptHydrationPromise,
 } from "./store.js";
@@ -21,99 +17,108 @@ export async function hydrateRemoteTranscript(
   snapshot,
   {
     fetchPage,
-    fetchIntervalMs,
-    now = () => Date.now(),
-    wait = (delayMs) =>
-      new Promise((resolve) => {
-        window.setTimeout(resolve, delayMs);
-      }),
     onProgress = () => {},
     onError = () => {},
   }
 ) {
-  const preparation = prepareTranscriptHydration(state, snapshot);
-  if (!preparation.shouldHydrate) {
-    return;
+  const { signature, shouldHydrate, alreadyComplete, existingPromise } = prepareTranscriptHydration(
+    state,
+    snapshot
+  );
+
+  if (!shouldHydrate || alreadyComplete) {
+    applyTranscriptHydrationProgress(state, onProgress);
+    return existingPromise;
   }
-  const { signature, alreadyComplete, existingPromise } = preparation;
-  if (alreadyComplete) {
-    return;
-  }
+
   if (existingPromise) {
     return existingPromise;
   }
 
-  beginTranscriptHydration(state);
+  beginTranscriptHydration(state, "loading");
   applyTranscriptHydrationProgress(state, onProgress);
+
   const hydrationPromise = (async () => {
     try {
-      await hydrateRemoteTranscriptPages(state, snapshot.active_thread_id, signature, {
-        fetchPage,
-        fetchIntervalMs,
-        now,
-        wait,
-        onProgress,
+      const page = await fetchPage({
+        threadId: snapshot.active_thread_id,
+        before: null,
       });
+
+      if (!page || page.thread_id !== snapshot.active_thread_id) {
+        throw new Error("remote transcript page response is incomplete");
+      }
+      if ((snapshot.transcript || []).length > 0 && (page.entries || []).length === 0) {
+        throw new Error("remote transcript page response did not include visible tail entries");
+      }
+
+      mergeTranscriptHydrationPage(state, page, { prepend: false });
+      if (getTranscriptHydrationThreadId(state) !== snapshot.active_thread_id) {
+        return;
+      }
+      if (getTranscriptHydrationSignature(state) !== signature) {
+        return;
+      }
+      if (page.prev_cursor == null) {
+        markTranscriptHydrationComplete();
+      }
+
+      applyTranscriptHydrationProgress(state, onProgress);
     } catch (error) {
-      setTranscriptHydrationIdle(state);
+      setTranscriptHydrationIdle();
       onError(error);
     } finally {
       clearTranscriptHydrationPromise(state, signature);
     }
   })();
-  setTranscriptHydrationPromise(state, hydrationPromise);
 
+  setTranscriptHydrationPromise(state, hydrationPromise);
   return hydrationPromise;
 }
 
-async function hydrateRemoteTranscriptPages(
+export async function loadOlderRemoteTranscript(
   state,
-  threadId,
-  signature,
-  { fetchPage, fetchIntervalMs, now, wait, onProgress }
-) {
-  while (getTranscriptHydrationThreadId(state) === threadId) {
-    if (state.transcriptHydrationStatus === "complete") {
-      markTranscriptHydrationComplete(state);
-      applyTranscriptHydrationProgress(state, onProgress);
-      return;
-    }
-
-    await waitForTranscriptFetchWindow(
-      state,
-      fetchIntervalMs,
-      now,
-      wait,
-      hasIncompleteTailHydrationEntries(state)
-    );
-
-    const page = await fetchPage({
-      threadId,
-      before: getTranscriptHydrationCursor(state),
-    });
-    setTranscriptHydrationFetchAt(state, now());
-
-    if (!page || page.thread_id !== threadId) {
-      throw new Error("remote transcript response is incomplete");
-    }
-
-    mergeTranscriptHydrationPage(state, page);
-    applyTranscriptHydrationProgress(state, onProgress);
-
-    if (!hasIncompleteTailHydrationEntries(state)) {
-      if (state.transcriptHydrationStatus === "complete") {
-        markTranscriptHydrationComplete(state);
-        applyTranscriptHydrationProgress(state, onProgress);
-        return;
-      }
-      pauseTranscriptHydrationAfterTailReady(state);
-      return;
-    }
-
-    if (getTranscriptHydrationSignature(state) !== signature) {
-      return;
-    }
+  {
+    fetchPage,
+    onProgress = () => {},
+    onError = () => {},
   }
+) {
+  const threadId = state.session?.active_thread_id;
+  const before = getTranscriptHydrationCursor(state);
+  if (!threadId || before == null) {
+    return null;
+  }
+  if (state.transcriptHydrationPromise || state.transcriptHydrationStatus === "loading") {
+    return state.transcriptHydrationPromise;
+  }
+
+  const signature = getTranscriptHydrationSignature(state);
+  beginTranscriptHydration(state, "loading");
+  const loadPromise = (async () => {
+    try {
+      const page = await fetchPage({ threadId, before });
+      if (!page || page.thread_id !== threadId) {
+        throw new Error("remote older transcript page response is incomplete");
+      }
+
+      mergeTranscriptHydrationPage(state, page, { prepend: true });
+      if (page.prev_cursor == null) {
+        markTranscriptHydrationComplete();
+      } else {
+        setTranscriptHydrationIdle();
+      }
+      applyTranscriptHydrationProgress(state, onProgress);
+    } catch (error) {
+      setTranscriptHydrationIdle();
+      onError(error);
+    } finally {
+      clearTranscriptHydrationPromise(state, signature);
+    }
+  })();
+
+  setTranscriptHydrationPromise(state, loadPromise);
+  return loadPromise;
 }
 
 function applyTranscriptHydrationProgress(state, onProgress) {
@@ -123,24 +128,4 @@ function applyTranscriptHydrationProgress(state, onProgress) {
   }
 
   onProgress(snapshot);
-}
-
-async function waitForTranscriptFetchWindow(
-  state,
-  fetchIntervalMs,
-  now,
-  wait,
-  prioritizeTailCompletion = false
-) {
-  if (prioritizeTailCompletion) {
-    return;
-  }
-
-  const elapsedMs = now() - getTranscriptHydrationLastFetchAt(state);
-  const delayMs = Math.max(0, fetchIntervalMs - elapsedMs);
-  if (delayMs <= 0) {
-    return;
-  }
-
-  await wait(delayMs);
 }

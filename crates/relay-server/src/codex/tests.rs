@@ -106,6 +106,81 @@ fn parse_transcript_truncates_large_tool_payloads() {
 }
 
 #[test]
+fn parse_transcript_enriches_file_change_tool_items_with_paths() {
+    let thread = json!({
+        "turns": [
+            {
+                "id": "turn-1",
+                "items": [
+                    {
+                        "id": "item-file-change",
+                        "type": "fileChange",
+                        "changes": [
+                            { "path": "crates/relay-server/src/protocol.rs", "kind": "modify" },
+                            { "path": "frontend/shared/transcript-render.js", "kind": "modify" }
+                        ]
+                    }
+                ]
+            }
+        ]
+    });
+
+    let transcript = parse_transcript(&thread);
+    let tool = transcript[0]
+        .tool
+        .as_ref()
+        .expect("file change should render as a tool call");
+
+    assert_eq!(transcript[0].kind, TranscriptEntryKind::ToolCall);
+    assert_eq!(tool.item_type, "fileChange");
+    assert_eq!(tool.title, "Codex wants to edit 2 files.");
+    assert_eq!(tool.detail.as_deref(), Some("Target files: crates/relay-server/src/protocol.rs, frontend/shared/transcript-render.js"));
+    assert!(tool
+        .input_preview
+        .as_deref()
+        .unwrap_or_default()
+        .contains("crates/relay-server/src/protocol.rs"));
+    assert!(tool
+        .input_preview
+        .as_deref()
+        .unwrap_or_default()
+        .contains("frontend/shared/transcript-render.js"));
+}
+
+#[test]
+fn parse_transcript_preserves_full_agent_messages() {
+    let huge_text = "A".repeat(MAX_COMMAND_ENTRY_CHARS * 3);
+    let thread = json!({
+        "turns": [
+            {
+                "id": "turn-1",
+                "items": [
+                    {
+                        "id": "item-assistant",
+                        "type": "agentMessage",
+                        "text": huge_text
+                    }
+                ]
+            }
+        ]
+    });
+
+    let transcript = parse_transcript(&thread);
+
+    assert_eq!(transcript.len(), 1);
+    assert_eq!(transcript[0].kind, TranscriptEntryKind::AgentText);
+    assert_eq!(
+        transcript[0].text.as_deref().map(str::len),
+        Some(MAX_COMMAND_ENTRY_CHARS * 3)
+    );
+    assert!(!transcript[0]
+        .text
+        .as_deref()
+        .unwrap_or_default()
+        .contains("..."));
+}
+
+#[test]
 fn command_execution_text_truncates_large_output() {
     let item = json!({
         "type": "commandExecution",

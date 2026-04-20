@@ -82,3 +82,57 @@ test("createTranscriptPageFetcher normalizes legacy chunk transcript pages", asy
     thread_id: "thread-1",
   });
 });
+
+test("createTranscriptPageFetcher preserves complete-entry transcript pages", async () => {
+  const requests = [];
+  const fetchTranscriptPage = createTranscriptPageFetcher(async (action, payload) => {
+    requests.push({ action, payload });
+    return {
+      thread_transcript: {
+        thread_id: "thread-1",
+        entries: [
+          {
+            item_id: "item-1",
+            kind: "agent_text",
+            text: "full text",
+            status: "completed",
+            turn_id: "turn-1",
+            tool: null,
+          },
+        ],
+      },
+    };
+  });
+
+  const response = await fetchTranscriptPage({
+    before: null,
+    threadId: "thread-1",
+  });
+
+  assert.deepEqual(requests, [
+    {
+      action: "fetch_thread_transcript",
+      payload: {
+        input: {
+          before: null,
+          cursor: null,
+          thread_id: "thread-1",
+        },
+      },
+    },
+  ]);
+  assert.deepEqual(response, {
+    thread_id: "thread-1",
+    prev_cursor: null,
+    entries: [
+      {
+        item_id: "item-1",
+        kind: "agent_text",
+        text: "full text",
+        status: "completed",
+        turn_id: "turn-1",
+        tool: null,
+      },
+    ],
+  });
+});

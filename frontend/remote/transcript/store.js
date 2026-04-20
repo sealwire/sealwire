@@ -8,7 +8,7 @@ export function clearTranscriptHydration(state) {
 }
 
 export function restoreHydratedTranscript(state, snapshot) {
-  if (!snapshot?.active_thread_id || !snapshot.transcript_truncated) {
+  if (!snapshot?.active_thread_id) {
     return snapshot;
   }
 
@@ -16,7 +16,7 @@ export function restoreHydratedTranscript(state, snapshot) {
   if (
     state.transcriptHydrationThreadId !== snapshot.active_thread_id
     || state.transcriptHydrationSignature !== signature
-    || !state.transcriptHydrationEntries.size
+    || !state.transcriptHydrationOrder.length
   ) {
     return snapshot;
   }
@@ -39,7 +39,7 @@ export function prepareTranscriptHydration(state, snapshot) {
     state.transcriptHydrationThreadId !== snapshot.active_thread_id
     || state.transcriptHydrationSignature !== signature
   ) {
-    resetTranscriptHydration(state, snapshot, signature);
+    resetTranscriptHydration(snapshot, signature);
   } else {
     applyRemoteSurfacePatch({
       transcriptHydrationBaseSnapshot: snapshot,
@@ -49,21 +49,15 @@ export function prepareTranscriptHydration(state, snapshot) {
   return {
     signature,
     shouldHydrate: !state.transcriptHydrationTailReady,
-    alreadyComplete: state.transcriptHydrationStatus === "complete",
+    alreadyComplete:
+      state.transcriptHydrationTailReady && state.transcriptHydrationOlderCursor == null,
     existingPromise: state.transcriptHydrationPromise,
   };
 }
 
-export function beginTranscriptHydration(state) {
+export function beginTranscriptHydration(state, status = "loading") {
   applyRemoteSurfacePatch({
-    transcriptHydrationStatus: "loading",
-  });
-}
-
-export function pauseTranscriptHydrationAfterTailReady(state) {
-  applyRemoteSurfacePatch({
-    transcriptHydrationStatus: "idle",
-    transcriptHydrationTailReady: true,
+    transcriptHydrationStatus: status,
   });
 }
 
@@ -81,13 +75,13 @@ export function clearTranscriptHydrationPromise(state, signature) {
   }
 }
 
-export function setTranscriptHydrationIdle(state) {
+export function setTranscriptHydrationIdle() {
   applyRemoteSurfacePatch({
     transcriptHydrationStatus: "idle",
   });
 }
 
-export function markTranscriptHydrationComplete(state) {
+export function markTranscriptHydrationComplete() {
   applyRemoteSurfacePatch({
     transcriptHydrationStatus: "complete",
     transcriptHydrationTailReady: true,
@@ -106,71 +100,43 @@ export function getTranscriptHydrationCursor(state) {
   return state.transcriptHydrationOlderCursor;
 }
 
-export function setTranscriptHydrationFetchAt(state, timestamp) {
-  applyRemoteSurfacePatch({
-    transcriptHydrationLastFetchAt: timestamp,
-  });
-}
+export function mergeTranscriptHydrationPage(state, page, { prepend = false } = {}) {
+  const nextEntries = new Map(state.transcriptHydrationEntries);
+  const nextOrder = prepend ? [...state.transcriptHydrationOrder] : [];
+  const pageItemIds = [];
 
-export function getTranscriptHydrationLastFetchAt(state) {
-  return state.transcriptHydrationLastFetchAt;
-}
-
-export function hasIncompleteTailHydrationEntries(state) {
-  const snapshot = state.transcriptHydrationBaseSnapshot;
-  if (!snapshot?.transcript?.length) {
-    return false;
-  }
-
-  const loadedEntries = new Map(
-    buildHydratedTranscriptEntries(state).map((entry) => [entry.item_id, entry])
-  );
-
-  return (snapshot.transcript || []).some((entry) => {
+  for (const entry of page.entries || []) {
     const itemId = entry?.item_id;
     if (!itemId) {
-      return false;
+      continue;
     }
-    return !loadedEntries.get(itemId)?.complete;
-  });
-}
-
-export function mergeTranscriptHydrationPage(state, page) {
-  const nextEntries = new Map(state.transcriptHydrationEntries);
-  for (const entryPage of page.entries || []) {
-    if (!nextEntries.has(entryPage.entry_index)) {
-      nextEntries.set(entryPage.entry_index, {
-        item_id: entryPage.item_id,
-        kind: entryPage.kind,
-        status: entryPage.status,
-        turn_id: entryPage.turn_id || null,
-        tool: entryPage.tool || null,
-        parts: new Array(entryPage.part_count),
-      });
-    }
-
-    const entry = nextEntries.get(entryPage.entry_index);
-    entry.item_id = entryPage.item_id;
-    entry.kind = entryPage.kind;
-    entry.status = entryPage.status;
-    entry.turn_id = entryPage.turn_id || null;
-    entry.tool = entryPage.tool || null;
-    if (entryPage.part_count > entry.parts.length) {
-      entry.parts.length = entryPage.part_count;
-    }
-
-    for (const part of entryPage.parts || []) {
-      if (part.part_index >= entry.parts.length) {
-        entry.parts.length = entryPage.part_count;
-      }
-      entry.parts[part.part_index] = part.text || "";
-    }
+    nextEntries.set(itemId, {
+      item_id: itemId,
+      kind: entry.kind,
+      text: entry.text || null,
+      status: entry.status,
+      turn_id: entry.turn_id || null,
+      tool: entry.tool || null,
+    });
+    pageItemIds.push(itemId);
   }
+
+  const mergedOrder = prepend
+    ? uniqueItemIds([...pageItemIds, ...nextOrder])
+    : uniqueItemIds(pageItemIds);
+  const nextStatus =
+    page.prev_cursor == null
+      ? "complete"
+      : state.transcriptHydrationTailReady || !prepend
+        ? "idle"
+        : "loading";
 
   applyRemoteSurfacePatch({
     transcriptHydrationEntries: nextEntries,
+    transcriptHydrationOrder: mergedOrder,
     transcriptHydrationOlderCursor: page.prev_cursor ?? null,
-    transcriptHydrationStatus: page.prev_cursor == null ? "complete" : "loading",
+    transcriptHydrationStatus: nextStatus,
+    transcriptHydrationTailReady: mergedOrder.length > 0,
   });
 }
 
@@ -207,7 +173,7 @@ export function transcriptHydrationSignature(snapshot) {
   return parts.join("|");
 }
 
-function resetTranscriptHydration(state, snapshot, signature) {
+function resetTranscriptHydration(snapshot, signature) {
   applyRemoteSurfacePatch({
     ...createClearedTranscriptHydrationPatch(),
     transcriptHydrationBaseSnapshot: snapshot,
@@ -217,57 +183,30 @@ function resetTranscriptHydration(state, snapshot, signature) {
 }
 
 function buildHydratedTranscriptSnapshot(state, snapshot) {
-  const loadedEntries = buildHydratedTranscriptEntries(state);
-  const resolvedTailEntries = new Map(
-    loadedEntries
-      .filter((entry) => entry.complete && entry.item_id)
-      .map((entry) => [entry.item_id, entry])
-  );
-  const tailEntries = (snapshot.transcript || []).map((entry) => {
-    const resolved = entry.item_id ? resolvedTailEntries.get(entry.item_id) : null;
-    if (!resolved) {
-      return entry;
-    }
+  const transcript = state.transcriptHydrationOrder
+    .map((itemId) => state.transcriptHydrationEntries.get(itemId))
+    .filter(Boolean);
 
-    const { complete, ...nextEntry } = resolved;
-    return nextEntry;
-  });
-  const tailItemIds = new Set(
-    (snapshot.transcript || []).map((entry) => entry.item_id).filter(Boolean)
-  );
-  const olderLoadedEntries = loadedEntries
-    .filter((entry) => !tailItemIds.has(entry.item_id))
-    .map(({ complete, ...entry }) => entry);
+  if (!transcript.length) {
+    return snapshot;
+  }
 
   return {
     ...snapshot,
-    transcript: [...olderLoadedEntries, ...tailEntries],
-    transcript_truncated: state.transcriptHydrationStatus !== "complete",
+    transcript,
+    transcript_truncated: state.transcriptHydrationOlderCursor != null,
   };
 }
 
-function buildHydratedTranscriptEntries(state) {
-  return [...state.transcriptHydrationEntries.entries()]
-    .sort(([left], [right]) => left - right)
-    .map(([, entry]) => {
-      let complete = true;
-      let text = "";
-      for (const part of entry.parts) {
-        if (typeof part !== "string") {
-          complete = false;
-          continue;
-        }
-        text += part;
-      }
-
-      return {
-        item_id: entry.item_id,
-        kind: entry.kind,
-        text: text || null,
-        status: entry.status,
-        turn_id: entry.turn_id,
-        tool: entry.tool,
-        complete,
-      };
-    });
+function uniqueItemIds(itemIds) {
+  const seen = new Set();
+  const unique = [];
+  for (const itemId of itemIds) {
+    if (!itemId || seen.has(itemId)) {
+      continue;
+    }
+    seen.add(itemId);
+    unique.push(itemId);
+  }
+  return unique;
 }

@@ -10,9 +10,9 @@ use crate::{
         AllowedRootsInput, AllowedRootsReceipt, ApprovalDecision, ApprovalDecisionInput,
         ApprovalReceipt, BulkRevokeDevicesReceipt, HeartbeatInput, PairingDecision,
         PairingDecisionInput, PairingDecisionReceipt, PairingStartInput, PairingTicketView,
-        ReadThreadTranscriptInput, ResumeSessionInput, RevokeDeviceReceipt, SendMessageInput,
-        SessionSnapshot, StartSessionInput, TakeOverInput, ThreadArchiveReceipt,
-        ThreadDeleteReceipt, ThreadTranscriptResponse, ThreadsResponse,
+        ReadThreadEntriesInput, ReadThreadTranscriptInput, ResumeSessionInput, RevokeDeviceReceipt,
+        SendMessageInput, SessionSnapshot, StartSessionInput, TakeOverInput, ThreadArchiveReceipt,
+        ThreadDeleteReceipt, ThreadEntriesResponse, ThreadTranscriptResponse, ThreadsResponse,
     },
 };
 
@@ -355,6 +355,31 @@ impl AppState {
         &self,
         input: ReadThreadTranscriptInput,
     ) -> Result<ThreadTranscriptResponse, String> {
+        {
+            let relay = self.relay.read().await;
+            if relay.active_thread_id.as_deref() == Some(input.thread_id.as_str()) {
+                ensure_path_within_allowed_roots(&relay.current_cwd, &relay.allowed_roots)?;
+                let transcript = relay
+                    .transcript
+                    .iter()
+                    .map(|entry| entry.to_view())
+                    .collect::<Vec<_>>();
+
+                if input.before.is_some() {
+                    return Ok(ThreadTranscriptResponse::from_transcript_before(
+                        input.thread_id,
+                        transcript,
+                        input.before,
+                    ));
+                }
+
+                return Ok(ThreadTranscriptResponse::from_transcript_tail(
+                    input.thread_id,
+                    transcript,
+                ));
+            }
+        }
+
         let thread_data = self.codex.read_thread(&input.thread_id).await?;
         {
             let relay = self.relay.read().await;
@@ -372,6 +397,41 @@ impl AppState {
         Ok(ThreadTranscriptResponse::from_transcript_tail(
             input.thread_id,
             thread_data.transcript,
+        ))
+    }
+
+    pub async fn read_thread_entries(
+        &self,
+        input: ReadThreadEntriesInput,
+    ) -> Result<ThreadEntriesResponse, String> {
+        {
+            let relay = self.relay.read().await;
+            if relay.active_thread_id.as_deref() == Some(input.thread_id.as_str()) {
+                ensure_path_within_allowed_roots(&relay.current_cwd, &relay.allowed_roots)?;
+                let transcript = relay
+                    .transcript
+                    .iter()
+                    .map(|entry| entry.to_view())
+                    .collect::<Vec<_>>();
+
+                return Ok(ThreadEntriesResponse::from_item_ids(
+                    input.thread_id,
+                    transcript,
+                    input.item_ids,
+                ));
+            }
+        }
+
+        let thread_data = self.codex.read_thread(&input.thread_id).await?;
+        {
+            let relay = self.relay.read().await;
+            ensure_path_within_allowed_roots(&thread_data.thread.cwd, &relay.allowed_roots)?;
+        }
+
+        Ok(ThreadEntriesResponse::from_item_ids(
+            input.thread_id,
+            thread_data.transcript,
+            input.item_ids,
         ))
     }
 

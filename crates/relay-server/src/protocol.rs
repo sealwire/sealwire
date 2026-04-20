@@ -584,30 +584,24 @@ pub struct ReadThreadTranscriptInput {
     pub before: Option<usize>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct TranscriptEntryPartView {
-    pub part_index: usize,
-    pub text: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ThreadTranscriptEntryView {
-    pub entry_index: usize,
-    pub item_id: String,
-    pub kind: TranscriptEntryKind,
-    pub status: String,
-    pub turn_id: Option<String>,
-    pub tool: Option<ToolCallView>,
-    pub part_count: usize,
-    pub parts: Vec<TranscriptEntryPartView>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadThreadEntriesInput {
+    pub thread_id: String,
+    pub item_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreadTranscriptResponse {
     pub thread_id: String,
-    pub entries: Vec<ThreadTranscriptEntryView>,
+    pub entries: Vec<TranscriptEntryView>,
     pub next_cursor: Option<usize>,
     pub prev_cursor: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreadEntriesResponse {
+    pub thread_id: String,
+    pub entries: Vec<TranscriptEntryView>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -753,7 +747,6 @@ pub struct HeartbeatInput {
     pub device_id: Option<String>,
 }
 
-const TRANSCRIPT_CHUNK_MAX_CHARS: usize = 4_000;
 const THREAD_TRANSCRIPT_RESPONSE_TARGET_BYTES: usize = 20_000;
 
 impl ThreadTranscriptResponse {
@@ -763,12 +756,11 @@ impl ThreadTranscriptResponse {
         transcript: Vec<TranscriptEntryView>,
         cursor: usize,
     ) -> Self {
-        let fragments = flatten_transcript_fragments(transcript);
         let mut selected = Vec::new();
-        let mut index = cursor.min(fragments.len());
+        let mut index = cursor.min(transcript.len());
 
-        while index < fragments.len() {
-            selected.push(fragments[index].clone());
+        while index < transcript.len() {
+            selected.push(transcript[index].clone());
             let candidate = build_thread_transcript_page(&thread_id, &selected, None, None);
             if serialized_len(&candidate) > THREAD_TRANSCRIPT_RESPONSE_TARGET_BYTES
                 && selected.len() > 1
@@ -779,22 +771,21 @@ impl ThreadTranscriptResponse {
             index += 1;
         }
 
-        if selected.is_empty() && index < fragments.len() {
-            selected.push(fragments[index].clone());
+        if selected.is_empty() && index < transcript.len() {
+            selected.push(transcript[index].clone());
             index += 1;
         }
 
         build_thread_transcript_page(
             &thread_id,
             &selected,
-            (index < fragments.len()).then_some(index),
+            (index < transcript.len()).then_some(index),
             None,
         )
     }
 
     pub fn from_transcript_tail(thread_id: String, transcript: Vec<TranscriptEntryView>) -> Self {
-        let fragments = flatten_transcript_fragments(transcript);
-        build_reverse_thread_transcript_page(&thread_id, &fragments, fragments.len())
+        build_reverse_thread_transcript_page(&thread_id, &transcript, transcript.len())
     }
 
     pub fn from_transcript_before(
@@ -802,62 +793,50 @@ impl ThreadTranscriptResponse {
         transcript: Vec<TranscriptEntryView>,
         before: Option<usize>,
     ) -> Self {
-        let fragments = flatten_transcript_fragments(transcript);
-        let upper_bound = before.unwrap_or(fragments.len()).min(fragments.len());
-        build_reverse_thread_transcript_page(&thread_id, &fragments, upper_bound)
+        let upper_bound = before.unwrap_or(transcript.len()).min(transcript.len());
+        build_reverse_thread_transcript_page(&thread_id, &transcript, upper_bound)
     }
 }
 
-#[derive(Debug, Clone)]
-struct TranscriptEntryFragment {
-    entry_index: usize,
-    item_id: String,
-    kind: TranscriptEntryKind,
-    status: String,
-    turn_id: Option<String>,
-    tool: Option<ToolCallView>,
-    part_index: usize,
-    part_count: usize,
-    text: String,
+impl ThreadEntriesResponse {
+    pub fn from_item_ids(
+        thread_id: String,
+        transcript: Vec<TranscriptEntryView>,
+        item_ids: Vec<String>,
+    ) -> Self {
+        let requested = item_ids
+            .into_iter()
+            .filter(|item_id| !item_id.is_empty())
+            .collect::<std::collections::HashSet<_>>();
+
+        let entries = if requested.is_empty() {
+            Vec::new()
+        } else {
+            transcript
+                .into_iter()
+                .filter(|entry| {
+                    entry
+                        .item_id
+                        .as_ref()
+                        .map(|item_id| requested.contains(item_id))
+                        .unwrap_or(false)
+                })
+                .collect()
+        };
+
+        Self { thread_id, entries }
+    }
 }
 
 fn build_thread_transcript_page(
     thread_id: &str,
-    fragments: &[TranscriptEntryFragment],
+    entries: &[TranscriptEntryView],
     next_cursor: Option<usize>,
     prev_cursor: Option<usize>,
 ) -> ThreadTranscriptResponse {
-    let mut entries = Vec::<ThreadTranscriptEntryView>::new();
-
-    for fragment in fragments {
-        if entries
-            .last()
-            .map(|entry| entry.entry_index != fragment.entry_index)
-            .unwrap_or(true)
-        {
-            entries.push(ThreadTranscriptEntryView {
-                entry_index: fragment.entry_index,
-                item_id: fragment.item_id.clone(),
-                kind: fragment.kind,
-                status: fragment.status.clone(),
-                turn_id: fragment.turn_id.clone(),
-                tool: fragment.tool.clone(),
-                part_count: fragment.part_count,
-                parts: Vec::new(),
-            });
-        }
-
-        let entry = entries.last_mut().expect("entry was just inserted");
-        entry.part_count = fragment.part_count;
-        entry.parts.push(TranscriptEntryPartView {
-            part_index: fragment.part_index,
-            text: fragment.text.clone(),
-        });
-    }
-
     ThreadTranscriptResponse {
         thread_id: thread_id.to_string(),
-        entries,
+        entries: entries.to_vec(),
         next_cursor,
         prev_cursor,
     }
@@ -865,14 +844,14 @@ fn build_thread_transcript_page(
 
 fn build_reverse_thread_transcript_page(
     thread_id: &str,
-    fragments: &[TranscriptEntryFragment],
+    transcript: &[TranscriptEntryView],
     upper_bound: usize,
 ) -> ThreadTranscriptResponse {
     let mut selected = Vec::new();
     let mut index = upper_bound;
 
     while index > 0 {
-        selected.push(fragments[index - 1].clone());
+        selected.push(transcript[index - 1].clone());
         let candidate = build_thread_transcript_page(
             thread_id,
             &selected.iter().rev().cloned().collect::<Vec<_>>(),
@@ -889,65 +868,14 @@ fn build_reverse_thread_transcript_page(
     }
 
     if selected.is_empty() && upper_bound > 0 {
-        selected.push(fragments[upper_bound - 1].clone());
+        selected.push(transcript[upper_bound - 1].clone());
         index = upper_bound - 1;
     }
 
     build_thread_transcript_page(
         thread_id,
         &selected.into_iter().rev().collect::<Vec<_>>(),
-        (upper_bound < fragments.len()).then_some(upper_bound),
+        (upper_bound < transcript.len()).then_some(upper_bound),
         (index > 0).then_some(index),
     )
-}
-
-fn flatten_transcript_fragments(
-    transcript: Vec<TranscriptEntryView>,
-) -> Vec<TranscriptEntryFragment> {
-    let mut fragments = Vec::new();
-
-    for (entry_index, entry) in transcript.into_iter().enumerate() {
-        let TranscriptEntryView {
-            item_id,
-            kind,
-            text,
-            status,
-            turn_id,
-            tool,
-        } = entry;
-        let item_id = item_id.unwrap_or_else(|| format!("entry-{entry_index}"));
-        let text_chunks = split_text_chunks(
-            text.as_deref().unwrap_or_default(),
-            TRANSCRIPT_CHUNK_MAX_CHARS,
-        );
-        let part_count = text_chunks.len();
-
-        for (part_index, text) in text_chunks.into_iter().enumerate() {
-            fragments.push(TranscriptEntryFragment {
-                entry_index,
-                item_id: item_id.clone(),
-                kind,
-                status: status.clone(),
-                turn_id: turn_id.clone(),
-                tool: tool.clone(),
-                part_index,
-                part_count,
-                text,
-            });
-        }
-    }
-
-    fragments
-}
-
-fn split_text_chunks(text: &str, max_chars: usize) -> Vec<String> {
-    if text.is_empty() {
-        return vec![String::new()];
-    }
-
-    let chars = text.chars().collect::<Vec<_>>();
-    chars
-        .chunks(max_chars.max(1))
-        .map(|chunk| chunk.iter().collect())
-        .collect()
 }

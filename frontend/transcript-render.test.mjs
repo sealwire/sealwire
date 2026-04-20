@@ -47,6 +47,42 @@ test("renderTranscriptEntry renders typed session items safely", () => {
   assert.match(toolMarkup, /frontend\/remote\/main\.js/);
 });
 
+test("renderTranscriptEntry collapses long command and tool previews without collapsing assistant text", () => {
+  const longCommand = Array.from({ length: 18 }, (_, index) => `line ${index + 1}`).join("\n");
+  const longToolInput = Array.from({ length: 20 }, (_, index) => `frontend/file-${index + 1}.js`).join("\n");
+  const assistantText = "A".repeat(1200);
+
+  const commandMarkup = renderTranscriptEntry({
+    kind: "command",
+    status: "completed",
+    text: longCommand,
+  });
+  const toolMarkup = renderTranscriptEntry({
+    kind: "tool_call",
+    status: "completed",
+    tool: {
+      name: "File change",
+      title: "Codex wants to edit 20 files.",
+      item_type: "fileChange",
+      input_preview: `Files:\n${longToolInput}`,
+    },
+  });
+  const assistantMarkup = renderTranscriptEntry({
+    kind: "agent_text",
+    status: "completed",
+    turn_id: "turn-123456789",
+    text: assistantText,
+  });
+
+  assert.match(commandMarkup, /<details class="message-collapsible">/);
+  assert.match(commandMarkup, /message-collapsible-label-closed">Expand<\/span>/);
+  assert.match(commandMarkup, /message-collapsible-label-open">Collapse<\/span>/);
+  assert.match(toolMarkup, /<details class="message-collapsible">/);
+  assert.match(toolMarkup, /Files:\nfrontend\/file-1\.js/);
+  assert.doesNotMatch(assistantMarkup, /message-collapsible/);
+  assert.match(assistantMarkup, new RegExp(`A{1200}`));
+});
+
 test("renderApprovalCard includes session-scope actions and escapes requested permissions", () => {
   const markup = renderApprovalCard({
     kind: "command",
@@ -67,6 +103,23 @@ test("renderApprovalCard includes session-scope actions and escapes requested pe
   assert.match(markup, /frontend\/shared\/transcript-render\.js/);
   assert.match(markup, /&lt;unsafe&gt;/);
   assert.match(markup, /cwd: \/tmp\/project/);
+});
+
+test("renderApprovalCard collapses large command and permission payloads", () => {
+  const markup = renderApprovalCard({
+    kind: "command",
+    summary: "Run long command",
+    detail: "Need approval",
+    command: Array.from({ length: 16 }, (_, index) => `arg-${index}`).join("\n"),
+    requested_permissions: {
+      sandbox: "danger-full-access",
+      note: "x".repeat(1200),
+    },
+    supports_session_scope: true,
+  });
+
+  assert.match(markup, /<details class="message-collapsible">/);
+  assert.match(markup, /message-collapsible-label-closed">Expand<\/span>/);
 });
 
 test("renderTranscriptMarkup combines typed entries and pending approval into one thread content block", () => {

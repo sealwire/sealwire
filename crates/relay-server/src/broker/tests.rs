@@ -2,8 +2,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::*;
 use crate::protocol::{
-    SendMessageInput, ThreadTranscriptEntryView, ThreadTranscriptResponse, TranscriptEntryKind,
-    TranscriptEntryPartView,
+    SendMessageInput, ThreadTranscriptResponse, TranscriptEntryKind, TranscriptEntryView,
 };
 use axum::{extract::Path, routing::post, Json, Router};
 use base64::engine::general_purpose::STANDARD;
@@ -859,41 +858,25 @@ fn device_claim_proof_rejects_different_peer() {
 }
 
 #[test]
-fn summarize_thread_transcript_response_reports_entry_and_part_counts() {
+fn summarize_thread_transcript_response_reports_entry_and_char_counts() {
     let summary = summarize_thread_transcript_response(&ThreadTranscriptResponse {
         thread_id: "thread-1".to_string(),
         entries: vec![
-            ThreadTranscriptEntryView {
-                entry_index: 0,
-                item_id: "item-1".to_string(),
+            TranscriptEntryView {
+                item_id: Some("item-1".to_string()),
                 kind: TranscriptEntryKind::AgentText,
+                text: Some("helloworld".to_string()),
                 status: "completed".to_string(),
                 turn_id: Some("turn-1".to_string()),
                 tool: None,
-                part_count: 2,
-                parts: vec![
-                    TranscriptEntryPartView {
-                        part_index: 0,
-                        text: "hello".to_string(),
-                    },
-                    TranscriptEntryPartView {
-                        part_index: 1,
-                        text: "world".to_string(),
-                    },
-                ],
             },
-            ThreadTranscriptEntryView {
-                entry_index: 1,
-                item_id: "item-2".to_string(),
+            TranscriptEntryView {
+                item_id: Some("item-2".to_string()),
                 kind: TranscriptEntryKind::ToolCall,
+                text: Some("done".to_string()),
                 status: "completed".to_string(),
                 turn_id: Some("turn-1".to_string()),
                 tool: None,
-                part_count: 1,
-                parts: vec![TranscriptEntryPartView {
-                    part_index: 0,
-                    text: "done".to_string(),
-                }],
             },
         ],
         next_cursor: Some(8),
@@ -902,7 +885,7 @@ fn summarize_thread_transcript_response_reports_entry_and_part_counts() {
 
     assert!(summary.contains("thread_id=thread-1"));
     assert!(summary.contains("entries=2"));
-    assert!(summary.contains("parts=3"));
+    assert!(summary.contains("chars=14"));
     assert!(summary.contains("next_cursor=8"));
     assert!(summary.contains("prev_cursor=3"));
 }

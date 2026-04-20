@@ -1,7 +1,8 @@
 use crate::protocol::{
     truncate_with_ellipsis, ApprovalRequestView, LogEntryView, SecurityMode, SessionSnapshot,
-    SessionSnapshotCompactProfile, ThreadSummaryView, ThreadTranscriptResponse, ThreadsResponse,
-    ThreadsResponseCompactProfile, TranscriptEntryKind, TranscriptEntryView,
+    SessionSnapshotCompactProfile, ThreadEntriesResponse, ThreadSummaryView,
+    ThreadTranscriptResponse, ThreadsResponse, ThreadsResponseCompactProfile, TranscriptEntryKind,
+    TranscriptEntryView,
 };
 
 const MAX_BROKER_LOGS: usize = 8;
@@ -333,20 +334,21 @@ fn thread_transcript_response_chunks_large_transcripts() {
     let rebuilt = pages
         .into_iter()
         .flat_map(|page| page.entries.into_iter())
-        .fold(std::collections::BTreeMap::new(), |mut acc, entry| {
-            let buffer = acc.entry(entry.entry_index).or_insert_with(String::new);
-            for part in entry.parts {
-                buffer.push_str(&part.text);
-            }
-            acc
-        });
+        .enumerate()
+        .fold(
+            std::collections::BTreeMap::new(),
+            |mut acc, (entry_index, entry)| {
+                acc.insert(entry_index, entry.text.unwrap_or_default());
+                acc
+            },
+        );
 
     assert_eq!(rebuilt.get(&0).unwrap(), &"长".repeat(9_500));
     assert_eq!(rebuilt.get(&1).unwrap(), "next");
 }
 
 #[test]
-fn thread_transcript_response_groups_parts_under_one_entry() {
+fn thread_transcript_response_keeps_complete_entries_together() {
     let transcript = vec![TranscriptEntryView {
         item_id: Some("item-1".to_string()),
         kind: TranscriptEntryKind::AgentText,
@@ -359,14 +361,11 @@ fn thread_transcript_response_groups_parts_under_one_entry() {
     let page = ThreadTranscriptResponse::from_transcript("thread-1".to_string(), transcript, 0);
 
     assert_eq!(page.entries.len(), 1);
-    assert_eq!(page.entries[0].entry_index, 0);
-    assert_eq!(page.entries[0].item_id, "item-1");
-    assert_eq!(page.entries[0].part_count, 2);
-    assert_eq!(page.entries[0].parts.len(), 2);
-    assert_eq!(page.entries[0].parts[0].part_index, 0);
-    assert_eq!(page.entries[0].parts[0].text, "a".repeat(4_000));
-    assert_eq!(page.entries[0].parts[1].part_index, 1);
-    assert_eq!(page.entries[0].parts[1].text, "a".repeat(500));
+    assert_eq!(page.entries[0].item_id.as_deref(), Some("item-1"));
+    assert_eq!(
+        page.entries[0].text.as_deref(),
+        Some("a".repeat(4_500).as_str())
+    );
 }
 
 #[test]
@@ -375,7 +374,7 @@ fn thread_transcript_response_can_page_backwards_from_tail() {
         .map(|index| TranscriptEntryView {
             item_id: Some(format!("item-{index}")),
             kind: TranscriptEntryKind::AgentText,
-            text: Some(format!("entry-{index}-{}", "z".repeat(1500))),
+            text: Some(format!("entry-{index}-{}", "z".repeat(4500))),
             status: "completed".to_string(),
             turn_id: Some(format!("turn-{index}")),
             tool: None,
@@ -404,13 +403,14 @@ fn thread_transcript_response_can_page_backwards_from_tail() {
         .into_iter()
         .rev()
         .flat_map(|page| page.entries.into_iter())
-        .fold(std::collections::BTreeMap::new(), |mut acc, entry| {
-            let buffer = acc.entry(entry.entry_index).or_insert_with(String::new);
-            for part in entry.parts {
-                buffer.push_str(&part.text);
-            }
-            acc
-        });
+        .enumerate()
+        .fold(
+            std::collections::BTreeMap::new(),
+            |mut acc, (entry_index, entry)| {
+                acc.insert(entry_index, entry.text.unwrap_or_default());
+                acc
+            },
+        );
 
     assert_eq!(rebuilt.len(), transcript.len());
     assert!(rebuilt.get(&0).unwrap().starts_with("entry-0-"));
@@ -423,7 +423,7 @@ fn thread_transcript_response_tail_returns_latest_page_first() {
         .map(|index| TranscriptEntryView {
             item_id: Some(format!("item-{index}")),
             kind: TranscriptEntryKind::AgentText,
-            text: Some(format!("entry-{index}-{}", "z".repeat(1500))),
+            text: Some(format!("entry-{index}-{}", "z".repeat(4500))),
             status: "completed".to_string(),
             turn_id: Some(format!("turn-{index}")),
             tool: None,
@@ -440,10 +440,49 @@ fn thread_transcript_response_tail_returns_latest_page_first() {
     assert!(page
         .entries
         .first()
-        .map(|entry| entry.entry_index > 0)
+        .and_then(|entry| entry.item_id.as_deref())
+        .map(|item_id| item_id != "item-0")
         .unwrap_or(false));
     assert_eq!(
-        page.entries.last().map(|entry| entry.entry_index),
-        Some(transcript.len() - 1)
+        page.entries
+            .last()
+            .and_then(|entry| entry.item_id.as_deref()),
+        Some("item-11")
+    );
+}
+
+#[test]
+fn thread_entries_response_returns_complete_entries_for_requested_item_ids() {
+    let transcript = vec![
+        TranscriptEntryView {
+            item_id: Some("item-1".to_string()),
+            kind: TranscriptEntryKind::UserText,
+            text: Some("hello".repeat(2_000)),
+            status: "completed".to_string(),
+            turn_id: Some("turn-1".to_string()),
+            tool: None,
+        },
+        TranscriptEntryView {
+            item_id: Some("item-2".to_string()),
+            kind: TranscriptEntryKind::AgentText,
+            text: Some("world".repeat(2_000)),
+            status: "completed".to_string(),
+            turn_id: Some("turn-2".to_string()),
+            tool: None,
+        },
+    ];
+
+    let response = ThreadEntriesResponse::from_item_ids(
+        "thread-1".to_string(),
+        transcript.clone(),
+        vec!["item-2".to_string()],
+    );
+
+    assert_eq!(response.thread_id, "thread-1");
+    assert_eq!(response.entries.len(), 1);
+    assert_eq!(response.entries[0].item_id.as_deref(), Some("item-2"));
+    assert_eq!(
+        response.entries[0].text.as_deref(),
+        transcript[1].text.as_deref()
     );
 }

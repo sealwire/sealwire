@@ -9,8 +9,8 @@ use tokio::sync::watch;
 use crate::{
     codex::ThreadSyncData,
     protocol::{
-        ApprovalReceipt, LogEntryView, ModelOptionView, SessionSnapshot, ThreadSummaryView,
-        ThreadTranscriptResponse, ThreadsResponse,
+        ApprovalReceipt, LogEntryView, ModelOptionView, SessionSnapshot, ThreadEntriesResponse,
+        ThreadSummaryView, ThreadTranscriptResponse, ThreadsResponse,
     },
 };
 
@@ -37,6 +37,7 @@ pub(crate) struct CachedRemoteActionResult {
     pub(crate) snapshot: SessionSnapshot,
     pub(crate) receipt: Option<ApprovalReceipt>,
     pub(crate) threads: Option<ThreadsResponse>,
+    pub(crate) thread_entries: Option<ThreadEntriesResponse>,
     pub(crate) thread_transcript: Option<ThreadTranscriptResponse>,
     pub(crate) session_claim: Option<String>,
     pub(crate) session_claim_expires_at: Option<u64>,

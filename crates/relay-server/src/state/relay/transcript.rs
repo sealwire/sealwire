@@ -15,7 +15,7 @@ pub(crate) struct TranscriptRecord {
 }
 
 impl TranscriptRecord {
-    pub(super) fn to_view(&self) -> TranscriptEntryView {
+    pub(crate) fn to_view(&self) -> TranscriptEntryView {
         TranscriptEntryView {
             item_id: Some(self.item_id.clone()),
             kind: self.kind,

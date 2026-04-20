@@ -44,7 +44,10 @@ import {
   initializeRemoteSurface,
   installSidebarGestureDebug,
 } from "./remote-runtime.js";
-import { sendHeartbeat } from "./session-ops.js";
+import {
+  maybeLoadOlderTranscriptHistory,
+  sendHeartbeat,
+} from "./session-ops.js";
 import {
   computeTranscriptScrollPosition,
   deriveTranscriptScrollMode,
@@ -971,6 +974,7 @@ function RemoteTranscriptPanel({
             })
           )
         );
+        void maybeLoadOlderTranscriptHistory();
       },
       ref: transcriptRef,
     },

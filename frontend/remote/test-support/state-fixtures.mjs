@@ -38,6 +38,7 @@ export function seedTranscriptHydrationState(state, patch = {}) {
       transcriptHydrationBaseSnapshot: null,
       transcriptHydrationOlderCursor: null,
       transcriptHydrationEntries: new Map(),
+      transcriptHydrationOrder: [],
       transcriptHydrationStatus: "idle",
       transcriptHydrationTailReady: false,
       transcriptHydrationLastFetchAt: 0,

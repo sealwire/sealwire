@@ -223,7 +223,7 @@ async function waitFor(predicate, timeoutMs = 1000) {
   throw new Error("timed out waiting for async browser state");
 }
 
-test("applySessionSnapshot hydrates truncated transcript with chunked remote fetches", async () => {
+test("applySessionSnapshot hydrates truncated transcript with full tail entries", async () => {
   const browser = activeBrowser || installBrowserStubs();
 
   const fullText = "A".repeat(9000);
@@ -260,7 +260,6 @@ test("applySessionSnapshot hydrates truncated transcript with chunked remote fet
     send(frameText) {
       const frame = JSON.parse(frameText);
       sentPayloads.push(frame.payload);
-      const before = frame.payload.request?.input?.before ?? null;
       setImmediate(async () => {
         await handleRemoteBrokerPayload({
           kind: "remote_action_result",
@@ -270,58 +269,25 @@ test("applySessionSnapshot hydrates truncated transcript with chunked remote fet
           snapshot: {},
           thread_transcript: {
             thread_id: "thread-1",
-            entries:
-              before == null
-                ? [
-                    {
-                      entry_index: 0,
-                      item_id: "item-1",
-                      kind: "agent_text",
-                      status: "completed",
-                      turn_id: "turn-1",
-                      tool: null,
-                      part_count: 2,
-                      parts: [
-                        {
-                          part_index: 1,
-                          text: fullText.slice(4000),
-                        },
-                      ],
-                    },
-                    {
-                      entry_index: 1,
-                      item_id: "item-2",
-                      kind: "user_text",
-                      status: "completed",
-                      turn_id: "turn-2",
-                      tool: null,
-                      part_count: 1,
-                      parts: [
-                        {
-                          part_index: 0,
-                          text: "thanks",
-                        },
-                      ],
-                    },
-                  ]
-                : [
-                    {
-                      entry_index: 0,
-                      item_id: "item-1",
-                      kind: "agent_text",
-                      status: "completed",
-                      turn_id: "turn-1",
-                      tool: null,
-                      part_count: 2,
-                      parts: [
-                        {
-                          part_index: 0,
-                          text: fullText.slice(0, 4000),
-                        },
-                      ],
-                    },
-                  ],
-            prev_cursor: before == null ? 1 : null,
+            entries: [
+              {
+                item_id: "item-1",
+                kind: "agent_text",
+                text: fullText,
+                status: "completed",
+                turn_id: "turn-1",
+                tool: null,
+              },
+              {
+                item_id: "item-2",
+                kind: "user_text",
+                text: "thanks",
+                status: "completed",
+                turn_id: "turn-2",
+                tool: null,
+              },
+            ],
+            prev_cursor: null,
           },
         });
       });
@@ -380,7 +346,6 @@ test("applySessionSnapshot hydrates truncated transcript with chunked remote fet
     ],
   });
 
-  await waitFor(() => state.transcriptHydrationOlderCursor === 1);
   await waitFor(() => state.transcriptHydrationTailReady === true);
   await waitFor(() => state.transcriptHydrationPromise === null);
 
@@ -389,11 +354,10 @@ test("applySessionSnapshot hydrates truncated transcript with chunked remote fet
   assert.equal(state.session.transcript_truncated, false);
   assert.equal(
     sentPayloads.filter((payload) => payload.request?.type === "fetch_thread_transcript").length,
-    2
+    1
   );
   assert.equal(sentPayloads[0].request.input.thread_id, "thread-1");
-  assert.equal(sentPayloads[0].request.input.before ?? null, null);
-  assert.equal(sentPayloads[1].request.input.before, 1);
+  assert.equal(sentPayloads[0].request.input.before, null);
   assert.equal(sentPayloads[0].session_claim, undefined);
 
   const resumedSnapshot = {
@@ -422,12 +386,16 @@ test("applySessionSnapshot hydrates truncated transcript with chunked remote fet
 
   assert.equal(state.session.transcript_truncated, false);
   assert.equal(state.session.transcript[0].text, fullText);
+  assert.equal(
+    sentPayloads.filter((payload) => payload.request?.type === "fetch_thread_transcript").length,
+    1
+  );
 });
 
-test("transcript hydration resumes from the saved cursor after a broker interruption", async () => {
+test("transcript hydration retries after an incomplete entry fetch", async () => {
   const browser = activeBrowser || installBrowserStubs();
   const sentPayloads = [];
-  let allowSecondPage = false;
+  let allowSecondFetch = false;
 
   const { state, saveRemoteAuth } = await import("./state.js");
   const { handleRemoteBrokerPayload } = await import("./actions.js");
@@ -460,46 +428,6 @@ test("transcript hydration resumes from the saved cursor after a broker interrup
     send(frameText) {
       const frame = JSON.parse(frameText);
       sentPayloads.push(frame.payload);
-      const before = frame.payload.request?.input?.before ?? null;
-
-      if (before == null) {
-        setImmediate(async () => {
-          await handleRemoteBrokerPayload({
-            kind: "remote_action_result",
-            action_id: frame.payload.action_id,
-            action: "fetch_thread_transcript",
-            ok: true,
-            snapshot: {},
-            thread_transcript: {
-              thread_id: "thread-1",
-              entries: [
-                {
-                  entry_index: 0,
-                  item_id: "item-1",
-                  kind: "agent_text",
-                  status: "completed",
-                  turn_id: "turn-1",
-                  tool: null,
-                  part_count: 2,
-                  parts: [
-                    {
-                      part_index: 1,
-                      text: "world",
-                    },
-                  ],
-                },
-              ],
-              prev_cursor: 1,
-            },
-          });
-        });
-        return;
-      }
-
-      if (!allowSecondPage) {
-        return;
-      }
-
       setImmediate(async () => {
         await handleRemoteBrokerPayload({
           kind: "remote_action_result",
@@ -509,23 +437,18 @@ test("transcript hydration resumes from the saved cursor after a broker interrup
           snapshot: {},
           thread_transcript: {
             thread_id: "thread-1",
-            entries: [
-              {
-                entry_index: 0,
-                item_id: "item-1",
-                kind: "agent_text",
-                status: "completed",
-                turn_id: "turn-1",
-                tool: null,
-                part_count: 2,
-                parts: [
+            entries: allowSecondFetch
+              ? [
                   {
-                    part_index: 0,
-                    text: "hello ".repeat(600),
+                    item_id: "item-1",
+                    kind: "agent_text",
+                    text: `${"hello ".repeat(600)}world`,
+                    status: "completed",
+                    turn_id: "turn-1",
+                    tool: null,
                   },
-                ],
-              },
-            ],
+                ]
+              : [],
             prev_cursor: null,
           },
         });
@@ -578,24 +501,19 @@ test("transcript hydration resumes from the saved cursor after a broker interrup
   };
 
   applySessionSnapshot(snapshot);
-  await waitFor(() => state.transcriptHydrationOlderCursor === 1);
-  assert.equal(state.transcriptHydrationOlderCursor, 1);
-
-  await nextTick();
-  browser.runTimers();
   await waitFor(() => state.transcriptHydrationPromise === null);
-
-  assert.equal(state.transcriptHydrationOlderCursor, 1);
+  browser.runTimers();
   assert.equal(state.transcriptHydrationStatus, "idle");
+  assert.equal(state.transcriptHydrationTailReady, false);
 
-  allowSecondPage = true;
+  allowSecondFetch = true;
   applySessionSnapshot(snapshot);
   await waitFor(() => state.session?.transcript_truncated === false);
 
-  const fetchCursors = sentPayloads
+  const fetchRequests = sentPayloads
     .filter((payload) => payload.request?.type === "fetch_thread_transcript")
-    .map((payload) => payload.request.input.before ?? null);
-  assert.deepEqual(fetchCursors, [null, 1, 1]);
+    .map((payload) => payload.request.input.before);
+  assert.deepEqual(fetchRequests, [null, null]);
   assert.equal(state.session.transcript[0].text, `${"hello ".repeat(600)}world`);
 });
 
@@ -635,7 +553,6 @@ test("hydrated transcript stays expanded when a later snapshot changes only the 
     send(frameText) {
       const frame = JSON.parse(frameText);
       sentPayloads.push(frame.payload);
-      const before = frame.payload.request?.input?.before ?? null;
       setImmediate(async () => {
         await handleRemoteBrokerPayload({
           kind: "remote_action_result",
@@ -645,43 +562,17 @@ test("hydrated transcript stays expanded when a later snapshot changes only the 
           snapshot: {},
           thread_transcript: {
             thread_id: "thread-1",
-            entries:
-              before == null
-                ? [
-                    {
-                      entry_index: 0,
-                      item_id: "item-1",
-                      kind: "agent_text",
-                      status: "completed",
-                      turn_id: "turn-1",
-                      tool: null,
-                      part_count: 2,
-                      parts: [
-                        {
-                          part_index: 1,
-                          text: fullText.slice(4000),
-                        },
-                      ],
-                    },
-                  ]
-                : [
-                    {
-                      entry_index: 0,
-                      item_id: "item-1",
-                      kind: "agent_text",
-                      status: "completed",
-                      turn_id: "turn-1",
-                      tool: null,
-                      part_count: 2,
-                      parts: [
-                        {
-                          part_index: 0,
-                          text: fullText.slice(0, 4000),
-                        },
-                      ],
-                    },
-                  ],
-            prev_cursor: before == null ? 1 : null,
+            entries: [
+              {
+                item_id: "item-1",
+                kind: "agent_text",
+                text: fullText,
+                status: "completed",
+                turn_id: "turn-1",
+                tool: null,
+              },
+            ],
+            prev_cursor: null,
           },
         });
       });
@@ -732,12 +623,11 @@ test("hydrated transcript stays expanded when a later snapshot changes only the 
     ],
   });
 
-  await waitFor(() => state.transcriptHydrationOlderCursor === 1);
   await waitFor(() => state.transcriptHydrationTailReady === true);
   await waitFor(() => state.transcriptHydrationPromise === null);
   assert.equal(state.session.transcript[0].text, fullText);
   assert.equal(state.session.transcript_truncated, false);
-  assert.equal(sentPayloads.filter((payload) => payload.request?.type === "fetch_thread_transcript").length, 2);
+  assert.equal(sentPayloads.filter((payload) => payload.request?.type === "fetch_thread_transcript").length, 1);
 
   applySessionSnapshot({
     active_thread_id: "thread-1",
@@ -787,7 +677,7 @@ test("hydrated transcript stays expanded when a later snapshot changes only the 
   assert.equal(state.session.transcript[0].text, fullText);
   assert.equal(
     sentPayloads.filter((payload) => payload.request?.type === "fetch_thread_transcript").length,
-    2
+    1
   );
 });
 
@@ -827,40 +717,6 @@ test("reapplying the same compact snapshot while hydration is loading does not r
     send(frameText) {
       const frame = JSON.parse(frameText);
       sentPayloads.push(frame.payload);
-      const before = frame.payload.request?.input?.before ?? null;
-      if (before != null) {
-        return;
-      }
-      setImmediate(async () => {
-        await handleRemoteBrokerPayload({
-          kind: "remote_action_result",
-          action_id: frame.payload.action_id,
-          action: "fetch_thread_transcript",
-          ok: true,
-          snapshot: {},
-          thread_transcript: {
-            thread_id: "thread-1",
-            entries: [
-              {
-                entry_index: 0,
-                item_id: "item-1",
-                kind: "agent_text",
-                status: "completed",
-                turn_id: "turn-1",
-                tool: null,
-                part_count: 2,
-                parts: [
-                  {
-                    part_index: 1,
-                    text: "world",
-                  },
-                ],
-              },
-            ],
-            prev_cursor: 1,
-          },
-        });
-      });
     },
   };
 
@@ -909,21 +765,42 @@ test("reapplying the same compact snapshot while hydration is loading does not r
   };
 
   applySessionSnapshot(snapshot);
-  await waitFor(() => state.transcriptHydrationOlderCursor === 1);
-  await waitFor(() => sentPayloads.length >= 2);
+  await waitFor(() => sentPayloads.length >= 1);
 
   assert.deepEqual(
-    sentPayloads.map((payload) => payload.request?.input?.before ?? null),
-    [null, 1]
+    sentPayloads.map((payload) => payload.request?.type),
+    ["fetch_thread_transcript"]
   );
 
   applySessionSnapshot(snapshot);
   await nextTick();
 
   assert.deepEqual(
-    sentPayloads.map((payload) => payload.request?.input?.before ?? null),
-    [null, 1]
+    sentPayloads.map((payload) => payload.request?.type),
+    ["fetch_thread_transcript"]
   );
+
+  await handleRemoteBrokerPayload({
+    kind: "remote_action_result",
+    action_id: sentPayloads[0].action_id,
+    action: "fetch_thread_transcript",
+    ok: true,
+    snapshot: {},
+    thread_transcript: {
+      thread_id: "thread-1",
+      entries: [
+        {
+          item_id: "item-1",
+          kind: "agent_text",
+          text: "hello world",
+          status: "completed",
+          turn_id: "turn-1",
+          tool: null,
+        },
+      ],
+      prev_cursor: null,
+    },
+  });
 });
 
 test("hydration stops automatically once the tail entries are complete", async () => {
@@ -962,7 +839,6 @@ test("hydration stops automatically once the tail entries are complete", async (
     send(frameText) {
       const frame = JSON.parse(frameText);
       sentPayloads.push(frame.payload);
-      const before = frame.payload.request?.input?.before ?? null;
       setImmediate(async () => {
         await handleRemoteBrokerPayload({
           kind: "remote_action_result",
@@ -972,43 +848,17 @@ test("hydration stops automatically once the tail entries are complete", async (
           snapshot: {},
           thread_transcript: {
             thread_id: "thread-1",
-            entries:
-              before == null
-                ? [
-                    {
-                      entry_index: 0,
-                      item_id: "item-1",
-                      kind: "agent_text",
-                      status: "completed",
-                      turn_id: "turn-1",
-                      tool: null,
-                      part_count: 2,
-                      parts: [
-                        {
-                          part_index: 1,
-                          text: "world",
-                        },
-                      ],
-                    },
-                  ]
-                : [
-                    {
-                      entry_index: 0,
-                      item_id: "item-1",
-                      kind: "agent_text",
-                      status: "completed",
-                      turn_id: "turn-1",
-                      tool: null,
-                      part_count: 2,
-                      parts: [
-                        {
-                          part_index: 0,
-                          text: "hello ",
-                        },
-                      ],
-                    },
-                  ],
-            prev_cursor: before == null ? 1 : 0,
+            entries: [
+              {
+                item_id: "item-1",
+                kind: "agent_text",
+                text: "hello world",
+                status: "completed",
+                turn_id: "turn-1",
+                tool: null,
+              },
+            ],
+            prev_cursor: null,
           },
         });
       });
@@ -1064,8 +914,175 @@ test("hydration stops automatically once the tail entries are complete", async (
   await nextTick();
 
   assert.equal(state.session.transcript[0].text, "hello world");
-  assert.equal(state.transcriptHydrationStatus, "idle");
-  assert.equal(state.transcriptHydrationOlderCursor, 0);
+  assert.equal(state.transcriptHydrationStatus, "complete");
+  assert.equal(state.transcriptHydrationOlderCursor, null);
+  assert.deepEqual(
+    sentPayloads.map((payload) => payload.request?.type),
+    ["fetch_thread_transcript"]
+  );
+});
+
+test("maybeLoadOlderTranscriptHistory prepends older complete transcript pages", async () => {
+  activeBrowser || installBrowserStubs();
+
+  const sentPayloads = [];
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { handleRemoteBrokerPayload } = await import("./actions.js");
+  const {
+    applySessionSnapshot,
+    maybeLoadOlderTranscriptHistory,
+  } = await import("./session-ops.js");
+  const { setRemoteTranscriptElement } = await import("./ui-refs.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-1",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: null,
+    sessionClaimExpiresAt: null,
+  });
+  seedSocketState(state, {
+    socketConnected: true,
+    socketPeerId: "surface-peer-1",
+  });
+  state.pendingActions.clear();
+  seedTranscriptHydrationState(state);
+
+  let fetchCount = 0;
+  state.socket = {
+    readyState: 1,
+    send(frameText) {
+      const frame = JSON.parse(frameText);
+      sentPayloads.push(frame.payload);
+      setImmediate(async () => {
+        fetchCount += 1;
+        await handleRemoteBrokerPayload({
+          kind: "remote_action_result",
+          action_id: frame.payload.action_id,
+          action: "fetch_thread_transcript",
+          ok: true,
+          snapshot: {},
+          thread_transcript: fetchCount === 1
+            ? {
+                thread_id: "thread-1",
+                entries: [
+                  {
+                    item_id: "item-2",
+                    kind: "agent_text",
+                    text: "latest reply",
+                    status: "completed",
+                    turn_id: "turn-2",
+                    tool: null,
+                  },
+                  {
+                    item_id: "item-3",
+                    kind: "user_text",
+                    text: "thanks",
+                    status: "completed",
+                    turn_id: "turn-3",
+                    tool: null,
+                  },
+                ],
+                prev_cursor: 1,
+              }
+            : {
+                thread_id: "thread-1",
+                entries: [
+                  {
+                    item_id: "item-1",
+                    kind: "user_text",
+                    text: "older question",
+                    status: "completed",
+                    turn_id: "turn-1",
+                    tool: null,
+                  },
+                ],
+                prev_cursor: null,
+              },
+        });
+      });
+    },
+  };
+
+  setRemoteTranscriptElement({
+    scrollTop: 0,
+  });
+
+  applySessionSnapshot({
+    active_thread_id: "thread-1",
+    active_controller_device_id: null,
+    active_controller_last_seen_at: null,
+    active_flags: [],
+    active_turn_id: "turn-3",
+    allowed_roots: [],
+    approval_policy: "untrusted",
+    audit_enabled: false,
+    available_models: [],
+    broker_can_read_content: true,
+    broker_channel_id: "room-a",
+    broker_connected: true,
+    broker_peer_id: "relay-1",
+    codex_connected: true,
+    controller_lease_expires_at: null,
+    controller_lease_seconds: 15,
+    current_cwd: "/tmp/project",
+    current_status: "idle",
+    device_records: [],
+    e2ee_enabled: false,
+    logs: [],
+    model: "gpt-5.4",
+    paired_devices: [],
+    pending_approvals: [],
+    pending_pairing_requests: [],
+    provider: "codex",
+    reasoning_effort: "medium",
+    sandbox: "workspace-write",
+    security_mode: "managed",
+    service_ready: true,
+    transcript_truncated: true,
+    transcript: [
+      {
+        item_id: "item-2",
+        kind: "agent_text",
+        text: "latest...",
+        status: "completed",
+        turn_id: "turn-2",
+        tool: null,
+      },
+      {
+        item_id: "item-3",
+        kind: "user_text",
+        text: "thanks",
+        status: "completed",
+        turn_id: "turn-3",
+        tool: null,
+      },
+    ],
+  });
+
+  await waitFor(() => state.transcriptHydrationTailReady === true);
+  await waitFor(() => state.transcriptHydrationOlderCursor === 1);
+  assert.equal(state.session.transcript_truncated, true);
+
+  await maybeLoadOlderTranscriptHistory();
+  await waitFor(() => state.transcriptHydrationOlderCursor === null);
+
+  assert.deepEqual(
+    state.session.transcript.map((entry) => entry.item_id),
+    ["item-1", "item-2", "item-3"]
+  );
+  assert.equal(state.session.transcript[0].text, "older question");
+  assert.equal(state.session.transcript_truncated, false);
   assert.deepEqual(
     sentPayloads.map((payload) => payload.request?.input?.before ?? null),
     [null, 1]

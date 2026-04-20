@@ -65,6 +65,7 @@ export function createClearedTranscriptHydrationPatch() {
   return {
     transcriptHydrationBaseSnapshot: null,
     transcriptHydrationEntries: new Map(),
+    transcriptHydrationOrder: [],
     transcriptHydrationLastFetchAt: 0,
     transcriptHydrationOlderCursor: null,
     transcriptHydrationPromise: null,

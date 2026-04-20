@@ -880,9 +880,7 @@ fn transcript_item_text(
 ) -> Option<String> {
     match item_type {
         "userMessage" => parse_user_text(Some(item)),
-        "agentMessage" => string_at(item, &["text"])
-            .or_else(|| parse_text_content(item))
-            .map(|text| truncate_owned(text, MAX_COMMAND_ENTRY_CHARS)),
+        "agentMessage" => string_at(item, &["text"]).or_else(|| parse_text_content(item)),
         "commandExecution" => Some(command_execution_text(item)),
         _ if is_reasoning_item_type(item_type) => string_at(item, &["text"])
             .or_else(|| parse_text_content(item))
@@ -906,6 +904,9 @@ fn command_execution_text(item: &Value) -> String {
 }
 
 fn build_tool_call_view(item: &Value, item_type: &str) -> ToolCallView {
+    let file_change_paths = (item_type == "fileChange")
+        .then(|| collect_file_change_paths(item))
+        .unwrap_or_default();
     let name = truncate_owned(
         string_at(item, &["name"])
             .or_else(|| string_at(item, &["toolName"]))
@@ -919,11 +920,20 @@ fn build_tool_call_view(item: &Value, item_type: &str) -> ToolCallView {
             .or_else(|| string_at(item, &["summary"]))
             .or_else(|| string_at(item, &["text"]))
             .or_else(|| parse_text_content(item))
+            .or_else(|| {
+                (item_type == "fileChange" && !file_change_paths.is_empty())
+                    .then(|| summarize_file_change(&file_change_paths))
+            })
             .unwrap_or_else(|| format!("{name} call")),
         MAX_TOOL_SUMMARY_CHARS,
     );
     let detail = string_at(item, &["description"])
         .or_else(|| string_at(item, &["detail"]))
+        .or_else(|| {
+            (item_type == "fileChange")
+                .then(|| file_change_detail(&file_change_paths))
+                .flatten()
+        })
         .map(|value| truncate_owned(value, MAX_TOOL_SUMMARY_CHARS));
 
     ToolCallView {
@@ -932,11 +942,19 @@ fn build_tool_call_view(item: &Value, item_type: &str) -> ToolCallView {
         title,
         detail,
         query: preview_string_field(item, "query"),
-        path: preview_string_field(item, "path"),
+        path: preview_string_field(item, "path").or_else(|| {
+            (file_change_paths.len() == 1)
+                .then(|| truncate_owned(file_change_paths[0].clone(), MAX_TOOL_FIELD_CHARS))
+        }),
         url: preview_string_field(item, "url"),
         command: preview_string_field(item, "command"),
         input_preview: preview_json_field(item, "input")
-            .or_else(|| preview_json_field(item, "arguments")),
+            .or_else(|| preview_json_field(item, "arguments"))
+            .or_else(|| {
+                (item_type == "fileChange")
+                    .then(|| file_change_paths_preview(&file_change_paths))
+                    .flatten()
+            }),
         result_preview: preview_json_field(item, "result")
             .or_else(|| preview_json_field(item, "output")),
     }
@@ -1108,6 +1126,17 @@ fn file_change_context_preview(params: &Value, paths: &[String]) -> Option<Strin
         request_preview.map(|value| format!("Request:\n{value}")),
     )
     .map(|value| truncate_owned(value, MAX_APPROVAL_CONTEXT_CHARS))
+}
+
+fn file_change_paths_preview(paths: &[String]) -> Option<String> {
+    if paths.is_empty() {
+        return None;
+    }
+
+    Some(truncate_owned(
+        format!("Files:\n{}", paths.join("\n")),
+        MAX_TOOL_JSON_CHARS,
+    ))
 }
 
 fn filtered_json_preview(
@@ -1288,6 +1317,7 @@ fn fallback_item_type_label(item_type: &str) -> String {
         "mcpToolCall" => "MCP tool call".to_string(),
         "webSearch" => "Web search".to_string(),
         "fileSearch" => "File search".to_string(),
+        "fileChange" => "File change".to_string(),
         _ => item_type.to_string(),
     }
 }

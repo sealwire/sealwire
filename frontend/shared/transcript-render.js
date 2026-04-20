@@ -11,6 +11,63 @@ function shortId(value) {
   return value ? String(value).slice(0, 8) : "unknown";
 }
 
+const COLLAPSIBLE_CHAR_THRESHOLD = 900;
+const COLLAPSIBLE_LINE_THRESHOLD = 12;
+
+function isCollapsible(value) {
+  if (!value) {
+    return false;
+  }
+  const text = String(value);
+  return (
+    text.length > COLLAPSIBLE_CHAR_THRESHOLD
+    || text.split("\n").length > COLLAPSIBLE_LINE_THRESHOLD
+  );
+}
+
+function previewText(value) {
+  const text = String(value);
+  const lines = text.split("\n");
+  const previewByLines = lines.slice(0, COLLAPSIBLE_LINE_THRESHOLD).join("\n");
+  const preview = previewByLines.length > COLLAPSIBLE_CHAR_THRESHOLD
+    ? previewByLines.slice(0, COLLAPSIBLE_CHAR_THRESHOLD)
+    : previewByLines;
+  return preview === text ? preview : `${preview}\n…`;
+}
+
+function renderExpandableBlock({ className = "message-body", value, preformatted = false }) {
+  const escapedFull = escapeHtml(value || "(empty)");
+  if (!isCollapsible(value)) {
+    return preformatted
+      ? `<pre class="${className}">${escapedFull}</pre>`
+      : `<div class="${className}">${escapedFull}</div>`;
+  }
+
+  const escapedPreview = escapeHtml(previewText(value));
+  const summaryLabel = preformatted ? "Expand" : "Show more";
+  const collapseLabel = preformatted ? "Collapse" : "Show less";
+  const contentClass = preformatted ? `${className} collapsible-pre` : className;
+
+  return `
+    <details class="message-collapsible">
+      <summary class="message-collapsible-summary">
+        <span class="message-collapsible-label-closed">${summaryLabel}</span>
+        <span class="message-collapsible-label-open">${collapseLabel}</span>
+      </summary>
+      <div class="message-collapsible-preview">
+        ${preformatted
+          ? `<pre class="${contentClass}">${escapedPreview}</pre>`
+          : `<div class="${contentClass}">${escapedPreview}</div>`}
+      </div>
+      <div class="message-collapsible-full">
+        ${preformatted
+          ? `<pre class="${contentClass}">${escapedFull}</pre>`
+          : `<div class="${contentClass}">${escapedFull}</div>`}
+      </div>
+    </details>
+  `;
+}
+
 function renderUserEntry(entry) {
   return `
     <article class="chat-message chat-message-user">
@@ -49,7 +106,11 @@ function renderCommandEntry(entry) {
           <strong>Command</strong>
           <span>${escapeHtml(entry.status || "completed")}</span>
         </div>
-        <pre class="message-pre">${escapeHtml(entry.text || "(empty)")}</pre>
+        ${renderExpandableBlock({
+          className: "message-pre",
+          value: entry.text || "(empty)",
+          preformatted: true,
+        })}
       </div>
     </article>
   `;
@@ -90,7 +151,11 @@ function renderToolPreviewBlock(label, value) {
   return `
     <div class="tool-preview-block">
       <div class="tool-preview-label">${escapeHtml(label)}</div>
-      <pre class="message-pre">${escapeHtml(value)}</pre>
+      ${renderExpandableBlock({
+        className: "message-pre",
+        value,
+        preformatted: true,
+      })}
     </div>
   `;
 }
@@ -170,11 +235,27 @@ export function renderApprovalCard(approval) {
         <h3 class="approval-title">${escapeHtml(approval.summary)}</h3>
         <p class="approval-copy">${escapeHtml(approval.detail || "Codex is waiting for a remote approval.")}</p>
         ${approval.cwd ? `<p class="approval-copy">cwd: ${escapeHtml(approval.cwd)}</p>` : ""}
-        ${approval.command ? `<pre class="message-pre">${escapeHtml(approval.command)}</pre>` : ""}
-        ${approval.context_preview ? `<pre class="message-pre">${escapeHtml(approval.context_preview)}</pre>` : ""}
+        ${approval.command
+          ? renderExpandableBlock({
+            className: "message-pre",
+            value: approval.command,
+            preformatted: true,
+          })
+          : ""}
+        ${approval.context_preview
+          ? renderExpandableBlock({
+            className: "message-pre",
+            value: approval.context_preview,
+            preformatted: true,
+          })
+          : ""}
         ${
           approval.requested_permissions
-            ? `<pre class="message-pre">${escapeHtml(JSON.stringify(approval.requested_permissions, null, 2))}</pre>`
+            ? renderExpandableBlock({
+              className: "message-pre",
+              value: JSON.stringify(approval.requested_permissions, null, 2),
+              preformatted: true,
+            })
             : ""
         }
         <div class="approval-actions">

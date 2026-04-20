@@ -279,7 +279,8 @@ async function handleEncryptedRemoteActionResult(payload) {
 
 function handleRemoteActionResult(actionId, result) {
   settlePendingAction(actionId, result);
-  const isTranscriptFetch = result.action === "fetch_thread_transcript";
+  const isTranscriptFetch =
+    result.action === "fetch_thread_transcript" || result.action === "fetch_thread_entries";
 
   try {
     if (result.session_claim && state.remoteAuth) {
@@ -287,7 +288,10 @@ function handleRemoteActionResult(actionId, result) {
       scheduleClaimRefresh();
     }
 
-    if (result.snapshot && !isTranscriptFetch) {
+    if (isTranscriptFetch) {
+      return;
+    }
+    if (result.snapshot) {
       const message = `[scroll-source] kind=remote_action_result action=${result.action || "-"} entries=${result.snapshot?.transcript?.length || 0} truncated=${result.snapshot?.transcript_truncated ? "1" : "0"} has_truncated=${Object.prototype.hasOwnProperty.call(result.snapshot || {}, "transcript_truncated") ? "1" : "0"} thread=${result.snapshot?.active_thread_id || "-"} status=${result.snapshot?.current_status || "-"}`;
       renderLog(message);
       console.log(message);
@@ -302,9 +306,6 @@ function handleRemoteActionResult(actionId, result) {
   }
 
   if (result.ok) {
-    if (isTranscriptFetch) {
-      return;
-    }
     if (result.action === "claim_challenge") {
       return;
     }

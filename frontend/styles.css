@@ -1576,6 +1576,71 @@ input:focus, textarea:focus, select:focus {
   word-break: break-word;
   border: 1px solid var(--border-subtle);
 }
+.message-collapsible {
+  display: grid;
+  gap: 8px;
+}
+
+.message-collapsible-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent-primary);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.message-collapsible-summary:hover {
+  color: var(--accent-hover);
+}
+
+.message-collapsible-summary::-webkit-details-marker {
+  display: none;
+}
+
+.message-collapsible-summary::before {
+  content: "▸";
+  font-size: 11px;
+  transition: transform 120ms ease;
+}
+
+.message-collapsible[open] > .message-collapsible-summary::before {
+  transform: rotate(90deg);
+}
+
+.message-collapsible-label-open,
+.message-collapsible[open] > .message-collapsible-summary .message-collapsible-label-closed,
+.message-collapsible[open] > .message-collapsible-preview {
+  display: none;
+}
+
+.message-collapsible[open] > .message-collapsible-summary .message-collapsible-label-open,
+.message-collapsible-full {
+  display: block;
+}
+
+.message-collapsible-preview,
+.message-collapsible-full {
+  min-width: 0;
+}
+
+.message-collapsible-full .message-pre,
+.message-collapsible-preview .message-pre {
+  margin: 0;
+}
+
+.collapsible-pre {
+  max-height: 320px;
+  overflow: auto;
+}
 
 /* MODAL */
 .panel-modal,

@@ -24,8 +24,8 @@ use url::Url;
 
 use crate::{
     protocol::{
-        ApprovalReceipt, PairedDeviceView, SessionSnapshot, ThreadTranscriptResponse,
-        ThreadsResponse,
+        ApprovalReceipt, PairedDeviceView, SessionSnapshot, ThreadEntriesResponse,
+        ThreadTranscriptResponse, ThreadsResponse,
     },
     state::{AppState, BrokerPendingMessage},
 };
@@ -183,6 +183,7 @@ enum OutboundBrokerPayload {
         snapshot: SessionSnapshot,
         receipt: Option<ApprovalReceipt>,
         threads: Option<ThreadsResponse>,
+        thread_entries: Option<ThreadEntriesResponse>,
         thread_transcript: Option<ThreadTranscriptResponse>,
         session_claim: Option<String>,
         session_claim_expires_at: Option<u64>,
@@ -1059,16 +1060,16 @@ fn parse_inbound_payload(payload: Value) -> Result<Option<InboundBrokerPayload>,
 }
 
 fn summarize_thread_transcript_response(page: &ThreadTranscriptResponse) -> String {
-    let part_count = page
+    let char_count = page
         .entries
         .iter()
-        .map(|entry| entry.parts.len())
+        .map(|entry| entry.text.as_deref().map(str::len).unwrap_or(0))
         .sum::<usize>();
     format!(
-        "thread_id={} entries={} parts={} next_cursor={} prev_cursor={}",
+        "thread_id={} entries={} chars={} next_cursor={} prev_cursor={}",
         page.thread_id,
         page.entries.len(),
-        part_count,
+        char_count,
         page.next_cursor
             .map(|cursor| cursor.to_string())
             .unwrap_or_else(|| "-".to_string()),
