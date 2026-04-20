@@ -50,7 +50,6 @@ import {
   createResetRemoteSurfaceStatePatch,
 } from "./surface-state.js";
 import { mountRemoteApp } from "./react-app.js";
-import { setSessionPanelOpen } from "./store-actions.js";
 
 initializeRemoteNavigation();
 
@@ -58,11 +57,11 @@ mountRemoteApp({
   onRefreshRelayDirectory() {
     void refreshRelayDirectoryFromUi();
   },
-  onRefreshThreads() {
-    void refreshRemoteThreads("manual refresh");
+  onRefreshThreads(filterValue, { reason = "manual refresh", silent = false } = {}) {
+    return refreshRemoteThreads(reason, { filterValue, silent });
   },
-  onResumeThread(threadId) {
-    void resumeRemoteSession(threadId);
+  onResumeThread(threadId, sessionDraft) {
+    return resumeRemoteSession(threadId, sessionDraft);
   },
   onReturnHome() {
     returnToRelayHome();
@@ -70,17 +69,17 @@ mountRemoteApp({
   onSelectRelay(relayId) {
     void switchRelay(relayId);
   },
-  onBeginPairing(rawValue) {
-    void beginPairing(rawValue);
+  onBeginPairing(rawValue, deviceLabel) {
+    return beginPairing(rawValue, { deviceLabel });
   },
   onForgetDevice() {
     forgetCurrentDevice();
   },
-  onSendMessage() {
-    void sendMessage();
+  onSendMessage(messageDraft, effort) {
+    return sendMessage(messageDraft, effort);
   },
-  onStartSession() {
-    void startRemoteSession();
+  onStartSession(sessionDraft) {
+    return startRemoteSession(sessionDraft);
   },
   onSubmitDecision(decision, scope) {
     void submitDecision(decision, scope);
@@ -150,7 +149,6 @@ async function boot() {
   }
   void registerRemotePwa();
 
-  setSessionPanelOpen(false);
   const pairingQuery = applyPairingQuery();
 
   if (pairingQuery) {
@@ -284,7 +282,6 @@ function returnToRelayHome() {
   clearActiveRelaySelection();
   closeBrokerSocket();
   openRemoteNavigation();
-  setSessionPanelOpen(false);
   renderLog("Returned to relay directory.");
 }
 

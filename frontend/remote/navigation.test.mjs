@@ -2,11 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 function installBrowserStubs() {
-  const mediaQuery = {
-    matches: false,
-    addEventListener() {},
-    removeEventListener() {},
-  };
+  const mediaQueries = [];
+  let activeMediaQuery = createMediaQuery();
 
   globalThis.document = {
     body: {
@@ -26,11 +23,35 @@ function installBrowserStubs() {
       setItem() {},
     },
     matchMedia() {
-      return mediaQuery;
+      return activeMediaQuery;
     },
   };
 
-  return { mediaQuery };
+  return {
+    get mediaQuery() {
+      return activeMediaQuery;
+    },
+    replaceMediaQuery(next = {}) {
+      activeMediaQuery = createMediaQuery(next);
+      mediaQueries.push(activeMediaQuery);
+      return activeMediaQuery;
+    },
+  };
+}
+
+function createMediaQuery(overrides = {}) {
+  return {
+    matches: false,
+    addCalls: 0,
+    removeCalls: 0,
+    addEventListener() {
+      this.addCalls += 1;
+    },
+    removeEventListener() {
+      this.removeCalls += 1;
+    },
+    ...overrides,
+  };
 }
 
 const browser = installBrowserStubs();
@@ -73,5 +94,24 @@ test("desktop layout keeps the sidebar open", { concurrency: false }, async () =
   assert.equal(state.remoteNavOpen, true);
 
   navigation.closeRemoteNavigation();
+  assert.equal(state.remoteNavOpen, true);
+});
+
+test("re-initializing remote navigation replaces the previous viewport listener", { concurrency: false }, async () => {
+  resetNavigationState();
+  const firstMediaQuery = browser.replaceMediaQuery({ matches: true });
+
+  navigation.initializeRemoteNavigation();
+
+  assert.equal(firstMediaQuery.addCalls, 1);
+  assert.equal(firstMediaQuery.removeCalls, 0);
+
+  const secondMediaQuery = browser.replaceMediaQuery({ matches: false });
+
+  navigation.initializeRemoteNavigation();
+
+  assert.equal(firstMediaQuery.removeCalls, 1);
+  assert.equal(secondMediaQuery.addCalls, 1);
+  assert.equal(state.remoteNavMode, "desktop");
   assert.equal(state.remoteNavOpen, true);
 });

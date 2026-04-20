@@ -823,7 +823,7 @@ test("startRemoteSession re-enables the start button when the relay does not rep
     socketPeerId: "surface-peer-1",
   });
   state.pendingActions.clear();
-  state.sessionDraft = {
+  const sessionDraft = {
     approvalPolicy: "on-request",
     cwd: "/tmp/demo",
     effort: "medium",
@@ -836,13 +836,10 @@ test("startRemoteSession re-enables the start button when the relay does not rep
     send() {},
   };
 
-  const pending = startRemoteSession();
-  assert.equal(state.sessionStartPending, true);
+  const pending = startRemoteSession(sessionDraft);
 
   browser.runTimers();
-  await pending;
-
-  assert.equal(state.sessionStartPending, false);
+  assert.equal(await pending, false);
 });
 
 test("refreshRemoteThreads clears loading state and records an error when the relay does not reply", async () => {
@@ -873,23 +870,19 @@ test("refreshRemoteThreads clears loading state and records an error when the re
   });
   state.pendingActions.clear();
   state.threads = [];
-  state.threadsError = null;
-  state.threadsFilterValue = "/tmp/demo";
   state.socket = {
     readyState: 1,
     send() {},
   };
 
-  const pending = refreshRemoteThreads("unit-test refresh").catch((error) => error);
-  assert.equal(state.threadsRefreshPending, true);
-  assert.equal(state.threadsError, null);
+  const pending = refreshRemoteThreads("unit-test refresh", {
+    filterValue: "/tmp/demo",
+  }).catch((error) => error);
 
   browser.runTimers();
   const result = await pending;
 
   assert.match(result.message, /timed out/i);
-  assert.equal(state.threadsRefreshPending, false);
-  assert.match(state.threadsError, /timed out/i);
 });
 
 test("sendMessage clears pending state when the relay does not reply", async () => {
@@ -919,9 +912,6 @@ test("sendMessage clears pending state when the relay does not reply", async () 
     socketPeerId: "surface-peer-1",
   });
   state.pendingActions.clear();
-  state.composerDraft = "hello remote";
-  state.composerEffort = "medium";
-  state.sendPending = false;
   state.socket = {
     readyState: 1,
     send() {
@@ -929,10 +919,7 @@ test("sendMessage clears pending state when the relay does not reply", async () 
     },
   };
 
-  const pending = sendMessage();
-  assert.equal(state.sendPending, true);
+  const pending = sendMessage("hello remote", "medium");
 
-  await pending;
-
-  assert.equal(state.sendPending, false);
+  assert.equal(await pending, false);
 });

@@ -1,6 +1,7 @@
 import React, {
   useEffect,
   useLayoutEffect,
+  useReducer,
   useRef,
   useState,
   useSyncExternalStore,
@@ -20,20 +21,13 @@ import {
   toggleRemoteNavigation,
 } from "./navigation.js";
 import {
+  createInitialRemoteUiState,
+  reduceRemoteUiState,
+} from "./remote-ui-state.js";
+import {
   readRemoteStateSnapshot,
   subscribeRemoteState,
 } from "./state.js";
-import {
-  setComposerDraft,
-  setComposerEffort,
-  setDeviceLabelDraft,
-  setPairingInputValue,
-  setPairingModalOpen,
-  setRemoteInfoModalOpen,
-  setSessionPanelOpen,
-  setThreadsFilterValue,
-  updateSessionDraftField,
-} from "./store-actions.js";
 import {
   selectEmptyStateRenderModel,
   selectRelayDirectoryRenderModel,
@@ -44,10 +38,12 @@ import {
   applyRemoteSurfacePatch,
   createTranscriptScrollModePatch,
 } from "./surface-state.js";
+import { sendHeartbeat } from "./session-ops.js";
 import {
   computeTranscriptScrollPosition,
   deriveTranscriptScrollMode,
 } from "./transcript-scroll.js";
+import { useRemoteSessionRuntime } from "./use-remote-session-runtime.js";
 import {
   Composer,
   ControlBanner,
@@ -112,6 +108,11 @@ function RemoteApp({
   const previousSessionRef = useRef(null);
   const remoteCwdInputRef = useRef(null);
   const [collapsedGroupCwds, setCollapsedGroupCwds] = useState(() => new Set());
+  const [uiState, dispatchUi] = useReducer(
+    reduceRemoteUiState,
+    undefined,
+    createInitialRemoteUiState
+  );
 
   const session = currentState.session;
   const previousSession = previousSessionRef.current;
@@ -126,12 +127,12 @@ function RemoteApp({
     : null;
   const sessionRuntime = sessionView
     ? deriveSessionRuntime({
-        composerDraft: currentState.composerDraft,
-        composerEffort: currentState.composerEffort,
-        sendPending: currentState.sendPending,
+        composerDraft: uiState.composerDraft,
+        composerEffort: uiState.composerEffort,
+        sendPending: uiState.sendPending,
         session,
         sessionView,
-        threadsFilterValue: currentState.threadsFilterValue,
+        threadsFilterValue: uiState.threadsFilterValue,
       })
     : null;
   const emptyStateModel = selectEmptyStateRenderModel({
@@ -146,9 +147,9 @@ function RemoteApp({
   });
   const threadsModel = selectThreadsRenderModel({
     activeThreadId: session?.active_thread_id || null,
-    error: currentState.threadsError,
-    filterValue: currentState.threadsFilterValue,
-    loading: currentState.threadsRefreshPending,
+    error: uiState.threadsError,
+    filterValue: uiState.threadsFilterValue,
+    loading: uiState.threadsRefreshPending,
     relayDirectory: currentState.relayDirectory,
     remoteAuth: currentState.remoteAuth,
     session,
@@ -171,27 +172,27 @@ function RemoteApp({
     : resetChromeModel.controlBanner;
   const sessionToggleLabel = !hasRelay
     ? "Select a relay first"
-    : currentState.sessionPanelOpen
+    : uiState.sessionPanelOpen
       ? "Close Remote Session Setup"
       : "Start Remote Session";
   const sessionPanelModel = {
-    fields: currentState.sessionDraft,
+    fields: uiState.sessionDraft,
     hasRemoteAuth: hasRelay,
     hasUsableRelay,
     models: session?.available_models?.length
       ? session.available_models
       : [
           {
-            display_name: currentState.sessionDraft.model,
-            model: currentState.sessionDraft.model,
+            display_name: uiState.sessionDraft.model,
+            model: uiState.sessionDraft.model,
           },
         ],
-    startPending: currentState.sessionStartPending,
+    startPending: uiState.sessionStartPending,
   };
   const composerModel = sessionRuntime || {
     composerDisabled: true,
-    currentDraft: currentState.composerDraft,
-    currentEffortValue: currentState.composerEffort,
+    currentDraft: uiState.composerDraft,
+    currentEffortValue: uiState.composerEffort,
     messagePlaceholder: !hasRelay
       ? currentState.relayDirectory?.length
         ? "Open a relay before sending messages."
@@ -199,7 +200,7 @@ function RemoteApp({
       : hasUsableRelay
         ? "Start or resume a remote session first."
         : "Local credentials are unavailable. Pair this relay again in this browser.",
-    sendPending: currentState.sendPending,
+    sendPending: uiState.sendPending,
   };
 
   useLayoutEffect(() => {
@@ -214,6 +215,122 @@ function RemoteApp({
   useEffect(() => {
     previousSessionRef.current = session || null;
   }, [session]);
+
+  useEffect(() => {
+    dispatchUi({
+      type: "threads/clearError",
+    });
+  }, [currentState.remoteAuth?.relayId, currentState.threads]);
+
+  useRemoteSessionRuntime({
+    remoteAuth: currentState.remoteAuth,
+    sendHeartbeat,
+    session,
+  });
+
+  async function runThreadRefresh(reason, { filterValue, silent = false } = {}) {
+    let completed = false;
+    if (!silent) {
+      dispatchUi({
+        type: "threads/startRefresh",
+      });
+    }
+
+    try {
+      await onRefreshThreads(filterValue, { reason, silent });
+      completed = true;
+    } catch (error) {
+      if (!silent) {
+        dispatchUi({
+          type: "threads/failRefresh",
+          message: error.message,
+        });
+      }
+      throw error;
+    } finally {
+      if (!silent && completed) {
+        dispatchUi({
+          type: "threads/finishRefresh",
+        });
+      }
+    }
+  }
+
+  async function handleStartSession() {
+    dispatchUi({
+      type: "session/setStartPending",
+      value: true,
+    });
+    try {
+      const started = await onStartSession(uiState.sessionDraft);
+      if (started) {
+        closeRemoteNavigation();
+        dispatchUi({
+          type: "session/setPanelOpen",
+          open: false,
+        });
+        await runThreadRefresh("post-start refresh", {
+          filterValue: uiState.threadsFilterValue,
+          silent: true,
+        });
+      }
+      return started;
+    } finally {
+      dispatchUi({
+        type: "session/setStartPending",
+        value: false,
+      });
+    }
+  }
+
+  async function handleResumeThread(threadId) {
+    closeRemoteNavigation();
+    if (threadId === session?.active_thread_id) {
+      return;
+    }
+    const resumed = await onResumeThread(threadId, uiState.sessionDraft);
+    if (resumed) {
+      await runThreadRefresh("post-resume refresh", {
+        filterValue: uiState.threadsFilterValue,
+        silent: true,
+      });
+    }
+  }
+
+  async function handleSendMessage() {
+    dispatchUi({
+      type: "send/setPending",
+      value: true,
+    });
+    try {
+      const sent = await onSendMessage(uiState.composerDraft, uiState.composerEffort);
+      if (sent) {
+        dispatchUi({
+          type: "composer/clearDraft",
+        });
+      }
+      return sent;
+    } finally {
+      dispatchUi({
+        type: "send/setPending",
+        value: false,
+      });
+    }
+  }
+
+  async function handleBeginPairing(rawValue) {
+    const started = await onBeginPairing(rawValue, uiState.deviceLabelDraft);
+    if (started) {
+      dispatchUi({
+        type: "pairing/setModalOpen",
+        open: false,
+      });
+      dispatchUi({
+        type: "pairing/resetInput",
+      });
+    }
+    return started;
+  }
 
   return h(
     React.Fragment,
@@ -232,23 +349,24 @@ function RemoteApp({
         hasRelay,
         hasUsableRelay,
         onOpenPairing() {
-          setPairingModalOpen(true);
+          dispatchUi({
+            type: "pairing/setModalOpen",
+            open: true,
+          });
         },
         onRefreshRelayDirectory,
-        onRefreshThreads,
-        onResumeThread(threadId) {
-          closeRemoteNavigation();
-          if (threadId === session?.active_thread_id) {
-            return;
-          }
-          void onResumeThread(threadId);
+        onRefreshThreads(filterValue) {
+          void runThreadRefresh("manual refresh", {
+            filterValue,
+          });
         },
+        onResumeThread: handleResumeThread,
         onSelectRelay(relayId) {
           closeRemoteNavigation();
           void onSelectRelay(relayId);
         },
         onStartSession() {
-          void onStartSession();
+          void handleStartSession();
         },
         onToggleGroup(cwd) {
           setCollapsedGroupCwds((previous) => {
@@ -264,9 +382,32 @@ function RemoteApp({
         relayDirectoryModel,
         remoteCwdInputRef,
         sessionPanelModel,
+        sessionPanelOpen: uiState.sessionPanelOpen,
         sessionToggleLabel,
         threadsFilterHint: sessionRuntime?.threadsFilterHint || null,
+        threadsFilterValue: uiState.threadsFilterValue,
         threadsModel,
+        updateSessionDraft(nextPatch) {
+          for (const [field, value] of Object.entries(nextPatch)) {
+            dispatchUi({
+              type: "session/setDraftField",
+              field,
+              value,
+            });
+          }
+        },
+        setSessionPanelOpenLocal(open) {
+          dispatchUi({
+            type: "session/setPanelOpen",
+            open,
+          });
+        },
+        setThreadsFilterValueLocal(value) {
+          dispatchUi({
+            type: "threads/setFilterValue",
+            value,
+          });
+        },
       }),
       h("div", {
         className: "remote-nav-backdrop",
@@ -288,7 +429,10 @@ function RemoteApp({
           deviceChromeModel,
           headerModel,
           onOpenInfo() {
-            setRemoteInfoModalOpen(true);
+            dispatchUi({
+              type: "remoteInfo/setOpen",
+              open: true,
+            });
           },
           onReturnHome() {
             void onReturnHome();
@@ -300,6 +444,20 @@ function RemoteApp({
         }),
         h(RemoteThreadPanel, {
           composerModel,
+          composerDraft: uiState.composerDraft,
+          composerEffort: uiState.composerEffort,
+          onComposerDraftChange(value) {
+            dispatchUi({
+              type: "composer/setDraft",
+              value,
+            });
+          },
+          onComposerEffortChange(value) {
+            dispatchUi({
+              type: "composer/setEffort",
+              value,
+            });
+          },
           controlBannerModel,
           currentState,
           emptyStateModel,
@@ -308,7 +466,7 @@ function RemoteApp({
             void onSelectRelay(relayId);
           },
           onSendMessage() {
-            void onSendMessage();
+            void handleSendMessage();
           },
           onSubmitDecision(decision, scope) {
             void onSubmitDecision(decision, scope);
@@ -326,27 +484,41 @@ function RemoteApp({
     ),
     h(PairingModal, {
       deviceChromeModel,
-      deviceLabel: currentState.deviceLabelDraft,
-      pairingInputValue: currentState.pairingInputValue,
-      pairingModalOpen: currentState.pairingModalOpen,
-      onBeginPairing,
+      deviceLabel: uiState.deviceLabelDraft,
+      pairingInputValue: uiState.pairingInputValue,
+      pairingModalOpen: uiState.pairingModalOpen,
+      onBeginPairing(rawValue) {
+        void handleBeginPairing(rawValue);
+      },
       onClose() {
-        setPairingModalOpen(false);
+        dispatchUi({
+          type: "pairing/setModalOpen",
+          open: false,
+        });
       },
       onDeviceLabelChange(value) {
-        setDeviceLabelDraft(value);
+        dispatchUi({
+          type: "pairing/setDeviceLabelDraft",
+          value,
+        });
       },
       onForgetDevice() {
         onForgetDevice();
       },
       onPairingInputChange(value) {
-        setPairingInputValue(value);
+        dispatchUi({
+          type: "pairing/setInputValue",
+          value,
+        });
       },
     }),
     h(RemoteInfoModal, {
-      open: currentState.remoteInfoModalOpen,
+      open: uiState.remoteInfoModalOpen,
       onClose() {
-        setRemoteInfoModalOpen(false);
+        dispatchUi({
+          type: "remoteInfo/setOpen",
+          open: false,
+        });
       },
       sessionMetaModel,
       sessionPath: headerModel.sessionPath || "No workspace path yet.",
@@ -369,9 +541,14 @@ function RemoteSidebar({
   relayDirectoryModel,
   remoteCwdInputRef,
   sessionPanelModel,
+  sessionPanelOpen,
   sessionToggleLabel,
   threadsFilterHint,
+  threadsFilterValue,
   threadsModel,
+  updateSessionDraft,
+  setSessionPanelOpenLocal,
+  setThreadsFilterValueLocal,
 }) {
   const navOpen = currentState.remoteNavMode !== "drawer" || currentState.remoteNavOpen;
 
@@ -404,12 +581,12 @@ function RemoteSidebar({
     h(
       "button",
       {
-        "aria-expanded": String(Boolean(hasUsableRelay && currentState.sessionPanelOpen)),
+        "aria-expanded": String(Boolean(hasUsableRelay && sessionPanelOpen)),
         className: "new-chat-button",
         disabled: !hasUsableRelay,
         id: "remote-session-toggle",
         onClick: () => {
-          setSessionPanelOpen(!currentState.sessionPanelOpen);
+          setSessionPanelOpenLocal(!sessionPanelOpen);
         },
         type: "button",
       },
@@ -448,14 +625,14 @@ function RemoteSidebar({
       "section",
       {
         className: "new-session-panel",
-        hidden: !(hasRelay && currentState.sessionPanelOpen),
+        hidden: !(hasRelay && sessionPanelOpen),
         id: "remote-session-panel",
       },
       h(SessionPanel, {
         cwdInputRef: remoteCwdInputRef,
         model: sessionPanelModel,
         onFieldChange(field, value) {
-          updateSessionDraftField(field, value);
+          updateSessionDraft({ [field]: value });
         },
         onStartSession,
       })
@@ -480,9 +657,9 @@ function RemoteSidebar({
           "button",
           {
             className: "sidebar-link-button",
-            disabled: currentState.threadsRefreshPending || !hasUsableRelay,
+            disabled: threadsModel.loading || !hasUsableRelay,
             id: "remote-threads-refresh-button",
-            onClick: onRefreshThreads,
+            onClick: () => onRefreshThreads(threadsFilterValue),
             type: "button",
           },
           "Refresh"
@@ -500,12 +677,12 @@ function RemoteSidebar({
           disabled: !hasUsableRelay,
           id: "remote-threads-cwd-input",
           onChange: (event) => {
-            setThreadsFilterValue(event.target.value);
+            setThreadsFilterValueLocal(event.target.value);
           },
           placeholder: threadsFilterHint?.placeholder || "Optional exact workspace path",
           title: threadsFilterHint?.title || "",
           type: "text",
-          value: currentState.threadsFilterValue,
+          value: threadsFilterValue,
         })
       ),
       h(
@@ -605,9 +782,13 @@ function RemoteHeader({
 
 function RemoteThreadPanel({
   composerModel,
+  composerDraft,
+  composerEffort,
   controlBannerModel,
   currentState,
   emptyStateModel,
+  onComposerDraftChange,
+  onComposerEffortChange,
   onSelectRelay,
   onSendMessage,
   onSubmitDecision,
@@ -655,10 +836,10 @@ function RemoteThreadPanel({
       h(Composer, {
         ...composerModel,
         onDraftChange(value) {
-          setComposerDraft(value);
+          onComposerDraftChange?.(value);
         },
         onEffortChange(value) {
-          setComposerEffort(value);
+          onComposerEffortChange?.(value);
         },
       })
     )

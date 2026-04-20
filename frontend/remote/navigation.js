@@ -8,6 +8,8 @@ const MOBILE_NAV_CLOSED_LABEL = "Open sidebar";
 let detachViewportListener = null;
 
 export function initializeRemoteNavigation() {
+  detachViewportListener?.();
+  detachViewportListener = null;
   syncRemoteNavigationForViewport();
   attachViewportListener();
 }

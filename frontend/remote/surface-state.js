@@ -8,7 +8,6 @@ export function createClearedRemoteSurfaceSessionStatePatch() {
   return {
     currentApprovalId: null,
     session: null,
-    threadsError: null,
     threads: [],
   };
 }
@@ -34,7 +33,6 @@ export function createResetRemoteSurfaceStatePatch({
 
 export function createRemoteThreadsPatch(threads) {
   return {
-    threadsError: null,
     threads,
   };
 }

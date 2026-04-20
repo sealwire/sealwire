@@ -1,5 +1,4 @@
 import { dispatchOrRecover, scheduleClaimRefresh } from "./actions.js";
-import { closeRemoteNavigation } from "./navigation.js";
 import {
   isCurrentDeviceActiveController,
   renderLog,
@@ -18,23 +17,9 @@ import { createTranscriptPageFetcher } from "./transcript/api.js";
 import { remoteUiRefs } from "./ui-refs.js";
 import {
   applyRemoteSurfacePatch,
+  createRemoteThreadsPatch,
   createTranscriptScrollModePatch,
 } from "./surface-state.js";
-import {
-  setSessionPanelOpen,
-  setSessionStartPending,
-  beginThreadsRefresh,
-  failThreadsRefresh,
-  finishThreadsRefresh,
-  clearComposerDraft,
-  setSendPending,
-  setThreads,
-} from "./store-actions.js";
-import {
-  clearSessionRuntimeEffects,
-  scheduleControllerHeartbeat,
-  syncSessionRuntimeEffects,
-} from "./session-runtime-effects.js";
 
 const fetchTranscriptPage = createTranscriptPageFetcher(dispatchOrRecover);
 
@@ -80,46 +65,45 @@ export async function syncRemoteSnapshot(reason, silent = false) {
   }
 }
 
-export async function startRemoteSession() {
-  const cwd = state.sessionDraft.cwd.trim();
+export async function startRemoteSession(sessionDraftOverride = null) {
+  const sessionDraft = sessionDraftOverride;
+  if (!sessionDraft) {
+    throw new Error("startRemoteSession requires a session draft");
+  }
+  const cwd = sessionDraft.cwd.trim();
   if (!cwd) {
     renderLog("Choose a workspace before starting a remote session.");
     remoteUiRefs.remoteCwdInput?.focus();
-    return;
+    return false;
   }
 
-  setSessionStartPending(true);
   renderLog(`Starting remote session in ${cwd}.`);
 
   try {
     await dispatchOrRecover("start_session", {
       input: {
         cwd,
-        initial_prompt: state.sessionDraft.initialPrompt.trim() || null,
-        model: state.sessionDraft.model.trim() || null,
-        approval_policy: state.sessionDraft.approvalPolicy,
-        sandbox: state.sessionDraft.sandbox,
-        effort: state.sessionDraft.effort,
+        initial_prompt: sessionDraft.initialPrompt.trim() || null,
+        model: sessionDraft.model.trim() || null,
+        approval_policy: sessionDraft.approvalPolicy,
+        sandbox: sessionDraft.sandbox,
+        effort: sessionDraft.effort,
       },
     });
-    closeRemoteNavigation();
-    setSessionPanelOpen(false);
-    await refreshRemoteThreads("post-start refresh", { silent: true });
+    return true;
   } catch (error) {
     renderLog(`Remote start failed: ${error.message}`);
-  } finally {
-    setSessionStartPending(false);
+    return false;
   }
 }
 
 export async function refreshRemoteThreads(reason, options = {}) {
-  const { silent = false } = options;
+  const { filterValue = "", silent = false } = options;
   if (!state.remoteAuth) {
-    setThreads([]);
+    applyRemoteSurfacePatch(createRemoteThreadsPatch([]));
     return;
   }
 
-  beginThreadsRefresh();
   if (!silent) {
     renderLog(`Fetching remote thread list (${reason}).`);
   }
@@ -127,24 +111,25 @@ export async function refreshRemoteThreads(reason, options = {}) {
   try {
     await dispatchOrRecover("list_threads", {
       query: {
-        cwd: state.threadsFilterValue.trim() || null,
+        cwd: filterValue.trim() || null,
         limit: 80,
       },
     });
   } catch (error) {
-    failThreadsRefresh(error.message);
     if (!silent) {
       renderLog(`Remote thread refresh failed: ${error.message}`);
     }
     throw error;
-  } finally {
-    finishThreadsRefresh();
   }
 }
 
-export async function resumeRemoteSession(threadId) {
+export async function resumeRemoteSession(threadId, sessionDraftOverride = null) {
   if (!threadId) {
     return;
+  }
+  const sessionDraft = sessionDraftOverride;
+  if (!sessionDraft) {
+    throw new Error("resumeRemoteSession requires a session draft");
   }
 
   renderLog(`Resuming remote thread ${threadId}.`);
@@ -153,38 +138,39 @@ export async function resumeRemoteSession(threadId) {
     await dispatchOrRecover("resume_session", {
       input: {
         thread_id: threadId,
-        approval_policy: state.sessionDraft.approvalPolicy,
-        sandbox: state.sessionDraft.sandbox,
-        effort: state.sessionDraft.effort,
+        approval_policy: sessionDraft.approvalPolicy,
+        sandbox: sessionDraft.sandbox,
+        effort: sessionDraft.effort,
       },
     });
-    await refreshRemoteThreads("post-resume refresh", { silent: true });
+    return true;
   } catch (error) {
     renderLog(`Remote resume failed: ${error.message}`);
+    return false;
   }
 }
 
-export async function sendMessage() {
-  const text = state.composerDraft.trim();
+export async function sendMessage(messageDraft, effort) {
+  if (typeof messageDraft !== "string" || typeof effort !== "string") {
+    throw new Error("sendMessage requires a draft and effort");
+  }
+  const text = messageDraft.trim();
   if (!text) {
     renderLog("Message is empty.");
-    return;
+    return false;
   }
-
-  setSendPending(true);
 
   try {
     await dispatchOrRecover("send_message", {
       input: {
         text,
-        effort: state.composerEffort,
+        effort,
       },
     });
-    clearComposerDraft();
+    return true;
   } catch (error) {
     renderLog(`Remote send failed: ${error.message}`);
-  } finally {
-    setSendPending(false);
+    return false;
   }
 }
 
@@ -218,7 +204,6 @@ export async function submitDecision(decision, scope) {
 }
 
 export function clearSessionRuntime() {
-  clearSessionRuntimeEffects();
   clearTranscriptHydration(state);
   applyRemoteSurfacePatch(createTranscriptScrollModePatch("follow-latest"));
 }
@@ -234,10 +219,6 @@ async function sendHeartbeat() {
     });
   } catch (error) {
     renderLog(`Remote heartbeat failed: ${error.message}`);
-  } finally {
-    if (state.session?.active_thread_id && isCurrentDeviceActiveController(state.session)) {
-      scheduleControllerHeartbeat(state.session, sendHeartbeat);
-    }
   }
 }
 
@@ -258,21 +239,10 @@ async function hydrateActiveTranscript(snapshot) {
 
 function applyRenderedSession(session, { hydrateTranscript = true } = {}) {
   renderSession(session);
-  syncSessionRuntimeEffects(session, {
-    onHeartbeat: sendHeartbeat,
-    onLeaseExpired() {
-      const next = {
-        ...state.session,
-        active_controller_device_id: null,
-        active_controller_last_seen_at: null,
-        controller_lease_expires_at: null,
-      };
-      applySessionSnapshot(next);
-      renderLog("Remote control lease expired locally. The next sender can reclaim control.");
-    },
-  });
   scheduleClaimRefresh();
   if (hydrateTranscript) {
     void hydrateActiveTranscript(session);
   }
 }
+
+export { sendHeartbeat };
