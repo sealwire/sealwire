@@ -205,6 +205,27 @@ function renderToolDetailRow(label, value) {
   `;
 }
 
+function normalizePreviewText(value) {
+  return String(value || "").trim();
+}
+
+function isRedundantFileChangePreview(tool, detail) {
+  const inputPreview = normalizePreviewText(tool.input_preview);
+  if (!inputPreview) {
+    return false;
+  }
+
+  if (inputPreview === normalizePreviewText(detail)) {
+    return true;
+  }
+
+  if (inputPreview.startsWith("Files:\n")) {
+    return true;
+  }
+
+  return false;
+}
+
 function renderToolPreviewBlock(label, value, options = null) {
   if (!value) {
     return "";
@@ -226,8 +247,12 @@ function renderToolPreviewBlock(label, value, options = null) {
 
 function renderToolEntry(entry, options = null) {
   const tool = entry.tool || {};
+  const isFileChange = tool.item_type === "fileChange";
   const title = tool.title || entry.text || tool.name || "Tool call";
   const detail = tool.detail && tool.detail !== title ? tool.detail : null;
+  const showTypeRow = !isFileChange;
+  const showPathRow = !isFileChange;
+  const showInputPreview = !isFileChange || !isRedundantFileChangePreview(tool, detail);
   const inputExpandKey = entry.item_id ? `tool:${entry.item_id}:input` : "";
   const resultExpandKey = entry.item_id ? `tool:${entry.item_id}:result` : "";
 
@@ -241,16 +266,16 @@ function renderToolEntry(entry, options = null) {
         <h3 class="tool-card-title">${escapeHtml(title)}</h3>
         ${detail ? `<p class="tool-card-detail">${escapeHtml(detail)}</p>` : ""}
         <div class="tool-details">
-          ${renderToolDetailRow("Type", tool.item_type)}
+          ${showTypeRow ? renderToolDetailRow("Type", tool.item_type) : ""}
           ${renderToolDetailRow("Query", tool.query)}
-          ${renderToolDetailRow("Path", tool.path)}
+          ${showPathRow ? renderToolDetailRow("Path", tool.path) : ""}
           ${renderToolDetailRow("URL", tool.url)}
           ${renderToolDetailRow("Command", tool.command)}
         </div>
-        ${renderToolPreviewBlock("Input", tool.input_preview, {
+        ${showInputPreview ? renderToolPreviewBlock("Input", tool.input_preview, {
           expandKey: inputExpandKey,
           expanded: Boolean(inputExpandKey && options?.expandedKeys?.has(inputExpandKey)),
-        })}
+        }) : ""}
         ${renderToolPreviewBlock("Result", tool.result_preview, {
           expandKey: resultExpandKey,
           expanded: Boolean(resultExpandKey && options?.expandedKeys?.has(resultExpandKey)),

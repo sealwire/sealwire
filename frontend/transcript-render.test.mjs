@@ -69,9 +69,9 @@ test("renderTranscriptEntry collapses long command and tool previews without col
     kind: "tool_call",
     status: "completed",
     tool: {
-      name: "File change",
-      title: "Codex wants to edit 20 files.",
-      item_type: "fileChange",
+      name: "Search",
+      title: "Search result payload",
+      item_type: "mcpToolCall",
       input_preview: `Files:\n${longToolInput}`,
     },
   });
@@ -91,6 +91,28 @@ test("renderTranscriptEntry collapses long command and tool previews without col
   assert.match(toolMarkup, /Files:\nfrontend\/file-1\.js/);
   assert.doesNotMatch(assistantMarkup, /message-collapsible/);
   assert.match(assistantMarkup, new RegExp(`A{1200}`));
+});
+
+test("renderTranscriptEntry avoids repeating file change metadata and path previews", () => {
+  const markup = renderTranscriptEntry({
+    item_id: "fc-1",
+    kind: "tool_call",
+    status: "completed",
+    tool: {
+      name: "File change",
+      title: "Codex wants to edit 2 files.",
+      detail: "Target files: crates/relay-server/src/protocol.rs, frontend/shared/transcript-render.js",
+      item_type: "fileChange",
+      path: "crates/relay-server/src/protocol.rs",
+      input_preview: "Files:\ncrates/relay-server/src/protocol.rs\nfrontend/shared/transcript-render.js",
+    },
+  });
+
+  assert.match(markup, /Codex wants to edit 2 files\./);
+  assert.match(markup, /Target files: crates\/relay-server\/src\/protocol\.rs, frontend\/shared\/transcript-render\.js/);
+  assert.doesNotMatch(markup, /tool-detail-label">Type</);
+  assert.doesNotMatch(markup, /tool-detail-label">Path</);
+  assert.doesNotMatch(markup, /tool-preview-label">Input</);
 });
 
 test("renderTranscriptEntry shows expanded command detail and loading note when requested", () => {
