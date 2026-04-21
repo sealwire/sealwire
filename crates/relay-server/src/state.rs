@@ -16,7 +16,8 @@ use self::relay::TranscriptRecord;
 pub(crate) use self::relay::{
     ApprovalKind, BrokerPendingMessage, CachedRemoteActionResult, ClaimChallenge,
     CompletedRemoteClaim, DeviceRecord, IssuedClaimChallenge, PairedDevice, PendingApproval,
-    PendingPairingResult, RelayState, RemoteActionReplayDecision,
+    PendingPairingResult, PendingTranscriptDelta, RelayState, RemoteActionReplayDecision,
+    TranscriptDeltaKind,
 };
 pub(crate) use self::security::SecurityProfile;
 

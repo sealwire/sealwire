@@ -33,7 +33,54 @@ const fetchTranscriptPage = createTranscriptPageFetcher(dispatchOrRecover);
 const fetchTranscriptEntryDetailRequest =
   createTranscriptEntryDetailFetcher(dispatchOrRecover);
 
+function transcriptDeltaKindToEntryKind(deltaKind) {
+  switch (deltaKind) {
+    case "command_output":
+      return "command";
+    case "agent_text":
+    default:
+      return "agent_text";
+  }
+}
+
+export function applyTranscriptDelta({ item_id, turn_id, delta, delta_kind, kind }) {
+  if (typeof window !== "undefined" && typeof window.__transcriptDeltaCount === "number") {
+    window.__transcriptDeltaCount++;
+  }
+  if (!state.session) return;
+
+  const transcript = state.session.transcript;
+  if (!Array.isArray(transcript)) return;
+  const resolvedKind = transcriptDeltaKindToEntryKind(delta_kind || kind);
+
+  const entry = transcript.find((e) => e.item_id === item_id);
+  if (entry) {
+    entry.text = `${entry.text ?? ""}${delta ?? ""}`;
+    entry.status = "running";
+    if (!entry.kind) {
+      entry.kind = resolvedKind;
+    }
+    if (!entry.turn_id && turn_id) {
+      entry.turn_id = turn_id;
+    }
+  } else {
+    transcript.push({
+      item_id,
+      turn_id: turn_id ?? null,
+      text: delta ?? "",
+      kind: resolvedKind,
+      status: "running",
+      tool: null,
+    });
+  }
+
+  renderSession(state.session);
+}
+
 export function applySessionSnapshot(snapshot) {
+  if (typeof window !== "undefined" && typeof window.__snapshotCount === "number") {
+    window.__snapshotCount++;
+  }
   syncLiveTranscriptEntryDetailsFromSnapshot(state, snapshot);
   const effectiveSnapshot = restoreHydratedTranscript(state, snapshot);
   applyRenderedSession(effectiveSnapshot, {

@@ -27,7 +27,7 @@ use crate::{
         ApprovalReceipt, PairedDeviceView, SessionSnapshot, ThreadEntriesResponse,
         ThreadEntryDetailResponse, ThreadTranscriptResponse, ThreadsResponse,
     },
-    state::{AppState, BrokerPendingMessage},
+    state::{AppState, BrokerPendingMessage, PendingTranscriptDelta, TranscriptDeltaKind},
 };
 
 use self::auth::{
@@ -174,6 +174,17 @@ enum InboundBrokerPayload {
 enum OutboundBrokerPayload {
     SessionSnapshot {
         snapshot: SessionSnapshot,
+    },
+    TranscriptDelta {
+        item_id: String,
+        turn_id: Option<String>,
+        delta: String,
+        delta_kind: String,
+    },
+    EncryptedTranscriptDelta {
+        target_peer_id: String,
+        device_id: String,
+        envelope: EncryptedEnvelope,
     },
     RemoteActionResult {
         action_id: String,
@@ -1119,6 +1130,17 @@ fn summarize_outbound_payload(payload: &OutboundBrokerPayload) -> String {
             "kind=encrypted_session_snapshot target_peer_id={} device_id={}",
             target_peer_id, device_id
         ),
+        OutboundBrokerPayload::TranscriptDelta { item_id, delta_kind, .. } => {
+            format!("kind=transcript_delta item_id={} delta_kind={}", item_id, delta_kind)
+        }
+        OutboundBrokerPayload::EncryptedTranscriptDelta {
+            target_peer_id,
+            device_id,
+            ..
+        } => format!(
+            "kind=encrypted_transcript_delta target_peer_id={} device_id={}",
+            target_peer_id, device_id
+        ),
         OutboundBrokerPayload::EncryptedRemoteActionResult {
             action_id,
             target_peer_id,
@@ -1201,13 +1223,77 @@ async fn publish_pending_broker_messages(
     sender: &mut futures_util::stream::SplitSink<BrokerSocket, Message>,
     state: &AppState,
 ) -> Result<(), String> {
-    for message in state.drain_pending_broker_messages().await {
+    const MAX_DELTAS_PER_DRAIN: usize = 50;
+    let messages = state.drain_pending_broker_messages().await;
+    let mut delta_count = 0;
+    let mut messages = messages.into_iter();
+    while let Some(message) = messages.next() {
         match message {
             BrokerPendingMessage::PairingResult(result) => {
                 publish_pairing_result(sender, result).await?;
             }
+            BrokerPendingMessage::TranscriptDelta(delta) => {
+                if delta_count >= MAX_DELTAS_PER_DRAIN {
+                    let mut remaining = vec![BrokerPendingMessage::TranscriptDelta(delta)];
+                    remaining.extend(messages);
+                    state.prepend_pending_broker_messages(remaining).await;
+                    break;
+                }
+                publish_transcript_delta(sender, state, delta).await?;
+                delta_count += 1;
+            }
         }
     }
+    Ok(())
+}
+
+async fn publish_transcript_delta(
+    sender: &mut futures_util::stream::SplitSink<BrokerSocket, Message>,
+    state: &AppState,
+    delta: PendingTranscriptDelta,
+) -> Result<(), String> {
+    let kind = match delta.kind {
+        TranscriptDeltaKind::AgentText => "agent_text",
+        TranscriptDeltaKind::CommandOutput => "command_output",
+    };
+
+    if state.broker_can_read_content().await {
+        publish_payload(
+            sender,
+            OutboundBrokerPayload::TranscriptDelta {
+                item_id: delta.item_id,
+                turn_id: delta.turn_id,
+                delta: delta.delta,
+                delta_kind: kind.to_string(),
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    } else {
+        let targets = state.broker_targets().await;
+        for target in targets {
+            let envelope = encrypt_json(
+                &target.payload_secret,
+                &serde_json::json!({
+                    "item_id": delta.item_id,
+                    "turn_id": delta.turn_id,
+                    "delta": delta.delta,
+                    "delta_kind": kind,
+                }),
+            )?;
+            publish_payload(
+                sender,
+                OutboundBrokerPayload::EncryptedTranscriptDelta {
+                    target_peer_id: target.peer_id,
+                    device_id: target.device_id,
+                    envelope,
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        }
+    }
+
     Ok(())
 }
 

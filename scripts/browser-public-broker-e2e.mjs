@@ -9,6 +9,7 @@ import { setTimeout as delay } from "node:timers/promises";
 
 import { chromium } from "playwright";
 import { deleteThreadsForCwdAndWait, fetchSession } from "./e2e-thread-cleanup.mjs";
+import { prepareSeededCodexHome } from "./e2e-codex-home.mjs";
 
 const ROOT = process.cwd();
 const TIMEOUT_MS = Number(process.env.BROWSER_E2E_TIMEOUT_MS || 60000);
@@ -43,7 +44,7 @@ async function main() {
   const relayStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-public-browser-e2e-"));
   const relayStatePath = path.join(relayStateDir, "session.json");
   const brokerStatePath = path.join(relayStateDir, "public-control.json");
-  const codexHomeDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-public-broker-codex-"));
+  const codexHomeDir = await prepareSeededCodexHome("agent-relay-public-broker-codex-");
   const workspaceDir = await fs.realpath(
     await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-public-workspace-"))
   );

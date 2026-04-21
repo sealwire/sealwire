@@ -23,7 +23,7 @@ pub use self::approval::{ApprovalKind, PendingApproval};
 pub(crate) use self::device::{
     BrokerPendingMessage, ClaimChallenge, CompletedPairing, CompletedRemoteClaim, DeviceRecord,
     IssuedClaimChallenge, PairedDevice, PendingPairing, PendingPairingRequest,
-    PendingPairingResult,
+    PendingPairingResult, PendingTranscriptDelta, TranscriptDeltaKind,
 };
 pub(crate) use self::transcript::TranscriptRecord;
 
@@ -457,6 +457,14 @@ impl RelayState {
 
     pub fn drain_pending_broker_messages(&mut self) -> Vec<BrokerPendingMessage> {
         std::mem::take(&mut self.pending_broker_messages)
+    }
+
+    pub fn prepend_pending_broker_messages(&mut self, mut messages: Vec<BrokerPendingMessage>) {
+        if messages.is_empty() {
+            return;
+        }
+        messages.append(&mut self.pending_broker_messages);
+        self.pending_broker_messages = messages;
     }
 
     pub fn can_device_send_message(&self, device_id: &str) -> bool {

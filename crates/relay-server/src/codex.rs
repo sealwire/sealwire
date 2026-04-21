@@ -23,7 +23,10 @@ use crate::{
         truncate_with_ellipsis, ApprovalDecisionInput, ModelOptionView, ThreadSummaryView,
         ToolCallView, TranscriptEntryKind, TranscriptEntryView,
     },
-    state::{ApprovalKind, PendingApproval, RelayState},
+    state::{
+        ApprovalKind, BrokerPendingMessage, PendingApproval, PendingTranscriptDelta, RelayState,
+        TranscriptDeltaKind,
+    },
 };
 
 #[cfg(test)]
@@ -652,6 +655,16 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
                 string_at(&params, &["delta"]),
             ) {
                 relay.append_agent_delta(&item_id, &delta, &turn_id);
+                relay
+                    .pending_broker_messages
+                    .push(BrokerPendingMessage::TranscriptDelta(
+                        PendingTranscriptDelta {
+                            item_id,
+                            turn_id: Some(turn_id),
+                            delta,
+                            kind: TranscriptDeltaKind::AgentText,
+                        },
+                    ));
                 changed = true;
             }
         }
@@ -757,6 +770,16 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
                     string_at(&params, &["itemId"]).or_else(|| string_at(&params, &["item", "id"]))
                 {
                     relay.append_command_delta(&item_id, &delta);
+                    relay
+                        .pending_broker_messages
+                        .push(BrokerPendingMessage::TranscriptDelta(
+                            PendingTranscriptDelta {
+                                item_id,
+                                turn_id: None,
+                                delta: delta.clone(),
+                                kind: TranscriptDeltaKind::CommandOutput,
+                            },
+                        ));
                 }
                 relay.push_log("command", delta);
                 changed = true;

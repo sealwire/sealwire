@@ -964,6 +964,14 @@ impl AppState {
         relay.drain_pending_broker_messages()
     }
 
+    pub(crate) async fn prepend_pending_broker_messages(
+        &self,
+        messages: Vec<super::BrokerPendingMessage>,
+    ) {
+        let mut relay = self.relay.write().await;
+        relay.prepend_pending_broker_messages(messages);
+    }
+
     pub(crate) async fn pending_pairing_secret(&self, pairing_id: &str) -> Result<String, String> {
         let mut relay = self.relay.write().await;
         relay.pending_pairing_secret(pairing_id, unix_now())

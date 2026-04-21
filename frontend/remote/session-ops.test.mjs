@@ -1216,3 +1216,34 @@ test("sendMessage clears pending state when the relay does not reply", async () 
 
   assert.equal(await pending, false);
 });
+
+test("applyTranscriptDelta updates existing transcript entries using text and status fields", async () => {
+  activeBrowser || installBrowserStubs();
+
+  const { state } = await import("./state.js");
+  const { applyTranscriptDelta } = await import("./session-ops.js");
+
+  state.session = {
+    transcript: [
+      {
+        item_id: "item-1",
+        kind: "agent_text",
+        status: "completed",
+        text: "Hello",
+        turn_id: "turn-1",
+        tool: null,
+      },
+    ],
+  };
+
+  applyTranscriptDelta({
+    item_id: "item-1",
+    turn_id: "turn-1",
+    delta: " world",
+    delta_kind: "agent_text",
+  });
+
+  assert.equal(state.session.transcript[0].text, "Hello world");
+  assert.equal(state.session.transcript[0].status, "running");
+  assert.equal(state.session.transcript[0].kind, "agent_text");
+});

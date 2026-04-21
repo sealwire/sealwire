@@ -27,14 +27,26 @@ const REMOTE_ACTION_TIMEOUT_MS = 15_000;
 
 let onApplySessionSnapshot = () => {};
 let onSyncRemoteSnapshot = async () => {};
+let onApplyTranscriptDelta = () => {};
 
 export function configureRemoteActions(handlers) {
   onApplySessionSnapshot = handlers.onApplySessionSnapshot || onApplySessionSnapshot;
   onSyncRemoteSnapshot = handlers.onSyncRemoteSnapshot || onSyncRemoteSnapshot;
+  onApplyTranscriptDelta = handlers.onApplyTranscriptDelta || onApplyTranscriptDelta;
 }
 
 export async function handleRemoteBrokerPayload(payload) {
   const kind = payload?.kind;
+
+  if (kind === "transcript_delta") {
+    onApplyTranscriptDelta(payload);
+    return;
+  }
+
+  if (kind === "encrypted_transcript_delta") {
+    await handleEncryptedTranscriptDelta(payload);
+    return;
+  }
 
   if (kind === "encrypted_session_snapshot") {
     await handleEncryptedSessionSnapshot(payload);
@@ -265,6 +277,18 @@ async function handleEncryptedSessionSnapshot(payload) {
   onApplySessionSnapshot(snapshot);
 }
 
+async function handleEncryptedTranscriptDelta(payload) {
+  if (
+    payload.target_peer_id !== state.socketPeerId ||
+    payload.device_id !== state.remoteAuth?.deviceId
+  ) {
+    return;
+  }
+
+  const delta = await decryptPayloadWithDeviceTokens(payload.envelope);
+  onApplyTranscriptDelta(delta);
+}
+
 async function handleEncryptedRemoteActionResult(payload) {
   if (
     payload.target_peer_id !== state.socketPeerId ||
@@ -293,7 +317,15 @@ function handleRemoteActionResult(actionId, result) {
     if (isTranscriptFetch) {
       return;
     }
-    if (result.snapshot) {
+
+    const isLiveDisruptingAction =
+      result.action === "heartbeat"
+      || result.action === "claim_challenge"
+      || result.action === "claim_device"
+      || result.action === "list_threads"
+      || result.action === "take_over";
+
+    if (result.snapshot && !isLiveDisruptingAction) {
       const message = `[scroll-source] kind=remote_action_result action=${result.action || "-"} entries=${result.snapshot?.transcript?.length || 0} truncated=${result.snapshot?.transcript_truncated ? "1" : "0"} has_truncated=${Object.prototype.hasOwnProperty.call(result.snapshot || {}, "transcript_truncated") ? "1" : "0"} thread=${result.snapshot?.active_thread_id || "-"} status=${result.snapshot?.current_status || "-"}`;
       renderLog(message);
       console.log(message);

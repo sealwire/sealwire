@@ -525,3 +525,123 @@ test("recoverRemoteSession only auto-claims when this device still controls the 
   assert.equal(state.remoteAuth.sessionClaim, null);
   assert.equal(state.recoverPromise, null);
 });
+
+test("handleRemoteBrokerPayload routes transcript_delta to onApplyTranscriptDelta", async () => {
+  installBrowserStubs();
+
+  const { configureRemoteActions, handleRemoteBrokerPayload } = await import("./actions.js");
+
+  const received = [];
+  configureRemoteActions({
+    onApplyTranscriptDelta: (delta) => received.push(delta),
+  });
+
+  await handleRemoteBrokerPayload({
+    kind: "transcript_delta",
+    item_id: "item-1",
+    turn_id: "turn-1",
+    delta: "Hello",
+    delta_kind: "agent_text",
+  });
+
+  assert.equal(received.length, 1);
+  assert.equal(received[0].item_id, "item-1");
+  assert.equal(received[0].delta, "Hello");
+  assert.equal(received[0].delta_kind, "agent_text");
+});
+
+test("handleRemoteBrokerPayload decrypts encrypted transcript deltas with delta_kind", async () => {
+  installBrowserStubs();
+
+  const { encryptJson } = await import("./crypto.js");
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { configureRemoteActions, handleRemoteBrokerPayload } = await import("./actions.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-1",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "private",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: null,
+    sessionClaimExpiresAt: null,
+  });
+  seedSocketState(state, {
+    socketPeerId: "surface-peer-1",
+  });
+
+  const received = [];
+  configureRemoteActions({
+    onApplyTranscriptDelta: (delta) => received.push(delta),
+  });
+
+  const envelope = await encryptJson("payload-secret-1", {
+    item_id: "item-9",
+    turn_id: "turn-9",
+    delta: "Hello",
+    delta_kind: "agent_text",
+  });
+
+  await handleRemoteBrokerPayload({
+    kind: "encrypted_transcript_delta",
+    target_peer_id: "surface-peer-1",
+    device_id: "device-1",
+    envelope,
+  });
+
+  assert.equal(received.length, 1);
+  assert.equal(received[0].item_id, "item-9");
+  assert.equal(received[0].delta_kind, "agent_text");
+});
+
+test("handleRemoteBrokerPayload does not apply snapshot for heartbeat action result", async () => {
+  installBrowserStubs();
+
+  const { configureRemoteActions, handleRemoteBrokerPayload } = await import("./actions.js");
+
+  let snapshotApplied = false;
+  configureRemoteActions({
+    onApplySessionSnapshot: () => { snapshotApplied = true; },
+  });
+
+  await handleRemoteBrokerPayload({
+    kind: "remote_action_result",
+    action_id: "action-1",
+    action: "heartbeat",
+    ok: true,
+    snapshot: { active_thread_id: "thread-1" },
+  });
+
+  assert.equal(snapshotApplied, false);
+});
+
+test("handleRemoteBrokerPayload does not apply snapshot for claim_challenge action result", async () => {
+  installBrowserStubs();
+
+  const { configureRemoteActions, handleRemoteBrokerPayload } = await import("./actions.js");
+
+  let snapshotApplied = false;
+  configureRemoteActions({
+    onApplySessionSnapshot: () => { snapshotApplied = true; },
+  });
+
+  await handleRemoteBrokerPayload({
+    kind: "remote_action_result",
+    action_id: "action-2",
+    action: "claim_challenge",
+    ok: true,
+    snapshot: { active_thread_id: "thread-1" },
+    claim_challenge_id: "challenge-1",
+    claim_challenge: "server-challenge",
+    claim_challenge_expires_at: Math.floor(Date.now() / 1000) + 60,
+  });
+
+  assert.equal(snapshotApplied, false);
+});

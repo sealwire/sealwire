@@ -5,7 +5,7 @@ import { initializeRemoteNavigation, openRemoteNavigation } from "./navigation.j
 import { applyPairingQuery, beginPairing, forgetCurrentDevice, handleEncryptedPairingResult, sendPairingRequest } from "./pairing.js";
 import { registerRemotePwa } from "./pwa.js";
 import { renderLog } from "./render.js";
-import { applySessionSnapshot, clearSessionRuntime, fetchTranscriptEntryDetail, refreshRemoteThreads, resumeRemoteSession, sendMessage, startRemoteSession, submitDecision, syncRemoteSnapshot, takeOverControl } from "./session-ops.js";
+import { applySessionSnapshot, applyTranscriptDelta, clearSessionRuntime, fetchTranscriptEntryDetail, refreshRemoteThreads, resumeRemoteSession, sendMessage, startRemoteSession, submitDecision, syncRemoteSnapshot, takeOverControl } from "./session-ops.js";
 import { clearActiveRelaySelection, ensureDeviceIdentity, hydrateStoredRemoteSecrets, selectRelayProfile, state } from "./state.js";
 import { applyRemoteSurfacePatch, createResetRemoteSurfaceStatePatch } from "./surface-state.js";
 
@@ -50,6 +50,7 @@ export function ensureRemoteRuntimeConfigured() {
 
   configureRemoteActions({
     onApplySessionSnapshot: applySessionSnapshot,
+    onApplyTranscriptDelta: applyTranscriptDelta,
     onSyncRemoteSnapshot: syncRemoteSnapshot,
   });
 

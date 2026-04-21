@@ -167,6 +167,21 @@ pub(crate) struct CompletedPairing {
 #[derive(Clone, Debug)]
 pub(crate) enum BrokerPendingMessage {
     PairingResult(PendingPairingResult),
+    TranscriptDelta(PendingTranscriptDelta),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PendingTranscriptDelta {
+    pub(crate) item_id: String,
+    pub(crate) turn_id: Option<String>,
+    pub(crate) delta: String,
+    pub(crate) kind: TranscriptDeltaKind,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum TranscriptDeltaKind {
+    AgentText,
+    CommandOutput,
 }
 
 #[derive(Clone, Debug)]
