@@ -50,6 +50,7 @@ test("prepareTranscriptEntryForSurface previews completed commands and caches sm
 
   assert.notEqual(prepared.entry.text, fullText);
   assert.match(prepared.entry.text, /\.\.\.|…/);
+  assert.doesNotMatch(prepared.entry.text, /\n/);
   assert.equal(
     getCachedTranscriptEntryDetail(state, "thread-1", "cmd-1")?.text,
     fullText
@@ -80,5 +81,6 @@ test("prepareTranscriptEntryForSurface avoids caching oversized command details"
   });
 
   assert.notEqual(prepared.entry.text, fullText);
+  assert.doesNotMatch(prepared.entry.text, /\n/);
   assert.equal(getCachedTranscriptEntryDetail(state, "thread-1", "cmd-2"), null);
 });

@@ -2,21 +2,23 @@ import { applyRemoteSurfacePatch } from "../surface-state.js";
 
 export const TRANSCRIPT_ENTRY_DETAIL_INLINE_CACHE_MAX_BYTES = 64 * 1024;
 export const TRANSCRIPT_ENTRY_DETAIL_CACHE_MAX_BYTES = 256 * 1024;
-const COMMAND_PREVIEW_CHAR_THRESHOLD = 600;
-const COMMAND_PREVIEW_LINE_THRESHOLD = 8;
+const COMMAND_PREVIEW_CHAR_THRESHOLD = 140;
 
 function transcriptEntryCacheKey(threadId, itemId) {
   return `${threadId || "-"}:${itemId || "-"}`;
 }
 
 function truncateCommandPreview(text) {
-  const normalized = String(text || "");
-  const lines = normalized.split("\n");
-  const previewByLines = lines.slice(0, COMMAND_PREVIEW_LINE_THRESHOLD).join("\n");
-  const preview = previewByLines.length > COMMAND_PREVIEW_CHAR_THRESHOLD
-    ? previewByLines.slice(0, COMMAND_PREVIEW_CHAR_THRESHOLD)
-    : previewByLines;
-  return preview === normalized ? preview : `${preview}\n…`;
+  const normalized = String(text || "").replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return "(empty)";
+  }
+
+  if (normalized.length <= COMMAND_PREVIEW_CHAR_THRESHOLD) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, COMMAND_PREVIEW_CHAR_THRESHOLD - 1).trimEnd()}…`;
 }
 
 function estimateTranscriptEntryDetailBytes(entry) {

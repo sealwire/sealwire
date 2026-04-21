@@ -44,7 +44,7 @@ test("renderTranscriptEntry renders typed session items safely", () => {
   assert.match(commandMarkup, /Command/);
   assert.match(commandMarkup, /data-transcript-toggle="command"/);
   assert.match(commandMarkup, /data-item-id="cmd-1"/);
-  assert.match(commandMarkup, /<pre class="message-pre">npm test<\/pre>/);
+  assert.match(commandMarkup, /<div class="command-preview"[^>]*>npm test<\/div>/);
   assert.match(toolMarkup, /Read frontend\/remote\/main\.js/);
   assert.match(toolMarkup, /message-card-tool/);
   assert.match(toolMarkup, /frontend\/remote\/main\.js/);
@@ -84,6 +84,9 @@ test("renderTranscriptEntry collapses long command and tool previews without col
 
   assert.match(commandMarkup, /data-transcript-toggle="command"/);
   assert.match(commandMarkup, />\s*Expand\s*<\/button>/);
+  assert.match(commandMarkup, /class="command-preview"/);
+  assert.match(commandMarkup, /line 1 line 2 line 3/);
+  assert.doesNotMatch(commandMarkup, /line 1\nline 2/);
   assert.match(toolMarkup, /<details class="message-collapsible">/);
   assert.match(toolMarkup, /Files:\nfrontend\/file-1\.js/);
   assert.doesNotMatch(assistantMarkup, /message-collapsible/);
@@ -120,6 +123,7 @@ test("renderTranscriptEntry shows expanded command detail and loading note when 
   });
 
   assert.match(expandedMarkup, />\s*Collapse\s*<\/button>/);
+  assert.match(expandedMarkup, /class="command-detail"/);
   assert.match(expandedMarkup, /full command output/);
   assert.match(loadingMarkup, /Loading full command output/);
 });

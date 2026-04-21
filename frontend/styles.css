@@ -1132,6 +1132,11 @@ input:focus, textarea:focus, select:focus {
   margin: 0;
 }
 
+.remote-chat-shell[data-view="conversation"] .thread-content {
+  max-width: 800px;
+  margin: 0 auto;
+}
+
 .chat-shell[data-view="console"] .surface-list,
 .chat-shell[data-view="console"] .audit-list {
   max-height: min(52vh, 620px);
@@ -1263,6 +1268,8 @@ input:focus, textarea:focus, select:focus {
   display: flex;
   align-items: flex-start;
   gap: 16px;
+  min-width: 0;
+  max-width: 100%;
 }
 .chat-message-user { justify-content: flex-end; }
 .chat-message-system { justify-content: center; }
@@ -1403,6 +1410,11 @@ input:focus, textarea:focus, select:focus {
 .chat-shell[data-view="conversation"] .composer-inner {
   max-width: 980px;
   margin: 0;
+}
+
+.remote-chat-shell[data-view="conversation"] .composer-inner {
+  max-width: 800px;
+  margin: 0 auto;
 }
 .composer-inner:focus-within {
   border-color: var(--accent-primary);
@@ -1576,27 +1588,74 @@ input:focus, textarea:focus, select:focus {
   word-break: break-word;
   border: 1px solid var(--border-subtle);
 }
-.transcript-entry-controls {
-  display: flex;
-  justify-content: flex-end;
-  margin-bottom: 8px;
+.message-card-command {
+  padding: 14px 16px;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
 }
 
-.transcript-toggle-button {
-  padding: 4px 10px;
+.command-entry-controls {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 6px;
+}
+
+.command-toggle-button {
+  padding: 3px 9px;
   border-radius: 999px;
   border: 1px solid var(--border-prominent);
   background: transparent;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
+  line-height: 1.2;
 }
 
-.transcript-toggle-button:hover {
+.command-toggle-button:hover {
   color: var(--text-primary);
 }
 
-.transcript-detail-note {
+.command-preview {
+  display: block;
+  margin: 0;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-base);
+  color: var(--text-secondary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.command-detail {
+  display: block;
+  margin: 0;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  background: var(--bg-base);
+  padding: 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-x: auto;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.command-detail-note {
   margin: 8px 0 0;
   font-size: 12px;
   color: var(--text-tertiary);

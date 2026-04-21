@@ -35,6 +35,17 @@ function previewText(value) {
   return preview === text ? preview : `${preview}\n…`;
 }
 
+function renderCommandPreviewText(value) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!text) {
+    return "(empty)";
+  }
+  if (text.length <= 160) {
+    return text;
+  }
+  return `${text.slice(0, 159).trimEnd()}…`;
+}
+
 function commandExpandKey(itemId) {
   return itemId ? `command:${itemId}` : "";
 }
@@ -122,18 +133,18 @@ function renderCommandEntry(entry, options = null) {
   const expanded = Boolean(expandKey && options?.expandedKeys?.has(expandKey));
   const loading = Boolean(itemId && options?.loadingItemIds?.has(itemId));
   const detailEntry = resolveTranscriptDetailEntry(entry, options);
-  const preview = entry.text || "(empty)";
+  const preview = renderCommandPreviewText(entry.text || "(empty)");
   const fullText = detailEntry?.text || preview;
 
   if (!itemId) {
     return `
       <article class="chat-message chat-message-system">
-        <div class="message-card message-card-system">
+        <div class="message-card message-card-system message-card-command">
           <div class="message-meta">
             <strong>Command</strong>
             <span>${escapeHtml(entry.status || "completed")}</span>
           </div>
-          <pre class="message-pre">${escapeHtml(preview)}</pre>
+          <div class="command-preview" title="${escapeHtml(preview)}">${escapeHtml(preview)}</div>
         </div>
       </article>
     `;
@@ -141,14 +152,14 @@ function renderCommandEntry(entry, options = null) {
 
   return `
     <article class="chat-message chat-message-system">
-      <div class="message-card message-card-system">
+      <div class="message-card message-card-system message-card-command">
         <div class="message-meta">
           <strong>Command</strong>
           <span>${escapeHtml(entry.status || "completed")}</span>
         </div>
-        <div class="transcript-entry-controls">
+        <div class="command-entry-controls">
           <button
-            class="transcript-toggle-button"
+            class="command-toggle-button"
             type="button"
             data-transcript-toggle="command"
             data-item-id="${escapeHtml(itemId)}"
@@ -157,10 +168,10 @@ function renderCommandEntry(entry, options = null) {
           </button>
         </div>
         ${expanded
-          ? `<pre class="message-pre">${escapeHtml(fullText)}</pre>`
-          : `<pre class="message-pre">${escapeHtml(preview)}</pre>`}
+          ? `<pre class="command-detail">${escapeHtml(fullText)}</pre>`
+          : `<div class="command-preview" title="${escapeHtml(preview)}">${escapeHtml(preview)}</div>`}
         ${expanded && loading && !detailEntry
-          ? '<p class="transcript-detail-note">Loading full command output…</p>'
+          ? '<p class="command-detail-note">Loading full command output…</p>'
           : ""}
       </div>
     </article>
