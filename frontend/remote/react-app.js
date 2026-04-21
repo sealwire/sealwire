@@ -45,12 +45,15 @@ import {
   installSidebarGestureDebug,
 } from "./remote-runtime.js";
 import {
+  fetchTranscriptEntryDetail as fetchRemoteTranscriptEntryDetail,
   maybeLoadOlderTranscriptHistory,
   sendHeartbeat,
 } from "./session-ops.js";
 import {
   cacheTranscriptEntryDetail,
   getCachedTranscriptEntryDetail,
+  getLiveTranscriptEntryDetail,
+  setLiveTranscriptEntryDetail,
 } from "./transcript/details.js";
 import {
   computeTranscriptScrollPosition,
@@ -78,6 +81,7 @@ import {
 } from "./ui-refs.js";
 
 const h = React.createElement;
+const LIVE_TRANSCRIPT_DETAIL_REFRESH_MS = 1000;
 
 let remoteAppRoot = null;
 
@@ -207,14 +211,28 @@ function RemoteApp() {
     sendPending: uiState.sendPending,
   };
   const transcriptDetailEntries = new Map();
+  const transcriptEntriesByItemId = new Map(
+    (session?.transcript || [])
+      .filter((entry) => entry?.item_id)
+      .map((entry) => [entry.item_id, entry])
+  );
   for (const expandedKey of uiState.transcriptExpandedItemIds) {
-    if (!expandedKey.startsWith("command:")) {
+    if (!expandedKey.startsWith("entry:")) {
       continue;
     }
-    const itemId = expandedKey.slice("command:".length);
+    const itemId = expandedKey.slice("entry:".length);
     const transientDetail = uiState.transcriptExpandedDetails.get(itemId);
+    const liveDetail = getLiveTranscriptEntryDetail(
+      currentState,
+      session?.active_thread_id || null,
+      itemId
+    );
     if (transientDetail) {
       transcriptDetailEntries.set(itemId, transientDetail);
+      continue;
+    }
+    if (liveDetail) {
+      transcriptDetailEntries.set(itemId, liveDetail);
       continue;
     }
 
@@ -227,6 +245,18 @@ function RemoteApp() {
       transcriptDetailEntries.set(itemId, cachedDetail);
     }
   }
+  const runningExpandedItemIds = [...uiState.transcriptExpandedItemIds]
+    .filter((expandKey) => expandKey.startsWith("entry:"))
+    .map((expandKey) => expandKey.slice("entry:".length))
+    .filter((itemId) => {
+      const entry = transcriptEntriesByItemId.get(itemId);
+      return (
+        entry
+        && (entry.kind === "command" || entry.kind === "tool_call")
+        && entry.status !== "completed"
+      );
+    });
+  const runningExpandedItemIdsSignature = runningExpandedItemIds.join("|");
 
   useLayoutEffect(() => {
     setRemoteCwdInputElement(remoteCwdInputRef.current);
@@ -246,6 +276,72 @@ function RemoteApp() {
       type: "transcript/reset",
     });
   }, [session?.active_thread_id]);
+
+  useEffect(() => {
+    if (!session?.active_thread_id) {
+      return undefined;
+    }
+
+    if (!runningExpandedItemIds.length) {
+      return undefined;
+    }
+
+    let cancelled = false;
+    let timerId = null;
+
+    const refreshLiveDetails = async () => {
+      for (const itemId of runningExpandedItemIds) {
+        if (cancelled || uiState.transcriptLoadingItemIds.has(itemId)) {
+          continue;
+        }
+
+        dispatchUi({
+          type: "transcript/startLoadingDetail",
+          itemId,
+        });
+
+        try {
+          const detail = await fetchRemoteTranscriptEntryDetail(
+            session.active_thread_id,
+            itemId
+          );
+          if (!detail || cancelled) {
+            continue;
+          }
+
+          const { cached } = cacheTranscriptEntryDetail(
+            currentState,
+            session.active_thread_id,
+            detail
+          );
+          if (!cached) {
+            setLiveTranscriptEntryDetail(currentState, session.active_thread_id, detail);
+          }
+        } finally {
+          dispatchUi({
+            type: "transcript/finishLoadingDetail",
+            itemId,
+          });
+        }
+      }
+
+      if (!cancelled) {
+        timerId = window.setTimeout(refreshLiveDetails, LIVE_TRANSCRIPT_DETAIL_REFRESH_MS);
+      }
+    };
+
+    timerId = window.setTimeout(refreshLiveDetails, LIVE_TRANSCRIPT_DETAIL_REFRESH_MS);
+    return () => {
+      cancelled = true;
+      if (timerId) {
+        window.clearTimeout(timerId);
+      }
+    };
+  }, [
+    session?.active_thread_id,
+    runningExpandedItemIdsSignature,
+    uiState.transcriptLoadingItemIds,
+  ]);
 
   useEffect(() => {
     dispatchUi({
@@ -362,8 +458,13 @@ function RemoteApp() {
       return;
     }
 
-    const expandKey = `command:${itemId}`;
+    const expandKey = `entry:${itemId}`;
     const cachedDetail = getCachedTranscriptEntryDetail(
+      currentState,
+      session.active_thread_id,
+      itemId
+    );
+    const liveDetail = getLiveTranscriptEntryDetail(
       currentState,
       session.active_thread_id,
       itemId
@@ -373,7 +474,7 @@ function RemoteApp() {
     if (isExpanded) {
       dispatchUi({
         type: "transcript/collapse",
-        dropTransient: !cachedDetail,
+        dropTransient: !cachedDetail && !liveDetail,
         itemId: expandKey,
       });
       return;
@@ -383,7 +484,7 @@ function RemoteApp() {
       type: "transcript/expand",
       itemId: expandKey,
     });
-    if (cachedDetail || uiState.transcriptExpandedDetails.has(itemId)) {
+    if (cachedDetail || liveDetail || uiState.transcriptExpandedDetails.has(itemId)) {
       return;
     }
 
@@ -393,7 +494,7 @@ function RemoteApp() {
     });
 
     try {
-      const detail = await handlers.onFetchTranscriptEntryDetail(
+      const detail = await fetchRemoteTranscriptEntryDetail(
         session.active_thread_id,
         itemId
       );
@@ -406,9 +507,12 @@ function RemoteApp() {
         session.active_thread_id,
         detail
       );
+      if (!cached) {
+        setLiveTranscriptEntryDetail(currentState, session.active_thread_id, detail);
+      }
       dispatchUi({
         type: "transcript/setExpandedDetail",
-        detail: cached ? null : detail,
+        detail: null,
         itemId,
       });
     } finally {

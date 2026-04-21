@@ -49,6 +49,8 @@ export const state = {
   socketReconnectTimer: null,
   transcriptEntryDetailCache: new Map(),
   transcriptEntryDetailOrder: [],
+  transcriptLiveEntryDetails: new Map(),
+  transcriptLiveEntryThreadId: null,
   transcriptHydrationPromise: null,
   transcriptHydrationSignature: null,
   transcriptHydrationThreadId: null,

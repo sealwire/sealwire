@@ -19,6 +19,9 @@ import {
   createTranscriptEntriesFetcher,
   createTranscriptPageFetcher,
 } from "./transcript/api.js";
+import {
+  syncLiveTranscriptEntryDetailsFromSnapshot,
+} from "./transcript/details.js";
 import { remoteUiRefs } from "./ui-refs.js";
 import {
   applyRemoteSurfacePatch,
@@ -30,6 +33,7 @@ const fetchTranscriptPage = createTranscriptPageFetcher(dispatchOrRecover);
 const fetchTranscriptEntries = createTranscriptEntriesFetcher(dispatchOrRecover);
 
 export function applySessionSnapshot(snapshot) {
+  syncLiveTranscriptEntryDetailsFromSnapshot(state, snapshot);
   const effectiveSnapshot = restoreHydratedTranscript(state, snapshot);
   applyRenderedSession(effectiveSnapshot, {
     hydrationSnapshot: snapshot,

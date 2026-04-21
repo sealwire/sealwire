@@ -193,6 +193,65 @@ impl RelayState {
             None,
         );
     }
+
+    pub fn start_command_execution(
+        &mut self,
+        item_id: String,
+        command: String,
+        status: String,
+        turn_id: String,
+    ) {
+        if let Some(entry) = self
+            .transcript
+            .iter_mut()
+            .find(|entry| entry.item_id == item_id)
+        {
+            entry.kind = TranscriptEntryKind::Command;
+            entry.text = Some(command);
+            entry.status = status;
+            entry.turn_id = Some(turn_id);
+            entry.tool = None;
+            return;
+        }
+
+        self.upsert_transcript_item(
+            item_id,
+            TranscriptEntryKind::Command,
+            Some(command),
+            status,
+            Some(turn_id),
+            None,
+        );
+    }
+
+    pub fn append_command_delta(&mut self, item_id: &str, delta: &str) {
+        if let Some(entry) = self
+            .transcript
+            .iter_mut()
+            .find(|entry| entry.item_id == item_id)
+        {
+            entry.kind = TranscriptEntryKind::Command;
+            let text = entry.text.get_or_insert_with(String::new);
+            if !text.is_empty() && !text.ends_with('\n') && !delta.starts_with('\n') {
+                text.push('\n');
+            }
+            text.push_str(delta);
+            if entry.status.trim().is_empty() || entry.status == "completed" {
+                entry.status = "running".to_string();
+            }
+            entry.tool = None;
+            return;
+        }
+
+        self.upsert_transcript_item(
+            item_id.to_string(),
+            TranscriptEntryKind::Command,
+            Some(delta.to_string()),
+            "running".to_string(),
+            None,
+            None,
+        );
+    }
 }
 
 fn merge_tool_call_view(

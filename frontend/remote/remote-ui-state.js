@@ -106,9 +106,15 @@ export function reduceRemoteUiState(state, action) {
       const nextDetails = new Map(state.transcriptExpandedDetails);
       if (action.dropTransient !== false) {
         nextDetails.delete(action.itemId);
+        if (String(action.itemId || "").startsWith("entry:")) {
+          nextDetails.delete(String(action.itemId).slice("entry:".length));
+        }
       }
       const nextLoading = new Set(state.transcriptLoadingItemIds);
       nextLoading.delete(action.itemId);
+      if (String(action.itemId || "").startsWith("entry:")) {
+        nextLoading.delete(String(action.itemId).slice("entry:".length));
+      }
       return {
         ...state,
         transcriptExpandedDetails: nextDetails,

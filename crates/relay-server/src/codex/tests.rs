@@ -197,6 +197,64 @@ fn command_execution_text_truncates_large_output() {
 }
 
 #[tokio::test]
+async fn handle_notification_tracks_live_command_output_in_transcript() {
+    let (change_tx, _) = watch::channel(0_u64);
+    let state = std::sync::Arc::new(RwLock::new(RelayState::new(
+        "/tmp/project".to_string(),
+        change_tx,
+        SecurityProfile::private(),
+    )));
+
+    {
+        let mut relay = state.write().await;
+        relay.active_thread_id = Some("thread-1".to_string());
+    }
+
+    handle_notification(
+        json!({
+            "method": "item/started",
+            "params": {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "item": {
+                    "id": "item-command",
+                    "type": "commandExecution",
+                    "command": "npm test",
+                    "status": "running"
+                }
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    handle_notification(
+        json!({
+            "method": "item/commandExecution/outputDelta",
+            "params": {
+                "threadId": "thread-1",
+                "itemId": "item-command",
+                "delta": "line 1"
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    let relay = state.read().await;
+    let snapshot = relay.snapshot();
+    let entry = snapshot
+        .transcript
+        .iter()
+        .find(|entry| entry.item_id.as_deref() == Some("item-command"))
+        .expect("command entry should exist");
+
+    assert_eq!(entry.kind, TranscriptEntryKind::Command);
+    assert_eq!(entry.status, "running");
+    assert_eq!(entry.text.as_deref(), Some("npm test\nline 1"));
+}
+
+#[tokio::test]
 async fn handle_notification_updates_generic_tool_items() {
     let (change_tx, _) = watch::channel(0_u64);
     let state = std::sync::Arc::new(RwLock::new(RelayState::new(

@@ -9,6 +9,8 @@ export function createClearedRemoteSurfaceSessionStatePatch() {
     currentApprovalId: null,
     session: null,
     threads: [],
+    transcriptLiveEntryDetails: new Map(),
+    transcriptLiveEntryThreadId: null,
   };
 }
 

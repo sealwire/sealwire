@@ -557,7 +557,26 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
                 }
             }
             Some("commandExecution") => {
-                if let Some(command) = string_at(&params, &["item", "command"]) {
+                if !should_apply_session_notification(&relay, notification_thread_id.as_deref()) {
+                    log_ignored_session_notification(
+                        method,
+                        notification_thread_id.as_deref(),
+                        &relay,
+                    );
+                    return;
+                }
+                if let (Some(item_id), Some(turn_id), Some(command)) = (
+                    string_at(&params, &["item", "id"]),
+                    string_at(&params, &["turnId"]),
+                    string_at(&params, &["item", "command"]),
+                ) {
+                    relay.start_command_execution(
+                        item_id,
+                        command.clone(),
+                        string_at(&params, &["item", "status"])
+                            .unwrap_or_else(|| "running".to_string()),
+                        turn_id,
+                    );
                     relay.push_log("command", format!("Command started: {command}"));
                     changed = true;
                 }
@@ -686,7 +705,16 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
             }
         }
         "item/commandExecution/outputDelta" => {
+            if !should_apply_session_notification(&relay, notification_thread_id.as_deref()) {
+                log_ignored_session_notification(method, notification_thread_id.as_deref(), &relay);
+                return;
+            }
             if let Some(delta) = string_at(&params, &["delta"]) {
+                if let Some(item_id) =
+                    string_at(&params, &["itemId"]).or_else(|| string_at(&params, &["item", "id"]))
+                {
+                    relay.append_command_delta(&item_id, &delta);
+                }
                 relay.push_log("command", delta);
                 changed = true;
             }

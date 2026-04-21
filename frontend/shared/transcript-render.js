@@ -46,6 +46,17 @@ function renderCommandPreviewText(value) {
   return `${text.slice(0, 159).trimEnd()}…`;
 }
 
+function renderToolPreviewText(value) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!text) {
+    return "(empty)";
+  }
+  if (text.length <= 180) {
+    return text;
+  }
+  return `${text.slice(0, 179).trimEnd()}…`;
+}
+
 function commandExpandKey(itemId) {
   return itemId ? `command:${itemId}` : "";
 }
@@ -129,12 +140,12 @@ function renderAgentEntry(entry) {
 
 function renderCommandEntry(entry, options = null) {
   const itemId = entry.item_id || "";
-  const expandKey = commandExpandKey(itemId);
+  const expandKey = itemId ? `entry:${itemId}` : commandExpandKey(itemId);
   const expanded = Boolean(expandKey && options?.expandedKeys?.has(expandKey));
   const loading = Boolean(itemId && options?.loadingItemIds?.has(itemId));
   const detailEntry = resolveTranscriptDetailEntry(entry, options);
   const preview = renderCommandPreviewText(entry.text || "(empty)");
-  const fullText = detailEntry?.text || preview;
+  const fullText = detailEntry?.text || entry.text || preview;
 
   if (!itemId) {
     return `
@@ -161,7 +172,7 @@ function renderCommandEntry(entry, options = null) {
           <button
             class="command-toggle-button"
             type="button"
-            data-transcript-toggle="command"
+            data-transcript-toggle="entry"
             data-item-id="${escapeHtml(itemId)}"
           >
             ${expanded ? "Collapse" : "Expand"}
@@ -246,15 +257,22 @@ function renderToolPreviewBlock(label, value, options = null) {
 }
 
 function renderToolEntry(entry, options = null) {
-  const tool = entry.tool || {};
+  const itemId = entry.item_id || "";
+  const expandKey = itemId ? `entry:${itemId}` : "";
+  const expanded = Boolean(expandKey && options?.expandedKeys?.has(expandKey));
+  const loading = Boolean(itemId && options?.loadingItemIds?.has(itemId));
+  const detailEntry = resolveTranscriptDetailEntry(entry, options);
+  const toolEntry = detailEntry || entry;
+  const tool = toolEntry.tool || entry.tool || {};
   const isFileChange = tool.item_type === "fileChange";
-  const title = tool.title || entry.text || tool.name || "Tool call";
+  const title = tool.title || toolEntry.text || entry.text || tool.name || "Tool call";
   const detail = tool.detail && tool.detail !== title ? tool.detail : null;
   const showTypeRow = !isFileChange;
   const showPathRow = !isFileChange;
   const showInputPreview = !isFileChange || !isRedundantFileChangePreview(tool, detail);
-  const inputExpandKey = entry.item_id ? `tool:${entry.item_id}:input` : "";
-  const resultExpandKey = entry.item_id ? `tool:${entry.item_id}:result` : "";
+  const collapsedPreview = renderToolPreviewText(toolEntry.text || detail || title);
+  const inputExpandKey = itemId ? `tool:${itemId}:input` : "";
+  const resultExpandKey = itemId ? `tool:${itemId}:result` : "";
 
   return `
     <article class="chat-message chat-message-system">
@@ -263,8 +281,22 @@ function renderToolEntry(entry, options = null) {
           <strong>${escapeHtml(tool.name || "Tool")}</strong>
           <span>${escapeHtml(entry.status || "completed")}</span>
         </div>
+        ${itemId
+          ? `<div class="tool-entry-controls">
+          <button
+            class="tool-toggle-button"
+            type="button"
+            data-transcript-toggle="entry"
+            data-item-id="${escapeHtml(itemId)}"
+          >
+            ${expanded ? "Collapse" : "Expand"}
+          </button>
+        </div>`
+          : ""}
         <h3 class="tool-card-title">${escapeHtml(title)}</h3>
-        ${detail ? `<p class="tool-card-detail">${escapeHtml(detail)}</p>` : ""}
+        ${!expanded
+          ? `<div class="tool-preview">${escapeHtml(collapsedPreview)}</div>`
+          : `${detail ? `<p class="tool-card-detail">${escapeHtml(detail)}</p>` : ""}
         <div class="tool-details">
           ${showTypeRow ? renderToolDetailRow("Type", tool.item_type) : ""}
           ${renderToolDetailRow("Query", tool.query)}
@@ -280,6 +312,9 @@ function renderToolEntry(entry, options = null) {
           expandKey: resultExpandKey,
           expanded: Boolean(resultExpandKey && options?.expandedKeys?.has(resultExpandKey)),
         })}
+        ${expanded && loading && !detailEntry
+          ? '<p class="tool-detail-note">Loading full item details…</p>'
+          : ""}`}
       </div>
     </article>
   `;

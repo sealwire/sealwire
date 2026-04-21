@@ -42,7 +42,7 @@ test("renderTranscriptEntry renders typed session items safely", () => {
   assert.match(assistantMarkup, /Codex/);
   assert.match(assistantMarkup, /turn-123/);
   assert.match(commandMarkup, /Command/);
-  assert.match(commandMarkup, /data-transcript-toggle="command"/);
+  assert.match(commandMarkup, /data-transcript-toggle="entry"/);
   assert.match(commandMarkup, /data-item-id="cmd-1"/);
   assert.match(commandMarkup, /<div class="command-preview"[^>]*>npm test<\/div>/);
   assert.match(toolMarkup, /Read frontend\/remote\/main\.js/);
@@ -66,6 +66,7 @@ test("renderTranscriptEntry collapses long command and tool previews without col
     loadingItemIds: new Set(),
   });
   const toolMarkup = renderTranscriptEntry({
+    item_id: "tool-2",
     kind: "tool_call",
     status: "completed",
     tool: {
@@ -82,13 +83,14 @@ test("renderTranscriptEntry collapses long command and tool previews without col
     text: assistantText,
   });
 
-  assert.match(commandMarkup, /data-transcript-toggle="command"/);
+  assert.match(commandMarkup, /data-transcript-toggle="entry"/);
   assert.match(commandMarkup, />\s*Expand\s*<\/button>/);
   assert.match(commandMarkup, /class="command-preview"/);
   assert.match(commandMarkup, /line 1 line 2 line 3/);
   assert.doesNotMatch(commandMarkup, /line 1\nline 2/);
-  assert.match(toolMarkup, /<details class="message-collapsible">/);
-  assert.match(toolMarkup, /Files:\nfrontend\/file-1\.js/);
+  assert.match(toolMarkup, /data-transcript-toggle="entry"/);
+  assert.match(toolMarkup, /class="tool-preview"/);
+  assert.match(toolMarkup, /Search result payload/);
   assert.doesNotMatch(assistantMarkup, /message-collapsible/);
   assert.match(assistantMarkup, new RegExp(`A{1200}`));
 });
@@ -130,7 +132,7 @@ test("renderTranscriptEntry shows expanded command detail and loading note when 
         text: "full command output",
       }],
     ]),
-    expandedKeys: new Set(["command:cmd-3"]),
+    expandedKeys: new Set(["entry:cmd-3"]),
     loadingItemIds: new Set(),
   });
   const loadingMarkup = renderTranscriptEntry({
@@ -140,7 +142,7 @@ test("renderTranscriptEntry shows expanded command detail and loading note when 
     text: "preview",
   }, {
     detailEntries: new Map(),
-    expandedKeys: new Set(["command:cmd-3"]),
+    expandedKeys: new Set(["entry:cmd-3"]),
     loadingItemIds: new Set(["cmd-3"]),
   });
 
@@ -148,6 +150,45 @@ test("renderTranscriptEntry shows expanded command detail and loading note when 
   assert.match(expandedMarkup, /class="command-detail"/);
   assert.match(expandedMarkup, /full command output/);
   assert.match(loadingMarkup, /Loading full command output/);
+});
+
+test("renderTranscriptEntry expands tool details from fetched entry data", () => {
+  const expandedMarkup = renderTranscriptEntry({
+    item_id: "tool-9",
+    kind: "tool_call",
+    status: "running",
+    text: "Read frontend/remote/main.js",
+    tool: {
+      name: "Read",
+      title: "Read frontend/remote/main.js",
+      item_type: "mcpToolCall",
+    },
+  }, {
+    detailEntries: new Map([
+      ["tool-9", {
+        item_id: "tool-9",
+        kind: "tool_call",
+        status: "completed",
+        text: "Read frontend/remote/main.js",
+        tool: {
+          name: "Read",
+          title: "Read frontend/remote/main.js",
+          detail: "Loaded the requested file.",
+          item_type: "mcpToolCall",
+          path: "frontend/remote/main.js",
+          input_preview: "{\"path\":\"frontend/remote/main.js\"}",
+          result_preview: "{\"text\":\"file contents\"}",
+        },
+      }],
+    ]),
+    expandedKeys: new Set(["entry:tool-9"]),
+    loadingItemIds: new Set(),
+  });
+
+  assert.match(expandedMarkup, />\s*Collapse\s*<\/button>/);
+  assert.match(expandedMarkup, /Loaded the requested file\./);
+  assert.match(expandedMarkup, /tool-preview-label">Input</);
+  assert.match(expandedMarkup, /tool-preview-label">Result</);
 });
 
 test("renderApprovalCard includes session-scope actions and escapes requested permissions", () => {
