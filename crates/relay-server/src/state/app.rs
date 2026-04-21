@@ -10,9 +10,11 @@ use crate::{
         AllowedRootsInput, AllowedRootsReceipt, ApprovalDecision, ApprovalDecisionInput,
         ApprovalReceipt, BulkRevokeDevicesReceipt, HeartbeatInput, PairingDecision,
         PairingDecisionInput, PairingDecisionReceipt, PairingStartInput, PairingTicketView,
-        ReadThreadEntriesInput, ReadThreadTranscriptInput, ResumeSessionInput, RevokeDeviceReceipt,
-        SendMessageInput, SessionSnapshot, StartSessionInput, TakeOverInput, ThreadArchiveReceipt,
-        ThreadDeleteReceipt, ThreadEntriesResponse, ThreadTranscriptResponse, ThreadsResponse,
+        ReadThreadEntriesInput, ReadThreadEntryDetailInput, ReadThreadTranscriptInput,
+        ResumeSessionInput, RevokeDeviceReceipt, SendMessageInput, SessionSnapshot,
+        StartSessionInput, TakeOverInput, ThreadArchiveReceipt, ThreadDeleteReceipt,
+        ThreadEntriesResponse, ThreadEntryDetailResponse, ThreadTranscriptResponse,
+        ThreadsResponse,
     },
 };
 
@@ -433,6 +435,57 @@ impl AppState {
             thread_data.transcript,
             input.item_ids,
         ))
+    }
+
+    pub async fn read_thread_entry_detail(
+        &self,
+        input: ReadThreadEntryDetailInput,
+    ) -> Result<ThreadEntryDetailResponse, String> {
+        let relay_entry = {
+            let relay = self.relay.read().await;
+            if relay.active_thread_id.as_deref() == Some(input.thread_id.as_str()) {
+                ensure_path_within_allowed_roots(&relay.current_cwd, &relay.allowed_roots)?;
+                relay
+                    .transcript
+                    .iter()
+                    .find(|entry| entry.item_id == input.item_id)
+                    .filter(|entry| entry.kind != crate::protocol::TranscriptEntryKind::ToolCall)
+                    .map(|entry| entry.to_view())
+            } else {
+                None
+            }
+        };
+
+        let entry = if let Some(entry) = relay_entry {
+            entry
+        } else {
+            let thread_data = self.codex.read_thread(&input.thread_id).await?;
+            {
+                let relay = self.relay.read().await;
+                ensure_path_within_allowed_roots(&thread_data.thread.cwd, &relay.allowed_roots)?;
+            }
+
+            self.codex
+                .read_thread_entry_detail(&input.thread_id, &input.item_id)
+                .await?
+                .ok_or_else(|| {
+                    format!(
+                        "thread entry `{}` was not found in thread `{}`",
+                        input.item_id, input.thread_id
+                    )
+                })?
+        };
+
+        if let Some(field) = input.field.as_deref() {
+            return ThreadEntryDetailResponse::from_entry_chunk(
+                input.thread_id,
+                &entry,
+                field,
+                input.cursor.unwrap_or_default(),
+            );
+        }
+
+        ThreadEntryDetailResponse::from_entry(input.thread_id, entry)
     }
 
     pub async fn send_message(&self, input: SendMessageInput) -> Result<SessionSnapshot, String> {

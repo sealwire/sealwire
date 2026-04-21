@@ -27,6 +27,56 @@ export function createTranscriptEntriesFetcher(dispatchOrRecover) {
   };
 }
 
+export function createTranscriptEntryDetailFetcher(dispatchOrRecover) {
+  return async function fetchTranscriptEntryDetail({ threadId, itemId }) {
+    if (!threadId || !itemId) {
+      return null;
+    }
+
+    const initialResult = await dispatchOrRecover("fetch_thread_entry_detail", {
+      input: {
+        cursor: null,
+        field: null,
+        item_id: itemId,
+        thread_id: threadId,
+      },
+    });
+    const detailResponse = initialResult.thread_entry_detail;
+    const entry = detailResponse?.entry || null;
+    if (!entry) {
+      return null;
+    }
+
+    const pendingFields = [...(detailResponse?.pending_fields || [])];
+    while (pendingFields.length > 0) {
+      const pending = pendingFields.shift();
+      if (!pending?.field) {
+        continue;
+      }
+
+      let cursor = pending.next_cursor;
+      while (typeof cursor === "number") {
+        const chunkResult = await dispatchOrRecover("fetch_thread_entry_detail", {
+          input: {
+            cursor,
+            field: pending.field,
+            item_id: itemId,
+            thread_id: threadId,
+          },
+        });
+        const chunk = chunkResult.thread_entry_detail?.chunk;
+        if (!chunk?.field || chunk.field !== pending.field) {
+          break;
+        }
+        appendTranscriptEntryDetailChunk(entry, chunk.field, chunk.text || "");
+        cursor = typeof chunk.next_cursor === "number" ? chunk.next_cursor : null;
+      }
+    }
+
+    return entry;
+  };
+}
+
 function normalizeThreadTranscriptPage(page) {
   if (!page) {
     return page;
@@ -80,4 +130,29 @@ function normalizeThreadTranscriptPage(page) {
     prev_cursor: page.prev_cursor ?? page.next_cursor ?? null,
     thread_id: page.thread_id,
   };
+}
+
+function appendTranscriptEntryDetailChunk(entry, field, chunkText) {
+  if (!entry || !field || !chunkText) {
+    return;
+  }
+
+  switch (field) {
+    case "text":
+      entry.text = `${entry.text || ""}${chunkText}`;
+      return;
+    case "tool.detail":
+      entry.tool = entry.tool || {};
+      entry.tool.detail = `${entry.tool.detail || ""}${chunkText}`;
+      return;
+    case "tool.input_preview":
+      entry.tool = entry.tool || {};
+      entry.tool.input_preview = `${entry.tool.input_preview || ""}${chunkText}`;
+      return;
+    case "tool.result_preview":
+      entry.tool = entry.tool || {};
+      entry.tool.result_preview = `${entry.tool.result_preview || ""}${chunkText}`;
+      return;
+    default:
+  }
 }

@@ -225,6 +225,49 @@ impl CodexBridge {
         })
     }
 
+    pub async fn read_thread_entry_detail(
+        &self,
+        thread_id: &str,
+        item_id: &str,
+    ) -> Result<Option<TranscriptEntryView>, String> {
+        let result = self
+            .send_request(
+                "thread/read",
+                json!({
+                    "threadId": thread_id,
+                    "includeTurns": true
+                }),
+            )
+            .await?;
+
+        let thread = value_at(&result, &["thread"])
+            .ok_or_else(|| "thread/read did not return a thread".to_string())?;
+        let turns = value_at(thread, &["turns"])
+            .and_then(Value::as_array)
+            .ok_or_else(|| "thread/read did not return transcript turns".to_string())?;
+
+        for turn in turns {
+            let turn_id = string_at(turn, &["id"]);
+            let items = match value_at(turn, &["items"]).and_then(Value::as_array) {
+                Some(items) => items,
+                None => continue,
+            };
+
+            for item in items {
+                if string_at(item, &["id"]).as_deref() != Some(item_id) {
+                    continue;
+                }
+                return Ok(parse_transcript_detail_item(
+                    item,
+                    turn_id.clone(),
+                    "completed",
+                ));
+            }
+        }
+
+        Ok(None)
+    }
+
     pub async fn archive_thread(&self, thread_id: &str) -> Result<(), String> {
         self.send_request("thread/archive", json!({ "threadId": thread_id }))
             .await
@@ -883,6 +926,29 @@ fn parse_transcript_item(
     })
 }
 
+fn parse_transcript_detail_item(
+    item: &Value,
+    turn_id: Option<String>,
+    default_status: &str,
+) -> Option<TranscriptEntryView> {
+    let item_id = string_at(item, &["id"])?;
+    let item_type = string_at(item, &["type"])?;
+    let status = transcript_item_status(item, default_status);
+    let kind = transcript_item_kind(&item_type);
+    let tool = (kind == TranscriptEntryKind::ToolCall)
+        .then(|| build_tool_call_detail_view(item, &item_type));
+    let text = transcript_item_detail_text(item, &item_type);
+
+    Some(TranscriptEntryView {
+        item_id: Some(item_id),
+        kind,
+        text,
+        status,
+        turn_id,
+        tool,
+    })
+}
+
 fn transcript_item_kind(item_type: &str) -> TranscriptEntryKind {
     match item_type {
         "userMessage" => TranscriptEntryKind::UserText,
@@ -919,6 +985,18 @@ fn transcript_item_text(
     }
 }
 
+fn transcript_item_detail_text(item: &Value, item_type: &str) -> Option<String> {
+    match item_type {
+        "userMessage" => parse_user_text(Some(item)),
+        "agentMessage" => string_at(item, &["text"]).or_else(|| parse_text_content(item)),
+        "commandExecution" => Some(command_execution_detail_text(item)),
+        _ if is_reasoning_item_type(item_type) => {
+            string_at(item, &["text"]).or_else(|| parse_text_content(item))
+        }
+        _ => None,
+    }
+}
+
 fn command_execution_text(item: &Value) -> String {
     let mut text = truncate_owned(
         string_at(item, &["command"]).unwrap_or_else(|| "Command".to_string()),
@@ -929,6 +1007,15 @@ fn command_execution_text(item: &Value) -> String {
         text.push_str(&truncate_owned(output, MAX_COMMAND_OUTPUT_CHARS));
     }
     truncate_owned(text, MAX_COMMAND_ENTRY_CHARS)
+}
+
+fn command_execution_detail_text(item: &Value) -> String {
+    let mut text = string_at(item, &["command"]).unwrap_or_else(|| "Command".to_string());
+    if let Some(output) = non_empty_string(string_at(item, &["aggregatedOutput"])) {
+        text.push('\n');
+        text.push_str(&output);
+    }
+    text
 }
 
 fn build_tool_call_view(item: &Value, item_type: &str) -> ToolCallView {
@@ -988,6 +1075,60 @@ fn build_tool_call_view(item: &Value, item_type: &str) -> ToolCallView {
     }
 }
 
+fn build_tool_call_detail_view(item: &Value, item_type: &str) -> ToolCallView {
+    let file_change_paths = (item_type == "fileChange")
+        .then(|| collect_file_change_paths(item))
+        .unwrap_or_default();
+    let name = truncate_owned(
+        string_at(item, &["name"])
+            .or_else(|| string_at(item, &["toolName"]))
+            .or_else(|| string_at(item, &["tool"]))
+            .or_else(|| string_at(item, &["label"]))
+            .or_else(|| string_at(item, &["type"]))
+            .unwrap_or_else(|| fallback_item_type_label(item_type)),
+        MAX_TOOL_SUMMARY_CHARS,
+    );
+    let title = truncate_owned(
+        string_at(item, &["title"])
+            .or_else(|| string_at(item, &["summary"]))
+            .or_else(|| string_at(item, &["text"]))
+            .or_else(|| parse_text_content(item))
+            .or_else(|| {
+                (item_type == "fileChange" && !file_change_paths.is_empty())
+                    .then(|| summarize_file_change(&file_change_paths))
+            })
+            .unwrap_or_else(|| format!("{name} call")),
+        MAX_TOOL_SUMMARY_CHARS,
+    );
+    let detail = string_at(item, &["description"])
+        .or_else(|| string_at(item, &["detail"]))
+        .or_else(|| {
+            (item_type == "fileChange")
+                .then(|| file_change_detail(&file_change_paths))
+                .flatten()
+        });
+
+    ToolCallView {
+        item_type: item_type.to_string(),
+        name,
+        title,
+        detail,
+        query: full_string_field(item, "query"),
+        path: full_string_field(item, "path")
+            .or_else(|| (file_change_paths.len() == 1).then(|| file_change_paths[0].clone())),
+        url: full_string_field(item, "url"),
+        command: full_string_field(item, "command"),
+        input_preview: full_json_field(item, "input")
+            .or_else(|| full_json_field(item, "arguments"))
+            .or_else(|| {
+                (item_type == "fileChange")
+                    .then(|| full_json_value(value_at(item, &["changes"])?))
+                    .flatten()
+            }),
+        result_preview: full_json_field(item, "result").or_else(|| full_json_field(item, "output")),
+    }
+}
+
 fn tool_preview_text(tool: &ToolCallView) -> String {
     let mut lines = vec![tool.title.clone()];
     if let Some(detail) = &tool.detail {
@@ -1012,6 +1153,14 @@ fn preview_string_field(item: &Value, key: &str) -> Option<String> {
 
 fn preview_json_field(item: &Value, key: &str) -> Option<String> {
     value_at(item, &[key]).and_then(|value| compact_json_value(value, MAX_TOOL_JSON_CHARS))
+}
+
+fn full_string_field(item: &Value, key: &str) -> Option<String> {
+    non_empty_string(string_at(item, &[key]))
+}
+
+fn full_json_field(item: &Value, key: &str) -> Option<String> {
+    value_at(item, &[key]).and_then(full_json_value)
 }
 
 fn parse_command_approval(
@@ -1337,6 +1486,19 @@ fn compact_json_value(value: &Value, max_chars: usize) -> Option<String> {
         _ => serde_json::to_string_pretty(value)
             .ok()
             .map(|text| truncate_owned(text, max_chars)),
+    }
+}
+
+fn full_json_value(value: &Value) -> Option<String> {
+    if value.is_null() {
+        return None;
+    }
+
+    match value {
+        Value::String(text) => non_empty_string(Some(text.clone())),
+        _ => serde_json::to_string_pretty(value)
+            .ok()
+            .and_then(|text| non_empty_string(Some(text))),
     }
 }
 

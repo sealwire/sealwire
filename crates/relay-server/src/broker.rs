@@ -25,7 +25,7 @@ use url::Url;
 use crate::{
     protocol::{
         ApprovalReceipt, PairedDeviceView, SessionSnapshot, ThreadEntriesResponse,
-        ThreadTranscriptResponse, ThreadsResponse,
+        ThreadEntryDetailResponse, ThreadTranscriptResponse, ThreadsResponse,
     },
     state::{AppState, BrokerPendingMessage},
 };
@@ -184,6 +184,7 @@ enum OutboundBrokerPayload {
         receipt: Option<ApprovalReceipt>,
         threads: Option<ThreadsResponse>,
         thread_entries: Option<ThreadEntriesResponse>,
+        thread_entry_detail: Option<ThreadEntryDetailResponse>,
         thread_transcript: Option<ThreadTranscriptResponse>,
         session_claim: Option<String>,
         session_claim_expires_at: Option<u64>,

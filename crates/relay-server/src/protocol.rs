@@ -218,6 +218,10 @@ const THREADS_RESPONSE_LOCAL_WEB_BUDGET: ThreadsResponseCompactBudget =
 const THREADS_RESPONSE_IOS_SURFACE_BUDGET: ThreadsResponseCompactBudget =
     THREADS_RESPONSE_REMOTE_SURFACE_BUDGET;
 
+const THREAD_ENTRY_DETAIL_INLINE_CHARS: usize = 12_000;
+const THREAD_ENTRY_DETAIL_INITIAL_CHUNK_CHARS: usize = 4_000;
+const THREAD_ENTRY_DETAIL_CHUNK_CHARS: usize = 12_000;
+
 #[derive(Clone, Copy)]
 pub enum SessionSnapshotCompactProfile {
     LocalWeb,
@@ -591,6 +595,14 @@ pub struct ReadThreadEntriesInput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadThreadEntryDetailInput {
+    pub thread_id: String,
+    pub item_id: String,
+    pub field: Option<String>,
+    pub cursor: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreadTranscriptResponse {
     pub thread_id: String,
     pub entries: Vec<TranscriptEntryView>,
@@ -602,6 +614,30 @@ pub struct ThreadTranscriptResponse {
 pub struct ThreadEntriesResponse {
     pub thread_id: String,
     pub entries: Vec<TranscriptEntryView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThreadEntryDetailPendingField {
+    pub field: String,
+    pub next_cursor: usize,
+    pub total_chars: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThreadEntryDetailChunk {
+    pub field: String,
+    pub text: String,
+    pub next_cursor: Option<usize>,
+    pub total_chars: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreadEntryDetailResponse {
+    pub thread_id: String,
+    pub item_id: String,
+    pub entry: Option<TranscriptEntryView>,
+    pub pending_fields: Vec<ThreadEntryDetailPendingField>,
+    pub chunk: Option<ThreadEntryDetailChunk>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -828,6 +864,82 @@ impl ThreadEntriesResponse {
     }
 }
 
+impl ThreadEntryDetailResponse {
+    pub fn from_entry(thread_id: String, entry: TranscriptEntryView) -> Result<Self, String> {
+        let item_id = entry
+            .item_id
+            .clone()
+            .ok_or_else(|| "thread entry detail is missing item_id".to_string())?;
+        let mut entry_for_response = entry.clone();
+        let mut pending_fields = Vec::new();
+
+        for field in detail_field_names(&entry) {
+            let Some(value) = detail_field_value(&entry, field) else {
+                continue;
+            };
+            let total_chars = value.chars().count();
+            if total_chars <= THREAD_ENTRY_DETAIL_INLINE_CHARS {
+                continue;
+            }
+
+            let chunk = slice_chars(value, 0, THREAD_ENTRY_DETAIL_INITIAL_CHUNK_CHARS);
+            set_detail_field_value(&mut entry_for_response, field, chunk.clone())?;
+            pending_fields.push(ThreadEntryDetailPendingField {
+                field: field.to_string(),
+                next_cursor: chunk.chars().count(),
+                total_chars,
+            });
+        }
+
+        Ok(Self {
+            thread_id,
+            item_id,
+            entry: Some(entry_for_response),
+            pending_fields,
+            chunk: None,
+        })
+    }
+
+    pub fn from_entry_chunk(
+        thread_id: String,
+        entry: &TranscriptEntryView,
+        field: &str,
+        cursor: usize,
+    ) -> Result<Self, String> {
+        let item_id = entry
+            .item_id
+            .clone()
+            .ok_or_else(|| "thread entry detail is missing item_id".to_string())?;
+        let value = detail_field_value(entry, field)
+            .ok_or_else(|| format!("thread entry detail field `{field}` is unavailable"))?;
+        let total_chars = value.chars().count();
+        let text = slice_chars(value, cursor, THREAD_ENTRY_DETAIL_CHUNK_CHARS);
+        let advanced_by = text.chars().count();
+        let next_cursor = (cursor + advanced_by < total_chars).then_some(cursor + advanced_by);
+
+        Ok(Self {
+            thread_id,
+            item_id,
+            entry: None,
+            pending_fields: next_cursor
+                .map(|next_cursor| {
+                    vec![ThreadEntryDetailPendingField {
+                        field: field.to_string(),
+                        next_cursor,
+                        total_chars,
+                    }]
+                })
+                .unwrap_or_default(),
+            chunk: Some(ThreadEntryDetailChunk {
+                field: field.to_string(),
+                text,
+                next_cursor,
+                total_chars,
+            }),
+        })
+    }
+}
+
 fn build_thread_transcript_page(
     thread_id: &str,
     entries: &[TranscriptEntryView],
@@ -878,4 +990,65 @@ fn build_reverse_thread_transcript_page(
         (upper_bound < transcript.len()).then_some(upper_bound),
         (index > 0).then_some(index),
     )
+}
+
+fn detail_field_names(entry: &TranscriptEntryView) -> &'static [&'static str] {
+    match entry.kind {
+        TranscriptEntryKind::ToolCall => {
+            &["tool.detail", "tool.input_preview", "tool.result_preview"]
+        }
+        _ => &["text"],
+    }
+}
+
+fn detail_field_value<'a>(entry: &'a TranscriptEntryView, field: &str) -> Option<&'a str> {
+    match field {
+        "text" => entry.text.as_deref(),
+        "tool.detail" => entry.tool.as_ref()?.detail.as_deref(),
+        "tool.input_preview" => entry.tool.as_ref()?.input_preview.as_deref(),
+        "tool.result_preview" => entry.tool.as_ref()?.result_preview.as_deref(),
+        _ => None,
+    }
+}
+
+fn set_detail_field_value(
+    entry: &mut TranscriptEntryView,
+    field: &str,
+    value: String,
+) -> Result<(), String> {
+    match field {
+        "text" => {
+            entry.text = Some(value);
+            Ok(())
+        }
+        "tool.detail" => {
+            let tool = entry
+                .tool
+                .as_mut()
+                .ok_or_else(|| "tool.detail is unavailable for this entry".to_string())?;
+            tool.detail = Some(value);
+            Ok(())
+        }
+        "tool.input_preview" => {
+            let tool = entry
+                .tool
+                .as_mut()
+                .ok_or_else(|| "tool.input_preview is unavailable for this entry".to_string())?;
+            tool.input_preview = Some(value);
+            Ok(())
+        }
+        "tool.result_preview" => {
+            let tool = entry
+                .tool
+                .as_mut()
+                .ok_or_else(|| "tool.result_preview is unavailable for this entry".to_string())?;
+            tool.result_preview = Some(value);
+            Ok(())
+        }
+        _ => Err(format!("unsupported thread entry detail field `{field}`")),
+    }
+}
+
+fn slice_chars(value: &str, start: usize, len: usize) -> String {
+    value.chars().skip(start).take(len).collect()
 }

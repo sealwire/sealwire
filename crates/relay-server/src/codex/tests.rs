@@ -148,6 +148,48 @@ fn parse_transcript_enriches_file_change_tool_items_with_paths() {
 }
 
 #[test]
+fn parse_transcript_detail_item_preserves_full_tool_payloads() {
+    let item = json!({
+        "id": "item-tool",
+        "type": "mcpToolCall",
+        "toolName": "Read",
+        "title": "Read frontend/remote/main.js",
+        "detail": "Loaded the requested file contents.",
+        "input": {
+            "path": "frontend/remote/main.js",
+            "range": {
+                "start": 1,
+                "end": 4000
+            }
+        },
+        "result": {
+            "text": "A".repeat(MAX_TOOL_JSON_CHARS * 4)
+        }
+    });
+
+    let entry = parse_transcript_detail_item(&item, Some("turn-1".to_string()), "completed")
+        .expect("detail entry should parse");
+    let tool = entry.tool.as_ref().expect("tool detail should exist");
+
+    assert_eq!(entry.kind, TranscriptEntryKind::ToolCall);
+    assert_eq!(tool.title, "Read frontend/remote/main.js");
+    assert_eq!(
+        tool.detail.as_deref(),
+        Some("Loaded the requested file contents.")
+    );
+    assert!(tool
+        .input_preview
+        .as_deref()
+        .unwrap_or_default()
+        .contains("\"path\": \"frontend/remote/main.js\""));
+    assert!(tool
+        .result_preview
+        .as_deref()
+        .unwrap_or_default()
+        .contains(&"A".repeat(MAX_TOOL_JSON_CHARS * 2)));
+}
+
+#[test]
 fn parse_transcript_preserves_full_agent_messages() {
     let huge_text = "A".repeat(MAX_COMMAND_ENTRY_CHARS * 3);
     let thread = json!({

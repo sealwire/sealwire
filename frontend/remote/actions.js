@@ -280,7 +280,9 @@ async function handleEncryptedRemoteActionResult(payload) {
 function handleRemoteActionResult(actionId, result) {
   settlePendingAction(actionId, result);
   const isTranscriptFetch =
-    result.action === "fetch_thread_transcript" || result.action === "fetch_thread_entries";
+    result.action === "fetch_thread_transcript"
+    || result.action === "fetch_thread_entries"
+    || result.action === "fetch_thread_entry_detail";
 
   try {
     if (result.session_claim && state.remoteAuth) {

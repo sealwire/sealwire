@@ -1,8 +1,8 @@
 use crate::protocol::{
     truncate_with_ellipsis, ApprovalRequestView, LogEntryView, SecurityMode, SessionSnapshot,
-    SessionSnapshotCompactProfile, ThreadEntriesResponse, ThreadSummaryView,
-    ThreadTranscriptResponse, ThreadsResponse, ThreadsResponseCompactProfile, TranscriptEntryKind,
-    TranscriptEntryView,
+    SessionSnapshotCompactProfile, ThreadEntriesResponse, ThreadEntryDetailResponse,
+    ThreadSummaryView, ThreadTranscriptResponse, ThreadsResponse, ThreadsResponseCompactProfile,
+    TranscriptEntryKind, TranscriptEntryView,
 };
 
 const MAX_BROKER_LOGS: usize = 8;
@@ -492,4 +492,49 @@ fn thread_entries_response_returns_complete_entries_for_requested_item_ids() {
         response.entries[0].text.as_deref(),
         transcript[1].text.as_deref()
     );
+}
+
+#[test]
+fn thread_entry_detail_response_chunks_large_command_text() {
+    let entry = TranscriptEntryView {
+        item_id: Some("item-1".to_string()),
+        kind: TranscriptEntryKind::Command,
+        text: Some("x".repeat(20_000)),
+        status: "completed".to_string(),
+        turn_id: Some("turn-1".to_string()),
+        tool: None,
+    };
+
+    let response =
+        ThreadEntryDetailResponse::from_entry("thread-1".to_string(), entry.clone()).unwrap();
+
+    assert_eq!(response.item_id, "item-1");
+    assert!(response.entry.is_some());
+    assert_eq!(response.pending_fields.len(), 1);
+    assert_eq!(response.pending_fields[0].field, "text");
+    assert!(response
+        .entry
+        .as_ref()
+        .and_then(|entry| entry.text.as_ref())
+        .map(|text| text.len() < entry.text.as_ref().unwrap().len())
+        .unwrap_or(false));
+
+    let chunk = ThreadEntryDetailResponse::from_entry_chunk(
+        "thread-1".to_string(),
+        &entry,
+        "text",
+        response.pending_fields[0].next_cursor,
+    )
+    .unwrap();
+
+    assert!(chunk.entry.is_none());
+    assert_eq!(
+        chunk.chunk.as_ref().map(|chunk| chunk.field.as_str()),
+        Some("text")
+    );
+    assert!(!chunk
+        .chunk
+        .as_ref()
+        .map(|chunk| chunk.text.is_empty())
+        .unwrap_or(true));
 }

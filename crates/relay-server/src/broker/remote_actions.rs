@@ -6,9 +6,9 @@ use tracing::info;
 use crate::{
     protocol::{
         ApprovalDecisionInput, ApprovalReceipt, HeartbeatInput, ReadThreadEntriesInput,
-        ReadThreadTranscriptInput, ResumeSessionInput, SendMessageInput, SessionSnapshot,
-        StartSessionInput, TakeOverInput, ThreadEntriesResponse, ThreadTranscriptResponse,
-        ThreadsQuery, ThreadsResponse,
+        ReadThreadEntryDetailInput, ReadThreadTranscriptInput, ResumeSessionInput,
+        SendMessageInput, SessionSnapshot, StartSessionInput, TakeOverInput, ThreadEntriesResponse,
+        ThreadEntryDetailResponse, ThreadTranscriptResponse, ThreadsQuery, ThreadsResponse,
     },
     state::{AppState, ApprovalError, CachedRemoteActionResult, RemoteActionReplayDecision},
 };
@@ -53,6 +53,9 @@ pub(super) enum RemoteActionRequest {
     FetchThreadEntries {
         input: ReadThreadEntriesInput,
     },
+    FetchThreadEntryDetail {
+        input: ReadThreadEntryDetailInput,
+    },
     FetchThreadTranscript {
         input: ReadThreadTranscriptInput,
     },
@@ -74,6 +77,7 @@ impl RemoteActionRequest {
             Self::Heartbeat { .. } => RemoteActionKind::Heartbeat,
             Self::ListThreads { .. } => RemoteActionKind::ListThreads,
             Self::FetchThreadEntries { .. } => RemoteActionKind::FetchThreadEntries,
+            Self::FetchThreadEntryDetail { .. } => RemoteActionKind::FetchThreadEntryDetail,
             Self::FetchThreadTranscript { .. } => RemoteActionKind::FetchThreadTranscript,
             Self::DecideApproval { .. } => RemoteActionKind::DecideApproval,
         }
@@ -111,6 +115,7 @@ impl RemoteActionRequest {
             }
             Self::ListThreads { query } => Self::ListThreads { query },
             Self::FetchThreadEntries { input } => Self::FetchThreadEntries { input },
+            Self::FetchThreadEntryDetail { input } => Self::FetchThreadEntryDetail { input },
             Self::FetchThreadTranscript { input } => Self::FetchThreadTranscript { input },
             Self::DecideApproval {
                 request_id,
@@ -135,6 +140,7 @@ pub(super) enum RemoteActionKind {
     Heartbeat,
     ListThreads,
     FetchThreadEntries,
+    FetchThreadEntryDetail,
     FetchThreadTranscript,
     DecideApproval,
 }
@@ -151,6 +157,7 @@ impl RemoteActionKind {
             Self::Heartbeat => "heartbeat",
             Self::ListThreads => "list_threads",
             Self::FetchThreadEntries => "fetch_thread_entries",
+            Self::FetchThreadEntryDetail => "fetch_thread_entry_detail",
             Self::FetchThreadTranscript => "fetch_thread_transcript",
             Self::DecideApproval => "decide_approval",
         }
@@ -165,6 +172,7 @@ struct RemoteActionResultPlaintext {
     receipt: Option<ApprovalReceipt>,
     threads: Option<ThreadsResponse>,
     thread_entries: Option<ThreadEntriesResponse>,
+    thread_entry_detail: Option<ThreadEntryDetailResponse>,
     thread_transcript: Option<ThreadTranscriptResponse>,
     session_claim: Option<String>,
     session_claim_expires_at: Option<u64>,
@@ -179,6 +187,7 @@ pub(super) struct RemoteActionOutcome {
     pub(super) receipt: Option<ApprovalReceipt>,
     pub(super) threads: Option<ThreadsResponse>,
     pub(super) thread_entries: Option<ThreadEntriesResponse>,
+    pub(super) thread_entry_detail: Option<ThreadEntryDetailResponse>,
     pub(super) thread_transcript: Option<ThreadTranscriptResponse>,
     pub(super) session_claim: Option<String>,
     pub(super) session_claim_expires_at: Option<u64>,
@@ -626,6 +635,7 @@ async fn execute_remote_action(
                 receipt: None,
                 threads: Some(threads),
                 thread_entries: None,
+                thread_entry_detail: None,
                 thread_transcript: None,
                 session_claim: None,
                 session_claim_expires_at: None,
@@ -638,6 +648,20 @@ async fn execute_remote_action(
                 receipt: None,
                 threads: None,
                 thread_entries: Some(thread_entries),
+                thread_entry_detail: None,
+                thread_transcript: None,
+                session_claim: None,
+                session_claim_expires_at: None,
+                ..RemoteActionOutcome::default()
+            }),
+        RemoteActionRequest::FetchThreadEntryDetail { input } => state
+            .read_thread_entry_detail(input)
+            .await
+            .map(|thread_entry_detail| RemoteActionOutcome {
+                receipt: None,
+                threads: None,
+                thread_entries: None,
+                thread_entry_detail: Some(thread_entry_detail),
                 thread_transcript: None,
                 session_claim: None,
                 session_claim_expires_at: None,
@@ -657,6 +681,7 @@ async fn execute_remote_action(
                     receipt: None,
                     threads: None,
                     thread_entries: None,
+                    thread_entry_detail: None,
                     thread_transcript: Some(thread_transcript),
                     session_claim: None,
                     session_claim_expires_at: None,
@@ -670,6 +695,7 @@ async fn execute_remote_action(
                 receipt: Some(receipt),
                 threads: None,
                 thread_entries: None,
+                thread_entry_detail: None,
                 thread_transcript: None,
                 session_claim: None,
                 session_claim_expires_at: None,
@@ -926,6 +952,7 @@ async fn publish_plain_remote_action_result(
             receipt: outcome.receipt,
             threads,
             thread_entries: outcome.thread_entries,
+            thread_entry_detail: outcome.thread_entry_detail,
             thread_transcript: outcome.thread_transcript,
             session_claim: outcome.session_claim,
             session_claim_expires_at: outcome.session_claim_expires_at,
@@ -956,6 +983,7 @@ async fn replay_plain_remote_action_result(
             receipt: cached.receipt,
             threads: cached.threads,
             thread_entries: cached.thread_entries,
+            thread_entry_detail: cached.thread_entry_detail,
             thread_transcript: cached.thread_transcript,
             session_claim: cached.session_claim,
             session_claim_expires_at: cached.session_claim_expires_at,
@@ -1011,6 +1039,7 @@ async fn publish_remote_action_result_private(
             receipt: outcome.receipt,
             threads,
             thread_entries: outcome.thread_entries,
+            thread_entry_detail: outcome.thread_entry_detail,
             thread_transcript: outcome.thread_transcript,
             session_claim: outcome.session_claim,
             session_claim_expires_at: outcome.session_claim_expires_at,
@@ -1055,6 +1084,7 @@ async fn replay_encrypted_remote_action_result(
             receipt: cached.receipt,
             threads: cached.threads,
             thread_entries: cached.thread_entries,
+            thread_entry_detail: cached.thread_entry_detail,
             thread_transcript: cached.thread_transcript,
             session_claim: cached.session_claim,
             session_claim_expires_at: cached.session_claim_expires_at,
@@ -1087,6 +1117,7 @@ fn cached_remote_action_result(
         // use ThreadsResponseCompactProfile.
         threads: outcome.threads,
         thread_entries: outcome.thread_entries,
+        thread_entry_detail: outcome.thread_entry_detail,
         thread_transcript: outcome.thread_transcript,
         session_claim: outcome.session_claim,
         session_claim_expires_at: outcome.session_claim_expires_at,

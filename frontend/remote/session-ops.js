@@ -16,7 +16,7 @@ import {
   loadOlderRemoteTranscript,
 } from "./transcript/hydration.js";
 import {
-  createTranscriptEntriesFetcher,
+  createTranscriptEntryDetailFetcher,
   createTranscriptPageFetcher,
 } from "./transcript/api.js";
 import {
@@ -30,7 +30,8 @@ import {
 } from "./surface-state.js";
 
 const fetchTranscriptPage = createTranscriptPageFetcher(dispatchOrRecover);
-const fetchTranscriptEntries = createTranscriptEntriesFetcher(dispatchOrRecover);
+const fetchTranscriptEntryDetailRequest =
+  createTranscriptEntryDetailFetcher(dispatchOrRecover);
 
 export function applySessionSnapshot(snapshot) {
   syncLiveTranscriptEntryDetailsFromSnapshot(state, snapshot);
@@ -268,16 +269,10 @@ export async function maybeLoadOlderTranscriptHistory() {
 }
 
 export async function fetchTranscriptEntryDetail(threadId, itemId) {
-  if (!threadId || !itemId) {
-    return null;
-  }
-
-  const result = await fetchTranscriptEntries({
-    itemIds: [itemId],
+  return fetchTranscriptEntryDetailRequest({
+    itemId,
     threadId,
   });
-
-  return (result.entries || []).find((entry) => entry?.item_id === itemId) || null;
 }
 
 function applyRenderedSession(

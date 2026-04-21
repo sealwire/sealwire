@@ -1,7 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { createTranscriptPageFetcher } from "../transcript/api.js";
+import {
+  createTranscriptEntryDetailFetcher,
+  createTranscriptPageFetcher,
+} from "../transcript/api.js";
 
 test("createTranscriptPageFetcher normalizes legacy chunk transcript pages", async () => {
   const requests = [];
@@ -135,4 +138,81 @@ test("createTranscriptPageFetcher preserves complete-entry transcript pages", as
       },
     ],
   });
+});
+
+test("createTranscriptEntryDetailFetcher assembles chunked detail fields", async () => {
+  const requests = [];
+  const fetchTranscriptEntryDetail = createTranscriptEntryDetailFetcher(async (action, payload) => {
+    requests.push({ action, payload });
+    if (payload.input.cursor == null) {
+      return {
+        thread_entry_detail: {
+          thread_id: "thread-1",
+          item_id: "cmd-1",
+          entry: {
+            item_id: "cmd-1",
+            kind: "command",
+            status: "completed",
+            text: "line 1\n",
+            turn_id: "turn-1",
+            tool: null,
+          },
+          pending_fields: [
+            {
+              field: "text",
+              next_cursor: 7,
+              total_chars: 13,
+            },
+          ],
+          chunk: null,
+        },
+      };
+    }
+
+    return {
+      thread_entry_detail: {
+        thread_id: "thread-1",
+        item_id: "cmd-1",
+        entry: null,
+        pending_fields: [],
+        chunk: {
+          field: "text",
+          text: "line 2",
+          next_cursor: null,
+          total_chars: 13,
+        },
+      },
+    };
+  });
+
+  const entry = await fetchTranscriptEntryDetail({
+    itemId: "cmd-1",
+    threadId: "thread-1",
+  });
+
+  assert.deepEqual(requests, [
+    {
+      action: "fetch_thread_entry_detail",
+      payload: {
+        input: {
+          cursor: null,
+          field: null,
+          item_id: "cmd-1",
+          thread_id: "thread-1",
+        },
+      },
+    },
+    {
+      action: "fetch_thread_entry_detail",
+      payload: {
+        input: {
+          cursor: 7,
+          field: "text",
+          item_id: "cmd-1",
+          thread_id: "thread-1",
+        },
+      },
+    },
+  ]);
+  assert.equal(entry?.text, "line 1\nline 2");
 });
