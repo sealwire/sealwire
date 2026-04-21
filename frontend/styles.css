@@ -1576,6 +1576,32 @@ input:focus, textarea:focus, select:focus {
   word-break: break-word;
   border: 1px solid var(--border-subtle);
 }
+.transcript-entry-controls {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 8px;
+}
+
+.transcript-toggle-button {
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border-prominent);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.transcript-toggle-button:hover {
+  color: var(--text-primary);
+}
+
+.transcript-detail-note {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
 .message-collapsible {
   display: grid;
   gap: 8px;

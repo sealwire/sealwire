@@ -49,6 +49,10 @@ import {
   sendHeartbeat,
 } from "./session-ops.js";
 import {
+  cacheTranscriptEntryDetail,
+  getCachedTranscriptEntryDetail,
+} from "./transcript/details.js";
+import {
   computeTranscriptScrollPosition,
   deriveTranscriptScrollMode,
 } from "./transcript-scroll.js";
@@ -202,6 +206,27 @@ function RemoteApp() {
         : "Local credentials are unavailable. Pair this relay again in this browser.",
     sendPending: uiState.sendPending,
   };
+  const transcriptDetailEntries = new Map();
+  for (const expandedKey of uiState.transcriptExpandedItemIds) {
+    if (!expandedKey.startsWith("command:")) {
+      continue;
+    }
+    const itemId = expandedKey.slice("command:".length);
+    const transientDetail = uiState.transcriptExpandedDetails.get(itemId);
+    if (transientDetail) {
+      transcriptDetailEntries.set(itemId, transientDetail);
+      continue;
+    }
+
+    const cachedDetail = getCachedTranscriptEntryDetail(
+      currentState,
+      session?.active_thread_id || null,
+      itemId
+    );
+    if (cachedDetail) {
+      transcriptDetailEntries.set(itemId, cachedDetail);
+    }
+  }
 
   useLayoutEffect(() => {
     setRemoteCwdInputElement(remoteCwdInputRef.current);
@@ -215,6 +240,12 @@ function RemoteApp() {
   useEffect(() => {
     previousSessionRef.current = session || null;
   }, [session]);
+
+  useEffect(() => {
+    dispatchUi({
+      type: "transcript/reset",
+    });
+  }, [session?.active_thread_id]);
 
   useEffect(() => {
     dispatchUi({
@@ -324,6 +355,81 @@ function RemoteApp() {
         value: false,
       });
     }
+  }
+
+  async function handleTranscriptToggle(itemId) {
+    if (!itemId || !session?.active_thread_id) {
+      return;
+    }
+
+    const expandKey = `command:${itemId}`;
+    const cachedDetail = getCachedTranscriptEntryDetail(
+      currentState,
+      session.active_thread_id,
+      itemId
+    );
+    const isExpanded = uiState.transcriptExpandedItemIds.has(expandKey);
+
+    if (isExpanded) {
+      dispatchUi({
+        type: "transcript/collapse",
+        dropTransient: !cachedDetail,
+        itemId: expandKey,
+      });
+      return;
+    }
+
+    dispatchUi({
+      type: "transcript/expand",
+      itemId: expandKey,
+    });
+    if (cachedDetail || uiState.transcriptExpandedDetails.has(itemId)) {
+      return;
+    }
+
+    dispatchUi({
+      type: "transcript/startLoadingDetail",
+      itemId,
+    });
+
+    try {
+      const detail = await handlers.onFetchTranscriptEntryDetail(
+        session.active_thread_id,
+        itemId
+      );
+      if (!detail) {
+        return;
+      }
+
+      const { cached } = cacheTranscriptEntryDetail(
+        currentState,
+        session.active_thread_id,
+        detail
+      );
+      dispatchUi({
+        type: "transcript/setExpandedDetail",
+        detail: cached ? null : detail,
+        itemId,
+      });
+    } finally {
+      dispatchUi({
+        type: "transcript/finishLoadingDetail",
+        itemId,
+      });
+    }
+  }
+
+  function handleExpandableBlockToggle(expandKey) {
+    if (!expandKey) {
+      return;
+    }
+
+    const isExpanded = uiState.transcriptExpandedItemIds.has(expandKey);
+    dispatchUi({
+      type: isExpanded ? "transcript/collapse" : "transcript/expand",
+      dropTransient: false,
+      itemId: expandKey,
+    });
   }
 
   async function handleBeginPairing(rawValue) {
@@ -478,6 +584,8 @@ function RemoteApp() {
           onSendMessage() {
             void handleSendMessage();
           },
+          onToggleExpandableBlock: handleExpandableBlockToggle,
+          onToggleTranscriptItem: handleTranscriptToggle,
           onSubmitDecision(decision, scope) {
             void handlers.onSubmitDecision(decision, scope);
           },
@@ -486,6 +594,8 @@ function RemoteApp() {
           },
           session,
           sessionView,
+          transcriptDetailEntries,
+          uiState,
         }),
         h(RemoteClientLog, {
           lines: currentState.clientLogs,
@@ -801,10 +911,14 @@ function RemoteThreadPanel({
   onComposerEffortChange,
   onSelectRelay,
   onSendMessage,
+  onToggleExpandableBlock,
+  onToggleTranscriptItem,
   onSubmitDecision,
   onTakeOver,
   session,
   sessionView,
+  transcriptDetailEntries,
+  uiState,
 }) {
   return h(
     "section",
@@ -828,8 +942,12 @@ function RemoteThreadPanel({
         currentState,
         emptyStateModel,
         onSelectRelay,
+        onToggleExpandableBlock,
+        onToggleTranscriptItem,
         onSubmitDecision,
         session,
+        transcriptDetailEntries,
+        uiState,
         sessionView,
       })
     ),
@@ -860,9 +978,13 @@ function RemoteTranscriptPanel({
   currentState,
   emptyStateModel,
   onSelectRelay,
+  onToggleExpandableBlock,
   onSubmitDecision,
+  onToggleTranscriptItem,
   session,
   sessionView,
+  transcriptDetailEntries,
+  uiState,
 }) {
   const transcriptRef = useRef(null);
   const previousRenderRef = useRef({
@@ -939,10 +1061,26 @@ function RemoteTranscriptPanel({
   } else {
     body = h(TranscriptMarkupState, {
       hydrationLoading,
-      markup: renderTranscriptMarkup(entries, approval),
+      markup: renderTranscriptMarkup(entries, approval, {
+        detailEntries: transcriptDetailEntries,
+        expandedItemIds: uiState.transcriptExpandedItemIds,
+        expandedKeys: uiState.transcriptExpandedItemIds,
+        loadingItemIds: uiState.transcriptLoadingItemIds,
+      }),
       onApprovalClick: (event) => {
         const approvalButton = event.target.closest?.("[data-approval-decision]");
         if (!approvalButton) {
+          const expandSummary = event.target.closest?.("[data-expand-key]");
+          if (expandSummary) {
+            event.preventDefault();
+            onToggleExpandableBlock?.(expandSummary.dataset.expandKey || "");
+            return;
+          }
+          const toggleButton = event.target.closest?.("[data-transcript-toggle]");
+          if (!toggleButton) {
+            return;
+          }
+          void onToggleTranscriptItem?.(toggleButton.dataset.itemId || "");
           return;
         }
 

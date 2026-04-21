@@ -2,6 +2,7 @@ import {
   applyRemoteSurfacePatch,
   createClearedTranscriptHydrationPatch,
 } from "../surface-state.js";
+import { prepareTranscriptEntryForSurface } from "./details.js";
 
 export function clearTranscriptHydration(state) {
   applyRemoteSurfacePatch(createClearedTranscriptHydrationPatch());
@@ -101,6 +102,8 @@ export function getTranscriptHydrationCursor(state) {
 }
 
 export function mergeTranscriptHydrationPage(state, page, { prepend = false } = {}) {
+  let cacheState = state;
+  let pendingCachePatch = null;
   const nextEntries = new Map(state.transcriptHydrationEntries);
   const nextOrder = prepend ? [...state.transcriptHydrationOrder] : [];
   const pageItemIds = [];
@@ -110,13 +113,27 @@ export function mergeTranscriptHydrationPage(state, page, { prepend = false } = 
     if (!itemId) {
       continue;
     }
+    const preparedEntry = prepareTranscriptEntryForSurface(
+      cacheState,
+      page.thread_id || state.transcriptHydrationThreadId,
+      entry,
+      { applyPatch: false }
+    );
+    const surfaceEntry = preparedEntry.entry;
+    if (preparedEntry.cachePatch) {
+      pendingCachePatch = preparedEntry.cachePatch;
+      cacheState = {
+        ...cacheState,
+        ...preparedEntry.cachePatch,
+      };
+    }
     nextEntries.set(itemId, {
       item_id: itemId,
-      kind: entry.kind,
-      text: entry.text || null,
-      status: entry.status,
-      turn_id: entry.turn_id || null,
-      tool: entry.tool || null,
+      kind: surfaceEntry.kind,
+      text: surfaceEntry.text || null,
+      status: surfaceEntry.status,
+      turn_id: surfaceEntry.turn_id || null,
+      tool: surfaceEntry.tool || null,
     });
     pageItemIds.push(itemId);
   }
@@ -132,6 +149,7 @@ export function mergeTranscriptHydrationPage(state, page, { prepend = false } = 
         : "loading";
 
   applyRemoteSurfacePatch({
+    ...(pendingCachePatch || {}),
     transcriptHydrationEntries: nextEntries,
     transcriptHydrationOrder: mergedOrder,
     transcriptHydrationOlderCursor: page.prev_cursor ?? null,

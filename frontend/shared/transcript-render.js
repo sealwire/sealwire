@@ -35,7 +35,25 @@ function previewText(value) {
   return preview === text ? preview : `${preview}\n…`;
 }
 
-function renderExpandableBlock({ className = "message-body", value, preformatted = false }) {
+function commandExpandKey(itemId) {
+  return itemId ? `command:${itemId}` : "";
+}
+
+function resolveTranscriptDetailEntry(entry, options) {
+  if (!entry?.item_id || !options?.detailEntries) {
+    return null;
+  }
+
+  return options.detailEntries.get(entry.item_id) || null;
+}
+
+function renderExpandableBlock({
+  className = "message-body",
+  expandKey = "",
+  expanded = false,
+  value,
+  preformatted = false,
+}) {
   const escapedFull = escapeHtml(value || "(empty)");
   if (!isCollapsible(value)) {
     return preformatted
@@ -49,8 +67,8 @@ function renderExpandableBlock({ className = "message-body", value, preformatted
   const contentClass = preformatted ? `${className} collapsible-pre` : className;
 
   return `
-    <details class="message-collapsible">
-      <summary class="message-collapsible-summary">
+    <details class="message-collapsible"${expanded ? " open" : ""}>
+      <summary class="message-collapsible-summary"${expandKey ? ` data-expand-key="${escapeHtml(expandKey)}"` : ""}>
         <span class="message-collapsible-label-closed">${summaryLabel}</span>
         <span class="message-collapsible-label-open">${collapseLabel}</span>
       </summary>
@@ -98,7 +116,29 @@ function renderAgentEntry(entry) {
   `;
 }
 
-function renderCommandEntry(entry) {
+function renderCommandEntry(entry, options = null) {
+  const itemId = entry.item_id || "";
+  const expandKey = commandExpandKey(itemId);
+  const expanded = Boolean(expandKey && options?.expandedKeys?.has(expandKey));
+  const loading = Boolean(itemId && options?.loadingItemIds?.has(itemId));
+  const detailEntry = resolveTranscriptDetailEntry(entry, options);
+  const preview = entry.text || "(empty)";
+  const fullText = detailEntry?.text || preview;
+
+  if (!itemId) {
+    return `
+      <article class="chat-message chat-message-system">
+        <div class="message-card message-card-system">
+          <div class="message-meta">
+            <strong>Command</strong>
+            <span>${escapeHtml(entry.status || "completed")}</span>
+          </div>
+          <pre class="message-pre">${escapeHtml(preview)}</pre>
+        </div>
+      </article>
+    `;
+  }
+
   return `
     <article class="chat-message chat-message-system">
       <div class="message-card message-card-system">
@@ -106,11 +146,22 @@ function renderCommandEntry(entry) {
           <strong>Command</strong>
           <span>${escapeHtml(entry.status || "completed")}</span>
         </div>
-        ${renderExpandableBlock({
-          className: "message-pre",
-          value: entry.text || "(empty)",
-          preformatted: true,
-        })}
+        <div class="transcript-entry-controls">
+          <button
+            class="transcript-toggle-button"
+            type="button"
+            data-transcript-toggle="command"
+            data-item-id="${escapeHtml(itemId)}"
+          >
+            ${expanded ? "Collapse" : "Expand"}
+          </button>
+        </div>
+        ${expanded
+          ? `<pre class="message-pre">${escapeHtml(fullText)}</pre>`
+          : `<pre class="message-pre">${escapeHtml(preview)}</pre>`}
+        ${expanded && loading && !detailEntry
+          ? '<p class="transcript-detail-note">Loading full command output…</p>'
+          : ""}
       </div>
     </article>
   `;
@@ -143,7 +194,7 @@ function renderToolDetailRow(label, value) {
   `;
 }
 
-function renderToolPreviewBlock(label, value) {
+function renderToolPreviewBlock(label, value, options = null) {
   if (!value) {
     return "";
   }
@@ -153,6 +204,8 @@ function renderToolPreviewBlock(label, value) {
       <div class="tool-preview-label">${escapeHtml(label)}</div>
       ${renderExpandableBlock({
         className: "message-pre",
+        expandKey: options?.expandKey || "",
+        expanded: Boolean(options?.expanded),
         value,
         preformatted: true,
       })}
@@ -160,10 +213,12 @@ function renderToolPreviewBlock(label, value) {
   `;
 }
 
-function renderToolEntry(entry) {
+function renderToolEntry(entry, options = null) {
   const tool = entry.tool || {};
   const title = tool.title || entry.text || tool.name || "Tool call";
   const detail = tool.detail && tool.detail !== title ? tool.detail : null;
+  const inputExpandKey = entry.item_id ? `tool:${entry.item_id}:input` : "";
+  const resultExpandKey = entry.item_id ? `tool:${entry.item_id}:result` : "";
 
   return `
     <article class="chat-message chat-message-system">
@@ -181,8 +236,14 @@ function renderToolEntry(entry) {
           ${renderToolDetailRow("URL", tool.url)}
           ${renderToolDetailRow("Command", tool.command)}
         </div>
-        ${renderToolPreviewBlock("Input", tool.input_preview)}
-        ${renderToolPreviewBlock("Result", tool.result_preview)}
+        ${renderToolPreviewBlock("Input", tool.input_preview, {
+          expandKey: inputExpandKey,
+          expanded: Boolean(inputExpandKey && options?.expandedKeys?.has(inputExpandKey)),
+        })}
+        ${renderToolPreviewBlock("Result", tool.result_preview, {
+          expandKey: resultExpandKey,
+          expanded: Boolean(resultExpandKey && options?.expandedKeys?.has(resultExpandKey)),
+        })}
       </div>
     </article>
   `;
@@ -202,7 +263,7 @@ function renderFallbackEntry(entry) {
   `;
 }
 
-export function renderTranscriptEntry(entry) {
+export function renderTranscriptEntry(entry, options = null) {
   const kind = entry.kind || "reasoning";
 
   if (kind === "user_text") {
@@ -212,10 +273,10 @@ export function renderTranscriptEntry(entry) {
     return renderAgentEntry(entry);
   }
   if (kind === "command") {
-    return renderCommandEntry(entry);
+    return renderCommandEntry(entry, options);
   }
   if (kind === "tool_call") {
-    return renderToolEntry(entry);
+    return renderToolEntry(entry, options);
   }
   if (kind === "reasoning") {
     return renderReasoningEntry(entry);
@@ -224,7 +285,10 @@ export function renderTranscriptEntry(entry) {
   return renderFallbackEntry(entry);
 }
 
-export function renderApprovalCard(approval) {
+export function renderApprovalCard(approval, options = null) {
+  const commandExpandKey = approval.request_id ? `approval:${approval.request_id}:command` : "";
+  const contextExpandKey = approval.request_id ? `approval:${approval.request_id}:context` : "";
+  const permissionsExpandKey = approval.request_id ? `approval:${approval.request_id}:permissions` : "";
   return `
     <article class="chat-message chat-message-system">
       <div class="message-card message-card-approval">
@@ -238,6 +302,8 @@ export function renderApprovalCard(approval) {
         ${approval.command
           ? renderExpandableBlock({
             className: "message-pre",
+            expandKey: commandExpandKey,
+            expanded: Boolean(commandExpandKey && options?.expandedKeys?.has(commandExpandKey)),
             value: approval.command,
             preformatted: true,
           })
@@ -245,6 +311,8 @@ export function renderApprovalCard(approval) {
         ${approval.context_preview
           ? renderExpandableBlock({
             className: "message-pre",
+            expandKey: contextExpandKey,
+            expanded: Boolean(contextExpandKey && options?.expandedKeys?.has(contextExpandKey)),
             value: approval.context_preview,
             preformatted: true,
           })
@@ -253,6 +321,10 @@ export function renderApprovalCard(approval) {
           approval.requested_permissions
             ? renderExpandableBlock({
               className: "message-pre",
+              expandKey: permissionsExpandKey,
+              expanded: Boolean(
+                permissionsExpandKey && options?.expandedKeys?.has(permissionsExpandKey)
+              ),
               value: JSON.stringify(approval.requested_permissions, null, 2),
               preformatted: true,
             })
@@ -295,10 +367,10 @@ export function renderApprovalCard(approval) {
   `;
 }
 
-export function renderTranscriptMarkup(entries = [], approval = null) {
-  const items = (entries || []).map(renderTranscriptEntry);
+export function renderTranscriptMarkup(entries = [], approval = null, options = null) {
+  const items = (entries || []).map((entry) => renderTranscriptEntry(entry, options));
   if (approval) {
-    items.push(renderApprovalCard(approval));
+    items.push(renderApprovalCard(approval, options));
   }
 
   return `<div class="thread-content">${items.join("")}</div>`;

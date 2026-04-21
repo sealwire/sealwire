@@ -287,7 +287,7 @@ fn compact_for_broker_preserves_existing_transcript_truncated_flag() {
 }
 
 #[test]
-fn thread_transcript_response_chunks_large_transcripts() {
+fn thread_transcript_response_preserves_oversized_single_entries() {
     let transcript = vec![
         TranscriptEntryView {
             item_id: Some("item-1".to_string()),
@@ -315,7 +315,11 @@ fn thread_transcript_response_chunks_large_transcripts() {
             transcript.clone(),
             cursor,
         );
-        assert!(serde_json::to_vec(&page).unwrap().len() <= THREADS_RESPONSE_TARGET_BYTES);
+        let page_bytes = serde_json::to_vec(&page).unwrap().len();
+        let single_entry_page = page.entries.len() == 1;
+        if !single_entry_page {
+            assert!(page_bytes <= THREADS_RESPONSE_TARGET_BYTES);
+        }
         assert!(!page.entries.is_empty());
         cursor = match page.next_cursor {
             Some(next_cursor) => {
@@ -330,6 +334,9 @@ fn thread_transcript_response_chunks_large_transcripts() {
     }
 
     assert!(pages.len() >= 2);
+    assert_eq!(pages[0].entries.len(), 1);
+    assert_eq!(pages[0].entries[0].item_id.as_deref(), Some("item-1"));
+    assert!(serde_json::to_vec(&pages[0]).unwrap().len() > THREADS_RESPONSE_TARGET_BYTES);
 
     let rebuilt = pages
         .into_iter()

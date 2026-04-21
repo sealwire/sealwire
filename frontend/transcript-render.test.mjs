@@ -20,6 +20,7 @@ test("renderTranscriptEntry renders typed session items safely", () => {
     text: "Hello from Codex",
   });
   const commandMarkup = renderTranscriptEntry({
+    item_id: "cmd-1",
     kind: "command",
     status: "completed",
     text: "npm test",
@@ -41,6 +42,8 @@ test("renderTranscriptEntry renders typed session items safely", () => {
   assert.match(assistantMarkup, /Codex/);
   assert.match(assistantMarkup, /turn-123/);
   assert.match(commandMarkup, /Command/);
+  assert.match(commandMarkup, /data-transcript-toggle="command"/);
+  assert.match(commandMarkup, /data-item-id="cmd-1"/);
   assert.match(commandMarkup, /<pre class="message-pre">npm test<\/pre>/);
   assert.match(toolMarkup, /Read frontend\/remote\/main\.js/);
   assert.match(toolMarkup, /message-card-tool/);
@@ -53,9 +56,14 @@ test("renderTranscriptEntry collapses long command and tool previews without col
   const assistantText = "A".repeat(1200);
 
   const commandMarkup = renderTranscriptEntry({
+    item_id: "cmd-2",
     kind: "command",
     status: "completed",
     text: longCommand,
+  }, {
+    detailEntries: new Map(),
+    expandedKeys: new Set(),
+    loadingItemIds: new Set(),
   });
   const toolMarkup = renderTranscriptEntry({
     kind: "tool_call",
@@ -74,13 +82,46 @@ test("renderTranscriptEntry collapses long command and tool previews without col
     text: assistantText,
   });
 
-  assert.match(commandMarkup, /<details class="message-collapsible">/);
-  assert.match(commandMarkup, /message-collapsible-label-closed">Expand<\/span>/);
-  assert.match(commandMarkup, /message-collapsible-label-open">Collapse<\/span>/);
+  assert.match(commandMarkup, /data-transcript-toggle="command"/);
+  assert.match(commandMarkup, />\s*Expand\s*<\/button>/);
   assert.match(toolMarkup, /<details class="message-collapsible">/);
   assert.match(toolMarkup, /Files:\nfrontend\/file-1\.js/);
   assert.doesNotMatch(assistantMarkup, /message-collapsible/);
   assert.match(assistantMarkup, new RegExp(`A{1200}`));
+});
+
+test("renderTranscriptEntry shows expanded command detail and loading note when requested", () => {
+  const expandedMarkup = renderTranscriptEntry({
+    item_id: "cmd-3",
+    kind: "command",
+    status: "completed",
+    text: "preview",
+  }, {
+    detailEntries: new Map([
+      ["cmd-3", {
+        item_id: "cmd-3",
+        kind: "command",
+        status: "completed",
+        text: "full command output",
+      }],
+    ]),
+    expandedKeys: new Set(["command:cmd-3"]),
+    loadingItemIds: new Set(),
+  });
+  const loadingMarkup = renderTranscriptEntry({
+    item_id: "cmd-3",
+    kind: "command",
+    status: "completed",
+    text: "preview",
+  }, {
+    detailEntries: new Map(),
+    expandedKeys: new Set(["command:cmd-3"]),
+    loadingItemIds: new Set(["cmd-3"]),
+  });
+
+  assert.match(expandedMarkup, />\s*Collapse\s*<\/button>/);
+  assert.match(expandedMarkup, /full command output/);
+  assert.match(loadingMarkup, /Loading full command output/);
 });
 
 test("renderApprovalCard includes session-scope actions and escapes requested permissions", () => {

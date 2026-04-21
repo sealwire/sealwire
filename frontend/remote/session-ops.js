@@ -15,7 +15,10 @@ import {
   hydrateRemoteTranscript,
   loadOlderRemoteTranscript,
 } from "./transcript/hydration.js";
-import { createTranscriptPageFetcher } from "./transcript/api.js";
+import {
+  createTranscriptEntriesFetcher,
+  createTranscriptPageFetcher,
+} from "./transcript/api.js";
 import { remoteUiRefs } from "./ui-refs.js";
 import {
   applyRemoteSurfacePatch,
@@ -24,6 +27,7 @@ import {
 } from "./surface-state.js";
 
 const fetchTranscriptPage = createTranscriptPageFetcher(dispatchOrRecover);
+const fetchTranscriptEntries = createTranscriptEntriesFetcher(dispatchOrRecover);
 
 export function applySessionSnapshot(snapshot) {
   const effectiveSnapshot = restoreHydratedTranscript(state, snapshot);
@@ -257,6 +261,19 @@ export async function maybeLoadOlderTranscriptHistory() {
       renderLog(`Remote older transcript sync failed: ${error.message}`);
     },
   });
+}
+
+export async function fetchTranscriptEntryDetail(threadId, itemId) {
+  if (!threadId || !itemId) {
+    return null;
+  }
+
+  const result = await fetchTranscriptEntries({
+    itemIds: [itemId],
+    threadId,
+  });
+
+  return (result.entries || []).find((entry) => entry?.item_id === itemId) || null;
 }
 
 function applyRenderedSession(
