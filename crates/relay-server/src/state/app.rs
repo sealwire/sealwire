@@ -925,6 +925,23 @@ impl AppState {
         relay.notify();
     }
 
+    pub(crate) async fn update_surface_presence(&self, peer_id: &str, connected: bool) -> bool {
+        let mut relay = self.relay.write().await;
+        if connected {
+            relay.mark_surface_peer_online(peer_id)
+        } else {
+            relay.mark_surface_peer_offline(peer_id)
+        }
+    }
+
+    pub(crate) async fn replace_online_surface_peers<I>(&self, peer_ids: I)
+    where
+        I: IntoIterator<Item = String>,
+    {
+        let mut relay = self.relay.write().await;
+        relay.replace_online_surface_peers(peer_ids);
+    }
+
     pub(crate) async fn push_runtime_log(&self, kind: &'static str, message: String) {
         let mut relay = self.relay.write().await;
         relay.push_log(kind, message);
@@ -1050,14 +1067,12 @@ impl AppState {
     pub(crate) async fn broker_targets(&self) -> Vec<BrokerTarget> {
         let relay = self.relay.read().await;
         relay
-            .paired_devices
-            .values()
-            .filter_map(|device| {
-                device.last_peer_id.as_ref().map(|peer_id| BrokerTarget {
-                    device_id: device.device_id.clone(),
-                    peer_id: peer_id.clone(),
-                    payload_secret: device.payload_secret.clone(),
-                })
+            .broker_targets()
+            .into_iter()
+            .map(|(device_id, peer_id, payload_secret)| BrokerTarget {
+                device_id,
+                peer_id,
+                payload_secret,
             })
             .collect()
     }

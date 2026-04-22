@@ -1247,3 +1247,53 @@ test("applyTranscriptDelta updates existing transcript entries using text and st
   assert.equal(state.session.transcript[0].status, "running");
   assert.equal(state.session.transcript[0].kind, "agent_text");
 });
+
+test("sendHeartbeat dispatches a heartbeat when the current device holds control", async () => {
+  const browser = activeBrowser || installBrowserStubs();
+
+  const sentPayloads = [];
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { sendHeartbeat } = await import("./session-ops.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-1",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: "claim-token-1",
+    sessionClaimExpiresAt: Math.floor(Date.now() / 1000) + 300,
+  });
+  seedSocketState(state, {
+    socketConnected: true,
+    socketPeerId: "surface-peer-1",
+  });
+  state.pendingActions.clear();
+  state.session = {
+    active_thread_id: "thread-1",
+    active_controller_device_id: "device-1",
+  };
+  state.socket = {
+    readyState: 1,
+    send(frameText) {
+      const frame = JSON.parse(frameText);
+      sentPayloads.push(frame.payload);
+    },
+  };
+
+  const pending = sendHeartbeat();
+  await nextTick();
+
+  assert.equal(sentPayloads.length, 1);
+  assert.equal(sentPayloads[0].request.type, "heartbeat");
+
+  browser.runTimers();
+  await pending;
+});

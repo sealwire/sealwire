@@ -327,12 +327,18 @@ pub(super) async fn handle_remote_action(
             )
             .await
         }
-        request => attach_session_claim_if_needed(
-            action_kind,
-            &resolved_device_id,
-            &from_peer_id,
-            execute_remote_action(state, request.bind_device(resolved_device_id.clone())).await?,
-        ),
+        request => {
+            state
+                .mark_remote_device_seen(&resolved_device_id, &from_peer_id)
+                .await?;
+            attach_session_claim_if_needed(
+                action_kind,
+                &resolved_device_id,
+                &from_peer_id,
+                execute_remote_action(state, request.bind_device(resolved_device_id.clone()))
+                    .await?,
+            )
+        }
     };
     let snapshot = state.snapshot().await;
     info!(

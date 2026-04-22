@@ -28,11 +28,17 @@ export function renderLog(message) {
 }
 
 export function isCurrentDeviceActiveController(session) {
-  return isRemoteController(session);
+  return isRemoteController({
+    remoteAuth: state.remoteAuth,
+    session,
+  });
 }
 
 export function canCurrentDeviceWrite(session) {
-  return canRemoteDeviceWrite(session);
+  return canRemoteDeviceWrite({
+    remoteAuth: state.remoteAuth,
+    session,
+  });
 }
 
 export { handleTranscriptScroll } from "./transcript-scroll.js";

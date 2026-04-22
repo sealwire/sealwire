@@ -765,6 +765,164 @@ fn claim_challenge_keeps_payload_secret_stable_and_invalidates_old_challenge() {
 }
 
 #[test]
+fn broker_targets_require_online_surface_presence() {
+    let mut relay = test_state();
+    let ticket = issue_test_pairing_ticket(
+        &mut relay,
+        "ws://127.0.0.1:8789",
+        "room-a",
+        "relay-a",
+        Some(60),
+    );
+
+    let (device, payload_secret) = relay
+        .consume_pairing_ticket(
+            &ticket.pairing_id,
+            &ticket.pairing_secret,
+            Some("My Phone".to_string()),
+            Some("Primary Phone".to_string()),
+            TEST_VERIFY_KEY_B64.to_string(),
+            None,
+            "surface-a",
+            100,
+        )
+        .expect("pairing should succeed");
+
+    assert!(relay.broker_targets().is_empty());
+
+    assert!(relay.mark_surface_peer_online("surface-a"));
+    assert_eq!(
+        relay.broker_targets(),
+        vec![(
+            device.device_id.clone(),
+            "surface-a".to_string(),
+            payload_secret.clone(),
+        )]
+    );
+
+    relay
+        .mark_paired_device_seen(&device.device_id, "surface-b", 101)
+        .expect("device should remain paired");
+    assert_eq!(
+        relay.broker_targets(),
+        vec![(
+            device.device_id.clone(),
+            "surface-a".to_string(),
+            payload_secret.clone(),
+        )]
+    );
+
+    assert!(relay.mark_surface_peer_online("surface-b"));
+    let mut targets = relay.broker_targets();
+    targets.sort();
+    assert_eq!(
+        targets,
+        vec![
+            (
+                device.device_id.clone(),
+                "surface-a".to_string(),
+                payload_secret.clone(),
+            ),
+            (
+                device.device_id.clone(),
+                "surface-b".to_string(),
+                payload_secret.clone(),
+            ),
+        ]
+    );
+
+    assert!(relay.mark_surface_peer_offline("surface-b"));
+    assert_eq!(
+        relay.broker_targets(),
+        vec![(device.device_id, "surface-a".to_string(), payload_secret,)]
+    );
+}
+
+#[test]
+fn broker_disconnect_clears_online_surface_targets() {
+    let mut relay = test_state();
+    let ticket = issue_test_pairing_ticket(
+        &mut relay,
+        "ws://127.0.0.1:8789",
+        "room-a",
+        "relay-a",
+        Some(60),
+    );
+
+    let (device, payload_secret) = relay
+        .consume_pairing_ticket(
+            &ticket.pairing_id,
+            &ticket.pairing_secret,
+            Some("My Phone".to_string()),
+            Some("Primary Phone".to_string()),
+            TEST_VERIFY_KEY_B64.to_string(),
+            None,
+            "surface-a",
+            100,
+        )
+        .expect("pairing should succeed");
+
+    relay.set_broker_connection(true);
+    relay.mark_surface_peer_online("surface-a");
+    assert_eq!(
+        relay.broker_targets(),
+        vec![(device.device_id, "surface-a".to_string(), payload_secret,)]
+    );
+
+    relay.set_broker_connection(false);
+    assert!(relay.broker_targets().is_empty());
+}
+
+#[test]
+fn replacing_online_surface_peers_restores_targets_for_reconnected_broker_sessions() {
+    let mut relay = test_state();
+    let ticket = issue_test_pairing_ticket(
+        &mut relay,
+        "ws://127.0.0.1:8789",
+        "room-a",
+        "relay-a",
+        Some(60),
+    );
+
+    let (device, payload_secret) = relay
+        .consume_pairing_ticket(
+            &ticket.pairing_id,
+            &ticket.pairing_secret,
+            Some("My Phone".to_string()),
+            Some("Primary Phone".to_string()),
+            TEST_VERIFY_KEY_B64.to_string(),
+            None,
+            "surface-a",
+            100,
+        )
+        .expect("pairing should succeed");
+
+    relay.set_broker_connection(true);
+    relay.replace_online_surface_peers(["surface-a".to_string()]);
+    assert_eq!(
+        relay.broker_targets(),
+        vec![(
+            device.device_id.clone(),
+            "surface-a".to_string(),
+            payload_secret.clone(),
+        )]
+    );
+
+    relay.set_broker_connection(false);
+    assert!(relay.broker_targets().is_empty());
+
+    relay.set_broker_connection(true);
+    relay
+        .mark_paired_device_seen(&device.device_id, "surface-b", 101)
+        .unwrap();
+    relay.replace_online_surface_peers(["surface-b".to_string()]);
+    assert_eq!(
+        relay.broker_targets(),
+        vec![(device.device_id, "surface-b".to_string(), payload_secret,)]
+    );
+}
+
+#[test]
 fn claim_challenge_enforces_peer_binding_and_replaces_older_challenges() {
     let mut relay = test_state();
     let ticket = issue_test_pairing_ticket(

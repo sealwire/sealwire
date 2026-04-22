@@ -764,7 +764,16 @@ async fn run_broker_session(
         .ok_or_else(|| "broker closed before welcome".to_string())?
         .map_err(|error| format!("broker welcome read failed: {error}"))?;
     match decode_server_frame(welcome)? {
-        Some(ServerMessage::Welcome { .. }) => {}
+        Some(ServerMessage::Welcome { peers, .. }) => {
+            state
+                .replace_online_surface_peers(
+                    peers
+                        .into_iter()
+                        .filter(|peer| peer.role == PeerRole::Surface)
+                        .map(|peer| peer.peer_id),
+                )
+                .await;
+        }
         Some(ServerMessage::Error { message, .. }) => return Err(message),
         Some(other) => {
             return Err(format!(
@@ -858,6 +867,9 @@ async fn handle_server_message(
             peer,
         } => {
             if peer.role == PeerRole::Surface {
+                state
+                    .update_surface_presence(&peer.peer_id, matches!(kind, PresenceKind::Joined))
+                    .await;
                 let status = match kind {
                     PresenceKind::Joined => "joined",
                     PresenceKind::Left => "left",

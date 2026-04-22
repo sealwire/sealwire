@@ -78,6 +78,7 @@ test("selectSessionChromeRenderModel derives header, status, and control banner"
   assert.equal(model.header.subtitle, "/Users/luchi/git/agent-relay");
   assert.equal(model.statusBadge.label, "idle");
   assert.equal(model.controlBanner.hidden, false);
+  assert.match(model.controlBanner.hint, /Approvals can still be handled here/i);
   assert.equal(model.controlBanner.summary, "Controlled by device-2");
   assert.equal(model.sessionMeta.chips.find((chip) => chip.label === "Thread").value, "thread-1");
 });

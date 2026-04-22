@@ -29,6 +29,11 @@ const BROKER_ROOM_ID =
 
 const managedProcesses = [];
 
+function logStep(message, details) {
+  const suffix = details ? ` ${JSON.stringify(details)}` : "";
+  console.log(`[public-broker-e2e] ${message}${suffix}`);
+}
+
 process.on("exit", () => {
   for (const child of managedProcesses) {
     if (!child.killed && child.exitCode === null) {
@@ -38,6 +43,7 @@ process.on("exit", () => {
 });
 
 async function main() {
+  logStep("starting");
   const lanIp = resolvePrivateIpv4();
   const brokerPort = await getFreePort();
   const relayPort = await getFreePort();
@@ -53,7 +59,9 @@ async function main() {
     brokerPort,
     brokerStatePath,
   });
+  logStep("broker started", { brokerPort });
   await waitForHealth(`http://127.0.0.1:${brokerPort}/api/health`);
+  logStep("broker healthy");
 
   const relay = spawnManagedProcess(
     "relay",
@@ -73,8 +81,11 @@ async function main() {
       CODEX_HOME: codexHomeDir,
     }
   );
+  logStep("relay started", { relayPort, workspaceDir });
   await waitForHealth(`http://127.0.0.1:${relayPort}/api/health`);
+  logStep("relay healthy");
   await waitForBrokerConnection(`http://127.0.0.1:${relayPort}/api/session`);
+  logStep("relay connected to broker");
 
   let browser;
   let context;
@@ -85,32 +96,44 @@ async function main() {
   try {
     browser = await chromium.launch({ headless: true });
     context = await browser.newContext();
+    logStep("browser launched");
 
     localPage = await context.newPage();
+    attachPageDebugLogging(localPage, "local");
     await localPage.goto(`http://127.0.0.1:${relayPort}`, { waitUntil: "domcontentloaded" });
+    logStep("local page loaded");
     await openSecurityModal(localPage);
+    logStep("security modal opened");
     await localPage.click("#start-pairing-button");
+    logStep("clicked start pairing");
     await localPage.waitForFunction(() => {
       const input = document.querySelector("#pairing-link-input");
       return Boolean(input && input.value.startsWith("http"));
     });
+    logStep("pairing link ready");
     const pairingUrl = await localPage.inputValue("#pairing-link-input");
+    logStep("pairing url captured", { pairingUrl });
     assert.ok(
       pairingUrl.startsWith(`http://${lanIp}:${brokerPort}/?pairing=`),
       `pairing url should use broker public url, got: ${pairingUrl}`
     );
 
     remotePage = await context.newPage();
+    attachPageDebugLogging(remotePage, "remote");
     remotePage.on("request", (request) => {
       if (request.url().endsWith("/api/public/device/ws-token")) {
         refreshRequests.push(request.url());
+        logStep("captured refresh request", { count: refreshRequests.length });
       }
     });
     await remotePage.goto(pairingUrl, { waitUntil: "domcontentloaded" });
+    logStep("remote page loaded");
     await localPage.waitForFunction(() => {
       return Boolean(document.querySelector("[data-pairing-id][data-pairing-decision='approve']"));
     }, null, { timeout: TIMEOUT_MS });
+    logStep("pairing approval visible");
     await localPage.click("[data-pairing-id][data-pairing-decision='approve']");
+    logStep("pairing approved");
 
     await remotePage.waitForFunction(() => {
       const stored = JSON.parse(
@@ -120,24 +143,33 @@ async function main() {
       );
       return Boolean(stored?.clientAuth?.clientId && Object.keys(stored?.remoteProfiles || {}).length);
     }, null, { timeout: TIMEOUT_MS });
+    logStep("remote auth stored");
 
     await installDuplicateStartSessionReplayHook(remotePage);
+    logStep("duplicate start-session replay hook installed");
     await openRemoteSessionPanel(remotePage);
+    logStep("remote session panel opened");
     await remotePage.selectOption("#remote-approval-policy-input", "never");
     await remotePage.fill("#remote-cwd-input", workspaceDir);
     await remotePage.click("#remote-start-session-button");
+    logStep("clicked start session");
     await remotePage.waitForFunction(() => Boolean(window.__capturedStartSessionFrame), null, {
       timeout: TIMEOUT_MS,
     });
+    logStep("captured start-session frame");
     await remotePage.evaluate(() => window.__replayCapturedStartSessionFrame());
+    logStep("replayed start-session frame");
 
     await waitForSingleStartedThread(relayPort, workspaceDir);
+    logStep("single started thread ready");
     await remotePage.waitForFunction(() => {
       const input = document.querySelector("#remote-message-input");
       return Boolean(input && !input.disabled);
     }, null, { timeout: TIMEOUT_MS });
+    logStep("message input ready before broker restart");
 
     await sendPromptAndWaitForReply(remotePage, BEFORE_RESTART_PROMPT);
+    logStep("received reply before broker restart");
     const authBeforeRestart = await readStoredRemoteAuth(remotePage);
     assert.equal(
       authBeforeRestart?.hasStoredPayloadSecret,
@@ -158,43 +190,58 @@ async function main() {
       `http://${lanIp}:${brokerPort}`
     );
     assert.ok(deviceSessionCookie, "paired remote should establish a device session cookie");
+    logStep("device session cookie captured");
     await delay(3000);
 
+    logStep("stopping broker for restart");
     await stopManagedProcess(broker);
     broker = await startPublicBroker({
       brokerPort,
       brokerStatePath,
     });
+    logStep("broker restarted");
     await waitForHealth(`http://127.0.0.1:${brokerPort}/api/health`);
+    logStep("broker healthy after restart");
     await waitForBrokerConnection(`http://127.0.0.1:${relayPort}/api/session`);
+    logStep("relay reconnected after broker restart");
 
     await waitFor(() => refreshRequests.length >= 1);
+    logStep("refresh request observed after broker restart", { count: refreshRequests.length });
     await remotePage.waitForFunction(() => {
       const badge = document.querySelector("#remote-status-badge")?.textContent || "";
       return badge.trim().length > 0 && !badge.toLowerCase().includes("offline");
     }, null, { timeout: TIMEOUT_MS });
+    logStep("remote status badge recovered");
     await remotePage.waitForFunction(() => {
       const input = document.querySelector("#remote-message-input");
       return Boolean(input && !input.disabled);
     }, null, { timeout: TIMEOUT_MS });
+    logStep("message input ready after broker restart");
 
     await sendPromptAndWaitForReply(remotePage, AFTER_RESTART_PROMPT);
+    logStep("received reply after broker restart");
 
     localPage.once("dialog", (dialog) => dialog.accept());
     await localPage.click("[data-revoke-device-id]");
+    logStep("clicked revoke device");
     await waitForRevokedDevice(relayPort);
+    logStep("device revoked");
     const authAfterRevoke = await readStoredRemoteAuth(remotePage);
     assert.equal(authAfterRevoke?.deviceRefreshMode, "cookie");
     assert.equal(authAfterRevoke?.deviceRefreshToken, undefined);
     await delay(3000);
 
+    logStep("stopping broker after revoke");
     await stopManagedProcess(broker);
     broker = await startPublicBroker({
       brokerPort,
       brokerStatePath,
     });
+    logStep("broker restarted after revoke");
     await waitForHealth(`http://127.0.0.1:${brokerPort}/api/health`);
+    logStep("broker healthy after revoke restart");
     await waitForBrokerConnection(`http://127.0.0.1:${relayPort}/api/session`);
+    logStep("relay reconnected after revoke restart");
 
     const revokedRefreshResponse = await fetch(
       `http://127.0.0.1:${brokerPort}/api/public/device/ws-token`,
@@ -210,8 +257,13 @@ async function main() {
       false,
       "revoked device refresh token should not mint a new broker ws token"
     );
+    logStep("revoked device refresh rejected");
 
     const relaySession = await fetchSession(relayPort);
+    logStep("finished successfully", {
+      refreshRequestCount: refreshRequests.length,
+      activeThreadId: relaySession.active_thread_id,
+    });
     console.log(
       JSON.stringify(
         {
@@ -234,11 +286,16 @@ async function main() {
       )
     );
   } catch (error) {
+    logStep("failed", {
+      message: error instanceof Error ? error.message : String(error),
+      name: error instanceof Error ? error.name : "Error",
+    });
     await dumpBrowserState(localPage, remotePage);
     dumpProcessLogs(broker);
     dumpProcessLogs(relay);
     throw error;
   } finally {
+    logStep("cleanup starting");
     await deleteThreadsForCwdAndWait(relayPort, workspaceDir).catch((error) => {
       console.error(
         `[cleanup] failed to delete public broker e2e threads for ${workspaceDir}: ${error.message}`
@@ -251,7 +308,27 @@ async function main() {
     await fs.rm(codexHomeDir, { recursive: true, force: true }).catch(() => {});
     await fs.rm(relayStateDir, { recursive: true, force: true }).catch(() => {});
     await fs.rm(workspaceDir, { recursive: true, force: true }).catch(() => {});
+    logStep("cleanup finished");
   }
+}
+
+function attachPageDebugLogging(page, label) {
+  page.on("console", (message) => {
+    const text = message.text();
+    if (!text) {
+      return;
+    }
+    console.log(`[public-broker-e2e:${label}:console:${message.type()}] ${text}`);
+  });
+  page.on("pageerror", (error) => {
+    console.error(`[public-broker-e2e:${label}:pageerror] ${error.stack || error.message}`);
+  });
+  page.on("requestfailed", (request) => {
+    const failure = request.failure();
+    console.error(
+      `[public-broker-e2e:${label}:requestfailed] ${request.method()} ${request.url()} ${failure?.errorText || ""}`.trim()
+    );
+  });
 }
 
 async function openSecurityModal(page) {

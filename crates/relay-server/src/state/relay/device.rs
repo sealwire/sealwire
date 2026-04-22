@@ -332,6 +332,7 @@ impl RelayState {
             device.broker_join_ticket_expires_at = broker_join_ticket_expires_at;
             device.clone()
         };
+        self.bind_surface_peer_to_device(&approved_device.device_id, peer_id);
         self.sync_device_record_from_approved_device(&approved_device, now);
 
         Ok((approved_device.to_view(), payload_secret))
@@ -655,6 +656,7 @@ impl RelayState {
             .get(device_id)
             .cloned()
             .ok_or_else(|| "device is not paired".to_string())?;
+        self.bind_surface_peer_to_device(device_id, peer_id);
         self.sync_device_record_from_approved_device(&approved_device, now);
         self.prune_claim_challenges_for_device(device_id, &challenge.challenge_id);
 
@@ -693,6 +695,7 @@ impl RelayState {
         device.last_seen_at = Some(now);
         device.last_peer_id = Some(peer_id.to_string());
         let approved_device = device.clone();
+        self.bind_surface_peer_to_device(device_id, peer_id);
         self.sync_device_record_from_approved_device(&approved_device, now);
         Ok(())
     }

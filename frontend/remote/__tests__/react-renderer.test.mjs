@@ -36,6 +36,7 @@ installBrowserStubs();
 
 const {
   MissingCredentialsState,
+  ReadyTranscriptState,
   RelayHomeState,
   WorkspaceHeading,
 } = await import("../react-renderer.js");
@@ -109,4 +110,20 @@ test("WorkspaceHeading compacts status labels for the chrome header", () => {
   assert.match(markup, /agent-relay/);
   assert.match(markup, />Approval</);
   assert.match(markup, /\/Users\/luchi\/git\/agent-relay/);
+});
+
+test("ReadyTranscriptState explains approvals remain available on passive devices", () => {
+  const markup = renderToStaticMarkup(
+    h(ReadyTranscriptState, {
+      canWrite: false,
+      session: {
+        active_thread_id: "thread-1",
+        current_cwd: "/Users/luchi/git/agent-relay",
+      },
+    })
+  );
+
+  assert.match(markup, /Session active on another device/);
+  assert.match(markup, /approve or decline requests here/i);
+  assert.match(markup, /take over only if you want to send messages/i);
 });

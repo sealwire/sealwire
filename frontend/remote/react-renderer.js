@@ -537,7 +537,7 @@ export function ReadyTranscriptState({ canWrite, session }) {
   const title = canWrite ? "Session ready" : "Session active on another device";
   const copy = canWrite
     ? "The remote session is live. Send the first prompt below when you're ready."
-    : "This thread is already open, but another device currently has control. Take over to send the first prompt from here.";
+    : "This thread is already open, but another device currently has control. You can still approve or decline requests here; take over only if you want to send messages from this device.";
   const detailParts = [];
 
   if (session.current_cwd) {

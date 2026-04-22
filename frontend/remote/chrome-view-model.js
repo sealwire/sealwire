@@ -228,7 +228,7 @@ function selectControlBannerRenderModel(currentState, session) {
 
   return {
     hidden: false,
-    hint: "Read-only here until you take over.",
+    hint: "Read-only for sending until you take over. Approvals can still be handled here.",
     summary: `Controlled by ${controllerLabel(currentState, session.active_controller_device_id)}`,
     takeOverHidden: false,
   };
@@ -299,7 +299,7 @@ function remoteAccessLabel(currentState) {
     return `Ready here until ${formatTimestamp(currentState.remoteAuth.sessionClaimExpiresAt)}`;
   }
 
-  return `Viewing while ${controllerLabel(currentState, currentState.session.active_controller_device_id)} has control`;
+  return `Viewing while ${controllerLabel(currentState, currentState.session.active_controller_device_id)} has control. Approvals can still be handled here.`;
 }
 
 function remoteAccessStatusText(currentState) {

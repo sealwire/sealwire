@@ -91,6 +91,8 @@ pub struct RelayState {
     pub available_models: Vec<ModelOptionView>,
     pub device_records: HashMap<String, DeviceRecord>,
     pub paired_devices: HashMap<String, PairedDevice>,
+    online_surface_peer_ids: HashSet<String>,
+    online_surface_peer_devices: HashMap<String, String>,
     pub pending_pairings: HashMap<String, PendingPairing>,
     pub pending_pairing_requests: HashMap<String, PendingPairingRequest>,
     pub completed_pairings: HashMap<String, CompletedPairing>,
@@ -133,6 +135,8 @@ impl RelayState {
             available_models: Vec::new(),
             device_records: HashMap::new(),
             paired_devices: HashMap::new(),
+            online_surface_peer_ids: HashSet::new(),
+            online_surface_peer_devices: HashMap::new(),
             pending_pairings: HashMap::new(),
             pending_pairing_requests: HashMap::new(),
             completed_pairings: HashMap::new(),
@@ -357,6 +361,8 @@ impl RelayState {
         self.allowed_roots = persisted.allowed_roots.clone();
         self.device_records = persisted.device_records.clone();
         self.paired_devices = persisted.paired_devices.clone();
+        self.online_surface_peer_ids.clear();
+        self.online_surface_peer_devices.clear();
         self.backfill_device_records_from_paired_devices();
         self.pending_pairings.clear();
         self.pending_pairing_requests.clear();
@@ -444,6 +450,10 @@ impl RelayState {
 
     pub fn set_broker_connection(&mut self, connected: bool) {
         self.broker_connected = connected;
+        if !connected {
+            self.online_surface_peer_ids.clear();
+            self.online_surface_peer_devices.clear();
+        }
     }
 
     pub fn set_broker_target(&mut self, channel_id: Option<String>, peer_id: Option<String>) {
@@ -453,6 +463,29 @@ impl RelayState {
 
     pub fn set_active_turn(&mut self, turn_id: Option<String>) {
         self.active_turn_id = turn_id;
+    }
+
+    pub fn mark_surface_peer_online(&mut self, peer_id: &str) -> bool {
+        self.online_surface_peer_ids.insert(peer_id.to_string())
+    }
+
+    pub fn mark_surface_peer_offline(&mut self, peer_id: &str) -> bool {
+        self.online_surface_peer_devices.remove(peer_id);
+        self.online_surface_peer_ids.remove(peer_id)
+    }
+
+    pub fn replace_online_surface_peers<I>(&mut self, peer_ids: I)
+    where
+        I: IntoIterator<Item = String>,
+    {
+        self.online_surface_peer_ids = peer_ids.into_iter().collect();
+        self.online_surface_peer_devices
+            .retain(|peer_id, _| self.online_surface_peer_ids.contains(peer_id));
+    }
+
+    pub fn bind_surface_peer_to_device(&mut self, device_id: &str, peer_id: &str) {
+        self.online_surface_peer_devices
+            .insert(peer_id.to_string(), device_id.to_string());
     }
 
     pub fn drain_pending_broker_messages(&mut self) -> Vec<BrokerPendingMessage> {
@@ -582,6 +615,8 @@ impl RelayState {
         self.allowed_roots = persisted.allowed_roots.clone();
         self.device_records = persisted.device_records.clone();
         self.paired_devices = persisted.paired_devices.clone();
+        self.online_surface_peer_ids.clear();
+        self.online_surface_peer_devices.clear();
         self.backfill_device_records_from_paired_devices();
         self.pending_pairings.clear();
         self.pending_pairing_requests.clear();
@@ -618,6 +653,21 @@ impl RelayState {
                 .entry(device.device_id.clone())
                 .or_insert_with(|| DeviceRecord::approved_from(device));
         }
+    }
+
+    pub fn broker_targets(&self) -> Vec<(String, String, String)> {
+        self.online_surface_peer_ids
+            .iter()
+            .filter_map(|peer_id| {
+                let device_id = self.online_surface_peer_devices.get(peer_id)?;
+                let device = self.paired_devices.get(device_id)?;
+                Some((
+                    device.device_id.clone(),
+                    peer_id.clone(),
+                    device.payload_secret.clone(),
+                ))
+            })
+            .collect()
     }
 
     pub fn set_allowed_roots(&mut self, allowed_roots: Vec<String>) -> bool {
