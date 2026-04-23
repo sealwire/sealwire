@@ -112,10 +112,6 @@ function renderUserEntry(entry) {
   return `
     <article class="chat-message chat-message-user">
       <div class="message-card">
-        <div class="message-meta">
-          <strong>You</strong>
-          <span>${escapeHtml(entry.status || "completed")}</span>
-        </div>
         <div class="message-body">${escapeHtml(entry.text || "(empty)")}</div>
       </div>
     </article>
@@ -127,11 +123,6 @@ function renderAgentEntry(entry) {
     <article class="chat-message chat-message-assistant">
       <div class="message-avatar">C</div>
       <div class="message-card">
-        <div class="message-meta">
-          <strong>Codex</strong>
-          <span>${escapeHtml(entry.status || "completed")}</span>
-          <span>${escapeHtml(shortId(entry.turn_id || ""))}</span>
-        </div>
         <div class="message-body">${escapeHtml(entry.text || "(empty)")}</div>
       </div>
     </article>

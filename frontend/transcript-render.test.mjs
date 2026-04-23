@@ -37,10 +37,9 @@ test("renderTranscriptEntry renders typed session items safely", () => {
     },
   });
 
-  assert.match(userMarkup, /You/);
   assert.match(userMarkup, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
-  assert.match(assistantMarkup, /Codex/);
-  assert.match(assistantMarkup, /turn-123/);
+  assert.match(assistantMarkup, /message-card/);
+  assert.doesNotMatch(assistantMarkup, /turn-123/);
   assert.match(commandMarkup, /Command/);
   assert.match(commandMarkup, /data-transcript-toggle="entry"/);
   assert.match(commandMarkup, /data-item-id="cmd-1"/);

@@ -1159,19 +1159,11 @@ input:focus, textarea:focus, select:focus {
 }
 
 .chat-shell[data-view="conversation"] .chat-thread {
-  padding: 20px 24px 140px;
-}
-
-.remote-chat-shell[data-view="conversation"] .chat-thread {
   padding: 20px 24px 28px;
+  scroll-padding-bottom: 28px;
 }
 
 .chat-shell[data-view="conversation"] .thread-content {
-  max-width: 980px;
-  margin: 0;
-}
-
-.remote-chat-shell[data-view="conversation"] .thread-content {
   max-width: 800px;
   margin: 0 auto;
 }
@@ -1193,7 +1185,7 @@ input:focus, textarea:focus, select:focus {
   max-width: 800px;
   margin: 0 auto;
   display: grid;
-  gap: 24px;
+  gap: 12px;
 }
 .thread-empty {
   max-width: 600px;
@@ -1311,7 +1303,7 @@ input:focus, textarea:focus, select:focus {
   max-width: 100%;
 }
 .chat-message-user { justify-content: flex-end; }
-.chat-message-system { justify-content: center; }
+.chat-message-system { justify-content: flex-start; }
 
 .message-avatar {
   width: 32px;
@@ -1329,10 +1321,10 @@ input:focus, textarea:focus, select:focus {
 
 .message-card {
   min-width: 0;
-  max-width: 85%;
+  max-width: 72%;
 }
 .chat-message-user .message-card {
-  padding: 16px;
+  padding: 12px 16px;
   border-radius: var(--radius-md) var(--radius-xs) var(--radius-md) var(--radius-md);
   background: var(--msg-user-bg);
   border: 1px solid var(--border-subtle);
@@ -1343,7 +1335,7 @@ input:focus, textarea:focus, select:focus {
   border-color: transparent;
 }
 .chat-message-assistant .message-card {
-  padding: 16px;
+  padding: 12px 16px;
   border-radius: var(--radius-xs) var(--radius-md) var(--radius-md) var(--radius-md);
   background: var(--msg-assistant-bg);
   border: 1px solid var(--border-subtle);
@@ -1351,6 +1343,7 @@ input:focus, textarea:focus, select:focus {
 
 .message-card-system, .message-card-approval {
   width: 100%;
+  max-width: calc(100% - 48px);
   padding: 10px 14px;
   border-radius: var(--radius-md);
   background: var(--msg-system-bg);
@@ -1625,11 +1618,6 @@ input:focus, textarea:focus, select:focus {
 }
 
 .chat-shell[data-view="conversation"] .composer-inner {
-  max-width: 980px;
-  margin: 0;
-}
-
-.remote-chat-shell[data-view="conversation"] .composer-inner {
   max-width: 800px;
   margin: 0 auto;
 }
