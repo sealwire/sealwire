@@ -327,25 +327,41 @@ function renderToolEntry(entry, options = null) {
   const showPathRow = !isFileChange;
   const showInputPreview = !isFileChange || !isRedundantFileChangePreview(tool, detail);
   const collapsedPreview = renderToolPreviewText(toolEntry.text || detail || title);
+  const collapsedTitle = title;
+  const collapsedSubtitle = detail && detail !== title ? renderToolPreviewText(detail) : null;
   const inputExpandKey = itemId ? `tool:${itemId}:input` : "";
   const resultExpandKey = itemId ? `tool:${itemId}:result` : "";
 
   return `
     <article class="chat-message chat-message-system">
       <div class="message-card message-card-system message-card-tool">
-        <div class="message-meta">
+        ${!expanded
+          ? `<div class="tool-collapsed-row">
+          ${itemId
+            ? `<button
+              class="tool-toggle-button tool-collapsed-toggle"
+              type="button"
+              data-transcript-toggle="entry"
+              data-item-id="${escapeHtml(itemId)}"
+            >${isFileChange ? "Show diff" : "Expand"}</button>`
+            : ""}
+          <span class="tool-collapsed-name">${escapeHtml(tool.name || "Tool")}</span>
+          <span class="tool-collapsed-preview">${escapeHtml(collapsedSubtitle || collapsedTitle)}</span>
+          <span class="tool-collapsed-status">${escapeHtml(entry.status || "completed")}</span>
+        </div>
+        ${collapsedSubtitle ? `<div class="tool-collapsed-title">${escapeHtml(collapsedTitle)}</div>` : ""}`
+          : `<div class="message-meta">
           <strong>${escapeHtml(tool.name || "Tool")}</strong>
           <span>${escapeHtml(entry.status || "completed")}</span>
         </div>
-        ${itemId
-          ? `<div class="tool-entry-controls">
+        <div class="tool-entry-controls">
           <button
             class="tool-toggle-button"
             type="button"
             data-transcript-toggle="entry"
             data-item-id="${escapeHtml(itemId)}"
           >
-            ${isFileChange ? (expanded ? "Hide diff" : "Show diff") : (expanded ? "Collapse" : "Expand")}
+            ${isFileChange ? "Hide diff" : "Collapse"}
           </button>
           ${isFileChange && options?.enableFileChangeActions ? `
             <button
@@ -365,12 +381,9 @@ function renderToolEntry(entry, options = null) {
               Reapply
             </button>
           ` : ""}
-        </div>`
-          : ""}
+        </div>
         <h3 class="tool-card-title">${escapeHtml(title)}</h3>
-        ${!expanded
-          ? `<div class="tool-preview">${escapeHtml(collapsedPreview)}</div>`
-          : `${detail ? `<p class="tool-card-detail">${escapeHtml(detail)}</p>` : ""}
+        ${detail ? `<p class="tool-card-detail">${escapeHtml(detail)}</p>` : ""}
         ${isFileChange ? renderFileChangeDiff(tool) : ""}
         <div class="tool-details">
           ${showTypeRow ? renderToolDetailRow("Type", tool.item_type) : ""}
@@ -387,7 +400,7 @@ function renderToolEntry(entry, options = null) {
           expandKey: resultExpandKey,
           expanded: Boolean(resultExpandKey && options?.expandedKeys?.has(resultExpandKey)),
         })}
-        ${expanded && loading && !detailEntry
+        ${loading && !detailEntry
           ? '<p class="tool-detail-note">Loading full item details…</p>'
           : ""}`}
       </div>

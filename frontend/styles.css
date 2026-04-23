@@ -1312,7 +1312,7 @@ input:focus, textarea:focus, select:focus {
 
 .message-card-system, .message-card-approval {
   width: 100%;
-  padding: 20px;
+  padding: 10px 14px;
   border-radius: var(--radius-md);
   background: var(--msg-system-bg);
   border: 1px solid var(--border-subtle);
@@ -1334,8 +1334,8 @@ input:focus, textarea:focus, select:focus {
 .approval-button-primary { background: var(--accent-primary); color: var(--bg-base); }
 .tool-card-title {
   margin: 0 0 8px;
-  font-size: 16px;
-  font-weight: 600;
+  font-size: 13px;
+  font-weight: 500;
   color: var(--text-primary);
 }
 .tool-card-detail {
@@ -1495,6 +1495,51 @@ input:focus, textarea:focus, select:focus {
   color: var(--text-secondary);
   font-size: 13px;
   line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tool-collapsed-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.tool-collapsed-toggle {
+  flex-shrink: 0;
+}
+
+.tool-collapsed-name {
+  flex-shrink: 0;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.tool-collapsed-preview {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-collapsed-status {
+  flex-shrink: 0;
+  white-space: nowrap;
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+
+.tool-collapsed-title {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-tertiary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

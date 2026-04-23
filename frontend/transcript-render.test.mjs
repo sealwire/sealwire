@@ -89,7 +89,7 @@ test("renderTranscriptEntry collapses long command and tool previews without col
   assert.match(commandMarkup, /line 1 line 2 line 3/);
   assert.doesNotMatch(commandMarkup, /line 1\nline 2/);
   assert.match(toolMarkup, /data-transcript-toggle="entry"/);
-  assert.match(toolMarkup, /class="tool-preview"/);
+  assert.match(toolMarkup, /class="tool-collapsed-preview"/);
   assert.match(toolMarkup, /Search result payload/);
   assert.doesNotMatch(assistantMarkup, /message-collapsible/);
   assert.match(assistantMarkup, new RegExp(`A{1200}`));
