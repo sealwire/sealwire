@@ -18,8 +18,6 @@ import {
   closeSessionDetailsModalButton,
   connectionForm,
   controlBanner,
-  controlHint,
-  controlSummary,
   copyPairingLinkButton,
   cwdInput,
   deleteThreadButton,
@@ -63,7 +61,6 @@ import {
   startPromptInput,
   startSessionButton,
   statusBadge,
-  takeOverButton,
   threadContextMenu,
   threadsCount,
   threadsList,
@@ -441,7 +438,11 @@ resumeLatestButton?.addEventListener("click", () => {
   void resumeLatestSession();
 });
 
-takeOverButton.addEventListener("click", () => {
+controlBanner?.addEventListener("click", (event) => {
+  if (!event.target.closest("#take-over-button")) {
+    return;
+  }
+
   void takeOverControl();
 });
 

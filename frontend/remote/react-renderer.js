@@ -1,5 +1,4 @@
 import React from "react";
-import { canonicalizeWorkspace } from "../shared/thread-groups.js";
 import { formatTimestamp, shortId } from "./utils.js";
 
 const h = React.createElement;
@@ -336,79 +335,6 @@ export function RelayDirectoryList({ onSelectRelay, viewModel }) {
         h("span", { className: "conversation-meta" }, `${item.meta} · ${item.actionLabel}`)
       )
     )
-  );
-}
-
-export function ThreadList({
-  collapsedGroupCwds,
-  onResumeThread,
-  onToggleGroup,
-  viewModel,
-}) {
-  if (viewModel.emptyMessage) {
-    return h("p", { className: "sidebar-empty" }, viewModel.emptyMessage);
-  }
-
-  return h(
-    React.Fragment,
-    null,
-    ...(viewModel.groups || []).map((group) => {
-      const normalizedCwd = canonicalizeWorkspace(group.cwd);
-      const isCollapsed = collapsedGroupCwds.has(normalizedCwd);
-      return h(
-        "section",
-        {
-          className: `thread-group${isCollapsed ? " is-collapsed" : ""}`,
-          "data-thread-group-cwd": group.cwd,
-          key: group.cwd,
-        },
-        h(
-          "button",
-          {
-            "aria-expanded": isCollapsed ? "false" : "true",
-            className: "thread-group-header",
-            onClick: () => onToggleGroup(normalizedCwd),
-            title: group.cwd,
-            type: "button",
-          },
-          h("span", { "aria-hidden": "true", className: "thread-group-icon" }),
-          h("span", { className: "thread-group-name" }, group.label),
-          h("span", { "aria-hidden": "true", className: "thread-group-chevron" })
-        ),
-        h(
-          "div",
-          {
-            className: "thread-group-list",
-            hidden: isCollapsed,
-          },
-          ...(group.threads || []).map((thread) => {
-            const title = thread.name || thread.preview || shortId(thread.id);
-            return h(
-              "button",
-              {
-                className: `conversation-item${
-                  viewModel.activeThreadId === thread.id ? " is-active" : ""
-                }`,
-                "data-thread-cwd": group.cwd,
-                "data-thread-id": thread.id,
-                "data-thread-title": title,
-                key: thread.id,
-                onClick: () => onResumeThread(thread.id),
-                title,
-                type: "button",
-              },
-              h("span", { className: "conversation-title" }, title),
-              h(
-                "span",
-                { className: "conversation-preview" },
-                thread.preview || "No preview yet."
-              ),
-              h("span", { className: "conversation-meta" }, formatTimestamp(thread.updated_at))
-            );
-          })
-        )
-      );
-    })
   );
 }
 

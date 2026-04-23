@@ -4,8 +4,6 @@ import {
   auditTimeline,
   chatShell,
   controlBanner,
-  controlHint,
-  controlSummary,
   goConsoleHomeButton,
   goConsoleHomeSidebarButton,
   liveSurfacesList,
@@ -24,7 +22,6 @@ import {
   sessionHistoryDrawer,
   sessionMeta,
   statusBadge,
-  takeOverButton,
   threadsCount,
   threadsList,
   transcript,
@@ -36,7 +33,6 @@ import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import {
   canonicalizeWorkspace,
-  renderThreadGroupsMarkup,
   summarizeThreadGroups,
 } from "../shared/thread-groups.js";
 import {
@@ -45,10 +41,36 @@ import {
   TranscriptMarkupState,
 } from "../shared/conversation.js";
 import { renderTranscriptMarkup } from "../shared/transcript-render.js";
+import {
+  AuditList,
+  ControlBannerContent,
+  OverviewBadges,
+  SessionMetaPanel,
+  SurfaceCards,
+  TextContent,
+} from "./react-session-panels.js";
+import { ThreadGroupList } from "../shared/thread-list-react.js";
 
 const h = React.createElement;
+const reactRoots = new WeakMap();
 let transcriptRoot = null;
 let transcriptRootElement = null;
+
+function renderReactContent(element, content) {
+  if (!element) {
+    return;
+  }
+
+  let root = reactRoots.get(element);
+  if (!root) {
+    root = createRoot(element);
+    reactRoots.set(element, root);
+  }
+
+  flushSync(() => {
+    root.render(content);
+  });
+}
 
 function renderConversationContent(content) {
   if (!transcript) {
@@ -214,7 +236,10 @@ export function createSessionRenderer({
     renderOverviewState(null, message);
     statusBadge.textContent = "Offline";
     statusBadge.className = "status-badge status-badge-offline";
-    sessionMeta.innerHTML = `<span class="meta-empty">${escapeHtml(message)}</span>`;
+    renderReactContent(
+      sessionMeta,
+      h(SessionMetaPanel, { emptyMessage: message })
+    );
     renderConversationContent(
       h(ConversationEmptyState, {
         copy: message,
@@ -235,7 +260,10 @@ export function createSessionRenderer({
     threadsList.innerHTML = `<p class="sidebar-empty">Enter RELAY_API_TOKEN to load threads.</p>`;
     statusBadge.textContent = "Sign in";
     statusBadge.className = "status-badge status-badge-offline";
-    sessionMeta.innerHTML = `<span class="meta-empty">${escapeHtml(message)}</span>`;
+    renderReactContent(
+      sessionMeta,
+      h(SessionMetaPanel, { emptyMessage: message })
+    );
     renderConversationContent(
       h(ConversationEmptyState, {
         copy: message,
@@ -277,33 +305,16 @@ export function createSessionRenderer({
     const pendingCount = session?.pending_pairing_requests?.length || 0;
     const activeController = controllerStateLabel(session);
 
-    liveSurfacesSummary.textContent =
-      `${surfaces.length} active surface${surfaces.length === 1 ? "" : "s"} · ${approvedCount} trusted · ${pendingCount} pending · controller ${activeController}${revokedCount > 0 ? ` · ${revokedCount} revoked hidden` : ""}`;
-
-    liveSurfacesList.innerHTML = surfaces
-      .map(
-        (surface) => `
-          <article class="surface-card">
-            <div class="surface-card-heading">
-              <div>
-                <h3 class="surface-card-title">${escapeHtml(surface.title)}</h3>
-                <p class="surface-card-copy">${escapeHtml(surface.copy)}</p>
-              </div>
-              <span class="device-state-badge ${escapeHtml(surface.badgeClass)}">${escapeHtml(surface.badgeLabel)}</span>
-            </div>
-            <div class="surface-card-meta">
-              ${surface.chips
-                .map(
-                  (chip) => `
-                    <span class="surface-chip"><strong>${escapeHtml(chip.label)}</strong>${escapeHtml(chip.value)}</span>
-                  `
-                )
-                .join("")}
-            </div>
-          </article>
-        `
+    renderReactContent(
+      liveSurfacesSummary,
+      h(
+        TextContent,
+        null,
+        `${surfaces.length} active surface${surfaces.length === 1 ? "" : "s"} / ${approvedCount} trusted / ${pendingCount} pending / controller ${activeController}${revokedCount > 0 ? ` / ${revokedCount} revoked hidden` : ""}`
       )
-      .join("");
+    );
+
+    renderReactContent(liveSurfacesList, h(SurfaceCards, { surfaces }));
   }
 
   function buildLocalSurface(session, activeThread) {
@@ -318,6 +329,7 @@ export function createSessionRenderer({
         : "device-state-approved";
 
     return {
+      key: "local-browser",
       title: "This browser",
       copy: hasControl
         ? "You currently control the live session from this surface."
@@ -373,6 +385,7 @@ export function createSessionRenderer({
     }
 
     return {
+      key: `device:${record.device_id}`,
       title: record.label,
       copy,
       badgeLabel,
@@ -391,8 +404,11 @@ export function createSessionRenderer({
     }
 
     if (!entries.length) {
-      auditSummary.textContent = "Recent relay, control, and security events will appear here.";
-      auditTimeline.innerHTML = `<p class="sidebar-empty">No relay events yet.</p>`;
+      renderReactContent(
+        auditSummary,
+        h(TextContent, null, "Recent relay, control, and security events will appear here.")
+      );
+      renderReactContent(auditTimeline, h(AuditList));
       return;
     }
 
@@ -402,31 +418,37 @@ export function createSessionRenderer({
     const significantCount = visibleEntries.filter(
       (entry) => classifyAuditEntry(entry) !== "neutral"
     ).length;
-    auditSummary.textContent =
-      significantCount > 0
-        ? `${visibleEntries.length} recent events · ${significantCount} notable${hiddenDebugCount > 0 ? ` · ${hiddenDebugCount} debug hidden` : ""}`
-        : `${visibleEntries.length} recent relay events${hiddenDebugCount > 0 ? ` · ${hiddenDebugCount} debug hidden` : ""}`;
+    renderReactContent(
+      auditSummary,
+      h(
+        TextContent,
+        null,
+        significantCount > 0
+          ? `${visibleEntries.length} recent events / ${significantCount} notable${hiddenDebugCount > 0 ? ` / ${hiddenDebugCount} debug hidden` : ""}`
+          : `${visibleEntries.length} recent relay events${hiddenDebugCount > 0 ? ` / ${hiddenDebugCount} debug hidden` : ""}`
+      )
+    );
 
     if (!visibleEntries.length) {
-      auditTimeline.innerHTML = `<p class="sidebar-empty">No relay-level audit events yet.</p>`;
+      renderReactContent(
+        auditTimeline,
+        h(AuditList, { emptyMessage: "No relay-level audit events yet." })
+      );
       return;
     }
 
-    auditTimeline.innerHTML = visibleEntries
-      .map((entry) => {
-        const tone = classifyAuditEntry(entry);
-        const toneClass = tone === "alert" ? " is-alert" : tone === "ready" ? " is-ready" : "";
-        return `
-          <article class="audit-item${toneClass}">
-            <div class="audit-item-header">
-              <span class="audit-item-kind">${escapeHtml(humanizeLabel(entry.kind || "relay"))}</span>
-              <time class="audit-item-time">${escapeHtml(formatTimestamp(entry.created_at))}</time>
-            </div>
-            <p class="audit-item-message">${escapeHtml(entry.message || "")}</p>
-          </article>
-        `;
+    renderReactContent(
+      auditTimeline,
+      h(AuditList, {
+        entries: visibleEntries.map((entry, index) => ({
+          key: `${entry.created_at || index}:${entry.kind || "relay"}:${entry.message || ""}`,
+          kind: humanizeLabel(entry.kind || "relay"),
+          message: entry.message || "",
+          time: formatTimestamp(entry.created_at),
+          tone: classifyAuditEntry(entry),
+        })),
       })
-      .join("");
+    );
   }
 
   function renderSessionMeta(session) {
@@ -444,23 +466,31 @@ export function createSessionRenderer({
     ];
 
     if (!session.active_thread_id) {
-      sessionMeta.innerHTML = [
-        ...securityChips,
-        `<span class="meta-empty">Session details will appear here.</span>`,
-      ].join("");
+      renderReactContent(
+        sessionMeta,
+        h(SessionMetaPanel, {
+          chips: securityChips,
+          emptyMessage: "Session details will appear here.",
+        })
+      );
       return;
     }
 
-    sessionMeta.innerHTML = [
-      ...securityChips,
-      metaChip("Workspace", session.current_cwd || "None"),
-      metaChip("Model", session.model),
-      metaChip("Permissions", session.approval_policy),
-      metaChip("File access", session.sandbox),
-      metaChip("Effort", session.reasoning_effort),
-      metaChip("Control", controllerStateLabel(session)),
-      metaChip("Thread", shortId(session.active_thread_id)),
-    ].join("");
+    renderReactContent(
+      sessionMeta,
+      h(SessionMetaPanel, {
+        chips: [
+          ...securityChips,
+          metaChip("Workspace", session.current_cwd || "None"),
+          metaChip("Model", session.model),
+          metaChip("Permissions", session.approval_policy),
+          metaChip("File access", session.sandbox),
+          metaChip("Effort", session.reasoning_effort),
+          metaChip("Control", controllerStateLabel(session)),
+          metaChip("Thread", shortId(session.active_thread_id)),
+        ],
+      })
+    );
   }
 
   function renderOverviewState(session, errorMessage = null) {
@@ -562,44 +592,54 @@ export function createSessionRenderer({
       overviewBadge("Devices", pairedDeviceCountLabel(session)),
     ];
 
-    overviewSessionTitle.textContent = sessionTitle;
-    overviewSessionCopy.textContent = sessionCopy;
-    overviewSessionBadges.innerHTML = sessionBadges.join("");
-    overviewSecurityTitle.textContent = securityTitle;
-    overviewSecurityCopy.textContent = securityCopy;
-    overviewSecurityBadges.innerHTML = securityBadges.join("");
+    renderReactContent(overviewSessionTitle, h(TextContent, null, sessionTitle));
+    renderReactContent(overviewSessionCopy, h(TextContent, null, sessionCopy));
+    renderReactContent(overviewSessionBadges, h(OverviewBadges, { badges: sessionBadges }));
+    renderReactContent(overviewSecurityTitle, h(TextContent, null, securityTitle));
+    renderReactContent(overviewSecurityCopy, h(TextContent, null, securityCopy));
+    renderReactContent(overviewSecurityBadges, h(OverviewBadges, { badges: securityBadges }));
   }
 
   function renderControlBanner(session) {
     if (!session.active_thread_id || !isViewingConversation(session)) {
       controlBanner.hidden = true;
-      takeOverButton.hidden = true;
       return;
     }
 
     controlBanner.hidden = false;
 
     if (!session.active_controller_device_id) {
-      controlSummary.textContent = "No device currently has control";
-      controlHint.textContent = "The next device to send a message will claim control.";
-      takeOverButton.hidden = true;
+      renderReactContent(
+        controlBanner,
+        h(ControlBannerContent, {
+          hint: "The next device to send a message will claim control.",
+          summary: "No device currently has control",
+        })
+      );
       return;
     }
 
     if (isCurrentDeviceActiveController(session)) {
-      controlSummary.textContent = "This device has control";
-      controlHint.textContent =
-        "You can type here. Other owner devices can still approve pending actions.";
-      takeOverButton.hidden = true;
+      renderReactContent(
+        controlBanner,
+        h(ControlBannerContent, {
+          hint: "You can type here. Other owner devices can still approve pending actions.",
+          summary: "This device has control",
+        })
+      );
       return;
     }
 
-    controlSummary.textContent = session.active_controller_device_id
-      ? `Another device has control (${controllerLabel(session.active_controller_device_id)})`
-      : "No device currently has control";
-    controlHint.textContent =
-      "You can still approve from this device. Take over when you want to type or continue the session.";
-    takeOverButton.hidden = false;
+    renderReactContent(
+      controlBanner,
+      h(ControlBannerContent, {
+        hint: "You can still approve from this device. Take over when you want to type or continue the session.",
+        showTakeOver: true,
+        summary: session.active_controller_device_id
+          ? `Another device has control (${controllerLabel(session.active_controller_device_id)})`
+          : "No device currently has control",
+      })
+    );
   }
 
   function renderTranscript(session, approval) {
@@ -734,38 +774,29 @@ export function createSessionRenderer({
     threadsCount.title = groups.map((group) => group.cwd).join("\n");
     resumeLatestButton.disabled = totalThreads === 0;
 
-    if (!groups.length) {
-      threadsList.innerHTML = `<p class="sidebar-empty">Start or resume a session to build workspace groups.</p>`;
-      syncThreadHistoryScroll();
-      return;
-    }
-
-    threadsList.innerHTML = renderThreadGroupsMarkup(groups, {
-      activeThreadId: viewedThreadId,
-      selectedCwd,
-      selectWorkspaceAttrName: "data-select-workspace",
-      formatThreadMeta(thread) {
-        return formatRelativeTime(thread.updated_at);
-      },
-    });
-
-    threadsList.querySelectorAll("[data-select-workspace]").forEach((button) => {
-      button.addEventListener("click", () => {
-        setSelectedCwd(button.dataset.selectWorkspace || "");
-        renderThreads();
-        renderOverviewState(state.session);
-      });
-    });
-
-    threadsList.querySelectorAll("[data-thread-id]").forEach((button) => {
-      button.addEventListener("click", () => {
-        void resumeSession(button.dataset.threadId);
-      });
-      button.addEventListener("contextmenu", (event) => {
-        event.preventDefault();
-        openThreadContextMenu(button.dataset.threadId, event.clientX, event.clientY);
-      });
-    });
+    renderReactContent(
+      threadsList,
+      h(ThreadGroupList, {
+        activeThreadId: viewedThreadId,
+        emptyMessage: "Start or resume a session to build workspace groups.",
+        formatThreadMeta(thread) {
+          return formatRelativeTime(thread.updated_at);
+        },
+        groups,
+        onContextThread(threadId, clientX, clientY) {
+          openThreadContextMenu(threadId, clientX, clientY);
+        },
+        onResumeThread(threadId) {
+          void resumeSession(threadId);
+        },
+        onSelectWorkspace(cwd) {
+          setSelectedCwd(cwd || "");
+          renderThreads();
+          renderOverviewState(state.session);
+        },
+        selectedCwd,
+      })
+    );
 
     window.requestAnimationFrame(() => {
       syncThreadHistoryScroll();
@@ -866,21 +897,11 @@ export function createSessionRenderer({
   }
 
   function metaChip(label, value) {
-    return `
-      <span class="meta-chip">
-        <strong>${escapeHtml(label)}:</strong>
-        <span>${escapeHtml(value)}</span>
-      </span>
-    `;
+    return { label, value };
   }
 
   function overviewBadge(label, value) {
-    return `
-      <span class="overview-badge">
-        <strong>${escapeHtml(label)}</strong>
-        <span>${escapeHtml(value)}</span>
-      </span>
-    `;
+    return { label, value };
   }
 
   function sessionStatusLabel(session, approval) {

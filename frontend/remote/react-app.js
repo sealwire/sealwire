@@ -69,7 +69,6 @@ import {
   RelayHomeState,
   SessionMetaPanel,
   SessionPanel,
-  ThreadList,
   WorkspaceHeading,
 } from "./react-renderer.js";
 import {
@@ -77,11 +76,12 @@ import {
   ReadyConversationState,
   TranscriptMarkupState,
 } from "../shared/conversation.js";
+import { ThreadGroupList } from "../shared/thread-list-react.js";
 import {
   setRemoteCwdInputElement,
   setRemoteTranscriptElement,
 } from "./ui-refs.js";
-import { shortId } from "./utils.js";
+import { formatTimestamp, shortId } from "./utils.js";
 
 const h = React.createElement;
 const LIVE_TRANSCRIPT_DETAIL_REFRESH_MS = 1000;
@@ -917,11 +917,18 @@ function RemoteSidebar({
       h(
         "div",
         { className: "conversation-list", id: "remote-threads-list" },
-        h(ThreadList, {
+        h(ThreadGroupList, {
+          activeThreadId: threadsModel.activeThreadId,
           collapsedGroupCwds,
+          collapsible: true,
+          emptyMessage: threadsModel.emptyMessage,
+          formatThreadMeta(thread) {
+            return formatTimestamp(thread.updated_at);
+          },
+          groups: threadsModel.groups || [],
+          includePreview: true,
           onResumeThread,
           onToggleGroup,
-          viewModel: threadsModel,
         })
       )
     )
