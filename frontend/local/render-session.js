@@ -31,12 +31,40 @@ import {
   workspaceTitle,
   workspaceSubtitle,
 } from "./dom.js";
+import React from "react";
+import { flushSync } from "react-dom";
+import { createRoot } from "react-dom/client";
 import {
   canonicalizeWorkspace,
   renderThreadGroupsMarkup,
   summarizeThreadGroups,
 } from "../shared/thread-groups.js";
+import {
+  ConversationEmptyState,
+  ReadyConversationState,
+  TranscriptMarkupState,
+} from "../shared/conversation.js";
 import { renderTranscriptMarkup } from "../shared/transcript-render.js";
+
+const h = React.createElement;
+let transcriptRoot = null;
+let transcriptRootElement = null;
+
+function renderConversationContent(content) {
+  if (!transcript) {
+    return;
+  }
+
+  if (transcriptRootElement !== transcript) {
+    transcriptRoot?.unmount();
+    transcriptRoot = createRoot(transcript);
+    transcriptRootElement = transcript;
+  }
+
+  flushSync(() => {
+    transcriptRoot.render(content);
+  });
+}
 
 export function createSessionRenderer({
   state,
@@ -187,12 +215,12 @@ export function createSessionRenderer({
     statusBadge.textContent = "Offline";
     statusBadge.className = "status-badge status-badge-offline";
     sessionMeta.innerHTML = `<span class="meta-empty">${escapeHtml(message)}</span>`;
-    transcript.innerHTML = `
-      <div class="thread-empty">
-        <h2>Relay unavailable</h2>
-        <p>${escapeHtml(message)}</p>
-      </div>
-    `;
+    renderConversationContent(
+      h(ConversationEmptyState, {
+        copy: message,
+        title: "Relay unavailable",
+      })
+    );
   }
 
   function renderAuthRequiredState(message) {
@@ -208,12 +236,12 @@ export function createSessionRenderer({
     statusBadge.textContent = "Sign in";
     statusBadge.className = "status-badge status-badge-offline";
     sessionMeta.innerHTML = `<span class="meta-empty">${escapeHtml(message)}</span>`;
-    transcript.innerHTML = `
-      <div class="thread-empty">
-        <h2>Authentication required</h2>
-        <p>${escapeHtml(message)}</p>
-      </div>
-    `;
+    renderConversationContent(
+      h(ConversationEmptyState, {
+        copy: message,
+        title: "Authentication required",
+      })
+    );
   }
 
   function announceNewPendingPairings(requests) {
@@ -585,38 +613,50 @@ export function createSessionRenderer({
         state.threads.find((thread) => thread.id === state.viewThreadId);
 
       if (state.viewThreadId && state.viewThreadId !== session.active_thread_id) {
-        transcript.innerHTML = `
-          <div class="thread-empty">
-            <h2>Thread page not active yet</h2>
-            <p>This URL points at a saved thread, but the relay is currently attached to a different session.</p>
-            ${
-              requestedThread
-                ? `<p class="thread-empty-detail">Requested thread: ${escapeHtml(requestedThread.name || requestedThread.preview || shortId(requestedThread.id))}</p>`
-                : `<p class="thread-empty-detail">Requested thread: ${escapeHtml(shortId(state.viewThreadId))}</p>`
-            }
-            <div class="suggestion-row">
-              <button class="suggestion-button" type="button" data-resume-thread-id="${escapeHtml(state.viewThreadId)}">Resume this thread</button>
-              <button class="suggestion-button" type="button" data-go-console-home="true">Back to console</button>
-            </div>
-          </div>
-        `;
+        renderConversationContent(
+          h(ConversationEmptyState, {
+            actions: [
+              {
+                attrs: { "data-resume-thread-id": state.viewThreadId },
+                label: "Resume this thread",
+              },
+              {
+                attrs: { "data-go-console-home": "true" },
+                label: "Back to console",
+              },
+            ],
+            copy: "This URL points at a saved thread, but the relay is currently attached to a different session.",
+            details: [
+              `Requested thread: ${
+                requestedThread
+                  ? requestedThread.name || requestedThread.preview || shortId(requestedThread.id)
+                  : shortId(state.viewThreadId)
+              }`,
+            ],
+            title: "Thread page not active yet",
+          })
+        );
         return;
       }
 
       if (session.active_thread_id) {
         const threadLabel =
           activeThread?.name || activeThread?.preview || shortId(session.active_thread_id);
-        transcript.innerHTML = `
-          <div class="thread-empty thread-empty-ready">
-            <span class="thread-empty-badge">Live</span>
-            <h2>Relay console home</h2>
-            <p>A live session is running, but the conversation stays behind its own thread page so the local home does not default into chat.</p>
-            <p class="thread-empty-detail">Current thread: ${escapeHtml(threadLabel)}</p>
-            <div class="suggestion-row">
-              <button class="suggestion-button" type="button" data-open-thread-id="${escapeHtml(session.active_thread_id)}">Open live conversation</button>
-            </div>
-          </div>
-        `;
+        renderConversationContent(
+          h(ConversationEmptyState, {
+            actions: [
+              {
+                attrs: { "data-open-thread-id": session.active_thread_id },
+                label: "Open live conversation",
+              },
+            ],
+            badge: "Live",
+            className: "thread-empty-ready",
+            copy: "A live session is running, but the conversation stays behind its own thread page so the local home does not default into chat.",
+            details: [`Current thread: ${threadLabel}`],
+            title: "Relay console home",
+          })
+        );
         return;
       }
     }
@@ -624,57 +664,56 @@ export function createSessionRenderer({
     if (!entries.length && !approval) {
       if (session.active_thread_id) {
         const hasControl = canCurrentDeviceWrite(session);
-        const title = hasControl ? "Session ready" : "Session active on another device";
-        const copy = hasControl
-          ? "Codex is connected. Send the first prompt below when you're ready."
-          : "This thread is open, but another device currently has control. Take over to send the first prompt from here.";
-        const detailParts = [];
-
-        if (session.current_cwd) {
-          detailParts.push(`Workspace: ${escapeHtml(session.current_cwd)}`);
-        }
-        if (session.active_thread_id) {
-          detailParts.push(`Thread: ${escapeHtml(shortId(session.active_thread_id))}`);
-        }
-
-        transcript.innerHTML = `
-          <div class="thread-empty thread-empty-ready">
-            <span class="thread-empty-badge">${hasControl ? "Ready" : "Waiting"}</span>
-            <h2>${title}</h2>
-            <p>${copy}</p>
-            ${
-              detailParts.length
-                ? `<p class="thread-empty-detail">${detailParts.join(" · ")}</p>`
-                : ""
-            }
-          </div>
-        `;
+        renderConversationContent(
+          h(ReadyConversationState, {
+            canWrite: hasControl,
+            readyCopy: "Codex is connected. Send the first prompt below when you're ready.",
+            session,
+            shortId,
+            waitingCopy: "This thread is open, but another device currently has control. Take over to send the first prompt from here.",
+          })
+        );
         return;
       }
 
-      transcript.innerHTML = `
-        <div class="thread-empty">
-          <h2>Relay standing by</h2>
-          <p>Pick a workspace, then use this console to launch or resume a session while keeping an eye on control, trust, and audit state.</p>
-          ${
-            state.selectedCwd
-              ? `<p class="thread-empty-detail">Selected workspace: ${escapeHtml(state.selectedCwd)}</p>`
-              : ""
-          }
-          <div class="suggestion-row">
-            <button class="suggestion-button" type="button" data-suggestion="Summarize the structure of this repo and point out the important entry points.">Summarize this repo</button>
-            <button class="suggestion-button" type="button" data-suggestion="Find the bug in this project and explain the likely root cause before changing code.">Find the bug</button>
-            <button class="suggestion-button" type="button" data-suggestion="Review this codebase for areas that feel too complex and suggest a cleanup plan.">Suggest a cleanup</button>
-          </div>
-        </div>
-      `;
+      renderConversationContent(
+        h(ConversationEmptyState, {
+          actions: [
+            {
+              attrs: {
+                "data-suggestion": "Summarize the structure of this repo and point out the important entry points.",
+              },
+              label: "Summarize this repo",
+            },
+            {
+              attrs: {
+                "data-suggestion": "Find the bug in this project and explain the likely root cause before changing code.",
+              },
+              label: "Find the bug",
+            },
+            {
+              attrs: {
+                "data-suggestion": "Review this codebase for areas that feel too complex and suggest a cleanup plan.",
+              },
+              label: "Suggest a cleanup",
+            },
+          ],
+          copy: "Pick a workspace, then use this console to launch or resume a session while keeping an eye on control, trust, and audit state.",
+          details: state.selectedCwd ? [`Selected workspace: ${state.selectedCwd}`] : [],
+          title: "Relay standing by",
+        })
+      );
       return;
     }
 
-    transcript.innerHTML = renderTranscriptMarkup(entries, approval, {
-      enableFileChangeActions: true,
-      expandedKeys: state.transcriptExpandedItemIds || new Set(),
-    });
+    renderConversationContent(
+      h(TranscriptMarkupState, {
+        markup: renderTranscriptMarkup(entries, approval, {
+          enableFileChangeActions: true,
+          expandedKeys: state.transcriptExpandedItemIds || new Set(),
+        }),
+      })
+    );
     transcript.scrollTop = transcript.scrollHeight;
   }
 

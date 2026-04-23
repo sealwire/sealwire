@@ -412,19 +412,6 @@ export function ThreadList({
   );
 }
 
-export function DefaultTranscriptEmpty() {
-  return h(
-    "div",
-    { className: "thread-empty" },
-    h("h2", null, "No remote session yet"),
-    h(
-      "p",
-      null,
-      "After pairing, this page will stream the live relay transcript through the broker."
-    )
-  );
-}
-
 export function RelayHomeState({ clientAuth, onSelectRelay, relayDirectory }) {
   if (!(relayDirectory || []).length) {
     return h(
@@ -530,48 +517,6 @@ export function MissingCredentialsState({ remoteAuth }) {
       `${relayLabel} is still known to this browser, but its local encrypted credentials are unavailable.`
     ),
     h("p", null, "Pair this relay again on this device to restore remote access.")
-  );
-}
-
-export function ReadyTranscriptState({ canWrite, session }) {
-  const title = canWrite ? "Session ready" : "Session active on another device";
-  const copy = canWrite
-    ? "The remote session is live. Send the first prompt below when you're ready."
-    : "This thread is already open, but another device currently has control. You can still approve or decline requests here; take over only if you want to send messages from this device.";
-  const detailParts = [];
-
-  if (session.current_cwd) {
-    detailParts.push(`Workspace: ${session.current_cwd}`);
-  }
-  if (session.active_thread_id) {
-    detailParts.push(`Thread: ${shortId(session.active_thread_id)}`);
-  }
-
-  return h(
-    "div",
-    { className: "thread-empty thread-empty-ready" },
-    h("span", { className: "thread-empty-badge" }, canWrite ? "Ready" : "Waiting"),
-    h("h2", null, title),
-    h("p", null, copy),
-    detailParts.length
-      ? h("p", { className: "thread-empty-detail" }, detailParts.join(" · "))
-      : null
-  );
-}
-
-export function TranscriptMarkupState({ hydrationLoading, markup, onApprovalClick, onScroll }) {
-  return h(
-    React.Fragment,
-    null,
-    hydrationLoading
-      ? h("div", { className: "transcript-loading-banner" }, "Loading earlier transcript…")
-      : null,
-    h("div", {
-      className: "transcript-react-root",
-      dangerouslySetInnerHTML: { __html: markup },
-      onClick: onApprovalClick,
-      onScroll,
-    })
   );
 }
 

@@ -63,22 +63,25 @@ import { useRemoteSessionRuntime } from "./use-remote-session-runtime.js";
 import {
   Composer,
   ControlBanner,
-  DefaultTranscriptEmpty,
   DeviceMetaPanel,
   MissingCredentialsState,
-  ReadyTranscriptState,
   RelayDirectoryList,
   RelayHomeState,
   SessionMetaPanel,
   SessionPanel,
   ThreadList,
-  TranscriptMarkupState,
   WorkspaceHeading,
 } from "./react-renderer.js";
+import {
+  ConversationEmptyState,
+  ReadyConversationState,
+  TranscriptMarkupState,
+} from "../shared/conversation.js";
 import {
   setRemoteCwdInputElement,
   setRemoteTranscriptElement,
 } from "./ui-refs.js";
+import { shortId } from "./utils.js";
 
 const h = React.createElement;
 const LIVE_TRANSCRIPT_DETAIL_REFRESH_MS = 1000;
@@ -1157,12 +1160,18 @@ function RemoteTranscriptPanel({
         remoteAuth: emptyStateModel.remoteAuth,
       });
     } else {
-      body = h(DefaultTranscriptEmpty);
+      body = h(ConversationEmptyState, {
+        copy: "After pairing, this page will stream the live relay transcript through the broker.",
+        title: "No remote session yet",
+      });
     }
   } else if (!entries.length && !approval) {
-    body = h(ReadyTranscriptState, {
+    body = h(ReadyConversationState, {
       canWrite: sessionView.canWrite,
+      readyCopy: "The remote session is live. Send the first prompt below when you're ready.",
       session,
+      shortId,
+      waitingCopy: "This thread is already open, but another device currently has control. You can still approve or decline requests here; take over only if you want to send messages from this device.",
     });
   } else {
     body = h(TranscriptMarkupState, {
