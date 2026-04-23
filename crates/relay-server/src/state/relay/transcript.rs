@@ -264,6 +264,76 @@ impl RelayState {
         entry.status = status.to_string();
         true
     }
+
+    pub fn turn_file_change_summary(
+        &self,
+        turn_id: &str,
+    ) -> Vec<crate::protocol::FileChangeDiffView> {
+        let mut file_changes = Vec::new();
+
+        for entry in &self.transcript {
+            if entry.turn_id.as_deref() != Some(turn_id) {
+                continue;
+            }
+            let Some(tool) = entry.tool.as_ref() else {
+                continue;
+            };
+            if tool.item_type != "fileChange" {
+                continue;
+            }
+
+            for path in tool
+                .file_changes
+                .iter()
+                .map(|change| change.path.clone())
+                .chain(tool.path.clone())
+            {
+                merge_turn_file_change(
+                    &mut file_changes,
+                    crate::protocol::FileChangeDiffView {
+                        path,
+                        change_type: "update".to_string(),
+                        diff: String::new(),
+                    },
+                    false,
+                );
+            }
+            for change in tool.file_changes.clone() {
+                merge_turn_file_change(&mut file_changes, change, true);
+            }
+        }
+
+        file_changes
+    }
+}
+
+fn merge_turn_file_change(
+    file_changes: &mut Vec<crate::protocol::FileChangeDiffView>,
+    incoming: crate::protocol::FileChangeDiffView,
+    replace_existing_diff: bool,
+) {
+    if let Some(existing) = file_changes
+        .iter_mut()
+        .find(|change| change.path == incoming.path)
+    {
+        if replace_existing_diff {
+            if !incoming.diff.is_empty() || existing.diff.is_empty() {
+                *existing = incoming;
+            } else if existing.change_type == "update" && incoming.change_type != "update" {
+                existing.change_type = incoming.change_type;
+            }
+            return;
+        }
+
+        if existing.diff.is_empty() && !incoming.diff.is_empty() {
+            *existing = incoming;
+        } else if existing.change_type == "update" && incoming.change_type != "update" {
+            existing.change_type = incoming.change_type;
+        }
+        return;
+    }
+
+    file_changes.push(incoming);
 }
 
 fn merge_tool_call_view(

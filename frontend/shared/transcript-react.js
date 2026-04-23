@@ -267,37 +267,306 @@ function UnifiedDiff({ value }) {
   );
 }
 
+function sanitizeFileChange(change) {
+  if (!change || typeof change !== "object") {
+    return null;
+  }
+
+  const path = typeof change.path === "string" ? change.path.trim() : "";
+  if (!path) {
+    return null;
+  }
+
+  return {
+    change_type: typeof change.change_type === "string" && change.change_type.trim()
+      ? change.change_type
+      : typeof change.kind === "string" && change.kind.trim()
+        ? change.kind
+        : typeof change.type === "string" && change.type.trim() && change.type !== "fileChange"
+          ? change.type
+          : "update",
+    diff: typeof change.diff === "string" ? change.diff : "",
+    path,
+  };
+}
+
+function parseFileChangesFromDiff(diff) {
+  if (!diff) {
+    return [];
+  }
+
+  const changes = [];
+  let currentLines = [];
+  let currentPath = "";
+
+  function flushCurrentChange() {
+    if (!currentPath || !currentLines.length) {
+      currentLines = [];
+      return;
+    }
+    changes.push({
+      change_type: "update",
+      diff: currentLines.join("\n"),
+      path: currentPath,
+    });
+    currentLines = [];
+  }
+
+  for (const line of String(diff).split("\n")) {
+    if (line.startsWith("diff --git ")) {
+      flushCurrentChange();
+      const match = line.match(/^diff --git a\/(.+?) b\/(.+)$/);
+      currentPath = match?.[2] || match?.[1] || "";
+    }
+    currentLines.push(line);
+  }
+
+  flushCurrentChange();
+  return changes;
+}
+
+function collectFileChangesFromJsonValue(value, fileChanges, seenKeys) {
+  if (!value || typeof value !== "object") {
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectFileChangesFromJsonValue(item, fileChanges, seenKeys);
+    }
+    return;
+  }
+
+  const normalized = sanitizeFileChange(value);
+  if (normalized) {
+    const key = `${normalized.path}\u0000${normalized.diff}`;
+    if (!seenKeys.has(key)) {
+      seenKeys.add(key);
+      fileChanges.push(normalized);
+    }
+  }
+
+  for (const nestedValue of Object.values(value)) {
+    if (nestedValue && typeof nestedValue === "object") {
+      collectFileChangesFromJsonValue(nestedValue, fileChanges, seenKeys);
+    }
+  }
+}
+
+function parseFileChangesFromInputPreview(inputPreview) {
+  if (!inputPreview) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(inputPreview);
+    const fileChanges = [];
+    collectFileChangesFromJsonValue(parsed, fileChanges, new Set());
+    return fileChanges;
+  } catch {
+    return [];
+  }
+}
+
+function parseFilePathsFromDetail(detail) {
+  const detailMatch = String(detail || "").match(/^Target files?:\s*(.+)$/i);
+  if (!detailMatch) {
+    return [];
+  }
+
+  return detailMatch[1].split(",").map((path) => path.trim()).filter(Boolean);
+}
+
+function parseFilePathsFromInputPreview(inputPreview) {
+  const inputMatch = String(inputPreview || "").match(/^Files:\n([\s\S]+)$/i);
+  if (!inputMatch) {
+    return [];
+  }
+
+  return inputMatch[1].split("\n").map((path) => path.trim()).filter(Boolean);
+}
+
+function getFileChanges(tool) {
+  const explicitChanges = Array.isArray(tool?.file_changes)
+    ? tool.file_changes.map(sanitizeFileChange).filter(Boolean)
+    : [];
+  if (explicitChanges.length) {
+    return explicitChanges;
+  }
+
+  const structuredInputChanges = parseFileChangesFromInputPreview(tool?.input_preview);
+  if (structuredInputChanges.length) {
+    return structuredInputChanges;
+  }
+
+  const diffChanges = parseFileChangesFromDiff(tool?.diff);
+  if (diffChanges.length) {
+    return diffChanges;
+  }
+
+  const fallbackPaths = [
+    ...parseFilePathsFromDetail(tool?.detail),
+    ...parseFilePathsFromInputPreview(tool?.input_preview),
+    ...(tool?.path ? [tool.path] : []),
+  ];
+  const seenPaths = new Set();
+  return fallbackPaths
+    .filter((path) => {
+      if (!path || seenPaths.has(path)) {
+        return false;
+      }
+      seenPaths.add(path);
+      return true;
+    })
+    .map((path) => ({
+      change_type: "update",
+      diff: "",
+      path,
+    }));
+}
+
 function FileChangeDiff({ tool }) {
-  const diff = tool.diff || (tool.file_changes || [])
+  const fileChanges = getFileChanges(tool);
+  const displayPaths = buildFileDisplayPathMap(fileChanges);
+  const fileChangesWithDiff = fileChanges.filter((change) => change?.diff);
+  const fallbackDiff = tool.diff || fileChangesWithDiff
     .map((change) => change?.diff)
     .filter(Boolean)
     .join("\n");
 
-  if (!diff) {
+  if (!fallbackDiff && !fileChanges.length) {
     return null;
   }
-
-  const fileChanges = tool.file_changes || [];
 
   return h(
     "div",
     { className: "file-diff-panel" },
     fileChanges.length
       ? h(
-          "div",
-          { className: "diff-file-list" },
-          ...fileChanges.map((change, index) =>
-            h(
-              "span",
-              { className: "diff-file-chip", key: `${change.path || "unknown"}:${index}` },
-              h("span", null, change.change_type || "update"),
-              h("strong", null, change.path || "unknown")
-            )
-          )
+        "div",
+          { className: "diff-file-sections" },
+          ...fileChanges.map((change, index) => {
+            const { added, removed } = diffStats(change.diff);
+            const displayPath = displayPaths.get(change.path) || fileBasename(change.path);
+            return h(
+              "details",
+              { className: "diff-file-section", key: `${change.path || "unknown"}:${index}` },
+              h(
+                "summary",
+                { className: "diff-file-section-header" },
+                h(
+                  "div",
+                  { className: "diff-file-section-meta", title: change.path || "unknown" },
+                  h(
+                    "div",
+                    { className: "diff-file-section-primary" },
+                    h("strong", { className: "diff-file-section-name" }, displayPath),
+                    added > 0 ? h("span", { className: "file-change-chip-add" }, `+${added}`) : null,
+                    removed > 0 ? h("span", { className: "file-change-chip-del" }, `-${removed}`) : null
+                  ),
+                  h(
+                    "div",
+                    { className: "diff-file-section-secondary" },
+                    h("span", { className: "diff-file-section-kind" }, change.change_type || "update")
+                  )
+                ),
+                h("span", { className: "diff-file-section-chevron", "aria-hidden": "true" }, "▾")
+              ),
+              h(
+                "div",
+                { className: "diff-file-section-body" },
+                change.diff
+                  ? h(UnifiedDiff, { value: change.diff })
+                  : h("p", { className: "diff-file-empty" }, "Diff unavailable for this file.")
+              )
+            );
+          })
         )
-      : null,
-    h(UnifiedDiff, { value: diff })
+      : h(UnifiedDiff, { value: fallbackDiff })
   );
+}
+
+function diffStats(diff) {
+  if (!diff) return { added: 0, removed: 0 };
+  let added = 0, removed = 0;
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("+") && !line.startsWith("+++")) added++;
+    else if (line.startsWith("-") && !line.startsWith("---")) removed++;
+  }
+  return { added, removed };
+}
+
+function fileBasename(path) {
+  return String(path || "unknown").split("/").pop() || "unknown";
+}
+
+function splitPathSegments(path) {
+  return String(path || "unknown")
+    .replaceAll("\\", "/")
+    .split("/")
+    .filter(Boolean);
+}
+
+function buildFileDisplayPathMap(fileChanges) {
+  const uniquePaths = [...new Set(fileChanges.map((change) => String(change?.path || "unknown")))];
+  const segmentsByPath = new Map(
+    uniquePaths.map((path) => [path, splitPathSegments(path)])
+  );
+  const displayPathMap = new Map();
+
+  for (const path of uniquePaths) {
+    const segments = segmentsByPath.get(path) || [];
+    if (!segments.length) {
+      displayPathMap.set(path, "unknown");
+      continue;
+    }
+
+    const minSegments = Math.min(2, segments.length);
+    let displayPath = segments.slice(-minSegments).join("/");
+
+    for (let suffixLength = minSegments; suffixLength <= segments.length; suffixLength += 1) {
+      const candidate = segments.slice(-suffixLength).join("/");
+      const collides = uniquePaths.some((otherPath) => {
+        if (otherPath === path) {
+          return false;
+        }
+        const otherSegments = segmentsByPath.get(otherPath) || [];
+        return otherSegments.slice(-suffixLength).join("/") === candidate;
+      });
+      if (!collides) {
+        displayPath = candidate;
+        break;
+      }
+    }
+
+    displayPathMap.set(path, displayPath);
+  }
+
+  return displayPathMap;
+}
+
+function FileChangeSummary({ tool, fallback }) {
+  const fileChanges = getFileChanges(tool);
+  const displayPaths = buildFileDisplayPathMap(fileChanges);
+
+  if (fileChanges.length) {
+    return h(
+      "div",
+      { className: "file-change-summary" },
+      ...fileChanges.map((change, i) => {
+        const { added, removed } = diffStats(change.diff);
+        const filename = displayPaths.get(change.path) || fileBasename(change.path);
+        return h(
+          "span",
+          { className: "file-change-chip", key: `${change.path}:${i}` },
+          h("span", { className: "file-change-chip-name" }, filename),
+          added > 0 ? h("span", { className: "file-change-chip-add" }, `+${added}`) : null,
+          removed > 0 ? h("span", { className: "file-change-chip-del" }, `-${removed}`) : null
+        );
+      })
+    );
+  }
+  return h("span", { className: "tool-collapsed-preview" }, fallback || tool.detail || "");
 }
 
 function ToolEntry({ entry, options = null }) {
@@ -325,6 +594,28 @@ function ToolEntry({ entry, options = null }) {
     h(
       "div",
       { className: "message-card message-card-system message-card-tool" },
+      itemId
+        ? h(
+            "div",
+            { className: "tool-entry-controls" },
+            h(
+              "button",
+              {
+                className: "tool-toggle-button",
+                "data-item-id": itemId,
+                "data-transcript-toggle": "entry",
+                type: "button",
+              },
+              expanded ? "▴" : "▾"
+            ),
+            expanded && isFileChange && options?.enableFileChangeActions
+              ? [
+                  h("button", { className: "tool-toggle-button tool-action-button", "data-item-id": itemId, "data-file-change-action": "rollback", type: "button", key: "rollback" }, "Rollback"),
+                  h("button", { className: "tool-toggle-button tool-action-button", "data-item-id": itemId, "data-file-change-action": "reapply", type: "button", key: "reapply" }, "Reapply"),
+                ]
+              : null
+          )
+        : null,
       !expanded
         ? h(
             React.Fragment,
@@ -332,23 +623,13 @@ function ToolEntry({ entry, options = null }) {
             h(
               "div",
               { className: "tool-collapsed-row" },
-              itemId
-                ? h(
-                    "button",
-                    {
-                      className: "tool-toggle-button tool-collapsed-toggle",
-                      "data-item-id": itemId,
-                      "data-transcript-toggle": "entry",
-                      type: "button",
-                    },
-                    isFileChange ? "Show diff" : "Expand"
-                  )
-                : null,
               h("span", { className: "tool-collapsed-name" }, tool.name || "Tool"),
-              h("span", { className: "tool-collapsed-preview" }, collapsedSubtitle || collapsedTitle),
+              isFileChange
+                ? h(FileChangeSummary, { tool, fallback: collapsedSubtitle || collapsedTitle })
+                : h("span", { className: "tool-collapsed-preview" }, collapsedSubtitle || collapsedTitle),
               h("span", { className: "tool-collapsed-status" }, entry.status || "completed")
             ),
-            collapsedSubtitle
+            !isFileChange && collapsedSubtitle
               ? h("div", { className: "tool-collapsed-title" }, collapsedTitle)
               : null
           )
@@ -361,48 +642,8 @@ function ToolEntry({ entry, options = null }) {
               h("strong", null, tool.name || "Tool"),
               h("span", null, entry.status || "completed")
             ),
-            h(
-              "div",
-              { className: "tool-entry-controls" },
-              h(
-                "button",
-                {
-                  className: "tool-toggle-button",
-                  "data-item-id": itemId,
-                  "data-transcript-toggle": "entry",
-                  type: "button",
-                },
-                isFileChange ? "Hide diff" : "Collapse"
-              ),
-              isFileChange && options?.enableFileChangeActions
-                ? [
-                    h(
-                      "button",
-                      {
-                        className: "tool-toggle-button tool-action-button",
-                        "data-file-change-action": "rollback",
-                        "data-item-id": itemId,
-                        key: "rollback",
-                        type: "button",
-                      },
-                      "Rollback"
-                    ),
-                    h(
-                      "button",
-                      {
-                        className: "tool-toggle-button tool-action-button",
-                        "data-file-change-action": "reapply",
-                        "data-item-id": itemId,
-                        key: "reapply",
-                        type: "button",
-                      },
-                      "Reapply"
-                    ),
-                  ]
-                : null
-            ),
             h("h3", { className: "tool-card-title" }, title),
-            detail ? h("p", { className: "tool-card-detail" }, detail) : null,
+            detail && !isFileChange ? h("p", { className: "tool-card-detail" }, detail) : null,
             isFileChange ? h(FileChangeDiff, { tool }) : null,
             h(
               "div",

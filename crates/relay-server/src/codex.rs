@@ -983,6 +983,41 @@ fn parse_transcript(thread: &Value) -> Vec<TranscriptEntryView> {
     transcript
 }
 
+fn refresh_turn_diff_entry(relay: &mut RelayState, turn_id: &str) -> bool {
+    let turn_diff_item_id = format!("turn-diff:{turn_id}");
+    let existing_entry = relay
+        .snapshot()
+        .transcript
+        .into_iter()
+        .find(|entry| entry.item_id.as_deref() == Some(turn_diff_item_id.as_str()));
+    let Some(existing_entry) = existing_entry else {
+        return false;
+    };
+    let Some(existing_tool) = existing_entry.tool else {
+        return false;
+    };
+
+    let fallback_file_changes = relay.turn_file_change_summary(turn_id);
+    let entry = build_turn_diff_entry_with_fallback(
+        turn_id.to_string(),
+        existing_tool.diff,
+        &existing_entry.status,
+        fallback_file_changes,
+    );
+    let Some(item_id) = entry.item_id.clone() else {
+        return false;
+    };
+    relay.upsert_transcript_item(
+        item_id,
+        entry.kind,
+        entry.text,
+        entry.status,
+        entry.turn_id,
+        entry.tool,
+    );
+    true
+}
+
 fn upsert_transcript_item_from_value(
     relay: &mut RelayState,
     item: Option<&Value>,
@@ -992,6 +1027,9 @@ fn upsert_transcript_item_from_value(
     let Some(item) = item else {
         return false;
     };
+    let refresh_turn_id = (string_at(item, &["type"]).as_deref() == Some("fileChange"))
+        .then(|| turn_id.clone())
+        .flatten();
     let Some(entry) = parse_transcript_item(item, turn_id, default_status) else {
         return false;
     };
@@ -1007,6 +1045,9 @@ fn upsert_transcript_item_from_value(
         entry.turn_id,
         entry.tool,
     );
+    if let Some(turn_id) = refresh_turn_id {
+        refresh_turn_diff_entry(relay, &turn_id);
+    }
     true
 }
 
@@ -1253,35 +1294,57 @@ fn build_turn_file_summary(
     items: &[Value],
 ) -> Option<TranscriptEntryView> {
     let turn_id = turn_id?;
-    let mut file_changes = Vec::new();
-    for item in items {
-        if string_at(item, &["type"]).as_deref() != Some("fileChange") {
-            continue;
-        }
-        file_changes.extend(collect_file_change_diffs(item));
-    }
-
+    let file_changes = summarize_turn_file_changes(items);
     if file_changes.is_empty() {
         return None;
     }
 
-    Some(build_turn_diff_entry(
+    Some(build_turn_diff_entry_with_fallback(
         turn_id,
-        joined_file_change_diff(&file_changes)?,
+        joined_file_change_diff(&file_changes),
         "completed",
+        file_changes,
     ))
 }
 
 fn build_turn_diff_entry(turn_id: String, diff: String, status: &str) -> TranscriptEntryView {
-    let file_changes = split_unified_diff_by_file(&diff);
-    let paths = if file_changes.is_empty() {
-        extract_paths_from_unified_diff(&diff)
-    } else {
-        file_changes
-            .iter()
-            .map(|change| change.path.clone())
-            .collect::<Vec<_>>()
-    };
+    build_turn_diff_entry_with_fallback(turn_id, Some(diff), status, Vec::new())
+}
+
+fn build_turn_diff_entry_with_fallback(
+    turn_id: String,
+    diff: Option<String>,
+    status: &str,
+    fallback_file_changes: Vec<FileChangeDiffView>,
+) -> TranscriptEntryView {
+    let mut file_changes = diff
+        .as_deref()
+        .map(split_unified_diff_by_file)
+        .unwrap_or_default();
+    if file_changes.is_empty() {
+        for path in diff
+            .as_deref()
+            .map(extract_paths_from_unified_diff)
+            .unwrap_or_default()
+        {
+            merge_file_change_view(
+                &mut file_changes,
+                FileChangeDiffView {
+                    path,
+                    change_type: "update".to_string(),
+                    diff: String::new(),
+                },
+                false,
+            );
+        }
+    }
+    for change in fallback_file_changes {
+        merge_file_change_view(&mut file_changes, change, false);
+    }
+    let paths = file_changes
+        .iter()
+        .map(|change| change.path.clone())
+        .collect::<Vec<_>>();
     let detail = file_change_detail(&paths);
 
     TranscriptEntryView {
@@ -1301,7 +1364,7 @@ fn build_turn_diff_entry(turn_id: String, diff: String, status: &str) -> Transcr
             command: None,
             input_preview: file_change_paths_preview(&paths),
             result_preview: None,
-            diff: Some(diff),
+            diff,
             file_changes,
         }),
     }
@@ -1561,6 +1624,59 @@ fn collect_file_change_diffs(item: &Value) -> Vec<FileChangeDiffView> {
             })
         })
         .collect()
+}
+
+fn merge_file_change_view(
+    file_changes: &mut Vec<FileChangeDiffView>,
+    incoming: FileChangeDiffView,
+    replace_existing_diff: bool,
+) {
+    if let Some(existing) = file_changes
+        .iter_mut()
+        .find(|change| change.path == incoming.path)
+    {
+        if replace_existing_diff {
+            if !incoming.diff.is_empty() || existing.diff.is_empty() {
+                *existing = incoming;
+            } else if existing.change_type == "update" && incoming.change_type != "update" {
+                existing.change_type = incoming.change_type;
+            }
+            return;
+        }
+
+        if existing.diff.is_empty() && !incoming.diff.is_empty() {
+            *existing = incoming;
+        } else if existing.change_type == "update" && incoming.change_type != "update" {
+            existing.change_type = incoming.change_type;
+        }
+        return;
+    }
+
+    file_changes.push(incoming);
+}
+
+fn summarize_turn_file_changes(items: &[Value]) -> Vec<FileChangeDiffView> {
+    let mut file_changes = Vec::new();
+    for item in items {
+        if string_at(item, &["type"]).as_deref() != Some("fileChange") {
+            continue;
+        }
+        for path in collect_file_change_paths(item) {
+            merge_file_change_view(
+                &mut file_changes,
+                FileChangeDiffView {
+                    path,
+                    change_type: "update".to_string(),
+                    diff: String::new(),
+                },
+                false,
+            );
+        }
+        for change in collect_file_change_diffs(item) {
+            merge_file_change_view(&mut file_changes, change, true);
+        }
+    }
+    file_changes
 }
 
 fn parse_file_change_kind(change: &Value) -> String {

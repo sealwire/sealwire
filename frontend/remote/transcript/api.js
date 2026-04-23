@@ -153,6 +153,10 @@ function appendTranscriptEntryDetailChunk(entry, field, chunkText) {
       entry.tool = entry.tool || {};
       entry.tool.result_preview = `${entry.tool.result_preview || ""}${chunkText}`;
       return;
+    case "tool.diff":
+      entry.tool = entry.tool || {};
+      entry.tool.diff = `${entry.tool.diff || ""}${chunkText}`;
+      return;
     default:
   }
 }

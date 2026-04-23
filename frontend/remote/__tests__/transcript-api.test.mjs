@@ -216,3 +216,61 @@ test("createTranscriptEntryDetailFetcher assembles chunked detail fields", async
   ]);
   assert.equal(entry?.text, "line 1\nline 2");
 });
+
+test("createTranscriptEntryDetailFetcher appends chunked tool diffs", async () => {
+  const fetchTranscriptEntryDetail = createTranscriptEntryDetailFetcher(async (_action, payload) => {
+    if (payload.input.cursor == null) {
+      return {
+        thread_entry_detail: {
+          thread_id: "thread-1",
+          item_id: "fc-1",
+          entry: {
+            item_id: "fc-1",
+            kind: "tool_call",
+            status: "completed",
+            turn_id: "turn-1",
+            tool: {
+              item_type: "fileChange",
+              name: "File change",
+              title: "Codex changed frontend/app.js.",
+              diff: "diff --git a/frontend/app.js b/frontend/app.js\n@@ -1 +1 @@\n-old\n",
+            },
+          },
+          pending_fields: [
+            {
+              field: "tool.diff",
+              next_cursor: 63,
+              total_chars: 68,
+            },
+          ],
+          chunk: null,
+        },
+      };
+    }
+
+    return {
+      thread_entry_detail: {
+        thread_id: "thread-1",
+        item_id: "fc-1",
+        entry: null,
+        pending_fields: [],
+        chunk: {
+          field: "tool.diff",
+          text: "+new",
+          next_cursor: null,
+          total_chars: 68,
+        },
+      },
+    };
+  });
+
+  const entry = await fetchTranscriptEntryDetail({
+    itemId: "fc-1",
+    threadId: "thread-1",
+  });
+
+  assert.equal(
+    entry?.tool?.diff,
+    "diff --git a/frontend/app.js b/frontend/app.js\n@@ -1 +1 @@\n-old\n+new"
+  );
+});

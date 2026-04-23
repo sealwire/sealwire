@@ -124,6 +124,7 @@
 }
 
 .message-card-tool {
+  position: relative;
   border-color: color-mix(in srgb, var(--accent-primary) 42%, var(--border-subtle));
   background: color-mix(in srgb, var(--msg-system-bg) 86%, var(--accent-primary) 14%);
 }
@@ -202,13 +203,12 @@
 
 .command-toggle-button,
 .tool-toggle-button {
-  padding: 3px 9px;
+  padding: 2px 7px;
   border-radius: 999px;
   border: 1px solid var(--border-prominent);
   background: transparent;
   color: var(--text-secondary);
-  font-size: 11px;
-  font-weight: 600;
+  font-size: 13px;
   line-height: 1.2;
 }
 
@@ -320,11 +320,12 @@
 }
 
 .tool-entry-controls {
+  position: absolute;
+  top: 8px;
+  right: 10px;
   display: flex;
-  flex-wrap: wrap;
   gap: 6px;
-  justify-content: flex-end;
-  margin-bottom: 6px;
+  align-items: center;
 }
 
 .tool-action-button {
@@ -337,31 +338,103 @@
   margin-top: 12px;
 }
 
-.diff-file-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+.diff-file-sections {
+  display: grid;
+  gap: 10px;
 }
 
-.diff-file-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  max-width: 100%;
-  padding: 4px 8px;
+.diff-file-section {
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   background: var(--bg-base);
-  color: var(--text-secondary);
-  font-size: 12px;
+  overflow: hidden;
 }
 
-.diff-file-chip strong {
+.diff-file-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  padding: 10px 12px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.diff-file-section-header::-webkit-details-marker {
+  display: none;
+}
+
+.diff-file-section-meta {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+}
+
+.diff-file-section-primary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.diff-file-section-name {
   min-width: 0;
   overflow: hidden;
   color: var(--text-primary);
+  font-size: 13px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.diff-file-section-secondary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.diff-file-section-kind {
+  flex-shrink: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-transform: lowercase;
+}
+
+.diff-file-section-path {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diff-file-section-chevron {
+  flex-shrink: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  transition: transform 140ms ease;
+}
+
+.diff-file-section[open] .diff-file-section-chevron {
+  transform: rotate(180deg);
+}
+
+.diff-file-section-body {
+  display: grid;
+  gap: 8px;
+  padding: 0 12px 12px;
+}
+
+.diff-file-empty {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px dashed var(--border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 12px;
 }
 
 .diff-view {
@@ -420,6 +493,7 @@
   min-width: 0;
   font-size: 13px;
   line-height: 1.4;
+  padding-right: 80px;
 }
 
 .tool-collapsed-toggle {
@@ -456,6 +530,41 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.file-change-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+
+.file-change-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.file-change-chip-name {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.file-change-chip-add {
+  color: var(--status-ready-text);
+  font-size: 11px;
+}
+
+.file-change-chip-del {
+  color: var(--status-offline-text);
+  font-size: 11px;
 }
 
 .message-collapsible {

@@ -122,3 +122,62 @@ test("prepareTranscriptEntryForSurface caches completed tool call details withou
     entry.tool
   );
 });
+
+test("setLiveTranscriptEntryDetail preserves diff metadata from later tool detail fetches", async () => {
+  installBrowserStubs();
+  const { state } = await import("../state.js");
+  const { applyRemoteSurfacePatch } = await import("../surface-state.js");
+  const {
+    getLiveTranscriptEntryDetail,
+    setLiveTranscriptEntryDetail,
+  } = await import("./details.js");
+
+  applyRemoteSurfacePatch({
+    transcriptLiveEntryDetails: new Map(),
+    transcriptLiveEntryThreadId: null,
+  });
+
+  setLiveTranscriptEntryDetail(state, "thread-1", {
+    item_id: "tool-2",
+    kind: "tool_call",
+    status: "running",
+    tool: {
+      item_type: "fileChange",
+      name: "File change",
+      title: "Codex changed frontend/app.js.",
+    },
+  });
+  setLiveTranscriptEntryDetail(state, "thread-1", {
+    item_id: "tool-2",
+    kind: "tool_call",
+    status: "completed",
+    tool: {
+      item_type: "fileChange",
+      name: "File change",
+      title: "Codex changed frontend/app.js.",
+      diff: "diff --git a/frontend/app.js b/frontend/app.js\n@@ -1 +1 @@\n-old\n+new",
+      file_changes: [
+        {
+          path: "frontend/app.js",
+          change_type: "update",
+          diff: "diff --git a/frontend/app.js b/frontend/app.js\n@@ -1 +1 @@\n-old\n+new",
+        },
+      ],
+    },
+  });
+
+  assert.equal(
+    getLiveTranscriptEntryDetail(state, "thread-1", "tool-2")?.tool?.diff,
+    "diff --git a/frontend/app.js b/frontend/app.js\n@@ -1 +1 @@\n-old\n+new"
+  );
+  assert.deepEqual(
+    getLiveTranscriptEntryDetail(state, "thread-1", "tool-2")?.tool?.file_changes,
+    [
+      {
+        path: "frontend/app.js",
+        change_type: "update",
+        diff: "diff --git a/frontend/app.js b/frontend/app.js\n@@ -1 +1 @@\n-old\n+new",
+      },
+    ]
+  );
+});

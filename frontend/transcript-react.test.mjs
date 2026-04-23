@@ -125,11 +125,78 @@ test("renderEntryMarkup avoids repeating file change metadata and path previews"
     },
   });
 
-  assert.match(markup, /Codex wants to edit 2 files\./);
-  assert.match(markup, /Target files: crates\/relay-server\/src\/protocol\.rs, frontend\/shared\/transcript-react\.js/);
+  assert.match(markup, /protocol\.rs/);
+  assert.match(markup, /transcript-react\.js/);
+  assert.doesNotMatch(markup, /Codex wants to edit 2 files\./); // title only shown expanded
   assert.doesNotMatch(markup, /tool-detail-label">Type</);
   assert.doesNotMatch(markup, /tool-detail-label">Path</);
   assert.doesNotMatch(markup, /tool-preview-label">Input</);
+});
+
+test("renderEntryMarkup derives file chips and +/- stats from unified diff when file_changes are absent", () => {
+  const markup = renderEntryMarkup({
+    item_id: "fc-legacy",
+    kind: "tool_call",
+    status: "completed",
+    tool: {
+      name: "File change",
+      title: "Codex wants to edit 2 files.",
+      item_type: "fileChange",
+      diff: [
+        "diff --git a/frontend/app.js b/frontend/app.js",
+        "@@ -1 +1,2 @@",
+        "-old",
+        "+new",
+        "+extra",
+        "diff --git a/frontend/styles.css b/frontend/styles.css",
+        "@@ -1,2 +1 @@",
+        "-color: red;",
+        "-padding: 8px;",
+        "+color: blue;",
+      ].join("\n"),
+    },
+  });
+
+  assert.match(markup, /app\.js/);
+  assert.match(markup, /styles\.css/);
+  assert.match(markup, /\+2/);
+  assert.match(markup, /-2/);
+  assert.doesNotMatch(markup, /Codex wants to edit 2 files\./);
+});
+
+test("renderEntryMarkup derives file chips from detail JSON changes when file previews are absent", () => {
+  const markup = renderEntryMarkup({
+    item_id: "fc-json",
+    kind: "tool_call",
+    status: "completed",
+    tool: {
+      name: "File change",
+      title: "Codex wants to edit 1 file.",
+      item_type: "fileChange",
+    },
+  }, {
+    detailEntries: new Map([
+      ["fc-json", {
+        item_id: "fc-json",
+        kind: "tool_call",
+        status: "completed",
+        tool: {
+          name: "File change",
+          title: "Codex wants to edit 1 file.",
+          item_type: "fileChange",
+          input_preview: JSON.stringify([
+            {
+              kind: "modify",
+              path: "frontend/legacy.js",
+            },
+          ]),
+        },
+      }],
+    ]),
+  });
+
+  assert.match(markup, /legacy\.js/);
+  assert.doesNotMatch(markup, /Codex wants to edit 1 file\./);
 });
 
 test("renderEntryMarkup expands file change diffs with rollback controls", () => {
@@ -153,12 +220,50 @@ test("renderEntryMarkup expands file change diffs with rollback controls", () =>
     expandedKeys: new Set(["entry:fc-2"]),
   });
 
-  assert.match(markup, /Hide diff/);
+  assert.match(markup, /▴/);
   assert.match(markup, /data-file-change-action="rollback"/);
   assert.match(markup, /data-file-change-action="reapply"/);
   assert.match(markup, /diff-line-delete/);
   assert.match(markup, /diff-line-add/);
   assert.match(markup, /frontend\/app\.js/);
+});
+
+test("renderEntryMarkup expands turn diff entries into per-file sections", () => {
+  const markup = renderEntryMarkup({
+    item_id: "turn-diff:1",
+    kind: "tool_call",
+    status: "completed",
+    tool: {
+      name: "File summary",
+      title: "Codex changed 2 files in this turn.",
+      item_type: "turnDiff",
+      diff: "@@ -1 +1 @@\n-old\n+new",
+      file_changes: [
+        {
+          path: "frontend/app.js",
+          change_type: "update",
+          diff: "diff --git a/frontend/app.js b/frontend/app.js\n@@ -1 +1 @@\n-old\n+new",
+        },
+        {
+          path: "frontend/styles.css",
+          change_type: "update",
+          diff: "diff --git a/frontend/styles.css b/frontend/styles.css\n@@ -1 +1 @@\n-old-color\n+new-color",
+        },
+      ],
+    },
+  }, {
+    expandedKeys: new Set(["entry:turn-diff:1"]),
+  });
+
+  assert.match(markup, /diff-file-section/);
+  assert.match(markup, /diff-file-section-chevron/);
+  assert.match(markup, /app\.js<\/strong><span class="file-change-chip-add">\+1/);
+  assert.match(markup, /styles\.css<\/strong><span class="file-change-chip-add">\+1/);
+  assert.match(markup, /file-change-chip-del">-1/);
+  assert.match(markup, /frontend\/app\.js/);
+  assert.match(markup, /frontend\/styles\.css/);
+  assert.match(markup, /diff --git a\/frontend\/app\.js b\/frontend\/app\.js/);
+  assert.match(markup, /diff --git a\/frontend\/styles\.css b\/frontend\/styles\.css/);
 });
 
 test("renderEntryMarkup shows expanded command detail and loading note when requested", () => {
@@ -229,7 +334,7 @@ test("renderEntryMarkup expands tool details from fetched entry data", () => {
     loadingItemIds: new Set(),
   });
 
-  assert.match(expandedMarkup, />\s*Collapse\s*<\/button>/);
+  assert.match(expandedMarkup, />\s*▴\s*<\/button>/);
   assert.match(expandedMarkup, /Loaded the requested file\./);
   assert.match(expandedMarkup, /tool-preview-label">Input</);
   assert.match(expandedMarkup, /tool-preview-label">Result</);

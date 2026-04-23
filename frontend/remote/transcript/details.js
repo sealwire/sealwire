@@ -251,6 +251,10 @@ function mergeToolDetail(existing, incoming) {
     command: selectLongerString(existing.command, incoming.command),
     input_preview: selectLongerString(existing.input_preview, incoming.input_preview),
     result_preview: selectLongerString(existing.result_preview, incoming.result_preview),
+    diff: selectLongerString(existing.diff, incoming.diff),
+    file_changes: Array.isArray(incoming.file_changes) && incoming.file_changes.length
+      ? incoming.file_changes
+      : (existing.file_changes || []),
   };
 }
 

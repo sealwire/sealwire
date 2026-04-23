@@ -148,6 +148,91 @@ fn parse_transcript_enriches_file_change_tool_items_with_paths() {
 }
 
 #[test]
+fn parse_transcript_builds_turn_summary_from_path_only_file_changes() {
+    let thread = json!({
+        "turns": [
+            {
+                "id": "turn-1",
+                "items": [
+                    {
+                        "id": "item-file-change",
+                        "type": "fileChange",
+                        "changes": [
+                            { "path": "frontend/app.js", "kind": "modify" },
+                            { "path": "frontend/styles.css", "kind": "modify" }
+                        ]
+                    }
+                ]
+            }
+        ]
+    });
+
+    let transcript = parse_transcript(&thread);
+    let summary = transcript[1]
+        .tool
+        .as_ref()
+        .expect("turn summary should render as a tool call");
+
+    assert_eq!(transcript.len(), 2);
+    assert_eq!(summary.item_type, "turnDiff");
+    assert_eq!(summary.title, "Codex changed 2 files in this turn.");
+    assert_eq!(
+        summary.detail.as_deref(),
+        Some("Target files: frontend/app.js, frontend/styles.css")
+    );
+    assert_eq!(summary.file_changes.len(), 2);
+    assert_eq!(summary.file_changes[0].path, "frontend/app.js");
+    assert_eq!(summary.file_changes[1].path, "frontend/styles.css");
+    assert_eq!(summary.diff, None);
+}
+
+#[test]
+fn parse_transcript_turn_summary_prefers_latest_diff_for_repeated_file_changes() {
+    let thread = json!({
+        "turns": [
+            {
+                "id": "turn-1",
+                "items": [
+                    {
+                        "id": "item-file-change-1",
+                        "type": "fileChange",
+                        "changes": [
+                            {
+                                "path": "frontend/app.js",
+                                "kind": "modify",
+                                "diff": "diff --git a/frontend/app.js b/frontend/app.js\n@@ -1 +1 @@\n-old\n+mid"
+                            }
+                        ]
+                    },
+                    {
+                        "id": "item-file-change-2",
+                        "type": "fileChange",
+                        "changes": [
+                            {
+                                "path": "frontend/app.js",
+                                "kind": "modify",
+                                "diff": "diff --git a/frontend/app.js b/frontend/app.js\n@@ -1 +1 @@\n-mid\n+final"
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    });
+
+    let transcript = parse_transcript(&thread);
+    let summary = transcript[2]
+        .tool
+        .as_ref()
+        .expect("turn summary should be present");
+
+    assert_eq!(summary.item_type, "turnDiff");
+    assert_eq!(summary.file_changes.len(), 1);
+    assert!(summary.file_changes[0].diff.contains("+final"));
+    assert!(!summary.file_changes[0].diff.contains("+mid"));
+}
+
+#[test]
 fn parse_transcript_detail_item_preserves_full_tool_payloads() {
     let item = json!({
         "id": "item-tool",
@@ -350,6 +435,75 @@ async fn handle_notification_updates_generic_tool_items() {
             .map(|tool| tool.title.as_str()),
         Some("Read frontend/remote/main.js")
     );
+}
+
+#[tokio::test]
+async fn handle_notification_enriches_turn_diff_from_same_turn_file_changes() {
+    let (change_tx, _) = watch::channel(0_u64);
+    let state = std::sync::Arc::new(RwLock::new(RelayState::new(
+        "/tmp/project".to_string(),
+        change_tx,
+        SecurityProfile::private(),
+    )));
+
+    {
+        let mut relay = state.write().await;
+        relay.active_thread_id = Some("thread-1".to_string());
+    }
+
+    handle_notification(
+        json!({
+            "method": "turn/diff/updated",
+            "params": {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "diff": "@@ -1 +1 @@\n-old\n+new"
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    handle_notification(
+        json!({
+            "method": "item/completed",
+            "params": {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "item": {
+                    "id": "item-file-change",
+                    "type": "fileChange",
+                    "status": "completed",
+                    "changes": [
+                        { "path": "frontend/app.js", "kind": "modify" }
+                    ]
+                }
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    let relay = state.read().await;
+    let snapshot = relay.snapshot();
+    let summary = snapshot
+        .transcript
+        .iter()
+        .find(|entry| entry.item_id.as_deref() == Some("turn-diff:turn-1"))
+        .and_then(|entry| entry.tool.as_ref())
+        .expect("turn diff entry should exist");
+
+    assert_eq!(
+        summary.title,
+        "Codex changed `frontend/app.js` in this turn."
+    );
+    assert_eq!(
+        summary.detail.as_deref(),
+        Some("Target file: frontend/app.js")
+    );
+    assert_eq!(summary.file_changes.len(), 1);
+    assert_eq!(summary.file_changes[0].path, "frontend/app.js");
+    assert_eq!(summary.diff.as_deref(), Some("@@ -1 +1 @@\n-old\n+new"));
 }
 
 #[tokio::test]
