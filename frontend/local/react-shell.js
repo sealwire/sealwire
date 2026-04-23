@@ -1,370 +1,579 @@
 import React from "react";
+import { ConversationComposer } from "../shared/composer.js";
 
 const h = React.createElement;
 
-const LOCAL_SHELL_HTML = String.raw`
-  <div class="app-shell">
-    <aside class="sidebar">
-      <form id="connection-form" class="workspace-form auth-form" hidden>
-        <label class="sidebar-label" for="api-token-input">API Token</label>
-        <div class="workspace-picker">
-          <input id="api-token-input" type="password" placeholder="Enter RELAY_API_TOKEN to sign in" autocomplete="off">
-          <button id="apply-token-button" class="load-button" type="submit">Sign In</button>
-        </div>
-      </form>
+function Sidebar() {
+  return h(
+    "aside",
+    { className: "sidebar" },
+    h(AuthForm),
+    h(LaunchPanel),
+    h(ThreadDrawer),
+    h(ThreadContextMenu)
+  );
+}
 
-      <section class="launch-panel">
-        <div class="launch-copy">
-          <p class="sidebar-caption">Relay console</p>
-          <h2 class="launch-title">Load a workspace</h2>
-          <p class="launch-body">
-            Point this relay at the project you care about, then start or resume a session when you need local control.
-          </p>
-        </div>
+function AuthForm() {
+  return h(
+    "form",
+    { className: "workspace-form auth-form", hidden: true, id: "connection-form" },
+    h("label", { className: "sidebar-label", htmlFor: "api-token-input" }, "API Token"),
+    h(
+      "div",
+      { className: "workspace-picker" },
+      h("input", {
+        autoComplete: "off",
+        id: "api-token-input",
+        placeholder: "Enter RELAY_API_TOKEN to sign in",
+        type: "password",
+      }),
+      h("button", { className: "load-button", id: "apply-token-button", type: "submit" }, "Sign In")
+    )
+  );
+}
 
-        <form id="directory-form" class="workspace-form">
-          <label class="sidebar-label" for="cwd-input">Workspace</label>
-          <div class="workspace-picker">
-            <input id="cwd-input" type="text" placeholder="/path/to/project or ~/project">
-            <button id="load-directory-button" class="load-button" type="submit">Load</button>
-          </div>
-        </form>
+function LaunchPanel() {
+  return h(
+    "section",
+    { className: "launch-panel" },
+    h(
+      "div",
+      { className: "launch-copy" },
+      h("p", { className: "sidebar-caption" }, "Relay console"),
+      h("h2", { className: "launch-title" }, "Load a workspace"),
+      h(
+        "p",
+        { className: "launch-body" },
+        "Point this relay at the project you care about, then start or resume a session when you need local control."
+      )
+    ),
+    h(
+      "form",
+      { className: "workspace-form", id: "directory-form" },
+      h("label", { className: "sidebar-label", htmlFor: "cwd-input" }, "Workspace"),
+      h(
+        "div",
+        { className: "workspace-picker" },
+        h("input", {
+          id: "cwd-input",
+          placeholder: "/path/to/project or ~/project",
+          type: "text",
+        }),
+        h("button", { className: "load-button", id: "load-directory-button", type: "submit" }, "Load")
+      )
+    ),
+    h(
+      "div",
+      { className: "launch-actions" },
+      h("button", { className: "start-session-button", id: "start-session-button", type: "button" }, "Start Session"),
+      h("button", { className: "secondary-button", id: "resume-latest-button", type: "button" }, "Continue Latest")
+    ),
+    h(
+      "div",
+      { className: "launch-footer" },
+      h("button", { className: "sidebar-link-button", id: "open-launch-settings", type: "button" }, "Launch options"),
+      h("button", { className: "sidebar-link-button", id: "open-security-modal", type: "button" }, "Remote devices")
+    )
+  );
+}
 
-        <div class="launch-actions">
-          <button id="start-session-button" class="start-session-button" type="button">
-            Start Session
-          </button>
-          <button id="resume-latest-button" class="secondary-button" type="button">
-            Continue Latest
-          </button>
-        </div>
+function ThreadDrawer() {
+  return h(
+    "details",
+    { className: "sidebar-drawer" },
+    h(
+      "summary",
+      { className: "sidebar-drawer-summary" },
+      h(
+        "div",
+        null,
+        h("p", { className: "sidebar-caption" }, "Threads"),
+        h("p", { className: "sidebar-hint", id: "threads-count" }, "Loading workspace groups...")
+      )
+    ),
+    h(
+      "div",
+      { className: "sidebar-drawer-body" },
+      h("button", {
+        className: "secondary-button sidebar-home-button",
+        hidden: true,
+        id: "go-console-home-sidebar",
+        type: "button",
+      }, "Back to console"),
+      h(
+        "div",
+        { className: "sidebar-row" },
+        h("div", null, h("p", { className: "sidebar-caption" }, "Workspace Folders")),
+        h("button", { className: "sidebar-link-button", id: "threads-refresh-button", type: "button" }, "Refresh")
+      ),
+      h(
+        "div",
+        { className: "conversation-list", id: "threads-list" },
+        h("p", { className: "sidebar-empty" }, "Threads will appear here once the relay loads saved workspaces.")
+      )
+    )
+  );
+}
 
-        <div class="launch-footer">
-          <button id="open-launch-settings" class="sidebar-link-button" type="button">
-            Launch options
-          </button>
-          <button id="open-security-modal" class="sidebar-link-button" type="button">
-            Remote devices
-          </button>
-        </div>
-      </section>
+function ThreadContextMenu() {
+  return h(
+    "div",
+    { className: "context-menu", hidden: true, id: "thread-context-menu" },
+    h("button", { className: "context-menu-button", id: "archive-thread-button", type: "button" }, "Archive session"),
+    h("button", {
+      className: "context-menu-button context-menu-button-danger",
+      id: "delete-thread-button",
+      type: "button",
+    }, "Delete permanently")
+  );
+}
 
-      <details class="sidebar-drawer">
-        <summary class="sidebar-drawer-summary">
-          <div>
-            <p class="sidebar-caption">Threads</p>
-            <p id="threads-count" class="sidebar-hint">Loading workspace groups...</p>
-          </div>
-        </summary>
+function HeaderOverflowIcon() {
+  return h(
+    "svg",
+    { "aria-hidden": "true", fill: "none", height: "16", viewBox: "0 0 16 16", width: "16" },
+    h("circle", { cx: "3", cy: "8", fill: "currentColor", r: "1.5" }),
+    h("circle", { cx: "8", cy: "8", fill: "currentColor", r: "1.5" }),
+    h("circle", { cx: "13", cy: "8", fill: "currentColor", r: "1.5" })
+  );
+}
 
-        <div class="sidebar-drawer-body">
-          <button id="go-console-home-sidebar" class="secondary-button sidebar-home-button" type="button" hidden>
-            Back to console
-          </button>
-          <div class="sidebar-row">
-            <div>
-              <p class="sidebar-caption">Workspace Folders</p>
-            </div>
-            <button id="threads-refresh-button" class="sidebar-link-button" type="button">
-              Refresh
-            </button>
-          </div>
+function ChatHeader() {
+  return h(
+    "header",
+    { className: "chat-header" },
+    h(
+      "div",
+      { className: "chat-heading" },
+      h("span", { className: "chat-heading-label" }, "Relay"),
+      h("h1", { id: "workspace-title" }, "Relay console"),
+      h(
+        "p",
+        { className: "chat-subtitle", id: "workspace-subtitle" },
+        "Monitor live control, trusted devices, and the active session from here."
+      )
+    ),
+    h(
+      "div",
+      { className: "chat-header-actions" },
+      h("span", { className: "status-badge", id: "status-badge" }, "Idle"),
+      h("button", { className: "header-button", hidden: true, id: "go-console-home", type: "button" }, "Back"),
+      h("button", { className: "header-button", id: "open-security-header", type: "button" }, "Devices"),
+      h("button", { className: "header-button", id: "open-session-details", type: "button" }, "Details"),
+      h(
+        "div",
+        { className: "header-overflow-wrap" },
+        h(
+          "button",
+          {
+            "aria-label": "More options",
+            className: "header-button header-overflow-button",
+            id: "header-overflow-button",
+            type: "button",
+          },
+          h(HeaderOverflowIcon)
+        ),
+        h(
+          "div",
+          { className: "header-overflow-menu", hidden: true, id: "header-overflow-menu" },
+          h("button", { className: "overflow-menu-item", id: "refresh-button", type: "button" }, "Refresh")
+        )
+      )
+    )
+  );
+}
 
-          <div id="threads-list" class="conversation-list">
-            <p class="sidebar-empty">Threads will appear here once the relay loads saved workspaces.</p>
-          </div>
-        </div>
-      </details>
+function OverviewStrip() {
+  return h(
+    "section",
+    { "aria-label": "Relay overview", className: "overview-strip", id: "overview-strip" },
+    h(
+      "article",
+      { className: "overview-card overview-card-primary" },
+      h("p", { className: "overview-label" }, "Live Session"),
+      h(
+        "div",
+        { className: "overview-body" },
+        h(
+          "div",
+          null,
+          h("h2", { className: "overview-title", id: "overview-session-title" }, "Pick a workspace to launch"),
+          h(
+            "p",
+            { className: "overview-copy", id: "overview-session-copy" },
+            "Load a workspace, inspect relay state, and start or resume a session when you need it."
+          )
+        ),
+        h("div", { className: "overview-badges", id: "overview-session-badges" })
+      )
+    ),
+    h(
+      "article",
+      { className: "overview-card overview-card-secondary" },
+      h("p", { className: "overview-label" }, "Trust & Privacy"),
+      h(
+        "div",
+        { className: "overview-body" },
+        h(
+          "div",
+          null,
+          h("h2", { className: "overview-title", id: "overview-security-title" }, "Private by default"),
+          h(
+            "p",
+            { className: "overview-copy", id: "overview-security-copy" },
+            "Watch broker posture, paired devices, and visibility guarantees without leaving the live console."
+          )
+        ),
+        h("div", { className: "overview-badges", id: "overview-security-badges" })
+      )
+    )
+  );
+}
 
-      <div id="thread-context-menu" class="context-menu" hidden>
-        <button id="archive-thread-button" class="context-menu-button" type="button">
-          Archive session
-        </button>
-        <button id="delete-thread-button" class="context-menu-button context-menu-button-danger" type="button">
-          Delete permanently
-        </button>
-      </div>
-    </aside>
+function ConsoleGrid() {
+  return h(
+    "section",
+    { className: "console-grid" },
+    h(LiveSurfacesCard),
+    h(AuditTimelineCard),
+    h(ThreadPanel)
+  );
+}
 
-    <main class="chat-shell">
-      <header class="chat-header">
-        <div class="chat-heading">
-          <span class="chat-heading-label">Relay</span>
-          <h1 id="workspace-title">Relay console</h1>
-          <p id="workspace-subtitle" class="chat-subtitle">
-            Monitor live control, trusted devices, and the active session from here.
-          </p>
-        </div>
-        <div class="chat-header-actions">
-          <span id="status-badge" class="status-badge">Idle</span>
-          <button id="go-console-home" class="header-button" type="button" hidden>Back</button>
-          <button id="open-security-header" class="header-button" type="button">Devices</button>
-          <button id="open-session-details" class="header-button" type="button">Details</button>
-          <div class="header-overflow-wrap">
-            <button id="header-overflow-button" class="header-button header-overflow-button" type="button" aria-label="More options">
-              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <circle cx="3" cy="8" r="1.5" fill="currentColor"/>
-                <circle cx="8" cy="8" r="1.5" fill="currentColor"/>
-                <circle cx="13" cy="8" r="1.5" fill="currentColor"/>
-              </svg>
-            </button>
-            <div id="header-overflow-menu" class="header-overflow-menu" hidden>
-              <button id="refresh-button" class="overflow-menu-item" type="button">Refresh</button>
-            </div>
-          </div>
-        </div>
-      </header>
+function LiveSurfacesCard() {
+  return h(
+    "section",
+    { className: "console-card console-card-surfaces" },
+    h(
+      "div",
+      { className: "console-card-header" },
+      h(
+        "div",
+        null,
+        h("p", { className: "sidebar-caption" }, "Live Surfaces"),
+        h(
+          "p",
+          { className: "sidebar-hint", id: "live-surfaces-summary" },
+          "See which devices are trusted, pending, or currently controlling the active session."
+        )
+      ),
+      h("button", { className: "sidebar-link-button", id: "open-security-console", type: "button" }, "Manage")
+    ),
+    h(
+      "div",
+      { className: "surface-list", id: "live-surfaces-list" },
+      h("p", { className: "sidebar-empty" }, "No relay surfaces are active yet.")
+    )
+  );
+}
 
-      <section id="overview-strip" class="overview-strip" aria-label="Relay overview">
-        <article class="overview-card overview-card-primary">
-          <p class="overview-label">Live Session</p>
-          <div class="overview-body">
-            <div>
-              <h2 id="overview-session-title" class="overview-title">Pick a workspace to launch</h2>
-              <p id="overview-session-copy" class="overview-copy">
-                Load a workspace, inspect relay state, and start or resume a session when you need it.
-              </p>
-            </div>
-            <div id="overview-session-badges" class="overview-badges"></div>
-          </div>
-        </article>
+function AuditTimelineCard() {
+  return h(
+    "section",
+    { className: "console-card console-card-audit" },
+    h(
+      "div",
+      { className: "console-card-header" },
+      h(
+        "div",
+        null,
+        h("p", { className: "sidebar-caption" }, "Audit Timeline"),
+        h(
+          "p",
+          { className: "sidebar-hint", id: "audit-summary" },
+          "Recent relay, control, and security events will appear here."
+        )
+      )
+    ),
+    h(
+      "div",
+      { className: "audit-list", id: "audit-timeline" },
+      h("p", { className: "sidebar-empty" }, "No relay events yet.")
+    )
+  );
+}
 
-        <article class="overview-card overview-card-secondary">
-          <p class="overview-label">Trust & Privacy</p>
-          <div class="overview-body">
-            <div>
-              <h2 id="overview-security-title" class="overview-title">Private by default</h2>
-              <p id="overview-security-copy" class="overview-copy">
-                Watch broker posture, paired devices, and visibility guarantees without leaving the live console.
-              </p>
-            </div>
-            <div id="overview-security-badges" class="overview-badges"></div>
-          </div>
-        </article>
-      </section>
+function ThreadPanel() {
+  return h(
+    "section",
+    { className: "thread-panel" },
+    h(
+      "section",
+      { className: "control-banner", hidden: true, id: "control-banner" },
+      h(
+        "div",
+        null,
+        h("p", { className: "control-summary", id: "control-summary" }, "This device has control"),
+        h("p", { className: "control-hint", id: "control-hint" }, "Only the active device can type, but any owner device can approve.")
+      ),
+      h("button", { className: "header-button control-button", id: "take-over-button", type: "button" }, "Take over")
+    ),
+    h(
+      "section",
+      { className: "thread-shell" },
+      h(
+        "div",
+        { className: "chat-thread", id: "transcript" },
+        h(
+          "div",
+          { className: "thread-empty" },
+          h("h2", null, "Relay standing by"),
+          h("p", null, "Load a workspace, then use this console to watch the live session, control state, and trusted devices.")
+        )
+      )
+    )
+  );
+}
 
-      <section class="console-grid">
-        <section class="console-card console-card-surfaces">
-          <div class="console-card-header">
-            <div>
-              <p class="sidebar-caption">Live Surfaces</p>
-              <p id="live-surfaces-summary" class="sidebar-hint">
-                See which devices are trusted, pending, or currently controlling the active session.
-              </p>
-            </div>
-            <button id="open-security-console" class="sidebar-link-button" type="button">
-              Manage
-            </button>
-          </div>
-          <div id="live-surfaces-list" class="surface-list">
-            <p class="sidebar-empty">No relay surfaces are active yet.</p>
-          </div>
-        </section>
+function ComposerShell() {
+  return h(
+    "form",
+    { className: "composer-shell", hidden: true, id: "message-form" },
+    h(ConversationComposer, {
+      effortId: "message-effort",
+      effortLabel: "Response mode",
+      messageId: "message-input",
+      messagePlaceholder: "Start or resume a session first.",
+      sendButtonId: "send-button",
+    })
+  );
+}
 
-        <section class="console-card console-card-audit">
-          <div class="console-card-header">
-            <div>
-              <p class="sidebar-caption">Audit Timeline</p>
-              <p id="audit-summary" class="sidebar-hint">
-                Recent relay, control, and security events will appear here.
-              </p>
-            </div>
-          </div>
-          <div id="audit-timeline" class="audit-list">
-            <p class="sidebar-empty">No relay events yet.</p>
-          </div>
-        </section>
+function ChatShell() {
+  return h(
+    "main",
+    { className: "chat-shell" },
+    h(ChatHeader),
+    h(OverviewStrip),
+    h(ConsoleGrid),
+    h(ComposerShell)
+  );
+}
 
-        <section class="thread-panel">
-          <section id="control-banner" class="control-banner" hidden>
-            <div>
-              <p id="control-summary" class="control-summary">This device has control</p>
-              <p id="control-hint" class="control-hint">Only the active device can type, but any owner device can approve.</p>
-            </div>
-            <button id="take-over-button" class="header-button control-button" type="button">
-              Take over
-            </button>
-          </section>
+function LaunchSettingsModal() {
+  return h(
+    "dialog",
+    { className: "panel-modal", id: "launch-settings-modal" },
+    h(
+      "div",
+      { className: "modal-header" },
+      h("h2", null, "Launch options"),
+      h("button", {
+        className: "header-button close-modal-btn",
+        id: "close-launch-settings-modal",
+        type: "button",
+      }, "\u00d7")
+    ),
+    h(
+      "section",
+      { className: "panel-modal-body" },
+      h(
+        "p",
+        { className: "panel-modal-copy" },
+        "Most people can leave these alone. Change them only if you need a different startup behavior."
+      ),
+      h(
+        "div",
+        { className: "settings-grid" },
+        h(
+          "label",
+          { className: "field" },
+          h("span", null, "Model"),
+          h("select", { id: "model-input" }, h("option", { value: "gpt-5.4" }, "gpt-5.4"))
+        ),
+        h(
+          "label",
+          { className: "field" },
+          h("span", null, "Permission mode"),
+          h(
+            "select",
+            { id: "approval-policy-input" },
+            h("option", { value: "untrusted" }, "untrusted"),
+            h("option", { value: "on-request" }, "on-request"),
+            h("option", { value: "never" }, "never")
+          )
+        ),
+        h(
+          "label",
+          { className: "field" },
+          h("span", null, "File access"),
+          h(
+            "select",
+            { id: "sandbox-input" },
+            h("option", { value: "workspace-write" }, "workspace-write"),
+            h("option", { value: "read-only" }, "read-only"),
+            h("option", { value: "danger-full-access" }, "danger-full-access")
+          )
+        ),
+        h(
+          "label",
+          { className: "field" },
+          h("span", null, "Default effort"),
+          h(
+            "select",
+            { id: "start-effort" },
+            h("option", { value: "medium" }, "medium"),
+            h("option", { value: "low" }, "low"),
+            h("option", { value: "high" }, "high")
+          )
+        ),
+        h(
+          "label",
+          { className: "field field-full" },
+          h("span", null, "Initial prompt"),
+          h("textarea", {
+            id: "start-prompt",
+            placeholder: "Optional first task for the new session.",
+            rows: "4",
+          })
+        )
+      )
+    )
+  );
+}
 
-          <section class="thread-shell">
-            <div id="transcript" class="chat-thread">
-              <div class="thread-empty">
-                <h2>Relay standing by</h2>
-                <p>Load a workspace, then use this console to watch the live session, control state, and trusted devices.</p>
-              </div>
-            </div>
-          </section>
-        </section>
-      </section>
+function SessionDetailsModal() {
+  return h(
+    "dialog",
+    { className: "panel-modal panel-modal-wide", id: "session-details-modal" },
+    h(
+      "div",
+      { className: "modal-header" },
+      h("h2", null, "Relay details"),
+      h("button", {
+        className: "header-button close-modal-btn",
+        id: "close-session-details-modal",
+        type: "button",
+      }, "\u00d7")
+    ),
+    h(
+      "section",
+      { className: "panel-modal-body session-details-shell" },
+      h(
+        "section",
+        { className: "details-section" },
+        h("h3", { className: "details-heading" }, "Environment"),
+        h("section", { className: "session-meta", id: "session-meta" }, h("span", { className: "meta-empty" }, "Session details will appear here."))
+      ),
+      h(
+        "section",
+        { className: "details-section" },
+        h("h3", { className: "details-heading" }, "Relay log"),
+        h("pre", { className: "client-log", id: "client-log" }, "Booting web client...")
+      )
+    )
+  );
+}
 
-      <form id="message-form" class="composer-shell" hidden>
-        <div class="composer-inner">
-          <textarea
-            id="message-input"
-            rows="3"
-            placeholder="Start or resume a session first."
-          ></textarea>
-          <div class="composer-actions">
-            <label class="composer-select" for="message-effort">
-              <span>Response mode</span>
-              <select id="message-effort">
-                <option value="medium">medium</option>
-                <option value="low">low</option>
-                <option value="high">high</option>
-              </select>
-            </label>
-            <button id="send-button" class="send-button" type="submit">Send</button>
-          </div>
-        </div>
-      </form>
-    </main>
-  </div>
+function SecurityModal() {
+  return h(
+    "dialog",
+    { className: "security-modal", id: "security-modal" },
+    h(
+      "div",
+      { className: "modal-header" },
+      h("h2", null, "Remote devices"),
+      h("button", {
+        className: "header-button close-modal-btn",
+        id: "close-security-modal",
+        type: "button",
+      }, "\u00d7")
+    ),
+    h(
+      "section",
+      { className: "remote-access-shell" },
+      h(
+        "div",
+        { className: "sidebar-row" },
+        h(
+          "div",
+          null,
+          h("p", { className: "sidebar-caption" }, "Remote Pairing"),
+          h("p", { className: "sidebar-hint" }, "Create a QR link for the broker-hosted mobile surface.")
+        ),
+        h("button", { className: "sidebar-link-button", id: "start-pairing-button", type: "button" }, "New QR")
+      ),
+      h(
+        "section",
+        { className: "pairing-panel", hidden: true, id: "pairing-panel" },
+        h("div", { "aria-live": "polite", className: "pairing-qr", id: "pairing-qr" }),
+        h("p", { className: "pairing-copy", id: "pairing-expiry" }, "Pairing ticket not created yet."),
+        h("label", { className: "sidebar-label", htmlFor: "pairing-link-input" }, "Pairing Link"),
+        h(
+          "div",
+          { className: "workspace-picker" },
+          h("input", { id: "pairing-link-input", readOnly: true, type: "text" }),
+          h("button", { className: "load-button", id: "copy-pairing-link-button", type: "button" }, "Copy")
+        )
+      ),
+      hSecuritySection("Workspace Roots", "Limit every device on this relay to specific root directories. Leave empty for unrestricted access."),
+      hAllowedRootsForm(),
+      h(
+        "div",
+        { className: "paired-devices-list", id: "allowed-roots-list" },
+        h("p", { className: "sidebar-empty" }, "No workspace restrictions are configured.")
+      ),
+      hSecuritySection("Device Security", "Review known devices, fingerprints, and broker access."),
+      h(
+        "div",
+        { className: "paired-devices-list", id: "paired-devices-list" },
+        h("p", { className: "sidebar-empty" }, "No remote devices have touched this relay yet.")
+      ),
+      hSecuritySection("Pending Pairing Requests", "Approve or reject devices that are asking to pair."),
+      h(
+        "div",
+        { className: "paired-devices-list", id: "pending-pairings-list" },
+        h("p", { className: "sidebar-empty" }, "No devices are waiting for local approval.")
+      )
+    )
+  );
+}
 
-  <dialog id="launch-settings-modal" class="panel-modal">
-    <div class="modal-header">
-      <h2>Launch options</h2>
-      <button id="close-launch-settings-modal" class="header-button close-modal-btn" type="button">&times;</button>
-    </div>
-    <section class="panel-modal-body">
-      <p class="panel-modal-copy">
-        Most people can leave these alone. Change them only if you need a different startup behavior.
-      </p>
-      <div class="settings-grid">
-        <label class="field">
-          <span>Model</span>
-          <select id="model-input">
-            <option value="gpt-5.4">gpt-5.4</option>
-          </select>
-        </label>
-        <label class="field">
-          <span>Permission mode</span>
-          <select id="approval-policy-input">
-            <option value="untrusted">untrusted</option>
-            <option value="on-request">on-request</option>
-            <option value="never">never</option>
-          </select>
-        </label>
-        <label class="field">
-          <span>File access</span>
-          <select id="sandbox-input">
-            <option value="workspace-write">workspace-write</option>
-            <option value="read-only">read-only</option>
-            <option value="danger-full-access">danger-full-access</option>
-          </select>
-        </label>
-        <label class="field">
-          <span>Default effort</span>
-          <select id="start-effort">
-            <option value="medium">medium</option>
-            <option value="low">low</option>
-            <option value="high">high</option>
-          </select>
-        </label>
-        <label class="field field-full">
-          <span>Initial prompt</span>
-          <textarea id="start-prompt" rows="4" placeholder="Optional first task for the new session."></textarea>
-        </label>
-      </div>
-    </section>
-  </dialog>
+function hSecuritySection(caption, hint) {
+  return h(
+    "div",
+    { className: "sidebar-row" },
+    h(
+      "div",
+      null,
+      h("p", { className: "sidebar-caption" }, caption),
+      h("p", { className: "sidebar-hint" }, hint)
+    )
+  );
+}
 
-  <dialog id="session-details-modal" class="panel-modal panel-modal-wide">
-    <div class="modal-header">
-      <h2>Relay details</h2>
-      <button id="close-session-details-modal" class="header-button close-modal-btn" type="button">&times;</button>
-    </div>
-    <section class="panel-modal-body session-details-shell">
-      <section class="details-section">
-        <h3 class="details-heading">Environment</h3>
-        <section id="session-meta" class="session-meta">
-          <span class="meta-empty">Session details will appear here.</span>
-        </section>
-      </section>
-
-      <section class="details-section">
-        <h3 class="details-heading">Relay log</h3>
-        <pre id="client-log" class="client-log">Booting web client...</pre>
-      </section>
-    </section>
-  </dialog>
-
-  <dialog id="security-modal" class="security-modal">
-    <div class="modal-header">
-      <h2>Remote devices</h2>
-      <button id="close-security-modal" class="header-button close-modal-btn" type="button">&times;</button>
-    </div>
-    <section class="remote-access-shell">
-      <div class="sidebar-row">
-        <div>
-          <p class="sidebar-caption">Remote Pairing</p>
-          <p class="sidebar-hint">Create a QR link for the broker-hosted mobile surface.</p>
-        </div>
-        <button id="start-pairing-button" class="sidebar-link-button" type="button">
-          New QR
-        </button>
-      </div>
-
-      <section id="pairing-panel" class="pairing-panel" hidden>
-        <div id="pairing-qr" class="pairing-qr" aria-live="polite"></div>
-        <p id="pairing-expiry" class="pairing-copy">Pairing ticket not created yet.</p>
-        <label class="sidebar-label" for="pairing-link-input">Pairing Link</label>
-        <div class="workspace-picker">
-          <input id="pairing-link-input" type="text" readonly>
-          <button id="copy-pairing-link-button" class="load-button" type="button">Copy</button>
-        </div>
-      </section>
-
-      <div class="sidebar-row">
-        <div>
-          <p class="sidebar-caption">Workspace Roots</p>
-          <p class="sidebar-hint">Limit every device on this relay to specific root directories. Leave empty for unrestricted access.</p>
-        </div>
-      </div>
-      <form id="allowed-roots-form" class="workspace-form">
-        <label class="sidebar-label" for="allowed-roots-input">Allowed Roots</label>
-        <textarea
-          id="allowed-roots-input"
-          rows="4"
-          placeholder="~/projects&#10;~/Documents/projects"
-        ></textarea>
-        <div class="workspace-picker">
-          <button id="save-allowed-roots-button" class="load-button" type="submit">Save roots</button>
-        </div>
-        <p id="allowed-roots-summary" class="sidebar-hint">
-          This relay is currently unrestricted.
-        </p>
-      </form>
-      <div id="allowed-roots-list" class="paired-devices-list">
-        <p class="sidebar-empty">No workspace restrictions are configured.</p>
-      </div>
-
-      <div class="sidebar-row">
-        <div>
-          <p class="sidebar-caption">Device Security</p>
-          <p class="sidebar-hint">Review known devices, fingerprints, and broker access.</p>
-        </div>
-      </div>
-      <div id="paired-devices-list" class="paired-devices-list">
-        <p class="sidebar-empty">No remote devices have touched this relay yet.</p>
-      </div>
-
-      <div class="sidebar-row">
-        <div>
-          <p class="sidebar-caption">Pending Pairing Requests</p>
-          <p class="sidebar-hint">Approve or reject devices that are asking to pair.</p>
-        </div>
-      </div>
-      <div id="pending-pairings-list" class="paired-devices-list">
-        <p class="sidebar-empty">No devices are waiting for local approval.</p>
-      </div>
-    </section>
-  </dialog>
-`;
+function hAllowedRootsForm() {
+  return h(
+    "form",
+    { className: "workspace-form", id: "allowed-roots-form" },
+    h("label", { className: "sidebar-label", htmlFor: "allowed-roots-input" }, "Allowed Roots"),
+    h("textarea", {
+      id: "allowed-roots-input",
+      placeholder: "~/projects\n~/Documents/projects",
+      rows: "4",
+    }),
+    h(
+      "div",
+      { className: "workspace-picker" },
+      h("button", { className: "load-button", id: "save-allowed-roots-button", type: "submit" }, "Save roots")
+    ),
+    h("p", { className: "sidebar-hint", id: "allowed-roots-summary" }, "This relay is currently unrestricted.")
+  );
+}
 
 export function LocalShell() {
-  return h("div", {
-    dangerouslySetInnerHTML: {
-      __html: LOCAL_SHELL_HTML,
-    },
-  });
+  return h(
+    React.Fragment,
+    null,
+    h(
+      "div",
+      { className: "app-shell" },
+      h(Sidebar),
+      h(ChatShell)
+    ),
+    h(LaunchSettingsModal),
+    h(SessionDetailsModal),
+    h(SecurityModal)
+  );
 }

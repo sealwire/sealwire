@@ -1,4 +1,5 @@
 import React from "react";
+export { ConversationComposer as Composer } from "../shared/composer.js";
 import { formatTimestamp, shortId } from "./utils.js";
 
 const h = React.createElement;
@@ -443,59 +444,5 @@ export function MissingCredentialsState({ remoteAuth }) {
       `${relayLabel} is still known to this browser, but its local encrypted credentials are unavailable.`
     ),
     h("p", null, "Pair this relay again on this device to restore remote access.")
-  );
-}
-
-export function Composer({
-  composerDisabled,
-  currentDraft,
-  currentEffortValue,
-  messagePlaceholder,
-  onDraftChange = null,
-  onEffortChange = null,
-  sendPending,
-}) {
-  const submitDisabled = composerDisabled || sendPending;
-  return h(
-    "div",
-    { className: "composer-inner" },
-    h("textarea", {
-      disabled: submitDisabled,
-      id: "remote-message-input",
-      onChange: (event) => onDraftChange?.(event.target.value),
-      placeholder: messagePlaceholder,
-      rows: 3,
-      value: currentDraft,
-    }),
-    h(
-      "div",
-      { className: "composer-actions" },
-      h(
-        "label",
-        { className: "composer-select", htmlFor: "remote-message-effort" },
-        h("span", null, "Effort"),
-        h(
-          "select",
-          {
-            id: "remote-message-effort",
-            onChange: (event) => onEffortChange?.(event.target.value),
-            value: currentEffortValue,
-          },
-          h("option", { value: "medium" }, "medium"),
-          h("option", { value: "low" }, "low"),
-          h("option", { value: "high" }, "high")
-        )
-      ),
-      h(
-        "button",
-        {
-          className: "send-button",
-          disabled: submitDisabled,
-          id: "remote-send-button",
-          type: "submit",
-        },
-        sendPending ? "Sending..." : "Send"
-      )
-    )
   );
 }
