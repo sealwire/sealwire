@@ -101,10 +101,21 @@
           </div>
           <div class="chat-header-actions">
             <span id="status-badge" class="status-badge">Idle</span>
-            <button id="go-console-home" class="header-button" type="button" hidden>Back to console</button>
+            <button id="go-console-home" class="header-button" type="button" hidden>Back</button>
             <button id="open-security-header" class="header-button" type="button">Devices</button>
-            <button id="open-session-details" class="header-button" type="button">Relay details</button>
-            <button id="refresh-button" class="header-button" type="button">Refresh</button>
+            <div class="header-overflow-wrap">
+              <button id="header-overflow-button" class="header-button header-overflow-button" type="button" aria-label="More options">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <circle cx="3" cy="8" r="1.5" fill="currentColor"/>
+                  <circle cx="8" cy="8" r="1.5" fill="currentColor"/>
+                  <circle cx="13" cy="8" r="1.5" fill="currentColor"/>
+                </svg>
+              </button>
+              <div id="header-overflow-menu" class="header-overflow-menu" hidden>
+                <button id="open-session-details" class="overflow-menu-item" type="button">Relay details</button>
+                <button id="refresh-button" class="overflow-menu-item" type="button">Refresh</button>
+              </div>
+            </div>
           </div>
         </header>
 

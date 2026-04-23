@@ -564,9 +564,9 @@ input:focus, textarea:focus, select:focus {
   top: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  align-items: start;
+  align-items: center;
   gap: 16px;
-  padding: 24px 32px 16px;
+  padding: 14px 24px;
   background: var(--bg-base);
   border-bottom: 1px solid var(--border-subtle);
   z-index: 3;
@@ -592,7 +592,7 @@ input:focus, textarea:focus, select:focus {
 
 .chat-heading h1 {
   margin: 0;
-  font-size: 18px;
+  font-size: 16px;
   font-weight: 550;
   color: var(--text-primary);
   line-height: 1.25;
@@ -612,7 +612,46 @@ input:focus, textarea:focus, select:focus {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 12px;
+  gap: 8px;
+}
+
+.header-overflow-wrap {
+  position: relative;
+}
+
+.header-overflow-button {
+  width: 34px;
+  min-width: 34px;
+  padding: 0;
+}
+
+.header-overflow-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 50;
+  min-width: 160px;
+  padding: 4px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-md);
+}
+
+.overflow-menu-item {
+  width: 100%;
+  text-align: left;
+  padding: 8px 12px;
+  font-size: 14px;
+  border: 0;
+  border-radius: calc(var(--radius-sm) - 2px);
+  background: transparent;
+  color: var(--text-primary);
+}
+
+.overflow-menu-item:hover {
+  background: var(--bg-hover);
+  border-color: transparent;
 }
 
 .remote-info-button {

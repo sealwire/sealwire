@@ -26,6 +26,8 @@ import {
   directoryForm,
   goConsoleHomeButton,
   goConsoleHomeSidebarButton,
+  headerOverflowButton,
+  headerOverflowMenu,
   launchSettingsModal,
   liveSurfacesList,
   liveSurfacesSummary,
@@ -342,6 +344,19 @@ allowedRootsInput?.addEventListener("input", () => {
 allowedRootsForm?.addEventListener("submit", (event) => {
   event.preventDefault();
   void saveAllowedRoots();
+});
+
+headerOverflowButton?.addEventListener("click", (event) => {
+  event.stopPropagation();
+  if (headerOverflowMenu) {
+    headerOverflowMenu.hidden = !headerOverflowMenu.hidden;
+  }
+});
+
+document.addEventListener("click", () => {
+  if (headerOverflowMenu && !headerOverflowMenu.hidden) {
+    headerOverflowMenu.hidden = true;
+  }
 });
 
 refreshButton.addEventListener("click", () => {
