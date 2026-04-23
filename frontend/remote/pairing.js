@@ -21,7 +21,7 @@ import {
 } from "./actions.js";
 import {
   renderLog,
-} from "./render.js";
+} from "./session-surface.js";
 import {
   brokerControlUrl,
   normalizedDeviceLabel,

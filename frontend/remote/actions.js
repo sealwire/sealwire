@@ -4,7 +4,7 @@ import {
   signClaimChallengeProof,
   signClaimInitProof,
 } from "./crypto.js";
-import { renderLog } from "./render.js";
+import { renderLog } from "./session-surface.js";
 import {
   CLAIM_REFRESH_FLOOR_MS,
   CLAIM_REFRESH_SKEW_MS,

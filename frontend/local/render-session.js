@@ -103,6 +103,7 @@ export function createSessionRenderer({
   cancelControllerHeartbeat,
   cancelControllerLeaseRefresh,
   logLine,
+  renderClientLogLines,
   escapeHtml,
   formatTimestamp,
   formatRelativeTime,
@@ -901,13 +902,12 @@ export function createSessionRenderer({
   }
 
   function renderLogs(entries) {
-    const clientLog = document.querySelector("#client-log");
-    clientLog.textContent = entries
-      .map(
+    renderClientLogLines?.(
+      entries.map(
         (entry) =>
           `${new Date(entry.created_at * 1000).toLocaleTimeString()}  [${entry.kind}] ${entry.message}`
       )
-      .join("\n");
+    );
   }
 
   function metaChip(label, value) {

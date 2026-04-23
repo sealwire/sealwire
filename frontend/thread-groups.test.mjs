@@ -1,13 +1,21 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 
 import {
   buildThreadGroups,
   canonicalizeWorkspace,
   findLatestThread,
-  renderThreadGroupsMarkup,
   summarizeThreadGroups,
 } from "./shared/thread-groups.js";
+import { ThreadGroupList } from "./shared/thread-list-react.js";
+
+const h = React.createElement;
+
+function renderThreadGroups(groups, props = {}) {
+  return renderToStaticMarkup(h(ThreadGroupList, { groups, ...props }));
+}
 
 test("buildThreadGroups sorts groups by latest activity and threads by recency", () => {
   const groups = buildThreadGroups([
@@ -53,7 +61,7 @@ test("findLatestThread respects preferred workspace when available", () => {
   assert.equal(findLatestThread([], "/tmp/b"), null);
 });
 
-test("renderThreadGroupsMarkup can render selectable groups and preview rows", () => {
+test("ThreadGroupList can render selectable groups and preview rows", () => {
   const groups = buildThreadGroups([
     {
       id: "thread-1",
@@ -64,10 +72,10 @@ test("renderThreadGroupsMarkup can render selectable groups and preview rows", (
     },
   ]);
 
-  const markup = renderThreadGroupsMarkup(groups, {
+  const markup = renderThreadGroups(groups, {
     activeThreadId: "thread-1",
     selectedCwd: "/tmp/demo/",
-    selectWorkspaceAttrName: "data-select-workspace",
+    onSelectWorkspace() {},
     includePreview: true,
     formatThreadMeta() {
       return "just now";
@@ -75,13 +83,13 @@ test("renderThreadGroupsMarkup can render selectable groups and preview rows", (
   });
 
   assert.match(markup, /thread-group is-selected-workspace/);
-  assert.match(markup, /data-select-workspace="\/tmp\/demo"/);
+  assert.match(markup, /title="\/tmp\/demo"/);
   assert.match(markup, /conversation-item is-active/);
   assert.match(markup, /Fix login flow/);
   assert.match(markup, /just now/);
 });
 
-test("renderThreadGroupsMarkup can render collapsible groups", () => {
+test("ThreadGroupList can render collapsible groups", () => {
   const groups = buildThreadGroups([
     {
       id: "thread-1",
@@ -92,19 +100,18 @@ test("renderThreadGroupsMarkup can render collapsible groups", () => {
     },
   ]);
 
-  const markup = renderThreadGroupsMarkup(groups, {
+  const markup = renderThreadGroups(groups, {
     activeThreadId: null,
     collapsible: true,
     collapsedGroupCwds: new Set(["/tmp/demo"]),
   });
 
-  assert.match(markup, /data-toggle-thread-group="\/tmp\/demo"/);
   assert.match(markup, /thread-group is-collapsed/);
   assert.match(markup, /aria-expanded="false"/);
   assert.match(markup, /thread-group-list" hidden/);
 });
 
-test("renderThreadGroupsMarkup allows collapsing the active thread group", () => {
+test("ThreadGroupList allows collapsing the active thread group", () => {
   const groups = buildThreadGroups([
     {
       id: "thread-1",
@@ -115,7 +122,7 @@ test("renderThreadGroupsMarkup allows collapsing the active thread group", () =>
     },
   ]);
 
-  const markup = renderThreadGroupsMarkup(groups, {
+  const markup = renderThreadGroups(groups, {
     activeThreadId: "thread-1",
     collapsible: true,
     collapsedGroupCwds: new Set(["/tmp/demo"]),

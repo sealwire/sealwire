@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { renderLog } from "./render.js";
+import { renderLog } from "./session-surface.js";
 import { applySessionSnapshot } from "./session-ops.js";
 import { isCurrentDeviceActiveController } from "./chrome-view-model.js";
 import { CONTROL_HEARTBEAT_MS, LEASE_EXPIRY_REFRESH_SKEW_MS } from "./state.js";

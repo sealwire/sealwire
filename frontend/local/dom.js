@@ -1,6 +1,6 @@
 export const appShell = document.querySelector(".app-shell");
 export const transcript = document.querySelector("#transcript");
-export const clientLog = document.querySelector("#client-log");
+export const clientLogRoot = document.querySelector("#client-log-root");
 export const connectionForm = document.querySelector("#connection-form");
 export const apiTokenLabel = connectionForm.querySelector("label[for='api-token-input']");
 export const apiTokenInput = document.querySelector("#api-token-input");

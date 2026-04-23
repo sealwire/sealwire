@@ -1,31 +1,47 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 
 import {
-  renderApprovalCard,
-  renderTranscriptEntry,
-  renderTranscriptMarkup,
-} from "./shared/transcript-render.js";
+  ApprovalCard,
+  TranscriptContent,
+  TranscriptEntry,
+} from "./shared/transcript-react.js";
 
-test("renderTranscriptEntry renders typed session items safely", () => {
-  const userMarkup = renderTranscriptEntry({
+const h = React.createElement;
+
+function renderEntryMarkup(entry, options = null) {
+  return renderToStaticMarkup(h(TranscriptEntry, { entry, options }));
+}
+
+function renderApprovalMarkup(approval, options = null) {
+  return renderToStaticMarkup(h(ApprovalCard, { approval, options }));
+}
+
+function renderTranscriptContentMarkup(entries = [], approval = null, options = null) {
+  return renderToStaticMarkup(h(TranscriptContent, { approval, entries, options }));
+}
+
+test("renderEntryMarkup renders typed session items safely", () => {
+  const userMarkup = renderEntryMarkup({
     kind: "user_text",
     status: "completed",
     text: "<script>alert(1)</script>",
   });
-  const assistantMarkup = renderTranscriptEntry({
+  const assistantMarkup = renderEntryMarkup({
     kind: "agent_text",
     status: "running",
     turn_id: "turn-123456789",
     text: "Hello from Codex",
   });
-  const commandMarkup = renderTranscriptEntry({
+  const commandMarkup = renderEntryMarkup({
     item_id: "cmd-1",
     kind: "command",
     status: "completed",
     text: "npm test",
   });
-  const toolMarkup = renderTranscriptEntry({
+  const toolMarkup = renderEntryMarkup({
     kind: "tool_call",
     status: "running",
     tool: {
@@ -49,12 +65,12 @@ test("renderTranscriptEntry renders typed session items safely", () => {
   assert.match(toolMarkup, /frontend\/remote\/main\.js/);
 });
 
-test("renderTranscriptEntry collapses long command and tool previews without collapsing assistant text", () => {
+test("renderEntryMarkup collapses long command and tool previews without collapsing assistant text", () => {
   const longCommand = Array.from({ length: 18 }, (_, index) => `line ${index + 1}`).join("\n");
   const longToolInput = Array.from({ length: 20 }, (_, index) => `frontend/file-${index + 1}.js`).join("\n");
   const assistantText = "A".repeat(1200);
 
-  const commandMarkup = renderTranscriptEntry({
+  const commandMarkup = renderEntryMarkup({
     item_id: "cmd-2",
     kind: "command",
     status: "completed",
@@ -64,7 +80,7 @@ test("renderTranscriptEntry collapses long command and tool previews without col
     expandedKeys: new Set(),
     loadingItemIds: new Set(),
   });
-  const toolMarkup = renderTranscriptEntry({
+  const toolMarkup = renderEntryMarkup({
     item_id: "tool-2",
     kind: "tool_call",
     status: "completed",
@@ -75,7 +91,7 @@ test("renderTranscriptEntry collapses long command and tool previews without col
       input_preview: `Files:\n${longToolInput}`,
     },
   });
-  const assistantMarkup = renderTranscriptEntry({
+  const assistantMarkup = renderEntryMarkup({
     kind: "agent_text",
     status: "completed",
     turn_id: "turn-123456789",
@@ -94,30 +110,30 @@ test("renderTranscriptEntry collapses long command and tool previews without col
   assert.match(assistantMarkup, new RegExp(`A{1200}`));
 });
 
-test("renderTranscriptEntry avoids repeating file change metadata and path previews", () => {
-  const markup = renderTranscriptEntry({
+test("renderEntryMarkup avoids repeating file change metadata and path previews", () => {
+  const markup = renderEntryMarkup({
     item_id: "fc-1",
     kind: "tool_call",
     status: "completed",
     tool: {
       name: "File change",
       title: "Codex wants to edit 2 files.",
-      detail: "Target files: crates/relay-server/src/protocol.rs, frontend/shared/transcript-render.js",
+      detail: "Target files: crates/relay-server/src/protocol.rs, frontend/shared/transcript-react.js",
       item_type: "fileChange",
       path: "crates/relay-server/src/protocol.rs",
-      input_preview: "Files:\ncrates/relay-server/src/protocol.rs\nfrontend/shared/transcript-render.js",
+      input_preview: "Files:\ncrates/relay-server/src/protocol.rs\nfrontend/shared/transcript-react.js",
     },
   });
 
   assert.match(markup, /Codex wants to edit 2 files\./);
-  assert.match(markup, /Target files: crates\/relay-server\/src\/protocol\.rs, frontend\/shared\/transcript-render\.js/);
+  assert.match(markup, /Target files: crates\/relay-server\/src\/protocol\.rs, frontend\/shared\/transcript-react\.js/);
   assert.doesNotMatch(markup, /tool-detail-label">Type</);
   assert.doesNotMatch(markup, /tool-detail-label">Path</);
   assert.doesNotMatch(markup, /tool-preview-label">Input</);
 });
 
-test("renderTranscriptEntry expands file change diffs with rollback controls", () => {
-  const markup = renderTranscriptEntry({
+test("renderEntryMarkup expands file change diffs with rollback controls", () => {
+  const markup = renderEntryMarkup({
     item_id: "fc-2",
     kind: "tool_call",
     status: "completed",
@@ -145,8 +161,8 @@ test("renderTranscriptEntry expands file change diffs with rollback controls", (
   assert.match(markup, /frontend\/app\.js/);
 });
 
-test("renderTranscriptEntry shows expanded command detail and loading note when requested", () => {
-  const expandedMarkup = renderTranscriptEntry({
+test("renderEntryMarkup shows expanded command detail and loading note when requested", () => {
+  const expandedMarkup = renderEntryMarkup({
     item_id: "cmd-3",
     kind: "command",
     status: "completed",
@@ -163,7 +179,7 @@ test("renderTranscriptEntry shows expanded command detail and loading note when 
     expandedKeys: new Set(["entry:cmd-3"]),
     loadingItemIds: new Set(),
   });
-  const loadingMarkup = renderTranscriptEntry({
+  const loadingMarkup = renderEntryMarkup({
     item_id: "cmd-3",
     kind: "command",
     status: "completed",
@@ -180,8 +196,8 @@ test("renderTranscriptEntry shows expanded command detail and loading note when 
   assert.match(loadingMarkup, /Loading full command output/);
 });
 
-test("renderTranscriptEntry expands tool details from fetched entry data", () => {
-  const expandedMarkup = renderTranscriptEntry({
+test("renderEntryMarkup expands tool details from fetched entry data", () => {
+  const expandedMarkup = renderEntryMarkup({
     item_id: "tool-9",
     kind: "tool_call",
     status: "running",
@@ -219,14 +235,14 @@ test("renderTranscriptEntry expands tool details from fetched entry data", () =>
   assert.match(expandedMarkup, /tool-preview-label">Result</);
 });
 
-test("renderApprovalCard includes session-scope actions and escapes requested permissions", () => {
-  const markup = renderApprovalCard({
+test("renderApprovalMarkup includes session-scope actions and escapes requested permissions", () => {
+  const markup = renderApprovalMarkup({
     kind: "command",
     summary: "Run migration",
     detail: "Need elevated access",
     cwd: "/tmp/project",
     command: "uv run migrate",
-    context_preview: "Files\nfrontend/shared/transcript-render.js",
+    context_preview: "Files\nfrontend/shared/transcript-react.js",
     requested_permissions: {
       sandbox: "danger-full-access",
       note: "<unsafe>",
@@ -236,13 +252,13 @@ test("renderApprovalCard includes session-scope actions and escapes requested pe
 
   assert.match(markup, /Approve Session/);
   assert.match(markup, /uv run migrate/);
-  assert.match(markup, /frontend\/shared\/transcript-render\.js/);
+  assert.match(markup, /frontend\/shared\/transcript-react\.js/);
   assert.match(markup, /&lt;unsafe&gt;/);
   assert.match(markup, /cwd: \/tmp\/project/);
 });
 
-test("renderApprovalCard collapses large command and permission payloads", () => {
-  const markup = renderApprovalCard({
+test("renderApprovalMarkup collapses large command and permission payloads", () => {
+  const markup = renderApprovalMarkup({
     kind: "command",
     summary: "Run long command",
     detail: "Need approval",
@@ -258,8 +274,8 @@ test("renderApprovalCard collapses large command and permission payloads", () =>
   assert.match(markup, /message-collapsible-label-closed">Expand<\/span>/);
 });
 
-test("renderTranscriptMarkup combines typed entries and pending approval into one thread content block", () => {
-  const markup = renderTranscriptMarkup(
+test("renderTranscriptContentMarkup combines typed entries and pending approval into one thread content block", () => {
+  const markup = renderTranscriptContentMarkup(
     [
       { kind: "user_text", text: "Investigate this bug", status: "completed" },
       { kind: "agent_text", text: "Looking into it", status: "running", turn_id: "turn-abcdefghi" },

@@ -1,6 +1,6 @@
 import {
   renderLog as appendClientLog,
-} from "./render-transcript.js";
+} from "./client-log.js";
 import {
   handleTranscriptScroll,
   syncTranscriptScrollModeForSession,

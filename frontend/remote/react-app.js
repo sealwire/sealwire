@@ -8,6 +8,7 @@ import React, {
 } from "react";
 import { createRoot } from "react-dom/client";
 import { flushSync } from "react-dom";
+import { ClientLog } from "../shared/client-log.js";
 import {
   selectDeviceChromeRenderModel,
   selectResetChromeRenderModel,
@@ -705,7 +706,7 @@ function RemoteApp() {
           transcriptDetailEntries,
           uiState,
         }),
-        h(RemoteClientLog, {
+        h(RemoteClientLogDrawer, {
           lines: currentState.clientLogs,
         })
       )
@@ -1474,11 +1475,14 @@ function ManagedDialog({
   );
 }
 
-function RemoteClientLog({ lines }) {
+function RemoteClientLogDrawer({ lines }) {
   return h(
     "details",
     { className: "log-drawer" },
     h("summary", null, "Remote log"),
-    h("pre", { className: "client-log", id: "remote-client-log" }, (lines || []).join("\n"))
+    h(ClientLog, {
+      id: "remote-client-log",
+      lines,
+    })
   );
 }

@@ -3,7 +3,7 @@ import {
   isCurrentDeviceActiveController,
   renderLog,
   renderSession,
-} from "./render.js";
+} from "./session-surface.js";
 import {
   state,
 } from "./state.js";

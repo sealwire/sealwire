@@ -12,7 +12,7 @@ import {
   auditSummary,
   auditTimeline,
   chatShell,
-  clientLog,
+  clientLogRoot,
   closeLaunchSettingsModalButton,
   closeSecurityModalBtn,
   closeSessionDetailsModalButton,
@@ -69,6 +69,9 @@ import {
   workspaceTitle,
   workspaceSubtitle,
 } from "./local/dom.js";
+import React from "react";
+import { flushSync } from "react-dom";
+import { createRoot } from "react-dom/client";
 import {
   createApiFetch,
   createAuthSession,
@@ -89,6 +92,7 @@ import {
   buildThreadGroups,
 } from "./shared/thread-groups.js";
 import { mountBuildBadge } from "./shared/build-badge.js";
+import { ClientLog } from "./shared/client-log.js";
 import { renderSelectOptions } from "./shared/select-options.js";
 
 const DEVICE_STORAGE_KEY = "agent-relay.device-id";
@@ -106,6 +110,7 @@ const state = {
   controllerLeaseRefreshTimer: null,
   currentApprovalId: null,
   currentPairing: null,
+  clientLogLines: ["Booting web client..."],
   deviceId: loadOrCreateDeviceId(),
   defaultsSeeded: false,
   pendingPairingIds: [],
@@ -180,6 +185,7 @@ const renderer = createSessionRenderer({
     return controller?.cancelControllerLeaseRefresh();
   },
   logLine,
+  renderClientLogLines,
   escapeHtml,
   formatTimestamp,
   formatRelativeTime,
@@ -1189,7 +1195,27 @@ function clearStoredApiToken() {
 
 function logLine(message) {
   const time = new Date().toLocaleTimeString();
-  clientLog.textContent = `${time}  ${message}\n${clientLog.textContent}`.trim();
+  state.clientLogLines = [`${time}  ${message}`, ...state.clientLogLines].slice(0, 400);
+  renderClientLogLines(state.clientLogLines);
+}
+
+let clientLogRootHandle = null;
+let clientLogRootElement = null;
+
+function renderClientLogLines(lines) {
+  if (!clientLogRoot) {
+    return;
+  }
+
+  if (clientLogRootElement !== clientLogRoot) {
+    clientLogRootHandle?.unmount();
+    clientLogRootHandle = createRoot(clientLogRoot);
+    clientLogRootElement = clientLogRoot;
+  }
+
+  flushSync(() => {
+    clientLogRootHandle.render(React.createElement(ClientLog, { lines }));
+  });
 }
 
 function escapeHtml(value) {

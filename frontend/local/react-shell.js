@@ -1,4 +1,5 @@
 import React from "react";
+import { ClientLog } from "../shared/client-log.js";
 import { ConversationComposer } from "../shared/composer.js";
 
 const h = React.createElement;
@@ -460,7 +461,13 @@ function SessionDetailsModal() {
         "section",
         { className: "details-section" },
         h("h3", { className: "details-heading" }, "Relay log"),
-        h("pre", { className: "client-log", id: "client-log" }, "Booting web client...")
+        h(
+          "div",
+          { id: "client-log-root" },
+          h(ClientLog, {
+            lines: ["Booting web client..."],
+          })
+        )
       )
     )
   );

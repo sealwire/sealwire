@@ -1,4 +1,4 @@
-import { renderLog } from "./render.js";
+import { renderLog } from "./session-surface.js";
 import { isExpiredPairingError, normalizePairingError } from "./pairing-errors.js";
 import {
   brokerControlUrl,

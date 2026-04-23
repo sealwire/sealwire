@@ -4,7 +4,7 @@ import { closeBrokerSocket, configureBrokerClient, connectBroker, refreshRelayDi
 import { initializeRemoteNavigation, openRemoteNavigation } from "./navigation.js";
 import { applyPairingQuery, beginPairing, forgetCurrentDevice, handleEncryptedPairingResult, sendPairingRequest } from "./pairing.js";
 import { registerRemotePwa } from "./pwa.js";
-import { renderLog } from "./render.js";
+import { renderLog } from "./session-surface.js";
 import { applySessionSnapshot, applyTranscriptDelta, clearSessionRuntime, fetchTranscriptEntryDetail, refreshRemoteThreads, resumeRemoteSession, sendMessage, startRemoteSession, submitDecision, syncRemoteSnapshot, takeOverControl } from "./session-ops.js";
 import { clearActiveRelaySelection, ensureDeviceIdentity, hydrateStoredRemoteSecrets, selectRelayProfile, state } from "./state.js";
 import { applyRemoteSurfacePatch, createResetRemoteSurfaceStatePatch } from "./surface-state.js";
