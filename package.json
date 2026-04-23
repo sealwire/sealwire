@@ -20,6 +20,7 @@
     "test:browser:local-thread-groups": "npm run build && node scripts/browser-local-thread-groups-e2e.mjs",
     "test:browser:local-history-scroll": "npm run build && node scripts/browser-local-history-scroll-e2e.mjs",
     "test:browser:local-allowed-roots": "npm run build && node scripts/browser-local-allowed-roots-e2e.mjs",
+    "test:browser:local-file-diff": "npm run build && node scripts/browser-local-file-diff-e2e.mjs",
     "test:browser:local-auth": "npm run build && node scripts/browser-local-auth-e2e.mjs",
     "test:browser:public-enrollment": "npm run build && node scripts/browser-public-enrollment-e2e.mjs",
     "test:browser:public-broker": "npm run build && node scripts/browser-public-broker-e2e.mjs",

@@ -250,6 +250,13 @@ export function createSessionController({
         kind: entry.kind || null,
         status: entry.status || null,
         text: entry.text || null,
+        tool: entry.tool
+          ? {
+              item_type: entry.tool.item_type || null,
+              diff: entry.tool.diff || null,
+              file_changes: entry.tool.file_changes || [],
+            }
+          : null,
       })),
     });
   }
@@ -998,6 +1005,56 @@ export function createSessionController({
     }
   }
 
+  function toggleTranscriptEntry(itemId) {
+    if (!itemId) {
+      return;
+    }
+    const expandKey = `entry:${itemId}`;
+    if (!state.transcriptExpandedItemIds) {
+      state.transcriptExpandedItemIds = new Set();
+    }
+    if (state.transcriptExpandedItemIds.has(expandKey)) {
+      state.transcriptExpandedItemIds.delete(expandKey);
+    } else {
+      state.transcriptExpandedItemIds.add(expandKey);
+    }
+    if (state.session) {
+      renderSession(state.session);
+    }
+  }
+
+  async function applyFileChange(itemId, direction) {
+    if (!itemId) {
+      logLine("No file change selected.");
+      return;
+    }
+
+    logLine(`${direction === "rollback" ? "Rolling back" : "Reapplying"} file change ${itemId}`);
+
+    try {
+      const response = await apiFetch(`/api/file-changes/${encodeURIComponent(itemId)}/apply`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          direction,
+          device_id: state.deviceId,
+        }),
+      });
+      const payload = await response.json();
+
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload?.error?.message || "File change action failed");
+      }
+
+      logLine(payload.data.message);
+      await loadSession("post-file-change action");
+    } catch (error) {
+      logLine(`File change action failed: ${error.message}`);
+    }
+  }
+
   return {
     cancelControllerHeartbeat,
     cancelControllerLeaseRefresh,
@@ -1025,5 +1082,7 @@ export function createSessionController({
     startSession,
     submitDecision,
     takeOverControl,
+    toggleTranscriptEntry,
+    applyFileChange,
   };
 }

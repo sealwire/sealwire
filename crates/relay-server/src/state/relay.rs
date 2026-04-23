@@ -331,7 +331,7 @@ impl RelayState {
             .into_iter()
             .enumerate()
             .map(|(index, entry)| TranscriptRecord {
-                item_id: format!("history-{index}"),
+                item_id: entry.item_id.unwrap_or_else(|| format!("history-{index}")),
                 kind: entry.kind,
                 text: entry.text,
                 status: entry.status,
@@ -377,7 +377,7 @@ impl RelayState {
             .into_iter()
             .enumerate()
             .map(|(index, entry)| TranscriptRecord {
-                item_id: format!("history-{index}"),
+                item_id: entry.item_id.unwrap_or_else(|| format!("history-{index}")),
                 kind: entry.kind,
                 text: entry.text,
                 status: entry.status,

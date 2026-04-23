@@ -20,8 +20,8 @@ use crate::{
         delete_thread_permanently as delete_thread_permanently_local, LocalThreadDeleteSummary,
     },
     protocol::{
-        truncate_with_ellipsis, ApprovalDecisionInput, ModelOptionView, ThreadSummaryView,
-        ToolCallView, TranscriptEntryKind, TranscriptEntryView,
+        truncate_with_ellipsis, ApprovalDecisionInput, FileChangeDiffView, ModelOptionView,
+        ThreadSummaryView, ToolCallView, TranscriptEntryKind, TranscriptEntryView,
     },
     state::{
         ApprovalKind, BrokerPendingMessage, PendingApproval, PendingTranscriptDelta, RelayState,
@@ -586,11 +586,38 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
             }
             relay.set_active_turn(None);
             changed = true;
+            if let Some(turn_id) = string_at(&params, &["turn", "id"]) {
+                changed |=
+                    relay.set_transcript_item_status(&format!("turn-diff:{turn_id}"), "completed");
+            }
             if let Some(turn_error) =
                 value_at(&params, &["turn", "error", "message"]).and_then(Value::as_str)
             {
                 relay.push_log("error", turn_error.to_string());
                 changed = true;
+            }
+        }
+        "turn/diff/updated" => {
+            if !should_apply_session_notification(&relay, notification_thread_id.as_deref()) {
+                log_ignored_session_notification(method, notification_thread_id.as_deref(), &relay);
+                return;
+            }
+            if let (Some(turn_id), Some(diff)) = (
+                string_at(&params, &["turnId"]),
+                string_at(&params, &["diff"]),
+            ) {
+                let entry = build_turn_diff_entry(turn_id, diff, "running");
+                if let Some(item_id) = entry.item_id.clone() {
+                    relay.upsert_transcript_item(
+                        item_id,
+                        entry.kind,
+                        entry.text,
+                        entry.status,
+                        entry.turn_id,
+                        entry.tool,
+                    );
+                    changed = true;
+                }
             }
         }
         "item/started" => match string_at(&params, &["item", "type"]).as_deref() {
@@ -857,6 +884,7 @@ fn is_session_notification_method(method: &str) -> bool {
         method,
         "turn/started"
             | "turn/completed"
+            | "turn/diff/updated"
             | "item/started"
             | "item/agentMessage/delta"
             | "item/completed"
@@ -945,6 +973,10 @@ fn parse_transcript(thread: &Value) -> Vec<TranscriptEntryView> {
             if let Some(entry) = parse_transcript_item(item, turn_id.clone(), "completed") {
                 transcript.push(entry);
             }
+        }
+
+        if let Some(entry) = build_turn_file_summary(turn_id.clone(), items) {
+            transcript.push(entry);
         }
     }
 
@@ -1097,6 +1129,10 @@ fn build_tool_call_view(item: &Value, item_type: &str) -> ToolCallView {
     let file_change_paths = (item_type == "fileChange")
         .then(|| collect_file_change_paths(item))
         .unwrap_or_default();
+    let file_changes = (item_type == "fileChange")
+        .then(|| collect_file_change_diffs(item))
+        .unwrap_or_default();
+    let diff = joined_file_change_diff(&file_changes);
     let name = truncate_owned(
         string_at(item, &["name"])
             .or_else(|| string_at(item, &["toolName"]))
@@ -1147,6 +1183,8 @@ fn build_tool_call_view(item: &Value, item_type: &str) -> ToolCallView {
             }),
         result_preview: preview_json_field(item, "result")
             .or_else(|| preview_json_field(item, "output")),
+        diff,
+        file_changes,
     }
 }
 
@@ -1154,6 +1192,10 @@ fn build_tool_call_detail_view(item: &Value, item_type: &str) -> ToolCallView {
     let file_change_paths = (item_type == "fileChange")
         .then(|| collect_file_change_paths(item))
         .unwrap_or_default();
+    let file_changes = (item_type == "fileChange")
+        .then(|| collect_file_change_diffs(item))
+        .unwrap_or_default();
+    let diff = joined_file_change_diff(&file_changes);
     let name = truncate_owned(
         string_at(item, &["name"])
             .or_else(|| string_at(item, &["toolName"]))
@@ -1201,6 +1243,67 @@ fn build_tool_call_detail_view(item: &Value, item_type: &str) -> ToolCallView {
                     .flatten()
             }),
         result_preview: full_json_field(item, "result").or_else(|| full_json_field(item, "output")),
+        diff,
+        file_changes,
+    }
+}
+
+fn build_turn_file_summary(
+    turn_id: Option<String>,
+    items: &[Value],
+) -> Option<TranscriptEntryView> {
+    let turn_id = turn_id?;
+    let mut file_changes = Vec::new();
+    for item in items {
+        if string_at(item, &["type"]).as_deref() != Some("fileChange") {
+            continue;
+        }
+        file_changes.extend(collect_file_change_diffs(item));
+    }
+
+    if file_changes.is_empty() {
+        return None;
+    }
+
+    Some(build_turn_diff_entry(
+        turn_id,
+        joined_file_change_diff(&file_changes)?,
+        "completed",
+    ))
+}
+
+fn build_turn_diff_entry(turn_id: String, diff: String, status: &str) -> TranscriptEntryView {
+    let file_changes = split_unified_diff_by_file(&diff);
+    let paths = if file_changes.is_empty() {
+        extract_paths_from_unified_diff(&diff)
+    } else {
+        file_changes
+            .iter()
+            .map(|change| change.path.clone())
+            .collect::<Vec<_>>()
+    };
+    let detail = file_change_detail(&paths);
+
+    TranscriptEntryView {
+        item_id: Some(format!("turn-diff:{turn_id}")),
+        kind: TranscriptEntryKind::ToolCall,
+        text: Some(format!("Changed files in turn {turn_id}")),
+        status: status.to_string(),
+        turn_id: Some(turn_id),
+        tool: Some(ToolCallView {
+            item_type: "turnDiff".to_string(),
+            name: "File summary".to_string(),
+            title: summarize_turn_diff(&paths),
+            detail,
+            query: None,
+            path: (paths.len() == 1).then(|| paths[0].clone()),
+            url: None,
+            command: None,
+            input_preview: file_change_paths_preview(&paths),
+            result_preview: None,
+            diff: Some(diff),
+            file_changes,
+        }),
     }
 }
 
@@ -1391,6 +1494,17 @@ fn file_change_paths_preview(paths: &[String]) -> Option<String> {
     ))
 }
 
+fn summarize_turn_diff(paths: &[String]) -> String {
+    match paths {
+        [] => "Codex changed files in this turn.".to_string(),
+        [path] => format!(
+            "Codex changed {} in this turn.",
+            inline_snippet(path, MAX_APPROVAL_SUMMARY_CHARS)
+        ),
+        _ => format!("Codex changed {} files in this turn.", paths.len()),
+    }
+}
+
 fn filtered_json_preview(
     params: &Value,
     excluded_keys: &[&str],
@@ -1426,6 +1540,124 @@ fn collect_file_change_paths(params: &Value) -> Vec<String> {
     let mut paths = Vec::new();
     collect_file_change_paths_inner(params, &mut paths, 0);
     paths
+}
+
+fn collect_file_change_diffs(item: &Value) -> Vec<FileChangeDiffView> {
+    let changes = match value_at(item, &["changes"]).and_then(Value::as_array) {
+        Some(changes) => changes,
+        None => return Vec::new(),
+    };
+
+    changes
+        .iter()
+        .filter_map(|change| {
+            let path = string_at(change, &["path"])?;
+            let diff = string_at(change, &["diff"])?;
+            let change_type = parse_file_change_kind(change);
+            Some(FileChangeDiffView {
+                path,
+                change_type,
+                diff,
+            })
+        })
+        .collect()
+}
+
+fn parse_file_change_kind(change: &Value) -> String {
+    value_at(change, &["kind", "type"])
+        .and_then(Value::as_str)
+        .or_else(|| value_at(change, &["type"]).and_then(Value::as_str))
+        .unwrap_or("update")
+        .to_string()
+}
+
+fn joined_file_change_diff(file_changes: &[FileChangeDiffView]) -> Option<String> {
+    let parts = file_changes
+        .iter()
+        .filter_map(|change| non_empty_string(Some(change.diff.clone())))
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n"))
+    }
+}
+
+fn split_unified_diff_by_file(diff: &str) -> Vec<FileChangeDiffView> {
+    let mut changes = Vec::new();
+    let mut current = Vec::new();
+    let mut current_path: Option<String> = None;
+    let mut current_kind = "update".to_string();
+
+    for line in diff.lines() {
+        if line.starts_with("diff --git ") && !current.is_empty() {
+            if let Some(path) = current_path.take() {
+                changes.push(FileChangeDiffView {
+                    path,
+                    change_type: current_kind.clone(),
+                    diff: current.join("\n"),
+                });
+            }
+            current.clear();
+            current_kind = "update".to_string();
+        }
+
+        if let Some(path) = line.strip_prefix("+++ ") {
+            let normalized = normalize_diff_path(path);
+            if normalized != "/dev/null" {
+                current_path = Some(normalized);
+            }
+        } else if current_path.is_none() {
+            if let Some(path) = line.strip_prefix("--- ") {
+                let normalized = normalize_diff_path(path);
+                if normalized != "/dev/null" {
+                    current_path = Some(normalized);
+                }
+            }
+        }
+
+        if line.starts_with("new file mode") {
+            current_kind = "add".to_string();
+        } else if line.starts_with("deleted file mode") {
+            current_kind = "delete".to_string();
+        }
+
+        current.push(line.to_string());
+    }
+
+    if let Some(path) = current_path {
+        changes.push(FileChangeDiffView {
+            path,
+            change_type: current_kind,
+            diff: current.join("\n"),
+        });
+    }
+
+    changes
+}
+
+fn extract_paths_from_unified_diff(diff: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    for line in diff.lines() {
+        let candidate = line
+            .strip_prefix("+++ ")
+            .or_else(|| line.strip_prefix("--- "));
+        if let Some(path) = candidate {
+            let path = normalize_diff_path(path);
+            if path != "/dev/null" {
+                push_unique_path(&mut paths, &path);
+            }
+        }
+    }
+    paths
+}
+
+fn normalize_diff_path(path: &str) -> String {
+    path.trim()
+        .strip_prefix("a/")
+        .or_else(|| path.trim().strip_prefix("b/"))
+        .unwrap_or_else(|| path.trim())
+        .to_string()
 }
 
 fn collect_file_change_paths_inner(value: &Value, paths: &mut Vec<String>, depth: usize) {

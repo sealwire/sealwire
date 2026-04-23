@@ -299,6 +299,28 @@ impl SessionSnapshot {
             if let Some(text) = &mut entry.text {
                 transcript_truncated |= truncate_with_ellipsis(text, budget.max_transcript_chars);
             }
+            if let Some(tool) = &mut entry.tool {
+                if let Some(detail) = &mut tool.detail {
+                    transcript_truncated |=
+                        truncate_with_ellipsis(detail, budget.max_transcript_chars);
+                }
+                if let Some(input_preview) = &mut tool.input_preview {
+                    transcript_truncated |=
+                        truncate_with_ellipsis(input_preview, budget.max_transcript_chars);
+                }
+                if let Some(result_preview) = &mut tool.result_preview {
+                    transcript_truncated |=
+                        truncate_with_ellipsis(result_preview, budget.max_transcript_chars);
+                }
+                if let Some(diff) = &mut tool.diff {
+                    transcript_truncated |=
+                        truncate_with_ellipsis(diff, budget.max_transcript_chars);
+                }
+                for change in &mut tool.file_changes {
+                    transcript_truncated |=
+                        truncate_with_ellipsis(&mut change.diff, budget.max_transcript_chars);
+                }
+            }
         }
 
         for approval in &mut self.pending_approvals {
@@ -330,11 +352,32 @@ impl SessionSnapshot {
                     .as_ref()
                     .map(|text| text.chars().count() > budget.fallback_transcript_chars)
                     .unwrap_or(false)
+                    || entry.tool.as_ref().is_some_and(|tool| {
+                        tool.diff
+                            .as_ref()
+                            .map(|diff| diff.chars().count() > budget.fallback_transcript_chars)
+                            .unwrap_or(false)
+                            || tool.file_changes.iter().any(|change| {
+                                change.diff.chars().count() > budget.fallback_transcript_chars
+                            })
+                    })
             }) {
                 for entry in &mut self.transcript {
                     if let Some(text) = &mut entry.text {
                         transcript_truncated |=
                             truncate_with_ellipsis(text, budget.fallback_transcript_chars);
+                    }
+                    if let Some(tool) = &mut entry.tool {
+                        if let Some(diff) = &mut tool.diff {
+                            transcript_truncated |=
+                                truncate_with_ellipsis(diff, budget.fallback_transcript_chars);
+                        }
+                        for change in &mut tool.file_changes {
+                            transcript_truncated |= truncate_with_ellipsis(
+                                &mut change.diff,
+                                budget.fallback_transcript_chars,
+                            );
+                        }
                     }
                 }
                 continue;
@@ -558,6 +601,13 @@ pub enum TranscriptEntryKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FileChangeDiffView {
+    pub path: String,
+    pub change_type: String,
+    pub diff: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ToolCallView {
     pub item_type: String,
     pub name: String,
@@ -569,6 +619,10 @@ pub struct ToolCallView {
     pub command: Option<String>,
     pub input_preview: Option<String>,
     pub result_preview: Option<String>,
+    #[serde(default)]
+    pub diff: Option<String>,
+    #[serde(default)]
+    pub file_changes: Vec<FileChangeDiffView>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -783,6 +837,27 @@ pub struct HeartbeatInput {
     pub device_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FileChangeApplyDirection {
+    Rollback,
+    Reapply,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApplyFileChangeInput {
+    pub device_id: Option<String>,
+    pub direction: FileChangeApplyDirection,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ApplyFileChangeReceipt {
+    pub item_id: String,
+    pub direction: FileChangeApplyDirection,
+    pub resulting_state: String,
+    pub message: String,
+}
+
 const THREAD_TRANSCRIPT_RESPONSE_TARGET_BYTES: usize = 20_000;
 
 impl ThreadTranscriptResponse {
@@ -994,9 +1069,12 @@ fn build_reverse_thread_transcript_page(
 
 fn detail_field_names(entry: &TranscriptEntryView) -> &'static [&'static str] {
     match entry.kind {
-        TranscriptEntryKind::ToolCall => {
-            &["tool.detail", "tool.input_preview", "tool.result_preview"]
-        }
+        TranscriptEntryKind::ToolCall => &[
+            "tool.detail",
+            "tool.input_preview",
+            "tool.result_preview",
+            "tool.diff",
+        ],
         _ => &["text"],
     }
 }
@@ -1007,6 +1085,7 @@ fn detail_field_value<'a>(entry: &'a TranscriptEntryView, field: &str) -> Option
         "tool.detail" => entry.tool.as_ref()?.detail.as_deref(),
         "tool.input_preview" => entry.tool.as_ref()?.input_preview.as_deref(),
         "tool.result_preview" => entry.tool.as_ref()?.result_preview.as_deref(),
+        "tool.diff" => entry.tool.as_ref()?.diff.as_deref(),
         _ => None,
     }
 }
@@ -1043,6 +1122,14 @@ fn set_detail_field_value(
                 .as_mut()
                 .ok_or_else(|| "tool.result_preview is unavailable for this entry".to_string())?;
             tool.result_preview = Some(value);
+            Ok(())
+        }
+        "tool.diff" => {
+            let tool = entry
+                .tool
+                .as_mut()
+                .ok_or_else(|| "tool.diff is unavailable for this entry".to_string())?;
+            tool.diff = Some(value);
             Ok(())
         }
         _ => Err(format!("unsupported thread entry detail field `{field}`")),

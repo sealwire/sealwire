@@ -256,6 +256,62 @@ function renderToolPreviewBlock(label, value, options = null) {
   `;
 }
 
+function renderDiffLine(line) {
+  let className = "diff-line";
+  if (line.startsWith("+") && !line.startsWith("+++")) {
+    className += " diff-line-add";
+  } else if (line.startsWith("-") && !line.startsWith("---")) {
+    className += " diff-line-delete";
+  } else if (line.startsWith("@@")) {
+    className += " diff-line-hunk";
+  } else if (line.startsWith("diff --git") || line.startsWith("+++") || line.startsWith("---")) {
+    className += " diff-line-meta";
+  }
+
+  const marker = line[0] === "+" || line[0] === "-" ? line[0] : " ";
+  return `
+    <div class="${className}">
+      <span class="diff-line-marker">${escapeHtml(marker)}</span>
+      <code>${escapeHtml(line)}</code>
+    </div>
+  `;
+}
+
+function renderUnifiedDiff(value) {
+  return `
+    <div class="diff-view" role="region" aria-label="File diff">
+      ${String(value || "").split("\n").map(renderDiffLine).join("")}
+    </div>
+  `;
+}
+
+function renderFileChangeDiff(tool) {
+  const diff = tool.diff || (tool.file_changes || [])
+    .map((change) => change?.diff)
+    .filter(Boolean)
+    .join("\n");
+
+  if (!diff) {
+    return "";
+  }
+
+  const fileRows = (tool.file_changes || [])
+    .map((change) => `
+      <span class="diff-file-chip">
+        <span>${escapeHtml(change.change_type || "update")}</span>
+        <strong>${escapeHtml(change.path || "unknown")}</strong>
+      </span>
+    `)
+    .join("");
+
+  return `
+    <div class="file-diff-panel">
+      ${fileRows ? `<div class="diff-file-list">${fileRows}</div>` : ""}
+      ${renderUnifiedDiff(diff)}
+    </div>
+  `;
+}
+
 function renderToolEntry(entry, options = null) {
   const itemId = entry.item_id || "";
   const expandKey = itemId ? `entry:${itemId}` : "";
@@ -264,7 +320,7 @@ function renderToolEntry(entry, options = null) {
   const detailEntry = resolveTranscriptDetailEntry(entry, options);
   const toolEntry = detailEntry || entry;
   const tool = toolEntry.tool || entry.tool || {};
-  const isFileChange = tool.item_type === "fileChange";
+  const isFileChange = tool.item_type === "fileChange" || tool.item_type === "turnDiff";
   const title = tool.title || toolEntry.text || entry.text || tool.name || "Tool call";
   const detail = tool.detail && tool.detail !== title ? tool.detail : null;
   const showTypeRow = !isFileChange;
@@ -289,14 +345,33 @@ function renderToolEntry(entry, options = null) {
             data-transcript-toggle="entry"
             data-item-id="${escapeHtml(itemId)}"
           >
-            ${expanded ? "Collapse" : "Expand"}
+            ${isFileChange ? (expanded ? "Hide diff" : "Show diff") : (expanded ? "Collapse" : "Expand")}
           </button>
+          ${isFileChange && options?.enableFileChangeActions ? `
+            <button
+              class="tool-toggle-button tool-action-button"
+              type="button"
+              data-file-change-action="rollback"
+              data-item-id="${escapeHtml(itemId)}"
+            >
+              Rollback
+            </button>
+            <button
+              class="tool-toggle-button tool-action-button"
+              type="button"
+              data-file-change-action="reapply"
+              data-item-id="${escapeHtml(itemId)}"
+            >
+              Reapply
+            </button>
+          ` : ""}
         </div>`
           : ""}
         <h3 class="tool-card-title">${escapeHtml(title)}</h3>
         ${!expanded
           ? `<div class="tool-preview">${escapeHtml(collapsedPreview)}</div>`
           : `${detail ? `<p class="tool-card-detail">${escapeHtml(detail)}</p>` : ""}
+        ${isFileChange ? renderFileChangeDiff(tool) : ""}
         <div class="tool-details">
           ${showTypeRow ? renderToolDetailRow("Type", tool.item_type) : ""}
           ${renderToolDetailRow("Query", tool.query)}

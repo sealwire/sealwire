@@ -123,6 +123,7 @@ const state = {
   transcriptChunkThreadId: null,
   transcriptDesiredSignature: null,
   transcriptHydratedSignature: null,
+  transcriptExpandedItemIds: new Set(),
   transcriptOlderCursor: null,
   transcriptTailPromise: null,
   transcriptOlderPromise: null,
@@ -257,6 +258,8 @@ const {
   startSession,
   submitDecision,
   takeOverControl,
+  toggleTranscriptEntry,
+  applyFileChange,
 } = controller;
 
 threadsList?.addEventListener("scroll", () => {
@@ -438,6 +441,21 @@ transcript.addEventListener("click", (event) => {
     void submitDecision(
       approvalButton.dataset.approvalDecision,
       approvalButton.dataset.approvalScope || "once"
+    );
+    return;
+  }
+
+  const transcriptToggleButton = event.target.closest("[data-transcript-toggle='entry']");
+  if (transcriptToggleButton) {
+    toggleTranscriptEntry(transcriptToggleButton.dataset.itemId);
+    return;
+  }
+
+  const fileChangeActionButton = event.target.closest("[data-file-change-action]");
+  if (fileChangeActionButton) {
+    void applyFileChange(
+      fileChangeActionButton.dataset.itemId,
+      fileChangeActionButton.dataset.fileChangeAction
     );
     return;
   }

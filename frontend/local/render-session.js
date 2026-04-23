@@ -671,7 +671,10 @@ export function createSessionRenderer({
       return;
     }
 
-    transcript.innerHTML = renderTranscriptMarkup(entries, approval);
+    transcript.innerHTML = renderTranscriptMarkup(entries, approval, {
+      enableFileChangeActions: true,
+      expandedKeys: state.transcriptExpandedItemIds || new Set(),
+    });
     transcript.scrollTop = transcript.scrollHeight;
   }
 

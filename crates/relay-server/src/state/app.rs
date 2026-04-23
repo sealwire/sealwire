@@ -1,20 +1,24 @@
-use std::sync::Arc;
+use std::{process::Stdio, sync::Arc};
 
-use tokio::sync::{watch, RwLock};
+use tokio::{
+    io::AsyncWriteExt,
+    process::Command,
+    sync::{watch, RwLock},
+};
 use tracing::warn;
 
 use crate::{
     broker::BrokerConfig,
     codex::CodexBridge,
     protocol::{
-        AllowedRootsInput, AllowedRootsReceipt, ApprovalDecision, ApprovalDecisionInput,
-        ApprovalReceipt, BulkRevokeDevicesReceipt, HeartbeatInput, PairingDecision,
-        PairingDecisionInput, PairingDecisionReceipt, PairingStartInput, PairingTicketView,
-        ReadThreadEntriesInput, ReadThreadEntryDetailInput, ReadThreadTranscriptInput,
-        ResumeSessionInput, RevokeDeviceReceipt, SendMessageInput, SessionSnapshot,
-        StartSessionInput, TakeOverInput, ThreadArchiveReceipt, ThreadDeleteReceipt,
-        ThreadEntriesResponse, ThreadEntryDetailResponse, ThreadTranscriptResponse,
-        ThreadsResponse,
+        AllowedRootsInput, AllowedRootsReceipt, ApplyFileChangeInput, ApplyFileChangeReceipt,
+        ApprovalDecision, ApprovalDecisionInput, ApprovalReceipt, BulkRevokeDevicesReceipt,
+        FileChangeApplyDirection, HeartbeatInput, PairingDecision, PairingDecisionInput,
+        PairingDecisionReceipt, PairingStartInput, PairingTicketView, ReadThreadEntriesInput,
+        ReadThreadEntryDetailInput, ReadThreadTranscriptInput, ResumeSessionInput,
+        RevokeDeviceReceipt, SendMessageInput, SessionSnapshot, StartSessionInput, TakeOverInput,
+        ThreadArchiveReceipt, ThreadDeleteReceipt, ThreadEntriesResponse,
+        ThreadEntryDetailResponse, ThreadTranscriptResponse, ThreadsResponse,
     },
 };
 
@@ -600,6 +604,69 @@ impl AppState {
         })
     }
 
+    pub async fn apply_file_change(
+        &self,
+        item_id: &str,
+        input: ApplyFileChangeInput,
+    ) -> Result<ApplyFileChangeReceipt, String> {
+        let device_id = require_device_id(input.device_id)?;
+        let (cwd, diff) = {
+            let relay = self.relay.read().await;
+            relay.ensure_device_can_send_message(&device_id)?;
+            ensure_path_within_allowed_roots(&relay.current_cwd, &relay.allowed_roots)?;
+            let entry = relay
+                .transcript
+                .iter()
+                .find(|entry| entry.item_id == item_id)
+                .ok_or_else(|| format!("file change `{item_id}` was not found"))?;
+            let tool = entry
+                .tool
+                .as_ref()
+                .ok_or_else(|| format!("entry `{item_id}` is not a file change"))?;
+            let diff = tool
+                .diff
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+                .or_else(|| {
+                    let parts = tool
+                        .file_changes
+                        .iter()
+                        .filter(|change| !change.diff.trim().is_empty())
+                        .map(|change| change.diff.clone())
+                        .collect::<Vec<_>>();
+                    (!parts.is_empty()).then(|| parts.join("\n"))
+                })
+                .ok_or_else(|| format!("file change `{item_id}` has no diff to apply"))?;
+            (relay.current_cwd.clone(), diff)
+        };
+
+        apply_unified_diff(&cwd, &diff, input.direction).await?;
+
+        let mut relay = self.relay.write().await;
+        relay.push_log(
+            "info",
+            format!(
+                "{} file change {item_id} from {}.",
+                match input.direction {
+                    FileChangeApplyDirection::Rollback => "Rolled back",
+                    FileChangeApplyDirection::Reapply => "Reapplied",
+                },
+                short_device_id(&device_id)
+            ),
+        );
+        relay.notify();
+
+        Ok(ApplyFileChangeReceipt {
+            item_id: item_id.to_string(),
+            direction: input.direction,
+            resulting_state: "diff_applied".to_string(),
+            message: match input.direction {
+                FileChangeApplyDirection::Rollback => "File change rolled back.".to_string(),
+                FileChangeApplyDirection::Reapply => "File change reapplied.".to_string(),
+            },
+        })
+    }
+
     pub async fn start_pairing(
         &self,
         input: PairingStartInput,
@@ -1096,6 +1163,54 @@ impl AppState {
         let mut relay = self.relay.write().await;
         relay.store_remote_action_result(device_id, action_id, result, unix_now());
     }
+}
+
+async fn apply_unified_diff(
+    cwd: &str,
+    diff: &str,
+    direction: FileChangeApplyDirection,
+) -> Result<(), String> {
+    let mut command = Command::new("git");
+    command
+        .arg("apply")
+        .arg("--whitespace=nowarn")
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    if matches!(direction, FileChangeApplyDirection::Rollback) {
+        command.arg("--reverse");
+    }
+
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("failed to start git apply: {error}"))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(diff.as_bytes())
+            .await
+            .map_err(|error| format!("failed to send diff to git apply: {error}"))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|error| format!("failed to wait for git apply: {error}"))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let message = if stderr.is_empty() { stdout } else { stderr };
+    Err(if message.is_empty() {
+        "git apply failed".to_string()
+    } else {
+        format!("git apply failed: {message}")
+    })
 }
 
 #[derive(Debug)]

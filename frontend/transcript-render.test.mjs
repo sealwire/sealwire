@@ -117,6 +117,35 @@ test("renderTranscriptEntry avoids repeating file change metadata and path previ
   assert.doesNotMatch(markup, /tool-preview-label">Input</);
 });
 
+test("renderTranscriptEntry expands file change diffs with rollback controls", () => {
+  const markup = renderTranscriptEntry({
+    item_id: "fc-2",
+    kind: "tool_call",
+    status: "completed",
+    tool: {
+      name: "File change",
+      title: "Codex changed frontend/app.js.",
+      item_type: "fileChange",
+      diff: "diff --git a/frontend/app.js b/frontend/app.js\n@@ -1 +1 @@\n-old\n+new",
+      file_changes: [{
+        path: "frontend/app.js",
+        change_type: "update",
+        diff: "diff --git a/frontend/app.js b/frontend/app.js\n@@ -1 +1 @@\n-old\n+new",
+      }],
+    },
+  }, {
+    enableFileChangeActions: true,
+    expandedKeys: new Set(["entry:fc-2"]),
+  });
+
+  assert.match(markup, /Hide diff/);
+  assert.match(markup, /data-file-change-action="rollback"/);
+  assert.match(markup, /data-file-change-action="reapply"/);
+  assert.match(markup, /diff-line-delete/);
+  assert.match(markup, /diff-line-add/);
+  assert.match(markup, /frontend\/app\.js/);
+});
+
 test("renderTranscriptEntry shows expanded command detail and loading note when requested", () => {
   const expandedMarkup = renderTranscriptEntry({
     item_id: "cmd-3",

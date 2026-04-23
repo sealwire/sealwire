@@ -252,6 +252,18 @@ impl RelayState {
             None,
         );
     }
+
+    pub fn set_transcript_item_status(&mut self, item_id: &str, status: &str) -> bool {
+        let Some(entry) = self
+            .transcript
+            .iter_mut()
+            .find(|entry| entry.item_id == item_id)
+        else {
+            return false;
+        };
+        entry.status = status.to_string();
+        true
+    }
 }
 
 fn merge_tool_call_view(
@@ -284,6 +296,12 @@ fn merge_tool_call_view(
                 command: incoming.command.or(existing.command),
                 input_preview: incoming.input_preview.or(existing.input_preview),
                 result_preview: incoming.result_preview.or(existing.result_preview),
+                diff: incoming.diff.or(existing.diff),
+                file_changes: if incoming.file_changes.is_empty() {
+                    existing.file_changes
+                } else {
+                    incoming.file_changes
+                },
             })
         }
     }

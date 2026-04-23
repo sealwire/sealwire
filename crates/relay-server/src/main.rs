@@ -17,7 +17,7 @@ use auth::AuthConfig;
 use axum::{
     extract::{Path, Query, Request, State},
     http::header::HeaderName,
-    http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri},
+    http::{header, HeaderMap, Method, StatusCode, Uri},
     middleware::{self, Next},
     response::{
         sse::{Event, KeepAlive, Sse},
@@ -28,13 +28,14 @@ use axum::{
 };
 use futures_util::stream::{self, StreamExt};
 use protocol::{
-    AllowedRootsInput, AllowedRootsReceipt, ApiEnvelope, ApiError, ApprovalDecisionInput,
-    ApprovalReceipt, AuthSessionInput, AuthSessionView, BulkRevokeDevicesReceipt, HealthResponse,
-    HeartbeatInput, PairingDecisionInput, PairingDecisionReceipt, PairingStartInput,
-    PairingTicketView, ReadThreadTranscriptInput, ResumeSessionInput, RevokeDeviceReceipt,
-    SendMessageInput, SessionSnapshot, SessionSnapshotCompactProfile, StartSessionInput,
-    TakeOverInput, ThreadArchiveReceipt, ThreadDeleteReceipt, ThreadTranscriptResponse,
-    ThreadsQuery, ThreadsResponse,
+    AllowedRootsInput, AllowedRootsReceipt, ApiEnvelope, ApiError, ApplyFileChangeInput,
+    ApplyFileChangeReceipt, ApprovalDecisionInput, ApprovalReceipt, AuthSessionInput,
+    AuthSessionView, BulkRevokeDevicesReceipt, HealthResponse, HeartbeatInput,
+    PairingDecisionInput, PairingDecisionReceipt, PairingStartInput, PairingTicketView,
+    ReadThreadTranscriptInput, ResumeSessionInput, RevokeDeviceReceipt, SendMessageInput,
+    SessionSnapshot, SessionSnapshotCompactProfile, StartSessionInput, TakeOverInput,
+    ThreadArchiveReceipt, ThreadDeleteReceipt, ThreadTranscriptResponse, ThreadsQuery,
+    ThreadsResponse,
 };
 use relay_http::{
     apply_standard_security_headers, header_origin, parse_optional_string_env, request_origin,
@@ -47,6 +48,9 @@ use tower_http::{
     trace::TraceLayer,
 };
 use tracing::{info, warn};
+
+#[cfg(test)]
+use axum::http::HeaderValue;
 
 const CSP_CONNECT_SRC_ENV: &str = "RELAY_CSP_CONNECT_SRC";
 const ENABLE_HSTS_ENV: &str = "RELAY_ENABLE_HSTS";
@@ -146,6 +150,7 @@ fn build_router(context: AppContext, web_root: PathBuf) -> Router {
             "/api/threads/:thread_id/delete",
             post(delete_thread_permanently),
         )
+        .route("/api/file-changes/:item_id/apply", post(apply_file_change))
         .route("/api/session/start", post(start_session))
         .route("/api/session/resume", post(resume_session))
         .route("/api/session/heartbeat", post(session_heartbeat))
@@ -519,6 +524,22 @@ async fn decide_approval(
                 Json(ApiError::new("approval_failed", message)),
             ),
         })
+}
+
+async fn apply_file_change(
+    Path(item_id): Path<String>,
+    State(context): State<AppContext>,
+    headers: HeaderMap,
+    uri: Uri,
+    Json(input): Json<ApplyFileChangeInput>,
+) -> Result<Json<ApiEnvelope<ApplyFileChangeReceipt>>, (StatusCode, Json<ApiError>)> {
+    authorize_api(&context, &headers, &uri)?;
+    context
+        .app
+        .apply_file_change(&item_id, input)
+        .await
+        .map(|receipt| Json(ApiEnvelope::ok(receipt)))
+        .map_err(bad_request)
 }
 
 async fn start_pairing(
