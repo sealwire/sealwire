@@ -87,13 +87,9 @@ import { createSessionController } from "./local/session-controller.js";
 import { openSessionStream, sessionStreamUrl } from "./session-stream.js";
 import {
   buildThreadGroups,
-  canonicalizeWorkspace,
-  findLatestThread,
-  renderThreadGroupsMarkup,
-  summarizeThreadGroups,
 } from "./shared/thread-groups.js";
 import { mountBuildBadge } from "./shared/build-badge.js";
-import { renderTranscriptMarkup } from "./shared/transcript-render.js";
+import { renderSelectOptions } from "./shared/select-options.js";
 
 const DEVICE_STORAGE_KEY = "agent-relay.device-id";
 const API_TOKEN_STORAGE_KEY = "agent-relay.api-token";
@@ -209,7 +205,6 @@ const renderer = createSessionRenderer({
 controller = createSessionController({
   state,
   apiFetch,
-  escapeHtml,
   shortId,
   logLine,
   seedDefaults,
@@ -219,6 +214,7 @@ controller = createSessionController({
   renderSession: renderer.renderSession,
   renderOverviewState: renderer.renderOverviewState,
   renderSessionUnavailable: renderer.renderSessionUnavailable,
+  renderThreadListMessage: renderer.renderThreadListMessage,
   renderThreads: renderer.renderThreads,
   renderAuthRequiredState: renderer.renderAuthRequiredState,
   runViewTransition: renderer.runViewTransition,
@@ -766,10 +762,14 @@ function syncModelSuggestions(select, models, selectedModel) {
     });
   }
 
-  select.innerHTML = options
-    .map((model) => `<option value="${escapeHtml(model.model)}">${escapeHtml(model.display_name)}</option>`)
-    .join("");
-  select.value = currentValue;
+  renderSelectOptions(
+    select,
+    options.map((model) => ({
+      label: model.display_name,
+      value: model.model,
+    })),
+    currentValue
+  );
 }
 
 function setSelectedCwd(cwd) {

@@ -236,8 +236,13 @@ async function main() {
       "remote observer should not take over the session to receive updates"
     );
     assert.ok(
-      remoteStats.transcriptText.length > remoteTranscriptBeforeSend.length,
-      `remote transcript should grow after the local Codex reply (before=${remoteTranscriptBeforeSend.length}, after=${remoteStats.transcriptText.length})`
+      remoteStats.transcriptText.includes(EXPECTED_REPLY),
+      "remote transcript should include the local Codex reply"
+    );
+    assert.notEqual(
+      remoteStats.transcriptText,
+      remoteTranscriptBeforeSend,
+      "remote transcript should update after the local Codex reply"
     );
 
     console.log(

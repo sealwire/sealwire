@@ -14,7 +14,6 @@ import {
   selectSessionChromeRenderModel,
   selectStatusBadgeRenderModel,
 } from "./chrome-view-model.js";
-import { renderTranscriptMarkup } from "../shared/transcript-render.js";
 import { deriveSessionRuntime } from "./session-runtime.js";
 import {
   closeRemoteNavigation,
@@ -74,7 +73,7 @@ import {
 import {
   ConversationEmptyState,
   ReadyConversationState,
-  TranscriptMarkupState,
+  TranscriptState,
 } from "../shared/conversation.js";
 import { ThreadGroupList } from "../shared/thread-list-react.js";
 import {
@@ -1181,14 +1180,16 @@ function RemoteTranscriptPanel({
       waitingCopy: "This thread is already open, but another device currently has control. You can still approve or decline requests here; take over only if you want to send messages from this device.",
     });
   } else {
-    body = h(TranscriptMarkupState, {
+    body = h(TranscriptState, {
+      approval,
+      entries,
       hydrationLoading,
-      markup: renderTranscriptMarkup(entries, approval, {
+      options: {
         detailEntries: transcriptDetailEntries,
         expandedItemIds: uiState.transcriptExpandedItemIds,
         expandedKeys: uiState.transcriptExpandedItemIds,
         loadingItemIds: uiState.transcriptLoadingItemIds,
-      }),
+      },
       onApprovalClick: (event) => {
         const approvalButton = event.target.closest?.("[data-approval-decision]");
         if (!approvalButton) {

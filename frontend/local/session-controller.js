@@ -18,7 +18,6 @@ import {
   startSessionButton,
   takeOverButton,
   transcript,
-  threadsCount,
   threadsList,
 } from "./dom.js";
 import { renderAllowedRoots, renderPairingPanel } from "./render-security.js";
@@ -31,7 +30,6 @@ const LEASE_EXPIRY_REFRESH_SKEW_MS = 250;
 export function createSessionController({
   state,
   apiFetch,
-  escapeHtml,
   shortId,
   logLine,
   seedDefaults,
@@ -41,6 +39,7 @@ export function createSessionController({
   renderSession,
   renderOverviewState,
   renderSessionUnavailable,
+  renderThreadListMessage,
   renderThreads,
   renderAuthRequiredState,
   runViewTransition,
@@ -607,8 +606,7 @@ export function createSessionController({
   }
 
   async function loadThreads(reason) {
-    threadsCount.textContent = "Loading...";
-    threadsCount.title = "";
+    renderThreadListMessage("Loading...", "Loading saved workspace groups...");
     logLine(`Fetching thread list across saved workspaces (${reason})`);
 
     try {
@@ -630,16 +628,14 @@ export function createSessionController({
       if (state.authRequired && !state.authenticated) {
         state.threadGroups = [];
         state.threads = [];
-        threadsCount.textContent = "Sign in";
-        threadsList.innerHTML = `<p class="sidebar-empty">Enter RELAY_API_TOKEN to load threads.</p>`;
+        renderThreadListMessage("Sign in", "Enter RELAY_API_TOKEN to load threads.");
         logLine(`Thread fetch blocked by local auth: ${error.message}`);
         return;
       }
 
       state.threadGroups = [];
       state.threads = [];
-      threadsCount.textContent = "Error";
-      threadsList.innerHTML = `<p class="sidebar-empty">${escapeHtml(error.message)}</p>`;
+      renderThreadListMessage("Error", error.message);
       logLine(`Thread fetch failed: ${error.message}`);
     } finally {
       scheduleThreadsPoll();

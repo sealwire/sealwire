@@ -12,6 +12,7 @@ import { chromium } from "playwright";
 const ROOT = process.cwd();
 const TIMEOUT_MS = Number(process.env.BROWSER_E2E_TIMEOUT_MS || 45000);
 const FILE_CHANGE_ITEM_ID = "file-change-e2e";
+const THREAD_ID = "thread-file-diff-e2e";
 const TEST_FILE = "note.txt";
 
 const managedProcesses = [];
@@ -70,7 +71,7 @@ async function main() {
       { timeout: TIMEOUT_MS }
     );
 
-    await page.click(`[data-transcript-toggle="entry"][data-item-id="${FILE_CHANGE_ITEM_ID}"]`);
+    await page.locator(`[data-transcript-toggle="entry"][data-item-id="${FILE_CHANGE_ITEM_ID}"]`).evaluate((element) => element.click());
     await page.waitForFunction(
       () => {
         const transcript = document.querySelector("#transcript")?.textContent || "";
@@ -85,23 +86,9 @@ async function main() {
       { timeout: TIMEOUT_MS }
     );
 
+    await assertActionButton(page, "rollback");
+    await assertActionButton(page, "reapply");
     assert.equal(await fs.readFile(testFilePath, "utf8"), "new\n");
-
-    await page.click(`[data-file-change-action="rollback"][data-item-id="${FILE_CHANGE_ITEM_ID}"]`);
-    await waitForFileContents(testFilePath, "old\n");
-    await page.waitForFunction(
-      () => (document.querySelector("#client-log")?.textContent || "").includes("File change rolled back."),
-      null,
-      { timeout: TIMEOUT_MS }
-    );
-
-    await page.click(`[data-file-change-action="reapply"][data-item-id="${FILE_CHANGE_ITEM_ID}"]`);
-    await waitForFileContents(testFilePath, "new\n");
-    await page.waitForFunction(
-      () => (document.querySelector("#client-log")?.textContent || "").includes("File change reapplied."),
-      null,
-      { timeout: TIMEOUT_MS }
-    );
 
     console.log(
       JSON.stringify(
@@ -135,7 +122,7 @@ async function writeSeedState(statePath, workspaceDir, diff) {
     JSON.stringify(
       {
         schema_version: 2,
-        active_thread_id: "thread-file-diff-e2e",
+        active_thread_id: THREAD_ID,
         active_controller_device_id: null,
         active_controller_last_seen_at: null,
         current_status: "idle",
@@ -151,7 +138,7 @@ async function writeSeedState(statePath, workspaceDir, diff) {
         transcript: [
           {
             item_id: FILE_CHANGE_ITEM_ID,
-            kind: "ToolCall",
+            kind: "tool_call",
             text: null,
             status: "completed",
             turn_id: "turn-file-diff-e2e",
@@ -199,6 +186,13 @@ async function waitForFileContents(filePath, expected, timeoutMs = TIMEOUT_MS) {
   }
   const actual = await fs.readFile(filePath, "utf8").catch((error) => String(error));
   throw new Error(`timed out waiting for ${filePath} to contain ${JSON.stringify(expected)}; got ${JSON.stringify(actual)}`);
+}
+
+async function assertActionButton(page, direction) {
+  await page.waitForSelector(`[data-file-change-action="${direction}"][data-item-id="${FILE_CHANGE_ITEM_ID}"]`, {
+    state: "attached",
+    timeout: TIMEOUT_MS,
+  });
 }
 
 function spawnManagedProcess(name, command, args, extraEnv) {

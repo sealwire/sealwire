@@ -38,9 +38,8 @@ import {
 import {
   ConversationEmptyState,
   ReadyConversationState,
-  TranscriptMarkupState,
+  TranscriptState,
 } from "../shared/conversation.js";
-import { renderTranscriptMarkup } from "../shared/transcript-render.js";
 import {
   AuditList,
   ControlBannerContent,
@@ -256,8 +255,7 @@ export function createSessionRenderer({
     cancelControllerLeaseRefresh();
     openSessionDetailsButton.disabled = true;
     renderOverviewState(null, message);
-    threadsCount.textContent = "Sign in";
-    threadsList.innerHTML = `<p class="sidebar-empty">Enter RELAY_API_TOKEN to load threads.</p>`;
+    renderThreadListMessage("Sign in", "Enter RELAY_API_TOKEN to load threads.");
     statusBadge.textContent = "Sign in";
     statusBadge.className = "status-badge status-badge-offline";
     renderReactContent(
@@ -747,11 +745,13 @@ export function createSessionRenderer({
     }
 
     renderConversationContent(
-      h(TranscriptMarkupState, {
-        markup: renderTranscriptMarkup(entries, approval, {
+      h(TranscriptState, {
+        approval,
+        entries,
+        options: {
           enableFileChangeActions: true,
           expandedKeys: state.transcriptExpandedItemIds || new Set(),
-        }),
+        },
       })
     );
     transcript.scrollTop = transcript.scrollHeight;
@@ -806,6 +806,20 @@ export function createSessionRenderer({
         state.threadHistoryScrollTop = threadsList.scrollTop;
       }
     });
+  }
+
+  function renderThreadListMessage(countLabel, message) {
+    closeThreadContextMenu();
+    threadsCount.textContent = countLabel;
+    threadsCount.title = "";
+    resumeLatestButton.disabled = true;
+    renderReactContent(
+      threadsList,
+      h(ThreadGroupList, {
+        emptyMessage: message,
+        groups: [],
+      })
+    );
   }
 
   function syncThreadSelection() {
@@ -971,6 +985,7 @@ export function createSessionRenderer({
     renderSession,
     renderSessionMeta,
     renderSessionUnavailable,
+    renderThreadListMessage,
     renderThreads,
     restoreThreadHistoryScroll,
     runViewTransition,
