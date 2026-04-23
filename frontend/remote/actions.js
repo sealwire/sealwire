@@ -61,6 +61,7 @@ export async function handleRemoteBrokerPayload(payload) {
   if (kind === "session_snapshot") {
     const message = `[scroll-source] kind=session_snapshot entries=${payload.snapshot?.transcript?.length || 0} truncated=${payload.snapshot?.transcript_truncated ? "1" : "0"} has_truncated=${Object.prototype.hasOwnProperty.call(payload.snapshot || {}, "transcript_truncated") ? "1" : "0"} thread=${payload.snapshot?.active_thread_id || "-"} status=${payload.snapshot?.current_status || "-"}`;
     renderLog(message);
+    // TODO(remote-monitor-debug): Remove this console mirror once snapshot routing is stable.
     console.log(message);
     onApplySessionSnapshot(payload.snapshot);
     renderLog("Received managed-mode session snapshot from broker.");
@@ -270,10 +271,13 @@ async function handleEncryptedSessionSnapshot(payload) {
     payload.target_peer_id !== state.socketPeerId ||
     payload.device_id !== state.remoteAuth?.deviceId
   ) {
+    logIgnoredEncryptedPayload("encrypted_session_snapshot", payload);
     return;
   }
 
+  logAcceptedEncryptedPayload("encrypted_session_snapshot", payload);
   const snapshot = await decryptPayloadWithDeviceTokens(payload.envelope);
+  logDecryptedSessionSnapshot("encrypted_session_snapshot", snapshot);
   onApplySessionSnapshot(snapshot);
 }
 
@@ -282,10 +286,13 @@ async function handleEncryptedTranscriptDelta(payload) {
     payload.target_peer_id !== state.socketPeerId ||
     payload.device_id !== state.remoteAuth?.deviceId
   ) {
+    logIgnoredEncryptedPayload("encrypted_transcript_delta", payload);
     return;
   }
 
+  logAcceptedEncryptedPayload("encrypted_transcript_delta", payload);
   const delta = await decryptPayloadWithDeviceTokens(payload.envelope);
+  logDecryptedTranscriptDelta(delta);
   onApplyTranscriptDelta(delta);
 }
 
@@ -294,11 +301,51 @@ async function handleEncryptedRemoteActionResult(payload) {
     payload.target_peer_id !== state.socketPeerId ||
     payload.device_id !== state.remoteAuth?.deviceId
   ) {
+    logIgnoredEncryptedPayload("encrypted_remote_action_result", payload);
     return;
   }
 
+  logAcceptedEncryptedPayload("encrypted_remote_action_result", payload);
   const result = await decryptPayloadWithDeviceTokens(payload.envelope);
+  logDecryptedRemoteActionResult(payload.action_id, result);
   handleRemoteActionResult(payload.action_id, result);
+}
+
+function logIgnoredEncryptedPayload(kind, payload) {
+  const peerMatches = payload.target_peer_id === state.socketPeerId;
+  const deviceMatches = payload.device_id === state.remoteAuth?.deviceId;
+  const message = `[broker-filter] ignored kind=${kind} target=${payload.target_peer_id || "-"} socket=${state.socketPeerId || "-"} peer_match=${peerMatches ? "1" : "0"} device=${payload.device_id || "-"} localDevice=${state.remoteAuth?.deviceId || "-"} device_match=${deviceMatches ? "1" : "0"}`;
+  renderLog(message);
+  // TODO(remote-monitor-debug): Remove this console mirror once broker routing is stable.
+  console.log(message);
+}
+
+function logAcceptedEncryptedPayload(kind, payload) {
+  const message = `[broker-filter] accepted kind=${kind} target=${payload.target_peer_id || "-"} socket=${state.socketPeerId || "-"} device=${payload.device_id || "-"} localDevice=${state.remoteAuth?.deviceId || "-"}`;
+  renderLog(message);
+  // TODO(remote-monitor-debug): Remove this console mirror once broker routing is stable.
+  console.log(message);
+}
+
+function logDecryptedSessionSnapshot(kind, snapshot) {
+  const message = `[broker-decrypt] kind=${kind} thread=${snapshot?.active_thread_id || "-"} entries=${snapshot?.transcript?.length || 0} truncated=${snapshot?.transcript_truncated ? "1" : "0"} status=${snapshot?.current_status || "-"} turn=${snapshot?.active_turn_id || "-"}`;
+  renderLog(message);
+  // TODO(remote-monitor-debug): Remove this console mirror once broker routing is stable.
+  console.log(message);
+}
+
+function logDecryptedTranscriptDelta(delta) {
+  const message = `[broker-decrypt] kind=encrypted_transcript_delta thread=${delta?.thread_id || "-"} item=${delta?.item_id || "-"} turn=${delta?.turn_id || "-"} delta_kind=${delta?.delta_kind || delta?.kind || "-"} bytes=${typeof delta?.delta === "string" ? delta.delta.length : 0}`;
+  renderLog(message);
+  // TODO(remote-monitor-debug): Remove this console mirror once broker routing is stable.
+  console.log(message);
+}
+
+function logDecryptedRemoteActionResult(actionId, result) {
+  const message = `[broker-decrypt] kind=encrypted_remote_action_result action_id=${actionId || "-"} action=${result?.action || "-"} thread=${result?.snapshot?.active_thread_id || "-"} entries=${result?.snapshot?.transcript?.length || 0} truncated=${result?.snapshot?.transcript_truncated ? "1" : "0"} ok=${result?.ok ? "1" : "0"}`;
+  renderLog(message);
+  // TODO(remote-monitor-debug): Remove this console mirror once broker routing is stable.
+  console.log(message);
 }
 
 function handleRemoteActionResult(actionId, result) {
@@ -328,6 +375,7 @@ function handleRemoteActionResult(actionId, result) {
     if (result.snapshot && !isLiveDisruptingAction) {
       const message = `[scroll-source] kind=remote_action_result action=${result.action || "-"} entries=${result.snapshot?.transcript?.length || 0} truncated=${result.snapshot?.transcript_truncated ? "1" : "0"} has_truncated=${Object.prototype.hasOwnProperty.call(result.snapshot || {}, "transcript_truncated") ? "1" : "0"} thread=${result.snapshot?.active_thread_id || "-"} status=${result.snapshot?.current_status || "-"}`;
       renderLog(message);
+      // TODO(remote-monitor-debug): Remove this console mirror once snapshot routing is stable.
       console.log(message);
       onApplySessionSnapshot(result.snapshot);
     }

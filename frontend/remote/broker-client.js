@@ -311,7 +311,17 @@ async function handleSocketMessage(rawData, connectReason) {
     return;
   }
 
+  logInboundBrokerMessage(frame);
   await onBrokerPayload(frame.payload);
+}
+
+function logInboundBrokerMessage(frame) {
+  const payload = frame.payload || {};
+  const kind = payload.kind || "unknown";
+  const message = `[broker-inbound] from=${frame.from_peer_id || "-"} role=${frame.from_role || "-"} kind=${kind} target=${payload.target_peer_id || "-"} device=${payload.device_id || "-"} socket=${state.socketPeerId || "-"} localDevice=${state.remoteAuth?.deviceId || "-"}`;
+  renderLog(message);
+  // TODO(remote-monitor-debug): Remove this console mirror once broker routing is stable.
+  console.log(message);
 }
 
 function scheduleSocketReconnect() {

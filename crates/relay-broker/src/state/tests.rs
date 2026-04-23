@@ -6,13 +6,13 @@ use serde_json::json;
 async fn join_publish_and_leave_broadcast_presence() {
     let state = BrokerState::default();
     let mut relay = state
-        .join("room-a", "relay-1", PeerRole::Relay)
+        .join("room-a", "relay-1", PeerRole::Relay, None)
         .await
         .expect("relay should join");
     assert!(relay.existing_peers.is_empty());
 
     let mut surface = state
-        .join("room-a", "phone-1", PeerRole::Surface)
+        .join("room-a", "phone-1", PeerRole::Surface, None)
         .await
         .expect("surface should join");
     assert_eq!(
@@ -20,6 +20,7 @@ async fn join_publish_and_leave_broadcast_presence() {
         vec![PeerSummary {
             peer_id: "relay-1".to_string(),
             role: PeerRole::Relay,
+            device_id: None,
         }]
     );
 
@@ -36,6 +37,7 @@ async fn join_publish_and_leave_broadcast_presence() {
             peer: PeerSummary {
                 peer_id: "phone-1".to_string(),
                 role: PeerRole::Surface,
+                device_id: None,
             },
         }
     );
@@ -73,6 +75,7 @@ async fn join_publish_and_leave_broadcast_presence() {
             peer: PeerSummary {
                 peer_id: "phone-1".to_string(),
                 role: PeerRole::Surface,
+                device_id: None,
             },
         }
     );
@@ -82,18 +85,18 @@ async fn join_publish_and_leave_broadcast_presence() {
 async fn duplicate_peer_ids_are_rejected_per_channel() {
     let state = BrokerState::default();
     state
-        .join("room-a", "phone-1", PeerRole::Surface)
+        .join("room-a", "phone-1", PeerRole::Surface, None)
         .await
         .expect("first peer should join");
 
     let error = state
-        .join("room-a", "phone-1", PeerRole::Surface)
+        .join("room-a", "phone-1", PeerRole::Surface, None)
         .await
         .expect_err("duplicate peer should fail");
     assert!(error.contains("already connected"));
 
     state
-        .join("room-b", "phone-1", PeerRole::Surface)
+        .join("room-b", "phone-1", PeerRole::Surface, None)
         .await
         .expect("same peer id in another channel should work");
 }

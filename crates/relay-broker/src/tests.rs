@@ -514,6 +514,7 @@ async fn websocket_relays_messages_between_peers() {
         ServerMessage::Welcome { peers, .. } => {
             assert_eq!(peers.len(), 1);
             assert_eq!(peers[0].peer_id, "relay-1");
+            assert_eq!(peers[0].device_id, None);
         }
         other => panic!("unexpected welcome frame: {other:?}"),
     }
@@ -523,6 +524,7 @@ async fn websocket_relays_messages_between_peers() {
         ServerMessage::Presence { kind, peer, .. } => {
             assert_eq!(kind, protocol::PresenceKind::Joined);
             assert_eq!(peer.peer_id, "phone-1");
+            assert_eq!(peer.device_id, None);
         }
         other => panic!("unexpected presence frame: {other:?}"),
     }
@@ -687,12 +689,39 @@ async fn device_join_ticket_can_reconnect() {
     let (mut first_surface, _) = connect_async(&surface_url)
         .await
         .expect("first surface should connect");
-    let _welcome = next_server_message(&mut first_surface).await;
+    let welcome = next_server_message(&mut first_surface).await;
+    let first_peer_id = match welcome {
+        ServerMessage::Welcome { peer_id, peers, .. } => {
+            assert!(peer_id.starts_with("surface-"));
+            assert_eq!(peers.len(), 1);
+            assert_eq!(peers[0].peer_id, "relay-1");
+            assert_eq!(peers[0].device_id, None);
+            peer_id
+        }
+        other => panic!("unexpected welcome frame: {other:?}"),
+    };
+    let joined = next_server_message(&mut relay).await;
+    match joined {
+        ServerMessage::Presence { kind, peer, .. } => {
+            assert_eq!(kind, protocol::PresenceKind::Joined);
+            assert_eq!(peer.peer_id, first_peer_id);
+            assert_eq!(peer.device_id.as_deref(), Some("device-1"));
+        }
+        other => panic!("unexpected presence frame: {other:?}"),
+    }
     first_surface
         .close(None)
         .await
         .expect("surface should close");
-    let _left = next_server_message(&mut relay).await;
+    let left = next_server_message(&mut relay).await;
+    match left {
+        ServerMessage::Presence { kind, peer, .. } => {
+            assert_eq!(kind, protocol::PresenceKind::Left);
+            assert_eq!(peer.peer_id, first_peer_id);
+            assert_eq!(peer.device_id.as_deref(), Some("device-1"));
+        }
+        other => panic!("unexpected presence frame: {other:?}"),
+    }
 
     let (mut second_surface, _) = connect_async(&surface_url)
         .await
@@ -703,8 +732,17 @@ async fn device_join_ticket_can_reconnect() {
             assert!(peer_id.starts_with("surface-"));
             assert_eq!(peers.len(), 1);
             assert_eq!(peers[0].peer_id, "relay-1");
+            assert_eq!(peers[0].device_id, None);
         }
         other => panic!("unexpected welcome frame: {other:?}"),
+    }
+    let joined = next_server_message(&mut relay).await;
+    match joined {
+        ServerMessage::Presence { kind, peer, .. } => {
+            assert_eq!(kind, protocol::PresenceKind::Joined);
+            assert_eq!(peer.device_id.as_deref(), Some("device-1"));
+        }
+        other => panic!("unexpected presence frame: {other:?}"),
     }
 }
 

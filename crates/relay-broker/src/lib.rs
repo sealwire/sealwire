@@ -230,6 +230,7 @@ enum BrokerJoinVerifier {
 #[derive(Debug)]
 struct VerifiedBrokerJoin {
     peer_id: Option<String>,
+    device_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -526,6 +527,7 @@ impl BrokerJoinVerifier {
             )
             .map(|claims| VerifiedBrokerJoin {
                 peer_id: claims.peer_id,
+                device_id: claims.device_id,
             }),
             Self::PublicControlPlane(control_plane) => verify_join_ticket_for_connection(
                 control_plane.issuer_key(),
@@ -535,6 +537,7 @@ impl BrokerJoinVerifier {
             )
             .map(|claims| VerifiedBrokerJoin {
                 peer_id: claims.peer_id,
+                device_id: claims.device_id,
             }),
             Self::Misconfigured(error) => Err(error.clone()),
         }
@@ -1194,7 +1197,16 @@ async fn handle_socket(
                 return;
             }
         }
-        match state.broker.join(&channel_id, &candidate, query.role).await {
+        match state
+            .broker
+            .join(
+                &channel_id,
+                &candidate,
+                query.role,
+                verified_join.device_id.clone(),
+            )
+            .await
+        {
             Ok(join) => {
                 peer_id = Some(candidate);
                 break join;

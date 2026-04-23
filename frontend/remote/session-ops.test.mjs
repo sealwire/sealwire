@@ -1224,6 +1224,7 @@ test("applyTranscriptDelta updates existing transcript entries using text and st
   const { applyTranscriptDelta } = await import("./session-ops.js");
 
   state.session = {
+    active_thread_id: "thread-1",
     transcript: [
       {
         item_id: "item-1",
@@ -1237,6 +1238,7 @@ test("applyTranscriptDelta updates existing transcript entries using text and st
   };
 
   applyTranscriptDelta({
+    thread_id: "thread-1",
     item_id: "item-1",
     turn_id: "turn-1",
     delta: " world",
@@ -1246,6 +1248,38 @@ test("applyTranscriptDelta updates existing transcript entries using text and st
   assert.equal(state.session.transcript[0].text, "Hello world");
   assert.equal(state.session.transcript[0].status, "running");
   assert.equal(state.session.transcript[0].kind, "agent_text");
+});
+
+test("applyTranscriptDelta ignores deltas for a different active thread", async () => {
+  activeBrowser || installBrowserStubs();
+
+  const { state } = await import("./state.js");
+  const { applyTranscriptDelta } = await import("./session-ops.js");
+
+  state.session = {
+    active_thread_id: "thread-1",
+    transcript: [
+      {
+        item_id: "item-1",
+        kind: "agent_text",
+        status: "completed",
+        text: "Hello",
+        turn_id: "turn-1",
+        tool: null,
+      },
+    ],
+  };
+
+  applyTranscriptDelta({
+    thread_id: "thread-2",
+    item_id: "item-1",
+    turn_id: "turn-1",
+    delta: " wrong",
+    delta_kind: "agent_text",
+  });
+
+  assert.equal(state.session.transcript[0].text, "Hello");
+  assert.equal(state.session.transcript[0].status, "completed");
 });
 
 test("sendHeartbeat dispatches a heartbeat when the current device holds control", async () => {

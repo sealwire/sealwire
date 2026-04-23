@@ -124,8 +124,10 @@ function RemoteApp() {
 
   const session = currentState.session;
   const previousSession = previousSessionRef.current;
-  const hasControllerLease = !session?.active_controller_device_id
-    || session.active_controller_device_id === currentState.remoteAuth?.deviceId;
+  const hasControllerLease = !session?.view_only && (
+    !session?.active_controller_device_id
+    || session.active_controller_device_id === currentState.remoteAuth?.deviceId
+  );
   const sessionView = session
     ? selectSessionRenderModel({
         hasControllerLease,

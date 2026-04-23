@@ -20,6 +20,7 @@ struct RoomState {
 
 struct PeerHandle {
     role: PeerRole,
+    device_id: Option<String>,
     tx: mpsc::UnboundedSender<ServerMessage>,
 }
 
@@ -35,11 +36,13 @@ impl BrokerState {
         channel_id: &str,
         peer_id: &str,
         role: PeerRole,
+        device_id: Option<String>,
     ) -> Result<JoinResult, String> {
         let (tx, rx) = mpsc::unbounded_channel();
         let joined_peer = PeerSummary {
             peer_id: peer_id.to_string(),
             role,
+            device_id: device_id.clone(),
         };
         let mut inner = self.inner.lock().await;
         let room = inner
@@ -59,6 +62,7 @@ impl BrokerState {
             .map(|(peer_id, handle)| PeerSummary {
                 peer_id: peer_id.clone(),
                 role: handle.role,
+                device_id: handle.device_id.clone(),
             })
             .collect::<Vec<_>>();
 
@@ -70,8 +74,14 @@ impl BrokerState {
             });
         }
 
-        room.peers
-            .insert(peer_id.to_string(), PeerHandle { role, tx });
+        room.peers.insert(
+            peer_id.to_string(),
+            PeerHandle {
+                role,
+                device_id,
+                tx,
+            },
+        );
 
         Ok(JoinResult {
             existing_peers,
@@ -92,6 +102,7 @@ impl BrokerState {
         let left_peer = PeerSummary {
             peer_id: peer_id.to_string(),
             role: handle.role,
+            device_id: handle.device_id,
         };
 
         for peer in room.peers.values() {

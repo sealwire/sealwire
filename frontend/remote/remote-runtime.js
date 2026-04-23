@@ -231,12 +231,14 @@ export function installSidebarGestureDebug() {
     const relaysTop = remoteRelaysList?.scrollTop ?? -1;
     const threadsTop = remoteThreadsList?.scrollTop ?? -1;
     const message = `[sidebar-debug] ${scope} type=${event.type} target=${target} current=${current} sidebarTop=${sidebarTop} relaysTop=${relaysTop} threadsTop=${threadsTop}`;
+    // TODO(remote-monitor-debug): Remove this sidebar gesture console trace after scroll bugs are fixed.
     console.log(message);
     renderLog(message);
   };
 
   const logScrollEvent = (scope, element) => {
     const message = `[sidebar-debug] ${scope} type=scroll current=${describeNode(element)} top=${element.scrollTop} height=${element.scrollHeight} client=${element.clientHeight}`;
+    // TODO(remote-monitor-debug): Remove this sidebar scroll console trace after scroll bugs are fixed.
     console.log(message);
     renderLog(message);
   };

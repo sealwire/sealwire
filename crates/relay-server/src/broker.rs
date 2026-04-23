@@ -176,6 +176,7 @@ enum OutboundBrokerPayload {
         snapshot: SessionSnapshot,
     },
     TranscriptDelta {
+        thread_id: String,
         item_id: String,
         turn_id: Option<String>,
         delta: String,
@@ -765,14 +766,28 @@ async fn run_broker_session(
         .map_err(|error| format!("broker welcome read failed: {error}"))?;
     match decode_server_frame(welcome)? {
         Some(ServerMessage::Welcome { peers, .. }) => {
+            let surface_peers = peers
+                .into_iter()
+                .filter(|peer| peer.role == PeerRole::Surface)
+                .collect::<Vec<_>>();
             state
-                .replace_online_surface_peers(
-                    peers
-                        .into_iter()
-                        .filter(|peer| peer.role == PeerRole::Surface)
-                        .map(|peer| peer.peer_id),
-                )
+                .replace_online_surface_peers(surface_peers.iter().map(|peer| peer.peer_id.clone()))
                 .await;
+            for peer in &surface_peers {
+                if let Some(device_id) = peer.device_id.as_deref() {
+                    if let Err(error) = state
+                        .mark_remote_device_seen(device_id, &peer.peer_id)
+                        .await
+                    {
+                        warn!(
+                            peer_id = %peer.peer_id,
+                            device_id,
+                            %error,
+                            "failed to bind broker surface peer from welcome"
+                        );
+                    }
+                }
+            }
         }
         Some(ServerMessage::Error { message, .. }) => return Err(message),
         Some(other) => {
@@ -870,6 +885,21 @@ async fn handle_server_message(
                 state
                     .update_surface_presence(&peer.peer_id, matches!(kind, PresenceKind::Joined))
                     .await;
+                if matches!(kind, PresenceKind::Joined) {
+                    if let Some(device_id) = peer.device_id.as_deref() {
+                        if let Err(error) = state
+                            .mark_remote_device_seen(device_id, &peer.peer_id)
+                            .await
+                        {
+                            warn!(
+                                peer_id = %peer.peer_id,
+                                device_id,
+                                %error,
+                                "failed to bind broker surface peer from presence"
+                            );
+                        }
+                    }
+                }
                 let status = match kind {
                     PresenceKind::Joined => "joined",
                     PresenceKind::Left => "left",
@@ -1214,6 +1244,29 @@ async fn publish_snapshot(
     }
 
     let targets = state.broker_targets().await;
+    let target_summary = targets
+        .iter()
+        .map(|target| format!("{}:{}", target.device_id, target.peer_id))
+        .collect::<Vec<_>>()
+        .join(",");
+    let target_summary = if target_summary.is_empty() {
+        "-".to_string()
+    } else {
+        target_summary
+    };
+    info!(
+        scope = "session_snapshot",
+        target_count = targets.len(),
+        targets = %target_summary,
+        "resolved broker surface targets"
+    );
+    if targets.is_empty() {
+        warn!(
+            active_thread_id = compacted.active_thread_id.as_deref().unwrap_or("-"),
+            transcript_entries = compacted.transcript.len(),
+            "broker session snapshot has no online surface targets"
+        );
+    }
     for target in targets {
         let envelope = encrypt_json(&target.payload_secret, &compacted)?;
         publish_payload(
@@ -1237,6 +1290,20 @@ async fn publish_pending_broker_messages(
 ) -> Result<(), String> {
     const MAX_DELTAS_PER_DRAIN: usize = 50;
     let messages = state.drain_pending_broker_messages().await;
+    if !messages.is_empty() {
+        let pairing_count = messages
+            .iter()
+            .filter(|message| matches!(message, BrokerPendingMessage::PairingResult(_)))
+            .count();
+        let transcript_delta_count = messages
+            .iter()
+            .filter(|message| matches!(message, BrokerPendingMessage::TranscriptDelta(_)))
+            .count();
+        info!(
+            total_count = messages.len(),
+            pairing_count, transcript_delta_count, "drained pending broker messages"
+        );
+    }
     let mut delta_count = 0;
     let mut messages = messages.into_iter();
     while let Some(message) = messages.next() {
@@ -1273,6 +1340,7 @@ async fn publish_transcript_delta(
         publish_payload(
             sender,
             OutboundBrokerPayload::TranscriptDelta {
+                thread_id: delta.thread_id,
                 item_id: delta.item_id,
                 turn_id: delta.turn_id,
                 delta: delta.delta,
@@ -1283,10 +1351,40 @@ async fn publish_transcript_delta(
         .map_err(|error| error.to_string())?;
     } else {
         let targets = state.broker_targets().await;
+        let target_summary = targets
+            .iter()
+            .map(|target| format!("{}:{}", target.device_id, target.peer_id))
+            .collect::<Vec<_>>()
+            .join(",");
+        let target_summary = if target_summary.is_empty() {
+            "-".to_string()
+        } else {
+            target_summary
+        };
+        info!(
+            scope = "transcript_delta",
+            target_count = targets.len(),
+            targets = %target_summary,
+            item_id = %delta.item_id,
+            thread_id = %delta.thread_id,
+            turn_id = delta.turn_id.as_deref().unwrap_or("-"),
+            delta_kind = kind,
+            "resolved broker surface targets"
+        );
+        if targets.is_empty() {
+            warn!(
+                item_id = %delta.item_id,
+                thread_id = %delta.thread_id,
+                turn_id = delta.turn_id.as_deref().unwrap_or("-"),
+                delta_kind = kind,
+                "broker transcript delta has no online surface targets"
+            );
+        }
         for target in targets {
             let envelope = encrypt_json(
                 &target.payload_secret,
                 &serde_json::json!({
+                    "thread_id": delta.thread_id,
                     "item_id": delta.item_id,
                     "turn_id": delta.turn_id,
                     "delta": delta.delta,

@@ -544,6 +544,15 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
     let mut relay = state.write().await;
     let mut changed = false;
     let notification_thread_id = notification_thread_id(&params);
+    if is_session_notification_method(method) {
+        info!(
+            method,
+            notification_thread_id = notification_thread_id.as_deref().unwrap_or("-"),
+            active_thread_id = relay.active_thread_id.as_deref().unwrap_or("-"),
+            active_turn_id = relay.active_turn_id.as_deref().unwrap_or("-"),
+            "received codex session notification"
+        );
+    }
 
     match method {
         "thread/started" => {
@@ -654,11 +663,26 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
                 string_at(&params, &["turnId"]),
                 string_at(&params, &["delta"]),
             ) {
+                let delta_len = delta.len();
                 relay.append_agent_delta(&item_id, &delta, &turn_id);
+                let thread_id = notification_thread_id
+                    .clone()
+                    .or_else(|| relay.active_thread_id.clone())
+                    .unwrap_or_default();
+                info!(
+                    method,
+                    thread_id = %thread_id,
+                    item_id = %item_id,
+                    turn_id = %turn_id,
+                    delta_len,
+                    pending_broker_messages = relay.pending_broker_messages.len() + 1,
+                    "queued broker transcript delta"
+                );
                 relay
                     .pending_broker_messages
                     .push(BrokerPendingMessage::TranscriptDelta(
                         PendingTranscriptDelta {
+                            thread_id,
                             item_id,
                             turn_id: Some(turn_id),
                             delta,
@@ -769,11 +793,25 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
                 if let Some(item_id) =
                     string_at(&params, &["itemId"]).or_else(|| string_at(&params, &["item", "id"]))
                 {
+                    let delta_len = delta.len();
                     relay.append_command_delta(&item_id, &delta);
+                    let thread_id = notification_thread_id
+                        .clone()
+                        .or_else(|| relay.active_thread_id.clone())
+                        .unwrap_or_default();
+                    info!(
+                        method,
+                        thread_id = %thread_id,
+                        item_id = %item_id,
+                        delta_len,
+                        pending_broker_messages = relay.pending_broker_messages.len() + 1,
+                        "queued broker transcript delta"
+                    );
                     relay
                         .pending_broker_messages
                         .push(BrokerPendingMessage::TranscriptDelta(
                             PendingTranscriptDelta {
+                                thread_id,
                                 item_id,
                                 turn_id: None,
                                 delta: delta.clone(),
@@ -812,6 +850,20 @@ fn notification_thread_id(params: &Value) -> Option<String> {
     string_at(params, &["threadId"])
         .or_else(|| string_at(params, &["turn", "threadId"]))
         .or_else(|| string_at(params, &["item", "threadId"]))
+}
+
+fn is_session_notification_method(method: &str) -> bool {
+    matches!(
+        method,
+        "turn/started"
+            | "turn/completed"
+            | "item/started"
+            | "item/agentMessage/delta"
+            | "item/completed"
+            | "item/commandExecution/outputDelta"
+            | "item/fileChange/outputDelta"
+            | "item/commandExecution/terminalInteraction"
+    )
 }
 
 fn should_apply_session_notification(relay: &RelayState, thread_id: Option<&str>) -> bool {

@@ -12,6 +12,15 @@ pub enum PeerRole {
 pub struct PeerSummary {
     pub peer_id: String,
     pub role: PeerRole,
+    /// Remote device identity when the peer represents a known device-backed surface.
+    ///
+    /// This is optional because broker peers are not all approved remote devices:
+    /// relay peers identify themselves by `peer_id`, and pairing-time surface peers
+    /// may exist before the relay has approved and bound a durable device identity.
+    /// Device-backed surfaces should include this so the relay can bind the current
+    /// broker peer id to the paired device record for encrypted targeted payloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

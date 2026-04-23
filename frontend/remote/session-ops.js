@@ -43,11 +43,19 @@ function transcriptDeltaKindToEntryKind(deltaKind) {
   }
 }
 
-export function applyTranscriptDelta({ item_id, turn_id, delta, delta_kind, kind }) {
+export function applyTranscriptDelta({ thread_id, item_id, turn_id, delta, delta_kind, kind }) {
   if (typeof window !== "undefined" && typeof window.__transcriptDeltaCount === "number") {
     window.__transcriptDeltaCount++;
   }
   if (!state.session) return;
+  const currentThreadId = state.session.active_thread_id || null;
+  if (thread_id && currentThreadId && thread_id !== currentThreadId) {
+    const message = `[transcript-delta] ignored thread=${thread_id} current=${currentThreadId} item=${item_id || "-"} kind=${delta_kind || kind || "-"}`;
+    renderLog(message);
+    // TODO(remote-monitor-debug): Remove this console mirror once transcript routing is stable.
+    console.log(message);
+    return;
+  }
 
   const transcript = state.session.transcript;
   if (!Array.isArray(transcript)) return;
@@ -81,6 +89,7 @@ export function applySessionSnapshot(snapshot) {
   if (typeof window !== "undefined" && typeof window.__snapshotCount === "number") {
     window.__snapshotCount++;
   }
+  const previousThreadId = state.session?.active_thread_id || "-";
   syncLiveTranscriptEntryDetailsFromSnapshot(state, snapshot);
   const effectiveSnapshot = restoreHydratedTranscript(state, snapshot);
   applyRenderedSession(effectiveSnapshot, {
@@ -100,8 +109,9 @@ export function applySessionSnapshot(snapshot) {
       || (snapshot?.transcript_truncated && !effectiveSnapshot?.transcript_truncated)
       ? "1"
       : "0";
-  const message = `[scroll] applySessionSnapshot thread=${snapshot?.active_thread_id || "-"} in_truncated=${snapshot?.transcript_truncated ? "1" : "0"} out_truncated=${effectiveSnapshot?.transcript_truncated ? "1" : "0"} restored=${restored} hydration=${state.transcriptHydrationStatus} older_cursor=${state.transcriptHydrationOlderCursor ?? "-"} entries=${effectiveSnapshot?.transcript?.length || 0} top=${scrollTop} height=${scrollHeight} client=${clientHeight} winY=${windowY}`;
+  const message = `[scroll] applySessionSnapshot prev=${previousThreadId} input=${snapshot?.active_thread_id || "-"} effective=${effectiveSnapshot?.active_thread_id || "-"} state=${state.session?.active_thread_id || "-"} in_truncated=${snapshot?.transcript_truncated ? "1" : "0"} out_truncated=${effectiveSnapshot?.transcript_truncated ? "1" : "0"} restored=${restored} hydration=${state.transcriptHydrationStatus} older_cursor=${state.transcriptHydrationOlderCursor ?? "-"} entries=${effectiveSnapshot?.transcript?.length || 0} top=${scrollTop} height=${scrollHeight} client=${clientHeight} winY=${windowY}`;
   renderLog(message);
+  // TODO(remote-monitor-debug): Remove this console mirror once snapshot scroll restoration is stable.
   console.log(message);
 }
 
@@ -206,6 +216,51 @@ export async function resumeRemoteSession(threadId, sessionDraftOverride = null)
     return true;
   } catch (error) {
     renderLog(`Remote resume failed: ${error.message}`);
+    return false;
+  }
+}
+
+export async function viewRemoteThread(threadId) {
+  if (!threadId) {
+    return false;
+  }
+
+  renderLog(`Viewing remote thread ${threadId}.`);
+
+  try {
+    const page = await fetchTranscriptPage({
+      before: null,
+      threadId,
+    });
+    if (!page || page.thread_id !== threadId) {
+      throw new Error("remote transcript page response is incomplete");
+    }
+
+    const thread = (state.threads || []).find((candidate) => candidate?.id === threadId);
+    clearTranscriptHydration(state);
+    applyRenderedSession(
+      {
+        ...(state.session || {}),
+        active_controller_device_id: "__view_only__",
+        active_controller_last_seen_at: null,
+        active_flags: [],
+        active_thread_id: threadId,
+        active_turn_id: null,
+        controller_lease_expires_at: null,
+        current_cwd: thread?.cwd || state.session?.current_cwd || "",
+        current_status: "viewing",
+        pending_approvals: [],
+        transcript: page.entries || [],
+        transcript_truncated: page.prev_cursor != null,
+        view_only: true,
+      },
+      {
+        hydrateTranscript: true,
+      }
+    );
+    return true;
+  } catch (error) {
+    renderLog(`Remote thread view failed: ${error.message}`);
     return false;
   }
 }
@@ -326,7 +381,12 @@ function applyRenderedSession(
   session,
   { hydrateTranscript = true, hydrationSnapshot = session } = {}
 ) {
+  const previousThreadId = state.session?.active_thread_id || "-";
   renderSession(session);
+  const message = `[session-state] renderSession prev=${previousThreadId} next=${session?.active_thread_id || "-"} state=${state.session?.active_thread_id || "-"} entries=${session?.transcript?.length || 0} hydrate=${hydrateTranscript ? "1" : "0"} hydration_input=${hydrationSnapshot?.active_thread_id || "-"}`;
+  renderLog(message);
+  // TODO(remote-monitor-debug): Remove this console mirror once session rendering is stable.
+  console.log(message);
   scheduleClaimRefresh();
   if (hydrateTranscript) {
     void hydrateActiveTranscript(hydrationSnapshot);

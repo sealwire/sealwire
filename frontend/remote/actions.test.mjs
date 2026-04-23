@@ -538,6 +538,7 @@ test("handleRemoteBrokerPayload routes transcript_delta to onApplyTranscriptDelt
 
   await handleRemoteBrokerPayload({
     kind: "transcript_delta",
+    thread_id: "thread-1",
     item_id: "item-1",
     turn_id: "turn-1",
     delta: "Hello",
@@ -546,6 +547,7 @@ test("handleRemoteBrokerPayload routes transcript_delta to onApplyTranscriptDelt
 
   assert.equal(received.length, 1);
   assert.equal(received[0].item_id, "item-1");
+  assert.equal(received[0].thread_id, "thread-1");
   assert.equal(received[0].delta, "Hello");
   assert.equal(received[0].delta_kind, "agent_text");
 });
@@ -583,6 +585,7 @@ test("handleRemoteBrokerPayload decrypts encrypted transcript deltas with delta_
   });
 
   const envelope = await encryptJson("payload-secret-1", {
+    thread_id: "thread-9",
     item_id: "item-9",
     turn_id: "turn-9",
     delta: "Hello",
@@ -598,6 +601,7 @@ test("handleRemoteBrokerPayload decrypts encrypted transcript deltas with delta_
 
   assert.equal(received.length, 1);
   assert.equal(received[0].item_id, "item-9");
+  assert.equal(received[0].thread_id, "thread-9");
   assert.equal(received[0].delta_kind, "agent_text");
 });
 

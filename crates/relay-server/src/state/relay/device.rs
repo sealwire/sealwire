@@ -172,6 +172,7 @@ pub(crate) enum BrokerPendingMessage {
 
 #[derive(Clone, Debug)]
 pub(crate) struct PendingTranscriptDelta {
+    pub(crate) thread_id: String,
     pub(crate) item_id: String,
     pub(crate) turn_id: Option<String>,
     pub(crate) delta: String,
