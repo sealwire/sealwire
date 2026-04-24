@@ -1,7 +1,7 @@
 use futures_util::stream::SplitSink;
 use serde::{Deserialize, Serialize};
 use tokio_tungstenite::tungstenite::Message;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::{
     protocol::{
@@ -15,8 +15,9 @@ use crate::{
 
 use super::{
     crypto::{decrypt_json, encrypt_json, EncryptedEnvelope},
-    issue_session_claim, publish_payload, verify_device_claim_challenge_proof,
-    verify_device_claim_init_proof, verify_session_claim, BrokerSocket, OutboundBrokerPayload,
+    frame_bytes_for_payload, issue_session_claim, publish_payload,
+    verify_device_claim_challenge_proof, verify_device_claim_init_proof, verify_session_claim,
+    BrokerSocket, OutboundBrokerPayload, MAX_BROKER_TEXT_FRAME_BYTES,
 };
 
 const SESSION_CONTROL_REQUIRED_ERROR: &str =
@@ -180,6 +181,20 @@ struct RemoteActionResultPlaintext {
     claim_challenge: Option<String>,
     claim_challenge_expires_at: Option<u64>,
     error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RemoteActionResultSizeBreakdown {
+    snapshot_bytes: usize,
+    receipt_bytes: usize,
+    threads_bytes: usize,
+    thread_entries_bytes: usize,
+    thread_entry_detail_bytes: usize,
+    thread_transcript_bytes: usize,
+    session_claim_bytes: usize,
+    claim_challenge_bytes: usize,
+    error_bytes: usize,
+    plaintext_bytes: usize,
 }
 
 #[derive(Debug, Default)]
@@ -947,29 +962,57 @@ async fn publish_plain_remote_action_result(
     let threads = outcome.threads.map(|threads| {
         threads.compact_for(crate::protocol::ThreadsResponseCompactProfile::RemoteSurface)
     });
-    publish_payload(
-        sender,
-        OutboundBrokerPayload::RemoteActionResult {
-            action_id,
-            target_peer_id,
-            action,
-            ok,
-            snapshot,
-            receipt: outcome.receipt,
-            threads,
-            thread_entries: outcome.thread_entries,
-            thread_entry_detail: outcome.thread_entry_detail,
-            thread_transcript: outcome.thread_transcript,
-            session_claim: outcome.session_claim,
-            session_claim_expires_at: outcome.session_claim_expires_at,
-            claim_challenge_id: outcome.claim_challenge_id,
-            claim_challenge: outcome.claim_challenge,
-            claim_challenge_expires_at: outcome.claim_challenge_expires_at,
-            error,
-        },
-    )
-    .await
-    .map_err(|error| format!("broker action result publish failed: {error}"))
+    let RemoteActionOutcome {
+        receipt,
+        thread_entries,
+        thread_entry_detail,
+        thread_transcript,
+        session_claim,
+        session_claim_expires_at,
+        claim_challenge_id,
+        claim_challenge,
+        claim_challenge_expires_at,
+        ..
+    } = outcome;
+    let size_breakdown = measure_remote_action_result_sizes(
+        action,
+        ok,
+        &snapshot,
+        receipt.as_ref(),
+        threads.as_ref(),
+        thread_entries.as_ref(),
+        thread_entry_detail.as_ref(),
+        thread_transcript.as_ref(),
+        session_claim.as_ref(),
+        session_claim_expires_at,
+        claim_challenge_id.as_ref(),
+        claim_challenge.as_ref(),
+        claim_challenge_expires_at,
+        error.as_ref(),
+    );
+    let payload = OutboundBrokerPayload::RemoteActionResult {
+        action_id,
+        target_peer_id,
+        action,
+        ok,
+        snapshot,
+        receipt,
+        threads,
+        thread_entries,
+        thread_entry_detail,
+        thread_transcript,
+        session_claim,
+        session_claim_expires_at,
+        claim_challenge_id,
+        claim_challenge,
+        claim_challenge_expires_at,
+        error,
+    };
+    let frame_bytes = frame_bytes_for_payload(&payload);
+    log_remote_action_result_sizes("plaintext", action, &size_breakdown, None, frame_bytes);
+    publish_payload(sender, payload)
+        .await
+        .map_err(|error| format!("broker action result publish failed: {error}"))
 }
 
 async fn replay_plain_remote_action_result(
@@ -1032,41 +1075,73 @@ async fn publish_remote_action_result_private(
     let threads = outcome.threads.map(|threads| {
         threads.compact_for(crate::protocol::ThreadsResponseCompactProfile::RemoteSurface)
     });
+    let RemoteActionOutcome {
+        receipt,
+        thread_entries,
+        thread_entry_detail,
+        thread_transcript,
+        session_claim,
+        session_claim_expires_at,
+        claim_challenge_id,
+        claim_challenge,
+        claim_challenge_expires_at,
+        ..
+    } = outcome;
     let secret = match response_secret {
         Some(secret) => secret.to_string(),
         None => state.paired_device_payload_secret(&device_id).await?,
     };
-    let envelope = encrypt_json(
-        &secret,
-        &RemoteActionResultPlaintext {
-            action,
-            ok,
-            snapshot,
-            receipt: outcome.receipt,
-            threads,
-            thread_entries: outcome.thread_entries,
-            thread_entry_detail: outcome.thread_entry_detail,
-            thread_transcript: outcome.thread_transcript,
-            session_claim: outcome.session_claim,
-            session_claim_expires_at: outcome.session_claim_expires_at,
-            claim_challenge_id: outcome.claim_challenge_id,
-            claim_challenge: outcome.claim_challenge,
-            claim_challenge_expires_at: outcome.claim_challenge_expires_at,
-            error,
-        },
-    )?;
-
-    publish_payload(
-        sender,
-        OutboundBrokerPayload::EncryptedRemoteActionResult {
-            action_id,
-            target_peer_id,
-            device_id,
-            envelope,
-        },
-    )
-    .await
-    .map_err(|error| format!("encrypted broker action result publish failed: {error}"))
+    let size_breakdown = measure_remote_action_result_sizes(
+        action,
+        ok,
+        &snapshot,
+        receipt.as_ref(),
+        threads.as_ref(),
+        thread_entries.as_ref(),
+        thread_entry_detail.as_ref(),
+        thread_transcript.as_ref(),
+        session_claim.as_ref(),
+        session_claim_expires_at,
+        claim_challenge_id.as_ref(),
+        claim_challenge.as_ref(),
+        claim_challenge_expires_at,
+        error.as_ref(),
+    );
+    let plaintext = RemoteActionResultPlaintext {
+        action,
+        ok,
+        snapshot,
+        receipt,
+        threads,
+        thread_entries,
+        thread_entry_detail,
+        thread_transcript,
+        session_claim,
+        session_claim_expires_at,
+        claim_challenge_id,
+        claim_challenge,
+        claim_challenge_expires_at,
+        error,
+    };
+    let envelope = encrypt_json(&secret, &plaintext)?;
+    let envelope_bytes = serialized_json_bytes(&envelope);
+    let payload = OutboundBrokerPayload::EncryptedRemoteActionResult {
+        action_id,
+        target_peer_id,
+        device_id,
+        envelope,
+    };
+    let frame_bytes = frame_bytes_for_payload(&payload);
+    log_remote_action_result_sizes(
+        "encrypted",
+        action,
+        &size_breakdown,
+        Some(envelope_bytes),
+        frame_bytes,
+    );
+    publish_payload(sender, payload)
+        .await
+        .map_err(|error| format!("encrypted broker action result publish failed: {error}"))
 }
 
 async fn replay_encrypted_remote_action_result(
@@ -1133,6 +1208,146 @@ fn cached_remote_action_result(
         response_secret,
         error,
     }
+}
+
+fn measure_remote_action_result_sizes(
+    action: RemoteActionKind,
+    ok: bool,
+    snapshot: &SessionSnapshot,
+    receipt: Option<&ApprovalReceipt>,
+    threads: Option<&ThreadsResponse>,
+    thread_entries: Option<&ThreadEntriesResponse>,
+    thread_entry_detail: Option<&ThreadEntryDetailResponse>,
+    thread_transcript: Option<&ThreadTranscriptResponse>,
+    session_claim: Option<&String>,
+    session_claim_expires_at: Option<u64>,
+    claim_challenge_id: Option<&String>,
+    claim_challenge: Option<&String>,
+    claim_challenge_expires_at: Option<u64>,
+    error: Option<&String>,
+) -> RemoteActionResultSizeBreakdown {
+    let plaintext = RemoteActionResultPlaintextRef {
+        action,
+        ok,
+        snapshot,
+        receipt,
+        threads,
+        thread_entries,
+        thread_entry_detail,
+        thread_transcript,
+        session_claim,
+        session_claim_expires_at,
+        claim_challenge_id,
+        claim_challenge,
+        claim_challenge_expires_at,
+        error,
+    };
+    RemoteActionResultSizeBreakdown {
+        snapshot_bytes: serialized_json_bytes(snapshot),
+        receipt_bytes: maybe_serialized_json_bytes(receipt),
+        threads_bytes: maybe_serialized_json_bytes(threads),
+        thread_entries_bytes: maybe_serialized_json_bytes(thread_entries),
+        thread_entry_detail_bytes: maybe_serialized_json_bytes(thread_entry_detail),
+        thread_transcript_bytes: maybe_serialized_json_bytes(thread_transcript),
+        session_claim_bytes: session_claim
+            .map(|claim| serialized_json_bytes(&(claim, session_claim_expires_at)))
+            .unwrap_or(0),
+        claim_challenge_bytes: if claim_challenge_id.is_some()
+            || claim_challenge.is_some()
+            || claim_challenge_expires_at.is_some()
+        {
+            serialized_json_bytes(&(
+                claim_challenge_id,
+                claim_challenge,
+                claim_challenge_expires_at,
+            ))
+        } else {
+            0
+        },
+        error_bytes: maybe_serialized_json_bytes(error),
+        plaintext_bytes: serialized_json_bytes(&plaintext),
+    }
+}
+
+fn log_remote_action_result_sizes(
+    transport: &str,
+    action: RemoteActionKind,
+    breakdown: &RemoteActionResultSizeBreakdown,
+    envelope_bytes: Option<usize>,
+    frame_bytes: usize,
+) {
+    info!(
+        transport,
+        action = action.as_str(),
+        snapshot_bytes = breakdown.snapshot_bytes,
+        receipt_bytes = breakdown.receipt_bytes,
+        threads_bytes = breakdown.threads_bytes,
+        thread_entries_bytes = breakdown.thread_entries_bytes,
+        thread_entry_detail_bytes = breakdown.thread_entry_detail_bytes,
+        thread_transcript_bytes = breakdown.thread_transcript_bytes,
+        session_claim_bytes = breakdown.session_claim_bytes,
+        claim_challenge_bytes = breakdown.claim_challenge_bytes,
+        error_bytes = breakdown.error_bytes,
+        plaintext_bytes = breakdown.plaintext_bytes,
+        envelope_bytes = envelope_bytes.unwrap_or(0),
+        frame_bytes,
+        frame_limit_bytes = MAX_BROKER_TEXT_FRAME_BYTES,
+        "remote action result size breakdown"
+    );
+    if frame_bytes > MAX_BROKER_TEXT_FRAME_BYTES {
+        // TODO(remote-action-frame-budget): Use this breakdown to decide which fields should stay
+        // in the first response versus move behind detail/chunk loading. In particular, preserve
+        // normal agent/user text when possible, but treat large tool payloads (`thread_transcript`,
+        // `thread_entries`, command/tool detail blobs) as candidates for preview-only transport.
+        // Once the hotspots are confirmed, pair that policy with broker-level chunk fallback at
+        // the final publish boundary so oversized action results never tear down the socket.
+        warn!(
+            transport,
+            action = action.as_str(),
+            snapshot_bytes = breakdown.snapshot_bytes,
+            receipt_bytes = breakdown.receipt_bytes,
+            threads_bytes = breakdown.threads_bytes,
+            thread_entries_bytes = breakdown.thread_entries_bytes,
+            thread_entry_detail_bytes = breakdown.thread_entry_detail_bytes,
+            thread_transcript_bytes = breakdown.thread_transcript_bytes,
+            session_claim_bytes = breakdown.session_claim_bytes,
+            claim_challenge_bytes = breakdown.claim_challenge_bytes,
+            error_bytes = breakdown.error_bytes,
+            plaintext_bytes = breakdown.plaintext_bytes,
+            envelope_bytes = envelope_bytes.unwrap_or(0),
+            frame_bytes,
+            frame_limit_bytes = MAX_BROKER_TEXT_FRAME_BYTES,
+            "remote action result exceeds broker websocket frame limit"
+        );
+    }
+}
+
+fn serialized_json_bytes<T: Serialize>(value: &T) -> usize {
+    serde_json::to_vec(value)
+        .map(|bytes| bytes.len())
+        .unwrap_or(usize::MAX)
+}
+
+fn maybe_serialized_json_bytes<T: Serialize>(value: Option<&T>) -> usize {
+    value.map(serialized_json_bytes).unwrap_or(0)
+}
+
+#[derive(Serialize)]
+struct RemoteActionResultPlaintextRef<'a> {
+    action: RemoteActionKind,
+    ok: bool,
+    snapshot: &'a SessionSnapshot,
+    receipt: Option<&'a ApprovalReceipt>,
+    threads: Option<&'a ThreadsResponse>,
+    thread_entries: Option<&'a ThreadEntriesResponse>,
+    thread_entry_detail: Option<&'a ThreadEntryDetailResponse>,
+    thread_transcript: Option<&'a ThreadTranscriptResponse>,
+    session_claim: Option<&'a String>,
+    session_claim_expires_at: Option<u64>,
+    claim_challenge_id: Option<&'a String>,
+    claim_challenge: Option<&'a String>,
+    claim_challenge_expires_at: Option<u64>,
+    error: Option<&'a String>,
 }
 
 #[cfg(test)]

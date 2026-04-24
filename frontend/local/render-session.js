@@ -210,7 +210,9 @@ export function createSessionRenderer({
     syncThreadSelection();
     syncThreadHistoryScroll();
     restoreThreadHistoryScroll();
-    ensureConversationTranscript?.(session);
+    if (viewingConversation && session.active_thread_id && session.transcript_truncated) {
+      ensureConversationTranscript?.(session);
+    }
     scheduleControllerHeartbeat(session);
     scheduleControllerLeaseRefresh(session);
 

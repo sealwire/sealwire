@@ -50,6 +50,7 @@ const SNAPSHOT_PUBLISH_MIN_INTERVAL_MILLIS: u64 = 500;
 const DEFAULT_PUBLIC_RELAY_REGISTRATION_FILE: &str = ".agent-relay/public-broker-registration.json";
 const DEFAULT_PUBLIC_RELAY_IDENTITY_FILE: &str = ".agent-relay/public-broker-identity.json";
 pub(crate) const RELAY_BROKER_IDENTITY_PATH_ENV: &str = "RELAY_BROKER_IDENTITY_PATH";
+const MAX_BROKER_TEXT_FRAME_BYTES: usize = 65_536;
 type BrokerSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
 #[derive(Clone, Debug)]
@@ -1444,16 +1445,38 @@ async fn publish_payload(
     payload: OutboundBrokerPayload,
 ) -> Result<(), tokio_tungstenite::tungstenite::Error> {
     let summary = summarize_outbound_payload(&payload);
-    let frame = ClientMessage::Publish {
-        payload: serde_json::to_value(payload).expect("broker payload should serialize"),
-    };
-    let frame_text = serde_json::to_string(&frame).expect("broker client frame should serialize");
+    let frame_text = frame_text_for_payload(&payload);
+    let frame_bytes = frame_text.len();
     info!(
         broker_payload = %summary,
-        frame_bytes = frame_text.len(),
+        frame_bytes,
         "publishing broker payload"
     );
+    if frame_bytes > MAX_BROKER_TEXT_FRAME_BYTES {
+        // TODO(broker-frame-budget): This warn is only diagnostic. The actual fix should live at
+        // this transport boundary: measure the final serialized publish frame, then fall back to a
+        // chunked broker payload when it exceeds the websocket limit instead of attempting a send.
+        // Keep the budget check here even if upstream action-specific compaction improves, because
+        // this is the last point where we know the true post-encryption/post-envelope frame size.
+        warn!(
+            broker_payload = %summary,
+            frame_bytes,
+            frame_limit_bytes = MAX_BROKER_TEXT_FRAME_BYTES,
+            "broker payload exceeds websocket text frame limit before send"
+        );
+    }
     sender.send(Message::Text(frame_text)).await
+}
+
+fn frame_bytes_for_payload(payload: &OutboundBrokerPayload) -> usize {
+    frame_text_for_payload(payload).len()
+}
+
+fn frame_text_for_payload(payload: &OutboundBrokerPayload) -> String {
+    let frame = ClientMessage::Publish {
+        payload: serde_json::to_value(payload.clone()).expect("broker payload should serialize"),
+    };
+    serde_json::to_string(&frame).expect("broker client frame should serialize")
 }
 
 fn resolve_public_relay_registration_path(cwd: &Path, configured: Option<String>) -> PathBuf {

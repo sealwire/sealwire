@@ -1,6 +1,7 @@
 use super::*;
 use crate::protocol::{
-    SecurityMode, ThreadSummaryView, ThreadsResponse, TranscriptEntryKind, TranscriptEntryView,
+    SecurityMode, ThreadEntriesResponse, ThreadSummaryView, ThreadTranscriptResponse,
+    ThreadsResponse, TranscriptEntryKind, TranscriptEntryView,
 };
 
 fn make_snapshot() -> SessionSnapshot {
@@ -108,4 +109,56 @@ fn cached_remote_action_result_keeps_canonical_threads() {
         cached_threads.threads[0].preview,
         threads.threads[0].preview
     );
+}
+
+#[test]
+fn remote_action_result_size_breakdown_reports_large_thread_transcript_payloads() {
+    let mut snapshot = make_snapshot();
+    snapshot.transcript.clear();
+
+    let thread_transcript = ThreadTranscriptResponse {
+        thread_id: "thread-1".to_string(),
+        entries: vec![TranscriptEntryView {
+            item_id: Some("item-large".to_string()),
+            kind: TranscriptEntryKind::AgentText,
+            text: Some("transcript".repeat(3_000)),
+            status: "completed".to_string(),
+            turn_id: Some("turn-large".to_string()),
+            tool: None,
+        }],
+        next_cursor: None,
+        prev_cursor: Some(1),
+    };
+    let thread_entries = ThreadEntriesResponse {
+        thread_id: "thread-1".to_string(),
+        entries: vec![TranscriptEntryView {
+            item_id: Some("item-small".to_string()),
+            kind: TranscriptEntryKind::UserText,
+            text: Some("short".to_string()),
+            status: "completed".to_string(),
+            turn_id: Some("turn-small".to_string()),
+            tool: None,
+        }],
+    };
+
+    let breakdown = measure_remote_action_result_sizes(
+        RemoteActionKind::FetchThreadTranscript,
+        true,
+        &snapshot,
+        None,
+        None,
+        Some(&thread_entries),
+        None,
+        Some(&thread_transcript),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+
+    assert!(breakdown.thread_transcript_bytes > breakdown.thread_entries_bytes);
+    assert!(breakdown.thread_transcript_bytes > breakdown.snapshot_bytes);
+    assert!(breakdown.plaintext_bytes >= breakdown.thread_transcript_bytes);
 }

@@ -26,6 +26,15 @@ import { buildThreadGroups, findLatestThread } from "../shared/thread-groups.js"
 import {
   fetchTranscriptEntryDetailViaRequester,
 } from "../shared/transcript-entry-detail.js";
+import { normalizeThreadTranscriptPage } from "../shared/transcript-page.js";
+import {
+  hydrateLocalTranscript,
+  loadOlderLocalTranscript,
+} from "./transcript/hydration.js";
+import {
+  clearTranscriptHydration,
+  restoreHydratedTranscript,
+} from "./transcript/store.js";
 
 const CONTROL_HEARTBEAT_MS = 5000;
 const LEASE_EXPIRY_REFRESH_SKEW_MS = 250;
@@ -242,98 +251,14 @@ export function createSessionController({
     return Boolean(session?.active_thread_id && state.viewThreadId === session.active_thread_id);
   }
 
-  function transcriptSignature(snapshot) {
-    return JSON.stringify({
-      threadId: snapshot?.active_thread_id || null,
-      turnId: snapshot?.active_turn_id || null,
-      status: snapshot?.current_status || null,
-      transcript: (snapshot?.transcript || []).map((entry) => ({
-        item_id: entry.item_id || null,
-        kind: entry.kind || null,
-        status: entry.status || null,
-        text: entry.text || null,
-        tool: entry.tool
-          ? {
-              item_type: entry.tool.item_type || null,
-              diff: entry.tool.diff || null,
-              file_changes: entry.tool.file_changes || [],
-            }
-          : null,
-      })),
-    });
-  }
-
-  function resetTranscriptPaging(threadId = null) {
-    state.transcriptChunkMap = new Map();
-    state.transcriptChunkThreadId = threadId;
-    state.transcriptDesiredSignature = null;
-    state.transcriptHydratedSignature = null;
-    state.transcriptHydrationLoading = false;
-    state.transcriptOlderCursor = null;
-    state.transcriptTailPromise = null;
-    state.transcriptOlderPromise = null;
+  function resetTranscriptHydrationState() {
+    clearTranscriptHydration(state);
     state.transcriptPreserveScroll = false;
   }
 
-  function setTranscriptLoading(loading, { preserveScroll = false } = {}) {
-    state.transcriptHydrationLoading = loading;
-    state.transcriptPreserveScroll = preserveScroll;
-  }
-
-  function mergeSnapshotWithLoadedTranscript(snapshot) {
-    if (
-      !snapshot?.active_thread_id ||
-      state.transcriptChunkThreadId !== snapshot.active_thread_id ||
-      !state.transcriptChunkMap.size
-    ) {
-      return snapshot;
-    }
-
-    const grouped = new Map();
-    for (const part of state.transcriptChunkMap.values()) {
-      if (!grouped.has(part.entry_index)) {
-        grouped.set(part.entry_index, {
-          item_id: part.item_id,
-          kind: part.kind,
-          status: part.status,
-          turn_id: part.turn_id || null,
-          tool: part.tool || null,
-          parts: new Array(part.part_count).fill(""),
-        });
-      }
-      const entry = grouped.get(part.entry_index);
-      entry.item_id = part.item_id;
-      entry.kind = part.kind;
-      entry.status = part.status;
-      entry.turn_id = part.turn_id || null;
-      entry.tool = part.tool || null;
-      if (part.part_index >= entry.parts.length) {
-        entry.parts.length = part.part_count;
-      }
-      entry.parts[part.part_index] = part.text || "";
-    }
-
-    const transcript = [...grouped.entries()]
-      .sort(([left], [right]) => left - right)
-      .map(([, entry]) => ({
-        item_id: entry.item_id,
-        kind: entry.kind,
-        text: entry.parts.join("") || null,
-        status: entry.status,
-        turn_id: entry.turn_id,
-        tool: entry.tool,
-      }));
-
-    return {
-      ...snapshot,
-      transcript,
-      transcript_truncated: state.transcriptOlderCursor != null,
-    };
-  }
-
   function applySessionSnapshot(snapshot) {
-    if (snapshot?.active_thread_id !== state.transcriptChunkThreadId) {
-      resetTranscriptPaging(snapshot?.active_thread_id || null);
+    if (snapshot?.active_thread_id !== state.transcriptHydrationThreadId) {
+      resetTranscriptHydrationState();
     }
     if (snapshot?.active_thread_id !== state.transcriptDetailThreadId) {
       state.transcriptDetailEntries = new Map();
@@ -341,8 +266,7 @@ export function createSessionController({
       state.transcriptLoadingItemIds = new Set();
     }
 
-    state.transcriptDesiredSignature = transcriptSignature(snapshot);
-    const merged = mergeSnapshotWithLoadedTranscript(snapshot);
+    const merged = restoreHydratedTranscript(state, snapshot);
     renderSession(merged);
   }
 
@@ -393,26 +317,7 @@ export function createSessionController({
       throw new Error(payload?.error?.message || "Failed to load transcript history");
     }
 
-    return payload.data;
-  }
-
-  function storeTranscriptPage(page) {
-    for (const entry of page?.entries || []) {
-      for (const part of entry.parts || []) {
-        state.transcriptChunkMap.set(`${entry.entry_index}:${part.part_index}`, {
-          entry_index: entry.entry_index,
-          item_id: entry.item_id,
-          kind: entry.kind,
-          status: entry.status,
-          turn_id: entry.turn_id || null,
-          tool: entry.tool || null,
-          part_index: part.part_index,
-          part_count: entry.part_count,
-          text: part.text || "",
-        });
-      }
-    }
-    state.transcriptOlderCursor = page?.prev_cursor ?? null;
+    return normalizeThreadTranscriptPage(payload.data);
   }
 
   async function ensureConversationTranscript(session = state.session) {
@@ -420,56 +325,18 @@ export function createSessionController({
       return;
     }
 
-    const threadId = session.active_thread_id;
-    const desiredSignature = state.transcriptDesiredSignature || transcriptSignature(session);
-    if (
-      state.transcriptChunkThreadId === threadId &&
-      state.transcriptHydratedSignature === desiredSignature
-    ) {
-      return;
-    }
-    if (state.transcriptTailPromise) {
-      return state.transcriptTailPromise;
-    }
-
-    state.transcriptTailPromise = (async () => {
-      setTranscriptLoading(true);
-      renderSession(
-        mergeSnapshotWithLoadedTranscript({
-          ...state.session,
-          active_thread_id: threadId,
-        })
-      );
-      const page = await fetchTranscriptPage(threadId);
-      if (state.session?.active_thread_id !== threadId) {
-        setTranscriptLoading(false);
-        return;
-      }
-      if (state.transcriptChunkThreadId !== threadId) {
-        resetTranscriptPaging(threadId);
-      }
-      storeTranscriptPage(page);
-      state.transcriptHydratedSignature = desiredSignature;
-      setTranscriptLoading(false);
-      renderSession(
-        mergeSnapshotWithLoadedTranscript({
-          ...state.session,
-          active_thread_id: threadId,
-        })
-      );
-    })()
-      .catch((error) => {
-        setTranscriptLoading(false);
-        if (state.session?.active_thread_id === threadId) {
-          renderSession(mergeSnapshotWithLoadedTranscript(state.session));
+    return hydrateLocalTranscript(state, session, {
+      fetchPage: ({ threadId, before }) => fetchTranscriptPage(threadId, { before }),
+      onProgress(hydratedSnapshot) {
+        renderSession(hydratedSnapshot);
+      },
+      onError(error) {
+        if (state.session) {
+          renderSession(restoreHydratedTranscript(state, state.session));
         }
         logLine(`Transcript sync failed: ${error.message}`);
-      })
-      .finally(() => {
-        state.transcriptTailPromise = null;
-      });
-
-    return state.transcriptTailPromise;
+      },
+    });
   }
 
   async function maybeLoadOlderTranscript() {
@@ -478,53 +345,37 @@ export function createSessionController({
       transcript.scrollTop > 80 ||
       !state.session?.active_thread_id ||
       !isViewingConversation(state.session) ||
-      state.transcriptOlderCursor == null
+      state.transcriptHydrationOlderCursor == null
     ) {
       return;
     }
-    if (state.transcriptOlderPromise) {
-      return state.transcriptOlderPromise;
-    }
 
-    const threadId = state.session.active_thread_id;
     const previousScrollHeight = transcript.scrollHeight;
     const previousScrollTop = transcript.scrollTop;
+    state.transcriptPreserveScroll = true;
 
-    state.transcriptOlderPromise = (async () => {
-      setTranscriptLoading(true, { preserveScroll: true });
-      renderSession(mergeSnapshotWithLoadedTranscript(state.session));
-      const page = await fetchTranscriptPage(threadId, {
-        before: state.transcriptOlderCursor,
-      });
-      if (state.session?.active_thread_id !== threadId) {
-        setTranscriptLoading(false);
-        return;
-      }
-      storeTranscriptPage(page);
-      renderSession(mergeSnapshotWithLoadedTranscript(state.session));
-      window.requestAnimationFrame(() => {
-        const nextScrollHeight = transcript.scrollHeight;
-        transcript.scrollTop = Math.max(
-          0,
-          nextScrollHeight - previousScrollHeight + previousScrollTop
-        );
-        setTranscriptLoading(false, { preserveScroll: true });
-        renderSession(mergeSnapshotWithLoadedTranscript(state.session));
+    return loadOlderLocalTranscript(state, {
+      fetchPage: ({ threadId, before }) => fetchTranscriptPage(threadId, { before }),
+      onProgress(hydratedSnapshot) {
+        renderSession(hydratedSnapshot);
+        window.requestAnimationFrame(() => {
+          const nextScrollHeight = transcript.scrollHeight;
+          transcript.scrollTop = Math.max(
+            0,
+            nextScrollHeight - previousScrollHeight + previousScrollTop
+          );
+          state.transcriptPreserveScroll = false;
+          renderSession(hydratedSnapshot);
+        });
+      },
+      onError(error) {
         state.transcriptPreserveScroll = false;
-      });
-    })()
-      .catch((error) => {
-        setTranscriptLoading(false);
-        if (state.session?.active_thread_id === threadId) {
-          renderSession(mergeSnapshotWithLoadedTranscript(state.session));
+        if (state.session) {
+          renderSession(restoreHydratedTranscript(state, state.session));
         }
         logLine(`Older transcript load failed: ${error.message}`);
-      })
-      .finally(() => {
-        state.transcriptOlderPromise = null;
-      });
-
-    return state.transcriptOlderPromise;
+      },
+    });
   }
 
   function connectSessionStream() {
@@ -1097,7 +948,7 @@ export function createSessionController({
       return;
     }
 
-    const snapshot = mergeSnapshotWithLoadedTranscript(state.session);
+    const snapshot = restoreHydratedTranscript(state, state.session);
     const entry = (snapshot?.transcript || []).find((candidate) => candidate?.item_id === itemId);
     if (!entry || (entry.kind !== "tool_call" && entry.kind !== "command")) {
       return;
