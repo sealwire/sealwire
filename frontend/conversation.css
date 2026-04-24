@@ -361,7 +361,6 @@
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 5px 8px;
   min-width: 0;
   padding: 10px 12px;
   cursor: pointer;
@@ -390,29 +389,6 @@
   min-width: 0;
   overflow: hidden;
   color: var(--text-primary);
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.diff-file-section-secondary {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-.diff-file-section-kind {
-  flex-shrink: 0;
-  color: var(--text-secondary);
-  font-size: 12px;
-  text-transform: lowercase;
-}
-
-.diff-file-section-path {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text-secondary);
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -457,7 +433,7 @@
 
 .diff-line {
   display: grid;
-  grid-template-columns: 24px minmax(0, 1fr);
+  grid-template-columns: 24px 52px 52px minmax(0, 1fr);
   min-width: max-content;
   border-bottom: 1px solid rgba(255, 255, 255, 0.03);
 }
@@ -466,6 +442,13 @@
   padding: 1px 6px;
   color: var(--text-tertiary);
   text-align: center;
+  user-select: none;
+}
+
+.diff-line-number {
+  padding: 1px 6px;
+  color: var(--text-tertiary);
+  text-align: right;
   user-select: none;
 }
 
@@ -481,11 +464,6 @@
 
 .diff-line-delete {
   background: rgba(180, 58, 58, 0.16);
-}
-
-.diff-line-hunk {
-  background: rgba(75, 105, 160, 0.18);
-  color: var(--text-primary);
 }
 
 .diff-line-meta {

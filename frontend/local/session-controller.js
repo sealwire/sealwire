@@ -23,6 +23,9 @@ import {
 import { renderAllowedRoots, renderPairingPanel } from "./render-security.js";
 import { openSessionStream, sessionStreamUrl } from "../session-stream.js";
 import { buildThreadGroups, findLatestThread } from "../shared/thread-groups.js";
+import {
+  fetchTranscriptEntryDetailViaRequester,
+} from "../shared/transcript-entry-detail.js";
 
 const CONTROL_HEARTBEAT_MS = 5000;
 const LEASE_EXPIRY_REFRESH_SKEW_MS = 250;
@@ -265,9 +268,16 @@ export function createSessionController({
     state.transcriptChunkThreadId = threadId;
     state.transcriptDesiredSignature = null;
     state.transcriptHydratedSignature = null;
+    state.transcriptHydrationLoading = false;
     state.transcriptOlderCursor = null;
     state.transcriptTailPromise = null;
     state.transcriptOlderPromise = null;
+    state.transcriptPreserveScroll = false;
+  }
+
+  function setTranscriptLoading(loading, { preserveScroll = false } = {}) {
+    state.transcriptHydrationLoading = loading;
+    state.transcriptPreserveScroll = preserveScroll;
   }
 
   function mergeSnapshotWithLoadedTranscript(snapshot) {
@@ -325,10 +335,46 @@ export function createSessionController({
     if (snapshot?.active_thread_id !== state.transcriptChunkThreadId) {
       resetTranscriptPaging(snapshot?.active_thread_id || null);
     }
+    if (snapshot?.active_thread_id !== state.transcriptDetailThreadId) {
+      state.transcriptDetailEntries = new Map();
+      state.transcriptDetailThreadId = snapshot?.active_thread_id || null;
+      state.transcriptLoadingItemIds = new Set();
+    }
 
     state.transcriptDesiredSignature = transcriptSignature(snapshot);
     const merged = mergeSnapshotWithLoadedTranscript(snapshot);
     renderSession(merged);
+  }
+
+  async function requestTranscriptEntryDetail(threadId, itemId, { field = null, cursor = null } = {}) {
+    const url = new URL(
+      `/api/threads/${encodeURIComponent(threadId)}/entries/${encodeURIComponent(itemId)}/detail`,
+      window.location.origin
+    );
+    if (field) {
+      url.searchParams.set("field", field);
+    }
+    if (typeof cursor === "number") {
+      url.searchParams.set("cursor", String(cursor));
+    }
+
+    const response = await apiFetch(url);
+    const payload = await response.json();
+
+    if (!response.ok || !payload.ok) {
+      throw new Error(payload?.error?.message || "Failed to load transcript entry detail");
+    }
+
+    return payload.data;
+  }
+
+  async function fetchTranscriptEntryDetail(threadId, itemId) {
+    return fetchTranscriptEntryDetailViaRequester({
+      itemId,
+      requestDetail: ({ cursor, field, itemId: requestItemId, threadId: requestThreadId }) =>
+        requestTranscriptEntryDetail(requestThreadId, requestItemId, { cursor, field }),
+      threadId,
+    });
   }
 
   async function fetchTranscriptPage(threadId, { before = null } = {}) {
@@ -387,8 +433,16 @@ export function createSessionController({
     }
 
     state.transcriptTailPromise = (async () => {
+      setTranscriptLoading(true);
+      renderSession(
+        mergeSnapshotWithLoadedTranscript({
+          ...state.session,
+          active_thread_id: threadId,
+        })
+      );
       const page = await fetchTranscriptPage(threadId);
       if (state.session?.active_thread_id !== threadId) {
+        setTranscriptLoading(false);
         return;
       }
       if (state.transcriptChunkThreadId !== threadId) {
@@ -396,6 +450,7 @@ export function createSessionController({
       }
       storeTranscriptPage(page);
       state.transcriptHydratedSignature = desiredSignature;
+      setTranscriptLoading(false);
       renderSession(
         mergeSnapshotWithLoadedTranscript({
           ...state.session,
@@ -404,6 +459,10 @@ export function createSessionController({
       );
     })()
       .catch((error) => {
+        setTranscriptLoading(false);
+        if (state.session?.active_thread_id === threadId) {
+          renderSession(mergeSnapshotWithLoadedTranscript(state.session));
+        }
         logLine(`Transcript sync failed: ${error.message}`);
       })
       .finally(() => {
@@ -432,10 +491,13 @@ export function createSessionController({
     const previousScrollTop = transcript.scrollTop;
 
     state.transcriptOlderPromise = (async () => {
+      setTranscriptLoading(true, { preserveScroll: true });
+      renderSession(mergeSnapshotWithLoadedTranscript(state.session));
       const page = await fetchTranscriptPage(threadId, {
         before: state.transcriptOlderCursor,
       });
       if (state.session?.active_thread_id !== threadId) {
+        setTranscriptLoading(false);
         return;
       }
       storeTranscriptPage(page);
@@ -446,9 +508,16 @@ export function createSessionController({
           0,
           nextScrollHeight - previousScrollHeight + previousScrollTop
         );
+        setTranscriptLoading(false, { preserveScroll: true });
+        renderSession(mergeSnapshotWithLoadedTranscript(state.session));
+        state.transcriptPreserveScroll = false;
       });
     })()
       .catch((error) => {
+        setTranscriptLoading(false);
+        if (state.session?.active_thread_id === threadId) {
+          renderSession(mergeSnapshotWithLoadedTranscript(state.session));
+        }
         logLine(`Older transcript load failed: ${error.message}`);
       })
       .finally(() => {
@@ -1001,7 +1070,7 @@ export function createSessionController({
     }
   }
 
-  function toggleTranscriptEntry(itemId) {
+  async function toggleTranscriptEntry(itemId) {
     if (!itemId) {
       return;
     }
@@ -1016,6 +1085,44 @@ export function createSessionController({
     }
     if (state.session) {
       renderSession(state.session);
+    }
+
+    if (
+      !state.transcriptExpandedItemIds.has(expandKey)
+      || !state.session?.active_thread_id
+      || state.transcriptDetailThreadId !== state.session.active_thread_id
+      || state.transcriptDetailEntries.has(itemId)
+      || state.transcriptLoadingItemIds.has(itemId)
+    ) {
+      return;
+    }
+
+    const snapshot = mergeSnapshotWithLoadedTranscript(state.session);
+    const entry = (snapshot?.transcript || []).find((candidate) => candidate?.item_id === itemId);
+    if (!entry || (entry.kind !== "tool_call" && entry.kind !== "command")) {
+      return;
+    }
+
+    state.transcriptLoadingItemIds = new Set(state.transcriptLoadingItemIds).add(itemId);
+    renderSession(state.session);
+
+    try {
+      const detail = await fetchTranscriptEntryDetail(state.session.active_thread_id, itemId);
+      if (!detail || state.session?.active_thread_id !== state.transcriptDetailThreadId) {
+        return;
+      }
+      const nextDetails = new Map(state.transcriptDetailEntries);
+      nextDetails.set(itemId, detail);
+      state.transcriptDetailEntries = nextDetails;
+    } catch (error) {
+      logLine(`Transcript detail load failed: ${error.message}`);
+    } finally {
+      const nextLoading = new Set(state.transcriptLoadingItemIds);
+      nextLoading.delete(itemId);
+      state.transcriptLoadingItemIds = nextLoading;
+      if (state.session) {
+        renderSession(state.session);
+      }
     }
   }
 

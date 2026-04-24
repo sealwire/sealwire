@@ -148,6 +148,52 @@ fn parse_transcript_enriches_file_change_tool_items_with_paths() {
 }
 
 #[test]
+fn parse_transcript_enriches_new_file_changes_with_synthetic_diff() {
+    let thread = json!({
+        "turns": [
+            {
+                "id": "turn-1",
+                "items": [
+                    {
+                        "id": "item-file-change",
+                        "type": "fileChange",
+                        "changes": [
+                            {
+                                "path": "crates/relay-server/src/file_changes.rs",
+                                "type": "add",
+                                "content": "pub(crate) fn merge_file_change_diff(existing: &str, incoming: &str) -> String {\n    format!(\"{existing}{incoming}\")\n}"
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    });
+
+    let transcript = parse_transcript(&thread);
+    let tool = transcript[0]
+        .tool
+        .as_ref()
+        .expect("file change should render as a tool call");
+
+    assert_eq!(tool.file_changes.len(), 1);
+    assert_eq!(tool.file_changes[0].change_type, "add");
+    assert!(tool.file_changes[0].diff.contains("new file mode 100644"));
+    assert!(tool.file_changes[0].diff.contains("--- /dev/null"));
+    assert!(tool.file_changes[0]
+        .diff
+        .contains("+++ b/crates/relay-server/src/file_changes.rs"));
+    assert!(tool.file_changes[0].diff.contains("@@ -0,0 +1,3 @@"));
+    assert!(tool.file_changes[0].diff.contains(
+        "+pub(crate) fn merge_file_change_diff(existing: &str, incoming: &str) -> String {"
+    ));
+    assert_eq!(
+        tool.diff.as_deref(),
+        Some(tool.file_changes[0].diff.as_str())
+    );
+}
+
+#[test]
 fn parse_transcript_builds_turn_summary_from_path_only_file_changes() {
     let thread = json!({
         "turns": [
@@ -187,7 +233,7 @@ fn parse_transcript_builds_turn_summary_from_path_only_file_changes() {
 }
 
 #[test]
-fn parse_transcript_turn_summary_prefers_latest_diff_for_repeated_file_changes() {
+fn parse_transcript_turn_summary_accumulates_multiple_hunks_for_same_file() {
     let thread = json!({
         "turns": [
             {
@@ -228,8 +274,10 @@ fn parse_transcript_turn_summary_prefers_latest_diff_for_repeated_file_changes()
 
     assert_eq!(summary.item_type, "turnDiff");
     assert_eq!(summary.file_changes.len(), 1);
+    assert!(summary.file_changes[0].diff.contains("+mid"));
     assert!(summary.file_changes[0].diff.contains("+final"));
-    assert!(!summary.file_changes[0].diff.contains("+mid"));
+    assert!(summary.file_changes[0].diff.contains("-old"));
+    assert!(summary.file_changes[0].diff.contains("-mid"));
 }
 
 #[test]
@@ -504,6 +552,164 @@ async fn handle_notification_enriches_turn_diff_from_same_turn_file_changes() {
     assert_eq!(summary.file_changes.len(), 1);
     assert_eq!(summary.file_changes[0].path, "frontend/app.js");
     assert_eq!(summary.diff.as_deref(), Some("@@ -1 +1 @@\n-old\n+new"));
+}
+
+#[tokio::test]
+async fn handle_notification_enriches_turn_diff_from_added_file_content() {
+    let (change_tx, _) = watch::channel(0_u64);
+    let state = std::sync::Arc::new(RwLock::new(RelayState::new(
+        "/tmp/project".to_string(),
+        change_tx,
+        SecurityProfile::private(),
+    )));
+
+    {
+        let mut relay = state.write().await;
+        relay.active_thread_id = Some("thread-1".to_string());
+    }
+
+    handle_notification(
+        json!({
+            "method": "turn/diff/updated",
+            "params": {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "diff": "@@ -1 +1 @@\n-old\n+new"
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    handle_notification(
+        json!({
+            "method": "item/completed",
+            "params": {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "item": {
+                    "id": "item-file-change",
+                    "type": "fileChange",
+                    "status": "completed",
+                    "changes": [
+                        {
+                            "path": "crates/relay-server/src/file_changes.rs",
+                            "type": "add",
+                            "content": "one\ntwo\nthree"
+                        }
+                    ]
+                }
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    let relay = state.read().await;
+    let snapshot = relay.snapshot();
+    let summary = snapshot
+        .transcript
+        .iter()
+        .find(|entry| entry.item_id.as_deref() == Some("turn-diff:turn-1"))
+        .and_then(|entry| entry.tool.as_ref())
+        .expect("turn diff entry should exist");
+
+    assert_eq!(summary.file_changes.len(), 1);
+    assert_eq!(summary.file_changes[0].change_type, "add");
+    assert!(summary.file_changes[0]
+        .diff
+        .contains("new file mode 100644"));
+    assert!(summary.file_changes[0].diff.contains("@@ -0,0 +1,3 @@"));
+    assert_eq!(summary.diff.as_deref(), Some("@@ -1 +1 @@\n-old\n+new"));
+}
+
+#[tokio::test]
+async fn handle_notification_turn_diff_accumulates_multiple_hunks_for_same_file() {
+    let (change_tx, _) = watch::channel(0_u64);
+    let state = std::sync::Arc::new(RwLock::new(RelayState::new(
+        "/tmp/project".to_string(),
+        change_tx,
+        SecurityProfile::private(),
+    )));
+
+    {
+        let mut relay = state.write().await;
+        relay.active_thread_id = Some("thread-1".to_string());
+    }
+
+    handle_notification(
+        json!({
+            "method": "turn/diff/updated",
+            "params": {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "diff": "@@ -1 +1 @@\n-old\n+new"
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    handle_notification(
+        json!({
+            "method": "item/completed",
+            "params": {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "item": {
+                    "id": "item-file-change-1",
+                    "type": "fileChange",
+                    "status": "completed",
+                    "changes": [
+                        {
+                            "path": "frontend/app.js",
+                            "kind": "modify",
+                            "diff": "diff --git a/frontend/app.js b/frontend/app.js\n@@ -10 +10 @@\n-a\n+b"
+                        }
+                    ]
+                }
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    handle_notification(
+        json!({
+            "method": "item/completed",
+            "params": {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "item": {
+                    "id": "item-file-change-2",
+                    "type": "fileChange",
+                    "status": "completed",
+                    "changes": [
+                        {
+                            "path": "frontend/app.js",
+                            "kind": "modify",
+                            "diff": "diff --git a/frontend/app.js b/frontend/app.js\n@@ -20 +20 @@\n-c\n+d"
+                        }
+                    ]
+                }
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    let relay = state.read().await;
+    let snapshot = relay.snapshot();
+    let summary = snapshot
+        .transcript
+        .iter()
+        .find(|entry| entry.item_id.as_deref() == Some("turn-diff:turn-1"))
+        .and_then(|entry| entry.tool.as_ref())
+        .expect("turn diff entry should exist");
+
+    assert_eq!(summary.file_changes.len(), 1);
+    assert!(summary.file_changes[0].diff.contains("@@ -10 +10 @@"));
+    assert!(summary.file_changes[0].diff.contains("@@ -20 +20 @@"));
 }
 
 #[tokio::test]

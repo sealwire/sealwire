@@ -2,6 +2,7 @@ mod auth;
 mod broker;
 mod codex;
 mod codex_local;
+mod file_changes;
 mod protocol;
 #[cfg(test)]
 mod protocol_tests;
@@ -32,10 +33,10 @@ use protocol::{
     ApplyFileChangeReceipt, ApprovalDecisionInput, ApprovalReceipt, AuthSessionInput,
     AuthSessionView, BulkRevokeDevicesReceipt, HealthResponse, HeartbeatInput,
     PairingDecisionInput, PairingDecisionReceipt, PairingStartInput, PairingTicketView,
-    ReadThreadTranscriptInput, ResumeSessionInput, RevokeDeviceReceipt, SendMessageInput,
-    SessionSnapshot, SessionSnapshotCompactProfile, StartSessionInput, TakeOverInput,
-    ThreadArchiveReceipt, ThreadDeleteReceipt, ThreadTranscriptResponse, ThreadsQuery,
-    ThreadsResponse,
+    ReadThreadEntryDetailInput, ReadThreadTranscriptInput, ResumeSessionInput, RevokeDeviceReceipt,
+    SendMessageInput, SessionSnapshot, SessionSnapshotCompactProfile, StartSessionInput,
+    TakeOverInput, ThreadArchiveReceipt, ThreadDeleteReceipt, ThreadEntryDetailResponse,
+    ThreadTranscriptResponse, ThreadsQuery, ThreadsResponse,
 };
 use relay_http::{
     apply_standard_security_headers, header_origin, parse_optional_string_env, request_origin,
@@ -69,6 +70,12 @@ struct AppContext {
 struct ThreadTranscriptQuery {
     cursor: Option<usize>,
     before: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ThreadEntryDetailQuery {
+    field: Option<String>,
+    cursor: Option<usize>,
 }
 
 #[tokio::main]
@@ -144,6 +151,10 @@ fn build_router(context: AppContext, web_root: PathBuf) -> Router {
         .route("/api/stream", get(session_stream))
         .route("/api/threads", get(list_threads))
         .route("/api/threads/:thread_id/transcript", get(thread_transcript))
+        .route(
+            "/api/threads/:thread_id/entries/:item_id/detail",
+            get(thread_entry_detail),
+        )
         .route("/api/allowed-roots", post(update_allowed_roots))
         .route("/api/threads/:thread_id/archive", post(archive_thread))
         .route(
@@ -345,6 +356,33 @@ async fn thread_transcript(
         })
         .await
         .map(|transcript| Json(ApiEnvelope::ok(transcript)))
+        .map_err(|error| {
+            if is_path_policy_error(&error) {
+                bad_request(error)
+            } else {
+                bad_gateway(error)
+            }
+        })
+}
+
+async fn thread_entry_detail(
+    Path((thread_id, item_id)): Path<(String, String)>,
+    State(context): State<AppContext>,
+    headers: HeaderMap,
+    uri: Uri,
+    Query(query): Query<ThreadEntryDetailQuery>,
+) -> Result<Json<ApiEnvelope<ThreadEntryDetailResponse>>, (StatusCode, Json<ApiError>)> {
+    authorize_api(&context, &headers, &uri)?;
+    context
+        .app
+        .read_thread_entry_detail(ReadThreadEntryDetailInput {
+            thread_id,
+            item_id,
+            field: query.field,
+            cursor: query.cursor,
+        })
+        .await
+        .map(|detail| Json(ApiEnvelope::ok(detail)))
         .map_err(|error| {
             if is_path_policy_error(&error) {
                 bad_request(error)

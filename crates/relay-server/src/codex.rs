@@ -1327,19 +1327,18 @@ fn build_turn_diff_entry_with_fallback(
             .map(extract_paths_from_unified_diff)
             .unwrap_or_default()
         {
-            merge_file_change_view(
+            crate::file_changes::merge_file_change_view(
                 &mut file_changes,
                 FileChangeDiffView {
                     path,
                     change_type: "update".to_string(),
                     diff: String::new(),
                 },
-                false,
             );
         }
     }
     for change in fallback_file_changes {
-        merge_file_change_view(&mut file_changes, change, false);
+        crate::file_changes::merge_file_change_view(&mut file_changes, change);
     }
     let paths = file_changes
         .iter()
@@ -1615,8 +1614,9 @@ fn collect_file_change_diffs(item: &Value) -> Vec<FileChangeDiffView> {
         .iter()
         .filter_map(|change| {
             let path = string_at(change, &["path"])?;
-            let diff = string_at(change, &["diff"])?;
             let change_type = parse_file_change_kind(change);
+            let diff = string_at(change, &["diff"])
+                .or_else(|| synthesize_file_change_diff(change, &path, &change_type))?;
             Some(FileChangeDiffView {
                 path,
                 change_type,
@@ -1626,33 +1626,31 @@ fn collect_file_change_diffs(item: &Value) -> Vec<FileChangeDiffView> {
         .collect()
 }
 
-fn merge_file_change_view(
-    file_changes: &mut Vec<FileChangeDiffView>,
-    incoming: FileChangeDiffView,
-    replace_existing_diff: bool,
-) {
-    if let Some(existing) = file_changes
-        .iter_mut()
-        .find(|change| change.path == incoming.path)
-    {
-        if replace_existing_diff {
-            if !incoming.diff.is_empty() || existing.diff.is_empty() {
-                *existing = incoming;
-            } else if existing.change_type == "update" && incoming.change_type != "update" {
-                existing.change_type = incoming.change_type;
-            }
-            return;
+fn synthesize_file_change_diff(change: &Value, path: &str, change_type: &str) -> Option<String> {
+    match change_type {
+        "add" | "create" => {
+            let content = string_at(change, &["content"])?;
+            Some(render_added_file_diff(path, &content))
         }
-
-        if existing.diff.is_empty() && !incoming.diff.is_empty() {
-            *existing = incoming;
-        } else if existing.change_type == "update" && incoming.change_type != "update" {
-            existing.change_type = incoming.change_type;
-        }
-        return;
+        _ => None,
     }
+}
 
-    file_changes.push(incoming);
+fn render_added_file_diff(path: &str, content: &str) -> String {
+    let normalized_lines = content
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+        .collect::<Vec<_>>();
+    let line_count = normalized_lines.len();
+    let mut diff_lines = vec![
+        format!("diff --git a/{path} b/{path}"),
+        "new file mode 100644".to_string(),
+        "--- /dev/null".to_string(),
+        format!("+++ b/{path}"),
+        format!("@@ -0,0 +1,{line_count} @@"),
+    ];
+    diff_lines.extend(normalized_lines.into_iter().map(|line| format!("+{line}")));
+    diff_lines.join("\n")
 }
 
 fn summarize_turn_file_changes(items: &[Value]) -> Vec<FileChangeDiffView> {
@@ -1662,18 +1660,17 @@ fn summarize_turn_file_changes(items: &[Value]) -> Vec<FileChangeDiffView> {
             continue;
         }
         for path in collect_file_change_paths(item) {
-            merge_file_change_view(
+            crate::file_changes::merge_file_change_view(
                 &mut file_changes,
                 FileChangeDiffView {
                     path,
                     change_type: "update".to_string(),
                     diff: String::new(),
                 },
-                false,
             );
         }
         for change in collect_file_change_diffs(item) {
-            merge_file_change_view(&mut file_changes, change, true);
+            crate::file_changes::merge_file_change_view(&mut file_changes, change);
         }
     }
     file_changes

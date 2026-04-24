@@ -35,6 +35,7 @@ import {
   canonicalizeWorkspace,
   summarizeThreadGroups,
 } from "../shared/thread-groups.js";
+import { shouldShowTranscriptLoading } from "./transcript-loading.js";
 import {
   ConversationEmptyState,
   ReadyConversationState,
@@ -749,13 +750,19 @@ export function createSessionRenderer({
       h(TranscriptState, {
         approval,
         entries,
+        hydrationLoading: shouldShowTranscriptLoading(session, state),
         options: {
+          currentCwd: session?.current_cwd || state.selectedCwd || "",
+          detailEntries: state.transcriptDetailEntries,
           enableFileChangeActions: true,
           expandedKeys: state.transcriptExpandedItemIds || new Set(),
+          loadingItemIds: state.transcriptLoadingItemIds || new Set(),
         },
       })
     );
-    transcript.scrollTop = transcript.scrollHeight;
+    if (!state.transcriptPreserveScroll) {
+      transcript.scrollTop = transcript.scrollHeight;
+    }
   }
 
   function renderThreads() {

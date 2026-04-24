@@ -121,12 +121,17 @@ const state = {
   streamConnected: false,
   transcriptChunkMap: new Map(),
   transcriptChunkThreadId: null,
+  transcriptDetailEntries: new Map(),
+  transcriptDetailThreadId: null,
   transcriptDesiredSignature: null,
   transcriptHydratedSignature: null,
   transcriptExpandedItemIds: new Set(),
+  transcriptHydrationLoading: false,
+  transcriptLoadingItemIds: new Set(),
   transcriptOlderCursor: null,
   transcriptTailPromise: null,
   transcriptOlderPromise: null,
+  transcriptPreserveScroll: false,
   pendingThreadHistoryScrollTop: null,
   threadGroups: [],
   threadHistoryScrollTop: 0,
@@ -465,7 +470,7 @@ transcript.addEventListener("click", (event) => {
 
   const transcriptToggleButton = event.target.closest("[data-transcript-toggle='entry']");
   if (transcriptToggleButton) {
-    toggleTranscriptEntry(transcriptToggleButton.dataset.itemId);
+    void toggleTranscriptEntry(transcriptToggleButton.dataset.itemId);
     return;
   }
 

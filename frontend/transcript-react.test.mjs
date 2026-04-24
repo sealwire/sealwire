@@ -220,11 +220,13 @@ test("renderEntryMarkup expands file change diffs with rollback controls", () =>
     expandedKeys: new Set(["entry:fc-2"]),
   });
 
-  assert.match(markup, /▴/);
+  assert.match(markup, /diff-file-section-chevron/);
   assert.match(markup, /data-file-change-action="rollback"/);
   assert.match(markup, /data-file-change-action="reapply"/);
   assert.match(markup, /diff-line-delete/);
   assert.match(markup, /diff-line-add/);
+  assert.match(markup, /diff-line-number">1</);
+  assert.doesNotMatch(markup, /@@ -1 \+1 @@/);
   assert.match(markup, /frontend\/app\.js/);
 });
 
@@ -262,8 +264,189 @@ test("renderEntryMarkup expands turn diff entries into per-file sections", () =>
   assert.match(markup, /file-change-chip-del">-1/);
   assert.match(markup, /frontend\/app\.js/);
   assert.match(markup, /frontend\/styles\.css/);
-  assert.match(markup, /diff --git a\/frontend\/app\.js b\/frontend\/app\.js/);
-  assert.match(markup, /diff --git a\/frontend\/styles\.css b\/frontend\/styles\.css/);
+  assert.match(markup, /diff-line-number">1</);
+  assert.doesNotMatch(markup, /diff --git a\/frontend\/app\.js b\/frontend\/app\.js/);
+  assert.doesNotMatch(markup, /diff --git a\/frontend\/styles\.css b\/frontend\/styles\.css/);
+  assert.doesNotMatch(markup, /@@ -1 \+1 @@/);
+});
+
+test("renderEntryMarkup enriches path-only file changes from a single new-file diff", () => {
+  const diff = [
+    "diff --git a/crates/relay-server/src/file_changes.rs b/crates/relay-server/src/file_changes.rs",
+    "new file mode 100644",
+    "index 0000000..1111111",
+    "--- /dev/null",
+    "+++ b/crates/relay-server/src/file_changes.rs",
+    "@@ -0,0 +1,11 @@",
+    "+pub(crate) fn merge_file_change_diff(existing: &str, incoming: &str) -> String {",
+    "+    match (existing.trim(), incoming.trim()) {",
+    "+        (\"\", \"\") => String::new(),",
+    "+        (\"\", incoming) => incoming.to_string(),",
+    "+        (existing, \"\") => existing.to_string(),",
+    "+        (existing, incoming) if existing == incoming => existing.to_string(),",
+    "+        (existing, incoming) if existing.contains(incoming) => existing.to_string(),",
+    "+        (existing, incoming) if incoming.contains(existing) => incoming.to_string(),",
+    "+        (existing, incoming) => format!(\"{existing}\\\\n{incoming}\"),",
+    "+    }",
+    "+}",
+  ].join("\n");
+
+  const markup = renderEntryMarkup({
+    item_id: "turn-diff:new-file",
+    kind: "tool_call",
+    status: "completed",
+    tool: {
+      name: "File summary",
+      title: "Codex changed 1 file in this turn.",
+      item_type: "turnDiff",
+      diff,
+      file_changes: [
+        {
+          path: "crates/relay-server/src/file_changes.rs",
+          change_type: "add",
+          diff: "",
+        },
+      ],
+    },
+  }, {
+    expandedKeys: new Set(["entry:turn-diff:new-file"]),
+  });
+
+  assert.match(markup, /file_changes\.rs<\/strong><span class="file-change-chip-add">\+11/);
+  assert.match(markup, /crates\/relay-server\/src\/file_changes\.rs/);
+  assert.match(markup, /diff-line diff-line-add/);
+  assert.match(markup, /diff-line-number">11</);
+  assert.doesNotMatch(markup, /file-change-chip-del">-1/);
+  assert.doesNotMatch(markup, /Diff unavailable for this file\./);
+});
+
+test("renderEntryMarkup treats raw created-file content as added lines", () => {
+  const markup = renderEntryMarkup({
+    item_id: "file-change:raw-add",
+    kind: "tool_call",
+    status: "completed",
+    tool: {
+      name: "File change",
+      title: "Codex wants to edit `file-diff-ui-smoke-test.md`.",
+      item_type: "fileChange",
+      path: "/Users/luchi/git/agent-relay/file-diff-ui-smoke-test.md",
+      diff: [
+        "# File Diff UI Smoke Test",
+        "",
+        "This file exists to verify created-file rendering in transcript views.",
+        "",
+        "- It is intentionally small.",
+        "- It should appear as a newly created file.",
+        "- The UI should show a positive added-line count.",
+        "- The diff body should render as added lines.",
+      ].join("\n"),
+      file_changes: [
+        {
+          path: "/Users/luchi/git/agent-relay/file-diff-ui-smoke-test.md",
+          change_type: "add",
+          diff: [
+            "# File Diff UI Smoke Test",
+            "",
+            "This file exists to verify created-file rendering in transcript views.",
+            "",
+            "- It is intentionally small.",
+            "- It should appear as a newly created file.",
+            "- The UI should show a positive added-line count.",
+            "- The diff body should render as added lines.",
+          ].join("\n"),
+        },
+      ],
+    },
+  }, {
+    expandedKeys: new Set(["entry:file-change:raw-add"]),
+  });
+
+  assert.match(markup, /file-diff-ui-smoke-test\.md<\/strong><span class="file-change-chip-add">\+8/);
+  assert.doesNotMatch(markup, /file-change-chip-del">-4/);
+  assert.match(markup, /diff-line diff-line-add/);
+});
+
+test("renderEntryMarkup shows workspace-relative file paths for absolute paths", () => {
+  const markup = renderEntryMarkup({
+    item_id: "turn-diff:absolute",
+    kind: "tool_call",
+    status: "completed",
+    tool: {
+      name: "File summary",
+      title: "Codex changed 2 files in this turn.",
+      item_type: "turnDiff",
+      file_changes: [
+        {
+          path: "/Users/luchi/git/agent-relay/crates/relay-server/src/codex.rs",
+          change_type: "update",
+          diff: "diff --git a/crates/relay-server/src/codex.rs b/crates/relay-server/src/codex.rs\n@@ -1 +1 @@\n-old\n+new",
+        },
+        {
+          path: "/Users/luchi/git/agent-relay/crates/relay-server/src/state/relay/transcript.rs",
+          change_type: "update",
+          diff: "diff --git a/crates/relay-server/src/state/relay/transcript.rs b/crates/relay-server/src/state/relay/transcript.rs\n@@ -1 +1 @@\n-old\n+new",
+        },
+      ],
+    },
+  }, {
+    expandedKeys: new Set(["entry:turn-diff:absolute"]),
+  });
+
+  assert.match(markup, /crates\/relay-server\/src\/codex\.rs/);
+  assert.match(markup, /crates\/relay-server\/src\/state\/relay\/transcript\.rs/);
+  assert.doesNotMatch(markup, /<strong class="diff-file-section-name">src\/codex\.rs<\/strong>/);
+  assert.doesNotMatch(markup, /<strong class="diff-file-section-name">\/Users\/luchi\/git\/agent-relay\/crates\/relay-server\/src\/codex\.rs<\/strong>/);
+});
+
+test("renderEntryMarkup shows workspace-relative path for a single absolute file within current cwd", () => {
+  const markup = renderEntryMarkup({
+    item_id: "turn-diff:single-absolute",
+    kind: "tool_call",
+    status: "completed",
+    tool: {
+      name: "File summary",
+      title: "Codex changed 1 file in this turn.",
+      item_type: "turnDiff",
+      file_changes: [
+        {
+          path: "/Users/luchi/git/agent-relay/file-diff-ui-smoke-test.md",
+          change_type: "add",
+          diff: "diff --git a/file-diff-ui-smoke-test.md b/file-diff-ui-smoke-test.md\nnew file mode 100644\n--- /dev/null\n+++ b/file-diff-ui-smoke-test.md\n@@ -0,0 +1,1 @@\n+hello",
+        },
+      ],
+    },
+  }, {
+    currentCwd: "/Users/luchi/git/agent-relay",
+    expandedKeys: new Set(["entry:turn-diff:single-absolute"]),
+  });
+
+  assert.match(markup, /file-diff-ui-smoke-test\.md/);
+  assert.doesNotMatch(markup, /<strong class="diff-file-section-name">\/Users\/luchi\/git\/agent-relay\/file-diff-ui-smoke-test\.md<\/strong>/);
+});
+
+test("renderEntryMarkup preserves absolute path outside current cwd", () => {
+  const markup = renderEntryMarkup({
+    item_id: "turn-diff:outside-cwd",
+    kind: "tool_call",
+    status: "completed",
+    tool: {
+      name: "File summary",
+      title: "Codex changed 1 file in this turn.",
+      item_type: "turnDiff",
+      file_changes: [
+        {
+          path: "/tmp/outside-project/file.txt",
+          change_type: "update",
+          diff: "diff --git a/file.txt b/file.txt\n@@ -1 +1 @@\n-old\n+new",
+        },
+      ],
+    },
+  }, {
+    currentCwd: "/Users/luchi/git/agent-relay",
+    expandedKeys: new Set(["entry:turn-diff:outside-cwd"]),
+  });
+
+  assert.match(markup, /\/tmp\/outside-project\/file\.txt/);
 });
 
 test("renderEntryMarkup shows expanded command detail and loading note when requested", () => {

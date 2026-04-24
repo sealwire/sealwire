@@ -236,33 +236,111 @@ function ToolPreviewBlock({ expandKey = "", expanded = false, label, value }) {
   );
 }
 
-function DiffLine({ line }) {
-  let className = "diff-line";
+function formatDiffCode(line) {
   if (line.startsWith("+") && !line.startsWith("+++")) {
+    return line.slice(1);
+  }
+  if (line.startsWith("-") && !line.startsWith("---")) {
+    return line.slice(1);
+  }
+  if (line.startsWith(" ")) {
+    return line.slice(1);
+  }
+  return line;
+}
+
+function DiffLine({ row }) {
+  const line = row?.line || "";
+  let className = "diff-line";
+  if (row?.type === "add") {
     className += " diff-line-add";
-  } else if (line.startsWith("-") && !line.startsWith("---")) {
+  } else if (row?.type === "delete") {
     className += " diff-line-delete";
-  } else if (line.startsWith("@@")) {
-    className += " diff-line-hunk";
-  } else if (line.startsWith("diff --git") || line.startsWith("+++") || line.startsWith("---")) {
+  } else if (row?.type === "meta") {
     className += " diff-line-meta";
   }
 
-  const marker = line[0] === "+" || line[0] === "-" ? line[0] : " ";
   return h(
     "div",
     { className },
-    h("span", { className: "diff-line-marker" }, marker),
-    h("code", null, line)
+    h("span", { className: "diff-line-marker" }, row?.marker || " "),
+    h("span", { className: "diff-line-number" }, row?.oldLine ?? ""),
+    h("span", { className: "diff-line-number" }, row?.newLine ?? ""),
+    h("code", null, formatDiffCode(line))
   );
+}
+
+function parseUnifiedDiffRows(value) {
+  const rows = [];
+  let oldLine = 0;
+  let newLine = 0;
+  let inHunk = false;
+
+  for (const line of String(value || "").split("\n")) {
+    if (!line) {
+      if (inHunk) {
+        rows.push({ line, marker: " ", newLine, oldLine, type: "context" });
+        oldLine += 1;
+        newLine += 1;
+      }
+      continue;
+    }
+
+    if (line.startsWith("diff --git") || line.startsWith("+++") || line.startsWith("---")) {
+      continue;
+    }
+
+    const hunkMatch = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    if (hunkMatch) {
+      oldLine = Number(hunkMatch[1]);
+      newLine = Number(hunkMatch[2]);
+      inHunk = true;
+      continue;
+    }
+
+    if (line === "\\ No newline at end of file") {
+      rows.push({ line, marker: "", oldLine: null, newLine: null, type: "meta" });
+      continue;
+    }
+
+    if (!inHunk && !line.startsWith("+") && !line.startsWith("-") && !line.startsWith(" ")) {
+      continue;
+    }
+
+    if (line.startsWith("+") && !line.startsWith("+++")) {
+      rows.push({ line, marker: "+", oldLine: null, newLine, type: "add" });
+      newLine += 1;
+      continue;
+    }
+
+    if (line.startsWith("-") && !line.startsWith("---")) {
+      rows.push({ line, marker: "-", oldLine, newLine: null, type: "delete" });
+      oldLine += 1;
+      continue;
+    }
+
+    rows.push({
+      line,
+      marker: " ",
+      oldLine: inHunk ? oldLine : null,
+      newLine: inHunk ? newLine : null,
+      type: "context",
+    });
+    if (inHunk) {
+      oldLine += 1;
+      newLine += 1;
+    }
+  }
+
+  return rows;
 }
 
 function UnifiedDiff({ value }) {
   return h(
     "div",
     { "aria-label": "File diff", className: "diff-view", role: "region" },
-    ...String(value || "").split("\n").map((line, index) =>
-      h(DiffLine, { key: `${index}:${line}`, line })
+    ...parseUnifiedDiffRows(value).map((row, index) =>
+      h(DiffLine, { key: `${index}:${row.line}`, row })
     )
   );
 }
@@ -277,17 +355,104 @@ function sanitizeFileChange(change) {
     return null;
   }
 
-  return {
-    change_type: typeof change.change_type === "string" && change.change_type.trim()
+  const changeType = typeof change.change_type === "string" && change.change_type.trim()
       ? change.change_type
       : typeof change.kind === "string" && change.kind.trim()
         ? change.kind
         : typeof change.type === "string" && change.type.trim() && change.type !== "fileChange"
           ? change.type
-          : "update",
-    diff: typeof change.diff === "string" ? change.diff : "",
+          : "update";
+  const rawDiff = typeof change.diff === "string" ? change.diff : "";
+
+  return {
+    change_type: changeType,
+    diff: normalizeFileChangeDiff(path, changeType, rawDiff),
     path,
   };
+}
+
+function looksLikeUnifiedDiff(diff) {
+  const text = String(diff || "");
+  return (
+    text.startsWith("diff --git ")
+    || text.includes("\n@@ ")
+    || text.startsWith("@@ ")
+    || text.includes("\n--- ")
+    || text.includes("\n+++ ")
+    || text.startsWith("--- ")
+    || text.startsWith("+++ ")
+  );
+}
+
+function synthesizeAddedFileDiff(path, content) {
+  const normalizedLines = String(content || "").replaceAll("\r\n", "\n").split("\n");
+  return [
+    `diff --git a/${path} b/${path}`,
+    "new file mode 100644",
+    "--- /dev/null",
+    `+++ b/${path}`,
+    `@@ -0,0 +1,${normalizedLines.length} @@`,
+    ...normalizedLines.map((line) => `+${line}`),
+  ].join("\n");
+}
+
+function normalizeFileChangeDiff(path, changeType, diff) {
+  if (!diff) {
+    return "";
+  }
+  if ((changeType === "add" || changeType === "create") && !looksLikeUnifiedDiff(diff)) {
+    return synthesizeAddedFileDiff(path, diff);
+  }
+  return diff;
+}
+
+function mergeFileChangeDiff(existingDiff, incomingDiff) {
+  const existing = String(existingDiff || "").trim();
+  const incoming = String(incomingDiff || "").trim();
+  if (!existing) {
+    return incoming;
+  }
+  if (!incoming) {
+    return existing;
+  }
+  if (existing === incoming || existing.includes(incoming)) {
+    return existing;
+  }
+  if (incoming.includes(existing)) {
+    return incoming;
+  }
+  return `${existing}\n${incoming}`;
+}
+
+function mergeFileChangeLists(existingChanges, incomingChanges) {
+  const merged = [];
+
+  function mergeOne(change) {
+    const normalized = sanitizeFileChange(change);
+    if (!normalized) {
+      return;
+    }
+
+    const existing = merged.find((entry) => entry.path === normalized.path);
+    if (!existing) {
+      merged.push({ ...normalized });
+      return;
+    }
+
+    existing.diff = mergeFileChangeDiff(existing.diff, normalized.diff);
+    if (existing.change_type === "update" && normalized.change_type !== "update") {
+      existing.change_type = normalized.change_type;
+    }
+  }
+
+  for (const change of existingChanges || []) {
+    mergeOne(change);
+  }
+  for (const change of incomingChanges || []) {
+    mergeOne(change);
+  }
+
+  return merged;
 }
 
 function parseFileChangesFromDiff(diff) {
@@ -390,8 +555,13 @@ function getFileChanges(tool) {
   const explicitChanges = Array.isArray(tool?.file_changes)
     ? tool.file_changes.map(sanitizeFileChange).filter(Boolean)
     : [];
+  const diffChanges = parseFileChangesFromDiff(tool?.diff);
   if (explicitChanges.length) {
-    return explicitChanges;
+    const mergedChanges = mergeFileChangeLists(explicitChanges, diffChanges);
+    if (!diffChanges.length && mergedChanges.length === 1 && !mergedChanges[0].diff && tool?.diff) {
+      mergedChanges[0].diff = String(tool.diff);
+    }
+    return mergedChanges;
   }
 
   const structuredInputChanges = parseFileChangesFromInputPreview(tool?.input_preview);
@@ -399,7 +569,6 @@ function getFileChanges(tool) {
     return structuredInputChanges;
   }
 
-  const diffChanges = parseFileChangesFromDiff(tool?.diff);
   if (diffChanges.length) {
     return diffChanges;
   }
@@ -427,7 +596,7 @@ function getFileChanges(tool) {
 
 function FileChangeDiff({ tool }) {
   const fileChanges = getFileChanges(tool);
-  const displayPaths = buildFileDisplayPathMap(fileChanges);
+  const displayPaths = buildFileDisplayPathMap(fileChanges, tool?.display_options || null);
   const fileChangesWithDiff = fileChanges.filter((change) => change?.diff);
   const fallbackDiff = tool.diff || fileChangesWithDiff
     .map((change) => change?.diff)
@@ -502,39 +671,74 @@ function splitPathSegments(path) {
     .filter(Boolean);
 }
 
-function buildFileDisplayPathMap(fileChanges) {
+function isAbsolutePath(path) {
+  const normalized = String(path || "").replaceAll("\\", "/");
+  return normalized.startsWith("/") || /^[A-Za-z]:\//.test(normalized);
+}
+
+function normalizePath(path) {
+  return String(path || "").replaceAll("\\", "/");
+}
+
+function relativeDisplayPath(path, currentCwd) {
+  const normalizedPath = normalizePath(path);
+  const normalizedCwd = normalizePath(currentCwd).replace(/\/+$/, "");
+  if (!normalizedPath || !normalizedCwd) {
+    return null;
+  }
+  if (normalizedPath === normalizedCwd) {
+    return "";
+  }
+  if (!normalizedPath.startsWith(`${normalizedCwd}/`)) {
+    return null;
+  }
+  return normalizedPath.slice(normalizedCwd.length + 1);
+}
+
+function commonLeadingSegments(paths) {
+  if (!paths.length) {
+    return [];
+  }
+
+  const segmentLists = paths.map(splitPathSegments);
+  const first = segmentLists[0] || [];
+  let count = 0;
+  while (
+    count < first.length
+    && segmentLists.every((segments) => segments[count] === first[count])
+  ) {
+    count += 1;
+  }
+  return first.slice(0, count);
+}
+
+function buildFileDisplayPathMap(fileChanges, options = null) {
   const uniquePaths = [...new Set(fileChanges.map((change) => String(change?.path || "unknown")))];
-  const segmentsByPath = new Map(
-    uniquePaths.map((path) => [path, splitPathSegments(path)])
-  );
+  const absolutePaths = uniquePaths.filter(isAbsolutePath);
+  const absolutePrefix = commonLeadingSegments(absolutePaths);
   const displayPathMap = new Map();
+  const currentCwd = options?.currentCwd || "";
 
   for (const path of uniquePaths) {
-    const segments = segmentsByPath.get(path) || [];
+    const normalized = normalizePath(path) || "unknown";
+    const segments = splitPathSegments(path);
     if (!segments.length) {
       displayPathMap.set(path, "unknown");
       continue;
     }
 
-    const minSegments = Math.min(2, segments.length);
-    let displayPath = segments.slice(-minSegments).join("/");
-
-    for (let suffixLength = minSegments; suffixLength <= segments.length; suffixLength += 1) {
-      const candidate = segments.slice(-suffixLength).join("/");
-      const collides = uniquePaths.some((otherPath) => {
-        if (otherPath === path) {
-          return false;
-        }
-        const otherSegments = segmentsByPath.get(otherPath) || [];
-        return otherSegments.slice(-suffixLength).join("/") === candidate;
-      });
-      if (!collides) {
-        displayPath = candidate;
-        break;
-      }
+    const cwdRelativePath = relativeDisplayPath(path, currentCwd);
+    if (cwdRelativePath) {
+      displayPathMap.set(path, cwdRelativePath);
+      continue;
     }
 
-    displayPathMap.set(path, displayPath);
+    if (isAbsolutePath(path) && absolutePrefix.length > 0 && absolutePrefix.length < segments.length) {
+      displayPathMap.set(path, segments.slice(absolutePrefix.length).join("/"));
+      continue;
+    }
+
+    displayPathMap.set(path, normalized || fileBasename(path));
   }
 
   return displayPathMap;
@@ -542,7 +746,7 @@ function buildFileDisplayPathMap(fileChanges) {
 
 function FileChangeSummary({ tool, fallback }) {
   const fileChanges = getFileChanges(tool);
-  const displayPaths = buildFileDisplayPathMap(fileChanges);
+  const displayPaths = buildFileDisplayPathMap(fileChanges, tool?.display_options || null);
 
   if (fileChanges.length) {
     return h(
@@ -573,6 +777,9 @@ function ToolEntry({ entry, options = null }) {
   const toolEntry = detailEntry || entry;
   const tool = toolEntry.tool || entry.tool || {};
   const isFileChange = tool.item_type === "fileChange" || tool.item_type === "turnDiff";
+  const displayTool = isFileChange
+    ? { ...tool, display_options: options || null }
+    : tool;
   const title = tool.title || toolEntry.text || entry.text || tool.name || "Tool call";
   const detail = tool.detail && tool.detail !== title ? tool.detail : null;
   const showTypeRow = !isFileChange;
@@ -609,7 +816,7 @@ function ToolEntry({ entry, options = null }) {
         ? h(
             React.Fragment,
             null,
-            h(FileChangeDiff, { tool }),
+            h(FileChangeDiff, { tool: displayTool }),
             options?.enableFileChangeActions && itemId
               ? h(
                   "div",

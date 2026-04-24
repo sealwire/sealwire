@@ -1186,6 +1186,7 @@ function RemoteTranscriptPanel({
       entries,
       hydrationLoading,
       options: {
+        currentCwd: session?.current_cwd || "",
         detailEntries: transcriptDetailEntries,
         expandedItemIds: uiState.transcriptExpandedItemIds,
         expandedKeys: uiState.transcriptExpandedItemIds,
