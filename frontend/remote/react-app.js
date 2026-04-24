@@ -50,6 +50,7 @@ import {
   sendHeartbeat,
 } from "./session-ops.js";
 import {
+  buildExpandedTranscriptDetailEntries,
   cacheTranscriptEntryDetail,
   getCachedTranscriptEntryDetail,
   getLiveTranscriptEntryDetail,
@@ -73,9 +74,8 @@ import {
 } from "./react-renderer.js";
 import {
   ConversationEmptyState,
-  ReadyConversationState,
-  TranscriptState,
 } from "../shared/conversation.js";
+import { ConversationPanel } from "../shared/conversation-panel.js";
 import { ThreadGroupList } from "../shared/thread-list-react.js";
 import {
   setRemoteCwdInputElement,
@@ -215,41 +215,16 @@ function RemoteApp() {
         : "Local credentials are unavailable. Pair this relay again in this browser.",
     sendPending: uiState.sendPending,
   };
-  const transcriptDetailEntries = new Map();
+  const transcriptDetailEntries = buildExpandedTranscriptDetailEntries(currentState, {
+    expandedItemIds: uiState.transcriptExpandedItemIds,
+    threadId: session?.active_thread_id || null,
+    transientDetails: uiState.transcriptExpandedDetails,
+  });
   const transcriptEntriesByItemId = new Map(
     (session?.transcript || [])
       .filter((entry) => entry?.item_id)
       .map((entry) => [entry.item_id, entry])
   );
-  for (const expandedKey of uiState.transcriptExpandedItemIds) {
-    if (!expandedKey.startsWith("entry:")) {
-      continue;
-    }
-    const itemId = expandedKey.slice("entry:".length);
-    const transientDetail = uiState.transcriptExpandedDetails.get(itemId);
-    const liveDetail = getLiveTranscriptEntryDetail(
-      currentState,
-      session?.active_thread_id || null,
-      itemId
-    );
-    if (transientDetail) {
-      transcriptDetailEntries.set(itemId, transientDetail);
-      continue;
-    }
-    if (liveDetail) {
-      transcriptDetailEntries.set(itemId, liveDetail);
-      continue;
-    }
-
-    const cachedDetail = getCachedTranscriptEntryDetail(
-      currentState,
-      session?.active_thread_id || null,
-      itemId
-    );
-    if (cachedDetail) {
-      transcriptDetailEntries.set(itemId, cachedDetail);
-    }
-  }
   const runningExpandedItemIds = [...uiState.transcriptExpandedItemIds]
     .filter((expandKey) => expandKey.startsWith("entry:"))
     .map((expandKey) => expandKey.slice("entry:".length))
@@ -1172,27 +1147,27 @@ function RemoteTranscriptPanel({
         title: "No remote session yet",
       });
     }
-  } else if (!entries.length && !approval) {
-    body = h(ReadyConversationState, {
-      canWrite: sessionView.canWrite,
-      readyCopy: "The remote session is live. Send the first prompt below when you're ready.",
-      session,
-      shortId,
-      waitingCopy: "This thread is already open, but another device currently has control. You can still approve or decline requests here; take over only if you want to send messages from this device.",
-    });
   } else {
-    body = h(TranscriptState, {
+    body = h(ConversationPanel, {
       approval,
+      canWrite: sessionView.canWrite,
+      emptyContent: null,
       entries,
       hydrationLoading,
-      options: {
+      readyState: {
+        readyCopy: "The remote session is live. Send the first prompt below when you're ready.",
+        session,
+        shortId,
+        waitingCopy: "This thread is already open, but another device currently has control. You can still approve or decline requests here; take over only if you want to send messages from this device.",
+      },
+      transcriptOptions: {
         currentCwd: session?.current_cwd || "",
         detailEntries: transcriptDetailEntries,
         expandedItemIds: uiState.transcriptExpandedItemIds,
         expandedKeys: uiState.transcriptExpandedItemIds,
         loadingItemIds: uiState.transcriptLoadingItemIds,
       },
-      onApprovalClick: (event) => {
+      onTranscriptInteract: (event) => {
         const approvalButton = event.target.closest?.("[data-approval-decision]");
         if (!approvalButton) {
           const expandSummary = event.target.closest?.("[data-expand-key]");

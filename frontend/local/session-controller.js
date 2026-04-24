@@ -28,6 +28,13 @@ import {
 } from "../shared/transcript-entry-detail.js";
 import { normalizeThreadTranscriptPage } from "../shared/transcript-page.js";
 import {
+  cacheTranscriptEntryDetail,
+  getCachedTranscriptEntryDetail,
+  getLiveTranscriptEntryDetail,
+  setLiveTranscriptEntryDetail,
+  syncLiveTranscriptEntryDetailsFromSnapshot,
+} from "./transcript/details.js";
+import {
   hydrateLocalTranscript,
   loadOlderLocalTranscript,
 } from "./transcript/hydration.js";
@@ -257,15 +264,15 @@ export function createSessionController({
   }
 
   function applySessionSnapshot(snapshot) {
+    const previousThreadId = state.session?.active_thread_id || null;
     if (snapshot?.active_thread_id !== state.transcriptHydrationThreadId) {
       resetTranscriptHydrationState();
     }
-    if (snapshot?.active_thread_id !== state.transcriptDetailThreadId) {
-      state.transcriptDetailEntries = new Map();
-      state.transcriptDetailThreadId = snapshot?.active_thread_id || null;
+    if (snapshot?.active_thread_id !== previousThreadId) {
       state.transcriptLoadingItemIds = new Set();
     }
 
+    syncLiveTranscriptEntryDetailsFromSnapshot(state, snapshot);
     const merged = restoreHydratedTranscript(state, snapshot);
     renderSession(merged);
   }
@@ -941,8 +948,8 @@ export function createSessionController({
     if (
       !state.transcriptExpandedItemIds.has(expandKey)
       || !state.session?.active_thread_id
-      || state.transcriptDetailThreadId !== state.session.active_thread_id
-      || state.transcriptDetailEntries.has(itemId)
+      || getCachedTranscriptEntryDetail(state, state.session.active_thread_id, itemId)
+      || getLiveTranscriptEntryDetail(state, state.session.active_thread_id, itemId)
       || state.transcriptLoadingItemIds.has(itemId)
     ) {
       return;
@@ -958,13 +965,15 @@ export function createSessionController({
     renderSession(state.session);
 
     try {
-      const detail = await fetchTranscriptEntryDetail(state.session.active_thread_id, itemId);
-      if (!detail || state.session?.active_thread_id !== state.transcriptDetailThreadId) {
+      const detailThreadId = state.session.active_thread_id;
+      const detail = await fetchTranscriptEntryDetail(detailThreadId, itemId);
+      if (!detail || state.session?.active_thread_id !== detailThreadId) {
         return;
       }
-      const nextDetails = new Map(state.transcriptDetailEntries);
-      nextDetails.set(itemId, detail);
-      state.transcriptDetailEntries = nextDetails;
+      const { cached } = cacheTranscriptEntryDetail(state, detailThreadId, detail);
+      if (!cached) {
+        setLiveTranscriptEntryDetail(state, detailThreadId, detail);
+      }
     } catch (error) {
       logLine(`Transcript detail load failed: ${error.message}`);
     } finally {

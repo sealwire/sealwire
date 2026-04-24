@@ -35,12 +35,12 @@ import {
   canonicalizeWorkspace,
   summarizeThreadGroups,
 } from "../shared/thread-groups.js";
+import { buildExpandedTranscriptDetailEntries } from "./transcript/details.js";
 import { shouldShowTranscriptLoading } from "./transcript-loading.js";
 import {
   ConversationEmptyState,
-  ReadyConversationState,
-  TranscriptState,
 } from "../shared/conversation.js";
+import { ConversationPanel } from "../shared/conversation-panel.js";
 import {
   AuditList,
   ControlBannerContent,
@@ -647,6 +647,10 @@ export function createSessionRenderer({
   function renderTranscript(session, approval) {
     const viewingConversation = isViewingConversation(session);
     const entries = session.transcript || [];
+    const transcriptDetailEntries = buildExpandedTranscriptDetailEntries(state, {
+      expandedItemIds: state.transcriptExpandedItemIds,
+      threadId: session?.active_thread_id || null,
+    });
 
     if (!viewingConversation) {
       const activeThread = resolveActiveThread(session.active_thread_id);
@@ -704,58 +708,58 @@ export function createSessionRenderer({
     }
 
     if (!entries.length && !approval) {
-      if (session.active_thread_id) {
-        const hasControl = canCurrentDeviceWrite(session);
-        renderConversationContent(
-          h(ReadyConversationState, {
-            canWrite: hasControl,
-            readyCopy: "Codex is connected. Send the first prompt below when you're ready.",
-            session,
-            shortId,
-            waitingCopy: "This thread is open, but another device currently has control. Take over to send the first prompt from here.",
-          })
-        );
-        return;
-      }
-
       renderConversationContent(
-        h(ConversationEmptyState, {
-          actions: [
-            {
-              attrs: {
-                "data-suggestion": "Summarize the structure of this repo and point out the important entry points.",
-              },
-              label: "Summarize this repo",
-            },
-            {
-              attrs: {
-                "data-suggestion": "Find the bug in this project and explain the likely root cause before changing code.",
-              },
-              label: "Find the bug",
-            },
-            {
-              attrs: {
-                "data-suggestion": "Review this codebase for areas that feel too complex and suggest a cleanup plan.",
-              },
-              label: "Suggest a cleanup",
-            },
-          ],
-          copy: "Pick a workspace, then use this console to launch or resume a session while keeping an eye on control, trust, and audit state.",
-          details: state.selectedCwd ? [`Selected workspace: ${state.selectedCwd}`] : [],
-          title: "Relay standing by",
+        h(ConversationPanel, {
+          canWrite: canCurrentDeviceWrite(session),
+          emptyContent: session.active_thread_id
+            ? null
+            : h(ConversationEmptyState, {
+              actions: [
+                {
+                  attrs: {
+                    "data-suggestion": "Summarize the structure of this repo and point out the important entry points.",
+                  },
+                  label: "Summarize this repo",
+                },
+                {
+                  attrs: {
+                    "data-suggestion": "Find the bug in this project and explain the likely root cause before changing code.",
+                  },
+                  label: "Find the bug",
+                },
+                {
+                  attrs: {
+                    "data-suggestion": "Review this codebase for areas that feel too complex and suggest a cleanup plan.",
+                  },
+                  label: "Suggest a cleanup",
+                },
+              ],
+              copy: "Pick a workspace, then use this console to launch or resume a session while keeping an eye on control, trust, and audit state.",
+              details: state.selectedCwd ? [`Selected workspace: ${state.selectedCwd}`] : [],
+              title: "Relay standing by",
+            }),
+          readyState: session.active_thread_id
+            ? {
+              readyCopy: "Codex is connected. Send the first prompt below when you're ready.",
+              session,
+              shortId,
+              waitingCopy: "This thread is open, but another device currently has control. Take over to send the first prompt from here.",
+            }
+            : null,
         })
       );
       return;
     }
 
     renderConversationContent(
-      h(TranscriptState, {
+      h(ConversationPanel, {
         approval,
+        canWrite: canCurrentDeviceWrite(session),
         entries,
         hydrationLoading: shouldShowTranscriptLoading(session, state),
-        options: {
+        transcriptOptions: {
           currentCwd: session?.current_cwd || state.selectedCwd || "",
-          detailEntries: state.transcriptDetailEntries,
+          detailEntries: transcriptDetailEntries,
           enableFileChangeActions: true,
           expandedKeys: state.transcriptExpandedItemIds || new Set(),
           loadingItemIds: state.transcriptLoadingItemIds || new Set(),

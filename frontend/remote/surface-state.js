@@ -1,4 +1,10 @@
 import { patchRemoteState } from "./state.js";
+import {
+  createClearedTranscriptEntryDetailsPatch,
+} from "../shared/transcript-entry-details-state.js";
+import {
+  createClearedTranscriptHydrationPatch as createSharedClearedTranscriptHydrationPatch,
+} from "../shared/transcript-hydration-store.js";
 
 export function applyRemoteSurfacePatch(patch) {
   return patchRemoteState(patch);
@@ -9,8 +15,7 @@ export function createClearedRemoteSurfaceSessionStatePatch() {
     currentApprovalId: null,
     session: null,
     threads: [],
-    transcriptLiveEntryDetails: new Map(),
-    transcriptLiveEntryThreadId: null,
+    ...createClearedTranscriptEntryDetailsPatch(),
   };
 }
 
@@ -64,18 +69,7 @@ export function createTranscriptScrollModePatch(mode) {
 }
 
 export function createClearedTranscriptHydrationPatch() {
-  return {
-    transcriptHydrationBaseSnapshot: null,
-    transcriptHydrationEntries: new Map(),
-    transcriptHydrationOrder: [],
-    transcriptHydrationLastFetchAt: 0,
-    transcriptHydrationOlderCursor: null,
-    transcriptHydrationPromise: null,
-    transcriptHydrationSignature: null,
-    transcriptHydrationStatus: "idle",
-    transcriptHydrationTailReady: false,
-    transcriptHydrationThreadId: null,
-  };
+  return createSharedClearedTranscriptHydrationPatch();
 }
 
 export function createBrokerConnectionPatch({
