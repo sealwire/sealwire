@@ -463,11 +463,6 @@ function FileChangeDiff({ tool }) {
                     h("strong", { className: "diff-file-section-name" }, displayPath),
                     added > 0 ? h("span", { className: "file-change-chip-add" }, `+${added}`) : null,
                     removed > 0 ? h("span", { className: "file-change-chip-del" }, `-${removed}`) : null
-                  ),
-                  h(
-                    "div",
-                    { className: "diff-file-section-secondary" },
-                    h("span", { className: "diff-file-section-kind" }, change.change_type || "update")
                   )
                 ),
                 h("span", { className: "diff-file-section-chevron", "aria-hidden": "true" }, "▾")
@@ -594,7 +589,7 @@ function ToolEntry({ entry, options = null }) {
     h(
       "div",
       { className: "message-card message-card-system message-card-tool" },
-      itemId
+      itemId && !isFileChange
         ? h(
             "div",
             { className: "tool-entry-controls" },
@@ -607,71 +602,76 @@ function ToolEntry({ entry, options = null }) {
                 type: "button",
               },
               expanded ? "▴" : "▾"
-            ),
-            expanded && isFileChange && options?.enableFileChangeActions
-              ? [
-                  h("button", { className: "tool-toggle-button tool-action-button", "data-item-id": itemId, "data-file-change-action": "rollback", type: "button", key: "rollback" }, "Rollback"),
-                  h("button", { className: "tool-toggle-button tool-action-button", "data-item-id": itemId, "data-file-change-action": "reapply", type: "button", key: "reapply" }, "Reapply"),
-                ]
-              : null
+            )
           )
         : null,
-      !expanded
+      isFileChange
         ? h(
             React.Fragment,
             null,
-            h(
-              "div",
-              { className: "tool-collapsed-row" },
-              h("span", { className: "tool-collapsed-name" }, tool.name || "Tool"),
-              isFileChange
-                ? h(FileChangeSummary, { tool, fallback: collapsedSubtitle || collapsedTitle })
-                : h("span", { className: "tool-collapsed-preview" }, collapsedSubtitle || collapsedTitle),
-              h("span", { className: "tool-collapsed-status" }, entry.status || "completed")
-            ),
-            !isFileChange && collapsedSubtitle
-              ? h("div", { className: "tool-collapsed-title" }, collapsedTitle)
+            h(FileChangeDiff, { tool }),
+            options?.enableFileChangeActions && itemId
+              ? h(
+                  "div",
+                  { className: "tool-file-actions" },
+                  h("button", { className: "tool-toggle-button tool-action-button", "data-item-id": itemId, "data-file-change-action": "rollback", type: "button" }, "Rollback"),
+                  h("button", { className: "tool-toggle-button tool-action-button", "data-item-id": itemId, "data-file-change-action": "reapply", type: "button" }, "Reapply")
+                )
               : null
           )
-        : h(
-            React.Fragment,
-            null,
-            h(
-              "div",
-              { className: "message-meta" },
-              h("strong", null, tool.name || "Tool"),
-              h("span", null, entry.status || "completed")
-            ),
-            h("h3", { className: "tool-card-title" }, title),
-            detail && !isFileChange ? h("p", { className: "tool-card-detail" }, detail) : null,
-            isFileChange ? h(FileChangeDiff, { tool }) : null,
-            h(
-              "div",
-              { className: "tool-details" },
-              showTypeRow ? h(ToolDetailRow, { label: "Type", value: tool.item_type }) : null,
-              h(ToolDetailRow, { label: "Query", value: tool.query }),
-              showPathRow ? h(ToolDetailRow, { label: "Path", value: tool.path }) : null,
-              h(ToolDetailRow, { label: "URL", value: tool.url }),
-              h(ToolDetailRow, { label: "Command", value: tool.command })
-            ),
-            showInputPreview
-              ? h(ToolPreviewBlock, {
-                  expandKey: inputExpandKey,
-                  expanded: Boolean(inputExpandKey && options?.expandedKeys?.has(inputExpandKey)),
-                  label: "Input",
-                  value: tool.input_preview,
-                })
-              : null,
-            h(ToolPreviewBlock, {
-              expandKey: resultExpandKey,
-              expanded: Boolean(resultExpandKey && options?.expandedKeys?.has(resultExpandKey)),
-              label: "Result",
-              value: tool.result_preview,
-            }),
-            loading && !detailEntry
-              ? h("p", { className: "tool-detail-note" }, "Loading full item details…")
-              : null
-          )
+        : !expanded
+          ? h(
+              React.Fragment,
+              null,
+              h(
+                "div",
+                { className: "tool-collapsed-row" },
+                h("span", { className: "tool-collapsed-name" }, tool.name || "Tool"),
+                h("span", { className: "tool-collapsed-preview" }, collapsedSubtitle || collapsedTitle),
+                h("span", { className: "tool-collapsed-status" }, entry.status || "completed")
+              ),
+              collapsedSubtitle
+                ? h("div", { className: "tool-collapsed-title" }, collapsedTitle)
+                : null
+            )
+          : h(
+              React.Fragment,
+              null,
+              h(
+                "div",
+                { className: "message-meta" },
+                h("strong", null, tool.name || "Tool"),
+                h("span", null, entry.status || "completed")
+              ),
+              h("h3", { className: "tool-card-title" }, title),
+              detail ? h("p", { className: "tool-card-detail" }, detail) : null,
+              h(
+                "div",
+                { className: "tool-details" },
+                showTypeRow ? h(ToolDetailRow, { label: "Type", value: tool.item_type }) : null,
+                h(ToolDetailRow, { label: "Query", value: tool.query }),
+                showPathRow ? h(ToolDetailRow, { label: "Path", value: tool.path }) : null,
+                h(ToolDetailRow, { label: "URL", value: tool.url }),
+                h(ToolDetailRow, { label: "Command", value: tool.command })
+              ),
+              showInputPreview
+                ? h(ToolPreviewBlock, {
+                    expandKey: inputExpandKey,
+                    expanded: Boolean(inputExpandKey && options?.expandedKeys?.has(inputExpandKey)),
+                    label: "Input",
+                    value: tool.input_preview,
+                  })
+                : null,
+              h(ToolPreviewBlock, {
+                expandKey: resultExpandKey,
+                expanded: Boolean(resultExpandKey && options?.expandedKeys?.has(resultExpandKey)),
+                label: "Result",
+                value: tool.result_preview,
+              }),
+              loading && !detailEntry
+                ? h("p", { className: "tool-detail-note" }, "Loading full item details…")
+                : null
+            )
     )
   );
 }
