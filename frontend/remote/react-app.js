@@ -8,6 +8,7 @@ import React, {
 } from "react";
 import { createRoot } from "react-dom/client";
 import { flushSync } from "react-dom";
+import { fetchBuildInfo } from "../shared/build-badge.js";
 import { ClientLog } from "../shared/client-log.js";
 import {
   selectDeviceChromeRenderModel,
@@ -1220,6 +1221,24 @@ function RemoteTranscriptPanel({
   );
 }
 
+function BuildInfoLine({ surface = "remote" }) {
+  const [info, setInfo] = useState(null);
+
+  useEffect(() => {
+    fetchBuildInfo(surface).then(setInfo);
+  }, [surface]);
+
+  if (!info) {
+    return null;
+  }
+
+  return h(
+    "p",
+    { className: "build-info-inline", title: info.title },
+    info.label
+  );
+}
+
 function PairingModal({
   deviceChromeModel,
   deviceLabel,
@@ -1326,7 +1345,8 @@ function PairingModal({
         "div",
         { className: "paired-devices-list", id: "device-meta" },
         h(DeviceMetaPanel, { model: deviceChromeModel.deviceMeta })
-      )
+      ),
+      h(BuildInfoLine, { surface: "remote" })
     )
   );
 }

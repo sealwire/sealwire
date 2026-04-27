@@ -469,6 +469,12 @@ function SessionDetailsModal() {
             lines: ["Booting web client..."],
           })
         )
+      ),
+      h(
+        "section",
+        { className: "details-section" },
+        h("h3", { className: "details-heading" }, "Build"),
+        h("p", { className: "build-info-inline", id: "build-info-local" }, "Loading...")
       )
     )
   );

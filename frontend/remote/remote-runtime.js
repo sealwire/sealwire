@@ -1,4 +1,3 @@
-import { mountBuildBadge } from "../shared/build-badge.js";
 import { clearClaimLifecycle, configureRemoteActions, handleRemoteBrokerPayload, recoverRemoteSession, rejectPendingActions } from "./actions.js";
 import { closeBrokerSocket, configureBrokerClient, connectBroker, refreshRelayDirectory } from "./broker-client.js";
 import { initializeRemoteNavigation, openRemoteNavigation } from "./navigation.js";
@@ -10,7 +9,6 @@ import { clearActiveRelaySelection, ensureDeviceIdentity, hydrateStoredRemoteSec
 import { applyRemoteSurfacePatch, createResetRemoteSurfaceStatePatch } from "./surface-state.js";
 
 let runtimeConfigured = false;
-let buildBadgeMounted = false;
 
 export function ensureRemoteRuntimeConfigured() {
   if (runtimeConfigured) {
@@ -53,13 +51,6 @@ export function ensureRemoteRuntimeConfigured() {
     onApplyTranscriptDelta: applyTranscriptDelta,
     onSyncRemoteSnapshot: syncRemoteSnapshot,
   });
-
-  if (!buildBadgeMounted) {
-    buildBadgeMounted = true;
-    void mountBuildBadge({
-      surface: "remote",
-    });
-  }
 
   runtimeConfigured = true;
 }

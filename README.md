@@ -179,6 +179,34 @@ Requirements:
 Testing and CI coverage live in [`TESTING.md`](TESTING.md).
 Deployment guidance lives in [`DEPLOYMENT.md`](DEPLOYMENT.md).
 
+### npm package
+
+The repository can be published as an npm CLI package. The package ships the
+Rust workspace source plus built web assets, then starts `relay-server` from
+the user's current directory:
+
+```bash
+npx agent-relay
+```
+
+If a public broker URL is configured by the package publisher, the CLI connects
+to it by default. Until then, or for overrides:
+
+```bash
+AGENT_RELAY_PUBLIC_BROKER_URL=https://broker.example.com npx agent-relay
+```
+
+The npm CLI still requires local Rust/Cargo and a logged-in `codex` CLI. It
+stores relay state under the directory where the command is run.
+
+Useful options:
+
+```bash
+agent-relay --broker https://broker.example.com
+agent-relay --no-broker
+agent-relay --host 127.0.0.1 --port 8787
+```
+
 Then run:
 
 ```bash

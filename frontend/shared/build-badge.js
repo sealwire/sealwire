@@ -1,27 +1,23 @@
 const BUILD_BADGE_ID = "build-badge";
 const BUILD_META_URL = `${import.meta.env.BASE_URL}build-meta.json`;
 
-export async function mountBuildBadge(options = {}) {
-  const { surface = "broker" } = options;
-  document.querySelector(`#${BUILD_BADGE_ID}`)?.remove();
+let cachedBuildInfo = null;
 
-  const badge = document.createElement("div");
-  badge.id = BUILD_BADGE_ID;
-  badge.className = "build-badge";
-  badge.textContent = `${surface} · loading build...`;
-  badge.title = "Loading build metadata";
-  document.body.appendChild(badge);
+export async function fetchBuildInfo(surface = "broker") {
+  if (cachedBuildInfo) {
+    return cachedBuildInfo;
+  }
 
   if (import.meta.env.DEV) {
-    badge.textContent = `${surface} · dev live`;
-    badge.title = `Dev server · ${window.location.origin}`;
-    return;
+    cachedBuildInfo = {
+      label: `${surface} · dev live`,
+      title: `Dev server · ${window.location.origin}`,
+    };
+    return cachedBuildInfo;
   }
 
   try {
-    const response = await fetch(BUILD_META_URL, {
-      cache: "no-store",
-    });
+    const response = await fetch(BUILD_META_URL, { cache: "no-store" });
     if (!response.ok) {
       throw new Error(`build metadata request failed: ${response.status}`);
     }
@@ -39,10 +35,32 @@ export async function mountBuildBadge(options = {}) {
         second: "2-digit",
       }).format(builtAt);
 
-    badge.textContent = `${surface} · ${builtAtLabel} · ${buildMeta.buildId || "unknown-build"}`;
-    badge.title = `Build ${buildMeta.buildId || "unknown-build"}\nBuilt at ${buildMeta.builtAtIso || builtAtLabel}\nServed from ${window.location.origin}`;
+    cachedBuildInfo = {
+      label: `${surface} · ${builtAtLabel} · ${buildMeta.buildId || "unknown-build"}`,
+      title: `Build ${buildMeta.buildId || "unknown-build"}\nBuilt at ${buildMeta.builtAtIso || builtAtLabel}\nServed from ${window.location.origin}`,
+    };
   } catch (error) {
-    badge.textContent = `${surface} · build unknown`;
-    badge.title = error instanceof Error ? error.message : "Build metadata unavailable";
+    cachedBuildInfo = {
+      label: `${surface} · build unknown`,
+      title: error instanceof Error ? error.message : "Build metadata unavailable",
+    };
   }
+
+  return cachedBuildInfo;
+}
+
+export async function mountBuildBadge(options = {}) {
+  const { surface = "broker" } = options;
+  document.querySelector(`#${BUILD_BADGE_ID}`)?.remove();
+
+  const badge = document.createElement("div");
+  badge.id = BUILD_BADGE_ID;
+  badge.className = "build-badge";
+  badge.textContent = `${surface} · loading build...`;
+  badge.title = "Loading build metadata";
+  document.body.appendChild(badge);
+
+  const info = await fetchBuildInfo(surface);
+  badge.textContent = info.label;
+  badge.title = info.title;
 }

@@ -80,6 +80,15 @@ body[data-remote-nav-open="true"] {
   overflow: hidden;
 }
 
+.build-info-inline {
+  margin: 0;
+  padding: 8px 0 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  line-height: 1.3;
+}
+
 .build-badge {
   position: fixed;
   right: 14px;

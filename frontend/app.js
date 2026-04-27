@@ -92,7 +92,7 @@ import { openSessionStream, sessionStreamUrl } from "./session-stream.js";
 import {
   buildThreadGroups,
 } from "./shared/thread-groups.js";
-import { mountBuildBadge } from "./shared/build-badge.js";
+import { fetchBuildInfo } from "./shared/build-badge.js";
 import { ClientLog } from "./shared/client-log.js";
 import { renderSelectOptions } from "./shared/select-options.js";
 
@@ -165,8 +165,12 @@ configureSecurityRenderers({
 
 let controller;
 
-void mountBuildBadge({
-  surface: "relay",
+fetchBuildInfo("relay").then((info) => {
+  const el = document.querySelector("#build-info-local");
+  if (el) {
+    el.textContent = info.label;
+    el.title = info.title;
+  }
 });
 
 const renderer = createSessionRenderer({

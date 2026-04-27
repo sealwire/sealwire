@@ -1,9 +1,29 @@
 {
-  "name": "agent-relay-frontend",
-  "private": true,
+  "name": "agent-relay",
   "version": "0.1.0",
+  "description": "Local-first control plane for Codex sessions with optional public broker pairing.",
+  "license": "Elastic-2.0",
   "type": "module",
+  "bin": {
+    "agent-relay": "./scripts/agent-relay.mjs"
+  },
+  "files": [
+    "Cargo.lock",
+    "Cargo.toml",
+    "LICENSE",
+    "README.md",
+    "crates/**",
+    "scripts/agent-relay.mjs",
+    "web/**"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "config": {
+    "public_broker_origin": ""
+  },
   "scripts": {
+    "start": "node scripts/agent-relay.mjs",
     "dev": "vite --host",
     "dev:full": "node scripts/dev-full.mjs",
     "dev:full:local": "RELAY_DEV_LOCALHOST_ONLY=1 node scripts/dev-full.mjs",
@@ -11,6 +31,7 @@
     "dev:restart:local": "sh scripts/restart-dev.sh --local",
     "test": "node --test frontend/*.test.mjs frontend/remote/*.test.mjs && vite build",
     "build": "vite build",
+    "prepack": "npm run build",
     "preview": "vite preview --host",
     "smoke:pairing": "node scripts/pairing-smoke.mjs",
     "test:browser:install": "playwright install chromium",
