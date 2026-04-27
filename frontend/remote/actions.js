@@ -58,6 +58,11 @@ export async function handleRemoteBrokerPayload(payload) {
     return;
   }
 
+  if (kind === "encrypted_remote_action_result_chunk") {
+    await handleEncryptedRemoteActionResultChunk(payload);
+    return;
+  }
+
   if (kind === "session_snapshot") {
     const message = `[scroll-source] kind=session_snapshot entries=${payload.snapshot?.transcript?.length || 0} truncated=${payload.snapshot?.transcript_truncated ? "1" : "0"} has_truncated=${Object.prototype.hasOwnProperty.call(payload.snapshot || {}, "transcript_truncated") ? "1" : "0"} thread=${payload.snapshot?.active_thread_id || "-"} status=${payload.snapshot?.current_status || "-"}`;
     renderLog(message);
@@ -70,6 +75,11 @@ export async function handleRemoteBrokerPayload(payload) {
 
   if (kind === "remote_action_result") {
     handleRemoteActionResult(payload.action_id, payload);
+    return;
+  }
+
+  if (kind === "remote_action_result_chunk") {
+    handleRemoteActionResultChunk(payload.action_id, payload);
   }
 }
 
@@ -255,15 +265,15 @@ export function clearClaimLifecycle() {
 
 export function rejectPendingActions(message) {
   if (!state.pendingActions.size) {
+    state.pendingActionChunks.clear();
     return;
   }
 
   const error = new Error(message);
-  for (const pending of state.pendingActions.values()) {
-    window.clearTimeout(pending.timeoutId);
-    pending.reject(error);
+  for (const actionId of Array.from(state.pendingActions.keys())) {
+    rejectPendingAction(actionId, error);
   }
-  state.pendingActions.clear();
+  state.pendingActionChunks.clear();
 }
 
 async function handleEncryptedSessionSnapshot(payload) {
@@ -311,6 +321,32 @@ async function handleEncryptedRemoteActionResult(payload) {
   handleRemoteActionResult(payload.action_id, result);
 }
 
+async function handleEncryptedRemoteActionResultChunk(payload) {
+  if (
+    payload.target_peer_id !== state.socketPeerId ||
+    payload.device_id !== state.remoteAuth?.deviceId
+  ) {
+    logIgnoredEncryptedPayload("encrypted_remote_action_result_chunk", payload);
+    return;
+  }
+
+  logAcceptedEncryptedPayload("encrypted_remote_action_result_chunk", payload);
+  const chunk = await decryptPayloadWithDeviceTokens(payload.envelope);
+  if (
+    chunk?.action_id !== payload.action_id ||
+    chunk?.action !== payload.action ||
+    chunk?.chunk_index !== payload.chunk_index ||
+    chunk?.chunk_count !== payload.chunk_count
+  ) {
+    rejectPendingAction(
+      payload.action_id,
+      new Error("remote action chunk metadata mismatch")
+    );
+    return;
+  }
+  handleRemoteActionResultChunk(payload.action_id, chunk);
+}
+
 function logIgnoredEncryptedPayload(kind, payload) {
   const peerMatches = payload.target_peer_id === state.socketPeerId;
   const deviceMatches = payload.device_id === state.remoteAuth?.deviceId;
@@ -349,6 +385,7 @@ function logDecryptedRemoteActionResult(actionId, result) {
 }
 
 function handleRemoteActionResult(actionId, result) {
+  clearPendingActionChunks(actionId);
   settlePendingAction(actionId, result);
   const isTranscriptFetch =
     result.action === "fetch_thread_transcript"
@@ -411,6 +448,108 @@ function handleRemoteActionResult(actionId, result) {
   renderLog(`Remote ${result.action} failed: ${result.error || "unknown error"}`);
 }
 
+function handleRemoteActionResultChunk(actionId, chunk) {
+  if (!actionId || !state.pendingActions.has(actionId)) {
+    clearPendingActionChunks(actionId);
+    return;
+  }
+
+  const chunkIndex = Number(chunk?.chunk_index);
+  const chunkCount = Number(chunk?.chunk_count);
+  if (
+    !Number.isInteger(chunkIndex) ||
+    !Number.isInteger(chunkCount) ||
+    chunkIndex < 0 ||
+    chunkCount <= 0 ||
+    chunkIndex >= chunkCount ||
+    typeof chunk?.data_base64 !== "string"
+  ) {
+    rejectPendingAction(actionId, new Error("remote action chunk is malformed"));
+    return;
+  }
+
+  let pendingChunks = state.pendingActionChunks.get(actionId);
+  if (!pendingChunks) {
+    pendingChunks = {
+      action: chunk.action || null,
+      chunkCount,
+      chunks: new Array(chunkCount),
+      receivedCount: 0,
+    };
+    state.pendingActionChunks.set(actionId, pendingChunks);
+  }
+
+  if (pendingChunks.chunkCount !== chunkCount) {
+    rejectPendingAction(actionId, new Error("remote action chunk count changed mid-stream"));
+    return;
+  }
+
+  if (pendingChunks.chunks[chunkIndex] == null) {
+    pendingChunks.receivedCount += 1;
+  }
+  pendingChunks.chunks[chunkIndex] = chunk.data_base64;
+
+  if (pendingChunks.receivedCount !== chunkCount) {
+    return;
+  }
+
+  clearPendingActionChunks(actionId);
+  try {
+    const result = reassembleRemoteActionResultChunks(pendingChunks.chunks);
+    logDecryptedRemoteActionResult(actionId, result);
+    handleRemoteActionResult(actionId, result);
+  } catch (error) {
+    rejectPendingAction(actionId, error);
+  }
+}
+
+function reassembleRemoteActionResultChunks(chunks) {
+  const parts = chunks.map((chunk, index) => {
+    if (typeof chunk !== "string") {
+      throw new Error(`remote action result chunk ${index + 1} is missing`);
+    }
+    return decodeBase64ToBytes(chunk);
+  });
+  const totalBytes = parts.reduce((sum, part) => sum + part.length, 0);
+  const bytes = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const part of parts) {
+    bytes.set(part, offset);
+    offset += part.length;
+  }
+  return JSON.parse(new TextDecoder().decode(bytes));
+}
+
+function decodeBase64ToBytes(value) {
+  const binary = window.atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
+
+function clearPendingActionChunks(actionId) {
+  if (!actionId) {
+    return;
+  }
+  state.pendingActionChunks.delete(actionId);
+}
+
+function rejectPendingAction(actionId, error) {
+  if (!actionId) {
+    return;
+  }
+  const pending = state.pendingActions.get(actionId);
+  clearPendingActionChunks(actionId);
+  if (!pending) {
+    return;
+  }
+  window.clearTimeout(pending.timeoutId);
+  state.pendingActions.delete(actionId);
+  pending.reject(error);
+}
+
 async function decryptPayloadWithDeviceTokens(envelope) {
   if (!state.remoteAuth) {
     throw new Error("this browser is not paired yet");
@@ -457,6 +596,7 @@ async function dispatchRemoteAction(actionType, request) {
       window.clearTimeout(pending.timeoutId);
       state.pendingActions.delete(actionId);
     }
+    clearPendingActionChunks(actionId);
     throw error;
   }
 }
@@ -591,13 +731,10 @@ async function buildDeviceActionPayload(actionId, actionType, request) {
 function registerPendingAction(actionId, actionType) {
   return new Promise((resolve, reject) => {
     const timeoutId = window.setTimeout(() => {
-      const pending = state.pendingActions.get(actionId);
-      if (!pending) {
-        return;
-      }
-
-      state.pendingActions.delete(actionId);
-      reject(new Error(`remote ${actionType} timed out waiting for relay response`));
+      rejectPendingAction(
+        actionId,
+        new Error(`remote ${actionType} timed out waiting for relay response`)
+      );
     }, REMOTE_ACTION_TIMEOUT_MS);
 
     state.pendingActions.set(actionId, {
@@ -619,6 +756,7 @@ function settlePendingAction(actionId, result) {
     return;
   }
 
+  clearPendingActionChunks(actionId);
   state.pendingActions.delete(actionId);
   window.clearTimeout(pending.timeoutId);
   if (result.ok) {

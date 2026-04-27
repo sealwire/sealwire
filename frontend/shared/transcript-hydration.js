@@ -9,6 +9,8 @@ export async function hydrateTranscript(
     onError = () => {},
     onProgress = () => {},
     progressBeforeFetch = false,
+    minInitialEntries = 0,
+    maxInitialPages = 1,
   }
 ) {
   const { signature, shouldHydrate, alreadyComplete, existingPromise } = store.prepareTranscriptHydration(
@@ -53,6 +55,30 @@ export async function hydrateTranscript(
       if (store.getTranscriptHydrationSignature(state) !== signature) {
         return;
       }
+
+      let loadedPages = 1;
+      while (
+        state.transcriptHydrationOrder.length < minInitialEntries &&
+        state.transcriptHydrationOlderCursor != null &&
+        loadedPages < maxInitialPages
+      ) {
+        const olderPage = await fetchPage({
+          threadId: snapshot.active_thread_id,
+          before: state.transcriptHydrationOlderCursor,
+        });
+        if (!olderPage || olderPage.thread_id !== snapshot.active_thread_id) {
+          throw new Error(incompletePageError);
+        }
+        store.mergeTranscriptHydrationPage(state, olderPage, { prepend: true });
+        loadedPages += 1;
+        if (store.getTranscriptHydrationThreadId(state) !== snapshot.active_thread_id) {
+          return;
+        }
+        if (store.getTranscriptHydrationSignature(state) !== signature) {
+          return;
+        }
+      }
+
       if (page.prev_cursor == null) {
         store.markTranscriptHydrationComplete(state);
       }

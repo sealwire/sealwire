@@ -34,6 +34,7 @@ export const state = {
   pairingPhase: null,
   pairingTicket: null,
   pendingActions: new Map(),
+  pendingActionChunks: new Map(),
   recoverPromise: null,
   recoveredSocketPeerId: null,
   relayDirectory: deriveRelayDirectory(loadedStore.remoteProfiles, []),

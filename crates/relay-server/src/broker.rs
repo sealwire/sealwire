@@ -206,6 +206,14 @@ enum OutboundBrokerPayload {
         claim_challenge_expires_at: Option<u64>,
         error: Option<String>,
     },
+    RemoteActionResultChunk {
+        action_id: String,
+        target_peer_id: String,
+        action: RemoteActionKind,
+        chunk_index: usize,
+        chunk_count: usize,
+        data_base64: String,
+    },
     EncryptedSessionSnapshot {
         target_peer_id: String,
         device_id: String,
@@ -215,6 +223,15 @@ enum OutboundBrokerPayload {
         action_id: String,
         target_peer_id: String,
         device_id: String,
+        envelope: EncryptedEnvelope,
+    },
+    EncryptedRemoteActionResultChunk {
+        action_id: String,
+        target_peer_id: String,
+        device_id: String,
+        action: RemoteActionKind,
+        chunk_index: usize,
+        chunk_count: usize,
         envelope: EncryptedEnvelope,
     },
     EncryptedPairingResult {
@@ -1165,6 +1182,21 @@ fn summarize_outbound_payload(payload: &OutboundBrokerPayload) -> String {
                 .unwrap_or_else(|| "thread_transcript=-".to_string()),
             error.as_deref().unwrap_or("-"),
         ),
+        OutboundBrokerPayload::RemoteActionResultChunk {
+            action_id,
+            target_peer_id,
+            action,
+            chunk_index,
+            chunk_count,
+            ..
+        } => format!(
+            "kind=remote_action_result_chunk action={} action_id={} target_peer_id={} chunk={}/{}",
+            action.as_str(),
+            action_id,
+            target_peer_id,
+            chunk_index + 1,
+            chunk_count
+        ),
         OutboundBrokerPayload::EncryptedSessionSnapshot {
             target_peer_id,
             device_id,
@@ -1192,6 +1224,23 @@ fn summarize_outbound_payload(payload: &OutboundBrokerPayload) -> String {
         } => format!(
             "kind=encrypted_remote_action_result action_id={} target_peer_id={} device_id={}",
             action_id, target_peer_id, device_id
+        ),
+        OutboundBrokerPayload::EncryptedRemoteActionResultChunk {
+            action_id,
+            target_peer_id,
+            device_id,
+            action,
+            chunk_index,
+            chunk_count,
+            ..
+        } => format!(
+            "kind=encrypted_remote_action_result_chunk action={} action_id={} target_peer_id={} device_id={} chunk={}/{}",
+            action.as_str(),
+            action_id,
+            target_peer_id,
+            device_id,
+            chunk_index + 1,
+            chunk_count
         ),
         OutboundBrokerPayload::EncryptedPairingResult {
             pairing_id,

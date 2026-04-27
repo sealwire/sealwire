@@ -77,6 +77,106 @@ test("hydrateLocalTranscript replaces a truncated tail with the full tail page",
   );
 });
 
+test("hydrateLocalTranscript backfills sparse oversized tail pages", async () => {
+  const state = createState();
+  const snapshot = {
+    active_thread_id: "thread-1",
+    active_turn_id: "turn-12",
+    transcript_truncated: true,
+    transcript: [
+      {
+        item_id: "item-12",
+        kind: "tool_call",
+        text: null,
+        status: "completed",
+        turn_id: "turn-12",
+        tool: {
+          item_type: "file_change",
+          diff: "+".repeat(90_000),
+        },
+      },
+    ],
+  };
+  const requestedBefore = [];
+  const pages = [
+    {
+      thread_id: "thread-1",
+      prev_cursor: 8,
+      entries: [
+        {
+          item_id: "item-12",
+          kind: "tool_call",
+          text: null,
+          status: "completed",
+          turn_id: "turn-12",
+          tool: {
+            item_type: "file_change",
+            diff: "+".repeat(90_000),
+          },
+        },
+      ],
+    },
+    {
+      thread_id: "thread-1",
+      prev_cursor: 4,
+      entries: Array.from({ length: 4 }, (_, index) => ({
+        item_id: `item-${index + 8}`,
+        kind: "agent_text",
+        text: `older reply ${index + 8}`,
+        status: "completed",
+        turn_id: `turn-${index + 8}`,
+        tool: null,
+      })),
+    },
+    {
+      thread_id: "thread-1",
+      prev_cursor: 1,
+      entries: Array.from({ length: 4 }, (_, index) => ({
+        item_id: `item-${index + 4}`,
+        kind: "user_text",
+        text: `older prompt ${index + 4}`,
+        status: "completed",
+        turn_id: `turn-${index + 4}`,
+        tool: null,
+      })),
+    },
+  ];
+  const progress = [];
+
+  await hydrateLocalTranscript(state, snapshot, {
+    async fetchPage({ before }) {
+      requestedBefore.push(before);
+      return pages.shift();
+    },
+    onProgress(nextSnapshot) {
+      progress.push(nextSnapshot);
+      state.session = nextSnapshot;
+    },
+  });
+
+  assert.deepEqual(requestedBefore, [null, 8, 4]);
+  assert.deepEqual(
+    state.session.transcript.map((entry) => entry.item_id),
+    [
+      "item-4",
+      "item-5",
+      "item-6",
+      "item-7",
+      "item-8",
+      "item-9",
+      "item-10",
+      "item-11",
+      "item-12",
+    ]
+  );
+  assert.equal(state.transcriptHydrationOlderCursor, 1);
+  assert.equal(state.session.transcript_truncated, true);
+  assert.deepEqual(
+    progress.at(-1)?.transcript?.map((entry) => entry.item_id),
+    state.session.transcript.map((entry) => entry.item_id)
+  );
+});
+
 test("hydrateLocalTranscript does nothing for non-truncated snapshots", async () => {
   const state = createState();
   const snapshot = {

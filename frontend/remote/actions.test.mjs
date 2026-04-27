@@ -358,6 +358,105 @@ test("encrypted remote action results decrypt with the persisted payload secret"
   assert.equal(storedAuth.remoteProfiles["relay-1"].hasStoredPayloadSecret, true);
 });
 
+test("encrypted remote action result chunks reassemble before resolving", async () => {
+  installBrowserStubs();
+
+  const { encryptJson } = await import("./crypto.js");
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { dispatchOrRecover, handleRemoteBrokerPayload } = await import("./actions.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-1",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "private",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: null,
+    sessionClaimExpiresAt: null,
+  });
+  seedSocketState(state, {
+    socketConnected: true,
+    socketPeerId: "surface-peer-1",
+  });
+  state.pendingActions.clear();
+  state.pendingActionChunks.clear();
+  state.socket = {
+    readyState: 1,
+    send(frameText) {
+      const frame = JSON.parse(frameText);
+      setImmediate(async () => {
+        const result = {
+          action: "fetch_thread_transcript",
+          ok: true,
+          snapshot: {
+            active_thread_id: "thread-1",
+          },
+          thread_transcript: {
+            thread_id: "thread-1",
+            entries: [
+              {
+                item_id: "item-1",
+                kind: "agent_text",
+                text: "chunked transcript payload",
+                status: "completed",
+                turn_id: "turn-1",
+                tool: null,
+              },
+            ],
+            next_cursor: null,
+            prev_cursor: 10,
+          },
+        };
+        const bytes = new TextEncoder().encode(JSON.stringify(result));
+        const midpoint = Math.ceil(bytes.length / 2);
+        const chunks = [
+          { chunk_index: 1, data: bytes.slice(midpoint) },
+          { chunk_index: 0, data: bytes.slice(0, midpoint) },
+        ];
+        for (const chunk of chunks) {
+          const envelope = await encryptJson("payload-secret-1", {
+            action_id: frame.payload.action_id,
+            action: "fetch_thread_transcript",
+            chunk_index: chunk.chunk_index,
+            chunk_count: chunks.length,
+            data_base64: Buffer.from(chunk.data).toString("base64"),
+          });
+          await handleRemoteBrokerPayload({
+            kind: "encrypted_remote_action_result_chunk",
+            action_id: frame.payload.action_id,
+            target_peer_id: "surface-peer-1",
+            device_id: "device-1",
+            action: "fetch_thread_transcript",
+            chunk_index: chunk.chunk_index,
+            chunk_count: chunks.length,
+            envelope,
+          });
+        }
+      });
+    },
+  };
+
+  const result = await dispatchOrRecover("fetch_thread_transcript", {
+    input: {
+      thread_id: "thread-1",
+    },
+  });
+  await nextTick();
+
+  assert.equal(result.thread_transcript.thread_id, "thread-1");
+  assert.equal(result.thread_transcript.entries.length, 1);
+  assert.equal(result.thread_transcript.entries[0].text, "chunked transcript payload");
+  assert.equal(state.pendingActions.size, 0);
+  assert.equal(state.pendingActionChunks.size, 0);
+});
+
 test("list_threads uses device access without pre-claiming control", async () => {
   installBrowserStubs();
   const sentPayloads = [];

@@ -162,3 +162,68 @@ fn remote_action_result_size_breakdown_reports_large_thread_transcript_payloads(
     assert!(breakdown.thread_transcript_bytes > breakdown.snapshot_bytes);
     assert!(breakdown.plaintext_bytes >= breakdown.thread_transcript_bytes);
 }
+
+fn make_large_thread_transcript_plaintext() -> RemoteActionResultPlaintext {
+    let mut snapshot = make_snapshot();
+    snapshot.transcript.clear();
+
+    RemoteActionResultPlaintext {
+        action: RemoteActionKind::FetchThreadTranscript,
+        ok: true,
+        snapshot,
+        receipt: None,
+        threads: None,
+        thread_entries: None,
+        thread_entry_detail: None,
+        thread_transcript: Some(ThreadTranscriptResponse {
+            thread_id: "thread-1".to_string(),
+            entries: vec![TranscriptEntryView {
+                item_id: Some("item-large".to_string()),
+                kind: TranscriptEntryKind::AgentText,
+                text: Some("transcript".repeat(12_000)),
+                status: "completed".to_string(),
+                turn_id: Some("turn-large".to_string()),
+                tool: None,
+            }],
+            next_cursor: None,
+            prev_cursor: Some(1),
+        }),
+        session_claim: None,
+        session_claim_expires_at: None,
+        claim_challenge_id: None,
+        claim_challenge: None,
+        claim_challenge_expires_at: None,
+        error: None,
+    }
+}
+
+#[test]
+fn plain_remote_action_result_chunk_payloads_fit_within_broker_limit() {
+    let plaintext = make_large_thread_transcript_plaintext();
+    let payloads =
+        build_plain_remote_action_result_chunk_payloads("action-1", "surface-1", &plaintext)
+            .expect("plain chunk payloads");
+
+    assert!(payloads.len() > 1);
+    assert!(payloads
+        .iter()
+        .all(|payload| frame_bytes_for_payload(payload) <= MAX_BROKER_TEXT_FRAME_BYTES));
+}
+
+#[test]
+fn encrypted_remote_action_result_chunk_payloads_fit_within_broker_limit() {
+    let plaintext = make_large_thread_transcript_plaintext();
+    let payloads = build_encrypted_remote_action_result_chunk_payloads(
+        "action-1",
+        "surface-1",
+        "device-1",
+        "payload-secret",
+        &plaintext,
+    )
+    .expect("encrypted chunk payloads");
+
+    assert!(payloads.len() > 1);
+    assert!(payloads
+        .iter()
+        .all(|payload| frame_bytes_for_payload(payload) <= MAX_BROKER_TEXT_FRAME_BYTES));
+}
