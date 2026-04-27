@@ -46,6 +46,7 @@ import {
   overviewSessionCopy,
   overviewSessionTitle,
   pairedDevicesList,
+  pendingActionBanner,
   pendingPairingsList,
   refreshButton,
   resumeLatestButton,
@@ -532,6 +533,22 @@ transcript.addEventListener("click", (event) => {
 
 transcript.addEventListener("scroll", () => {
   void controller?.maybeLoadOlderTranscript();
+});
+
+pendingActionBanner?.addEventListener("click", (event) => {
+  const approvalButton = event.target.closest("[data-approval-decision]");
+  if (approvalButton) {
+    void submitDecision(
+      approvalButton.dataset.approvalDecision,
+      approvalButton.dataset.approvalScope || "once"
+    );
+    return;
+  }
+
+  const openSecurity = event.target.closest("[data-open-security]");
+  if (openSecurity) {
+    openSecurityModal();
+  }
 });
 
 pairedDevicesList.addEventListener("click", (event) => {

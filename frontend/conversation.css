@@ -9,6 +9,7 @@
 }
 
 .thread-content {
+  width: 100%;
   max-width: 800px;
   margin: 0 auto;
   display: grid;
@@ -618,6 +619,74 @@
   overflow: auto;
 }
 
+.pending-action-banner {
+  flex-shrink: 0;
+  padding: 0 24px;
+}
+
+.pending-action-banner-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 10px 16px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  animation: banner-slide-in 200ms ease;
+}
+
+@keyframes banner-slide-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.pending-action-banner-approval {
+  background: color-mix(in srgb, var(--status-alert-bg) 60%, var(--bg-elevated));
+  border: 1px solid var(--status-alert-text);
+  color: var(--status-alert-text);
+}
+
+.pending-action-banner-pairing {
+  background: color-mix(in srgb, var(--accent-primary) 10%, var(--bg-elevated));
+  border: 1px solid color-mix(in srgb, var(--accent-primary) 50%, var(--border-subtle));
+  color: var(--text-primary);
+}
+
+.pending-action-banner-text {
+  flex: 1;
+  min-width: 0;
+  font-weight: 500;
+}
+
+.pending-action-banner-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.pending-action-btn {
+  padding: 5px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-prominent);
+  background: transparent;
+  color: var(--text-primary);
+}
+
+.pending-action-btn-primary {
+  background: var(--status-alert-text);
+  color: var(--bg-base);
+  border-color: transparent;
+}
+
+.pending-action-btn-danger {
+  border-color: var(--status-offline-text);
+  color: var(--status-offline-text);
+}
+
 @media (max-width: 900px) {
   .chat-thread {
     padding: 16px 16px 40px;
@@ -626,6 +695,12 @@
   .remote-chat-shell .chat-thread,
   .remote-chat-shell[data-view="conversation"] .chat-thread {
     padding: 16px 16px 20px;
+  }
+
+  .thread-content,
+  .chat-shell[data-view="conversation"] .thread-content {
+    width: 100%;
+    max-width: 100%;
   }
 
   .message-card {

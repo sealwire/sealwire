@@ -74,3 +74,4 @@ export const controlBanner = document.querySelector("#control-banner");
 export const controlSummary = document.querySelector("#control-summary");
 export const controlHint = document.querySelector("#control-hint");
 export const takeOverButton = document.querySelector("#take-over-button");
+export const pendingActionBanner = document.querySelector("#pending-action-banner");

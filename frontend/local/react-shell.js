@@ -348,6 +348,7 @@ function ChatShell() {
     h(ChatHeader),
     h(OverviewStrip),
     h(ConsoleGrid),
+    h("div", { className: "pending-action-banner", id: "pending-action-banner", hidden: true }),
     h(ComposerShell)
   );
 }

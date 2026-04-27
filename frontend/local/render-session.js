@@ -17,6 +17,7 @@ import {
   overviewSessionBadges,
   overviewSessionCopy,
   overviewSessionTitle,
+  pendingActionBanner,
   resumeLatestButton,
   sendButton,
   sessionHistoryDrawer,
@@ -205,6 +206,7 @@ export function createSessionRenderer({
     }
     announceNewPendingPairings(pendingPairings);
     renderControlBanner(session);
+    renderPendingActionBanner(approval, pendingPairings);
     renderTranscript(session, approval);
     renderLogs(session.logs);
     syncThreadSelection();
@@ -642,6 +644,76 @@ export function createSessionRenderer({
           : "No device currently has control",
       })
     );
+  }
+
+  function renderPendingActionBanner(approval, pendingPairings) {
+    if (!pendingActionBanner) {
+      return;
+    }
+
+    if (approval) {
+      pendingActionBanner.hidden = false;
+      renderReactContent(
+        pendingActionBanner,
+        h(
+          "div",
+          { className: "pending-action-banner-inner pending-action-banner-approval" },
+          h("span", { className: "pending-action-banner-text" }, approval.summary || "Approval required"),
+          h(
+            "div",
+            { className: "pending-action-banner-actions" },
+            h(
+              "button",
+              {
+                className: "pending-action-btn pending-action-btn-primary",
+                "data-approval-decision": "approve",
+                "data-approval-scope": "once",
+                type: "button",
+              },
+              "Approve"
+            ),
+            h(
+              "button",
+              {
+                className: "pending-action-btn pending-action-btn-danger",
+                "data-approval-decision": "deny",
+                "data-approval-scope": "once",
+                type: "button",
+              },
+              "Deny"
+            )
+          )
+        )
+      );
+      return;
+    }
+
+    if (pendingPairings.length > 0) {
+      const label = pendingPairings.length === 1
+        ? `Device "${pendingPairings[0].label || shortId(pendingPairings[0].device_id)}" wants to pair`
+        : `${pendingPairings.length} devices waiting to pair`;
+      pendingActionBanner.hidden = false;
+      renderReactContent(
+        pendingActionBanner,
+        h(
+          "div",
+          { className: "pending-action-banner-inner pending-action-banner-pairing" },
+          h("span", { className: "pending-action-banner-text" }, label),
+          h(
+            "button",
+            {
+              className: "pending-action-btn",
+              "data-open-security": "true",
+              type: "button",
+            },
+            "Review"
+          )
+        )
+      );
+      return;
+    }
+
+    pendingActionBanner.hidden = true;
   }
 
   function renderTranscript(session, approval) {
