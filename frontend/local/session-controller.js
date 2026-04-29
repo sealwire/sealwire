@@ -42,6 +42,10 @@ import {
   clearTranscriptHydration,
   restoreHydratedTranscript,
 } from "./transcript/store.js";
+import {
+  createThreadListQueryOptions,
+  createThreadTranscriptPageQueryOptions,
+} from "../shared/thread-queries.js";
 
 const CONTROL_HEARTBEAT_MS = 5000;
 const LEASE_EXPIRY_REFRESH_SKEW_MS = 250;
@@ -49,6 +53,7 @@ const LEASE_EXPIRY_REFRESH_SKEW_MS = 250;
 export function createSessionController({
   state,
   apiFetch,
+  queryClient = null,
   shortId,
   logLine,
   seedDefaults,
@@ -309,22 +314,55 @@ export function createSessionController({
   }
 
   async function fetchTranscriptPage(threadId, { before = null } = {}) {
+    const fetchPage = async () => {
+      const url = new URL(
+        `/api/threads/${encodeURIComponent(threadId)}/transcript`,
+        window.location.origin
+      );
+      if (before != null) {
+        url.searchParams.set("before", String(before));
+      }
+
+      const response = await apiFetch(url);
+      const payload = await response.json();
+
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload?.error?.message || "Failed to load transcript history");
+      }
+
+      return normalizeThreadTranscriptPage(payload.data);
+    };
+
+    if (!queryClient) {
+      return fetchPage();
+    }
+
+    return queryClient.fetchQuery(
+      createThreadTranscriptPageQueryOptions({
+        before,
+        fetchPage,
+        scope: "local",
+        surface: "local",
+        threadId,
+      })
+    );
+  }
+
+  async function fetchThreadList({ limit = 120 } = {}) {
     const url = new URL(
-      `/api/threads/${encodeURIComponent(threadId)}/transcript`,
+      "/api/threads",
       window.location.origin
     );
-    if (before != null) {
-      url.searchParams.set("before", String(before));
-    }
+    url.searchParams.set("limit", String(limit));
 
     const response = await apiFetch(url);
     const payload = await response.json();
 
     if (!response.ok || !payload.ok) {
-      throw new Error(payload?.error?.message || "Failed to load transcript history");
+      throw new Error(payload?.error?.message || "Failed to load threads");
     }
 
-    return normalizeThreadTranscriptPage(payload.data);
+    return payload.data?.threads || [];
   }
 
   async function ensureConversationTranscript(session = state.session) {
@@ -537,17 +575,18 @@ export function createSessionController({
     logLine(`Fetching thread list across saved workspaces (${reason})`);
 
     try {
-      const url = new URL("/api/threads", window.location.origin);
-      url.searchParams.set("limit", "120");
+      const threads = queryClient
+        ? await queryClient.fetchQuery(
+            createThreadListQueryOptions({
+              fetchThreads: fetchThreadList,
+              limit: 120,
+              scope: "local",
+              surface: "local",
+            })
+          )
+        : await fetchThreadList({ limit: 120 });
 
-      const response = await apiFetch(url);
-      const payload = await response.json();
-
-      if (!response.ok || !payload.ok) {
-        throw new Error(payload?.error?.message || "Failed to load threads");
-      }
-
-      state.threadGroups = buildThreadGroups(payload.data.threads || []);
+      state.threadGroups = buildThreadGroups(threads);
       state.threads = state.threadGroups.flatMap((group) => group.threads);
       renderThreads();
       renderOverviewState(state.session);

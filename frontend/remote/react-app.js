@@ -8,6 +8,7 @@ import React, {
 } from "react";
 import { createRoot } from "react-dom/client";
 import { flushSync } from "react-dom";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { fetchBuildInfo } from "../shared/build-badge.js";
 import { ClientLog } from "../shared/client-log.js";
 import {
@@ -82,6 +83,7 @@ import {
   setRemoteCwdInputElement,
   setRemoteTranscriptElement,
 } from "./ui-refs.js";
+import { remoteQueryClient } from "./query-client.js";
 import { formatTimestamp, shortId } from "./utils.js";
 
 const h = React.createElement;
@@ -102,7 +104,13 @@ export function mountRemoteApp() {
   }
 
   flushSync(() => {
-    remoteAppRoot.render(h(RemoteApp));
+    remoteAppRoot.render(
+      h(
+        QueryClientProvider,
+        { client: remoteQueryClient },
+        h(RemoteApp)
+      )
+    );
   });
 }
 

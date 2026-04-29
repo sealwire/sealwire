@@ -95,6 +95,7 @@ import {
 import { fetchBuildInfo } from "./shared/build-badge.js";
 import { ClientLog } from "./shared/client-log.js";
 import { renderSelectOptions } from "./shared/select-options.js";
+import { localQueryClient } from "./local/query-client.js";
 
 const DEVICE_STORAGE_KEY = "agent-relay.device-id";
 const API_TOKEN_STORAGE_KEY = "agent-relay.api-token";
@@ -225,6 +226,7 @@ const renderer = createSessionRenderer({
 controller = createSessionController({
   state,
   apiFetch,
+  queryClient: localQueryClient,
   shortId,
   logLine,
   seedDefaults,

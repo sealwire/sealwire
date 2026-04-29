@@ -147,6 +147,7 @@ async function main() {
               this.dispatchEvent(new Event("open"));
               this.#emit({
                 type: "welcome",
+                protocol_version: 1,
                 peer_id: "surface-e2e",
                 channel_id: "room-e2e",
                 peers: [{ peer_id: "relay-peer-e2e", role: "relay" }],
@@ -155,6 +156,14 @@ async function main() {
                 type: "presence",
                 kind: "joined",
                 peer: { peer_id: "relay-peer-e2e", role: "relay" },
+              });
+              this.#emit({
+                type: "message",
+                payload: {
+                  protocol_version: 1,
+                  kind: "session_snapshot",
+                  snapshot: truncatedSnapshot,
+                },
               });
             });
           }
@@ -212,6 +221,7 @@ async function main() {
                 this.#emit({
                   type: "message",
                   payload: {
+                    protocol_version: 1,
                     kind: "session_snapshot",
                     snapshot: truncatedSnapshot,
                   },
@@ -229,6 +239,7 @@ async function main() {
             this.#emit({
               type: "message",
               payload: {
+                protocol_version: 1,
                 kind: "remote_action_result",
                 action_id: actionId,
                 ...result,

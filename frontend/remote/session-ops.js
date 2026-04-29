@@ -20,8 +20,13 @@ import {
   createTranscriptPageFetcher,
 } from "./transcript/api.js";
 import {
+  createThreadListQueryOptions,
+  createThreadTranscriptPageQueryOptions,
+} from "../shared/thread-queries.js";
+import {
   syncLiveTranscriptEntryDetailsFromSnapshot,
 } from "./transcript/details.js";
+import { remoteQueryClient } from "./query-client.js";
 import { remoteUiRefs } from "./ui-refs.js";
 import {
   applyRemoteSurfacePatch,
@@ -29,9 +34,25 @@ import {
   createTranscriptScrollModePatch,
 } from "./surface-state.js";
 
-const fetchTranscriptPage = createTranscriptPageFetcher(dispatchOrRecover);
+const fetchRawTranscriptPage = createTranscriptPageFetcher(dispatchOrRecover);
 const fetchTranscriptEntryDetailRequest =
   createTranscriptEntryDetailFetcher(dispatchOrRecover);
+
+function remoteQueryScope() {
+  return state.remoteAuth?.relayId || "unpaired";
+}
+
+function fetchTranscriptPage({ threadId, before }) {
+  return remoteQueryClient.fetchQuery(
+    createThreadTranscriptPageQueryOptions({
+      before,
+      fetchPage: fetchRawTranscriptPage,
+      scope: remoteQueryScope(),
+      surface: "remote",
+      threadId,
+    })
+  );
+}
 
 function transcriptDeltaKindToEntryKind(deltaKind) {
   switch (deltaKind) {
@@ -240,28 +261,43 @@ export async function startRemoteSession(sessionDraftOverride = null) {
 
 export async function refreshRemoteThreads(reason, options = {}) {
   const { filterValue = "", silent = false } = options;
-  if (!state.remoteAuth) {
-    applyRemoteSurfacePatch(createRemoteThreadsPatch([]));
-    return;
-  }
 
   if (!silent) {
     renderLog(`Fetching remote thread list (${reason}).`);
   }
 
   try {
-    await dispatchOrRecover("list_threads", {
-      query: {
-        cwd: filterValue.trim() || null,
+    const threads = await remoteQueryClient.fetchQuery(
+      createThreadListQueryOptions({
+        fetchThreads: fetchRemoteThreads,
+        filterValue,
         limit: 80,
-      },
-    });
+        scope: remoteQueryScope(),
+        surface: "remote",
+      })
+    );
+    applyRemoteSurfacePatch(createRemoteThreadsPatch(threads));
+    return threads;
   } catch (error) {
     if (!silent) {
       renderLog(`Remote thread refresh failed: ${error.message}`);
     }
     throw error;
   }
+}
+
+export async function fetchRemoteThreads({ filterValue = "", limit = 80 } = {}) {
+  if (!state.remoteAuth) {
+    return [];
+  }
+
+  const result = await dispatchOrRecover("list_threads", {
+    query: {
+      cwd: filterValue.trim() || null,
+      limit,
+    },
+  });
+  return result.threads?.threads || [];
 }
 
 export async function resumeRemoteSession(threadId, sessionDraftOverride = null) {
