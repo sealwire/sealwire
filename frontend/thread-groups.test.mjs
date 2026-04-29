@@ -134,6 +134,27 @@ test("ThreadGroupList allows collapsing the active thread group", () => {
   assert.match(markup, /thread-group-list" hidden/);
 });
 
+test("ThreadGroupList can keep show-more state controlled by the parent", () => {
+  const groups = buildThreadGroups(
+    Array.from({ length: 12 }, (_, index) => ({
+      id: `thread-${index + 1}`,
+      cwd: "/tmp/demo",
+      name: `Thread ${index + 1}`,
+      updated_at: 100 - index,
+    }))
+  );
+
+  const collapsedMarkup = renderThreadGroups(groups);
+  assert.match(collapsedMarkup, /Show 2 more/);
+  assert.doesNotMatch(collapsedMarkup, /Thread 11/);
+
+  const expandedMarkup = renderThreadGroups(groups, {
+    expandedGroupCwds: new Set(["/tmp/demo"]),
+  });
+  assert.match(expandedMarkup, /Thread 11/);
+  assert.match(expandedMarkup, /Show less/);
+});
+
 test("summarizeThreadGroups and canonicalizeWorkspace produce stable display values", () => {
   const groups = buildThreadGroups([
     { id: "thread-1", cwd: "/tmp/demo/", updated_at: 1 },

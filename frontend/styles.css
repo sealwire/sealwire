@@ -475,6 +475,24 @@ input:focus, textarea:focus, select:focus {
   padding-left: 26px;
 }
 
+.thread-group-show-more {
+  width: 100%;
+  padding: 6px 10px;
+  background: transparent;
+  border: none;
+  color: var(--accent-primary);
+  font-size: 12px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+
+.thread-group-show-more:hover {
+  color: var(--accent-hover);
+  background: transparent;
+  border-color: transparent;
+}
+
 .thread-group.is-selected-workspace .thread-group-name,
 .thread-group.is-selected-workspace .thread-group-icon,
 .thread-group.is-selected-workspace .thread-group-icon::before {

@@ -571,7 +571,10 @@ export function createSessionController({
   }
 
   async function loadThreads(reason) {
-    renderThreadListMessage("Loading...", "Loading saved workspace groups...");
+    const hasThreadList = (state.threadGroups?.length || 0) > 0 || (state.threads?.length || 0) > 0;
+    if (!hasThreadList) {
+      renderThreadListMessage("Loading...", "Loading saved workspace groups...");
+    }
     logLine(`Fetching thread list across saved workspaces (${reason})`);
 
     try {

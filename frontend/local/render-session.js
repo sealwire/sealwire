@@ -865,6 +865,7 @@ export function createSessionRenderer({
       h(ThreadGroupList, {
         activeThreadId: viewedThreadId,
         emptyMessage: "Start or resume a session to build workspace groups.",
+        expandedGroupCwds: state.threadListExpandedGroupCwds || new Set(),
         formatThreadMeta(thread) {
           return formatRelativeTime(thread.updated_at);
         },
@@ -879,6 +880,16 @@ export function createSessionRenderer({
           setSelectedCwd(cwd || "");
           renderThreads();
           renderOverviewState(state.session);
+        },
+        onToggleExpandedGroup(cwd) {
+          const next = new Set(state.threadListExpandedGroupCwds || []);
+          if (next.has(cwd)) {
+            next.delete(cwd);
+          } else {
+            next.add(cwd);
+          }
+          state.threadListExpandedGroupCwds = next;
+          renderThreads();
         },
         selectedCwd,
       })

@@ -8,7 +8,8 @@ import process from "node:process";
 import { setTimeout as delay } from "node:timers/promises";
 
 import { chromium } from "playwright";
-import { fetchSession } from "./e2e-thread-cleanup.mjs";
+import { prepareSeededCodexHome } from "./e2e-codex-home.mjs";
+import { deleteThreadAndWait, fetchSession } from "./e2e-thread-cleanup.mjs";
 
 const ROOT = process.cwd();
 const LOCAL_TIMEOUT_MS = Number(process.env.BROWSER_E2E_TIMEOUT_MS || 45000);
@@ -29,9 +30,15 @@ async function main() {
   const relayPort = await getFreePort();
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-local-delete-e2e-"));
   const statePath = path.join(stateDir, "session.json");
-  const cwdInput = toTildePath(ROOT);
+  const codexHomeDir = await prepareSeededCodexHome("agent-relay-local-delete-codex-");
+  const workspaceDir = await fs.realpath(
+    await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-local-delete-workspace-"))
+  );
+  const cwdInput = toTildePath(workspaceDir);
+  const cleanupThreadIds = [];
 
   const relay = spawnManagedProcess("relay", "cargo", ["run", "-p", "relay-server"], {
+    CODEX_HOME: codexHomeDir,
     PORT: String(relayPort),
     RELAY_STATE_PATH: statePath,
   });
@@ -48,6 +55,16 @@ async function main() {
     page = await context.newPage();
 
     await page.goto(`http://127.0.0.1:${relayPort}`, { waitUntil: "domcontentloaded" });
+    const deviceId = await page.evaluate(() => localStorage.getItem("agent-relay.device-id"));
+    assert.ok(deviceId, "local delete e2e should have a browser device id");
+
+    const fallbackThreadId = await startThread(relayPort, {
+      cwd: workspaceDir,
+      deviceId,
+      initialPrompt: "Reply with exactly: local-delete-fallback-e2e",
+    });
+    cleanupThreadIds.push(fallbackThreadId);
+
     await page.fill("#cwd-input", cwdInput);
     await page.click("#open-launch-settings");
     await page.waitForFunction(() => {
@@ -78,6 +95,8 @@ async function main() {
     const relaySession = await fetchSession(relayPort);
     const threadId = relaySession.active_thread_id;
     assert.ok(threadId, "local delete e2e should create an active thread");
+    cleanupThreadIds.push(threadId);
+    assert.notEqual(threadId, fallbackThreadId, "delete target should be different from fallback");
 
     const target = page.locator(`[data-thread-id="${threadId}"]`);
     await target.waitFor({ state: "visible", timeout: LOCAL_TIMEOUT_MS });
@@ -90,18 +109,33 @@ async function main() {
     }, null, { timeout: LOCAL_TIMEOUT_MS });
     await page.click("#delete-thread-button");
 
-    await waitForThreadMissing(relayPort, threadId);
+    await waitForThreadMissing(relayPort, workspaceDir, threadId);
     await page.waitForFunction(
       (deletedThreadId) => !document.querySelector(`[data-thread-id="${deletedThreadId}"]`),
       threadId,
+      { timeout: LOCAL_TIMEOUT_MS }
+    );
+    await page.waitForFunction(
+      (expectedThreadId) => {
+        const shell = document.querySelector(".app-shell");
+        const chatShell = document.querySelector(".chat-shell");
+        const activeThread = document.querySelector(`[data-thread-id="${expectedThreadId}"]`);
+        return (
+          shell?.dataset.view === "conversation" &&
+          chatShell?.dataset.view === "conversation" &&
+          activeThread?.classList.contains("is-active") &&
+          new URL(window.location.href).searchParams.get("thread") === expectedThreadId
+        );
+      },
+      fallbackThreadId,
       { timeout: LOCAL_TIMEOUT_MS }
     );
 
     const relayAfterDelete = await fetchSession(relayPort);
     assert.equal(
       relayAfterDelete.active_thread_id,
-      null,
-      "deleting the current idle session should clear the active session"
+      fallbackThreadId,
+      "deleting the current viewed session should resume the adjacent local thread"
     );
 
     console.log(
@@ -110,6 +144,7 @@ async function main() {
           relayPort,
           cwdInput,
           deletedThreadId: threadId,
+          fallbackThreadId,
           currentStatus: relayAfterDelete.current_status,
         },
         null,
@@ -121,9 +156,23 @@ async function main() {
     dumpProcessLogs(relay);
     throw error;
   } finally {
+    for (const threadId of cleanupThreadIds.reverse()) {
+      await deleteThreadAndWait(relayPort, threadId, {
+        cwd: workspaceDir,
+        timeoutMs: LOCAL_TIMEOUT_MS,
+      }).catch((error) => {
+        if (!error.message.includes("not found")) {
+          console.error(
+            `[cleanup] failed to delete local delete e2e thread ${threadId}: ${error.message}`
+          );
+        }
+      });
+    }
     await context?.close().catch(() => {});
     await browser?.close().catch(() => {});
     await stopManagedProcess(relay);
+    await fs.rm(codexHomeDir, { recursive: true, force: true }).catch(() => {});
+    await fs.rm(workspaceDir, { recursive: true, force: true }).catch(() => {});
     await fs.rm(stateDir, { recursive: true, force: true }).catch(() => {});
   }
 }
@@ -222,11 +271,11 @@ async function waitForHealth(url, timeoutMs = 30000) {
   throw new Error(`timed out waiting for health endpoint: ${url}`);
 }
 
-async function waitForThreadMissing(relayPort, threadId, timeoutMs = LOCAL_TIMEOUT_MS) {
+async function waitForThreadMissing(relayPort, cwd, threadId, timeoutMs = LOCAL_TIMEOUT_MS) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const response = await fetch(
-      `http://127.0.0.1:${relayPort}/api/threads?cwd=${encodeURIComponent(ROOT)}`
+      `http://127.0.0.1:${relayPort}/api/threads?cwd=${encodeURIComponent(cwd)}`
     );
     const payload = await response.json();
     if (response.ok && payload?.ok) {
@@ -239,6 +288,29 @@ async function waitForThreadMissing(relayPort, threadId, timeoutMs = LOCAL_TIMEO
   }
 
   throw new Error(`timed out waiting for deleted thread ${threadId} to disappear`);
+}
+
+async function startThread(relayPort, { cwd, deviceId, initialPrompt }) {
+  const response = await fetch(`http://127.0.0.1:${relayPort}/api/session/start`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      cwd,
+      device_id: deviceId,
+      initial_prompt: initialPrompt,
+      approval_policy: "never",
+      sandbox: "workspace-write",
+      effort: "medium",
+    }),
+  });
+
+  const payload = await response.json();
+  assert.equal(response.status, 200, `failed to start thread ${initialPrompt}`);
+  assert.equal(payload?.ok, true, `thread start payload should succeed for ${initialPrompt}`);
+  assert.ok(payload?.data?.active_thread_id, `thread id missing for ${initialPrompt}`);
+  return payload.data.active_thread_id;
 }
 
 async function getFreePort() {

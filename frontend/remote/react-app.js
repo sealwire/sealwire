@@ -119,6 +119,7 @@ function RemoteApp() {
   const previousSessionRef = useRef(null);
   const remoteCwdInputRef = useRef(null);
   const [collapsedGroupCwds, setCollapsedGroupCwds] = useState(() => new Set());
+  const [expandedGroupCwds, setExpandedGroupCwds] = useState(() => new Set());
   const [uiState, dispatchUi] = useReducer(
     reduceRemoteUiState,
     undefined,
@@ -545,6 +546,7 @@ function RemoteApp() {
       h(RemoteSidebar, {
         collapsedGroupCwds,
         currentState,
+        expandedGroupCwds,
         hasRelay,
         hasUsableRelay,
         onOpenPairing() {
@@ -571,6 +573,17 @@ function RemoteApp() {
         },
         onToggleGroup(cwd) {
           setCollapsedGroupCwds((previous) => {
+            const next = new Set(previous);
+            if (next.has(cwd)) {
+              next.delete(cwd);
+            } else {
+              next.add(cwd);
+            }
+            return next;
+          });
+        },
+        onToggleExpandedGroup(cwd) {
+          setExpandedGroupCwds((previous) => {
             const next = new Set(previous);
             if (next.has(cwd)) {
               next.delete(cwd);
@@ -734,6 +747,7 @@ function RemoteApp() {
 function RemoteSidebar({
   collapsedGroupCwds,
   currentState,
+  expandedGroupCwds,
   hasRelay,
   hasUsableRelay,
   onOpenPairing,
@@ -742,6 +756,7 @@ function RemoteSidebar({
   onResumeThread,
   onSelectRelay,
   onStartSession,
+  onToggleExpandedGroup,
   onToggleGroup,
   relayDirectoryModel,
   remoteCwdInputRef,
@@ -898,12 +913,14 @@ function RemoteSidebar({
           collapsedGroupCwds,
           collapsible: true,
           emptyMessage: threadsModel.emptyMessage,
+          expandedGroupCwds,
           formatThreadMeta(thread) {
             return formatTimestamp(thread.updated_at);
           },
           groups: threadsModel.groups || [],
           includePreview: true,
           onResumeThread,
+          onToggleExpandedGroup,
           onToggleGroup,
         })
       )

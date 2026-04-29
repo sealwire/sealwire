@@ -8,6 +8,7 @@ import process from "node:process";
 import { setTimeout as delay } from "node:timers/promises";
 
 import { chromium } from "playwright";
+import { prepareSeededCodexHome } from "./e2e-codex-home.mjs";
 import { deleteThreadAndWait } from "./e2e-thread-cleanup.mjs";
 
 const ROOT = process.cwd();
@@ -27,6 +28,10 @@ async function main() {
   const relayPort = await getFreePort();
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-local-scroll-e2e-"));
   const statePath = path.join(stateDir, "session.json");
+  const codexHomeDir = await prepareSeededCodexHome("agent-relay-local-scroll-codex-");
+  const workspaceDir = await fs.realpath(
+    await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-local-scroll-workspace-"))
+  );
 
   const relay = spawnManagedProcess(
     "relay",
@@ -35,6 +40,7 @@ async function main() {
     {
       PORT: String(relayPort),
       RELAY_STATE_PATH: statePath,
+      CODEX_HOME: codexHomeDir,
     }
   );
 
@@ -50,7 +56,7 @@ async function main() {
     context = await browser.newContext({
       viewport: {
         width: 2048,
-        height: 1180,
+        height: 720,
       },
     });
     page = await context.newPage();
@@ -64,7 +70,7 @@ async function main() {
     for (let index = 0; index < 10; index += 1) {
       threadIds.push(
         await startThread(relayPort, {
-          cwd: ROOT,
+          cwd: workspaceDir,
           deviceId,
           initialPrompt: `history-scroll-${index}`,
         })
@@ -208,7 +214,7 @@ async function main() {
     throw error;
   } finally {
     for (const threadId of threadIds.reverse()) {
-      await deleteThreadAndWait(relayPort, threadId, { cwd: ROOT }).catch((error) => {
+      await deleteThreadAndWait(relayPort, threadId, { cwd: workspaceDir }).catch((error) => {
         if (!error.message.includes("not found")) {
           console.error(
             `[cleanup] failed to delete scroll e2e thread ${threadId}: ${error.message}`
@@ -219,6 +225,8 @@ async function main() {
     await context?.close().catch(() => {});
     await browser?.close().catch(() => {});
     await stopManagedProcess(relay);
+    await fs.rm(codexHomeDir, { recursive: true, force: true }).catch(() => {});
+    await fs.rm(workspaceDir, { recursive: true, force: true }).catch(() => {});
     await fs.rm(stateDir, { recursive: true, force: true }).catch(() => {});
   }
 }

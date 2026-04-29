@@ -1,7 +1,8 @@
-import React from "react";
+import React, { useCallback, useState } from "react";
 import { canonicalizeWorkspace } from "./thread-groups.js";
 
 const h = React.createElement;
+const VISIBLE_THREAD_LIMIT = 10;
 
 function shortId(value) {
   return value ? String(value).slice(0, 8) : "unknown";
@@ -12,16 +13,38 @@ export function ThreadGroupList({
   collapsedGroupCwds = new Set(),
   collapsible = false,
   emptyMessage = "No saved threads yet.",
+  expandedGroupCwds = null,
   formatThreadMeta = (thread) => thread.updated_at || "",
   groups = [],
   includePreview = false,
   onContextThread = null,
   onResumeThread = null,
   onSelectWorkspace = null,
+  onToggleExpandedGroup = null,
   onToggleGroup = null,
   previewFallback = "No preview yet.",
   selectedCwd = "",
 }) {
+  const [internalExpandedGroupCwds, setInternalExpandedGroupCwds] = useState(() => new Set());
+  const effectiveExpandedGroupCwds = expandedGroupCwds || internalExpandedGroupCwds;
+
+  const toggleShowAll = useCallback((cwd) => {
+    if (onToggleExpandedGroup) {
+      onToggleExpandedGroup(cwd);
+      return;
+    }
+
+    setInternalExpandedGroupCwds((prev) => {
+      const next = new Set(prev);
+      if (next.has(cwd)) {
+        next.delete(cwd);
+      } else {
+        next.add(cwd);
+      }
+      return next;
+    });
+  }, [onToggleExpandedGroup]);
+
   if (!groups.length) {
     return h("p", { className: "sidebar-empty" }, emptyMessage);
   }
@@ -35,6 +58,11 @@ export function ThreadGroupList({
       const normalizedCwd = canonicalizeWorkspace(group.cwd);
       const isCollapsed = collapsible && collapsedGroupCwds.has(normalizedCwd);
       const isSelected = normalizedSelectedCwd && normalizedCwd === normalizedSelectedCwd;
+      const allThreads = group.threads || [];
+      const showAll = effectiveExpandedGroupCwds.has(normalizedCwd);
+      const visibleThreads = showAll ? allThreads : allThreads.slice(0, VISIBLE_THREAD_LIMIT);
+      const hiddenCount = allThreads.length - visibleThreads.length;
+
       return h(
         "section",
         {
@@ -56,7 +84,7 @@ export function ThreadGroupList({
             className: "thread-group-list",
             hidden: isCollapsed,
           },
-          ...(group.threads || []).map((thread) =>
+          ...visibleThreads.map((thread) =>
             h(ThreadGroupItem, {
               active: activeThreadId === thread.id,
               formatThreadMeta,
@@ -68,7 +96,29 @@ export function ThreadGroupList({
               previewFallback,
               thread,
             })
-          )
+          ),
+          hiddenCount > 0
+            ? h(
+                "button",
+                {
+                  className: "thread-group-show-more",
+                  onClick: () => toggleShowAll(normalizedCwd),
+                  type: "button",
+                },
+                `Show ${hiddenCount} more`
+              )
+            : null,
+          showAll && allThreads.length > VISIBLE_THREAD_LIMIT
+            ? h(
+                "button",
+                {
+                  className: "thread-group-show-more",
+                  onClick: () => toggleShowAll(normalizedCwd),
+                  type: "button",
+                },
+                "Show less"
+              )
+            : null
         )
       );
     })
@@ -104,6 +154,7 @@ function ThreadGroupHeader({
       "button",
       {
         className: "thread-group-header",
+        "data-select-workspace": group.cwd,
         onClick: () => onSelectWorkspace(group.cwd),
         title: group.cwd,
         type: "button",

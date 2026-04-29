@@ -8,6 +8,7 @@ import process from "node:process";
 import { setTimeout as delay } from "node:timers/promises";
 
 import { chromium } from "playwright";
+import { prepareSeededCodexHome } from "./e2e-codex-home.mjs";
 import { deleteThreadAndWait, fetchSession } from "./e2e-thread-cleanup.mjs";
 
 const ROOT = process.cwd();
@@ -27,6 +28,7 @@ async function main() {
   const relayPort = await getFreePort();
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-local-groups-e2e-"));
   const statePath = path.join(stateDir, "session.json");
+  const codexHomeDir = await prepareSeededCodexHome("agent-relay-local-groups-codex-");
   const requestedWorkspaces = {
     root: path.join(stateDir, "thread-groups-e2e-root"),
     nested: path.join(stateDir, "thread-groups-e2e-nested"),
@@ -45,6 +47,7 @@ async function main() {
     "cargo",
     ["run", "-p", "relay-server"],
     {
+      CODEX_HOME: codexHomeDir,
       PORT: String(relayPort),
       RELAY_STATE_PATH: statePath,
     }
@@ -218,6 +221,7 @@ async function main() {
     await context?.close().catch(() => {});
     await browser?.close().catch(() => {});
     await stopManagedProcess(relay);
+    await fs.rm(codexHomeDir, { recursive: true, force: true }).catch(() => {});
     await fs.rm(stateDir, { recursive: true, force: true }).catch(() => {});
   }
 }

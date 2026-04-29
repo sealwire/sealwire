@@ -141,6 +141,7 @@ const state = {
   pendingThreadHistoryScrollTop: null,
   threadGroups: [],
   threadHistoryScrollTop: 0,
+  threadListExpandedGroupCwds: new Set(),
   streamReconnectTimer: null,
   sessionPollTimer: null,
   threadContextMenuThreadId: null,
@@ -913,6 +914,8 @@ async function deleteThreadFromContextMenu() {
   }
 
   const thread = resolveActiveThread(threadId) || state.threads.find((entry) => entry.id === threadId);
+  const shouldPreserveConversation = state.viewThreadId === threadId;
+  const fallbackThreadId = shouldPreserveConversation ? findAdjacentThreadId(threadId) : null;
   const title = thread?.name || thread?.preview || shortId(threadId);
   const confirmed = window.confirm(
     `Permanently delete "${title}" from local Codex storage?\n\nThis removes the local thread file and related local index/state entries. This cannot be undone.`
@@ -933,12 +936,37 @@ async function deleteThreadFromContextMenu() {
     state.threads = state.threads.filter((entry) => entry.id !== threadId);
     state.threadGroups = buildThreadGroups(state.threads);
     renderThreads();
-    await loadSession("post-delete refresh");
     await loadThreads("post-delete refresh");
+    if (shouldPreserveConversation) {
+      const canResumeFallback =
+        fallbackThreadId && state.threads.some((entry) => entry.id === fallbackThreadId);
+      if (canResumeFallback) {
+        await resumeSession(fallbackThreadId);
+      } else {
+        clearThreadRoute({ replace: true });
+        await loadSession("post-delete refresh");
+      }
+    } else {
+      await loadSession("post-delete refresh");
+    }
     logLine(payload.data?.message || `Deleted local session ${shortId(threadId)} permanently.`);
   } catch (error) {
     logLine(`Failed to permanently delete local session: ${error.message}`);
   }
+}
+
+function findAdjacentThreadId(threadId) {
+  const index = state.threads.findIndex((entry) => entry.id === threadId);
+  if (index === -1) {
+    return state.threads.find((entry) => entry.id !== threadId)?.id || null;
+  }
+
+  return (
+    state.threads[index + 1]?.id ||
+    state.threads[index - 1]?.id ||
+    state.threads.find((entry) => entry.id !== threadId)?.id ||
+    null
+  );
 }
 
 function metaChip(label, value) {
