@@ -691,7 +691,7 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
                 string_at(&params, &["delta"]),
             ) {
                 let delta_len = delta.len();
-                relay.append_agent_delta(&item_id, &delta, &turn_id);
+                let mutation = relay.append_agent_delta(&item_id, &delta, &turn_id);
                 let thread_id = notification_thread_id
                     .clone()
                     .or_else(|| relay.active_thread_id.clone())
@@ -710,6 +710,10 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
                     .push(BrokerPendingMessage::TranscriptDelta(
                         PendingTranscriptDelta {
                             thread_id,
+                            base_revision: mutation.base_revision,
+                            revision: mutation.revision,
+                            entry_seq: mutation.entry_seq,
+                            server_time: mutation.server_time,
                             item_id,
                             turn_id: Some(turn_id),
                             delta,
@@ -821,7 +825,7 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
                     string_at(&params, &["itemId"]).or_else(|| string_at(&params, &["item", "id"]))
                 {
                     let delta_len = delta.len();
-                    relay.append_command_delta(&item_id, &delta);
+                    let mutation = relay.append_command_delta(&item_id, &delta);
                     let thread_id = notification_thread_id
                         .clone()
                         .or_else(|| relay.active_thread_id.clone())
@@ -839,6 +843,10 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
                         .push(BrokerPendingMessage::TranscriptDelta(
                             PendingTranscriptDelta {
                                 thread_id,
+                                base_revision: mutation.base_revision,
+                                revision: mutation.revision,
+                                entry_seq: mutation.entry_seq,
+                                server_time: mutation.server_time,
                                 item_id,
                                 turn_id: None,
                                 delta: delta.clone(),

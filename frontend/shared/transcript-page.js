@@ -8,8 +8,12 @@ export function normalizeThreadTranscriptPage(page) {
     && page.entries.every((entry) => !Array.isArray(entry?.parts))
   ) {
     return {
+      entry_seq_end: page.entry_seq_end ?? null,
+      entry_seq_start: page.entry_seq_start ?? null,
       entries: page.entries,
       prev_cursor: page.prev_cursor ?? page.next_cursor ?? null,
+      revision: page.revision ?? null,
+      server_time: page.server_time ?? null,
       thread_id: page.thread_id,
     };
   }
@@ -47,8 +51,12 @@ export function normalizeThreadTranscriptPage(page) {
   }
 
   return {
+    entry_seq_end: page.entry_seq_end ?? null,
+    entry_seq_start: page.entry_seq_start ?? null,
     entries: [...entriesByIndex.values()].sort((left, right) => left.entry_index - right.entry_index),
     prev_cursor: page.prev_cursor ?? page.next_cursor ?? null,
+    revision: page.revision ?? null,
+    server_time: page.server_time ?? null,
     thread_id: page.thread_id,
   };
 }

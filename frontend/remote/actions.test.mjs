@@ -725,6 +725,49 @@ test("handleRemoteBrokerPayload does not apply snapshot for heartbeat action res
   assert.equal(snapshotApplied, false);
 });
 
+test("handleRemoteBrokerPayload keeps control results out of the transcript channel", async () => {
+  installBrowserStubs();
+
+  const { configureRemoteActions, handleRemoteBrokerPayload } = await import("./actions.js");
+
+  let snapshotApplied = false;
+  configureRemoteActions({
+    onApplySessionSnapshot: () => { snapshotApplied = true; },
+  });
+
+  await handleRemoteBrokerPayload({
+    kind: "remote_control_result",
+    action_id: "action-control",
+    action: "heartbeat",
+    ok: true,
+    snapshot: { active_thread_id: "thread-1" },
+  });
+
+  assert.equal(snapshotApplied, false);
+});
+
+test("handleRemoteBrokerPayload applies snapshots only from session results", async () => {
+  installBrowserStubs();
+
+  const { configureRemoteActions, handleRemoteBrokerPayload } = await import("./actions.js");
+
+  const applied = [];
+  configureRemoteActions({
+    onApplySessionSnapshot: (snapshot) => { applied.push(snapshot); },
+  });
+
+  await handleRemoteBrokerPayload({
+    kind: "remote_session_result",
+    action_id: "action-session",
+    action: "start_session",
+    ok: true,
+    snapshot: { active_thread_id: "thread-1" },
+  });
+
+  assert.equal(applied.length, 1);
+  assert.equal(applied[0].active_thread_id, "thread-1");
+});
+
 test("handleRemoteBrokerPayload does not apply snapshot for claim_challenge action result", async () => {
   installBrowserStubs();
 

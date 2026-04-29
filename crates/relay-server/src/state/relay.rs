@@ -34,7 +34,7 @@ const MAX_REMOTE_ACTION_REPLAY_ENTRIES: usize = 512;
 pub(crate) struct CachedRemoteActionResult {
     pub(crate) action_kind: String,
     pub(crate) ok: bool,
-    pub(crate) snapshot: SessionSnapshot,
+    pub(crate) snapshot: Option<SessionSnapshot>,
     pub(crate) receipt: Option<ApprovalReceipt>,
     pub(crate) threads: Option<ThreadsResponse>,
     pub(crate) thread_entries: Option<ThreadEntriesResponse>,
@@ -71,6 +71,7 @@ enum CachedRemoteActionState {
 pub struct RelayState {
     change_tx: watch::Sender<u64>,
     revision: u64,
+    transcript_revision: u64,
     security: SecurityProfile,
     pub codex_connected: bool,
     pub broker_connected: bool,
@@ -115,6 +116,7 @@ impl RelayState {
         let mut state = Self {
             change_tx,
             revision: 0,
+            transcript_revision: 0,
             security,
             codex_connected: false,
             broker_connected: false,
@@ -156,6 +158,16 @@ impl RelayState {
     pub fn notify(&mut self) {
         self.revision = self.revision.wrapping_add(1);
         let _ = self.change_tx.send(self.revision);
+    }
+
+    pub fn transcript_revision(&self) -> u64 {
+        self.transcript_revision
+    }
+
+    pub(super) fn bump_transcript_revision(&mut self) -> (u64, u64) {
+        let base_revision = self.transcript_revision;
+        self.transcript_revision = self.transcript_revision.wrapping_add(1);
+        (base_revision, self.transcript_revision)
     }
 
     pub fn snapshot(&self) -> SessionSnapshot {
@@ -203,6 +215,9 @@ impl RelayState {
         pending_pairing_requests.sort_by(|left, right| left.requested_at.cmp(&right.requested_at));
 
         SessionSnapshot {
+            revision: self.revision,
+            transcript_revision: self.transcript_revision,
+            server_time: unix_now(),
             provider: "codex",
             service_ready: true,
             codex_connected: self.codex_connected,
@@ -269,6 +284,7 @@ impl RelayState {
         self.reasoning_effort = effort.to_string();
         self.pending_approvals.clear();
         self.transcript.clear();
+        self.bump_transcript_revision();
         self.upsert_thread(thread);
     }
 
@@ -339,6 +355,7 @@ impl RelayState {
                 tool: entry.tool,
             })
             .collect();
+        self.bump_transcript_revision();
         self.upsert_thread(data.thread);
     }
 
@@ -385,6 +402,7 @@ impl RelayState {
                 tool: entry.tool,
             })
             .collect();
+        self.bump_transcript_revision();
         self.upsert_thread(data.thread);
     }
 

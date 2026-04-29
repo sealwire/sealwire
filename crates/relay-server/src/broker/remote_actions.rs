@@ -170,9 +170,11 @@ impl RemoteActionKind {
 
 #[derive(Debug, Clone, Serialize)]
 struct RemoteActionResultPlaintext {
+    kind: RemoteActionResultKind,
     action: RemoteActionKind,
     ok: bool,
-    snapshot: SessionSnapshot,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    snapshot: Option<SessionSnapshot>,
     receipt: Option<ApprovalReceipt>,
     threads: Option<ThreadsResponse>,
     thread_entries: Option<ThreadEntriesResponse>,
@@ -184,6 +186,17 @@ struct RemoteActionResultPlaintext {
     claim_challenge: Option<String>,
     claim_challenge_expires_at: Option<u64>,
     error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum RemoteActionResultKind {
+    RemoteActionAck,
+    RemoteApprovalResult,
+    RemoteControlResult,
+    RemoteSessionResult,
+    RemoteThreadsResult,
+    RemoteTranscriptResult,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -276,7 +289,7 @@ pub(super) async fn handle_remote_action(
                 from_peer_id,
                 action_id,
                 action_kind,
-                snapshot,
+                remote_action_result_snapshot(action_kind, snapshot),
                 RemoteActionOutcome::default(),
                 Some(error),
                 false,
@@ -451,7 +464,7 @@ pub(super) async fn handle_encrypted_remote_action(
                 device_id,
                 action_id,
                 action_kind,
-                snapshot,
+                remote_action_result_snapshot(action_kind, snapshot),
                 RemoteActionOutcome::default(),
                 Some(error),
                 false,
@@ -953,22 +966,35 @@ async fn publish_plain_remote_action_result(
     target_peer_id: String,
     action_id: String,
     action: RemoteActionKind,
-    snapshot: SessionSnapshot,
+    snapshot: Option<SessionSnapshot>,
     outcome: RemoteActionOutcome,
     error: Option<String>,
     ok: bool,
     _device_id: String,
 ) -> Result<(), String> {
-    let input_transcript_entries = snapshot.transcript.len();
-    let input_transcript_truncated = snapshot.transcript_truncated;
-    let snapshot =
-        snapshot.compact_for(crate::protocol::SessionSnapshotCompactProfile::RemoteSurface);
+    let input_transcript_entries = snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.transcript.len())
+        .unwrap_or(0);
+    let input_transcript_truncated = snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.transcript_truncated)
+        .unwrap_or(false);
+    let snapshot = snapshot.map(|snapshot| {
+        snapshot.compact_for(crate::protocol::SessionSnapshotCompactProfile::RemoteSurface)
+    });
     info!(
         action = action.as_str(),
         input_transcript_entries,
         input_transcript_truncated,
-        compacted_transcript_entries = snapshot.transcript.len(),
-        compacted_transcript_truncated = snapshot.transcript_truncated,
+        compacted_transcript_entries = snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.transcript.len())
+            .unwrap_or(0),
+        compacted_transcript_truncated = snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.transcript_truncated)
+            .unwrap_or(false),
         "publishing plaintext remote action result compacted snapshot"
     );
     let threads = outcome.threads.map(|threads| {
@@ -989,7 +1015,7 @@ async fn publish_plain_remote_action_result(
     let size_breakdown = measure_remote_action_result_sizes(
         action,
         ok,
-        &snapshot,
+        snapshot.as_ref(),
         receipt.as_ref(),
         threads.as_ref(),
         thread_entries.as_ref(),
@@ -1003,6 +1029,7 @@ async fn publish_plain_remote_action_result(
         error.as_ref(),
     );
     let plaintext = RemoteActionResultPlaintext {
+        kind: remote_action_result_kind(action),
         action,
         ok,
         snapshot,
@@ -1018,24 +1045,8 @@ async fn publish_plain_remote_action_result(
         claim_challenge_expires_at,
         error,
     };
-    let payload = OutboundBrokerPayload::RemoteActionResult {
-        action_id: action_id.clone(),
-        target_peer_id: target_peer_id.clone(),
-        action,
-        ok,
-        snapshot: plaintext.snapshot.clone(),
-        receipt: plaintext.receipt.clone(),
-        threads: plaintext.threads.clone(),
-        thread_entries: plaintext.thread_entries.clone(),
-        thread_entry_detail: plaintext.thread_entry_detail.clone(),
-        thread_transcript: plaintext.thread_transcript.clone(),
-        session_claim: plaintext.session_claim.clone(),
-        session_claim_expires_at: plaintext.session_claim_expires_at,
-        claim_challenge_id: plaintext.claim_challenge_id.clone(),
-        claim_challenge: plaintext.claim_challenge.clone(),
-        claim_challenge_expires_at: plaintext.claim_challenge_expires_at,
-        error: plaintext.error.clone(),
-    };
+    let payload =
+        build_plain_remote_action_result_payload(&action_id, &target_peer_id, &plaintext)?;
     let frame_bytes = frame_bytes_for_payload(&payload);
     log_remote_action_result_sizes("plaintext", action, &size_breakdown, None, frame_bytes);
     if frame_bytes <= MAX_BROKER_TEXT_FRAME_BYTES {
@@ -1059,6 +1070,79 @@ async fn publish_plain_remote_action_result(
             .map_err(|error| format!("broker action result chunk publish failed: {error}"))?;
     }
     Ok(())
+}
+
+fn build_plain_remote_action_result_payload(
+    action_id: &str,
+    target_peer_id: &str,
+    result: &RemoteActionResultPlaintext,
+) -> Result<OutboundBrokerPayload, String> {
+    let action_id = action_id.to_string();
+    let target_peer_id = target_peer_id.to_string();
+    Ok(match result.kind {
+        RemoteActionResultKind::RemoteActionAck => OutboundBrokerPayload::RemoteActionAck {
+            action_id,
+            target_peer_id,
+            action: result.action,
+            ok: result.ok,
+            error: result.error.clone(),
+        },
+        RemoteActionResultKind::RemoteApprovalResult => {
+            OutboundBrokerPayload::RemoteApprovalResult {
+                action_id,
+                target_peer_id,
+                action: result.action,
+                ok: result.ok,
+                receipt: result.receipt.clone(),
+                error: result.error.clone(),
+            }
+        }
+        RemoteActionResultKind::RemoteControlResult => OutboundBrokerPayload::RemoteControlResult {
+            action_id,
+            target_peer_id,
+            action: result.action,
+            ok: result.ok,
+            session_claim: result.session_claim.clone(),
+            session_claim_expires_at: result.session_claim_expires_at,
+            claim_challenge_id: result.claim_challenge_id.clone(),
+            claim_challenge: result.claim_challenge.clone(),
+            claim_challenge_expires_at: result.claim_challenge_expires_at,
+            error: result.error.clone(),
+        },
+        RemoteActionResultKind::RemoteSessionResult => OutboundBrokerPayload::RemoteSessionResult {
+            action_id,
+            target_peer_id,
+            action: result.action,
+            ok: result.ok,
+            snapshot: result
+                .snapshot
+                .clone()
+                .ok_or_else(|| "remote session result is missing snapshot".to_string())?,
+            session_claim: result.session_claim.clone(),
+            session_claim_expires_at: result.session_claim_expires_at,
+            error: result.error.clone(),
+        },
+        RemoteActionResultKind::RemoteThreadsResult => OutboundBrokerPayload::RemoteThreadsResult {
+            action_id,
+            target_peer_id,
+            action: result.action,
+            ok: result.ok,
+            threads: result.threads.clone(),
+            error: result.error.clone(),
+        },
+        RemoteActionResultKind::RemoteTranscriptResult => {
+            OutboundBrokerPayload::RemoteTranscriptResult {
+                action_id,
+                target_peer_id,
+                action: result.action,
+                ok: result.ok,
+                thread_entries: result.thread_entries.clone(),
+                thread_entry_detail: result.thread_entry_detail.clone(),
+                thread_transcript: result.thread_transcript.clone(),
+                error: result.error.clone(),
+            }
+        }
+    })
 }
 
 async fn replay_plain_remote_action_result(
@@ -1100,22 +1184,35 @@ async fn publish_remote_action_result_private(
     device_id: String,
     action_id: String,
     action: RemoteActionKind,
-    snapshot: SessionSnapshot,
+    snapshot: Option<SessionSnapshot>,
     outcome: RemoteActionOutcome,
     error: Option<String>,
     ok: bool,
     response_secret: Option<&str>,
 ) -> Result<(), String> {
-    let input_transcript_entries = snapshot.transcript.len();
-    let input_transcript_truncated = snapshot.transcript_truncated;
-    let snapshot =
-        snapshot.compact_for(crate::protocol::SessionSnapshotCompactProfile::RemoteSurface);
+    let input_transcript_entries = snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.transcript.len())
+        .unwrap_or(0);
+    let input_transcript_truncated = snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.transcript_truncated)
+        .unwrap_or(false);
+    let snapshot = snapshot.map(|snapshot| {
+        snapshot.compact_for(crate::protocol::SessionSnapshotCompactProfile::RemoteSurface)
+    });
     info!(
         action = action.as_str(),
         input_transcript_entries,
         input_transcript_truncated,
-        compacted_transcript_entries = snapshot.transcript.len(),
-        compacted_transcript_truncated = snapshot.transcript_truncated,
+        compacted_transcript_entries = snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.transcript.len())
+            .unwrap_or(0),
+        compacted_transcript_truncated = snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.transcript_truncated)
+            .unwrap_or(false),
         "publishing encrypted remote action result compacted snapshot"
     );
     let threads = outcome.threads.map(|threads| {
@@ -1140,7 +1237,7 @@ async fn publish_remote_action_result_private(
     let size_breakdown = measure_remote_action_result_sizes(
         action,
         ok,
-        &snapshot,
+        snapshot.as_ref(),
         receipt.as_ref(),
         threads.as_ref(),
         thread_entries.as_ref(),
@@ -1154,6 +1251,7 @@ async fn publish_remote_action_result_private(
         error.as_ref(),
     );
     let plaintext = RemoteActionResultPlaintext {
+        kind: remote_action_result_kind(action),
         action,
         ok,
         snapshot,
@@ -1413,7 +1511,7 @@ fn cached_remote_action_result(
     CachedRemoteActionResult {
         action_kind: action.as_str().to_string(),
         ok,
-        snapshot,
+        snapshot: remote_action_result_snapshot(action, snapshot),
         receipt: outcome.receipt,
         // Snapshots and thread lists are compacted at the remote-surface publish
         // boundary. Thread transcript responses are already paginated and do not
@@ -1435,7 +1533,7 @@ fn cached_remote_action_result(
 fn measure_remote_action_result_sizes(
     action: RemoteActionKind,
     ok: bool,
-    snapshot: &SessionSnapshot,
+    snapshot: Option<&SessionSnapshot>,
     receipt: Option<&ApprovalReceipt>,
     threads: Option<&ThreadsResponse>,
     thread_entries: Option<&ThreadEntriesResponse>,
@@ -1449,6 +1547,7 @@ fn measure_remote_action_result_sizes(
     error: Option<&String>,
 ) -> RemoteActionResultSizeBreakdown {
     let plaintext = RemoteActionResultPlaintextRef {
+        kind: remote_action_result_kind(action),
         action,
         ok,
         snapshot,
@@ -1465,7 +1564,7 @@ fn measure_remote_action_result_sizes(
         error,
     };
     RemoteActionResultSizeBreakdown {
-        snapshot_bytes: serialized_json_bytes(snapshot),
+        snapshot_bytes: maybe_serialized_json_bytes(snapshot),
         receipt_bytes: maybe_serialized_json_bytes(receipt),
         threads_bytes: maybe_serialized_json_bytes(threads),
         thread_entries_bytes: maybe_serialized_json_bytes(thread_entries),
@@ -1561,9 +1660,11 @@ fn maybe_serialized_json_bytes<T: Serialize>(value: Option<&T>) -> usize {
 
 #[derive(Serialize)]
 struct RemoteActionResultPlaintextRef<'a> {
+    kind: RemoteActionResultKind,
     action: RemoteActionKind,
     ok: bool,
-    snapshot: &'a SessionSnapshot,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    snapshot: Option<&'a SessionSnapshot>,
     receipt: Option<&'a ApprovalReceipt>,
     threads: Option<&'a ThreadsResponse>,
     thread_entries: Option<&'a ThreadEntriesResponse>,
@@ -1575,6 +1676,38 @@ struct RemoteActionResultPlaintextRef<'a> {
     claim_challenge: Option<&'a String>,
     claim_challenge_expires_at: Option<u64>,
     error: Option<&'a String>,
+}
+
+fn remote_action_result_snapshot(
+    action: RemoteActionKind,
+    snapshot: SessionSnapshot,
+) -> Option<SessionSnapshot> {
+    remote_action_result_allows_snapshot(action).then_some(snapshot)
+}
+
+fn remote_action_result_kind(action: RemoteActionKind) -> RemoteActionResultKind {
+    match action {
+        RemoteActionKind::StartSession | RemoteActionKind::ResumeSession => {
+            RemoteActionResultKind::RemoteSessionResult
+        }
+        RemoteActionKind::ClaimChallenge
+        | RemoteActionKind::ClaimDevice
+        | RemoteActionKind::Heartbeat
+        | RemoteActionKind::TakeOver => RemoteActionResultKind::RemoteControlResult,
+        RemoteActionKind::ListThreads => RemoteActionResultKind::RemoteThreadsResult,
+        RemoteActionKind::FetchThreadEntries
+        | RemoteActionKind::FetchThreadEntryDetail
+        | RemoteActionKind::FetchThreadTranscript => RemoteActionResultKind::RemoteTranscriptResult,
+        RemoteActionKind::DecideApproval => RemoteActionResultKind::RemoteApprovalResult,
+        RemoteActionKind::SendMessage => RemoteActionResultKind::RemoteActionAck,
+    }
+}
+
+fn remote_action_result_allows_snapshot(action: RemoteActionKind) -> bool {
+    matches!(
+        action,
+        RemoteActionKind::StartSession | RemoteActionKind::ResumeSession
+    )
 }
 
 #[cfg(test)]

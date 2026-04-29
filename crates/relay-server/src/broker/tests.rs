@@ -908,6 +908,10 @@ fn device_claim_proof_rejects_different_peer() {
 fn summarize_thread_transcript_response_reports_entry_and_char_counts() {
     let summary = summarize_thread_transcript_response(&ThreadTranscriptResponse {
         thread_id: "thread-1".to_string(),
+        revision: 5,
+        server_time: 6,
+        entry_seq_start: Some(1),
+        entry_seq_end: Some(2),
         entries: vec![
             TranscriptEntryView {
                 item_id: Some("item-1".to_string()),

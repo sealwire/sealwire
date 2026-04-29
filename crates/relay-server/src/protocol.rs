@@ -1,3 +1,5 @@
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -74,6 +76,9 @@ pub enum DeviceLifecycleState {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionSnapshot {
+    pub revision: u64,
+    pub transcript_revision: u64,
+    pub server_time: u64,
     pub provider: &'static str,
     pub service_ready: bool,
     pub codex_connected: bool,
@@ -659,6 +664,10 @@ pub struct ReadThreadEntryDetailInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreadTranscriptResponse {
     pub thread_id: String,
+    pub revision: u64,
+    pub server_time: u64,
+    pub entry_seq_start: Option<u64>,
+    pub entry_seq_end: Option<u64>,
     pub entries: Vec<TranscriptEntryView>,
     pub next_cursor: Option<usize>,
     pub prev_cursor: Option<usize>,
@@ -872,7 +881,14 @@ impl ThreadTranscriptResponse {
 
         while index < transcript.len() {
             selected.push(transcript[index].clone());
-            let candidate = build_thread_transcript_page(&thread_id, &selected, None, None);
+            let candidate = build_thread_transcript_page(
+                &thread_id,
+                &selected,
+                None,
+                None,
+                0,
+                cursor.min(transcript.len()),
+            );
             if serialized_len(&candidate) > THREAD_TRANSCRIPT_RESPONSE_TARGET_BYTES
                 && selected.len() > 1
             {
@@ -892,20 +908,27 @@ impl ThreadTranscriptResponse {
             &selected,
             (index < transcript.len()).then_some(index),
             None,
+            0,
+            cursor.min(transcript.len()),
         )
     }
 
-    pub fn from_transcript_tail(thread_id: String, transcript: Vec<TranscriptEntryView>) -> Self {
-        build_reverse_thread_transcript_page(&thread_id, &transcript, transcript.len())
+    pub fn from_transcript_tail(
+        thread_id: String,
+        transcript: Vec<TranscriptEntryView>,
+        revision: u64,
+    ) -> Self {
+        build_reverse_thread_transcript_page(&thread_id, &transcript, transcript.len(), revision)
     }
 
     pub fn from_transcript_before(
         thread_id: String,
         transcript: Vec<TranscriptEntryView>,
         before: Option<usize>,
+        revision: u64,
     ) -> Self {
         let upper_bound = before.unwrap_or(transcript.len()).min(transcript.len());
-        build_reverse_thread_transcript_page(&thread_id, &transcript, upper_bound)
+        build_reverse_thread_transcript_page(&thread_id, &transcript, upper_bound, revision)
     }
 }
 
@@ -1020,9 +1043,15 @@ fn build_thread_transcript_page(
     entries: &[TranscriptEntryView],
     next_cursor: Option<usize>,
     prev_cursor: Option<usize>,
+    revision: u64,
+    start_index: usize,
 ) -> ThreadTranscriptResponse {
     ThreadTranscriptResponse {
         thread_id: thread_id.to_string(),
+        revision,
+        server_time: unix_now_secs(),
+        entry_seq_start: (!entries.is_empty()).then_some(start_index as u64 + 1),
+        entry_seq_end: (!entries.is_empty()).then_some(start_index as u64 + entries.len() as u64),
         entries: entries.to_vec(),
         next_cursor,
         prev_cursor,
@@ -1033,6 +1062,7 @@ fn build_reverse_thread_transcript_page(
     thread_id: &str,
     transcript: &[TranscriptEntryView],
     upper_bound: usize,
+    revision: u64,
 ) -> ThreadTranscriptResponse {
     let mut selected = Vec::new();
     let mut index = upper_bound;
@@ -1044,6 +1074,8 @@ fn build_reverse_thread_transcript_page(
             &selected.iter().rev().cloned().collect::<Vec<_>>(),
             None,
             None,
+            revision,
+            index - 1,
         );
         if serialized_len(&candidate) > THREAD_TRANSCRIPT_RESPONSE_TARGET_BYTES
             && selected.len() > 1
@@ -1064,7 +1096,16 @@ fn build_reverse_thread_transcript_page(
         &selected.into_iter().rev().collect::<Vec<_>>(),
         (upper_bound < transcript.len()).then_some(upper_bound),
         (index > 0).then_some(index),
+        revision,
+        index,
     )
+}
+
+fn unix_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 fn detail_field_names(entry: &TranscriptEntryView) -> &'static [&'static str] {

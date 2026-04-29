@@ -17,6 +17,7 @@ export function transcriptHydrationSignature(snapshot) {
   const parts = [
     snapshot.active_thread_id || "",
     snapshot.active_turn_id || "",
+    String(snapshot.transcript_revision ?? ""),
     String(snapshot.transcript?.length || 0),
   ];
 
@@ -184,8 +185,21 @@ export function buildHydratedTranscriptProgress(state) {
   if (!snapshot || state.session?.active_thread_id !== snapshot.active_thread_id) {
     return null;
   }
+  const snapshotRevision = numericRevision(snapshot.transcript_revision);
+  const sessionRevision = numericRevision(state.session?.transcript_revision);
+  if (
+    snapshotRevision != null
+    && sessionRevision != null
+    && snapshotRevision < sessionRevision
+  ) {
+    return null;
+  }
 
   return buildHydratedTranscriptSnapshot(state, snapshot);
+}
+
+function numericRevision(value) {
+  return Number.isSafeInteger(value) ? value : null;
 }
 
 function buildHydratedTranscriptSnapshot(state, snapshot) {

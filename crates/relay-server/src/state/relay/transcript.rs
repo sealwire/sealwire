@@ -4,6 +4,14 @@ use crate::protocol::{LogEntryView, ToolCallView, TranscriptEntryKind, Transcrip
 
 use super::RelayState;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TranscriptMutationMeta {
+    pub(crate) base_revision: u64,
+    pub(crate) revision: u64,
+    pub(crate) entry_seq: u64,
+    pub(crate) server_time: u64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct TranscriptRecord {
     pub(crate) item_id: String,
@@ -36,12 +44,14 @@ impl RelayState {
         status: String,
         turn_id: Option<String>,
         tool: Option<ToolCallView>,
-    ) {
-        if let Some(entry) = self
+    ) -> TranscriptMutationMeta {
+        if let Some(index) = self
             .transcript
-            .iter_mut()
-            .find(|entry| entry.item_id == item_id)
+            .iter()
+            .position(|entry| entry.item_id == item_id)
         {
+            let (base_revision, revision) = self.bump_transcript_revision();
+            let entry = &mut self.transcript[index];
             entry.kind = kind;
             entry.text = text.or(entry.text.take());
             entry.status = status;
@@ -51,9 +61,11 @@ impl RelayState {
             } else {
                 tool
             };
-            return;
+            return transcript_mutation_meta(base_revision, revision, index as u64 + 1);
         }
 
+        let entry_seq = self.transcript.len() as u64 + 1;
+        let (base_revision, revision) = self.bump_transcript_revision();
         self.transcript.push(TranscriptRecord {
             item_id,
             kind,
@@ -62,6 +74,7 @@ impl RelayState {
             turn_id,
             tool,
         });
+        transcript_mutation_meta(base_revision, revision, entry_seq)
     }
 
     pub fn push_log(&mut self, kind: &str, message: impl Into<String>) {
@@ -89,17 +102,24 @@ impl RelayState {
         );
     }
 
-    pub fn append_agent_delta(&mut self, item_id: &str, delta: &str, turn_id: &str) {
-        if let Some(entry) = self
+    pub fn append_agent_delta(
+        &mut self,
+        item_id: &str,
+        delta: &str,
+        turn_id: &str,
+    ) -> TranscriptMutationMeta {
+        if let Some(index) = self
             .transcript
-            .iter_mut()
-            .find(|entry| entry.item_id == item_id)
+            .iter()
+            .position(|entry| entry.item_id == item_id)
         {
+            let (base_revision, revision) = self.bump_transcript_revision();
+            let entry = &mut self.transcript[index];
             entry.kind = TranscriptEntryKind::AgentText;
             entry.text.get_or_insert_with(String::new).push_str(delta);
             entry.status = "streaming".to_string();
             entry.tool = None;
-            return;
+            return transcript_mutation_meta(base_revision, revision, index as u64 + 1);
         }
 
         self.upsert_transcript_item(
@@ -109,15 +129,17 @@ impl RelayState {
             "streaming".to_string(),
             Some(turn_id.to_string()),
             None,
-        );
+        )
     }
 
     pub fn upsert_user_message(&mut self, item_id: String, text: String, turn_id: String) {
-        if let Some(entry) = self
+        if let Some(index) = self
             .transcript
-            .iter_mut()
-            .find(|entry| entry.item_id == item_id)
+            .iter()
+            .position(|entry| entry.item_id == item_id)
         {
+            self.bump_transcript_revision();
+            let entry = &mut self.transcript[index];
             entry.kind = TranscriptEntryKind::UserText;
             entry.text = Some(text);
             entry.status = "completed".to_string();
@@ -136,11 +158,13 @@ impl RelayState {
     }
 
     pub fn complete_agent_message(&mut self, item_id: String, text: String, turn_id: String) {
-        if let Some(entry) = self
+        if let Some(index) = self
             .transcript
-            .iter_mut()
-            .find(|entry| entry.item_id == item_id)
+            .iter()
+            .position(|entry| entry.item_id == item_id)
         {
+            self.bump_transcript_revision();
+            let entry = &mut self.transcript[index];
             entry.kind = TranscriptEntryKind::AgentText;
             entry.text = Some(text);
             entry.status = "completed".to_string();
@@ -172,11 +196,13 @@ impl RelayState {
             text.push_str(&output);
         }
 
-        if let Some(entry) = self
+        if let Some(index) = self
             .transcript
-            .iter_mut()
-            .find(|entry| entry.item_id == item_id)
+            .iter()
+            .position(|entry| entry.item_id == item_id)
         {
+            self.bump_transcript_revision();
+            let entry = &mut self.transcript[index];
             entry.kind = TranscriptEntryKind::Command;
             entry.text = Some(text);
             entry.status = status;
@@ -201,11 +227,13 @@ impl RelayState {
         status: String,
         turn_id: String,
     ) {
-        if let Some(entry) = self
+        if let Some(index) = self
             .transcript
-            .iter_mut()
-            .find(|entry| entry.item_id == item_id)
+            .iter()
+            .position(|entry| entry.item_id == item_id)
         {
+            self.bump_transcript_revision();
+            let entry = &mut self.transcript[index];
             entry.kind = TranscriptEntryKind::Command;
             entry.text = Some(command);
             entry.status = status;
@@ -224,12 +252,14 @@ impl RelayState {
         );
     }
 
-    pub fn append_command_delta(&mut self, item_id: &str, delta: &str) {
-        if let Some(entry) = self
+    pub fn append_command_delta(&mut self, item_id: &str, delta: &str) -> TranscriptMutationMeta {
+        if let Some(index) = self
             .transcript
-            .iter_mut()
-            .find(|entry| entry.item_id == item_id)
+            .iter()
+            .position(|entry| entry.item_id == item_id)
         {
+            let (base_revision, revision) = self.bump_transcript_revision();
+            let entry = &mut self.transcript[index];
             entry.kind = TranscriptEntryKind::Command;
             let text = entry.text.get_or_insert_with(String::new);
             if !text.is_empty() && !text.ends_with('\n') && !delta.starts_with('\n') {
@@ -240,7 +270,7 @@ impl RelayState {
                 entry.status = "running".to_string();
             }
             entry.tool = None;
-            return;
+            return transcript_mutation_meta(base_revision, revision, index as u64 + 1);
         }
 
         self.upsert_transcript_item(
@@ -250,17 +280,19 @@ impl RelayState {
             "running".to_string(),
             None,
             None,
-        );
+        )
     }
 
     pub fn set_transcript_item_status(&mut self, item_id: &str, status: &str) -> bool {
-        let Some(entry) = self
+        let Some(index) = self
             .transcript
-            .iter_mut()
-            .find(|entry| entry.item_id == item_id)
+            .iter()
+            .position(|entry| entry.item_id == item_id)
         else {
             return false;
         };
+        self.bump_transcript_revision();
+        let entry = &mut self.transcript[index];
         entry.status = status.to_string();
         true
     }
@@ -344,6 +376,19 @@ fn merge_tool_call_view(
                 },
             })
         }
+    }
+}
+
+fn transcript_mutation_meta(
+    base_revision: u64,
+    revision: u64,
+    entry_seq: u64,
+) -> TranscriptMutationMeta {
+    TranscriptMutationMeta {
+        base_revision,
+        revision,
+        entry_seq,
+        server_time: super::super::unix_now(),
     }
 }
 

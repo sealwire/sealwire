@@ -16,6 +16,9 @@ const THREADS_RESPONSE_TARGET_BYTES: usize = 20_000;
 
 fn make_snapshot() -> SessionSnapshot {
     SessionSnapshot {
+        revision: 7,
+        transcript_revision: 3,
+        server_time: 11,
         provider: "codex",
         service_ready: true,
         codex_connected: true,
@@ -396,8 +399,13 @@ fn thread_transcript_response_can_page_backwards_from_tail() {
             "thread-1".to_string(),
             transcript.clone(),
             before,
+            42,
         );
         assert!(!page.entries.is_empty());
+        assert_eq!(page.revision, 42);
+        assert!(page.server_time > 0);
+        assert!(page.entry_seq_start.is_some());
+        assert!(page.entry_seq_end.is_some());
         assert!(serde_json::to_vec(&page).unwrap().len() <= THREADS_RESPONSE_TARGET_BYTES);
         before = page.prev_cursor;
         pages.push(page);
@@ -437,10 +445,15 @@ fn thread_transcript_response_tail_returns_latest_page_first() {
         })
         .collect::<Vec<_>>();
 
-    let page =
-        ThreadTranscriptResponse::from_transcript_tail("thread-1".to_string(), transcript.clone());
+    let page = ThreadTranscriptResponse::from_transcript_tail(
+        "thread-1".to_string(),
+        transcript.clone(),
+        42,
+    );
 
     assert!(!page.entries.is_empty());
+    assert_eq!(page.revision, 42);
+    assert_eq!(page.entry_seq_end, Some(12));
     assert!(serde_json::to_vec(&page).unwrap().len() <= THREADS_RESPONSE_TARGET_BYTES);
     assert_eq!(page.next_cursor, None);
     assert!(page.prev_cursor.is_some());

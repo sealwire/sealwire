@@ -370,18 +370,21 @@ impl AppState {
                     .iter()
                     .map(|entry| entry.to_view())
                     .collect::<Vec<_>>();
+                let revision = relay.transcript_revision();
 
                 if input.before.is_some() {
                     return Ok(ThreadTranscriptResponse::from_transcript_before(
                         input.thread_id,
                         transcript,
                         input.before,
+                        revision,
                     ));
                 }
 
                 return Ok(ThreadTranscriptResponse::from_transcript_tail(
                     input.thread_id,
                     transcript,
+                    revision,
                 ));
             }
         }
@@ -397,12 +400,14 @@ impl AppState {
                 input.thread_id,
                 thread_data.transcript,
                 input.before,
+                0,
             ));
         }
 
         Ok(ThreadTranscriptResponse::from_transcript_tail(
             input.thread_id,
             thread_data.transcript,
+            0,
         ))
     }
 

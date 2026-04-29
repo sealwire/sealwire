@@ -73,7 +73,7 @@ export async function handleRemoteBrokerPayload(payload) {
     return;
   }
 
-  if (kind === "remote_action_result") {
+  if (isRemoteActionResultKind(kind)) {
     handleRemoteActionResult(payload.action_id, payload);
     return;
   }
@@ -378,7 +378,7 @@ function logDecryptedTranscriptDelta(delta) {
 }
 
 function logDecryptedRemoteActionResult(actionId, result) {
-  const message = `[broker-decrypt] kind=encrypted_remote_action_result action_id=${actionId || "-"} action=${result?.action || "-"} thread=${result?.snapshot?.active_thread_id || "-"} entries=${result?.snapshot?.transcript?.length || 0} truncated=${result?.snapshot?.transcript_truncated ? "1" : "0"} ok=${result?.ok ? "1" : "0"}`;
+  const message = `[broker-decrypt] kind=${result?.kind || "encrypted_remote_action_result"} action_id=${actionId || "-"} action=${result?.action || "-"} thread=${result?.snapshot?.active_thread_id || "-"} entries=${result?.snapshot?.transcript?.length || 0} truncated=${result?.snapshot?.transcript_truncated ? "1" : "0"} ok=${result?.ok ? "1" : "0"}`;
   renderLog(message);
   // TODO(remote-monitor-debug): Remove this console mirror once broker routing is stable.
   console.log(message);
@@ -387,10 +387,6 @@ function logDecryptedRemoteActionResult(actionId, result) {
 function handleRemoteActionResult(actionId, result) {
   clearPendingActionChunks(actionId);
   settlePendingAction(actionId, result);
-  const isTranscriptFetch =
-    result.action === "fetch_thread_transcript"
-    || result.action === "fetch_thread_entries"
-    || result.action === "fetch_thread_entry_detail";
 
   try {
     if (result.session_claim && state.remoteAuth) {
@@ -398,19 +394,8 @@ function handleRemoteActionResult(actionId, result) {
       scheduleClaimRefresh();
     }
 
-    if (isTranscriptFetch) {
-      return;
-    }
-
-    const isLiveDisruptingAction =
-      result.action === "heartbeat"
-      || result.action === "claim_challenge"
-      || result.action === "claim_device"
-      || result.action === "list_threads"
-      || result.action === "take_over";
-
-    if (result.snapshot && !isLiveDisruptingAction) {
-      const message = `[scroll-source] kind=remote_action_result action=${result.action || "-"} entries=${result.snapshot?.transcript?.length || 0} truncated=${result.snapshot?.transcript_truncated ? "1" : "0"} has_truncated=${Object.prototype.hasOwnProperty.call(result.snapshot || {}, "transcript_truncated") ? "1" : "0"} thread=${result.snapshot?.active_thread_id || "-"} status=${result.snapshot?.current_status || "-"}`;
+    if (result.kind === "remote_session_result" && result.snapshot) {
+      const message = `[scroll-source] kind=remote_session_result action=${result.action || "-"} entries=${result.snapshot?.transcript?.length || 0} truncated=${result.snapshot?.transcript_truncated ? "1" : "0"} has_truncated=${Object.prototype.hasOwnProperty.call(result.snapshot || {}, "transcript_truncated") ? "1" : "0"} thread=${result.snapshot?.active_thread_id || "-"} status=${result.snapshot?.current_status || "-"}`;
       renderLog(message);
       // TODO(remote-monitor-debug): Remove this console mirror once snapshot routing is stable.
       console.log(message);
@@ -446,6 +431,16 @@ function handleRemoteActionResult(actionId, result) {
   }
 
   renderLog(`Remote ${result.action} failed: ${result.error || "unknown error"}`);
+}
+
+function isRemoteActionResultKind(kind) {
+  return kind === "remote_action_ack"
+    || kind === "remote_action_result"
+    || kind === "remote_approval_result"
+    || kind === "remote_control_result"
+    || kind === "remote_session_result"
+    || kind === "remote_threads_result"
+    || kind === "remote_transcript_result";
 }
 
 function handleRemoteActionResultChunk(actionId, chunk) {

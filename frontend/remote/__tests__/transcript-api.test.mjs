@@ -60,6 +60,8 @@ test("createTranscriptPageFetcher normalizes legacy chunk transcript pages", asy
     },
   ]);
   assert.deepEqual(page, {
+    entry_seq_end: null,
+    entry_seq_start: null,
     entries: [
       {
         entry_index: 0,
@@ -82,6 +84,8 @@ test("createTranscriptPageFetcher normalizes legacy chunk transcript pages", asy
       },
     ],
     prev_cursor: 3,
+    revision: null,
+    server_time: null,
     thread_id: "thread-1",
   });
 });
@@ -125,8 +129,8 @@ test("createTranscriptPageFetcher preserves complete-entry transcript pages", as
     },
   ]);
   assert.deepEqual(response, {
-    thread_id: "thread-1",
-    prev_cursor: null,
+    entry_seq_end: null,
+    entry_seq_start: null,
     entries: [
       {
         item_id: "item-1",
@@ -137,6 +141,10 @@ test("createTranscriptPageFetcher preserves complete-entry transcript pages", as
         tool: null,
       },
     ],
+    prev_cursor: null,
+    revision: null,
+    server_time: null,
+    thread_id: "thread-1",
   });
 });
 

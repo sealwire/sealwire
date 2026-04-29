@@ -43,7 +43,18 @@ function transcriptDeltaKindToEntryKind(deltaKind) {
   }
 }
 
-export function applyTranscriptDelta({ thread_id, item_id, turn_id, delta, delta_kind, kind }) {
+export function applyTranscriptDelta({
+  thread_id,
+  base_revision,
+  revision,
+  entry_seq,
+  server_time,
+  item_id,
+  turn_id,
+  delta,
+  delta_kind,
+  kind,
+}) {
   if (typeof window !== "undefined" && typeof window.__transcriptDeltaCount === "number") {
     window.__transcriptDeltaCount++;
   }
@@ -56,6 +67,29 @@ export function applyTranscriptDelta({ thread_id, item_id, turn_id, delta, delta
     console.log(message);
     return;
   }
+  const currentRevision = numericRevision(state.session.transcript_revision);
+  const deltaBaseRevision = numericRevision(base_revision);
+  const deltaRevision = numericRevision(revision);
+  if (
+    deltaRevision != null
+    && currentRevision != null
+    && deltaRevision < currentRevision
+  ) {
+    const message = `[transcript-delta] ignored stale revision=${deltaRevision} current=${currentRevision} thread=${thread_id || "-"} item=${item_id || "-"}`;
+    renderLog(message);
+    console.log(message);
+    return;
+  }
+  if (
+    deltaBaseRevision != null
+    && currentRevision != null
+    && deltaBaseRevision !== currentRevision
+  ) {
+    const message = `[transcript-delta] ignored base_revision=${deltaBaseRevision} current=${currentRevision} thread=${thread_id || "-"} item=${item_id || "-"}`;
+    renderLog(message);
+    console.log(message);
+    return;
+  }
 
   const transcript = state.session.transcript;
   if (!Array.isArray(transcript)) return;
@@ -65,6 +99,9 @@ export function applyTranscriptDelta({ thread_id, item_id, turn_id, delta, delta
   if (entry) {
     entry.text = `${entry.text ?? ""}${delta ?? ""}`;
     entry.status = "running";
+    if (Number.isSafeInteger(entry_seq) && !Number.isSafeInteger(entry.entry_seq)) {
+      entry.entry_seq = entry_seq;
+    }
     if (!entry.kind) {
       entry.kind = resolvedKind;
     }
@@ -79,7 +116,14 @@ export function applyTranscriptDelta({ thread_id, item_id, turn_id, delta, delta
       kind: resolvedKind,
       status: "running",
       tool: null,
+      entry_seq: Number.isSafeInteger(entry_seq) ? entry_seq : null,
     });
+  }
+  if (deltaRevision != null) {
+    state.session.transcript_revision = deltaRevision;
+  }
+  if (Number.isSafeInteger(server_time)) {
+    state.session.server_time = server_time;
   }
 
   renderSession(state.session);
@@ -88,6 +132,14 @@ export function applyTranscriptDelta({ thread_id, item_id, turn_id, delta, delta
 export function applySessionSnapshot(snapshot) {
   if (typeof window !== "undefined" && typeof window.__snapshotCount === "number") {
     window.__snapshotCount++;
+  }
+  if (!shouldAcceptSessionSnapshot(snapshot)) {
+    const currentRevision = numericRevision(state.session?.transcript_revision);
+    const incomingRevision = numericRevision(snapshot?.transcript_revision);
+    const message = `[session-snapshot] ignored stale revision=${incomingRevision ?? "-"} current=${currentRevision ?? "-"} thread=${snapshot?.active_thread_id || "-"}`;
+    renderLog(message);
+    console.log(message);
+    return;
   }
   const previousThreadId = state.session?.active_thread_id || "-";
   syncLiveTranscriptEntryDetailsFromSnapshot(state, snapshot);
@@ -113,6 +165,25 @@ export function applySessionSnapshot(snapshot) {
   renderLog(message);
   // TODO(remote-monitor-debug): Remove this console mirror once snapshot scroll restoration is stable.
   console.log(message);
+}
+
+function shouldAcceptSessionSnapshot(snapshot) {
+  if (!snapshot) {
+    return false;
+  }
+  const incomingThreadId = snapshot.active_thread_id || null;
+  const currentThreadId = state.session?.active_thread_id || null;
+  if (!incomingThreadId || incomingThreadId !== currentThreadId) {
+    return true;
+  }
+
+  const incomingRevision = numericRevision(snapshot.transcript_revision);
+  const currentRevision = numericRevision(state.session?.transcript_revision);
+  return incomingRevision == null || currentRevision == null || incomingRevision >= currentRevision;
+}
+
+function numericRevision(value) {
+  return Number.isSafeInteger(value) ? value : null;
 }
 
 export async function syncRemoteSnapshot(reason, silent = false) {

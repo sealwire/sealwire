@@ -47,6 +47,9 @@ export async function hydrateTranscript(
       if ((snapshot.transcript || []).length > 0 && (page.entries || []).length === 0) {
         throw new Error(missingTailError);
       }
+      if (isStaleTranscriptPage(state, page)) {
+        return;
+      }
 
       store.mergeTranscriptHydrationPage(state, page, { prepend: false });
       if (store.getTranscriptHydrationThreadId(state) !== snapshot.active_thread_id) {
@@ -68,6 +71,9 @@ export async function hydrateTranscript(
         });
         if (!olderPage || olderPage.thread_id !== snapshot.active_thread_id) {
           throw new Error(incompletePageError);
+        }
+        if (isStaleTranscriptPage(state, olderPage)) {
+          return;
         }
         store.mergeTranscriptHydrationPage(state, olderPage, { prepend: true });
         loadedPages += 1;
@@ -126,6 +132,9 @@ export async function loadOlderTranscript(
       if (!page || page.thread_id !== threadId) {
         throw new Error(incompletePageError);
       }
+      if (isStaleTranscriptPage(state, page)) {
+        return;
+      }
 
       store.mergeTranscriptHydrationPage(state, page, { prepend: true });
       if (page.prev_cursor == null) {
@@ -153,4 +162,14 @@ function applyTranscriptHydrationProgress(state, store, onProgress) {
   }
 
   onProgress(snapshot);
+}
+
+function isStaleTranscriptPage(state, page) {
+  const pageRevision = numericRevision(page?.revision);
+  const sessionRevision = numericRevision(state.session?.transcript_revision);
+  return pageRevision != null && sessionRevision != null && pageRevision < sessionRevision;
+}
+
+function numericRevision(value) {
+  return Number.isSafeInteger(value) ? value : null;
 }

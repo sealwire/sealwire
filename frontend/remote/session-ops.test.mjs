@@ -1250,6 +1250,57 @@ test("applyTranscriptDelta updates existing transcript entries using text and st
   assert.equal(state.session.transcript[0].kind, "agent_text");
 });
 
+test("applyTranscriptDelta requires matching base revision when present", async () => {
+  activeBrowser || installBrowserStubs();
+
+  const { state } = await import("./state.js");
+  const { applyTranscriptDelta } = await import("./session-ops.js");
+
+  state.session = {
+    active_thread_id: "thread-1",
+    transcript_revision: 5,
+    transcript: [
+      {
+        item_id: "item-1",
+        kind: "agent_text",
+        status: "completed",
+        text: "Hello",
+        turn_id: "turn-1",
+        tool: null,
+      },
+    ],
+  };
+
+  applyTranscriptDelta({
+    thread_id: "thread-1",
+    base_revision: 4,
+    revision: 5,
+    entry_seq: 1,
+    item_id: "item-1",
+    turn_id: "turn-1",
+    delta: " stale",
+    delta_kind: "agent_text",
+  });
+
+  assert.equal(state.session.transcript[0].text, "Hello");
+  assert.equal(state.session.transcript_revision, 5);
+
+  applyTranscriptDelta({
+    thread_id: "thread-1",
+    base_revision: 5,
+    revision: 6,
+    entry_seq: 1,
+    item_id: "item-1",
+    turn_id: "turn-1",
+    delta: " world",
+    delta_kind: "agent_text",
+  });
+
+  assert.equal(state.session.transcript[0].text, "Hello world");
+  assert.equal(state.session.transcript_revision, 6);
+  assert.equal(state.session.transcript[0].entry_seq, 1);
+});
+
 test("applyTranscriptDelta ignores deltas for a different active thread", async () => {
   activeBrowser || installBrowserStubs();
 
@@ -1280,6 +1331,47 @@ test("applyTranscriptDelta ignores deltas for a different active thread", async 
 
   assert.equal(state.session.transcript[0].text, "Hello");
   assert.equal(state.session.transcript[0].status, "completed");
+});
+
+test("applySessionSnapshot ignores stale snapshots for the active thread", async () => {
+  activeBrowser || installBrowserStubs();
+
+  const { state } = await import("./state.js");
+  const { applySessionSnapshot } = await import("./session-ops.js");
+
+  state.session = {
+    active_thread_id: "thread-1",
+    transcript_revision: 5,
+    transcript: [
+      {
+        item_id: "item-1",
+        kind: "agent_text",
+        status: "completed",
+        text: "fresh",
+        turn_id: "turn-1",
+        tool: null,
+      },
+    ],
+  };
+
+  applySessionSnapshot({
+    active_thread_id: "thread-1",
+    transcript_revision: 4,
+    transcript_truncated: false,
+    transcript: [
+      {
+        item_id: "item-1",
+        kind: "agent_text",
+        status: "completed",
+        text: "stale",
+        turn_id: "turn-1",
+        tool: null,
+      },
+    ],
+  });
+
+  assert.equal(state.session.transcript_revision, 5);
+  assert.equal(state.session.transcript[0].text, "fresh");
 });
 
 test("sendHeartbeat dispatches a heartbeat when the current device holds control", async () => {

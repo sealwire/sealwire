@@ -6,6 +6,9 @@ use crate::protocol::{
 
 fn make_snapshot() -> SessionSnapshot {
     SessionSnapshot {
+        revision: 7,
+        transcript_revision: 3,
+        server_time: 11,
         provider: "codex",
         service_ready: true,
         codex_connected: true,
@@ -68,23 +71,102 @@ fn make_threads() -> ThreadsResponse {
 }
 
 #[test]
-fn cached_remote_action_result_keeps_canonical_snapshot() {
+fn cached_remote_action_result_keeps_canonical_snapshot_for_session_lifecycle() {
     let snapshot = make_snapshot();
 
     let cached = cached_remote_action_result(
-        RemoteActionKind::Heartbeat,
+        RemoteActionKind::StartSession,
         snapshot.clone(),
         RemoteActionOutcome::default(),
         None,
         true,
         None,
     );
+    let cached_snapshot = cached.snapshot.expect("allowed snapshot");
 
-    assert_eq!(cached.snapshot.transcript.len(), snapshot.transcript.len());
+    assert_eq!(cached_snapshot.transcript.len(), snapshot.transcript.len());
     assert_eq!(
-        cached.snapshot.transcript_truncated,
+        cached_snapshot.transcript_truncated,
         snapshot.transcript_truncated
     );
+}
+
+#[test]
+fn cached_remote_action_result_omits_snapshot_for_non_session_lifecycle_actions() {
+    let cached = cached_remote_action_result(
+        RemoteActionKind::Heartbeat,
+        make_snapshot(),
+        RemoteActionOutcome::default(),
+        None,
+        true,
+        None,
+    );
+
+    assert!(cached.snapshot.is_none());
+}
+
+#[test]
+fn plain_remote_action_result_payload_splits_control_results_from_session_results() {
+    let control = RemoteActionResultPlaintext {
+        kind: RemoteActionResultKind::RemoteControlResult,
+        action: RemoteActionKind::Heartbeat,
+        ok: true,
+        snapshot: Some(make_snapshot()),
+        receipt: None,
+        threads: None,
+        thread_entries: None,
+        thread_entry_detail: None,
+        thread_transcript: None,
+        session_claim: None,
+        session_claim_expires_at: None,
+        claim_challenge_id: None,
+        claim_challenge: None,
+        claim_challenge_expires_at: None,
+        error: None,
+    };
+
+    let payload = build_plain_remote_action_result_payload("action-1", "surface-1", &control)
+        .expect("control payload");
+    match payload {
+        OutboundBrokerPayload::RemoteControlResult { action, .. } => {
+            assert_eq!(action, RemoteActionKind::Heartbeat);
+        }
+        other => panic!("unexpected control payload: {other:?}"),
+    }
+
+    let session = RemoteActionResultPlaintext {
+        kind: RemoteActionResultKind::RemoteSessionResult,
+        action: RemoteActionKind::StartSession,
+        ok: true,
+        snapshot: Some(make_snapshot()),
+        receipt: None,
+        threads: None,
+        thread_entries: None,
+        thread_entry_detail: None,
+        thread_transcript: None,
+        session_claim: Some("claim-1".to_string()),
+        session_claim_expires_at: Some(123),
+        claim_challenge_id: None,
+        claim_challenge: None,
+        claim_challenge_expires_at: None,
+        error: None,
+    };
+
+    let payload = build_plain_remote_action_result_payload("action-2", "surface-1", &session)
+        .expect("session payload");
+    match payload {
+        OutboundBrokerPayload::RemoteSessionResult {
+            action,
+            snapshot,
+            session_claim,
+            ..
+        } => {
+            assert_eq!(action, RemoteActionKind::StartSession);
+            assert_eq!(snapshot.active_thread_id.as_deref(), Some("thread-1"));
+            assert_eq!(session_claim.as_deref(), Some("claim-1"));
+        }
+        other => panic!("unexpected session payload: {other:?}"),
+    }
 }
 
 #[test]
@@ -113,11 +195,12 @@ fn cached_remote_action_result_keeps_canonical_threads() {
 
 #[test]
 fn remote_action_result_size_breakdown_reports_large_thread_transcript_payloads() {
-    let mut snapshot = make_snapshot();
-    snapshot.transcript.clear();
-
     let thread_transcript = ThreadTranscriptResponse {
         thread_id: "thread-1".to_string(),
+        revision: 9,
+        server_time: 12,
+        entry_seq_start: Some(4),
+        entry_seq_end: Some(4),
         entries: vec![TranscriptEntryView {
             item_id: Some("item-large".to_string()),
             kind: TranscriptEntryKind::AgentText,
@@ -144,7 +227,7 @@ fn remote_action_result_size_breakdown_reports_large_thread_transcript_payloads(
     let breakdown = measure_remote_action_result_sizes(
         RemoteActionKind::FetchThreadTranscript,
         true,
-        &snapshot,
+        None,
         None,
         None,
         Some(&thread_entries),
@@ -159,24 +242,27 @@ fn remote_action_result_size_breakdown_reports_large_thread_transcript_payloads(
     );
 
     assert!(breakdown.thread_transcript_bytes > breakdown.thread_entries_bytes);
+    assert_eq!(breakdown.snapshot_bytes, 0);
     assert!(breakdown.thread_transcript_bytes > breakdown.snapshot_bytes);
     assert!(breakdown.plaintext_bytes >= breakdown.thread_transcript_bytes);
 }
 
 fn make_large_thread_transcript_plaintext() -> RemoteActionResultPlaintext {
-    let mut snapshot = make_snapshot();
-    snapshot.transcript.clear();
-
     RemoteActionResultPlaintext {
+        kind: RemoteActionResultKind::RemoteTranscriptResult,
         action: RemoteActionKind::FetchThreadTranscript,
         ok: true,
-        snapshot,
+        snapshot: None,
         receipt: None,
         threads: None,
         thread_entries: None,
         thread_entry_detail: None,
         thread_transcript: Some(ThreadTranscriptResponse {
             thread_id: "thread-1".to_string(),
+            revision: 9,
+            server_time: 12,
+            entry_seq_start: Some(4),
+            entry_seq_end: Some(4),
             entries: vec![TranscriptEntryView {
                 item_id: Some("item-large".to_string()),
                 kind: TranscriptEntryKind::AgentText,

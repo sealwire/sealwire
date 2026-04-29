@@ -170,7 +170,10 @@ fn test_cached_remote_action_result(action_kind: &str, ok: bool) -> CachedRemote
     CachedRemoteActionResult {
         action_kind: action_kind.to_string(),
         ok,
-        snapshot: SessionSnapshot {
+        snapshot: Some(SessionSnapshot {
+            revision: 7,
+            transcript_revision: 3,
+            server_time: 11,
             provider: "codex",
             service_ready: true,
             codex_connected: true,
@@ -203,7 +206,7 @@ fn test_cached_remote_action_result(action_kind: &str, ok: bool) -> CachedRemote
             transcript_truncated: false,
             transcript: Vec::new(),
             logs: Vec::new(),
-        },
+        }),
         receipt: Some(ApprovalReceipt {
             request_id: "req-1".to_string(),
             decision: crate::protocol::ApprovalDecision::Approve,
