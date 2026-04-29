@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 import { spawn, spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -10,6 +11,7 @@ import { fileURLToPath } from "node:url";
 const scriptPath = fileURLToPath(import.meta.url);
 const packageRoot = path.resolve(path.dirname(scriptPath), "..");
 const userCwd = process.cwd();
+const require = createRequire(import.meta.url);
 
 const DEFAULT_PUBLIC_BROKER_ORIGIN = "";
 const defaultPort = "8787";
@@ -28,7 +30,13 @@ if (args.rest.length > 0) {
   process.exit(2);
 }
 
-ensureCommand("cargo", "Rust/Cargo is required because this npm package builds relay-server locally.");
+const relayServerBinary = resolveRelayServerBinary();
+if (!relayServerBinary) {
+  ensureCommand(
+    "cargo",
+    "No prebuilt relay-server binary was found, and Rust/Cargo is required for the source fallback."
+  );
+}
 ensureCommand("codex", "The Codex CLI must be installed and logged in before starting agent-relay.");
 
 const brokerOrigin =
@@ -68,16 +76,24 @@ if (brokerConfig) {
 }
 console.log(`agent-relay: workspace/state directory is ${userCwd}`);
 
-const cargoArgs = [
-  "run",
-  "--release",
-  "--manifest-path",
-  path.join(packageRoot, "Cargo.toml"),
-  "-p",
-  "relay-server",
-];
+const command = relayServerBinary || "cargo";
+const commandArgs = relayServerBinary
+  ? []
+  : [
+      "run",
+      "--release",
+      "--manifest-path",
+      path.join(packageRoot, "Cargo.toml"),
+      "-p",
+      "relay-server",
+    ];
+if (relayServerBinary) {
+  console.log(`agent-relay: starting bundled relay-server binary ${relayServerBinary}`);
+} else {
+  console.warn("agent-relay: starting relay-server via cargo fallback; install a prebuilt package to avoid Rust/Cargo.");
+}
 
-const child = spawn("cargo", cargoArgs, {
+const child = spawn(command, commandArgs, {
   cwd: userCwd,
   env,
   stdio: "inherit",
@@ -176,6 +192,67 @@ function ensureCommand(command, message) {
   }
 }
 
+function resolveRelayServerBinary() {
+  const override = process.env.AGENT_RELAY_SERVER_BIN;
+  if (override) {
+    if (existsSync(override)) {
+      return override;
+    }
+    console.error(`agent-relay: AGENT_RELAY_SERVER_BIN does not exist: ${override}`);
+    process.exit(1);
+  }
+
+  const executable = process.platform === "win32" ? "relay-server.exe" : "relay-server";
+  const platformTarget = platformBinaryTarget();
+  if (platformTarget) {
+    const localPlatformBinary = path.join(packageRoot, "bin", platformTarget, executable);
+    if (existsSync(localPlatformBinary)) {
+      return localPlatformBinary;
+    }
+  }
+
+  const localBinary = path.join(packageRoot, "bin", executable);
+  if (existsSync(localBinary)) {
+    return localBinary;
+  }
+
+  const platformPackageName = platformBinaryPackageName();
+  if (!platformPackageName) {
+    return null;
+  }
+
+  try {
+    return require.resolve(`${platformPackageName}/bin/${executable}`);
+  } catch {
+    return null;
+  }
+}
+
+function platformBinaryPackageName() {
+  const target = platformBinaryTarget();
+  if (!target) {
+    return null;
+  }
+  return `@agent-relay/relay-${target}`;
+}
+
+function platformBinaryTarget() {
+  const platform = process.platform;
+  const arch = process.arch;
+  const supported = new Set([
+    "darwin-arm64",
+    "darwin-x64",
+    "linux-arm64",
+    "linux-x64",
+    "win32-x64",
+  ]);
+  const target = `${platform}-${arch}`;
+  if (!supported.has(target)) {
+    return null;
+  }
+  return target;
+}
+
 function readPackagedBrokerOrigin() {
   try {
     const packageJson = JSON.parse(
@@ -213,6 +290,11 @@ Defaults:
   --host        127.0.0.1
   --port        8787
   --broker      AGENT_RELAY_PUBLIC_BROKER_URL, if set by the package publisher or user
+
+Binary resolution:
+  Uses AGENT_RELAY_SERVER_BIN, a package-local bin/<platform>-<arch>/relay-server,
+  package-local bin/relay-server, or an installed @agent-relay/relay-<platform>-<arch>
+  package. Falls back to Cargo only when no prebuilt binary is present.
 
 Examples:
   agent-relay

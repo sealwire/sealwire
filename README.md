@@ -181,9 +181,9 @@ Deployment guidance lives in [`DEPLOYMENT.md`](DEPLOYMENT.md).
 
 ### npm package
 
-The repository can be published as an npm CLI package. The package ships the
-Rust workspace source plus built web assets, then starts `relay-server` from
-the user's current directory:
+The repository can be published as an npm CLI package. The published package
+contains a small JavaScript wrapper plus platform-specific prebuilt
+`relay-server` binaries with the web UI embedded:
 
 ```bash
 npx agent-relay
@@ -206,6 +206,17 @@ agent-relay --broker https://broker.example.com
 agent-relay --no-broker
 agent-relay --host 127.0.0.1 --port 8787
 ```
+
+With a prebuilt binary package installed, users do not need Rust, Cargo, Vite,
+or a local checkout of this repository. The only external runtime dependency is
+the local `codex` CLI, which must already be installed and logged in.
+
+During development, if no prebuilt binary is installed, the CLI falls back to
+`cargo run --release -p relay-server`. Release builds embed the generated
+`web/` assets, so run `npm run build` before compiling a distributable binary.
+The `npm Release` GitHub Actions workflow builds binaries for macOS, Linux, and
+Windows, stages them under `bin/<platform>-<arch>/`, verifies `npm pack`, then
+publishes the package when `NPM_TOKEN` is configured.
 
 Then run:
 

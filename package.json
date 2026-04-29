@@ -8,6 +8,7 @@
     "agent-relay": "./scripts/agent-relay.mjs"
   },
   "files": [
+    "bin/**",
     "Cargo.lock",
     "Cargo.toml",
     "LICENSE",

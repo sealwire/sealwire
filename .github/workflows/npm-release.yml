@@ -1,0 +1,124 @@
+name: npm Release
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+jobs:
+  build-binary:
+    name: build-${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: darwin-arm64
+            runner: macos-14
+            cargo_target: aarch64-apple-darwin
+            executable: relay-server
+          - target: darwin-x64
+            runner: macos-13
+            cargo_target: x86_64-apple-darwin
+            executable: relay-server
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+            cargo_target: aarch64-unknown-linux-gnu
+            executable: relay-server
+          - target: linux-x64
+            runner: ubuntu-latest
+            cargo_target: x86_64-unknown-linux-gnu
+            executable: relay-server
+          - target: win32-x64
+            runner: windows-latest
+            cargo_target: x86_64-pc-windows-msvc
+            executable: relay-server.exe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.cargo_target }}
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: npm ci
+        run: npm ci
+
+      - name: Build embedded web assets
+        run: npm run build
+
+      - name: Build relay-server
+        run: cargo build --release -p relay-server --target ${{ matrix.cargo_target }}
+
+      - name: Stage binary
+        shell: bash
+        run: |
+          mkdir -p "dist-bin/${{ matrix.target }}"
+          cp "target/${{ matrix.cargo_target }}/release/${{ matrix.executable }}" "dist-bin/${{ matrix.target }}/${{ matrix.executable }}"
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: relay-server-${{ matrix.target }}
+          path: dist-bin/${{ matrix.target }}/${{ matrix.executable }}
+          if-no-files-found: error
+
+  publish:
+    name: publish-npm
+    needs: build-binary
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - name: npm ci
+        run: npm ci
+
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: relay-server-*
+          path: bin
+          merge-multiple: false
+
+      - name: Move binaries into package layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          for artifact_dir in bin/relay-server-*; do
+            target="${artifact_dir#bin/relay-server-}"
+            mkdir -p "bin/${target}"
+            find "${artifact_dir}" -maxdepth 1 -type f -exec mv {} "bin/${target}/" \;
+            rmdir "${artifact_dir}"
+          done
+          chmod +x bin/*/relay-server || true
+
+      - name: Verify package contents
+        run: npm pack --dry-run
+
+      - name: Publish to npm
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

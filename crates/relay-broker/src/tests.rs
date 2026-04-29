@@ -532,6 +532,7 @@ async fn websocket_relays_messages_between_peers() {
     relay
         .send(Message::Text(
             serde_json::to_string(&ClientMessage::Publish {
+                protocol_version: protocol::BROKER_PROTOCOL_VERSION,
                 payload: json!({"ciphertext":"abc"}),
             })
             .expect("client frame should serialize"),
@@ -552,6 +553,75 @@ async fn websocket_relays_messages_between_peers() {
             assert_eq!(payload, json!({"ciphertext":"abc"}));
         }
         other => panic!("unexpected relayed frame: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn unsupported_broker_protocol_version_gets_error_frame() {
+    let address = spawn_app().await;
+    let url = websocket_url(
+        address,
+        "room-a",
+        protocol::PeerRole::Surface,
+        None,
+        JoinTicketClaims::pairing_surface_join("room-a", "pair-protocol-version", u64::MAX),
+    );
+
+    let (mut socket, _) = connect_async(&url).await.expect("surface should connect");
+    let _welcome = next_server_message(&mut socket).await;
+    socket
+        .send(Message::Text(
+            json!({
+                "type": "publish",
+                "protocol_version": protocol::BROKER_PROTOCOL_VERSION + 1,
+                "payload": {}
+            })
+            .to_string(),
+        ))
+        .await
+        .expect("publish should send");
+
+    let error = next_server_message(&mut socket).await;
+    match error {
+        ServerMessage::Error { code, message } => {
+            assert_eq!(code, "unsupported_protocol_version");
+            assert!(message.contains("unsupported broker protocol_version"));
+        }
+        other => panic!("unexpected protocol version response: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn missing_broker_protocol_version_gets_error_frame() {
+    let address = spawn_app().await;
+    let url = websocket_url(
+        address,
+        "room-a",
+        protocol::PeerRole::Surface,
+        None,
+        JoinTicketClaims::pairing_surface_join("room-a", "pair-missing-version", u64::MAX),
+    );
+
+    let (mut socket, _) = connect_async(&url).await.expect("surface should connect");
+    let _welcome = next_server_message(&mut socket).await;
+    socket
+        .send(Message::Text(
+            json!({
+                "type": "publish",
+                "payload": {}
+            })
+            .to_string(),
+        ))
+        .await
+        .expect("publish should send");
+
+    let error = next_server_message(&mut socket).await;
+    match error {
+        ServerMessage::Error { code, message } => {
+            assert_eq!(code, "invalid_client_frame");
+            assert!(message.contains("protocol_version"));
+        }
+        other => panic!("unexpected missing protocol version response: {other:?}"),
     }
 }
 

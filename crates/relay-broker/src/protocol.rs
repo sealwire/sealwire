@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub const BROKER_PROTOCOL_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PeerRole {
@@ -33,13 +35,17 @@ pub enum PresenceKind {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
-    Publish { payload: Value },
+    Publish {
+        protocol_version: u32,
+        payload: Value,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
     Welcome {
+        protocol_version: u32,
         channel_id: String,
         peer_id: String,
         peers: Vec<PeerSummary>,

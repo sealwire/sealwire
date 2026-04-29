@@ -12,7 +12,9 @@ use futures_util::{sink::SinkExt, stream::StreamExt};
 use rand::RngCore;
 use relay_broker::auth::{BrokerAuthMode, BROKER_AUTH_MODE_ENV};
 use relay_broker::join_ticket::unix_now;
-use relay_broker::protocol::{ClientMessage, PeerRole, PresenceKind, ServerMessage};
+use relay_broker::protocol::{
+    ClientMessage, PeerRole, PresenceKind, ServerMessage, BROKER_PROTOCOL_VERSION,
+};
 use relay_util::{trimmed_option_string, trimmed_string};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -51,6 +53,7 @@ const DEFAULT_PUBLIC_RELAY_REGISTRATION_FILE: &str = ".agent-relay/public-broker
 const DEFAULT_PUBLIC_RELAY_IDENTITY_FILE: &str = ".agent-relay/public-broker-identity.json";
 pub(crate) const RELAY_BROKER_IDENTITY_PATH_ENV: &str = "RELAY_BROKER_IDENTITY_PATH";
 const MAX_BROKER_TEXT_FRAME_BYTES: usize = 65_536;
+const RELAY_PROTOCOL_VERSION: u64 = 1;
 type BrokerSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
 #[derive(Clone, Debug)]
@@ -783,7 +786,12 @@ async fn run_broker_session(
         .ok_or_else(|| "broker closed before welcome".to_string())?
         .map_err(|error| format!("broker welcome read failed: {error}"))?;
     match decode_server_frame(welcome)? {
-        Some(ServerMessage::Welcome { peers, .. }) => {
+        Some(ServerMessage::Welcome {
+            protocol_version,
+            peers,
+            ..
+        }) => {
+            validate_broker_protocol_version(protocol_version)?;
             let surface_peers = peers
                 .into_iter()
                 .filter(|peer| peer.role == PeerRole::Surface)
@@ -893,7 +901,9 @@ async fn handle_server_message(
     message: ServerMessage,
 ) -> Result<(), String> {
     match message {
-        ServerMessage::Welcome { .. } => Ok(()),
+        ServerMessage::Welcome {
+            protocol_version, ..
+        } => validate_broker_protocol_version(protocol_version),
         ServerMessage::Presence {
             channel_id,
             kind,
@@ -1126,9 +1136,32 @@ fn parse_inbound_payload(payload: Value) -> Result<Option<InboundBrokerPayload>,
     ) {
         return Ok(None);
     }
+    validate_relay_payload_protocol_version(&payload)?;
     serde_json::from_value(payload)
         .map(Some)
         .map_err(|error| format!("invalid broker payload: {error}"))
+}
+
+fn validate_relay_payload_protocol_version(payload: &Value) -> Result<(), String> {
+    match payload.get("protocol_version") {
+        None => Err("relay payload protocol_version is required".to_string()),
+        Some(version) => match version.as_u64() {
+            Some(RELAY_PROTOCOL_VERSION) => Ok(()),
+            Some(version) => Err(format!(
+                "unsupported relay payload protocol_version {version}; supported version is {RELAY_PROTOCOL_VERSION}"
+            )),
+            None => Err("relay payload protocol_version must be a number".to_string()),
+        },
+    }
+}
+
+fn validate_broker_protocol_version(protocol_version: u32) -> Result<(), String> {
+    if protocol_version == BROKER_PROTOCOL_VERSION {
+        return Ok(());
+    }
+    Err(format!(
+        "unsupported broker protocol_version {protocol_version}; supported version is {BROKER_PROTOCOL_VERSION}"
+    ))
 }
 
 fn summarize_thread_transcript_response(page: &ThreadTranscriptResponse) -> String {
@@ -1522,8 +1555,17 @@ fn frame_bytes_for_payload(payload: &OutboundBrokerPayload) -> usize {
 }
 
 fn frame_text_for_payload(payload: &OutboundBrokerPayload) -> String {
+    let mut payload_value =
+        serde_json::to_value(payload.clone()).expect("broker payload should serialize");
+    if let Some(object) = payload_value.as_object_mut() {
+        object.insert(
+            "protocol_version".to_string(),
+            Value::from(RELAY_PROTOCOL_VERSION),
+        );
+    }
     let frame = ClientMessage::Publish {
-        payload: serde_json::to_value(payload.clone()).expect("broker payload should serialize"),
+        protocol_version: BROKER_PROTOCOL_VERSION,
+        payload: payload_value,
     };
     serde_json::to_string(&frame).expect("broker client frame should serialize")
 }

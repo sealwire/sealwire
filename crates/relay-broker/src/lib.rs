@@ -31,6 +31,7 @@ use futures_util::{sink::SinkExt, StreamExt};
 use join_ticket::{JoinTicketClaims, JoinTicketKey, JoinTicketKind, JOIN_TICKET_SECRET_ENV};
 use protocol::{
     ClientMessage, ConnectQuery, HealthResponse, PublicBrokerMonitoring, ServerMessage,
+    BROKER_PROTOCOL_VERSION,
 };
 use public_control::{
     ClientGrantRequest, ClientGrantResponse, ClientIdentityRevokeResponse,
@@ -1236,6 +1237,7 @@ async fn handle_socket(
 
     let (mut sender, mut receiver) = socket.split();
     let welcome = ServerMessage::Welcome {
+        protocol_version: BROKER_PROTOCOL_VERSION,
         channel_id: channel_id.clone(),
         peer_id: peer_id.clone(),
         peers: join.existing_peers,
@@ -1298,7 +1300,20 @@ async fn handle_socket(
 
                         let parsed = serde_json::from_str::<ClientMessage>(&text);
                         match parsed {
-                            Ok(ClientMessage::Publish { payload }) => {
+                            Ok(ClientMessage::Publish { protocol_version, payload }) => {
+                                if protocol_version != BROKER_PROTOCOL_VERSION {
+                                    let _ = send_message(
+                                        &mut sender,
+                                        &ServerMessage::Error {
+                                            code: "unsupported_protocol_version".to_string(),
+                                            message: format!(
+                                                "unsupported broker protocol_version {protocol_version}; supported version is {BROKER_PROTOCOL_VERSION}"
+                                            ),
+                                        },
+                                    )
+                                    .await;
+                                    break;
+                                }
                                 let payload_summary = summarize_published_payload(&payload);
                                 if !state
                                     .hardening
@@ -1339,7 +1354,16 @@ async fn handle_socket(
                                 }
                             }
                             Err(error) => {
-                                debug!(channel_id, peer_id, %error, "dropping invalid client frame");
+                                debug!(channel_id, peer_id, %error, "rejecting invalid client frame");
+                                let _ = send_message(
+                                    &mut sender,
+                                    &ServerMessage::Error {
+                                        code: "invalid_client_frame".to_string(),
+                                        message: format!("invalid broker client frame: {error}"),
+                                    },
+                                )
+                                .await;
+                                break;
                             }
                         }
                     }

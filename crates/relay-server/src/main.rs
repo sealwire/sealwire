@@ -16,6 +16,7 @@ use std::{
 
 use auth::AuthConfig;
 use axum::{
+    body::Body,
     extract::{Path, Query, Request, State},
     http::header::HeaderName,
     http::{header, HeaderMap, Method, StatusCode, Uri},
@@ -56,8 +57,22 @@ use axum::http::HeaderValue;
 const CSP_CONNECT_SRC_ENV: &str = "RELAY_CSP_CONNECT_SRC";
 const ENABLE_HSTS_ENV: &str = "RELAY_ENABLE_HSTS";
 const HSTS_VALUE_ENV: &str = "RELAY_HSTS_VALUE";
+const WEB_ROOT_ENV: &str = "RELAY_WEB_ROOT";
 const CSRF_HEADER_NAME: &str = "x-agent-relay-csrf";
 const CSRF_HEADER_VALUE: &str = "1";
+
+struct EmbeddedWebAsset {
+    path: &'static str,
+    bytes: &'static [u8],
+}
+
+include!(concat!(env!("OUT_DIR"), "/embedded_web_assets.rs"));
+
+#[derive(Clone, Debug)]
+enum WebAssets {
+    Embedded,
+    Directory(PathBuf),
+}
 
 #[derive(Clone)]
 struct AppContext {
@@ -112,19 +127,14 @@ async fn main() {
     let state = AppState::new()
         .await
         .expect("failed to initialize Codex app-server bridge");
-    let web_root = workspace_root().join("web");
-    if !web_root.join("index.html").exists() {
-        warn!(
-            path = %web_root.join("index.html").display(),
-            "relay web assets are missing; run `npm run build` before opening the local UI"
-        );
-    }
+    let web_assets = default_web_assets();
+    log_web_assets(&web_assets);
     let context = AppContext {
         app: state,
         auth,
         security_headers,
     };
-    let app = build_router(context, web_root);
+    let app = build_router(context, web_assets);
     let address = SocketAddr::from((host, port));
 
     info!("relay-server listening on http://{}:{}", host, port);
@@ -138,8 +148,8 @@ async fn main() {
         .expect("server exited unexpectedly");
 }
 
-fn build_router(context: AppContext, web_root: PathBuf) -> Router {
-    Router::new()
+fn build_router(context: AppContext, web_assets: WebAssets) -> Router {
+    let router = Router::new()
         .route("/api/health", get(health))
         .route(
             "/api/auth/session",
@@ -177,9 +187,18 @@ fn build_router(context: AppContext, web_root: PathBuf) -> Router {
             "/api/devices/:device_id/revoke-others",
             post(revoke_other_devices),
         )
-        .route("/api/approvals/:request_id", post(decide_approval))
-        .route_service("/", ServeFile::new(web_root.join("index.html")))
-        .nest_service("/static", ServeDir::new(web_root))
+        .route("/api/approvals/:request_id", post(decide_approval));
+
+    let router = match web_assets {
+        WebAssets::Embedded => router
+            .route("/", get(serve_embedded_index))
+            .route("/static/*path", get(serve_embedded_static_asset)),
+        WebAssets::Directory(web_root) => router
+            .route_service("/", ServeFile::new(web_root.join("index.html")))
+            .nest_service("/static", ServeDir::new(web_root)),
+    };
+
+    router
         .with_state(context.clone())
         .layer(middleware::from_fn_with_state(
             context.clone(),
@@ -190,6 +209,60 @@ fn build_router(context: AppContext, web_root: PathBuf) -> Router {
             with_security_headers,
         ))
         .layer(TraceLayer::new_for_http())
+}
+
+async fn serve_embedded_index() -> Response {
+    embedded_asset_response("index.html")
+}
+
+async fn serve_embedded_static_asset(Path(path): Path<String>) -> Response {
+    embedded_asset_response(&path)
+}
+
+fn embedded_asset_response(path: &str) -> Response {
+    let Some(path) = normalize_embedded_asset_path(path) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some(asset) = embedded_asset(path) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    Response::builder()
+        .header(
+            header::CONTENT_TYPE,
+            embedded_asset_content_type(asset.path),
+        )
+        .body(Body::from(asset.bytes))
+        .expect("embedded asset response should build")
+}
+
+fn normalize_embedded_asset_path(path: &str) -> Option<&str> {
+    let path = path.trim_start_matches('/');
+    if path.is_empty()
+        || path.contains('\\')
+        || path
+            .split('/')
+            .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+    {
+        return None;
+    }
+    Some(path)
+}
+
+fn embedded_asset(path: &str) -> Option<&'static EmbeddedWebAsset> {
+    EMBEDDED_WEB_ASSETS.iter().find(|asset| asset.path == path)
+}
+
+fn embedded_asset_content_type(path: &str) -> &'static str {
+    match path.rsplit('.').next().unwrap_or_default() {
+        "css" => "text/css; charset=utf-8",
+        "html" => "text/html; charset=utf-8",
+        "js" => "text/javascript; charset=utf-8",
+        "json" => "application/json; charset=utf-8",
+        "svg" => "image/svg+xml",
+        "webmanifest" => "application/manifest+json; charset=utf-8",
+        _ => "application/octet-stream",
+    }
 }
 
 fn security_headers_from_env() -> Result<SecurityHeadersConfig, String> {
@@ -655,6 +728,55 @@ fn workspace_root() -> PathBuf {
         .join("..")
         .canonicalize()
         .expect("workspace root should resolve")
+}
+
+fn default_web_assets() -> WebAssets {
+    if let Some(web_root) = std::env::var(WEB_ROOT_ENV).ok().and_then(trimmed_string) {
+        return WebAssets::Directory(PathBuf::from(web_root));
+    }
+
+    let workspace_web_root = workspace_root().join("web");
+    if cfg!(debug_assertions) && workspace_web_root.join("index.html").exists() {
+        return WebAssets::Directory(workspace_web_root);
+    }
+
+    WebAssets::Embedded
+}
+
+fn log_web_assets(web_assets: &WebAssets) {
+    match web_assets {
+        WebAssets::Directory(web_root) => {
+            if web_root.join("index.html").exists() {
+                info!(path = %web_root.display(), "relay web assets are served from disk");
+            } else {
+                warn!(
+                    path = %web_root.join("index.html").display(),
+                    "relay web assets are missing; run `npm run build` before opening the local UI"
+                );
+            }
+        }
+        WebAssets::Embedded => {
+            if embedded_asset("index.html").is_some() {
+                info!(
+                    asset_count = EMBEDDED_WEB_ASSETS.len(),
+                    "relay web assets are served from the embedded binary bundle"
+                );
+            } else {
+                warn!(
+                    "embedded relay web assets are missing; run `npm run build` before compiling relay-server"
+                );
+            }
+        }
+    }
+}
+
+fn trimmed_string(value: String) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
 }
 
 fn bad_request(message: String) -> (StatusCode, Json<ApiError>) {

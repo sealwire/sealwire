@@ -19,6 +19,9 @@ import {
   createPairingStatePatch,
 } from "./surface-state.js";
 
+const BROKER_PROTOCOL_VERSION = 1;
+const RELAY_PROTOCOL_VERSION = 1;
+
 let onBrokerReady = () => {};
 let onBrokerPayload = async () => {};
 let onBrokerDisconnect = () => {};
@@ -162,7 +165,8 @@ export function sendBrokerFrame(payload) {
   state.socket.send(
     JSON.stringify({
       type: "publish",
-      payload,
+      protocol_version: BROKER_PROTOCOL_VERSION,
+      payload: withRelayProtocolVersion(payload),
     })
   );
 }
@@ -278,6 +282,13 @@ async function handleSocketMessage(rawData, connectReason) {
   }
 
   if (frame.type === "welcome") {
+    if (!isSupportedBrokerProtocolVersion(frame.protocol_version)) {
+      renderLog(
+        `Broker protocol ${frame.protocol_version} is not supported by this client. Refresh this page after updating.`
+      );
+      closeBrokerSocket();
+      return;
+    }
     setSocketPeerId(frame.peer_id || null);
     renderLog(
       `Joined broker channel ${frame.channel_id} as ${frame.peer_id || "unknown-peer"}.`
@@ -312,7 +323,28 @@ async function handleSocketMessage(rawData, connectReason) {
   }
 
   logInboundBrokerMessage(frame);
+  if (!isSupportedRelayProtocolVersion(frame.payload?.protocol_version)) {
+    renderLog(
+      `Relay payload protocol ${frame.payload?.protocol_version} is not supported by this client. Refresh this page after updating.`
+    );
+    return;
+  }
   await onBrokerPayload(frame.payload);
+}
+
+function withRelayProtocolVersion(payload) {
+  return {
+    ...payload,
+    protocol_version: RELAY_PROTOCOL_VERSION,
+  };
+}
+
+function isSupportedBrokerProtocolVersion(version) {
+  return Number.isInteger(version) && version === BROKER_PROTOCOL_VERSION;
+}
+
+function isSupportedRelayProtocolVersion(version) {
+  return Number.isInteger(version) && version === RELAY_PROTOCOL_VERSION;
 }
 
 function logInboundBrokerMessage(frame) {

@@ -548,6 +548,7 @@ async fn broker_config_self_hosted_can_issue_expiring_device_join_credentials() 
 #[test]
 fn parse_inbound_payload_parses_remote_action_requests() {
     let payload = serde_json::json!({
+        "protocol_version": RELAY_PROTOCOL_VERSION,
         "kind": "remote_action",
         "action_id": "act-1",
         "device_id": "phone-1",
@@ -581,6 +582,7 @@ fn parse_inbound_payload_parses_remote_action_requests() {
 #[test]
 fn parse_inbound_payload_parses_list_threads_requests() {
     let payload = serde_json::json!({
+        "protocol_version": RELAY_PROTOCOL_VERSION,
         "kind": "remote_action",
         "action_id": "act-threads",
         "device_id": "phone-1",
@@ -629,6 +631,7 @@ fn parse_inbound_payload_parses_pairing_requests() {
     )
     .expect("pairing request should encrypt");
     let payload = serde_json::json!({
+        "protocol_version": RELAY_PROTOCOL_VERSION,
         "kind": "pairing_request",
         "pairing_id": "pair-1",
         "envelope": envelope
@@ -673,6 +676,7 @@ fn parse_inbound_payload_parses_encrypted_remote_actions() {
     )
     .expect("encrypted action should encrypt");
     let payload = serde_json::json!({
+        "protocol_version": RELAY_PROTOCOL_VERSION,
         "kind": "encrypted_remote_action",
         "action_id": "act-2",
         "device_id": "phone-1",
@@ -708,6 +712,7 @@ fn parse_inbound_payload_parses_encrypted_remote_actions() {
 #[test]
 fn parse_inbound_payload_parses_claim_challenge_request() {
     let payload = serde_json::json!({
+        "protocol_version": RELAY_PROTOCOL_VERSION,
         "kind": "remote_action",
         "action_id": "claim-start-1",
         "device_id": "phone-1",
@@ -738,6 +743,7 @@ fn parse_inbound_payload_parses_claim_challenge_request() {
 #[test]
 fn parse_inbound_payload_parses_claim_device_proof() {
     let payload = serde_json::json!({
+        "protocol_version": RELAY_PROTOCOL_VERSION,
         "kind": "remote_action",
         "action_id": "claim-finish-1",
         "device_id": "phone-1",
@@ -769,6 +775,47 @@ fn parse_inbound_payload_parses_claim_device_proof() {
         }
         other => panic!("unexpected request: {other:?}"),
     }
+}
+
+#[test]
+fn parse_inbound_payload_requires_relay_protocol_version() {
+    let payload = serde_json::json!({
+        "kind": "remote_action",
+        "action_id": "act-missing-version",
+        "device_id": "phone-1",
+        "request": {
+            "type": "claim_challenge",
+            "proof": "claim-init-proof"
+        }
+    });
+
+    let error = parse_inbound_payload(payload).expect_err("protocol version should be required");
+    assert!(error.contains("protocol_version is required"));
+}
+
+#[test]
+fn parse_inbound_payload_rejects_unsupported_relay_protocol_version() {
+    let payload = serde_json::json!({
+        "protocol_version": RELAY_PROTOCOL_VERSION + 1,
+        "kind": "remote_action",
+        "action_id": "act-new-version",
+        "device_id": "phone-1",
+        "request": {
+            "type": "claim_challenge",
+            "proof": "claim-init-proof"
+        }
+    });
+
+    let error =
+        parse_inbound_payload(payload).expect_err("unsupported protocol version should reject");
+    assert!(error.contains("unsupported relay payload protocol_version"));
+}
+
+#[test]
+fn validate_broker_protocol_version_rejects_unsupported_welcome_version() {
+    let error = validate_broker_protocol_version(BROKER_PROTOCOL_VERSION + 1)
+        .expect_err("unsupported broker protocol should reject");
+    assert!(error.contains("unsupported broker protocol_version"));
 }
 
 #[test]
