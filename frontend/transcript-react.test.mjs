@@ -8,6 +8,7 @@ import {
   TranscriptContent,
   TranscriptEntry,
 } from "./shared/transcript-react.js";
+import { TranscriptPane } from "./shared/transcript-pane.js";
 
 const h = React.createElement;
 
@@ -21,6 +22,10 @@ function renderApprovalMarkup(approval, options = null) {
 
 function renderTranscriptContentMarkup(entries = [], approval = null, options = null) {
   return renderToStaticMarkup(h(TranscriptContent, { approval, entries, options }));
+}
+
+function renderTranscriptPaneMarkup(props) {
+  return renderToStaticMarkup(h(TranscriptPane, props));
 }
 
 test("renderEntryMarkup renders typed session items safely", () => {
@@ -63,6 +68,36 @@ test("renderEntryMarkup renders typed session items safely", () => {
   assert.match(toolMarkup, /Read frontend\/remote\/main\.js/);
   assert.match(toolMarkup, /message-card-tool/);
   assert.match(toolMarkup, /frontend\/remote\/main\.js/);
+});
+
+test("TranscriptPane renders empty, ready, and transcript states", () => {
+  const emptyMarkup = renderTranscriptPaneMarkup({
+    emptyContent: h("p", { className: "empty-marker" }, "No session"),
+  });
+  assert.match(emptyMarkup, /empty-marker/);
+
+  const readyMarkup = renderTranscriptPaneMarkup({
+    canWrite: true,
+    entries: [],
+    readyState: {
+      session: {
+        active_thread_id: "thread-1",
+        current_cwd: "/tmp/demo",
+      },
+    },
+  });
+  assert.match(readyMarkup, /Session ready/);
+
+  const transcriptMarkup = renderTranscriptPaneMarkup({
+    entries: [
+      {
+        kind: "agent_text",
+        status: "completed",
+        text: "Hello from Codex",
+      },
+    ],
+  });
+  assert.match(transcriptMarkup, /Hello from Codex/);
 });
 
 test("renderEntryMarkup collapses long command and tool previews without collapsing assistant text", () => {

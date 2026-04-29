@@ -8,7 +8,6 @@ import React, {
 } from "react";
 import { createRoot } from "react-dom/client";
 import { flushSync } from "react-dom";
-import { QueryClientProvider } from "@tanstack/react-query";
 import { fetchBuildInfo } from "../shared/build-badge.js";
 import { ClientLog } from "../shared/client-log.js";
 import {
@@ -77,13 +76,12 @@ import {
 import {
   ConversationEmptyState,
 } from "../shared/conversation.js";
-import { ConversationPanel } from "../shared/conversation-panel.js";
 import { ThreadGroupList } from "../shared/thread-list-react.js";
+import { TranscriptPane } from "../shared/transcript-pane.js";
 import {
   setRemoteCwdInputElement,
   setRemoteTranscriptElement,
 } from "./ui-refs.js";
-import { remoteQueryClient } from "./query-client.js";
 import { formatTimestamp, shortId } from "./utils.js";
 
 const h = React.createElement;
@@ -104,13 +102,7 @@ export function mountRemoteApp() {
   }
 
   flushSync(() => {
-    remoteAppRoot.render(
-      h(
-        QueryClientProvider,
-        { client: remoteQueryClient },
-        h(RemoteApp)
-      )
-    );
+    remoteAppRoot.render(h(RemoteApp));
   });
 }
 
@@ -1157,7 +1149,7 @@ function RemoteTranscriptPanel({
       });
     }
   } else {
-    body = h(ConversationPanel, {
+    body = h(TranscriptPane, {
       approval,
       canWrite: sessionView.canWrite,
       emptyContent: null,

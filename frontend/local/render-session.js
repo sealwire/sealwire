@@ -41,7 +41,6 @@ import { shouldShowTranscriptLoading } from "./transcript-loading.js";
 import {
   ConversationEmptyState,
 } from "../shared/conversation.js";
-import { ConversationPanel } from "../shared/conversation-panel.js";
 import {
   AuditList,
   ControlBannerContent,
@@ -51,6 +50,7 @@ import {
   TextContent,
 } from "./react-session-panels.js";
 import { ThreadGroupList } from "../shared/thread-list-react.js";
+import { TranscriptPane } from "../shared/transcript-pane.js";
 
 const h = React.createElement;
 const reactRoots = new WeakMap();
@@ -781,7 +781,7 @@ export function createSessionRenderer({
 
     if (!entries.length && !approval) {
       renderConversationContent(
-        h(ConversationPanel, {
+        h(TranscriptPane, {
           canWrite: canCurrentDeviceWrite(session),
           emptyContent: session.active_thread_id
             ? null
@@ -824,7 +824,7 @@ export function createSessionRenderer({
     }
 
     renderConversationContent(
-      h(ConversationPanel, {
+      h(TranscriptPane, {
         approval,
         canWrite: canCurrentDeviceWrite(session),
         entries,

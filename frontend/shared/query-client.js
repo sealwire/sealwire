@@ -1,10 +1,10 @@
-import { QueryClient } from "@tanstack/react-query";
+import { QueryClient } from "@tanstack/query-core";
 
 export function createRelayQueryClient() {
   return new QueryClient({
     defaultOptions: {
       queries: {
-        gcTime: 5 * 60 * 1000,
+        gcTime: Infinity,
         retry: false,
         staleTime: 0,
       },
