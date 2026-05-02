@@ -36,6 +36,9 @@ import {
   canonicalizeWorkspace,
   summarizeThreadGroups,
 } from "../shared/thread-groups.js";
+import {
+  toggleThreadListExpandedGroup,
+} from "../shared/thread-list-state.js";
 import { buildExpandedTranscriptDetailEntries } from "./transcript/details.js";
 import { shouldShowTranscriptLoading } from "./transcript-loading.js";
 import {
@@ -844,7 +847,8 @@ export function createSessionRenderer({
   }
 
   function renderThreads() {
-    const selectedCwd = canonicalizeWorkspace(state.selectedCwd);
+    const threadListUi = state.threadListUi || {};
+    const selectedCwd = canonicalizeWorkspace(threadListUi.selectedCwd || state.selectedCwd);
     const viewedThreadId = state.viewThreadId || null;
     const previousScrollTop =
       appShell?.dataset.view === "conversation"
@@ -865,7 +869,7 @@ export function createSessionRenderer({
       h(ThreadGroupList, {
         activeThreadId: viewedThreadId,
         emptyMessage: "Start or resume a session to build workspace groups.",
-        expandedGroupCwds: state.threadListExpandedGroupCwds || new Set(),
+        expandedGroupCwds: threadListUi.expandedGroupCwds || new Set(),
         formatThreadMeta(thread) {
           return formatRelativeTime(thread.updated_at);
         },
@@ -882,13 +886,7 @@ export function createSessionRenderer({
           renderOverviewState(state.session);
         },
         onToggleExpandedGroup(cwd) {
-          const next = new Set(state.threadListExpandedGroupCwds || []);
-          if (next.has(cwd)) {
-            next.delete(cwd);
-          } else {
-            next.add(cwd);
-          }
-          state.threadListExpandedGroupCwds = next;
+          state.threadListUi = toggleThreadListExpandedGroup(state.threadListUi, cwd);
           renderThreads();
         },
         selectedCwd,

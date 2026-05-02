@@ -10,6 +10,16 @@ import {
   summarizeThreadGroups,
 } from "./shared/thread-groups.js";
 import { ThreadGroupList } from "./shared/thread-list-react.js";
+import {
+  createThreadListUiState,
+  failThreadListRefresh,
+  finishThreadListRefresh,
+  setThreadListFilterValue,
+  setThreadListSelectedCwd,
+  startThreadListRefresh,
+  toggleThreadListCollapsedGroup,
+  toggleThreadListExpandedGroup,
+} from "./shared/thread-list-state.js";
 
 const h = React.createElement;
 
@@ -153,6 +163,36 @@ test("ThreadGroupList can keep show-more state controlled by the parent", () => 
   });
   assert.match(expandedMarkup, /Thread 11/);
   assert.match(expandedMarkup, /Show less/);
+});
+
+test("thread list UI state normalizes shared local and remote controls", () => {
+  let state = createThreadListUiState({
+    filterValue: " /tmp/demo ",
+    selectedCwd: "/tmp/demo/",
+  });
+
+  state = toggleThreadListExpandedGroup(state, "/tmp/demo//");
+  state = toggleThreadListCollapsedGroup(state, "/tmp/demo//");
+  assert.equal(state.selectedCwd, "/tmp/demo/");
+  assert.equal(state.filterValue, " /tmp/demo ");
+  assert.deepEqual([...state.expandedGroupCwds], ["/tmp/demo"]);
+  assert.deepEqual([...state.collapsedGroupCwds], ["/tmp/demo"]);
+
+  state = setThreadListSelectedCwd(state, "/tmp/next");
+  state = setThreadListFilterValue(state, "/tmp/filter");
+  state = startThreadListRefresh(state);
+  assert.equal(state.selectedCwd, "/tmp/next");
+  assert.equal(state.filterValue, "/tmp/filter");
+  assert.equal(state.loading, true);
+  assert.equal(state.error, null);
+
+  state = failThreadListRefresh(state, "network failed");
+  assert.equal(state.loading, false);
+  assert.equal(state.error, "network failed");
+
+  state = finishThreadListRefresh(startThreadListRefresh(state));
+  assert.equal(state.loading, false);
+  assert.equal(state.error, null);
 });
 
 test("summarizeThreadGroups and canonicalizeWorkspace produce stable display values", () => {

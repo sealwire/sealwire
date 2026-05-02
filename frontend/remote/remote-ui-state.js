@@ -1,4 +1,14 @@
 import { loadDeviceLabel } from "./state.js";
+import {
+  clearThreadListError,
+  createThreadListUiState,
+  failThreadListRefresh,
+  finishThreadListRefresh,
+  setThreadListFilterValue,
+  startThreadListRefresh,
+  toggleThreadListCollapsedGroup,
+  toggleThreadListExpandedGroup,
+} from "../shared/thread-list-state.js";
 
 export function createDefaultSessionDraft() {
   return {
@@ -26,9 +36,7 @@ export function createInitialRemoteUiState() {
     transcriptExpandedDetails: new Map(),
     transcriptExpandedItemIds: new Set(),
     transcriptLoadingItemIds: new Set(),
-    threadsError: null,
-    threadsFilterValue: "",
-    threadsRefreshPending: false,
+    threadList: createThreadListUiState(),
   };
 }
 
@@ -165,29 +173,37 @@ export function reduceRemoteUiState(state, action) {
     case "threads/setFilterValue":
       return {
         ...state,
-        threadsFilterValue: action.value,
+        threadList: setThreadListFilterValue(state.threadList, action.value),
       };
     case "threads/startRefresh":
       return {
         ...state,
-        threadsError: null,
-        threadsRefreshPending: true,
+        threadList: startThreadListRefresh(state.threadList),
       };
     case "threads/finishRefresh":
       return {
         ...state,
-        threadsRefreshPending: false,
+        threadList: finishThreadListRefresh(state.threadList),
       };
     case "threads/failRefresh":
       return {
         ...state,
-        threadsError: action.message,
-        threadsRefreshPending: false,
+        threadList: failThreadListRefresh(state.threadList, action.message),
       };
     case "threads/clearError":
       return {
         ...state,
-        threadsError: null,
+        threadList: clearThreadListError(state.threadList),
+      };
+    case "threads/toggleCollapsedGroup":
+      return {
+        ...state,
+        threadList: toggleThreadListCollapsedGroup(state.threadList, action.cwd),
+      };
+    case "threads/toggleExpandedGroup":
+      return {
+        ...state,
+        threadList: toggleThreadListExpandedGroup(state.threadList, action.cwd),
       };
     default:
       return state;

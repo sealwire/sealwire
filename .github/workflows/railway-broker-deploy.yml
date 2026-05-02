@@ -1,0 +1,57 @@
+name: Railway Broker Deploy
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - Cargo.lock
+      - Cargo.toml
+      - crates/**
+      - docker/broker.Dockerfile
+      - frontend/**
+      - package-lock.json
+      - package.json
+      - railway.toml
+      - vite.config.js
+      - .github/workflows/railway-broker-deploy.yml
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: deploy-public-broker
+    runs-on: ubuntu-latest
+    env:
+      RAILWAY_SERVICE_ID: ${{ vars.RAILWAY_SERVICE_ID }}
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check Railway deploy inputs
+        id: railway_inputs
+        shell: bash
+        run: |
+          if [ -n "${RAILWAY_TOKEN:-}" ] && [ -n "${RAILWAY_SERVICE_ID:-}" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Skipping Railway deploy. Set repository secret RAILWAY_TOKEN and repository variable RAILWAY_SERVICE_ID to enable this workflow."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Node
+        if: steps.railway_inputs.outputs.ready == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Railway CLI
+        if: steps.railway_inputs.outputs.ready == 'true'
+        run: npm install -g @railway/cli
+
+      - name: Deploy to Railway
+        if: steps.railway_inputs.outputs.ready == 'true'
+        run: railway up --service "$RAILWAY_SERVICE_ID" --ci

@@ -1,0 +1,24 @@
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "docker/broker.Dockerfile"
+watchPatterns = [
+  "Cargo.lock",
+  "Cargo.toml",
+  "crates/**",
+  "docker/broker.Dockerfile",
+  "frontend/**",
+  "package-lock.json",
+  "package.json",
+  "railway.toml",
+  "vite.config.js",
+]
+
+[deploy]
+startCommand = "sh -c 'state_dir=${RAILWAY_VOLUME_MOUNT_PATH:-/data}; mkdir -p $state_dir; export RELAY_BROKER_AUTH_MODE=${RELAY_BROKER_AUTH_MODE:-public} RELAY_BROKER_PUBLIC_STATE_PATH=${RELAY_BROKER_PUBLIC_STATE_PATH:-$state_dir/public-control.json} RUST_LOG=${RUST_LOG:-relay_broker=info,tower_http=info}; exec relay-broker'"
+healthcheckPath = "/api/health"
+healthcheckTimeout = 30
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
+sleepApplication = false
+numReplicas = 1
+requiredMountPath = "/data"

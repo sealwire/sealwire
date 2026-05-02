@@ -118,8 +118,6 @@ function RemoteApp() {
   ).state;
   const previousSessionRef = useRef(null);
   const remoteCwdInputRef = useRef(null);
-  const [collapsedGroupCwds, setCollapsedGroupCwds] = useState(() => new Set());
-  const [expandedGroupCwds, setExpandedGroupCwds] = useState(() => new Set());
   const [uiState, dispatchUi] = useReducer(
     reduceRemoteUiState,
     undefined,
@@ -147,7 +145,7 @@ function RemoteApp() {
         sendPending: uiState.sendPending,
         session,
         sessionView,
-        threadsFilterValue: uiState.threadsFilterValue,
+        threadsFilterValue: uiState.threadList.filterValue,
       })
     : null;
   const emptyStateModel = selectEmptyStateRenderModel({
@@ -162,9 +160,9 @@ function RemoteApp() {
   });
   const threadsModel = selectThreadsRenderModel({
     activeThreadId: session?.active_thread_id || null,
-    error: uiState.threadsError,
-    filterValue: uiState.threadsFilterValue,
-    loading: uiState.threadsRefreshPending,
+    error: uiState.threadList.error,
+    filterValue: uiState.threadList.filterValue,
+    loading: uiState.threadList.loading,
     relayDirectory: currentState.relayDirectory,
     remoteAuth: currentState.remoteAuth,
     session,
@@ -387,7 +385,7 @@ function RemoteApp() {
           open: false,
         });
         await runThreadRefresh("post-start refresh", {
-          filterValue: uiState.threadsFilterValue,
+          filterValue: uiState.threadList.filterValue,
           silent: true,
         });
       }
@@ -408,7 +406,7 @@ function RemoteApp() {
     const resumed = await handlers.onResumeThread(threadId, uiState.sessionDraft);
     if (resumed) {
       await runThreadRefresh("post-resume refresh", {
-        filterValue: uiState.threadsFilterValue,
+        filterValue: uiState.threadList.filterValue,
         silent: true,
       });
     }
@@ -544,9 +542,7 @@ function RemoteApp() {
         "data-view": "conversation",
       },
       h(RemoteSidebar, {
-        collapsedGroupCwds,
         currentState,
-        expandedGroupCwds,
         hasRelay,
         hasUsableRelay,
         onOpenPairing() {
@@ -572,25 +568,15 @@ function RemoteApp() {
           void handleStartSession();
         },
         onToggleGroup(cwd) {
-          setCollapsedGroupCwds((previous) => {
-            const next = new Set(previous);
-            if (next.has(cwd)) {
-              next.delete(cwd);
-            } else {
-              next.add(cwd);
-            }
-            return next;
+          dispatchUi({
+            type: "threads/toggleCollapsedGroup",
+            cwd,
           });
         },
         onToggleExpandedGroup(cwd) {
-          setExpandedGroupCwds((previous) => {
-            const next = new Set(previous);
-            if (next.has(cwd)) {
-              next.delete(cwd);
-            } else {
-              next.add(cwd);
-            }
-            return next;
+          dispatchUi({
+            type: "threads/toggleExpandedGroup",
+            cwd,
           });
         },
         relayDirectoryModel,
@@ -598,8 +584,8 @@ function RemoteApp() {
         sessionPanelModel,
         sessionPanelOpen: uiState.sessionPanelOpen,
         sessionToggleLabel,
+        threadListUi: uiState.threadList,
         threadsFilterHint: sessionRuntime?.threadsFilterHint || null,
-        threadsFilterValue: uiState.threadsFilterValue,
         threadsModel,
         updateSessionDraft(nextPatch) {
           for (const [field, value] of Object.entries(nextPatch)) {
@@ -745,9 +731,7 @@ function RemoteApp() {
 }
 
 function RemoteSidebar({
-  collapsedGroupCwds,
   currentState,
-  expandedGroupCwds,
   hasRelay,
   hasUsableRelay,
   onOpenPairing,
@@ -763,14 +747,15 @@ function RemoteSidebar({
   sessionPanelModel,
   sessionPanelOpen,
   sessionToggleLabel,
+  threadListUi,
   threadsFilterHint,
-  threadsFilterValue,
   threadsModel,
   updateSessionDraft,
   setSessionPanelOpenLocal,
   setThreadsFilterValueLocal,
 }) {
   const navOpen = currentState.remoteNavMode !== "drawer" || currentState.remoteNavOpen;
+  const threadsFilterValue = threadListUi?.filterValue || "";
 
   return h(
     "aside",
@@ -910,10 +895,10 @@ function RemoteSidebar({
         { className: "conversation-list", id: "remote-threads-list" },
         h(ThreadGroupList, {
           activeThreadId: threadsModel.activeThreadId,
-          collapsedGroupCwds,
+          collapsedGroupCwds: threadListUi?.collapsedGroupCwds || new Set(),
           collapsible: true,
           emptyMessage: threadsModel.emptyMessage,
-          expandedGroupCwds,
+          expandedGroupCwds: threadListUi?.expandedGroupCwds || new Set(),
           formatThreadMeta(thread) {
             return formatTimestamp(thread.updated_at);
           },

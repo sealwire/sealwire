@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from "react";
+import React from "react";
 import { canonicalizeWorkspace } from "./thread-groups.js";
 
 const h = React.createElement;
@@ -13,7 +13,7 @@ export function ThreadGroupList({
   collapsedGroupCwds = new Set(),
   collapsible = false,
   emptyMessage = "No saved threads yet.",
-  expandedGroupCwds = null,
+  expandedGroupCwds = new Set(),
   formatThreadMeta = (thread) => thread.updated_at || "",
   groups = [],
   includePreview = false,
@@ -25,26 +25,6 @@ export function ThreadGroupList({
   previewFallback = "No preview yet.",
   selectedCwd = "",
 }) {
-  const [internalExpandedGroupCwds, setInternalExpandedGroupCwds] = useState(() => new Set());
-  const effectiveExpandedGroupCwds = expandedGroupCwds || internalExpandedGroupCwds;
-
-  const toggleShowAll = useCallback((cwd) => {
-    if (onToggleExpandedGroup) {
-      onToggleExpandedGroup(cwd);
-      return;
-    }
-
-    setInternalExpandedGroupCwds((prev) => {
-      const next = new Set(prev);
-      if (next.has(cwd)) {
-        next.delete(cwd);
-      } else {
-        next.add(cwd);
-      }
-      return next;
-    });
-  }, [onToggleExpandedGroup]);
-
   if (!groups.length) {
     return h("p", { className: "sidebar-empty" }, emptyMessage);
   }
@@ -59,7 +39,7 @@ export function ThreadGroupList({
       const isCollapsed = collapsible && collapsedGroupCwds.has(normalizedCwd);
       const isSelected = normalizedSelectedCwd && normalizedCwd === normalizedSelectedCwd;
       const allThreads = group.threads || [];
-      const showAll = effectiveExpandedGroupCwds.has(normalizedCwd);
+      const showAll = expandedGroupCwds.has(normalizedCwd);
       const visibleThreads = showAll ? allThreads : allThreads.slice(0, VISIBLE_THREAD_LIMIT);
       const hiddenCount = allThreads.length - visibleThreads.length;
 
@@ -102,7 +82,7 @@ export function ThreadGroupList({
                 "button",
                 {
                   className: "thread-group-show-more",
-                  onClick: () => toggleShowAll(normalizedCwd),
+                  onClick: () => onToggleExpandedGroup?.(normalizedCwd),
                   type: "button",
                 },
                 `Show ${hiddenCount} more`
@@ -113,7 +93,7 @@ export function ThreadGroupList({
                 "button",
                 {
                   className: "thread-group-show-more",
-                  onClick: () => toggleShowAll(normalizedCwd),
+                  onClick: () => onToggleExpandedGroup?.(normalizedCwd),
                   type: "button",
                 },
                 "Show less"

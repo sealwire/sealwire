@@ -46,6 +46,12 @@ import {
   createThreadListQueryOptions,
   createThreadTranscriptPageQueryOptions,
 } from "../shared/thread-queries.js";
+import {
+  failThreadListRefresh,
+  finishThreadListRefresh,
+  shouldRenderThreadListLoadingPlaceholder,
+  startThreadListRefresh,
+} from "../shared/thread-list-state.js";
 
 const CONTROL_HEARTBEAT_MS = 5000;
 const LEASE_EXPIRY_REFRESH_SKEW_MS = 250;
@@ -571,8 +577,14 @@ export function createSessionController({
   }
 
   async function loadThreads(reason) {
-    const hasThreadList = (state.threadGroups?.length || 0) > 0 || (state.threads?.length || 0) > 0;
-    if (!hasThreadList) {
+    state.threadListUi = startThreadListRefresh(state.threadListUi);
+    if (
+      shouldRenderThreadListLoadingPlaceholder(
+        state.threadListUi,
+        state.threadGroups,
+        state.threads
+      )
+    ) {
       renderThreadListMessage("Loading...", "Loading saved workspace groups...");
     }
     logLine(`Fetching thread list across saved workspaces (${reason})`);
@@ -591,9 +603,11 @@ export function createSessionController({
 
       state.threadGroups = buildThreadGroups(threads);
       state.threads = state.threadGroups.flatMap((group) => group.threads);
+      state.threadListUi = finishThreadListRefresh(state.threadListUi);
       renderThreads();
       renderOverviewState(state.session);
     } catch (error) {
+      state.threadListUi = failThreadListRefresh(state.threadListUi, error.message);
       if (state.authRequired && !state.authenticated) {
         state.threadGroups = [];
         state.threads = [];

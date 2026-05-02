@@ -92,6 +92,10 @@ import { openSessionStream, sessionStreamUrl } from "./session-stream.js";
 import {
   buildThreadGroups,
 } from "./shared/thread-groups.js";
+import {
+  createThreadListUiState,
+  setThreadListSelectedCwd,
+} from "./shared/thread-list-state.js";
 import { fetchBuildInfo } from "./shared/build-badge.js";
 import { ClientLog } from "./shared/client-log.js";
 import { renderSelectOptions } from "./shared/select-options.js";
@@ -141,7 +145,7 @@ const state = {
   pendingThreadHistoryScrollTop: null,
   threadGroups: [],
   threadHistoryScrollTop: 0,
-  threadListExpandedGroupCwds: new Set(),
+  threadListUi: createThreadListUiState(),
   streamReconnectTimer: null,
   sessionPollTimer: null,
   threadContextMenuThreadId: null,
@@ -812,8 +816,9 @@ function syncModelSuggestions(select, models, selectedModel) {
 }
 
 function setSelectedCwd(cwd) {
-  state.selectedCwd = cwd;
-  cwdInput.value = cwd;
+  state.threadListUi = setThreadListSelectedCwd(state.threadListUi, cwd);
+  state.selectedCwd = state.threadListUi.selectedCwd;
+  cwdInput.value = state.selectedCwd;
 }
 
 function resolveActiveThread(threadId) {
