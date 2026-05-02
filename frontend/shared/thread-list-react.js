@@ -39,123 +39,12 @@ export function ThreadGroupList({
   onToggleGroup = null,
   previewFallback = "No preview yet.",
   selectedCwd = "",
-  virtualized = false,
 }) {
   if (!groups.length) {
     return h("p", { className: "sidebar-empty" }, emptyMessage);
   }
 
   const normalizedSelectedCwd = canonicalizeWorkspace(selectedCwd);
-
-  if (virtualized) {
-    return h(VirtualThreadGroupList, {
-      activeThreadId,
-      collapsedGroupCwds,
-      collapsible,
-      expandedGroupCwds,
-      formatThreadMeta,
-      groups,
-      includePreview,
-      normalizedSelectedCwd,
-      onContextThread,
-      onResumeThread,
-      onSelectWorkspace,
-      onToggleExpandedGroup,
-      onToggleGroup,
-      previewFallback,
-    });
-  }
-
-  return h(
-    React.Fragment,
-    null,
-    ...groups.map((group) => {
-      const normalizedCwd = canonicalizeWorkspace(group.cwd);
-      const isCollapsed = collapsible && collapsedGroupCwds.has(normalizedCwd);
-      const isSelected = normalizedSelectedCwd && normalizedCwd === normalizedSelectedCwd;
-      const allThreads = group.threads || [];
-      const showAll = expandedGroupCwds.has(normalizedCwd);
-      const visibleThreads = showAll ? allThreads : allThreads.slice(0, VISIBLE_THREAD_LIMIT);
-      const hiddenCount = allThreads.length - visibleThreads.length;
-
-      return h(
-        "section",
-        {
-          className: `thread-group${isSelected ? " is-selected-workspace" : ""}${isCollapsed ? " is-collapsed" : ""}`,
-          "data-thread-group-cwd": group.cwd,
-          key: group.cwd,
-        },
-        h(ThreadGroupHeader, {
-          collapsible,
-          group,
-          isCollapsed,
-          normalizedCwd,
-          onSelectWorkspace,
-          onToggleGroup,
-        }),
-        h(
-          "div",
-          {
-            className: "thread-group-list",
-            hidden: isCollapsed,
-          },
-          ...visibleThreads.map((thread) =>
-            h(ThreadGroupItem, {
-              active: activeThreadId === thread.id,
-              formatThreadMeta,
-              group,
-              includePreview,
-              key: thread.id,
-              onContextThread,
-              onResumeThread,
-              previewFallback,
-              thread,
-            })
-          ),
-          hiddenCount > 0
-            ? h(
-                "button",
-                {
-                  className: "thread-group-show-more",
-                  onClick: () => onToggleExpandedGroup?.(normalizedCwd),
-                  type: "button",
-                },
-                `Show ${hiddenCount} more`
-              )
-            : null,
-          showAll && allThreads.length > VISIBLE_THREAD_LIMIT
-            ? h(
-                "button",
-                {
-                  className: "thread-group-show-more",
-                  onClick: () => onToggleExpandedGroup?.(normalizedCwd),
-                  type: "button",
-                },
-                "Show less"
-              )
-            : null
-        )
-      );
-    })
-  );
-}
-
-function VirtualThreadGroupList({
-  activeThreadId,
-  collapsedGroupCwds,
-  collapsible,
-  expandedGroupCwds,
-  formatThreadMeta,
-  groups,
-  includePreview,
-  normalizedSelectedCwd,
-  onContextThread,
-  onResumeThread,
-  onSelectWorkspace,
-  onToggleExpandedGroup,
-  onToggleGroup,
-  previewFallback,
-}) {
   const rows = useMemo(
     () =>
       createThreadListRows({

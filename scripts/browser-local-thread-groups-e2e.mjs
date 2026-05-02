@@ -113,6 +113,7 @@ async function main() {
 
     const grouping = await page.evaluate(() => {
       const groups = [...document.querySelectorAll("#threads-list .thread-group")];
+      const threadButtons = [...document.querySelectorAll("#threads-list [data-thread-id]")];
       const cwdInput = document.querySelector("#cwd-input");
 
       return {
@@ -120,9 +121,11 @@ async function main() {
           group.querySelector(".thread-group-name")?.textContent?.trim() || ""
         ),
         groupCwds: groups.map((group) => group.dataset.threadGroupCwd || ""),
-        nestedThreadCwds: groups.map((group) =>
-          [...group.querySelectorAll("[data-thread-id]")].map((button) => button.dataset.threadCwd || "")
-        ),
+        threadRows: threadButtons.map((button) => ({
+          cwd: button.dataset.threadCwd || "",
+          id: button.dataset.threadId || "",
+          rowType: button.closest("[data-row-type]")?.dataset.rowType || "",
+        })),
         countText: document.querySelector("#threads-count")?.textContent?.trim() || "",
         selectedWorkspaceValue: cwdInput instanceof HTMLInputElement ? cwdInput.value : "",
       };
@@ -149,13 +152,17 @@ async function main() {
         rendered: grouping.groupCwds,
       })}`
     );
-    assert(
-      grouping.nestedThreadCwds[nestedIndex].every((cwd) => cwd === workspaces.nested),
-      `nested workspace group should only contain nested threads: ${JSON.stringify(grouping.nestedThreadCwds[nestedIndex])}`
+    const threadRowsById = new Map(grouping.threadRows.map((row) => [row.id, row]));
+    assert.deepEqual(
+      threadFixtures.map((fixture) => threadRowsById.get(fixture.id)?.cwd),
+      threadFixtures.map((fixture) => fixture.cwd),
+      `visible virtual rows should render each fixture under its workspace: ${JSON.stringify(grouping.threadRows)}`
     );
     assert(
-      grouping.nestedThreadCwds[rootIndex].every((cwd) => cwd === workspaces.root),
-      `root workspace group should only contain root threads: ${JSON.stringify(grouping.nestedThreadCwds[rootIndex])}`
+      grouping.threadRows
+        .filter((row) => threadFixtures.some((fixture) => fixture.id === row.id))
+        .every((row) => row.rowType === "thread"),
+      `fixture threads should render through thread virtual rows: ${JSON.stringify(grouping.threadRows)}`
     );
     assert(
       grouping.countText.includes("folders") && grouping.countText.includes("threads"),
@@ -380,6 +387,11 @@ async function dumpBrowserState(page) {
           label: group.querySelector(".thread-group-name")?.textContent?.trim() || null,
           threadCount: group.querySelectorAll("[data-thread-id]").length,
         }));
+        const threadRows = [...document.querySelectorAll("#threads-list [data-thread-id]")].map((button) => ({
+          cwd: button.dataset.threadCwd || null,
+          id: button.dataset.threadId || null,
+          rowType: button.closest("[data-row-type]")?.dataset.rowType || null,
+        }));
 
         return JSON.stringify(
           {
@@ -389,6 +401,7 @@ async function dumpBrowserState(page) {
                 ? document.querySelector("#cwd-input").value
                 : null,
             groups,
+            threadRows,
           },
           null,
           2

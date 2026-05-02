@@ -495,12 +495,6 @@ input:focus, textarea:focus, select:focus {
   transform: rotate(-45deg);
 }
 
-.thread-group-list {
-  display: grid;
-  gap: 2px;
-  padding-left: 26px;
-}
-
 .thread-group-show-more {
   width: 100%;
   padding: 6px 10px;

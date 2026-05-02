@@ -907,7 +907,6 @@ function RemoteSidebar({
           onResumeThread,
           onToggleExpandedGroup,
           onToggleGroup,
-          virtualized: true,
         })
       )
     )
