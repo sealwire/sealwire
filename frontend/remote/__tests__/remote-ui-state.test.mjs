@@ -89,7 +89,7 @@ test("remote UI reducer updates session, composer, pairing, and modal state loca
   assert.equal(state.remoteInfoModalOpen, true);
 });
 
-test("remote UI reducer tracks async pending and thread refresh error state", () => {
+test("remote UI reducer tracks async pending state", () => {
   let state = createInitialRemoteUiState();
 
   state = reduceRemoteUiState(state, {
@@ -100,26 +100,12 @@ test("remote UI reducer tracks async pending and thread refresh error state", ()
     type: "send/setPending",
     value: true,
   });
-  state = reduceRemoteUiState(state, {
-    type: "threads/startRefresh",
-  });
-  state = reduceRemoteUiState(state, {
-    type: "threads/failRefresh",
-    message: "timed out",
-  });
 
   assert.equal(state.sessionStartPending, true);
   assert.equal(state.sendPending, true);
-  assert.equal(state.threadsRefreshPending, false);
-  assert.equal(state.threadsError, "timed out");
-
-  state = reduceRemoteUiState(state, {
-    type: "threads/clearError",
-  });
   state = reduceRemoteUiState(state, {
     type: "pairing/resetInput",
   });
 
-  assert.equal(state.threadsError, null);
   assert.equal(state.pairingInputValue, "");
 });

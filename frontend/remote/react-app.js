@@ -77,6 +77,9 @@ import {
   ConversationEmptyState,
 } from "../shared/conversation.js";
 import { ThreadGroupList } from "../shared/thread-list-react.js";
+import {
+  createThreadListStore,
+} from "../shared/thread-list-store.js";
 import { TranscriptPane } from "../shared/transcript-pane.js";
 import {
   setRemoteCwdInputElement,
@@ -88,6 +91,14 @@ const h = React.createElement;
 const LIVE_TRANSCRIPT_DETAIL_REFRESH_MS = 1000;
 
 let remoteAppRoot = null;
+
+function useThreadListStoreState(store) {
+  return useSyncExternalStore(
+    store.subscribe,
+    () => store.getState().threadList,
+    () => store.getState().threadList
+  );
+}
 
 export function mountRemoteApp() {
   const container = document.querySelector("#remote-root");
@@ -123,6 +134,8 @@ function RemoteApp() {
     undefined,
     createInitialRemoteUiState
   );
+  const [threadListStore] = useState(() => createThreadListStore());
+  const threadListUi = useThreadListStoreState(threadListStore);
   const handlers = createRemoteAppHandlers();
 
   const session = currentState.session;
@@ -145,7 +158,7 @@ function RemoteApp() {
         sendPending: uiState.sendPending,
         session,
         sessionView,
-        threadsFilterValue: uiState.threadList.filterValue,
+        threadsFilterValue: threadListUi.filterValue,
       })
     : null;
   const emptyStateModel = selectEmptyStateRenderModel({
@@ -160,9 +173,9 @@ function RemoteApp() {
   });
   const threadsModel = selectThreadsRenderModel({
     activeThreadId: session?.active_thread_id || null,
-    error: uiState.threadList.error,
-    filterValue: uiState.threadList.filterValue,
-    loading: uiState.threadList.loading,
+    error: threadListUi.error,
+    filterValue: threadListUi.filterValue,
+    loading: threadListUi.loading,
     relayDirectory: currentState.relayDirectory,
     remoteAuth: currentState.remoteAuth,
     session,
@@ -324,10 +337,8 @@ function RemoteApp() {
   ]);
 
   useEffect(() => {
-    dispatchUi({
-      type: "threads/clearError",
-    });
-  }, [currentState.remoteAuth?.relayId, currentState.threads]);
+    threadListStore.getState().clearError();
+  }, [currentState.remoteAuth?.relayId, currentState.threads, threadListStore]);
 
   useRemoteSessionRuntime({
     remoteAuth: currentState.remoteAuth,
@@ -346,9 +357,7 @@ function RemoteApp() {
   async function runThreadRefresh(reason, { filterValue, silent = false } = {}) {
     let completed = false;
     if (!silent) {
-      dispatchUi({
-        type: "threads/startRefresh",
-      });
+      threadListStore.getState().startRefresh();
     }
 
     try {
@@ -356,17 +365,12 @@ function RemoteApp() {
       completed = true;
     } catch (error) {
       if (!silent) {
-        dispatchUi({
-          type: "threads/failRefresh",
-          message: error.message,
-        });
+        threadListStore.getState().failRefresh(error.message);
       }
       throw error;
     } finally {
       if (!silent && completed) {
-        dispatchUi({
-          type: "threads/finishRefresh",
-        });
+        threadListStore.getState().finishRefresh();
       }
     }
   }
@@ -385,7 +389,7 @@ function RemoteApp() {
           open: false,
         });
         await runThreadRefresh("post-start refresh", {
-          filterValue: uiState.threadList.filterValue,
+          filterValue: threadListUi.filterValue,
           silent: true,
         });
       }
@@ -406,7 +410,7 @@ function RemoteApp() {
     const resumed = await handlers.onResumeThread(threadId, uiState.sessionDraft);
     if (resumed) {
       await runThreadRefresh("post-resume refresh", {
-        filterValue: uiState.threadList.filterValue,
+        filterValue: threadListUi.filterValue,
         silent: true,
       });
     }
@@ -568,23 +572,17 @@ function RemoteApp() {
           void handleStartSession();
         },
         onToggleGroup(cwd) {
-          dispatchUi({
-            type: "threads/toggleCollapsedGroup",
-            cwd,
-          });
+          threadListStore.getState().toggleCollapsedGroup(cwd);
         },
         onToggleExpandedGroup(cwd) {
-          dispatchUi({
-            type: "threads/toggleExpandedGroup",
-            cwd,
-          });
+          threadListStore.getState().toggleExpandedGroup(cwd);
         },
         relayDirectoryModel,
         remoteCwdInputRef,
         sessionPanelModel,
         sessionPanelOpen: uiState.sessionPanelOpen,
         sessionToggleLabel,
-        threadListUi: uiState.threadList,
+        threadListUi,
         threadsFilterHint: sessionRuntime?.threadsFilterHint || null,
         threadsModel,
         updateSessionDraft(nextPatch) {
@@ -603,10 +601,7 @@ function RemoteApp() {
           });
         },
         setThreadsFilterValueLocal(value) {
-          dispatchUi({
-            type: "threads/setFilterValue",
-            value,
-          });
+          threadListStore.getState().setFilterValue(value);
         },
       }),
       h("div", {

@@ -1,14 +1,4 @@
 import { loadDeviceLabel } from "./state.js";
-import {
-  clearThreadListError,
-  createThreadListUiState,
-  failThreadListRefresh,
-  finishThreadListRefresh,
-  setThreadListFilterValue,
-  startThreadListRefresh,
-  toggleThreadListCollapsedGroup,
-  toggleThreadListExpandedGroup,
-} from "../shared/thread-list-state.js";
 
 export function createDefaultSessionDraft() {
   return {
@@ -36,7 +26,6 @@ export function createInitialRemoteUiState() {
     transcriptExpandedDetails: new Map(),
     transcriptExpandedItemIds: new Set(),
     transcriptLoadingItemIds: new Set(),
-    threadList: createThreadListUiState(),
   };
 }
 
@@ -169,41 +158,6 @@ export function reduceRemoteUiState(state, action) {
       return {
         ...state,
         sendPending: Boolean(action.value),
-      };
-    case "threads/setFilterValue":
-      return {
-        ...state,
-        threadList: setThreadListFilterValue(state.threadList, action.value),
-      };
-    case "threads/startRefresh":
-      return {
-        ...state,
-        threadList: startThreadListRefresh(state.threadList),
-      };
-    case "threads/finishRefresh":
-      return {
-        ...state,
-        threadList: finishThreadListRefresh(state.threadList),
-      };
-    case "threads/failRefresh":
-      return {
-        ...state,
-        threadList: failThreadListRefresh(state.threadList, action.message),
-      };
-    case "threads/clearError":
-      return {
-        ...state,
-        threadList: clearThreadListError(state.threadList),
-      };
-    case "threads/toggleCollapsedGroup":
-      return {
-        ...state,
-        threadList: toggleThreadListCollapsedGroup(state.threadList, action.cwd),
-      };
-    case "threads/toggleExpandedGroup":
-      return {
-        ...state,
-        threadList: toggleThreadListExpandedGroup(state.threadList, action.cwd),
       };
     default:
       return state;

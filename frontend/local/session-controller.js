@@ -47,10 +47,10 @@ import {
   createThreadTranscriptPageQueryOptions,
 } from "../shared/thread-queries.js";
 import {
-  failThreadListRefresh,
-  finishThreadListRefresh,
+  readThreadListUi,
+} from "../shared/thread-list-store.js";
+import {
   shouldRenderThreadListLoadingPlaceholder,
-  startThreadListRefresh,
 } from "../shared/thread-list-state.js";
 
 const CONTROL_HEARTBEAT_MS = 5000;
@@ -577,10 +577,10 @@ export function createSessionController({
   }
 
   async function loadThreads(reason) {
-    state.threadListUi = startThreadListRefresh(state.threadListUi);
+    state.threadListStore.getState().startRefresh();
     if (
       shouldRenderThreadListLoadingPlaceholder(
-        state.threadListUi,
+        readThreadListUi(state.threadListStore),
         state.threadGroups,
         state.threads
       )
@@ -603,11 +603,11 @@ export function createSessionController({
 
       state.threadGroups = buildThreadGroups(threads);
       state.threads = state.threadGroups.flatMap((group) => group.threads);
-      state.threadListUi = finishThreadListRefresh(state.threadListUi);
+      state.threadListStore.getState().finishRefresh();
       renderThreads();
       renderOverviewState(state.session);
     } catch (error) {
-      state.threadListUi = failThreadListRefresh(state.threadListUi, error.message);
+      state.threadListStore.getState().failRefresh(error.message);
       if (state.authRequired && !state.authenticated) {
         state.threadGroups = [];
         state.threads = [];

@@ -62,7 +62,8 @@
     "@tanstack/virtual-core": "^3.14.0",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
-    "tweetnacl": "^1.0.3"
+    "tweetnacl": "^1.0.3",
+    "zustand": "^5.0.12"
   },
   "devDependencies": {
     "playwright": "^1.58.2",

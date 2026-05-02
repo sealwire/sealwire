@@ -18,6 +18,11 @@ import {
   toggleThreadListCollapsedGroup,
   toggleThreadListExpandedGroup,
 } from "./shared/thread-list-state.js";
+import {
+  createThreadListStore,
+  readThreadListContextMenu,
+  readThreadListUi,
+} from "./shared/thread-list-store.js";
 
 test("buildThreadGroups sorts groups by latest activity and threads by recency", () => {
   const groups = buildThreadGroups([
@@ -91,6 +96,44 @@ test("thread list UI state normalizes shared local and remote controls", () => {
   state = finishThreadListRefresh(startThreadListRefresh(state));
   assert.equal(state.loading, false);
   assert.equal(state.error, null);
+});
+
+test("thread list store owns shared local and remote UI actions", () => {
+  const store = createThreadListStore({
+    selectedCwd: "/tmp/demo/",
+  });
+
+  store.getState().toggleExpandedGroup("/tmp/demo//");
+  store.getState().toggleCollapsedGroup("/tmp/demo//");
+  store.getState().setFilterValue("/tmp/filter");
+  store.getState().startRefresh();
+
+  let state = readThreadListUi(store);
+  assert.equal(state.selectedCwd, "/tmp/demo/");
+  assert.equal(state.filterValue, "/tmp/filter");
+  assert.equal(state.loading, true);
+  assert.deepEqual([...state.expandedGroupCwds], ["/tmp/demo"]);
+  assert.deepEqual([...state.collapsedGroupCwds], ["/tmp/demo"]);
+
+  store.getState().failRefresh("timed out");
+  state = readThreadListUi(store);
+  assert.equal(state.loading, false);
+  assert.equal(state.error, "timed out");
+
+  store.getState().setSelectedCwd("/tmp/next");
+  store.getState().openContextMenu("thread-1", 42, 84);
+  store.getState().clearError();
+  state = readThreadListUi(store);
+  assert.equal(state.selectedCwd, "/tmp/next");
+  assert.equal(state.error, null);
+  assert.deepEqual(readThreadListContextMenu(store), {
+    clientX: 42,
+    clientY: 84,
+    threadId: "thread-1",
+  });
+
+  store.getState().closeContextMenu();
+  assert.equal(readThreadListContextMenu(store).threadId, null);
 });
 
 test("createThreadListRows flattens groups for virtual rendering", () => {

@@ -37,8 +37,8 @@ import {
   summarizeThreadGroups,
 } from "../shared/thread-groups.js";
 import {
-  toggleThreadListExpandedGroup,
-} from "../shared/thread-list-state.js";
+  readThreadListUi,
+} from "../shared/thread-list-store.js";
 import { buildExpandedTranscriptDetailEntries } from "./transcript/details.js";
 import { shouldShowTranscriptLoading } from "./transcript-loading.js";
 import {
@@ -847,7 +847,7 @@ export function createSessionRenderer({
   }
 
   function renderThreads() {
-    const threadListUi = state.threadListUi || {};
+    const threadListUi = readThreadListUi(state.threadListStore);
     const selectedCwd = canonicalizeWorkspace(threadListUi.selectedCwd || state.selectedCwd);
     const viewedThreadId = state.viewThreadId || null;
     const previousScrollTop =
@@ -886,7 +886,7 @@ export function createSessionRenderer({
           renderOverviewState(state.session);
         },
         onToggleExpandedGroup(cwd) {
-          state.threadListUi = toggleThreadListExpandedGroup(state.threadListUi, cwd);
+          state.threadListStore.getState().toggleExpandedGroup(cwd);
           renderThreads();
         },
         selectedCwd,

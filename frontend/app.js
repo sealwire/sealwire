@@ -93,9 +93,10 @@ import {
   buildThreadGroups,
 } from "./shared/thread-groups.js";
 import {
-  createThreadListUiState,
-  setThreadListSelectedCwd,
-} from "./shared/thread-list-state.js";
+  createThreadListStore,
+  readThreadListContextMenu,
+  readThreadListUi,
+} from "./shared/thread-list-store.js";
 import { fetchBuildInfo } from "./shared/build-badge.js";
 import { ClientLog } from "./shared/client-log.js";
 import { renderSelectOptions } from "./shared/select-options.js";
@@ -145,10 +146,9 @@ const state = {
   pendingThreadHistoryScrollTop: null,
   threadGroups: [],
   threadHistoryScrollTop: 0,
-  threadListUi: createThreadListUiState(),
+  threadListStore: createThreadListStore(),
   streamReconnectTimer: null,
   sessionPollTimer: null,
-  threadContextMenuThreadId: null,
   threads: [],
   threadsPollTimer: null,
 };
@@ -816,8 +816,8 @@ function syncModelSuggestions(select, models, selectedModel) {
 }
 
 function setSelectedCwd(cwd) {
-  state.threadListUi = setThreadListSelectedCwd(state.threadListUi, cwd);
-  state.selectedCwd = state.threadListUi.selectedCwd;
+  state.threadListStore.getState().setSelectedCwd(cwd);
+  state.selectedCwd = readThreadListUi(state.threadListStore).selectedCwd;
   cwdInput.value = state.selectedCwd;
 }
 
@@ -834,7 +834,7 @@ function openThreadContextMenu(threadId, clientX, clientY) {
     return;
   }
 
-  state.threadContextMenuThreadId = threadId;
+  state.threadListStore.getState().openContextMenu(threadId, clientX, clientY);
   const isActive = state.session?.active_thread_id === threadId;
   const isRunningActiveSession =
     isActive && Boolean(state.session?.active_turn_id);
@@ -859,7 +859,7 @@ function openThreadContextMenu(threadId, clientX, clientY) {
 }
 
 function closeThreadContextMenu() {
-  state.threadContextMenuThreadId = null;
+  state.threadListStore.getState().closeContextMenu();
   if (threadContextMenu) {
     threadContextMenu.hidden = true;
   }
@@ -877,7 +877,7 @@ function closeThreadContextMenu() {
 }
 
 async function archiveThreadFromContextMenu() {
-  const threadId = state.threadContextMenuThreadId;
+  const threadId = readThreadListContextMenu(state.threadListStore).threadId;
   closeThreadContextMenu();
 
   if (!threadId) {
@@ -911,7 +911,7 @@ async function archiveThreadFromContextMenu() {
 }
 
 async function deleteThreadFromContextMenu() {
-  const threadId = state.threadContextMenuThreadId;
+  const threadId = readThreadListContextMenu(state.threadListStore).threadId;
   closeThreadContextMenu();
 
   if (!threadId) {
