@@ -98,3 +98,65 @@ export function clearThreadListError(threadList) {
 export function shouldRenderThreadListLoadingPlaceholder(threadList, groups = [], threads = []) {
   return Boolean(threadList?.loading && !groups?.length && !threads?.length);
 }
+
+export function createThreadListRows({
+  collapsedGroupCwds = new Set(),
+  collapsible = false,
+  expandedGroupCwds = new Set(),
+  groups = [],
+  visibleThreadLimit = 10,
+} = {}) {
+  const rows = [];
+
+  for (const group of groups || []) {
+    const normalizedCwd = canonicalizeWorkspace(group.cwd);
+    const isCollapsed = collapsible && collapsedGroupCwds.has(normalizedCwd);
+    const allThreads = group.threads || [];
+    const showAll = expandedGroupCwds.has(normalizedCwd);
+    const visibleThreads = showAll ? allThreads : allThreads.slice(0, visibleThreadLimit);
+    const hiddenCount = allThreads.length - visibleThreads.length;
+
+    rows.push({
+      group,
+      isCollapsed,
+      key: `group:${normalizedCwd}`,
+      normalizedCwd,
+      type: "group",
+    });
+
+    if (isCollapsed) {
+      continue;
+    }
+
+    visibleThreads.forEach((thread) => {
+      rows.push({
+        group,
+        key: `thread:${thread.id}`,
+        normalizedCwd,
+        thread,
+        type: "thread",
+      });
+    });
+
+    if (hiddenCount > 0) {
+      rows.push({
+        group,
+        hiddenCount,
+        key: `show-more:${normalizedCwd}`,
+        normalizedCwd,
+        type: "show-more",
+      });
+    }
+
+    if (showAll && allThreads.length > visibleThreadLimit) {
+      rows.push({
+        group,
+        key: `show-less:${normalizedCwd}`,
+        normalizedCwd,
+        type: "show-less",
+      });
+    }
+  }
+
+  return rows;
+}

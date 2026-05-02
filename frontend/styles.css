@@ -403,6 +403,32 @@ input:focus, textarea:focus, select:focus {
   gap: 6px;
 }
 
+.thread-list-virtual-root {
+  width: 100%;
+  min-width: 0;
+}
+
+.thread-list-virtual-spacer {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+}
+
+.thread-list-virtual-row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.thread-list-virtual-row[data-row-type="thread"],
+.thread-list-virtual-row[data-row-type="show-more"],
+.thread-list-virtual-row[data-row-type="show-less"] {
+  padding-left: 26px;
+}
+
 .thread-group-header {
   width: 100%;
   padding: 6px 0;

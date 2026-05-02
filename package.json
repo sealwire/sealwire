@@ -59,6 +59,7 @@
   "dependencies": {
     "@noble/hashes": "^2.0.1",
     "@tanstack/query-core": "^5.100.6",
+    "@tanstack/virtual-core": "^3.14.0",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
     "tweetnacl": "^1.0.3"

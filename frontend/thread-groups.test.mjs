@@ -12,6 +12,7 @@ import {
 import { ThreadGroupList } from "./shared/thread-list-react.js";
 import {
   createThreadListUiState,
+  createThreadListRows,
   failThreadListRefresh,
   finishThreadListRefresh,
   setThreadListFilterValue,
@@ -193,6 +194,41 @@ test("thread list UI state normalizes shared local and remote controls", () => {
   state = finishThreadListRefresh(startThreadListRefresh(state));
   assert.equal(state.loading, false);
   assert.equal(state.error, null);
+});
+
+test("createThreadListRows flattens groups for virtual rendering", () => {
+  const groups = buildThreadGroups(
+    Array.from({ length: 12 }, (_, index) => ({
+      id: `thread-${index + 1}`,
+      cwd: "/tmp/demo",
+      name: `Thread ${index + 1}`,
+      updated_at: 100 - index,
+    }))
+  );
+
+  const collapsedRows = createThreadListRows({
+    groups,
+    visibleThreadLimit: 10,
+  });
+  assert.equal(collapsedRows.length, 12);
+  assert.equal(collapsedRows[0].type, "group");
+  assert.equal(collapsedRows.at(-1).type, "show-more");
+  assert.equal(collapsedRows.at(-1).hiddenCount, 2);
+
+  const expandedRows = createThreadListRows({
+    expandedGroupCwds: new Set(["/tmp/demo"]),
+    groups,
+    visibleThreadLimit: 10,
+  });
+  assert.equal(expandedRows.length, 14);
+  assert.equal(expandedRows.at(-1).type, "show-less");
+
+  const groupOnlyRows = createThreadListRows({
+    collapsedGroupCwds: new Set(["/tmp/demo"]),
+    collapsible: true,
+    groups,
+  });
+  assert.deepEqual(groupOnlyRows.map((row) => row.type), ["group"]);
 });
 
 test("summarizeThreadGroups and canonicalizeWorkspace produce stable display values", () => {

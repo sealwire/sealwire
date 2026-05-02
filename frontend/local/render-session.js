@@ -890,6 +890,7 @@ export function createSessionRenderer({
           renderThreads();
         },
         selectedCwd,
+        virtualized: true,
       })
     );
 
