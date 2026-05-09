@@ -50,6 +50,9 @@ import {
   readThreadListUi,
 } from "../shared/thread-list-store.js";
 import {
+  readLocalUiState,
+} from "./ui-store.js";
+import {
   shouldRenderThreadListLoadingPlaceholder,
 } from "../shared/thread-list-state.js";
 
@@ -206,9 +209,9 @@ export function createSessionController({
         throw new Error(payload?.error?.message || "Failed to save allowed roots");
       }
 
-      state.allowedRootsDraftDirty = false;
+      state.localUiStore.getState().setAllowedRootsDraftDirty(false);
       renderAllowedRoots(payload.data.allowed_roots || [], {
-        draftDirty: state.allowedRootsDraftDirty,
+        draftDirty: readLocalUiState(state.localUiStore).allowedRootsDraftDirty,
       });
       await loadSession("post-allowed-roots refresh");
       await loadThreads("post-allowed-roots refresh");
@@ -280,7 +283,7 @@ export function createSessionController({
       resetTranscriptHydrationState();
     }
     if (snapshot?.active_thread_id !== previousThreadId) {
-      state.transcriptLoadingItemIds = new Set();
+      state.localUiStore.getState().clearTranscriptDetailLoading();
     }
 
     syncLiveTranscriptEntryDetailsFromSnapshot(state, snapshot);
@@ -989,24 +992,18 @@ export function createSessionController({
       return;
     }
     const expandKey = `entry:${itemId}`;
-    if (!state.transcriptExpandedItemIds) {
-      state.transcriptExpandedItemIds = new Set();
-    }
-    if (state.transcriptExpandedItemIds.has(expandKey)) {
-      state.transcriptExpandedItemIds.delete(expandKey);
-    } else {
-      state.transcriptExpandedItemIds.add(expandKey);
-    }
+    state.localUiStore.getState().toggleTranscriptExpandedItem(expandKey);
     if (state.session) {
       renderSession(state.session);
     }
 
+    const localUi = readLocalUiState(state.localUiStore);
     if (
-      !state.transcriptExpandedItemIds.has(expandKey)
+      !localUi.transcriptExpandedItemIds.has(expandKey)
       || !state.session?.active_thread_id
       || getCachedTranscriptEntryDetail(state, state.session.active_thread_id, itemId)
       || getLiveTranscriptEntryDetail(state, state.session.active_thread_id, itemId)
-      || state.transcriptLoadingItemIds.has(itemId)
+      || localUi.transcriptLoadingItemIds.has(itemId)
     ) {
       return;
     }
@@ -1017,7 +1014,7 @@ export function createSessionController({
       return;
     }
 
-    state.transcriptLoadingItemIds = new Set(state.transcriptLoadingItemIds).add(itemId);
+    state.localUiStore.getState().startTranscriptDetailLoading(itemId);
     renderSession(state.session);
 
     try {
@@ -1033,9 +1030,7 @@ export function createSessionController({
     } catch (error) {
       logLine(`Transcript detail load failed: ${error.message}`);
     } finally {
-      const nextLoading = new Set(state.transcriptLoadingItemIds);
-      nextLoading.delete(itemId);
-      state.transcriptLoadingItemIds = nextLoading;
+      state.localUiStore.getState().finishTranscriptDetailLoading(itemId);
       if (state.session) {
         renderSession(state.session);
       }

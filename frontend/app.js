@@ -88,6 +88,10 @@ import {
 } from "./local/render-security.js";
 import { createSessionRenderer } from "./local/render-session.js";
 import { createSessionController } from "./local/session-controller.js";
+import {
+  createLocalUiStore,
+  readLocalUiState,
+} from "./local/ui-store.js";
 import { openSessionStream, sessionStreamUrl } from "./session-stream.js";
 import {
   buildThreadGroups,
@@ -112,7 +116,6 @@ const state = {
   apiToken: loadApiToken(),
   authRequired: false,
   authenticated: false,
-  allowedRootsDraftDirty: false,
   cookieSession: false,
   controllerHeartbeatTimer: null,
   controllerLeaseRefreshTimer: null,
@@ -121,7 +124,6 @@ const state = {
   clientLogLines: ["Booting web client..."],
   deviceId: loadOrCreateDeviceId(),
   defaultsSeeded: false,
-  pendingPairingIds: [],
   selectedCwd: "",
   session: null,
   viewThreadId: readThreadIdFromUrl(),
@@ -129,7 +131,6 @@ const state = {
   streamConnected: false,
   transcriptEntryDetailCache: new Map(),
   transcriptEntryDetailOrder: [],
-  transcriptExpandedItemIds: new Set(),
   transcriptHydrationBaseSnapshot: null,
   transcriptHydrationEntries: new Map(),
   transcriptHydrationLastFetchAt: 0,
@@ -142,12 +143,12 @@ const state = {
   transcriptHydrationThreadId: null,
   transcriptLiveEntryDetails: new Map(),
   transcriptLiveEntryThreadId: null,
-  transcriptLoadingItemIds: new Set(),
   transcriptPreserveScroll: false,
   pendingThreadHistoryScrollTop: null,
   threadGroups: [],
   threadHistoryScrollTop: 0,
   threadListStore: createThreadListStore(),
+  localUiStore: createLocalUiStore(),
   streamReconnectTimer: null,
   sessionPollTimer: null,
   threads: [],
@@ -311,9 +312,9 @@ startPairingButton.addEventListener("click", () => {
 });
 
 function openSecurityModal() {
-  state.allowedRootsDraftDirty = false;
+  state.localUiStore.getState().setAllowedRootsDraftDirty(false);
   renderAllowedRoots(state.session?.allowed_roots || [], {
-    draftDirty: state.allowedRootsDraftDirty,
+    draftDirty: readLocalUiState(state.localUiStore).allowedRootsDraftDirty,
   });
   renderPairingPanel(state.currentPairing);
   renderDeviceRecords(state.session?.device_records || []);
@@ -371,7 +372,7 @@ copyPairingLinkButton.addEventListener("click", () => {
 });
 
 allowedRootsInput?.addEventListener("input", () => {
-  state.allowedRootsDraftDirty = true;
+  state.localUiStore.getState().setAllowedRootsDraftDirty(true);
 });
 
 allowedRootsForm?.addEventListener("submit", (event) => {
@@ -382,12 +383,14 @@ allowedRootsForm?.addEventListener("submit", (event) => {
 headerOverflowButton?.addEventListener("click", (event) => {
   event.stopPropagation();
   if (headerOverflowMenu) {
-    headerOverflowMenu.hidden = !headerOverflowMenu.hidden;
+    state.localUiStore.getState().toggleHeaderOverflow();
+    headerOverflowMenu.hidden = !readLocalUiState(state.localUiStore).headerOverflowOpen;
   }
 });
 
 document.addEventListener("click", () => {
   if (headerOverflowMenu && !headerOverflowMenu.hidden) {
+    state.localUiStore.getState().closeHeaderOverflow();
     headerOverflowMenu.hidden = true;
   }
 });

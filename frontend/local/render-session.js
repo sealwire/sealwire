@@ -39,6 +39,9 @@ import {
 import {
   readThreadListUi,
 } from "../shared/thread-list-store.js";
+import {
+  readLocalUiState,
+} from "./ui-store.js";
 import { buildExpandedTranscriptDetailEntries } from "./transcript/details.js";
 import { shouldShowTranscriptLoading } from "./transcript-loading.js";
 import {
@@ -202,7 +205,7 @@ export function createSessionRenderer({
     }
     if (!viewingConversation || viewingSecurityDetails) {
       renderAllowedRoots(session.allowed_roots || [], {
-        draftDirty: state.allowedRootsDraftDirty,
+        draftDirty: readLocalUiState(state.localUiStore).allowedRootsDraftDirty,
       });
       renderPairingPanel(state.currentPairing);
       renderDeviceRecords(session.device_records || []);
@@ -282,10 +285,11 @@ export function createSessionRenderer({
 
   function announceNewPendingPairings(requests) {
     const pendingIds = requests.map((request) => request.pairing_id);
+    const localUi = readLocalUiState(state.localUiStore);
     const newRequests = requests.filter(
-      (request) => !state.pendingPairingIds.includes(request.pairing_id)
+      (request) => !localUi.pendingPairingIds.includes(request.pairing_id)
     );
-    state.pendingPairingIds = pendingIds;
+    state.localUiStore.getState().setPendingPairingIds(pendingIds);
 
     if (!newRequests.length) {
       return;
@@ -723,8 +727,9 @@ export function createSessionRenderer({
   function renderTranscript(session, approval) {
     const viewingConversation = isViewingConversation(session);
     const entries = session.transcript || [];
+    const localUi = readLocalUiState(state.localUiStore);
     const transcriptDetailEntries = buildExpandedTranscriptDetailEntries(state, {
-      expandedItemIds: state.transcriptExpandedItemIds,
+      expandedItemIds: localUi.transcriptExpandedItemIds,
       threadId: session?.active_thread_id || null,
     });
 
@@ -837,8 +842,8 @@ export function createSessionRenderer({
           currentCwd: session?.current_cwd || state.selectedCwd || "",
           detailEntries: transcriptDetailEntries,
           enableFileChangeActions: true,
-          expandedKeys: state.transcriptExpandedItemIds || new Set(),
-          loadingItemIds: state.transcriptLoadingItemIds || new Set(),
+          expandedKeys: localUi.transcriptExpandedItemIds,
+          loadingItemIds: localUi.transcriptLoadingItemIds,
         },
       })
     );
