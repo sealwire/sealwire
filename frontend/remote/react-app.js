@@ -22,9 +22,12 @@ import {
   toggleRemoteNavigation,
 } from "./navigation.js";
 import {
-  createInitialRemoteUiState,
-  reduceRemoteUiState,
+  createInitialRemoteTranscriptUiState,
+  reduceRemoteTranscriptUiState,
 } from "./remote-ui-state.js";
+import {
+  createRemoteUiStore,
+} from "./remote-ui-store.js";
 import {
   readRemoteStateSnapshot,
   subscribeRemoteState,
@@ -100,6 +103,14 @@ function useThreadListStoreState(store) {
   );
 }
 
+function useRemoteUiStoreState(store) {
+  return useSyncExternalStore(
+    store.subscribe,
+    () => store.getState(),
+    () => store.getState()
+  );
+}
+
 export function mountRemoteApp() {
   const container = document.querySelector("#remote-root");
   if (!container) {
@@ -129,11 +140,13 @@ function RemoteApp() {
   ).state;
   const previousSessionRef = useRef(null);
   const remoteCwdInputRef = useRef(null);
-  const [uiState, dispatchUi] = useReducer(
-    reduceRemoteUiState,
+  const [transcriptUiState, dispatchTranscriptUi] = useReducer(
+    reduceRemoteTranscriptUiState,
     undefined,
-    createInitialRemoteUiState
+    createInitialRemoteTranscriptUiState
   );
+  const [remoteUiStore] = useState(() => createRemoteUiStore());
+  const remoteUi = useRemoteUiStoreState(remoteUiStore);
   const [threadListStore] = useState(() => createThreadListStore());
   const threadListUi = useThreadListStoreState(threadListStore);
   const handlers = createRemoteAppHandlers();
@@ -153,9 +166,9 @@ function RemoteApp() {
     : null;
   const sessionRuntime = sessionView
     ? deriveSessionRuntime({
-        composerDraft: uiState.composerDraft,
-        composerEffort: uiState.composerEffort,
-        sendPending: uiState.sendPending,
+        composerDraft: remoteUi.composerDraft,
+        composerEffort: remoteUi.composerEffort,
+        sendPending: remoteUi.sendPending,
         session,
         sessionView,
         threadsFilterValue: threadListUi.filterValue,
@@ -198,27 +211,27 @@ function RemoteApp() {
     : resetChromeModel.controlBanner;
   const sessionToggleLabel = !hasRelay
     ? "Select a relay first"
-    : uiState.sessionPanelOpen
+    : remoteUi.sessionPanelOpen
       ? "Close Remote Session Setup"
       : "Start Remote Session";
   const sessionPanelModel = {
-    fields: uiState.sessionDraft,
+    fields: remoteUi.sessionDraft,
     hasRemoteAuth: hasRelay,
     hasUsableRelay,
     models: session?.available_models?.length
       ? session.available_models
       : [
           {
-            display_name: uiState.sessionDraft.model,
-            model: uiState.sessionDraft.model,
+            display_name: remoteUi.sessionDraft.model,
+            model: remoteUi.sessionDraft.model,
           },
         ],
-    startPending: uiState.sessionStartPending,
+    startPending: remoteUi.sessionStartPending,
   };
   const composerModel = sessionRuntime || {
     composerDisabled: true,
-    currentDraft: uiState.composerDraft,
-    currentEffortValue: uiState.composerEffort,
+    currentDraft: remoteUi.composerDraft,
+    currentEffortValue: remoteUi.composerEffort,
     messagePlaceholder: !hasRelay
       ? currentState.relayDirectory?.length
         ? "Open a relay before sending messages."
@@ -226,19 +239,19 @@ function RemoteApp() {
       : hasUsableRelay
         ? "Start or resume a remote session first."
         : "Local credentials are unavailable. Pair this relay again in this browser.",
-    sendPending: uiState.sendPending,
+    sendPending: remoteUi.sendPending,
   };
   const transcriptDetailEntries = buildExpandedTranscriptDetailEntries(currentState, {
-    expandedItemIds: uiState.transcriptExpandedItemIds,
+    expandedItemIds: transcriptUiState.transcriptExpandedItemIds,
     threadId: session?.active_thread_id || null,
-    transientDetails: uiState.transcriptExpandedDetails,
+    transientDetails: transcriptUiState.transcriptExpandedDetails,
   });
   const transcriptEntriesByItemId = new Map(
     (session?.transcript || [])
       .filter((entry) => entry?.item_id)
       .map((entry) => [entry.item_id, entry])
   );
-  const runningExpandedItemIds = [...uiState.transcriptExpandedItemIds]
+  const runningExpandedItemIds = [...transcriptUiState.transcriptExpandedItemIds]
     .filter((expandKey) => expandKey.startsWith("entry:"))
     .map((expandKey) => expandKey.slice("entry:".length))
     .filter((itemId) => {
@@ -265,7 +278,7 @@ function RemoteApp() {
   }, [session]);
 
   useEffect(() => {
-    dispatchUi({
+    dispatchTranscriptUi({
       type: "transcript/reset",
     });
   }, [session?.active_thread_id]);
@@ -284,11 +297,11 @@ function RemoteApp() {
 
     const refreshLiveDetails = async () => {
       for (const itemId of runningExpandedItemIds) {
-        if (cancelled || uiState.transcriptLoadingItemIds.has(itemId)) {
+        if (cancelled || transcriptUiState.transcriptLoadingItemIds.has(itemId)) {
           continue;
         }
 
-        dispatchUi({
+        dispatchTranscriptUi({
           type: "transcript/startLoadingDetail",
           itemId,
         });
@@ -311,7 +324,7 @@ function RemoteApp() {
             setLiveTranscriptEntryDetail(currentState, session.active_thread_id, detail);
           }
         } finally {
-          dispatchUi({
+          dispatchTranscriptUi({
             type: "transcript/finishLoadingDetail",
             itemId,
           });
@@ -333,7 +346,7 @@ function RemoteApp() {
   }, [
     session?.active_thread_id,
     runningExpandedItemIdsSignature,
-    uiState.transcriptLoadingItemIds,
+    transcriptUiState.transcriptLoadingItemIds,
   ]);
 
   useEffect(() => {
@@ -376,18 +389,12 @@ function RemoteApp() {
   }
 
   async function handleStartSession() {
-    dispatchUi({
-      type: "session/setStartPending",
-      value: true,
-    });
+    remoteUiStore.getState().setSessionStartPending(true);
     try {
-      const started = await handlers.onStartSession(uiState.sessionDraft);
+      const started = await handlers.onStartSession(remoteUi.sessionDraft);
       if (started) {
         closeRemoteNavigation();
-        dispatchUi({
-          type: "session/setPanelOpen",
-          open: false,
-        });
+        remoteUiStore.getState().setSessionPanelOpen(false);
         await runThreadRefresh("post-start refresh", {
           filterValue: threadListUi.filterValue,
           silent: true,
@@ -395,10 +402,7 @@ function RemoteApp() {
       }
       return started;
     } finally {
-      dispatchUi({
-        type: "session/setStartPending",
-        value: false,
-      });
+      remoteUiStore.getState().setSessionStartPending(false);
     }
   }
 
@@ -407,7 +411,7 @@ function RemoteApp() {
     if (threadId === session?.active_thread_id) {
       return;
     }
-    const resumed = await handlers.onResumeThread(threadId, uiState.sessionDraft);
+    const resumed = await handlers.onResumeThread(threadId, remoteUi.sessionDraft);
     if (resumed) {
       await runThreadRefresh("post-resume refresh", {
         filterValue: threadListUi.filterValue,
@@ -417,23 +421,15 @@ function RemoteApp() {
   }
 
   async function handleSendMessage() {
-    dispatchUi({
-      type: "send/setPending",
-      value: true,
-    });
+    remoteUiStore.getState().setSendPending(true);
     try {
-      const sent = await handlers.onSendMessage(uiState.composerDraft, uiState.composerEffort);
+      const sent = await handlers.onSendMessage(remoteUi.composerDraft, remoteUi.composerEffort);
       if (sent) {
-        dispatchUi({
-          type: "composer/clearDraft",
-        });
+        remoteUiStore.getState().clearComposerDraft();
       }
       return sent;
     } finally {
-      dispatchUi({
-        type: "send/setPending",
-        value: false,
-      });
+      remoteUiStore.getState().setSendPending(false);
     }
   }
 
@@ -453,10 +449,10 @@ function RemoteApp() {
       session.active_thread_id,
       itemId
     );
-    const isExpanded = uiState.transcriptExpandedItemIds.has(expandKey);
+    const isExpanded = transcriptUiState.transcriptExpandedItemIds.has(expandKey);
 
     if (isExpanded) {
-      dispatchUi({
+      dispatchTranscriptUi({
         type: "transcript/collapse",
         dropTransient: !cachedDetail && !liveDetail,
         itemId: expandKey,
@@ -464,15 +460,15 @@ function RemoteApp() {
       return;
     }
 
-    dispatchUi({
+    dispatchTranscriptUi({
       type: "transcript/expand",
       itemId: expandKey,
     });
-    if (cachedDetail || liveDetail || uiState.transcriptExpandedDetails.has(itemId)) {
+    if (cachedDetail || liveDetail || transcriptUiState.transcriptExpandedDetails.has(itemId)) {
       return;
     }
 
-    dispatchUi({
+    dispatchTranscriptUi({
       type: "transcript/startLoadingDetail",
       itemId,
     });
@@ -494,13 +490,13 @@ function RemoteApp() {
       if (!cached) {
         setLiveTranscriptEntryDetail(currentState, session.active_thread_id, detail);
       }
-      dispatchUi({
+      dispatchTranscriptUi({
         type: "transcript/setExpandedDetail",
         detail: null,
         itemId,
       });
     } finally {
-      dispatchUi({
+      dispatchTranscriptUi({
         type: "transcript/finishLoadingDetail",
         itemId,
       });
@@ -512,8 +508,8 @@ function RemoteApp() {
       return;
     }
 
-    const isExpanded = uiState.transcriptExpandedItemIds.has(expandKey);
-    dispatchUi({
+    const isExpanded = transcriptUiState.transcriptExpandedItemIds.has(expandKey);
+    dispatchTranscriptUi({
       type: isExpanded ? "transcript/collapse" : "transcript/expand",
       dropTransient: false,
       itemId: expandKey,
@@ -521,15 +517,10 @@ function RemoteApp() {
   }
 
   async function handleBeginPairing(rawValue) {
-    const started = await handlers.onBeginPairing(rawValue, uiState.deviceLabelDraft);
+    const started = await handlers.onBeginPairing(rawValue, remoteUi.deviceLabelDraft);
     if (started) {
-      dispatchUi({
-        type: "pairing/setModalOpen",
-        open: false,
-      });
-      dispatchUi({
-        type: "pairing/resetInput",
-      });
+      remoteUiStore.getState().setPairingModalOpen(false);
+      remoteUiStore.getState().resetPairingInput();
     }
     return started;
   }
@@ -550,10 +541,7 @@ function RemoteApp() {
         hasRelay,
         hasUsableRelay,
         onOpenPairing() {
-          dispatchUi({
-            type: "pairing/setModalOpen",
-            open: true,
-          });
+          remoteUiStore.getState().setPairingModalOpen(true);
         },
         onRefreshRelayDirectory() {
           void handlers.onRefreshRelayDirectory();
@@ -580,25 +568,18 @@ function RemoteApp() {
         relayDirectoryModel,
         remoteCwdInputRef,
         sessionPanelModel,
-        sessionPanelOpen: uiState.sessionPanelOpen,
+        sessionPanelOpen: remoteUi.sessionPanelOpen,
         sessionToggleLabel,
         threadListUi,
         threadsFilterHint: sessionRuntime?.threadsFilterHint || null,
         threadsModel,
         updateSessionDraft(nextPatch) {
           for (const [field, value] of Object.entries(nextPatch)) {
-            dispatchUi({
-              type: "session/setDraftField",
-              field,
-              value,
-            });
+            remoteUiStore.getState().setSessionDraftField(field, value);
           }
         },
         setSessionPanelOpenLocal(open) {
-          dispatchUi({
-            type: "session/setPanelOpen",
-            open,
-          });
+          remoteUiStore.getState().setSessionPanelOpen(open);
         },
         setThreadsFilterValueLocal(value) {
           threadListStore.getState().setFilterValue(value);
@@ -624,10 +605,7 @@ function RemoteApp() {
           deviceChromeModel,
           headerModel,
           onOpenInfo() {
-            dispatchUi({
-              type: "remoteInfo/setOpen",
-              open: true,
-            });
+            remoteUiStore.getState().setRemoteInfoModalOpen(true);
           },
           onReturnHome() {
             void handlers.onReturnHome();
@@ -639,19 +617,13 @@ function RemoteApp() {
         }),
         h(RemoteThreadPanel, {
           composerModel,
-          composerDraft: uiState.composerDraft,
-          composerEffort: uiState.composerEffort,
+          composerDraft: remoteUi.composerDraft,
+          composerEffort: remoteUi.composerEffort,
           onComposerDraftChange(value) {
-            dispatchUi({
-              type: "composer/setDraft",
-              value,
-            });
+            remoteUiStore.getState().setComposerDraft(value);
           },
           onComposerEffortChange(value) {
-            dispatchUi({
-              type: "composer/setEffort",
-              value,
-            });
+            remoteUiStore.getState().setComposerEffort(value);
           },
           controlBannerModel,
           currentState,
@@ -674,7 +646,7 @@ function RemoteApp() {
           session,
           sessionView,
           transcriptDetailEntries,
-          uiState,
+          uiState: transcriptUiState,
         }),
         h(RemoteClientLogDrawer, {
           lines: currentState.clientLogs,
@@ -683,41 +655,29 @@ function RemoteApp() {
     ),
     h(PairingModal, {
       deviceChromeModel,
-      deviceLabel: uiState.deviceLabelDraft,
-      pairingInputValue: uiState.pairingInputValue,
-      pairingModalOpen: uiState.pairingModalOpen,
+      deviceLabel: remoteUi.deviceLabelDraft,
+      pairingInputValue: remoteUi.pairingInputValue,
+      pairingModalOpen: remoteUi.pairingModalOpen,
       onBeginPairing(rawValue) {
         void handleBeginPairing(rawValue);
       },
       onClose() {
-        dispatchUi({
-          type: "pairing/setModalOpen",
-          open: false,
-        });
+        remoteUiStore.getState().setPairingModalOpen(false);
       },
       onDeviceLabelChange(value) {
-        dispatchUi({
-          type: "pairing/setDeviceLabelDraft",
-          value,
-        });
+        remoteUiStore.getState().setDeviceLabelDraft(value);
       },
       onForgetDevice() {
         handlers.onForgetDevice();
       },
       onPairingInputChange(value) {
-        dispatchUi({
-          type: "pairing/setInputValue",
-          value,
-        });
+        remoteUiStore.getState().setPairingInputValue(value);
       },
     }),
     h(RemoteInfoModal, {
-      open: uiState.remoteInfoModalOpen,
+      open: remoteUi.remoteInfoModalOpen,
       onClose() {
-        dispatchUi({
-          type: "remoteInfo/setOpen",
-          open: false,
-        });
+        remoteUiStore.getState().setRemoteInfoModalOpen(false);
       },
       sessionMetaModel,
       sessionPath: headerModel.sessionPath || "No workspace path yet.",

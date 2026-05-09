@@ -265,7 +265,7 @@ async function main() {
       }
     );
 
-    await page.goto(`${origin}/remote.html`, { waitUntil: "domcontentloaded" });
+    await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => window.__agentRelaySecretReady === true, null, {
       timeout: TIMEOUT_MS,
     });
@@ -417,7 +417,7 @@ async function startStaticServer() {
 
 function resolveWebPath(pathname) {
   if (pathname === "/") {
-    return "index.html";
+    return "remote.html";
   }
   if (pathname === "/manifest.webmanifest") {
     return "remote-manifest.webmanifest";

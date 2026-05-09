@@ -143,6 +143,7 @@ export function createSessionRenderer({
     const viewingSecurityDetails = Boolean(
       document.querySelector("#security-modal")?.open
     );
+    const threadListUi = readThreadListUi(state.threadListStore);
     state.currentApprovalId = approval?.request_id || null;
 
     workspaceTitle.textContent = workspaceName || "Relay console";
@@ -169,7 +170,7 @@ export function createSessionRenderer({
       appShell.dataset.view = viewingConversation ? "conversation" : "console";
     }
     if (sessionHistoryDrawer) {
-      sessionHistoryDrawer.open = viewingConversation;
+      sessionHistoryDrawer.open = viewingConversation || Boolean(threadListUi.drawerOpen);
     }
 
     syncThreadHistoryScroll();

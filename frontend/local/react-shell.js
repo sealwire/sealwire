@@ -110,7 +110,11 @@ function ThreadDrawer() {
       ),
       h(
         "div",
-        { className: "conversation-list", id: "threads-list" },
+        {
+          className: "conversation-list",
+          "data-thread-list-scroll-root": "",
+          id: "threads-list",
+        },
         h("p", { className: "sidebar-empty" }, "Threads will appear here once the relay loads saved workspaces.")
       )
     )

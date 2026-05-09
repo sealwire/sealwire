@@ -21,6 +21,7 @@ function toggleCwd(values, cwd) {
 
 export function createThreadListUiState({
   collapsedGroupCwds = new Set(),
+  drawerOpen = false,
   error = null,
   expandedGroupCwds = new Set(),
   filterValue = "",
@@ -29,11 +30,19 @@ export function createThreadListUiState({
 } = {}) {
   return {
     collapsedGroupCwds: copyCwdSet(collapsedGroupCwds),
+    drawerOpen: Boolean(drawerOpen),
     error,
     expandedGroupCwds: copyCwdSet(expandedGroupCwds),
     filterValue,
     loading: Boolean(loading),
     selectedCwd,
+  };
+}
+
+export function setThreadListDrawerOpen(threadList, open) {
+  return {
+    ...threadList,
+    drawerOpen: Boolean(open),
   };
 }
 

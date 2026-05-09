@@ -67,7 +67,22 @@ async function main() {
     );
     assert.ok(deviceId, "page should persist a local device id");
 
-    for (let index = 0; index < 10; index += 1) {
+    await page.click(".sidebar-drawer-summary");
+    await page.waitForFunction(
+      () => document.querySelector(".sidebar-drawer")?.open === true,
+      null,
+      { timeout: LOCAL_TIMEOUT_MS }
+    );
+    await page.click("#header-overflow-button");
+    await page.click("#refresh-button");
+    await delay(500);
+    await page.waitForFunction(
+      () => document.querySelector(".sidebar-drawer")?.open === true,
+      null,
+      { timeout: LOCAL_TIMEOUT_MS }
+    );
+
+    for (let index = 0; index < 20; index += 1) {
       threadIds.push(
         await startThread(relayPort, {
           cwd: workspaceDir,
@@ -126,6 +141,79 @@ async function main() {
     assert(
       initialMetrics.after > initialMetrics.before,
       `thread history should be programmatically scrollable (before=${initialMetrics.before}, after=${initialMetrics.after})`
+    );
+
+    const wheelTargetBox = await page
+      .locator("#threads-list .conversation-title")
+      .first()
+      .boundingBox();
+    assert.ok(wheelTargetBox, "thread title should be available as a wheel target");
+    const wheelBefore = await page.evaluate(() => {
+      const list = document.querySelector("#threads-list");
+      if (!list) {
+        throw new Error("thread list missing before wheel");
+      }
+      list.scrollTop = 0;
+      list.dispatchEvent(new Event("scroll"));
+      return list.scrollTop;
+    });
+    await page.mouse.move(
+      wheelTargetBox.x + Math.min(12, wheelTargetBox.width / 2),
+      wheelTargetBox.y + wheelTargetBox.height / 2
+    );
+    await page.mouse.wheel(0, 420);
+    await page.waitForFunction(
+      (before) => {
+        const list = document.querySelector("#threads-list");
+        return Boolean(list && list.scrollTop > before);
+      },
+      wheelBefore,
+      { timeout: LOCAL_TIMEOUT_MS }
+    );
+    const wheelAfter = await page.evaluate(() => document.querySelector("#threads-list")?.scrollTop || 0);
+    assert(
+      wheelAfter > wheelBefore,
+      `wheel over a thread title should scroll the thread list (before=${wheelBefore}, after=${wheelAfter})`
+    );
+
+    const drawerTitleBox = await page.locator(".sidebar-drawer-summary").boundingBox();
+    assert.ok(drawerTitleBox, "thread drawer title should be available as a wheel target");
+    const titleWheelBefore = await page.evaluate(() => {
+      const list = document.querySelector("#threads-list");
+      if (!list) {
+        throw new Error("thread list missing before title wheel");
+      }
+      list.scrollTop = 0;
+      list.dispatchEvent(new Event("scroll"));
+      return list.scrollTop;
+    });
+    await page.mouse.move(
+      drawerTitleBox.x + Math.min(24, drawerTitleBox.width / 2),
+      drawerTitleBox.y + drawerTitleBox.height / 2
+    );
+    await page.mouse.wheel(0, 420);
+    await page.waitForFunction(
+      (before) => {
+        const list = document.querySelector("#threads-list");
+        return Boolean(list && list.scrollTop > before);
+      },
+      titleWheelBefore,
+      { timeout: LOCAL_TIMEOUT_MS }
+    );
+    const titleWheelDownAfter = await page.evaluate(() => document.querySelector("#threads-list")?.scrollTop || 0);
+    assert(
+      titleWheelDownAfter > titleWheelBefore,
+      `wheel down over the thread drawer title should scroll the thread list (before=${titleWheelBefore}, after=${titleWheelDownAfter})`
+    );
+
+    await page.mouse.wheel(0, -420);
+    await page.waitForFunction(
+      (before) => {
+        const list = document.querySelector("#threads-list");
+        return Boolean(list && list.scrollTop < before);
+      },
+      titleWheelDownAfter,
+      { timeout: LOCAL_TIMEOUT_MS }
     );
 
     const targetThreadId = await page.evaluate(() => {

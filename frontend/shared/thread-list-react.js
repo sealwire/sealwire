@@ -18,6 +18,7 @@ import { createThreadListRows } from "./thread-list-state.js";
 const h = React.createElement;
 const VISIBLE_THREAD_LIMIT = 10;
 const VIRTUAL_OVERSCAN = 8;
+const THREAD_LIST_SCROLL_ROOT_SELECTOR = "[data-thread-list-scroll-root]";
 
 function shortId(value) {
   return value ? String(value).slice(0, 8) : "unknown";
@@ -85,7 +86,7 @@ export function ThreadGroupList({
             key: row.key,
             ref: virtualizer.measureElement,
             style: {
-              transform: `translateY(${virtualRow.start}px)`,
+              transform: `translateY(${virtualRow.start - virtualizer.scrollMargin}px)`,
             },
           },
           h(ThreadListRow, {
@@ -167,6 +168,8 @@ function useThreadListVirtualizer(rows) {
   const scrollTargetRef = useRef(null);
   const [, forceUpdate] = useReducer((value) => value + 1, 0);
   const virtualizerRef = useRef(null);
+  const scrollElement = findScrollElement(scrollTargetRef.current);
+  const scrollMargin = measureScrollMargin(scrollTargetRef.current, scrollElement);
 
   if (!virtualizerRef.current) {
     virtualizerRef.current = new Virtualizer({
@@ -176,6 +179,7 @@ function useThreadListVirtualizer(rows) {
       observeElementOffset,
       observeElementRect,
       overscan: VIRTUAL_OVERSCAN,
+      scrollMargin,
       scrollToFn: elementScroll,
       onChange: () => forceUpdate(),
     });
@@ -202,6 +206,7 @@ function useThreadListVirtualizer(rows) {
     observeElementOffset,
     observeElementRect,
     overscan: VIRTUAL_OVERSCAN,
+    scrollMargin,
     scrollToFn: elementScroll,
     onChange: () => forceUpdate(),
   });
@@ -222,11 +227,17 @@ function useThreadListVirtualizer(rows) {
     getTotalSize: () => virtualizerRef.current.getTotalSize(),
     getVirtualItems: () => virtualizerRef.current.getVirtualItems(),
     measureElement: virtualizerRef.current.measureElement,
+    scrollMargin,
     scrollTargetRef,
   };
 }
 
 function findScrollElement(node) {
+  const markedRoot = findMarkedScrollRoot(node);
+  if (markedRoot) {
+    return markedRoot;
+  }
+
   let current = node?.parentElement || null;
   while (current) {
     const overflowY = current.ownerDocument.defaultView
@@ -238,6 +249,23 @@ function findScrollElement(node) {
     current = current.parentElement;
   }
   return node?.parentElement || null;
+}
+
+function findMarkedScrollRoot(node) {
+  const parent = node?.parentElement || null;
+  const markedRoot = parent?.closest?.(THREAD_LIST_SCROLL_ROOT_SELECTOR) || null;
+  return markedRoot?.contains(node) ? markedRoot : null;
+}
+
+function measureScrollMargin(node, scrollElement) {
+  const root = node?.parentElement || null;
+  if (!root || !scrollElement || root === scrollElement) {
+    return 0;
+  }
+
+  const rootRect = root.getBoundingClientRect();
+  const scrollRect = scrollElement.getBoundingClientRect();
+  return rootRect.top - scrollRect.top + scrollElement.scrollTop;
 }
 
 function ThreadGroupHeader({

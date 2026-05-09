@@ -174,6 +174,25 @@ async function main() {
     );
     logStep("remote thread listed", { threadId });
 
+    const remoteThreadsLayout = await remotePage.evaluate(() => {
+      const list = document.querySelector("#remote-threads-list");
+      const sidebar = document.querySelector(".remote-app-shell .sidebar");
+      return {
+        listHasScrollRootAttribute: Boolean(list?.hasAttribute("data-thread-list-scroll-root")),
+        listOverflowY: list ? window.getComputedStyle(list).overflowY : "",
+        sidebarOverflowY: sidebar ? window.getComputedStyle(sidebar).overflowY : "",
+      };
+    });
+    assert.deepEqual(
+      remoteThreadsLayout,
+      {
+        listHasScrollRootAttribute: false,
+        listOverflowY: "visible",
+        sidebarOverflowY: "auto",
+      },
+      "remote threads should scroll with the sidebar instead of freezing its heading"
+    );
+
     await remotePage.click(`#remote-threads-list [data-thread-id="${threadId}"]`);
     logStep("remote resume requested", { threadId });
 

@@ -27,8 +27,11 @@ installBrowserStubs();
 
 const {
   createDefaultSessionDraft,
-  createInitialRemoteUiState,
-  reduceRemoteUiState,
+  createRemoteUiStore,
+} = await import("../remote-ui-store.js");
+const {
+  createInitialRemoteTranscriptUiState,
+  reduceRemoteTranscriptUiState,
 } = await import("../remote-ui-state.js");
 
 test("createDefaultSessionDraft returns the canonical remote session defaults", () => {
@@ -42,43 +45,19 @@ test("createDefaultSessionDraft returns the canonical remote session defaults", 
   });
 });
 
-test("remote UI reducer updates session, composer, pairing, and modal state locally", () => {
-  let state = createInitialRemoteUiState();
+test("remote UI store updates session, composer, pairing, and modal state locally", () => {
+  const store = createRemoteUiStore();
 
-  state = reduceRemoteUiState(state, {
-    type: "session/setDraftField",
-    field: "cwd",
-    value: "/tmp/project",
-  });
-  state = reduceRemoteUiState(state, {
-    type: "session/setPanelOpen",
-    open: true,
-  });
-  state = reduceRemoteUiState(state, {
-    type: "composer/setDraft",
-    value: "hello",
-  });
-  state = reduceRemoteUiState(state, {
-    type: "composer/setEffort",
-    value: "high",
-  });
-  state = reduceRemoteUiState(state, {
-    type: "pairing/setDeviceLabelDraft",
-    value: "iPad",
-  });
-  state = reduceRemoteUiState(state, {
-    type: "pairing/setInputValue",
-    value: "pairing-payload",
-  });
-  state = reduceRemoteUiState(state, {
-    type: "pairing/setModalOpen",
-    open: true,
-  });
-  state = reduceRemoteUiState(state, {
-    type: "remoteInfo/setOpen",
-    open: true,
-  });
+  store.getState().setSessionDraftField("cwd", "/tmp/project");
+  store.getState().setSessionPanelOpen(true);
+  store.getState().setComposerDraft("hello");
+  store.getState().setComposerEffort("high");
+  store.getState().setDeviceLabelDraft("iPad");
+  store.getState().setPairingInputValue("pairing-payload");
+  store.getState().setPairingModalOpen(true);
+  store.getState().setRemoteInfoModalOpen(true);
 
+  const state = store.getState();
   assert.equal(state.sessionDraft.cwd, "/tmp/project");
   assert.equal(state.sessionPanelOpen, true);
   assert.equal(state.composerDraft, "hello");
@@ -89,23 +68,48 @@ test("remote UI reducer updates session, composer, pairing, and modal state loca
   assert.equal(state.remoteInfoModalOpen, true);
 });
 
-test("remote UI reducer tracks async pending state", () => {
-  let state = createInitialRemoteUiState();
-
-  state = reduceRemoteUiState(state, {
-    type: "session/setStartPending",
-    value: true,
-  });
-  state = reduceRemoteUiState(state, {
-    type: "send/setPending",
-    value: true,
+test("remote UI store tracks async pending state", () => {
+  const store = createRemoteUiStore({
+    pairingInputValue: "pairing-payload",
   });
 
-  assert.equal(state.sessionStartPending, true);
-  assert.equal(state.sendPending, true);
-  state = reduceRemoteUiState(state, {
-    type: "pairing/resetInput",
+  store.getState().setSessionStartPending(true);
+  store.getState().setSendPending(true);
+
+  assert.equal(store.getState().sessionStartPending, true);
+  assert.equal(store.getState().sendPending, true);
+  store.getState().resetPairingInput();
+
+  assert.equal(store.getState().pairingInputValue, "");
+});
+
+test("remote transcript reducer tracks expanded item detail state", () => {
+  let state = createInitialRemoteTranscriptUiState();
+
+  state = reduceRemoteTranscriptUiState(state, {
+    type: "transcript/expand",
+    itemId: "entry:item-1",
+  });
+  state = reduceRemoteTranscriptUiState(state, {
+    type: "transcript/startLoadingDetail",
+    itemId: "item-1",
+  });
+  state = reduceRemoteTranscriptUiState(state, {
+    type: "transcript/setExpandedDetail",
+    detail: { item_id: "item-1" },
+    itemId: "item-1",
   });
 
-  assert.equal(state.pairingInputValue, "");
+  assert.equal(state.transcriptExpandedItemIds.has("entry:item-1"), true);
+  assert.equal(state.transcriptLoadingItemIds.has("item-1"), true);
+  assert.deepEqual(state.transcriptExpandedDetails.get("item-1"), { item_id: "item-1" });
+
+  state = reduceRemoteTranscriptUiState(state, {
+    type: "transcript/collapse",
+    itemId: "entry:item-1",
+  });
+
+  assert.equal(state.transcriptExpandedItemIds.has("entry:item-1"), false);
+  assert.equal(state.transcriptLoadingItemIds.has("item-1"), false);
+  assert.equal(state.transcriptExpandedDetails.has("item-1"), false);
 });

@@ -97,6 +97,7 @@ import {
   readThreadListContextMenu,
   readThreadListUi,
 } from "./shared/thread-list-store.js";
+import { installThreadListWheelProxy } from "./shared/thread-list-scroll.js";
 import { fetchBuildInfo } from "./shared/build-badge.js";
 import { ClientLog } from "./shared/client-log.js";
 import { renderSelectOptions } from "./shared/select-options.js";
@@ -286,6 +287,18 @@ const {
 
 threadsList?.addEventListener("scroll", () => {
   state.threadHistoryScrollTop = threadsList.scrollTop;
+});
+
+sessionHistoryDrawer?.addEventListener("toggle", () => {
+  state.threadListStore.getState().setDrawerOpen(Boolean(sessionHistoryDrawer.open));
+});
+
+installThreadListWheelProxy({
+  root: sessionHistoryDrawer,
+  scrollElement: threadsList,
+  shouldProxyWheel() {
+    return appShell?.dataset.view === "conversation";
+  },
 });
 
 connectionForm.addEventListener("submit", (event) => {

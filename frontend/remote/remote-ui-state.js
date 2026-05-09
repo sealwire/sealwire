@@ -1,94 +1,13 @@
-import { loadDeviceLabel } from "./state.js";
-
-export function createDefaultSessionDraft() {
+export function createInitialRemoteTranscriptUiState() {
   return {
-    approvalPolicy: "untrusted",
-    cwd: "",
-    effort: "medium",
-    initialPrompt: "",
-    model: "gpt-5.4",
-    sandbox: "workspace-write",
-  };
-}
-
-export function createInitialRemoteUiState() {
-  return {
-    composerDraft: "",
-    composerEffort: "medium",
-    deviceLabelDraft: loadDeviceLabel(),
-    pairingInputValue: "",
-    pairingModalOpen: false,
-    remoteInfoModalOpen: false,
-    sendPending: false,
-    sessionDraft: createDefaultSessionDraft(),
-    sessionPanelOpen: false,
-    sessionStartPending: false,
     transcriptExpandedDetails: new Map(),
     transcriptExpandedItemIds: new Set(),
     transcriptLoadingItemIds: new Set(),
   };
 }
 
-export function reduceRemoteUiState(state, action) {
+export function reduceRemoteTranscriptUiState(state, action) {
   switch (action.type) {
-    case "composer/setDraft":
-      return {
-        ...state,
-        composerDraft: action.value,
-      };
-    case "composer/clearDraft":
-      return {
-        ...state,
-        composerDraft: "",
-      };
-    case "composer/setEffort":
-      return {
-        ...state,
-        composerEffort: action.value,
-      };
-    case "pairing/setDeviceLabelDraft":
-      return {
-        ...state,
-        deviceLabelDraft: action.value,
-      };
-    case "pairing/setInputValue":
-      return {
-        ...state,
-        pairingInputValue: action.value,
-      };
-    case "pairing/setModalOpen":
-      return {
-        ...state,
-        pairingModalOpen: Boolean(action.open),
-      };
-    case "pairing/resetInput":
-      return {
-        ...state,
-        pairingInputValue: "",
-      };
-    case "remoteInfo/setOpen":
-      return {
-        ...state,
-        remoteInfoModalOpen: Boolean(action.open),
-      };
-    case "session/setDraftField":
-      return {
-        ...state,
-        sessionDraft: {
-          ...state.sessionDraft,
-          [action.field]: action.value,
-        },
-      };
-    case "session/setPanelOpen":
-      return {
-        ...state,
-        sessionPanelOpen: Boolean(action.open),
-      };
-    case "session/setStartPending":
-      return {
-        ...state,
-        sessionStartPending: Boolean(action.value),
-      };
     case "transcript/expand": {
       const nextExpanded = new Set(state.transcriptExpandedItemIds);
       nextExpanded.add(action.itemId);
@@ -153,11 +72,6 @@ export function reduceRemoteUiState(state, action) {
         transcriptExpandedDetails: new Map(),
         transcriptExpandedItemIds: new Set(),
         transcriptLoadingItemIds: new Set(),
-      };
-    case "send/setPending":
-      return {
-        ...state,
-        sendPending: Boolean(action.value),
       };
     default:
       return state;

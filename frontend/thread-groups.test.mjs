@@ -12,6 +12,7 @@ import {
   createThreadListRows,
   failThreadListRefresh,
   finishThreadListRefresh,
+  setThreadListDrawerOpen,
   setThreadListFilterValue,
   setThreadListSelectedCwd,
   startThreadListRefresh,
@@ -76,8 +77,10 @@ test("thread list UI state normalizes shared local and remote controls", () => {
 
   state = toggleThreadListExpandedGroup(state, "/tmp/demo//");
   state = toggleThreadListCollapsedGroup(state, "/tmp/demo//");
+  state = setThreadListDrawerOpen(state, true);
   assert.equal(state.selectedCwd, "/tmp/demo/");
   assert.equal(state.filterValue, " /tmp/demo ");
+  assert.equal(state.drawerOpen, true);
   assert.deepEqual([...state.expandedGroupCwds], ["/tmp/demo"]);
   assert.deepEqual([...state.collapsedGroupCwds], ["/tmp/demo"]);
 
@@ -105,12 +108,14 @@ test("thread list store owns shared local and remote UI actions", () => {
 
   store.getState().toggleExpandedGroup("/tmp/demo//");
   store.getState().toggleCollapsedGroup("/tmp/demo//");
+  store.getState().setDrawerOpen(true);
   store.getState().setFilterValue("/tmp/filter");
   store.getState().startRefresh();
 
   let state = readThreadListUi(store);
   assert.equal(state.selectedCwd, "/tmp/demo/");
   assert.equal(state.filterValue, "/tmp/filter");
+  assert.equal(state.drawerOpen, true);
   assert.equal(state.loading, true);
   assert.deepEqual([...state.expandedGroupCwds], ["/tmp/demo"]);
   assert.deepEqual([...state.collapsedGroupCwds], ["/tmp/demo"]);

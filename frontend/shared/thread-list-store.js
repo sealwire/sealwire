@@ -4,6 +4,7 @@ import {
   createThreadListUiState,
   failThreadListRefresh,
   finishThreadListRefresh,
+  setThreadListDrawerOpen,
   setThreadListFilterValue,
   setThreadListSelectedCwd,
   startThreadListRefresh,
@@ -37,6 +38,11 @@ export function createThreadListStore(initialThreadList = {}) {
     setFilterValue(value) {
       set((state) => ({
         threadList: setThreadListFilterValue(state.threadList, value),
+      }));
+    },
+    setDrawerOpen(open) {
+      set((state) => ({
+        threadList: setThreadListDrawerOpen(state.threadList, open),
       }));
     },
     setSelectedCwd(cwd) {
