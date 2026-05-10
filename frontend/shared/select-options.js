@@ -4,9 +4,27 @@ import { createRoot } from "react-dom/client";
 
 const h = React.createElement;
 const rootsBySelect = new WeakMap();
+const renderStateBySelect = new WeakMap();
 
 export function renderSelectOptions(select, options = [], selectedValue = "") {
   if (!select) {
+    return;
+  }
+
+  const nextState = {
+    optionsKey: JSON.stringify(
+      options.map((option) => ({
+        label: option.label,
+        value: option.value,
+      }))
+    ),
+    selectedValue,
+  };
+  const previousState = renderStateBySelect.get(select);
+  if (
+    previousState?.optionsKey === nextState.optionsKey
+    && previousState?.selectedValue === nextState.selectedValue
+  ) {
     return;
   }
 
@@ -36,4 +54,5 @@ export function renderSelectOptions(select, options = [], selectedValue = "") {
   });
 
   select.value = selectedValue;
+  renderStateBySelect.set(select, nextState);
 }

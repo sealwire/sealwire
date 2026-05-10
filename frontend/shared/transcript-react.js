@@ -172,6 +172,7 @@ function CommandEntry({ entry, options = null }) {
 }
 
 function ReasoningEntry({ entry }) {
+  const hasText = Boolean(String(entry.text || "").trim());
   return h(
     "article",
     { className: "chat-message chat-message-system" },
@@ -184,7 +185,9 @@ function ReasoningEntry({ entry }) {
         h("strong", null, "Reasoning"),
         h("span", null, entry.status || "completed")
       ),
-      h("div", { className: "message-body" }, entry.text || "(empty)")
+      hasText
+        ? h("div", { className: "message-body" }, entry.text)
+        : null
     )
   );
 }

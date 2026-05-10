@@ -1,4 +1,4 @@
-const DEFAULT_REASONING_EFFORTS = ["medium", "low", "high"];
+const DEFAULT_REASONING_EFFORTS = ["medium", "low", "high", "xhigh"];
 
 function formatReasoningEffortLabel(value) {
   return value || "medium";

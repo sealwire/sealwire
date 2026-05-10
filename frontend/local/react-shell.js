@@ -430,7 +430,8 @@ function LaunchSettingsModal() {
             { id: "start-effort" },
             h("option", { value: "medium" }, "medium"),
             h("option", { value: "low" }, "low"),
-            h("option", { value: "high" }, "high")
+            h("option", { value: "high" }, "high"),
+            h("option", { value: "xhigh" }, "xhigh")
           )
         ),
         h(

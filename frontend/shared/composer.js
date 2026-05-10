@@ -50,6 +50,7 @@ export function ConversationComposer({
         { label: "medium", value: "medium" },
         { label: "low", value: "low" },
         { label: "high", value: "high" },
+        { label: "xhigh", value: "xhigh" },
       ];
 
   if (currentDraft !== undefined) {

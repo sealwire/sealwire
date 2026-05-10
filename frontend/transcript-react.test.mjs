@@ -145,6 +145,19 @@ test("renderEntryMarkup collapses long command and tool previews without collaps
   assert.match(assistantMarkup, new RegExp(`A{1200}`));
 });
 
+test("renderEntryMarkup keeps empty reasoning entries on a single status line", () => {
+  const markup = renderEntryMarkup({
+    kind: "reasoning",
+    status: "completed",
+    text: "",
+  });
+
+  assert.match(markup, /Reasoning/);
+  assert.match(markup, /completed/);
+  assert.doesNotMatch(markup, /\(empty\)/);
+  assert.doesNotMatch(markup, /message-body/);
+});
+
 test("renderEntryMarkup avoids repeating file change metadata and path previews", () => {
   const markup = renderEntryMarkup({
     item_id: "fc-1",
