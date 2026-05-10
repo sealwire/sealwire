@@ -53,5 +53,5 @@ jobs:
         run: npm install -g @railway/cli
 
       - name: Deploy to Railway
+        run: railway up --service "$RAILWAY_SERVICE_ID"
         if: steps.railway_inputs.outputs.ready == 'true'
-        run: railway up --service "$RAILWAY_SERVICE_ID" --ci

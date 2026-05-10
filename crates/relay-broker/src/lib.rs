@@ -75,6 +75,7 @@ const IDLE_TIMEOUT_SECS_ENV: &str = "RELAY_BROKER_IDLE_TIMEOUT_SECS";
 const CSP_CONNECT_SRC_ENV: &str = "RELAY_BROKER_CSP_CONNECT_SRC";
 const ENABLE_HSTS_ENV: &str = "RELAY_BROKER_ENABLE_HSTS";
 const HSTS_VALUE_ENV: &str = "RELAY_BROKER_HSTS_VALUE";
+const BROKER_WEB_ROOT_ENV: &str = "RELAY_BROKER_WEB_ROOT";
 
 pub async fn app(state: BrokerState) -> Router {
     let join_verifier = BrokerJoinVerifier::from_env().await;
@@ -1422,15 +1423,29 @@ async fn reject_socket(socket: WebSocket, code: &str, message: &str) {
 }
 
 fn default_web_root() -> PathBuf {
-    workspace_root().join("web")
+    if let Some(web_root) = std::env::var(BROKER_WEB_ROOT_ENV)
+        .ok()
+        .and_then(|value| trimmed_option_string(Some(value)))
+    {
+        return PathBuf::from(web_root);
+    }
+
+    let container_web_root = PathBuf::from("/app/web");
+    if container_web_root.join("remote.html").exists() {
+        return container_web_root;
+    }
+
+    workspace_root()
+        .map(|root| root.join("web"))
+        .unwrap_or_else(|| PathBuf::from("web"))
 }
 
-fn workspace_root() -> PathBuf {
+fn workspace_root() -> Option<PathBuf> {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
         .canonicalize()
-        .expect("workspace root should resolve")
+        .ok()
 }
 
 fn generated_peer_id(role: protocol::PeerRole) -> String {
