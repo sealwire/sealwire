@@ -1,4 +1,8 @@
-import { dispatchOrRecover, scheduleClaimRefresh } from "./actions.js";
+import {
+  dispatchOrRecover,
+  dispatchRemoteActionWithoutReply,
+  scheduleClaimRefresh,
+} from "./actions.js";
 import {
   isCurrentDeviceActiveController,
   renderLog,
@@ -223,7 +227,7 @@ export async function syncRemoteSnapshot(reason, silent = false) {
   }
 
   try {
-    await dispatchOrRecover("heartbeat", {
+    await dispatchRemoteActionWithoutReply("heartbeat", {
       input: {},
     });
   } catch (error) {
@@ -465,7 +469,7 @@ async function sendHeartbeat() {
   }
 
   try {
-    await dispatchOrRecover("heartbeat", {
+    await dispatchRemoteActionWithoutReply("heartbeat", {
       input: {},
     });
   } catch (error) {

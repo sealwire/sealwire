@@ -1458,7 +1458,6 @@ test("sendHeartbeat dispatches a heartbeat when the current device holds control
 
   assert.equal(sentPayloads.length, 1);
   assert.equal(sentPayloads[0].request.type, "heartbeat");
-
-  browser.runTimers();
+  assert.equal(state.pendingActions.size, 0);
   await pending;
 });

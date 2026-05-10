@@ -311,6 +311,17 @@ pub(super) async fn handle_remote_action(
             .await;
         }
     };
+    if is_fire_and_forget_action(action_kind) {
+        return execute_fire_and_forget_remote_action(
+            state,
+            action_kind,
+            &resolved_device_id,
+            &from_peer_id,
+            request.bind_device(resolved_device_id.clone()),
+            false,
+        )
+        .await;
+    }
     match state
         .reserve_remote_action(&resolved_device_id, &action_id, action_kind.as_str())
         .await
@@ -513,6 +524,17 @@ pub(super) async fn handle_encrypted_remote_action(
                 ),
             )
             .await;
+    }
+    if is_fire_and_forget_action(action_kind) {
+        return execute_fire_and_forget_remote_action(
+            state,
+            action_kind,
+            &device_id,
+            &from_peer_id,
+            request.bind_device(device_id.clone()),
+            true,
+        )
+        .await;
     }
 
     match state
@@ -787,6 +809,31 @@ fn remote_action_emits_info_log(action: RemoteActionKind) -> bool {
             | RemoteActionKind::FetchThreadEntryDetail
             | RemoteActionKind::FetchThreadTranscript
     )
+}
+
+fn is_fire_and_forget_action(action: RemoteActionKind) -> bool {
+    matches!(action, RemoteActionKind::Heartbeat)
+}
+
+async fn execute_fire_and_forget_remote_action(
+    state: &AppState,
+    action: RemoteActionKind,
+    device_id: &str,
+    peer_id: &str,
+    request: RemoteActionRequest,
+    encrypted: bool,
+) -> Result<(), String> {
+    state.mark_remote_device_seen(device_id, peer_id).await?;
+    if let Err(error) = execute_remote_action(state, request).await {
+        warn!(
+            action = action.as_str(),
+            peer_id = %peer_id,
+            transport = if encrypted { "encrypted" } else { "plaintext" },
+            %error,
+            "fire-and-forget broker action failed"
+        );
+    }
+    Ok(())
 }
 
 fn issues_session_claim(action: RemoteActionKind) -> bool {

@@ -1340,7 +1340,7 @@ async fn handle_socket(
                                         },
                                     )
                                     .await;
-                                    break;
+                                    continue;
                                 }
                                 if let Err(error) =
                                     state.broker.publish(&channel_id, &peer_id, payload).await

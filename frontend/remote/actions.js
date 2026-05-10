@@ -613,6 +613,25 @@ async function dispatchRemoteAction(actionType, request) {
   }
 }
 
+export async function dispatchRemoteActionWithoutReply(actionType, request) {
+  if (!state.remoteAuth) {
+    throw new Error("this browser is not paired yet");
+  }
+  if (!state.socket || state.socket.readyState !== WebSocket.OPEN) {
+    throw new Error("broker socket is not connected");
+  }
+  if (requiresSessionClaim(actionType) && !state.remoteAuth.sessionClaim) {
+    throw new Error("device is not claimed yet");
+  }
+
+  const actionId = makeActionId(actionType);
+  sendBrokerFrame(
+    requiresSessionClaim(actionType)
+      ? await buildClaimedActionPayload(actionId, actionType, request)
+      : await buildDeviceActionPayload(actionId, actionType, request)
+  );
+}
+
 async function buildClaimChallengePayload(actionId) {
   if (!state.socketPeerId) {
     throw new Error("broker peer id is not ready yet");

@@ -2054,6 +2054,68 @@ async fn websocket_connection_limit_is_enforced_per_ip() {
 }
 
 #[tokio::test]
+async fn websocket_publish_rate_limit_rejects_messages_without_closing_socket() {
+    let address = spawn_app_with(
+        BrokerJoinVerifier::SelfHosted(test_join_ticket_key()),
+        BrokerHardeningConfig {
+            publish_rate_limit_per_minute: 1,
+            ..BrokerHardeningConfig::default()
+        },
+        SecurityHeadersConfig::default(),
+    )
+    .await;
+    let relay_url = websocket_url(
+        address,
+        "room-a",
+        protocol::PeerRole::Relay,
+        Some("relay-1"),
+        JoinTicketClaims::relay_join("room-a", "relay-1"),
+    );
+
+    let (mut relay, _) = connect_async(&relay_url)
+        .await
+        .expect("relay socket should connect");
+    let _welcome = next_server_message(&mut relay).await;
+
+    let publish_frame = serde_json::to_string(&ClientMessage::Publish {
+        protocol_version: protocol::BROKER_PROTOCOL_VERSION,
+        payload: json!({"ciphertext":"abc"}),
+    })
+    .expect("client frame should serialize");
+
+    relay
+        .send(Message::Text(publish_frame.clone()))
+        .await
+        .expect("first publish should send");
+    relay
+        .send(Message::Text(publish_frame.clone()))
+        .await
+        .expect("second publish should send");
+
+    let error = next_server_message(&mut relay).await;
+    match error {
+        ServerMessage::Error { code, message } => {
+            assert_eq!(code, "rate_limited");
+            assert!(message.contains("rate limit"));
+        }
+        other => panic!("unexpected publish rate limit response: {other:?}"),
+    }
+
+    relay
+        .send(Message::Text(publish_frame))
+        .await
+        .expect("third publish should still send on same socket");
+    let second_error = next_server_message(&mut relay).await;
+    match second_error {
+        ServerMessage::Error { code, message } => {
+            assert_eq!(code, "rate_limited");
+            assert!(message.contains("rate limit"));
+        }
+        other => panic!("unexpected repeated publish rate limit response: {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn oversized_client_frames_are_rejected() {
     let address = spawn_app_with(
         BrokerJoinVerifier::SelfHosted(test_join_ticket_key()),

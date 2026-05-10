@@ -53,5 +53,17 @@ jobs:
         run: npm install -g @railway/cli
 
       - name: Deploy to Railway
-        run: railway up --service "$RAILWAY_SERVICE_ID"
         if: steps.railway_inputs.outputs.ready == 'true'
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            if railway up --service "$RAILWAY_SERVICE_ID"; then
+              exit 0
+            fi
+            status=$?
+            echo "::warning::railway up failed on attempt ${attempt} with exit code ${status}."
+            if [ "$attempt" -lt 3 ]; then
+              sleep $((attempt * 20))
+            fi
+          done
+          exit "$status"

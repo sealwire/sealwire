@@ -49,6 +49,7 @@ const PUBLIC_RELAY_AUTH_REQUEST_RETRY_SECS: u64 = 5;
 const PUBLIC_RELAY_REGISTRATION_SCHEMA_VERSION: u32 = 1;
 const PUBLIC_RELAY_IDENTITY_SCHEMA_VERSION: u32 = 1;
 const SNAPSHOT_PUBLISH_MIN_INTERVAL_MILLIS: u64 = 500;
+const BROKER_RATE_LIMIT_SNAPSHOT_COOLDOWN_SECS: u64 = 5;
 const DEFAULT_PUBLIC_RELAY_REGISTRATION_FILE: &str = ".agent-relay/public-broker-registration.json";
 const DEFAULT_PUBLIC_RELAY_IDENTITY_FILE: &str = ".agent-relay/public-broker-identity.json";
 pub(crate) const RELAY_BROKER_IDENTITY_PATH_ENV: &str = "RELAY_BROKER_IDENTITY_PATH";
@@ -82,6 +83,7 @@ struct PendingPublicEnrollment {
 struct SnapshotPublishGate {
     min_interval: Duration,
     last_published_at: Option<Instant>,
+    cooldown_until: Option<Instant>,
     scheduled: bool,
 }
 
@@ -90,6 +92,7 @@ impl SnapshotPublishGate {
         Self {
             min_interval,
             last_published_at: None,
+            cooldown_until: None,
             scheduled: false,
         }
     }
@@ -103,7 +106,22 @@ impl SnapshotPublishGate {
         self.scheduled = false;
     }
 
+    fn defer_until(&mut self, deadline: Instant) {
+        self.cooldown_until = Some(match self.cooldown_until {
+            Some(current) if current > deadline => current,
+            _ => deadline,
+        });
+        self.scheduled = true;
+    }
+
     fn ready_or_deadline(&mut self, now: Instant) -> Result<(), Instant> {
+        if let Some(cooldown_until) = self.cooldown_until {
+            if now < cooldown_until {
+                self.scheduled = true;
+                return Err(cooldown_until);
+            }
+            self.cooldown_until = None;
+        }
         match self.last_published_at {
             None => {
                 self.mark_published(now);
@@ -121,6 +139,11 @@ impl SnapshotPublishGate {
             }
         }
     }
+}
+
+enum ServerMessageOutcome {
+    Continue,
+    RateLimited,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -906,10 +929,16 @@ async fn run_broker_session(
                 }
             }
             () = &mut pending_snapshot_timer, if snapshot_publish_gate.has_pending_publish() => {
-                snapshot_publish_gate.mark_published(Instant::now());
-                publish_snapshot(&mut sender, state)
-                    .await
-                    .map_err(|error| format!("broker publish failed: {error}"))?;
+                match snapshot_publish_gate.ready_or_deadline(Instant::now()) {
+                    Ok(()) => {
+                        publish_snapshot(&mut sender, state)
+                            .await
+                            .map_err(|error| format!("broker publish failed: {error}"))?;
+                    }
+                    Err(deadline) => {
+                        pending_snapshot_timer.as_mut().reset(deadline);
+                    }
+                }
             }
             incoming = receiver.next() => {
                 let Some(frame) = incoming else {
@@ -917,7 +946,15 @@ async fn run_broker_session(
                 };
                 let frame = frame.map_err(|error| format!("broker receive failed: {error}"))?;
                 if let Some(message) = decode_server_frame(frame)? {
-                    handle_server_message(state, &mut sender, message).await?;
+                    match handle_server_message(state, &mut sender, message).await? {
+                        ServerMessageOutcome::Continue => {}
+                        ServerMessageOutcome::RateLimited => {
+                            let deadline = Instant::now()
+                                + Duration::from_secs(BROKER_RATE_LIMIT_SNAPSHOT_COOLDOWN_SECS);
+                            snapshot_publish_gate.defer_until(deadline);
+                            pending_snapshot_timer.as_mut().reset(deadline);
+                        }
+                    }
                 }
             }
         }
@@ -940,11 +977,12 @@ async fn handle_server_message(
     state: &AppState,
     sender: &mut futures_util::stream::SplitSink<BrokerSocket, Message>,
     message: ServerMessage,
-) -> Result<(), String> {
+) -> Result<ServerMessageOutcome, String> {
     match message {
         ServerMessage::Welcome {
             protocol_version, ..
-        } => validate_broker_protocol_version(protocol_version),
+        } => validate_broker_protocol_version(protocol_version)
+            .map(|()| ServerMessageOutcome::Continue),
         ServerMessage::Presence {
             channel_id,
             kind,
@@ -983,7 +1021,7 @@ async fn handle_server_message(
                     )
                     .await;
             }
-            Ok(())
+            Ok(ServerMessageOutcome::Continue)
         }
         ServerMessage::Message {
             from_peer_id,
@@ -997,54 +1035,59 @@ async fn handle_server_message(
                     ?from_role,
                     "ignoring broker message from non-surface peer"
                 );
-                return Ok(());
+                return Ok(ServerMessageOutcome::Continue);
             }
 
             match parse_inbound_payload(payload)? {
                 Some(InboundBrokerPayload::PairingRequest {
                     pairing_id,
                     envelope,
-                }) => {
-                    handle_pairing_request(state, sender, from_peer_id, pairing_id, envelope).await
-                }
+                }) => handle_pairing_request(state, sender, from_peer_id, pairing_id, envelope)
+                    .await
+                    .map(|()| ServerMessageOutcome::Continue),
                 Some(InboundBrokerPayload::RemoteAction {
                     action_id,
                     session_claim,
                     device_id,
                     request,
-                }) => {
-                    handle_remote_action(
-                        state,
-                        sender,
-                        from_peer_id,
-                        action_id,
-                        session_claim,
-                        device_id,
-                        request,
-                    )
-                    .await
-                }
+                }) => handle_remote_action(
+                    state,
+                    sender,
+                    from_peer_id,
+                    action_id,
+                    session_claim,
+                    device_id,
+                    request,
+                )
+                .await
+                .map(|()| ServerMessageOutcome::Continue),
                 Some(InboundBrokerPayload::EncryptedRemoteAction {
                     action_id,
                     session_claim,
                     device_id,
                     envelope,
-                }) => {
-                    handle_encrypted_remote_action(
-                        state,
-                        sender,
-                        from_peer_id,
-                        action_id,
-                        session_claim,
-                        device_id,
-                        envelope,
-                    )
-                    .await
-                }
-                None => Ok(()),
+                }) => handle_encrypted_remote_action(
+                    state,
+                    sender,
+                    from_peer_id,
+                    action_id,
+                    session_claim,
+                    device_id,
+                    envelope,
+                )
+                .await
+                .map(|()| ServerMessageOutcome::Continue),
+                None => Ok(ServerMessageOutcome::Continue),
             }
         }
-        ServerMessage::Error { message, .. } => Err(message),
+        ServerMessage::Error { code, message } => {
+            if code == "rate_limited" {
+                warn!(%message, "broker requested publish backpressure");
+                Ok(ServerMessageOutcome::RateLimited)
+            } else {
+                Err(message)
+            }
+        }
     }
 }
 
