@@ -106,6 +106,27 @@ fn cached_remote_action_result_omits_snapshot_for_non_session_lifecycle_actions(
 }
 
 #[test]
+fn high_frequency_remote_actions_do_not_emit_info_logs() {
+    assert!(!remote_action_emits_info_log(RemoteActionKind::Heartbeat));
+    assert!(!remote_action_emits_info_log(RemoteActionKind::ListThreads));
+    assert!(!remote_action_emits_info_log(
+        RemoteActionKind::FetchThreadEntries
+    ));
+    assert!(!remote_action_emits_info_log(
+        RemoteActionKind::FetchThreadEntryDetail
+    ));
+    assert!(!remote_action_emits_info_log(
+        RemoteActionKind::FetchThreadTranscript
+    ));
+
+    assert!(remote_action_emits_info_log(RemoteActionKind::StartSession));
+    assert!(remote_action_emits_info_log(RemoteActionKind::SendMessage));
+    assert!(remote_action_emits_info_log(
+        RemoteActionKind::DecideApproval
+    ));
+}
+
+#[test]
 fn plain_remote_action_result_payload_splits_control_results_from_session_results() {
     let control = RemoteActionResultPlaintext {
         kind: RemoteActionResultKind::RemoteControlResult,

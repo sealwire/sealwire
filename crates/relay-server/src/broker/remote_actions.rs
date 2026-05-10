@@ -260,16 +260,18 @@ pub(super) async fn handle_remote_action(
         return Err("plaintext remote actions are disabled in private mode".to_string());
     }
     let action_kind = request.kind();
-    state
-        .push_runtime_log(
-            "info",
-            format!(
-                "Broker action `{}` received from {}.",
-                action_kind.as_str(),
-                from_peer_id
-            ),
-        )
-        .await;
+    if remote_action_emits_info_log(action_kind) {
+        state
+            .push_runtime_log(
+                "info",
+                format!(
+                    "Broker action `{}` received from {}.",
+                    action_kind.as_str(),
+                    from_peer_id
+                ),
+            )
+            .await;
+    }
 
     let resolved_device_id = match resolve_plain_remote_device(
         state,
@@ -325,16 +327,18 @@ pub(super) async fn handle_remote_action(
             .await;
         }
         Ok(RemoteActionReplayDecision::InFlight) => {
-            state
-                .push_runtime_log(
-                    "info",
-                    format!(
-                        "Ignored duplicate broker action `{}` from {} while the original request is still running.",
-                        action_kind.as_str(),
-                        from_peer_id
-                    ),
-                )
-                .await;
+            if remote_action_emits_info_log(action_kind) {
+                state
+                    .push_runtime_log(
+                        "info",
+                        format!(
+                            "Ignored duplicate broker action `{}` from {} while the original request is still running.",
+                            action_kind.as_str(),
+                            from_peer_id
+                        ),
+                    )
+                    .await;
+            }
             return Ok(());
         }
         Err(error) => {
@@ -498,16 +502,18 @@ pub(super) async fn handle_encrypted_remote_action(
             return Ok(());
         }
     };
-    state
-        .push_runtime_log(
-            "info",
-            format!(
-                "Encrypted broker action `{}` received from {}.",
-                action_kind.as_str(),
-                from_peer_id
-            ),
-        )
-        .await;
+    if remote_action_emits_info_log(action_kind) {
+        state
+            .push_runtime_log(
+                "info",
+                format!(
+                    "Encrypted broker action `{}` received from {}.",
+                    action_kind.as_str(),
+                    from_peer_id
+                ),
+            )
+            .await;
+    }
 
     match state
         .reserve_remote_action(&device_id, &action_id, action_kind.as_str())
@@ -527,16 +533,18 @@ pub(super) async fn handle_encrypted_remote_action(
             .await;
         }
         Ok(RemoteActionReplayDecision::InFlight) => {
-            state
-                .push_runtime_log(
-                    "info",
-                    format!(
-                        "Ignored duplicate encrypted broker action `{}` from {} while the original request is still running.",
-                        action_kind.as_str(),
-                        from_peer_id
-                    ),
-                )
-                .await;
+            if remote_action_emits_info_log(action_kind) {
+                state
+                    .push_runtime_log(
+                        "info",
+                        format!(
+                            "Ignored duplicate encrypted broker action `{}` from {} while the original request is still running.",
+                            action_kind.as_str(),
+                            from_peer_id
+                        ),
+                    )
+                    .await;
+            }
             return Ok(());
         }
         Err(error) => {
@@ -768,6 +776,17 @@ async fn execute_remote_action(
 
 fn requires_session_claim(action: RemoteActionKind) -> bool {
     matches!(action, RemoteActionKind::SendMessage)
+}
+
+fn remote_action_emits_info_log(action: RemoteActionKind) -> bool {
+    !matches!(
+        action,
+        RemoteActionKind::Heartbeat
+            | RemoteActionKind::ListThreads
+            | RemoteActionKind::FetchThreadEntries
+            | RemoteActionKind::FetchThreadEntryDetail
+            | RemoteActionKind::FetchThreadTranscript
+    )
 }
 
 fn issues_session_claim(action: RemoteActionKind) -> bool {

@@ -1175,7 +1175,6 @@ impl AppState {
     ) -> Result<(), String> {
         let mut relay = self.relay.write().await;
         relay.mark_paired_device_seen(device_id, peer_id, unix_now())?;
-        relay.notify();
         Ok(())
     }
 
