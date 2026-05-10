@@ -30,6 +30,7 @@
     "dev:full:local": "RELAY_DEV_LOCALHOST_ONLY=1 node scripts/dev-full.mjs",
     "dev:restart": "sh scripts/restart-dev.sh",
     "dev:restart:local": "sh scripts/restart-dev.sh --local",
+    "dev:restart:public": "sh scripts/restart-dev-public.sh",
     "test": "node --test frontend/*.test.mjs frontend/remote/*.test.mjs && vite build",
     "build": "vite build",
     "prepack": "npm run build",

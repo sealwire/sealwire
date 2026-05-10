@@ -1461,7 +1461,7 @@ async fn publish_snapshot(
         "resolved broker surface targets"
     );
     if targets.is_empty() {
-        warn!(
+        debug!(
             active_thread_id = compacted.active_thread_id.as_deref().unwrap_or("-"),
             transcript_entries = compacted.transcript.len(),
             "broker session snapshot has no online surface targets"
@@ -1576,7 +1576,7 @@ async fn publish_transcript_delta(
             "resolved broker surface targets"
         );
         if targets.is_empty() {
-            warn!(
+            debug!(
                 item_id = %delta.item_id,
                 thread_id = %delta.thread_id,
                 turn_id = delta.turn_id.as_deref().unwrap_or("-"),
