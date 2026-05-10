@@ -28,6 +28,7 @@ export const headerOverflowMenu = document.querySelector("#header-overflow-menu"
 export const sessionHistoryDrawer = document.querySelector(".sidebar-drawer");
 export const goConsoleHomeSidebarButton = document.querySelector("#go-console-home-sidebar");
 export const sendButton = document.querySelector("#send-button");
+export const stopButton = document.querySelector("#stop-button");
 export const messageForm = document.querySelector("#message-form");
 export const messageInput = document.querySelector("#message-input");
 export const messageModel = document.querySelector("#message-model");

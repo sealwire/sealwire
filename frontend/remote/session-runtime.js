@@ -15,8 +15,10 @@ export function deriveSessionRuntime({
     currentModelValue: composerModel || session?.model || "",
     messagePlaceholder: sessionView.messagePlaceholder,
     models: session?.available_models || [],
+    sendDisabled: Boolean(session?.active_turn_id),
     sendPending,
     session,
+    stopVisible: Boolean(session?.active_turn_id && !sessionView.composerDisabled),
     threadsFilterHint:
       sessionView.cwdFilterHint && !threadsFilterValue.trim()
         ? sessionView.cwdFilterHint

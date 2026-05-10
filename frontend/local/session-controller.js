@@ -785,6 +785,37 @@ export function createSessionController({
     }
   }
 
+  async function stopActiveTurn() {
+    if (!state.session?.active_thread_id || !state.session.active_turn_id) {
+      logLine("There is no running Codex turn to stop.");
+      return;
+    }
+
+    logLine("Requesting Codex stop");
+
+    try {
+      const response = await apiFetch("/api/session/stop", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          device_id: state.deviceId,
+        }),
+      });
+      const payload = await response.json();
+
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload?.error?.message || "Failed to stop Codex");
+      }
+
+      applySessionSnapshot(payload.data);
+      logLine("Stop request sent to Codex");
+    } catch (error) {
+      logLine(`Stop failed: ${error.message}`);
+    }
+  }
+
   async function startPairing() {
     startPairingButton.disabled = true;
     logLine("Creating a broker pairing ticket.");
@@ -1094,6 +1125,7 @@ export function createSessionController({
     scheduleSessionPoll,
     scheduleThreadsPoll,
     sendMessage,
+    stopActiveTurn,
     startPairing,
     startSession,
     submitDecision,

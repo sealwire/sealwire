@@ -17,13 +17,21 @@ export function ConversationComposer({
   onDraftChange = null,
   onEffortChange = null,
   onModelChange = null,
+  onStop = null,
+  sendDisabled = false,
   sendButtonId = "remote-send-button",
   sendLabel = "Send",
   sendPending = false,
+  stopButtonId = null,
+  stopLabel = "Stop",
+  stopPending = false,
+  stopVisible = false,
 }) {
-  const submitDisabled = composerDisabled || sendPending;
+  const inputDisabled = composerDisabled || sendPending;
+  const submitDisabled = inputDisabled || sendDisabled;
+  const stopDisabled = composerDisabled || stopPending;
   const textareaProps = {
-    disabled: submitDisabled,
+    disabled: inputDisabled,
     id: messageId,
     placeholder: messagePlaceholder,
     rows: 3,
@@ -103,7 +111,21 @@ export function ConversationComposer({
           type: "submit",
         },
         sendPending ? "Sending..." : sendLabel
-      )
+      ),
+      stopButtonId || onStop
+        ? h(
+            "button",
+            {
+              className: "stop-button",
+              disabled: stopDisabled,
+              hidden: !stopVisible,
+              id: stopButtonId || undefined,
+              onClick: onStop ? () => onStop() : undefined,
+              type: "button",
+            },
+            stopPending ? "Stopping..." : stopLabel
+          )
+        : null
     )
   );
 }

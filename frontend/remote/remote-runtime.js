@@ -4,7 +4,7 @@ import { initializeRemoteNavigation, openRemoteNavigation } from "./navigation.j
 import { applyPairingQuery, beginPairing, forgetCurrentDevice, handleEncryptedPairingResult, sendPairingRequest } from "./pairing.js";
 import { registerRemotePwa } from "./pwa.js";
 import { renderLog } from "./session-surface.js";
-import { applySessionSnapshot, applyTranscriptDelta, clearSessionRuntime, fetchTranscriptEntryDetail, refreshRemoteThreads, resumeRemoteSession, sendMessage, startRemoteSession, submitDecision, syncRemoteSnapshot, takeOverControl } from "./session-ops.js";
+import { applySessionSnapshot, applyTranscriptDelta, clearSessionRuntime, fetchTranscriptEntryDetail, refreshRemoteThreads, resumeRemoteSession, sendMessage, startRemoteSession, stopActiveTurn, submitDecision, syncRemoteSnapshot, takeOverControl } from "./session-ops.js";
 import { clearActiveRelaySelection, ensureDeviceIdentity, hydrateStoredRemoteSecrets, selectRelayProfile, state } from "./state.js";
 import { applyRemoteSurfacePatch, createResetRemoteSurfaceStatePatch } from "./surface-state.js";
 
@@ -169,6 +169,9 @@ export function createRemoteAppHandlers() {
     },
     onSendMessage(messageDraft, effort, model) {
       return sendMessage(messageDraft, effort, model);
+    },
+    onStopTurn() {
+      return stopActiveTurn();
     },
     onStartSession(sessionDraft) {
       return startRemoteSession(sessionDraft);

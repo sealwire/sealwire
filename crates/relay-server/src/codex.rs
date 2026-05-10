@@ -316,6 +316,18 @@ impl CodexBridge {
             .map(ToOwned::to_owned))
     }
 
+    pub async fn interrupt_turn(&self, thread_id: &str, turn_id: &str) -> Result<(), String> {
+        self.send_request(
+            "turn/interrupt",
+            json!({
+                "threadId": thread_id,
+                "turnId": turn_id
+            }),
+        )
+        .await
+        .map(|_| ())
+    }
+
     pub async fn respond_to_approval(
         &self,
         pending: &PendingApproval,

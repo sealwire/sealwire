@@ -349,6 +349,7 @@ function ComposerShell() {
       modelLabel: "Model",
       models: [{ display_name: "gpt-5.4", model: "gpt-5.4" }],
       sendButtonId: "send-button",
+      stopButtonId: "stop-button",
     })
   );
 }

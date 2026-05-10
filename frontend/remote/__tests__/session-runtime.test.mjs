@@ -33,8 +33,10 @@ test("deriveSessionRuntime returns runtime state and cwd hint when no filter is 
     currentModelValue: "gpt-5.5",
     messagePlaceholder: "Another device has control. Take over to reply.",
     models: [{ display_name: "GPT-5.5", model: "gpt-5.5" }],
+    sendDisabled: false,
     sendPending: false,
     session,
+    stopVisible: false,
     threadsFilterHint: {
       placeholder: "Optional exact path filter (current: agent-relay)",
       title: "/Users/luchi/git/agent-relay",
@@ -62,4 +64,22 @@ test("deriveSessionRuntime suppresses cwd hint when the user already typed a fil
   assert.equal(runtime.messagePlaceholder, "Message Codex remotely...");
   assert.equal(runtime.sendPending, false);
   assert.equal(runtime.threadsFilterHint, null);
+});
+
+test("deriveSessionRuntime disables send and shows stop for a running turn", () => {
+  const runtime = deriveSessionRuntime({
+    session: {
+      active_thread_id: "thread-2",
+      active_turn_id: "turn-1",
+    },
+    sessionView: {
+      composerDisabled: false,
+      currentApprovalId: null,
+      cwdFilterHint: null,
+      messagePlaceholder: "Message Codex remotely...",
+    },
+  });
+
+  assert.equal(runtime.sendDisabled, true);
+  assert.equal(runtime.stopVisible, true);
 });

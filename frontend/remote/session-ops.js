@@ -397,6 +397,24 @@ export async function sendMessage(messageDraft, effort, model = "") {
   }
 }
 
+export async function stopActiveTurn() {
+  if (!state.session?.active_thread_id || !state.session.active_turn_id) {
+    renderLog("There is no running Codex turn to stop.");
+    return false;
+  }
+
+  try {
+    await dispatchOrRecover("stop_turn", {
+      input: {},
+    });
+    renderLog("Remote stop request sent to Codex.");
+    return true;
+  } catch (error) {
+    renderLog(`Remote stop failed: ${error.message}`);
+    return false;
+  }
+}
+
 export async function takeOverControl() {
   try {
     await dispatchOrRecover("take_over", {

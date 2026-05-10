@@ -838,6 +838,11 @@ pub struct SendMessageInput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StopTurnInput {
+    pub device_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TakeOverInput {
     pub device_id: Option<String>,
 }

@@ -36,8 +36,8 @@ use protocol::{
     PairingDecisionInput, PairingDecisionReceipt, PairingStartInput, PairingTicketView,
     ReadThreadEntryDetailInput, ReadThreadTranscriptInput, ResumeSessionInput, RevokeDeviceReceipt,
     SendMessageInput, SessionSnapshot, SessionSnapshotCompactProfile, StartSessionInput,
-    TakeOverInput, ThreadArchiveReceipt, ThreadDeleteReceipt, ThreadEntryDetailResponse,
-    ThreadTranscriptResponse, ThreadsQuery, ThreadsResponse,
+    StopTurnInput, TakeOverInput, ThreadArchiveReceipt, ThreadDeleteReceipt,
+    ThreadEntryDetailResponse, ThreadTranscriptResponse, ThreadsQuery, ThreadsResponse,
 };
 use relay_http::{
     apply_standard_security_headers, header_origin, parse_optional_string_env, request_origin,
@@ -177,6 +177,7 @@ fn build_router(context: AppContext, web_assets: WebAssets) -> Router {
         .route("/api/session/heartbeat", post(session_heartbeat))
         .route("/api/session/take-over", post(take_over_session))
         .route("/api/session/message", post(send_message))
+        .route("/api/session/stop", post(stop_active_turn))
         .route("/api/pairing/start", post(start_pairing))
         .route(
             "/api/pairings/:pairing_id/decision",
@@ -574,6 +575,21 @@ async fn send_message(
     context
         .app
         .send_message(input)
+        .await
+        .map(|snapshot| Json(ApiEnvelope::ok(compact_local_snapshot(snapshot))))
+        .map_err(bad_request)
+}
+
+async fn stop_active_turn(
+    State(context): State<AppContext>,
+    headers: HeaderMap,
+    uri: Uri,
+    Json(input): Json<StopTurnInput>,
+) -> Result<Json<ApiEnvelope<SessionSnapshot>>, (StatusCode, Json<ApiError>)> {
+    authorize_api(&context, &headers, &uri)?;
+    context
+        .app
+        .stop_active_turn(input)
         .await
         .map(|snapshot| Json(ApiEnvelope::ok(compact_local_snapshot(snapshot))))
         .map_err(bad_request)

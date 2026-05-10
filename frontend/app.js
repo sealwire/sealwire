@@ -63,6 +63,7 @@ import {
   startPromptInput,
   startSessionButton,
   statusBadge,
+  stopButton,
   threadContextMenu,
   threadsCount,
   threadsList,
@@ -279,6 +280,7 @@ const {
   saveAllowedRoots,
   scheduleThreadsPoll,
   sendMessage,
+  stopActiveTurn,
   startPairing,
   startSession,
   submitDecision,
@@ -489,6 +491,10 @@ controlBanner?.addEventListener("click", (event) => {
 messageForm.addEventListener("submit", (event) => {
   event.preventDefault();
   void sendMessage();
+});
+
+stopButton?.addEventListener("click", () => {
+  void stopActiveTurn();
 });
 
 transcript.addEventListener("click", (event) => {

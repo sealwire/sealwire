@@ -24,6 +24,7 @@ import {
   sessionHistoryDrawer,
   sessionMeta,
   statusBadge,
+  stopButton,
   threadsCount,
   threadsList,
   transcript,
@@ -141,6 +142,7 @@ export function createSessionRenderer({
     const hasActiveSession = Boolean(session.active_thread_id);
     const viewingConversation = isViewingConversation(session);
     const canWrite = canCurrentDeviceWrite(session);
+    const turnRunning = Boolean(session.active_turn_id);
     const workspace = session.current_cwd || state.selectedCwd || "";
     const workspaceName = workspace ? workspaceBasename(workspace) : "";
     const viewingSessionDetails = Boolean(sessionMeta?.closest("dialog")?.open);
@@ -235,7 +237,11 @@ export function createSessionRenderer({
       goConsoleHomeSidebarButton.hidden = !viewingConversation;
     }
     messageForm.hidden = !viewingConversation;
-    sendButton.disabled = !hasActiveSession || !canWrite || !viewingConversation;
+    sendButton.disabled = !hasActiveSession || !canWrite || !viewingConversation || turnRunning;
+    if (stopButton) {
+      stopButton.hidden = !hasActiveSession || !canWrite || !viewingConversation || !turnRunning;
+      stopButton.disabled = stopButton.hidden;
+    }
     messageInput.disabled = !hasActiveSession || !canWrite || !viewingConversation;
     messageInput.placeholder = !hasActiveSession
       ? "Start or resume a session first."
@@ -851,6 +857,13 @@ export function createSessionRenderer({
       return;
     }
 
+    const approvalId = approval?.request_id || null;
+    const newApproval = approvalId && approvalId !== state.lastRenderedApprovalId;
+    state.lastRenderedApprovalId = approvalId;
+    const pinnedBeforeRender = !state.transcriptPreserveScroll && (
+      newApproval || transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80
+    );
+
     renderConversationContent(
       h(TranscriptPane, {
         approval,
@@ -866,7 +879,7 @@ export function createSessionRenderer({
         },
       })
     );
-    if (!state.transcriptPreserveScroll) {
+    if (pinnedBeforeRender) {
       transcript.scrollTop = transcript.scrollHeight;
     }
   }

@@ -242,6 +242,18 @@ button:disabled {
   background: var(--accent-hover);
 }
 
+.stop-button {
+  padding: 8px 16px;
+  border-color: color-mix(in srgb, var(--status-offline-text) 50%, transparent);
+  background: color-mix(in srgb, var(--status-offline-text) 12%, var(--bg-surface));
+  color: var(--status-offline-text);
+  font-weight: 600;
+}
+.stop-button:hover {
+  background: color-mix(in srgb, var(--status-offline-text) 18%, var(--bg-surface));
+  border-color: color-mix(in srgb, var(--status-offline-text) 70%, transparent);
+}
+
 .secondary-button {
   width: 100%;
   padding: 12px 16px;

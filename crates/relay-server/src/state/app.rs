@@ -16,8 +16,8 @@ use crate::{
         FileChangeApplyDirection, HeartbeatInput, PairingDecision, PairingDecisionInput,
         PairingDecisionReceipt, PairingStartInput, PairingTicketView, ReadThreadEntriesInput,
         ReadThreadEntryDetailInput, ReadThreadTranscriptInput, ResumeSessionInput,
-        RevokeDeviceReceipt, SendMessageInput, SessionSnapshot, StartSessionInput, TakeOverInput,
-        ThreadArchiveReceipt, ThreadDeleteReceipt, ThreadEntriesResponse,
+        RevokeDeviceReceipt, SendMessageInput, SessionSnapshot, StartSessionInput, StopTurnInput,
+        TakeOverInput, ThreadArchiveReceipt, ThreadDeleteReceipt, ThreadEntriesResponse,
         ThreadEntryDetailResponse, ThreadTranscriptResponse, ThreadsResponse,
     },
 };
@@ -529,6 +529,48 @@ impl AppState {
             relay.push_log(
                 "info",
                 format!("Sent a prompt to thread {thread_id} with {model} / {effort}."),
+            );
+            relay.notify();
+        }
+
+        Ok(self.snapshot().await)
+    }
+
+    pub async fn stop_active_turn(&self, input: StopTurnInput) -> Result<SessionSnapshot, String> {
+        let device_id = require_device_id(input.device_id)?;
+        self.expire_stale_controller_if_needed().await;
+        let (thread_id, turn_id) = {
+            let relay = self.relay.read().await;
+            relay.ensure_device_can_send_message(&device_id)?;
+            ensure_path_within_allowed_roots(&relay.current_cwd, &relay.allowed_roots)?;
+            let thread_id = relay
+                .active_thread_id
+                .clone()
+                .ok_or_else(|| "there is no active Codex thread to stop".to_string())?;
+            let turn_id = relay
+                .active_turn_id
+                .clone()
+                .ok_or_else(|| "there is no running Codex turn to stop".to_string())?;
+            (thread_id, turn_id)
+        };
+
+        self.codex.interrupt_turn(&thread_id, &turn_id).await?;
+
+        {
+            let mut relay = self.relay.write().await;
+            relay.assign_active_controller(&device_id, unix_now());
+            if relay.active_thread_id.as_deref() == Some(thread_id.as_str())
+                && relay.active_turn_id.as_deref() == Some(turn_id.as_str())
+            {
+                relay.set_active_turn(None);
+                relay.set_thread_status(&thread_id, "idle".to_string(), Vec::new());
+            }
+            relay.push_log(
+                "info",
+                format!(
+                    "Stop requested for turn {turn_id} in thread {thread_id} from {}.",
+                    short_device_id(&device_id)
+                ),
             );
             relay.notify();
         }

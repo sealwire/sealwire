@@ -439,6 +439,10 @@ function RemoteApp() {
     }
   }
 
+  async function handleStopTurn() {
+    return handlers.onStopTurn();
+  }
+
   async function handleTranscriptToggle(itemId) {
     if (!itemId || !session?.active_thread_id) {
       return;
@@ -643,6 +647,9 @@ function RemoteApp() {
           },
           onSendMessage() {
             void handleSendMessage();
+          },
+          onStopTurn() {
+            void handleStopTurn();
           },
           onToggleExpandableBlock: handleExpandableBlockToggle,
           onToggleTranscriptItem: handleTranscriptToggle,
@@ -970,6 +977,7 @@ function RemoteThreadPanel({
   onComposerModelChange,
   onSelectRelay,
   onSendMessage,
+  onStopTurn,
   onToggleExpandableBlock,
   onToggleTranscriptItem,
   onSubmitDecision,
@@ -1031,6 +1039,10 @@ function RemoteThreadPanel({
         onModelChange(value) {
           onComposerModelChange?.(value);
         },
+        onStop() {
+          onStopTurn?.();
+        },
+        stopButtonId: "remote-stop-button",
       })
     )
   );

@@ -8,8 +8,9 @@ use crate::{
     protocol::{
         ApprovalDecisionInput, ApprovalReceipt, HeartbeatInput, ReadThreadEntriesInput,
         ReadThreadEntryDetailInput, ReadThreadTranscriptInput, ResumeSessionInput,
-        SendMessageInput, SessionSnapshot, StartSessionInput, TakeOverInput, ThreadEntriesResponse,
-        ThreadEntryDetailResponse, ThreadTranscriptResponse, ThreadsQuery, ThreadsResponse,
+        SendMessageInput, SessionSnapshot, StartSessionInput, StopTurnInput, TakeOverInput,
+        ThreadEntriesResponse, ThreadEntryDetailResponse, ThreadTranscriptResponse, ThreadsQuery,
+        ThreadsResponse,
     },
     state::{AppState, ApprovalError, CachedRemoteActionResult, RemoteActionReplayDecision},
 };
@@ -45,6 +46,9 @@ pub(super) enum RemoteActionRequest {
     SendMessage {
         input: SendMessageInput,
     },
+    StopTurn {
+        input: StopTurnInput,
+    },
     TakeOver {
         input: TakeOverInput,
     },
@@ -77,6 +81,7 @@ impl RemoteActionRequest {
             Self::StartSession { .. } => RemoteActionKind::StartSession,
             Self::ResumeSession { .. } => RemoteActionKind::ResumeSession,
             Self::SendMessage { .. } => RemoteActionKind::SendMessage,
+            Self::StopTurn { .. } => RemoteActionKind::StopTurn,
             Self::TakeOver { .. } => RemoteActionKind::TakeOver,
             Self::Heartbeat { .. } => RemoteActionKind::Heartbeat,
             Self::ListThreads { .. } => RemoteActionKind::ListThreads,
@@ -109,6 +114,10 @@ impl RemoteActionRequest {
                 input.device_id = Some(device_id);
                 Self::SendMessage { input }
             }
+            Self::StopTurn { mut input } => {
+                input.device_id = Some(device_id);
+                Self::StopTurn { input }
+            }
             Self::TakeOver { mut input } => {
                 input.device_id = Some(device_id);
                 Self::TakeOver { input }
@@ -140,6 +149,7 @@ pub(super) enum RemoteActionKind {
     StartSession,
     ResumeSession,
     SendMessage,
+    StopTurn,
     TakeOver,
     Heartbeat,
     ListThreads,
@@ -157,6 +167,7 @@ impl RemoteActionKind {
             Self::StartSession => "start_session",
             Self::ResumeSession => "resume_session",
             Self::SendMessage => "send_message",
+            Self::StopTurn => "stop_turn",
             Self::TakeOver => "take_over",
             Self::Heartbeat => "heartbeat",
             Self::ListThreads => "list_threads",
@@ -664,6 +675,10 @@ async fn execute_remote_action(
             .map(|_| RemoteActionOutcome::default()),
         RemoteActionRequest::SendMessage { input } => state
             .send_message(input)
+            .await
+            .map(|_| RemoteActionOutcome::default()),
+        RemoteActionRequest::StopTurn { input } => state
+            .stop_active_turn(input)
             .await
             .map(|_| RemoteActionOutcome::default()),
         RemoteActionRequest::TakeOver { input } => state
@@ -1693,6 +1708,7 @@ fn remote_action_result_kind(action: RemoteActionKind) -> RemoteActionResultKind
         RemoteActionKind::ClaimChallenge
         | RemoteActionKind::ClaimDevice
         | RemoteActionKind::Heartbeat
+        | RemoteActionKind::StopTurn
         | RemoteActionKind::TakeOver => RemoteActionResultKind::RemoteControlResult,
         RemoteActionKind::ListThreads => RemoteActionResultKind::RemoteThreadsResult,
         RemoteActionKind::FetchThreadEntries
