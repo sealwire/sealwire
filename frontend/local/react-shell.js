@@ -162,6 +162,11 @@ function ChatHeader() {
     h(
       "div",
       { className: "chat-header-actions" },
+      h("span", {
+        className: "model-badge-compact",
+        hidden: true,
+        id: "local-model-badge",
+      }),
       h("span", { className: "status-badge", id: "status-badge" }, "Idle"),
       h("button", { className: "header-button", hidden: true, id: "go-console-home", type: "button" }, "Back"),
       h("button", { className: "header-button", id: "open-security-header", type: "button" }, "Devices"),

@@ -8,6 +8,7 @@ import {
   goConsoleHomeSidebarButton,
   liveSurfacesList,
   liveSurfacesSummary,
+  localModelBadge,
   messageForm,
   messageInput,
   openSessionDetailsButton,
@@ -194,6 +195,7 @@ export function createSessionRenderer({
       statusBadge.textContent = sessionStatusLabel(session, approval);
       statusBadge.className = "status-badge status-badge-ready";
     }
+    renderHeaderModelBadge(session);
 
     if (!viewingConversation) {
       renderOverviewState(session);
@@ -246,6 +248,7 @@ export function createSessionRenderer({
 
   function renderSessionUnavailable(message) {
     renderOverviewState(null, message);
+    renderHeaderModelBadge(null);
     statusBadge.textContent = "Offline";
     statusBadge.className = "status-badge status-badge-offline";
     renderReactContent(
@@ -269,6 +272,7 @@ export function createSessionRenderer({
     openSessionDetailsButton.disabled = true;
     renderOverviewState(null, message);
     renderThreadListMessage("Sign in", "Enter RELAY_API_TOKEN to load threads.");
+    renderHeaderModelBadge(null);
     statusBadge.textContent = "Sign in";
     statusBadge.className = "status-badge status-badge-offline";
     renderReactContent(
@@ -298,6 +302,21 @@ export function createSessionRenderer({
     const labels = newRequests.map((request) => request.label || shortId(request.device_id));
     const summary = labels.length === 1 ? labels[0] : `${labels.length} devices`;
     logLine(`Local pairing approval required for ${summary}.`);
+  }
+
+  function renderHeaderModelBadge(session) {
+    if (!localModelBadge) {
+      return;
+    }
+
+    const shouldShow = Boolean(session?.active_thread_id && session.model);
+    localModelBadge.hidden = !shouldShow;
+    localModelBadge.textContent = shouldShow ? session.model : "";
+    localModelBadge.title = shouldShow
+      ? session.reasoning_effort
+        ? `${session.model} · effort ${session.reasoning_effort}`
+        : session.model
+      : "";
   }
 
   function renderLiveSurfaces(session, activeThread) {

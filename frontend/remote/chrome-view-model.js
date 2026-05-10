@@ -28,6 +28,8 @@ export function selectSessionChromeRenderModel(currentState, session) {
   return {
     controlBanner: selectControlBannerRenderModel(currentState, session),
     header: {
+      modelLabel: sessionModelLabel(session),
+      modelTitle: sessionModelTitle(session),
       sessionPath: headerPath,
       subtitle: headerSubtitle,
       subtitleHidden: !headerSubtitle,
@@ -193,6 +195,8 @@ function selectSessionMetaRenderModel(currentState, session) {
       { label: "Visibility", value: contentVisibilityLabel(session) },
       { label: "Broker", value: brokerStatusLabel(currentState, session) },
       { label: "Device", value: currentState.remoteAuth?.deviceLabel || "Unpaired" },
+      ...(session.model ? [{ label: "Model", value: session.model }] : []),
+      ...(session.reasoning_effort ? [{ label: "Effort", value: session.reasoning_effort }] : []),
       {
         label: "Control",
         value: session.active_controller_device_id
@@ -205,6 +209,19 @@ function selectSessionMetaRenderModel(currentState, session) {
     ],
     emptyMessage: session.active_thread_id ? null : "No live session yet.",
   };
+}
+
+function sessionModelLabel(session) {
+  return session?.active_thread_id && session.model ? session.model : null;
+}
+
+function sessionModelTitle(session) {
+  if (!sessionModelLabel(session)) {
+    return "";
+  }
+  return session.reasoning_effort
+    ? `${session.model} · effort ${session.reasoning_effort}`
+    : session.model;
 }
 
 function selectControlBannerRenderModel(currentState, session) {

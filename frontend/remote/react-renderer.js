@@ -76,7 +76,18 @@ export function WorkspaceHeading({ header, statusBadge }) {
           title: statusLabel,
         },
         compactStatusLabel(statusLabel)
-      )
+      ),
+      header?.modelLabel
+        ? h(
+            "span",
+            {
+              className: "model-badge-compact",
+              id: "remote-model-badge",
+              title: header.modelTitle || header.modelLabel,
+            },
+            header.modelLabel
+          )
+        : null
     ),
     h(
       "p",

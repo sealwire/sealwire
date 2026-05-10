@@ -824,6 +824,21 @@ input:focus, textarea:focus, select:focus {
   box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 18%, transparent);
 }
 
+.model-badge-compact {
+  max-width: 180px;
+  padding: 4px 9px;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* STATUS BADGES */
 .status-badge, .device-state-badge {
   display: inline-flex;
@@ -1677,6 +1692,11 @@ input:focus, textarea:focus, select:focus {
   }
   .status-badge-compact {
     padding: 4px 8px 4px 7px;
+    font-size: 10px;
+  }
+  .model-badge-compact {
+    max-width: 120px;
+    padding: 4px 7px;
     font-size: 10px;
   }
   .chat-header-actions {

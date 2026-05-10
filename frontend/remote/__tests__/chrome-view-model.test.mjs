@@ -60,6 +60,8 @@ test("selectSessionChromeRenderModel derives header, status, and control banner"
     active_thread_id: "thread-1",
     current_cwd: "/Users/luchi/git/agent-relay",
     current_status: "idle",
+    model: "gpt-5.4",
+    reasoning_effort: "medium",
     codex_connected: true,
     broker_connected: true,
     broker_channel_id: "room-a",
@@ -76,11 +78,15 @@ test("selectSessionChromeRenderModel derives header, status, and control banner"
 
   assert.equal(model.header.title, "agent-relay");
   assert.equal(model.header.subtitle, "/Users/luchi/git/agent-relay");
+  assert.equal(model.header.modelLabel, "gpt-5.4");
+  assert.equal(model.header.modelTitle, "gpt-5.4 · effort medium");
   assert.equal(model.statusBadge.label, "idle");
   assert.equal(model.controlBanner.hidden, false);
   assert.match(model.controlBanner.hint, /Approvals can still be handled here/i);
   assert.equal(model.controlBanner.summary, "Controlled by device-2");
   assert.equal(model.sessionMeta.chips.find((chip) => chip.label === "Thread").value, "thread-1");
+  assert.equal(model.sessionMeta.chips.find((chip) => chip.label === "Model").value, "gpt-5.4");
+  assert.equal(model.sessionMeta.chips.find((chip) => chip.label === "Effort").value, "medium");
 });
 
 test("selectStatusBadgeRenderModel falls back to home and pairing states without a session", () => {
