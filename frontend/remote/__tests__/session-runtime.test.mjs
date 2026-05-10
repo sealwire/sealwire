@@ -6,6 +6,8 @@ import { deriveSessionRuntime } from "../session-runtime.js";
 test("deriveSessionRuntime returns runtime state and cwd hint when no filter is typed", () => {
   const session = {
     active_thread_id: "thread-1",
+    available_models: [{ display_name: "GPT-5.5", model: "gpt-5.5" }],
+    model: "gpt-5.5",
   };
   const sessionView = {
     composerDisabled: true,
@@ -28,7 +30,9 @@ test("deriveSessionRuntime returns runtime state and cwd hint when no filter is 
     currentDraft: "",
     currentApprovalId: "approval-1",
     currentEffortValue: "medium",
+    currentModelValue: "gpt-5.5",
     messagePlaceholder: "Another device has control. Take over to reply.",
+    models: [{ display_name: "GPT-5.5", model: "gpt-5.5" }],
     sendPending: false,
     session,
     threadsFilterHint: {

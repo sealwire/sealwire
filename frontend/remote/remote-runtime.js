@@ -167,8 +167,8 @@ export function createRemoteAppHandlers() {
     onSelectRelay(relayId) {
       return switchRemoteRelay(relayId);
     },
-    onSendMessage(messageDraft, effort) {
-      return sendMessage(messageDraft, effort);
+    onSendMessage(messageDraft, effort, model) {
+      return sendMessage(messageDraft, effort, model);
     },
     onStartSession(sessionDraft) {
       return startRemoteSession(sessionDraft);

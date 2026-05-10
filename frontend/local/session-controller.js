@@ -5,6 +5,7 @@ import {
   loadDirectoryButton,
   messageEffort,
   messageInput,
+  messageModel,
   modelInput,
   openLaunchSettingsButton,
   pairingLinkInput,
@@ -763,6 +764,7 @@ export function createSessionController({
         },
         body: JSON.stringify({
           text,
+          model: messageModel?.value,
           effort: messageEffort.value,
           device_id: state.deviceId,
         }),

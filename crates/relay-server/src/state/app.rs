@@ -308,6 +308,7 @@ impl AppState {
             return self
                 .send_message(SendMessageInput {
                     text: initial_prompt,
+                    model: Some(model),
                     effort: Some(effort),
                     device_id: Some(device_id),
                 })
@@ -503,6 +504,7 @@ impl AppState {
         let defaults = self.defaults().await;
         let text = non_empty(Some(input.text))
             .ok_or_else(|| "message text cannot be empty".to_string())?;
+        let model = non_empty(input.model).unwrap_or(defaults.model);
         let effort = non_empty(input.effort).unwrap_or(defaults.reasoning_effort);
         let thread_id = {
             let relay = self.relay.read().await;
@@ -514,15 +516,19 @@ impl AppState {
                 .ok_or_else(|| "there is no active Codex thread to send to".to_string())?
         };
 
-        let turn_id = self.codex.start_turn(&thread_id, &text, &effort).await?;
+        let turn_id = self
+            .codex
+            .start_turn(&thread_id, &text, &model, &effort)
+            .await?;
         {
             let mut relay = self.relay.write().await;
             relay.assign_active_controller(&device_id, unix_now());
             relay.active_turn_id = turn_id;
+            relay.model = model.clone();
             relay.reasoning_effort = effort.clone();
             relay.push_log(
                 "info",
-                format!("Sent a prompt to thread {thread_id} with {effort} effort."),
+                format!("Sent a prompt to thread {thread_id} with {model} / {effort}."),
             );
             relay.notify();
         }

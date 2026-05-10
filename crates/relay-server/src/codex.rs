@@ -291,6 +291,7 @@ impl CodexBridge {
         &self,
         thread_id: &str,
         text: &str,
+        model: &str,
         effort: &str,
     ) -> Result<Option<String>, String> {
         let result = self
@@ -298,6 +299,7 @@ impl CodexBridge {
                 "turn/start",
                 json!({
                     "threadId": thread_id,
+                    "model": model,
                     "effort": effort,
                     "input": [
                         {

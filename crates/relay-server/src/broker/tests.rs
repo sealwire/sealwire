@@ -669,6 +669,7 @@ fn parse_inbound_payload_parses_encrypted_remote_actions() {
         &RemoteActionRequest::SendMessage {
             input: SendMessageInput {
                 text: "encrypted hello".to_string(),
+                model: None,
                 effort: None,
                 device_id: None,
             },

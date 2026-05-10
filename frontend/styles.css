@@ -1415,7 +1415,8 @@ input:focus, textarea:focus, select:focus {
 .composer-actions {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 14px;
   padding: 8px 8px 0;
   margin-top: 4px;
   border-top: 1px solid var(--border-subtle);
@@ -1430,6 +1431,7 @@ input:focus, textarea:focus, select:focus {
   width: auto;
   cursor: pointer;
 }
+.composer-actions .send-button { margin-left: auto; }
 
 .client-log {
   margin: 0;

@@ -52,6 +52,7 @@ test("remote UI store updates session, composer, pairing, and modal state locall
   store.getState().setSessionPanelOpen(true);
   store.getState().setComposerDraft("hello");
   store.getState().setComposerEffort("high");
+  store.getState().setComposerModel("gpt-5.5");
   store.getState().setDeviceLabelDraft("iPad");
   store.getState().setPairingInputValue("pairing-payload");
   store.getState().setPairingModalOpen(true);
@@ -62,6 +63,7 @@ test("remote UI store updates session, composer, pairing, and modal state locall
   assert.equal(state.sessionPanelOpen, true);
   assert.equal(state.composerDraft, "hello");
   assert.equal(state.composerEffort, "high");
+  assert.equal(state.composerModel, "gpt-5.5");
   assert.equal(state.deviceLabelDraft, "iPad");
   assert.equal(state.pairingInputValue, "pairing-payload");
   assert.equal(state.pairingModalOpen, true);

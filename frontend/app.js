@@ -33,6 +33,7 @@ import {
   messageEffort,
   messageForm,
   messageInput,
+  messageModel,
   modelInput,
   openLaunchSettingsButton,
   openSecurityConsoleButton,
@@ -790,6 +791,7 @@ function handleUnauthorized(message) {
 
 function seedDefaults(session) {
   syncModelSuggestions(modelInput, session.available_models || [], session.model);
+  syncModelSuggestions(messageModel, session.available_models || [], messageModel?.value || session.model);
 
   if (!state.defaultsSeeded) {
     if (!modelInput.value || modelInput.value === "gpt-5-codex") {
@@ -798,6 +800,9 @@ function seedDefaults(session) {
     approvalPolicyInput.value = session.approval_policy;
     sandboxInput.value = session.sandbox;
     startEffortInput.value = session.reasoning_effort;
+    if (messageModel) {
+      messageModel.value = session.model || "gpt-5.4";
+    }
     messageEffort.value = session.reasoning_effort;
     state.defaultsSeeded = true;
   }

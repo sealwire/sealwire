@@ -168,6 +168,7 @@ function RemoteApp() {
     ? deriveSessionRuntime({
         composerDraft: remoteUi.composerDraft,
         composerEffort: remoteUi.composerEffort,
+        composerModel: remoteUi.composerModel,
         sendPending: remoteUi.sendPending,
         session,
         sessionView,
@@ -232,6 +233,7 @@ function RemoteApp() {
     composerDisabled: true,
     currentDraft: remoteUi.composerDraft,
     currentEffortValue: remoteUi.composerEffort,
+    currentModelValue: remoteUi.composerModel,
     messagePlaceholder: !hasRelay
       ? currentState.relayDirectory?.length
         ? "Open a relay before sending messages."
@@ -423,7 +425,11 @@ function RemoteApp() {
   async function handleSendMessage() {
     remoteUiStore.getState().setSendPending(true);
     try {
-      const sent = await handlers.onSendMessage(remoteUi.composerDraft, remoteUi.composerEffort);
+      const sent = await handlers.onSendMessage(
+        remoteUi.composerDraft,
+        remoteUi.composerEffort,
+        remoteUi.composerModel || session?.model || ""
+      );
       if (sent) {
         remoteUiStore.getState().clearComposerDraft();
       }
@@ -624,6 +630,9 @@ function RemoteApp() {
           },
           onComposerEffortChange(value) {
             remoteUiStore.getState().setComposerEffort(value);
+          },
+          onComposerModelChange(value) {
+            remoteUiStore.getState().setComposerModel(value);
           },
           controlBannerModel,
           currentState,
@@ -958,6 +967,7 @@ function RemoteThreadPanel({
   emptyStateModel,
   onComposerDraftChange,
   onComposerEffortChange,
+  onComposerModelChange,
   onSelectRelay,
   onSendMessage,
   onToggleExpandableBlock,
@@ -1017,6 +1027,9 @@ function RemoteThreadPanel({
         },
         onEffortChange(value) {
           onComposerEffortChange?.(value);
+        },
+        onModelChange(value) {
+          onComposerModelChange?.(value);
         },
       })
     )

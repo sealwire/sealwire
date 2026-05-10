@@ -30,6 +30,7 @@ export const goConsoleHomeSidebarButton = document.querySelector("#go-console-ho
 export const sendButton = document.querySelector("#send-button");
 export const messageForm = document.querySelector("#message-form");
 export const messageInput = document.querySelector("#message-input");
+export const messageModel = document.querySelector("#message-model");
 export const messageEffort = document.querySelector("#message-effort");
 export const directoryForm = document.querySelector("#directory-form");
 export const loadDirectoryButton = document.querySelector("#load-directory-button");

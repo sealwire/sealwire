@@ -6,12 +6,17 @@ export function ConversationComposer({
   composerDisabled = false,
   currentDraft,
   currentEffortValue = "medium",
+  currentModelValue,
   effortId = "remote-message-effort",
   effortLabel = "Effort",
   messageId = "remote-message-input",
   messagePlaceholder = "",
+  modelId = "remote-message-model",
+  modelLabel = "Model",
+  models = [],
   onDraftChange = null,
   onEffortChange = null,
+  onModelChange = null,
   sendButtonId = "remote-send-button",
   sendLabel = "Send",
   sendPending = false,
@@ -26,6 +31,10 @@ export function ConversationComposer({
   const selectProps = {
     id: effortId,
   };
+  const modelSelectProps = {
+    id: modelId,
+  };
+  const modelOptions = [...models];
 
   if (currentDraft !== undefined) {
     textareaProps.value = currentDraft;
@@ -39,6 +48,18 @@ export function ConversationComposer({
   if (onEffortChange) {
     selectProps.onChange = (event) => onEffortChange(event.target.value);
   }
+  if (currentModelValue && !modelOptions.some((model) => model.model === currentModelValue)) {
+    modelOptions.unshift({
+      display_name: currentModelValue,
+      model: currentModelValue,
+    });
+  }
+  if (currentModelValue !== undefined) {
+    modelSelectProps.value = currentModelValue;
+  }
+  if (onModelChange) {
+    modelSelectProps.onChange = (event) => onModelChange(event.target.value);
+  }
 
   return h(
     "div",
@@ -47,6 +68,20 @@ export function ConversationComposer({
     h(
       "div",
       { className: "composer-actions" },
+      modelOptions.length
+        ? h(
+            "label",
+            { className: "composer-select", htmlFor: modelId },
+            h("span", null, modelLabel),
+            h(
+              "select",
+              modelSelectProps,
+              ...modelOptions.map((model) =>
+                h("option", { key: model.model, value: model.model }, model.display_name || model.model)
+              )
+            )
+          )
+        : null,
       h(
         "label",
         { className: "composer-select", htmlFor: effortId },

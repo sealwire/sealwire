@@ -16,6 +16,7 @@ export function createRemoteUiStore(initialState = {}) {
   return createStore((set) => ({
     composerDraft: "",
     composerEffort: "medium",
+    composerModel: "",
     deviceLabelDraft: loadDeviceLabel(),
     pairingInputValue: "",
     pairingModalOpen: false,
@@ -43,6 +44,11 @@ export function createRemoteUiStore(initialState = {}) {
     setComposerEffort(value) {
       set({
         composerEffort: value || "medium",
+      });
+    },
+    setComposerModel(value) {
+      set({
+        composerModel: value || "",
       });
     },
     setDeviceLabelDraft(value) {

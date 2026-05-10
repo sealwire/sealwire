@@ -372,7 +372,7 @@ export async function viewRemoteThread(threadId) {
   }
 }
 
-export async function sendMessage(messageDraft, effort) {
+export async function sendMessage(messageDraft, effort, model = "") {
   if (typeof messageDraft !== "string" || typeof effort !== "string") {
     throw new Error("sendMessage requires a draft and effort");
   }
@@ -386,6 +386,7 @@ export async function sendMessage(messageDraft, effort) {
     await dispatchOrRecover("send_message", {
       input: {
         text,
+        model,
         effort,
       },
     });
