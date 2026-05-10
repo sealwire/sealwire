@@ -510,14 +510,6 @@ impl RelayState {
         std::mem::take(&mut self.pending_broker_messages)
     }
 
-    pub fn prepend_pending_broker_messages(&mut self, mut messages: Vec<BrokerPendingMessage>) {
-        if messages.is_empty() {
-            return;
-        }
-        messages.append(&mut self.pending_broker_messages);
-        self.pending_broker_messages = messages;
-    }
-
     pub fn can_device_send_message(&self, device_id: &str) -> bool {
         if self.active_thread_id.is_none() {
             return false;

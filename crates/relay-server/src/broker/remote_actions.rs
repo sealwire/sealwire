@@ -1,6 +1,7 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use futures_util::stream::SplitSink;
 use serde::{Deserialize, Serialize};
+use tokio::time::{sleep, Duration};
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{info, warn};
 
@@ -24,8 +25,9 @@ use super::{
 
 const SESSION_CONTROL_REQUIRED_ERROR: &str =
     "broker transport auth only grants room access; session claim is missing or expired";
-const REMOTE_ACTION_RESULT_CHUNK_TARGET_BYTES: usize = 16_384;
+const REMOTE_ACTION_RESULT_CHUNK_TARGET_BYTES: usize = 32_768;
 const REMOTE_ACTION_RESULT_CHUNK_MIN_BYTES: usize = 1_024;
+const REMOTE_ACTION_RESULT_CHUNK_PUBLISH_INTERVAL_MILLIS: u64 = 250;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -1145,10 +1147,27 @@ async fn publish_plain_remote_action_result(
         chunk_count = chunk_payloads.len(),
         "falling back to chunked remote action result transport"
     );
-    for payload in chunk_payloads {
+    publish_remote_action_result_chunks(sender, chunk_payloads, "broker action result chunk")
+        .await?;
+    Ok(())
+}
+
+async fn publish_remote_action_result_chunks(
+    sender: &mut SplitSink<BrokerSocket, Message>,
+    chunk_payloads: Vec<OutboundBrokerPayload>,
+    error_context: &str,
+) -> Result<(), String> {
+    let chunk_count = chunk_payloads.len();
+    for (index, payload) in chunk_payloads.into_iter().enumerate() {
         publish_payload(sender, payload)
             .await
-            .map_err(|error| format!("broker action result chunk publish failed: {error}"))?;
+            .map_err(|error| format!("{error_context} publish failed: {error}"))?;
+        if index + 1 < chunk_count {
+            sleep(Duration::from_millis(
+                REMOTE_ACTION_RESULT_CHUNK_PUBLISH_INTERVAL_MILLIS,
+            ))
+            .await;
+        }
     }
     Ok(())
 }
@@ -1384,12 +1403,12 @@ async fn publish_remote_action_result_private(
         chunk_count = chunk_payloads.len(),
         "falling back to chunked remote action result transport"
     );
-    for payload in chunk_payloads {
-        publish_payload(sender, payload).await.map_err(|error| {
-            format!("encrypted broker action result chunk publish failed: {error}")
-        })?;
-    }
-    Ok(())
+    publish_remote_action_result_chunks(
+        sender,
+        chunk_payloads,
+        "encrypted broker action result chunk",
+    )
+    .await
 }
 
 async fn replay_encrypted_remote_action_result(

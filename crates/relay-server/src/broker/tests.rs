@@ -4,6 +4,7 @@ use super::*;
 use crate::protocol::{
     SendMessageInput, ThreadTranscriptResponse, TranscriptEntryKind, TranscriptEntryView,
 };
+use crate::state::{PendingTranscriptDelta, TranscriptDeltaKind};
 use axum::{extract::Path, routing::post, Json, Router};
 use base64::engine::general_purpose::STANDARD;
 use ed25519_dalek::{Signer, SigningKey, Verifier};
@@ -444,6 +445,45 @@ fn snapshot_publish_gate_throttles_burst_snapshot_updates() {
         .ready_or_deadline(start + Duration::from_millis(500))
         .is_ok());
     assert!(!gate.has_pending_publish());
+}
+
+#[test]
+fn transcript_delta_coalescing_merges_contiguous_item_updates() {
+    let first = PendingTranscriptDelta {
+        thread_id: "thread-1".to_string(),
+        base_revision: 10,
+        revision: 11,
+        entry_seq: 4,
+        server_time: 100,
+        item_id: "item-1".to_string(),
+        turn_id: Some("turn-1".to_string()),
+        delta: "hel".to_string(),
+        kind: TranscriptDeltaKind::AgentText,
+    };
+    let second = PendingTranscriptDelta {
+        base_revision: 11,
+        revision: 12,
+        server_time: 101,
+        delta: "lo".to_string(),
+        ..first.clone()
+    };
+    let command = PendingTranscriptDelta {
+        base_revision: 12,
+        revision: 13,
+        server_time: 102,
+        delta: "!".to_string(),
+        kind: TranscriptDeltaKind::CommandOutput,
+        ..first.clone()
+    };
+
+    let coalesced = coalesce_transcript_deltas(vec![first, second, command]);
+
+    assert_eq!(coalesced.len(), 2);
+    assert_eq!(coalesced[0].base_revision, 10);
+    assert_eq!(coalesced[0].revision, 12);
+    assert_eq!(coalesced[0].server_time, 101);
+    assert_eq!(coalesced[0].delta, "hello");
+    assert_eq!(coalesced[1].delta, "!");
 }
 
 #[tokio::test]

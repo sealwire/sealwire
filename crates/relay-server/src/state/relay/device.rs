@@ -183,7 +183,7 @@ pub(crate) struct PendingTranscriptDelta {
     pub(crate) kind: TranscriptDeltaKind,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum TranscriptDeltaKind {
     AgentText,
     CommandOutput,

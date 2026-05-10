@@ -50,6 +50,7 @@ const PUBLIC_RELAY_REGISTRATION_SCHEMA_VERSION: u32 = 1;
 const PUBLIC_RELAY_IDENTITY_SCHEMA_VERSION: u32 = 1;
 const SNAPSHOT_PUBLISH_MIN_INTERVAL_MILLIS: u64 = 500;
 const BROKER_RATE_LIMIT_SNAPSHOT_COOLDOWN_SECS: u64 = 5;
+const TRANSCRIPT_DELTA_PUBLISH_WINDOW_MILLIS: u64 = 100;
 const DEFAULT_PUBLIC_RELAY_REGISTRATION_FILE: &str = ".agent-relay/public-broker-registration.json";
 const DEFAULT_PUBLIC_RELAY_IDENTITY_FILE: &str = ".agent-relay/public-broker-identity.json";
 pub(crate) const RELAY_BROKER_IDENTITY_PATH_ENV: &str = "RELAY_BROKER_IDENTITY_PATH";
@@ -909,14 +910,28 @@ async fn run_broker_session(
     let mut pending_snapshot_timer = Box::pin(sleep_until(
         Instant::now() + Duration::from_secs(24 * 60 * 60),
     ));
+    let mut pending_transcript_deltas = Vec::new();
+    let mut pending_transcript_delta_timer = Box::pin(sleep_until(
+        Instant::now() + Duration::from_secs(24 * 60 * 60),
+    ));
 
     loop {
         tokio::select! {
             changed = change_rx.changed() => {
                 changed.map_err(|_| "relay change channel closed".to_string())?;
-                publish_pending_broker_messages(&mut sender, state)
+                let deltas = drain_pending_broker_messages_for_publish(&mut sender, state)
                     .await
                     .map_err(|error| format!("broker direct publish failed: {error}"))?;
+                if !deltas.is_empty() {
+                    let schedule_flush = pending_transcript_deltas.is_empty();
+                    pending_transcript_deltas.extend(deltas);
+                    if schedule_flush {
+                        pending_transcript_delta_timer.as_mut().reset(
+                            Instant::now()
+                                + Duration::from_millis(TRANSCRIPT_DELTA_PUBLISH_WINDOW_MILLIS),
+                        );
+                    }
+                }
                 match snapshot_publish_gate.ready_or_deadline(Instant::now()) {
                     Ok(()) => {
                         publish_snapshot(&mut sender, state)
@@ -926,6 +941,18 @@ async fn run_broker_session(
                     Err(deadline) => {
                         pending_snapshot_timer.as_mut().reset(deadline);
                     }
+                }
+            }
+            () = &mut pending_transcript_delta_timer, if !pending_transcript_deltas.is_empty() => {
+                let deltas = std::mem::take(&mut pending_transcript_deltas);
+                pending_transcript_deltas = publish_transcript_delta_batch(&mut sender, state, deltas)
+                    .await
+                    .map_err(|error| format!("broker transcript delta publish failed: {error}"))?;
+                if !pending_transcript_deltas.is_empty() {
+                    pending_transcript_delta_timer.as_mut().reset(
+                        Instant::now()
+                            + Duration::from_millis(TRANSCRIPT_DELTA_PUBLISH_WINDOW_MILLIS),
+                    );
                 }
             }
             () = &mut pending_snapshot_timer, if snapshot_publish_gate.has_pending_publish() => {
@@ -1531,8 +1558,19 @@ async fn publish_pending_broker_messages(
     sender: &mut futures_util::stream::SplitSink<BrokerSocket, Message>,
     state: &AppState,
 ) -> Result<(), String> {
-    const MAX_DELTAS_PER_DRAIN: usize = 50;
+    let deltas = drain_pending_broker_messages_for_publish(sender, state).await?;
+    for delta in coalesce_transcript_deltas(deltas) {
+        publish_transcript_delta(sender, state, delta).await?;
+    }
+    Ok(())
+}
+
+async fn drain_pending_broker_messages_for_publish(
+    sender: &mut futures_util::stream::SplitSink<BrokerSocket, Message>,
+    state: &AppState,
+) -> Result<Vec<PendingTranscriptDelta>, String> {
     let messages = state.drain_pending_broker_messages().await;
+    let mut transcript_deltas = Vec::new();
     if !messages.is_empty() {
         let pairing_count = messages
             .iter()
@@ -1547,26 +1585,67 @@ async fn publish_pending_broker_messages(
             pairing_count, transcript_delta_count, "drained pending broker messages"
         );
     }
-    let mut delta_count = 0;
-    let mut messages = messages.into_iter();
-    while let Some(message) = messages.next() {
+    for message in messages {
         match message {
             BrokerPendingMessage::PairingResult(result) => {
                 publish_pairing_result(sender, result).await?;
             }
-            BrokerPendingMessage::TranscriptDelta(delta) => {
-                if delta_count >= MAX_DELTAS_PER_DRAIN {
-                    let mut remaining = vec![BrokerPendingMessage::TranscriptDelta(delta)];
-                    remaining.extend(messages);
-                    state.prepend_pending_broker_messages(remaining).await;
-                    break;
-                }
-                publish_transcript_delta(sender, state, delta).await?;
-                delta_count += 1;
-            }
+            BrokerPendingMessage::TranscriptDelta(delta) => transcript_deltas.push(delta),
         }
     }
-    Ok(())
+    Ok(transcript_deltas)
+}
+
+async fn publish_transcript_delta_batch(
+    sender: &mut futures_util::stream::SplitSink<BrokerSocket, Message>,
+    state: &AppState,
+    deltas: Vec<PendingTranscriptDelta>,
+) -> Result<Vec<PendingTranscriptDelta>, String> {
+    const MAX_DELTAS_PER_DRAIN: usize = 50;
+    let mut deltas = coalesce_transcript_deltas(deltas);
+    let remaining = if deltas.len() > MAX_DELTAS_PER_DRAIN {
+        deltas.split_off(MAX_DELTAS_PER_DRAIN)
+    } else {
+        Vec::new()
+    };
+
+    let mut delta_count = 0;
+    for delta in deltas {
+        publish_transcript_delta(sender, state, delta).await?;
+        delta_count += 1;
+    }
+    if delta_count > 0 {
+        debug!(delta_count, "published coalesced broker transcript deltas");
+    }
+    Ok(remaining)
+}
+
+fn coalesce_transcript_deltas(deltas: Vec<PendingTranscriptDelta>) -> Vec<PendingTranscriptDelta> {
+    let mut coalesced: Vec<PendingTranscriptDelta> = Vec::new();
+    for delta in deltas {
+        if let Some(last) = coalesced.last_mut() {
+            if can_merge_transcript_delta(last, &delta) {
+                last.delta.push_str(&delta.delta);
+                last.revision = delta.revision;
+                last.entry_seq = delta.entry_seq;
+                last.server_time = delta.server_time;
+                continue;
+            }
+        }
+        coalesced.push(delta);
+    }
+    coalesced
+}
+
+fn can_merge_transcript_delta(
+    current: &PendingTranscriptDelta,
+    next: &PendingTranscriptDelta,
+) -> bool {
+    current.thread_id == next.thread_id
+        && current.item_id == next.item_id
+        && current.turn_id == next.turn_id
+        && current.kind == next.kind
+        && current.revision == next.base_revision
 }
 
 async fn publish_transcript_delta(
