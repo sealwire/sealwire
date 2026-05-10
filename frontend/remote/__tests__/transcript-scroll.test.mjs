@@ -34,10 +34,12 @@ function installBrowserStubs() {
 installBrowserStubs();
 
 const {
+  applyTranscriptScrollMode,
   computeTranscriptScrollPosition,
   deriveTranscriptScrollMode,
   didPrependOlderTranscript,
 } = await import("../transcript-scroll.js");
+const { state } = await import("../state.js");
 
 function entry(id, turn = id) {
   return {
@@ -54,7 +56,7 @@ test("deriveTranscriptScrollMode follows latest only when near the bottom", () =
     deriveTranscriptScrollMode({
       clientHeight: 400,
       scrollHeight: 2000,
-      scrollTop: 1590,
+      scrollTop: 1596,
     }),
     "follow-latest"
   );
@@ -67,6 +69,18 @@ test("deriveTranscriptScrollMode follows latest only when near the bottom", () =
     }),
     "preserve"
   );
+});
+
+test("applyTranscriptScrollMode skips no-op state writes", () => {
+  state.transcriptScrollMode = "follow-latest";
+
+  assert.equal(applyTranscriptScrollMode("follow-latest"), false);
+  assert.equal(state.transcriptScrollMode, "follow-latest");
+
+  assert.equal(applyTranscriptScrollMode("preserve"), true);
+  assert.equal(state.transcriptScrollMode, "preserve");
+
+  state.transcriptScrollMode = "follow-latest";
 });
 
 test("computeTranscriptScrollPosition preserves the viewport while reading history", () => {

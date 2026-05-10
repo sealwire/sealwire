@@ -11,6 +11,10 @@ import { flushSync } from "react-dom";
 import { fetchBuildInfo } from "../shared/build-badge.js";
 import { ClientLog } from "../shared/client-log.js";
 import {
+  buildReasoningEffortOptions,
+  resolveReasoningEffortValue,
+} from "../shared/reasoning-efforts.js";
+import {
   selectDeviceChromeRenderModel,
   selectResetChromeRenderModel,
   selectSessionChromeRenderModel,
@@ -39,10 +43,6 @@ import {
   selectThreadsRenderModel,
 } from "./view-model.js";
 import {
-  applyRemoteSurfacePatch,
-  createTranscriptScrollModePatch,
-} from "./surface-state.js";
-import {
   bootRemoteRuntime,
   createRemoteAppHandlers,
   initializeRemoteSurface,
@@ -61,6 +61,7 @@ import {
   setLiveTranscriptEntryDetail,
 } from "./transcript/details.js";
 import {
+  applyTranscriptScrollMode,
   computeTranscriptScrollPosition,
   deriveTranscriptScrollMode,
 } from "./transcript-scroll.js";
@@ -216,7 +217,18 @@ function RemoteApp() {
       ? "Close Remote Session Setup"
       : "Start Remote Session";
   const sessionPanelModel = {
-    fields: remoteUi.sessionDraft,
+    fields: {
+      ...remoteUi.sessionDraft,
+      effort: resolveReasoningEffortValue(
+        session?.available_models || [],
+        remoteUi.sessionDraft.model,
+        remoteUi.sessionDraft.effort
+      ),
+    },
+    effortOptions: buildReasoningEffortOptions(
+      session?.available_models || [],
+      remoteUi.sessionDraft.model
+    ),
     hasRemoteAuth: hasRelay,
     hasUsableRelay,
     models: session?.available_models?.length
@@ -354,6 +366,34 @@ function RemoteApp() {
   useEffect(() => {
     threadListStore.getState().clearError();
   }, [currentState.remoteAuth?.relayId, currentState.threads, threadListStore]);
+
+  useEffect(() => {
+    const availableModels = session?.available_models || [];
+    const nextComposerEffort = resolveReasoningEffortValue(
+      availableModels,
+      remoteUi.composerModel || session?.model || "",
+      remoteUi.composerEffort
+    );
+    if (nextComposerEffort !== remoteUi.composerEffort) {
+      remoteUiStore.getState().setComposerEffort(nextComposerEffort);
+    }
+
+    const nextSessionEffort = resolveReasoningEffortValue(
+      availableModels,
+      remoteUi.sessionDraft.model,
+      remoteUi.sessionDraft.effort
+    );
+    if (nextSessionEffort !== remoteUi.sessionDraft.effort) {
+      remoteUiStore.getState().setSessionDraftField("effort", nextSessionEffort);
+    }
+  }, [
+    remoteUi.composerEffort,
+    remoteUi.composerModel,
+    remoteUi.sessionDraft.effort,
+    remoteUi.sessionDraft.model,
+    session?.available_models,
+    session?.model,
+  ]);
 
   useRemoteSessionRuntime({
     remoteAuth: currentState.remoteAuth,
@@ -636,7 +676,13 @@ function RemoteApp() {
             remoteUiStore.getState().setComposerEffort(value);
           },
           onComposerModelChange(value) {
+            const nextEffort = resolveReasoningEffortValue(
+              session?.available_models || [],
+              value,
+              remoteUi.composerEffort
+            );
             remoteUiStore.getState().setComposerModel(value);
+            remoteUiStore.getState().setComposerEffort(nextEffort);
           },
           controlBannerModel,
           currentState,
@@ -808,6 +854,18 @@ function RemoteSidebar({
         cwdInputRef: remoteCwdInputRef,
         model: sessionPanelModel,
         onFieldChange(field, value) {
+          if (field === "model") {
+            updateSessionDraft({
+              effort: resolveReasoningEffortValue(
+                session?.available_models || [],
+                value,
+                remoteUi.sessionDraft.effort
+              ),
+              model: value,
+            });
+            return;
+          }
+
           updateSessionDraft({ [field]: value });
         },
         onStartSession,
@@ -1100,7 +1158,9 @@ function RemoteTranscriptPanel({
       previousScrollTop,
       previousThreadId: previous.activeThreadId,
     });
-    transcript.scrollTop = nextPosition.scrollTop;
+    if (Math.abs((transcript.scrollTop || 0) - nextPosition.scrollTop) > 1) {
+      transcript.scrollTop = nextPosition.scrollTop;
+    }
 
     previousRenderRef.current = {
       activeThreadId: session?.active_thread_id || null,
@@ -1186,14 +1246,12 @@ function RemoteTranscriptPanel({
           return;
         }
 
-        applyRemoteSurfacePatch(
-          createTranscriptScrollModePatch(
-            deriveTranscriptScrollMode({
-              clientHeight: transcript.clientHeight || 0,
-              scrollHeight: transcript.scrollHeight || 0,
-              scrollTop: transcript.scrollTop || 0,
-            })
-          )
+        applyTranscriptScrollMode(
+          deriveTranscriptScrollMode({
+            clientHeight: transcript.clientHeight || 0,
+            scrollHeight: transcript.scrollHeight || 0,
+            scrollTop: transcript.scrollTop || 0,
+          })
         );
         void maybeLoadOlderTranscriptHistory();
       },

@@ -6,7 +6,12 @@ import { deriveSessionRuntime } from "../session-runtime.js";
 test("deriveSessionRuntime returns runtime state and cwd hint when no filter is typed", () => {
   const session = {
     active_thread_id: "thread-1",
-    available_models: [{ display_name: "GPT-5.5", model: "gpt-5.5" }],
+    available_models: [{
+      default_reasoning_effort: "medium",
+      display_name: "GPT-5.5",
+      model: "gpt-5.5",
+      supported_reasoning_efforts: ["minimal", "medium", "xhigh"],
+    }],
     model: "gpt-5.5",
   };
   const sessionView = {
@@ -31,8 +36,18 @@ test("deriveSessionRuntime returns runtime state and cwd hint when no filter is 
     currentApprovalId: "approval-1",
     currentEffortValue: "medium",
     currentModelValue: "gpt-5.5",
+    effortOptions: [
+      { label: "minimal", value: "minimal" },
+      { label: "medium", value: "medium" },
+      { label: "xhigh", value: "xhigh" },
+    ],
     messagePlaceholder: "Another device has control. Take over to reply.",
-    models: [{ display_name: "GPT-5.5", model: "gpt-5.5" }],
+    models: [{
+      default_reasoning_effort: "medium",
+      display_name: "GPT-5.5",
+      model: "gpt-5.5",
+      supported_reasoning_efforts: ["minimal", "medium", "xhigh"],
+    }],
     sendDisabled: false,
     sendPending: false,
     session,

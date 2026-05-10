@@ -860,8 +860,12 @@ export function createSessionRenderer({
     const approvalId = approval?.request_id || null;
     const newApproval = approvalId && approvalId !== state.lastRenderedApprovalId;
     state.lastRenderedApprovalId = approvalId;
+    const lastEntry = entries[entries.length - 1];
+    const transcriptSignature = `${entries.length}:${lastEntry?.item_id || ""}:${lastEntry?.status || ""}`;
+    const contentChanged = transcriptSignature !== state.lastTranscriptSignature;
+    state.lastTranscriptSignature = transcriptSignature;
     const pinnedBeforeRender = !state.transcriptPreserveScroll && (
-      newApproval || transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80
+      newApproval || (contentChanged && transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80)
     );
 
     renderConversationContent(

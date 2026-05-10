@@ -112,42 +112,52 @@ export function applyTranscriptDelta({
     return;
   }
 
-  const transcript = state.session.transcript;
+  const currentSession = state.session;
+  const transcript = currentSession.transcript;
   if (!Array.isArray(transcript)) return;
   const resolvedKind = transcriptDeltaKindToEntryKind(delta_kind || kind);
 
-  const entry = transcript.find((e) => e.item_id === item_id);
-  if (entry) {
-    entry.text = `${entry.text ?? ""}${delta ?? ""}`;
-    entry.status = "running";
-    if (Number.isSafeInteger(entry_seq) && !Number.isSafeInteger(entry.entry_seq)) {
-      entry.entry_seq = entry_seq;
-    }
-    if (!entry.kind) {
-      entry.kind = resolvedKind;
-    }
-    if (!entry.turn_id && turn_id) {
-      entry.turn_id = turn_id;
-    }
-  } else {
-    transcript.push({
-      item_id,
-      turn_id: turn_id ?? null,
-      text: delta ?? "",
-      kind: resolvedKind,
-      status: "running",
-      tool: null,
-      entry_seq: Number.isSafeInteger(entry_seq) ? entry_seq : null,
-    });
-  }
+  const entryIndex = transcript.findIndex((e) => e.item_id === item_id);
+  const nextTranscript = entryIndex >= 0
+    ? transcript.map((entry, index) => {
+        if (index !== entryIndex) {
+          return entry;
+        }
+        return {
+          ...entry,
+          entry_seq: Number.isSafeInteger(entry_seq) && !Number.isSafeInteger(entry.entry_seq)
+            ? entry_seq
+            : entry.entry_seq,
+          kind: entry.kind || resolvedKind,
+          status: "running",
+          text: `${entry.text ?? ""}${delta ?? ""}`,
+          turn_id: entry.turn_id || turn_id || null,
+        };
+      })
+    : [
+        ...transcript,
+        {
+          item_id,
+          turn_id: turn_id ?? null,
+          text: delta ?? "",
+          kind: resolvedKind,
+          status: "running",
+          tool: null,
+          entry_seq: Number.isSafeInteger(entry_seq) ? entry_seq : null,
+        },
+      ];
+  const nextSession = {
+    ...currentSession,
+    transcript: nextTranscript,
+  };
   if (deltaRevision != null) {
-    state.session.transcript_revision = deltaRevision;
+    nextSession.transcript_revision = deltaRevision;
   }
   if (Number.isSafeInteger(server_time)) {
-    state.session.server_time = server_time;
+    nextSession.server_time = server_time;
   }
 
-  renderSession(state.session);
+  renderSession(nextSession);
 }
 
 export function applySessionSnapshot(snapshot) {

@@ -107,6 +107,10 @@ import { installThreadListWheelProxy } from "./shared/thread-list-scroll.js";
 import { fetchBuildInfo } from "./shared/build-badge.js";
 import { ClientLog } from "./shared/client-log.js";
 import { renderSelectOptions } from "./shared/select-options.js";
+import {
+  buildReasoningEffortOptions,
+  resolveReasoningEffortValue,
+} from "./shared/reasoning-efforts.js";
 import { localQueryClient } from "./local/query-client.js";
 
 const DEVICE_STORAGE_KEY = "agent-relay.device-id";
@@ -493,6 +497,16 @@ messageForm.addEventListener("submit", (event) => {
   void sendMessage();
 });
 
+modelInput?.addEventListener("change", () => {
+  const models = state.session?.available_models || [];
+  syncEffortSuggestions(startEffortInput, models, modelInput.value, startEffortInput.value);
+});
+
+messageModel?.addEventListener("change", () => {
+  const models = state.session?.available_models || [];
+  syncEffortSuggestions(messageEffort, models, messageModel.value, messageEffort.value);
+});
+
 stopButton?.addEventListener("click", () => {
   void stopActiveTurn();
 });
@@ -813,6 +827,19 @@ function seedDefaults(session) {
     state.defaultsSeeded = true;
   }
 
+  syncEffortSuggestions(
+    startEffortInput,
+    session.available_models || [],
+    modelInput?.value || session.model,
+    startEffortInput?.value || session.reasoning_effort
+  );
+  syncEffortSuggestions(
+    messageEffort,
+    session.available_models || [],
+    messageModel?.value || session.model,
+    messageEffort?.value || session.reasoning_effort
+  );
+
   if (!state.selectedCwd && session.current_cwd) {
     setSelectedCwd(session.current_cwd);
   }
@@ -839,6 +866,19 @@ function syncModelSuggestions(select, models, selectedModel) {
       value: model.model,
     })),
     currentValue
+  );
+}
+
+function syncEffortSuggestions(select, models, selectedModel, selectedEffort) {
+  if (!select) {
+    return;
+  }
+
+  const resolvedEffort = resolveReasoningEffortValue(models, selectedModel, selectedEffort);
+  renderSelectOptions(
+    select,
+    buildReasoningEffortOptions(models, selectedModel, resolvedEffort),
+    resolvedEffort
   );
 }
 

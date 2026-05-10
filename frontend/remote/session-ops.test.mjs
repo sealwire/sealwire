@@ -1250,6 +1250,45 @@ test("applyTranscriptDelta updates existing transcript entries using text and st
   assert.equal(state.session.transcript[0].kind, "agent_text");
 });
 
+test("applyTranscriptDelta does not mutate the previous session snapshot", async () => {
+  activeBrowser || installBrowserStubs();
+
+  const { state } = await import("./state.js");
+  const { applyTranscriptDelta } = await import("./session-ops.js");
+
+  const entry = {
+    item_id: "item-1",
+    kind: "agent_text",
+    status: "completed",
+    text: "Hello",
+    turn_id: "turn-1",
+    tool: null,
+  };
+  const previousSession = {
+    active_thread_id: "thread-1",
+    transcript_revision: 1,
+    transcript: [entry],
+  };
+  state.session = previousSession;
+
+  applyTranscriptDelta({
+    thread_id: "thread-1",
+    base_revision: 1,
+    revision: 2,
+    item_id: "item-1",
+    turn_id: "turn-1",
+    delta: " world",
+    delta_kind: "agent_text",
+  });
+
+  assert.equal(previousSession.transcript[0], entry);
+  assert.equal(previousSession.transcript[0].text, "Hello");
+  assert.notEqual(state.session, previousSession);
+  assert.notEqual(state.session.transcript, previousSession.transcript);
+  assert.equal(state.session.transcript[0].text, "Hello world");
+  assert.equal(state.session.transcript_revision, 2);
+});
+
 test("applyTranscriptDelta requires matching base revision when present", async () => {
   activeBrowser || installBrowserStubs();
 

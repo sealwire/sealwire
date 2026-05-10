@@ -5,15 +5,24 @@ import {
 } from "./surface-state.js";
 import { remoteUiRefs } from "./ui-refs.js";
 
-export const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 80;
+export const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 4;
 export const TOP_SCROLL_PRESERVE_THRESHOLD_PX = 80;
+
+export function applyTranscriptScrollMode(mode) {
+  if (state.transcriptScrollMode === mode) {
+    return false;
+  }
+
+  applyRemoteSurfacePatch(createTranscriptScrollModePatch(mode));
+  return true;
+}
 
 export function syncTranscriptScrollModeForSession(session, previousSession) {
   const nextThreadId = session?.active_thread_id || null;
   const previousThreadId = previousSession?.active_thread_id || null;
 
   if (!nextThreadId || nextThreadId !== previousThreadId) {
-    applyRemoteSurfacePatch(createTranscriptScrollModePatch("follow-latest"));
+    applyTranscriptScrollMode("follow-latest");
   }
 }
 
@@ -35,14 +44,12 @@ export function handleTranscriptScroll(
     return;
   }
 
-  applyRemoteSurfacePatch(
-    createTranscriptScrollModePatch(
-      deriveTranscriptScrollMode({
-        clientHeight: transcript.clientHeight || 0,
-        scrollHeight: transcript.scrollHeight || 0,
-        scrollTop: transcript.scrollTop || 0,
-      })
-    )
+  applyTranscriptScrollMode(
+    deriveTranscriptScrollMode({
+      clientHeight: transcript.clientHeight || 0,
+      scrollHeight: transcript.scrollHeight || 0,
+      scrollTop: transcript.scrollTop || 0,
+    })
   );
 }
 

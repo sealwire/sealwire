@@ -7,6 +7,7 @@ export function ConversationComposer({
   currentDraft,
   currentEffortValue = "medium",
   currentModelValue,
+  effortOptions = null,
   effortId = "remote-message-effort",
   effortLabel = "Effort",
   messageId = "remote-message-input",
@@ -43,6 +44,13 @@ export function ConversationComposer({
     id: modelId,
   };
   const modelOptions = [...models];
+  const reasoningEffortOptions = effortOptions?.length
+    ? effortOptions
+    : [
+        { label: "medium", value: "medium" },
+        { label: "low", value: "low" },
+        { label: "high", value: "high" },
+      ];
 
   if (currentDraft !== undefined) {
     textareaProps.value = currentDraft;
@@ -97,9 +105,9 @@ export function ConversationComposer({
         h(
           "select",
           selectProps,
-          h("option", { value: "medium" }, "medium"),
-          h("option", { value: "low" }, "low"),
-          h("option", { value: "high" }, "high")
+          ...reasoningEffortOptions.map((option) =>
+            h("option", { key: option.value, value: option.value }, option.label)
+          )
         )
       ),
       h(

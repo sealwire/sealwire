@@ -112,6 +112,14 @@ export function SessionPanel({
     return null;
   }
 
+  const effortOptions = model.effortOptions?.length
+    ? model.effortOptions
+    : [
+        { label: "medium", value: "medium" },
+        { label: "low", value: "low" },
+        { label: "high", value: "high" },
+      ];
+
   return h(
     React.Fragment,
     null,
@@ -219,9 +227,9 @@ export function SessionPanel({
               onChange: (event) => onFieldChange?.("effort", event.target.value),
               value: model.fields.effort,
             },
-            h("option", { value: "medium" }, "medium"),
-            h("option", { value: "low" }, "low"),
-            h("option", { value: "high" }, "high")
+            ...effortOptions.map((option) =>
+              h("option", { key: option.value, value: option.value }, option.label)
+            )
           )
         ),
         h(

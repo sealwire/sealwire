@@ -348,6 +348,9 @@ async function handleEncryptedRemoteActionResultChunk(payload) {
 }
 
 function logIgnoredEncryptedPayload(kind, payload) {
+  if (isHighVolumeEncryptedPayloadKind(kind) && !isVerboseBrokerLoggingEnabled()) {
+    return;
+  }
   const peerMatches = payload.target_peer_id === state.socketPeerId;
   const deviceMatches = payload.device_id === state.remoteAuth?.deviceId;
   const message = `[broker-filter] ignored kind=${kind} target=${payload.target_peer_id || "-"} socket=${state.socketPeerId || "-"} peer_match=${peerMatches ? "1" : "0"} device=${payload.device_id || "-"} localDevice=${state.remoteAuth?.deviceId || "-"} device_match=${deviceMatches ? "1" : "0"}`;
@@ -357,6 +360,9 @@ function logIgnoredEncryptedPayload(kind, payload) {
 }
 
 function logAcceptedEncryptedPayload(kind, payload) {
+  if (isHighVolumeEncryptedPayloadKind(kind) && !isVerboseBrokerLoggingEnabled()) {
+    return;
+  }
   const message = `[broker-filter] accepted kind=${kind} target=${payload.target_peer_id || "-"} socket=${state.socketPeerId || "-"} device=${payload.device_id || "-"} localDevice=${state.remoteAuth?.deviceId || "-"}`;
   renderLog(message);
   // TODO(remote-monitor-debug): Remove this console mirror once broker routing is stable.
@@ -371,10 +377,21 @@ function logDecryptedSessionSnapshot(kind, snapshot) {
 }
 
 function logDecryptedTranscriptDelta(delta) {
+  if (!isVerboseBrokerLoggingEnabled()) {
+    return;
+  }
   const message = `[broker-decrypt] kind=encrypted_transcript_delta thread=${delta?.thread_id || "-"} item=${delta?.item_id || "-"} turn=${delta?.turn_id || "-"} delta_kind=${delta?.delta_kind || delta?.kind || "-"} bytes=${typeof delta?.delta === "string" ? delta.delta.length : 0}`;
   renderLog(message);
   // TODO(remote-monitor-debug): Remove this console mirror once broker routing is stable.
   console.log(message);
+}
+
+function isHighVolumeEncryptedPayloadKind(kind) {
+  return kind === "encrypted_transcript_delta";
+}
+
+function isVerboseBrokerLoggingEnabled() {
+  return typeof window !== "undefined" && window.__agentRelayVerboseBrokerLogs === true;
 }
 
 function logDecryptedRemoteActionResult(actionId, result) {
