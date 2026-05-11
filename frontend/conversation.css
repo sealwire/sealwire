@@ -201,16 +201,20 @@
 }
 
 .message-card-command {
-  padding: 14px 16px;
+  position: relative;
+  padding: 10px 14px;
   min-width: 0;
   max-width: 100%;
   overflow: hidden;
 }
 
 .command-entry-controls {
+  position: absolute;
+  top: 8px;
+  right: 10px;
   display: flex;
-  justify-content: flex-end;
-  margin-bottom: 6px;
+  gap: 6px;
+  align-items: center;
 }
 
 .command-toggle-button,
@@ -229,7 +233,6 @@
   color: var(--text-primary);
 }
 
-.command-preview,
 .tool-preview {
   display: block;
   margin: 0;
@@ -241,20 +244,27 @@
   border: 1px solid var(--border-subtle);
   background: var(--bg-base);
   color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.command-preview {
+  margin: 0;
+  padding: 0;
+  padding-right: 60px;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  color: var(--text-secondary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
   line-height: 1.35;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-.command-preview {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-  font-size: 12px;
-}
-
-.tool-preview {
-  font-size: 13px;
-  line-height: 1.4;
 }
 
 .command-detail {
@@ -263,10 +273,7 @@
   width: 100%;
   min-width: 0;
   max-width: 100%;
-  background: var(--bg-base);
-  padding: 12px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border-subtle);
+  padding: 8px 0;
   color: var(--text-primary);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   font-size: 13px;

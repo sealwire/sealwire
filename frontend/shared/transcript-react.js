@@ -139,12 +139,6 @@ function CommandEntry({ entry, options = null }) {
     h(
       "div",
       { className: "message-card message-card-system message-card-command" },
-      h(
-        "div",
-        { className: "message-meta" },
-        h("strong", null, "Command"),
-        h("span", null, entry.status || "completed")
-      ),
       itemId
         ? h(
             "div",
@@ -157,7 +151,7 @@ function CommandEntry({ entry, options = null }) {
                 "data-transcript-toggle": "entry",
                 type: "button",
               },
-              expanded ? "Collapse" : "Expand"
+              expanded ? "▴" : "▾"
             )
           )
         : null,

@@ -165,11 +165,9 @@ function applyTranscriptHydrationProgress(state, store, onProgress) {
 }
 
 function isStaleTranscriptPage(state, page) {
-  const pageRevision = numericRevision(page?.revision);
-  const sessionRevision = numericRevision(state.session?.transcript_revision);
-  return pageRevision != null && sessionRevision != null && pageRevision < sessionRevision;
-}
-
-function numericRevision(value) {
-  return Number.isSafeInteger(value) ? value : null;
+  return Boolean(
+    page?.thread_id
+      && state.session?.active_thread_id
+      && page.thread_id !== state.session.active_thread_id
+  );
 }

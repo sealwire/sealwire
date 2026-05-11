@@ -61,7 +61,7 @@ test("renderEntryMarkup renders typed session items safely", () => {
   assert.match(userMarkup, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
   assert.match(assistantMarkup, /message-card/);
   assert.doesNotMatch(assistantMarkup, /turn-123/);
-  assert.match(commandMarkup, /Command/);
+  assert.match(commandMarkup, /message-card-command/);
   assert.match(commandMarkup, /data-transcript-toggle="entry"/);
   assert.match(commandMarkup, /data-item-id="cmd-1"/);
   assert.match(commandMarkup, /<div class="command-preview"[^>]*>npm test<\/div>/);
@@ -134,7 +134,7 @@ test("renderEntryMarkup collapses long command and tool previews without collaps
   });
 
   assert.match(commandMarkup, /data-transcript-toggle="entry"/);
-  assert.match(commandMarkup, />\s*Expand\s*<\/button>/);
+  assert.match(commandMarkup, />\s*▾\s*<\/button>/);
   assert.match(commandMarkup, /class="command-preview"/);
   assert.match(commandMarkup, /line 1 line 2 line 3/);
   assert.doesNotMatch(commandMarkup, /line 1\nline 2/);
@@ -527,7 +527,7 @@ test("renderEntryMarkup shows expanded command detail and loading note when requ
     loadingItemIds: new Set(["cmd-3"]),
   });
 
-  assert.match(expandedMarkup, />\s*Collapse\s*<\/button>/);
+  assert.match(expandedMarkup, />\s*▴\s*<\/button>/);
   assert.match(expandedMarkup, /class="command-detail"/);
   assert.match(expandedMarkup, /full command output/);
   assert.match(loadingMarkup, /Loading full command output/);

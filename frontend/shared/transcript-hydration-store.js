@@ -17,7 +17,6 @@ export function transcriptHydrationSignature(snapshot) {
   const parts = [
     snapshot.active_thread_id || "",
     snapshot.active_turn_id || "",
-    String(snapshot.transcript_revision ?? ""),
     String(snapshot.transcript?.length || 0),
   ];
 
@@ -25,7 +24,6 @@ export function transcriptHydrationSignature(snapshot) {
     parts.push(
       entry.item_id || "",
       entry.kind || "",
-      entry.status || "",
       entry.turn_id || "",
       entry.tool?.item_type || "",
       entry.tool?.name || "",
@@ -46,13 +44,15 @@ export function restoreHydratedTranscriptSnapshot(state, snapshot) {
   const signature = transcriptHydrationSignature(snapshot);
   if (
     state.transcriptHydrationThreadId !== snapshot.active_thread_id
-    || state.transcriptHydrationSignature !== signature
     || !state.transcriptHydrationOrder.length
   ) {
     return snapshot;
   }
 
-  return buildHydratedTranscriptSnapshot(state, snapshot);
+  return buildHydratedTranscriptSnapshot(state, snapshot, {
+    signature,
+    overlayEntries: snapshot.transcript || [],
+  });
 }
 
 export function prepareTranscriptHydrationState(state, snapshot) {
@@ -67,18 +67,22 @@ export function prepareTranscriptHydrationState(state, snapshot) {
   }
 
   const signature = transcriptHydrationSignature(snapshot);
-  const patch =
-    state.transcriptHydrationThreadId !== snapshot.active_thread_id
+  const sameThreadWithVisibleEntries =
+    state.transcriptHydrationThreadId === snapshot.active_thread_id
+    && state.transcriptHydrationOrder.length > 0;
+  const patch = sameThreadWithVisibleEntries
+    ? createMergedSnapshotTailPatch(state, snapshot, signature)
+    : state.transcriptHydrationThreadId !== snapshot.active_thread_id
       || state.transcriptHydrationSignature !== signature
-      ? {
-        ...createClearedTranscriptHydrationPatch(),
-        transcriptHydrationBaseSnapshot: snapshot,
-        transcriptHydrationSignature: signature,
-        transcriptHydrationThreadId: snapshot.active_thread_id,
-      }
-      : {
-        transcriptHydrationBaseSnapshot: snapshot,
-      };
+        ? {
+          ...createClearedTranscriptHydrationPatch(),
+          transcriptHydrationBaseSnapshot: snapshot,
+          transcriptHydrationSignature: signature,
+          transcriptHydrationThreadId: snapshot.active_thread_id,
+        }
+        : {
+          transcriptHydrationBaseSnapshot: snapshot,
+        };
 
   return {
     signature,
@@ -155,7 +159,10 @@ export function createMergedTranscriptHydrationPagePatch(
       };
     }
 
-    nextEntries.set(itemId, toTranscriptEntry(prepared.entry || entry));
+    nextEntries.set(
+      itemId,
+      mergeTranscriptEntry(nextEntries.get(itemId), toTranscriptEntry(prepared.entry || entry))
+    );
     pageItemIds.push(itemId);
   }
 
@@ -185,27 +192,32 @@ export function buildHydratedTranscriptProgress(state) {
   if (!snapshot || state.session?.active_thread_id !== snapshot.active_thread_id) {
     return null;
   }
-  const snapshotRevision = numericRevision(snapshot.transcript_revision);
-  const sessionRevision = numericRevision(state.session?.transcript_revision);
-  if (
-    snapshotRevision != null
-    && sessionRevision != null
-    && snapshotRevision < sessionRevision
-  ) {
-    return null;
-  }
 
   return buildHydratedTranscriptSnapshot(state, snapshot);
 }
 
-function numericRevision(value) {
-  return Number.isSafeInteger(value) ? value : null;
-}
+function buildHydratedTranscriptSnapshot(
+  state,
+  snapshot,
+  {
+    overlayEntries = [],
+  } = {}
+) {
+  const entries = new Map(state.transcriptHydrationEntries);
+  const order = [...state.transcriptHydrationOrder];
 
-function buildHydratedTranscriptSnapshot(state, snapshot) {
-  const transcript = state.transcriptHydrationOrder
-    .map((itemId) => state.transcriptHydrationEntries.get(itemId))
-    .filter(Boolean);
+  for (const entry of overlayEntries || []) {
+    const itemId = entry?.item_id;
+    if (!itemId) {
+      continue;
+    }
+    entries.set(itemId, mergeTranscriptEntry(entries.get(itemId), toTranscriptEntry(entry)));
+    if (!order.includes(itemId)) {
+      order.push(itemId);
+    }
+  }
+
+  const transcript = order.map((itemId) => entries.get(itemId)).filter(Boolean);
 
   if (!transcript.length) {
     return snapshot;
@@ -234,6 +246,109 @@ function toTranscriptEntry(entry) {
     turn_id: entry.turn_id || null,
     tool: entry.tool || null,
   };
+}
+
+function createMergedSnapshotTailPatch(state, snapshot, signature) {
+  const nextEntries = new Map(state.transcriptHydrationEntries);
+  const nextOrder = [...state.transcriptHydrationOrder];
+
+  for (const entry of snapshot.transcript || []) {
+    const itemId = entry?.item_id;
+    if (!itemId) {
+      continue;
+    }
+    nextEntries.set(itemId, mergeTranscriptEntry(nextEntries.get(itemId), toTranscriptEntry(entry)));
+    if (!nextOrder.includes(itemId)) {
+      nextOrder.push(itemId);
+    }
+  }
+
+  return {
+    transcriptHydrationBaseSnapshot: snapshot,
+    transcriptHydrationEntries: nextEntries,
+    transcriptHydrationOrder: nextOrder,
+    transcriptHydrationSignature: signature,
+    transcriptHydrationThreadId: snapshot.active_thread_id,
+  };
+}
+
+function mergeTranscriptEntry(existing, incoming) {
+  if (!existing) {
+    return incoming;
+  }
+  if (!incoming) {
+    return existing;
+  }
+
+  return {
+    ...existing,
+    ...incoming,
+    text: selectTranscriptText(existing.text, incoming.text),
+    tool: mergeToolView(existing.tool, incoming.tool),
+    turn_id: incoming.turn_id || existing.turn_id || null,
+  };
+}
+
+function selectTranscriptText(existingText, incomingText) {
+  if (incomingText == null) {
+    return existingText ?? null;
+  }
+  if (existingText == null) {
+    return incomingText;
+  }
+  if (looksTruncated(incomingText) && existingText.length > incomingText.length) {
+    return existingText;
+  }
+  return incomingText.length >= existingText.length ? incomingText : existingText;
+}
+
+function mergeToolView(existingTool, incomingTool) {
+  if (!existingTool) {
+    return incomingTool || null;
+  }
+  if (!incomingTool) {
+    return existingTool;
+  }
+
+  return {
+    ...existingTool,
+    ...incomingTool,
+    detail: selectTranscriptText(existingTool.detail, incomingTool.detail),
+    input_preview: selectTranscriptText(existingTool.input_preview, incomingTool.input_preview),
+    result_preview: selectTranscriptText(existingTool.result_preview, incomingTool.result_preview),
+    diff: selectTranscriptText(existingTool.diff, incomingTool.diff),
+    file_changes: mergeFileChanges(existingTool.file_changes, incomingTool.file_changes),
+  };
+}
+
+function mergeFileChanges(existingChanges, incomingChanges) {
+  if (!Array.isArray(existingChanges) || !existingChanges.length) {
+    return incomingChanges || existingChanges || [];
+  }
+  if (!Array.isArray(incomingChanges) || !incomingChanges.length) {
+    return existingChanges;
+  }
+
+  const changesByPath = new Map(existingChanges.map((change) => [change.path, change]));
+  const order = existingChanges.map((change) => change.path);
+  for (const incoming of incomingChanges) {
+    const key = incoming.path;
+    const existing = changesByPath.get(key);
+    changesByPath.set(key, {
+      ...(existing || {}),
+      ...incoming,
+      diff: selectTranscriptText(existing?.diff, incoming.diff),
+    });
+    if (!order.includes(key)) {
+      order.push(key);
+    }
+  }
+
+  return order.map((key) => changesByPath.get(key)).filter(Boolean);
+}
+
+function looksTruncated(value) {
+  return typeof value === "string" && value.endsWith("...");
 }
 
 function collapseEntryParts(parts) {
