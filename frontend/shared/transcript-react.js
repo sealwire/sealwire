@@ -178,7 +178,9 @@ function ReasoningEntry({ entry }) {
     { className: "chat-message chat-message-system" },
     h(
       "div",
-      { className: "message-card message-card-system message-card-reasoning" },
+      {
+        className: `message-card message-card-system message-card-reasoning${hasText ? "" : " message-card-reasoning-empty"}`,
+      },
       h(
         "div",
         { className: "message-meta" },

@@ -30,6 +30,7 @@ import {
   transcript,
   workspaceTitle,
   workspaceSubtitle,
+  workspaceSuggestionsList,
 } from "./dom.js";
 import React from "react";
 import { flushSync } from "react-dom";
@@ -38,6 +39,7 @@ import {
   canonicalizeWorkspace,
   summarizeThreadGroups,
 } from "../shared/thread-groups.js";
+import { selectWorkspaceSuggestionsModel } from "../shared/workspace-suggestions.js";
 import {
   readThreadListUi,
 } from "../shared/thread-list-store.js";
@@ -218,6 +220,7 @@ export function createSessionRenderer({
     announceNewPendingPairings(pendingPairings);
     renderControlBanner(session);
     renderPendingActionBanner(approval, pendingPairings);
+    renderWorkspaceSuggestions(session);
     renderTranscript(session, approval);
     renderLogs(session.logs);
     syncThreadSelection();
@@ -254,6 +257,7 @@ export function createSessionRenderer({
 
   function renderSessionUnavailable(message) {
     renderOverviewState(null, message);
+    renderWorkspaceSuggestions(null);
     renderHeaderModelBadge(null);
     statusBadge.textContent = "Offline";
     statusBadge.className = "status-badge status-badge-offline";
@@ -277,6 +281,7 @@ export function createSessionRenderer({
     cancelControllerLeaseRefresh();
     openSessionDetailsButton.disabled = true;
     renderOverviewState(null, message);
+    renderWorkspaceSuggestions(null);
     renderThreadListMessage("Sign in", "Enter RELAY_API_TOKEN to load threads.");
     renderHeaderModelBadge(null);
     statusBadge.textContent = "Sign in";
@@ -902,6 +907,7 @@ export function createSessionRenderer({
     const groups = state.threadGroups || [];
     const totalThreads = state.threads.length;
 
+    renderWorkspaceSuggestions(state.session);
     threadsCount.textContent = summarizeThreadGroups(groups);
     threadsCount.title = groups.map((group) => group.cwd).join("\n");
     resumeLatestButton.disabled = totalThreads === 0;
@@ -943,6 +949,27 @@ export function createSessionRenderer({
         state.threadHistoryScrollTop = threadsList.scrollTop;
       }
     });
+  }
+
+  function renderWorkspaceSuggestions(session) {
+    if (!workspaceSuggestionsList) {
+      return;
+    }
+
+    const suggestions = selectWorkspaceSuggestionsModel({
+      session,
+      selectedCwd: state.selectedCwd,
+      threads: state.threads || [],
+    });
+
+    workspaceSuggestionsList.replaceChildren(
+      ...suggestions.map((suggestion) => {
+        const option = document.createElement("option");
+        option.value = suggestion.cwd;
+        option.label = suggestion.label || workspaceBasename(suggestion.cwd);
+        return option;
+      })
+    );
   }
 
   function renderThreadListMessage(countLabel, message) {

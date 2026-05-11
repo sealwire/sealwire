@@ -100,3 +100,74 @@ async fn duplicate_peer_ids_are_rejected_per_channel() {
         .await
         .expect("same peer id in another channel should work");
 }
+
+#[tokio::test]
+async fn targeted_messages_publish_only_to_listed_peers() {
+    let state = BrokerState::default();
+    let mut surface_a = state
+        .join("room-a", "surface-a", PeerRole::Surface, None)
+        .await
+        .expect("surface a should join");
+    let mut surface_b = state
+        .join("room-a", "surface-b", PeerRole::Surface, None)
+        .await
+        .expect("surface b should join");
+    let mut surface_c = state
+        .join("room-a", "surface-c", PeerRole::Surface, None)
+        .await
+        .expect("surface c should join");
+    let mut relay = state
+        .join("room-a", "relay-1", PeerRole::Relay, None)
+        .await
+        .expect("relay should join");
+
+    drain_presence(&mut surface_a.receiver).await;
+    drain_presence(&mut surface_b.receiver).await;
+    drain_presence(&mut surface_c.receiver).await;
+    drain_presence(&mut relay.receiver).await;
+
+    state
+        .publish(
+            "room-a",
+            "relay-1",
+            json!({
+                "kind": "targeted_messages",
+                "messages": [
+                    {
+                        "target_peer_id": "surface-a",
+                        "payload": {"kind": "encrypted_transcript_delta", "value": 1}
+                    },
+                    {
+                        "target_peer_id": "surface-c",
+                        "payload": {"kind": "encrypted_transcript_delta", "value": 3}
+                    }
+                ]
+            }),
+        )
+        .await
+        .expect("targeted publish should succeed");
+
+    assert_eq!(
+        surface_a.receiver.recv().await,
+        Some(ServerMessage::Message {
+            channel_id: "room-a".to_string(),
+            from_peer_id: "relay-1".to_string(),
+            from_role: PeerRole::Relay,
+            payload: json!({"kind": "encrypted_transcript_delta", "value": 1}),
+        })
+    );
+    assert_eq!(
+        surface_c.receiver.recv().await,
+        Some(ServerMessage::Message {
+            channel_id: "room-a".to_string(),
+            from_peer_id: "relay-1".to_string(),
+            from_role: PeerRole::Relay,
+            payload: json!({"kind": "encrypted_transcript_delta", "value": 3}),
+        })
+    );
+    assert!(surface_b.receiver.try_recv().is_err());
+}
+
+async fn drain_presence(receiver: &mut tokio::sync::mpsc::UnboundedReceiver<ServerMessage>) {
+    while matches!(receiver.try_recv(), Ok(ServerMessage::Presence { .. })) {}
+}

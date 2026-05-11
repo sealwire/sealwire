@@ -154,6 +154,7 @@ test("renderEntryMarkup keeps empty reasoning entries on a single status line", 
 
   assert.match(markup, /Reasoning/);
   assert.match(markup, /completed/);
+  assert.match(markup, /message-card-reasoning-empty/);
   assert.doesNotMatch(markup, /\(empty\)/);
   assert.doesNotMatch(markup, /message-body/);
 });

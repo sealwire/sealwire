@@ -133,16 +133,29 @@ export function SessionPanel({
       "Workspace"
     ),
     h(
-        "div",
-        { className: "workspace-picker" },
-        h("input", {
-          id: "remote-cwd-input",
-          onChange: (event) => onFieldChange?.("cwd", event.target.value),
-          placeholder: "/path/to/project",
-          ref: cwdInputRef,
-          type: "text",
+      "div",
+      { className: "workspace-picker" },
+      h("input", {
+        autoComplete: "off",
+        id: "remote-cwd-input",
+        list: "remote-workspace-suggestions",
+        onChange: (event) => onFieldChange?.("cwd", event.target.value),
+        placeholder: "/path/to/project",
+        ref: cwdInputRef,
+        type: "text",
         value: model.fields.cwd,
-      })
+      }),
+      h(
+        "datalist",
+        { id: "remote-workspace-suggestions" },
+        ...(model.workspaceSuggestions || []).map((suggestion) =>
+          h("option", {
+            key: suggestion.cwd,
+            label: suggestion.label,
+            value: suggestion.cwd,
+          })
+        )
+      )
     ),
     h(
       "button",

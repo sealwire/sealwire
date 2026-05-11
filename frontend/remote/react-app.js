@@ -14,6 +14,7 @@ import {
   buildReasoningEffortOptions,
   resolveReasoningEffortValue,
 } from "../shared/reasoning-efforts.js";
+import { selectWorkspaceSuggestionsModel } from "../shared/workspace-suggestions.js";
 import {
   selectDeviceChromeRenderModel,
   selectResetChromeRenderModel,
@@ -240,6 +241,11 @@ function RemoteApp() {
           },
         ],
     startPending: remoteUi.sessionStartPending,
+    workspaceSuggestions: selectWorkspaceSuggestionsModel({
+      session,
+      selectedCwd: remoteUi.sessionDraft?.cwd || "",
+      threads: currentState.threads,
+    }),
   };
   const composerModel = sessionRuntime || {
     composerDisabled: true,

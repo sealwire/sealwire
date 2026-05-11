@@ -307,6 +307,15 @@ enum OutboundBrokerPayload {
         target_peer_id: String,
         envelope: EncryptedEnvelope,
     },
+    TargetedMessages {
+        messages: Vec<TargetedBrokerMessage>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TargetedBrokerMessage {
+    target_peer_id: String,
+    payload: Box<OutboundBrokerPayload>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1470,6 +1479,22 @@ fn summarize_outbound_payload(payload: &OutboundBrokerPayload) -> String {
             "kind=encrypted_pairing_result pairing_id={} target_peer_id={}",
             pairing_id, target_peer_id
         ),
+        OutboundBrokerPayload::TargetedMessages { messages } => {
+            let inner_kinds = messages
+                .iter()
+                .map(|message| summarize_outbound_payload(&message.payload))
+                .collect::<Vec<_>>()
+                .join(";");
+            format!(
+                "kind=targeted_messages target_count={} inner={}",
+                messages.len(),
+                if inner_kinds.is_empty() {
+                    "-"
+                } else {
+                    inner_kinds.as_str()
+                }
+            )
+        }
     }
 }
 
@@ -1537,19 +1562,19 @@ async fn publish_snapshot(
             "broker session snapshot has no online surface targets"
         );
     }
+    let mut messages = Vec::new();
     for target in targets {
         let envelope = encrypt_json(&target.payload_secret, &compacted)?;
-        publish_payload(
-            sender,
-            OutboundBrokerPayload::EncryptedSessionSnapshot {
+        messages.push(TargetedBrokerMessage {
+            target_peer_id: target.peer_id.clone(),
+            payload: Box::new(OutboundBrokerPayload::EncryptedSessionSnapshot {
                 target_peer_id: target.peer_id,
                 device_id: target.device_id,
                 envelope,
-            },
-        )
-        .await
-        .map_err(|error| error.to_string())?;
+            }),
+        });
     }
+    publish_targeted_messages(sender, messages).await?;
 
     Ok(())
 }
@@ -1706,6 +1731,7 @@ async fn publish_transcript_delta(
                 "broker transcript delta has no online surface targets"
             );
         }
+        let mut messages = Vec::new();
         for target in targets {
             let envelope = encrypt_json(
                 &target.payload_secret,
@@ -1721,17 +1747,16 @@ async fn publish_transcript_delta(
                     "delta_kind": kind,
                 }),
             )?;
-            publish_payload(
-                sender,
-                OutboundBrokerPayload::EncryptedTranscriptDelta {
+            messages.push(TargetedBrokerMessage {
+                target_peer_id: target.peer_id.clone(),
+                payload: Box::new(OutboundBrokerPayload::EncryptedTranscriptDelta {
                     target_peer_id: target.peer_id,
                     device_id: target.device_id,
                     envelope,
-                },
-            )
-            .await
-            .map_err(|error| error.to_string())?;
+                }),
+            });
         }
+        publish_targeted_messages(sender, messages).await?;
     }
 
     Ok(())
@@ -1795,6 +1820,46 @@ async fn publish_payload(
         );
     }
     sender.send(Message::Text(frame_text)).await
+}
+
+async fn publish_targeted_messages(
+    sender: &mut futures_util::stream::SplitSink<BrokerSocket, Message>,
+    messages: Vec<TargetedBrokerMessage>,
+) -> Result<(), String> {
+    if messages.is_empty() {
+        return Ok(());
+    }
+
+    let mut batch = Vec::new();
+    for message in messages {
+        let mut candidate = batch.clone();
+        candidate.push(message.clone());
+        let candidate_payload = OutboundBrokerPayload::TargetedMessages {
+            messages: candidate,
+        };
+        if !batch.is_empty()
+            && frame_bytes_for_payload(&candidate_payload) > MAX_BROKER_TEXT_FRAME_BYTES
+        {
+            let payload = OutboundBrokerPayload::TargetedMessages { messages: batch };
+            publish_payload(sender, payload)
+                .await
+                .map_err(|error| error.to_string())?;
+            batch = vec![message];
+            continue;
+        }
+        batch.push(message);
+    }
+
+    if !batch.is_empty() {
+        publish_payload(
+            sender,
+            OutboundBrokerPayload::TargetedMessages { messages: batch },
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    }
+
+    Ok(())
 }
 
 fn frame_bytes_for_payload(payload: &OutboundBrokerPayload) -> usize {

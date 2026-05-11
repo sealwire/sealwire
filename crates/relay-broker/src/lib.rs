@@ -122,6 +122,34 @@ fn summarize_published_payload(payload: &serde_json::Value) -> String {
                 .map(|items| items.len())
                 .unwrap_or(0),
         ),
+        "targeted_messages" => {
+            let messages = payload
+                .get("messages")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let inner_kinds = messages
+                .iter()
+                .filter_map(|message| {
+                    message
+                        .get("payload")
+                        .and_then(|payload| payload.get("kind"))
+                        .and_then(serde_json::Value::as_str)
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                "kind=targeted_messages target_count={} inner_kinds={}",
+                messages.len(),
+                if inner_kinds.is_empty() {
+                    "-"
+                } else {
+                    inner_kinds.as_str()
+                }
+            )
+        }
         "remote_action_result" => {
             let entry_count = payload
                 .get("thread_transcript")

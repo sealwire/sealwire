@@ -135,6 +135,17 @@
   background: color-mix(in srgb, var(--msg-system-bg) 90%, var(--status-alert-text) 10%);
 }
 
+.message-card-reasoning-empty {
+  padding: 2px 0 0;
+  background: transparent;
+  border-color: transparent;
+}
+
+.message-card-reasoning-empty .message-meta {
+  margin-bottom: 0;
+  color: color-mix(in srgb, var(--text-tertiary) 84%, transparent);
+}
+
 .message-card-approval {
   border-color: var(--status-alert-text);
 }

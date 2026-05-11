@@ -141,6 +141,25 @@ impl BrokerState {
             .expect("sender should exist in room")
             .role;
 
+        if is_targeted_messages_payload(&payload) {
+            let targeted = parse_targeted_messages_payload(payload)?;
+            for message in targeted.messages {
+                if message.target_peer_id == from_peer_id {
+                    continue;
+                }
+                let Some(handle) = room.peers.get(&message.target_peer_id) else {
+                    continue;
+                };
+                let _ = handle.tx.send(ServerMessage::Message {
+                    channel_id: channel_id.to_string(),
+                    from_peer_id: from_peer_id.to_string(),
+                    from_role: sender_role,
+                    payload: message.payload,
+                });
+            }
+            return Ok(());
+        }
+
         for (peer_id, handle) in &room.peers {
             if peer_id == from_peer_id {
                 continue;
@@ -156,6 +175,36 @@ impl BrokerState {
 
         Ok(())
     }
+}
+
+#[derive(serde::Deserialize)]
+struct TargetedMessagesPayload {
+    messages: Vec<TargetedMessagePayload>,
+}
+
+#[derive(serde::Deserialize)]
+struct TargetedMessagePayload {
+    target_peer_id: String,
+    payload: serde_json::Value,
+}
+
+fn is_targeted_messages_payload(payload: &serde_json::Value) -> bool {
+    payload.get("kind").and_then(serde_json::Value::as_str) == Some("targeted_messages")
+}
+
+fn parse_targeted_messages_payload(
+    payload: serde_json::Value,
+) -> Result<TargetedMessagesPayload, String> {
+    let targeted = serde_json::from_value::<TargetedMessagesPayload>(payload)
+        .map_err(|error| format!("invalid targeted_messages payload: {error}"))?;
+    if targeted
+        .messages
+        .iter()
+        .any(|message| message.target_peer_id.is_empty())
+    {
+        return Err("invalid targeted_messages payload: target_peer_id is empty".to_string());
+    }
+    Ok(targeted)
 }
 
 impl Default for RoomState {

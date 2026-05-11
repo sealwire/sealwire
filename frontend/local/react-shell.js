@@ -57,10 +57,13 @@ function LaunchPanel() {
         "div",
         { className: "workspace-picker" },
         h("input", {
+          autoComplete: "off",
           id: "cwd-input",
+          list: "workspace-suggestions",
           placeholder: "/path/to/project or ~/project",
           type: "text",
         }),
+        h("datalist", { id: "workspace-suggestions" }),
         h("button", { className: "load-button", id: "load-directory-button", type: "submit" }, "Load")
       )
     ),

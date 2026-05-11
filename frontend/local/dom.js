@@ -55,6 +55,7 @@ export const pairedDevicesList = document.querySelector("#paired-devices-list");
 export const chatShell = document.querySelector(".chat-shell");
 export const workspaceTitle = document.querySelector("#workspace-title");
 export const workspaceSubtitle = document.querySelector("#workspace-subtitle");
+export const workspaceSuggestionsList = document.querySelector("#workspace-suggestions");
 export const localModelBadge = document.querySelector("#local-model-badge");
 export const statusBadge = document.querySelector("#status-badge");
 export const goConsoleHomeButton = document.querySelector("#go-console-home");
