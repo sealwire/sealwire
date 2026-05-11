@@ -5,7 +5,7 @@ const h = React.createElement;
 export function ConversationComposer({
   composerDisabled = false,
   currentDraft,
-  currentEffortValue = "medium",
+  currentEffortValue,
   currentModelValue,
   effortOptions = null,
   effortId = "remote-message-effort",

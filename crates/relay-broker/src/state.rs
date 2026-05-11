@@ -1,6 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use tokio::sync::{mpsc, Mutex};
+use tracing::{info, warn};
 
 use crate::protocol::{PeerRole, PeerSummary, PresenceKind, ServerMessage};
 
@@ -140,38 +141,111 @@ impl BrokerState {
             .get(from_peer_id)
             .expect("sender should exist in room")
             .role;
+        let outbound_payload_kind = payload_kind(&payload).to_string();
 
         if is_targeted_messages_payload(&payload) {
             let targeted = parse_targeted_messages_payload(payload)?;
+            let target_count = targeted.messages.len();
+            let inner_kinds = targeted
+                .messages
+                .iter()
+                .map(|message| payload_kind(&message.payload).to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut delivered_count = 0usize;
+            let mut skipped_sender_count = 0usize;
+            let mut missing_target_count = 0usize;
+            let mut failed_count = 0usize;
             for message in targeted.messages {
                 if message.target_peer_id == from_peer_id {
+                    skipped_sender_count += 1;
                     continue;
                 }
                 let Some(handle) = room.peers.get(&message.target_peer_id) else {
+                    missing_target_count += 1;
+                    warn!(
+                        channel_id,
+                        from_peer_id,
+                        target_peer_id = %message.target_peer_id,
+                        "broker targeted publish target is not connected"
+                    );
                     continue;
                 };
-                let _ = handle.tx.send(ServerMessage::Message {
-                    channel_id: channel_id.to_string(),
-                    from_peer_id: from_peer_id.to_string(),
-                    from_role: sender_role,
-                    payload: message.payload,
-                });
+                if handle
+                    .tx
+                    .send(ServerMessage::Message {
+                        channel_id: channel_id.to_string(),
+                        from_peer_id: from_peer_id.to_string(),
+                        from_role: sender_role,
+                        payload: message.payload,
+                    })
+                    .is_ok()
+                {
+                    delivered_count += 1;
+                } else {
+                    failed_count += 1;
+                    warn!(
+                        channel_id,
+                        from_peer_id,
+                        target_peer_id = %message.target_peer_id,
+                        "broker targeted publish receiver is closed"
+                    );
+                }
             }
+            info!(
+                channel_id,
+                from_peer_id,
+                target_count,
+                delivered_count,
+                skipped_sender_count,
+                missing_target_count,
+                failed_count,
+                inner_kinds = %inner_kinds,
+                "broker targeted publish fanout"
+            );
             return Ok(());
         }
 
+        let mut recipient_count = 0usize;
+        let mut delivered_count = 0usize;
+        let mut failed_count = 0usize;
         for (peer_id, handle) in &room.peers {
             if peer_id == from_peer_id {
                 continue;
             }
 
-            let _ = handle.tx.send(ServerMessage::Message {
-                channel_id: channel_id.to_string(),
-                from_peer_id: from_peer_id.to_string(),
-                from_role: sender_role,
-                payload: payload.clone(),
-            });
+            recipient_count += 1;
+            if handle
+                .tx
+                .send(ServerMessage::Message {
+                    channel_id: channel_id.to_string(),
+                    from_peer_id: from_peer_id.to_string(),
+                    from_role: sender_role,
+                    payload: payload.clone(),
+                })
+                .is_ok()
+            {
+                delivered_count += 1;
+            } else {
+                failed_count += 1;
+                warn!(
+                    channel_id,
+                    from_peer_id,
+                    target_peer_id = %peer_id,
+                    payload_kind = %outbound_payload_kind,
+                    "broker publish receiver is closed"
+                );
+            }
         }
+        info!(
+            channel_id,
+            from_peer_id,
+            payload_kind = %outbound_payload_kind,
+            recipient_count,
+            delivered_count,
+            failed_count,
+            "broker publish fanout"
+        );
 
         Ok(())
     }
@@ -190,6 +264,13 @@ struct TargetedMessagePayload {
 
 fn is_targeted_messages_payload(payload: &serde_json::Value) -> bool {
     payload.get("kind").and_then(serde_json::Value::as_str) == Some("targeted_messages")
+}
+
+fn payload_kind(payload: &serde_json::Value) -> &str {
+    payload
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("-")
 }
 
 fn parse_targeted_messages_payload(

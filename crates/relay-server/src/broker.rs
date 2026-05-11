@@ -51,6 +51,7 @@ const PUBLIC_RELAY_IDENTITY_SCHEMA_VERSION: u32 = 1;
 const SNAPSHOT_PUBLISH_MIN_INTERVAL_MILLIS: u64 = 500;
 const BROKER_RATE_LIMIT_SNAPSHOT_COOLDOWN_SECS: u64 = 5;
 const TRANSCRIPT_DELTA_PUBLISH_WINDOW_MILLIS: u64 = 100;
+const BROKER_MESSAGE_HANDLER_SLOW_WARN_MILLIS: u128 = 1_000;
 const DEFAULT_PUBLIC_RELAY_REGISTRATION_FILE: &str = ".agent-relay/public-broker-registration.json";
 const DEFAULT_PUBLIC_RELAY_IDENTITY_FILE: &str = ".agent-relay/public-broker-identity.json";
 pub(crate) const RELAY_BROKER_IDENTITY_PATH_ENV: &str = "RELAY_BROKER_IDENTITY_PATH";
@@ -982,7 +983,18 @@ async fn run_broker_session(
                 };
                 let frame = frame.map_err(|error| format!("broker receive failed: {error}"))?;
                 if let Some(message) = decode_server_frame(frame)? {
-                    match handle_server_message(state, &mut sender, message).await? {
+                    let message_name = server_message_name(&message);
+                    let started_at = Instant::now();
+                    let outcome = handle_server_message(state, &mut sender, message).await?;
+                    let elapsed_ms = started_at.elapsed().as_millis();
+                    if elapsed_ms >= BROKER_MESSAGE_HANDLER_SLOW_WARN_MILLIS {
+                        warn!(
+                            message = message_name,
+                            elapsed_ms,
+                            "broker server message handling was slow"
+                        );
+                    }
+                    match outcome {
                         ServerMessageOutcome::Continue => {}
                         ServerMessageOutcome::RateLimited => {
                             let deadline = Instant::now()
@@ -1869,17 +1881,30 @@ fn frame_bytes_for_payload(payload: &OutboundBrokerPayload) -> usize {
 fn frame_text_for_payload(payload: &OutboundBrokerPayload) -> String {
     let mut payload_value =
         serde_json::to_value(payload.clone()).expect("broker payload should serialize");
-    if let Some(object) = payload_value.as_object_mut() {
-        object.insert(
-            "protocol_version".to_string(),
-            Value::from(RELAY_PROTOCOL_VERSION),
-        );
-    }
+    add_relay_payload_protocol_version(&mut payload_value);
     let frame = ClientMessage::Publish {
         protocol_version: BROKER_PROTOCOL_VERSION,
         payload: payload_value,
     };
     serde_json::to_string(&frame).expect("broker client frame should serialize")
+}
+
+fn add_relay_payload_protocol_version(payload: &mut Value) {
+    if let Some(object) = payload.as_object_mut() {
+        object.insert(
+            "protocol_version".to_string(),
+            Value::from(RELAY_PROTOCOL_VERSION),
+        );
+        if object.get("kind").and_then(Value::as_str) == Some("targeted_messages") {
+            if let Some(messages) = object.get_mut("messages").and_then(Value::as_array_mut) {
+                for message in messages {
+                    if let Some(inner_payload) = message.get_mut("payload") {
+                        add_relay_payload_protocol_version(inner_payload);
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn resolve_public_relay_registration_path(cwd: &Path, configured: Option<String>) -> PathBuf {

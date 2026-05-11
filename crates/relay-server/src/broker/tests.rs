@@ -486,6 +486,53 @@ fn transcript_delta_coalescing_merges_contiguous_item_updates() {
     assert_eq!(coalesced[1].delta, "!");
 }
 
+#[test]
+fn targeted_messages_inner_payloads_include_relay_protocol_version() {
+    let payload = OutboundBrokerPayload::TargetedMessages {
+        messages: vec![TargetedBrokerMessage {
+            target_peer_id: "surface-1".to_string(),
+            payload: Box::new(OutboundBrokerPayload::EncryptedTranscriptDelta {
+                target_peer_id: "surface-1".to_string(),
+                device_id: "device-1".to_string(),
+                envelope: EncryptedEnvelope {
+                    nonce: "nonce".to_string(),
+                    ciphertext: "ciphertext".to_string(),
+                },
+            }),
+        }],
+    };
+
+    let frame: serde_json::Value =
+        serde_json::from_str(&frame_text_for_payload(&payload)).expect("frame should parse");
+    let outer_payload = frame
+        .get("payload")
+        .expect("frame should contain publish payload");
+    assert_eq!(
+        outer_payload
+            .get("protocol_version")
+            .and_then(serde_json::Value::as_u64),
+        Some(RELAY_PROTOCOL_VERSION)
+    );
+    let inner_payload = outer_payload
+        .get("messages")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|messages| messages.first())
+        .and_then(|message| message.get("payload"))
+        .expect("targeted message should contain inner payload");
+    assert_eq!(
+        inner_payload
+            .get("protocol_version")
+            .and_then(serde_json::Value::as_u64),
+        Some(RELAY_PROTOCOL_VERSION)
+    );
+    assert_eq!(
+        inner_payload
+            .get("kind")
+            .and_then(serde_json::Value::as_str),
+        Some("encrypted_transcript_delta")
+    );
+}
+
 #[tokio::test]
 async fn perform_public_relay_enrollment_uses_relay_keypair_challenge_flow() {
     let control_url = spawn_public_control_mock().await;

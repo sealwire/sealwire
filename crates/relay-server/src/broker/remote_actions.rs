@@ -1,7 +1,7 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use futures_util::stream::SplitSink;
 use serde::{Deserialize, Serialize};
-use tokio::time::{sleep, Duration};
+use tokio::time::{sleep, Duration, Instant};
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{info, warn};
 
@@ -28,6 +28,8 @@ const SESSION_CONTROL_REQUIRED_ERROR: &str =
 const REMOTE_ACTION_RESULT_CHUNK_TARGET_BYTES: usize = 32_768;
 const REMOTE_ACTION_RESULT_CHUNK_MIN_BYTES: usize = 1_024;
 const REMOTE_ACTION_RESULT_CHUNK_PUBLISH_INTERVAL_MILLIS: u64 = 250;
+const REMOTE_ACTION_SLOW_WARN_MILLIS: u128 = 1_000;
+const REMOTE_ACTION_CHUNK_SLOW_WARN_MILLIS: u128 = 500;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -262,6 +264,14 @@ pub(super) async fn handle_remote_action(
         return Err("plaintext remote actions are disabled in private mode".to_string());
     }
     let action_kind = request.kind();
+    let action_started_at = Instant::now();
+    info!(
+        transport = "plaintext",
+        action = action_kind.as_str(),
+        action_id,
+        from_peer_id,
+        "broker remote action handling started"
+    );
     if remote_action_emits_info_log(action_kind) {
         state
             .push_runtime_log(
@@ -439,7 +449,26 @@ pub(super) async fn handle_remote_action(
     state
         .store_remote_action_result(&resolved_device_id, &action_id, cached.clone())
         .await;
-    replay_plain_remote_action_result(sender, from_peer_id, action_id, action_kind, cached).await
+    let replay_result =
+        replay_plain_remote_action_result(sender, from_peer_id, action_id, action_kind, cached)
+            .await;
+    let elapsed_ms = action_started_at.elapsed().as_millis();
+    if elapsed_ms >= REMOTE_ACTION_SLOW_WARN_MILLIS {
+        warn!(
+            transport = "plaintext",
+            action = action_kind.as_str(),
+            elapsed_ms,
+            "broker remote action handling was slow"
+        );
+    } else {
+        info!(
+            transport = "plaintext",
+            action = action_kind.as_str(),
+            elapsed_ms,
+            "broker remote action handling completed"
+        );
+    }
+    replay_result
 }
 
 pub(super) async fn handle_encrypted_remote_action(
@@ -515,6 +544,15 @@ pub(super) async fn handle_encrypted_remote_action(
             return Ok(());
         }
     };
+    let action_started_at = Instant::now();
+    info!(
+        transport = "encrypted",
+        action = action_kind.as_str(),
+        action_id,
+        from_peer_id,
+        device_id,
+        "broker remote action handling started"
+    );
     if remote_action_emits_info_log(action_kind) {
         state
             .push_runtime_log(
@@ -656,7 +694,7 @@ pub(super) async fn handle_encrypted_remote_action(
         .store_remote_action_result(&device_id, &action_id, cached.clone())
         .await;
 
-    match replay_encrypted_remote_action_result(
+    let replay_result = replay_encrypted_remote_action_result(
         state,
         sender,
         from_peer_id,
@@ -665,8 +703,24 @@ pub(super) async fn handle_encrypted_remote_action(
         action_kind,
         cached,
     )
-    .await
-    {
+    .await;
+    let elapsed_ms = action_started_at.elapsed().as_millis();
+    if elapsed_ms >= REMOTE_ACTION_SLOW_WARN_MILLIS {
+        warn!(
+            transport = "encrypted",
+            action = action_kind.as_str(),
+            elapsed_ms,
+            "broker remote action handling was slow"
+        );
+    } else {
+        info!(
+            transport = "encrypted",
+            action = action_kind.as_str(),
+            elapsed_ms,
+            "broker remote action handling completed"
+        );
+    }
+    match replay_result {
         Ok(()) => Ok(()),
         Err(publish_error) if publish_error.contains("device is not paired") => {
             state
@@ -1158,10 +1212,23 @@ async fn publish_remote_action_result_chunks(
     error_context: &str,
 ) -> Result<(), String> {
     let chunk_count = chunk_payloads.len();
+    info!(
+        chunk_count,
+        publish_interval_ms = REMOTE_ACTION_RESULT_CHUNK_PUBLISH_INTERVAL_MILLIS,
+        "publishing broker remote action result chunks"
+    );
     for (index, payload) in chunk_payloads.into_iter().enumerate() {
+        let chunk_started_at = Instant::now();
         publish_payload(sender, payload)
             .await
             .map_err(|error| format!("{error_context} publish failed: {error}"))?;
+        let elapsed_ms = chunk_started_at.elapsed().as_millis();
+        if elapsed_ms >= REMOTE_ACTION_CHUNK_SLOW_WARN_MILLIS {
+            warn!(
+                chunk_index = index,
+                chunk_count, elapsed_ms, "broker remote action result chunk publish was slow"
+            );
+        }
         if index + 1 < chunk_count {
             sleep(Duration::from_millis(
                 REMOTE_ACTION_RESULT_CHUNK_PUBLISH_INTERVAL_MILLIS,
