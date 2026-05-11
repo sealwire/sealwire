@@ -193,7 +193,18 @@ export function buildHydratedTranscriptProgress(state) {
     return null;
   }
 
-  return buildHydratedTranscriptSnapshot(state, snapshot);
+  const hydrated = buildHydratedTranscriptSnapshot(state, snapshot);
+  if (!hydrated) return null;
+
+  if (state.session) {
+    return {
+      ...state.session,
+      transcript: hydrated.transcript,
+      transcript_truncated: hydrated.transcript_truncated,
+    };
+  }
+
+  return hydrated;
 }
 
 function buildHydratedTranscriptSnapshot(
@@ -296,7 +307,7 @@ function selectTranscriptText(existingText, incomingText) {
   if (existingText == null) {
     return incomingText;
   }
-  if (looksTruncated(incomingText) && existingText.length > incomingText.length) {
+  if (looksTruncated(incomingText) && existingText.length >= incomingText.length) {
     return existingText;
   }
   return incomingText.length >= existingText.length ? incomingText : existingText;

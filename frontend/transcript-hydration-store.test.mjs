@@ -164,3 +164,46 @@ test("buildHydratedTranscriptProgress still merges history when live revision ha
   );
   assert.match(progress.transcript.at(-1).text, /passed passed/);
 });
+
+test("buildHydratedTranscriptProgress preserves live session metadata", () => {
+  const state = hydratedState({
+    session: {
+      active_thread_id: "thread-1",
+      transcript_revision: 20,
+      pending_approvals: [{ request_id: "approval-1" }],
+    },
+    transcriptHydrationBaseSnapshot: {
+      active_thread_id: "thread-1",
+      active_turn_id: "turn-3",
+      transcript_revision: 10,
+      transcript_truncated: true,
+      transcript: [
+        {
+          item_id: "item-3",
+          kind: "command",
+          text: "cargo test\npassed ...",
+          status: "running",
+          turn_id: "turn-3",
+          tool: null,
+        },
+      ],
+    },
+  });
+
+  const progress = buildHydratedTranscriptProgress(state);
+
+  assert.equal(progress.pending_approvals[0].request_id, "approval-1");
+  assert.equal(progress.transcript_revision, 20);
+});
+
+test("buildHydratedTranscriptProgress returns null when thread ids differ", () => {
+  const state = hydratedState({
+    session: {
+      active_thread_id: "thread-2",
+    },
+  });
+
+  const progress = buildHydratedTranscriptProgress(state);
+
+  assert.equal(progress, null);
+});
