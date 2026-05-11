@@ -63,8 +63,9 @@ import {
 } from "./transcript/details.js";
 import {
   applyTranscriptScrollMode,
-  computeTranscriptScrollPosition,
+  captureTranscriptScrollSnapshot,
   deriveTranscriptScrollMode,
+  restoreTranscriptScrollPosition,
 } from "./transcript-scroll.js";
 import { useRemoteSessionRuntime } from "./use-remote-session-runtime.js";
 import {
@@ -1156,27 +1157,19 @@ function RemoteTranscriptPanel({
     }
 
     const previous = previousRenderRef.current;
-    const previousScrollTop = transcript.scrollTop || 0;
-    const previousScrollHeight = transcript.scrollHeight || 0;
-    const nextPosition = computeTranscriptScrollPosition({
-      clientHeight: transcript.clientHeight || 0,
+    restoreTranscriptScrollPosition({
       currentMode: currentState.transcriptScrollMode,
       nextEntries: entries,
-      nextScrollHeight: transcript.scrollHeight || 0,
       nextThreadId: session?.active_thread_id || null,
-      previousEntries: previous.entries,
-      previousScrollHeight,
-      previousScrollTop,
-      previousThreadId: previous.activeThreadId,
+      previousSnapshot: previous,
+      scrollElement: transcript,
     });
-    if (Math.abs((transcript.scrollTop || 0) - nextPosition.scrollTop) > 1) {
-      transcript.scrollTop = nextPosition.scrollTop;
-    }
 
-    previousRenderRef.current = {
-      activeThreadId: session?.active_thread_id || null,
+    previousRenderRef.current = captureTranscriptScrollSnapshot({
       entries,
-    };
+      scrollElement: transcript,
+      threadId: session?.active_thread_id || null,
+    });
     return () => {
       setRemoteTranscriptElement(null);
     };

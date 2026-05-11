@@ -19,6 +19,7 @@ export function openSessionStream({
   fetchImpl = globalThis.fetch,
   onOpen = () => {},
   onSession = () => {},
+  onEvent = () => {},
   onError = () => {},
 } = {}) {
   if (typeof fetchImpl !== "function") {
@@ -63,12 +64,12 @@ export function openSessionStream({
           break;
         }
         buffer += decoder.decode(value, { stream: true });
-        buffer = dispatchBufferedEvents(buffer, onSession);
+        buffer = dispatchBufferedEvents(buffer, { onEvent, onSession });
       }
 
       if (!closed) {
         buffer += decoder.decode();
-        dispatchBufferedEvents(`${buffer}\n\n`, onSession);
+        dispatchBufferedEvents(`${buffer}\n\n`, { onEvent, onSession });
         throw new Error("session stream connection ended");
       }
     } catch (error) {
@@ -91,7 +92,7 @@ export function openSessionStream({
   };
 }
 
-function dispatchBufferedEvents(buffer, onSession) {
+function dispatchBufferedEvents(buffer, handlers) {
   const normalized = buffer.replaceAll("\r\n", "\n").replaceAll("\r", "\n");
   let cursor = 0;
 
@@ -103,11 +104,11 @@ function dispatchBufferedEvents(buffer, onSession) {
 
     const rawEvent = normalized.slice(cursor, separatorIndex);
     cursor = separatorIndex + 2;
-    dispatchEvent(rawEvent, onSession);
+    dispatchEvent(rawEvent, handlers);
   }
 }
 
-function dispatchEvent(rawEvent, onSession) {
+function dispatchEvent(rawEvent, { onEvent, onSession }) {
   if (!rawEvent.trim()) {
     return;
   }
@@ -127,7 +128,14 @@ function dispatchEvent(rawEvent, onSession) {
     }
   }
 
-  if (eventType === "session" && dataLines.length > 0) {
-    onSession(dataLines.join("\n"));
+  if (!dataLines.length) {
+    return;
   }
+
+  const data = dataLines.join("\n");
+  if (eventType === "session") {
+    onSession(data);
+    return;
+  }
+  onEvent({ data, type: eventType });
 }

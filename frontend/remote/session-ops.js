@@ -164,6 +164,65 @@ export function applyTranscriptDelta({
   renderSession(nextSession);
 }
 
+export function applyTranscriptEvent(event) {
+  const eventKind = event?.kind || event?.type || "";
+  if (!state.session) {
+    return;
+  }
+
+  if (eventKind === "transcript_entry_delta") {
+    applyTranscriptDelta({
+      ...event,
+      delta_kind: event.delta_kind || event.entry_kind || event.entry?.kind,
+      kind: event.entry_kind || event.entry?.kind,
+    });
+    return;
+  }
+
+  if (
+    eventKind === "transcript_entry_started"
+    || eventKind === "transcript_entry_completed"
+    || eventKind === "transcript_entry_patched"
+  ) {
+    applyTranscriptEntryPatch(event, {
+      defaultStatus:
+        eventKind === "transcript_entry_completed"
+          ? "completed"
+          : eventKind === "transcript_entry_started"
+            ? "running"
+            : null,
+    });
+    return;
+  }
+
+  if (eventKind === "approval_added") {
+    const approval = event.approval || event.request || null;
+    if (!approval?.request_id) {
+      return;
+    }
+    applySessionMetadataPatch({
+      pending_approvals: upsertApproval(state.session.pending_approvals || [], approval),
+    });
+    return;
+  }
+
+  if (eventKind === "approval_resolved") {
+    const requestId = event.request_id || event.approval?.request_id || null;
+    if (!requestId) {
+      return;
+    }
+    applySessionMetadataPatch({
+      pending_approvals: (state.session.pending_approvals || [])
+        .filter((approval) => approval?.request_id !== requestId),
+    });
+    return;
+  }
+
+  if (eventKind === "session_meta_updated") {
+    applySessionMetadataPatch(event.session || event.patch || event);
+  }
+}
+
 export function applySessionSnapshot(snapshot) {
   if (typeof window !== "undefined" && typeof window.__snapshotCount === "number") {
     window.__snapshotCount++;
@@ -215,6 +274,136 @@ function shouldAcceptSessionSnapshot(snapshot) {
   const incomingRevision = numericRevision(snapshot.transcript_revision);
   const currentRevision = numericRevision(state.session?.transcript_revision);
   return incomingRevision == null || currentRevision == null || incomingRevision >= currentRevision;
+}
+
+function applyTranscriptEntryPatch(event, { defaultStatus = null } = {}) {
+  const currentSession = state.session;
+  if (!currentSession) {
+    return;
+  }
+  const currentThreadId = currentSession.active_thread_id || null;
+  const eventThreadId = event.thread_id || event.active_thread_id || event.entry?.thread_id || null;
+  if (eventThreadId && currentThreadId && eventThreadId !== currentThreadId) {
+    return;
+  }
+  if (!shouldAcceptTranscriptRevision(event)) {
+    return;
+  }
+
+  const incoming = event.entry || {
+    item_id: event.item_id,
+    entry_seq: event.entry_seq,
+    kind: event.entry_kind || event.kind,
+    status: event.status,
+    text: event.text,
+    tool: event.tool,
+    turn_id: event.turn_id,
+  };
+  const itemId = incoming.item_id || event.item_id;
+  if (!itemId || !Array.isArray(currentSession.transcript)) {
+    return;
+  }
+
+  const entryPatch = {
+    ...incoming,
+    item_id: itemId,
+    kind: incoming.kind || event.entry_kind
+      ? normalizeTranscriptEventEntryKind(incoming.kind || event.entry_kind)
+      : null,
+    status: incoming.status || defaultStatus || "completed",
+    turn_id: incoming.turn_id || event.turn_id || null,
+  };
+  const entryIndex = currentSession.transcript.findIndex((entry) => entry.item_id === itemId);
+  const nextTranscript = entryIndex >= 0
+    ? currentSession.transcript.map((entry, index) => {
+        if (index !== entryIndex) {
+          return entry;
+        }
+        return {
+          ...entry,
+          ...entryPatch,
+          kind: entryPatch.kind || entry.kind || "agent_text",
+          text: entryPatch.text ?? entry.text ?? null,
+          tool: entryPatch.tool ?? entry.tool ?? null,
+          turn_id: entryPatch.turn_id || entry.turn_id || null,
+        };
+      })
+    : [
+        ...currentSession.transcript,
+        {
+          text: entryPatch.text ?? "",
+          tool: entryPatch.tool ?? null,
+          ...entryPatch,
+          kind: entryPatch.kind || "agent_text",
+        },
+      ];
+
+  const nextSession = {
+    ...currentSession,
+    transcript: nextTranscript,
+  };
+  const eventRevision = numericRevision(event.revision ?? event.transcript_revision);
+  if (eventRevision != null) {
+    nextSession.transcript_revision = eventRevision;
+  }
+  if (Number.isSafeInteger(event.server_time)) {
+    nextSession.server_time = event.server_time;
+  }
+  renderSession(nextSession);
+}
+
+function applySessionMetadataPatch(patch) {
+  if (!state.session || !patch) {
+    return;
+  }
+  const {
+    kind: _kind,
+    type: _type,
+    transcript: _transcript,
+    transcript_truncated: _transcriptTruncated,
+    ...metadata
+  } = patch;
+  renderSession({
+    ...state.session,
+    ...metadata,
+    transcript: state.session.transcript,
+    transcript_truncated: state.session.transcript_truncated,
+  });
+}
+
+function shouldAcceptTranscriptRevision(event) {
+  const currentRevision = numericRevision(state.session?.transcript_revision);
+  const eventBaseRevision = numericRevision(event.base_revision);
+  const eventRevision = numericRevision(event.revision ?? event.transcript_revision);
+  if (eventRevision != null && currentRevision != null && eventRevision < currentRevision) {
+    return false;
+  }
+  return !(eventBaseRevision != null && currentRevision != null && eventBaseRevision !== currentRevision);
+}
+
+function normalizeTranscriptEventEntryKind(kind) {
+  if (
+    kind === "user_text"
+    || kind === "agent_text"
+    || kind === "command"
+    || kind === "tool_call"
+    || kind === "reasoning"
+  ) {
+    return kind;
+  }
+  return transcriptDeltaKindToEntryKind(kind || "agent_text");
+}
+
+function upsertApproval(approvals, incoming) {
+  const existingIndex = approvals.findIndex(
+    (approval) => approval?.request_id === incoming.request_id
+  );
+  if (existingIndex === -1) {
+    return [...approvals, incoming];
+  }
+  return approvals.map((approval, index) =>
+    index === existingIndex ? { ...approval, ...incoming } : approval
+  );
 }
 
 function numericRevision(value) {

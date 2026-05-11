@@ -1413,6 +1413,96 @@ test("applySessionSnapshot ignores stale snapshots for the active thread", async
   assert.equal(state.session.transcript[0].text, "fresh");
 });
 
+test("applyTranscriptEvent patches entries without replacing visible transcript", async () => {
+  activeBrowser || installBrowserStubs();
+
+  const { state } = await import("./state.js");
+  const { applyTranscriptEvent } = await import("./session-ops.js");
+
+  state.session = {
+    active_thread_id: "thread-1",
+    transcript_revision: 7,
+    transcript: [
+      {
+        item_id: "item-1",
+        kind: "user_text",
+        status: "completed",
+        text: "older question",
+        turn_id: "turn-1",
+        tool: null,
+      },
+      {
+        item_id: "item-2",
+        kind: "command",
+        status: "running",
+        text: "npm test",
+        turn_id: "turn-2",
+        tool: null,
+      },
+    ],
+  };
+
+  applyTranscriptEvent({
+    kind: "transcript_entry_completed",
+    thread_id: "thread-1",
+    revision: 8,
+    item_id: "item-2",
+    entry_kind: "command",
+    status: "completed",
+    text: "npm test\npassed",
+    turn_id: "turn-2",
+  });
+
+  assert.deepEqual(
+    state.session.transcript.map((entry) => entry.item_id),
+    ["item-1", "item-2"]
+  );
+  assert.equal(state.session.transcript[1].status, "completed");
+  assert.equal(state.session.transcript[1].text, "npm test\npassed");
+  assert.equal(state.session.transcript_revision, 8);
+});
+
+test("applyTranscriptEvent updates approvals as metadata only", async () => {
+  activeBrowser || installBrowserStubs();
+
+  const { state } = await import("./state.js");
+  const { applyTranscriptEvent } = await import("./session-ops.js");
+
+  state.session = {
+    active_thread_id: "thread-1",
+    transcript: [
+      {
+        item_id: "item-1",
+        kind: "agent_text",
+        status: "completed",
+        text: "visible history",
+        turn_id: "turn-1",
+        tool: null,
+      },
+    ],
+    pending_approvals: [],
+  };
+
+  applyTranscriptEvent({
+    kind: "approval_added",
+    approval: {
+      request_id: "approval-1",
+      summary: "Run command",
+    },
+  });
+
+  assert.equal(state.session.pending_approvals[0].request_id, "approval-1");
+  assert.equal(state.session.transcript[0].text, "visible history");
+
+  applyTranscriptEvent({
+    kind: "approval_resolved",
+    request_id: "approval-1",
+  });
+
+  assert.deepEqual(state.session.pending_approvals, []);
+  assert.equal(state.session.transcript[0].text, "visible history");
+});
+
 test("sendHeartbeat dispatches a heartbeat when the current device holds control", async () => {
   const browser = activeBrowser || installBrowserStubs();
 

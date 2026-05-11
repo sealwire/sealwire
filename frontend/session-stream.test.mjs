@@ -79,3 +79,49 @@ test("session stream surfaces unauthorized errors for expired local auth", async
   assert.equal(observedError?.code, "unauthorized");
   assert.match(observedError?.message || "", /401/);
 });
+
+test("session stream dispatches typed events separately from session snapshots", async () => {
+  const observedEvents = [];
+  let observedSession = null;
+
+  const stream = openSessionStream({
+    url: sessionStreamUrl("https://relay.example.test"),
+    fetchImpl: async () => ({
+      ok: true,
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode(
+              [
+                'event: transcript_entry_completed',
+                'data: {"item_id":"item-1","status":"completed"}',
+                "",
+                'event: session',
+                'data: {"current_status":"idle"}',
+                "",
+                "",
+              ].join("\n")
+            )
+          );
+          controller.close();
+        },
+      }),
+    }),
+    onEvent(event) {
+      observedEvents.push(event);
+    },
+    onSession(data) {
+      observedSession = JSON.parse(data);
+    },
+  });
+
+  await stream.ready;
+
+  assert.deepEqual(observedEvents, [
+    {
+      type: "transcript_entry_completed",
+      data: '{"item_id":"item-1","status":"completed"}',
+    },
+  ]);
+  assert.deepEqual(observedSession, { current_status: "idle" });
+});

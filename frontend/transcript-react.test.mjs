@@ -62,6 +62,8 @@ test("renderEntryMarkup renders typed session items safely", () => {
   assert.match(assistantMarkup, /message-card/);
   assert.doesNotMatch(assistantMarkup, /turn-123/);
   assert.match(commandMarkup, /message-card-command/);
+  assert.match(commandMarkup, /data-transcript-entry-id="cmd-1"/);
+  assert.match(commandMarkup, /data-transcript-entry-kind="command"/);
   assert.match(commandMarkup, /data-transcript-toggle="entry"/);
   assert.match(commandMarkup, /data-item-id="cmd-1"/);
   assert.match(commandMarkup, /<div class="command-preview"[^>]*>npm test<\/div>/);

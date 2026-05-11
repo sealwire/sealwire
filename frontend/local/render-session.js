@@ -61,6 +61,10 @@ import {
 } from "./react-session-panels.js";
 import { ThreadGroupList } from "../shared/thread-list-react.js";
 import { TranscriptPane } from "../shared/transcript-pane.js";
+import {
+  captureTranscriptScrollSnapshot,
+  restoreTranscriptScrollPosition,
+} from "../shared/transcript-scroll.js";
 
 const h = React.createElement;
 const reactRoots = new WeakMap();
@@ -862,16 +866,13 @@ export function createSessionRenderer({
       return;
     }
 
-    const approvalId = approval?.request_id || null;
-    const newApproval = approvalId && approvalId !== state.lastRenderedApprovalId;
-    state.lastRenderedApprovalId = approvalId;
-    const lastEntry = entries[entries.length - 1];
-    const transcriptSignature = `${entries.length}:${lastEntry?.item_id || ""}:${lastEntry?.status || ""}`;
-    const contentChanged = transcriptSignature !== state.lastTranscriptSignature;
-    state.lastTranscriptSignature = transcriptSignature;
-    const pinnedBeforeRender = !state.transcriptPreserveScroll && (
-      newApproval || (contentChanged && transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80)
-    );
+    const previousSnapshot =
+      state.localTranscriptScrollSnapshot ||
+      captureTranscriptScrollSnapshot({
+        entries: [],
+        scrollElement: transcript,
+        threadId: null,
+      });
 
     renderConversationContent(
       h(TranscriptPane, {
@@ -888,9 +889,19 @@ export function createSessionRenderer({
         },
       })
     );
-    if (pinnedBeforeRender) {
-      transcript.scrollTop = transcript.scrollHeight;
-    }
+
+    restoreTranscriptScrollPosition({
+      currentMode: state.transcriptScrollMode || "follow-latest",
+      nextEntries: entries,
+      nextThreadId: session?.active_thread_id || null,
+      previousSnapshot,
+      scrollElement: transcript,
+    });
+    state.localTranscriptScrollSnapshot = captureTranscriptScrollSnapshot({
+      entries,
+      scrollElement: transcript,
+      threadId: session?.active_thread_id || null,
+    });
   }
 
   function renderThreads() {

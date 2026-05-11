@@ -28,11 +28,13 @@ const REMOTE_ACTION_TIMEOUT_MS = 15_000;
 let onApplySessionSnapshot = () => {};
 let onSyncRemoteSnapshot = async () => {};
 let onApplyTranscriptDelta = () => {};
+let onApplyTranscriptEvent = () => {};
 
 export function configureRemoteActions(handlers) {
   onApplySessionSnapshot = handlers.onApplySessionSnapshot || onApplySessionSnapshot;
   onSyncRemoteSnapshot = handlers.onSyncRemoteSnapshot || onSyncRemoteSnapshot;
   onApplyTranscriptDelta = handlers.onApplyTranscriptDelta || onApplyTranscriptDelta;
+  onApplyTranscriptEvent = handlers.onApplyTranscriptEvent || onApplyTranscriptEvent;
 }
 
 export async function handleRemoteBrokerPayload(payload) {
@@ -45,6 +47,16 @@ export async function handleRemoteBrokerPayload(payload) {
 
   if (kind === "encrypted_transcript_delta") {
     await handleEncryptedTranscriptDelta(payload);
+    return;
+  }
+
+  if (isTranscriptEventKind(kind)) {
+    onApplyTranscriptEvent(payload);
+    return;
+  }
+
+  if (kind === "encrypted_transcript_event") {
+    await handleEncryptedTranscriptEvent(payload);
     return;
   }
 
@@ -306,6 +318,20 @@ async function handleEncryptedTranscriptDelta(payload) {
   onApplyTranscriptDelta(delta);
 }
 
+async function handleEncryptedTranscriptEvent(payload) {
+  if (
+    payload.target_peer_id !== state.socketPeerId ||
+    payload.device_id !== state.remoteAuth?.deviceId
+  ) {
+    logIgnoredEncryptedPayload("encrypted_transcript_event", payload);
+    return;
+  }
+
+  logAcceptedEncryptedPayload("encrypted_transcript_event", payload);
+  const event = await decryptPayloadWithDeviceTokens(payload.envelope);
+  onApplyTranscriptEvent(event);
+}
+
 async function handleEncryptedRemoteActionResult(payload) {
   if (
     payload.target_peer_id !== state.socketPeerId ||
@@ -387,7 +413,17 @@ function logDecryptedTranscriptDelta(delta) {
 }
 
 function isHighVolumeEncryptedPayloadKind(kind) {
-  return kind === "encrypted_transcript_delta";
+  return kind === "encrypted_transcript_delta" || kind === "encrypted_transcript_event";
+}
+
+function isTranscriptEventKind(kind) {
+  return kind === "session_meta_updated"
+    || kind === "transcript_entry_started"
+    || kind === "transcript_entry_delta"
+    || kind === "transcript_entry_completed"
+    || kind === "transcript_entry_patched"
+    || kind === "approval_added"
+    || kind === "approval_resolved";
 }
 
 function isVerboseBrokerLoggingEnabled() {

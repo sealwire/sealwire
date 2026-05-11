@@ -52,6 +52,15 @@ function commandExpandKey(itemId) {
   return itemId ? `command:${itemId}` : "";
 }
 
+function transcriptEntryDomAttrs(entry, className) {
+  const itemId = entry?.item_id || entry?.id || "";
+  return {
+    className,
+    ...(itemId ? { "data-transcript-entry-id": itemId } : {}),
+    ...(entry?.kind ? { "data-transcript-entry-kind": entry.kind } : {}),
+  };
+}
+
 function resolveTranscriptDetailEntry(entry, options) {
   if (!entry?.item_id || !options?.detailEntries) {
     return null;
@@ -110,7 +119,7 @@ function ExpandableBlock({
 function UserEntry({ entry }) {
   return h(
     "article",
-    { className: "chat-message chat-message-user" },
+    transcriptEntryDomAttrs(entry, "chat-message chat-message-user"),
     h("div", { className: "message-card" }, h("div", { className: "message-body" }, entry.text || "(empty)"))
   );
 }
@@ -118,7 +127,7 @@ function UserEntry({ entry }) {
 function AgentEntry({ entry }) {
   return h(
     "article",
-    { className: "chat-message chat-message-assistant" },
+    transcriptEntryDomAttrs(entry, "chat-message chat-message-assistant"),
     h("div", { className: "message-avatar" }, "C"),
     h("div", { className: "message-card" }, h("div", { className: "message-body" }, entry.text || "(empty)"))
   );
@@ -135,7 +144,7 @@ function CommandEntry({ entry, options = null }) {
 
   return h(
     "article",
-    { className: "chat-message chat-message-system" },
+    transcriptEntryDomAttrs(entry, "chat-message chat-message-system"),
     h(
       "div",
       { className: "message-card message-card-system message-card-command" },
@@ -169,7 +178,7 @@ function ReasoningEntry({ entry }) {
   const hasText = Boolean(String(entry.text || "").trim());
   return h(
     "article",
-    { className: "chat-message chat-message-system" },
+    transcriptEntryDomAttrs(entry, "chat-message chat-message-system"),
     h(
       "div",
       {
@@ -791,7 +800,7 @@ function ToolEntry({ entry, options = null }) {
 
   return h(
     "article",
-    { className: "chat-message chat-message-system" },
+    transcriptEntryDomAttrs(entry, "chat-message chat-message-system"),
     h(
       "div",
       { className: "message-card message-card-system message-card-tool" },
@@ -885,7 +894,7 @@ function ToolEntry({ entry, options = null }) {
 function FallbackEntry({ entry }) {
   return h(
     "article",
-    { className: "chat-message chat-message-system" },
+    transcriptEntryDomAttrs(entry, "chat-message chat-message-system"),
     h(
       "div",
       { className: "message-card message-card-system" },
@@ -929,7 +938,10 @@ export function ApprovalCard({ approval, options = null }) {
 
   return h(
     "article",
-    { className: "chat-message chat-message-system" },
+    {
+      className: "chat-message chat-message-system",
+      ...(approval.request_id ? { "data-approval-id": approval.request_id } : {}),
+    },
     h(
       "div",
       { className: "message-card message-card-approval" },

@@ -651,6 +651,77 @@ test("handleRemoteBrokerPayload routes transcript_delta to onApplyTranscriptDelt
   assert.equal(received[0].delta_kind, "agent_text");
 });
 
+test("handleRemoteBrokerPayload routes typed transcript events", async () => {
+  installBrowserStubs();
+
+  const { configureRemoteActions, handleRemoteBrokerPayload } = await import("./actions.js");
+
+  const received = [];
+  configureRemoteActions({
+    onApplyTranscriptEvent: (event) => received.push(event),
+  });
+
+  await handleRemoteBrokerPayload({
+    kind: "transcript_entry_completed",
+    thread_id: "thread-1",
+    item_id: "item-1",
+    status: "completed",
+  });
+
+  assert.equal(received.length, 1);
+  assert.equal(received[0].kind, "transcript_entry_completed");
+  assert.equal(received[0].item_id, "item-1");
+});
+
+test("handleRemoteBrokerPayload decrypts encrypted typed transcript events", async () => {
+  installBrowserStubs();
+
+  const { encryptJson } = await import("./crypto.js");
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { configureRemoteActions, handleRemoteBrokerPayload } = await import("./actions.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-1",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "private",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: null,
+    sessionClaimExpiresAt: null,
+  });
+  seedSocketState(state, {
+    socketPeerId: "surface-peer-1",
+  });
+
+  const received = [];
+  configureRemoteActions({
+    onApplyTranscriptEvent: (event) => received.push(event),
+  });
+
+  const envelope = await encryptJson("payload-secret-1", {
+    kind: "approval_resolved",
+    request_id: "approval-1",
+  });
+
+  await handleRemoteBrokerPayload({
+    kind: "encrypted_transcript_event",
+    target_peer_id: "surface-peer-1",
+    device_id: "device-1",
+    envelope,
+  });
+
+  assert.equal(received.length, 1);
+  assert.equal(received[0].kind, "approval_resolved");
+  assert.equal(received[0].request_id, "approval-1");
+});
+
 test("handleRemoteBrokerPayload decrypts encrypted transcript deltas with delta_kind", async () => {
   installBrowserStubs();
 
