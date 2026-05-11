@@ -203,43 +203,8 @@ function OverviewStrip() {
     { "aria-label": "Relay overview", className: "overview-strip", id: "overview-strip" },
     h(
       "article",
-      { className: "overview-card overview-card-primary" },
-      h("p", { className: "overview-label" }, "Live Session"),
-      h(
-        "div",
-        { className: "overview-body" },
-        h(
-          "div",
-          null,
-          h("h2", { className: "overview-title", id: "overview-session-title" }, "Pick a workspace to launch"),
-          h(
-            "p",
-            { className: "overview-copy", id: "overview-session-copy" },
-            "Load a workspace, inspect relay state, and start or resume a session when you need it."
-          )
-        ),
-        h("div", { className: "overview-badges", id: "overview-session-badges" })
-      )
-    ),
-    h(
-      "article",
-      { className: "overview-card overview-card-secondary" },
-      h("p", { className: "overview-label" }, "Trust & Privacy"),
-      h(
-        "div",
-        { className: "overview-body" },
-        h(
-          "div",
-          null,
-          h("h2", { className: "overview-title", id: "overview-security-title" }, "Private by default"),
-          h(
-            "p",
-            { className: "overview-copy", id: "overview-security-copy" },
-            "Watch broker posture, paired devices, and visibility guarantees without leaving the live console."
-          )
-        ),
-        h("div", { className: "overview-badges", id: "overview-security-badges" })
-      )
+      { className: "overview-card overview-card-status" },
+      h("div", { className: "overview-status-bar", id: "overview-security-badges" })
     )
   );
 }

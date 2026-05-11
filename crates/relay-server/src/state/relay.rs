@@ -7,11 +7,11 @@ use std::collections::{HashMap, HashSet};
 use tokio::sync::watch;
 
 use crate::{
-    codex::ThreadSyncData,
     protocol::{
         ApprovalReceipt, LogEntryView, ModelOptionView, SessionSnapshot, ThreadEntriesResponse,
         ThreadEntryDetailResponse, ThreadSummaryView, ThreadTranscriptResponse, ThreadsResponse,
     },
+    provider::ThreadSyncData,
 };
 
 use super::{
@@ -73,7 +73,9 @@ pub struct RelayState {
     revision: u64,
     transcript_revision: u64,
     security: SecurityProfile,
-    pub codex_connected: bool,
+    pub provider_connected: bool,
+    pub provider_name: String,
+    pub provider_connections: HashMap<String, bool>,
     pub broker_connected: bool,
     pub broker_channel_id: Option<String>,
     pub broker_peer_id: Option<String>,
@@ -118,7 +120,9 @@ impl RelayState {
             revision: 0,
             transcript_revision: 0,
             security,
-            codex_connected: false,
+            provider_connected: false,
+            provider_name: String::new(),
+            provider_connections: HashMap::new(),
             broker_connected: false,
             broker_channel_id: None,
             broker_peer_id: None,
@@ -218,9 +222,9 @@ impl RelayState {
             revision: self.revision,
             transcript_revision: self.transcript_revision,
             server_time: unix_now(),
-            provider: "codex",
+            provider: self.provider_name.clone(),
             service_ready: true,
-            codex_connected: self.codex_connected,
+            provider_connected: self.provider_connected,
             broker_connected: self.broker_connected,
             broker_channel_id: self.broker_channel_id.clone(),
             broker_peer_id: self.broker_peer_id.clone(),
@@ -462,8 +466,14 @@ impl RelayState {
             .collect()
     }
 
-    pub fn set_connection(&mut self, connected: bool) {
-        self.codex_connected = connected;
+    pub fn set_provider_connection(&mut self, provider: &str, connected: bool) {
+        self.provider_connections
+            .insert(provider.to_string(), connected);
+        self.provider_connected = self.provider_connections.values().any(|c| *c);
+    }
+
+    pub fn set_provider_name(&mut self, name: String) {
+        self.provider_name = name;
     }
 
     pub fn set_broker_connection(&mut self, connected: bool) {

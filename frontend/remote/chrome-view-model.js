@@ -44,7 +44,7 @@ export function selectSessionChromeRenderModel(currentState, session) {
         currentState.serverConnectionState === "disconnected"
         || currentState.serverConnectionMessage
         || !currentState.socketConnected
-        || !session.codex_connected
+        || !session.provider_connected
       )
         ? { label: "Offline", tone: "offline" }
         : { label: session.current_status || "Ready", tone: "ready" },
@@ -141,7 +141,7 @@ export function selectStatusBadgeRenderModel(currentState, session = currentStat
       currentState.serverConnectionState === "disconnected"
       || currentState.serverConnectionMessage
       || !currentState.socketConnected
-      || !session.codex_connected
+      || !session.provider_connected
     ) {
       return { label: "Offline", tone: "offline" };
     }
@@ -434,7 +434,7 @@ function currentStatusLabel(currentState, session = currentState.session) {
   }
 
   if (session) {
-    if (!currentState.socketConnected || !session.codex_connected) {
+    if (!currentState.socketConnected || !session.provider_connected) {
       return "Offline";
     }
 

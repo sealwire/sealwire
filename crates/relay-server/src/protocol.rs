@@ -43,7 +43,7 @@ pub struct ErrorBody {
 pub struct HealthResponse {
     pub status: &'static str,
     pub service: &'static str,
-    pub provider: &'static str,
+    pub provider: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -79,9 +79,9 @@ pub struct SessionSnapshot {
     pub revision: u64,
     pub transcript_revision: u64,
     pub server_time: u64,
-    pub provider: &'static str,
+    pub provider: String,
     pub service_ready: bool,
-    pub codex_connected: bool,
+    pub provider_connected: bool,
     pub broker_connected: bool,
     pub broker_channel_id: Option<String>,
     pub broker_peer_id: Option<String>,
@@ -720,6 +720,7 @@ pub struct ThreadSummaryView {
     pub source: String,
     pub status: String,
     pub model_provider: String,
+    pub provider: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -818,6 +819,7 @@ pub struct StartSessionInput {
     pub sandbox: Option<String>,
     pub effort: Option<String>,
     pub device_id: Option<String>,
+    pub provider: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -827,6 +829,7 @@ pub struct ResumeSessionInput {
     pub sandbox: Option<String>,
     pub effort: Option<String>,
     pub device_id: Option<String>,
+    pub provider: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

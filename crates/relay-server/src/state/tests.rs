@@ -4,11 +4,11 @@ use std::{env, path::PathBuf};
 use tokio::sync::watch;
 
 use crate::{
-    codex::ThreadSyncData,
     protocol::{
         ApprovalReceipt, DeviceLifecycleState, LogEntryView, ModelOptionView, SessionSnapshot,
         ThreadSummaryView, ThreadsResponse, TranscriptEntryKind, TranscriptEntryView,
     },
+    provider::ThreadSyncData,
 };
 
 use super::{
@@ -146,6 +146,7 @@ fn test_thread(id: &str, cwd: &str) -> ThreadSummaryView {
         source: "codex".to_string(),
         status: "idle".to_string(),
         model_provider: "openai".to_string(),
+        provider: "codex".to_string(),
     }
 }
 
@@ -174,9 +175,9 @@ fn test_cached_remote_action_result(action_kind: &str, ok: bool) -> CachedRemote
             revision: 7,
             transcript_revision: 3,
             server_time: 11,
-            provider: "codex",
+            provider: "codex".to_string(),
             service_ready: true,
-            codex_connected: true,
+            provider_connected: true,
             broker_connected: true,
             broker_channel_id: Some("room-a".to_string()),
             broker_peer_id: Some("relay-a".to_string()),

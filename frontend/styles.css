@@ -856,6 +856,7 @@ input:focus, textarea:focus, select:focus {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
   padding: 6px 12px;
   border-radius: 999px;
   font-size: 12px;
@@ -885,9 +886,12 @@ input:focus, textarea:focus, select:focus {
 /* OVERVIEW STRIP */
 .overview-strip {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
-  padding: 20px 32px 0;
+  padding: 16px 32px 0;
+}
+
+.overview-card-status {
+  padding: 12px 16px;
 }
 
 .overview-card {
@@ -923,7 +927,6 @@ input:focus, textarea:focus, select:focus {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin-top: 16px;
 }
 .overview-badge {
   display: inline-flex;
@@ -1032,9 +1035,9 @@ input:focus, textarea:focus, select:focus {
 
 .surface-card {
   display: grid;
-  gap: 10px;
-  padding: 14px;
-  border-radius: var(--radius-md);
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
   border: 1px solid var(--border-subtle);
   background: var(--bg-base);
 }
@@ -1043,88 +1046,112 @@ input:focus, textarea:focus, select:focus {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 10px;
+  min-width: 0;
+}
+
+.surface-card-heading > div {
+  min-width: 0;
 }
 
 .surface-card-title {
   margin: 0;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--text-primary);
 }
 
 .surface-card-copy {
   margin: 0;
-  font-size: 13px;
-  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .surface-card-meta {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 6px;
 }
 
 .surface-chip {
   display: inline-flex;
   align-items: center;
-  padding: 4px 8px;
+  gap: 4px;
+  max-width: 100%;
+  padding: 2px 6px;
   border-radius: 999px;
   border: 1px solid var(--border-subtle);
   background: var(--bg-elevated);
   font-size: 11px;
   color: var(--text-secondary);
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 .surface-chip strong {
   color: var(--text-primary);
-  margin-right: 4px;
+  flex-shrink: 0;
 }
 
 .audit-item {
   display: grid;
-  gap: 6px;
-  padding: 14px;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border-subtle);
-  background: var(--bg-base);
+  gap: 4px;
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  border: none;
+  border-left: 3px solid var(--border-subtle);
+  background: color-mix(in srgb, var(--bg-base) 92%, var(--bg-surface));
 }
 
 .audit-item-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 8px;
 }
 
 .audit-item-kind {
   font-size: 11px;
   font-weight: 600;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  text-transform: capitalize;
   color: var(--text-tertiary);
 }
 
 .audit-item-time {
-  font-size: 12px;
+  font-size: 11px;
   color: var(--text-tertiary);
 }
 
 .audit-item-message {
   margin: 0;
   font-size: 13px;
-  line-height: 1.6;
+  line-height: 1.5;
   color: var(--text-secondary);
 }
 
 .audit-item.is-alert {
-  border-color: rgba(248, 113, 113, 0.35);
-  background: rgba(248, 113, 113, 0.05);
+  border-left-color: var(--status-offline-text);
+}
+
+.audit-item.is-alert .audit-item-kind {
+  color: var(--status-offline-text);
 }
 
 .audit-item.is-ready {
-  border-color: rgba(52, 211, 153, 0.35);
-  background: rgba(52, 211, 153, 0.05);
+  border-left-color: var(--status-ready-text);
+}
+
+.audit-item.is-ready .audit-item-kind {
+  color: var(--status-ready-text);
 }
 
 .chat-shell[data-view="console"] .thread-panel {
@@ -1517,8 +1544,8 @@ input:focus, textarea:focus, select:focus {
 .session-meta {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 12px;
+  gap: 6px;
+  margin-top: 8px;
 }
 
 .details-path {
@@ -1605,12 +1632,12 @@ input:focus, textarea:focus, select:focus {
 
 .details-section {
   display: grid;
-  gap: 12px;
+  gap: 8px;
 }
 
 .details-heading {
   margin: 0;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;

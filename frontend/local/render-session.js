@@ -13,11 +13,6 @@ import {
   messageInput,
   openSessionDetailsButton,
   overviewSecurityBadges,
-  overviewSecurityCopy,
-  overviewSecurityTitle,
-  overviewSessionBadges,
-  overviewSessionCopy,
-  overviewSessionTitle,
   pendingActionBanner,
   resumeLatestButton,
   sendButton,
@@ -196,7 +191,7 @@ export function createSessionRenderer({
           ? "Pairing request"
           : `${pendingPairings.length} pairing requests`;
       statusBadge.className = "status-badge status-badge-alert";
-    } else if (!session.codex_connected) {
+    } else if (!session.provider_connected) {
       statusBadge.textContent = "Offline";
       statusBadge.className = "status-badge status-badge-offline";
     } else {
@@ -377,13 +372,7 @@ export function createSessionRenderer({
     return {
       key: "local-browser",
       title: "This browser",
-      copy: hasControl
-        ? "You currently control the live session from this surface."
-        : canClaim
-          ? "No device currently owns typing control. This surface can open the thread and claim it."
-          : session?.active_thread_id
-            ? "This surface can review the live session and take over when needed."
-            : "This surface is ready to launch or resume a session locally.",
+      copy: "",
       badgeLabel: status,
       badgeClass,
       chips: [
@@ -395,13 +384,6 @@ export function createSessionRenderer({
             : state.selectedCwd
               ? workspaceBasename(state.selectedCwd)
               : "Unset",
-        },
-        {
-          label: "Thread",
-          value:
-            activeThread?.name ||
-            activeThread?.preview ||
-            (session?.active_thread_id ? shortId(session.active_thread_id) : "Standby"),
         },
       ],
     };
@@ -419,21 +401,10 @@ export function createSessionRenderer({
           ? "device-state-rejected"
           : "device-state-approved";
 
-    let copy = "Trusted remote surface remembered by this relay.";
-    if (lifecycle === "pending") {
-      copy = "Waiting for local approval before it can join the relay.";
-    } else if (lifecycle === "revoked") {
-      copy = "Revoked from this relay. It can no longer reconnect without pairing again.";
-    } else if (isController) {
-      copy = activeThread
-        ? `Currently controlling ${activeThread.name || activeThread.preview || shortId(session.active_thread_id)}.`
-        : "Currently owns control of the active relay session.";
-    }
-
     return {
       key: `device:${record.device_id}`,
       title: record.label,
-      copy,
+      copy: "",
       badgeLabel,
       badgeClass,
       chips: [
@@ -540,94 +511,14 @@ export function createSessionRenderer({
   }
 
   function renderOverviewState(session, errorMessage = null) {
-    const activeThread = resolveActiveThread(session?.active_thread_id);
-    const approval = session?.pending_approvals?.[0] || null;
-    const workspace = session?.current_cwd || state.selectedCwd || "";
-    const workspaceName = workspaceBasename(workspace);
-    const historyCount = state.threads.length;
     const pendingPairings = session?.pending_pairing_requests?.length || 0;
-    const approvedDevices = approvedDeviceCount(session);
-    const controllerState = sessionControllerState(session);
-    const viewingConversation = isViewingConversation(session);
-
-    let sessionTitle = workspace ? `Ready in ${workspaceName}` : "Pick a workspace";
-    let sessionCopy = workspace
-      ? "This relay is pointed at the current workspace. Use the live console to watch control, trust state, and the current thread."
-      : "Choose a workspace, then use this page as the local relay console for the active session.";
-    let sessionBadges = [];
 
     if (errorMessage) {
-      sessionTitle = "Relay unavailable";
-      sessionCopy = errorMessage;
-      sessionBadges = [
-        overviewBadge("Status", "Offline"),
-        ...(workspace ? [overviewBadge("Workspace", workspaceName)] : []),
-      ];
-    } else if (session?.active_thread_id) {
-      const threadTitle =
-        activeThread?.name || activeThread?.preview || shortId(session.active_thread_id);
-
-      if (approval) {
-        sessionTitle = workspace ? `Approval needed in ${workspaceName}` : "Approval required";
-        sessionCopy = approval.summary || "Codex is blocked on a decision before it can continue.";
-      } else if (controllerState === "this_device") {
-        sessionTitle = workspace ? `Ready in ${workspaceName}` : "Session ready";
-        sessionCopy = viewingConversation
-          ? `This device controls ${threadTitle}. Use the composer below to continue the live thread.`
-          : `This device controls ${threadTitle}. Open the thread page only when you want the conversation view.`;
-      } else if (controllerState === "unclaimed") {
-        sessionTitle = workspace ? `Live in ${workspaceName}` : "Live session";
-        sessionCopy = `${threadTitle} is live, but no device currently holds typing control. Open the thread only when you want to claim it.`;
-      } else {
-        sessionTitle = workspace ? `Watching ${workspaceName}` : "Session active elsewhere";
-        sessionCopy = `Another paired device controls ${threadTitle}. Use the console to monitor trust and activity until you want to take over.`;
-      }
-
-      sessionBadges = [
-        overviewBadge("Status", sessionStatusLabel(session, approval)),
-        overviewBadge("Model", session.model || "Unknown"),
-        overviewBadge("Permissions", session.approval_policy || "Unknown"),
-        overviewBadge("Control", controllerStateLabel(session)),
-      ];
-
-      if (session.reasoning_effort) {
-        sessionBadges.push(overviewBadge("Effort", session.reasoning_effort));
-      }
-    } else {
-      sessionBadges = [
-        ...(workspace ? [overviewBadge("Workspace", workspaceName)] : []),
-        overviewBadge(
-          "History",
-          historyCount > 0
-            ? `${historyCount} saved session${historyCount === 1 ? "" : "s"}`
-            : "No saved sessions"
-        ),
-        overviewBadge("Status", sessionStatusLabel(session, approval)),
-      ];
-    }
-
-    let securityTitle = "Private by default";
-    let securityCopy =
-      "Create a QR ticket when you want remote access. Broker visibility and trusted devices will surface here.";
-
-    if (errorMessage) {
-      securityTitle = "Last known relay posture";
-      securityCopy =
-        "The session snapshot could not be refreshed, so broker and device state may be stale.";
-    } else if (pendingPairings > 0) {
-      securityTitle = `${pendingPairings} pairing request${pendingPairings === 1 ? "" : "s"} waiting`;
-      securityCopy =
-        "New devices are waiting for local approval before they can join the relay.";
-    } else if (approvedDevices > 0) {
-      securityTitle = `${approvedDevices} trusted device${approvedDevices === 1 ? "" : "s"}`;
-      securityCopy = session?.broker_connected
-        ? "Remote access is live and approved devices can reconnect quickly."
-        : "Approved devices are remembered, but the broker link is currently offline.";
-    } else if (session?.broker_channel_id) {
-      securityTitle = session.broker_connected ? "Remote access ready" : "Broker link configured";
-      securityCopy = session.broker_connected
-        ? "The relay is reachable through the broker, but no extra devices are trusted yet."
-        : "A broker channel is configured, but it is not connected right now.";
+      renderReactContent(
+        overviewSecurityBadges,
+        h(OverviewBadges, { badges: [overviewBadge("Status", "Offline")] })
+      );
+      return;
     }
 
     const securityBadges = [
@@ -638,11 +529,11 @@ export function createSessionRenderer({
       overviewBadge("Devices", pairedDeviceCountLabel(session)),
     ];
 
-    renderReactContent(overviewSessionTitle, h(TextContent, null, sessionTitle));
-    renderReactContent(overviewSessionCopy, h(TextContent, null, sessionCopy));
-    renderReactContent(overviewSessionBadges, h(OverviewBadges, { badges: sessionBadges }));
-    renderReactContent(overviewSecurityTitle, h(TextContent, null, securityTitle));
-    renderReactContent(overviewSecurityCopy, h(TextContent, null, securityCopy));
+    if (session?.active_thread_id) {
+      securityBadges.push(overviewBadge("Model", session.model || "Unknown"));
+      securityBadges.push(overviewBadge("Control", controllerStateLabel(session)));
+    }
+
     renderReactContent(overviewSecurityBadges, h(OverviewBadges, { badges: securityBadges }));
   }
 
@@ -1097,7 +988,7 @@ export function createSessionRenderer({
       return "Approval required";
     }
 
-    if (!session?.codex_connected) {
+    if (!session?.provider_connected) {
       return "Offline";
     }
 
@@ -1127,14 +1018,30 @@ export function createSessionRenderer({
     }
 
     if (
+      text.includes("pairing approval required") ||
+      text.includes("approval required for")
+    ) {
+      return "alert";
+    }
+
+    if (text.includes("approval") && text.includes("requested")) {
+      return "alert";
+    }
+
+    if (
       text.includes("approved") ||
       text.includes("accepted") ||
       text.includes("started") ||
       text.includes("resumed") ||
       text.includes("connected") ||
-      text.includes("saved")
+      text.includes("saved") ||
+      (text.includes("responded to approval") && text.includes("approve"))
     ) {
       return "ready";
+    }
+
+    if (text.includes("responded to approval") && text.includes("deny")) {
+      return "alert";
     }
 
     return "neutral";

@@ -19,9 +19,9 @@ fn make_snapshot() -> SessionSnapshot {
         revision: 7,
         transcript_revision: 3,
         server_time: 11,
-        provider: "codex",
+        provider: "codex".to_string(),
         service_ready: true,
-        codex_connected: true,
+        provider_connected: true,
         broker_connected: true,
         broker_channel_id: Some("room".to_string()),
         broker_peer_id: Some("relay".to_string()),
@@ -155,6 +155,7 @@ fn threads_response_compact_for_broker_limits_serialized_size() {
                 source: "cli".to_string(),
                 status: "idle".to_string(),
                 model_provider: "openai".to_string(),
+                provider: "codex".to_string(),
             })
             .collect(),
     };
@@ -182,6 +183,7 @@ fn threads_response_compact_for_local_web_is_less_aggressive() {
                 source: "cli".to_string(),
                 status: "idle".to_string(),
                 model_provider: "openai".to_string(),
+                provider: "codex".to_string(),
             })
             .collect(),
     };
@@ -211,6 +213,7 @@ fn threads_response_compact_for_ios_surface_currently_reuses_remote_budget() {
                 source: "cli".to_string(),
                 status: "idle".to_string(),
                 model_provider: "openai".to_string(),
+                provider: "codex".to_string(),
             })
             .collect(),
     };

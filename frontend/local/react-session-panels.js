@@ -36,7 +36,7 @@ export function SurfaceCards({ surfaces = [] }) {
             "div",
             null,
             h("h3", { className: "surface-card-title" }, surface.title),
-            h("p", { className: "surface-card-copy" }, surface.copy)
+            surface.copy ? h("p", { className: "surface-card-copy" }, surface.copy) : null
           ),
           h(
             "span",
@@ -50,7 +50,11 @@ export function SurfaceCards({ surfaces = [] }) {
           ...(surface.chips || []).map((chip) =>
             h(
               "span",
-              { className: "surface-chip", key: `${chip.label}:${chip.value}` },
+              {
+                className: "surface-chip",
+                key: `${chip.label}:${chip.value}`,
+                title: `${chip.label}: ${chip.value}`,
+              },
               h("strong", null, chip.label),
               chip.value
             )

@@ -1,11 +1,13 @@
 mod auth;
 mod broker;
+mod claude;
 mod codex;
 mod codex_local;
 mod file_changes;
 mod protocol;
 #[cfg(test)]
 mod protocol_tests;
+mod provider;
 mod state;
 
 use std::{convert::Infallible, time::Duration};
@@ -151,6 +153,7 @@ async fn main() {
 fn build_router(context: AppContext, web_assets: WebAssets) -> Router {
     let router = Router::new()
         .route("/api/health", get(health))
+        .route("/api/providers", get(list_providers))
         .route(
             "/api/auth/session",
             get(auth_session_status)
@@ -276,12 +279,17 @@ fn security_headers_from_env() -> Result<SecurityHeadersConfig, String> {
     )
 }
 
-async fn health() -> Json<ApiEnvelope<HealthResponse>> {
+async fn health(State(context): State<AppContext>) -> Json<ApiEnvelope<HealthResponse>> {
+    let snapshot = context.app.snapshot().await;
     Json(ApiEnvelope::ok(HealthResponse {
         status: "ok",
         service: "relay-server",
-        provider: "codex",
+        provider: snapshot.provider,
     }))
+}
+
+async fn list_providers(State(context): State<AppContext>) -> Json<ApiEnvelope<Vec<String>>> {
+    Json(ApiEnvelope::ok(context.app.available_providers()))
 }
 
 async fn auth_session_status(
@@ -805,7 +813,7 @@ fn bad_request(message: String) -> (StatusCode, Json<ApiError>) {
 fn bad_gateway(message: String) -> (StatusCode, Json<ApiError>) {
     (
         StatusCode::BAD_GATEWAY,
-        Json(ApiError::new("codex_bridge_error", message)),
+        Json(ApiError::new("provider_bridge_error", message)),
     )
 }
 

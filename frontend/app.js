@@ -41,11 +41,6 @@ import {
   openSecurityModalBtn,
   openSessionDetailsButton,
   overviewSecurityBadges,
-  overviewSecurityCopy,
-  overviewSecurityTitle,
-  overviewSessionBadges,
-  overviewSessionCopy,
-  overviewSessionTitle,
   pairedDevicesList,
   pendingActionBanner,
   pendingPairingsList,
@@ -1064,7 +1059,7 @@ function sessionStatusLabel(session, approval) {
     return "Approval required";
   }
 
-  if (!session?.codex_connected) {
+  if (!session?.provider_connected) {
     return "Offline";
   }
 

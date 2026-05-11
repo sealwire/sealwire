@@ -1,4 +1,4 @@
-use std::{process::Stdio, sync::Arc};
+use std::{collections::HashMap, process::Stdio, sync::Arc};
 
 use tokio::{
     io::AsyncWriteExt,
@@ -9,7 +9,6 @@ use tracing::warn;
 
 use crate::{
     broker::BrokerConfig,
-    codex::CodexBridge,
     protocol::{
         AllowedRootsInput, AllowedRootsReceipt, ApplyFileChangeInput, ApplyFileChangeReceipt,
         ApprovalDecision, ApprovalDecisionInput, ApprovalReceipt, BulkRevokeDevicesReceipt,
@@ -20,6 +19,7 @@ use crate::{
         TakeOverInput, ThreadArchiveReceipt, ThreadDeleteReceipt, ThreadEntriesResponse,
         ThreadEntryDetailResponse, ThreadTranscriptResponse, ThreadsResponse,
     },
+    provider::{spawn_providers, ProviderBridge},
 };
 
 use super::persistence::{spawn_persistence_task, PersistedRelayState, PersistenceStore};
@@ -33,7 +33,7 @@ use super::{
 #[derive(Clone)]
 pub struct AppState {
     relay: Arc<RwLock<RelayState>>,
-    codex: Arc<CodexBridge>,
+    providers: HashMap<String, Arc<dyn ProviderBridge>>,
     change_tx: watch::Sender<u64>,
 }
 
@@ -81,12 +81,28 @@ impl AppState {
             relay.push_log("info", security.summary());
         }
 
-        let codex = Arc::new(CodexBridge::spawn(relay.clone()).await?);
+        let providers = spawn_providers(relay.clone()).await;
         spawn_persistence_task(relay.clone(), change_tx.subscribe(), persistence.clone());
+
+        if providers.is_empty() {
+            return Err(
+                "no agent providers are available; install codex or claude CLI".to_string(),
+            );
+        }
+
+        {
+            let provider_names: Vec<&String> = providers.keys().collect();
+            let mut relay = relay.write().await;
+            relay.push_log(
+                "info",
+                format!("Agent providers initialized: {:?}", provider_names),
+            );
+            relay.notify();
+        }
 
         let state = Self {
             relay,
-            codex,
+            providers,
             change_tx,
         };
 
@@ -107,8 +123,81 @@ impl AppState {
         relay.snapshot()
     }
 
+    pub fn available_providers(&self) -> Vec<String> {
+        self.providers.keys().cloned().collect()
+    }
+
     pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.change_tx.subscribe()
+    }
+
+    fn active_provider(&self) -> Option<(&str, &Arc<dyn ProviderBridge>)> {
+        let name = {
+            self.relay.try_read().ok().and_then(|r| {
+                if r.provider_name.is_empty() {
+                    None
+                } else {
+                    Some(r.provider_name.clone())
+                }
+            })
+        };
+        match name {
+            Some(name) => self
+                .providers
+                .get_key_value(&name)
+                .map(|(k, v)| (k.as_str(), v)),
+            None => self.providers.iter().next().map(|(k, v)| (k.as_str(), v)),
+        }
+    }
+
+    fn require_active_provider(&self) -> Result<(&str, &Arc<dyn ProviderBridge>), String> {
+        self.active_provider()
+            .ok_or_else(|| "no agent provider available".to_string())
+    }
+
+    fn resolve_provider(
+        &self,
+        provider_name: Option<&str>,
+    ) -> Result<(&str, &Arc<dyn ProviderBridge>), String> {
+        match provider_name {
+            Some(name) => self
+                .providers
+                .get_key_value(name)
+                .map(|(k, v)| (k.as_str(), v))
+                .ok_or_else(|| format!("agent provider '{name}' is not available")),
+            None => self.require_active_provider(),
+        }
+    }
+
+    async fn find_thread_provider(
+        &self,
+        thread_id: &str,
+    ) -> Result<(&str, &Arc<dyn ProviderBridge>), String> {
+        // First check the relay's cached thread list
+        {
+            let relay = self.relay.read().await;
+            for thread in &relay.threads {
+                if thread.id == thread_id {
+                    if let Some((name, bridge)) = self.providers.get_key_value(&thread.provider) {
+                        return Ok((name.as_str(), bridge));
+                    }
+                }
+            }
+        }
+        // Fall back to probing each provider's thread list
+        for (name, bridge) in &self.providers {
+            match bridge.list_threads(200).await {
+                Ok(threads) => {
+                    if threads.iter().any(|t| t.id == thread_id) {
+                        return Ok((name.as_str(), bridge));
+                    }
+                }
+                Err(_) => continue,
+            }
+        }
+        Err(format!(
+            "thread '{thread_id}' was not found on any provider"
+        ))
     }
 
     pub async fn list_threads(
@@ -122,14 +211,31 @@ impl AppState {
         } else {
             limit
         };
-        let listed_threads = self.codex.list_threads(scan_limit).await?;
+        let mut all_threads = Vec::new();
+        for (provider_name, bridge) in &self.providers {
+            match bridge.list_threads(scan_limit).await {
+                Ok(mut threads) => {
+                    for thread in &mut threads {
+                        thread.provider = provider_name.clone();
+                    }
+                    all_threads.extend(threads);
+                }
+                Err(error) => {
+                    self.push_runtime_log(
+                        "warn",
+                        format!("Failed to list {provider_name} threads: {error}"),
+                    )
+                    .await;
+                }
+            }
+        }
         let mut relay = self.relay.write().await;
         if let Some(selected_cwd) = cwd.as_deref() {
             ensure_path_within_allowed_roots(selected_cwd, &relay.allowed_roots)?;
         }
         let allowed_roots = relay.allowed_roots.clone();
         let threads = relay
-            .filter_deleted_threads(listed_threads)
+            .filter_deleted_threads(all_threads)
             .into_iter()
             .filter(|thread| path_within_allowed_roots(&thread.cwd, &allowed_roots))
             .collect::<Vec<_>>();
@@ -190,7 +296,11 @@ impl AppState {
             relay.can_archive_thread(thread_id)?
         };
 
-        self.codex.archive_thread(thread_id).await?;
+        self.find_thread_provider(thread_id)
+            .await?
+            .1
+            .archive_thread(thread_id)
+            .await?;
 
         {
             let mut relay = self.relay.write().await;
@@ -228,7 +338,12 @@ impl AppState {
             relay.can_delete_thread(thread_id)?
         };
 
-        let delete_summary = self.codex.delete_thread_permanently(thread_id).await?;
+        let delete_summary = self
+            .find_thread_provider(thread_id)
+            .await?
+            .1
+            .delete_thread_permanently(thread_id)
+            .await?;
 
         {
             let mut relay = self.relay.write().await;
@@ -277,14 +392,15 @@ impl AppState {
         let approval_policy = non_empty(input.approval_policy).unwrap_or(defaults.approval_policy);
         let sandbox = non_empty(input.sandbox).unwrap_or(defaults.sandbox);
         let effort = non_empty(input.effort).unwrap_or(defaults.reasoning_effort);
+        let (provider_name, bridge) = self.resolve_provider(input.provider.as_deref())?;
 
-        let thread = self
-            .codex
+        let thread = bridge
             .start_thread(&cwd, &model, &approval_policy, &sandbox)
             .await?;
 
         {
             let mut relay = self.relay.write().await;
+            relay.set_provider_name(provider_name.to_string());
             relay.activate_thread(
                 thread,
                 &cwd,
@@ -297,7 +413,7 @@ impl AppState {
             relay.push_log(
                 "info",
                 format!(
-                    "Started a new Codex thread in {cwd}. Control is now on {}.",
+                    "Started a new {provider_name} thread in {cwd}. Control is now on {}.",
                     short_device_id(&device_id)
                 ),
             );
@@ -329,19 +445,21 @@ impl AppState {
         let sandbox = non_empty(input.sandbox).unwrap_or(defaults.sandbox);
         let effort = non_empty(input.effort).unwrap_or(defaults.reasoning_effort);
 
-        let preview = self.codex.read_thread(&input.thread_id).await?;
+        let (provider_name, bridge) = self.find_thread_provider(&input.thread_id).await?;
+        let preview = bridge.read_thread(&input.thread_id).await?;
         {
             let relay = self.relay.read().await;
             ensure_path_within_allowed_roots(&preview.thread.cwd, &relay.allowed_roots)?;
         }
 
-        self.codex
+        bridge
             .resume_thread(&input.thread_id, &approval_policy, &sandbox)
             .await?;
 
-        let thread_data = self.codex.read_thread(&input.thread_id).await?;
+        let thread_data = bridge.read_thread(&input.thread_id).await?;
         {
             let mut relay = self.relay.write().await;
+            relay.set_provider_name(provider_name.to_string());
             relay.load_thread_data(thread_data, &approval_policy, &sandbox, &effort, &device_id);
             relay.push_log(
                 "info",
@@ -390,7 +508,12 @@ impl AppState {
             }
         }
 
-        let thread_data = self.codex.read_thread(&input.thread_id).await?;
+        let thread_data = self
+            .find_thread_provider(&input.thread_id)
+            .await?
+            .1
+            .read_thread(&input.thread_id)
+            .await?;
         {
             let relay = self.relay.read().await;
             ensure_path_within_allowed_roots(&thread_data.thread.cwd, &relay.allowed_roots)?;
@@ -434,7 +557,12 @@ impl AppState {
             }
         }
 
-        let thread_data = self.codex.read_thread(&input.thread_id).await?;
+        let thread_data = self
+            .find_thread_provider(&input.thread_id)
+            .await?
+            .1
+            .read_thread(&input.thread_id)
+            .await?;
         {
             let relay = self.relay.read().await;
             ensure_path_within_allowed_roots(&thread_data.thread.cwd, &relay.allowed_roots)?;
@@ -469,13 +597,20 @@ impl AppState {
         let entry = if let Some(entry) = relay_entry {
             entry
         } else {
-            let thread_data = self.codex.read_thread(&input.thread_id).await?;
+            let thread_data = self
+                .find_thread_provider(&input.thread_id)
+                .await?
+                .1
+                .read_thread(&input.thread_id)
+                .await?;
             {
                 let relay = self.relay.read().await;
                 ensure_path_within_allowed_roots(&thread_data.thread.cwd, &relay.allowed_roots)?;
             }
 
-            self.codex
+            self.find_thread_provider(&input.thread_id)
+                .await?
+                .1
                 .read_thread_entry_detail(&input.thread_id, &input.item_id)
                 .await?
                 .ok_or_else(|| {
@@ -517,7 +652,8 @@ impl AppState {
         };
 
         let turn_id = self
-            .codex
+            .require_active_provider()?
+            .1
             .start_turn(&thread_id, &text, &model, &effort)
             .await?;
         {
@@ -554,7 +690,10 @@ impl AppState {
             (thread_id, turn_id)
         };
 
-        self.codex.interrupt_turn(&thread_id, &turn_id).await?;
+        self.require_active_provider()?
+            .1
+            .interrupt_turn(&thread_id, &turn_id)
+            .await?;
 
         {
             let mut relay = self.relay.write().await;
@@ -628,7 +767,9 @@ impl AppState {
                 .ok_or(ApprovalError::NoPendingRequest)?
         };
 
-        self.codex
+        self.require_active_provider()
+            .map_err(ApprovalError::Bridge)?
+            .1
             .respond_to_approval(&pending, &input)
             .await
             .map_err(ApprovalError::Bridge)?;
@@ -967,20 +1108,20 @@ impl AppState {
     }
 
     async fn refresh_model_catalog(&self) {
-        match self.codex.list_models().await {
-            Ok(models) => {
-                let mut relay = self.relay.write().await;
-                relay.set_available_models(models);
-                relay.notify();
-            }
-            Err(error) => {
-                let mut relay = self.relay.write().await;
-                relay.push_log(
-                    "warn",
-                    format!("Failed to load Codex model catalog: {error}"),
-                );
-                relay.notify();
-            }
+        match self.require_active_provider() {
+            Ok((_, bridge)) => match bridge.list_models().await {
+                Ok(models) => {
+                    let mut relay = self.relay.write().await;
+                    relay.set_available_models(models);
+                    relay.notify();
+                }
+                Err(error) => {
+                    let mut relay = self.relay.write().await;
+                    relay.push_log("warn", format!("Failed to load model catalog: {error}"));
+                    relay.notify();
+                }
+            },
+            Err(_) => {}
         }
     }
 
@@ -994,18 +1135,23 @@ impl AppState {
             return;
         };
 
-        let restore_result = match self
-            .codex
+        let (provider_name, bridge) = match self.find_thread_provider(&thread_id).await {
+            Ok(found) => found,
+            Err(_) => return,
+        };
+
+        let restore_result = match bridge
             .resume_thread(&thread_id, &persisted.approval_policy, &persisted.sandbox)
             .await
         {
-            Ok(()) => self.codex.read_thread(&thread_id).await,
+            Ok(()) => bridge.read_thread(&thread_id).await,
             Err(error) => Err(error),
         };
 
         match restore_result {
             Ok(thread_data) => {
                 let mut relay = self.relay.write().await;
+                relay.set_provider_name(provider_name.to_string());
                 relay.restore_thread_data(thread_data, &persisted);
                 expire_controller_if_needed(&mut relay);
                 relay.push_log(

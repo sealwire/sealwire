@@ -15,6 +15,8 @@ use tokio::{
 };
 use tracing::info;
 
+use async_trait::async_trait;
+
 use crate::{
     codex_local::{
         delete_thread_permanently as delete_thread_permanently_local, LocalThreadDeleteSummary,
@@ -23,6 +25,7 @@ use crate::{
         truncate_with_ellipsis, ApprovalDecisionInput, FileChangeDiffView, ModelOptionView,
         ThreadSummaryView, ToolCallView, TranscriptEntryKind, TranscriptEntryView,
     },
+    provider::{ProviderBridge, ThreadSyncData},
     state::{
         ApprovalKind, BrokerPendingMessage, PendingApproval, PendingTranscriptDelta, RelayState,
         TranscriptDeltaKind,
@@ -50,19 +53,98 @@ pub struct CodexBridge {
     pending_responses: PendingResponses,
     next_request_id: AtomicU64,
     state: Arc<RwLock<RelayState>>,
+    provider_name: &'static str,
 }
 
-#[derive(Clone)]
-pub struct ThreadSyncData {
-    pub thread: ThreadSummaryView,
-    pub status: String,
-    pub active_flags: Vec<String>,
-    pub transcript: Vec<TranscriptEntryView>,
+#[async_trait]
+impl ProviderBridge for CodexBridge {
+    async fn list_threads(&self, limit: usize) -> Result<Vec<ThreadSummaryView>, String> {
+        self.list_threads(limit).await
+    }
+
+    async fn list_models(&self) -> Result<Vec<ModelOptionView>, String> {
+        self.list_models().await
+    }
+
+    async fn start_thread(
+        &self,
+        cwd: &str,
+        model: &str,
+        approval_policy: &str,
+        sandbox: &str,
+    ) -> Result<ThreadSummaryView, String> {
+        self.start_thread(cwd, model, approval_policy, sandbox)
+            .await
+    }
+
+    async fn resume_thread(
+        &self,
+        thread_id: &str,
+        approval_policy: &str,
+        sandbox: &str,
+    ) -> Result<(), String> {
+        self.resume_thread(thread_id, approval_policy, sandbox)
+            .await
+    }
+
+    async fn read_thread(&self, thread_id: &str) -> Result<ThreadSyncData, String> {
+        self.read_thread(thread_id).await
+    }
+
+    async fn read_thread_entry_detail(
+        &self,
+        thread_id: &str,
+        item_id: &str,
+    ) -> Result<Option<TranscriptEntryView>, String> {
+        self.read_thread_entry_detail(thread_id, item_id).await
+    }
+
+    async fn archive_thread(&self, thread_id: &str) -> Result<(), String> {
+        self.archive_thread(thread_id).await
+    }
+
+    async fn delete_thread_permanently(
+        &self,
+        thread_id: &str,
+    ) -> Result<LocalThreadDeleteSummary, String> {
+        self.delete_thread_permanently(thread_id).await
+    }
+
+    async fn start_turn(
+        &self,
+        thread_id: &str,
+        text: &str,
+        model: &str,
+        effort: &str,
+    ) -> Result<Option<String>, String> {
+        self.start_turn(thread_id, text, model, effort).await
+    }
+
+    async fn interrupt_turn(&self, thread_id: &str, turn_id: &str) -> Result<(), String> {
+        self.interrupt_turn(thread_id, turn_id).await
+    }
+
+    async fn respond_to_approval(
+        &self,
+        pending: &PendingApproval,
+        input: &ApprovalDecisionInput,
+    ) -> Result<(), String> {
+        self.respond_to_approval(pending, input).await
+    }
+
+    fn provider_name(&self) -> &'static str {
+        self.provider_name
+    }
 }
 
 impl CodexBridge {
-    pub async fn spawn(state: Arc<RwLock<RelayState>>) -> Result<Self, String> {
-        let mut command = Command::new("codex");
+    pub async fn spawn(
+        state: Arc<RwLock<RelayState>>,
+        binary_name: &'static str,
+        display_name: &'static str,
+        provider_key: &'static str,
+    ) -> Result<Self, String> {
+        let mut command = Command::new(binary_name);
         command
             .arg("app-server")
             .stdin(Stdio::piped())
@@ -72,25 +154,30 @@ impl CodexBridge {
 
         let mut child = command
             .spawn()
-            .map_err(|error| format!("failed to start `codex app-server`: {error}"))?;
+            .map_err(|error| format!("failed to start `{binary_name} app-server`: {error}"))?;
 
         let stdin = child
             .stdin
             .take()
-            .ok_or_else(|| "failed to capture codex stdin".to_string())?;
+            .ok_or_else(|| format!("failed to capture {binary_name} stdin"))?;
         let stdout = child
             .stdout
             .take()
-            .ok_or_else(|| "failed to capture codex stdout".to_string())?;
+            .ok_or_else(|| format!("failed to capture {binary_name} stdout"))?;
         let stderr = child
             .stderr
             .take()
-            .ok_or_else(|| "failed to capture codex stderr".to_string())?;
+            .ok_or_else(|| format!("failed to capture {binary_name} stderr"))?;
 
         let child = Arc::new(Mutex::new(child));
         let pending_responses = Arc::new(Mutex::new(HashMap::new()));
 
-        spawn_stdout_reader(stdout, pending_responses.clone(), state.clone());
+        spawn_stdout_reader(
+            stdout,
+            pending_responses.clone(),
+            state.clone(),
+            provider_key,
+        );
         spawn_stderr_reader(stderr, state.clone());
 
         let bridge = Self {
@@ -99,13 +186,15 @@ impl CodexBridge {
             pending_responses,
             next_request_id: AtomicU64::new(1),
             state,
+            provider_name: provider_key,
         };
 
         bridge.initialize().await?;
         {
             let mut relay = bridge.state.write().await;
-            relay.set_connection(true);
-            relay.push_log("info", "Connected to Codex app-server.");
+            relay.set_provider_connection(provider_key, true);
+            relay.set_provider_name(provider_key.to_string());
+            relay.push_log("info", format!("Connected to {display_name} app-server."));
             relay.notify();
         }
 
@@ -403,6 +492,7 @@ fn spawn_stdout_reader(
     stdout: ChildStdout,
     pending_responses: PendingResponses,
     state: Arc<RwLock<RelayState>>,
+    provider_key: &'static str,
 ) {
     tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
@@ -414,15 +504,18 @@ fn spawn_stdout_reader(
                 }
                 Ok(None) => {
                     let mut relay = state.write().await;
-                    relay.set_connection(false);
-                    relay.push_log("error", "Codex app-server stdout closed.");
+                    relay.set_provider_connection(provider_key, false);
+                    relay.push_log("error", format!("{provider_key} app-server stdout closed."));
                     relay.notify();
                     break;
                 }
                 Err(error) => {
                     let mut relay = state.write().await;
-                    relay.set_connection(false);
-                    relay.push_log("error", format!("Failed to read Codex stdout: {error}"));
+                    relay.set_provider_connection(provider_key, false);
+                    relay.push_log(
+                        "error",
+                        format!("Failed to read {provider_key} stdout: {error}"),
+                    );
                     relay.notify();
                     break;
                 }
@@ -949,6 +1042,7 @@ fn parse_thread_summary(thread: &Value) -> Result<ThreadSummaryView, String> {
         status: parse_status(value_at(thread, &["status"])).0,
         model_provider: string_at(thread, &["modelProvider"])
             .unwrap_or_else(|| "unknown".to_string()),
+        provider: String::new(),
     })
 }
 
