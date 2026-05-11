@@ -40,7 +40,12 @@ export function selectSessionChromeRenderModel(currentState, session) {
     sessionMeta: selectSessionMetaRenderModel(currentState, session),
     statusBadge: approval
       ? { label: "Approval required", tone: "alert" }
-      : !currentState.socketConnected || !session.codex_connected
+      : (
+        currentState.serverConnectionState === "disconnected"
+        || currentState.serverConnectionMessage
+        || !currentState.socketConnected
+        || !session.codex_connected
+      )
         ? { label: "Offline", tone: "offline" }
         : { label: session.current_status || "Ready", tone: "ready" },
   };
@@ -132,11 +137,24 @@ export function selectStatusBadgeRenderModel(currentState, session = currentStat
       return { label: "Approval required", tone: "alert" };
     }
 
-    if (!currentState.socketConnected || !session.codex_connected) {
+    if (
+      currentState.serverConnectionState === "disconnected"
+      || currentState.serverConnectionMessage
+      || !currentState.socketConnected
+      || !session.codex_connected
+    ) {
       return { label: "Offline", tone: "offline" };
     }
 
     return { label: session.current_status || "Ready", tone: "ready" };
+  }
+
+  if (currentState.remoteAuth && (
+    currentState.serverConnectionState === "disconnected"
+      || currentState.serverConnectionMessage
+      || (currentState.socketConnected && !currentState.relayConnected && currentState.relayConnectionMessage)
+  )) {
+    return { label: "Server disconnected", tone: "offline" };
   }
 
   if (currentState.socketConnected) {

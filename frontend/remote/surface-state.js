@@ -73,12 +73,28 @@ export function createClearedTranscriptHydrationPatch() {
 }
 
 export function createBrokerConnectionPatch({
+  relayConnected,
+  relayConnectionMessage,
+  serverConnectionMessage,
+  serverConnectionState,
   socket,
   socketConnected,
   socketPeerId,
   socketReconnectTimer,
 }) {
   const patch = {};
+  if (relayConnected !== undefined) {
+    patch.relayConnected = relayConnected;
+  }
+  if (relayConnectionMessage !== undefined) {
+    patch.relayConnectionMessage = relayConnectionMessage;
+  }
+  if (serverConnectionMessage !== undefined) {
+    patch.serverConnectionMessage = serverConnectionMessage;
+  }
+  if (serverConnectionState !== undefined) {
+    patch.serverConnectionState = serverConnectionState;
+  }
   if (socket !== undefined) {
     patch.socket = socket;
   }

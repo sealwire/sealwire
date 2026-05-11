@@ -116,3 +116,35 @@ test("selectStatusBadgeRenderModel falls back to home and pairing states without
     { label: "Home", tone: "ready" }
   );
 });
+
+test("selectStatusBadgeRenderModel shows disconnected server state", () => {
+  assert.deepEqual(
+    selectStatusBadgeRenderModel({
+      pairingError: null,
+      pairingPhase: null,
+      pairingTicket: null,
+      relayConnected: false,
+      relayConnectionMessage: "Relay server disconnected. Waiting for it to reconnect.",
+      relayDirectory: [],
+      remoteAuth: { relayId: "relay-1" },
+      session: null,
+      socketConnected: true,
+    }),
+    { label: "Server disconnected", tone: "offline" }
+  );
+
+  assert.deepEqual(
+    selectStatusBadgeRenderModel({
+      pairingError: null,
+      pairingPhase: null,
+      pairingTicket: null,
+      relayDirectory: [],
+      remoteAuth: { relayId: "relay-1" },
+      serverConnectionMessage: "Server disconnected. Retrying connection.",
+      serverConnectionState: "disconnected",
+      session: null,
+      socketConnected: false,
+    }),
+    { label: "Server disconnected", tone: "offline" }
+  );
+});

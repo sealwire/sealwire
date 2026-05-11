@@ -135,3 +135,37 @@ test("selectEmptyStateRenderModel exposes relay-home and re-pair branches", () =
   assert.equal(missingCredentials.showRelayHome, false);
   assert.equal(missingCredentials.showMissingCredentials, true);
 });
+
+test("selectEmptyStateRenderModel exposes server disconnected state", () => {
+  const brokerDisconnected = selectEmptyStateRenderModel({
+    clientAuth: { clientId: "client-1" },
+    pairingTicket: null,
+    relayDirectory: [],
+    remoteAuth: {
+      relayId: "relay-1",
+      payloadSecret: "payload-secret-1",
+    },
+    serverConnectionMessage: "Server disconnected. Retrying connection.",
+    serverConnectionState: "disconnected",
+    socketConnected: false,
+  });
+
+  assert.equal(brokerDisconnected.showServerDisconnected, true);
+  assert.match(brokerDisconnected.serverDisconnectedCopy, /Server disconnected/);
+
+  const relayDisconnected = selectEmptyStateRenderModel({
+    clientAuth: { clientId: "client-1" },
+    pairingTicket: null,
+    relayConnected: false,
+    relayConnectionMessage: "Relay server disconnected. Waiting for it to reconnect.",
+    relayDirectory: [],
+    remoteAuth: {
+      relayId: "relay-1",
+      payloadSecret: "payload-secret-1",
+    },
+    socketConnected: true,
+  });
+
+  assert.equal(relayDisconnected.showServerDisconnected, true);
+  assert.match(relayDisconnected.serverDisconnectedCopy, /Relay server disconnected/);
+});

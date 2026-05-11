@@ -142,12 +142,31 @@ export function selectEmptyStateRenderModel({
   pairingTicket,
   relayDirectory,
   remoteAuth,
+  relayConnected,
+  relayConnectionMessage,
+  serverConnectionMessage,
+  serverConnectionState,
+  socketConnected,
 }) {
+  const showServerDisconnected = Boolean(
+    remoteAuth
+      && (
+        serverConnectionState === "disconnected"
+        || serverConnectionMessage
+        || (socketConnected && !relayConnected && relayConnectionMessage)
+      )
+  );
+
   return {
     clientAuth,
     relayDirectory,
     remoteAuth,
     showMissingCredentials: Boolean(remoteAuth && !remoteAuth.payloadSecret && !pairingTicket),
     showRelayHome: Boolean(!remoteAuth && !pairingTicket),
+    showServerDisconnected,
+    serverDisconnectedCopy:
+      serverConnectionMessage
+      || relayConnectionMessage
+      || "Server disconnected. Waiting for it to reconnect.",
   };
 }

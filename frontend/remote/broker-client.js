@@ -79,6 +79,10 @@ export async function connectBroker(reason) {
   renderLog(`Connecting to broker (${reason}) via ${url.host}.`);
   const socket = new WebSocket(url.toString());
   applyRemoteSurfacePatch(createBrokerConnectionPatch({
+    relayConnected: false,
+    relayConnectionMessage: null,
+    serverConnectionMessage: null,
+    serverConnectionState: "connecting",
     socket,
     socketPeerId: null,
   }));
@@ -90,6 +94,8 @@ export async function connectBroker(reason) {
     }
 
     applyRemoteSurfacePatch(createBrokerConnectionPatch({
+      serverConnectionMessage: null,
+      serverConnectionState: "connected",
       socketConnected: true,
     }));
     renderLog("Broker websocket connected.");
@@ -109,6 +115,10 @@ export async function connectBroker(reason) {
     }
 
     applyRemoteSurfacePatch(createBrokerConnectionPatch({
+      relayConnected: false,
+      relayConnectionMessage: "Relay server disconnected. Waiting for it to reconnect.",
+      serverConnectionMessage: "Server disconnected. Retrying connection.",
+      serverConnectionState: "disconnected",
       socket: null,
       socketConnected: false,
       socketPeerId: null,
@@ -126,6 +136,10 @@ export async function connectBroker(reason) {
       return;
     }
 
+    applyRemoteSurfacePatch(createBrokerConnectionPatch({
+      serverConnectionMessage: "Server disconnected. Retrying connection.",
+      serverConnectionState: "disconnected",
+    }));
     renderLog("Broker websocket hit an error.");
   });
 }
@@ -134,6 +148,10 @@ export function closeBrokerSocket(resetConnectionState = true) {
   if (!state.socket) {
     if (resetConnectionState) {
       applyRemoteSurfacePatch(createBrokerConnectionPatch({
+        relayConnected: false,
+        relayConnectionMessage: null,
+        serverConnectionMessage: null,
+        serverConnectionState: "idle",
         socketConnected: false,
         socketPeerId: null,
       }));
@@ -150,6 +168,10 @@ export function closeBrokerSocket(resetConnectionState = true) {
 
   if (resetConnectionState) {
     applyRemoteSurfacePatch(createBrokerConnectionPatch({
+      relayConnected: false,
+      relayConnectionMessage: null,
+      serverConnectionMessage: null,
+      serverConnectionState: "idle",
       socketConnected: false,
       socketPeerId: null,
     }));
@@ -293,6 +315,14 @@ async function handleSocketMessage(rawData, connectReason) {
     renderLog(
       `Joined broker channel ${frame.channel_id} as ${frame.peer_id || "unknown-peer"}.`
     );
+    const relayPresent = Array.isArray(frame.peers)
+      && frame.peers.some((peer) => peer?.role === "relay");
+    applyRemoteSurfacePatch(createBrokerConnectionPatch({
+      relayConnected: relayPresent,
+      relayConnectionMessage: relayPresent
+        ? null
+        : "Relay server disconnected. Waiting for it to reconnect.",
+    }));
     void onBrokerReady(frame, connectReason);
     return;
   }
@@ -300,6 +330,12 @@ async function handleSocketMessage(rawData, connectReason) {
   if (frame.type === "presence") {
     if (frame.peer?.role === "relay") {
       renderLog(`Relay peer ${frame.peer.peer_id} ${frame.kind}.`);
+      applyRemoteSurfacePatch(createBrokerConnectionPatch({
+        relayConnected: frame.kind === "joined",
+        relayConnectionMessage: frame.kind === "joined"
+          ? null
+          : "Relay server disconnected. Waiting for it to reconnect.",
+      }));
       void onRelayPresence(frame.kind, frame.peer);
     }
     return;

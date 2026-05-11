@@ -181,7 +181,12 @@ function RemoteApp() {
     clientAuth: currentState.clientAuth,
     pairingTicket: currentState.pairingTicket,
     relayDirectory: currentState.relayDirectory,
+    relayConnected: currentState.relayConnected,
+    relayConnectionMessage: currentState.relayConnectionMessage,
     remoteAuth: currentState.remoteAuth,
+    serverConnectionMessage: currentState.serverConnectionMessage,
+    serverConnectionState: currentState.serverConnectionState,
+    socketConnected: currentState.socketConnected,
   });
   const relayDirectoryModel = selectRelayDirectoryRenderModel({
     activeRelayId: currentState.remoteAuth?.relayId || null,
@@ -1180,7 +1185,12 @@ function RemoteTranscriptPanel({
   let body = null;
 
   if (!session?.active_thread_id) {
-    if (emptyStateModel.showRelayHome) {
+    if (emptyStateModel.showServerDisconnected) {
+      body = h(ConversationEmptyState, {
+        copy: emptyStateModel.serverDisconnectedCopy,
+        title: "Server disconnected",
+      });
+    } else if (emptyStateModel.showRelayHome) {
       body = h(RelayHomeState, {
         clientAuth: emptyStateModel.clientAuth,
         onSelectRelay,
