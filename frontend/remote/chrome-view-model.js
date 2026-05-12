@@ -1,4 +1,5 @@
 import { formatTimestamp, shortId, workspaceBasename } from "./utils.js";
+import { providerLabel } from "../shared/provider-labels.js";
 
 export function isCurrentDeviceActiveController({ remoteAuth, session }) {
   return Boolean(
@@ -213,6 +214,7 @@ function selectSessionMetaRenderModel(currentState, session) {
       { label: "Visibility", value: contentVisibilityLabel(session) },
       { label: "Broker", value: brokerStatusLabel(currentState, session) },
       { label: "Device", value: currentState.remoteAuth?.deviceLabel || "Unpaired" },
+      ...(session.provider ? [{ label: "Provider", value: providerLabel(session.provider) }] : []),
       ...(session.model ? [{ label: "Model", value: session.model }] : []),
       ...(session.reasoning_effort ? [{ label: "Effort", value: session.reasoning_effort }] : []),
       {
@@ -230,7 +232,12 @@ function selectSessionMetaRenderModel(currentState, session) {
 }
 
 function sessionModelLabel(session) {
-  return session?.active_thread_id && session.model ? session.model : null;
+  if (!session?.active_thread_id || !session.model) {
+    return null;
+  }
+
+  const provider = providerLabel(session.provider);
+  return provider ? `${provider} · ${session.model}` : session.model;
 }
 
 function sessionModelTitle(session) {
@@ -238,8 +245,8 @@ function sessionModelTitle(session) {
     return "";
   }
   return session.reasoning_effort
-    ? `${session.model} · effort ${session.reasoning_effort}`
-    : session.model;
+    ? `${sessionModelLabel(session)} · effort ${session.reasoning_effort}`
+    : sessionModelLabel(session);
 }
 
 function selectControlBannerRenderModel(currentState, session) {

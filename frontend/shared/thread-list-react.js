@@ -14,6 +14,7 @@ import {
 } from "@tanstack/virtual-core";
 import { canonicalizeWorkspace } from "./thread-groups.js";
 import { createThreadListRows } from "./thread-list-state.js";
+import { providerLabel, providerTone } from "./provider-labels.js";
 
 const h = React.createElement;
 const VISIBLE_THREAD_LIMIT = 10;
@@ -329,6 +330,8 @@ function ThreadGroupItem({
   thread,
 }) {
   const title = thread.name || thread.preview || shortId(thread.id);
+  const provider = providerLabel(thread.provider);
+  const providerToneClass = `is-${providerTone(thread.provider)}`;
 
   return h(
     "button",
@@ -336,6 +339,7 @@ function ThreadGroupItem({
       className: `conversation-item${active ? " is-active" : ""}`,
       "data-thread-cwd": group.cwd,
       "data-thread-id": thread.id,
+      "data-thread-provider": thread.provider || "",
       "data-thread-title": title,
       onClick: () => onResumeThread?.(thread.id),
       onContextMenu: onContextThread
@@ -344,10 +348,21 @@ function ThreadGroupItem({
             onContextThread(thread.id, event.clientX, event.clientY);
           }
         : undefined,
-      title,
+      title: provider ? `${provider} · ${title}` : title,
       type: "button",
     },
-    h("span", { className: "conversation-title" }, title),
+    provider
+      ? h("span", {
+          className: `conversation-provider-dot ${providerToneClass}`,
+          title: provider,
+          "aria-label": provider,
+        })
+      : h("span", {}),
+    h(
+      "span",
+      { className: "conversation-title-row" },
+      h("span", { className: "conversation-title" }, title)
+    ),
     includePreview
       ? h("span", { className: "conversation-preview" }, thread.preview || previewFallback)
       : null,

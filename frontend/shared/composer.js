@@ -93,9 +93,10 @@ export function ConversationComposer({
             h(
               "select",
               modelSelectProps,
-              ...modelOptions.map((model) =>
-                h("option", { key: model.model, value: model.model }, model.display_name || model.model)
-              )
+              ...modelOptions.map((model) => {
+                const tag = model.provider ? `${model.provider} · ` : "";
+                return h("option", { key: model.model, value: model.model }, `${tag}${model.display_name || model.model}`);
+              })
             )
           )
         : null,

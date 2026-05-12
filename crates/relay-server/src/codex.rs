@@ -222,7 +222,7 @@ impl CodexBridge {
                     "model/list",
                     json!({
                         "cursor": cursor,
-                        "includeHidden": false,
+                        "includeHidden": true,
                         "limit": 100
                     }),
                 )
@@ -233,7 +233,10 @@ impl CodexBridge {
                 .ok_or_else(|| "model/list did not return a model array".to_string())?;
 
             for model in data {
-                models.push(parse_model_option(model)?);
+                let parsed = parse_model_option(model)?;
+                if parsed.provider.is_empty() || parsed.provider == self.provider_name {
+                    models.push(parsed);
+                }
             }
 
             cursor = value_at(&result, &["nextCursor"])
@@ -1063,6 +1066,9 @@ fn parse_model_option(model: &Value) -> Result<ModelOptionView, String> {
             .ok_or_else(|| "model/list item missing model".to_string())?,
         display_name: string_at(model, &["displayName"])
             .ok_or_else(|| "model/list item missing displayName".to_string())?,
+        provider: string_at(model, &["provider"])
+            .unwrap_or_default()
+            .to_string(),
         supported_reasoning_efforts,
         default_reasoning_effort: string_at(model, &["defaultReasoningEffort"])
             .ok_or_else(|| "model/list item missing defaultReasoningEffort".to_string())?,

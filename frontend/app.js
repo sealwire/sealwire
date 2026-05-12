@@ -984,8 +984,9 @@ async function deleteThreadFromContextMenu() {
   const shouldPreserveConversation = state.viewThreadId === threadId;
   const fallbackThreadId = shouldPreserveConversation ? findAdjacentThreadId(threadId) : null;
   const title = thread?.name || thread?.preview || shortId(threadId);
+  const providerLabel = thread?.provider === "claude_code" ? "Claude Code" : "Codex";
   const confirmed = window.confirm(
-    `Permanently delete "${title}" from local Codex storage?\n\nThis removes the local thread file and related local index/state entries. This cannot be undone.`
+    `Permanently delete "${title}" from local ${providerLabel} storage?\n\nThis removes the local thread file and related local index/state entries. This cannot be undone.`
   );
   if (!confirmed) {
     return;

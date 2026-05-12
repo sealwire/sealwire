@@ -444,7 +444,7 @@ input:focus, textarea:focus, select:focus {
 .thread-list-virtual-row[data-row-type="thread"],
 .thread-list-virtual-row[data-row-type="show-more"],
 .thread-list-virtual-row[data-row-type="show-less"] {
-  padding-left: 26px;
+  padding-left: 0;
 }
 
 .thread-group-header {
@@ -541,14 +541,27 @@ input:focus, textarea:focus, select:focus {
 .conversation-item {
   width: 100%;
   text-align: left;
-  padding: 8px 10px;
+  padding: 8px 10px 8px 0;
   border-radius: var(--radius-sm);
   background: transparent;
   border: 1px solid transparent;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
+}
+
+.conversation-provider-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  justify-self: center;
+}
+.conversation-provider-dot.is-claude-code {
+  background: #ea580c;
+}
+.conversation-provider-dot.is-codex {
+  background: #0891b2;
 }
 .conversation-item:hover {
   background: var(--bg-elevated);
@@ -570,6 +583,37 @@ input:focus, textarea:focus, select:focus {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.conversation-title-row {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.thread-provider-badge {
+  flex: none;
+  max-width: 92px;
+  padding: 2px 5px;
+  border-radius: 6px;
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  background: var(--bg-elevated);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.thread-provider-badge.is-claude-code {
+  color: #fed7aa;
+  border-color: color-mix(in srgb, #ea580c 28%, var(--border-subtle));
+  background: color-mix(in srgb, #ea580c 18%, transparent);
+}
+.thread-provider-badge.is-codex {
+  color: #67e8f9;
+  border-color: color-mix(in srgb, #0891b2 24%, var(--border-subtle));
+  background: color-mix(in srgb, #0891b2 18%, transparent);
 }
 .conversation-preview {
   display: none;

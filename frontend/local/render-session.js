@@ -41,6 +41,7 @@ import {
 import {
   readLocalUiState,
 } from "./ui-store.js";
+import { providerLabel } from "../shared/provider-labels.js";
 import { buildExpandedTranscriptDetailEntries } from "./transcript/details.js";
 import { shouldShowTranscriptLoading } from "./transcript-loading.js";
 import {
@@ -320,12 +321,14 @@ export function createSessionRenderer({
     }
 
     const shouldShow = Boolean(session?.active_thread_id && session.model);
+    const provider = providerLabel(session?.provider);
+    const modelLabel = provider ? `${provider} · ${session.model}` : session?.model || "";
     localModelBadge.hidden = !shouldShow;
-    localModelBadge.textContent = shouldShow ? session.model : "";
+    localModelBadge.textContent = shouldShow ? modelLabel : "";
     localModelBadge.title = shouldShow
       ? session.reasoning_effort
-        ? `${session.model} · effort ${session.reasoning_effort}`
-        : session.model
+        ? `${modelLabel} · effort ${session.reasoning_effort}`
+        : modelLabel
       : "";
   }
 
@@ -498,6 +501,7 @@ export function createSessionRenderer({
       h(SessionMetaPanel, {
         chips: [
           ...securityChips,
+          metaChip("Provider", providerLabel(session.provider) || "Unknown"),
           metaChip("Workspace", session.current_cwd || "None"),
           metaChip("Model", session.model),
           metaChip("Permissions", session.approval_policy),
@@ -530,6 +534,7 @@ export function createSessionRenderer({
     ];
 
     if (session?.active_thread_id) {
+      securityBadges.push(overviewBadge("Provider", providerLabel(session.provider) || "Unknown"));
       securityBadges.push(overviewBadge("Model", session.model || "Unknown"));
       securityBadges.push(overviewBadge("Control", controllerStateLabel(session)));
     }

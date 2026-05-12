@@ -12,12 +12,13 @@ use crate::{
     protocol::{
         AllowedRootsInput, AllowedRootsReceipt, ApplyFileChangeInput, ApplyFileChangeReceipt,
         ApprovalDecision, ApprovalDecisionInput, ApprovalReceipt, BulkRevokeDevicesReceipt,
-        FileChangeApplyDirection, HeartbeatInput, PairingDecision, PairingDecisionInput,
-        PairingDecisionReceipt, PairingStartInput, PairingTicketView, ReadThreadEntriesInput,
-        ReadThreadEntryDetailInput, ReadThreadTranscriptInput, ResumeSessionInput,
-        RevokeDeviceReceipt, SendMessageInput, SessionSnapshot, StartSessionInput, StopTurnInput,
-        TakeOverInput, ThreadArchiveReceipt, ThreadDeleteReceipt, ThreadEntriesResponse,
-        ThreadEntryDetailResponse, ThreadTranscriptResponse, ThreadsResponse,
+        FileChangeApplyDirection, HeartbeatInput, ModelOptionView, PairingDecision,
+        PairingDecisionInput, PairingDecisionReceipt, PairingStartInput, PairingTicketView,
+        ReadThreadEntriesInput, ReadThreadEntryDetailInput, ReadThreadTranscriptInput,
+        ResumeSessionInput, RevokeDeviceReceipt, SendMessageInput, SessionSnapshot,
+        StartSessionInput, StopTurnInput, TakeOverInput, ThreadArchiveReceipt, ThreadDeleteReceipt,
+        ThreadEntriesResponse, ThreadEntryDetailResponse, ThreadTranscriptResponse,
+        ThreadsResponse,
     },
     provider::{spawn_providers, ProviderBridge},
 };
@@ -354,7 +355,7 @@ impl AppState {
             relay.push_log(
                 "info",
                 format!(
-                    "{} local thread {thread_id} from Codex storage ({} rollout file{} removed, thread row removed: {}).",
+                    "{} local thread {thread_id} from provider storage ({} rollout file{} removed, provider row removed: {}).",
                     if deleted_active_thread {
                         "Permanently deleted active"
                     } else {
@@ -373,9 +374,9 @@ impl AppState {
         Ok(ThreadDeleteReceipt {
             thread_id: thread_id.to_string(),
             message: if deleted_active_thread {
-                "Active session permanently deleted from local Codex storage.".to_string()
+                "Active session permanently deleted from local provider storage.".to_string()
             } else {
-                "Session permanently deleted from local Codex storage.".to_string()
+                "Session permanently deleted from local provider storage.".to_string()
             },
         })
     }
@@ -388,11 +389,19 @@ impl AppState {
             let relay = self.relay.read().await;
             ensure_path_within_allowed_roots(&cwd, &relay.allowed_roots)?;
         }
-        let model = non_empty(input.model).unwrap_or(defaults.model);
+        let requested_model = non_empty(input.model);
         let approval_policy = non_empty(input.approval_policy).unwrap_or(defaults.approval_policy);
         let sandbox = non_empty(input.sandbox).unwrap_or(defaults.sandbox);
-        let effort = non_empty(input.effort).unwrap_or(defaults.reasoning_effort);
         let (provider_name, bridge) = self.resolve_provider(input.provider.as_deref())?;
+        let provider_models = self
+            .load_provider_model_catalog(provider_name, bridge)
+            .await;
+        let model = requested_model
+            .or_else(|| preferred_model(&provider_models).map(|model| model.model.clone()))
+            .unwrap_or_else(|| defaults.model.clone());
+        let effort = non_empty(input.effort)
+            .or_else(|| default_effort_for_model(&provider_models, &model))
+            .unwrap_or(defaults.reasoning_effort);
 
         let thread = bridge
             .start_thread(&cwd, &model, &approval_policy, &sandbox)
@@ -401,6 +410,9 @@ impl AppState {
         {
             let mut relay = self.relay.write().await;
             relay.set_provider_name(provider_name.to_string());
+            if let Some(models) = provider_models {
+                relay.set_available_models(models);
+            }
             relay.activate_thread(
                 thread,
                 &cwd,
@@ -443,9 +455,14 @@ impl AppState {
         let defaults = self.defaults().await;
         let approval_policy = non_empty(input.approval_policy).unwrap_or(defaults.approval_policy);
         let sandbox = non_empty(input.sandbox).unwrap_or(defaults.sandbox);
-        let effort = non_empty(input.effort).unwrap_or(defaults.reasoning_effort);
 
         let (provider_name, bridge) = self.find_thread_provider(&input.thread_id).await?;
+        let provider_models = self
+            .load_provider_model_catalog(provider_name, bridge)
+            .await;
+        let effort = non_empty(input.effort)
+            .or_else(|| default_effort_for_model(&provider_models, &defaults.model))
+            .unwrap_or(defaults.reasoning_effort);
         let preview = bridge.read_thread(&input.thread_id).await?;
         {
             let relay = self.relay.read().await;
@@ -460,6 +477,9 @@ impl AppState {
         {
             let mut relay = self.relay.write().await;
             relay.set_provider_name(provider_name.to_string());
+            if let Some(models) = provider_models {
+                relay.set_available_models(models);
+            }
             relay.load_thread_data(thread_data, &approval_policy, &sandbox, &effort, &device_id);
             relay.push_log(
                 "info",
@@ -1109,19 +1129,35 @@ impl AppState {
 
     async fn refresh_model_catalog(&self) {
         match self.require_active_provider() {
-            Ok((_, bridge)) => match bridge.list_models().await {
-                Ok(models) => {
+            Ok((provider_name, bridge)) => {
+                if let Some(models) = self
+                    .load_provider_model_catalog(provider_name, bridge)
+                    .await
+                {
                     let mut relay = self.relay.write().await;
                     relay.set_available_models(models);
                     relay.notify();
                 }
-                Err(error) => {
-                    let mut relay = self.relay.write().await;
-                    relay.push_log("warn", format!("Failed to load model catalog: {error}"));
-                    relay.notify();
-                }
-            },
+            }
             Err(_) => {}
+        }
+    }
+
+    async fn load_provider_model_catalog(
+        &self,
+        provider_name: &str,
+        bridge: &Arc<dyn ProviderBridge>,
+    ) -> Option<Vec<ModelOptionView>> {
+        match bridge.list_models().await {
+            Ok(models) => Some(models),
+            Err(error) => {
+                self.push_runtime_log(
+                    "warn",
+                    format!("Failed to load {provider_name} model catalog: {error}"),
+                )
+                .await;
+                None
+            }
         }
     }
 
@@ -1150,8 +1186,14 @@ impl AppState {
 
         match restore_result {
             Ok(thread_data) => {
+                let provider_models = self
+                    .load_provider_model_catalog(provider_name, bridge)
+                    .await;
                 let mut relay = self.relay.write().await;
                 relay.set_provider_name(provider_name.to_string());
+                if let Some(models) = provider_models {
+                    relay.set_available_models(models);
+                }
                 relay.restore_thread_data(thread_data, &persisted);
                 expire_controller_if_needed(&mut relay);
                 relay.push_log(
@@ -1416,6 +1458,26 @@ struct SessionDefaults {
     approval_policy: String,
     sandbox: String,
     reasoning_effort: String,
+}
+
+fn preferred_model(models: &Option<Vec<ModelOptionView>>) -> Option<&ModelOptionView> {
+    let models = models.as_ref()?;
+    models
+        .iter()
+        .find(|model| model.is_default)
+        .or_else(|| models.first())
+}
+
+fn default_effort_for_model(
+    models: &Option<Vec<ModelOptionView>>,
+    model_name: &str,
+) -> Option<String> {
+    models
+        .as_ref()?
+        .iter()
+        .find(|model| model.model == model_name)
+        .map(|model| model.default_reasoning_effort.clone())
+        .or_else(|| preferred_model(models).map(|model| model.default_reasoning_effort.clone()))
 }
 
 #[derive(Clone)]

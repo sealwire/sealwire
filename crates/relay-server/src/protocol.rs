@@ -117,6 +117,7 @@ pub struct SessionSnapshot {
 pub struct ModelOptionView {
     pub model: String,
     pub display_name: String,
+    pub provider: String,
     pub supported_reasoning_efforts: Vec<String>,
     pub default_reasoning_effort: String,
     pub hidden: bool,
