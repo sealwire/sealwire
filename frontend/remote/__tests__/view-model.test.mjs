@@ -75,6 +75,7 @@ test("selectThreadsRenderModel injects the active session thread until remote hi
       active_thread_id: "thread-1",
       current_cwd: "/tmp/project-alpha",
       current_status: "idle",
+      provider: "claude_code",
     },
   });
 
@@ -83,7 +84,33 @@ test("selectThreadsRenderModel injects the active session thread until remote hi
   assert.equal(model.groups[0].cwd, "/tmp/project-alpha");
   assert.equal(model.groups[0].threads.length, 1);
   assert.equal(model.groups[0].threads[0].id, "thread-1");
+  assert.equal(model.groups[0].threads[0].provider, "claude_code");
   assert.match(model.groups[0].threads[0].preview, /Current session/);
+});
+
+test("selectThreadsRenderModel keeps provider threads that do not report a cwd", () => {
+  const model = selectThreadsRenderModel({
+    threads: [
+      {
+        id: "claude-thread-1",
+        cwd: "",
+        provider: "claude_code",
+        preview: "Claude history",
+        updated_at: 1700000000,
+      },
+    ],
+    filterValue: "",
+    activeThreadId: null,
+    remoteAuth: { relayId: "relay-1" },
+    relayDirectory: [],
+  });
+
+  assert.equal(model.emptyMessage, null);
+  assert.equal(model.groups.length, 1);
+  assert.equal(model.groups[0].label, "Unknown workspace");
+  assert.equal(model.groups[0].threads.length, 1);
+  assert.equal(model.groups[0].threads[0].id, "claude-thread-1");
+  assert.equal(model.groups[0].threads[0].provider, "claude_code");
 });
 
 test("selectRelayDirectoryRenderModel builds action labels and active flags", () => {

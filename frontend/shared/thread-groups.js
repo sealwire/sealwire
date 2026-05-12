@@ -12,11 +12,16 @@ export function canonicalizeWorkspace(cwd) {
   return String(cwd || "").trim().replace(/[\\/]+$/, "");
 }
 
-export function buildThreadGroups(threads) {
+export const UNKNOWN_WORKSPACE_CWD = "__unknown_workspace__";
+export const UNKNOWN_WORKSPACE_LABEL = "Unknown workspace";
+
+export function buildThreadGroups(threads, options = {}) {
+  const includeUnknownWorkspace = options.includeUnknownWorkspace === true;
   const groups = new Map();
 
   for (const thread of threads || []) {
-    const cwd = canonicalizeWorkspace(thread.cwd);
+    const knownCwd = canonicalizeWorkspace(thread.cwd);
+    const cwd = knownCwd || (includeUnknownWorkspace ? UNKNOWN_WORKSPACE_CWD : "");
     if (!cwd) {
       continue;
     }
@@ -24,7 +29,7 @@ export function buildThreadGroups(threads) {
     if (!groups.has(cwd)) {
       groups.set(cwd, {
         cwd,
-        label: workspaceBasename(cwd),
+        label: knownCwd ? workspaceBasename(cwd) : UNKNOWN_WORKSPACE_LABEL,
         latestUpdatedAt: 0,
         threads: [],
       });

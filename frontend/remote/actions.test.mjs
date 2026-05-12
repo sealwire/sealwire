@@ -500,6 +500,8 @@ test("list_threads uses device access without pre-claiming control", async () =>
             threads: [
               {
                 id: "thread-1",
+                cwd: "/tmp/demo",
+                provider: "claude_code",
                 updated_at: Math.floor(Date.now() / 1000),
                 preview: "hello",
               },
@@ -518,6 +520,8 @@ test("list_threads uses device access without pre-claiming control", async () =>
   });
 
   assert.equal(result.threads.threads.length, 1);
+  assert.equal(result.threads.threads[0].provider, "claude_code");
+  assert.equal(result.threads.threads[0].cwd, "/tmp/demo");
   const listThreadsPayload = sentPayloads.find(
     (payload) => payload.request?.type === "list_threads"
   );

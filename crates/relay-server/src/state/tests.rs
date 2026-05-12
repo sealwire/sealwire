@@ -150,6 +150,30 @@ fn test_thread(id: &str, cwd: &str) -> ThreadSummaryView {
     }
 }
 
+#[test]
+fn sort_threads_by_recency_orders_threads_across_providers() {
+    let mut codex_old = test_thread("codex-old", "/tmp/project");
+    codex_old.provider = "codex".to_string();
+    codex_old.updated_at = 10;
+    let mut claude_new = test_thread("claude-new", "/tmp/project");
+    claude_new.provider = "claude_code".to_string();
+    claude_new.updated_at = 30;
+    let mut codex_middle = test_thread("codex-middle", "/tmp/project");
+    codex_middle.provider = "codex".to_string();
+    codex_middle.updated_at = 20;
+
+    let mut threads = vec![codex_old, codex_middle, claude_new];
+    sort_threads_by_recency(&mut threads);
+
+    assert_eq!(
+        threads
+            .iter()
+            .map(|thread| thread.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["claude-new", "codex-middle", "codex-old"]
+    );
+}
+
 fn test_pending_approval(thread_id: &str) -> PendingApproval {
     PendingApproval {
         request_id: "req-1".to_string(),

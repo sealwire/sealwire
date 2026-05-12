@@ -27,8 +27,8 @@ use super::persistence::{spawn_persistence_task, PersistedRelayState, Persistenc
 use super::{
     ensure_path_within_allowed_roots, expire_controller_if_needed, filter_threads, non_empty,
     normalize_allowed_roots, normalize_cwd, path_within_allowed_roots, require_device_id,
-    short_device_id, unix_now, CachedRemoteActionResult, RelayState, RemoteActionReplayDecision,
-    SecurityProfile, THREAD_SCAN_LIMIT,
+    short_device_id, sort_threads_by_recency, unix_now, CachedRemoteActionResult, RelayState,
+    RemoteActionReplayDecision, SecurityProfile, THREAD_SCAN_LIMIT,
 };
 
 #[derive(Clone)]
@@ -235,11 +235,12 @@ impl AppState {
             ensure_path_within_allowed_roots(selected_cwd, &relay.allowed_roots)?;
         }
         let allowed_roots = relay.allowed_roots.clone();
-        let threads = relay
+        let mut threads = relay
             .filter_deleted_threads(all_threads)
             .into_iter()
             .filter(|thread| path_within_allowed_roots(&thread.cwd, &allowed_roots))
             .collect::<Vec<_>>();
+        sort_threads_by_recency(&mut threads);
         let response_threads = filter_threads(threads.clone(), cwd.as_deref(), limit);
         relay.threads = threads;
         relay.notify();

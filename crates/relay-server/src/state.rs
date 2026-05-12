@@ -71,6 +71,16 @@ fn filter_threads(
     filtered
 }
 
+fn sort_threads_by_recency(threads: &mut [ThreadSummaryView]) {
+    threads.sort_by(|left, right| {
+        right
+            .updated_at
+            .cmp(&left.updated_at)
+            .then_with(|| left.provider.cmp(&right.provider))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+}
+
 fn thread_matches_cwd_scope(thread_cwd: &str, cwd: Option<&str>) -> bool {
     let Some(cwd) = cwd else {
         return true;

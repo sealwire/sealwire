@@ -13,6 +13,7 @@ function createActiveSessionThread(session) {
     cwd: session.current_cwd,
     id: session.active_thread_id,
     name: workspaceBasename(session.current_cwd),
+    provider: session.provider || "",
     preview: session.current_status
       ? `Current session · ${session.current_status}`
       : "Current remote session",
@@ -73,7 +74,9 @@ export function selectThreadsRenderModel({
     }
   }
 
-  const groups = buildThreadGroups(normalizedThreads);
+  const groups = buildThreadGroups(normalizedThreads, {
+    includeUnknownWorkspace: true,
+  });
 
   if (!remoteAuth) {
     return {
