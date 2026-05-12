@@ -9,6 +9,7 @@ import {
   modelInput,
   openLaunchSettingsButton,
   pairingLinkInput,
+  providerInput,
   resumeLatestButton,
   saveAllowedRootsButton,
   sandboxInput,
@@ -91,6 +92,7 @@ export function createSessionController({
       cwdInput,
       startPromptInput,
       modelInput,
+      providerInput,
       approvalPolicyInput,
       sandboxInput,
       startEffortInput,
@@ -836,6 +838,7 @@ export function createSessionController({
           sandbox: sandboxInput.value,
           effort: startEffortInput.value,
           device_id: state.deviceId,
+          provider: providerInput?.value || null,
         }),
       });
       const payload = await response.json();

@@ -34,7 +34,7 @@ use futures_util::stream::{self, StreamExt};
 use protocol::{
     AllowedRootsInput, AllowedRootsReceipt, ApiEnvelope, ApiError, ApplyFileChangeInput,
     ApplyFileChangeReceipt, ApprovalDecisionInput, ApprovalReceipt, AuthSessionInput,
-    AuthSessionView, BulkRevokeDevicesReceipt, HealthResponse, HeartbeatInput,
+    AuthSessionView, BulkRevokeDevicesReceipt, HealthResponse, HeartbeatInput, ModelOptionView,
     PairingDecisionInput, PairingDecisionReceipt, PairingStartInput, PairingTicketView,
     ReadThreadEntryDetailInput, ReadThreadTranscriptInput, ResumeSessionInput, RevokeDeviceReceipt,
     SendMessageInput, SessionSnapshot, SessionSnapshotCompactProfile, StartSessionInput,
@@ -154,6 +154,7 @@ fn build_router(context: AppContext, web_assets: WebAssets) -> Router {
     let router = Router::new()
         .route("/api/health", get(health))
         .route("/api/providers", get(list_providers))
+        .route("/api/providers/:provider/models", get(list_provider_models))
         .route(
             "/api/auth/session",
             get(auth_session_status)
@@ -290,6 +291,21 @@ async fn health(State(context): State<AppContext>) -> Json<ApiEnvelope<HealthRes
 
 async fn list_providers(State(context): State<AppContext>) -> Json<ApiEnvelope<Vec<String>>> {
     Json(ApiEnvelope::ok(context.app.available_providers()))
+}
+
+async fn list_provider_models(
+    State(context): State<AppContext>,
+    headers: HeaderMap,
+    uri: Uri,
+    Path(provider): Path<String>,
+) -> Result<Json<ApiEnvelope<Vec<ModelOptionView>>>, (StatusCode, Json<ApiError>)> {
+    authorize_api(&context, &headers, &uri)?;
+    context
+        .app
+        .provider_models(&provider)
+        .await
+        .map(|models| Json(ApiEnvelope::ok(models)))
+        .map_err(bad_gateway)
 }
 
 async fn auth_session_status(

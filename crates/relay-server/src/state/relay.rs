@@ -36,6 +36,8 @@ pub(crate) struct CachedRemoteActionResult {
     pub(crate) ok: bool,
     pub(crate) snapshot: Option<SessionSnapshot>,
     pub(crate) receipt: Option<ApprovalReceipt>,
+    pub(crate) providers: Option<Vec<String>>,
+    pub(crate) models: Option<Vec<ModelOptionView>>,
     pub(crate) threads: Option<ThreadsResponse>,
     pub(crate) thread_entries: Option<ThreadEntriesResponse>,
     pub(crate) thread_entry_detail: Option<ThreadEntryDetailResponse>,

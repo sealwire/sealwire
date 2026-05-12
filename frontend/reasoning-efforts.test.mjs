@@ -45,6 +45,25 @@ test("buildReasoningEffortOptions returns at least 2 effort options for any mode
   assert.equal(options[1].value, "high");
 });
 
+test("buildReasoningEffortOptions uses provider-specific effort labels", () => {
+  assert.deepEqual(
+    buildReasoningEffortOptions(
+      [{ default_reasoning_effort: "medium", model: "gpt-5.5", supported_reasoning_efforts: ["xhigh"] }],
+      "gpt-5.5",
+      "codex"
+    ),
+    [{ label: "Extreme high", value: "xhigh" }]
+  );
+  assert.deepEqual(
+    buildReasoningEffortOptions(
+      [{ default_reasoning_effort: "medium", model: "claude-opus", supported_reasoning_efforts: ["max"] }],
+      "claude-opus",
+      "claude_code"
+    ),
+    [{ label: "Max", value: "max" }]
+  );
+});
+
 test("resolveReasoningEffortValue falls back to model default when current effort is unsupported", () => {
   const effort = resolveReasoningEffortValue(
     [

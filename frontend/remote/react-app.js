@@ -14,6 +14,13 @@ import {
   buildReasoningEffortOptions,
   resolveReasoningEffortValue,
 } from "../shared/reasoning-efforts.js";
+import {
+  defaultModelForProvider,
+  defaultProvider,
+  normalizeProviderList,
+  providerOptions,
+  providerSettings,
+} from "../shared/provider-settings.js";
 import { selectWorkspaceSuggestionsModel } from "../shared/workspace-suggestions.js";
 import {
   selectDeviceChromeRenderModel,
@@ -153,6 +160,76 @@ function RemoteApp() {
   const [threadListStore] = useState(() => createThreadListStore());
   const threadListUi = useThreadListStoreState(threadListStore);
   const handlers = createRemoteAppHandlers();
+  const selectedProvider = remoteUi.sessionDraft.provider || defaultProvider(remoteUi.providers);
+  const selectedProviderModels = remoteUi.providerModels[selectedProvider] || [];
+  const selectedProviderSettings = providerSettings(selectedProvider);
+
+  useEffect(() => {
+    if (!currentState.remoteAuth?.payloadSecret) return;
+    let cancelled = false;
+    console.log("[providers] fetching provider list via broker...");
+    handlers.onFetchProviders?.()
+      .then((providers) => {
+        if (cancelled) return;
+        console.log("[providers] received:", JSON.stringify(providers));
+        const normalized = normalizeProviderList(providers);
+        console.log("[providers] normalized:", JSON.stringify(normalized));
+        remoteUiStore.getState().setProviders(normalized);
+        if (!remoteUiStore.getState().sessionDraft.provider) {
+          const def = defaultProvider(normalized);
+          console.log("[providers] setting default provider:", def);
+          remoteUiStore.getState().setSessionDraftField("provider", def);
+        }
+      })
+      .catch((err) => {
+        console.log("[providers] fetchProviders failed:", err.message || err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentState.remoteAuth?.relayId, currentState.remoteAuth?.payloadSecret]);
+
+  useEffect(() => {
+    if (!currentState.remoteAuth?.payloadSecret || !selectedProvider) return;
+    if (remoteUi.providerModels[selectedProvider]?.length) {
+      console.log("[providers] models already cached for", selectedProvider, remoteUi.providerModels[selectedProvider]?.length);
+      return;
+    }
+    console.log("[providers] fetching models for", selectedProvider);
+    let cancelled = false;
+    handlers.onFetchProviderModels?.(selectedProvider)
+      .then((models) => {
+        if (cancelled) return;
+        console.log("[providers] received models for", selectedProvider, models?.length || 0);
+        remoteUiStore.getState().setProviderModels(selectedProvider, models || []);
+        const currentDraft = remoteUiStore.getState().sessionDraft;
+        if (!currentDraft.model || currentDraft.model === defaultModelForProvider("codex")) {
+          const nextModel = models?.find((model) => model.is_default)?.model
+            || models?.[0]?.model
+            || defaultModelForProvider(selectedProvider);
+          remoteUiStore.getState().setSessionDraftField("model", nextModel);
+          remoteUiStore.getState().setSessionDraftField(
+            "effort",
+            resolveReasoningEffortValue(models || [], nextModel, currentDraft.effort)
+          );
+          return;
+        }
+        remoteUiStore.getState().setSessionDraftField(
+          "effort",
+          resolveReasoningEffortValue(
+            models || [],
+            currentDraft.model || defaultModelForProvider(selectedProvider),
+            currentDraft.effort
+          )
+        );
+      })
+      .catch((err) => {
+        console.log("[providers] fetchModels for", selectedProvider, "failed:", err.message || err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentState.remoteAuth?.relayId, currentState.remoteAuth?.payloadSecret, selectedProvider]);
 
   const session = currentState.session;
   const previousSession = previousSessionRef.current;
@@ -226,24 +303,35 @@ function RemoteApp() {
   const sessionPanelModel = {
     fields: {
       ...remoteUi.sessionDraft,
+      provider: selectedProvider,
+      model: remoteUi.sessionDraft.model || defaultModelForProvider(selectedProvider),
       effort: resolveReasoningEffortValue(
-        session?.available_models || [],
-        remoteUi.sessionDraft.model,
+        selectedProviderModels,
+        remoteUi.sessionDraft.model || defaultModelForProvider(selectedProvider),
         remoteUi.sessionDraft.effort
       ),
     },
     effortOptions: buildReasoningEffortOptions(
-      session?.available_models || [],
-      remoteUi.sessionDraft.model
+      selectedProviderModels,
+      remoteUi.sessionDraft.model || defaultModelForProvider(selectedProvider),
+      selectedProvider
     ),
+    labels: {
+      approval: selectedProviderSettings.approvalLabel,
+      effort: selectedProviderSettings.effortLabel,
+      model: selectedProviderSettings.modelLabel,
+      sandbox: selectedProviderSettings.sandboxLabel,
+    },
+    approvalOptions: selectedProviderSettings.approvalOptions,
     hasRemoteAuth: hasRelay,
     hasUsableRelay,
-    models: session?.available_models?.length
-      ? session.available_models
+    providerOptions: providerOptions(remoteUi.providers),
+    models: selectedProviderModels.length
+      ? selectedProviderModels
       : [
           {
-            display_name: remoteUi.sessionDraft.model,
-            model: remoteUi.sessionDraft.model,
+            display_name: remoteUi.sessionDraft.model || defaultModelForProvider(selectedProvider),
+            model: remoteUi.sessionDraft.model || defaultModelForProvider(selectedProvider),
           },
         ],
     startPending: remoteUi.sessionStartPending,
@@ -629,6 +717,7 @@ function RemoteApp() {
         },
         relayDirectoryModel,
         remoteCwdInputRef,
+        remoteUiState: remoteUi,
         sessionPanelModel,
         sessionPanelOpen: remoteUi.sessionPanelOpen,
         sessionToggleLabel,
@@ -766,6 +855,7 @@ function RemoteSidebar({
   onOpenPairing,
   onRefreshRelayDirectory,
   onRefreshThreads,
+  remoteUiState,
   onResumeThread,
   onSelectRelay,
   onStartSession,
@@ -866,12 +956,26 @@ function RemoteSidebar({
         cwdInputRef: remoteCwdInputRef,
         model: sessionPanelModel,
         onFieldChange(field, value) {
+          const uiState = remoteUiState;
+          if (field === "provider") {
+            const models = uiState.providerModels[value] || [];
+            const model = models.find((option) => option.is_default)?.model
+              || models[0]?.model
+              || defaultModelForProvider(value);
+            updateSessionDraft({
+              effort: resolveReasoningEffortValue(models, model, uiState.sessionDraft.effort),
+              model,
+              provider: value,
+            });
+            return;
+          }
           if (field === "model") {
+            const selectedModels = uiState.providerModels[uiState.sessionDraft.provider] || [];
             updateSessionDraft({
               effort: resolveReasoningEffortValue(
-                session?.available_models || [],
+                selectedModels,
                 value,
-                remoteUi.sessionDraft.effort
+                uiState.sessionDraft.effort
               ),
               model: value,
             });

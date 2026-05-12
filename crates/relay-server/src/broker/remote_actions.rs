@@ -7,11 +7,11 @@ use tracing::{info, warn};
 
 use crate::{
     protocol::{
-        ApprovalDecisionInput, ApprovalReceipt, HeartbeatInput, ReadThreadEntriesInput,
-        ReadThreadEntryDetailInput, ReadThreadTranscriptInput, ResumeSessionInput,
-        SendMessageInput, SessionSnapshot, StartSessionInput, StopTurnInput, TakeOverInput,
-        ThreadEntriesResponse, ThreadEntryDetailResponse, ThreadTranscriptResponse, ThreadsQuery,
-        ThreadsResponse,
+        ApprovalDecisionInput, ApprovalReceipt, HeartbeatInput, ModelOptionView,
+        ReadThreadEntriesInput, ReadThreadEntryDetailInput, ReadThreadTranscriptInput,
+        ResumeSessionInput, SendMessageInput, SessionSnapshot, StartSessionInput, StopTurnInput,
+        TakeOverInput, ThreadEntriesResponse, ThreadEntryDetailResponse, ThreadTranscriptResponse,
+        ThreadsQuery, ThreadsResponse,
     },
     state::{AppState, ApprovalError, CachedRemoteActionResult, RemoteActionReplayDecision},
 };
@@ -59,8 +59,12 @@ pub(super) enum RemoteActionRequest {
     Heartbeat {
         input: HeartbeatInput,
     },
+    ListProviders,
     ListThreads {
         query: ThreadsQuery,
+    },
+    ListProviderModels {
+        provider: String,
     },
     FetchThreadEntries {
         input: ReadThreadEntriesInput,
@@ -88,7 +92,9 @@ impl RemoteActionRequest {
             Self::StopTurn { .. } => RemoteActionKind::StopTurn,
             Self::TakeOver { .. } => RemoteActionKind::TakeOver,
             Self::Heartbeat { .. } => RemoteActionKind::Heartbeat,
+            Self::ListProviders => RemoteActionKind::ListProviders,
             Self::ListThreads { .. } => RemoteActionKind::ListThreads,
+            Self::ListProviderModels { .. } => RemoteActionKind::ListProviderModels,
             Self::FetchThreadEntries { .. } => RemoteActionKind::FetchThreadEntries,
             Self::FetchThreadEntryDetail { .. } => RemoteActionKind::FetchThreadEntryDetail,
             Self::FetchThreadTranscript { .. } => RemoteActionKind::FetchThreadTranscript,
@@ -130,7 +136,9 @@ impl RemoteActionRequest {
                 input.device_id = Some(device_id);
                 Self::Heartbeat { input }
             }
+            Self::ListProviders => Self::ListProviders,
             Self::ListThreads { query } => Self::ListThreads { query },
+            Self::ListProviderModels { provider } => Self::ListProviderModels { provider },
             Self::FetchThreadEntries { input } => Self::FetchThreadEntries { input },
             Self::FetchThreadEntryDetail { input } => Self::FetchThreadEntryDetail { input },
             Self::FetchThreadTranscript { input } => Self::FetchThreadTranscript { input },
@@ -156,7 +164,9 @@ pub(super) enum RemoteActionKind {
     StopTurn,
     TakeOver,
     Heartbeat,
+    ListProviders,
     ListThreads,
+    ListProviderModels,
     FetchThreadEntries,
     FetchThreadEntryDetail,
     FetchThreadTranscript,
@@ -174,7 +184,9 @@ impl RemoteActionKind {
             Self::StopTurn => "stop_turn",
             Self::TakeOver => "take_over",
             Self::Heartbeat => "heartbeat",
+            Self::ListProviders => "list_providers",
             Self::ListThreads => "list_threads",
+            Self::ListProviderModels => "list_provider_models",
             Self::FetchThreadEntries => "fetch_thread_entries",
             Self::FetchThreadEntryDetail => "fetch_thread_entry_detail",
             Self::FetchThreadTranscript => "fetch_thread_transcript",
@@ -191,6 +203,8 @@ struct RemoteActionResultPlaintext {
     #[serde(skip_serializing_if = "Option::is_none")]
     snapshot: Option<SessionSnapshot>,
     receipt: Option<ApprovalReceipt>,
+    providers: Option<Vec<String>>,
+    models: Option<Vec<ModelOptionView>>,
     threads: Option<ThreadsResponse>,
     thread_entries: Option<ThreadEntriesResponse>,
     thread_entry_detail: Option<ThreadEntryDetailResponse>,
@@ -240,6 +254,8 @@ struct RemoteActionResultSizeBreakdown {
 #[derive(Debug, Default)]
 pub(super) struct RemoteActionOutcome {
     pub(super) receipt: Option<ApprovalReceipt>,
+    pub(super) providers: Option<Vec<String>>,
+    pub(super) models: Option<Vec<ModelOptionView>>,
     pub(super) threads: Option<ThreadsResponse>,
     pub(super) thread_entries: Option<ThreadEntriesResponse>,
     pub(super) thread_entry_detail: Option<ThreadEntryDetailResponse>,
@@ -775,12 +791,39 @@ async fn execute_remote_action(
             .heartbeat_session(input)
             .await
             .map(|_| RemoteActionOutcome::default()),
+        RemoteActionRequest::ListProviders => Ok(RemoteActionOutcome {
+            receipt: None,
+            providers: Some(state.available_providers()),
+            models: None,
+            threads: None,
+            thread_entries: None,
+            thread_entry_detail: None,
+            thread_transcript: None,
+            session_claim: None,
+            session_claim_expires_at: None,
+            ..RemoteActionOutcome::default()
+        }),
         RemoteActionRequest::ListThreads { query } => state
             .list_threads(query.limit.unwrap_or(80).clamp(1, 200), query.cwd)
             .await
             .map(|threads| RemoteActionOutcome {
                 receipt: None,
+                models: None,
                 threads: Some(threads),
+                thread_entries: None,
+                thread_entry_detail: None,
+                thread_transcript: None,
+                session_claim: None,
+                session_claim_expires_at: None,
+                ..RemoteActionOutcome::default()
+            }),
+        RemoteActionRequest::ListProviderModels { provider } => state
+            .provider_models(&provider)
+            .await
+            .map(|models| RemoteActionOutcome {
+                receipt: None,
+                models: Some(models),
+                threads: None,
                 thread_entries: None,
                 thread_entry_detail: None,
                 thread_transcript: None,
@@ -1139,6 +1182,8 @@ async fn publish_plain_remote_action_result(
     });
     let RemoteActionOutcome {
         receipt,
+        providers,
+        models,
         thread_entries,
         thread_entry_detail,
         thread_transcript,
@@ -1154,6 +1199,8 @@ async fn publish_plain_remote_action_result(
         ok,
         snapshot.as_ref(),
         receipt.as_ref(),
+        providers.as_ref(),
+        models.as_ref(),
         threads.as_ref(),
         thread_entries.as_ref(),
         thread_entry_detail.as_ref(),
@@ -1171,6 +1218,8 @@ async fn publish_plain_remote_action_result(
         ok,
         snapshot,
         receipt,
+        providers,
+        models,
         threads,
         thread_entries,
         thread_entry_detail,
@@ -1294,6 +1343,8 @@ fn build_plain_remote_action_result_payload(
             target_peer_id,
             action: result.action,
             ok: result.ok,
+            providers: result.providers.clone(),
+            models: result.models.clone(),
             threads: result.threads.clone(),
             error: result.error.clone(),
         },
@@ -1327,6 +1378,8 @@ async fn replay_plain_remote_action_result(
         cached.snapshot,
         RemoteActionOutcome {
             receipt: cached.receipt,
+            providers: cached.providers,
+            models: cached.models,
             threads: cached.threads,
             thread_entries: cached.thread_entries,
             thread_entry_detail: cached.thread_entry_detail,
@@ -1387,6 +1440,8 @@ async fn publish_remote_action_result_private(
     });
     let RemoteActionOutcome {
         receipt,
+        providers,
+        models,
         thread_entries,
         thread_entry_detail,
         thread_transcript,
@@ -1406,6 +1461,8 @@ async fn publish_remote_action_result_private(
         ok,
         snapshot.as_ref(),
         receipt.as_ref(),
+        providers.as_ref(),
+        models.as_ref(),
         threads.as_ref(),
         thread_entries.as_ref(),
         thread_entry_detail.as_ref(),
@@ -1423,6 +1480,8 @@ async fn publish_remote_action_result_private(
         ok,
         snapshot,
         receipt,
+        providers,
+        models,
         threads,
         thread_entries,
         thread_entry_detail,
@@ -1497,6 +1556,8 @@ async fn replay_encrypted_remote_action_result(
         cached.snapshot,
         RemoteActionOutcome {
             receipt: cached.receipt,
+            providers: cached.providers,
+            models: cached.models,
             threads: cached.threads,
             thread_entries: cached.thread_entries,
             thread_entry_detail: cached.thread_entry_detail,
@@ -1680,6 +1741,8 @@ fn cached_remote_action_result(
         ok,
         snapshot: remote_action_result_snapshot(action, snapshot),
         receipt: outcome.receipt,
+        providers: outcome.providers,
+        models: outcome.models,
         // Snapshots and thread lists are compacted at the remote-surface publish
         // boundary. Thread transcript responses are already paginated and do not
         // use ThreadsResponseCompactProfile.
@@ -1702,6 +1765,8 @@ fn measure_remote_action_result_sizes(
     ok: bool,
     snapshot: Option<&SessionSnapshot>,
     receipt: Option<&ApprovalReceipt>,
+    providers: Option<&Vec<String>>,
+    models: Option<&Vec<ModelOptionView>>,
     threads: Option<&ThreadsResponse>,
     thread_entries: Option<&ThreadEntriesResponse>,
     thread_entry_detail: Option<&ThreadEntryDetailResponse>,
@@ -1719,6 +1784,8 @@ fn measure_remote_action_result_sizes(
         ok,
         snapshot,
         receipt,
+        providers,
+        models,
         threads,
         thread_entries,
         thread_entry_detail,
@@ -1833,6 +1900,8 @@ struct RemoteActionResultPlaintextRef<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     snapshot: Option<&'a SessionSnapshot>,
     receipt: Option<&'a ApprovalReceipt>,
+    providers: Option<&'a Vec<String>>,
+    models: Option<&'a Vec<ModelOptionView>>,
     threads: Option<&'a ThreadsResponse>,
     thread_entries: Option<&'a ThreadEntriesResponse>,
     thread_entry_detail: Option<&'a ThreadEntryDetailResponse>,
@@ -1862,7 +1931,9 @@ fn remote_action_result_kind(action: RemoteActionKind) -> RemoteActionResultKind
         | RemoteActionKind::Heartbeat
         | RemoteActionKind::StopTurn
         | RemoteActionKind::TakeOver => RemoteActionResultKind::RemoteControlResult,
-        RemoteActionKind::ListThreads => RemoteActionResultKind::RemoteThreadsResult,
+        RemoteActionKind::ListProviders
+        | RemoteActionKind::ListThreads
+        | RemoteActionKind::ListProviderModels => RemoteActionResultKind::RemoteThreadsResult,
         RemoteActionKind::FetchThreadEntries
         | RemoteActionKind::FetchThreadEntryDetail
         | RemoteActionKind::FetchThreadTranscript => RemoteActionResultKind::RemoteTranscriptResult,

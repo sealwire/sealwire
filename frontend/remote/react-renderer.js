@@ -1,4 +1,5 @@
 import React from "react";
+import { sandboxOptions } from "../shared/provider-settings.js";
 export { ConversationComposer as Composer } from "../shared/composer.js";
 import { formatTimestamp, shortId } from "./utils.js";
 
@@ -178,7 +179,23 @@ export function SessionPanel({
         h(
           "label",
           { className: "field" },
-          h("span", null, "Model"),
+          h("span", null, "Provider"),
+          h(
+            "select",
+            {
+              id: "remote-provider-input",
+              onChange: (event) => onFieldChange?.("provider", event.target.value),
+              value: model.fields.provider,
+            },
+            ...(model.providerOptions || []).map((option) =>
+              h("option", { key: option.value, value: option.value }, option.label)
+            )
+          )
+        ),
+        h(
+          "label",
+          { className: "field" },
+          h("span", null, model.labels?.model || "Model"),
           h(
             "select",
             {
@@ -201,7 +218,7 @@ export function SessionPanel({
         h(
           "label",
           { className: "field" },
-          h("span", null, "Approval"),
+          h("span", null, model.labels?.approval || "Permission mode"),
           h(
             "select",
             {
@@ -209,15 +226,15 @@ export function SessionPanel({
               onChange: (event) => onFieldChange?.("approvalPolicy", event.target.value),
               value: model.fields.approvalPolicy,
             },
-            h("option", { value: "untrusted" }, "untrusted"),
-            h("option", { value: "on-request" }, "on-request"),
-            h("option", { value: "never" }, "never")
+            ...(model.approvalOptions || []).map((option) =>
+              h("option", { key: option.value, value: option.value }, option.label)
+            )
           )
         ),
         h(
           "label",
           { className: "field" },
-          h("span", null, "Sandbox"),
+          h("span", null, model.labels?.sandbox || "File access"),
           h(
             "select",
             {
@@ -225,15 +242,15 @@ export function SessionPanel({
               onChange: (event) => onFieldChange?.("sandbox", event.target.value),
               value: model.fields.sandbox,
             },
-            h("option", { value: "workspace-write" }, "workspace-write"),
-            h("option", { value: "read-only" }, "read-only"),
-            h("option", { value: "danger-full-access" }, "danger-full-access")
+            ...sandboxOptions().map((option) =>
+              h("option", { key: option.value, value: option.value }, option.label)
+            )
           )
         ),
         h(
           "label",
           { className: "field" },
-          h("span", null, "Default Effort"),
+          h("span", null, model.labels?.effort || "Effort"),
           h(
             "select",
             {

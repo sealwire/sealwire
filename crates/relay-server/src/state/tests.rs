@@ -238,6 +238,8 @@ fn test_cached_remote_action_result(action_kind: &str, ok: bool) -> CachedRemote
             resulting_state: "approval_response_sent".to_string(),
             message: "approved".to_string(),
         }),
+        providers: None,
+        models: None,
         threads: Some(ThreadsResponse {
             threads: vec![test_thread("thread-1", "/tmp/project")],
         }),

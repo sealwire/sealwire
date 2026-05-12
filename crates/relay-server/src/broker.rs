@@ -26,7 +26,7 @@ use url::Url;
 
 use crate::{
     protocol::{
-        ApprovalReceipt, PairedDeviceView, SessionSnapshot, ThreadEntriesResponse,
+        ApprovalReceipt, ModelOptionView, PairedDeviceView, SessionSnapshot, ThreadEntriesResponse,
         ThreadEntryDetailResponse, ThreadTranscriptResponse, ThreadsResponse,
     },
     state::{AppState, BrokerPendingMessage, PendingTranscriptDelta, TranscriptDeltaKind},
@@ -262,6 +262,8 @@ enum OutboundBrokerPayload {
         target_peer_id: String,
         action: RemoteActionKind,
         ok: bool,
+        providers: Option<Vec<String>>,
+        models: Option<Vec<ModelOptionView>>,
         threads: Option<ThreadsResponse>,
         error: Option<String>,
     },
@@ -1392,14 +1394,18 @@ fn summarize_outbound_payload(payload: &OutboundBrokerPayload) -> String {
             target_peer_id,
             action,
             ok,
+            providers,
+            models,
             threads,
             error,
         } => format!(
-            "kind=remote_threads_result action={} action_id={} target_peer_id={} ok={} threads={} error={}",
+            "kind=remote_threads_result action={} action_id={} target_peer_id={} ok={} providers={} models={} threads={} error={}",
             action.as_str(),
             action_id,
             target_peer_id,
             ok,
+            providers.as_ref().map(|items| items.len()).unwrap_or(0),
+            models.as_ref().map(|items| items.len()).unwrap_or(0),
             threads.as_ref().map(|response| response.threads.len()).unwrap_or(0),
             error.as_deref().unwrap_or("-"),
         ),

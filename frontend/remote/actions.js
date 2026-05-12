@@ -491,6 +491,7 @@ function isRemoteActionResultKind(kind) {
     || kind === "remote_action_result"
     || kind === "remote_approval_result"
     || kind === "remote_control_result"
+    || kind === "remote_models_result"
     || kind === "remote_session_result"
     || kind === "remote_threads_result"
     || kind === "remote_transcript_result";

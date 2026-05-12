@@ -35,6 +35,7 @@ import {
   messageInput,
   messageModel,
   modelInput,
+  modelInputLabel,
   openLaunchSettingsButton,
   openSecurityConsoleButton,
   openSecurityHeaderButton,
@@ -44,6 +45,7 @@ import {
   pairedDevicesList,
   pendingActionBanner,
   pendingPairingsList,
+  providerInput,
   refreshButton,
   resumeLatestButton,
   sandboxInput,
@@ -54,6 +56,7 @@ import {
   sessionHistoryDrawer,
   sessionMeta,
   startEffortInput,
+  startEffortLabel,
   startPairingButton,
   startPromptInput,
   startSessionButton,
@@ -106,6 +109,14 @@ import {
   buildReasoningEffortOptions,
   resolveReasoningEffortValue,
 } from "./shared/reasoning-efforts.js";
+import {
+  defaultModelForProvider,
+  defaultProvider,
+  normalizeProviderList,
+  providerOptions,
+  providerSettings,
+  sandboxOptions,
+} from "./shared/provider-settings.js";
 import { localQueryClient } from "./local/query-client.js";
 
 const DEVICE_STORAGE_KEY = "agent-relay.device-id";
@@ -146,6 +157,8 @@ const state = {
   transcriptLiveEntryThreadId: null,
   transcriptPreserveScroll: false,
   pendingThreadHistoryScrollTop: null,
+  providerModels: {},
+  providers: [],
   threadGroups: [],
   threadHistoryScrollTop: 0,
   threadListStore: createThreadListStore(),
@@ -492,14 +505,19 @@ messageForm.addEventListener("submit", (event) => {
   void sendMessage();
 });
 
+providerInput?.addEventListener("change", () => {
+  void selectLaunchProvider(providerInput.value);
+});
+
 modelInput?.addEventListener("change", () => {
-  const models = state.session?.available_models || [];
-  syncEffortSuggestions(startEffortInput, models, modelInput.value, startEffortInput.value);
+  const provider = providerInput?.value || state.session?.provider || "codex";
+  const models = modelsForProvider(provider, state.session?.available_models || []);
+  syncEffortSuggestions(startEffortInput, models, modelInput.value, startEffortInput.value, provider);
 });
 
 messageModel?.addEventListener("change", () => {
   const models = state.session?.available_models || [];
-  syncEffortSuggestions(messageEffort, models, messageModel.value, messageEffort.value);
+  syncEffortSuggestions(messageEffort, models, messageModel.value, messageEffort.value, state.session?.provider || "");
 });
 
 stopButton?.addEventListener("click", () => {
@@ -805,10 +823,19 @@ function handleUnauthorized(message) {
 }
 
 function seedDefaults(session) {
-  syncModelSuggestions(modelInput, session.available_models || [], session.model);
+  void refreshProviderCatalogs(session);
+  const activeProvider = session.provider || defaultProvider(state.providers);
+  const launchProvider = providerInput?.value || activeProvider;
+  const launchModels = modelsForProvider(launchProvider, session.available_models || []);
+  syncProviderSuggestions(providerInput, state.providers, launchProvider);
+  syncLaunchSettingLabels(launchProvider);
+  syncModelSuggestions(modelInput, launchModels, modelInput?.value || defaultModelForProvider(launchProvider));
   syncModelSuggestions(messageModel, session.available_models || [], messageModel?.value || session.model);
 
   if (!state.defaultsSeeded) {
+    if (providerInput) {
+      providerInput.value = activeProvider;
+    }
     if (!modelInput.value || modelInput.value === "gpt-5-codex") {
       modelInput.value = session.model || "gpt-5.4";
     }
@@ -824,19 +851,58 @@ function seedDefaults(session) {
 
   syncEffortSuggestions(
     startEffortInput,
-    session.available_models || [],
+    modelsForProvider(providerInput?.value || activeProvider, session.available_models || []),
     modelInput?.value || session.model,
-    startEffortInput?.value || session.reasoning_effort
+    startEffortInput?.value || session.reasoning_effort,
+    providerInput?.value || activeProvider
   );
   syncEffortSuggestions(
     messageEffort,
     session.available_models || [],
     messageModel?.value || session.model,
-    messageEffort?.value || session.reasoning_effort
+    messageEffort?.value || session.reasoning_effort,
+    session.provider || ""
   );
 
   if (!state.selectedCwd && session.current_cwd) {
     setSelectedCwd(session.current_cwd);
+  }
+}
+
+async function refreshProviderCatalogs(session) {
+  try {
+    if (!state.providers.length) {
+      const providersResponse = await apiFetch("/api/providers");
+      const providersPayload = await providersResponse.json();
+      if (providersResponse.ok && providersPayload.ok) {
+        state.providers = normalizeProviderList(providersPayload.data);
+        syncProviderSuggestions(providerInput, state.providers, providerInput?.value || session.provider);
+      }
+    }
+    await Promise.all(state.providers.map(async (provider) => {
+      if (state.providerModels[provider]?.length) return;
+      const response = await apiFetch(`/api/providers/${encodeURIComponent(provider)}/models`);
+      const payload = await response.json();
+      if (response.ok && payload.ok) {
+        state.providerModels[provider] = payload.data || [];
+      }
+    }));
+    const provider = providerInput?.value || session.provider || defaultProvider(state.providers);
+    syncLaunchSettingLabels(provider);
+    syncModelSuggestions(
+      modelInput,
+      modelsForProvider(provider, session.available_models || []),
+      modelInput?.value || defaultModelForProvider(provider)
+    );
+    syncEffortSuggestions(
+      startEffortInput,
+      modelsForProvider(provider, session.available_models || []),
+      modelInput?.value || defaultModelForProvider(provider),
+      startEffortInput?.value || "",
+      provider
+    );
+  } catch (error) {
+    logLine(`Provider model refresh failed: ${error.message}`);
   }
 }
 
@@ -864,7 +930,56 @@ function syncModelSuggestions(select, models, selectedModel) {
   );
 }
 
-function syncEffortSuggestions(select, models, selectedModel, selectedEffort) {
+function syncProviderSuggestions(select, providers, selectedProvider) {
+  if (!select) {
+    return;
+  }
+  const options = providerOptions(providers);
+  renderSelectOptions(select, options, selectedProvider || defaultProvider(providers));
+}
+
+function modelsForProvider(provider, fallbackModels = []) {
+  const normalized = provider || "codex";
+  return state.providerModels[normalized]?.length
+    ? state.providerModels[normalized]
+    : fallbackModels;
+}
+
+function syncLaunchSettingLabels(provider) {
+  const settings = providerSettings(provider);
+  if (modelInputLabel) {
+    modelInputLabel.textContent = settings.modelLabel;
+  }
+  if (startEffortLabel) {
+    startEffortLabel.textContent = settings.effortLabel;
+  }
+  renderSelectOptions(
+    approvalPolicyInput,
+    settings.approvalOptions,
+    approvalPolicyInput?.value || "untrusted"
+  );
+  renderSelectOptions(
+    sandboxInput,
+    sandboxOptions(),
+    sandboxInput?.value || "workspace-write"
+  );
+}
+
+async function selectLaunchProvider(provider) {
+  const selected = provider || defaultProvider(state.providers);
+  syncLaunchSettingLabels(selected);
+  if (!state.providerModels[selected]?.length) {
+    await refreshProviderCatalogs(state.session || { provider: selected, available_models: [] });
+  }
+  const models = modelsForProvider(selected, state.session?.available_models || []);
+  const model = models.find((option) => option.is_default)?.model
+    || models[0]?.model
+    || defaultModelForProvider(selected);
+  syncModelSuggestions(modelInput, models, model);
+  syncEffortSuggestions(startEffortInput, models, model, startEffortInput?.value || "", selected);
+}
+
+function syncEffortSuggestions(select, models, selectedModel, selectedEffort, provider = "") {
   if (!select) {
     return;
   }
@@ -872,7 +987,7 @@ function syncEffortSuggestions(select, models, selectedModel, selectedEffort) {
   const resolvedEffort = resolveReasoningEffortValue(models, selectedModel, selectedEffort);
   renderSelectOptions(
     select,
-    buildReasoningEffortOptions(models, selectedModel, resolvedEffort),
+    buildReasoningEffortOptions(models, selectedModel, provider),
     resolvedEffort
   );
 }

@@ -53,13 +53,14 @@ async function main() {
     page = await context.newPage();
 
     await page.goto(`http://127.0.0.1:${relayPort}`, { waitUntil: "domcontentloaded" });
+    await page.waitForSelector("#start-session-button");
     assert.match(
-      (await page.textContent("#overview-session-title")) || "",
-      /^(Pick a workspace(?: to launch)?|Ready in .+)$/,
-      "overview should show either the empty launch prompt or the preselected workspace state"
+      (await page.textContent("#workspace-title")) || "",
+      /^(Relay console|Ready in .+|agent-relay)$/,
+      "workspace header should render the launch or active workspace state"
     );
     assert.ok(
-      ((await page.textContent("#overview-security-title")) || "").trim().length > 0,
+      ((await page.textContent("#overview-security-badges")) || "").trim().length > 0,
       "overview should describe relay posture"
     );
     await page.fill("#cwd-input", cwdInput);
@@ -96,8 +97,8 @@ async function main() {
       return Boolean(modal?.open);
     });
     assert.match(
-      (await page.textContent("#overview-session-copy")) || "",
-      /control|continue the live thread/i,
+      (await page.textContent("#session-meta")) || "",
+      /control|thread|model/i,
       "session details should describe the live session state"
     );
     assert.match(

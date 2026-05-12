@@ -362,7 +362,18 @@ function LaunchSettingsModal() {
         h(
           "label",
           { className: "field" },
-          h("span", null, "Model"),
+          h("span", null, "Provider"),
+          h(
+            "select",
+            { id: "provider-input" },
+            h("option", { value: "codex" }, "Codex"),
+            h("option", { value: "claude_code" }, "Claude Code")
+          )
+        ),
+        h(
+          "label",
+          { className: "field" },
+          h("span", { id: "model-input-label" }, "Codex model"),
           h("select", { id: "model-input" }, h("option", { value: "gpt-5.4" }, "gpt-5.4"))
         ),
         h(
@@ -392,7 +403,7 @@ function LaunchSettingsModal() {
         h(
           "label",
           { className: "field" },
-          h("span", null, "Default effort"),
+          h("span", { id: "start-effort-label" }, "Reasoning effort"),
           h(
             "select",
             { id: "start-effort" },

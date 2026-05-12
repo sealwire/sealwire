@@ -7,6 +7,7 @@ export function createDefaultSessionDraft() {
     cwd: "",
     effort: "medium",
     initialPrompt: "",
+    provider: "codex",
     model: "gpt-5.4",
     sandbox: "workspace-write",
   };
@@ -21,6 +22,8 @@ export function createRemoteUiStore(initialState = {}) {
     pairingInputValue: "",
     pairingModalOpen: false,
     remoteInfoModalOpen: false,
+    providerModels: {},
+    providers: [],
     sendPending: false,
     sessionDraft: createDefaultSessionDraft(),
     sessionPanelOpen: false,
@@ -69,6 +72,19 @@ export function createRemoteUiStore(initialState = {}) {
     setRemoteInfoModalOpen(open) {
       set({
         remoteInfoModalOpen: Boolean(open),
+      });
+    },
+    setProviderModels(provider, models) {
+      set((state) => ({
+        providerModels: {
+          ...state.providerModels,
+          [provider]: models || [],
+        },
+      }));
+    },
+    setProviders(providers) {
+      set({
+        providers: providers || [],
       });
     },
     setSendPending(value) {

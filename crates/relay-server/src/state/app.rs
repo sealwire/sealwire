@@ -125,7 +125,22 @@ impl AppState {
     }
 
     pub fn available_providers(&self) -> Vec<String> {
-        self.providers.keys().cloned().collect()
+        let mut providers: Vec<String> = self.providers.keys().cloned().collect();
+        providers.sort_by(|left, right| match (left.as_str(), right.as_str()) {
+            ("codex", "codex") => std::cmp::Ordering::Equal,
+            ("codex", _) => std::cmp::Ordering::Less,
+            (_, "codex") => std::cmp::Ordering::Greater,
+            _ => left.cmp(right),
+        });
+        providers
+    }
+
+    pub async fn provider_models(
+        &self,
+        provider_name: &str,
+    ) -> Result<Vec<ModelOptionView>, String> {
+        let (_, bridge) = self.resolve_provider(Some(provider_name))?;
+        bridge.list_models().await
     }
 
     pub fn subscribe(&self) -> watch::Receiver<u64> {
