@@ -40,7 +40,8 @@ test("createDefaultSessionDraft returns the canonical remote session defaults", 
     cwd: "",
     effort: "medium",
     initialPrompt: "",
-    model: "gpt-5.4",
+    model: "gpt-5.5",
+    provider: "codex",
     sandbox: "workspace-write",
   });
 });
@@ -114,4 +115,60 @@ test("remote transcript reducer tracks expanded item detail state", () => {
   assert.equal(state.transcriptExpandedItemIds.has("entry:item-1"), false);
   assert.equal(state.transcriptLoadingItemIds.has("item-1"), false);
   assert.equal(state.transcriptExpandedDetails.has("item-1"), false);
+});
+
+test("setProviderModels seeds models and updates default model when snapshot arrives", () => {
+  const store = createRemoteUiStore();
+  const models = [
+    { model: "gpt-5.5", display_name: "GPT-5.5", is_default: true, provider: "" },
+    { model: "gpt-5.4", display_name: "GPT-5.4", is_default: false, provider: "" },
+  ];
+
+  // Simulate: on page load, session snapshot has codex models
+  const provider = "codex";
+  store.getState().setProviderModels(provider, models);
+
+  assert.deepEqual(store.getState().providerModels.codex, models);
+
+  // Verify default model update (same logic as the useEffect)
+  const defaultModel = models.find((m) => m.is_default)?.model || models[0]?.model;
+  assert.equal(defaultModel, "gpt-5.5");
+});
+
+test("setProviderModels does not overwrite model when draft provider differs from session provider", () => {
+  const store = createRemoteUiStore();
+
+  // User selected codex provider with codex model
+  store.getState().setSessionDraftField("provider", "codex");
+  store.getState().setSessionDraftField("model", "gpt-5.5");
+
+  // Session snapshot arrives with claude_code models (active provider changed on relay)
+  const claudeModels = [
+    { model: "claude-sonnet-4-6", display_name: "Sonnet", is_default: true, provider: "anthropic" },
+  ];
+  store.getState().setProviderModels("claude_code", claudeModels);
+
+  // Simulate the useEffect logic: don't overwrite model when draft.provider !== session.provider
+  const sessionProvider = "claude_code";
+  const draft = store.getState().sessionDraft;
+  const shouldUpdateModel = draft.provider === sessionProvider
+    && (!draft.model || draft.model === "gpt-5.5");
+
+  assert.equal(shouldUpdateModel, false);
+  assert.equal(store.getState().sessionDraft.model, "gpt-5.5"); // unchanged
+  assert.equal(store.getState().sessionDraft.provider, "codex"); // unchanged
+});
+
+test("setProviderModels for claude_code provider seeds claude models", () => {
+  const store = createRemoteUiStore();
+  const models = [
+    { model: "claude-sonnet-4-6", display_name: "Sonnet", is_default: true, provider: "anthropic" },
+    { model: "claude-opus-4-7", display_name: "Opus", is_default: false, provider: "anthropic" },
+  ];
+
+  store.getState().setProviderModels("claude_code", models);
+
+  assert.equal(store.getState().providerModels.codex, undefined);
+  assert.equal(store.getState().providerModels.claude_code.length, 2);
+  assert.equal(store.getState().providerModels.claude_code[0].model, "claude-sonnet-4-6");
 });

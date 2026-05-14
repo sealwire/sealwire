@@ -167,23 +167,24 @@ function RemoteApp() {
   useEffect(() => {
     if (!currentState.remoteAuth?.payloadSecret) return;
     let cancelled = false;
-    console.log("[providers] fetching provider list via broker...");
     handlers.onFetchProviders?.()
       .then((providers) => {
         if (cancelled) return;
-        console.log("[providers] received:", JSON.stringify(providers));
         const normalized = normalizeProviderList(providers);
-        console.log("[providers] normalized:", JSON.stringify(normalized));
         remoteUiStore.getState().setProviders(normalized);
         if (!remoteUiStore.getState().sessionDraft.provider) {
-          const def = defaultProvider(normalized);
-          console.log("[providers] setting default provider:", def);
-          remoteUiStore.getState().setSessionDraftField("provider", def);
+          remoteUiStore.getState().setSessionDraftField("provider", defaultProvider(normalized));
+        }
+        // Pre-fetch models for all providers so the dropdown is populated immediately
+        for (const provider of normalized) {
+          handlers.onFetchProviderModels?.(provider)
+            .then((models) => {
+              if (!cancelled) remoteUiStore.getState().setProviderModels(provider, models || []);
+            })
+            .catch(() => {});
         }
       })
-      .catch((err) => {
-        console.log("[providers] fetchProviders failed:", err.message || err);
-      });
+      .catch(() => {});
     return () => {
       cancelled = true;
     };
@@ -191,26 +192,20 @@ function RemoteApp() {
 
   useEffect(() => {
     if (!currentState.remoteAuth?.payloadSecret || !selectedProvider) return;
-    if (remoteUi.providerModels[selectedProvider]?.length) {
-      console.log("[providers] models already cached for", selectedProvider, remoteUi.providerModels[selectedProvider]?.length);
-      return;
-    }
-    console.log("[providers] fetching models for", selectedProvider);
     let cancelled = false;
     handlers.onFetchProviderModels?.(selectedProvider)
       .then((models) => {
         if (cancelled) return;
-        console.log("[providers] received models for", selectedProvider, models?.length || 0);
         remoteUiStore.getState().setProviderModels(selectedProvider, models || []);
-        const currentDraft = remoteUiStore.getState().sessionDraft;
-        if (!currentDraft.model || currentDraft.model === defaultModelForProvider("codex")) {
+        const draft = remoteUiStore.getState().sessionDraft;
+        if (draft.provider === selectedProvider && (!draft.model || draft.model === defaultModelForProvider(selectedProvider))) {
           const nextModel = models?.find((model) => model.is_default)?.model
             || models?.[0]?.model
             || defaultModelForProvider(selectedProvider);
           remoteUiStore.getState().setSessionDraftField("model", nextModel);
           remoteUiStore.getState().setSessionDraftField(
             "effort",
-            resolveReasoningEffortValue(models || [], nextModel, currentDraft.effort)
+            resolveReasoningEffortValue(models || [], nextModel, draft.effort)
           );
           return;
         }
@@ -218,18 +213,31 @@ function RemoteApp() {
           "effort",
           resolveReasoningEffortValue(
             models || [],
-            currentDraft.model || defaultModelForProvider(selectedProvider),
-            currentDraft.effort
+            draft.model || defaultModelForProvider(selectedProvider),
+            draft.effort
           )
         );
       })
-      .catch((err) => {
-        console.log("[providers] fetchModels for", selectedProvider, "failed:", err.message || err);
-      });
+      .catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [currentState.remoteAuth?.relayId, currentState.remoteAuth?.payloadSecret, selectedProvider]);
+  }, [currentState.remoteAuth?.relayId, currentState.remoteAuth?.payloadSecret, selectedProvider, currentState.socketConnected]);
+
+  useEffect(() => {
+    const models = currentState.session?.available_models;
+    const provider = currentState.session?.provider;
+    if (!models?.length || !provider) return;
+    if (remoteUi.providerModels[provider]?.length >= models.length) return;
+    remoteUiStore.getState().setProviderModels(provider, models);
+    const draft = remoteUiStore.getState().sessionDraft;
+    if (draft.provider === provider && (!draft.model || draft.model === defaultModelForProvider(provider))) {
+      const nextModel = models.find((m) => m.is_default)?.model
+        || models[0]?.model
+        || defaultModelForProvider(provider);
+      remoteUiStore.getState().setSessionDraftField("model", nextModel);
+    }
+  }, [currentState.session?.available_models, currentState.session?.provider]);
 
   const session = currentState.session;
   const previousSession = previousSessionRef.current;
@@ -922,12 +930,7 @@ function RemoteSidebar({
       h(
         "div",
         { className: "sidebar-row" },
-        h(
-          "div",
-          null,
-          h("p", { className: "sidebar-caption", id: "remote-relays-count" }, relayDirectoryModel.countLabel),
-          h("p", { className: "sidebar-hint" }, "Switch between relays paired to this browser.")
-        ),
+        h("p", { className: "sidebar-caption", id: "remote-relays-count" }, relayDirectoryModel.countLabel),
         h(
           "button",
           {
@@ -993,16 +996,7 @@ function RemoteSidebar({
       h(
         "div",
         { className: "sidebar-row" },
-        h(
-          "div",
-          null,
-          h("p", { className: "sidebar-caption", id: "remote-threads-count" }, threadsModel.countLabel),
-          h(
-            "p",
-            { className: "sidebar-hint" },
-            "Refresh over broker and resume a previous thread from this browser."
-          )
-        ),
+        h("p", { className: "sidebar-caption", id: "remote-threads-count" }, threadsModel.countLabel),
         h(
           "button",
           {

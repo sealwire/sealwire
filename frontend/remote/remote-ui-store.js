@@ -1,4 +1,5 @@
 import { createStore } from "zustand/vanilla";
+import { defaultModelForProvider } from "../shared/provider-settings.js";
 import { loadDeviceLabel } from "./state.js";
 
 export function createDefaultSessionDraft() {
@@ -8,7 +9,7 @@ export function createDefaultSessionDraft() {
     effort: "medium",
     initialPrompt: "",
     provider: "codex",
-    model: "gpt-5.4",
+    model: defaultModelForProvider("codex"),
     sandbox: "workspace-write",
   };
 }

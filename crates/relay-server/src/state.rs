@@ -23,7 +23,7 @@ pub(crate) use self::security::SecurityProfile;
 
 use crate::protocol::ThreadSummaryView;
 
-pub const DEFAULT_MODEL: &str = "gpt-5.4";
+pub const DEFAULT_MODEL: &str = "gpt-5.5";
 pub const DEFAULT_APPROVAL_POLICY: &str = "untrusted";
 pub const DEFAULT_SANDBOX: &str = "workspace-write";
 pub const DEFAULT_EFFORT: &str = "medium";

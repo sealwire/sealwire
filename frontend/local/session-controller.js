@@ -743,7 +743,7 @@ export function createSessionController({
       applySessionSnapshot(payload.data);
     } catch (error) {
       if (state.authRequired && !state.authenticated) {
-        resetTranscriptPaging(null);
+        clearTranscriptHydration(state);
         renderAuthRequiredState("Enter RELAY_API_TOKEN to access the local relay.");
         logLine(`Session fetch blocked by local auth: ${error.message}`);
         return;

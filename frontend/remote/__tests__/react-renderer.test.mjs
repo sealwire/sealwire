@@ -36,8 +36,8 @@ installBrowserStubs();
 
 const {
   MissingCredentialsState,
-  ReadyTranscriptState,
   RelayHomeState,
+  SessionPanel,
   WorkspaceHeading,
 } = await import("../react-renderer.js");
 
@@ -112,18 +112,58 @@ test("WorkspaceHeading compacts status labels for the chrome header", () => {
   assert.match(markup, /\/Users\/luchi\/git\/agent-relay/);
 });
 
-test("ReadyTranscriptState explains approvals remain available on passive devices", () => {
+test("SessionPanel renders provider and model selects with correct field bindings", () => {
+  const fieldsCalled = [];
+  const onFieldChange = (field, value) => {
+    fieldsCalled.push({ field, value });
+  };
+
   const markup = renderToStaticMarkup(
-    h(ReadyTranscriptState, {
-      canWrite: false,
-      session: {
-        active_thread_id: "thread-1",
-        current_cwd: "/Users/luchi/git/agent-relay",
+    h(SessionPanel, {
+      model: {
+        effortOptions: [
+          { label: "Low", value: "low" },
+          { label: "Medium", value: "medium" },
+        ],
+        fields: {
+          approvalPolicy: "untrusted",
+          cwd: "/tmp/project",
+          effort: "medium",
+          initialPrompt: "",
+          model: "gpt-5.5",
+          provider: "codex",
+          sandbox: "workspace-write",
+        },
+        hasRemoteAuth: true,
+        hasUsableRelay: true,
+        providerOptions: [
+          { label: "Codex", value: "codex" },
+          { label: "Claude Code", value: "claude_code" },
+        ],
+        startPending: false,
+        models: [
+          { model: "gpt-5.5", display_name: "GPT-5.5", provider: "" },
+          { model: "claude-sonnet-4-6", display_name: "Sonnet", provider: "anthropic" },
+        ],
+        workspaceSuggestions: [],
       },
+      onFieldChange,
     })
   );
 
-  assert.match(markup, /Session active on another device/);
-  assert.match(markup, /approve or decline requests here/i);
-  assert.match(markup, /take over only if you want to send messages/i);
+  // Renders both provider and model selects
+  assert.match(markup, /id="remote-provider-input"/);
+  assert.match(markup, /id="remote-model-input"/);
+
+  // Provider select shows both options with correct values
+  assert.match(markup, /<option[^>]*value="codex"[^>]*>Codex<\/option>/);
+  assert.match(markup, /<option[^>]*value="claude_code"[^>]*>Claude Code<\/option>/);
+
+  // Provider select has correct current value
+  assert.match(markup, /<select[^>]*id="remote-provider-input"[^>]*>/);
+  assert.match(markup, /value="codex"/);
+
+  // Model select shows all models from the model list
+  assert.match(markup, /GPT-5\.5/);
+  assert.match(markup, /Sonnet/);
 });

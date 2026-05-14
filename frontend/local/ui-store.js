@@ -24,12 +24,29 @@ function toggleSetValue(values, value) {
 
 export function createLocalUiStore(initialState = {}) {
   return createStore((set) => ({
+    ...initialState,
     allowedRootsDraftDirty: false,
     headerOverflowOpen: false,
     pendingPairingIds: [],
+    sessionDraft: {
+      approvalPolicy: "untrusted",
+      effort: "medium",
+      initialPrompt: "",
+      model: "gpt-5.5",
+      provider: "codex",
+      sandbox: "workspace-write",
+      ...(initialState.sessionDraft || {}),
+    },
     transcriptExpandedItemIds: new Set(),
     transcriptLoadingItemIds: new Set(),
-    ...initialState,
+    setSessionDraftField(field, value) {
+      set((state) => ({
+        sessionDraft: {
+          ...state.sessionDraft,
+          [field]: value,
+        },
+      }));
+    },
     closeHeaderOverflow() {
       set({
         headerOverflowOpen: false,
@@ -90,6 +107,7 @@ export function readLocalUiState(store) {
     allowedRootsDraftDirty: Boolean(state.allowedRootsDraftDirty),
     headerOverflowOpen: Boolean(state.headerOverflowOpen),
     pendingPairingIds: copyStringList(state.pendingPairingIds),
+    sessionDraft: state.sessionDraft ? { ...state.sessionDraft } : null,
     transcriptExpandedItemIds: copyStringSet(state.transcriptExpandedItemIds),
     transcriptLoadingItemIds: copyStringSet(state.transcriptLoadingItemIds),
   };

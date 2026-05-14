@@ -1,5 +1,5 @@
 const PROVIDER_LABELS = {
-  claude_code: "Claude Code",
+  claude_code: "Claude",
   codex: "Codex",
 };
 

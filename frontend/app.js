@@ -3,7 +3,6 @@ import {
   allowedRootsInput,
   allowedRootsList,
   allowedRootsSummary,
-  approvalPolicyInput,
   apiTokenInput,
   apiTokenLabel,
   appShell,
@@ -104,6 +103,7 @@ import {
 import { installThreadListWheelProxy } from "./shared/thread-list-scroll.js";
 import { fetchBuildInfo } from "./shared/build-badge.js";
 import { ClientLog } from "./shared/client-log.js";
+import { setLaunchSettings } from "./shared/launch-settings-store.js";
 import { renderSelectOptions } from "./shared/select-options.js";
 import {
   buildReasoningEffortOptions,
@@ -827,35 +827,17 @@ function seedDefaults(session) {
   const activeProvider = session.provider || defaultProvider(state.providers);
   const launchProvider = providerInput?.value || activeProvider;
   const launchModels = modelsForProvider(launchProvider, session.available_models || []);
-  syncProviderSuggestions(providerInput, state.providers, launchProvider);
-  syncLaunchSettingLabels(launchProvider);
-  syncModelSuggestions(modelInput, launchModels, modelInput?.value || defaultModelForProvider(launchProvider));
+
   syncModelSuggestions(messageModel, session.available_models || [], messageModel?.value || session.model);
 
   if (!state.defaultsSeeded) {
-    if (providerInput) {
-      providerInput.value = activeProvider;
-    }
-    if (!modelInput.value || modelInput.value === "gpt-5-codex") {
-      modelInput.value = session.model || "gpt-5.4";
-    }
-    approvalPolicyInput.value = session.approval_policy;
-    sandboxInput.value = session.sandbox;
-    startEffortInput.value = session.reasoning_effort;
     if (messageModel) {
-      messageModel.value = session.model || "gpt-5.4";
+      messageModel.value = session.model || defaultModelForProvider(activeProvider);
     }
     messageEffort.value = session.reasoning_effort;
     state.defaultsSeeded = true;
   }
 
-  syncEffortSuggestions(
-    startEffortInput,
-    modelsForProvider(providerInput?.value || activeProvider, session.available_models || []),
-    modelInput?.value || session.model,
-    startEffortInput?.value || session.reasoning_effort,
-    providerInput?.value || activeProvider
-  );
   syncEffortSuggestions(
     messageEffort,
     session.available_models || [],
@@ -863,6 +845,8 @@ function seedDefaults(session) {
     messageEffort?.value || session.reasoning_effort,
     session.provider || ""
   );
+
+  syncLaunchSettingsModal(session, launchProvider, launchModels, activeProvider);
 
   if (!state.selectedCwd && session.current_cwd) {
     setSelectedCwd(session.current_cwd);
@@ -943,6 +927,46 @@ function modelsForProvider(provider, fallbackModels = []) {
   return state.providerModels[normalized]?.length
     ? state.providerModels[normalized]
     : fallbackModels;
+}
+
+function syncLaunchSettingsModal(session, provider, launchModels, activeProvider) {
+  const prov = provider || activeProvider || "codex";
+  const models = launchModels?.length ? launchModels : (session?.available_models || []);
+  const settings = providerSettings(prov);
+  const draftProvider = providerInput?.value || activeProvider;
+
+  const launchDraft = readLocalUiState(state.localUiStore).sessionDraft || {};
+
+  setLaunchSettings(
+    {
+      fields: {
+        approvalPolicy: launchDraft.approvalPolicy || session?.approval_policy || "untrusted",
+        effort: launchDraft.effort || session?.reasoning_effort || "medium",
+        initialPrompt: launchDraft.initialPrompt || "",
+        model: launchDraft.model || session?.model || defaultModelForProvider(prov),
+        provider: prov,
+        sandbox: launchDraft.sandbox || session?.sandbox || "workspace-write",
+      },
+      labels: {
+        approval: settings.approvalLabel,
+        effort: settings.effortLabel,
+        model: settings.modelLabel,
+        sandbox: settings.sandboxLabel,
+      },
+      approvalOptions: settings.approvalOptions,
+      effortOptions: buildReasoningEffortOptions(models, launchDraft.model || session?.model, prov),
+      models,
+      providerOptions: providerOptions(state.providers),
+    },
+    (field, value) => {
+      state.localUiStore.getState().setSessionDraftField(field, value);
+      if (field === "provider") {
+        void refreshProviderCatalogs(session);
+        const nextModels = modelsForProvider(value, session?.available_models || []);
+        syncLaunchSettingsModal(session, value, nextModels, activeProvider);
+      }
+    }
+  );
 }
 
 function syncLaunchSettingLabels(provider) {

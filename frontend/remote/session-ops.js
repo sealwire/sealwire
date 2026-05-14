@@ -465,24 +465,19 @@ export async function startRemoteSession(sessionDraftOverride = null) {
 
 export async function fetchRemoteProviders() {
   if (!state.remoteAuth) {
-    renderLog("[providers] fetchRemoteProviders skipped — no remoteAuth");
     return [];
   }
   const result = await dispatchOrRecover("list_providers", {});
-  renderLog(`[providers] list_providers result: ${JSON.stringify(result.providers || [])}`);
   return result.providers || [];
 }
 
 export async function fetchRemoteProviderModels(provider) {
   if (!state.remoteAuth || !provider) {
-    renderLog(`[providers] fetchRemoteProviderModels skipped — auth=${!!state.remoteAuth} provider=${provider || "none"}`);
     return [];
   }
-  renderLog(`[providers] fetchRemoteProviderModels requesting models for ${provider}`);
   const result = await dispatchOrRecover("list_provider_models", {
     provider,
   });
-  renderLog(`[providers] list_provider_models for ${provider} returned ${result.models?.length || 0} models`);
   return result.models || [];
 }
 

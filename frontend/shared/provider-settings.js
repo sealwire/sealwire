@@ -3,7 +3,7 @@ import { providerLabel } from "./provider-labels.js";
 const DEFAULT_PROVIDERS = ["codex", "claude_code"];
 const DEFAULT_MODELS = {
   claude_code: "claude-sonnet-4-6",
-  codex: "gpt-5.4",
+  codex: "gpt-5.5",
 };
 
 const PROVIDER_SETTINGS = {

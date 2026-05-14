@@ -1,6 +1,8 @@
-import React from "react";
+import React, { useSyncExternalStore } from "react";
 import { ClientLog } from "../shared/client-log.js";
 import { ConversationComposer } from "../shared/composer.js";
+import { getLaunchSettingsCallback, getLaunchSettingsModel, subscribeLaunchSettings } from "../shared/launch-settings-store.js";
+import { SessionSettingsFields } from "../shared/session-settings-fields.js";
 
 const h = React.createElement;
 
@@ -335,6 +337,8 @@ function ChatShell() {
 }
 
 function LaunchSettingsModal() {
+  const model = useSyncExternalStore(subscribeLaunchSettings, getLaunchSettingsModel);
+  const fieldChange = useSyncExternalStore(subscribeLaunchSettings, getLaunchSettingsCallback);
   return h(
     "dialog",
     { className: "panel-modal", id: "launch-settings-modal" },
@@ -356,74 +360,18 @@ function LaunchSettingsModal() {
         { className: "panel-modal-copy" },
         "Most people can leave these alone. Change them only if you need a different startup behavior."
       ),
-      h(
-        "div",
-        { className: "settings-grid" },
-        h(
-          "label",
-          { className: "field" },
-          h("span", null, "Provider"),
-          h(
-            "select",
-            { id: "provider-input" },
-            h("option", { value: "codex" }, "Codex"),
-            h("option", { value: "claude_code" }, "Claude Code")
-          )
-        ),
-        h(
-          "label",
-          { className: "field" },
-          h("span", { id: "model-input-label" }, "Codex model"),
-          h("select", { id: "model-input" }, h("option", { value: "gpt-5.4" }, "gpt-5.4"))
-        ),
-        h(
-          "label",
-          { className: "field" },
-          h("span", null, "Permission mode"),
-          h(
-            "select",
-            { id: "approval-policy-input" },
-            h("option", { value: "untrusted" }, "untrusted"),
-            h("option", { value: "on-request" }, "on-request"),
-            h("option", { value: "never" }, "never")
-          )
-        ),
-        h(
-          "label",
-          { className: "field" },
-          h("span", null, "File access"),
-          h(
-            "select",
-            { id: "sandbox-input" },
-            h("option", { value: "workspace-write" }, "workspace-write"),
-            h("option", { value: "read-only" }, "read-only"),
-            h("option", { value: "danger-full-access" }, "danger-full-access")
-          )
-        ),
-        h(
-          "label",
-          { className: "field" },
-          h("span", { id: "start-effort-label" }, "Reasoning effort"),
-          h(
-            "select",
-            { id: "start-effort" },
-            h("option", { value: "medium" }, "medium"),
-            h("option", { value: "low" }, "low"),
-            h("option", { value: "high" }, "high"),
-            h("option", { value: "xhigh" }, "xhigh")
-          )
-        ),
-        h(
-          "label",
-          { className: "field field-full" },
-          h("span", null, "Initial prompt"),
-          h("textarea", {
-            id: "start-prompt",
-            placeholder: "Optional first task for the new session.",
-            rows: "4",
-          })
-        )
-      )
+      model ? h(SessionSettingsFields, {
+        fields: model.fields,
+        idPrefix: "launch",
+        labels: model.labels || {},
+        model: {
+          approvalOptions: model.approvalOptions || [],
+          effortOptions: model.effortOptions || [],
+          models: model.models || [],
+          providerOptions: model.providerOptions || [],
+        },
+        onFieldChange: fieldChange,
+      }) : null
     )
   );
 }

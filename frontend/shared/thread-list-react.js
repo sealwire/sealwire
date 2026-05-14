@@ -353,10 +353,8 @@ function ThreadGroupItem({
     },
     provider
       ? h("span", {
-          className: `conversation-provider-dot ${providerToneClass}`,
-          title: provider,
-          "aria-label": provider,
-        })
+          className: `conversation-provider-badge ${providerToneClass}`,
+        }, provider)
       : h("span", {}),
     h(
       "span",

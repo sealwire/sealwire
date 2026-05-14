@@ -1,6 +1,8 @@
 import React from "react";
 import { sandboxOptions } from "../shared/provider-settings.js";
+import { SessionSettingsFields } from "../shared/session-settings-fields.js";
 export { ConversationComposer as Composer } from "../shared/composer.js";
+export { SessionSettingsFields } from "../shared/session-settings-fields.js";
 import { formatTimestamp, shortId } from "./utils.js";
 
 const h = React.createElement;
@@ -173,109 +175,18 @@ export function SessionPanel({
       "details",
       { className: "sidebar-settings" },
       h("summary", null, "Launch settings"),
-      h(
-        "div",
-        { className: "settings-grid" },
-        h(
-          "label",
-          { className: "field" },
-          h("span", null, "Provider"),
-          h(
-            "select",
-            {
-              id: "remote-provider-input",
-              onChange: (event) => onFieldChange?.("provider", event.target.value),
-              value: model.fields.provider,
-            },
-            ...(model.providerOptions || []).map((option) =>
-              h("option", { key: option.value, value: option.value }, option.label)
-            )
-          )
-        ),
-        h(
-          "label",
-          { className: "field" },
-          h("span", null, model.labels?.model || "Model"),
-          h(
-            "select",
-            {
-              id: "remote-model-input",
-              onChange: (event) => onFieldChange?.("model", event.target.value),
-              value: model.fields.model,
-            },
-            ...model.models.map((option) =>
-              h(
-                "option",
-                {
-                  key: option.model,
-                  value: option.model,
-                },
-                option.display_name
-              )
-            )
-          )
-        ),
-        h(
-          "label",
-          { className: "field" },
-          h("span", null, model.labels?.approval || "Permission mode"),
-          h(
-            "select",
-            {
-              id: "remote-approval-policy-input",
-              onChange: (event) => onFieldChange?.("approvalPolicy", event.target.value),
-              value: model.fields.approvalPolicy,
-            },
-            ...(model.approvalOptions || []).map((option) =>
-              h("option", { key: option.value, value: option.value }, option.label)
-            )
-          )
-        ),
-        h(
-          "label",
-          { className: "field" },
-          h("span", null, model.labels?.sandbox || "File access"),
-          h(
-            "select",
-            {
-              id: "remote-sandbox-input",
-              onChange: (event) => onFieldChange?.("sandbox", event.target.value),
-              value: model.fields.sandbox,
-            },
-            ...sandboxOptions().map((option) =>
-              h("option", { key: option.value, value: option.value }, option.label)
-            )
-          )
-        ),
-        h(
-          "label",
-          { className: "field" },
-          h("span", null, model.labels?.effort || "Effort"),
-          h(
-            "select",
-            {
-              id: "remote-start-effort",
-              onChange: (event) => onFieldChange?.("effort", event.target.value),
-              value: model.fields.effort,
-            },
-            ...effortOptions.map((option) =>
-              h("option", { key: option.value, value: option.value }, option.label)
-            )
-          )
-        ),
-        h(
-          "label",
-          { className: "field field-full" },
-          h("span", null, "Initial Prompt"),
-          h("textarea", {
-            id: "remote-start-prompt",
-            onChange: (event) => onFieldChange?.("initialPrompt", event.target.value),
-            placeholder: "Optional first task for the new remote session.",
-            rows: 4,
-            value: model.fields.initialPrompt,
-          })
-        )
-      )
+      h(SessionSettingsFields, {
+        fields: model.fields,
+        idPrefix: "remote",
+        labels: model.labels || {},
+        model: {
+          approvalOptions: model.approvalOptions,
+          effortOptions,
+          models: model.models,
+          providerOptions: model.providerOptions,
+        },
+        onFieldChange,
+      })
     )
   );
 }

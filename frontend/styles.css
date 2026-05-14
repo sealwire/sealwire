@@ -546,22 +546,26 @@ input:focus, textarea:focus, select:focus {
   background: transparent;
   border: 1px solid transparent;
   display: grid;
-  grid-template-columns: 16px minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
 }
 
-.conversation-provider-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  justify-self: center;
+.conversation-provider-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 5px;
+  line-height: 1.3;
+  white-space: nowrap;
 }
-.conversation-provider-dot.is-claude-code {
-  background: #ea580c;
+.conversation-provider-badge.is-claude-code {
+  color: #fbbf77;
+  background: rgba(234, 88, 12, 0.20);
 }
-.conversation-provider-dot.is-codex {
-  background: #0891b2;
+.conversation-provider-badge.is-codex {
+  color: #67e8f9;
+  background: rgba(8, 145, 178, 0.20);
 }
 .conversation-item:hover {
   background: var(--bg-elevated);
