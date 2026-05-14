@@ -1,6 +1,6 @@
 import React from "react";
+import { LaunchSettingsModal } from "../shared/launch-settings-modal.js";
 import { sandboxOptions } from "../shared/provider-settings.js";
-import { SessionSettingsFields } from "../shared/session-settings-fields.js";
 export { ConversationComposer as Composer } from "../shared/composer.js";
 export { SessionSettingsFields } from "../shared/session-settings-fields.js";
 import { formatTimestamp, shortId } from "./utils.js";
@@ -124,9 +124,26 @@ export function SessionPanel({
         { label: "xhigh", value: "xhigh" },
       ];
 
+  const openLaunchSettings = () => {
+    document.getElementById("remote-launch-settings-modal")?.showModal();
+  };
+
   return h(
     React.Fragment,
     null,
+    h(LaunchSettingsModal, {
+      id: "remote-launch-settings-modal",
+      model: {
+        fields: model.fields,
+        labels: model.labels || {},
+        approvalOptions: model.approvalOptions,
+        effortOptions,
+        models: model.models,
+        providerOptions: model.providerOptions,
+      },
+      onFieldChange,
+      title: "Launch settings",
+    }),
     h(
       "label",
       {
@@ -172,21 +189,14 @@ export function SessionPanel({
       model.startPending ? "Starting..." : "Start Session"
     ),
     h(
-      "details",
-      { className: "sidebar-settings" },
-      h("summary", null, "Launch settings"),
-      h(SessionSettingsFields, {
-        fields: model.fields,
-        idPrefix: "remote",
-        labels: model.labels || {},
-        model: {
-          approvalOptions: model.approvalOptions,
-          effortOptions,
-          models: model.models,
-          providerOptions: model.providerOptions,
-        },
-        onFieldChange,
-      })
+      "button",
+      {
+        className: "sidebar-link-button",
+        onClick: openLaunchSettings,
+        style: { marginTop: "8px", width: "100%" },
+        type: "button",
+      },
+      "Launch settings"
     )
   );
 }

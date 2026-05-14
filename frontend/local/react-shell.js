@@ -2,7 +2,7 @@ import React, { useSyncExternalStore } from "react";
 import { ClientLog } from "../shared/client-log.js";
 import { ConversationComposer } from "../shared/composer.js";
 import { getLaunchSettingsCallback, getLaunchSettingsModel, subscribeLaunchSettings } from "../shared/launch-settings-store.js";
-import { SessionSettingsFields } from "../shared/session-settings-fields.js";
+import { LaunchSettingsModal as SharedLaunchSettingsModal } from "../shared/launch-settings-modal.js";
 
 const h = React.createElement;
 
@@ -339,41 +339,12 @@ function ChatShell() {
 function LaunchSettingsModal() {
   const model = useSyncExternalStore(subscribeLaunchSettings, getLaunchSettingsModel);
   const fieldChange = useSyncExternalStore(subscribeLaunchSettings, getLaunchSettingsCallback);
-  return h(
-    "dialog",
-    { className: "panel-modal", id: "launch-settings-modal" },
-    h(
-      "div",
-      { className: "modal-header" },
-      h("h2", null, "Launch options"),
-      h("button", {
-        className: "header-button close-modal-btn",
-        id: "close-launch-settings-modal",
-        type: "button",
-      }, "\u00d7")
-    ),
-    h(
-      "section",
-      { className: "panel-modal-body" },
-      h(
-        "p",
-        { className: "panel-modal-copy" },
-        "Most people can leave these alone. Change them only if you need a different startup behavior."
-      ),
-      model ? h(SessionSettingsFields, {
-        fields: model.fields,
-        idPrefix: "launch",
-        labels: model.labels || {},
-        model: {
-          approvalOptions: model.approvalOptions || [],
-          effortOptions: model.effortOptions || [],
-          models: model.models || [],
-          providerOptions: model.providerOptions || [],
-        },
-        onFieldChange: fieldChange,
-      }) : null
-    )
-  );
+  return h(SharedLaunchSettingsModal, {
+    id: "launch-settings-modal",
+    model,
+    onFieldChange: fieldChange,
+    title: "Launch options",
+  });
 }
 
 function SessionDetailsModal() {
