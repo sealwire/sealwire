@@ -19,6 +19,12 @@ pub struct ThreadSyncData {
     pub transcript: Vec<TranscriptEntryView>,
 }
 
+#[derive(Clone)]
+pub struct StartThreadResult {
+    pub thread: ThreadSummaryView,
+    pub consumed_initial_prompt: bool,
+}
+
 #[async_trait]
 pub trait ProviderBridge: Send + Sync {
     async fn list_threads(&self, limit: usize) -> Result<Vec<ThreadSummaryView>, String>;
@@ -29,7 +35,8 @@ pub trait ProviderBridge: Send + Sync {
         model: &str,
         approval_policy: &str,
         sandbox: &str,
-    ) -> Result<ThreadSummaryView, String>;
+        initial_prompt: Option<&str>,
+    ) -> Result<StartThreadResult, String>;
     async fn resume_thread(
         &self,
         thread_id: &str,
@@ -82,6 +89,12 @@ const DEFAULT_PROVIDERS: &[ProviderEntry] = &[
     },
 ];
 
+const FAKE_PROVIDER: ProviderEntry = ProviderEntry {
+    binary_name: "fake",
+    display_name: "Fake",
+    provider_key: "fake",
+};
+
 fn configured_providers() -> Vec<&'static ProviderEntry> {
     let names = std::env::var("AGENT_PROVIDERS")
         .ok()
@@ -100,10 +113,12 @@ fn configured_providers() -> Vec<&'static ProviderEntry> {
 
     DEFAULT_PROVIDERS
         .iter()
+        .chain(std::iter::once(&FAKE_PROVIDER))
         .filter(|entry| {
             requested.iter().any(|name| {
                 *name == entry.provider_key
                     || *name == entry.binary_name
+                    || *name == "fake" && entry.provider_key == "fake"
                     || *name == "claude-code" && entry.provider_key == "claude_code"
                     || *name == "claude_code" && entry.provider_key == "claude_code"
                     || *name == "claude" && entry.provider_key == "claude_code"
@@ -119,6 +134,10 @@ pub async fn spawn_providers(
 
     for entry in configured_providers() {
         let result: Result<Arc<dyn ProviderBridge>, String> = match entry.provider_key {
+            "fake" => match crate::fake_provider::FakeProviderBridge::spawn(state.clone()).await {
+                Ok(bridge) => Ok(Arc::new(bridge)),
+                Err(e) => Err(e),
+            },
             "claude_code" => match crate::claude::ClaudeCodeBridge::spawn(state.clone()).await {
                 Ok(bridge) => Ok(Arc::new(bridge)),
                 Err(e) => Err(e),

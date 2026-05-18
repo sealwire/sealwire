@@ -21,14 +21,14 @@ export function SessionSettingsFields({
     "div",
     { className: "settings-grid" },
     h(SelectField, {
-      id: `${idPrefix}-provider-input`,
+      id: fieldId(idPrefix, "provider-input"),
       label: "Provider",
       onChange: (value) => onFieldChange?.("provider", value),
       options: providerOptions,
       value: fields.provider,
     }),
     h(SelectField, {
-      id: `${idPrefix}-model-input`,
+      id: fieldId(idPrefix, "model-input"),
       label: labels.model || "Model",
       onChange: (value) => onFieldChange?.("model", value),
       options: models.map((option) => ({
@@ -38,21 +38,21 @@ export function SessionSettingsFields({
       value: fields.model,
     }),
     h(SelectField, {
-      id: `${idPrefix}-approval-policy-input`,
+      id: fieldId(idPrefix, "approval-policy-input"),
       label: labels.approval || "Permission mode",
       onChange: (value) => onFieldChange?.("approvalPolicy", value),
       options: approvalOptions,
       value: fields.approvalPolicy,
     }),
     h(SelectField, {
-      id: `${idPrefix}-sandbox-input`,
+      id: fieldId(idPrefix, "sandbox-input"),
       label: labels.sandbox || "File access",
       onChange: (value) => onFieldChange?.("sandbox", value),
       options: sandboxOptions(),
       value: fields.sandbox,
     }),
     h(SelectField, {
-      id: `${idPrefix}-start-effort`,
+      id: fieldId(idPrefix, "start-effort"),
       label: labels.effort || "Effort",
       onChange: (value) => onFieldChange?.("effort", value),
       options: effortOptions,
@@ -63,7 +63,7 @@ export function SessionSettingsFields({
       { className: "field field-full" },
       h("span", null, "Initial Prompt"),
       h("textarea", {
-        id: `${idPrefix}-start-prompt`,
+        id: fieldId(idPrefix, "start-prompt"),
         onChange: (event) => onFieldChange?.("initialPrompt", event.target.value),
         placeholder: "Optional first task.",
         rows: 4,
@@ -71,6 +71,10 @@ export function SessionSettingsFields({
       })
     )
   );
+}
+
+function fieldId(prefix, suffix) {
+  return prefix ? `${prefix}-${suffix}` : suffix;
 }
 
 function SelectField({ id, label, onChange, options = [], value }) {

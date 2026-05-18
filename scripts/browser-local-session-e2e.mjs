@@ -46,14 +46,33 @@ async function main() {
   let context;
   let page;
   let createdThreadId = null;
+  const pageErrors = [];
+  const startRequests = [];
 
   try {
     browser = await chromium.launch({ headless: true });
     context = await browser.newContext();
     page = await context.newPage();
+    page.on("pageerror", (error) => {
+      pageErrors.push(error.stack || error.message);
+    });
+    page.on("request", (request) => {
+      if (request.url().includes("/api/session/start")) {
+        startRequests.push(`request ${request.postData() || ""}`);
+      }
+    });
+    page.on("response", async (response) => {
+      if (response.url().includes("/api/session/start")) {
+        startRequests.push(`response ${response.status()} ${await response.text().catch(() => "")}`);
+      }
+    });
 
     await page.goto(`http://127.0.0.1:${relayPort}`, { waitUntil: "domcontentloaded" });
-    await page.waitForSelector("#start-session-button");
+    await page.waitForSelector("#open-start-session-dialog");
+    await page.waitForFunction(() => {
+      const log = document.querySelector("#client-log-root")?.textContent || "";
+      return log.includes("Relay booted");
+    });
     assert.match(
       (await page.textContent("#workspace-title")) || "",
       /^(Relay console|Ready in .+|agent-relay)$/,
@@ -63,14 +82,14 @@ async function main() {
       ((await page.textContent("#overview-security-badges")) || "").trim().length > 0,
       "overview should describe relay posture"
     );
-    await page.fill("#cwd-input", cwdInput);
-    await page.click("#open-launch-settings");
+    await page.click("#open-start-session-dialog");
     await page.waitForFunction(() => {
-      const modal = document.querySelector("#launch-settings-modal");
+      const modal = document.querySelector("#launch-start-session-dialog");
       return Boolean(modal?.open);
     });
+    await page.fill("#cwd-input", cwdInput);
+    await page.selectOption("#provider-input", "codex");
     await page.selectOption("#approval-policy-input", "never");
-    await page.click("#close-launch-settings-modal");
     await page.click("#start-session-button");
 
     await page.waitForFunction(() => {
@@ -142,7 +161,7 @@ async function main() {
       )
     );
   } catch (error) {
-    await dumpBrowserState(page);
+    await dumpBrowserState(page, pageErrors, startRequests);
     dumpProcessLogs(relay);
     throw error;
   } finally {
@@ -224,12 +243,20 @@ function dumpProcessLogs(child) {
   console.error(lines.join("\n"));
 }
 
-async function dumpBrowserState(page) {
+async function dumpBrowserState(page, pageErrors = [], startRequests = []) {
   if (!page) {
     return;
   }
   console.error("\n[local page]");
   console.error(await safeText(page, "#client-log"));
+  if (pageErrors.length) {
+    console.error("\n[page errors]");
+    console.error(pageErrors.join("\n---\n"));
+  }
+  if (startRequests.length) {
+    console.error("\n[start requests]");
+    console.error(startRequests.join("\n"));
+  }
 }
 
 async function safeText(page, selector) {

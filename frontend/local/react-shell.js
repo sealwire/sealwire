@@ -1,17 +1,16 @@
-import React, { useSyncExternalStore } from "react";
+import React from "react";
 import { ClientLog } from "../shared/client-log.js";
 import { ConversationComposer } from "../shared/composer.js";
-import { getLaunchSettingsCallback, getLaunchSettingsModel, subscribeLaunchSettings } from "../shared/launch-settings-store.js";
-import { LaunchSettingsModal as SharedLaunchSettingsModal } from "../shared/launch-settings-modal.js";
+import { StartSessionDialog } from "../shared/start-session-dialog.js";
 
 const h = React.createElement;
 
-function Sidebar() {
+function Sidebar({ launchModel = null, onLaunchFieldChange = null, onLaunchStart = null }) {
   return h(
     "aside",
     { className: "sidebar" },
     h(AuthForm),
-    h(LaunchPanel),
+    h(LaunchPanel, { launchModel, onLaunchFieldChange, onLaunchStart }),
     h(ThreadDrawer),
     h(ThreadContextMenu)
   );
@@ -36,7 +35,8 @@ function AuthForm() {
   );
 }
 
-function LaunchPanel() {
+function LaunchPanel({ launchModel = null, onLaunchFieldChange = null, onLaunchStart = null }) {
+  const m = launchModel || {};
   return h(
     "section",
     { className: "launch-panel" },
@@ -44,43 +44,50 @@ function LaunchPanel() {
       "div",
       { className: "launch-copy" },
       h("p", { className: "sidebar-caption" }, "Relay console"),
-      h("h2", { className: "launch-title" }, "Load a workspace"),
+      h("h2", { className: "launch-title" }, "Sessions"),
       h(
         "p",
         { className: "launch-body" },
-        "Point this relay at the project you care about, then start or resume a session when you need local control."
-      )
-    ),
-    h(
-      "form",
-      { className: "workspace-form", id: "directory-form" },
-      h("label", { className: "sidebar-label", htmlFor: "cwd-input" }, "Workspace"),
-      h(
-        "div",
-        { className: "workspace-picker" },
-        h("input", {
-          autoComplete: "off",
-          id: "cwd-input",
-          list: "workspace-suggestions",
-          placeholder: "/path/to/project or ~/project",
-          type: "text",
-        }),
-        h("datalist", { id: "workspace-suggestions" }),
-        h("button", { className: "load-button", id: "load-directory-button", type: "submit" }, "Load")
+        "Start a new session or continue your latest work."
       )
     ),
     h(
       "div",
       { className: "launch-actions" },
-      h("button", { className: "start-session-button", id: "start-session-button", type: "button" }, "Start Session"),
+      h("button", {
+        className: "start-session-button",
+        id: "open-start-session-dialog",
+        onClick: () => document.getElementById("launch-start-session-dialog")?.setAttribute("open", ""),
+        type: "button",
+      }, "New session"),
       h("button", { className: "secondary-button", id: "resume-latest-button", type: "button" }, "Continue Latest")
     ),
     h(
       "div",
       { className: "launch-footer" },
-      h("button", { className: "sidebar-link-button", id: "open-launch-settings", type: "button" }, "Launch options"),
       h("button", { className: "sidebar-link-button", id: "open-security-modal", type: "button" }, "Remote devices")
-    )
+    ),
+    h(StartSessionDialog, {
+      id: "launch-start-session-dialog",
+      cwd: m.fields?.cwd || "",
+      fields: m.fields || {},
+      onFieldChange: onLaunchFieldChange || (() => {}),
+      onStart: () => {
+        document.getElementById("launch-start-session-dialog")?.close();
+      },
+      startPending: false,
+      providerOptions: m.providerOptions || [],
+      models: m.models || [],
+      approvalOptions: m.approvalOptions || [],
+      effortOptions: m.effortOptions || [],
+      workspaceInputId: "cwd-input",
+      suggestionsListId: "workspace-suggestions",
+      startButtonId: "start-session-button",
+      settingsPrefix: "",
+      directoryFormId: "directory-form",
+      loadButtonId: "load-directory-button",
+      requireInitialPrompt: false,
+    })
   );
 }
 
@@ -336,17 +343,6 @@ function ChatShell() {
   );
 }
 
-function LaunchSettingsModal() {
-  const model = useSyncExternalStore(subscribeLaunchSettings, getLaunchSettingsModel);
-  const fieldChange = useSyncExternalStore(subscribeLaunchSettings, getLaunchSettingsCallback);
-  return h(SharedLaunchSettingsModal, {
-    id: "launch-settings-modal",
-    model,
-    onFieldChange: fieldChange,
-    title: "Launch options",
-  });
-}
-
 function SessionDetailsModal() {
   return h(
     "dialog",
@@ -488,17 +484,16 @@ function hAllowedRootsForm() {
   );
 }
 
-export function LocalShell() {
+export function LocalShell({ launchModel = null, onLaunchFieldChange = null, onLaunchStart = null }) {
   return h(
     React.Fragment,
     null,
     h(
       "div",
       { className: "app-shell" },
-      h(Sidebar),
+      h(Sidebar, { launchModel, onLaunchFieldChange, onLaunchStart }),
       h(ChatShell)
     ),
-    h(LaunchSettingsModal),
     h(SessionDetailsModal),
     h(SecurityModal)
   );

@@ -25,7 +25,7 @@ use crate::{
         truncate_with_ellipsis, ApprovalDecisionInput, FileChangeDiffView, ModelOptionView,
         ThreadSummaryView, ToolCallView, TranscriptEntryKind, TranscriptEntryView,
     },
-    provider::{ProviderBridge, ThreadSyncData},
+    provider::{ProviderBridge, StartThreadResult, ThreadSyncData},
     state::{
         ApprovalKind, BrokerPendingMessage, PendingApproval, PendingTranscriptDelta, RelayState,
         TranscriptDeltaKind,
@@ -72,9 +72,15 @@ impl ProviderBridge for CodexBridge {
         model: &str,
         approval_policy: &str,
         sandbox: &str,
-    ) -> Result<ThreadSummaryView, String> {
-        self.start_thread(cwd, model, approval_policy, sandbox)
-            .await
+        _initial_prompt: Option<&str>,
+    ) -> Result<StartThreadResult, String> {
+        let thread = self
+            .start_thread(cwd, model, approval_policy, sandbox)
+            .await?;
+        Ok(StartThreadResult {
+            thread,
+            consumed_initial_prompt: false,
+        })
     }
 
     async fn resume_thread(

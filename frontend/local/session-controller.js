@@ -97,7 +97,9 @@ export function createSessionController({
       sandboxInput,
       startEffortInput,
     ].forEach((element) => {
-      element.disabled = busy;
+      if (element) {
+        element.disabled = busy;
+      }
     });
   }
 
@@ -812,11 +814,18 @@ export function createSessionController({
   }
 
   async function startSession() {
-    const cwd = cwdInput.value.trim();
+    const liveCwdInput = liveElement("cwd-input", cwdInput);
+    const liveStartPromptInput = liveElement("start-prompt", startPromptInput);
+    const liveProviderInput = liveElement("provider-input", providerInput);
+    const liveModelInput = liveElement("model-input", modelInput);
+    const liveApprovalPolicyInput = liveElement("approval-policy-input", approvalPolicyInput);
+    const liveSandboxInput = liveElement("sandbox-input", sandboxInput);
+    const liveStartEffortInput = liveElement("start-effort", startEffortInput);
+    const cwd = liveCwdInput.value.trim();
 
     if (!cwd) {
       logLine("Choose a directory before starting a session.");
-      cwdInput.focus();
+      liveCwdInput.focus();
       return;
     }
 
@@ -832,13 +841,13 @@ export function createSessionController({
         },
         body: JSON.stringify({
           cwd,
-          initial_prompt: startPromptInput.value.trim() || null,
-          model: modelInput.value.trim() || null,
-          approval_policy: approvalPolicyInput.value,
-          sandbox: sandboxInput.value,
-          effort: startEffortInput.value,
+          initial_prompt: liveStartPromptInput.value.trim() || null,
+          model: liveModelInput.value.trim() || null,
+          approval_policy: liveApprovalPolicyInput.value,
+          sandbox: liveSandboxInput.value,
+          effort: liveStartEffortInput.value,
           device_id: state.deviceId,
-          provider: providerInput?.value || null,
+          provider: liveProviderInput?.value || null,
         }),
       });
       const payload = await response.json();
@@ -864,6 +873,10 @@ export function createSessionController({
     } finally {
       setStartControlsBusy(false);
     }
+  }
+
+  function liveElement(id, fallback) {
+    return document.getElementById(id) || fallback;
   }
 
   async function resumeSession(threadId) {

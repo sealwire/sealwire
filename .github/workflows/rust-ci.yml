@@ -49,3 +49,43 @@ jobs:
 
       - name: cargo test
         run: cargo test --workspace
+
+  browser-e2e:
+    name: browser-public-core-fake
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      BROWSER_E2E_TIMEOUT_MS: 90000
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: npm ci
+        run: npm ci
+
+      - name: Install Playwright
+        run: npm run test:browser:install:ci
+
+      - name: Public broker browser smoke
+        run: npm run test:browser:public-core:fake
+
+      - name: Upload e2e artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-public-core-fake-artifacts
+          path: artifacts/e2e
+          if-no-files-found: ignore

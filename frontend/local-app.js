@@ -11,8 +11,12 @@ if (!rootElement) {
 
 const root = createRoot(rootElement);
 
-flushSync(() => {
-  root.render(React.createElement(LocalShell));
-});
+export function renderLocalShell(props = {}) {
+  flushSync(() => {
+    root.render(React.createElement(LocalShell, props));
+  });
+}
+
+renderLocalShell();
 
 void import("./app.js");

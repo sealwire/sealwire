@@ -24,7 +24,7 @@ use crate::{
         ApprovalDecision, ApprovalDecisionInput, ModelOptionView, ThreadSummaryView, ToolCallView,
         TranscriptEntryKind, TranscriptEntryView,
     },
-    provider::{ProviderBridge, ThreadSyncData},
+    provider::{ProviderBridge, StartThreadResult, ThreadSyncData},
     state::{
         BrokerPendingMessage, PendingApproval, PendingTranscriptDelta, RelayState,
         TranscriptDeltaKind,
@@ -236,15 +236,32 @@ impl ProviderBridge for ClaudeCodeBridge {
         model: &str,
         _approval_policy: &str,
         _sandbox: &str,
-    ) -> Result<ThreadSummaryView, String> {
-        let cmd = json!({
+        initial_prompt: Option<&str>,
+    ) -> Result<StartThreadResult, String> {
+        let initial_prompt = initial_prompt
+            .map(str::trim)
+            .filter(|prompt| !prompt.is_empty());
+        if initial_prompt.is_none() {
+            return Err(
+                "Claude Code requires an initial prompt to create a new session.".to_string(),
+            );
+        }
+
+        let mut cmd = json!({
             "type": "start",
             "cwd": cwd,
             "model": model,
             "permissionMode": claude_permission_mode(_approval_policy, _sandbox),
         });
+        if let Some(prompt) = initial_prompt {
+            cmd["prompt"] = Value::String(prompt.to_string());
+        }
         let result = self.send_request("start", cmd).await?;
-        parse_thread_summary(value_at(&result, &["thread"]).unwrap_or(&Value::Null))
+        let thread = parse_thread_summary(value_at(&result, &["thread"]).unwrap_or(&Value::Null))?;
+        Ok(StartThreadResult {
+            thread,
+            consumed_initial_prompt: true,
+        })
     }
 
     async fn resume_thread(

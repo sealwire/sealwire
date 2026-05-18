@@ -3,6 +3,7 @@ mod broker;
 mod claude;
 mod codex;
 mod codex_local;
+mod fake_provider;
 mod file_changes;
 mod protocol;
 #[cfg(test)]

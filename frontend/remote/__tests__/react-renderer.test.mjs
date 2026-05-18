@@ -152,15 +152,15 @@ test("SessionPanel renders provider and model selects with correct field binding
   );
 
   // Renders both provider and model selects
-  assert.match(markup, /id="remote-provider-input"/);
-  assert.match(markup, /id="remote-model-input"/);
+  assert.match(markup, /id="remote-launch-provider-input"/);
+  assert.match(markup, /id="remote-launch-model-input"/);
 
   // Provider select shows both options with correct values
   assert.match(markup, /<option[^>]*value="codex"[^>]*>Codex<\/option>/);
   assert.match(markup, /<option[^>]*value="claude_code"[^>]*>Claude Code<\/option>/);
 
   // Provider select has correct current value
-  assert.match(markup, /<select[^>]*id="remote-provider-input"[^>]*>/);
+  assert.match(markup, /<select[^>]*id="remote-launch-provider-input"[^>]*>/);
   assert.match(markup, /value="codex"/);
 
   // Model select shows all models from the model list

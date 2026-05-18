@@ -1634,12 +1634,20 @@ input:focus, textarea:focus, select:focus {
 }
 
 .panel-modal-wide {
-  max-width: 960px;
+  max-width: 520px;
 }
 
 .panel-modal:not([open]),
 .security-modal:not([open]) {
   display: none;
+}
+
+.panel-modal[open],
+.security-modal[open] {
+  position: fixed;
+  inset: 50% auto auto 50%;
+  transform: translate(-50%, -50%);
+  z-index: 1000;
 }
 
 .panel-modal::backdrop,
@@ -1669,8 +1677,23 @@ input:focus, textarea:focus, select:focus {
   line-height: 1.6;
 }
 
+.modal-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  padding: 16px 24px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.modal-actions .start-session-button {
+  padding: 12px 24px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
 .panel-modal .settings-grid {
   margin-top: 0;
+  gap: 12px;
 }
 
 .session-details-shell {
@@ -1817,6 +1840,8 @@ input:focus, textarea:focus, select:focus {
   }
   .panel-modal-body, .security-modal .remote-access-shell { padding: 16px; }
   .settings-grid { grid-template-columns: 1fr; }
+  .modal-actions { flex-direction: column; align-items: stretch; }
+  .modal-actions .start-session-button { flex: none; }
   .suggestion-row { justify-content: stretch; }
   .suggestion-button { width: 100%; }
   .surface-list,

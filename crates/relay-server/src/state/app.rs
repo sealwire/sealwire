@@ -418,9 +418,16 @@ impl AppState {
         let effort = non_empty(input.effort)
             .or_else(|| default_effort_for_model(&provider_models, &model))
             .unwrap_or(defaults.reasoning_effort);
+        let initial_prompt = non_empty(input.initial_prompt);
 
-        let thread = bridge
-            .start_thread(&cwd, &model, &approval_policy, &sandbox)
+        let start_result = bridge
+            .start_thread(
+                &cwd,
+                &model,
+                &approval_policy,
+                &sandbox,
+                initial_prompt.as_deref(),
+            )
             .await?;
 
         {
@@ -430,7 +437,7 @@ impl AppState {
                 relay.set_available_models(models);
             }
             relay.activate_thread(
-                thread,
+                start_result.thread,
                 &cwd,
                 &model,
                 &approval_policy,
@@ -448,7 +455,9 @@ impl AppState {
             relay.notify();
         }
 
-        if let Some(initial_prompt) = non_empty(input.initial_prompt) {
+        if let Some(initial_prompt) =
+            initial_prompt.filter(|_| !start_result.consumed_initial_prompt)
+        {
             return self
                 .send_message(SendMessageInput {
                     text: initial_prompt,

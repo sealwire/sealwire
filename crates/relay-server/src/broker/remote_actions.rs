@@ -422,16 +422,26 @@ pub(super) async fn handle_remote_action(
             .await
         }
         request => {
-            state
+            match state
                 .mark_remote_device_seen(&resolved_device_id, &from_peer_id)
-                .await?;
-            attach_session_claim_if_needed(
-                action_kind,
-                &resolved_device_id,
-                &from_peer_id,
-                execute_remote_action(state, request.bind_device(resolved_device_id.clone()))
-                    .await?,
-            )
+                .await
+            {
+                Ok(()) => match execute_remote_action(
+                    state,
+                    request.bind_device(resolved_device_id.clone()),
+                )
+                .await
+                {
+                    Ok(outcome) => attach_session_claim_if_needed(
+                        action_kind,
+                        &resolved_device_id,
+                        &from_peer_id,
+                        outcome,
+                    ),
+                    Err(error) => Err(error),
+                },
+                Err(error) => Err(error),
+            }
         }
     };
     let snapshot = state.snapshot().await;
@@ -660,15 +670,24 @@ pub(super) async fn handle_encrypted_remote_action(
             proof,
         } => issue_claim_outcome(state, &device_id, &from_peer_id, &challenge_id, &proof).await,
         request => {
-            state
+            match state
                 .mark_remote_device_seen(&device_id, &from_peer_id)
-                .await?;
-            attach_session_claim_if_needed(
-                action_kind,
-                &device_id,
-                &from_peer_id,
-                execute_remote_action(state, request.bind_device(device_id.clone())).await?,
-            )
+                .await
+            {
+                Ok(()) => {
+                    match execute_remote_action(state, request.bind_device(device_id.clone())).await
+                    {
+                        Ok(outcome) => attach_session_claim_if_needed(
+                            action_kind,
+                            &device_id,
+                            &from_peer_id,
+                            outcome,
+                        ),
+                        Err(error) => Err(error),
+                    }
+                }
+                Err(error) => Err(error),
+            }
         }
     };
 

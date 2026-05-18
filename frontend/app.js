@@ -8,6 +8,7 @@ import {
   appShell,
   applyTokenButton,
   archiveThreadButton,
+  approvalPolicyInput,
   auditSummary,
   auditTimeline,
   chatShell,
@@ -103,7 +104,6 @@ import {
 import { installThreadListWheelProxy } from "./shared/thread-list-scroll.js";
 import { fetchBuildInfo } from "./shared/build-badge.js";
 import { ClientLog } from "./shared/client-log.js";
-import { setLaunchSettings } from "./shared/launch-settings-store.js";
 import { renderSelectOptions } from "./shared/select-options.js";
 import {
   buildReasoningEffortOptions,
@@ -484,12 +484,32 @@ directoryForm.addEventListener("submit", (event) => {
   void loadThreads("directory change");
 });
 
-startSessionButton.addEventListener("click", () => {
+resumeLatestButton?.addEventListener("click", () => {
+  void resumeLatestSession();
+});
+
+document.addEventListener("click", (event) => {
+  const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+  if (!target?.closest("#start-session-button")) {
+    return;
+  }
   void startSession();
 });
 
-resumeLatestButton?.addEventListener("click", () => {
-  void resumeLatestSession();
+document.addEventListener("change", (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLSelectElement) && !(target instanceof HTMLTextAreaElement) && !(target instanceof HTMLInputElement)) {
+    return;
+  }
+  handleLaunchFieldInput(target.id, target.value);
+});
+
+document.addEventListener("input", (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLTextAreaElement) && !(target instanceof HTMLInputElement)) {
+    return;
+  }
+  handleLaunchFieldInput(target.id, target.value);
 });
 
 controlBanner?.addEventListener("click", (event) => {
@@ -855,12 +875,15 @@ function seedDefaults(session) {
 
 async function refreshProviderCatalogs(session) {
   try {
+    const launchDraft = readLocalUiState(state.localUiStore).sessionDraft || {};
+    const liveProviderInput = document.getElementById("provider-input") || providerInput;
+    const selectedProvider = launchDraft.provider || liveProviderInput?.value || session.provider;
     if (!state.providers.length) {
       const providersResponse = await apiFetch("/api/providers");
       const providersPayload = await providersResponse.json();
       if (providersResponse.ok && providersPayload.ok) {
         state.providers = normalizeProviderList(providersPayload.data);
-        syncProviderSuggestions(providerInput, state.providers, providerInput?.value || session.provider);
+        syncProviderSuggestions(liveProviderInput, state.providers, selectedProvider);
       }
     }
     await Promise.all(state.providers.map(async (provider) => {
@@ -871,18 +894,20 @@ async function refreshProviderCatalogs(session) {
         state.providerModels[provider] = payload.data || [];
       }
     }));
-    const provider = providerInput?.value || session.provider || defaultProvider(state.providers);
+    const provider = selectedProvider || defaultProvider(state.providers);
+    const liveModelInput = document.getElementById("model-input") || modelInput;
+    const liveStartEffortInput = document.getElementById("start-effort") || startEffortInput;
     syncLaunchSettingLabels(provider);
     syncModelSuggestions(
-      modelInput,
+      liveModelInput,
       modelsForProvider(provider, session.available_models || []),
-      modelInput?.value || defaultModelForProvider(provider)
+      liveModelInput?.value || defaultModelForProvider(provider)
     );
     syncEffortSuggestions(
-      startEffortInput,
+      liveStartEffortInput,
       modelsForProvider(provider, session.available_models || []),
-      modelInput?.value || defaultModelForProvider(provider),
-      startEffortInput?.value || "",
+      liveModelInput?.value || defaultModelForProvider(provider),
+      liveStartEffortInput?.value || "",
       provider
     );
   } catch (error) {
@@ -929,44 +954,72 @@ function modelsForProvider(provider, fallbackModels = []) {
     : fallbackModels;
 }
 
+function handleLaunchFieldInput(id, value) {
+  const fieldById = {
+    "approval-policy-input": "approvalPolicy",
+    "cwd-input": "cwd",
+    "model-input": "model",
+    "provider-input": "provider",
+    "sandbox-input": "sandbox",
+    "start-effort": "effort",
+    "start-prompt": "initialPrompt",
+  };
+  const field = fieldById[id];
+  if (!field) {
+    return;
+  }
+  state.localUiStore.getState().setSessionDraftField(field, value);
+  if (field !== "provider") {
+    return;
+  }
+
+  const session = state.session || {};
+  void refreshProviderCatalogs(session);
+  const nextModels = modelsForProvider(value, session.available_models || []);
+  const liveModelInput = document.getElementById("model-input") || modelInput;
+  const liveStartEffortInput = document.getElementById("start-effort") || startEffortInput;
+  const nextModel = defaultModelForProvider(value);
+  syncLaunchSettingLabels(value);
+  syncModelSuggestions(liveModelInput, nextModels, nextModel);
+  syncEffortSuggestions(
+    liveStartEffortInput,
+    nextModels,
+    nextModel,
+    liveStartEffortInput?.value || "",
+    value
+  );
+}
+
 function syncLaunchSettingsModal(session, provider, launchModels, activeProvider) {
   const prov = provider || activeProvider || "codex";
   const models = launchModels?.length ? launchModels : (session?.available_models || []);
   const settings = providerSettings(prov);
-  const draftProvider = providerInput?.value || activeProvider;
-
   const launchDraft = readLocalUiState(state.localUiStore).sessionDraft || {};
+  const fields = {
+    approvalPolicy: launchDraft.approvalPolicy || session?.approval_policy || "untrusted",
+    cwd: session?.current_cwd || state.selectedCwd || "",
+    effort: launchDraft.effort || session?.reasoning_effort || "medium",
+    initialPrompt: launchDraft.initialPrompt || "",
+    model: launchDraft.model || session?.model || defaultModelForProvider(prov),
+    provider: prov,
+    sandbox: launchDraft.sandbox || session?.sandbox || "workspace-write",
+  };
+  const liveCwdInput = document.getElementById("cwd-input") || cwdInput;
+  const liveStartPromptInput = document.getElementById("start-prompt") || startPromptInput;
+  const liveProviderInput = document.getElementById("provider-input") || providerInput;
+  const liveModelInput = document.getElementById("model-input") || modelInput;
+  const liveApprovalPolicyInput = document.getElementById("approval-policy-input") || approvalPolicyInput;
+  const liveSandboxInput = document.getElementById("sandbox-input") || sandboxInput;
+  const liveStartEffortInput = document.getElementById("start-effort") || startEffortInput;
 
-  setLaunchSettings(
-    {
-      fields: {
-        approvalPolicy: launchDraft.approvalPolicy || session?.approval_policy || "untrusted",
-        effort: launchDraft.effort || session?.reasoning_effort || "medium",
-        initialPrompt: launchDraft.initialPrompt || "",
-        model: launchDraft.model || session?.model || defaultModelForProvider(prov),
-        provider: prov,
-        sandbox: launchDraft.sandbox || session?.sandbox || "workspace-write",
-      },
-      labels: {
-        approval: settings.approvalLabel,
-        effort: settings.effortLabel,
-        model: settings.modelLabel,
-        sandbox: settings.sandboxLabel,
-      },
-      approvalOptions: settings.approvalOptions,
-      effortOptions: buildReasoningEffortOptions(models, launchDraft.model || session?.model, prov),
-      models,
-      providerOptions: providerOptions(state.providers),
-    },
-    (field, value) => {
-      state.localUiStore.getState().setSessionDraftField(field, value);
-      if (field === "provider") {
-        void refreshProviderCatalogs(session);
-        const nextModels = modelsForProvider(value, session?.available_models || []);
-        syncLaunchSettingsModal(session, value, nextModels, activeProvider);
-      }
-    }
-  );
+  if (liveCwdInput && !liveCwdInput.value) liveCwdInput.value = fields.cwd;
+  if (liveStartPromptInput) liveStartPromptInput.value = fields.initialPrompt;
+  syncProviderSuggestions(liveProviderInput, state.providers, fields.provider);
+  syncLaunchSettingLabels(fields.provider);
+  syncModelSuggestions(liveModelInput, models, fields.model);
+  renderSelectOptions(liveApprovalPolicyInput, settings.approvalOptions, fields.approvalPolicy);
+  renderSelectOptions(liveSandboxInput, sandboxOptions(), fields.sandbox);
+  syncEffortSuggestions(liveStartEffortInput, models, fields.model, fields.effort, fields.provider);
 }
 
 function syncLaunchSettingLabels(provider) {

@@ -172,7 +172,8 @@ function RemoteApp() {
         if (cancelled) return;
         const normalized = normalizeProviderList(providers);
         remoteUiStore.getState().setProviders(normalized);
-        if (!remoteUiStore.getState().sessionDraft.provider) {
+        const draftProvider = remoteUiStore.getState().sessionDraft.provider;
+        if (!draftProvider || !normalized.includes(draftProvider)) {
           remoteUiStore.getState().setSessionDraftField("provider", defaultProvider(normalized));
         }
         // Pre-fetch models for all providers so the dropdown is populated immediately
@@ -192,6 +193,7 @@ function RemoteApp() {
 
   useEffect(() => {
     if (!currentState.remoteAuth?.payloadSecret || !selectedProvider) return;
+    if (!remoteUi.providers.length || !remoteUi.providers.includes(selectedProvider)) return;
     let cancelled = false;
     handlers.onFetchProviderModels?.(selectedProvider)
       .then((models) => {
@@ -222,7 +224,7 @@ function RemoteApp() {
     return () => {
       cancelled = true;
     };
-  }, [currentState.remoteAuth?.relayId, currentState.remoteAuth?.payloadSecret, selectedProvider, currentState.socketConnected]);
+  }, [currentState.remoteAuth?.relayId, currentState.remoteAuth?.payloadSecret, selectedProvider, currentState.socketConnected, remoteUi.providers]);
 
   useEffect(() => {
     const models = currentState.session?.available_models;
@@ -306,8 +308,8 @@ function RemoteApp() {
   const sessionToggleLabel = !hasRelay
     ? "Select a relay first"
     : remoteUi.sessionPanelOpen
-      ? "Close Remote Session Setup"
-      : "Start Remote Session";
+      ? "Close"
+      : "New session";
   const sessionPanelModel = {
     fields: {
       ...remoteUi.sessionDraft,
@@ -913,16 +915,13 @@ function RemoteSidebar({
     h(
       "button",
       {
-        "aria-expanded": String(Boolean(hasUsableRelay && sessionPanelOpen)),
-        className: "new-chat-button",
+        className: "start-session-button",
         disabled: !hasUsableRelay,
         id: "remote-session-toggle",
-        onClick: () => {
-          setSessionPanelOpenLocal(!sessionPanelOpen);
-        },
+        onClick: () => document.getElementById("remote-start-session-dialog")?.showModal(),
         type: "button",
       },
-      sessionToggleLabel
+      "New session"
     ),
     h(
       "section",
@@ -948,15 +947,7 @@ function RemoteSidebar({
         h(RelayDirectoryList, { onSelectRelay, viewModel: relayDirectoryModel })
       )
     ),
-    h(
-      "section",
-      {
-        className: "new-session-panel",
-        hidden: !(hasRelay && sessionPanelOpen),
-        id: "remote-session-panel",
-      },
-      h(SessionPanel, {
-        cwdInputRef: remoteCwdInputRef,
+    h(SessionPanel, {
         model: sessionPanelModel,
         onFieldChange(field, value) {
           const uiState = remoteUiState;
@@ -989,7 +980,7 @@ function RemoteSidebar({
         },
         onStartSession,
       })
-    ),
+    ,
     h(
       "section",
       { className: "remote-access-shell remote-history-shell" },

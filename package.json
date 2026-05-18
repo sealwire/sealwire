@@ -40,6 +40,7 @@
     "test:claude:browser": "npm run build && node scripts/browser-claude-local-e2e.mjs",
     "test:claude": "npm run test:claude:provider && npm run test:claude:browser",
     "test:browser:install": "playwright install chromium",
+    "test:browser:install:ci": "playwright install --with-deps chromium",
     "test:browser:pairing": "npm run build && node scripts/browser-pairing-e2e.mjs",
     "test:browser:local-delete": "npm run build && node scripts/browser-local-delete-e2e.mjs",
     "test:browser:local-session": "npm run build && node scripts/browser-local-session-e2e.mjs",
@@ -58,6 +59,8 @@
     "test:browser:public-transcript-delta": "npm run build && node scripts/browser-public-transcript-delta-e2e.mjs",
     "test:browser:public-remote-follow": "npm run build && node scripts/browser-public-remote-follow-e2e.mjs",
     "test:browser:public-multi-remote-follow": "npm run build && node scripts/browser-public-multi-remote-follow-e2e.mjs",
+    "test:browser:public-core": "npm run build && node scripts/browser-public-transcript-delta-e2e.mjs && node scripts/browser-public-broker-e2e.mjs && node scripts/browser-public-refresh-e2e.mjs && node scripts/browser-public-revoke-e2e.mjs",
+    "test:browser:public-core:fake": "AGENT_PROVIDERS=fake npm run build && AGENT_PROVIDERS=fake node scripts/browser-public-transcript-delta-e2e.mjs && AGENT_PROVIDERS=fake node scripts/browser-public-broker-e2e.mjs && AGENT_PROVIDERS=fake node scripts/browser-public-refresh-e2e.mjs && AGENT_PROVIDERS=fake node scripts/browser-public-revoke-e2e.mjs",
     "test:browser:public": "npm run build && node scripts/browser-public-enrollment-e2e.mjs && node scripts/browser-public-refresh-e2e.mjs && node scripts/browser-public-persistence-e2e.mjs && node scripts/browser-public-revoke-e2e.mjs && node scripts/browser-public-reclaim-e2e.mjs && node scripts/browser-public-broker-e2e.mjs && node scripts/browser-public-long-transcript-e2e.mjs && node scripts/browser-public-remote-follow-e2e.mjs"
   },
   "dependencies": {

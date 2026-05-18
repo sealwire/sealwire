@@ -1,6 +1,5 @@
 import React from "react";
-import { LaunchSettingsModal } from "../shared/launch-settings-modal.js";
-import { sandboxOptions } from "../shared/provider-settings.js";
+import { StartSessionDialog } from "../shared/start-session-dialog.js";
 export { ConversationComposer as Composer } from "../shared/composer.js";
 export { SessionSettingsFields } from "../shared/session-settings-fields.js";
 import { formatTimestamp, shortId } from "./utils.js";
@@ -106,7 +105,6 @@ export function WorkspaceHeading({ header, statusBadge }) {
 }
 
 export function SessionPanel({
-  cwdInputRef = null,
   model,
   onFieldChange = null,
   onStartSession = null,
@@ -124,81 +122,21 @@ export function SessionPanel({
         { label: "xhigh", value: "xhigh" },
       ];
 
-  const openLaunchSettings = () => {
-    document.getElementById("remote-launch-settings-modal")?.showModal();
-  };
-
-  return h(
-    React.Fragment,
-    null,
-    h(LaunchSettingsModal, {
-      id: "remote-launch-settings-modal",
-      model: {
-        fields: model.fields,
-        labels: model.labels || {},
-        approvalOptions: model.approvalOptions,
-        effortOptions,
-        models: model.models,
-        providerOptions: model.providerOptions,
-      },
-      onFieldChange,
-      title: "Launch settings",
-    }),
-    h(
-      "label",
-      {
-        className: "sidebar-label",
-        htmlFor: "remote-cwd-input",
-      },
-      "Workspace"
-    ),
-    h(
-      "div",
-      { className: "workspace-picker" },
-      h("input", {
-        autoComplete: "off",
-        id: "remote-cwd-input",
-        list: "remote-workspace-suggestions",
-        onChange: (event) => onFieldChange?.("cwd", event.target.value),
-        placeholder: "/path/to/project",
-        ref: cwdInputRef,
-        type: "text",
-        value: model.fields.cwd,
-      }),
-      h(
-        "datalist",
-        { id: "remote-workspace-suggestions" },
-        ...(model.workspaceSuggestions || []).map((suggestion) =>
-          h("option", {
-            key: suggestion.cwd,
-            label: suggestion.label,
-            value: suggestion.cwd,
-          })
-        )
-      )
-    ),
-    h(
-      "button",
-      {
-        className: "start-session-button",
-        disabled: !model.hasUsableRelay || model.startPending,
-        id: "remote-start-session-button",
-        onClick: onStartSession,
-        type: "button",
-      },
-      model.startPending ? "Starting..." : "Start Session"
-    ),
-    h(
-      "button",
-      {
-        className: "sidebar-link-button",
-        onClick: openLaunchSettings,
-        style: { marginTop: "8px", width: "100%" },
-        type: "button",
-      },
-      "Launch settings"
-    )
-  );
+  return h(StartSessionDialog, {
+    id: "remote-start-session-dialog",
+    cwd: model.fields.cwd,
+    onCwdChange: (value) => onFieldChange?.("cwd", value),
+    fields: model.fields,
+    onFieldChange,
+    onStart: onStartSession,
+    startPending: model.startPending,
+    workspaceSuggestions: model.workspaceSuggestions,
+    providerOptions: model.providerOptions,
+    models: model.models,
+    approvalOptions: model.approvalOptions,
+    effortOptions,
+    settingsPrefix: "remote-launch",
+  });
 }
 
 export function SessionMetaPanel({ model }) {

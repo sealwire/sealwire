@@ -1,15 +1,24 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
-import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { setTimeout as delay } from "node:timers/promises";
 
-import { chromium } from "playwright";
+import { fetchSession } from "./e2e-thread-cleanup.mjs";
+import { writeFailureArtifacts } from "./e2e/harness/artifacts.mjs";
+import {
+  attachPageDebugLogging,
+  launchBrowser,
+  readDeviceSessionCookie,
+  readStoredRemoteAuth,
+} from "./e2e/harness/browser.mjs";
+import { startPublicBroker } from "./e2e/harness/broker.mjs";
+import { approvePairing, startPairingFromLocalPage, waitForPairedRemote } from "./e2e/harness/pairing.mjs";
+import { getFreePort, resolvePrivateIpv4 } from "./e2e/harness/ports.mjs";
+import { dumpProcessLogs, stopManagedProcess, waitForHealth } from "./e2e/harness/process.mjs";
+import { startPublicRelay, waitForBrokerConnection } from "./e2e/harness/relay.mjs";
 
-const ROOT = process.cwd();
 const TIMEOUT_MS = Number(process.env.BROWSER_E2E_TIMEOUT_MS || 60000);
 const PUBLIC_ISSUER_SECRET =
   process.env.BROWSER_E2E_PUBLIC_ISSUER_SECRET || "browser-e2e-public-issuer";
@@ -18,16 +27,6 @@ const RELAY_REFRESH_TOKEN =
 const RELAY_ID = process.env.BROWSER_E2E_PUBLIC_RELAY_ID || "browser-e2e-relay-1";
 const BROKER_ROOM_ID =
   process.env.BROWSER_E2E_PUBLIC_REVOKE_ROOM_ID || "browser-public-revoke-room";
-
-const managedProcesses = [];
-
-process.on("exit", () => {
-  for (const child of managedProcesses) {
-    if (!child.killed && child.exitCode === null) {
-      child.kill("SIGTERM");
-    }
-  }
-});
 
 async function main() {
   const lanIp = resolvePrivateIpv4();
@@ -40,26 +39,24 @@ async function main() {
   const broker = startPublicBroker({
     brokerPort,
     brokerStatePath,
+    relayId: RELAY_ID,
+    brokerRoomId: BROKER_ROOM_ID,
+    relayRefreshToken: RELAY_REFRESH_TOKEN,
+    issuerSecret: PUBLIC_ISSUER_SECRET,
   });
   await waitForHealth(`http://127.0.0.1:${brokerPort}/api/health`);
 
-  const relay = spawnManagedProcess(
-    "relay",
-    "cargo",
-    ["run", "-p", "relay-server"],
-    {
-      PORT: String(relayPort),
-      RELAY_STATE_PATH: relayStatePath,
-      RELAY_BROKER_URL: `ws://127.0.0.1:${brokerPort}`,
-      RELAY_BROKER_PUBLIC_URL: `ws://${lanIp}:${brokerPort}`,
-      RELAY_BROKER_CONTROL_URL: `http://127.0.0.1:${brokerPort}`,
-      RELAY_BROKER_AUTH_MODE: "public",
-      RELAY_BROKER_CHANNEL_ID: BROKER_ROOM_ID,
-      RELAY_BROKER_PEER_ID: "browser-public-revoke-relay",
-      RELAY_BROKER_RELAY_ID: RELAY_ID,
-      RELAY_BROKER_RELAY_REFRESH_TOKEN: RELAY_REFRESH_TOKEN,
-    }
-  );
+  const relay = startPublicRelay({
+    relayPort,
+    relayStatePath,
+    brokerPort,
+    lanIp,
+    brokerRoomId: BROKER_ROOM_ID,
+    relayId: RELAY_ID,
+    relayRefreshToken: RELAY_REFRESH_TOKEN,
+    peerId: "browser-public-revoke-relay",
+    extraEnv: process.env.AGENT_PROVIDERS === "fake" ? { AGENT_PROVIDERS: "fake" } : {},
+  });
   await waitForHealth(`http://127.0.0.1:${relayPort}/api/health`);
   await waitForBrokerConnection(`http://127.0.0.1:${relayPort}/api/session`);
 
@@ -69,14 +66,14 @@ async function main() {
   const remoteContexts = [];
 
   try {
-    browser = await chromium.launch({ headless: true });
-    localContext = await browser.newContext();
+    ({ browser, context: localContext } = await launchBrowser());
     localPage = await localContext.newPage();
+    attachPageDebugLogging(localPage, "local", { prefix: "public-revoke-e2e" });
     await localPage.goto(`http://127.0.0.1:${relayPort}`, { waitUntil: "domcontentloaded" });
 
-    const deviceA = await pairDevice(browser, localPage, lanIp, brokerPort);
-    const deviceB = await pairDevice(browser, localPage, lanIp, brokerPort);
-    const deviceC = await pairDevice(browser, localPage, lanIp, brokerPort);
+    const deviceA = await pairDevice(browser, localPage, lanIp, brokerPort, "a");
+    const deviceB = await pairDevice(browser, localPage, lanIp, brokerPort, "b");
+    const deviceC = await pairDevice(browser, localPage, lanIp, brokerPort, "c");
     remoteContexts.push(deviceA.context, deviceB.context, deviceC.context);
 
     await waitForDeviceLifecycleCount(relayPort, "approved", 3);
@@ -93,20 +90,14 @@ async function main() {
     );
     await waitForDeviceState(relayPort, deviceA.auth.deviceId, "revoked");
 
-    const revokedOneRefresh = await tryIssueDeviceWsToken(
-      brokerPort,
-      deviceA.cookie
-    );
+    const revokedOneRefresh = await tryIssueDeviceWsToken(brokerPort, deviceA.cookie);
     assert.equal(
       revokedOneRefresh.ok,
       false,
       "revoke one should make the old device refresh token unusable"
     );
 
-    const keptBeforeBulkRefresh = await issueDeviceWsToken(
-      brokerPort,
-      deviceB.cookie
-    );
+    const keptBeforeBulkRefresh = await issueDeviceWsToken(brokerPort, deviceB.cookie);
     assert.ok(
       keptBeforeBulkRefresh.device_ws_token,
       "a non-revoked device should still refresh after revoke one"
@@ -124,20 +115,14 @@ async function main() {
     await waitForDeviceState(relayPort, deviceB.auth.deviceId, "approved");
     await waitForDeviceState(relayPort, deviceC.auth.deviceId, "revoked");
 
-    const revokedOtherRefresh = await tryIssueDeviceWsToken(
-      brokerPort,
-      deviceC.cookie
-    );
+    const revokedOtherRefresh = await tryIssueDeviceWsToken(brokerPort, deviceC.cookie);
     assert.equal(
       revokedOtherRefresh.ok,
       false,
       "bulk revoke should make the revoked device refresh token unusable"
     );
 
-    const keptAfterBulkRefresh = await issueDeviceWsToken(
-      brokerPort,
-      deviceB.cookie
-    );
+    const keptAfterBulkRefresh = await issueDeviceWsToken(brokerPort, deviceB.cookie);
     assert.ok(
       keptAfterBulkRefresh.device_ws_token,
       "the kept device should still be able to refresh after bulk revoke"
@@ -162,7 +147,22 @@ async function main() {
       )
     );
   } catch (error) {
-    await dumpBrowserState(localPage, ...remoteContexts.map((context) => context.__page).filter(Boolean));
+    const remotePages = remoteContexts.map((context) => context.__page).filter(Boolean);
+    await writeFailureArtifacts({
+      scenario: "public-revoke",
+      broker,
+      relay,
+      localPage,
+      remotePage: remotePages[0],
+      extraPages: remotePages.slice(1),
+      metadata: {
+        brokerPort,
+        relayPort,
+        lanIp,
+        pairedRemoteCount: remotePages.length,
+        fakeProvider: process.env.AGENT_PROVIDERS === "fake",
+      },
+    });
     dumpProcessLogs(broker);
     dumpProcessLogs(relay);
     throw error;
@@ -178,43 +178,21 @@ async function main() {
   }
 }
 
-function startPublicBroker({ brokerPort, brokerStatePath }) {
-  const relayRegistrations = JSON.stringify([
-    {
-      relay_id: RELAY_ID,
-      broker_room_id: BROKER_ROOM_ID,
-      refresh_token: RELAY_REFRESH_TOKEN,
-    },
-  ]);
-
-  return spawnManagedProcess(
-    "broker",
-    "cargo",
-    ["run", "-p", "relay-broker"],
-    {
-      BIND_HOST: "0.0.0.0",
-      PORT: String(brokerPort),
-      RELAY_BROKER_AUTH_MODE: "public",
-      RELAY_BROKER_PUBLIC_ISSUER_SECRET: PUBLIC_ISSUER_SECRET,
-      RELAY_BROKER_PUBLIC_RELAYS_JSON: relayRegistrations,
-      RELAY_BROKER_PUBLIC_STATE_PATH: brokerStatePath,
-    }
-  );
-}
-
-async function pairDevice(browser, localPage, lanIp, brokerPort) {
+async function pairDevice(browser, localPage, lanIp, brokerPort, label) {
   const context = await browser.newContext();
   const page = await context.newPage();
   context.__page = page;
+  attachPageDebugLogging(page, `remote-${label}`, { prefix: "public-revoke-e2e" });
   const previousUrl = await localPage.inputValue("#pairing-link-input").catch(() => "");
-  const pairingUrl = await startPairingFromLocalPage(localPage, previousUrl);
-  assert.ok(
-    pairingUrl.startsWith(`http://${lanIp}:${brokerPort}/?pairing=`),
-    `pairing url should use broker public url, got: ${pairingUrl}`
-  );
+  const pairingUrl = await startPairingFromLocalPage(localPage, {
+    lanIp,
+    brokerPort,
+    previousUrl,
+    timeoutMs: TIMEOUT_MS,
+  });
   await page.goto(pairingUrl, { waitUntil: "domcontentloaded" });
-  await approvePendingPairing(localPage);
-  await waitForPairedRemote(page);
+  await approvePairing(localPage, TIMEOUT_MS);
+  await waitForPairedRemote(page, TIMEOUT_MS);
   const auth = await readStoredRemoteAuth(page);
   assert.ok(auth?.deviceId, "paired remote should persist a device id");
   assert.equal(auth?.deviceRefreshMode, "cookie");
@@ -230,55 +208,6 @@ async function pairDevice(browser, localPage, lanIp, brokerPort) {
     page,
     pairingUrl,
   };
-}
-
-async function startPairingFromLocalPage(localPage, previousUrl = "") {
-  await openSecurityModal(localPage);
-  await localPage.click("#start-pairing-button");
-  await localPage.waitForFunction(
-    (previous) => {
-      const input = document.querySelector("#pairing-link-input");
-      return Boolean(
-        input &&
-          input.value.startsWith("http") &&
-          (!previous || input.value !== previous)
-      );
-    },
-    previousUrl,
-    { timeout: TIMEOUT_MS }
-  );
-  return localPage.inputValue("#pairing-link-input");
-}
-
-async function openSecurityModal(page) {
-  const isOpen = await page.evaluate(() => Boolean(document.querySelector("#security-modal")?.open));
-  if (isOpen) {
-    return;
-  }
-
-  await page.click("#open-security-header");
-  await page.waitForFunction(() => {
-    const dialog = document.querySelector("#security-modal");
-    return Boolean(dialog?.open);
-  });
-}
-
-async function approvePendingPairing(localPage) {
-  await localPage.waitForFunction(() => {
-    return Boolean(document.querySelector("[data-pairing-id][data-pairing-decision='approve']"));
-  }, null, { timeout: TIMEOUT_MS });
-  await localPage.click("[data-pairing-id][data-pairing-decision='approve']");
-}
-
-async function waitForPairedRemote(remotePage) {
-  await remotePage.waitForFunction(() => {
-    const stored = JSON.parse(
-      window.localStorage.getItem("agent-relay.remote-state")
-        || window.localStorage.getItem("agent-relay.remote-state-v2")
-        || "null"
-    );
-    return Boolean(stored?.clientAuth?.clientId && Object.keys(stored?.remoteProfiles || {}).length);
-  }, null, { timeout: TIMEOUT_MS });
 }
 
 async function postRelayJson(relayPort, pathName, body) {
@@ -314,7 +243,9 @@ async function tryIssueDeviceWsToken(brokerPort, cookieHeader) {
 async function issueDeviceWsToken(brokerPort, cookieHeader) {
   const result = await tryIssueDeviceWsToken(brokerPort, cookieHeader);
   if (!result.ok) {
-    throw new Error(result.payload?.message || result.payload?.error || "device ws token refresh failed");
+    throw new Error(
+      result.payload?.message || result.payload?.error || "device ws token refresh failed"
+    );
   }
   return result.payload;
 }
@@ -349,181 +280,6 @@ async function waitForDeviceLifecycleCount(relayPort, lifecycleState, count, tim
   }
 
   throw new Error(`timed out waiting for ${count} device(s) in state ${lifecycleState}`);
-}
-
-async function fetchSession(relayPort) {
-  return fetch(`http://127.0.0.1:${relayPort}/api/session`)
-    .then((response) => response.json())
-    .then((response) => response.data);
-}
-
-async function readStoredRemoteAuth(page) {
-  return page.evaluate(() => {
-    const parsed = JSON.parse(
-      window.localStorage.getItem("agent-relay.remote-state")
-        || window.localStorage.getItem("agent-relay.remote-state-v2")
-        || "null"
-    );
-    if (!parsed?.remoteProfiles) {
-      return null;
-    }
-    const activeRelayId =
-      parsed.activeRelayId || Object.keys(parsed.remoteProfiles)[0] || null;
-    return activeRelayId ? parsed.remoteProfiles[activeRelayId] || null : null;
-  });
-}
-
-async function readDeviceSessionCookie(context, origin) {
-  const cookies = await context.cookies(
-    new URL("/api/public/device/ws-token", origin).toString()
-  );
-  return cookies.find((cookie) => cookie.name === "agent_relay_device_session") || null;
-}
-
-function spawnManagedProcess(name, command, args, extraEnv) {
-  const child = spawn(command, args, {
-    cwd: ROOT,
-    env: {
-      ...process.env,
-      ...extraEnv,
-    },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-
-  child._logName = name;
-  child._logBuffer = [];
-  child.stdout.on("data", (chunk) => appendLog(child, chunk));
-  child.stderr.on("data", (chunk) => appendLog(child, chunk));
-  managedProcesses.push(child);
-  return child;
-}
-
-function appendLog(child, chunk) {
-  const text = chunk.toString("utf8");
-  const lines = text.split(/\r?\n/).filter(Boolean);
-  child._logBuffer.push(...lines);
-  if (child._logBuffer.length > 160) {
-    child._logBuffer.splice(0, child._logBuffer.length - 160);
-  }
-}
-
-async function stopManagedProcess(child) {
-  if (!child || child.killed || child.exitCode !== null) {
-    return;
-  }
-
-  child.kill("SIGTERM");
-  await Promise.race([
-    new Promise((resolve) => child.once("exit", resolve)),
-    delay(3000).then(() => {
-      if (child.exitCode === null) {
-        child.kill("SIGKILL");
-      }
-    }),
-  ]);
-}
-
-function dumpProcessLogs(child) {
-  const lines = child?._logBuffer || [];
-  if (!lines.length) {
-    return;
-  }
-
-  console.error(`\n[${child._logName} logs]`);
-  console.error(lines.join("\n"));
-}
-
-async function dumpBrowserState(...pages) {
-  const labels = ["local page", "remote a", "remote b", "remote c"];
-  for (const [index, page] of pages.entries()) {
-    if (!page) {
-      continue;
-    }
-    console.error(`\n[${labels[index] || `page-${index}`}]`);
-    console.error(await safeText(page, index === 0 ? "#client-log" : "#remote-client-log"));
-  }
-}
-
-async function safeText(page, selector) {
-  try {
-    return (await page.textContent(selector)) || "";
-  } catch {
-    return "";
-  }
-}
-
-async function waitForHealth(url, timeoutMs = 30000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(url);
-      if (response.ok) {
-        return;
-      }
-    } catch {}
-    await delay(300);
-  }
-  throw new Error(`timed out waiting for health endpoint: ${url}`);
-}
-
-async function waitForBrokerConnection(sessionUrl, timeoutMs = 30000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(sessionUrl);
-      if (!response.ok) {
-        throw new Error(`unexpected status ${response.status}`);
-      }
-      const payload = await response.json();
-      if (payload?.data?.broker_connected) {
-        return;
-      }
-    } catch {}
-    await delay(300);
-  }
-  throw new Error("timed out waiting for relay broker connection");
-}
-
-async function getFreePort() {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.unref();
-    server.on("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      if (!address || typeof address === "string") {
-        reject(new Error("failed to allocate free port"));
-        return;
-      }
-      const { port } = address;
-      server.close((error) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-        resolve(port);
-      });
-    });
-  });
-}
-
-function resolvePrivateIpv4() {
-  const interfaces = os.networkInterfaces();
-  for (const addresses of Object.values(interfaces)) {
-    for (const address of addresses || []) {
-      if (address.family !== "IPv4" || address.internal) {
-        continue;
-      }
-      if (
-        address.address.startsWith("10.") ||
-        address.address.startsWith("192.168.") ||
-        /^172\.(1[6-9]|2\d|3[0-1])\./.test(address.address)
-      ) {
-        return address.address;
-      }
-    }
-  }
-  return "127.0.0.1";
 }
 
 main().catch((error) => {
