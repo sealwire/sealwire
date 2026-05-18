@@ -40,6 +40,7 @@ pub struct FakeProviderBridge {
 
 impl FakeProviderBridge {
     pub async fn spawn(state: Arc<RwLock<RelayState>>) -> Result<Self, String> {
+        let threads = Arc::new(Mutex::new(restore_threads_from_relay(&state).await));
         {
             let mut relay = state.write().await;
             relay.set_provider_connection("fake", true);
@@ -50,7 +51,7 @@ impl FakeProviderBridge {
 
         Ok(Self {
             state,
-            threads: Arc::new(Mutex::new(HashMap::new())),
+            threads,
             next_id: AtomicU64::new(1),
         })
     }
@@ -299,6 +300,41 @@ impl ProviderBridge for FakeProviderBridge {
     fn provider_name(&self) -> &'static str {
         "fake"
     }
+}
+
+async fn restore_threads_from_relay(
+    state: &Arc<RwLock<RelayState>>,
+) -> HashMap<String, FakeThread> {
+    let snapshot = state.read().await.snapshot();
+    let Some(thread_id) = snapshot.active_thread_id.clone() else {
+        return HashMap::new();
+    };
+
+    let preview = snapshot
+        .transcript
+        .iter()
+        .rev()
+        .find_map(|entry| entry.text.clone())
+        .unwrap_or_default();
+    let thread = ThreadSummaryView {
+        id: thread_id.clone(),
+        name: Some("Fake E2E Session".to_string()),
+        preview,
+        cwd: snapshot.current_cwd,
+        updated_at: snapshot.server_time,
+        source: "fake".to_string(),
+        status: snapshot.current_status,
+        model_provider: "fake".to_string(),
+        provider: "fake".to_string(),
+    };
+
+    HashMap::from([(
+        thread_id,
+        FakeThread {
+            summary: thread,
+            transcript: snapshot.transcript,
+        },
+    )])
 }
 
 fn fake_reply_for_prompt(prompt: &str) -> String {

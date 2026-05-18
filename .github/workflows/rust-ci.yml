@@ -54,8 +54,6 @@ jobs:
     name: browser-public-core-fake
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    env:
-      BROWSER_E2E_TIMEOUT_MS: 90000
 
     steps:
       - name: Checkout
@@ -78,6 +76,9 @@ jobs:
 
       - name: Install Playwright
         run: npm run test:browser:install:ci
+
+      - name: Build relay binaries
+        run: cargo build -p relay-broker -p relay-server
 
       - name: Public broker browser smoke
         run: npm run test:browser:public-core:fake
