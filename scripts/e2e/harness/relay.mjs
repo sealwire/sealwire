@@ -14,6 +14,8 @@ export function startPublicRelay({
   relayRefreshToken,
   codexHomeDir,
   peerId = "browser-public-relay",
+  registrationPath,
+  identityPath,
   extraEnv = {},
 }) {
   const env = {
@@ -23,12 +25,23 @@ export function startPublicRelay({
     RELAY_BROKER_PUBLIC_URL: `ws://${lanIp}:${brokerPort}`,
     RELAY_BROKER_CONTROL_URL: `http://127.0.0.1:${brokerPort}`,
     RELAY_BROKER_AUTH_MODE: "public",
-    RELAY_BROKER_CHANNEL_ID: brokerRoomId,
     RELAY_BROKER_PEER_ID: peerId,
-    RELAY_BROKER_RELAY_ID: relayId,
-    RELAY_BROKER_RELAY_REFRESH_TOKEN: relayRefreshToken,
     ...extraEnv,
   };
+  if (brokerRoomId || relayId || relayRefreshToken) {
+    if (!brokerRoomId || !relayId || !relayRefreshToken) {
+      throw new Error("brokerRoomId, relayId, and relayRefreshToken must be provided together");
+    }
+    env.RELAY_BROKER_CHANNEL_ID = brokerRoomId;
+    env.RELAY_BROKER_RELAY_ID = relayId;
+    env.RELAY_BROKER_RELAY_REFRESH_TOKEN = relayRefreshToken;
+  }
+  if (registrationPath) {
+    env.RELAY_BROKER_REGISTRATION_PATH = registrationPath;
+  }
+  if (identityPath) {
+    env.RELAY_BROKER_IDENTITY_PATH = identityPath;
+  }
   if (codexHomeDir) {
     env.CODEX_HOME = codexHomeDir;
   }

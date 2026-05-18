@@ -365,3 +365,109 @@ fn unix_now() -> u64 {
         .map(|duration| duration.as_secs())
         .unwrap_or_default()
 }
+
+#[cfg(test)]
+mod tests {
+    use tokio::{
+        sync::watch,
+        time::{sleep, Duration},
+    };
+
+    use super::*;
+    use crate::state::SecurityProfile;
+
+    #[tokio::test]
+    async fn spawn_restores_active_thread_from_relay_state() {
+        let (change_tx, _change_rx) = watch::channel(0);
+        let state = Arc::new(RwLock::new(RelayState::new(
+            "/tmp/project".to_string(),
+            change_tx,
+            SecurityProfile::private(),
+        )));
+
+        {
+            let mut relay = state.write().await;
+            relay.activate_thread(
+                test_thread("fake-thread-1", "/tmp/project"),
+                "/tmp/project",
+                "fake-echo",
+                "never",
+                "workspace-write",
+                "medium",
+                "device-1",
+            );
+            relay.upsert_transcript_item(
+                "history-1".to_string(),
+                TranscriptEntryKind::AgentText,
+                Some("before restart".to_string()),
+                "completed".to_string(),
+                Some("turn-1".to_string()),
+                None,
+            );
+        }
+
+        let bridge = FakeProviderBridge::spawn(state)
+            .await
+            .expect("fake provider");
+        let restored = bridge
+            .read_thread("fake-thread-1")
+            .await
+            .expect("restored thread should be readable");
+        assert_eq!(restored.thread.id, "fake-thread-1");
+        assert_eq!(restored.thread.cwd, "/tmp/project");
+        assert_eq!(restored.transcript.len(), 1);
+        assert_eq!(
+            restored.transcript[0].text.as_deref(),
+            Some("before restart")
+        );
+
+        bridge
+            .start_turn(
+                "fake-thread-1",
+                "Reply with exactly: after restart",
+                "fake-echo",
+                "medium",
+            )
+            .await
+            .expect("restored fake thread should accept a new turn");
+
+        let completed = wait_for_thread_text(&bridge, "fake-thread-1", "after restart").await;
+        assert!(
+            completed,
+            "restored fake thread should store the post-restart reply"
+        );
+    }
+
+    async fn wait_for_thread_text(
+        bridge: &FakeProviderBridge,
+        thread_id: &str,
+        expected: &str,
+    ) -> bool {
+        for _ in 0..20 {
+            let data = bridge.read_thread(thread_id).await.expect("thread data");
+            if data
+                .transcript
+                .iter()
+                .any(|entry| entry.text.as_deref() == Some(expected))
+            {
+                return true;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        false
+    }
+
+    fn test_thread(id: &str, cwd: &str) -> ThreadSummaryView {
+        ThreadSummaryView {
+            id: id.to_string(),
+            name: Some("Fake E2E Session".to_string()),
+            preview: String::new(),
+            cwd: cwd.to_string(),
+            updated_at: unix_now(),
+            source: "fake".to_string(),
+            status: "idle".to_string(),
+            model_provider: "fake".to_string(),
+            provider: "fake".to_string(),
+        }
+    }
+}
