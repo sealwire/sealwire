@@ -1,0 +1,3 @@
+{"kind":"session_snapshot","active_thread_id":"thread-1","active_turn_id":"turn-1","current_status":"running","transcript_revision":1,"transcript_truncated":false,"transcript":[{"item_id":"user-1","kind":"user","status":"completed","text":"Say hello","turn_id":"turn-1","tool":null},{"item_id":"assistant-1","kind":"agent_text","status":"running","text":"hel","turn_id":"turn-1","tool":null}]}
+{"kind":"transcript_delta","thread_id":"thread-2","base_revision":1,"revision":2,"entry_seq":2,"item_id":"assistant-other","turn_id":"turn-other","delta":"wrong thread","delta_kind":"agent_text"}
+{"kind":"transcript_delta","thread_id":"thread-1","base_revision":1,"revision":2,"entry_seq":2,"item_id":"assistant-1","turn_id":"turn-1","delta":"lo","delta_kind":"agent_text"}

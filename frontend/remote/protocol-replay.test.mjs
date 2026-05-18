@@ -92,13 +92,12 @@ test("protocol replay applies snapshot then deltas without duplicating entries",
 });
 
 test("protocol replay keeps hydrated transcript when action result carries compact snapshot", async () => {
-  const { state, applySessionSnapshot, applyTranscriptDelta } = await createReplayRuntime();
+  const runtime = await createReplayRuntime();
   await replayFixture("compact_snapshot_after_hydration.jsonl", {
-    state,
-    applySessionSnapshot,
-    applyTranscriptDelta,
+    ...runtime,
   });
 
+  const { state } = runtime;
   assert.equal(state.session.active_thread_id, "thread-1");
   assert.equal(state.session.transcript_revision, 11);
   assert.equal(state.session.transcript_truncated, false);
@@ -108,12 +107,53 @@ test("protocol replay keeps hydrated transcript when action result carries compa
   assertNoDuplicateEntries(state.session);
 });
 
+test("protocol replay ignores stale snapshots after reconnect replay", async () => {
+  const runtime = await createReplayRuntime();
+  await replayFixture("stale_snapshot_replay.jsonl", runtime);
+
+  const { state } = runtime;
+  assert.equal(state.session.active_thread_id, "thread-1");
+  assert.equal(state.session.transcript_revision, 5);
+  assert.equal(state.session.transcript.length, 3);
+  assert.equal(entryText(state.session, "assistant-2"), "Fresh answer");
+  assertNoDuplicateEntries(state.session);
+});
+
+test("protocol replay ignores deltas for a different active thread", async () => {
+  const runtime = await createReplayRuntime();
+  await replayFixture("wrong_thread_delta.jsonl", runtime);
+
+  const { state } = runtime;
+  assert.equal(state.session.active_thread_id, "thread-1");
+  assert.equal(state.session.transcript_revision, 2);
+  assert.equal(state.session.transcript.length, 2);
+  assert.equal(entryText(state.session, "assistant-1"), "hello");
+  assert.equal(entryText(state.session, "assistant-other"), undefined);
+  assertNoDuplicateEntries(state.session);
+});
+
+test("protocol replay patches duplicate transcript events in place", async () => {
+  const runtime = await createReplayRuntime();
+  await replayFixture("duplicate_transcript_event.jsonl", runtime);
+
+  const { state } = runtime;
+  assert.equal(state.session.active_thread_id, "thread-1");
+  assert.equal(state.session.transcript_revision, 4);
+  assert.equal(state.session.transcript.length, 2);
+  assert.equal(entryText(state.session, "assistant-1"), "hello world");
+  assertNoDuplicateEntries(state.session);
+});
+
 async function createReplayRuntime() {
   installBrowserStubs();
   const { state } = await import("./state.js");
-  const { applySessionSnapshot, applyTranscriptDelta } = await import("./session-ops.js");
+  const {
+    applySessionSnapshot,
+    applyTranscriptDelta,
+    applyTranscriptEvent,
+  } = await import("./session-ops.js");
   resetReplayState(state);
-  return { state, applySessionSnapshot, applyTranscriptDelta };
+  return { state, applySessionSnapshot, applyTranscriptDelta, applyTranscriptEvent };
 }
 
 function resetReplayState(state) {
@@ -140,7 +180,12 @@ async function replayFixture(filename, runtime) {
   }
 }
 
-function applyProtocolFrame(frame, { state, applySessionSnapshot, applyTranscriptDelta }) {
+function applyProtocolFrame(frame, {
+  state,
+  applySessionSnapshot,
+  applyTranscriptDelta,
+  applyTranscriptEvent,
+}) {
   switch (frame.kind) {
     case "hydrate_store":
       seedTranscriptHydrationState(state, {
@@ -164,6 +209,15 @@ function applyProtocolFrame(frame, { state, applySessionSnapshot, applyTranscrip
       return;
     case "transcript_delta":
       applyTranscriptDelta(withoutKind(frame));
+      return;
+    case "transcript_entry_started":
+    case "transcript_entry_delta":
+    case "transcript_entry_completed":
+    case "transcript_entry_patched":
+    case "approval_added":
+    case "approval_resolved":
+    case "session_meta_updated":
+      applyTranscriptEvent(frame);
       return;
     default:
       throw new Error(`unsupported protocol replay frame kind: ${frame.kind}`);

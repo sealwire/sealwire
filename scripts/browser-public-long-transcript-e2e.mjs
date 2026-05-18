@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import http from "node:http";
-import fs from "node:fs/promises";
-import net from "node:net";
 import path from "node:path";
 import process from "node:process";
-import { chromium } from "playwright";
+
+import { writeFailureArtifacts } from "./e2e/harness/artifacts.mjs";
+import { attachPageDebugLogging, launchBrowser } from "./e2e/harness/browser.mjs";
+import { startStaticServer } from "./e2e/harness/static-server.mjs";
 
 const ROOT = process.cwd();
 const WEB_ROOT = path.join(ROOT, "web");
@@ -15,11 +15,20 @@ const LONG_PROMPT_TAIL = "LONG-HYDRATE-TAIL-REMOTE-E2E";
 const FULL_TEXT = buildFullTranscriptText();
 
 async function main() {
-  const server = await startStaticServer();
+  const server = await startStaticServer({
+    rootDir: WEB_ROOT,
+    indexFile: "remote.html",
+    pathAliases: {
+      "/manifest.webmanifest": "remote-manifest.webmanifest",
+      "/static/icon.svg": "icon.svg",
+      "/static/remote-sw.js": "remote-sw.js",
+    },
+    stripStaticPrefix: true,
+  });
   const origin = `http://127.0.0.1:${server.port}`;
-  const browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext();
+  const { browser, context } = await launchBrowser();
   const page = await context.newPage();
+  attachPageDebugLogging(page, "remote", { prefix: "public-long-transcript-e2e" });
 
   try {
     await page.addInitScript(
@@ -340,6 +349,21 @@ async function main() {
         )
       );
     } catch (error) {
+      await writeFailureArtifacts({
+        scenario: "public-long-transcript-e2e",
+        remotePage: page,
+        metadata: {
+          origin,
+          relayId: RELAY_ID,
+          threadId: THREAD_ID,
+        },
+      }).catch((artifactError) => {
+        console.error(
+          artifactError instanceof Error
+            ? artifactError.stack || artifactError.message
+            : String(artifactError)
+        );
+      });
       console.error(
         JSON.stringify(
           {
@@ -367,7 +391,7 @@ async function main() {
   } finally {
     await context.close().catch(() => {});
     await browser.close().catch(() => {});
-    await new Promise((resolve) => server.server.close(resolve));
+    await server.close();
   }
 }
 
@@ -378,92 +402,6 @@ function buildFullTranscriptText() {
   }
   segments.push(LONG_PROMPT_TAIL);
   return `Store this exact user message in the thread history.\n${segments.join(" ")}`;
-}
-
-async function startStaticServer() {
-  const port = await getFreePort();
-  const server = http.createServer(async (request, response) => {
-    const requestUrl = new URL(request.url || "/", `http://127.0.0.1:${port}`);
-    const relativePath = resolveWebPath(requestUrl.pathname);
-    let filePath = path.join(WEB_ROOT, relativePath);
-    if (!filePath.startsWith(WEB_ROOT)) {
-      response.writeHead(403).end("forbidden");
-      return;
-    }
-
-    try {
-      const stat = await fs.stat(filePath);
-      if (stat.isDirectory()) {
-        filePath = path.join(filePath, "index.html");
-      }
-      const body = await fs.readFile(filePath);
-      response.writeHead(200, {
-        "Content-Type": contentType(filePath),
-        "Cache-Control": "no-store",
-      });
-      response.end(body);
-    } catch {
-      response.writeHead(404).end("not found");
-    }
-  });
-
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(port, "127.0.0.1", resolve);
-  });
-
-  return { port, server };
-}
-
-function resolveWebPath(pathname) {
-  if (pathname === "/") {
-    return "remote.html";
-  }
-  if (pathname === "/manifest.webmanifest") {
-    return "remote-manifest.webmanifest";
-  }
-  if (pathname.startsWith("/static/assets/")) {
-    return pathname.replace(/^\/static\//, "");
-  }
-  if (pathname === "/static/icon.svg") {
-    return "icon.svg";
-  }
-  if (pathname === "/static/remote-sw.js") {
-    return "remote-sw.js";
-  }
-  return pathname.replace(/^\/+/, "");
-}
-
-function contentType(filePath) {
-  if (filePath.endsWith(".html")) return "text/html; charset=utf-8";
-  if (filePath.endsWith(".js")) return "application/javascript; charset=utf-8";
-  if (filePath.endsWith(".css")) return "text/css; charset=utf-8";
-  if (filePath.endsWith(".json")) return "application/json; charset=utf-8";
-  if (filePath.endsWith(".webmanifest")) return "application/manifest+json; charset=utf-8";
-  return "application/octet-stream";
-}
-
-async function getFreePort() {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.unref();
-    server.on("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      if (!address || typeof address === "string") {
-        reject(new Error("failed to allocate free port"));
-        return;
-      }
-      const { port } = address;
-      server.close((error) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-        resolve(port);
-      });
-    });
-  });
 }
 
 main().catch((error) => {

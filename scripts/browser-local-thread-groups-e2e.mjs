@@ -1,28 +1,23 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
-import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { setTimeout as delay } from "node:timers/promises";
 
-import { chromium } from "playwright";
 import { prepareSeededCodexHome } from "./e2e-codex-home.mjs";
 import { deleteThreadAndWait, fetchSession } from "./e2e-thread-cleanup.mjs";
+import { writeFailureArtifacts } from "./e2e/harness/artifacts.mjs";
+import { launchBrowser } from "./e2e/harness/browser.mjs";
+import { startLocalRelay } from "./e2e/harness/local-relay.mjs";
+import { getFreePort } from "./e2e/harness/ports.mjs";
+import {
+  dumpProcessLogs,
+  stopManagedProcess,
+  waitForHealth,
+} from "./e2e/harness/process.mjs";
 
-const ROOT = process.cwd();
 const LOCAL_TIMEOUT_MS = Number(process.env.BROWSER_E2E_TIMEOUT_MS || 45000);
-
-const managedProcesses = [];
-
-process.on("exit", () => {
-  for (const child of managedProcesses) {
-    if (!child.killed && child.exitCode === null) {
-      child.kill("SIGTERM");
-    }
-  }
-});
 
 async function main() {
   const relayPort = await getFreePort();
@@ -42,16 +37,11 @@ async function main() {
   await fs.mkdir(requestedWorkspaces.root, { recursive: true });
   await fs.mkdir(requestedWorkspaces.nested, { recursive: true });
 
-  const relay = spawnManagedProcess(
-    "relay",
-    "cargo",
-    ["run", "-p", "relay-server"],
-    {
-      CODEX_HOME: codexHomeDir,
-      PORT: String(relayPort),
-      RELAY_STATE_PATH: statePath,
-    }
-  );
+  const relay = startLocalRelay({
+    relayPort,
+    relayStatePath: statePath,
+    codexHomeDir,
+  });
 
   await waitForHealth(`http://127.0.0.1:${relayPort}/api/health`);
 
@@ -90,13 +80,14 @@ async function main() {
     threadFixtures[0].cwd = workspaces.root;
     threadFixtures[1].cwd = workspaces.nested;
 
-    browser = await chromium.launch({ headless: true });
-    context = await browser.newContext({
-      viewport: {
-        width: 1600,
-        height: 1200,
+    ({ browser, context } = await launchBrowser({
+      contextOptions: {
+        viewport: {
+          width: 1600,
+          height: 1200,
+        },
       },
-    });
+    }));
     page = await context.newPage();
 
     await page.goto(`http://127.0.0.1:${relayPort}`, { waitUntil: "domcontentloaded" });
@@ -209,6 +200,24 @@ async function main() {
       )
     );
   } catch (error) {
+    await writeFailureArtifacts({
+      scenario: "local-thread-groups-e2e",
+      relay,
+      localPage: page,
+      metadata: {
+        relayPort,
+        statePath,
+        requestedWorkspaces,
+        workspaces,
+        threadFixtures,
+      },
+    }).catch((artifactError) => {
+      console.error(
+        artifactError instanceof Error
+          ? artifactError.stack || artifactError.message
+          : String(artifactError)
+      );
+    });
     await dumpBrowserState(page);
     dumpProcessLogs(relay);
     throw error;
@@ -320,59 +329,6 @@ function cssEscapeForSelector(value) {
   return value.replaceAll("\\", "\\\\").replaceAll("\"", "\\\"");
 }
 
-function spawnManagedProcess(name, command, args, extraEnv) {
-  const child = spawn(command, args, {
-    cwd: ROOT,
-    env: {
-      ...process.env,
-      ...extraEnv,
-    },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-
-  child._logName = name;
-  child._logBuffer = [];
-  child.stdout.on("data", (chunk) => appendLog(child, chunk));
-  child.stderr.on("data", (chunk) => appendLog(child, chunk));
-  managedProcesses.push(child);
-  return child;
-}
-
-function appendLog(child, chunk) {
-  const text = chunk.toString("utf8");
-  const lines = text.split(/\r?\n/).filter(Boolean);
-  child._logBuffer.push(...lines);
-  if (child._logBuffer.length > 120) {
-    child._logBuffer.splice(0, child._logBuffer.length - 120);
-  }
-}
-
-async function stopManagedProcess(child) {
-  if (!child || child.killed || child.exitCode !== null) {
-    return;
-  }
-
-  child.kill("SIGTERM");
-  await Promise.race([
-    new Promise((resolve) => child.once("exit", resolve)),
-    delay(3000).then(() => {
-      if (child.exitCode === null) {
-        child.kill("SIGKILL");
-      }
-    }),
-  ]);
-}
-
-function dumpProcessLogs(child) {
-  const lines = child?._logBuffer || [];
-  if (!lines.length) {
-    return;
-  }
-
-  console.error(`\n[${child._logName} logs]`);
-  console.error(lines.join("\n"));
-}
-
 async function dumpBrowserState(page) {
   if (!page) {
     return;
@@ -409,42 +365,6 @@ async function dumpBrowserState(page) {
       })
     );
   } catch {}
-}
-
-async function waitForHealth(url, timeoutMs = 30000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(url);
-      if (response.ok) {
-        return;
-      }
-    } catch {}
-    await delay(300);
-  }
-  throw new Error(`timed out waiting for health endpoint: ${url}`);
-}
-
-async function getFreePort() {
-  return await new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      if (!address || typeof address === "string") {
-        server.close(() => reject(new Error("failed to acquire an ephemeral port")));
-        return;
-      }
-      const { port } = address;
-      server.close((error) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-        resolve(port);
-      });
-    });
-    server.on("error", reject);
-  });
 }
 
 main().catch((error) => {

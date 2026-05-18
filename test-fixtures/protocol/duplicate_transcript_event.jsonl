@@ -1,0 +1,4 @@
+{"kind":"session_snapshot","active_thread_id":"thread-1","active_turn_id":"turn-1","current_status":"running","transcript_revision":1,"transcript_truncated":false,"transcript":[{"item_id":"user-1","kind":"user","status":"completed","text":"Say hello","turn_id":"turn-1","tool":null}]}
+{"kind":"transcript_entry_started","thread_id":"thread-1","revision":2,"entry":{"item_id":"assistant-1","entry_seq":2,"kind":"agent_text","status":"running","text":"hello","turn_id":"turn-1","tool":null}}
+{"kind":"transcript_entry_patched","thread_id":"thread-1","revision":3,"entry":{"item_id":"assistant-1","entry_seq":2,"kind":"agent_text","status":"running","text":"hello world","turn_id":"turn-1","tool":null}}
+{"kind":"transcript_entry_completed","thread_id":"thread-1","revision":4,"entry":{"item_id":"assistant-1","entry_seq":2,"kind":"agent_text","status":"completed","text":"hello world","turn_id":"turn-1","tool":null}}

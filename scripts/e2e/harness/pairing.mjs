@@ -15,6 +15,25 @@ export async function openSecurityModal(page) {
   });
 }
 
+export async function closeSecurityModal(page, timeoutMs) {
+  const isOpen = await page.evaluate(() =>
+    Boolean(document.querySelector("#security-modal")?.open)
+  );
+  if (!isOpen) {
+    return;
+  }
+
+  await page.click("#close-security-modal");
+  await page.waitForFunction(
+    () => {
+      const dialog = document.querySelector("#security-modal");
+      return !dialog?.open;
+    },
+    null,
+    { timeout: timeoutMs }
+  );
+}
+
 export async function startPairingFromLocalPage(
   localPage,
   { lanIp, brokerPort, timeoutMs, previousUrl = "" }

@@ -3,6 +3,9 @@ name: Rust CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * *"
 
 jobs:
   frontend:
@@ -88,5 +91,47 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: browser-public-core-fake-artifacts
+          path: artifacts/e2e
+          if-no-files-found: ignore
+
+  browser-public-full:
+    name: browser-public-full-fake
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: npm ci
+        run: npm ci
+
+      - name: Install Playwright
+        run: npm run test:browser:install:ci
+
+      - name: Build relay binaries
+        run: cargo build -p relay-broker -p relay-server
+
+      - name: Public browser full fake matrix
+        run: npm run test:browser:public:fake
+
+      - name: Upload e2e artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-public-full-fake-artifacts
           path: artifacts/e2e
           if-no-files-found: ignore

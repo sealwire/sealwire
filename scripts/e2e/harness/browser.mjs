@@ -1,8 +1,89 @@
 import { chromium } from "playwright";
 
-export async function launchBrowser() {
+export async function launchBrowser({ contextOptions = {} } = {}) {
   const browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext();
+  const context = await browser.newContext(contextOptions);
+  await context.addInitScript(() => {
+    window.__agentRelayProtocolFrames = [];
+    const maxFrames = 500;
+    const NativeWebSocket = window.WebSocket;
+
+    function summarizeFrame(direction, url, data) {
+      const text =
+        typeof data === "string"
+          ? data
+          : data instanceof ArrayBuffer
+            ? `[binary:${data.byteLength}]`
+            : ArrayBuffer.isView(data)
+              ? `[binary:${data.byteLength}]`
+              : String(data ?? "");
+      const summary = {
+        at: new Date().toISOString(),
+        direction,
+        url,
+        bytes: text.length,
+      };
+      try {
+        const frame = JSON.parse(text);
+        const payload = frame.payload && typeof frame.payload === "object"
+          ? frame.payload
+          : frame;
+        Object.assign(summary, {
+          protocol_version: frame.protocol_version ?? payload.protocol_version,
+          kind: payload.kind ?? frame.kind,
+          action: payload.action,
+          action_id: payload.action_id,
+          thread_id: payload.thread_id ?? payload.snapshot?.active_thread_id,
+          target_peer_id: payload.target_peer_id,
+          device_id: payload.device_id,
+          from_peer_id: frame.from_peer_id,
+          from_role: frame.from_role,
+          entries: Array.isArray(payload.entries)
+            ? payload.entries.length
+            : Array.isArray(payload.snapshot?.transcript)
+              ? payload.snapshot.transcript.length
+              : undefined,
+          truncated: payload.transcript_truncated ?? payload.snapshot?.transcript_truncated,
+          ok: payload.ok,
+        });
+      } catch {
+        summary.kind = "unparsed";
+      }
+      return Object.fromEntries(
+        Object.entries(summary).filter(([, value]) => value !== undefined)
+      );
+    }
+
+    function recordFrame(direction, url, data) {
+      window.__agentRelayProtocolFrames.push(summarizeFrame(direction, url, data));
+      if (window.__agentRelayProtocolFrames.length > maxFrames) {
+        window.__agentRelayProtocolFrames.splice(
+          0,
+          window.__agentRelayProtocolFrames.length - maxFrames
+        );
+      }
+    }
+
+    class InstrumentedWebSocket extends NativeWebSocket {
+      constructor(url, protocols) {
+        if (protocols === undefined) {
+          super(url);
+        } else {
+          super(url, protocols);
+        }
+        this.addEventListener("message", (event) => {
+          recordFrame("recv", String(url), event.data);
+        });
+      }
+
+      send(data) {
+        recordFrame("send", this.url, data);
+        return super.send(data);
+      }
+    }
+
+    window.WebSocket = InstrumentedWebSocket;
+  });
   return { browser, context };
 }
 
@@ -56,6 +137,14 @@ export async function readStoredRemoteAuth(page) {
     const activeRelayId = parsed.activeRelayId || Object.keys(parsed.remoteProfiles)[0] || null;
     return activeRelayId ? parsed.remoteProfiles[activeRelayId] || null : null;
   });
+}
+
+export async function readProtocolFrames(page) {
+  try {
+    return await page.evaluate(() => window.__agentRelayProtocolFrames || []);
+  } catch {
+    return [];
+  }
 }
 
 export async function safeText(page, selector) {

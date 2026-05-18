@@ -37,18 +37,24 @@ export async function writeFailureArtifacts({
   scenario,
   broker,
   relay,
+  relayPort,
   localPage,
   remotePage,
   extraPages = [],
   metadata = {},
-} = {}) {
-  const artifacts = createArtifactWriter(scenario || "browser-e2e");
+} = {}, writerOptions = {}) {
+  const effectiveRelayPort = relayPort || metadata.relayPort || metadata.localRelayPort || null;
+  const artifacts = createArtifactWriter(scenario || "browser-e2e", writerOptions);
   await artifacts.writeJson("metadata.json", {
     failedAt: new Date().toISOString(),
+    relayPort: effectiveRelayPort,
     ...metadata,
   });
   await artifacts.writeProcessLog("broker.log", broker);
   await artifacts.writeProcessLog("relay.log", relay);
+  if (effectiveRelayPort) {
+    await writeRelayApiArtifacts(artifacts, effectiveRelayPort);
+  }
   await writePageArtifacts(artifacts, "local", localPage, "#client-log");
   await writePageArtifacts(artifacts, "remote", remotePage, "#remote-client-log");
   for (const [index, page] of extraPages.entries()) {
@@ -65,6 +71,10 @@ async function writePageArtifacts(artifacts, label, page, logSelector) {
 
   await artifacts.writeText(`${label}-text.txt`, await safeText(page, logSelector));
   await artifacts.writeJson(`${label}-storage.json`, await readLocalStorage(page));
+  await artifacts.writeText(
+    `${label}-protocol-frames.ndjson`,
+    toNdjson(await readProtocolFrames(page))
+  );
   try {
     await page.screenshot({
       path: path.join(artifacts.dir, `${label}-screenshot.png`),
@@ -96,6 +106,45 @@ async function readLocalStorage(page) {
   } catch {
     return {};
   }
+}
+
+async function readProtocolFrames(page) {
+  try {
+    return await page.evaluate(() => window.__agentRelayProtocolFrames || []);
+  } catch {
+    return [];
+  }
+}
+
+async function writeRelayApiArtifacts(artifacts, relayPort) {
+  await artifacts.writeJson("session.json", await fetchRelayJson(relayPort, "/api/session"));
+  await artifacts.writeJson("threads.json", await fetchRelayJson(relayPort, "/api/threads?limit=200"));
+}
+
+async function fetchRelayJson(relayPort, pathname) {
+  try {
+    const response = await fetch(`http://127.0.0.1:${relayPort}${pathname}`);
+    const text = await response.text();
+    let body = text;
+    try {
+      body = text ? JSON.parse(text) : null;
+    } catch {}
+    return {
+      ok: response.ok,
+      status: response.status,
+      body,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: errorMessage(error),
+    };
+  }
+}
+
+function toNdjson(entries) {
+  const text = entries.map((entry) => JSON.stringify(redactSecrets(entry))).join("\n");
+  return text ? `${text}\n` : "";
 }
 
 function redactSecrets(value) {
