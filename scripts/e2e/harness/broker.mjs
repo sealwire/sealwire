@@ -36,3 +36,17 @@ export function startPublicBroker({
 
   return spawnManagedProcess("broker", "cargo", ["run", "-p", "relay-broker"], env);
 }
+
+export function startSelfHostedBroker({
+  brokerPort,
+  ticketSecret,
+  bindHost = "0.0.0.0",
+  extraEnv = {},
+}) {
+  return spawnManagedProcess("broker", "cargo", ["run", "-p", "relay-broker"], {
+    BIND_HOST: bindHost,
+    PORT: String(brokerPort),
+    RELAY_BROKER_TICKET_SECRET: ticketSecret,
+    ...extraEnv,
+  });
+}

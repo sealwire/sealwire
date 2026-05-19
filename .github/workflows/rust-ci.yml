@@ -137,6 +137,91 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  browser-self-hosted:
+    name: browser-self-hosted-pairing-fake
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: npm ci
+        run: npm ci
+
+      - name: Install Playwright
+        run: npm run test:browser:install:ci
+
+      - name: Build relay binaries
+        run: cargo build -p relay-broker -p relay-server
+
+      - name: Self-hosted pairing fake smoke
+        run: npm run test:browser:pairing:fake
+
+      - name: Upload e2e artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-self-hosted-pairing-fake-artifacts
+          path: artifacts/e2e
+          if-no-files-found: ignore
+          retention-days: 7
+
+  browser-local-full:
+    name: browser-local-full-fake
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: npm ci
+        run: npm ci
+
+      - name: Install Playwright
+        run: npm run test:browser:install:ci
+
+      - name: Build relay binary
+        run: cargo build -p relay-server
+
+      - name: Local browser full fake matrix
+        run: npm run test:browser:local-full:fake
+
+      - name: Upload e2e artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-local-full-fake-artifacts
+          path: artifacts/e2e
+          if-no-files-found: ignore
+          retention-days: 7
+
   browser-public-full:
     name: browser-public-full-fake
     runs-on: ubuntu-latest

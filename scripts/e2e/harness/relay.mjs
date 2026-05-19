@@ -48,6 +48,33 @@ export function startPublicRelay({
   return spawnManagedProcess("relay", "cargo", ["run", "-p", "relay-server"], env);
 }
 
+export function startSelfHostedRelay({
+  relayPort,
+  relayStatePath,
+  brokerPort,
+  lanIp,
+  brokerRoomId,
+  peerId,
+  ticketSecret,
+  codexHomeDir,
+  extraEnv = {},
+}) {
+  const env = {
+    PORT: String(relayPort),
+    RELAY_STATE_PATH: relayStatePath,
+    RELAY_BROKER_URL: `ws://127.0.0.1:${brokerPort}`,
+    RELAY_BROKER_PUBLIC_URL: `ws://${lanIp}:${brokerPort}`,
+    RELAY_BROKER_CHANNEL_ID: brokerRoomId,
+    RELAY_BROKER_PEER_ID: peerId,
+    RELAY_BROKER_TICKET_SECRET: ticketSecret,
+    ...extraEnv,
+  };
+  if (codexHomeDir) {
+    env.CODEX_HOME = codexHomeDir;
+  }
+  return spawnManagedProcess("relay", "cargo", ["run", "-p", "relay-server"], env);
+}
+
 export async function waitForBrokerConnection(sessionUrl, timeoutMs = 30000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {

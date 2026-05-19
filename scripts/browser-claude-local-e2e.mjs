@@ -1,44 +1,43 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
-import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { setTimeout as delay } from "node:timers/promises";
 
-import { chromium } from "playwright";
+import { writeFailureArtifacts } from "./e2e/harness/artifacts.mjs";
+import {
+  attachPageDebugLogging,
+  dumpBrowserState,
+  launchBrowser,
+} from "./e2e/harness/browser.mjs";
+import { startLocalRelay } from "./e2e/harness/local-relay.mjs";
+import { getFreePort } from "./e2e/harness/ports.mjs";
+import {
+  dumpProcessLogs,
+  stopManagedProcess,
+  waitForHealth,
+} from "./e2e/harness/process.mjs";
 
-const ROOT = process.cwd();
 const LOCAL_TIMEOUT_MS = Number(process.env.BROWSER_E2E_TIMEOUT_MS || 45000);
-const managedProcesses = [];
-
-process.on("exit", () => {
-  for (const child of managedProcesses) {
-    if (!child.killed && child.exitCode === null) {
-      child.kill("SIGTERM");
-    }
-  }
-});
 
 async function main() {
   const relayPort = await getFreePort();
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-browser-claude-e2e-"));
   const statePath = path.join(stateDir, "session.json");
 
-  const relay = spawnManagedProcess("relay", "cargo", ["run", "-p", "relay-server"], {
-    AGENT_PROVIDERS: "claude_code",
-    PORT: String(relayPort),
-    RELAY_STATE_PATH: statePath,
+  const relay = startLocalRelay({
+    relayPort,
+    relayStatePath: statePath,
+    extraEnv: { AGENT_PROVIDERS: "claude_code" },
   });
-
-  await waitForHealth(`http://127.0.0.1:${relayPort}/api/health`);
 
   let browser;
   let context;
   let page;
 
   try {
+    await waitForHealth(`http://127.0.0.1:${relayPort}/api/health`, LOCAL_TIMEOUT_MS);
+
     const providers = await fetchEnvelope(relayPort, "/api/providers");
     assert.ok(
       providers.data?.includes("claude_code"),
@@ -65,15 +64,27 @@ async function main() {
     }
 
     const { thread, session } = resumed;
+    if (hasMissingClaudeNativeBinary(session)) {
+      console.log(
+        JSON.stringify({
+          ok: true,
+          skipped: "Claude Code sessions exist, but the native Claude Code binary is unavailable",
+          threadId: thread.id,
+        })
+      );
+      return;
+    }
 
-    browser = await chromium.launch({ headless: true });
-    context = await browser.newContext({
-      viewport: {
-        width: 1440,
-        height: 1000,
+    ({ browser, context } = await launchBrowser({
+      contextOptions: {
+        viewport: {
+          width: 1440,
+          height: 1000,
+        },
       },
-    });
+    }));
     page = await context.newPage();
+    attachPageDebugLogging(page, "local", { prefix: "claude-local-e2e" });
 
     await page.goto(`http://127.0.0.1:${relayPort}`, { waitUntil: "domcontentloaded" });
     await page.goto(`http://127.0.0.1:${relayPort}/?thread=${encodeURIComponent(thread.id)}`, {
@@ -108,10 +119,14 @@ async function main() {
       { timeout: LOCAL_TIMEOUT_MS }
     );
 
-    await page.waitForFunction(() => {
-      const transcript = document.querySelector("#transcript")?.textContent || "";
-      return transcript.trim().length > 0 && !transcript.includes("No transcript");
-    }, null, { timeout: LOCAL_TIMEOUT_MS });
+    await page.waitForFunction(
+      () => {
+        const transcript = document.querySelector("#transcript")?.textContent || "";
+        return transcript.trim().length > 0 && !transcript.includes("No transcript");
+      },
+      null,
+      { timeout: LOCAL_TIMEOUT_MS }
+    );
 
     const providerDotLabel = await renderedThread
       .locator(".conversation-provider-dot")
@@ -120,11 +135,15 @@ async function main() {
     assert.equal(providerDotLabel, "Claude Code");
 
     await page.click("#open-session-details");
-    await page.waitForFunction(() => {
-      const modal = document.querySelector("#session-details-modal");
-      const meta = document.querySelector("#session-meta")?.textContent || "";
-      return Boolean(modal?.open) && meta.includes("Claude Code");
-    }, null, { timeout: LOCAL_TIMEOUT_MS });
+    await page.waitForFunction(
+      () => {
+        const modal = document.querySelector("#session-details-modal");
+        const meta = document.querySelector("#session-meta")?.textContent || "";
+        return Boolean(modal?.open) && meta.includes("Claude Code");
+      },
+      null,
+      { timeout: LOCAL_TIMEOUT_MS }
+    );
     await page.click("#close-session-details-modal");
 
     page.once("dialog", (dialog) => {
@@ -132,25 +151,37 @@ async function main() {
       dialog.dismiss();
     });
     await renderedThread.click({ button: "right" });
-    await page.waitForFunction(() => {
-      const menu = document.querySelector("#thread-context-menu");
-      const button = document.querySelector("#delete-thread-button");
-      return Boolean(menu && !menu.hidden && button && !button.disabled);
-    }, null, { timeout: LOCAL_TIMEOUT_MS });
+    await page.waitForFunction(
+      () => {
+        const menu = document.querySelector("#thread-context-menu");
+        const button = document.querySelector("#delete-thread-button");
+        return Boolean(menu && !menu.hidden && button && !button.disabled);
+      },
+      null,
+      { timeout: LOCAL_TIMEOUT_MS }
+    );
     await page.click("#delete-thread-button");
 
     page.once("dialog", (dialog) => dialog.accept());
     await renderedThread.click({ button: "right" });
-    await page.waitForFunction(() => {
-      const menu = document.querySelector("#thread-context-menu");
-      const button = document.querySelector("#archive-thread-button");
-      return Boolean(menu && !menu.hidden && button && !button.disabled);
-    }, null, { timeout: LOCAL_TIMEOUT_MS });
+    await page.waitForFunction(
+      () => {
+        const menu = document.querySelector("#thread-context-menu");
+        const button = document.querySelector("#archive-thread-button");
+        return Boolean(menu && !menu.hidden && button && !button.disabled);
+      },
+      null,
+      { timeout: LOCAL_TIMEOUT_MS }
+    );
     await page.click("#archive-thread-button");
-    await page.waitForFunction(() => {
-      const log = document.querySelector("#client-log")?.textContent || "";
-      return /Failed to archive local session: .*archive is not supported/i.test(log);
-    }, null, { timeout: LOCAL_TIMEOUT_MS });
+    await page.waitForFunction(
+      () => {
+        const log = document.querySelector("#client-log")?.textContent || "";
+        return /Failed to archive local session: .*archive is not supported/i.test(log);
+      },
+      null,
+      { timeout: LOCAL_TIMEOUT_MS }
+    );
 
     const relaySession = await fetchEnvelope(relayPort, "/api/session");
     assert.equal(relaySession.data?.provider, "claude_code");
@@ -174,8 +205,17 @@ async function main() {
       )
     );
   } catch (error) {
-    await dumpBrowserState(page);
+    await dumpBrowserState({ localPage: page });
     dumpProcessLogs(relay);
+    await writeFailureArtifacts({
+      scenario: "claude-local-e2e",
+      relay,
+      relayPort,
+      localPage: page,
+      metadata: { relayPort },
+    }).catch((artifactError) => {
+      console.error(`[e2e-artifacts] failed to write artifacts: ${artifactError.message}`);
+    });
     throw error;
   } finally {
     await context?.close().catch(() => {});
@@ -206,6 +246,12 @@ async function resumeFirstReadableClaudeThread(relayPort, threads) {
   return null;
 }
 
+function hasMissingClaudeNativeBinary(session) {
+  return (session.logs || []).some((entry) =>
+    /Claude Code native binary not found/i.test(entry?.message || "")
+  );
+}
+
 async function fetchEnvelope(relayPort, pathName) {
   const response = await fetch(`http://127.0.0.1:${relayPort}${pathName}`);
   return response.json();
@@ -220,107 +266,11 @@ async function postEnvelope(relayPort, pathName, body = undefined) {
   return response.json();
 }
 
-function spawnManagedProcess(name, command, args, extraEnv) {
-  const child = spawn(command, args, {
-    cwd: ROOT,
-    env: {
-      ...process.env,
-      ...extraEnv,
-    },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-
-  child._logName = name;
-  child._logBuffer = [];
-  child.stdout.on("data", (chunk) => appendLog(child, chunk));
-  child.stderr.on("data", (chunk) => appendLog(child, chunk));
-  managedProcesses.push(child);
-  return child;
-}
-
-function appendLog(child, chunk) {
-  const text = chunk.toString("utf8");
-  const lines = text.split(/\r?\n/).filter(Boolean);
-  child._logBuffer.push(...lines);
-  if (child._logBuffer.length > 160) {
-    child._logBuffer.splice(0, child._logBuffer.length - 160);
-  }
-}
-
-async function stopManagedProcess(child) {
-  if (!child || child.killed || child.exitCode !== null) {
-    return;
-  }
-
-  child.kill("SIGTERM");
-  await Promise.race([
-    new Promise((resolve) => child.once("exit", resolve)),
-    delay(3000).then(() => {
-      if (child.exitCode === null) {
-        child.kill("SIGKILL");
-      }
-    }),
-  ]);
-}
-
-function dumpProcessLogs(child) {
-  const lines = child?._logBuffer || [];
-  if (!lines.length) {
-    return;
-  }
-
-  console.error(`\n[${child._logName} logs]`);
-  console.error(lines.join("\n"));
-}
-
-async function dumpBrowserState(page) {
-  if (!page) {
-    return;
-  }
-  console.error("\n[local page]");
-  console.error(await safeText(page, "#client-log"));
-  console.error(await safeText(page, "#transcript"));
-}
-
-async function safeText(page, selector) {
-  try {
-    return (await page.textContent(selector)) || "";
-  } catch {
-    return "";
-  }
-}
-
-async function waitForHealth(url, timeoutMs = LOCAL_TIMEOUT_MS) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(url);
-      if (response.ok) {
-        return;
-      }
-    } catch {}
-    await delay(300);
-  }
-  throw new Error(`timed out waiting for health endpoint: ${url}`);
-}
-
 function cssEscapeForSelector(value) {
   return String(value).replace(/["\\]/g, "\\$&");
 }
 
-function getFreePort() {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.unref();
-    server.on("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      server.close(() => resolve(address.port));
-    });
-  });
-}
-
 main().catch((error) => {
   console.error(error);
-  process.exit(1);
+  process.exitCode = 1;
 });

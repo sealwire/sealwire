@@ -1,58 +1,62 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
-import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { setTimeout as delay } from "node:timers/promises";
 
-import { chromium } from "playwright";
 import { prepareSeededCodexHome } from "./e2e-codex-home.mjs";
 import { deleteThreadAndWait, fetchSession } from "./e2e-thread-cleanup.mjs";
+import { writeFailureArtifacts } from "./e2e/harness/artifacts.mjs";
+import {
+  attachPageDebugLogging,
+  dumpBrowserState,
+  launchBrowser,
+} from "./e2e/harness/browser.mjs";
+import { startLocalRelay } from "./e2e/harness/local-relay.mjs";
+import { startLocalSession } from "./e2e/harness/local-session.mjs";
+import { getFreePort } from "./e2e/harness/ports.mjs";
+import {
+  dumpProcessLogs,
+  stopManagedProcess,
+  waitForHealth,
+} from "./e2e/harness/process.mjs";
 
-const ROOT = process.cwd();
 const LOCAL_TIMEOUT_MS = Number(process.env.BROWSER_E2E_TIMEOUT_MS || 45000);
 const PROMPT =
   process.env.BROWSER_E2E_LOCAL_DELETE_PROMPT || "Reply with exactly: local-delete-browser-e2e";
-
-const managedProcesses = [];
-
-process.on("exit", () => {
-  for (const child of managedProcesses) {
-    if (!child.killed && child.exitCode === null) {
-      child.kill("SIGTERM");
-    }
-  }
-});
+const USE_FAKE_PROVIDER = process.env.AGENT_PROVIDERS === "fake";
 
 async function main() {
   const relayPort = await getFreePort();
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-local-delete-e2e-"));
   const statePath = path.join(stateDir, "session.json");
-  const codexHomeDir = await prepareSeededCodexHome("agent-relay-local-delete-codex-");
+  const codexHomeDir = await prepareSeededCodexHome("agent-relay-local-delete-codex-", {
+    requireAuth: !USE_FAKE_PROVIDER,
+  });
   const workspaceDir = await fs.realpath(
     await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-local-delete-workspace-"))
   );
   const cwdInput = toTildePath(workspaceDir);
   const cleanupThreadIds = [];
 
-  const relay = spawnManagedProcess("relay", "cargo", ["run", "-p", "relay-server"], {
-    CODEX_HOME: codexHomeDir,
-    PORT: String(relayPort),
-    RELAY_STATE_PATH: statePath,
+  const relay = startLocalRelay({
+    relayPort,
+    relayStatePath: statePath,
+    codexHomeDir,
+    extraEnv: USE_FAKE_PROVIDER ? { AGENT_PROVIDERS: "fake" } : {},
   });
-
-  await waitForHealth(`http://127.0.0.1:${relayPort}/api/health`);
 
   let browser;
   let context;
   let page;
 
   try {
-    browser = await chromium.launch({ headless: true });
-    context = await browser.newContext();
+    await waitForHealth(`http://127.0.0.1:${relayPort}/api/health`);
+
+    ({ browser, context } = await launchBrowser());
     page = await context.newPage();
+    attachPageDebugLogging(page, "local", { prefix: "local-delete-e2e" });
 
     await page.goto(`http://127.0.0.1:${relayPort}`, { waitUntil: "domcontentloaded" });
     const deviceId = await page.evaluate(() => localStorage.getItem("agent-relay.device-id"));
@@ -62,23 +66,27 @@ async function main() {
       cwd: workspaceDir,
       deviceId,
       initialPrompt: "Reply with exactly: local-delete-fallback-e2e",
+      provider: USE_FAKE_PROVIDER ? "fake" : undefined,
+      model: USE_FAKE_PROVIDER ? "fake-echo" : undefined,
     });
     cleanupThreadIds.push(fallbackThreadId);
 
-    await page.fill("#cwd-input", cwdInput);
-    await page.click("#open-launch-settings");
-    await page.waitForFunction(() => {
-      const modal = document.querySelector("#launch-settings-modal");
-      return Boolean(modal?.open);
+    await startLocalSession(page, {
+      cwd: cwdInput,
+      approvalPolicy: "never",
+      provider: USE_FAKE_PROVIDER ? "fake" : undefined,
+      model: USE_FAKE_PROVIDER ? "fake-echo" : undefined,
+      timeoutMs: LOCAL_TIMEOUT_MS,
     });
-    await page.selectOption("#approval-policy-input", "never");
-    await page.click("#close-launch-settings-modal");
-    await page.click("#start-session-button");
 
-    await page.waitForFunction(() => {
-      const transcript = document.querySelector("#transcript")?.textContent || "";
-      return transcript.includes("Session ready");
-    }, null, { timeout: LOCAL_TIMEOUT_MS });
+    await page.waitForFunction(
+      () => {
+        const transcript = document.querySelector("#transcript")?.textContent || "";
+        return transcript.includes("Session ready");
+      },
+      null,
+      { timeout: LOCAL_TIMEOUT_MS }
+    );
 
     await page.fill("#message-input", PROMPT);
     await page.click("#send-button");
@@ -102,11 +110,15 @@ async function main() {
     await target.waitFor({ state: "visible", timeout: LOCAL_TIMEOUT_MS });
     page.once("dialog", (dialog) => dialog.accept());
     await target.click({ button: "right" });
-    await page.waitForFunction(() => {
-      const menu = document.querySelector("#thread-context-menu");
-      const button = document.querySelector("#delete-thread-button");
-      return Boolean(menu && !menu.hidden && button && !button.disabled);
-    }, null, { timeout: LOCAL_TIMEOUT_MS });
+    await page.waitForFunction(
+      () => {
+        const menu = document.querySelector("#thread-context-menu");
+        const button = document.querySelector("#delete-thread-button");
+        return Boolean(menu && !menu.hidden && button && !button.disabled);
+      },
+      null,
+      { timeout: LOCAL_TIMEOUT_MS }
+    );
     await page.click("#delete-thread-button");
 
     await waitForThreadMissing(relayPort, workspaceDir, threadId);
@@ -146,14 +158,24 @@ async function main() {
           deletedThreadId: threadId,
           fallbackThreadId,
           currentStatus: relayAfterDelete.current_status,
+          fakeProvider: USE_FAKE_PROVIDER,
         },
         null,
         2
       )
     );
   } catch (error) {
-    await dumpBrowserState(page);
+    await dumpBrowserState({ localPage: page });
     dumpProcessLogs(relay);
+    await writeFailureArtifacts({
+      scenario: "local-delete-e2e",
+      relay,
+      relayPort,
+      localPage: page,
+      metadata: { cwdInput, fakeProvider: USE_FAKE_PROVIDER },
+    }).catch((artifactError) => {
+      console.error(`[e2e-artifacts] failed to write artifacts: ${artifactError.message}`);
+    });
     throw error;
   } finally {
     for (const threadId of cleanupThreadIds.reverse()) {
@@ -188,89 +210,6 @@ function toTildePath(absolutePath) {
   return absolutePath;
 }
 
-function spawnManagedProcess(name, command, args, extraEnv) {
-  const child = spawn(command, args, {
-    cwd: ROOT,
-    env: {
-      ...process.env,
-      ...extraEnv,
-    },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-
-  child._logName = name;
-  child._logBuffer = [];
-  child.stdout.on("data", (chunk) => appendLog(child, chunk));
-  child.stderr.on("data", (chunk) => appendLog(child, chunk));
-  managedProcesses.push(child);
-  return child;
-}
-
-function appendLog(child, chunk) {
-  const text = chunk.toString("utf8");
-  const lines = text.split(/\r?\n/).filter(Boolean);
-  child._logBuffer.push(...lines);
-  if (child._logBuffer.length > 120) {
-    child._logBuffer.splice(0, child._logBuffer.length - 120);
-  }
-}
-
-async function stopManagedProcess(child) {
-  if (!child || child.killed || child.exitCode !== null) {
-    return;
-  }
-
-  child.kill("SIGTERM");
-  await Promise.race([
-    new Promise((resolve) => child.once("exit", resolve)),
-    delay(3000).then(() => {
-      if (child.exitCode === null) {
-        child.kill("SIGKILL");
-      }
-    }),
-  ]);
-}
-
-function dumpProcessLogs(child) {
-  const lines = child?._logBuffer || [];
-  if (!lines.length) {
-    return;
-  }
-
-  console.error(`\n[${child._logName} logs]`);
-  console.error(lines.join("\n"));
-}
-
-async function dumpBrowserState(page) {
-  if (!page) {
-    return;
-  }
-  console.error("\n[local page]");
-  console.error(await safeText(page, "#client-log"));
-}
-
-async function safeText(page, selector) {
-  try {
-    return (await page.textContent(selector)) || "";
-  } catch {
-    return "";
-  }
-}
-
-async function waitForHealth(url, timeoutMs = 30000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(url);
-      if (response.ok) {
-        return;
-      }
-    } catch {}
-    await delay(300);
-  }
-  throw new Error(`timed out waiting for health endpoint: ${url}`);
-}
-
 async function waitForThreadMissing(relayPort, cwd, threadId, timeoutMs = LOCAL_TIMEOUT_MS) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -290,20 +229,28 @@ async function waitForThreadMissing(relayPort, cwd, threadId, timeoutMs = LOCAL_
   throw new Error(`timed out waiting for deleted thread ${threadId} to disappear`);
 }
 
-async function startThread(relayPort, { cwd, deviceId, initialPrompt }) {
+async function startThread(relayPort, { cwd, deviceId, initialPrompt, provider, model }) {
+  const body = {
+    cwd,
+    device_id: deviceId,
+    initial_prompt: initialPrompt,
+    approval_policy: "never",
+    sandbox: "workspace-write",
+    effort: "medium",
+  };
+  if (provider) {
+    body.provider = provider;
+  }
+  if (model) {
+    body.model = model;
+  }
+
   const response = await fetch(`http://127.0.0.1:${relayPort}/api/session/start`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      cwd,
-      device_id: deviceId,
-      initial_prompt: initialPrompt,
-      approval_policy: "never",
-      sandbox: "workspace-write",
-      effort: "medium",
-    }),
+    body: JSON.stringify(body),
   });
 
   const payload = await response.json();
@@ -311,28 +258,6 @@ async function startThread(relayPort, { cwd, deviceId, initialPrompt }) {
   assert.equal(payload?.ok, true, `thread start payload should succeed for ${initialPrompt}`);
   assert.ok(payload?.data?.active_thread_id, `thread id missing for ${initialPrompt}`);
   return payload.data.active_thread_id;
-}
-
-async function getFreePort() {
-  return await new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      if (!address || typeof address === "string") {
-        server.close(() => reject(new Error("failed to acquire an ephemeral port")));
-        return;
-      }
-      const { port } = address;
-      server.close((error) => {
-        if (error) {
-          reject(error);
-        } else {
-          resolve(port);
-        }
-      });
-    });
-    server.on("error", reject);
-  });
 }
 
 main().catch((error) => {

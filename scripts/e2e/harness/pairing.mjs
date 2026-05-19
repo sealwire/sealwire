@@ -73,13 +73,23 @@ export async function approvePairing(localPage, timeoutMs) {
 export async function waitForPairedRemote(remotePage, timeoutMs) {
   await remotePage.waitForFunction(
     () => {
-      const stored = JSON.parse(
-        window.localStorage.getItem("agent-relay.remote-state") ||
-          window.localStorage.getItem("agent-relay.remote-state-v2") ||
-          "null"
-      );
+      const stored = [
+        "agent-relay.remote-state",
+        "agent-relay.remote-state-v3",
+        "agent-relay.remote-state-v2",
+      ]
+        .map((key) => {
+          try {
+            return JSON.parse(window.localStorage.getItem(key) || "null");
+          } catch {
+            return null;
+          }
+        })
+        .find((value) => value?.remoteProfiles);
+      const profiles = stored?.remoteProfiles || {};
       return Boolean(
-        stored?.clientAuth?.clientId && Object.keys(stored?.remoteProfiles || {}).length
+        Object.keys(profiles).length &&
+          (stored.activeRelayId || stored.clientAuth?.clientId)
       );
     },
     null,
