@@ -18,12 +18,15 @@ import {
 } from "./e2e/harness/process.mjs";
 
 const LOCAL_TIMEOUT_MS = Number(process.env.BROWSER_E2E_TIMEOUT_MS || 45000);
+const USE_FAKE_PROVIDER = process.env.AGENT_PROVIDERS === "fake";
 
 async function main() {
   const relayPort = await getFreePort();
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-local-scroll-e2e-"));
   const statePath = path.join(stateDir, "session.json");
-  const codexHomeDir = await prepareSeededCodexHome("agent-relay-local-scroll-codex-");
+  const codexHomeDir = await prepareSeededCodexHome("agent-relay-local-scroll-codex-", {
+    requireAuth: !USE_FAKE_PROVIDER,
+  });
   const workspaceDir = await fs.realpath(
     await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-local-scroll-workspace-"))
   );
@@ -32,6 +35,7 @@ async function main() {
     relayPort,
     relayStatePath: statePath,
     codexHomeDir,
+    extraEnv: USE_FAKE_PROVIDER ? { AGENT_PROVIDERS: "fake" } : {},
   });
 
   await waitForHealth(`http://127.0.0.1:${relayPort}/api/health`);
@@ -79,6 +83,8 @@ async function main() {
           cwd: workspaceDir,
           deviceId,
           initialPrompt: `history-scroll-${index}`,
+          provider: USE_FAKE_PROVIDER ? "fake" : undefined,
+          model: USE_FAKE_PROVIDER ? "fake-echo" : undefined,
         })
       );
     }
@@ -327,20 +333,28 @@ async function main() {
   }
 }
 
-async function startThread(relayPort, { cwd, deviceId, initialPrompt }) {
+async function startThread(relayPort, { cwd, deviceId, initialPrompt, provider, model }) {
+  const body = {
+    cwd,
+    device_id: deviceId,
+    initial_prompt: initialPrompt,
+    approval_policy: "never",
+    sandbox: "workspace-write",
+    effort: "medium",
+  };
+  if (provider) {
+    body.provider = provider;
+  }
+  if (model) {
+    body.model = model;
+  }
+
   const response = await fetch(`http://127.0.0.1:${relayPort}/api/session/start`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      cwd,
-      device_id: deviceId,
-      initial_prompt: initialPrompt,
-      approval_policy: "never",
-      sandbox: "workspace-write",
-      effort: "medium",
-    }),
+    body: JSON.stringify(body),
   });
 
   const payload = await response.json();
