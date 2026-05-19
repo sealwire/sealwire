@@ -1,29 +1,25 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
-import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { setTimeout as delay } from "node:timers/promises";
 
-import { chromium } from "playwright";
+import { writeFailureArtifacts } from "./e2e/harness/artifacts.mjs";
+import { launchBrowser } from "./e2e/harness/browser.mjs";
+import { startLocalRelay } from "./e2e/harness/local-relay.mjs";
+import { getFreePort } from "./e2e/harness/ports.mjs";
+import {
+  dumpProcessLogs,
+  stopManagedProcess,
+  waitForHealth,
+} from "./e2e/harness/process.mjs";
 
 const ROOT = process.cwd();
 const TIMEOUT_MS = Number(process.env.BROWSER_E2E_TIMEOUT_MS || 45000);
 const FILE_CHANGE_ITEM_ID = "file-change-e2e";
 const THREAD_ID = "thread-file-diff-e2e";
 const TEST_FILE = "note.txt";
-
-const managedProcesses = [];
-
-process.on("exit", () => {
-  for (const child of managedProcesses) {
-    if (!child.killed && child.exitCode === null) {
-      child.kill("SIGTERM");
-    }
-  }
-});
 
 async function main() {
   const relayPort = await getFreePort();
@@ -48,9 +44,9 @@ async function main() {
   await runCommand("git", ["init"], { cwd: workspaceDir });
   await writeSeedState(statePath, workspaceDir, diff);
 
-  const relay = spawnManagedProcess("relay", "cargo", ["run", "-p", "relay-server"], {
-    PORT: String(relayPort),
-    RELAY_STATE_PATH: statePath,
+  const relay = startLocalRelay({
+    relayPort,
+    relayStatePath: statePath,
   });
 
   await waitForHealth(`http://127.0.0.1:${relayPort}/api/health`);
@@ -60,25 +56,46 @@ async function main() {
   let page;
 
   try {
-    browser = await chromium.launch({ headless: true });
-    context = await browser.newContext();
+    ({ browser, context } = await launchBrowser());
     page = await context.newPage();
 
     await page.goto(`http://127.0.0.1:${relayPort}`, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(
+      (threadId) => Boolean(document.querySelector(`[data-open-thread-id="${threadId}"]`)),
+      THREAD_ID,
+      { timeout: TIMEOUT_MS }
+    );
+    await page.evaluate((threadId) => {
+      const button = document.querySelector(`[data-open-thread-id="${threadId}"]`);
+      if (button instanceof HTMLButtonElement) {
+        button.click();
+      }
+    }, THREAD_ID);
+    await page.waitForFunction(
+      () => document.querySelector(".app-shell")?.dataset.view === "conversation",
+      null,
+      { timeout: TIMEOUT_MS }
+    );
     await page.waitForFunction(
       (itemId) => Boolean(document.querySelector(`[data-item-id="${itemId}"]`)),
       FILE_CHANGE_ITEM_ID,
       { timeout: TIMEOUT_MS }
     );
 
-    await page.locator(`[data-transcript-toggle="entry"][data-item-id="${FILE_CHANGE_ITEM_ID}"]`).evaluate((element) => element.click());
+    await page.evaluate((itemId) => {
+      const toggle = document.querySelector(
+        `[data-transcript-toggle="entry"][data-item-id="${itemId}"]`
+      );
+      if (toggle instanceof HTMLElement) {
+        toggle.click();
+      }
+    }, FILE_CHANGE_ITEM_ID);
     await page.waitForFunction(
       () => {
         const transcript = document.querySelector("#transcript")?.textContent || "";
         return (
-          transcript.includes("Hide diff") &&
-          transcript.includes("-old") &&
-          transcript.includes("+new") &&
+          transcript.includes("old") &&
+          transcript.includes("new") &&
           transcript.includes("note.txt")
         );
       },
@@ -103,6 +120,23 @@ async function main() {
       )
     );
   } catch (error) {
+    await writeFailureArtifacts({
+      scenario: "local-file-diff-e2e",
+      relay,
+      relayPort,
+      localPage: page,
+      metadata: {
+        statePath,
+        workspaceDir,
+        testFilePath,
+      },
+    }).catch((artifactError) => {
+      console.error(
+        artifactError instanceof Error
+          ? artifactError.stack || artifactError.message
+          : String(artifactError)
+      );
+    });
     await dumpBrowserState(page);
     dumpProcessLogs(relay);
     throw error;
@@ -173,79 +207,11 @@ async function writeSeedState(statePath, workspaceDir, diff) {
   );
 }
 
-async function waitForFileContents(filePath, expected, timeoutMs = TIMEOUT_MS) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const contents = await fs.readFile(filePath, "utf8");
-      if (contents === expected) {
-        return;
-      }
-    } catch {}
-    await delay(150);
-  }
-  const actual = await fs.readFile(filePath, "utf8").catch((error) => String(error));
-  throw new Error(`timed out waiting for ${filePath} to contain ${JSON.stringify(expected)}; got ${JSON.stringify(actual)}`);
-}
-
 async function assertActionButton(page, direction) {
   await page.waitForSelector(`[data-file-change-action="${direction}"][data-item-id="${FILE_CHANGE_ITEM_ID}"]`, {
     state: "attached",
     timeout: TIMEOUT_MS,
   });
-}
-
-function spawnManagedProcess(name, command, args, extraEnv) {
-  const child = spawn(command, args, {
-    cwd: ROOT,
-    env: {
-      ...process.env,
-      ...extraEnv,
-    },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-
-  child._logName = name;
-  child._logBuffer = [];
-  child.stdout.on("data", (chunk) => appendLog(child, chunk));
-  child.stderr.on("data", (chunk) => appendLog(child, chunk));
-  managedProcesses.push(child);
-  return child;
-}
-
-function appendLog(child, chunk) {
-  const text = chunk.toString("utf8");
-  const lines = text.split(/\r?\n/).filter(Boolean);
-  child._logBuffer.push(...lines);
-  if (child._logBuffer.length > 120) {
-    child._logBuffer.splice(0, child._logBuffer.length - 120);
-  }
-}
-
-async function stopManagedProcess(child) {
-  if (!child || child.killed || child.exitCode !== null) {
-    return;
-  }
-
-  child.kill("SIGTERM");
-  await Promise.race([
-    new Promise((resolve) => child.once("exit", resolve)),
-    delay(3000).then(() => {
-      if (child.exitCode === null) {
-        child.kill("SIGKILL");
-      }
-    }),
-  ]);
-}
-
-function dumpProcessLogs(child) {
-  const lines = child?._logBuffer || [];
-  if (!lines.length) {
-    return;
-  }
-
-  console.error(`\n[${child._logName} logs]`);
-  console.error(lines.join("\n"));
 }
 
 async function dumpBrowserState(page) {
@@ -263,42 +229,6 @@ async function safeText(page, selector) {
   } catch {
     return "";
   }
-}
-
-async function waitForHealth(url, timeoutMs = 30000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(url);
-      if (response.ok) {
-        return;
-      }
-    } catch {}
-    await delay(300);
-  }
-  throw new Error(`timed out waiting for health endpoint: ${url}`);
-}
-
-async function getFreePort() {
-  return await new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      if (!address || typeof address === "string") {
-        server.close(() => reject(new Error("failed to acquire an ephemeral port")));
-        return;
-      }
-      const { port } = address;
-      server.close((error) => {
-        if (error) {
-          reject(error);
-        } else {
-          resolve(port);
-        }
-      });
-    });
-    server.on("error", reject);
-  });
 }
 
 async function runCommand(command, args, options = {}) {

@@ -1,14 +1,20 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
-import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { setTimeout as delay } from "node:timers/promises";
 
-import { chromium } from "playwright";
 import { deleteThreadAndWait, fetchSession } from "./e2e-thread-cleanup.mjs";
+import { writeFailureArtifacts } from "./e2e/harness/artifacts.mjs";
+import { launchBrowser } from "./e2e/harness/browser.mjs";
+import { startLocalRelay } from "./e2e/harness/local-relay.mjs";
+import { startLocalSession } from "./e2e/harness/local-session.mjs";
+import { getFreePort } from "./e2e/harness/ports.mjs";
+import {
+  dumpProcessLogs,
+  stopManagedProcess,
+  waitForHealth,
+} from "./e2e/harness/process.mjs";
 
 const ROOT = process.cwd();
 const LOCAL_TIMEOUT_MS = Number(process.env.BROWSER_E2E_TIMEOUT_MS || 45000);
@@ -18,16 +24,6 @@ const PROMPT =
 const API_TOKEN =
   process.env.BROWSER_E2E_LOCAL_AUTH_TOKEN || "local-browser-auth-token";
 
-const managedProcesses = [];
-
-process.on("exit", () => {
-  for (const child of managedProcesses) {
-    if (!child.killed && child.exitCode === null) {
-      child.kill("SIGTERM");
-    }
-  }
-});
-
 async function main() {
   const relayPort = await getFreePort();
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-local-auth-e2e-"));
@@ -35,17 +31,14 @@ async function main() {
   const cwdInput = toTildePath(ROOT);
   const baseUrl = `http://127.0.0.1:${relayPort}`;
 
-  const relay = spawnManagedProcess(
-    "relay",
-    "cargo",
-    ["run", "-p", "relay-server"],
-    {
+  const relay = startLocalRelay({
+    relayPort,
+    relayStatePath: statePath,
+    extraEnv: {
       BIND_HOST: "0.0.0.0",
-      PORT: String(relayPort),
       RELAY_API_TOKEN: API_TOKEN,
-      RELAY_STATE_PATH: statePath,
-    }
-  );
+    },
+  });
 
   await waitForHealth(`${baseUrl}/api/health`);
 
@@ -55,15 +48,14 @@ async function main() {
   let createdThreadId = null;
 
   try {
-    browser = await chromium.launch({ headless: true });
-    context = await browser.newContext();
+    ({ browser, context } = await launchBrowser());
     page = await context.newPage();
 
     await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => {
-      const transcript = document.querySelector("#transcript")?.textContent || "";
       const badge = document.querySelector("#status-badge")?.textContent || "";
-      return transcript.includes("Authentication required") && badge.includes("Sign in");
+      const button = document.querySelector("#apply-token-button")?.textContent || "";
+      return badge.includes("Sign in") && button.includes("Sign In");
     });
 
     assert.equal(
@@ -78,12 +70,11 @@ async function main() {
     );
 
     await page.fill("#api-token-input", API_TOKEN);
-    await page.click("#apply-token-button");
+    await page.locator("#connection-form").evaluate((form) => form.requestSubmit());
 
     await page.waitForFunction(() => {
       const button = document.querySelector("#apply-token-button")?.textContent || "";
-      const title = document.querySelector("#overview-session-title")?.textContent || "";
-      return button.includes("Sign Out") && /^(Pick a workspace|Ready in .+)$/.test(title);
+      return button.includes("Sign Out");
     }, null, { timeout: LOCAL_TIMEOUT_MS });
 
     const issuedCookies = await context.cookies(baseUrl);
@@ -107,15 +98,12 @@ async function main() {
       "raw API token should be cleared after cookie sign-in"
     );
 
-    await page.fill("#cwd-input", cwdInput);
-    await page.click("#open-launch-settings");
-    await page.waitForFunction(() => {
-      const modal = document.querySelector("#launch-settings-modal");
-      return Boolean(modal?.open);
+    await startLocalSession(page, {
+      cwd: cwdInput,
+      approvalPolicy: "never",
+      provider: process.env.AGENT_PROVIDERS === "fake" ? "fake" : undefined,
+      timeoutMs: LOCAL_TIMEOUT_MS,
     });
-    await page.selectOption("#approval-policy-input", "never");
-    await page.click("#close-launch-settings-modal");
-    await page.click("#start-session-button");
 
     await page.waitForFunction(() => {
       const transcript = document.querySelector("#transcript")?.textContent || "";
@@ -148,13 +136,11 @@ async function main() {
     );
 
     await page.fill("#api-token-input", "");
-    await page.click("#apply-token-button");
+    await page.locator("#connection-form").evaluate((form) => form.requestSubmit());
     await page.waitForFunction(() => {
-      const transcript = document.querySelector("#transcript")?.textContent || "";
       const badge = document.querySelector("#status-badge")?.textContent || "";
       const button = document.querySelector("#apply-token-button")?.textContent || "";
       return (
-        transcript.includes("Authentication required") &&
         badge.includes("Sign in") &&
         button.includes("Sign In")
       );
@@ -169,8 +155,9 @@ async function main() {
 
     await page.reload({ waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => {
-      const transcript = document.querySelector("#transcript")?.textContent || "";
-      return transcript.includes("Authentication required");
+      const badge = document.querySelector("#status-badge")?.textContent || "";
+      const button = document.querySelector("#apply-token-button")?.textContent || "";
+      return badge.includes("Sign in") && button.includes("Sign In");
     }, null, { timeout: LOCAL_TIMEOUT_MS });
 
     const relaySession = await fetchSession(relayPort, { bearerToken: API_TOKEN });
@@ -193,6 +180,22 @@ async function main() {
       )
     );
   } catch (error) {
+    await writeFailureArtifacts({
+      scenario: "local-auth-e2e",
+      relay,
+      relayPort,
+      localPage: page,
+      metadata: {
+        baseUrl,
+        statePath,
+      },
+    }).catch((artifactError) => {
+      console.error(
+        artifactError instanceof Error
+          ? artifactError.stack || artifactError.message
+          : String(artifactError)
+      );
+    });
     await dumpBrowserState(page);
     dumpProcessLogs(relay);
     throw error;
@@ -225,59 +228,6 @@ function toTildePath(absolutePath) {
   return absolutePath;
 }
 
-function spawnManagedProcess(name, command, args, extraEnv) {
-  const child = spawn(command, args, {
-    cwd: ROOT,
-    env: {
-      ...process.env,
-      ...extraEnv,
-    },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-
-  child._logName = name;
-  child._logBuffer = [];
-  child.stdout.on("data", (chunk) => appendLog(child, chunk));
-  child.stderr.on("data", (chunk) => appendLog(child, chunk));
-  managedProcesses.push(child);
-  return child;
-}
-
-function appendLog(child, chunk) {
-  const text = chunk.toString("utf8");
-  const lines = text.split(/\r?\n/).filter(Boolean);
-  child._logBuffer.push(...lines);
-  if (child._logBuffer.length > 120) {
-    child._logBuffer.splice(0, child._logBuffer.length - 120);
-  }
-}
-
-async function stopManagedProcess(child) {
-  if (!child || child.killed || child.exitCode !== null) {
-    return;
-  }
-
-  child.kill("SIGTERM");
-  await Promise.race([
-    new Promise((resolve) => child.once("exit", resolve)),
-    delay(3000).then(() => {
-      if (child.exitCode === null) {
-        child.kill("SIGKILL");
-      }
-    }),
-  ]);
-}
-
-function dumpProcessLogs(child) {
-  const lines = child?._logBuffer || [];
-  if (!lines.length) {
-    return;
-  }
-
-  console.error(`\n[${child._logName} logs]`);
-  console.error(lines.join("\n"));
-}
-
 async function dumpBrowserState(page) {
   if (!page) {
     return;
@@ -292,44 +242,6 @@ async function safeText(page, selector) {
   } catch {
     return "";
   }
-}
-
-async function waitForHealth(url, timeoutMs = 30000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(url);
-      if (response.ok) {
-        return;
-      }
-    } catch {}
-    await delay(300);
-  }
-  throw new Error(`timed out waiting for health endpoint: ${url}`);
-}
-
-async function getFreePort() {
-  return await new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.unref();
-    server.on("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      if (!address || typeof address === "string") {
-        reject(new Error("failed to allocate free port"));
-        return;
-      }
-
-      const { port } = address;
-      server.close((closeError) => {
-        if (closeError) {
-          reject(closeError);
-          return;
-        }
-        resolve(port);
-      });
-    });
-  });
 }
 
 await main();

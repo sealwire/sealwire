@@ -1,28 +1,24 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
-import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { setTimeout as delay } from "node:timers/promises";
 
-import { chromium } from "playwright";
 import { deleteThreadAndWait, fetchSession } from "./e2e-thread-cleanup.mjs";
+import { writeFailureArtifacts } from "./e2e/harness/artifacts.mjs";
+import { launchBrowser } from "./e2e/harness/browser.mjs";
+import { startLocalRelay } from "./e2e/harness/local-relay.mjs";
+import { getFreePort } from "./e2e/harness/ports.mjs";
+import {
+  dumpProcessLogs,
+  stopManagedProcess,
+  waitForHealth,
+} from "./e2e/harness/process.mjs";
 
 const ROOT = process.cwd();
 const LOCAL_TIMEOUT_MS = Number(process.env.BROWSER_E2E_TIMEOUT_MS || 45000);
 const PROMPT = process.env.BROWSER_E2E_LOCAL_PROMPT || "Reply with exactly: local-browser-e2e";
-
-const managedProcesses = [];
-
-process.on("exit", () => {
-  for (const child of managedProcesses) {
-    if (!child.killed && child.exitCode === null) {
-      child.kill("SIGTERM");
-    }
-  }
-});
+const USE_FAKE_PROVIDER = process.env.AGENT_PROVIDERS === "fake";
 
 async function main() {
   const relayPort = await getFreePort();
@@ -30,15 +26,10 @@ async function main() {
   const statePath = path.join(stateDir, "session.json");
   const cwdInput = toTildePath(ROOT);
 
-  const relay = spawnManagedProcess(
-    "relay",
-    "cargo",
-    ["run", "-p", "relay-server"],
-    {
-      PORT: String(relayPort),
-      RELAY_STATE_PATH: statePath,
-    }
-  );
+  const relay = startLocalRelay({
+    relayPort,
+    relayStatePath: statePath,
+  });
 
   await waitForHealth(`http://127.0.0.1:${relayPort}/api/health`);
 
@@ -50,8 +41,7 @@ async function main() {
   const startRequests = [];
 
   try {
-    browser = await chromium.launch({ headless: true });
-    context = await browser.newContext();
+    ({ browser, context } = await launchBrowser());
     page = await context.newPage();
     page.on("pageerror", (error) => {
       pageErrors.push(error.stack || error.message);
@@ -88,7 +78,7 @@ async function main() {
       return Boolean(modal?.open);
     });
     await page.fill("#cwd-input", cwdInput);
-    await page.selectOption("#provider-input", "codex");
+    await page.selectOption("#provider-input", USE_FAKE_PROVIDER ? "fake" : "codex");
     await page.selectOption("#approval-policy-input", "never");
     await page.click("#start-session-button");
 
@@ -161,6 +151,24 @@ async function main() {
       )
     );
   } catch (error) {
+    await writeFailureArtifacts({
+      scenario: "local-session-e2e",
+      relay,
+      relayPort,
+      localPage: page,
+      metadata: {
+        cwdInput,
+        statePath,
+        pageErrors,
+        startRequests,
+      },
+    }).catch((artifactError) => {
+      console.error(
+        artifactError instanceof Error
+          ? artifactError.stack || artifactError.message
+          : String(artifactError)
+      );
+    });
     await dumpBrowserState(page, pageErrors, startRequests);
     dumpProcessLogs(relay);
     throw error;
@@ -188,59 +196,6 @@ function toTildePath(absolutePath) {
     return `~/${path.relative(home, absolutePath)}`;
   }
   return absolutePath;
-}
-
-function spawnManagedProcess(name, command, args, extraEnv) {
-  const child = spawn(command, args, {
-    cwd: ROOT,
-    env: {
-      ...process.env,
-      ...extraEnv,
-    },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-
-  child._logName = name;
-  child._logBuffer = [];
-  child.stdout.on("data", (chunk) => appendLog(child, chunk));
-  child.stderr.on("data", (chunk) => appendLog(child, chunk));
-  managedProcesses.push(child);
-  return child;
-}
-
-function appendLog(child, chunk) {
-  const text = chunk.toString("utf8");
-  const lines = text.split(/\r?\n/).filter(Boolean);
-  child._logBuffer.push(...lines);
-  if (child._logBuffer.length > 120) {
-    child._logBuffer.splice(0, child._logBuffer.length - 120);
-  }
-}
-
-async function stopManagedProcess(child) {
-  if (!child || child.killed || child.exitCode !== null) {
-    return;
-  }
-
-  child.kill("SIGTERM");
-  await Promise.race([
-    new Promise((resolve) => child.once("exit", resolve)),
-    delay(3000).then(() => {
-      if (child.exitCode === null) {
-        child.kill("SIGKILL");
-      }
-    }),
-  ]);
-}
-
-function dumpProcessLogs(child) {
-  const lines = child?._logBuffer || [];
-  if (!lines.length) {
-    return;
-  }
-
-  console.error(`\n[${child._logName} logs]`);
-  console.error(lines.join("\n"));
 }
 
 async function dumpBrowserState(page, pageErrors = [], startRequests = []) {
@@ -271,38 +226,6 @@ async function assertEnabled(locator) {
   await locator.waitFor({ state: "visible", timeout: LOCAL_TIMEOUT_MS });
   const disabled = await locator.evaluate((element) => element.disabled);
   assert.equal(disabled, false, "expected locator to be enabled");
-}
-
-async function waitForHealth(url, timeoutMs = 30000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(url);
-      if (response.ok) {
-        return;
-      }
-    } catch {}
-    await delay(300);
-  }
-  throw new Error(`timed out waiting for health endpoint: ${url}`);
-}
-
-async function getFreePort() {
-  return await new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      const port = address?.port;
-      server.close((error) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-        resolve(port);
-      });
-    });
-    server.on("error", reject);
-  });
 }
 
 await main();

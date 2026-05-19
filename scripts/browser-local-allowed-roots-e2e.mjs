@@ -1,27 +1,24 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
-import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { setTimeout as delay } from "node:timers/promises";
 
-import { chromium } from "playwright";
 import { deleteThreadAndWait, fetchSession } from "./e2e-thread-cleanup.mjs";
+import { writeFailureArtifacts } from "./e2e/harness/artifacts.mjs";
+import { launchBrowser } from "./e2e/harness/browser.mjs";
+import { startLocalRelay } from "./e2e/harness/local-relay.mjs";
+import { startLocalSession } from "./e2e/harness/local-session.mjs";
+import { getFreePort } from "./e2e/harness/ports.mjs";
+import {
+  dumpProcessLogs,
+  stopManagedProcess,
+  waitForHealth,
+} from "./e2e/harness/process.mjs";
 
 const ROOT = process.cwd();
 const LOCAL_TIMEOUT_MS = Number(process.env.BROWSER_E2E_TIMEOUT_MS || 45000);
-
-const managedProcesses = [];
-
-process.on("exit", () => {
-  for (const child of managedProcesses) {
-    if (!child.killed && child.exitCode === null) {
-      child.kill("SIGTERM");
-    }
-  }
-});
+const USE_FAKE_PROVIDER = process.env.AGENT_PROVIDERS === "fake";
 
 async function main() {
   const relayPort = await getFreePort();
@@ -31,15 +28,10 @@ async function main() {
   await fs.mkdir(outsideWorkspace, { recursive: true });
   const normalizedOutsideWorkspace = await fs.realpath(outsideWorkspace);
 
-  const relay = spawnManagedProcess(
-    "relay",
-    "cargo",
-    ["run", "-p", "relay-server"],
-    {
-      PORT: String(relayPort),
-      RELAY_STATE_PATH: statePath,
-    }
-  );
+  const relay = startLocalRelay({
+    relayPort,
+    relayStatePath: statePath,
+  });
 
   await waitForHealth(`http://127.0.0.1:${relayPort}/api/health`);
 
@@ -50,13 +42,16 @@ async function main() {
   let insideThreadId = null;
 
   try {
-    browser = await chromium.launch({ headless: true });
-    context = await browser.newContext();
+    ({ browser, context } = await launchBrowser());
     page = await context.newPage();
 
     await page.goto(`http://127.0.0.1:${relayPort}`, { waitUntil: "domcontentloaded" });
-    await page.fill("#cwd-input", outsideWorkspace);
-    await page.click("#start-session-button");
+    await startLocalSession(page, {
+      cwd: outsideWorkspace,
+      approvalPolicy: "never",
+      provider: USE_FAKE_PROVIDER ? "fake" : undefined,
+      timeoutMs: LOCAL_TIMEOUT_MS,
+    });
 
     await page.waitForFunction(() => {
       const transcript = document.querySelector("#transcript")?.textContent || "";
@@ -138,20 +133,28 @@ async function main() {
     );
 
     await page.click("#go-console-home");
-    await page.waitForFunction(() => {
-      const input = document.querySelector("#cwd-input");
-      return Boolean(input && input.offsetParent !== null);
-    }, null, { timeout: LOCAL_TIMEOUT_MS });
+    await page.waitForSelector("#open-start-session-dialog", {
+      state: "visible",
+      timeout: LOCAL_TIMEOUT_MS,
+    });
 
-    await page.fill("#cwd-input", outsideWorkspace);
-    await page.click("#start-session-button");
+    await startLocalSession(page, {
+      cwd: outsideWorkspace,
+      approvalPolicy: "never",
+      provider: USE_FAKE_PROVIDER ? "fake" : undefined,
+      timeoutMs: LOCAL_TIMEOUT_MS,
+    });
     await waitForLogLine(
       page,
       `Session start failed: workspace ${normalizedOutsideWorkspace} is outside this relay's allowed roots`
     );
 
-    await page.fill("#cwd-input", toTildePath(ROOT));
-    await page.click("#start-session-button");
+    await startLocalSession(page, {
+      cwd: toTildePath(ROOT),
+      approvalPolicy: "never",
+      provider: USE_FAKE_PROVIDER ? "fake" : undefined,
+      timeoutMs: LOCAL_TIMEOUT_MS,
+    });
 
     await page.waitForFunction(
       (expectedWorkspace) => {
@@ -187,6 +190,25 @@ async function main() {
       )
     );
   } catch (error) {
+    await writeFailureArtifacts({
+      scenario: "local-allowed-roots-e2e",
+      relay,
+      relayPort,
+      localPage: page,
+      metadata: {
+        statePath,
+        outsideWorkspace,
+        normalizedOutsideWorkspace,
+        outsideThreadId,
+        insideThreadId,
+      },
+    }).catch((artifactError) => {
+      console.error(
+        artifactError instanceof Error
+          ? artifactError.stack || artifactError.message
+          : String(artifactError)
+      );
+    });
     await dumpBrowserState(page);
     dumpProcessLogs(relay);
     throw error;
@@ -251,59 +273,6 @@ async function waitForLogLine(page, text) {
   );
 }
 
-function spawnManagedProcess(name, command, args, extraEnv) {
-  const child = spawn(command, args, {
-    cwd: ROOT,
-    env: {
-      ...process.env,
-      ...extraEnv,
-    },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-
-  child._logName = name;
-  child._logBuffer = [];
-  child.stdout.on("data", (chunk) => appendLog(child, chunk));
-  child.stderr.on("data", (chunk) => appendLog(child, chunk));
-  managedProcesses.push(child);
-  return child;
-}
-
-function appendLog(child, chunk) {
-  const text = chunk.toString("utf8");
-  const lines = text.split(/\r?\n/).filter(Boolean);
-  child._logBuffer.push(...lines);
-  if (child._logBuffer.length > 120) {
-    child._logBuffer.splice(0, child._logBuffer.length - 120);
-  }
-}
-
-async function stopManagedProcess(child) {
-  if (!child || child.killed || child.exitCode !== null) {
-    return;
-  }
-
-  child.kill("SIGTERM");
-  await Promise.race([
-    new Promise((resolve) => child.once("exit", resolve)),
-    delay(3000).then(() => {
-      if (child.exitCode === null) {
-        child.kill("SIGKILL");
-      }
-    }),
-  ]);
-}
-
-function dumpProcessLogs(child) {
-  const lines = child?._logBuffer || [];
-  if (!lines.length) {
-    return;
-  }
-
-  console.error(`\n[${child._logName} logs]`);
-  console.error(lines.join("\n"));
-}
-
 async function dumpBrowserState(page) {
   if (!page) {
     return;
@@ -319,43 +288,6 @@ async function safeText(page, selector) {
   } catch {
     return "";
   }
-}
-
-async function waitForHealth(url, timeoutMs = 30000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(url);
-      if (response.ok) {
-        return;
-      }
-    } catch {}
-    await delay(300);
-  }
-  throw new Error(`timed out waiting for ${url}`);
-}
-
-async function getFreePort() {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.unref();
-    server.on("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      if (!address || typeof address === "string") {
-        reject(new Error("failed to allocate port"));
-        return;
-      }
-      const { port } = address;
-      server.close((error) => {
-        if (error) {
-          reject(error);
-        } else {
-          resolve(port);
-        }
-      });
-    });
-  });
 }
 
 main().catch((error) => {
