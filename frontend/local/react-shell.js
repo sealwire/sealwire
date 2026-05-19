@@ -2,8 +2,17 @@ import React from "react";
 import { ClientLog } from "../shared/client-log.js";
 import { ConversationComposer } from "../shared/composer.js";
 import { StartSessionDialog } from "../shared/start-session-dialog.js";
+import { PLUS_SVG, ARROW_RETURN_SVG } from "../svg.js";
 
 const h = React.createElement;
+
+function iconNode(svgMarkup, extraClass = "") {
+  return h("span", {
+    className: extraClass ? `inline-icon ${extraClass}` : "inline-icon",
+    "aria-hidden": "true",
+    dangerouslySetInnerHTML: { __html: svgMarkup },
+  });
+}
 
 function Sidebar({ launchModel = null, onLaunchFieldChange = null, onLaunchStart = null }) {
   return h(
@@ -54,13 +63,23 @@ function LaunchPanel({ launchModel = null, onLaunchFieldChange = null, onLaunchS
     h(
       "div",
       { className: "launch-actions" },
-      h("button", {
-        className: "start-session-button",
-        id: "open-start-session-dialog",
-        onClick: () => document.getElementById("launch-start-session-dialog")?.setAttribute("open", ""),
-        type: "button",
-      }, "New session"),
-      h("button", { className: "secondary-button", id: "resume-latest-button", type: "button" }, "Continue Latest")
+      h(
+        "button",
+        {
+          className: "start-session-button",
+          id: "open-start-session-dialog",
+          onClick: () => document.getElementById("launch-start-session-dialog")?.setAttribute("open", ""),
+          type: "button",
+        },
+        iconNode(PLUS_SVG),
+        h("span", null, "New session")
+      ),
+      h(
+        "button",
+        { className: "secondary-button", id: "resume-latest-button", type: "button" },
+        iconNode(ARROW_RETURN_SVG),
+        h("span", null, "Continue latest")
+      )
     ),
     h(
       "div",
@@ -163,13 +182,8 @@ function ChatHeader() {
     h(
       "div",
       { className: "chat-heading" },
-      h("span", { className: "chat-heading-label" }, "Relay"),
       h("h1", { id: "workspace-title" }, "Relay console"),
-      h(
-        "p",
-        { className: "chat-subtitle", id: "workspace-subtitle" },
-        "Monitor live control, trusted devices, and the active session from here."
-      )
+      h("p", { className: "chat-subtitle", id: "workspace-subtitle" })
     ),
     h(
       "div",
@@ -180,9 +194,11 @@ function ChatHeader() {
         id: "local-model-badge",
       }),
       h("span", { className: "status-badge", id: "status-badge" }, "Idle"),
-      h("button", { className: "header-button", hidden: true, id: "go-console-home", type: "button" }, "Back"),
-      h("button", { className: "header-button", id: "open-security-header", type: "button" }, "Devices"),
-      h("button", { className: "header-button", id: "open-session-details", type: "button" }, "Details"),
+      h(
+        "button",
+        { className: "header-button", id: "open-security-header", type: "button" },
+        "Devices"
+      ),
       h(
         "div",
         { className: "header-overflow-wrap" },
@@ -199,6 +215,8 @@ function ChatHeader() {
         h(
           "div",
           { className: "header-overflow-menu", hidden: true, id: "header-overflow-menu" },
+          h("button", { className: "overflow-menu-item", id: "open-session-details", type: "button" }, "Session details"),
+          h("button", { className: "overflow-menu-item", hidden: true, id: "go-console-home", type: "button" }, "Back to console"),
           h("button", { className: "overflow-menu-item", id: "refresh-button", type: "button" }, "Refresh")
         )
       )
@@ -210,11 +228,7 @@ function OverviewStrip() {
   return h(
     "section",
     { "aria-label": "Relay overview", className: "overview-strip", id: "overview-strip" },
-    h(
-      "article",
-      { className: "overview-card overview-card-status" },
-      h("div", { className: "overview-status-bar", id: "overview-security-badges" })
-    )
+    h("div", { className: "overview-status-bar", id: "overview-security-badges" })
   );
 }
 
@@ -231,52 +245,45 @@ function ConsoleGrid() {
 function LiveSurfacesCard() {
   return h(
     "section",
-    { className: "console-card console-card-surfaces" },
+    { className: "console-card console-card-surfaces console-card-hero" },
     h(
       "div",
       { className: "console-card-header" },
       h(
         "div",
-        null,
-        h("p", { className: "sidebar-caption" }, "Live Surfaces"),
-        h(
-          "p",
-          { className: "sidebar-hint", id: "live-surfaces-summary" },
-          "See which devices are trusted, pending, or currently controlling the active session."
-        )
+        { className: "console-card-title-row" },
+        h("h2", { className: "console-card-title" }, "Devices"),
+        h("span", { className: "console-card-hint", id: "live-surfaces-summary" })
       ),
-      h("button", { className: "sidebar-link-button", id: "open-security-console", type: "button" }, "Manage")
+      h(
+        "button",
+        { className: "load-button console-card-action", id: "open-security-console", type: "button" },
+        "Manage"
+      )
     ),
     h(
       "div",
       { className: "surface-list", id: "live-surfaces-list" },
-      h("p", { className: "sidebar-empty" }, "No relay surfaces are active yet.")
+      h("p", { className: "sidebar-empty" }, "No devices paired yet.")
     )
   );
 }
 
 function AuditTimelineCard() {
   return h(
-    "section",
-    { className: "console-card console-card-audit" },
+    "details",
+    { className: "console-card console-card-audit console-card-collapsible" },
     h(
-      "div",
-      { className: "console-card-header" },
-      h(
-        "div",
-        null,
-        h("p", { className: "sidebar-caption" }, "Audit Timeline"),
-        h(
-          "p",
-          { className: "sidebar-hint", id: "audit-summary" },
-          "Recent relay, control, and security events will appear here."
-        )
-      )
+      "summary",
+      { className: "console-card-summary" },
+      h("span", { className: "console-card-title" }, "Recent events"),
+      h("span", { className: "console-card-hint", id: "audit-summary" }),
+      h("span", { className: "console-card-summary-chevron", "aria-hidden": "true" }, "›")
     ),
     h(
       "div",
       { className: "audit-list", id: "audit-timeline" },
-      h("p", { className: "sidebar-empty" }, "No relay events yet.")
+      h("p", { className: "sidebar-empty" }, "No events yet.")
     )
   );
 }

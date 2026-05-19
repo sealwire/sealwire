@@ -1,4 +1,5 @@
 import React from "react";
+import { SPARKLES_SVG } from "../svg.js";
 
 const h = React.createElement;
 
@@ -128,7 +129,11 @@ function AgentEntry({ entry }) {
   return h(
     "article",
     transcriptEntryDomAttrs(entry, "chat-message chat-message-assistant"),
-    h("div", { className: "message-avatar" }, "C"),
+    h("span", {
+      className: "message-avatar",
+      "aria-hidden": "true",
+      dangerouslySetInnerHTML: { __html: SPARKLES_SVG },
+    }),
     h("div", { className: "message-card" }, h("div", { className: "message-body" }, entry.text || "(empty)"))
   );
 }

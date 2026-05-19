@@ -1,5 +1,7 @@
 import React from "react";
 
+import { SEND_SVG } from "../svg.js";
+
 const h = React.createElement;
 
 export function ConversationComposer({
@@ -120,7 +122,17 @@ export function ConversationComposer({
           id: sendButtonId,
           type: "submit",
         },
-        sendPending ? "Sending..." : sendLabel
+        sendPending
+          ? "Sending..."
+          : [
+              h("span", {
+                key: "icon",
+                className: "send-button-icon",
+                "aria-hidden": "true",
+                dangerouslySetInnerHTML: { __html: SEND_SVG },
+              }),
+              h("span", { key: "label", className: "send-button-label" }, sendLabel),
+            ]
       ),
       stopButtonId || onStop
         ? h(
