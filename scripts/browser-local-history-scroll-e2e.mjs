@@ -57,6 +57,11 @@ async function main() {
     page = await context.newPage();
 
     await page.goto(`http://127.0.0.1:${relayPort}`, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(
+      () => Boolean(window.localStorage.getItem("agent-relay.device-id")),
+      null,
+      { timeout: LOCAL_TIMEOUT_MS }
+    );
     const deviceId = await page.evaluate(() =>
       window.localStorage.getItem("agent-relay.device-id")
     );
