@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { setTimeout as delay } from "node:timers/promises";
 
 import { fetchSession } from "../../e2e-thread-cleanup.mjs";
+import { resolveRelayServerCommand } from "./binaries.mjs";
 import { spawnManagedProcess } from "./process.mjs";
 
 export function startPublicRelay({
@@ -45,7 +46,8 @@ export function startPublicRelay({
   if (codexHomeDir) {
     env.CODEX_HOME = codexHomeDir;
   }
-  return spawnManagedProcess("relay", "cargo", ["run", "-p", "relay-server"], env);
+  const { command, args } = resolveRelayServerCommand();
+  return spawnManagedProcess("relay", command, args, env);
 }
 
 export function startSelfHostedRelay({
@@ -72,7 +74,8 @@ export function startSelfHostedRelay({
   if (codexHomeDir) {
     env.CODEX_HOME = codexHomeDir;
   }
-  return spawnManagedProcess("relay", "cargo", ["run", "-p", "relay-server"], env);
+  const { command, args } = resolveRelayServerCommand();
+  return spawnManagedProcess("relay", command, args, env);
 }
 
 export async function waitForBrokerConnection(sessionUrl, timeoutMs = 30000) {

@@ -1,0 +1,183 @@
+{
+  "suites": {
+    "local-core": [
+      "local-session",
+      "local-auth",
+      "local-allowed-roots",
+      "local-file-diff",
+      "local-history-scroll",
+      "local-thread-groups"
+    ],
+    "local-full": [
+      "local-session",
+      "local-auth",
+      "local-allowed-roots",
+      "local-file-diff",
+      "local-history-scroll",
+      "local-thread-groups",
+      "local-delete"
+    ],
+    "public-core": [
+      "public-transcript-delta",
+      "public-broker",
+      "public-enrollment",
+      "public-refresh",
+      "public-persistence",
+      "public-revoke",
+      "public-reclaim"
+    ],
+    "public-full": [
+      "public-enrollment",
+      "public-transcript-delta",
+      "public-refresh",
+      "public-persistence",
+      "public-revoke",
+      "public-reclaim",
+      "public-broker",
+      "public-long-transcript",
+      "public-remote-follow",
+      "public-multi-remote-follow"
+    ],
+    "self-hosted": [
+      "self-hosted-pairing"
+    ],
+    "real-provider": [
+      "claude-local"
+    ]
+  },
+  "scenarios": {
+    "local-session": {
+      "script": "browser-local-session-e2e.mjs",
+      "tier": "core",
+      "provider": "fake-compatible",
+      "transport": "local",
+      "coverage": ["session"]
+    },
+    "local-auth": {
+      "script": "browser-local-auth-e2e.mjs",
+      "tier": "core",
+      "provider": "fake-compatible",
+      "transport": "local",
+      "coverage": ["auth"]
+    },
+    "local-allowed-roots": {
+      "script": "browser-local-allowed-roots-e2e.mjs",
+      "tier": "core",
+      "provider": "fake-compatible",
+      "transport": "local",
+      "coverage": ["allowed-roots"]
+    },
+    "local-file-diff": {
+      "script": "browser-local-file-diff-e2e.mjs",
+      "tier": "core",
+      "provider": "fake-compatible",
+      "transport": "local",
+      "coverage": ["file-diff"]
+    },
+    "local-history-scroll": {
+      "script": "browser-local-history-scroll-e2e.mjs",
+      "tier": "core",
+      "provider": "fake-compatible",
+      "transport": "local",
+      "coverage": ["history"]
+    },
+    "local-thread-groups": {
+      "script": "browser-local-thread-groups-e2e.mjs",
+      "tier": "core",
+      "provider": "fake-compatible",
+      "transport": "local",
+      "coverage": ["thread-groups"]
+    },
+    "local-delete": {
+      "script": "browser-local-delete-e2e.mjs",
+      "tier": "full",
+      "provider": "fake-compatible",
+      "transport": "local",
+      "coverage": ["delete"]
+    },
+    "public-transcript-delta": {
+      "script": "browser-public-transcript-delta-e2e.mjs",
+      "tier": "core",
+      "provider": "fake-compatible",
+      "transport": "public-broker",
+      "coverage": ["transcript-delta"]
+    },
+    "public-broker": {
+      "script": "browser-public-broker-e2e.mjs",
+      "tier": "core",
+      "provider": "fake-compatible",
+      "transport": "public-broker",
+      "coverage": ["broker", "reconnect", "duplicate-start-session", "revoke"]
+    },
+    "public-enrollment": {
+      "script": "browser-public-enrollment-e2e.mjs",
+      "tier": "core",
+      "provider": "fake-compatible",
+      "transport": "public-broker",
+      "coverage": ["enrollment"]
+    },
+    "public-refresh": {
+      "script": "browser-public-refresh-e2e.mjs",
+      "tier": "core",
+      "provider": "fake-compatible",
+      "transport": "public-broker",
+      "coverage": ["refresh"]
+    },
+    "public-persistence": {
+      "script": "browser-public-persistence-e2e.mjs",
+      "tier": "core",
+      "provider": "fake-compatible",
+      "transport": "public-broker",
+      "coverage": ["persistence"]
+    },
+    "public-revoke": {
+      "script": "browser-public-revoke-e2e.mjs",
+      "tier": "core",
+      "provider": "fake-compatible",
+      "transport": "public-broker",
+      "coverage": ["revoke"]
+    },
+    "public-reclaim": {
+      "script": "browser-public-reclaim-e2e.mjs",
+      "tier": "core",
+      "provider": "fake-compatible",
+      "transport": "public-broker",
+      "coverage": ["reclaim"]
+    },
+    "public-long-transcript": {
+      "script": "browser-public-long-transcript-e2e.mjs",
+      "tier": "full",
+      "provider": "fake-compatible",
+      "transport": "public-broker",
+      "coverage": ["long-transcript"]
+    },
+    "public-remote-follow": {
+      "script": "browser-public-remote-follow-e2e.mjs",
+      "tier": "full",
+      "provider": "fake-compatible",
+      "transport": "public-broker",
+      "coverage": ["remote-follow"]
+    },
+    "public-multi-remote-follow": {
+      "script": "browser-public-multi-remote-follow-e2e.mjs",
+      "tier": "full",
+      "provider": "fake-compatible",
+      "transport": "public-broker",
+      "coverage": ["multi-remote-follow"]
+    },
+    "self-hosted-pairing": {
+      "script": "browser-pairing-e2e.mjs",
+      "tier": "core",
+      "provider": "fake-compatible",
+      "transport": "self-hosted-broker",
+      "coverage": ["pairing", "broker"]
+    },
+    "claude-local": {
+      "script": "browser-claude-local-e2e.mjs",
+      "tier": "manual",
+      "provider": "claude_code",
+      "transport": "local",
+      "coverage": ["real-provider"]
+    }
+  }
+}

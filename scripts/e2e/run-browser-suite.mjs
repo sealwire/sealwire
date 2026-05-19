@@ -2,56 +2,20 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 import process from "node:process";
 
-const LOCAL_CORE = [
-  "browser-local-session-e2e.mjs",
-  "browser-local-auth-e2e.mjs",
-  "browser-local-allowed-roots-e2e.mjs",
-  "browser-local-file-diff-e2e.mjs",
-  "browser-local-history-scroll-e2e.mjs",
-  "browser-local-thread-groups-e2e.mjs",
-];
-
-const PUBLIC_CORE = [
-  "browser-public-transcript-delta-e2e.mjs",
-  "browser-public-broker-e2e.mjs",
-  "browser-public-enrollment-e2e.mjs",
-  "browser-public-refresh-e2e.mjs",
-  "browser-public-persistence-e2e.mjs",
-  "browser-public-revoke-e2e.mjs",
-  "browser-public-reclaim-e2e.mjs",
-];
-
-const SUITES = {
-  "local-core": LOCAL_CORE,
-  "local-full": [...LOCAL_CORE, "browser-local-delete-e2e.mjs"],
-  "public-core": PUBLIC_CORE,
-  "public-full": [
-    "browser-public-enrollment-e2e.mjs",
-    "browser-public-transcript-delta-e2e.mjs",
-    "browser-public-refresh-e2e.mjs",
-    "browser-public-persistence-e2e.mjs",
-    "browser-public-revoke-e2e.mjs",
-    "browser-public-reclaim-e2e.mjs",
-    "browser-public-broker-e2e.mjs",
-    "browser-public-long-transcript-e2e.mjs",
-    "browser-public-remote-follow-e2e.mjs",
-    "browser-public-multi-remote-follow-e2e.mjs",
-  ],
-  "self-hosted": ["browser-pairing-e2e.mjs"],
-  "real-provider": ["browser-claude-local-e2e.mjs"],
-};
+import { loadE2eManifest, suiteScripts } from "./manifest.mjs";
 
 const suiteName = readOption("--suite") || process.argv[2];
-const scripts = SUITES[suiteName];
-if (!scripts) {
+const manifest = await loadE2eManifest();
+if (!suiteName || !manifest.suites?.[suiteName]) {
   console.error(
     [
       "Usage: node scripts/e2e/run-browser-suite.mjs --suite <name> [--fake] [--no-build]",
-      `Available suites: ${Object.keys(SUITES).join(", ")}`,
+      `Available suites: ${Object.keys(manifest.suites || {}).join(", ")}`,
     ].join("\n")
   );
   process.exit(1);
 }
+const scripts = suiteScripts(manifest, suiteName);
 
 const useFakeProvider = process.argv.includes("--fake");
 const noBuild = process.argv.includes("--no-build");

@@ -91,11 +91,25 @@ test("protocol replay applies snapshot then deltas without duplicating entries",
   assertNoDuplicateEntries(state.session);
 });
 
-test("protocol replay keeps hydrated transcript when action result carries compact snapshot", async () => {
+test("protocol replay ignores compact snapshots on non-session action results", async () => {
   const runtime = await createReplayRuntime();
   await replayFixture("compact_snapshot_after_hydration.jsonl", {
     ...runtime,
   });
+
+  const { state } = runtime;
+  assert.equal(state.session.active_thread_id, "thread-1");
+  assert.equal(state.session.transcript_revision, 10);
+  assert.equal(state.session.transcript_truncated, false);
+  assert.equal(state.session.transcript.length, 5);
+  assert.equal(entryText(state.session, "user-1"), "Prompt 1");
+  assert.equal(entryText(state.session, "assistant-3"), "Long tail remains hydrated");
+  assertNoDuplicateEntries(state.session);
+});
+
+test("protocol replay restores hydrated transcript for compact session snapshots", async () => {
+  const runtime = await createReplayRuntime();
+  await replayFixture("compact_session_snapshot_after_hydration.jsonl", runtime);
 
   const { state } = runtime;
   assert.equal(state.session.active_thread_id, "thread-1");
@@ -104,6 +118,30 @@ test("protocol replay keeps hydrated transcript when action result carries compa
   assert.equal(state.session.transcript.length, 5);
   assert.equal(entryText(state.session, "user-1"), "Prompt 1");
   assert.equal(entryText(state.session, "assistant-3"), "Long tail remains hydrated");
+  assertNoDuplicateEntries(state.session);
+});
+
+test("protocol replay applies session-bearing action result snapshots", async () => {
+  const runtime = await createReplayRuntime();
+  await replayFixture("session_result_snapshot.jsonl", runtime);
+
+  const { state } = runtime;
+  assert.equal(state.session.active_thread_id, "thread-2");
+  assert.equal(state.session.transcript_revision, 3);
+  assert.equal(state.session.transcript.length, 2);
+  assert.equal(entryText(state.session, "assistant-2"), "Session result answer");
+  assertNoDuplicateEntries(state.session);
+});
+
+test("protocol replay tolerates duplicate start_session result replay", async () => {
+  const runtime = await createReplayRuntime();
+  await replayFixture("duplicate_start_session_result.jsonl", runtime);
+
+  const { state } = runtime;
+  assert.equal(state.session.active_thread_id, "thread-1");
+  assert.equal(state.session.transcript_revision, 2);
+  assert.equal(state.session.transcript.length, 2);
+  assert.equal(entryText(state.session, "assistant-1"), "Started once");
   assertNoDuplicateEntries(state.session);
 });
 
@@ -116,6 +154,30 @@ test("protocol replay ignores stale snapshots after reconnect replay", async () 
   assert.equal(state.session.transcript_revision, 5);
   assert.equal(state.session.transcript.length, 3);
   assert.equal(entryText(state.session, "assistant-2"), "Fresh answer");
+  assertNoDuplicateEntries(state.session);
+});
+
+test("protocol replay preserves reconnect progress through broker replay", async () => {
+  const runtime = await createReplayRuntime();
+  await replayFixture("broker_reconnect_replay.jsonl", runtime);
+
+  const { state } = runtime;
+  assert.equal(state.session.active_thread_id, "thread-1");
+  assert.equal(state.session.transcript_revision, 4);
+  assert.equal(state.session.transcript.length, 3);
+  assert.equal(entryText(state.session, "assistant-2"), "after reconnect");
+  assertNoDuplicateEntries(state.session);
+});
+
+test("protocol replay ignores revoked-device control snapshots", async () => {
+  const runtime = await createReplayRuntime();
+  await replayFixture("revoked_device_refresh.jsonl", runtime);
+
+  const { state } = runtime;
+  assert.equal(state.session.active_thread_id, "thread-1");
+  assert.equal(state.session.transcript_revision, 4);
+  assert.equal(state.session.transcript.length, 3);
+  assert.equal(entryText(state.session, "assistant-2"), "still visible");
   assertNoDuplicateEntries(state.session);
 });
 
@@ -152,8 +214,23 @@ async function createReplayRuntime() {
     applyTranscriptDelta,
     applyTranscriptEvent,
   } = await import("./session-ops.js");
+  const {
+    configureRemoteActions,
+    handleRemoteBrokerPayload,
+  } = await import("./actions.js");
   resetReplayState(state);
-  return { state, applySessionSnapshot, applyTranscriptDelta, applyTranscriptEvent };
+  configureRemoteActions({
+    onApplySessionSnapshot: applySessionSnapshot,
+    onApplyTranscriptDelta: applyTranscriptDelta,
+    onApplyTranscriptEvent: applyTranscriptEvent,
+  });
+  return {
+    state,
+    applySessionSnapshot,
+    applyTranscriptDelta,
+    applyTranscriptEvent,
+    handleRemoteBrokerPayload,
+  };
 }
 
 function resetReplayState(state) {
@@ -168,7 +245,7 @@ async function replayFixture(filename, runtime) {
   const frames = await readJsonl(new URL(`../../test-fixtures/protocol/${filename}`, import.meta.url));
   let previousLength = 0;
   for (const frame of frames) {
-    applyProtocolFrame(frame, runtime);
+    await applyProtocolFrame(frame, runtime);
     if (stateHasSession(runtime.state)) {
       assertNoDuplicateEntries(runtime.state.session);
       assert.ok(
@@ -180,11 +257,12 @@ async function replayFixture(filename, runtime) {
   }
 }
 
-function applyProtocolFrame(frame, {
+async function applyProtocolFrame(frame, {
   state,
   applySessionSnapshot,
   applyTranscriptDelta,
   applyTranscriptEvent,
+  handleRemoteBrokerPayload,
 }) {
   switch (frame.kind) {
     case "hydrate_store":
@@ -203,9 +281,14 @@ function applyProtocolFrame(frame, {
       applySessionSnapshot(withoutKind(frame));
       return;
     case "remote_action_result":
-      if (frame.snapshot) {
-        applySessionSnapshot(frame.snapshot);
-      }
+    case "remote_action_ack":
+    case "remote_approval_result":
+    case "remote_control_result":
+    case "remote_models_result":
+    case "remote_session_result":
+    case "remote_threads_result":
+    case "remote_transcript_result":
+      await handleRemoteBrokerPayload(frame);
       return;
     case "transcript_delta":
       applyTranscriptDelta(withoutKind(frame));

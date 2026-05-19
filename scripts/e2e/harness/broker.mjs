@@ -1,3 +1,4 @@
+import { resolveRelayBrokerCommand } from "./binaries.mjs";
 import { spawnManagedProcess } from "./process.mjs";
 
 export function startPublicBroker({
@@ -34,7 +35,8 @@ export function startPublicBroker({
     env.RELAY_BROKER_PUBLIC_DEVICE_WS_TTL_SECS = String(deviceWsTtlSecs);
   }
 
-  return spawnManagedProcess("broker", "cargo", ["run", "-p", "relay-broker"], env);
+  const { command, args } = resolveRelayBrokerCommand();
+  return spawnManagedProcess("broker", command, args, env);
 }
 
 export function startSelfHostedBroker({
@@ -43,7 +45,8 @@ export function startSelfHostedBroker({
   bindHost = "0.0.0.0",
   extraEnv = {},
 }) {
-  return spawnManagedProcess("broker", "cargo", ["run", "-p", "relay-broker"], {
+  const { command, args } = resolveRelayBrokerCommand();
+  return spawnManagedProcess("broker", command, args, {
     BIND_HOST: bindHost,
     PORT: String(brokerPort),
     RELAY_BROKER_TICKET_SECRET: ticketSecret,

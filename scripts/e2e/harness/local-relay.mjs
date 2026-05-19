@@ -1,3 +1,4 @@
+import { resolveRelayServerCommand } from "./binaries.mjs";
 import { spawnManagedProcess } from "./process.mjs";
 
 export function startLocalRelay({
@@ -14,5 +15,6 @@ export function startLocalRelay({
   if (codexHomeDir) {
     env.CODEX_HOME = codexHomeDir;
   }
-  return spawnManagedProcess("relay", "cargo", ["run", "-p", "relay-server"], env);
+  const { command, args } = resolveRelayServerCommand();
+  return spawnManagedProcess("relay", command, args, env);
 }
