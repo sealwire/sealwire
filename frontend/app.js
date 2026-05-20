@@ -298,6 +298,7 @@ const {
   submitDecision,
   takeOverControl,
   toggleTranscriptEntry,
+  toggleTranscriptExpandKey,
   applyFileChange,
 } = controller;
 
@@ -551,6 +552,12 @@ transcript.addEventListener("click", (event) => {
       approvalButton.dataset.approvalDecision,
       approvalButton.dataset.approvalScope || "once"
     );
+    return;
+  }
+
+  const transcriptGroupToggleButton = event.target.closest("[data-transcript-toggle='group']");
+  if (transcriptGroupToggleButton) {
+    toggleTranscriptExpandKey(transcriptGroupToggleButton.dataset.expandKey || "");
     return;
   }
 

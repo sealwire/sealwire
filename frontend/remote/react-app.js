@@ -21,6 +21,7 @@ import {
   providerOptions,
   providerSettings,
 } from "../shared/provider-settings.js";
+import { RefreshButton } from "../shared/refresh-button.js";
 import { ThemePicker } from "../shared/theme-picker.js";
 import { selectWorkspaceSuggestionsModel } from "../shared/workspace-suggestions.js";
 import {
@@ -70,9 +71,7 @@ import {
   setLiveTranscriptEntryDetail,
 } from "./transcript/details.js";
 import {
-  applyTranscriptScrollMode,
   captureTranscriptScrollSnapshot,
-  deriveTranscriptScrollMode,
   restoreTranscriptScrollPosition,
 } from "./transcript-scroll.js";
 import { useRemoteSessionRuntime } from "./use-remote-session-runtime.js";
@@ -543,6 +542,7 @@ function RemoteApp() {
 
   async function handleStartSession() {
     remoteUiStore.getState().setSessionStartPending(true);
+    // StartSessionDialog auto-closes itself on Start click; no manual close needed here.
     try {
       const started = await handlers.onStartSession(remoteUi.sessionDraft);
       if (started) {
@@ -896,12 +896,7 @@ function RemoteSidebar({
     h(
       "div",
       { className: "sidebar-row" },
-      h(
-        "div",
-        null,
-        h("p", { className: "sidebar-caption" }, "Device Pairing"),
-        h("p", { className: "sidebar-hint" }, "Manage broker pairing and device identity.")
-      ),
+      h("p", { className: "sidebar-caption" }, "Device Pairing"),
       h(
         "button",
         {
@@ -931,16 +926,11 @@ function RemoteSidebar({
         "div",
         { className: "sidebar-row" },
         h("p", { className: "sidebar-caption", id: "remote-relays-count" }, relayDirectoryModel.countLabel),
-        h(
-          "button",
-          {
-            className: "sidebar-link-button",
-            id: "remote-relays-refresh-button",
-            onClick: onRefreshRelayDirectory,
-            type: "button",
-          },
-          "Refresh"
-        )
+        h(RefreshButton, {
+          id: "remote-relays-refresh-button",
+          label: "Refresh relays",
+          onClick: onRefreshRelayDirectory,
+        })
       ),
       h(
         "div",
@@ -989,17 +979,12 @@ function RemoteSidebar({
         "div",
         { className: "sidebar-row" },
         h("p", { className: "sidebar-caption", id: "remote-threads-count" }, threadsModel.countLabel),
-        h(
-          "button",
-          {
-            className: "sidebar-link-button",
-            disabled: threadsModel.loading || !hasUsableRelay,
-            id: "remote-threads-refresh-button",
-            onClick: () => onRefreshThreads(threadsFilterValue),
-            type: "button",
-          },
-          "Refresh"
-        )
+        h(RefreshButton, {
+          id: "remote-threads-refresh-button",
+          label: "Refresh threads",
+          disabled: threadsModel.loading || !hasUsableRelay,
+          onClick: () => onRefreshThreads(threadsFilterValue),
+        })
       ),
       h(
         "label",
@@ -1231,6 +1216,7 @@ function RemoteTranscriptPanel({
     activeThreadId: null,
     entries: [],
   });
+  const anchoredUserIdsRef = useRef(new Map()); // threadId -> Set<userId>
 
   const approval = sessionView?.approval || null;
   const entries = session?.transcript || [];
@@ -1253,18 +1239,31 @@ function RemoteTranscriptPanel({
     }
 
     const previous = previousRenderRef.current;
-    restoreTranscriptScrollPosition({
-      currentMode: currentState.transcriptScrollMode,
+    const remoteThreadId = session?.active_thread_id || null;
+    // Reset anchored set when the active thread changes; otherwise carry it
+    // forward so already-anchored user messages don't re-trigger anchor-user
+    // on intermediate snapshots (mid-hydration, transient subset renders).
+    if (previous?.activeThreadId && previous.activeThreadId !== remoteThreadId) {
+      anchoredUserIdsRef.current.delete(previous.activeThreadId);
+    }
+    const anchorsForThread =
+      anchoredUserIdsRef.current.get(remoteThreadId) || new Set();
+    const action = restoreTranscriptScrollPosition({
+      alreadyAnchoredUserIds: anchorsForThread,
       nextEntries: entries,
-      nextThreadId: session?.active_thread_id || null,
+      nextThreadId: remoteThreadId,
       previousSnapshot: previous,
       scrollElement: transcript,
     });
+    if (action?.kind === "anchor-user" && action.userEntryId) {
+      anchorsForThread.add(action.userEntryId);
+      anchoredUserIdsRef.current.set(remoteThreadId, anchorsForThread);
+    }
 
     previousRenderRef.current = captureTranscriptScrollSnapshot({
       entries,
       scrollElement: transcript,
-      threadId: session?.active_thread_id || null,
+      threadId: remoteThreadId,
     });
     return () => {
       setRemoteTranscriptElement(null);
@@ -1350,14 +1349,6 @@ function RemoteTranscriptPanel({
         if (!transcript || !session?.active_thread_id) {
           return;
         }
-
-        applyTranscriptScrollMode(
-          deriveTranscriptScrollMode({
-            clientHeight: transcript.clientHeight || 0,
-            scrollHeight: transcript.scrollHeight || 0,
-            scrollTop: transcript.scrollTop || 0,
-          })
-        );
         void maybeLoadOlderTranscriptHistory();
       },
       ref: transcriptRef,

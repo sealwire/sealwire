@@ -470,6 +470,40 @@ button:disabled {
   height: 14px;
 }
 
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.icon-button:hover:not(:disabled) {
+  background: var(--surface-2);
+  color: var(--text-1);
+}
+
+.icon-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+@keyframes refresh-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.icon-button.is-spinning .inline-icon {
+  animation: refresh-spin 600ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
 /* FORMS & PANELS */
 .workspace-form, .settings-grid, .remote-access-shell, .launch-panel {
   display: grid;
@@ -530,6 +564,7 @@ button:disabled {
 }
 
 .sidebar-label, .field span, .sidebar-caption {
+  margin: 0;
   font-family: var(--font-mono);
   font-size: var(--t-xs);
   font-weight: 500;
@@ -539,9 +574,9 @@ button:disabled {
 }
 
 .sidebar-hint {
+  margin: 4px 0 0;
   font-size: 13px;
   color: var(--text-tertiary);
-  margin-top: 4px;
 }
 
 .workspace-picker {
@@ -580,9 +615,13 @@ input:focus, textarea:focus, select:focus {
 
 .sidebar-row {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
+}
+
+.sidebar-row-end {
+  justify-content: flex-end;
 }
 
 .sidebar-footer {
@@ -606,6 +645,10 @@ input:focus, textarea:focus, select:focus {
 }
 
 .sidebar-drawer-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   list-style: none;
   cursor: pointer;
 }

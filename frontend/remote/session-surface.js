@@ -1,10 +1,6 @@
 import {
   renderLog as appendClientLog,
 } from "./client-log.js";
-import {
-  handleTranscriptScroll,
-  syncTranscriptScrollModeForSession,
-} from "./transcript-scroll.js";
 import { state } from "./state.js";
 import {
   applyRemoteSurfacePatch,
@@ -15,7 +11,6 @@ import {
 } from "./chrome-view-model.js";
 
 export function renderSession(session) {
-  syncTranscriptScrollModeForSession(session, state.session);
   const approval = session.pending_approvals?.[0] || null;
   applyRemoteSurfacePatch({
     currentApprovalId: approval?.request_id || null,
@@ -40,5 +35,3 @@ export function canCurrentDeviceWrite(session) {
     session,
   });
 }
-
-export { handleTranscriptScroll } from "./transcript-scroll.js";

@@ -67,7 +67,11 @@ export function SessionSettingsFields({
         onChange: (event) => onFieldChange?.("initialPrompt", event.target.value),
         placeholder: "Optional first task.",
         rows: 4,
-        value: fields.initialPrompt || "",
+        // Leave undefined when the caller doesn't manage initial prompt state — keeps
+        // the textarea uncontrolled so user input isn't wiped on the next re-render.
+        // Local launch flow relies on this (it reads .value at submit time via the
+        // document-level event listener pipeline).
+        value: fields.initialPrompt ?? undefined,
       })
     )
   );

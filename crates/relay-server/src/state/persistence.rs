@@ -39,9 +39,17 @@ pub(super) struct PersistedRelayState {
 
 impl PersistedRelayState {
     pub(super) fn from_relay(relay: &RelayState) -> Self {
+        // Pending Claude threads (deferred-start placeholders) exist only in
+        // server memory — they have no real SDK session yet. Dropping them
+        // from the persisted snapshot avoids "ghost" active threads after a
+        // restart that point at a session id Anthropic has never seen.
+        let active_thread_id = relay
+            .active_thread_id
+            .clone()
+            .filter(|id| !id.starts_with("claude-pending-"));
         Self {
             schema_version: PERSISTED_STATE_VERSION,
-            active_thread_id: relay.active_thread_id.clone(),
+            active_thread_id,
             active_controller_device_id: relay.active_controller_device_id.clone(),
             active_controller_last_seen_at: relay.active_controller_last_seen_at,
             current_status: relay.current_status.clone(),

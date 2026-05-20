@@ -1,5 +1,6 @@
 import React from "react";
 import { SPARKLES_SVG } from "../svg.js";
+import { renderMarkdown } from "./markdown.js";
 
 const h = React.createElement;
 
@@ -53,12 +54,13 @@ function commandExpandKey(itemId) {
   return itemId ? `command:${itemId}` : "";
 }
 
-function transcriptEntryDomAttrs(entry, className) {
+function transcriptEntryDomAttrs(entry, className, extras = null) {
   const itemId = entry?.item_id || entry?.id || "";
   return {
     className,
     ...(itemId ? { "data-transcript-entry-id": itemId } : {}),
     ...(entry?.kind ? { "data-transcript-entry-kind": entry.kind } : {}),
+    ...(extras || {}),
   };
 }
 
@@ -117,11 +119,22 @@ function ExpandableBlock({
   );
 }
 
-function UserEntry({ entry }) {
+function renderMessageBody(text) {
+  if (!text) return "(empty)";
+  return renderMarkdown(text);
+}
+
+function UserEntry({ entry, isLatestUser = false }) {
+  // `data-latest-user-message` is the anchor that the scroll layer uses to
+  // pin a freshly sent user message to the top of the viewport.
   return h(
     "article",
-    transcriptEntryDomAttrs(entry, "chat-message chat-message-user"),
-    h("div", { className: "message-card" }, h("div", { className: "message-body" }, entry.text || "(empty)"))
+    transcriptEntryDomAttrs(
+      entry,
+      "chat-message chat-message-user",
+      isLatestUser ? { "data-latest-user-message": "true" } : null
+    ),
+    h("div", { className: "message-card" }, h("div", { className: "message-body" }, renderMessageBody(entry.text)))
   );
 }
 
@@ -134,7 +147,7 @@ function AgentEntry({ entry }) {
       "aria-hidden": "true",
       dangerouslySetInnerHTML: { __html: SPARKLES_SVG },
     }),
-    h("div", { className: "message-card" }, h("div", { className: "message-body" }, entry.text || "(empty)"))
+    h("div", { className: "message-card" }, h("div", { className: "message-body" }, renderMessageBody(entry.text)))
   );
 }
 
@@ -217,30 +230,17 @@ function isRedundantFileChangePreview(tool, detail) {
   return inputPreview.startsWith("Files:\n");
 }
 
-function ToolDetailRow({ label, value }) {
+function ToolLogBlock({ expandKey = "", expanded = false, label, value }) {
   if (!value) {
     return null;
   }
 
   return h(
     "div",
-    { className: "tool-detail-row" },
-    h("span", { className: "tool-detail-label" }, label),
-    h("span", { className: "tool-detail-value" }, value)
-  );
-}
-
-function ToolPreviewBlock({ expandKey = "", expanded = false, label, value }) {
-  if (!value) {
-    return null;
-  }
-
-  return h(
-    "div",
-    { className: "tool-preview-block" },
-    h("div", { className: "tool-preview-label" }, label),
+    { className: "tool-log-block" },
+    label ? h("span", { className: "tool-log-block-label" }, label) : null,
     h(ExpandableBlock, {
-      className: "message-pre",
+      className: "tool-log-pre",
       expandKey,
       expanded,
       preformatted: true,
@@ -793,15 +793,27 @@ function ToolEntry({ entry, options = null }) {
   const displayTool = isFileChange
     ? { ...tool, display_options: options || null }
     : tool;
-  const title = tool.title || toolEntry.text || entry.text || tool.name || "Tool call";
-  const detail = tool.detail && tool.detail !== title ? tool.detail : null;
-  const showTypeRow = !isFileChange;
-  const showPathRow = !isFileChange;
-  const showInputPreview = !isFileChange || !isRedundantFileChangePreview(tool, detail);
-  const collapsedTitle = title;
-  const collapsedSubtitle = detail && detail !== title ? renderToolPreviewText(detail) : null;
+  const status = entry.status || "completed";
+  const nameLabel = tool.name || "Tool";
+  const fallbackTitle = tool.title || toolEntry.text || entry.text || "Tool call";
+  const primary = tool.command || tool.path || tool.url || tool.query || "";
+  const titleDiffers = fallbackTitle && fallbackTitle !== nameLabel && fallbackTitle !== primary;
+  const title = titleDiffers ? fallbackTitle : "";
+  const detail = tool.detail
+    && tool.detail !== title
+    && tool.detail !== primary
+    && tool.detail !== nameLabel
+      ? tool.detail
+      : "";
+  const inputPreviewText = String(tool.input_preview || "").trim();
+  const showInputPreview = Boolean(
+    inputPreviewText
+      && inputPreviewText !== primary
+      && (!isFileChange || !isRedundantFileChangePreview(tool, detail))
+  );
   const inputExpandKey = itemId ? `tool:${itemId}:input` : "";
   const resultExpandKey = itemId ? `tool:${itemId}:result` : "";
+  const collapsedSummary = primary || title || fallbackTitle;
 
   return h(
     "article",
@@ -841,55 +853,52 @@ function ToolEntry({ entry, options = null }) {
           )
         : !expanded
           ? h(
-              React.Fragment,
-              null,
+              "div",
+              { className: "tool-log-row" },
+              h("span", { className: "tool-log-name" }, nameLabel),
               h(
-                "div",
-                { className: "tool-collapsed-row" },
-                h("span", { className: "tool-collapsed-name" }, tool.name || "Tool"),
-                h("span", { className: "tool-collapsed-preview" }, collapsedSubtitle || collapsedTitle),
-                h("span", { className: "tool-collapsed-status" }, entry.status || "completed")
+                "span",
+                { className: "tool-log-primary" },
+                renderToolPreviewText(collapsedSummary)
               ),
-              collapsedSubtitle
-                ? h("div", { className: "tool-collapsed-title" }, collapsedTitle)
-                : null
+              h("span", { className: "tool-log-status" }, status)
             )
           : h(
               React.Fragment,
               null,
               h(
                 "div",
-                { className: "message-meta" },
-                h("strong", null, tool.name || "Tool"),
-                h("span", null, entry.status || "completed")
+                { className: "tool-log-row" },
+                h("span", { className: "tool-log-name" }, nameLabel),
+                primary
+                  ? h("span", { className: "tool-log-primary" }, primary)
+                  : title
+                    ? h("span", { className: "tool-log-primary" }, title)
+                    : null,
+                h("span", { className: "tool-log-status" }, status)
               ),
-              h("h3", { className: "tool-card-title" }, title),
-              detail ? h("p", { className: "tool-card-detail" }, detail) : null,
-              h(
-                "div",
-                { className: "tool-details" },
-                showTypeRow ? h(ToolDetailRow, { label: "Type", value: tool.item_type }) : null,
-                h(ToolDetailRow, { label: "Query", value: tool.query }),
-                showPathRow ? h(ToolDetailRow, { label: "Path", value: tool.path }) : null,
-                h(ToolDetailRow, { label: "URL", value: tool.url }),
-                h(ToolDetailRow, { label: "Command", value: tool.command })
-              ),
+              title && primary
+                ? h("div", { className: "tool-log-subtitle" }, title)
+                : null,
+              detail
+                ? h("div", { className: "tool-log-subtitle" }, detail)
+                : null,
               showInputPreview
-                ? h(ToolPreviewBlock, {
+                ? h(ToolLogBlock, {
                     expandKey: inputExpandKey,
                     expanded: Boolean(inputExpandKey && options?.expandedKeys?.has(inputExpandKey)),
-                    label: "Input",
+                    label: "input",
                     value: tool.input_preview,
                   })
                 : null,
-              h(ToolPreviewBlock, {
+              h(ToolLogBlock, {
                 expandKey: resultExpandKey,
                 expanded: Boolean(resultExpandKey && options?.expandedKeys?.has(resultExpandKey)),
-                label: "Result",
+                label: "",
                 value: tool.result_preview,
               }),
               loading && !detailEntry
-                ? h("p", { className: "tool-detail-note" }, "Loading full item details…")
+                ? h("div", { className: "tool-log-note" }, "Loading full item details…")
                 : null
             )
     )
@@ -914,11 +923,103 @@ function FallbackEntry({ entry }) {
   );
 }
 
-export function TranscriptEntry({ entry, options = null }) {
+function isGroupableCompletedTool(entry) {
+  if (!entry || entry.kind !== "tool_call") {
+    return false;
+  }
+  const status = entry.status || "completed";
+  if (status !== "completed") {
+    return false;
+  }
+  const itemType = entry?.tool?.item_type || "";
+  if (itemType === "fileChange" || itemType === "turnDiff") {
+    return false;
+  }
+  return true;
+}
+
+export function groupToolEntries(entries) {
+  const result = [];
+  let currentGroup = null;
+
+  for (const entry of entries || []) {
+    if (isGroupableCompletedTool(entry)) {
+      if (!currentGroup) {
+        currentGroup = { entries: [], type: "tool-group" };
+        result.push(currentGroup);
+      }
+      currentGroup.entries.push(entry);
+      continue;
+    }
+    currentGroup = null;
+    result.push(entry);
+  }
+
+  return result;
+}
+
+function groupExpandKey(group) {
+  const firstId = group?.entries?.[0]?.item_id || "";
+  return firstId ? `group:${firstId}` : "";
+}
+
+function aggregateGroupDiffStats(group) {
+  let added = 0;
+  let removed = 0;
+  for (const entry of group?.entries || []) {
+    const tool = entry?.tool || {};
+    const fileChanges = getFileChanges(tool);
+    for (const change of fileChanges) {
+      const stats = diffStats(change.diff);
+      added += stats.added;
+      removed += stats.removed;
+    }
+  }
+  return { added, removed };
+}
+
+function ToolGroupEntry({ group, options = null }) {
+  const expandKey = groupExpandKey(group);
+  const expanded = Boolean(expandKey && options?.expandedKeys?.has(expandKey));
+  const count = group?.entries?.length || 0;
+  const { added, removed } = aggregateGroupDiffStats(group);
+  const label = `··· ${count} tool ${count === 1 ? "call" : "calls"}`;
+
+  return h(
+    "article",
+    {
+      className: "chat-message chat-message-system chat-message-tool-group",
+      ...(expandKey ? { "data-tool-group-key": expandKey } : {}),
+    },
+    h(
+      "button",
+      {
+        className: `tool-group-chip${expanded ? " tool-group-chip-open" : ""}`,
+        ...(expandKey ? { "data-expand-key": expandKey } : {}),
+        "data-transcript-toggle": "group",
+        type: "button",
+      },
+      h(
+        "span",
+        { "aria-hidden": "true", className: "tool-group-chevron" },
+        expanded ? "▾" : "▸"
+      ),
+      h("span", { className: "tool-group-count" }, label),
+      added > 0
+        ? h("span", { className: "tool-group-chip-add" }, `+${added}`)
+        : null,
+      removed > 0
+        ? h("span", { className: "tool-group-chip-del" }, `−${removed}`)
+        : null
+    )
+  );
+}
+
+export function TranscriptEntry({ entry, isLatestUser = false, options = null }) {
   const kind = entry.kind || "reasoning";
 
   if (kind === "user_text") {
-    return h(UserEntry, { entry });
+    return h(UserEntry, { entry, isLatestUser });
   }
   if (kind === "agent_text") {
     return h(AgentEntry, { entry });
@@ -1027,16 +1128,59 @@ export function ApprovalCard({ approval, options = null }) {
 }
 
 export function TranscriptContent({ approval = null, entries = [], options = null }) {
-  return h(
-    "div",
-    { className: "thread-content" },
-    ...(entries || []).map((entry, index) =>
+  const groupedItems = React.useMemo(() => groupToolEntries(entries), [entries]);
+  const latestUserEntryId = React.useMemo(() => {
+    for (let index = entries.length - 1; index >= 0; index -= 1) {
+      const entry = entries[index];
+      if (entry?.kind === "user_text") {
+        return entry.item_id || entry.id || "";
+      }
+    }
+    return "";
+  }, [entries]);
+  const nodes = [];
+
+  groupedItems.forEach((item, index) => {
+    if (item?.type === "tool-group") {
+      const expandKey = groupExpandKey(item);
+      const expanded = Boolean(expandKey && options?.expandedKeys?.has(expandKey));
+      const groupKey = expandKey || `tool-group:${index}`;
+      nodes.push(
+        h(ToolGroupEntry, { group: item, key: groupKey, options })
+      );
+      if (expanded) {
+        item.entries.forEach((memberEntry, memberIndex) => {
+          nodes.push(
+            h(TranscriptEntry, {
+              entry: memberEntry,
+              isLatestUser: false,
+              key:
+                memberEntry.item_id
+                || memberEntry.id
+                || `${groupKey}:member:${memberIndex}`,
+              options,
+            })
+          );
+        });
+      }
+      return;
+    }
+
+    const entryId = item.item_id || item.id || "";
+    nodes.push(
       h(TranscriptEntry, {
-        entry,
-        key: entry.item_id || entry.id || `${entry.kind || "entry"}:${index}`,
+        entry: item,
+        isLatestUser:
+          item.kind === "user_text" && entryId && entryId === latestUserEntryId,
+        key: entryId || `${item.kind || "entry"}:${index}`,
         options,
       })
-    ),
-    approval ? h(ApprovalCard, { approval, key: "approval", options }) : null
-  );
+    );
+  });
+
+  if (approval) {
+    nodes.push(h(ApprovalCard, { approval, key: "approval", options }));
+  }
+
+  return h("div", { className: "thread-content" }, ...nodes);
 }

@@ -1,6 +1,7 @@
 import React from "react";
 import { ClientLog } from "../shared/client-log.js";
 import { ConversationComposer } from "../shared/composer.js";
+import { RefreshButton } from "../shared/refresh-button.js";
 import { StartSessionDialog } from "../shared/start-session-dialog.js";
 import { ThemePickerRow } from "../shared/theme-picker.js";
 import { PLUS_SVG, ARROW_RETURN_SVG, CHEVRON_RIGHT_SVG } from "../svg.js";
@@ -77,9 +78,9 @@ function LaunchPanel({ launchModel = null, onLaunchFieldChange = null, onLaunchS
       cwd: m.fields?.cwd || "",
       fields: m.fields || {},
       onFieldChange: onLaunchFieldChange || (() => {}),
-      onStart: () => {
-        document.getElementById("launch-start-session-dialog")?.close();
-      },
+      // StartSessionDialog auto-closes itself on Start click; the actual API
+      // call fires from app.js via the #start-session-button document listener.
+      onStart: null,
       startPending: false,
       providerOptions: m.providerOptions || [],
       models: m.models || [],
@@ -91,6 +92,8 @@ function LaunchPanel({ launchModel = null, onLaunchFieldChange = null, onLaunchS
       settingsPrefix: "",
       directoryFormId: "directory-form",
       loadButtonId: "load-directory-button",
+      // Claude supports deferred start — the relay accepts no initial prompt
+      // and promotes the session on the first composer message.
       requireInitialPrompt: false,
     })
   );
@@ -108,7 +111,8 @@ function ThreadDrawer() {
         null,
         h("p", { className: "sidebar-caption" }, "Threads"),
         h("p", { className: "sidebar-hint", id: "threads-count" }, "Loading workspace groups...")
-      )
+      ),
+      h(RefreshButton, { id: "threads-refresh-button", label: "Refresh threads" })
     ),
     h(
       "div",
@@ -119,12 +123,6 @@ function ThreadDrawer() {
         id: "go-console-home-sidebar",
         type: "button",
       }, "Back to console"),
-      h(
-        "div",
-        { className: "sidebar-row" },
-        h("div", null, h("p", { className: "sidebar-caption" }, "Workspace Folders")),
-        h("button", { className: "sidebar-link-button", id: "threads-refresh-button", type: "button" }, "Refresh")
-      ),
       h(
         "div",
         {

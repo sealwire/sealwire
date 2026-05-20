@@ -66,7 +66,6 @@ export const state = {
   transcriptHydrationStatus: "idle",
   transcriptHydrationTailReady: false,
   transcriptHydrationLastFetchAt: 0,
-  transcriptScrollMode: "follow-latest",
   threads: [],
 };
 

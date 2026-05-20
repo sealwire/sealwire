@@ -57,9 +57,6 @@ import {
 import {
   shouldRenderThreadListLoadingPlaceholder,
 } from "../shared/thread-list-state.js";
-import {
-  deriveTranscriptScrollMode,
-} from "../shared/transcript-scroll.js";
 
 const CONTROL_HEARTBEAT_MS = 5000;
 const LEASE_EXPIRY_REFRESH_SKEW_MS = 250;
@@ -282,9 +279,7 @@ export function createSessionController({
 
   function resetTranscriptHydrationState() {
     clearTranscriptHydration(state);
-    state.localTranscriptScrollSnapshot = null;
     state.transcriptPreserveScroll = false;
-    state.transcriptScrollMode = "follow-latest";
   }
 
   function applySessionSnapshot(snapshot) {
@@ -294,6 +289,29 @@ export function createSessionController({
     }
     if (snapshot?.active_thread_id !== previousThreadId) {
       state.localUiStore.getState().clearTranscriptDetailLoading();
+      // Scroll state belongs to the previous thread — drop it when the
+      // active thread actually changes so the new thread starts fresh
+      // (jump-to-bottom on first render of the new conversation).
+      state.localTranscriptScrollSnapshot = null;
+      if (state.localTranscriptScrollAnchors && previousThreadId) {
+        state.localTranscriptScrollAnchors.delete(previousThreadId);
+      }
+    }
+
+    // Deferred-start Claude threads get promoted server-side when the first
+    // message is sent: the public id changes from `claude-pending-…` to the
+    // real Anthropic session id. Keep the URL aligned (replace, not push, so
+    // we don't trap the back button) so isViewingConversation stays true.
+    // Scoped to the pending-prefix transition so initial loads with a seeded
+    // active_thread_id don't auto-enter conversation view.
+    if (
+      previousThreadId
+      && previousThreadId.startsWith("claude-pending-")
+      && snapshot?.active_thread_id
+      && snapshot.active_thread_id !== previousThreadId
+      && state.viewThreadId === previousThreadId
+    ) {
+      setThreadRoute(snapshot.active_thread_id, { replace: true });
     }
 
     syncLiveTranscriptEntryDetailsFromSnapshot(state, snapshot);
@@ -573,14 +591,6 @@ export function createSessionController({
   }
 
   async function maybeLoadOlderTranscript() {
-    if (transcript && state.session?.active_thread_id) {
-      state.transcriptScrollMode = deriveTranscriptScrollMode({
-        clientHeight: transcript.clientHeight || 0,
-        scrollHeight: transcript.scrollHeight || 0,
-        scrollTop: transcript.scrollTop || 0,
-      });
-    }
-
     if (
       !transcript ||
       transcript.scrollTop > 80 ||
@@ -592,7 +602,6 @@ export function createSessionController({
     }
 
     state.transcriptPreserveScroll = true;
-    state.transcriptScrollMode = "preserve";
 
     return loadOlderLocalTranscript(state, {
       fetchPage: ({ threadId, before }) => fetchTranscriptPage(threadId, { before }),
@@ -1216,6 +1225,16 @@ export function createSessionController({
     }
   }
 
+  function toggleTranscriptExpandKey(expandKey) {
+    if (!expandKey) {
+      return;
+    }
+    state.localUiStore.getState().toggleTranscriptExpandedItem(expandKey);
+    if (state.session) {
+      renderSession(state.session);
+    }
+  }
+
   async function toggleTranscriptEntry(itemId) {
     if (!itemId) {
       return;
@@ -1327,6 +1346,7 @@ export function createSessionController({
     submitDecision,
     takeOverControl,
     toggleTranscriptEntry,
+    toggleTranscriptExpandKey,
     applyFileChange,
   };
 }

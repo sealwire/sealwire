@@ -35,7 +35,6 @@ import { remoteUiRefs } from "./ui-refs.js";
 import {
   applyRemoteSurfacePatch,
   createRemoteThreadsPatch,
-  createTranscriptScrollModePatch,
 } from "./surface-state.js";
 
 const fetchRawTranscriptPage = createTranscriptPageFetcher(dispatchOrRecover);
@@ -668,7 +667,6 @@ export async function submitDecision(decision, scope) {
 
 export function clearSessionRuntime() {
   clearTranscriptHydration(state);
-  applyRemoteSurfacePatch(createTranscriptScrollModePatch("follow-latest"));
 }
 
 async function sendHeartbeat() {

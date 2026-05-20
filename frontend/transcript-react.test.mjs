@@ -7,6 +7,7 @@ import {
   ApprovalCard,
   TranscriptContent,
   TranscriptEntry,
+  groupToolEntries,
 } from "./shared/transcript-react.js";
 import { TranscriptPane } from "./shared/transcript-pane.js";
 
@@ -67,9 +68,9 @@ test("renderEntryMarkup renders typed session items safely", () => {
   assert.match(commandMarkup, /data-transcript-toggle="entry"/);
   assert.match(commandMarkup, /data-item-id="cmd-1"/);
   assert.match(commandMarkup, /<div class="command-preview"[^>]*>npm test<\/div>/);
-  assert.match(toolMarkup, /Read frontend\/remote\/main\.js/);
+  assert.match(toolMarkup, /tool-log-name">Read</);
   assert.match(toolMarkup, /message-card-tool/);
-  assert.match(toolMarkup, /frontend\/remote\/main\.js/);
+  assert.match(toolMarkup, /tool-log-primary">frontend\/remote\/main\.js</);
 });
 
 test("TranscriptPane renders empty, ready, and transcript states", () => {
@@ -141,7 +142,7 @@ test("renderEntryMarkup collapses long command and tool previews without collaps
   assert.match(commandMarkup, /line 1 line 2 line 3/);
   assert.doesNotMatch(commandMarkup, /line 1\nline 2/);
   assert.match(toolMarkup, /data-transcript-toggle="entry"/);
-  assert.match(toolMarkup, /class="tool-collapsed-preview"/);
+  assert.match(toolMarkup, /class="tool-log-primary"/);
   assert.match(toolMarkup, /Search result payload/);
   assert.doesNotMatch(assistantMarkup, /message-collapsible/);
   assert.match(assistantMarkup, new RegExp(`A{1200}`));
@@ -570,8 +571,8 @@ test("renderEntryMarkup expands tool details from fetched entry data", () => {
 
   assert.match(expandedMarkup, />\s*▴\s*<\/button>/);
   assert.match(expandedMarkup, /Loaded the requested file\./);
-  assert.match(expandedMarkup, /tool-preview-label">Input</);
-  assert.match(expandedMarkup, /tool-preview-label">Result</);
+  assert.match(expandedMarkup, /tool-log-block-label">input</);
+  assert.match(expandedMarkup, /tool-log-pre">{&quot;text&quot;:&quot;file contents&quot;}/);
 });
 
 test("renderApprovalMarkup includes session-scope actions and escapes requested permissions", () => {
@@ -611,6 +612,187 @@ test("renderApprovalMarkup collapses large command and permission payloads", () 
 
   assert.match(markup, /<details class="message-collapsible">/);
   assert.match(markup, /message-collapsible-label-closed">Expand<\/span>/);
+});
+
+function makeTool(id, overrides = {}) {
+  const { tool: toolOverrides, ...rest } = overrides;
+  return {
+    item_id: id,
+    kind: "tool_call",
+    status: "completed",
+    tool: {
+      item_type: "toolCall",
+      name: "Bash",
+      title: id,
+      ...(toolOverrides || {}),
+    },
+    ...rest,
+  };
+}
+
+function makeText(id) {
+  return { item_id: id, kind: "agent_text", status: "completed", text: id };
+}
+
+function makeReasoning(id) {
+  return { item_id: id, kind: "reasoning", status: "completed", text: id };
+}
+
+test("groupToolEntries returns empty for empty or missing input", () => {
+  assert.deepEqual(groupToolEntries([]), []);
+  assert.deepEqual(groupToolEntries(undefined), []);
+});
+
+test("groupToolEntries wraps a single completed tool in a one-item group", () => {
+  const result = groupToolEntries([makeTool("a")]);
+  assert.equal(result.length, 1);
+  assert.equal(result[0].type, "tool-group");
+  assert.deepEqual(result[0].entries.map((e) => e.item_id), ["a"]);
+});
+
+test("groupToolEntries fuses consecutive completed tools into one group", () => {
+  const result = groupToolEntries([makeTool("a"), makeTool("b"), makeTool("c")]);
+  assert.equal(result.length, 1);
+  assert.equal(result[0].type, "tool-group");
+  assert.deepEqual(
+    result[0].entries.map((e) => e.item_id),
+    ["a", "b", "c"]
+  );
+});
+
+test("groupToolEntries splits when text or reasoning breaks the run", () => {
+  const result = groupToolEntries([
+    makeTool("a"),
+    makeTool("b"),
+    makeText("t1"),
+    makeTool("c"),
+    makeReasoning("r1"),
+    makeTool("d"),
+  ]);
+  assert.equal(result.length, 5);
+  assert.equal(result[0].type, "tool-group");
+  assert.deepEqual(result[0].entries.map((e) => e.item_id), ["a", "b"]);
+  assert.equal(result[1].kind, "agent_text");
+  assert.equal(result[2].type, "tool-group");
+  assert.deepEqual(result[2].entries.map((e) => e.item_id), ["c"]);
+  assert.equal(result[3].kind, "reasoning");
+  assert.equal(result[4].type, "tool-group");
+  assert.deepEqual(result[4].entries.map((e) => e.item_id), ["d"]);
+});
+
+test("groupToolEntries leaves running tools ungrouped and breaks the run", () => {
+  const running = { ...makeTool("b"), status: "running" };
+  const result = groupToolEntries([makeTool("a"), running, makeTool("c")]);
+  assert.equal(result.length, 3);
+  assert.equal(result[0].type, "tool-group");
+  assert.deepEqual(result[0].entries.map((e) => e.item_id), ["a"]);
+  assert.equal(result[1].kind, "tool_call");
+  assert.equal(result[1].status, "running");
+  assert.equal(result[2].type, "tool-group");
+  assert.deepEqual(result[2].entries.map((e) => e.item_id), ["c"]);
+});
+
+test("groupToolEntries excludes fileChange and turnDiff item_types from groups", () => {
+  const fileChange = makeTool("fc", {
+    tool: { item_type: "fileChange", name: "Edit" },
+  });
+  const turnDiff = makeTool("td", {
+    tool: { item_type: "turnDiff", name: "TurnDiff" },
+  });
+  const result = groupToolEntries([
+    makeTool("a"),
+    fileChange,
+    makeTool("b"),
+    turnDiff,
+    makeTool("c"),
+  ]);
+  assert.equal(result.length, 5);
+  assert.equal(result[0].type, "tool-group");
+  assert.equal(result[1].tool.item_type, "fileChange");
+  assert.equal(result[2].type, "tool-group");
+  assert.equal(result[3].tool.item_type, "turnDiff");
+  assert.equal(result[4].type, "tool-group");
+});
+
+test("groupToolEntries groups Edit/Write tools alongside read tools", () => {
+  const edit = makeTool("e", {
+    tool: {
+      item_type: "toolCall",
+      name: "Edit",
+      file_changes: [
+        {
+          path: "a.js",
+          change_type: "update",
+          diff: "@@ -1,1 +1,1 @@\n-foo\n+bar\n",
+        },
+      ],
+    },
+  });
+  const result = groupToolEntries([makeTool("r1"), edit, makeTool("r2")]);
+  assert.equal(result.length, 1);
+  assert.equal(result[0].type, "tool-group");
+  assert.deepEqual(
+    result[0].entries.map((e) => e.item_id),
+    ["r1", "e", "r2"]
+  );
+});
+
+test("groupToolEntries treats missing status as completed", () => {
+  const noStatus = { item_id: "x", kind: "tool_call", tool: { name: "Read" } };
+  const result = groupToolEntries([noStatus, makeTool("y")]);
+  assert.equal(result.length, 1);
+  assert.equal(result[0].type, "tool-group");
+  assert.deepEqual(
+    result[0].entries.map((e) => e.item_id),
+    ["x", "y"]
+  );
+});
+
+test("TranscriptContent renders a collapsed group chip for consecutive completed tools", () => {
+  const markup = renderTranscriptContentMarkup([
+    makeTool("a"),
+    makeTool("b"),
+    makeTool("c"),
+  ]);
+  assert.match(markup, /chat-message-tool-group/);
+  assert.match(markup, /data-expand-key="group:a"/);
+  assert.match(markup, /data-transcript-toggle="group"/);
+  assert.match(markup, /··· 3 tool calls/);
+  // Members should NOT render when the group is collapsed.
+  assert.doesNotMatch(markup, /chat-message-system[^>]*>(?:(?!chat-message-tool-group)[\s\S])*?Bash/);
+});
+
+test("TranscriptContent renders group members when the group is expanded", () => {
+  const expandedKeys = new Set(["group:a"]);
+  const markup = renderTranscriptContentMarkup(
+    [makeTool("a"), makeTool("b")],
+    null,
+    { expandedKeys }
+  );
+  assert.match(markup, /chat-message-tool-group/);
+  assert.match(markup, /tool-group-chip-open/);
+  // Each member should render its compact log row when the group is open.
+  const collapsedRowCount = (markup.match(/tool-log-row/g) || []).length;
+  assert.equal(collapsedRowCount, 2);
+});
+
+test("TranscriptContent surfaces aggregate diff stats on the group chip for Edit/Write members", () => {
+  const edit = makeTool("e", {
+    tool: {
+      item_type: "toolCall",
+      name: "Edit",
+      file_changes: [
+        {
+          path: "a.js",
+          change_type: "update",
+          diff: "@@ -1,2 +1,3 @@\n-foo\n+bar\n+baz\n",
+        },
+      ],
+    },
+  });
+  const markup = renderTranscriptContentMarkup([makeTool("r"), edit]);
+  assert.match(markup, /tool-group-chip-add">\+2</);
+  assert.match(markup, /tool-group-chip-del">−1</);
 });
 
 test("renderTranscriptContentMarkup combines typed entries and pending approval into one thread content block", () => {

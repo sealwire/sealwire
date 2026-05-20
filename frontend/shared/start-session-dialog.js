@@ -131,7 +131,13 @@ export function StartSessionDialog({
           className: "start-session-button",
           disabled: startDisabled,
           id: btnId,
-          onClick: () => { onStart?.(); },
+          onClick: () => {
+            // Close the modal optimistically so the user immediately sees the
+            // (possibly pending) session view, then let the caller fire the
+            // actual session-start side effect.
+            document.getElementById(id)?.close?.();
+            onStart?.();
+          },
           type: "button",
         },
         startPending ? "Starting..." : "Start Session"

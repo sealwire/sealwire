@@ -136,6 +136,9 @@ export function SessionPanel({
     approvalOptions: model.approvalOptions,
     effortOptions,
     settingsPrefix: "remote-launch",
+    // Mirror local: Claude supports deferred start — the relay accepts no
+    // initial prompt and promotes the session on the first composer message.
+    requireInitialPrompt: false,
   });
 }
 

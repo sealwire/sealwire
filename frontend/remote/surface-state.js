@@ -62,12 +62,6 @@ export function createPairingStatePatch({
   return patch;
 }
 
-export function createTranscriptScrollModePatch(mode) {
-  return {
-    transcriptScrollMode: mode,
-  };
-}
-
 export function createClearedTranscriptHydrationPatch() {
   return createSharedClearedTranscriptHydrationPatch();
 }

@@ -40,6 +40,18 @@ type PendingResponses = Arc<Mutex<HashMap<String, oneshot::Sender<Result<Value, 
 
 const CLAUDE_REQUEST_TIMEOUT_SECS: u64 = 30;
 
+/// Configuration captured when a Claude session is created without an initial
+/// prompt. The SDK only assigns a `session_id` after it sees the first user
+/// message, so we cannot call the worker yet — we hand back a synthetic
+/// `claude-pending-…` thread id and use this config on the first turn to
+/// promote it to a real session.
+#[derive(Clone)]
+struct PendingClaudeConfig {
+    cwd: String,
+    model: String,
+    permission_mode: String,
+}
+
 /// Bridges the relay to Claude Code via a Node.js worker process that wraps the
 /// official `@anthropic-ai/claude-agent-sdk`. The worker speaks a normalized
 /// NDJSON protocol so the relay core never sees raw SDK shapes.
@@ -49,6 +61,11 @@ pub struct ClaudeCodeBridge {
     pending_responses: PendingResponses,
     next_request_id: AtomicU64,
     state: Arc<RwLock<RelayState>>,
+    /// Threads created without an initial prompt. In-memory only — never
+    /// persisted to disk (placeholder ids would point at a session Anthropic
+    /// has never seen). On the first send we promote the thread by swapping
+    /// the public id to the real SDK session id, then drop the entry here.
+    pending_threads: Arc<Mutex<HashMap<String, PendingClaudeConfig>>>,
 }
 
 impl ClaudeCodeBridge {
@@ -102,6 +119,7 @@ impl ClaudeCodeBridge {
             pending_responses,
             next_request_id: AtomicU64::new(1),
             state,
+            pending_threads: Arc::new(Mutex::new(HashMap::new())),
         };
 
         {
@@ -172,6 +190,25 @@ impl ClaudeCodeBridge {
             .find(|thread| thread.id == thread_id && !thread.cwd.is_empty())
             .map(|thread| thread.cwd.clone())
     }
+
+    /// Resolve a public thread id to the SDK's real session id. For
+    /// `claude-pending-…` placeholders (no SDK session yet, or a stale id left
+    /// over from a restart) returns `None` — callers treat that as a no-op.
+    /// Any other id is assumed to be a real Anthropic session id.
+    fn resolve_real_session_id(&self, thread_id: &str) -> Option<String> {
+        if thread_id.starts_with("claude-pending-") {
+            return None;
+        }
+        Some(thread_id.to_string())
+    }
+
+    fn synth_pending_thread_id(&self) -> String {
+        format!(
+            "claude-pending-{:x}-{}",
+            unix_now(),
+            self.next_request_id.fetch_add(1, Ordering::Relaxed)
+        )
+    }
 }
 
 #[async_trait]
@@ -241,17 +278,44 @@ impl ProviderBridge for ClaudeCodeBridge {
         let initial_prompt = initial_prompt
             .map(str::trim)
             .filter(|prompt| !prompt.is_empty());
+        let permission_mode = claude_permission_mode(_approval_policy, _sandbox);
+
+        // Deferred start: with no prompt the SDK cannot give us a session_id yet
+        // (it is only emitted after the first user message). Hand back a
+        // synthetic id so the frontend can open an empty composer; the actual
+        // session is created on the first turn via `start_turn`.
         if initial_prompt.is_none() {
-            return Err(
-                "Claude Code requires an initial prompt to create a new session.".to_string(),
+            let pending_id = self.synth_pending_thread_id();
+            self.pending_threads.lock().await.insert(
+                pending_id.clone(),
+                PendingClaudeConfig {
+                    cwd: cwd.to_string(),
+                    model: model.to_string(),
+                    permission_mode: permission_mode.to_string(),
+                },
             );
+            let thread = ThreadSummaryView {
+                id: pending_id,
+                name: None,
+                preview: String::new(),
+                cwd: cwd.to_string(),
+                updated_at: unix_now(),
+                source: "claude_code".to_string(),
+                status: "active".to_string(),
+                model_provider: "anthropic".to_string(),
+                provider: "claude_code".to_string(),
+            };
+            return Ok(StartThreadResult {
+                thread,
+                consumed_initial_prompt: false,
+            });
         }
 
         let mut cmd = json!({
             "type": "start",
             "cwd": cwd,
             "model": model,
-            "permissionMode": claude_permission_mode(_approval_policy, _sandbox),
+            "permissionMode": permission_mode,
         });
         if let Some(prompt) = initial_prompt {
             cmd["prompt"] = Value::String(prompt.to_string());
@@ -270,10 +334,15 @@ impl ProviderBridge for ClaudeCodeBridge {
         _approval_policy: &str,
         _sandbox: &str,
     ) -> Result<(), String> {
+        let Some(real_session_id) = self.resolve_real_session_id(thread_id) else {
+            // Pending thread: no SDK session exists yet. Treat resume as a
+            // no-op so the user can re-enter the empty composer view.
+            return Ok(());
+        };
         let cwd = self.cwd_for_thread(thread_id).await;
         let mut cmd = json!({
             "type": "resume",
-            "provider_session_id": thread_id,
+            "provider_session_id": real_session_id,
             "permissionMode": claude_permission_mode(_approval_policy, _sandbox),
         });
         if let Some(cwd) = cwd {
@@ -286,9 +355,29 @@ impl ProviderBridge for ClaudeCodeBridge {
     }
 
     async fn read_thread(&self, thread_id: &str) -> Result<ThreadSyncData, String> {
+        let Some(real_session_id) = self.resolve_real_session_id(thread_id) else {
+            // Pending thread: nothing to read from the SDK yet.
+            let cwd = self.cwd_for_thread(thread_id).await.unwrap_or_default();
+            return Ok(ThreadSyncData {
+                thread: ThreadSummaryView {
+                    id: thread_id.to_string(),
+                    name: None,
+                    preview: String::new(),
+                    cwd,
+                    updated_at: unix_now(),
+                    source: "claude_code".to_string(),
+                    status: "active".to_string(),
+                    model_provider: "anthropic".to_string(),
+                    provider: "claude_code".to_string(),
+                },
+                status: "idle".to_string(),
+                active_flags: Vec::new(),
+                transcript: Vec::new(),
+            });
+        };
         let cwd = self.cwd_for_thread(thread_id).await;
         let mut cmd = json!({
-            "provider_session_id": thread_id,
+            "provider_session_id": real_session_id,
         });
         if let Some(cwd) = cwd {
             if let Some(object) = cmd.as_object_mut() {
@@ -296,7 +385,11 @@ impl ProviderBridge for ClaudeCodeBridge {
             }
         }
         let result = self.send_request("read_session", cmd).await?;
-        let thread = parse_thread_summary(value_at(&result, &["thread"]).unwrap_or(&Value::Null))?;
+        let mut thread =
+            parse_thread_summary(value_at(&result, &["thread"]).unwrap_or(&Value::Null))?;
+        // Keep the public thread id stable when the underlying SDK session id
+        // differs (i.e. a promoted pending thread).
+        thread.id = thread_id.to_string();
         let transcript = value_at(&result, &["transcript"])
             .and_then(Value::as_array)
             .map(|items| {
@@ -330,9 +423,25 @@ impl ProviderBridge for ClaudeCodeBridge {
         &self,
         thread_id: &str,
     ) -> Result<LocalThreadDeleteSummary, String> {
+        // Pending thread never reached Anthropic — just drop our local state.
+        if self
+            .pending_threads
+            .lock()
+            .await
+            .remove(thread_id)
+            .is_some()
+        {
+            return Ok(LocalThreadDeleteSummary {
+                deleted_paths: Vec::new(),
+                deleted_thread_row: true,
+            });
+        }
+        let real_session_id = self
+            .resolve_real_session_id(thread_id)
+            .unwrap_or_else(|| thread_id.to_string());
         let cwd = self.cwd_for_thread(thread_id).await;
         let mut cmd = json!({
-            "provider_session_id": thread_id,
+            "provider_session_id": real_session_id,
         });
         if let Some(cwd) = cwd {
             if let Some(object) = cmd.as_object_mut() {
@@ -348,11 +457,44 @@ impl ProviderBridge for ClaudeCodeBridge {
 
     async fn start_turn(
         &self,
-        _thread_id: &str,
+        thread_id: &str,
         text: &str,
         _model: &str,
         _effort: &str,
     ) -> Result<Option<String>, String> {
+        // Promote a pending (deferred-start) thread to a real Claude session on
+        // the first turn. The worker `start` command both spins up the SDK
+        // session and sends the first message; the returned thread carries the
+        // real Anthropic session_id, which we map to the public thread_id.
+        // Pending (deferred-start) thread: promote it now. We send `start` to
+        // the worker — that boots the SDK session and uses `text` as the first
+        // user message. The worker's session_started event handler swaps the
+        // public thread id from the placeholder to the real Anthropic id, so
+        // no mapping needs to live past this turn.
+        let pending = self.pending_threads.lock().await.remove(thread_id);
+        if let Some(config) = pending {
+            let cmd = json!({
+                "type": "start",
+                "cwd": config.cwd,
+                "model": config.model,
+                "permissionMode": config.permission_mode,
+                "prompt": text,
+            });
+            if let Err(error) = self.send_request("start", cmd).await {
+                // Restore pending state so a retry can succeed.
+                self.pending_threads
+                    .lock()
+                    .await
+                    .insert(thread_id.to_string(), config);
+                return Err(error);
+            }
+            let turn_id = format!(
+                "claude-turn-{}",
+                self.next_request_id.fetch_add(1, Ordering::Relaxed)
+            );
+            return Ok(Some(turn_id));
+        }
+
         let turn_id = format!(
             "claude-turn-{}",
             self.next_request_id.fetch_add(1, Ordering::Relaxed)
@@ -496,9 +638,20 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
         }
 
         "session_started" => {
-            // SDK system/init message — the full session init.
+            // SDK system/init message — the full session init. When this fires
+            // while we are sitting on a synthetic `claude-pending-…` id (the
+            // deferred-start placeholder), promote the thread: swap the public
+            // id over to the real SDK session id and drop the placeholder row.
             if let Some(sid) = payload.get("provider_session_id").and_then(Value::as_str) {
+                let stale_pending_id = relay
+                    .active_thread_id
+                    .as_deref()
+                    .filter(|id| id.starts_with("claude-pending-"))
+                    .map(|id| id.to_string());
                 relay.active_thread_id = Some(sid.to_string());
+                if let Some(pending_id) = stale_pending_id {
+                    relay.threads.retain(|thread| thread.id != pending_id);
+                }
             }
             if let Some(model) = payload.get("model").and_then(Value::as_str) {
                 relay.model = model.to_string();

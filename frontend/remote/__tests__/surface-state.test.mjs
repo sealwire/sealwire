@@ -36,7 +36,6 @@ const {
   createRemoteThreadsPatch,
   createResetRemoteSurfaceStatePatch,
   createSessionRuntimeStatePatch,
-  createTranscriptScrollModePatch,
 } = await import("../surface-state.js");
 const { state } = await import("../state.js");
 
@@ -138,12 +137,6 @@ test("createClaimLifecyclePatch only includes defined lifecycle fields", () => {
   );
 });
 
-test("createTranscriptScrollModePatch returns the scroll mode patch", () => {
-  assert.deepEqual(createTranscriptScrollModePatch("preserve"), {
-    transcriptScrollMode: "preserve",
-  });
-});
-
 test("createClearedTranscriptHydrationPatch returns the hydration reset patch", () => {
   const patch = createClearedTranscriptHydrationPatch();
 
@@ -159,19 +152,15 @@ test("createClearedTranscriptHydrationPatch returns the hydration reset patch", 
 });
 
 test("applyRemoteSurfacePatch applies the patch to shared remote state", () => {
-  const previousMode = state.transcriptScrollMode;
   const previousApprovalId = state.currentApprovalId;
 
   applyRemoteSurfacePatch({
     currentApprovalId: "approval-test",
-    transcriptScrollMode: "preserve",
   });
 
   assert.equal(state.currentApprovalId, "approval-test");
-  assert.equal(state.transcriptScrollMode, "preserve");
 
   applyRemoteSurfacePatch({
     currentApprovalId: previousApprovalId,
-    transcriptScrollMode: previousMode,
   });
 });

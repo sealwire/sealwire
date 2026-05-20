@@ -30,3 +30,5 @@ export const SETTINGS_SVG = `<svg ${ICON_ATTRS}><circle cx="12" cy="12" r="3"/><
 export const X_SVG = `<svg ${ICON_ATTRS}><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>`;
 
 export const MORE_HORIZONTAL_SVG = `<svg ${ICON_ATTRS}><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></svg>`;
+
+export const REFRESH_SVG = `<svg ${ICON_ATTRS}><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M21 21v-5h-5"/></svg>`;

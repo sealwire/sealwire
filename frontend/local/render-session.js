@@ -754,13 +754,13 @@ export function createSessionRenderer({
       return;
     }
 
-    const previousSnapshot =
-      state.localTranscriptScrollSnapshot ||
-      captureTranscriptScrollSnapshot({
-        entries: [],
-        scrollElement: transcript,
-        threadId: null,
-      });
+    const previousSnapshot = state.localTranscriptScrollSnapshot || null;
+    const localThreadId = session?.active_thread_id || null;
+    if (!state.localTranscriptScrollAnchors) {
+      state.localTranscriptScrollAnchors = new Map();
+    }
+    const anchorsForThread =
+      state.localTranscriptScrollAnchors.get(localThreadId) || new Set();
 
     renderConversationContent(
       h(TranscriptPane, {
@@ -778,17 +778,21 @@ export function createSessionRenderer({
       })
     );
 
-    restoreTranscriptScrollPosition({
-      currentMode: state.transcriptScrollMode || "follow-latest",
+    const action = restoreTranscriptScrollPosition({
+      alreadyAnchoredUserIds: anchorsForThread,
       nextEntries: entries,
-      nextThreadId: session?.active_thread_id || null,
+      nextThreadId: localThreadId,
       previousSnapshot,
       scrollElement: transcript,
     });
+    if (action?.kind === "anchor-user" && action.userEntryId) {
+      anchorsForThread.add(action.userEntryId);
+      state.localTranscriptScrollAnchors.set(localThreadId, anchorsForThread);
+    }
     state.localTranscriptScrollSnapshot = captureTranscriptScrollSnapshot({
       entries,
       scrollElement: transcript,
-      threadId: session?.active_thread_id || null,
+      threadId: localThreadId,
     });
   }
 

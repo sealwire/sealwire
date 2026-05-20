@@ -7,6 +7,29 @@ import { StartSessionDialog } from "./shared/start-session-dialog.js";
 
 const h = React.createElement;
 
+/**
+ * Recursively walk a React element tree (as returned by calling a functional
+ * component directly) until `predicate(element)` is truthy. Returns the first
+ * match or null. Works without a DOM because we are inspecting the React
+ * element objects, not their rendered HTML.
+ */
+function findReactElement(node, predicate) {
+  if (!node || typeof node !== "object" || Array.isArray(node) === false && !node.props) {
+    if (!Array.isArray(node)) return null;
+  }
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findReactElement(child, predicate);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (predicate(node)) return node;
+  const children = node.props?.children;
+  if (children == null) return null;
+  return findReactElement(Array.isArray(children) ? children : [children], predicate);
+}
+
 function renderDialog(props = {}) {
   return renderToStaticMarkup(
     h(StartSessionDialog, {
@@ -133,4 +156,100 @@ test("codex can start without an initial prompt", () => {
 
   assert.doesNotMatch(html, /Claude Code starts when you send the first prompt\./);
   assert.doesNotMatch(html, /<button[^>]+disabled=""/);
+});
+
+test("Start button closes the dialog before invoking onStart (local id)", () => {
+  // Stash + replace global document so the onClick handler can find a dialog
+  // to close. Tracks how many times .close() was called for each id.
+  const originalDocument = globalThis.document;
+  const closedIds = [];
+  globalThis.document = {
+    getElementById(id) {
+      return { id, close: () => closedIds.push(id) };
+    },
+  };
+
+  let onStartCalls = 0;
+  try {
+    const tree = StartSessionDialog({
+      id: "launch-start-session-dialog",
+      cwd: "/tmp",
+      fields: { provider: "codex", initialPrompt: "" },
+      onStart: () => { onStartCalls += 1; },
+      startButtonId: "start-session-button",
+    });
+
+    const startButton = findReactElement(tree, (node) =>
+      node?.type === "button" && node?.props?.className === "start-session-button"
+    );
+    assert.ok(startButton, "rendered dialog should contain a Start button");
+    assert.equal(typeof startButton.props.onClick, "function", "Start button has onClick handler");
+
+    startButton.props.onClick();
+
+    assert.deepEqual(closedIds, ["launch-start-session-dialog"], "dialog.close() called once with the dialog's id");
+    assert.equal(onStartCalls, 1, "onStart invoked exactly once after close");
+  } finally {
+    globalThis.document = originalDocument;
+  }
+});
+
+test("Start button auto-closes the remote dialog too (shared component logic)", () => {
+  const originalDocument = globalThis.document;
+  const closedIds = [];
+  globalThis.document = {
+    getElementById(id) {
+      return { id, close: () => closedIds.push(id) };
+    },
+  };
+
+  let onStartCalls = 0;
+  try {
+    const tree = StartSessionDialog({
+      id: "remote-start-session-dialog",
+      cwd: "/tmp",
+      fields: { provider: "codex", initialPrompt: "" },
+      onStart: () => { onStartCalls += 1; },
+      settingsPrefix: "remote-launch",
+    });
+
+    const startButton = findReactElement(tree, (node) =>
+      node?.type === "button" && node?.props?.className === "start-session-button"
+    );
+    assert.ok(startButton, "remote dialog should also contain a Start button");
+
+    startButton.props.onClick();
+
+    assert.deepEqual(closedIds, ["remote-start-session-dialog"], "dialog.close() called with the remote dialog's id");
+    assert.equal(onStartCalls, 1, "onStart invoked exactly once after close");
+  } finally {
+    globalThis.document = originalDocument;
+  }
+});
+
+test("Start button still calls close even when onStart is omitted", () => {
+  const originalDocument = globalThis.document;
+  const closedIds = [];
+  globalThis.document = {
+    getElementById(id) {
+      return { id, close: () => closedIds.push(id) };
+    },
+  };
+
+  try {
+    const tree = StartSessionDialog({
+      id: "test-dialog",
+      cwd: "/tmp",
+      fields: { provider: "codex", initialPrompt: "" },
+      // no onStart — dialog still needs to dismiss itself
+    });
+
+    const startButton = findReactElement(tree, (node) =>
+      node?.type === "button" && node?.props?.className === "start-session-button"
+    );
+    assert.doesNotThrow(() => startButton.props.onClick());
+    assert.deepEqual(closedIds, ["test-dialog"], "dialog closes even without onStart");
+  } finally {
+    globalThis.document = originalDocument;
+  }
 });
