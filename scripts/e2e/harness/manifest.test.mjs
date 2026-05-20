@@ -45,6 +45,7 @@ test("browser e2e core suites keep required coverage", async () => {
     "history",
     "session",
     "thread-groups",
+    "transcript-load",
   ]);
 });
 

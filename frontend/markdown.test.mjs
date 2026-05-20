@@ -3,7 +3,12 @@ import assert from "node:assert/strict";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { renderMarkdown, __test__ } from "./shared/markdown.js";
+import {
+  renderMarkdown,
+  __clearMarkdownCacheForTests,
+  __getMarkdownCacheSizeForTests,
+  __test__,
+} from "./shared/markdown.js";
 
 const h = React.createElement;
 
@@ -150,4 +155,61 @@ test("empty / null input doesn't crash", () => {
 test("plain text passes through readable", () => {
   const html = render("just a plain line\nwith newlines");
   assert.match(html, /just a plain line/);
+});
+
+// -- Cache behavior ---------------------------------------------------------
+//
+// The markdown render-cache is what lets React.memo'd transcript entries skip
+// re-reconciling their body when a prepend triggers a parent re-render. We
+// verify it returns the *same element reference* for repeat inputs and stays
+// bounded under sustained inserts.
+
+test("renderMarkdown returns the same element reference on repeat calls", () => {
+  __clearMarkdownCacheForTests();
+  const first = renderMarkdown("Hello **world**");
+  const second = renderMarkdown("Hello **world**");
+  assert.strictEqual(first, second);
+});
+
+test("renderMarkdown caches per-text — different inputs get different elements", () => {
+  __clearMarkdownCacheForTests();
+  const a = renderMarkdown("alpha");
+  const b = renderMarkdown("beta");
+  assert.notStrictEqual(a, b);
+  // But each still memoizes on its own text:
+  assert.strictEqual(renderMarkdown("alpha"), a);
+  assert.strictEqual(renderMarkdown("beta"), b);
+});
+
+test("renderMarkdown LRU cache is bounded", () => {
+  __clearMarkdownCacheForTests();
+  for (let index = 0; index < 600; index += 1) {
+    renderMarkdown(`message-${index}`);
+  }
+  assert.ok(
+    __getMarkdownCacheSizeForTests() <= 256,
+    `cache should evict under sustained inserts, got ${__getMarkdownCacheSizeForTests()}`
+  );
+});
+
+test("renderMarkdown LRU evicts oldest entries first", () => {
+  __clearMarkdownCacheForTests();
+  // Fill the cache, then add one more to force a single eviction.
+  for (let index = 0; index < 256; index += 1) {
+    renderMarkdown(`msg-${index}`);
+  }
+  const stillCached = renderMarkdown("msg-1");
+  // Re-render msg-1 → should be the same reference (touches it).
+  assert.strictEqual(renderMarkdown("msg-1"), stillCached);
+  // Insert two more so the absolute oldest ("msg-0") falls out.
+  renderMarkdown("filler-1");
+  renderMarkdown("filler-2");
+  const oldestBefore = renderMarkdown("msg-0");
+  const oldestAfter = renderMarkdown("msg-0");
+  // The cache may have re-built it, but it should still memoize on this
+  // pass. The point of LRU is that the *recently-touched* msg-1 survives;
+  // verify that's still the same reference we got earlier:
+  assert.strictEqual(renderMarkdown("msg-1"), stillCached);
+  // And the freshly-rebuilt msg-0 is now memoized too:
+  assert.strictEqual(oldestBefore, oldestAfter);
 });

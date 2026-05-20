@@ -3,7 +3,13 @@
   flex: 1 1 auto;
   height: 100%;
   overflow-y: auto;
-  overflow-anchor: none;
+  /* `overflow-anchor: auto` is the browser-native equivalent of our manual
+   * "preserve scroll position on prepend" logic in transcript-scroll.js. With
+   * it on, prepending older messages stays visually stable without needing the
+   * JS scrollHeight-delta math to run during the same frame as the React
+   * commit. The JS path still runs for cases where we deliberately want to
+   * override (thread switch → jump to bottom; new user message → pin to top
+   * via scrollIntoView). */
   padding: 32px 32px 160px;
   scroll-padding-bottom: 160px;
 }
@@ -19,10 +25,10 @@
 
 /* Bottom spacer: guarantees a freshly sent user message can be scrolled all
  * the way up to the top of the viewport while the assistant streams below
- * it. Without this, short replies would pin the user message somewhere in
- * the middle and we'd be back to chasing the bottom. 60vh is the same
- * value Claude.ai and ChatGPT use. */
-.thread-content::after {
+ * it. Only attached while the latest turn is in flight (`data-bottom-spacer`
+ * is set by TranscriptContent) — once the turn is complete it would just
+ * show as awkward whitespace under finished conversations. */
+.thread-content[data-bottom-spacer="true"]::after {
   content: "";
   display: block;
   min-height: 60vh;
@@ -30,6 +36,12 @@
 
 .chat-message {
   min-width: 0;
+  /* Off-screen messages skip layout / paint until they scroll into view. The
+   * `auto` keyword uses the last-rendered size once known, falling back to
+   * the 200px estimate, so the scrollbar stays accurate. Cheaper than
+   * full virtualization and effective on long transcripts. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 200px;
 }
 
 .thread-empty {
@@ -75,15 +87,82 @@
   margin-top: 8px;
 }
 
-.transcript-loading-banner {
-  margin: 0 0 12px;
-  padding: 10px 12px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border-subtle);
-  background: color-mix(in srgb, var(--bg-elevated) 84%, white 16%);
-  color: var(--text-secondary);
-  font-size: 12px;
-  letter-spacing: 0.01em;
+/* Zero-height marker watched by IntersectionObserver to start prefetching
+ * older pages before the user reaches the top of the transcript. Visual
+ * height stays at 0 so it doesn't add gap above the first message. */
+.transcript-history-sentinel {
+  height: 0;
+  margin: 0;
+  padding: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* Skeleton rows shown above the first transcript entry while an older page
+ * is being fetched. They look like message cards so the visible space stays
+ * stable: when the real entries land, they replace the skeletons in place
+ * (no jump). */
+.transcript-history-skeletons {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.transcript-history-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+  border-radius: var(--radius-sm, 12px);
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.08));
+  background: color-mix(in srgb, var(--bg-elevated, #1c1c1f) 92%, transparent 8%);
+}
+
+.transcript-history-skeleton-user {
+  align-self: flex-end;
+  width: min(60%, 480px);
+  background: color-mix(in srgb, var(--bg-elevated, #1c1c1f) 80%, transparent 20%);
+}
+
+.transcript-history-skeleton-line {
+  height: 10px;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--text-secondary, #9aa0a6) 12%, transparent 88%) 0%,
+    color-mix(in srgb, var(--text-secondary, #9aa0a6) 22%, transparent 78%) 50%,
+    color-mix(in srgb, var(--text-secondary, #9aa0a6) 12%, transparent 88%) 100%
+  );
+  background-size: 200% 100%;
+  animation: transcript-history-skeleton-shimmer 1.4s ease-in-out infinite;
+}
+
+.transcript-history-skeleton-line-1 {
+  width: 95%;
+}
+.transcript-history-skeleton-line-2 {
+  width: 78%;
+  animation-delay: 0.15s;
+}
+.transcript-history-skeleton-line-3 {
+  width: 60%;
+  animation-delay: 0.3s;
+}
+
+@keyframes transcript-history-skeleton-shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .transcript-history-skeleton-line {
+    animation: none;
+    background: color-mix(in srgb, var(--text-secondary, #9aa0a6) 18%, transparent 82%);
+  }
 }
 
 .suggestion-row {
@@ -231,6 +310,14 @@
   line-height: 1.65;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+/* When the body contains markdown-rendered structural elements, disable
+ * `pre-wrap`. Otherwise blank lines in the source get rendered twice — once
+ * as literal whitespace (from pre-wrap) and once as a <p> margin — which
+ * makes paragraphs and list items look unusually far apart. */
+.message-body:has(> p, > ul, > ol, > pre, > blockquote, > h1, > h2, > h3, > h4, > h5, > h6, > table, > hr) {
+  white-space: normal;
 }
 
 .message-meta {
@@ -509,7 +596,15 @@
 .file-diff-panel {
   display: grid;
   gap: 6px;
-  margin-top: 8px;
+  margin-top: 0;
+  width: 100%;
+  max-width: 540px;
+}
+
+/* fileChange + turnDiff entries hug the preceding tool/diff entry instead of
+ * inheriting the 24px gap from .thread-content (flex `gap`). */
+.chat-message-file-change:not(:first-child) {
+  margin-top: -24px;
 }
 
 .tool-file-actions {

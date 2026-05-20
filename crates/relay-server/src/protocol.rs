@@ -834,6 +834,13 @@ pub struct ResumeSessionInput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateSessionSettingsInput {
+    pub approval_policy: Option<String>,
+    pub sandbox: Option<String>,
+    pub device_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SendMessageInput {
     pub text: String,
     pub model: Option<String>,

@@ -18,7 +18,7 @@ use crate::{
         ResumeSessionInput, RevokeDeviceReceipt, SendMessageInput, SessionSnapshot,
         StartSessionInput, StopTurnInput, TakeOverInput, ThreadArchiveReceipt, ThreadDeleteReceipt,
         ThreadEntriesResponse, ThreadEntryDetailResponse, ThreadTranscriptResponse,
-        ThreadsResponse,
+        ThreadsResponse, UpdateSessionSettingsInput,
     },
     provider::{spawn_providers, ProviderBridge},
 };
@@ -518,6 +518,72 @@ impl AppState {
         }
 
         let _ = self.list_threads(20, None).await;
+        Ok(self.snapshot().await)
+    }
+
+    pub async fn update_session_settings(
+        &self,
+        input: UpdateSessionSettingsInput,
+    ) -> Result<SessionSnapshot, String> {
+        let device_id = require_device_id(input.device_id)?;
+        self.expire_stale_controller_if_needed().await;
+
+        let (thread_id, next_approval_policy, next_sandbox) = {
+            let relay = self.relay.read().await;
+            relay.ensure_device_can_send_message(&device_id)?;
+
+            if relay.active_turn_id.is_some() {
+                return Err(
+                    "cannot change session settings while a turn is in progress".to_string()
+                );
+            }
+            if !relay.pending_approvals.is_empty() {
+                return Err(
+                    "cannot change session settings while approvals are pending".to_string()
+                );
+            }
+            if relay.current_status != "idle" {
+                return Err(format!(
+                    "cannot change session settings while agent is `{}`",
+                    relay.current_status
+                ));
+            }
+
+            let thread_id = relay
+                .active_thread_id
+                .clone()
+                .ok_or_else(|| "there is no active thread to update".to_string())?;
+            let next_approval_policy =
+                non_empty(input.approval_policy).unwrap_or_else(|| relay.approval_policy.clone());
+            let next_sandbox = non_empty(input.sandbox).unwrap_or_else(|| relay.sandbox.clone());
+
+            if next_approval_policy == relay.approval_policy && next_sandbox == relay.sandbox {
+                return Ok(relay.snapshot());
+            }
+
+            (thread_id, next_approval_policy, next_sandbox)
+        };
+
+        let (_provider_name, bridge) = self.find_thread_provider(&thread_id).await?;
+        bridge
+            .resume_thread(&thread_id, &next_approval_policy, &next_sandbox)
+            .await?;
+
+        {
+            let mut relay = self.relay.write().await;
+            relay.approval_policy = next_approval_policy.clone();
+            relay.sandbox = next_sandbox.clone();
+            relay.assign_active_controller(&device_id, unix_now());
+            relay.push_log(
+                "info",
+                format!(
+                    "Updated session settings on thread {thread_id}: approval={next_approval_policy}, sandbox={next_sandbox} (from {}).",
+                    short_device_id(&device_id)
+                ),
+            );
+            relay.notify();
+        }
+
         Ok(self.snapshot().await)
     }
 

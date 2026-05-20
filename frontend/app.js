@@ -118,6 +118,7 @@ import {
   sandboxOptions,
 } from "./shared/provider-settings.js";
 import { localQueryClient } from "./local/query-client.js";
+import { attachTranscriptHistoryLoader } from "./shared/transcript-history-loader.js";
 
 const DEVICE_STORAGE_KEY = "agent-relay.device-id";
 const API_TOKEN_STORAGE_KEY = "agent-relay.api-token";
@@ -241,6 +242,9 @@ const renderer = createSessionRenderer({
   pairedDeviceCountLabel,
   ensureConversationTranscript(session) {
     return controller?.ensureConversationTranscript(session);
+  },
+  updateSessionSettings(payload) {
+    return controller?.updateSessionSettings(payload);
   },
 });
 
@@ -619,9 +623,19 @@ transcript.addEventListener("click", (event) => {
   }
 });
 
-transcript.addEventListener("scroll", () => {
-  void controller?.maybeLoadOlderTranscript();
+// IntersectionObserver-driven prefetch: when the zero-height history sentinel
+// (the first child of TranscriptContent) gets within ~600px of the top edge of
+// the scroller, we kick off the next older-page fetch. Compared to the old
+// `addEventListener("scroll")` path, this (a) starts loading *before* the
+// user reaches the top, hiding the network round-trip, and (b) doesn't fire
+// dozens of times per second while scrolling. `sync()` is called after each
+// renderSession because the sentinel is part of the React tree and may be
+// replaced when the active branch swaps.
+const transcriptHistoryLoader = attachTranscriptHistoryLoader({
+  onLoad: () => controller?.maybeLoadOlderTranscript(),
+  scrollElement: transcript,
 });
+renderer.setTranscriptHistorySync(() => transcriptHistoryLoader.sync());
 
 pendingActionBanner?.addEventListener("click", (event) => {
   const approvalButton = event.target.closest("[data-approval-decision]");

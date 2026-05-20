@@ -548,6 +548,34 @@ export async function resumeRemoteSession(threadId, sessionDraftOverride = null)
   }
 }
 
+export async function updateRemoteSessionSettings({ approval_policy, sandbox } = {}) {
+  if (!state.session?.active_thread_id) {
+    return false;
+  }
+  const input = {};
+  if (typeof approval_policy === "string" && approval_policy) {
+    input.approval_policy = approval_policy;
+  }
+  if (typeof sandbox === "string" && sandbox) {
+    input.sandbox = sandbox;
+  }
+  if (!("approval_policy" in input) && !("sandbox" in input)) {
+    return false;
+  }
+
+  try {
+    await dispatchOrRecover("update_session_settings", { input });
+    const parts = [];
+    if (input.approval_policy) parts.push(`approval=${input.approval_policy}`);
+    if (input.sandbox) parts.push(`sandbox=${input.sandbox}`);
+    renderLog(`Updated remote session settings: ${parts.join(", ")}`);
+    return true;
+  } catch (error) {
+    renderLog(`Remote settings update failed: ${error.message}`);
+    return false;
+  }
+}
+
 export async function viewRemoteThread(threadId) {
   if (!threadId) {
     return false;
@@ -698,8 +726,11 @@ async function hydrateActiveTranscript(snapshot) {
 }
 
 export async function maybeLoadOlderTranscriptHistory() {
+  // The IntersectionObserver in react-app.js fires when the sentinel comes
+  // within ~600px of the top edge, so we drop the manual scrollTop check
+  // here — the observer's rootMargin is the prefetch trigger.
   const transcript = remoteUiRefs.remoteTranscript;
-  if (!transcript || transcript.scrollTop > 80) {
+  if (!transcript) {
     return null;
   }
 

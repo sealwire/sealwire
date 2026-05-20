@@ -90,11 +90,49 @@ const COMPONENTS = {
 
 const REMARK_PLUGINS = [remarkGfm];
 
+// LRU cache of rendered markdown React elements keyed by source text. Returning
+// the same element reference across renders lets React skip reconciling the
+// ReactMarkdown subtree, which is the most expensive part of an entry render
+// (parse + AST → element tree). Combined with React.memo on the entry
+// components, prepending older transcript pages re-uses every existing
+// entry's rendered tree instead of re-parsing it.
+const MARKDOWN_CACHE_CAP = 256;
+const markdownCache = new Map();
+
+function cacheGet(key) {
+  if (!markdownCache.has(key)) {
+    return undefined;
+  }
+  const value = markdownCache.get(key);
+  // Touch: move to end so it is the most-recently-used.
+  markdownCache.delete(key);
+  markdownCache.set(key, value);
+  return value;
+}
+
+function cacheSet(key, value) {
+  if (markdownCache.has(key)) {
+    markdownCache.delete(key);
+  } else if (markdownCache.size >= MARKDOWN_CACHE_CAP) {
+    // Evict the oldest entry — Map iterates in insertion order, so the first
+    // key is the least-recently-used after the touches above.
+    const oldestKey = markdownCache.keys().next().value;
+    if (oldestKey !== undefined) {
+      markdownCache.delete(oldestKey);
+    }
+  }
+  markdownCache.set(key, value);
+}
+
 export function renderMarkdown(text) {
   if (typeof text !== "string" || text.length === 0) {
     return text == null ? "" : text;
   }
-  return h(
+  const cached = cacheGet(text);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const element = h(
     ReactMarkdown,
     {
       components: COMPONENTS,
@@ -105,6 +143,16 @@ export function renderMarkdown(text) {
     },
     text
   );
+  cacheSet(text, element);
+  return element;
+}
+
+export function __clearMarkdownCacheForTests() {
+  markdownCache.clear();
+}
+
+export function __getMarkdownCacheSizeForTests() {
+  return markdownCache.size;
 }
 
 // Exported for tests.

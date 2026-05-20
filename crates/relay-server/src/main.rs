@@ -41,6 +41,7 @@ use protocol::{
     SendMessageInput, SessionSnapshot, SessionSnapshotCompactProfile, StartSessionInput,
     StopTurnInput, TakeOverInput, ThreadArchiveReceipt, ThreadDeleteReceipt,
     ThreadEntryDetailResponse, ThreadTranscriptResponse, ThreadsQuery, ThreadsResponse,
+    UpdateSessionSettingsInput,
 };
 use relay_http::{
     apply_standard_security_headers, header_origin, parse_optional_string_env, request_origin,
@@ -179,6 +180,7 @@ fn build_router(context: AppContext, web_assets: WebAssets) -> Router {
         .route("/api/file-changes/:item_id/apply", post(apply_file_change))
         .route("/api/session/start", post(start_session))
         .route("/api/session/resume", post(resume_session))
+        .route("/api/session/settings", post(update_session_settings))
         .route("/api/session/heartbeat", post(session_heartbeat))
         .route("/api/session/take-over", post(take_over_session))
         .route("/api/session/message", post(send_message))
@@ -588,6 +590,21 @@ async fn resume_session(
                 bad_gateway(error)
             }
         })
+}
+
+async fn update_session_settings(
+    State(context): State<AppContext>,
+    headers: HeaderMap,
+    uri: Uri,
+    Json(input): Json<UpdateSessionSettingsInput>,
+) -> Result<Json<ApiEnvelope<SessionSnapshot>>, (StatusCode, Json<ApiError>)> {
+    authorize_api(&context, &headers, &uri)?;
+    context
+        .app
+        .update_session_settings(input)
+        .await
+        .map(|snapshot| Json(ApiEnvelope::ok(compact_local_snapshot(snapshot))))
+        .map_err(bad_request)
 }
 
 async fn send_message(

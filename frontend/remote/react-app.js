@@ -89,6 +89,8 @@ import {
 import {
   ConversationEmptyState,
 } from "../shared/conversation.js";
+import { SessionSettingsPanel } from "../shared/session-settings-panel.js";
+import { attachTranscriptHistoryLoader } from "../shared/transcript-history-loader.js";
 import { ThreadGroupList } from "../shared/thread-list-react.js";
 import {
   createThreadListStore,
@@ -817,6 +819,9 @@ function RemoteApp() {
           onTakeOver() {
             void handlers.onTakeOver();
           },
+          onUpdateSessionSettings(payload) {
+            return handlers.onUpdateSessionSettings?.(payload);
+          },
           session,
           sessionView,
           transcriptDetailEntries,
@@ -1133,6 +1138,7 @@ function RemoteThreadPanel({
   onToggleTranscriptItem,
   onSubmitDecision,
   onTakeOver,
+  onUpdateSessionSettings,
   session,
   sessionView,
   transcriptDetailEntries,
@@ -1153,6 +1159,14 @@ function RemoteThreadPanel({
         onTakeOver,
       })
     ),
+    session?.active_thread_id
+      ? h(SessionSettingsPanel, {
+          session,
+          onUpdate: (payload) => {
+            void onUpdateSessionSettings?.(payload);
+          },
+        })
+      : null,
     h(
       "section",
       { className: "thread-shell" },
@@ -1339,18 +1353,39 @@ function RemoteTranscriptPanel({
     });
   }
 
+  // IntersectionObserver-driven prefetch (mirrors app.js for the local
+  // surface). The transcript scroll container is owned by this component, so
+  // we can scope the loader's lifetime to the effect rather than the page.
+  const historyLoaderRef = useRef(null);
+  useEffect(() => {
+    const transcript = transcriptRef.current;
+    if (!transcript) {
+      return undefined;
+    }
+    const loader = attachTranscriptHistoryLoader({
+      onLoad: () => maybeLoadOlderTranscriptHistory(),
+      scrollElement: transcript,
+    });
+    historyLoaderRef.current = loader;
+    loader.sync();
+    return () => {
+      historyLoaderRef.current = null;
+      loader.detach();
+    };
+  }, []);
+
+  // The sentinel can be replaced when the TranscriptContent branch swaps
+  // (entries ↔ empty ↔ ready). Re-sync after every render so the observer
+  // stays attached to whichever sentinel is currently live.
+  useLayoutEffect(() => {
+    historyLoaderRef.current?.sync();
+  });
+
   return h(
     "div",
     {
       className: "chat-thread",
       id: "remote-transcript",
-      onScroll: () => {
-        const transcript = transcriptRef.current;
-        if (!transcript || !session?.active_thread_id) {
-          return;
-        }
-        void maybeLoadOlderTranscriptHistory();
-      },
       ref: transcriptRef,
     },
     body

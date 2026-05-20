@@ -73,6 +73,7 @@ export const liveSurfacesSummary = document.querySelector("#live-surfaces-summar
 export const auditTimeline = document.querySelector("#audit-timeline");
 export const auditSummary = document.querySelector("#audit-summary");
 export const controlBanner = document.querySelector("#control-banner");
+export const sessionSettingsMount = document.querySelector("#session-settings-mount");
 export const controlSummary = document.querySelector("#control-summary");
 export const controlHint = document.querySelector("#control-hint");
 export const takeOverButton = document.querySelector("#take-over-button");

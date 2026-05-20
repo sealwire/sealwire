@@ -79,30 +79,23 @@ export function TranscriptState({
   approval = null,
   entries = [],
   hydrationLoading = false,
-  loadingLabel = "Loading earlier transcript...",
   onApprovalClick = null,
   onClick = null,
   onScroll = null,
   options = null,
 }) {
   return h(
-    React.Fragment,
-    null,
-    hydrationLoading
-      ? h("div", { className: "transcript-loading-banner" }, loadingLabel)
-      : null,
-    h(
-      "div",
-      {
-        className: "transcript-react-root",
-        onClick: onClick || onApprovalClick,
-        onScroll,
-      },
-      h(TranscriptContent, {
-        approval,
-        entries,
-        options,
-      })
-    )
+    "div",
+    {
+      className: "transcript-react-root",
+      onClick: onClick || onApprovalClick,
+      onScroll,
+    },
+    h(TranscriptContent, {
+      approval,
+      entries,
+      hydrationLoading,
+      options,
+    })
   );
 }

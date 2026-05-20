@@ -124,7 +124,7 @@ function renderMessageBody(text) {
   return renderMarkdown(text);
 }
 
-function UserEntry({ entry, isLatestUser = false }) {
+function UserEntryImpl({ entry, isLatestUser = false }) {
   // `data-latest-user-message` is the anchor that the scroll layer uses to
   // pin a freshly sent user message to the top of the viewport.
   return h(
@@ -138,7 +138,13 @@ function UserEntry({ entry, isLatestUser = false }) {
   );
 }
 
-function AgentEntry({ entry }) {
+// The transcript hydration store re-uses entry object references when an entry
+// hasn't changed, so React.memo's default Object.is comparison is enough to
+// skip the markdown parse + tree reconciliation on prepend. Only the streaming
+// tail entry gets a new reference and re-renders.
+const UserEntry = React.memo(UserEntryImpl);
+
+function AgentEntryImpl({ entry }) {
   return h(
     "article",
     transcriptEntryDomAttrs(entry, "chat-message chat-message-assistant"),
@@ -150,6 +156,8 @@ function AgentEntry({ entry }) {
     h("div", { className: "message-card" }, h("div", { className: "message-body" }, renderMessageBody(entry.text)))
   );
 }
+
+const AgentEntry = React.memo(AgentEntryImpl);
 
 function CommandEntry({ entry, options = null }) {
   const itemId = entry.item_id || "";
@@ -192,7 +200,7 @@ function CommandEntry({ entry, options = null }) {
   );
 }
 
-function ReasoningEntry({ entry }) {
+function ReasoningEntryImpl({ entry }) {
   const hasText = Boolean(String(entry.text || "").trim());
   return h(
     "article",
@@ -214,6 +222,8 @@ function ReasoningEntry({ entry }) {
     )
   );
 }
+
+const ReasoningEntry = React.memo(ReasoningEntryImpl);
 
 function normalizePreviewText(value) {
   return String(value || "").trim();
@@ -817,7 +827,10 @@ function ToolEntry({ entry, options = null }) {
 
   return h(
     "article",
-    transcriptEntryDomAttrs(entry, "chat-message chat-message-system"),
+    transcriptEntryDomAttrs(
+      entry,
+      `chat-message chat-message-system${isFileChange ? " chat-message-file-change" : ""}`
+    ),
     h(
       "div",
       { className: "message-card message-card-system message-card-tool" },
@@ -1127,7 +1140,50 @@ export function ApprovalCard({ approval, options = null }) {
   );
 }
 
-export function TranscriptContent({ approval = null, entries = [], options = null }) {
+const TRANSCRIPT_HISTORY_SENTINEL_ATTR = "data-transcript-history-sentinel";
+const TRANSCRIPT_HISTORY_SKELETON_COUNT = 3;
+
+export const TRANSCRIPT_HISTORY_SENTINEL_ATTRIBUTE = TRANSCRIPT_HISTORY_SENTINEL_ATTR;
+
+function TranscriptHistorySkeleton() {
+  // Rendered above the first transcript entry while older pages are being
+  // fetched. They occupy the same vertical real estate as real messages, so
+  // when the fetch resolves, the real entries replace the skeletons in place
+  // instead of "popping in" above the existing content.
+  const rows = [];
+  for (let index = 0; index < TRANSCRIPT_HISTORY_SKELETON_COUNT; index += 1) {
+    rows.push(
+      h(
+        "div",
+        {
+          "aria-hidden": "true",
+          className: `transcript-history-skeleton transcript-history-skeleton-${index % 2 === 0 ? "agent" : "user"}`,
+          key: `skeleton-${index}`,
+        },
+        h("div", { className: "transcript-history-skeleton-line transcript-history-skeleton-line-1" }),
+        h("div", { className: "transcript-history-skeleton-line transcript-history-skeleton-line-2" }),
+        h("div", { className: "transcript-history-skeleton-line transcript-history-skeleton-line-3" })
+      )
+    );
+  }
+  return h(
+    "div",
+    {
+      "aria-busy": "true",
+      "aria-label": "Loading earlier transcript",
+      className: "transcript-history-skeletons",
+      role: "status",
+    },
+    ...rows
+  );
+}
+
+export function TranscriptContent({
+  approval = null,
+  entries = [],
+  hydrationLoading = false,
+  options = null,
+}) {
   const groupedItems = React.useMemo(() => groupToolEntries(entries), [entries]);
   const latestUserEntryId = React.useMemo(() => {
     for (let index = entries.length - 1; index >= 0; index -= 1) {
@@ -1139,6 +1195,22 @@ export function TranscriptContent({ approval = null, entries = [], options = nul
     return "";
   }, [entries]);
   const nodes = [];
+
+  // Top sentinel: the IntersectionObserver in render-session.js / react-app.js
+  // watches this node to start prefetching older pages *before* the user
+  // reaches the top edge (rootMargin ~600px). It has zero height so the
+  // sentinel itself doesn't add visual space.
+  nodes.push(
+    h("div", {
+      className: "transcript-history-sentinel",
+      key: "transcript-history-sentinel",
+      [TRANSCRIPT_HISTORY_SENTINEL_ATTR]: "true",
+    })
+  );
+
+  if (hydrationLoading) {
+    nodes.push(h(TranscriptHistorySkeleton, { key: "transcript-history-skeleton" }));
+  }
 
   groupedItems.forEach((item, index) => {
     if (item?.type === "tool-group") {
@@ -1182,5 +1254,27 @@ export function TranscriptContent({ approval = null, entries = [], options = nul
     nodes.push(h(ApprovalCard, { approval, key: "approval", options }));
   }
 
-  return h("div", { className: "thread-content" }, ...nodes);
+  // The trailing bottom spacer (CSS `.thread-content[data-bottom-spacer]::after`)
+  // exists so a freshly sent user message can be scroll-anchored at the top of
+  // the viewport while the assistant streams below it. Once the turn settles
+  // (last entry is a completed agent message), the spacer is no longer needed
+  // and would just show as awkward whitespace under finished conversations.
+  const needsBottomSpacer = (() => {
+    if (approval) return true;
+    if (!entries.length) return false;
+    const last = entries[entries.length - 1];
+    if (!last) return false;
+    if (last.kind === "user_text") return true;
+    const status = String(last.status || "").toLowerCase();
+    return status !== "" && status !== "completed";
+  })();
+
+  return h(
+    "div",
+    {
+      className: "thread-content",
+      ...(needsBottomSpacer ? { "data-bottom-spacer": "true" } : {}),
+    },
+    ...nodes
+  );
 }

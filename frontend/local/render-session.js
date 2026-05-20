@@ -18,6 +18,7 @@ import {
   sendButton,
   sessionHistoryDrawer,
   sessionMeta,
+  sessionSettingsMount,
   statusBadge,
   stopButton,
   threadsCount,
@@ -47,6 +48,7 @@ import { shouldShowTranscriptLoading } from "./transcript-loading.js";
 import {
   ConversationEmptyState,
 } from "../shared/conversation.js";
+import { SessionSettingsPanel } from "../shared/session-settings-panel.js";
 import {
   AuditList,
   ControlBannerContent,
@@ -83,6 +85,11 @@ function renderReactContent(element, content) {
   });
 }
 
+// Fires after every conversation render so the IntersectionObserver wiring
+// in app.js can re-attach when the React tree swaps the transcript branch
+// (entries ↔ empty ↔ ready). Set via `setTranscriptHistorySync` once at boot.
+let transcriptHistorySync = null;
+
 function renderConversationContent(content) {
   if (!transcript) {
     return;
@@ -97,6 +104,14 @@ function renderConversationContent(content) {
   flushSync(() => {
     transcriptRoot.render(content);
   });
+
+  if (typeof transcriptHistorySync === "function") {
+    transcriptHistorySync();
+  }
+}
+
+function setTranscriptHistorySync(handler) {
+  transcriptHistorySync = typeof handler === "function" ? handler : null;
 }
 
 export function createSessionRenderer({
@@ -134,6 +149,7 @@ export function createSessionRenderer({
   brokerStatusLabel,
   pairedDeviceCountLabel,
   ensureConversationTranscript,
+  updateSessionSettings,
 }) {
   function renderSession(session) {
     state.session = session;
@@ -217,6 +233,7 @@ export function createSessionRenderer({
     }
     announceNewPendingPairings(pendingPairings);
     renderControlBanner(session);
+    renderSessionSettingsPanel(session);
     renderPendingActionBanner(approval, pendingPairings);
     renderWorkspaceSuggestions(session);
     renderTranscript(session, approval);
@@ -532,6 +549,25 @@ export function createSessionRenderer({
     ];
 
     renderReactContent(overviewSecurityBadges, h(OverviewBadges, { badges: securityBadges }));
+  }
+
+  function renderSessionSettingsPanel(session) {
+    if (!sessionSettingsMount) {
+      return;
+    }
+    if (!session?.active_thread_id || !isViewingConversation(session)) {
+      sessionSettingsMount.hidden = true;
+      renderReactContent(sessionSettingsMount, null);
+      return;
+    }
+    sessionSettingsMount.hidden = false;
+    renderReactContent(
+      sessionSettingsMount,
+      h(SessionSettingsPanel, {
+        session,
+        onUpdate: (payload) => updateSessionSettings?.(payload),
+      })
+    );
   }
 
   function renderControlBanner(session) {
@@ -1071,6 +1107,7 @@ export function createSessionRenderer({
     renderThreads,
     restoreThreadHistoryScroll,
     runViewTransition,
+    setTranscriptHistorySync,
     syncThreadHistoryScroll,
     syncThreadSelection,
   };

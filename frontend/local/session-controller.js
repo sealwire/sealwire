@@ -591,9 +591,13 @@ export function createSessionController({
   }
 
   async function maybeLoadOlderTranscript() {
+    // The IntersectionObserver in app.js gates *when* this is called (sentinel
+    // approaches the top edge with a 600px rootMargin), so we no longer
+    // hand-roll a scrollTop threshold here — the observer's `rootMargin` is
+    // already the prefetch trigger. We still bail when there's nothing to
+    // load, no active thread, or the user has navigated away.
     if (
       !transcript ||
-      transcript.scrollTop > 80 ||
       !state.session?.active_thread_id ||
       !isViewingConversation(state.session) ||
       state.transcriptHydrationOlderCursor == null
@@ -924,6 +928,41 @@ export function createSessionController({
       logLine(`Resume failed: ${error.message}`);
     } finally {
       state.pendingThreadHistoryScrollTop = null;
+    }
+  }
+
+  async function updateSessionSettings({ approval_policy, sandbox } = {}) {
+    if (!state.session?.active_thread_id) {
+      return;
+    }
+    const body = { device_id: state.deviceId };
+    if (typeof approval_policy === "string" && approval_policy) {
+      body.approval_policy = approval_policy;
+    }
+    if (typeof sandbox === "string" && sandbox) {
+      body.sandbox = sandbox;
+    }
+    if (!("approval_policy" in body) && !("sandbox" in body)) {
+      return;
+    }
+
+    try {
+      const response = await apiFetch("/api/session/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload?.error?.message || "Failed to update session settings");
+      }
+      applySessionSnapshot(payload.data);
+      const parts = [];
+      if (body.approval_policy) parts.push(`approval=${body.approval_policy}`);
+      if (body.sandbox) parts.push(`sandbox=${body.sandbox}`);
+      logLine(`Updated session settings: ${parts.join(", ")}`);
+    } catch (error) {
+      logLine(`Settings update failed: ${error.message}`);
     }
   }
 
@@ -1348,5 +1387,6 @@ export function createSessionController({
     toggleTranscriptEntry,
     toggleTranscriptExpandKey,
     applyFileChange,
+    updateSessionSettings,
   };
 }

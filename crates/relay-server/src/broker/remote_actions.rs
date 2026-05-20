@@ -11,7 +11,7 @@ use crate::{
         ReadThreadEntriesInput, ReadThreadEntryDetailInput, ReadThreadTranscriptInput,
         ResumeSessionInput, SendMessageInput, SessionSnapshot, StartSessionInput, StopTurnInput,
         TakeOverInput, ThreadEntriesResponse, ThreadEntryDetailResponse, ThreadTranscriptResponse,
-        ThreadsQuery, ThreadsResponse,
+        ThreadsQuery, ThreadsResponse, UpdateSessionSettingsInput,
     },
     state::{AppState, ApprovalError, CachedRemoteActionResult, RemoteActionReplayDecision},
 };
@@ -46,6 +46,9 @@ pub(super) enum RemoteActionRequest {
     },
     ResumeSession {
         input: ResumeSessionInput,
+    },
+    UpdateSessionSettings {
+        input: UpdateSessionSettingsInput,
     },
     SendMessage {
         input: SendMessageInput,
@@ -88,6 +91,7 @@ impl RemoteActionRequest {
             Self::ClaimDevice { .. } => RemoteActionKind::ClaimDevice,
             Self::StartSession { .. } => RemoteActionKind::StartSession,
             Self::ResumeSession { .. } => RemoteActionKind::ResumeSession,
+            Self::UpdateSessionSettings { .. } => RemoteActionKind::UpdateSessionSettings,
             Self::SendMessage { .. } => RemoteActionKind::SendMessage,
             Self::StopTurn { .. } => RemoteActionKind::StopTurn,
             Self::TakeOver { .. } => RemoteActionKind::TakeOver,
@@ -119,6 +123,10 @@ impl RemoteActionRequest {
             Self::ResumeSession { mut input } => {
                 input.device_id = Some(device_id);
                 Self::ResumeSession { input }
+            }
+            Self::UpdateSessionSettings { mut input } => {
+                input.device_id = Some(device_id);
+                Self::UpdateSessionSettings { input }
             }
             Self::SendMessage { mut input } => {
                 input.device_id = Some(device_id);
@@ -160,6 +168,7 @@ pub(super) enum RemoteActionKind {
     ClaimDevice,
     StartSession,
     ResumeSession,
+    UpdateSessionSettings,
     SendMessage,
     StopTurn,
     TakeOver,
@@ -180,6 +189,7 @@ impl RemoteActionKind {
             Self::ClaimDevice { .. } => "claim_device",
             Self::StartSession => "start_session",
             Self::ResumeSession => "resume_session",
+            Self::UpdateSessionSettings => "update_session_settings",
             Self::SendMessage => "send_message",
             Self::StopTurn => "stop_turn",
             Self::TakeOver => "take_over",
@@ -792,6 +802,10 @@ async fn execute_remote_action(
             .map(|_| RemoteActionOutcome::default()),
         RemoteActionRequest::ResumeSession { input } => state
             .resume_session(input)
+            .await
+            .map(|_| RemoteActionOutcome::default()),
+        RemoteActionRequest::UpdateSessionSettings { input } => state
+            .update_session_settings(input)
             .await
             .map(|_| RemoteActionOutcome::default()),
         RemoteActionRequest::SendMessage { input } => state
@@ -1942,9 +1956,9 @@ fn remote_action_result_snapshot(
 
 fn remote_action_result_kind(action: RemoteActionKind) -> RemoteActionResultKind {
     match action {
-        RemoteActionKind::StartSession | RemoteActionKind::ResumeSession => {
-            RemoteActionResultKind::RemoteSessionResult
-        }
+        RemoteActionKind::StartSession
+        | RemoteActionKind::ResumeSession
+        | RemoteActionKind::UpdateSessionSettings => RemoteActionResultKind::RemoteSessionResult,
         RemoteActionKind::ClaimChallenge
         | RemoteActionKind::ClaimDevice
         | RemoteActionKind::Heartbeat
@@ -1964,7 +1978,9 @@ fn remote_action_result_kind(action: RemoteActionKind) -> RemoteActionResultKind
 fn remote_action_result_allows_snapshot(action: RemoteActionKind) -> bool {
     matches!(
         action,
-        RemoteActionKind::StartSession | RemoteActionKind::ResumeSession
+        RemoteActionKind::StartSession
+            | RemoteActionKind::ResumeSession
+            | RemoteActionKind::UpdateSessionSettings
     )
 }
 

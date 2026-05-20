@@ -305,6 +305,7 @@ function ThreadPanel() {
       ),
       h("button", { className: "header-button control-button", id: "take-over-button", type: "button" }, "Take over")
     ),
+    h("div", { className: "session-settings-mount", hidden: true, id: "session-settings-mount" }),
     h(
       "section",
       { className: "thread-shell" },

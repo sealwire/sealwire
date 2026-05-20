@@ -33,11 +33,56 @@ function buildMetaPlugin() {
   };
 }
 
+function devReloadPlugin() {
+  const enabled = process.env.RELAY_DEV_RELOAD === "1";
+  const reloadPort = process.env.RELAY_DEV_RELOAD_PORT || "5174";
+  if (!enabled) {
+    return { name: "agent-relay-dev-reload-disabled" };
+  }
+  const clientScript = `(() => {
+  const port = ${JSON.stringify(reloadPort)};
+  let lastId = null;
+  let es = null;
+  function connect() {
+    const url = "http://" + location.hostname + ":" + port + "/dev/reload";
+    es = new EventSource(url);
+    es.addEventListener("reload", (ev) => {
+      if (lastId === null) {
+        lastId = ev.data;
+        return;
+      }
+      if (ev.data !== lastId) {
+        console.info("[dev:reload] new build " + ev.data + ", reloading");
+        location.reload();
+      }
+    });
+    es.addEventListener("error", () => {
+      try { es.close(); } catch {}
+      setTimeout(connect, 1000);
+    });
+  }
+  connect();
+})();`;
+  return {
+    name: "agent-relay-dev-reload",
+    transformIndexHtml() {
+      return [
+        {
+          tag: "script",
+          attrs: { type: "module" },
+          children: clientScript,
+          injectTo: "head",
+        },
+      ];
+    },
+  };
+}
+
 export default defineConfig({
   root: resolve(__dirname, "frontend"),
   base: "/static/",
   publicDir: resolve(__dirname, "frontend/public"),
-  plugins: [buildMetaPlugin()],
+  plugins: [buildMetaPlugin(), devReloadPlugin()],
   server: {
     host: true,
     port: vitePort,

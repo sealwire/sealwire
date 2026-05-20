@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { readFileSync, unwatchFile, watchFile } from "node:fs";
+import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import process from "node:process";
@@ -7,6 +8,7 @@ import process from "node:process";
 const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
 const relayPort = process.env.RELAY_DEV_SERVER_PORT || "8787";
 const brokerPort = process.env.RELAY_DEV_BROKER_PORT || "8788";
+const reloadPort = process.env.RELAY_DEV_RELOAD_PORT || "5174";
 const localhostOnly =
   process.env.RELAY_DEV_LOCALHOST_ONLY === "1" ||
   process.env.RELAY_DEV_LOCALHOST_ONLY === "true";
@@ -22,6 +24,12 @@ const sharedEnv = {
   ...process.env,
   RELAY_DEV_SERVER_PORT: relayPort,
   RELAY_DEV_BROKER_PORT: brokerPort,
+};
+
+const buildEnv = {
+  ...sharedEnv,
+  RELAY_DEV_RELOAD: "1",
+  RELAY_DEV_RELOAD_PORT: reloadPort,
 };
 
 const brokerEnv = {
@@ -47,6 +55,9 @@ const relayEnv = {
 
 const children = [];
 let shuttingDown = false;
+let reloadServer = null;
+const reloadClients = new Set();
+let lastBuildId = null;
 
 function spawnManaged(name, command, args, env) {
   const child = spawn(command, args, {
@@ -71,6 +82,13 @@ function shutdown(exitCode = 0) {
   }
   shuttingDown = true;
   unwatchFile(buildMetaPath);
+  if (reloadServer) {
+    reloadServer.close();
+    for (const client of reloadClients) {
+      try { client.end(); } catch {}
+    }
+    reloadClients.clear();
+  }
   for (const child of children) {
     if (!child.killed && child.exitCode === null) {
       child.kill("SIGTERM");
@@ -92,10 +110,13 @@ process.on("SIGTERM", () => shutdown(0));
 await ensurePortsAreAvailable([
   { name: "relay-server", port: relayPort },
   { name: "relay-broker", port: brokerPort },
+  { name: "dev-reload", port: reloadPort },
 ]);
 
+startReloadServer();
+
 console.log("[dev:full] Building frontend assets for relay-server and relay-broker...");
-await runCommand(npmCommand, ["run", "build"], sharedEnv);
+await runCommand(npmCommand, ["run", "build"], buildEnv);
 logCurrentBuildMeta("Initial frontend build");
 watchFrontendBuildMeta();
 
@@ -116,7 +137,7 @@ spawnManaged(
   "frontend-build",
   npmCommand,
   ["run", "build", "--", "--watch"],
-  sharedEnv
+  buildEnv
 );
 spawnManaged("relay-broker", "cargo", ["run", "-p", "relay-broker"], brokerEnv);
 spawnManaged("relay-server", "cargo", ["run", "-p", "relay-server"], relayEnv);
@@ -194,7 +215,56 @@ function logCurrentBuildMeta(prefix) {
   try {
     const meta = JSON.parse(readFileSync(buildMetaPath, "utf8"));
     console.log(`[dev:full] ${prefix}: ${meta.buildId} (${meta.builtAtIso})`);
+    lastBuildId = meta.buildId;
+    broadcastReload(meta.buildId);
   } catch (error) {
     console.warn(`[dev:full] ${prefix}, but build metadata could not be read: ${error.message}`);
+  }
+}
+
+function startReloadServer() {
+  const server = http.createServer((req, res) => {
+    if (req.url !== "/dev/reload") {
+      res.writeHead(404).end();
+      return;
+    }
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "Access-Control-Allow-Origin": "*",
+      "X-Accel-Buffering": "no",
+    });
+    res.write(": connected\n\n");
+    if (lastBuildId) {
+      res.write(`event: reload\ndata: ${lastBuildId}\n\n`);
+    }
+    const keepalive = setInterval(() => {
+      res.write(": ping\n\n");
+    }, 15000);
+    keepalive.unref();
+    reloadClients.add(res);
+    req.on("close", () => {
+      clearInterval(keepalive);
+      reloadClients.delete(res);
+    });
+  });
+  server.on("error", (err) => {
+    console.warn(`[dev:full] dev-reload server error: ${err.message}`);
+  });
+  server.listen(Number(reloadPort), "0.0.0.0", () => {
+    console.log(`[dev:full] Dev reload SSE: http://127.0.0.1:${reloadPort}/dev/reload`);
+  });
+  reloadServer = server;
+}
+
+function broadcastReload(buildId) {
+  const payload = `event: reload\ndata: ${buildId}\n\n`;
+  for (const client of reloadClients) {
+    try {
+      client.write(payload);
+    } catch {
+      reloadClients.delete(client);
+    }
   }
 }

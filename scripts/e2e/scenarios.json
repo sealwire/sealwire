@@ -6,6 +6,7 @@
       "local-allowed-roots",
       "local-file-diff",
       "local-history-scroll",
+      "local-transcript-load",
       "local-thread-groups"
     ],
     "local-full": [
@@ -14,6 +15,7 @@
       "local-allowed-roots",
       "local-file-diff",
       "local-history-scroll",
+      "local-transcript-load",
       "local-thread-groups",
       "local-delete"
     ],
@@ -80,6 +82,13 @@
       "provider": "fake-compatible",
       "transport": "local",
       "coverage": ["history"]
+    },
+    "local-transcript-load": {
+      "script": "browser-local-transcript-load-e2e.mjs",
+      "tier": "core",
+      "provider": "fake-compatible",
+      "transport": "local",
+      "coverage": ["transcript-load"]
     },
     "local-thread-groups": {
       "script": "browser-local-thread-groups-e2e.mjs",
