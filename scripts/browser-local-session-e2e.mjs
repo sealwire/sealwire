@@ -93,13 +93,15 @@ async function main() {
         const status = document.querySelector("#status-badge")?.textContent || "";
         return (
           title.includes(expectedWorkspace) &&
-          subtitle.toLowerCase().includes("live thread") &&
+          subtitle.toLowerCase().includes("live") &&
           status.trim().length > 0
         );
       },
       path.basename(ROOT),
       { timeout: LOCAL_TIMEOUT_MS }
     );
+    // Session details is a secondary action behind the header overflow menu — open it first.
+    await page.click("#header-overflow-button");
     await page.click("#open-session-details");
     await page.waitForFunction(() => {
       const modal = document.querySelector("#session-details-modal");

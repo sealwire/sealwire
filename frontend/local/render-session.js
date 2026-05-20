@@ -158,17 +158,15 @@ export function createSessionRenderer({
     if (viewingConversation && session.active_thread_id) {
       const threadLabel =
         activeThread?.name || activeThread?.preview || shortId(session.active_thread_id);
-      workspaceSubtitle.textContent = `Live thread: ${threadLabel}`;
+      workspaceSubtitle.textContent = `live · ${threadLabel}`;
     } else if (session.active_thread_id) {
       const threadLabel =
         activeThread?.name || activeThread?.preview || shortId(session.active_thread_id);
-      workspaceSubtitle.textContent = `A live session is running in ${workspaceName || "this workspace"}. Open ${threadLabel} only when you want the conversation view.`;
+      workspaceSubtitle.textContent = `live thread · ${threadLabel}`;
     } else if (workspace) {
-      workspaceSubtitle.textContent =
-        "Relay is standing by in this workspace. Watch control, trust, and audit state here before starting or resuming.";
+      workspaceSubtitle.textContent = "standby";
     } else {
-      workspaceSubtitle.textContent =
-        "Choose a workspace to bring the relay into focus, then use this page as the local control console.";
+      workspaceSubtitle.textContent = "no workspace selected";
     }
 
     if (chatShell) {
@@ -320,7 +318,11 @@ export function createSessionRenderer({
       return;
     }
 
-    const shouldShow = Boolean(session?.active_thread_id && session.model);
+    // Model is session-scoped — only relevant while actually viewing a conversation.
+    // On the console/home view, the model badge is noise (session state leaking into
+    // the monitor surface). Session details modal still surfaces it on demand.
+    const inConversationView = chatShell?.dataset.view === "conversation";
+    const shouldShow = Boolean(inConversationView && session?.active_thread_id && session.model);
     const provider = providerLabel(session?.provider);
     const modelLabel = provider ? `${provider} · ${session.model}` : session?.model || "";
     localModelBadge.hidden = !shouldShow;
@@ -347,15 +349,16 @@ export function createSessionRenderer({
 
     const approvedCount = approvedDeviceCount(session);
     const pendingCount = session?.pending_pairing_requests?.length || 0;
-    const activeController = controllerStateLabel(session);
+
+    const deviceCount = surfaces.length;
+    const parts = [`${deviceCount} device${deviceCount === 1 ? "" : "s"}`];
+    if (approvedCount > 0) parts.push(`${approvedCount} trusted`);
+    if (pendingCount > 0) parts.push(`${pendingCount} pending`);
+    if (revokedCount > 0) parts.push(`${revokedCount} revoked`);
 
     renderReactContent(
       liveSurfacesSummary,
-      h(
-        TextContent,
-        null,
-        `${surfaces.length} active surface${surfaces.length === 1 ? "" : "s"} / ${approvedCount} trusted / ${pendingCount} pending / controller ${activeController}${revokedCount > 0 ? ` / ${revokedCount} revoked hidden` : ""}`
-      )
+      h(TextContent, null, parts.join(" · "))
     );
 
     renderReactContent(liveSurfacesList, h(SurfaceCards, { surfaces }));
@@ -424,10 +427,7 @@ export function createSessionRenderer({
     }
 
     if (!entries.length) {
-      renderReactContent(
-        auditSummary,
-        h(TextContent, null, "Recent relay, control, and security events will appear here.")
-      );
+      renderReactContent(auditSummary, h(TextContent, null, ""));
       renderReactContent(auditTimeline, h(AuditList));
       return;
     }
@@ -438,15 +438,12 @@ export function createSessionRenderer({
     const significantCount = visibleEntries.filter(
       (entry) => classifyAuditEntry(entry) !== "neutral"
     ).length;
+    const summaryParts = [`${visibleEntries.length} events`];
+    if (significantCount > 0) summaryParts.push(`${significantCount} notable`);
+    if (hiddenDebugCount > 0) summaryParts.push(`${hiddenDebugCount} hidden`);
     renderReactContent(
       auditSummary,
-      h(
-        TextContent,
-        null,
-        significantCount > 0
-          ? `${visibleEntries.length} recent events / ${significantCount} notable${hiddenDebugCount > 0 ? ` / ${hiddenDebugCount} debug hidden` : ""}`
-          : `${visibleEntries.length} recent relay events${hiddenDebugCount > 0 ? ` / ${hiddenDebugCount} debug hidden` : ""}`
-      )
+      h(TextContent, null, summaryParts.join(" · "))
     );
 
     if (!visibleEntries.length) {
@@ -525,19 +522,14 @@ export function createSessionRenderer({
       return;
     }
 
+    // Trust posture only — Access + Sharing + Remote. Device count lives in the Devices hero;
+    // Provider/Model/Control are session-scoped (surfaced in the chat header or transcript).
     const securityBadges = [
       ...(pendingPairings > 0 ? [overviewBadge("Pending", String(pendingPairings))] : []),
       overviewBadge("Access", securityModeLabel(session)),
       overviewBadge("Sharing", contentVisibilityLabel(session)),
       overviewBadge("Remote", brokerStatusLabel(session)),
-      overviewBadge("Devices", pairedDeviceCountLabel(session)),
     ];
-
-    if (session?.active_thread_id) {
-      securityBadges.push(overviewBadge("Provider", providerLabel(session.provider) || "Unknown"));
-      securityBadges.push(overviewBadge("Model", session.model || "Unknown"));
-      securityBadges.push(overviewBadge("Control", controllerStateLabel(session)));
-    }
 
     renderReactContent(overviewSecurityBadges, h(OverviewBadges, { badges: securityBadges }));
   }

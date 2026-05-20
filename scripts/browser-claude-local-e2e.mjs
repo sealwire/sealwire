@@ -134,6 +134,8 @@ async function main() {
       .getAttribute("aria-label");
     assert.equal(providerDotLabel, "Claude Code");
 
+    // Session details is a secondary action behind the header overflow menu — open it first.
+    await page.click("#header-overflow-button");
     await page.click("#open-session-details");
     await page.waitForFunction(
       () => {

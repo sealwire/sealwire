@@ -109,6 +109,18 @@ async function main() {
       { timeout: LOCAL_TIMEOUT_MS }
     );
 
+    // Threads are paginated 10 at a time — expand to show all 20 so the list overflows
+    // the sidebar drawer.
+    await page.waitForFunction(
+      () => document.querySelectorAll("#threads-list [data-thread-id]").length >= 10,
+      null,
+      { timeout: LOCAL_TIMEOUT_MS }
+    );
+    const showMoreButton = page.locator("#threads-list .thread-group-show-more").first();
+    if (await showMoreButton.count()) {
+      await showMoreButton.click();
+    }
+
     await page.waitForFunction(() => {
       const list = document.querySelector("#threads-list");
       const items = document.querySelectorAll("#threads-list [data-thread-id]");

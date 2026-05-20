@@ -1,6 +1,8 @@
 @import "./conversation.css";
 
 :root {
+  color-scheme: dark;
+
   /* Surfaces — neutral near-black, no blue tint */
   --surface-0: #0a0a0b;
   --surface-1: #131316;
@@ -88,6 +90,103 @@
   --t-lg: 16px;
 
   --focus-ring: 0 0 0 2px var(--accent);
+
+  /* Floating popover (build badge etc.) */
+  --popover-bg: rgba(10, 14, 20, 0.84);
+  --popover-text: rgba(241, 245, 249, 0.92);
+
+  /* Glass / inset hairlines on dark surfaces */
+  --inset-highlight: rgba(255, 255, 255, 0.05);
+  --surface-glass: rgba(255, 255, 255, 0.05);
+
+  /* Scrims */
+  --modal-backdrop: rgba(0, 0, 0, 0.7);
+  --drawer-backdrop: rgba(15, 23, 42, 0.58);
+
+  /* Diff highlights */
+  --diff-add-bg: rgba(37, 128, 84, 0.16);
+  --diff-del-bg: rgba(180, 58, 58, 0.16);
+  --diff-meta-bg: rgba(255, 255, 255, 0.035);
+
+  /* Provider brand accents — Claude (orange) / Codex (cyan) */
+  --provider-claude-fg: #fbbf77;
+  --provider-claude-fg-outline: #fed7aa;
+  --provider-claude-bg: rgba(234, 88, 12, 0.20);
+  --provider-claude-border: color-mix(in srgb, #ea580c 28%, var(--border-subtle));
+  --provider-claude-fill: color-mix(in srgb, #ea580c 18%, transparent);
+  --provider-codex-fg: #67e8f9;
+  --provider-codex-bg: rgba(8, 145, 178, 0.20);
+  --provider-codex-border: color-mix(in srgb, #0891b2 24%, var(--border-subtle));
+  --provider-codex-fill: color-mix(in srgb, #0891b2 18%, transparent);
+}
+
+:root[data-theme="light"] {
+    color-scheme: light;
+
+    /* Surfaces — near-white, neutral */
+    --surface-0: #fafafa;
+    --surface-1: #ffffff;
+    --surface-2: #f4f4f5;
+    --surface-3: #e4e4e7;
+    --surface-overlay: rgba(255, 255, 255, 0.72);
+
+    /* Borders — hairline darks on light */
+    --border-faint: rgba(0, 0, 0, 0.05);
+    --border-soft:  rgba(0, 0, 0, 0.09);
+    --border-firm:  rgba(0, 0, 0, 0.14);
+
+    /* Typography — invert lightness, keep ramp */
+    --text-1: #18181b;
+    --text-2: #52525b;
+    --text-3: #71717a;
+    --text-faint: #a1a1aa;
+
+    /* Accent — darker indigo for AA contrast on white */
+    --accent: #6366f1;
+    --accent-hover-color: #4f46e5;
+    --accent-soft-bg: rgba(99, 102, 241, 0.10);
+
+    /* Semantic — darker hues for AA contrast on light */
+    --ok-fg:  #16a34a;
+    --ok-bg:  rgba(22, 163, 74, 0.10);
+    --warn-fg:#ca8a04;
+    --warn-bg:rgba(202, 138, 4, 0.10);
+    --err-fg: #dc2626;
+    --err-bg: rgba(220, 38, 38, 0.10);
+    --status-neutral-bg: rgba(0, 0, 0, 0.06);
+
+    /* Shadows — shorter, softer on light */
+    --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.06);
+    --shadow-2: 0 6px 16px rgba(0, 0, 0, 0.08);
+    --shadow-3: 0 12px 32px rgba(0, 0, 0, 0.10);
+
+    /* Popover flips to light */
+    --popover-bg: rgba(255, 255, 255, 0.92);
+    --popover-text: rgba(24, 24, 27, 0.92);
+
+    /* Glass / inset hairlines flip to dark */
+    --inset-highlight: rgba(0, 0, 0, 0.04);
+    --surface-glass: rgba(0, 0, 0, 0.05);
+
+    /* Scrims — lighter on light theme */
+    --modal-backdrop: rgba(0, 0, 0, 0.4);
+    --drawer-backdrop: rgba(0, 0, 0, 0.3);
+
+    /* Diff highlights — brighter on light bg */
+    --diff-add-bg: rgba(34, 197, 94, 0.14);
+    --diff-del-bg: rgba(239, 68, 68, 0.14);
+    --diff-meta-bg: rgba(0, 0, 0, 0.035);
+
+    /* Provider brand accents — darker text for AA contrast on light */
+    --provider-claude-fg: #c2410c;
+    --provider-claude-fg-outline: #9a3412;
+    --provider-claude-bg: rgba(234, 88, 12, 0.12);
+    --provider-claude-border: color-mix(in srgb, #ea580c 35%, var(--border-subtle));
+    --provider-claude-fill: color-mix(in srgb, #ea580c 12%, transparent);
+    --provider-codex-fg: #0e7490;
+    --provider-codex-bg: rgba(8, 145, 178, 0.12);
+    --provider-codex-border: color-mix(in srgb, #0891b2 35%, var(--border-subtle));
+    --provider-codex-fill: color-mix(in srgb, #0891b2 12%, transparent);
 }
 
 * {
@@ -137,11 +236,11 @@ body[data-remote-nav-open="true"] {
   z-index: 80;
   max-width: min(72vw, 420px);
   padding: 7px 10px;
-  border: 1px solid rgba(255, 255, 255, 0.16);
+  border: 1px solid var(--border-firm);
   border-radius: 999px;
-  background: rgba(10, 14, 20, 0.84);
-  color: rgba(241, 245, 249, 0.92);
-  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.32);
+  background: var(--popover-bg);
+  color: var(--popover-text);
+  box-shadow: var(--shadow-2);
   backdrop-filter: blur(10px);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   font-size: 11px;
@@ -184,6 +283,22 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   ::view-transition-old(root),
   ::view-transition-new(root) {
     animation-duration: 140ms;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation-duration: 0.01ms !important;
   }
 }
 
@@ -361,11 +476,17 @@ button:disabled {
   gap: 12px;
 }
 
-.launch-panel, .remote-access-shell {
+.launch-panel {
+  padding: 0;
+  border-radius: 0;
+  border: 0;
+  background: transparent;
+}
+.remote-access-shell {
   padding: 16px;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border-subtle);
-  background: var(--bg-base);
+  border-radius: var(--r-md);
+  border: 1px solid var(--border-faint);
+  background: var(--surface-1);
 }
 
 .auth-form {
@@ -381,19 +502,18 @@ button:disabled {
 }
 
 .launch-title {
-  margin: 0;
-  font-size: 18px;
-  font-weight: 600;
-  line-height: 1.25;
-  letter-spacing: -0.01em;
-  color: var(--text-1);
+  margin: 0 0 10px;
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  font-weight: 500;
+  letter-spacing: 0;
+  line-height: 1.3;
+  text-transform: lowercase;
+  color: var(--text-3);
 }
 
 .launch-body {
-  margin: 0;
-  font-size: var(--t-md);
-  line-height: 1.6;
-  color: var(--text-2);
+  display: none;
 }
 
 .launch-actions {
@@ -465,13 +585,24 @@ input:focus, textarea:focus, select:focus {
   gap: 12px;
 }
 
+.sidebar-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: auto;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-faint);
+}
+
 .sidebar-drawer {
   display: grid;
-  gap: 12px;
-  padding: 14px 16px;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border-subtle);
-  background: color-mix(in srgb, var(--bg-base) 92%, white 8%);
+  gap: 10px;
+  padding: 12px 0 0;
+  border-radius: 0;
+  border: 0;
+  border-top: 1px solid var(--border-faint);
+  background: transparent;
+  margin-top: 6px;
 }
 
 .sidebar-drawer-summary {
@@ -586,9 +717,13 @@ input:focus, textarea:focus, select:focus {
 
 .thread-group-name {
   min-width: 0;
-  font-size: 15px;
+  flex: 1 1 auto;
+  font-size: 14px;
   font-weight: 600;
   color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .thread-group-chevron {
@@ -665,12 +800,12 @@ input:focus, textarea:focus, select:focus {
   white-space: nowrap;
 }
 .conversation-provider-badge.is-claude-code {
-  color: #fbbf77;
-  background: rgba(234, 88, 12, 0.20);
+  color: var(--provider-claude-fg);
+  background: var(--provider-claude-bg);
 }
 .conversation-provider-badge.is-codex {
-  color: #67e8f9;
-  background: rgba(8, 145, 178, 0.20);
+  color: var(--provider-codex-fg);
+  background: var(--provider-codex-bg);
 }
 .conversation-item:hover {
   background: var(--surface-2);
@@ -721,14 +856,14 @@ input:focus, textarea:focus, select:focus {
   white-space: nowrap;
 }
 .thread-provider-badge.is-claude-code {
-  color: #fed7aa;
-  border-color: color-mix(in srgb, #ea580c 28%, var(--border-subtle));
-  background: color-mix(in srgb, #ea580c 18%, transparent);
+  color: var(--provider-claude-fg-outline);
+  border-color: var(--provider-claude-border);
+  background: var(--provider-claude-fill);
 }
 .thread-provider-badge.is-codex {
-  color: #67e8f9;
-  border-color: color-mix(in srgb, #0891b2 24%, var(--border-subtle));
-  background: color-mix(in srgb, #0891b2 18%, transparent);
+  color: var(--provider-codex-fg);
+  border-color: var(--provider-codex-border);
+  background: var(--provider-codex-fill);
 }
 .conversation-preview {
   display: none;
@@ -904,6 +1039,55 @@ input:focus, textarea:focus, select:focus {
   border-color: transparent;
 }
 
+.overflow-menu-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  font-size: var(--t-md);
+  font-weight: 500;
+  color: var(--text-1);
+}
+
+.overflow-menu-row-label {
+  color: var(--text-secondary);
+}
+
+.theme-picker {
+  display: inline-flex;
+  padding: 2px;
+  gap: 2px;
+  background: var(--surface-0);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+}
+
+.theme-picker-segment {
+  padding: 4px 10px;
+  min-height: 28px;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--t-sm);
+  font-weight: 500;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 120ms ease, color 120ms ease, box-shadow 120ms ease;
+}
+
+.theme-picker-segment:hover:not(.is-active):not(:disabled) {
+  color: var(--text-1);
+  background: var(--surface-3);
+}
+
+.theme-picker-segment.is-active {
+  background: var(--surface-2);
+  color: var(--text-1);
+  box-shadow: var(--shadow-1);
+}
+
 .remote-info-button {
   width: 36px;
   min-width: 36px;
@@ -913,7 +1097,7 @@ input:focus, textarea:focus, select:focus {
   background: color-mix(in srgb, var(--bg-elevated) 82%, white 18%);
   border-color: var(--border-subtle);
   color: var(--text-primary);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  box-shadow: inset 0 1px 0 var(--inset-highlight);
 }
 
 .remote-info-button:hover {
@@ -927,8 +1111,8 @@ input:focus, textarea:focus, select:focus {
   align-items: center;
   justify-content: center;
   border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border-firm);
+  background: var(--surface-glass);
   font-size: 11px;
   font-weight: 700;
   line-height: 1;
@@ -1066,35 +1250,37 @@ input:focus, textarea:focus, select:focus {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px 10px;
   font-family: var(--font-mono);
   font-size: var(--t-xs);
   color: var(--text-3);
+  row-gap: 6px;
 }
 
 .overview-badges {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px 10px;
+  row-gap: 6px;
 }
 
 .overview-badge {
   display: inline-flex;
   align-items: baseline;
-  gap: 5px;
-  padding: 0;
+  gap: 6px;
+  padding: 0 14px 0 0;
+  margin-right: 14px;
   border: 0;
+  border-right: 1px solid var(--border-faint);
   border-radius: 0;
   background: transparent;
   font-family: var(--font-mono);
   font-size: var(--t-xs);
   color: var(--text-2);
 }
-.overview-badge + .overview-badge::before {
-  content: "·";
-  margin-right: 6px;
-  color: var(--text-faint);
+.overview-badge:last-child {
+  border-right: 0;
+  margin-right: 0;
+  padding-right: 0;
 }
 .overview-badge strong {
   color: var(--text-3);
@@ -1236,16 +1422,37 @@ input:focus, textarea:focus, select:focus {
 }
 .console-card-summary-chevron {
   margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
   color: var(--text-3);
-  font-size: 18px;
-  line-height: 1;
   transition: transform 140ms ease;
+}
+.console-card-summary-chevron svg {
+  width: 14px;
+  height: 14px;
 }
 .console-card-collapsible[open] > .console-card-summary .console-card-summary-chevron {
   transform: rotate(90deg);
 }
 .console-card-collapsible > .audit-list {
   padding: 12px 20px 16px;
+}
+
+.console-footer-hint {
+  margin: 24px 0 0;
+  padding: 16px 20px;
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  color: var(--text-faint);
+  text-align: center;
+  letter-spacing: 0;
+}
+
+.chat-shell[data-view="conversation"] .console-footer-hint {
+  display: none;
 }
 
 .console-card-surfaces,
@@ -1320,23 +1527,40 @@ input:focus, textarea:focus, select:focus {
 
 .surface-chip {
   display: inline-flex;
-  align-items: center;
-  gap: 4px;
+  align-items: baseline;
+  gap: 5px;
   max-width: 100%;
-  padding: 2px 6px;
-  border-radius: 999px;
-  border: 1px solid var(--border-subtle);
-  background: var(--bg-elevated);
-  font-size: 11px;
-  color: var(--text-secondary);
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  color: var(--text-2);
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;
 }
 
 .surface-chip strong {
-  color: var(--text-primary);
+  color: var(--text-3);
+  font-weight: 400;
+  text-transform: lowercase;
+  letter-spacing: 0;
   flex-shrink: 0;
+}
+.surface-chip strong::after {
+  content: ":";
+  margin-left: 1px;
+  color: var(--text-faint);
+}
+
+.surface-card-meta {
+  gap: 6px 14px;
+}
+.surface-card-meta > .surface-chip + .surface-chip {
+  border-left: 1px solid var(--border-faint);
+  padding-left: 14px;
 }
 
 .audit-item {
@@ -1736,6 +1960,7 @@ input:focus, textarea:focus, select:focus {
   border-radius: var(--radius-md);
   border: 1px dashed var(--border-prominent);
 }
+/* QR code background stays white in both themes — required for scanner contrast. */
 .pairing-qr { background: #FFFFFF; padding: 12px; border-radius: var(--radius-sm); text-align: center; }
 .pairing-qr-image { display: block; width: 100%; height: auto; max-width: 240px; margin: 0 auto; }
 .paired-device-card {
@@ -1746,8 +1971,8 @@ input:focus, textarea:focus, select:focus {
   margin-top: 8px;
 }
 .paired-device-card-warning {
-  border-color: rgba(251, 191, 36, 0.35);
-  background: rgba(251, 191, 36, 0.06);
+  border-color: color-mix(in srgb, var(--warn-fg) 35%, transparent);
+  background: color-mix(in srgb, var(--warn-fg) 6%, transparent);
 }
 .paired-device-heading { font-weight: 600; margin-bottom: 8px; }
 .paired-device-meta { font-size: 13px; color: var(--text-tertiary); margin-bottom: 8px; }
@@ -1842,7 +2067,7 @@ input:focus, textarea:focus, select:focus {
 
 .panel-modal::backdrop,
 .security-modal::backdrop {
-  background: rgba(0, 0, 0, 0.7);
+  background: var(--modal-backdrop);
   backdrop-filter: blur(4px);
 }
 .modal-header {
@@ -1953,7 +2178,7 @@ input:focus, textarea:focus, select:focus {
     position: fixed;
     inset: 0;
     z-index: 10;
-    background: rgba(15, 23, 42, 0.58);
+    background: var(--drawer-backdrop);
     opacity: 0;
     pointer-events: none;
     transition: opacity 140ms ease;

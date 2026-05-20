@@ -10,6 +10,31 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <link rel="manifest" href="/manifest.webmanifest">
     <link rel="icon" href="/icon.svg" type="image/svg+xml">
+    <script>
+      (function () {
+        var KEY = "agent-relay.theme";
+        function read() {
+          try {
+            var v = localStorage.getItem(KEY);
+            return v === "light" || v === "dark" ? v : "auto";
+          } catch (e) { return "auto"; }
+        }
+        function osLight() {
+          return !!(window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches);
+        }
+        function apply() {
+          var s = read();
+          document.documentElement.dataset.theme = s === "auto" ? (osLight() ? "light" : "dark") : s;
+        }
+        apply();
+        if (window.matchMedia) {
+          var mql = window.matchMedia("(prefers-color-scheme: light)");
+          var handler = function () { if (read() === "auto") apply(); };
+          if (mql.addEventListener) mql.addEventListener("change", handler);
+          else if (mql.addListener) mql.addListener(handler);
+        }
+      })();
+    </script>
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>

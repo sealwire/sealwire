@@ -21,6 +21,7 @@ import {
   providerOptions,
   providerSettings,
 } from "../shared/provider-settings.js";
+import { ThemePicker } from "../shared/theme-picker.js";
 import { selectWorkspaceSuggestionsModel } from "../shared/workspace-suggestions.js";
 import {
   selectDeviceChromeRenderModel,
@@ -1039,6 +1040,12 @@ function RemoteSidebar({
           onToggleGroup,
         })
       )
+    ),
+    h(
+      "section",
+      { className: "sidebar-footer" },
+      h("p", { className: "sidebar-caption" }, "Appearance"),
+      h(ThemePicker)
     )
   );
 }

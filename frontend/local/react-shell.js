@@ -2,7 +2,8 @@ import React from "react";
 import { ClientLog } from "../shared/client-log.js";
 import { ConversationComposer } from "../shared/composer.js";
 import { StartSessionDialog } from "../shared/start-session-dialog.js";
-import { PLUS_SVG, ARROW_RETURN_SVG } from "../svg.js";
+import { ThemePickerRow } from "../shared/theme-picker.js";
+import { PLUS_SVG, ARROW_RETURN_SVG, CHEVRON_RIGHT_SVG } from "../svg.js";
 
 const h = React.createElement;
 
@@ -49,17 +50,7 @@ function LaunchPanel({ launchModel = null, onLaunchFieldChange = null, onLaunchS
   return h(
     "section",
     { className: "launch-panel" },
-    h(
-      "div",
-      { className: "launch-copy" },
-      h("p", { className: "sidebar-caption" }, "Relay console"),
-      h("h2", { className: "launch-title" }, "Sessions"),
-      h(
-        "p",
-        { className: "launch-body" },
-        "Start a new session or continue your latest work."
-      )
-    ),
+    h("h2", { className: "launch-title" }, "Sessions"),
     h(
       "div",
       { className: "launch-actions" },
@@ -80,11 +71,6 @@ function LaunchPanel({ launchModel = null, onLaunchFieldChange = null, onLaunchS
         iconNode(ARROW_RETURN_SVG),
         h("span", null, "Continue latest")
       )
-    ),
-    h(
-      "div",
-      { className: "launch-footer" },
-      h("button", { className: "sidebar-link-button", id: "open-security-modal", type: "button" }, "Remote devices")
     ),
     h(StartSessionDialog, {
       id: "launch-start-session-dialog",
@@ -196,6 +182,11 @@ function ChatHeader() {
       h("span", { className: "status-badge", id: "status-badge" }, "Idle"),
       h(
         "button",
+        { className: "header-button", hidden: true, id: "go-console-home", type: "button" },
+        "Back"
+      ),
+      h(
+        "button",
         { className: "header-button", id: "open-security-header", type: "button" },
         "Devices"
       ),
@@ -216,8 +207,8 @@ function ChatHeader() {
           "div",
           { className: "header-overflow-menu", hidden: true, id: "header-overflow-menu" },
           h("button", { className: "overflow-menu-item", id: "open-session-details", type: "button" }, "Session details"),
-          h("button", { className: "overflow-menu-item", hidden: true, id: "go-console-home", type: "button" }, "Back to console"),
-          h("button", { className: "overflow-menu-item", id: "refresh-button", type: "button" }, "Refresh")
+          h("button", { className: "overflow-menu-item", id: "refresh-button", type: "button" }, "Refresh"),
+          h(ThemePickerRow)
         )
       )
     )
@@ -238,6 +229,7 @@ function ConsoleGrid() {
     { className: "console-grid" },
     h(LiveSurfacesCard),
     h(AuditTimelineCard),
+    h(ConsoleFooterHint),
     h(ThreadPanel)
   );
 }
@@ -272,19 +264,31 @@ function LiveSurfacesCard() {
 function AuditTimelineCard() {
   return h(
     "details",
-    { className: "console-card console-card-audit console-card-collapsible" },
+    { className: "console-card console-card-audit console-card-collapsible", open: true },
     h(
       "summary",
       { className: "console-card-summary" },
       h("span", { className: "console-card-title" }, "Recent events"),
       h("span", { className: "console-card-hint", id: "audit-summary" }),
-      h("span", { className: "console-card-summary-chevron", "aria-hidden": "true" }, "›")
+      h("span", {
+        className: "console-card-summary-chevron",
+        "aria-hidden": "true",
+        dangerouslySetInnerHTML: { __html: CHEVRON_RIGHT_SVG },
+      })
     ),
     h(
       "div",
       { className: "audit-list", id: "audit-timeline" },
       h("p", { className: "sidebar-empty" }, "No events yet.")
     )
+  );
+}
+
+function ConsoleFooterHint() {
+  return h(
+    "p",
+    { className: "console-footer-hint" },
+    "Start a session from the sidebar to open the live transcript."
   );
 }
 
