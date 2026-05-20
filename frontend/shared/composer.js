@@ -5,6 +5,7 @@ import { SEND_SVG } from "../svg.js";
 const h = React.createElement;
 
 export function ConversationComposer({
+  actionsBeforeSend = null,
   composerDisabled = false,
   currentDraft,
   currentEffortValue,
@@ -114,6 +115,7 @@ export function ConversationComposer({
           )
         )
       ),
+      actionsBeforeSend,
       h(
         "button",
         {

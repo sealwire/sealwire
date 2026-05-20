@@ -34,11 +34,41 @@ export function sessionBusyReason(session) {
   return null;
 }
 
-export function SessionSettingsPanel({
+function lookupOptionLabel(options, value) {
+  if (!Array.isArray(options)) return value || "";
+  const hit = options.find((option) => option.value === value);
+  return hit?.label || value || "";
+}
+
+export function SessionSettingsButton({
   session,
   busy = false,
   onUpdate = null,
+  buttonId = "session-settings-button",
 }) {
+  const [open, setOpen] = React.useState(false);
+  const wrapperRef = React.useRef(null);
+
+  React.useEffect(() => {
+    if (!open) return undefined;
+    function onDocPointer(event) {
+      if (wrapperRef.current && !wrapperRef.current.contains(event.target)) {
+        setOpen(false);
+      }
+    }
+    function onKey(event) {
+      if (event.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("mousedown", onDocPointer);
+    document.addEventListener("touchstart", onDocPointer, { passive: true });
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDocPointer);
+      document.removeEventListener("touchstart", onDocPointer);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
   if (!session?.active_thread_id) {
     return null;
   }
@@ -49,6 +79,10 @@ export function SessionSettingsPanel({
   const disabled = !idle || busy;
   const hint = busy ? "Applying…" : sessionBusyReason(session);
   const showSandbox = provider !== "claude_code";
+  const approvalShort = lookupOptionLabel(
+    settings.approvalOptions,
+    session.approval_policy
+  );
 
   function emit(next) {
     if (disabled || !onUpdate) return;
@@ -56,34 +90,67 @@ export function SessionSettingsPanel({
   }
 
   return h(
-    "section",
+    "div",
     {
-      "aria-label": "Session settings",
-      className: "session-settings-panel" + (disabled ? " is-disabled" : ""),
+      ref: wrapperRef,
+      className: "session-settings-control" + (open ? " is-open" : ""),
     },
     h(
-      "div",
-      { className: "session-settings-fields" },
-      h(InlineSelect, {
-        id: "session-settings-approval",
-        label: settings.approvalLabel || "Permission mode",
-        options: settings.approvalOptions || [],
-        value: session.approval_policy || "",
-        disabled,
-        onChange: (value) => emit({ approval_policy: value }),
-      }),
-      showSandbox
-        ? h(InlineSelect, {
-            id: "session-settings-sandbox",
-            label: settings.sandboxLabel || "File access",
-            options: sandboxOptions(),
-            value: session.sandbox || "",
-            disabled,
-            onChange: (value) => emit({ sandbox: value }),
-          })
-        : null
+      "button",
+      {
+        id: buttonId,
+        type: "button",
+        className: "session-settings-toggle",
+        "aria-expanded": open ? "true" : "false",
+        "aria-haspopup": "dialog",
+        "aria-label": "Session permissions",
+        title: hint || "Adjust session permissions",
+        onClick: () => setOpen((prev) => !prev),
+      },
+      h(
+        "span",
+        { className: "session-settings-toggle-icon", "aria-hidden": "true" },
+        disabled ? "🔒" : "🔓"
+      ),
+      h(
+        "span",
+        { className: "session-settings-toggle-label" },
+        approvalShort || "Permissions"
+      )
     ),
-    hint ? h("p", { className: "session-settings-hint" }, hint) : null
+    open
+      ? h(
+          "div",
+          {
+            className: "session-settings-popover",
+            role: "dialog",
+            "aria-label": "Session permissions",
+          },
+          h(
+            "div",
+            { className: "session-settings-fields" },
+            h(InlineSelect, {
+              id: "session-settings-approval",
+              label: settings.approvalLabel || "Permission mode",
+              options: settings.approvalOptions || [],
+              value: session.approval_policy || "",
+              disabled,
+              onChange: (value) => emit({ approval_policy: value }),
+            }),
+            showSandbox
+              ? h(InlineSelect, {
+                  id: "session-settings-sandbox",
+                  label: settings.sandboxLabel || "File access",
+                  options: sandboxOptions(),
+                  value: session.sandbox || "",
+                  disabled,
+                  onChange: (value) => emit({ sandbox: value }),
+                })
+              : null
+          ),
+          hint ? h("p", { className: "session-settings-hint" }, hint) : null
+        )
+      : null
   );
 }
 

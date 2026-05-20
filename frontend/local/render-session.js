@@ -18,7 +18,8 @@ import {
   sendButton,
   sessionHistoryDrawer,
   sessionMeta,
-  sessionSettingsMount,
+  sessionDetailsPath,
+  composerSettingsMount,
   statusBadge,
   stopButton,
   threadsCount,
@@ -48,7 +49,7 @@ import { shouldShowTranscriptLoading } from "./transcript-loading.js";
 import {
   ConversationEmptyState,
 } from "../shared/conversation.js";
-import { SessionSettingsPanel } from "../shared/session-settings-panel.js";
+import { SessionSettingsButton } from "../shared/session-settings-panel.js";
 import {
   AuditList,
   ControlBannerContent,
@@ -276,6 +277,9 @@ export function createSessionRenderer({
     renderHeaderModelBadge(null);
     statusBadge.textContent = "Offline";
     statusBadge.className = "status-badge status-badge-offline";
+    if (sessionDetailsPath) {
+      sessionDetailsPath.textContent = "No workspace path yet.";
+    }
     renderReactContent(
       sessionMeta,
       h(SessionMetaPanel, { emptyMessage: message })
@@ -301,6 +305,9 @@ export function createSessionRenderer({
     renderHeaderModelBadge(null);
     statusBadge.textContent = "Sign in";
     statusBadge.className = "status-badge status-badge-offline";
+    if (sessionDetailsPath) {
+      sessionDetailsPath.textContent = "No workspace path yet.";
+    }
     renderReactContent(
       sessionMeta,
       h(SessionMetaPanel, { emptyMessage: message })
@@ -486,6 +493,10 @@ export function createSessionRenderer({
   }
 
   function renderSessionMeta(session) {
+    if (sessionDetailsPath) {
+      sessionDetailsPath.textContent = session.current_cwd || "No workspace path yet.";
+    }
+
     const securityChips = [
       metaChip("Access", securityModeLabel(session)),
       metaChip("Sharing", contentVisibilityLabel(session)),
@@ -516,7 +527,6 @@ export function createSessionRenderer({
         chips: [
           ...securityChips,
           metaChip("Provider", providerLabel(session.provider) || "Unknown"),
-          metaChip("Workspace", session.current_cwd || "None"),
           metaChip("Model", session.model),
           metaChip("Permissions", session.approval_policy),
           metaChip("File access", session.sandbox),
@@ -552,18 +562,16 @@ export function createSessionRenderer({
   }
 
   function renderSessionSettingsPanel(session) {
-    if (!sessionSettingsMount) {
+    if (!composerSettingsMount) {
       return;
     }
     if (!session?.active_thread_id || !isViewingConversation(session)) {
-      sessionSettingsMount.hidden = true;
-      renderReactContent(sessionSettingsMount, null);
+      renderReactContent(composerSettingsMount, null);
       return;
     }
-    sessionSettingsMount.hidden = false;
     renderReactContent(
-      sessionSettingsMount,
-      h(SessionSettingsPanel, {
+      composerSettingsMount,
+      h(SessionSettingsButton, {
         session,
         onUpdate: (payload) => updateSessionSettings?.(payload),
       })
@@ -571,43 +579,23 @@ export function createSessionRenderer({
   }
 
   function renderControlBanner(session) {
-    if (!session.active_thread_id || !isViewingConversation(session)) {
+    if (
+      !session.active_thread_id
+      || !isViewingConversation(session)
+      || !session.active_controller_device_id
+      || isCurrentDeviceActiveController(session)
+    ) {
       controlBanner.hidden = true;
       return;
     }
 
     controlBanner.hidden = false;
-
-    if (!session.active_controller_device_id) {
-      renderReactContent(
-        controlBanner,
-        h(ControlBannerContent, {
-          hint: "The next device to send a message will claim control.",
-          summary: "No device currently has control",
-        })
-      );
-      return;
-    }
-
-    if (isCurrentDeviceActiveController(session)) {
-      renderReactContent(
-        controlBanner,
-        h(ControlBannerContent, {
-          hint: "You can type here. Other owner devices can still approve pending actions.",
-          summary: "This device has control",
-        })
-      );
-      return;
-    }
-
     renderReactContent(
       controlBanner,
       h(ControlBannerContent, {
         hint: "You can still approve from this device. Take over when you want to type or continue the session.",
         showTakeOver: true,
-        summary: session.active_controller_device_id
-          ? `Another device has control (${controllerLabel(session.active_controller_device_id)})`
-          : "No device currently has control",
+        summary: `Another device has control (${controllerLabel(session.active_controller_device_id)})`,
       })
     );
   }

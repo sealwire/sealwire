@@ -44,6 +44,32 @@
   contain-intrinsic-size: auto 200px;
 }
 
+/* Entries that just landed via an older-page fetch get a one-shot fade +
+ * downward slide so the prepend feels intentional instead of "magically
+ * appeared." `forwards` so the animation's end state sticks even when the
+ * tag is removed on a later render. The exact same idiom Linear / Slack /
+ * Claude.ai use when scrolling up loads more history. */
+.chat-message-just-prepended {
+  animation: chat-message-prepend-in 280ms cubic-bezier(0.32, 0.72, 0.24, 1) forwards;
+}
+
+@keyframes chat-message-prepend-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-message-just-prepended {
+    animation: none;
+  }
+}
+
 .thread-empty {
   max-width: 600px;
   margin: 60px auto 0;
@@ -106,6 +132,48 @@
   display: flex;
   flex-direction: column;
   gap: 24px;
+  animation: transcript-history-skeleton-fade-in 200ms ease-out both;
+}
+
+@keyframes transcript-history-skeleton-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Small circular spinner above the skeleton cards. Gives the user an
+ * unambiguous "something is loading" affordance — the shimmer alone can
+ * read as static decoration on first encounter. */
+.transcript-history-spinner {
+  align-self: center;
+  width: 18px;
+  height: 18px;
+  border: 2px solid color-mix(in srgb, var(--text-secondary, #9aa0a6) 18%, transparent 82%);
+  border-top-color: var(--text-secondary, #9aa0a6);
+  border-radius: 50%;
+  margin: 0 0 4px;
+  animation: transcript-history-spinner-rotate 0.7s linear infinite;
+}
+
+@keyframes transcript-history-spinner-rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .transcript-history-skeletons {
+    animation: none;
+  }
+  .transcript-history-spinner {
+    animation: none;
+    border-top-color: var(--text-secondary, #9aa0a6);
+  }
 }
 
 .transcript-history-skeleton {

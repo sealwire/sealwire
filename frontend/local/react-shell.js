@@ -305,7 +305,6 @@ function ThreadPanel() {
       ),
       h("button", { className: "header-button control-button", id: "take-over-button", type: "button" }, "Take over")
     ),
-    h("div", { className: "session-settings-mount", hidden: true, id: "session-settings-mount" }),
     h(
       "section",
       { className: "thread-shell" },
@@ -328,6 +327,7 @@ function ComposerShell() {
     "form",
     { className: "composer-shell", hidden: true, id: "message-form" },
     h(ConversationComposer, {
+      actionsBeforeSend: h("span", { id: "composer-settings-mount" }),
       effortId: "message-effort",
       effortLabel: "Response mode",
       messageId: "message-input",
@@ -370,6 +370,12 @@ function SessionDetailsModal() {
     h(
       "section",
       { className: "panel-modal-body session-details-shell" },
+      h(
+        "section",
+        { className: "details-section" },
+        h("h3", { className: "details-heading" }, "Workspace"),
+        h("p", { className: "details-path", id: "session-details-path" }, "No workspace path yet.")
+      ),
       h(
         "section",
         { className: "details-section" },

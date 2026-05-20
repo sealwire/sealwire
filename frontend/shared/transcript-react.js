@@ -1,6 +1,7 @@
 import React from "react";
 import { SPARKLES_SVG } from "../svg.js";
 import { renderMarkdown } from "./markdown.js";
+import { didPrependOlderTranscript } from "./transcript-scroll.js";
 
 const h = React.createElement;
 
@@ -54,10 +55,13 @@ function commandExpandKey(itemId) {
   return itemId ? `command:${itemId}` : "";
 }
 
-function transcriptEntryDomAttrs(entry, className, extras = null) {
+function transcriptEntryDomAttrs(entry, className, extras = null, { justPrepended = false } = {}) {
   const itemId = entry?.item_id || entry?.id || "";
+  const finalClassName = justPrepended
+    ? `${className} chat-message-just-prepended`
+    : className;
   return {
-    className,
+    className: finalClassName,
     ...(itemId ? { "data-transcript-entry-id": itemId } : {}),
     ...(entry?.kind ? { "data-transcript-entry-kind": entry.kind } : {}),
     ...(extras || {}),
@@ -124,7 +128,7 @@ function renderMessageBody(text) {
   return renderMarkdown(text);
 }
 
-function UserEntryImpl({ entry, isLatestUser = false }) {
+function UserEntryImpl({ entry, isLatestUser = false, isJustPrepended = false }) {
   // `data-latest-user-message` is the anchor that the scroll layer uses to
   // pin a freshly sent user message to the top of the viewport.
   return h(
@@ -132,7 +136,8 @@ function UserEntryImpl({ entry, isLatestUser = false }) {
     transcriptEntryDomAttrs(
       entry,
       "chat-message chat-message-user",
-      isLatestUser ? { "data-latest-user-message": "true" } : null
+      isLatestUser ? { "data-latest-user-message": "true" } : null,
+      { justPrepended: isJustPrepended }
     ),
     h("div", { className: "message-card" }, h("div", { className: "message-body" }, renderMessageBody(entry.text)))
   );
@@ -144,10 +149,12 @@ function UserEntryImpl({ entry, isLatestUser = false }) {
 // tail entry gets a new reference and re-renders.
 const UserEntry = React.memo(UserEntryImpl);
 
-function AgentEntryImpl({ entry }) {
+function AgentEntryImpl({ entry, isJustPrepended = false }) {
   return h(
     "article",
-    transcriptEntryDomAttrs(entry, "chat-message chat-message-assistant"),
+    transcriptEntryDomAttrs(entry, "chat-message chat-message-assistant", null, {
+      justPrepended: isJustPrepended,
+    }),
     h("span", {
       className: "message-avatar",
       "aria-hidden": "true",
@@ -159,7 +166,7 @@ function AgentEntryImpl({ entry }) {
 
 const AgentEntry = React.memo(AgentEntryImpl);
 
-function CommandEntry({ entry, options = null }) {
+function CommandEntry({ entry, isJustPrepended = false, options = null }) {
   const itemId = entry.item_id || "";
   const expandKey = itemId ? `entry:${itemId}` : commandExpandKey(itemId);
   const expanded = Boolean(expandKey && options?.expandedKeys?.has(expandKey));
@@ -170,7 +177,9 @@ function CommandEntry({ entry, options = null }) {
 
   return h(
     "article",
-    transcriptEntryDomAttrs(entry, "chat-message chat-message-system"),
+    transcriptEntryDomAttrs(entry, "chat-message chat-message-system", null, {
+      justPrepended: isJustPrepended,
+    }),
     h(
       "div",
       { className: "message-card message-card-system message-card-command" },
@@ -200,11 +209,13 @@ function CommandEntry({ entry, options = null }) {
   );
 }
 
-function ReasoningEntryImpl({ entry }) {
+function ReasoningEntryImpl({ entry, isJustPrepended = false }) {
   const hasText = Boolean(String(entry.text || "").trim());
   return h(
     "article",
-    transcriptEntryDomAttrs(entry, "chat-message chat-message-system"),
+    transcriptEntryDomAttrs(entry, "chat-message chat-message-system", null, {
+      justPrepended: isJustPrepended,
+    }),
     h(
       "div",
       {
@@ -791,7 +802,7 @@ function FileChangeSummary({ tool, fallback }) {
   return h("span", { className: "tool-collapsed-preview" }, fallback || tool.detail || "");
 }
 
-function ToolEntry({ entry, options = null }) {
+function ToolEntry({ entry, isJustPrepended = false, options = null }) {
   const itemId = entry.item_id || "";
   const expandKey = itemId ? `entry:${itemId}` : "";
   const expanded = Boolean(expandKey && options?.expandedKeys?.has(expandKey));
@@ -829,7 +840,9 @@ function ToolEntry({ entry, options = null }) {
     "article",
     transcriptEntryDomAttrs(
       entry,
-      `chat-message chat-message-system${isFileChange ? " chat-message-file-change" : ""}`
+      `chat-message chat-message-system${isFileChange ? " chat-message-file-change" : ""}`,
+      null,
+      { justPrepended: isJustPrepended }
     ),
     h(
       "div",
@@ -918,10 +931,12 @@ function ToolEntry({ entry, options = null }) {
   );
 }
 
-function FallbackEntry({ entry }) {
+function FallbackEntry({ entry, isJustPrepended = false }) {
   return h(
     "article",
-    transcriptEntryDomAttrs(entry, "chat-message chat-message-system"),
+    transcriptEntryDomAttrs(entry, "chat-message chat-message-system", null, {
+      justPrepended: isJustPrepended,
+    }),
     h(
       "div",
       { className: "message-card message-card-system" },
@@ -1028,26 +1043,31 @@ function ToolGroupEntry({ group, options = null }) {
   );
 }
 
-export function TranscriptEntry({ entry, isLatestUser = false, options = null }) {
+export function TranscriptEntry({
+  entry,
+  isJustPrepended = false,
+  isLatestUser = false,
+  options = null,
+}) {
   const kind = entry.kind || "reasoning";
 
   if (kind === "user_text") {
-    return h(UserEntry, { entry, isLatestUser });
+    return h(UserEntry, { entry, isJustPrepended, isLatestUser });
   }
   if (kind === "agent_text") {
-    return h(AgentEntry, { entry });
+    return h(AgentEntry, { entry, isJustPrepended });
   }
   if (kind === "command") {
-    return h(CommandEntry, { entry, options });
+    return h(CommandEntry, { entry, isJustPrepended, options });
   }
   if (kind === "tool_call") {
-    return h(ToolEntry, { entry, options });
+    return h(ToolEntry, { entry, isJustPrepended, options });
   }
   if (kind === "reasoning") {
-    return h(ReasoningEntry, { entry });
+    return h(ReasoningEntry, { entry, isJustPrepended });
   }
 
-  return h(FallbackEntry, { entry });
+  return h(FallbackEntry, { entry, isJustPrepended });
 }
 
 export function ApprovalCard({ approval, options = null }) {
@@ -1174,8 +1194,69 @@ function TranscriptHistorySkeleton() {
       className: "transcript-history-skeletons",
       role: "status",
     },
+    h("div", {
+      "aria-hidden": "true",
+      className: "transcript-history-spinner",
+      key: "transcript-history-spinner",
+    }),
     ...rows
   );
+}
+
+// Track which entry item_ids have just been prepended in the most recent
+// render so we can play a one-shot entrance animation on them. The ref-based
+// diff is co-located with rendering so render-session.js and react-app.js
+// don't have to plumb extra state down — the contract is just "render with
+// these entries" and we figure out the rest.
+//
+// Exported so tests can drive it directly without rendering through React.
+export function diffPrependedItemIds(previousEntries, nextEntries) {
+  if (!didPrependOlderTranscript(previousEntries, nextEntries)) {
+    return [];
+  }
+  const prependCount = nextEntries.length - previousEntries.length;
+  const ids = [];
+  for (let index = 0; index < prependCount; index += 1) {
+    const id = nextEntries[index]?.item_id;
+    if (id) ids.push(id);
+  }
+  return ids;
+}
+
+function useJustPrependedItemIds(entries) {
+  const previousEntriesRef = React.useRef([]);
+  const prependedIdsRef = React.useRef(new Set());
+
+  // If there's no overlap between the previous and current entry lists, we
+  // jumped to a different thread (or the transcript was reset). Drop the
+  // accumulated set so we don't accidentally tag a new thread's entries
+  // because their item_ids happen to match the old thread's set.
+  if (previousEntriesRef.current.length > 0 && entries.length > 0) {
+    const prevIds = new Set();
+    for (const entry of previousEntriesRef.current) {
+      if (entry?.item_id) prevIds.add(entry.item_id);
+    }
+    let hasOverlap = false;
+    for (const entry of entries) {
+      if (entry?.item_id && prevIds.has(entry.item_id)) {
+        hasOverlap = true;
+        break;
+      }
+    }
+    if (!hasOverlap) {
+      prependedIdsRef.current = new Set();
+    }
+  }
+
+  const newlyPrepended = diffPrependedItemIds(previousEntriesRef.current, entries);
+  if (newlyPrepended.length > 0) {
+    for (const id of newlyPrepended) {
+      prependedIdsRef.current.add(id);
+    }
+  }
+
+  previousEntriesRef.current = entries;
+  return prependedIdsRef.current;
 }
 
 export function TranscriptContent({
@@ -1194,6 +1275,7 @@ export function TranscriptContent({
     }
     return "";
   }, [entries]);
+  const justPrependedItemIds = useJustPrependedItemIds(entries);
   const nodes = [];
 
   // Top sentinel: the IntersectionObserver in render-session.js / react-app.js
@@ -1222,12 +1304,14 @@ export function TranscriptContent({
       );
       if (expanded) {
         item.entries.forEach((memberEntry, memberIndex) => {
+          const memberId = memberEntry.item_id || "";
           nodes.push(
             h(TranscriptEntry, {
               entry: memberEntry,
+              isJustPrepended: Boolean(memberId && justPrependedItemIds.has(memberId)),
               isLatestUser: false,
               key:
-                memberEntry.item_id
+                memberId
                 || memberEntry.id
                 || `${groupKey}:member:${memberIndex}`,
               options,
@@ -1242,6 +1326,7 @@ export function TranscriptContent({
     nodes.push(
       h(TranscriptEntry, {
         entry: item,
+        isJustPrepended: Boolean(entryId && justPrependedItemIds.has(entryId)),
         isLatestUser:
           item.kind === "user_text" && entryId && entryId === latestUserEntryId,
         key: entryId || `${item.kind || "entry"}:${index}`,

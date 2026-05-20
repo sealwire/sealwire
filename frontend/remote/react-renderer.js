@@ -245,13 +245,17 @@ export function RelayDirectoryList({ onSelectRelay, viewModel }) {
         },
         h("span", { className: "conversation-title" }, item.title),
         h("span", { className: "conversation-preview" }, relaySubtitle(item.relay)),
-        h("span", { className: "conversation-meta" }, `${item.meta} · ${item.actionLabel}`)
+        h(
+          "span",
+          { className: "conversation-meta" },
+          item.meta ? `${item.meta} · ${item.actionLabel}` : item.actionLabel
+        )
       )
     )
   );
 }
 
-export function RelayHomeState({ clientAuth, onSelectRelay, relayDirectory }) {
+export function RelayHomeState({ clientAuth, nicknames, onRenameRelay, onSelectRelay, relayDirectory }) {
   if (!(relayDirectory || []).length) {
     return h(
       "div",
@@ -288,6 +292,8 @@ export function RelayHomeState({ clientAuth, onSelectRelay, relayDirectory }) {
       ...relayDirectory.map((relay) =>
         h(RelayHomeCard, {
           key: relay.relayId || relay.brokerRoomId || relay.deviceId,
+          nickname: (nicknames && relay.relayId) ? (nicknames[relay.relayId] || null) : null,
+          onRenameRelay,
           onSelectRelay,
           relay,
         })
@@ -296,50 +302,145 @@ export function RelayHomeState({ clientAuth, onSelectRelay, relayDirectory }) {
   );
 }
 
-function RelayHomeCard({ onSelectRelay, relay }) {
+function RelayHomeCard({ nickname, onRenameRelay, onSelectRelay, relay }) {
   const relayId = relay.relayId || relay.brokerRoomId || relay.deviceId || "";
-  const title =
+  const fallbackTitle =
     relay.relayLabel
     || relay.relayId
     || relay.brokerRoomId
     || relay.deviceLabel
     || relay.deviceId
     || "Unknown relay";
+  const title = nickname || fallbackTitle;
   const subtitle = relay.hasLocalProfile
     ? relay.deviceLabel || relay.deviceId
     : relay.needsLocalRePairing
       ? "Local credentials are missing in this browser. Pair this relay again to restore remote access."
       : "This browser can see the grant, but it does not have local encrypted access for this relay yet.";
-  const meta = relay.grantedAt
-    ? `Granted ${formatTimestamp(relay.grantedAt)}`
-    : relay.brokerRoomId || relayId;
+  const meta = relay.grantedAt ? `Granted ${formatTimestamp(relay.grantedAt)}` : null;
   const cta = relay.hasLocalProfile
     ? "Open relay"
     : relay.needsLocalRePairing
       ? "Re-pair in this browser"
       : "Pair again in this browser";
 
+  const canRename = Boolean(onRenameRelay && relay.relayId);
+  const [editing, setEditing] = React.useState(false);
+  const [draft, setDraft] = React.useState(nickname || "");
+
+  React.useEffect(() => {
+    if (!editing) {
+      setDraft(nickname || "");
+    }
+  }, [nickname, editing]);
+
+  const startEditing = () => {
+    setDraft(nickname || "");
+    setEditing(true);
+  };
+  const cancelEditing = () => setEditing(false);
+  const commitEditing = () => {
+    if (!canRename) {
+      setEditing(false);
+      return;
+    }
+    onRenameRelay(relay.relayId, draft);
+    setEditing(false);
+  };
+
+  if (editing) {
+    return h(
+      "div",
+      { className: "relay-home-card-wrapper is-editing" },
+      h(
+        "form",
+        {
+          className: "relay-home-card-edit",
+          onSubmit: (event) => {
+            event.preventDefault();
+            commitEditing();
+          },
+        },
+        h("label", { className: "relay-home-card-edit-label", htmlFor: `relay-rename-${relayId}` }, "Rename relay"),
+        h("input", {
+          autoFocus: true,
+          className: "relay-home-card-edit-input",
+          id: `relay-rename-${relayId}`,
+          onChange: (event) => setDraft(event.target.value),
+          onKeyDown: (event) => {
+            if (event.key === "Escape") {
+              event.preventDefault();
+              cancelEditing();
+            }
+          },
+          placeholder: fallbackTitle,
+          type: "text",
+          value: draft,
+        }),
+        h(
+          "div",
+          { className: "relay-home-card-edit-actions" },
+          h("button", { className: "relay-home-card-edit-save", type: "submit" }, "Save"),
+          h(
+            "button",
+            { className: "relay-home-card-edit-cancel", onClick: cancelEditing, type: "button" },
+            "Cancel"
+          ),
+          nickname
+            ? h(
+                "button",
+                {
+                  className: "relay-home-card-edit-clear",
+                  onClick: () => {
+                    if (canRename) onRenameRelay(relay.relayId, "");
+                    setEditing(false);
+                  },
+                  type: "button",
+                },
+                "Reset"
+              )
+            : null
+        )
+      )
+    );
+  }
+
   return h(
-    "button",
-    {
-      className: "relay-home-card",
-      disabled: !relay.hasLocalProfile || !relayId,
-      onClick: () => onSelectRelay(relayId),
-      type: "button",
-    },
+    "div",
+    { className: "relay-home-card-wrapper" },
     h(
-      "div",
-      { className: "relay-home-card-copy" },
-      h("span", { className: "relay-home-card-label" }, title),
-      h("strong", { className: "relay-home-card-title" }, title),
-      h("p", { className: "relay-home-card-body" }, subtitle)
+      "button",
+      {
+        className: "relay-home-card",
+        disabled: !relay.hasLocalProfile || !relayId,
+        onClick: () => onSelectRelay(relayId),
+        type: "button",
+      },
+      h(
+        "div",
+        { className: "relay-home-card-copy" },
+        h("strong", { className: "relay-home-card-title" }, title),
+        h("p", { className: "relay-home-card-body" }, subtitle)
+      ),
+      h(
+        "div",
+        { className: "relay-home-card-meta" },
+        meta ? h("span", null, meta) : null,
+        h("span", { className: "relay-home-card-cta" }, cta)
+      )
     ),
-    h(
-      "div",
-      { className: "relay-home-card-meta" },
-      h("span", null, meta),
-      h("span", null, cta)
-    )
+    canRename
+      ? h(
+          "button",
+          {
+            "aria-label": nickname ? `Rename ${title}` : `Give ${title} a nickname`,
+            className: "relay-home-card-rename",
+            onClick: startEditing,
+            type: "button",
+          },
+          nickname ? "Rename" : "Nickname"
+        )
+      : null
   );
 }
 

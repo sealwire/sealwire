@@ -140,6 +140,50 @@ test("selectRelayDirectoryRenderModel builds action labels and active flags", ()
   assert.equal(model.items[1].isEnabled, false);
 });
 
+test("selectRelayDirectoryRenderModel prefers client nicknames over relayLabel", () => {
+  const model = selectRelayDirectoryRenderModel({
+    activeRelayId: "relay-1",
+    nicknames: { "relay-1": "Mac mini" },
+    relayDirectory: [
+      {
+        relayId: "relay-1",
+        relayLabel: "Dev Relay",
+        brokerRoomId: "room-a",
+        hasLocalProfile: true,
+      },
+      {
+        relayId: "relay-2",
+        relayLabel: "Cold Relay",
+        brokerRoomId: "room-b",
+        hasLocalProfile: true,
+      },
+    ],
+  });
+  assert.equal(model.items[0].title, "Mac mini");
+  assert.equal(model.items[1].title, "Cold Relay");
+});
+
+test("selectRelayDirectoryRenderModel exposes relay id in meta only when nickname overrides title", () => {
+  const model = selectRelayDirectoryRenderModel({
+    activeRelayId: null,
+    nicknames: { "relay-1": "Mac mini" },
+    relayDirectory: [
+      {
+        relayId: "relay-1",
+        brokerRoomId: "dev-room",
+        hasLocalProfile: true,
+      },
+      {
+        relayId: "relay-2",
+        brokerRoomId: "dev-room",
+        hasLocalProfile: true,
+      },
+    ],
+  });
+  assert.equal(model.items[0].meta, "relay-1");
+  assert.equal(model.items[1].meta, "");
+});
+
 test("selectEmptyStateRenderModel exposes relay-home and re-pair branches", () => {
   const relayHome = selectEmptyStateRenderModel({
     clientAuth: { clientId: "client-1" },

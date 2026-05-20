@@ -47,6 +47,11 @@ import {
   subscribeRemoteState,
 } from "./state.js";
 import {
+  loadRelayNicknames,
+  saveRelayNickname,
+  subscribeRelayNicknames,
+} from "./relay-nicknames.js";
+import {
   selectEmptyStateRenderModel,
   selectRelayDirectoryRenderModel,
   selectSessionRenderModel,
@@ -89,7 +94,7 @@ import {
 import {
   ConversationEmptyState,
 } from "../shared/conversation.js";
-import { SessionSettingsPanel } from "../shared/session-settings-panel.js";
+import { SessionSettingsButton } from "../shared/session-settings-panel.js";
 import { attachTranscriptHistoryLoader } from "../shared/transcript-history-loader.js";
 import { ThreadGroupList } from "../shared/thread-list-react.js";
 import {
@@ -145,11 +150,20 @@ export function unmountRemoteApp() {
   remoteAppRoot = null;
 }
 
+function useRelayNicknames() {
+  return useSyncExternalStore(
+    subscribeRelayNicknames,
+    loadRelayNicknames,
+    loadRelayNicknames
+  );
+}
+
 function RemoteApp() {
   const currentState = useSyncExternalStore(
     subscribeRemoteState,
     readRemoteStateSnapshot
   ).state;
+  const relayNicknames = useRelayNicknames();
   const previousSessionRef = useRef(null);
   const remoteCwdInputRef = useRef(null);
   const [transcriptUiState, dispatchTranscriptUi] = useReducer(
@@ -280,6 +294,7 @@ function RemoteApp() {
   });
   const relayDirectoryModel = selectRelayDirectoryRenderModel({
     activeRelayId: currentState.remoteAuth?.relayId || null,
+    nicknames: relayNicknames,
     relayDirectory: currentState.relayDirectory,
   });
   const threadsModel = selectThreadsRenderModel({
@@ -1159,14 +1174,6 @@ function RemoteThreadPanel({
         onTakeOver,
       })
     ),
-    session?.active_thread_id
-      ? h(SessionSettingsPanel, {
-          session,
-          onUpdate: (payload) => {
-            void onUpdateSessionSettings?.(payload);
-          },
-        })
-      : null,
     h(
       "section",
       { className: "thread-shell" },
@@ -1195,6 +1202,15 @@ function RemoteThreadPanel({
       },
       h(Composer, {
         ...composerModel,
+        actionsBeforeSend: session?.active_thread_id
+          ? h(SessionSettingsButton, {
+              session,
+              buttonId: "remote-session-settings-button",
+              onUpdate: (payload) => {
+                void onUpdateSessionSettings?.(payload);
+              },
+            })
+          : null,
         onDraftChange(value) {
           onComposerDraftChange?.(value);
         },
@@ -1225,6 +1241,7 @@ function RemoteTranscriptPanel({
   transcriptDetailEntries,
   uiState,
 }) {
+  const relayNicknames = useRelayNicknames();
   const transcriptRef = useRef(null);
   const previousRenderRef = useRef({
     activeThreadId: null,
@@ -1295,6 +1312,8 @@ function RemoteTranscriptPanel({
     } else if (emptyStateModel.showRelayHome) {
       body = h(RelayHomeState, {
         clientAuth: emptyStateModel.clientAuth,
+        nicknames: relayNicknames,
+        onRenameRelay: saveRelayNickname,
         onSelectRelay,
         relayDirectory: emptyStateModel.relayDirectory,
       });

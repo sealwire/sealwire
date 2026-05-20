@@ -1,5 +1,22 @@
 # agent-relay
 
+**TL;DR** — Run a long-lived **Codex** or **Claude Code** session on your own
+machine, control it from any browser or phone (over LAN or the public
+internet), and let one operator move between devices without losing the
+session.
+
+- The local machine stays the source of truth; the relay is just the
+  control layer around it
+- Remote devices can pair through the **hosted public broker** at
+  `wss://agent-relay.up.railway.app` — no broker infrastructure to deploy
+- Default `private` mode keeps the broker as blind transport: it relays
+  encrypted traffic, it doesn't read your prompts, approvals, or code
+- **Rust** backend (`relay-server` + `relay-broker`), Node-based Claude Code
+  worker, Vite web UI — self-hosted, single-owner, run from source today
+  ([Quick start ↓](#quick-start))
+
+---
+
 `agent-relay` is a local-first, privacy-first control plane for coding
 agents.
 
@@ -8,13 +25,62 @@ trustworthy across browser, phone, and later other surfaces without turning a
 broker into the place where your workspace, prompts, and approvals have to
 live in plaintext.
 
-The product is currently Codex-first. The local machine remains the execution
-authority. The relay is the control layer around that execution:
+The product supports both Codex and Claude Code today. The local machine
+remains the execution authority. The relay is the control layer around that
+execution:
 
-- start and resume a coding session
+- start and resume a coding session against Codex or Claude Code
 - see whether it is running, blocked, or waiting
 - handle approvals away from the terminal
 - move control between devices without losing the session
+
+## Quick start
+
+Today `agent-relay` runs from source. A published `npx agent-relay` package
+is planned but not on npm yet, so the steps below are the supported path.
+
+You will need:
+
+- **Rust toolchain** (`cargo`) — to build `relay-server`
+- **Node.js 18+** and `npm` — to build the web UI and run the Claude Code
+  worker
+- **At least one agent CLI**, already installed and logged in:
+  - [`codex`](https://github.com/openai/codex) for Codex sessions, and/or
+  - [`claude`](https://docs.claude.com/en/docs/claude-code/overview)
+    for Claude Code sessions
+
+Then:
+
+```bash
+git clone https://github.com/YikaiLL/agent-relay.git
+cd agent-relay
+
+npm install                            # vite + frontend tooling
+(cd claude-worker && npm install)      # only needed for Claude Code sessions
+
+# Config for attaching to the hosted public broker. This file is gitignored.
+cat > .env.public.local <<'EOF'
+RELAY_BROKER_URL=wss://agent-relay.up.railway.app
+RELAY_BROKER_AUTH_MODE=public
+EOF
+
+npm run dev:restart:public
+```
+
+`npm run dev:restart:public` sources `.env.public.local`, rebuilds the web UI,
+and starts `relay-server`. Re-run it anytime to pick up code or config
+changes — it kills the previous process first.
+
+Open <http://localhost:8787> and pair a phone or remote browser from the
+Settings panel. If you only want a localhost-only setup with no remote pairing,
+use `npm run dev:restart:local` (no broker config needed) instead.
+
+The relay treats whatever directory you launched it from as your workspace
+root, and stores its state in `.agent-relay/` there.
+
+More detail on each piece — security model, what is and is not built, the full
+list of env vars, and the self-hosted broker option — is in the rest of this
+README and in [`DEPLOYMENT.md`](DEPLOYMENT.md).
 
 ## Current status
 
@@ -24,9 +90,10 @@ privacy-first default.
 The recommended deployment shape today is:
 
 - keep `relay-server` on the workstation, VM, or jump host that already has the
-  local workspace and logged-in `codex` CLI
-- deploy `relay-broker` separately when you want phones or remote browsers to
-  attach over LAN or the public internet
+  local workspace and a logged-in `codex` and/or `claude` CLI
+- use the hosted public broker at <https://agent-relay.up.railway.app/> to pair
+  phones and remote browsers without running broker infrastructure yourself, or
+  self-host `relay-broker` if you prefer to keep that hop under your control
 - treat the current product as a trustworthy control plane for one operator and
   multiple devices, not as a multi-tenant hosted service
 
@@ -37,14 +104,15 @@ and the problem is control, continuity, and trust rather than raw execution.
 
 Good fits today:
 
-- you want to start or resume a Codex session from a browser without
-  moving the workspace off the machine that already owns it
+- you want to start or resume a Codex or Claude Code session from a browser
+  without moving the workspace off the machine that already owns it
 - you want to review approval requests or take over a session from your phone
   while away from the terminal
 - you want one long-lived agent session to survive device switches instead of
   creating a fresh session on every surface
 - you want to self-host the control plane and keep the execution authority near
-  your repo, secrets, and logged-in CLI
+  your repo, secrets, and logged-in CLI, while still reaching it remotely
+  through a hosted public broker
 - you care about privacy and want the default model to treat the broker as
   transport, not as the place that gets to read everything
 
@@ -58,8 +126,8 @@ Not the current target:
 
 The design is intentionally opinionated:
 
-- local-first authority: the machine with the local workspace and Codex session
-  remains the source of truth
+- local-first authority: the machine with the local workspace and the Codex or
+  Claude Code session remains the source of truth
 - privacy-first defaults: the safe path should be the obvious path for people
   who do not want their code, prompts, and approvals copied into a hosted
   middle layer by default
@@ -93,26 +161,32 @@ Security is a core part of the product, not a later add-on.
 
 ## Current focus
 
-- Codex first, via the official `codex app-server` JSON-RPC protocol
+- Codex via the official `codex app-server` JSON-RPC protocol
+- Claude Code via the official `@anthropic-ai/claude-agent-sdk`
 - single owner, multiple devices
 - approval-first remote workflow
 - web first, native mobile later
-- local-first runtime with optional self-hosted or public broker transport
+- local-first runtime with the hosted public broker at
+  <https://agent-relay.up.railway.app/> as the default remote transport, and a
+  self-hosted broker as an option
 
 ## What exists today
 
 The repository currently includes:
 
-- `crates/relay-server`: Rust API server, Codex bridge, session state, and static web hosting
+- `crates/relay-server`: Rust API server, provider bridges, session state, and static web hosting
 - `crates/relay-broker`: Rust broker service for remote transport, pairing, and
   public-mode auth/control
+- `claude-worker/`: Node worker that bridges `@anthropic-ai/claude-agent-sdk`
+  into the relay's session protocol
 - `frontend/`: Vite-based web client source
 
 The current implementation supports:
 
-- starting a Codex session from the browser
+- starting a Codex or Claude Code session from the browser
+- picking the provider per session from the launch panel
 - listing saved threads scoped by workspace
-- resuming a saved thread
+- resuming a saved thread on the provider that owns it
 - sending the next user turn from the active device
 - streaming session updates over SSE
 - handling approval requests from the web UI
@@ -120,7 +194,7 @@ The current implementation supports:
 - approval decisions from any owner device
 - controller lease and heartbeat handling
 - configurable allowed workspace roots with enforced path restrictions
-- surfacing locally available Codex models in the web UI via `codex app-server`
+- surfacing locally available Codex and Claude Code models in the web UI
 - optional API token auth with `RELAY_API_TOKEN`
 - same-site relay auth cookies with CSRF protection for browser flows
 - local session persistence for refresh and resume
@@ -144,12 +218,11 @@ The current web UI is intentionally simple:
 
 The project is usable, but it is still early. It does not yet provide:
 
-- a polished hosted deployment story or managed ops for the public broker path
 - a formal event log with replay, cursor, and idempotency guarantees
 - push notifications or native mobile apps
 - team roles, org policy, or enterprise audit workflows
 - cloud runners or multi-agent orchestration
-- multi-provider support beyond the Codex-first path
+- providers beyond Codex and Claude Code
 - a hardened multi-user product surface for untrusted tenants
 
 ## Roadmap direction
@@ -173,58 +246,88 @@ Longer-term, the plan is to grow from local-first control into:
 
 Requirements:
 
-- Rust toolchain
-- `codex` CLI installed and logged in
+- Rust toolchain (`cargo`)
+- Node.js 18+ and `npm`
+- at least one agent CLI, installed and logged in:
+  - `codex` CLI (for Codex sessions)
+  - `claude` CLI (for Claude Code sessions)
+
+The end-to-end build and run steps live in [Quick start](#quick-start) above.
 
 Testing and CI coverage live in [`TESTING.md`](TESTING.md).
-Deployment guidance lives in [`DEPLOYMENT.md`](DEPLOYMENT.md).
+Deployment guidance, including the self-hosted broker option, lives in
+[`DEPLOYMENT.md`](DEPLOYMENT.md).
 
-### npm package
+### Planned: `npx agent-relay`
 
-The repository can be published as an npm CLI package. The published package
-contains a small JavaScript wrapper plus platform-specific prebuilt
-`relay-server` binaries with the web UI embedded:
+A single-command npm release is on the roadmap but **not yet published**. The
+wrapper script and `npm Release` GitHub Actions workflow already exist in the
+repo — the workflow builds prebuilt `relay-server` binaries for macOS, Linux,
+and Windows (with the web UI embedded), stages them under
+`bin/<platform>-<arch>/`, and publishes when `NPM_TOKEN` is configured.
+
+Once published, users will be able to skip the Rust toolchain entirely:
 
 ```bash
 npx agent-relay
 ```
 
-If a public broker URL is configured by the package publisher, the CLI connects
-to it by default. Until then, or for overrides:
+…with the CLI defaulting to the hosted public broker at
+<https://agent-relay.up.railway.app/>. Override flags will look like:
 
 ```bash
-AGENT_RELAY_PUBLIC_BROKER_URL=https://broker.example.com npx agent-relay
-```
-
-The npm CLI still requires local Rust/Cargo and a logged-in `codex` CLI. It
-stores relay state under the directory where the command is run.
-
-Useful options:
-
-```bash
-agent-relay --broker https://broker.example.com
+agent-relay --broker https://agent-relay.up.railway.app/
 agent-relay --no-broker
 agent-relay --host 127.0.0.1 --port 8787
 ```
 
-With a prebuilt binary package installed, users do not need Rust, Cargo, Vite,
-or a local checkout of this repository. The only external runtime dependency is
-the local `codex` CLI, which must already be installed and logged in.
+Until that release lands, use the from-source steps in
+[Quick start](#quick-start).
 
-During development, if no prebuilt binary is installed, the CLI falls back to
-`cargo run --release -p relay-server`. Release builds embed the generated
-`web/` assets, so run `npm run build` before compiling a distributable binary.
-The `npm Release` GitHub Actions workflow builds binaries for macOS, Linux, and
-Windows, stages them under `bin/<platform>-<arch>/`, verifies `npm pack`, then
-publishes the package when `NPM_TOKEN` is configured.
+### Minimal env vars (public broker)
 
-Then run:
+To attach to the hosted public broker, only two variables are required:
 
-```bash
-cargo run -p relay-server
+```ini
+# .env.public.local — gitignored; read by `npm run dev:restart:public`
+RELAY_BROKER_URL=wss://agent-relay.up.railway.app
+RELAY_BROKER_AUTH_MODE=public
 ```
 
-Open `http://localhost:8787`.
+`scripts/restart-dev-public.sh` (run via `npm run dev:restart:public`) sources
+this file before launching `relay-server`. The `relay-server` binary itself
+reads from the process environment and does not auto-load `.env` files, so if
+you launch it without the script you will need to `export` the vars or feed
+them in some other way (e.g. `direnv`, `dotenv-cli`).
+
+Everything else has a sensible default:
+
+- `RELAY_BROKER_CONTROL_URL` is derived from `RELAY_BROKER_URL`
+  (`wss://` becomes `https://`)
+- `RELAY_BROKER_PUBLIC_URL` falls back to `RELAY_BROKER_URL`; only set it
+  separately when the relay reaches the broker through a different hostname
+  than remote devices do (e.g. a Docker network)
+- `RELAY_BROKER_PEER_ID` defaults to `local-relay`
+- `RELAY_BROKER_REGISTRATION_PATH` and `RELAY_BROKER_IDENTITY_PATH` default to
+  `.agent-relay/public-broker-registration.json` and
+  `.agent-relay/public-broker-identity.json` under the working directory
+- `RELAY_SECURITY_MODE` already defaults to `private`
+- `BIND_HOST` and `PORT` already default to `127.0.0.1` and `8787`
+
+`RELAY_BROKER_AUTH_MODE` (how the relay authenticates to the broker) and
+`RELAY_SECURITY_MODE` (whether the broker can see session content) are
+independent: `auth_mode=public` + `security=private` is the recommended
+combination — use the hosted broker for transport, keep payloads end-to-end
+encrypted so the broker stays blind to content.
+
+Optional, but useful in practice:
+
+```ini
+RELAY_STATE_PATH=.agent-relay/public-session.json
+```
+
+This isolates state from any other localhost-only relay you may already run in
+the same workspace.
 
 Notes:
 

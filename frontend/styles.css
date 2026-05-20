@@ -1338,30 +1338,69 @@ input:focus, textarea:focus, select:focus {
   color: var(--text-faint);
 }
 
-/* SESSION SETTINGS PANEL (inline above transcript) */
-.session-settings-panel {
-  margin: 0;
-  padding: 10px 16px;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border-faint);
-  background: var(--bg-surface);
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+/* SESSION SETTINGS (composer toolbar chip + popover) */
+.session-settings-control {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
 }
-.session-settings-panel.is-disabled {
-  opacity: 0.7;
-}
-.session-settings-fields {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 14px;
-  align-items: center;
-}
-.session-settings-field {
+.session-settings-toggle {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  padding: 4px 10px;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-faint);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+.session-settings-toggle:hover,
+.session-settings-control.is-open .session-settings-toggle {
+  border-color: var(--border-prominent);
+  background: var(--surface-1, var(--bg-surface));
+  color: var(--text-primary);
+}
+.session-settings-toggle-icon {
+  font-size: 13px;
+  line-height: 1;
+}
+.session-settings-toggle-label {
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  max-width: 14ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.session-settings-popover {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 30;
+  min-width: 240px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-prominent);
+  background: var(--bg-surface);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.session-settings-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.session-settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
   font-size: 12px;
   color: var(--text-secondary);
 }
@@ -1371,8 +1410,8 @@ input:focus, textarea:focus, select:focus {
 }
 .session-settings-select {
   font: inherit;
-  font-size: 12px;
-  padding: 2px 6px;
+  font-size: 13px;
+  padding: 4px 8px;
   border-radius: 6px;
   border: 1px solid var(--border-faint);
   background: var(--bg-input, var(--bg-surface));
@@ -1386,6 +1425,21 @@ input:focus, textarea:focus, select:focus {
   margin: 0;
   font-size: 11px;
   color: var(--text-secondary);
+}
+
+@media (max-width: 600px) {
+  .session-settings-popover {
+    position: fixed;
+    inset: auto 0 0 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    border-radius: var(--radius-md) var(--radius-md) 0 0;
+    border-bottom: none;
+    padding: 14px 16px env(safe-area-inset-bottom, 14px);
+    min-width: 0;
+    box-shadow: 0 -10px 30px rgba(0, 0, 0, 0.25);
+  }
 }
 
 /* CONTROL BANNER */
@@ -1872,6 +1926,11 @@ input:focus, textarea:focus, select:focus {
   gap: 12px;
 }
 
+.relay-home-card-wrapper {
+  position: relative;
+  display: grid;
+}
+
 .relay-home-card {
   width: 100%;
   text-align: left;
@@ -1891,14 +1950,7 @@ input:focus, textarea:focus, select:focus {
 .relay-home-card-copy {
   display: grid;
   gap: 6px;
-}
-
-.relay-home-card-label {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-tertiary);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+  padding-right: 88px;
 }
 
 .relay-home-card-title {
@@ -1920,6 +1972,95 @@ input:focus, textarea:focus, select:focus {
   gap: 16px;
   font-size: 12px;
   color: var(--text-tertiary);
+}
+
+.relay-home-card-meta:empty {
+  display: none;
+}
+
+.relay-home-card-cta {
+  margin-left: auto;
+}
+
+.relay-home-card-rename {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  z-index: 1;
+}
+
+.relay-home-card-rename:hover {
+  color: var(--text-primary);
+  border-color: var(--border-prominent);
+}
+
+.relay-home-card-wrapper.is-editing {
+  padding: 18px 20px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-prominent);
+  background: var(--bg-surface);
+}
+
+.relay-home-card-edit {
+  display: grid;
+  gap: 10px;
+}
+
+.relay-home-card-edit-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.relay-home-card-edit-input {
+  padding: 8px 10px;
+  font-size: 14px;
+  color: var(--text-primary);
+  background: var(--bg-base);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+
+.relay-home-card-edit-input:focus {
+  outline: none;
+  border-color: var(--border-prominent);
+}
+
+.relay-home-card-edit-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.relay-home-card-edit-actions button {
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-base);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.relay-home-card-edit-save {
+  background: var(--text-primary) !important;
+  color: var(--bg-base) !important;
+  border-color: var(--text-primary) !important;
+}
+
+.relay-home-card-edit-clear {
+  margin-left: auto;
+  color: var(--text-tertiary) !important;
 }
 
 /* MESSAGES */

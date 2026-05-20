@@ -110,33 +110,39 @@ export function selectThreadsRenderModel({
   };
 }
 
-export function selectRelayDirectoryRenderModel({ relayDirectory, activeRelayId }) {
+export function selectRelayDirectoryRenderModel({ relayDirectory, activeRelayId, nicknames }) {
   const relays = relayDirectory || [];
+  const nicknameMap = nicknames || {};
 
   return {
     countLabel: `${relays.length} ${relays.length === 1 ? "relay" : "relays"}`,
     emptyMessage: relays.length
       ? null
       : "Pair a relay from your local machine to add it here.",
-    items: relays.map((relay) => ({
-      active: activeRelayId === relay.relayId,
-      actionLabel: relay.hasLocalProfile
-        ? "Open relay"
-        : relay.needsLocalRePairing
-          ? "Re-pair relay"
-          : "Pair again",
-      id: relay.relayId || relay.brokerRoomId || relay.deviceId || "",
-      isEnabled: Boolean(relay.hasLocalProfile && (relay.relayId || relay.brokerRoomId || relay.deviceId)),
-      meta: relay.brokerRoomId || relay.relayId || relay.deviceId || "",
-      relay,
-      title:
-        relay.relayLabel
-        || relay.relayId
-        || relay.brokerRoomId
-        || relay.deviceLabel
-        || relay.deviceId
-        || "Unknown relay",
-    })),
+    items: relays.map((relay) => {
+      const id = relay.relayId || relay.brokerRoomId || relay.deviceId || "";
+      const nickname = nicknameMap[relay.relayId] || null;
+      return {
+        active: activeRelayId === relay.relayId,
+        actionLabel: relay.hasLocalProfile
+          ? "Open relay"
+          : relay.needsLocalRePairing
+            ? "Re-pair relay"
+            : "Pair again",
+        id,
+        isEnabled: Boolean(relay.hasLocalProfile && id),
+        meta: nickname ? (relay.relayId || relay.brokerRoomId || relay.deviceId || "") : "",
+        relay,
+        title:
+          nickname
+          || relay.relayLabel
+          || relay.relayId
+          || relay.brokerRoomId
+          || relay.deviceLabel
+          || relay.deviceId
+          || "Unknown relay",
+      };
+    }),
   };
 }
 
