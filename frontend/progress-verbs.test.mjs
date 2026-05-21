@@ -70,15 +70,39 @@ test("progressPhaseLabel falls back when no verb is supplied", () => {
   assert.equal(progressPhaseLabel("streaming", null, null), "Streaming…");
 });
 
-test("isProgressStalled flips once we've been silent past the threshold", () => {
+test("isProgressStalled uses the per-phase threshold for thinking (default 60s)", () => {
   const session = {
     current_phase: "thinking",
     last_progress_at: 1000,
     server_time: 1010,
   };
   assert.equal(isProgressStalled(session), false);
-  assert.equal(isProgressStalled(session, { now: 1029 }), false);
-  assert.equal(isProgressStalled(session, { now: 1031 }), true);
+  assert.equal(isProgressStalled(session, { now: 1059 }), false);
+  assert.equal(isProgressStalled(session, { now: 1061 }), true);
+});
+
+test("isProgressStalled uses the per-phase threshold for tool (default 120s)", () => {
+  const session = {
+    current_phase: "tool",
+    current_tool: "Bash",
+    last_progress_at: 1000,
+  };
+  assert.equal(isProgressStalled(session, { now: 1100 }), false);
+  assert.equal(isProgressStalled(session, { now: 1119 }), false);
+  assert.equal(isProgressStalled(session, { now: 1121 }), true);
+});
+
+test("isProgressStalled never flags streaming or waiting_approval", () => {
+  const streaming = {
+    current_phase: "streaming",
+    last_progress_at: 1000,
+  };
+  const approval = {
+    current_phase: "waiting_approval",
+    last_progress_at: 1000,
+  };
+  assert.equal(isProgressStalled(streaming, { now: 99_999 }), false);
+  assert.equal(isProgressStalled(approval, { now: 99_999 }), false);
 });
 
 test("isProgressStalled returns false when no phase is active", () => {

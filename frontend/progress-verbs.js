@@ -21,11 +21,18 @@ export const PROGRESS_VERBS = [
   "Noodling",
 ];
 
-// Default stall window. Has to absorb the longest realistic silent gap
-// during a turn — model "thinking" between events on Codex (no tick), or a
-// long tool call running without output. 30s gives us a clear "something
-// is wrong" signal without false-alarming on normal pauses.
-const STALL_THRESHOLD_SECONDS = 30;
+// Per-phase stall thresholds in seconds. `null` disables stall detection
+// for that phase entirely. The defaults assume: streaming and
+// waiting_approval should never be flagged stalled (deltas are constant
+// when streaming; approvals are literally waiting on the human). Thinking
+// allows up to a minute of silent reasoning; tool calls can run for two
+// minutes (test suites, long greps, etc.) before we get suspicious.
+export const STALL_THRESHOLDS_BY_PHASE = {
+  thinking: 60,
+  tool: 120,
+  streaming: null,
+  waiting_approval: null,
+};
 
 export function createVerbCycler(opts = {}) {
   const verbs = opts.verbs ?? PROGRESS_VERBS;
@@ -94,11 +101,16 @@ export function progressPhaseLabel(phase, currentTool, verb) {
 }
 
 export function isProgressStalled(session, opts = {}) {
-  const thresholdSec = opts.thresholdSec ?? STALL_THRESHOLD_SECONDS;
   if (!session) return false;
-  if (!session.current_phase) return false;
+  const phase = session.current_phase;
+  if (!phase) return false;
   const lastAt = session.last_progress_at;
   if (lastAt == null) return false;
+
+  const phaseThresholds = opts.phaseThresholds ?? STALL_THRESHOLDS_BY_PHASE;
+  const threshold = opts.thresholdSec ?? phaseThresholds[phase];
+  if (threshold == null) return false;
+
   const now = opts.now ?? session.server_time ?? Math.floor(Date.now() / 1000);
-  return now - lastAt > thresholdSec;
+  return now - lastAt > threshold;
 }
