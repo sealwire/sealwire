@@ -1,4 +1,8 @@
 import { createStore } from "zustand/vanilla";
+import {
+  loadLastApprovalPolicy,
+  loadLastEffort,
+} from "../shared/last-used-settings.js";
 
 function copyStringSet(values) {
   return new Set([...(values || [])].map((value) => String(value)).filter(Boolean));
@@ -29,8 +33,8 @@ export function createLocalUiStore(initialState = {}) {
     headerOverflowOpen: false,
     pendingPairingIds: [],
     sessionDraft: {
-      approvalPolicy: "untrusted",
-      effort: "medium",
+      approvalPolicy: loadLastApprovalPolicy("codex") || "untrusted",
+      effort: loadLastEffort("codex") || "medium",
       initialPrompt: "",
       model: "gpt-5.5",
       provider: "codex",

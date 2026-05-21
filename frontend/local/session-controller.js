@@ -24,6 +24,7 @@ import {
 } from "./dom.js";
 import { renderAllowedRoots, renderPairingPanel } from "./render-security.js";
 import { openSessionStream, sessionStreamUrl } from "../session-stream.js";
+import { saveLastApprovalPolicy } from "../shared/last-used-settings.js";
 import { buildThreadGroups, findLatestThread } from "../shared/thread-groups.js";
 import {
   fetchTranscriptEntryDetailViaRequester,
@@ -832,7 +833,11 @@ export function createSessionController({
     const liveProviderInput = liveElement("provider-input", providerInput);
     const liveModelInput = liveElement("model-input", modelInput);
     const liveApprovalPolicyInput = liveElement("approval-policy-input", approvalPolicyInput);
+    // sandbox-input was removed from the UI when the file-access dropdown
+    // was collapsed into the permission level. Fall back to workspace-write
+    // so the session-start protocol stays unchanged.
     const liveSandboxInput = liveElement("sandbox-input", sandboxInput);
+    const sandboxValue = liveSandboxInput?.value || "workspace-write";
     const liveStartEffortInput = liveElement("start-effort", startEffortInput);
     const cwd = liveCwdInput.value.trim();
 
@@ -857,7 +862,7 @@ export function createSessionController({
           initial_prompt: liveStartPromptInput.value.trim() || null,
           model: liveModelInput.value.trim() || null,
           approval_policy: liveApprovalPolicyInput.value,
-          sandbox: liveSandboxInput.value,
+          sandbox: sandboxValue,
           effort: liveStartEffortInput.value,
           device_id: state.deviceId,
           provider: liveProviderInput?.value || null,
@@ -957,6 +962,9 @@ export function createSessionController({
         throw new Error(payload?.error?.message || "Failed to update session settings");
       }
       applySessionSnapshot(payload.data);
+      if (body.approval_policy && state.session?.provider) {
+        saveLastApprovalPolicy(state.session.provider, body.approval_policy);
+      }
       const parts = [];
       if (body.approval_policy) parts.push(`approval=${body.approval_policy}`);
       if (body.sandbox) parts.push(`sandbox=${body.sandbox}`);

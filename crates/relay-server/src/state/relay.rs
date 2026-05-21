@@ -86,6 +86,9 @@ pub struct RelayState {
     pub active_controller_last_seen_at: Option<u64>,
     pub active_turn_id: Option<String>,
     pub current_status: String,
+    pub current_phase: Option<String>,
+    pub current_tool: Option<String>,
+    pub last_progress_at: Option<u64>,
     pub active_flags: Vec<String>,
     pub current_cwd: String,
     pub model: String,
@@ -133,6 +136,9 @@ impl RelayState {
             active_controller_last_seen_at: None,
             active_turn_id: None,
             current_status: "idle".to_string(),
+            current_phase: None,
+            current_tool: None,
+            last_progress_at: None,
             active_flags: Vec::new(),
             current_cwd,
             model: DEFAULT_MODEL.to_string(),
@@ -244,6 +250,9 @@ impl RelayState {
             controller_lease_seconds: CONTROLLER_LEASE_SECS,
             active_turn_id: self.active_turn_id.clone(),
             current_status: self.current_status.clone(),
+            current_phase: self.current_phase.clone(),
+            current_tool: self.current_tool.clone(),
+            last_progress_at: self.last_progress_at,
             active_flags: self.active_flags.clone(),
             current_cwd: self.current_cwd.clone(),
             model: self.model.clone(),
@@ -631,6 +640,9 @@ impl RelayState {
         self.active_controller_last_seen_at = persisted.active_controller_last_seen_at;
         self.active_turn_id = None;
         self.current_status = persisted.current_status.clone();
+        self.current_phase = None;
+        self.current_tool = None;
+        self.last_progress_at = None;
         self.active_flags = persisted.active_flags.clone();
         self.current_cwd = persisted.current_cwd.clone();
         self.model = persisted.model.clone();
@@ -660,8 +672,29 @@ impl RelayState {
         self.active_controller_last_seen_at = None;
         self.active_turn_id = None;
         self.current_status = "idle".to_string();
+        self.current_phase = None;
+        self.current_tool = None;
+        self.last_progress_at = None;
         self.active_flags.clear();
         self.pending_approvals.clear();
+    }
+
+    /// Worker emitted a real event or a progress_tick. `phase` and `tool`
+    /// are advisory; pass None to leave them unchanged.
+    pub fn touch_progress(&mut self, phase: Option<&str>, tool: Option<&str>) {
+        self.last_progress_at = Some(unix_now());
+        if let Some(p) = phase {
+            self.current_phase = Some(p.to_string());
+        }
+        if let Some(t) = tool {
+            self.current_tool = Some(t.to_string());
+        }
+    }
+
+    pub fn clear_progress(&mut self) {
+        self.current_phase = None;
+        self.current_tool = None;
+        self.last_progress_at = None;
     }
 
     pub(super) fn assign_active_controller(&mut self, device_id: &str, now: u64) -> bool {

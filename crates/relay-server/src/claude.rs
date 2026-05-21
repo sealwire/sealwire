@@ -235,7 +235,7 @@ impl ProviderBridge for ClaudeCodeBridge {
                     "medium".to_string(),
                     "high".to_string(),
                 ],
-                default_reasoning_effort: "medium".to_string(),
+                default_reasoning_effort: "high".to_string(),
                 provider: "anthropic".to_string(),
                 hidden: false,
                 is_default: true,
@@ -250,7 +250,7 @@ impl ProviderBridge for ClaudeCodeBridge {
                     "xhigh".to_string(),
                     "max".to_string(),
                 ],
-                default_reasoning_effort: "medium".to_string(),
+                default_reasoning_effort: "xhigh".to_string(),
                 provider: "anthropic".to_string(),
                 hidden: false,
                 is_default: false,
@@ -683,6 +683,7 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                 string_at(&payload, &["text"]),
             ) {
                 relay.upsert_user_message(item_id, text, turn_id);
+                relay.touch_progress(Some("thinking"), None);
                 relay.notify();
             }
         }
@@ -697,7 +698,9 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                     string_at(&payload, &["status"]).unwrap_or_else(|| "completed".to_string());
                 if status == "completed" {
                     relay.complete_agent_message(item_id, text.clone(), turn_id);
+                    relay.touch_progress(Some("thinking"), None);
                 } else {
+                    relay.touch_progress(Some("streaming"), None);
                     let mutation = relay.append_agent_delta(&item_id, &text, &turn_id);
                     let thread_id = relay.active_thread_id.clone().unwrap_or_default();
                     relay
@@ -759,6 +762,7 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                     Some(tool),
                 );
             }
+            relay.touch_progress(Some("tool"), Some(name));
             relay.push_log("tool", format!("Tool call: {name}"));
             relay.notify();
         }
@@ -797,6 +801,10 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                     Some(tool),
                 );
             }
+            // Bump last_progress_at but defer phase changes to the next
+            // worker event (or progress_tick) — multiple tools may still
+            // be in flight and only the worker knows.
+            relay.touch_progress(None, None);
             relay.push_log("tool", "Tool result received");
             relay.notify();
         }
@@ -813,6 +821,7 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                     .insert(pending.request_id.clone(), pending.clone());
             }
             let action = string_at(&payload, &["action"]).unwrap_or_else(|| "unknown".to_string());
+            relay.touch_progress(Some("waiting_approval"), None);
             relay.push_log(
                 "approval",
                 format!("Claude requests approval for: {action}"),
@@ -820,10 +829,18 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
             relay.notify();
         }
 
+        "progress_tick" => {
+            let phase = string_at(&payload, &["phase"]);
+            let tool = string_at(&payload, &["tool"]);
+            relay.touch_progress(phase.as_deref(), tool.as_deref());
+            relay.notify();
+        }
+
         "done" => {
             let tid = relay.active_thread_id.clone().unwrap_or_default();
             relay.set_active_turn(None);
             relay.set_thread_status(&tid, "idle".to_string(), Vec::new());
+            relay.clear_progress();
             relay.push_log("info", "Claude turn completed.");
             relay.notify();
         }
@@ -943,6 +960,67 @@ mod tests {
             claude_permission_mode("bypass", "danger-full-access"),
             "bypassPermissions"
         );
+    }
+
+    fn new_test_state() -> Arc<RwLock<RelayState>> {
+        let (tx, _) = tokio::sync::watch::channel(0);
+        Arc::new(RwLock::new(RelayState::new(
+            "/tmp".to_string(),
+            tx,
+            crate::state::SecurityProfile::private(),
+        )))
+    }
+
+    #[tokio::test]
+    async fn progress_tick_sets_phase_and_tool_and_last_progress_at() {
+        let state = new_test_state();
+        handle_worker_event(
+            json!({ "type": "progress_tick", "phase": "tool", "tool": "Bash" }),
+            &state,
+        )
+        .await;
+
+        let relay = state.read().await;
+        assert_eq!(relay.current_phase.as_deref(), Some("tool"));
+        assert_eq!(relay.current_tool.as_deref(), Some("Bash"));
+        assert!(relay.last_progress_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn done_event_clears_progress_fields() {
+        let state = new_test_state();
+        handle_worker_event(
+            json!({ "type": "progress_tick", "phase": "thinking" }),
+            &state,
+        )
+        .await;
+        assert!(state.read().await.last_progress_at.is_some());
+
+        handle_worker_event(json!({ "type": "done" }), &state).await;
+        let relay = state.read().await;
+        assert_eq!(relay.current_phase, None);
+        assert_eq!(relay.current_tool, None);
+        assert_eq!(relay.last_progress_at, None);
+    }
+
+    #[tokio::test]
+    async fn tool_call_requested_marks_phase_and_records_tool() {
+        let state = new_test_state();
+        handle_worker_event(
+            json!({
+                "type": "tool_call_requested",
+                "id": "t1",
+                "name": "Read",
+                "args": {}
+            }),
+            &state,
+        )
+        .await;
+
+        let relay = state.read().await;
+        assert_eq!(relay.current_phase.as_deref(), Some("tool"));
+        assert_eq!(relay.current_tool.as_deref(), Some("Read"));
+        assert!(relay.last_progress_at.is_some());
     }
 
     #[test]

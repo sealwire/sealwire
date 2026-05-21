@@ -83,6 +83,11 @@ import {
   fetchAuthSession,
 } from "./local/api.js";
 import {
+  createVerbCycler,
+  isProgressStalled,
+  progressPhaseLabel,
+} from "./progress-verbs.js";
+import {
   configureSecurityRenderers,
   renderAllowedRoots,
   renderDeviceRecords,
@@ -108,6 +113,12 @@ import {
 import { installThreadListWheelProxy } from "./shared/thread-list-scroll.js";
 import { fetchBuildInfo } from "./shared/build-badge.js";
 import { ClientLog } from "./shared/client-log.js";
+import {
+  loadLastApprovalPolicy,
+  loadLastEffort,
+  saveLastApprovalPolicy,
+  saveLastEffort,
+} from "./shared/last-used-settings.js";
 import { renderSelectOptions } from "./shared/select-options.js";
 import {
   buildReasoningEffortOptions,
@@ -200,6 +211,54 @@ fetchBuildInfo("relay").then((info) => {
   }
 });
 
+// --- progress verb cycler --------------------------------------------------
+//
+// While `session.current_phase` is set we rotate through a small pool of
+// gerund verbs every 2.5s so the badge animates and proves the UI is live.
+// The timer is fully driven by phase transitions reported in session
+// snapshots — when phase clears we tear it down.
+
+const VERB_CYCLE_MS = 2500;
+const verbCycler = createVerbCycler();
+let currentProgressVerb = null;
+let verbTimer = null;
+
+function syncVerbTimer(session) {
+  const phase = session?.current_phase ?? null;
+  if (phase) {
+    if (!verbTimer) {
+      currentProgressVerb = verbCycler.next();
+      verbTimer = setInterval(() => {
+        currentProgressVerb = verbCycler.next();
+        refreshStatusBadgeForVerb();
+      }, VERB_CYCLE_MS);
+    }
+  } else if (verbTimer) {
+    clearInterval(verbTimer);
+    verbTimer = null;
+    currentProgressVerb = null;
+    verbCycler.reset();
+  }
+}
+
+function refreshStatusBadgeForVerb() {
+  const session = state.session;
+  if (!session || !statusBadge) return;
+  const approval = session.pending_approvals?.[0] || null;
+  if (approval) return;
+  if (!session.provider_connected) return;
+  if ((session.pending_pairing_requests || []).length > 0) return;
+  if (!session.current_phase) return;
+
+  if (isProgressStalled(session)) {
+    statusBadge.textContent = "Stalled?";
+    statusBadge.className = "status-badge status-badge-alert";
+  } else {
+    statusBadge.textContent = sessionStatusLabel(session, approval);
+    statusBadge.className = "status-badge status-badge-ready";
+  }
+}
+
 const renderer = createSessionRenderer({
   state,
   renderAllowedRoots,
@@ -252,6 +311,16 @@ const renderer = createSessionRenderer({
     return controller?.updateSessionSettings(payload);
   },
 });
+
+// Wrap renderer.renderSession so every full render also reconciles the
+// liveness verb timer. Patching the object (rather than only the local
+// destructured binding) ensures controller callbacks below also flow
+// through the wrapper.
+const _baseRenderSession = renderer.renderSession;
+renderer.renderSession = function wrappedRenderSession(session) {
+  _baseRenderSession(session);
+  syncVerbTimer(session);
+};
 
 controller = createSessionController({
   state,
@@ -569,6 +638,13 @@ modelInput?.addEventListener("change", () => {
 messageModel?.addEventListener("change", () => {
   const models = state.session?.available_models || [];
   syncEffortSuggestions(messageEffort, models, messageModel.value, messageEffort.value, state.session?.provider || "");
+  const provider = state.session?.provider;
+  if (provider && messageEffort?.value) saveLastEffort(provider, messageEffort.value);
+});
+
+messageEffort?.addEventListener("change", () => {
+  const provider = state.session?.provider;
+  if (provider && messageEffort.value) saveLastEffort(provider, messageEffort.value);
 });
 
 stopButton?.addEventListener("click", () => {
@@ -1026,6 +1102,9 @@ function handleLaunchFieldInput(id, value) {
     return;
   }
   state.localUiStore.getState().setSessionDraftField(field, value);
+  const draftProvider = readLocalUiState(state.localUiStore).sessionDraft?.provider || "codex";
+  if (field === "effort") saveLastEffort(draftProvider, value);
+  if (field === "approvalPolicy") saveLastApprovalPolicy(draftProvider, value);
   if (field !== "provider") {
     return;
   }
@@ -1035,14 +1114,24 @@ function handleLaunchFieldInput(id, value) {
   const nextModels = modelsForProvider(value, session.available_models || []);
   const liveModelInput = document.getElementById("model-input") || modelInput;
   const liveStartEffortInput = document.getElementById("start-effort") || startEffortInput;
+  const liveApprovalInput = document.getElementById("approval-policy-input") || approvalPolicyInput;
   const nextModel = defaultModelForProvider(value);
+  const storedEffort = loadLastEffort(value);
+  const storedApproval = loadLastApprovalPolicy(value);
+  if (storedApproval) {
+    state.localUiStore.getState().setSessionDraftField("approvalPolicy", storedApproval);
+    if (liveApprovalInput) liveApprovalInput.value = storedApproval;
+  }
+  if (storedEffort) {
+    state.localUiStore.getState().setSessionDraftField("effort", storedEffort);
+  }
   syncLaunchSettingLabels(value);
   syncModelSuggestions(liveModelInput, nextModels, nextModel);
   syncEffortSuggestions(
     liveStartEffortInput,
     nextModels,
     nextModel,
-    liveStartEffortInput?.value || "",
+    storedEffort || liveStartEffortInput?.value || "",
     value
   );
 }
@@ -1315,6 +1404,15 @@ function sessionStatusLabel(session, approval) {
 
   if (!session?.active_thread_id) {
     return "Standby";
+  }
+
+  const phaseLabel = progressPhaseLabel(
+    session.current_phase,
+    session.current_tool,
+    currentProgressVerb,
+  );
+  if (phaseLabel) {
+    return phaseLabel;
   }
 
   if (!session.active_controller_device_id && (session.current_status || "idle") === "idle") {

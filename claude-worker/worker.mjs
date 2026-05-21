@@ -30,7 +30,7 @@ import {
 } from "./permissions.mjs";
 import { createFileDiffTracker } from "./file-diff.mjs";
 import {
-  emit,
+  emit as rawEmit,
   emitErrorResponse,
   emitResponse,
   log,
@@ -41,8 +41,19 @@ import {
   mapSessionMessages,
 } from "./sdk-mapping.mjs";
 import { buildSessionOptionsBase } from "./session-options.mjs";
+import { createProgressTracker } from "./progress-tracker.mjs";
 
 const DEFAULT_SETTING_SOURCES = ["user", "project", "local"];
+
+// Tracker is initialized in main() but referenced by the module-level emit
+// wrapper so that every event (including those emitted from inside
+// flushEvents) gets recorded for liveness purposes.
+let progressTracker = null;
+
+function emit(event) {
+  rawEmit(event);
+  progressTracker?.record(event);
+}
 
 async function findSdk() {
   try {
@@ -136,6 +147,10 @@ async function main() {
   const pendingApprovals = new Map();
   const cancelFlag = { current: false };
 
+  // Tracker emits its own ticks via rawEmit so they don't recurse through
+  // the wrapper's record() call.
+  progressTracker = createProgressTracker({ emit: rawEmit });
+
   const rl = createInterface({ input: process.stdin });
   log("claude-worker ready");
 
@@ -154,6 +169,7 @@ async function main() {
     switch (cmd.type) {
       case "shutdown": {
         log("shutting down");
+        progressTracker?.stop();
         if (session) {
           cancelFlag.current = true;
           session.close();
@@ -188,6 +204,7 @@ async function main() {
           session = sdk.unstable_v2_createSession(options);
 
           if (cmd.prompt) {
+            progressTracker.start();
             emit({
               type: "user_message",
               item_id: `user:local-${nextLocalTurn}`,
@@ -254,6 +271,7 @@ async function main() {
           });
 
           if (cmd.prompt) {
+            progressTracker.start();
             emit({
               type: "user_message",
               item_id: `user:local-${nextLocalTurn}`,
@@ -306,6 +324,7 @@ async function main() {
         cancelFlag.current = false;
         try {
           log("sending message to session");
+          progressTracker.start();
           emit({
             type: "user_message",
             item_id: `user:local-${nextLocalTurn}`,

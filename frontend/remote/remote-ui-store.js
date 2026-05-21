@@ -1,15 +1,19 @@
 import { createStore } from "zustand/vanilla";
 import { defaultModelForProvider } from "../shared/provider-settings.js";
+import {
+  loadLastApprovalPolicy,
+  loadLastEffort,
+} from "../shared/last-used-settings.js";
 import { loadDeviceLabel } from "./state.js";
 
-export function createDefaultSessionDraft() {
+export function createDefaultSessionDraft(provider = "codex") {
   return {
-    approvalPolicy: "untrusted",
+    approvalPolicy: loadLastApprovalPolicy(provider) || "untrusted",
     cwd: "",
-    effort: "medium",
+    effort: loadLastEffort(provider) || "medium",
     initialPrompt: "",
-    provider: "codex",
-    model: defaultModelForProvider("codex"),
+    provider,
+    model: defaultModelForProvider(provider),
     sandbox: "workspace-write",
   };
 }

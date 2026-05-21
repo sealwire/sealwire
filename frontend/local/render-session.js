@@ -46,6 +46,7 @@ import {
   readLocalUiState,
 } from "./ui-store.js";
 import { providerLabel } from "../shared/provider-labels.js";
+import { isProgressStalled } from "../progress-verbs.js";
 import {
   earliestPairingExpiry,
   filterActivePairings,
@@ -219,6 +220,9 @@ export function createSessionRenderer({
     } else if (!session.provider_connected) {
       statusBadge.textContent = "Offline";
       statusBadge.className = "status-badge status-badge-offline";
+    } else if (isProgressStalled(session)) {
+      statusBadge.textContent = "Stalled?";
+      statusBadge.className = "status-badge status-badge-alert";
     } else {
       statusBadge.textContent = sessionStatusLabel(session, approval);
       statusBadge.className = "status-badge status-badge-ready";
@@ -606,7 +610,6 @@ export function createSessionRenderer({
           metaChip("Provider", providerLabel(session.provider) || "Unknown"),
           metaChip("Model", session.model),
           metaChip("Permissions", session.approval_policy),
-          metaChip("File access", session.sandbox),
           metaChip("Effort", session.reasoning_effort),
           metaChip("Control", controllerStateLabel(session)),
           metaChip("Thread", shortId(session.active_thread_id)),

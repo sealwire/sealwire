@@ -1,5 +1,4 @@
 import React from "react";
-import { sandboxOptions } from "./provider-settings.js";
 
 const h = React.createElement;
 
@@ -44,13 +43,11 @@ export function SessionSettingsFields({
       options: approvalOptions,
       value: fields.approvalPolicy,
     }),
-    h(SelectField, {
-      id: fieldId(idPrefix, "sandbox-input"),
-      label: labels.sandbox || "File access",
-      onChange: (value) => onFieldChange?.("sandbox", value),
-      options: sandboxOptions(),
-      value: fields.sandbox,
-    }),
+    // File access dropdown removed: the permission level (Ask first /
+    // Ask when needed / Auto-approve / Full access) now subsumes it. The
+    // sandbox value is still kept in state — it defaults to
+    // workspace-write for Codex; "Full access" overrides it in the rust
+    // shim — so the protocol contract is unchanged.
     h(SelectField, {
       id: fieldId(idPrefix, "start-effort"),
       label: labels.effort || "Effort",

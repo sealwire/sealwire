@@ -1,5 +1,5 @@
 import React from "react";
-import { providerSettings, sandboxOptions } from "./provider-settings.js";
+import { providerSettings } from "./provider-settings.js";
 
 const h = React.createElement;
 
@@ -78,7 +78,6 @@ export function SessionSettingsButton({
   const idle = isSessionIdle(session);
   const disabled = !idle || busy;
   const hint = busy ? "Applying…" : sessionBusyReason(session);
-  const showSandbox = provider !== "claude_code";
   const approvalShort = lookupOptionLabel(
     settings.approvalOptions,
     session.approval_policy
@@ -136,17 +135,7 @@ export function SessionSettingsButton({
               value: session.approval_policy || "",
               disabled,
               onChange: (value) => emit({ approval_policy: value }),
-            }),
-            showSandbox
-              ? h(InlineSelect, {
-                  id: "session-settings-sandbox",
-                  label: settings.sandboxLabel || "File access",
-                  options: sandboxOptions(),
-                  value: session.sandbox || "",
-                  disabled,
-                  onChange: (value) => emit({ sandbox: value }),
-                })
-              : null
+            })
           ),
           hint ? h("p", { className: "session-settings-hint" }, hint) : null
         )

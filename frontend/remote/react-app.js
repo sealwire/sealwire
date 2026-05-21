@@ -11,6 +11,12 @@ import { flushSync } from "react-dom";
 import { fetchBuildInfo } from "../shared/build-badge.js";
 import { ClientLog } from "../shared/client-log.js";
 import {
+  loadLastApprovalPolicy,
+  loadLastEffort,
+  saveLastApprovalPolicy,
+  saveLastEffort,
+} from "../shared/last-used-settings.js";
+import {
   buildReasoningEffortOptions,
   resolveReasoningEffortValue,
 } from "../shared/reasoning-efforts.js";
@@ -212,6 +218,14 @@ function RemoteApp() {
         if (cancelled) return;
         remoteUiStore.getState().setProviderModels(selectedProvider, models || []);
         const draft = remoteUiStore.getState().sessionDraft;
+        const storedEffort = loadLastEffort(selectedProvider);
+        const storedApproval = loadLastApprovalPolicy(selectedProvider);
+        if (storedApproval && draft.approvalPolicy !== storedApproval) {
+          remoteUiStore.getState().setSessionDraftField("approvalPolicy", storedApproval);
+        }
+        // Prefer stored effort (last-used for this provider) before falling back
+        // to draft.effort, which may be carried over from a different provider.
+        const effortSeed = storedEffort || draft.effort;
         if (draft.provider === selectedProvider && (!draft.model || draft.model === defaultModelForProvider(selectedProvider))) {
           const nextModel = models?.find((model) => model.is_default)?.model
             || models?.[0]?.model
@@ -219,7 +233,7 @@ function RemoteApp() {
           remoteUiStore.getState().setSessionDraftField("model", nextModel);
           remoteUiStore.getState().setSessionDraftField(
             "effort",
-            resolveReasoningEffortValue(models || [], nextModel, draft.effort)
+            resolveReasoningEffortValue(models || [], nextModel, effortSeed)
           );
           return;
         }
@@ -228,7 +242,7 @@ function RemoteApp() {
           resolveReasoningEffortValue(
             models || [],
             draft.model || defaultModelForProvider(selectedProvider),
-            draft.effort
+            effortSeed
           )
         );
       })
@@ -795,6 +809,7 @@ function RemoteApp() {
           },
           onComposerEffortChange(value) {
             remoteUiStore.getState().setComposerEffort(value);
+            if (session?.provider) saveLastEffort(session.provider, value);
           },
           onComposerModelChange(value) {
             const nextEffort = resolveReasoningEffortValue(
@@ -804,6 +819,7 @@ function RemoteApp() {
             );
             remoteUiStore.getState().setComposerModel(value);
             remoteUiStore.getState().setComposerEffort(nextEffort);
+            if (session?.provider) saveLastEffort(session.provider, nextEffort);
           },
           controlBannerModel,
           currentState,
@@ -827,6 +843,11 @@ function RemoteApp() {
             void handlers.onTakeOver();
           },
           onUpdateSessionSettings(payload) {
+            const provider = session?.provider;
+            if (provider && payload) {
+              if (payload.approval_policy) saveLastApprovalPolicy(provider, payload.approval_policy);
+              if (payload.effort) saveLastEffort(provider, payload.effort);
+            }
             return handlers.onUpdateSessionSettings?.(payload);
           },
           session,
@@ -957,11 +978,19 @@ function RemoteSidebar({
             const model = models.find((option) => option.is_default)?.model
               || models[0]?.model
               || defaultModelForProvider(value);
-            updateSessionDraft({
-              effort: resolveReasoningEffortValue(models, model, uiState.sessionDraft.effort),
+            const storedEffort = loadLastEffort(value);
+            const storedApproval = loadLastApprovalPolicy(value);
+            const patch = {
+              effort: resolveReasoningEffortValue(
+                models,
+                model,
+                storedEffort || uiState.sessionDraft.effort
+              ),
               model,
               provider: value,
-            });
+            };
+            if (storedApproval) patch.approvalPolicy = storedApproval;
+            updateSessionDraft(patch);
             return;
           }
           if (field === "model") {
@@ -977,6 +1006,9 @@ function RemoteSidebar({
             return;
           }
 
+          const provider = uiState.sessionDraft.provider;
+          if (provider && field === "effort") saveLastEffort(provider, value);
+          if (provider && field === "approvalPolicy") saveLastApprovalPolicy(provider, value);
           updateSessionDraft({ [field]: value });
         },
         onStartSession,
