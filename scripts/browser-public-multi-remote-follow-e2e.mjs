@@ -302,7 +302,6 @@ async function main() {
 
 async function attachRemoteMonitor(page, label, workspaceDir, threadId) {
   await selectFirstRelayIfNeeded(page);
-  await page.fill("#remote-threads-cwd-input", workspaceDir);
   await page.click("#remote-threads-refresh-button");
   logStep(`remote ${label} threads refresh requested`);
 

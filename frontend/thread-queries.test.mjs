@@ -8,10 +8,9 @@ import {
   threadTranscriptPageQueryKey,
 } from "./shared/thread-queries.js";
 
-test("thread list query keys include surface, scope, normalized cwd, and limit", () => {
+test("thread list query keys include surface, scope, and limit", () => {
   assert.deepEqual(
     threadListQueryKey({
-      filterValue: "  /tmp/demo  ",
       limit: 80,
       scope: "relay-1",
       surface: "remote",
@@ -20,34 +19,25 @@ test("thread list query keys include surface, scope, normalized cwd, and limit",
       "thread-list",
       "remote",
       "relay-1",
-      {
-        cwd: "/tmp/demo",
-        limit: 80,
-      },
+      { limit: 80 },
     ]
   );
 });
 
-test("thread list query options pass normalized arguments to the requester", async () => {
+test("thread list query options forward the limit to the requester", async () => {
   const calls = [];
   const options = createThreadListQueryOptions({
     fetchThreads(args) {
       calls.push(args);
       return [{ id: "thread-1" }];
     },
-    filterValue: "  /tmp/demo  ",
     limit: 120,
     scope: "local",
     surface: "local",
   });
 
   assert.deepEqual(await options.queryFn(), [{ id: "thread-1" }]);
-  assert.deepEqual(calls, [
-    {
-      filterValue: "/tmp/demo",
-      limit: 120,
-    },
-  ]);
+  assert.deepEqual(calls, [{ limit: 120 }]);
 });
 
 test("transcript page query keys include cursor and thread identity", () => {

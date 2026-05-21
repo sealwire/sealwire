@@ -676,7 +676,6 @@ fn parse_inbound_payload_parses_list_threads_requests() {
         "request": {
             "type": "list_threads",
             "query": {
-                "cwd": "/tmp/project",
                 "limit": 40
             }
         }
@@ -692,7 +691,6 @@ fn parse_inbound_payload_parses_list_threads_requests() {
             ..
         } => {
             assert_eq!(action_id, "act-threads");
-            assert_eq!(query.cwd.as_deref(), Some("/tmp/project"));
             assert_eq!(query.limit, Some(40));
         }
         other => panic!("unexpected request: {other:?}"),

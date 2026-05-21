@@ -32,12 +32,6 @@ export function selectSessionRenderModel({ session, previousSession, hasControll
     currentApprovalId: approval?.request_id || null,
     hasActiveSession,
     hasControllerLease,
-    cwdFilterHint: session.current_cwd
-      ? {
-          placeholder: `Optional exact path filter (current: ${workspaceBasename(session.current_cwd)})`,
-          title: session.current_cwd,
-        }
-      : null,
     messagePlaceholder: !hasActiveSession
       ? "Start a remote session first."
       : hasControllerLease
@@ -55,7 +49,6 @@ export function selectSessionRenderModel({ session, previousSession, hasControll
 
 export function selectThreadsRenderModel({
   threads,
-  filterValue,
   activeThreadId,
   error,
   loading,
@@ -101,11 +94,7 @@ export function selectThreadsRenderModel({
   return {
     activeThreadId,
     countLabel: loading ? "Loading..." : summarizeThreadGroups(groups),
-    emptyMessage: groups.length
-      ? null
-      : filterValue
-        ? "No remote sessions found for this workspace filter."
-        : "No remote sessions found yet.",
+    emptyMessage: groups.length ? null : "No remote sessions found yet.",
     groups,
   };
 }

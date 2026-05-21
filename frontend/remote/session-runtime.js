@@ -10,7 +10,6 @@ export function deriveSessionRuntime({
   sendPending = false,
   session,
   sessionView,
-  threadsFilterValue = "",
 }) {
   const currentModelValue = composerModel || session?.model || "";
   const currentEffortValue = resolveReasoningEffortValue(
@@ -35,9 +34,5 @@ export function deriveSessionRuntime({
     sendPending,
     session,
     stopVisible: Boolean(session?.active_turn_id && !sessionView.composerDisabled),
-    threadsFilterHint:
-      sessionView.cwdFilterHint && !threadsFilterValue.trim()
-        ? sessionView.cwdFilterHint
-        : null,
   };
 }

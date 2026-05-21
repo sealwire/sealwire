@@ -43,6 +43,9 @@ import {
   openSessionDetailsButton,
   overviewSecurityBadges,
   pairedDevicesList,
+  pairingApprovalList,
+  pairingApprovalModal,
+  closePairingApprovalModalBtn,
   pendingActionBanner,
   pendingPairingsList,
   providerInput,
@@ -83,6 +86,7 @@ import {
   configureSecurityRenderers,
   renderAllowedRoots,
   renderDeviceRecords,
+  renderPairingApprovalModal,
   renderPairingPanel,
   renderPendingPairingRequests,
 } from "./local/render-security.js";
@@ -202,6 +206,7 @@ const renderer = createSessionRenderer({
   renderPairingPanel,
   renderDeviceRecords,
   renderPendingPairingRequests,
+  renderPairingApprovalModal,
   resolveActiveThread,
   setSelectedCwd,
   resumeSession(...args) {
@@ -354,6 +359,27 @@ securityModal?.addEventListener("click", (event) => {
   if (event.target === securityModal) {
     securityModal.close();
   }
+});
+
+closePairingApprovalModalBtn?.addEventListener("click", () => {
+  pairingApprovalModal?.close();
+});
+
+pairingApprovalModal?.addEventListener("click", (event) => {
+  if (event.target === pairingApprovalModal) {
+    pairingApprovalModal.close();
+    return;
+  }
+
+  const decisionButton = event.target.closest("[data-pairing-id][data-pairing-decision]");
+  if (!decisionButton) {
+    return;
+  }
+
+  void decidePairingRequest(
+    decisionButton.dataset.pairingId,
+    decisionButton.dataset.pairingDecision
+  );
 });
 
 openLaunchSettingsButton?.addEventListener("click", () => {
@@ -644,6 +670,16 @@ pendingActionBanner?.addEventListener("click", (event) => {
       approvalButton.dataset.approvalDecision,
       approvalButton.dataset.approvalScope || "once"
     );
+    return;
+  }
+
+  const openPairingApproval = event.target.closest("[data-open-pairing-approval]");
+  if (openPairingApproval) {
+    if (pairingApprovalModal && !pairingApprovalModal.open) {
+      try {
+        pairingApprovalModal.showModal();
+      } catch {}
+    }
     return;
   }
 

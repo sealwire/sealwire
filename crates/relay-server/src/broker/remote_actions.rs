@@ -837,7 +837,7 @@ async fn execute_remote_action(
             ..RemoteActionOutcome::default()
         }),
         RemoteActionRequest::ListThreads { query } => state
-            .list_threads(query.limit.unwrap_or(80).clamp(1, 200), query.cwd)
+            .list_threads(query.limit.unwrap_or(80).clamp(1, 200))
             .await
             .map(|threads| RemoteActionOutcome {
                 receipt: None,

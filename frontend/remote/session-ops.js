@@ -437,7 +437,6 @@ export async function startRemoteSession(sessionDraftOverride = null) {
   const cwd = sessionDraft.cwd.trim();
   if (!cwd) {
     renderLog("Choose a workspace before starting a remote session.");
-    remoteUiRefs.remoteCwdInput?.focus();
     return false;
   }
 
@@ -481,7 +480,7 @@ export async function fetchRemoteProviderModels(provider) {
 }
 
 export async function refreshRemoteThreads(reason, options = {}) {
-  const { filterValue = "", silent = false } = options;
+  const { silent = false } = options;
 
   if (!silent) {
     renderLog(`Fetching remote thread list (${reason}).`);
@@ -491,7 +490,6 @@ export async function refreshRemoteThreads(reason, options = {}) {
     const threads = await remoteQueryClient.fetchQuery(
       createThreadListQueryOptions({
         fetchThreads: fetchRemoteThreads,
-        filterValue,
         limit: 80,
         scope: remoteQueryScope(),
         surface: "remote",
@@ -507,16 +505,13 @@ export async function refreshRemoteThreads(reason, options = {}) {
   }
 }
 
-export async function fetchRemoteThreads({ filterValue = "", limit = 80 } = {}) {
+export async function fetchRemoteThreads({ limit = 80 } = {}) {
   if (!state.remoteAuth) {
     return [];
   }
 
   const result = await dispatchOrRecover("list_threads", {
-    query: {
-      cwd: filterValue.trim() || null,
-      limit,
-    },
+    query: { limit },
   });
   return result.threads?.threads || [];
 }

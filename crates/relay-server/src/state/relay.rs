@@ -177,8 +177,13 @@ impl RelayState {
     }
 
     pub fn snapshot(&self) -> SessionSnapshot {
+        let now = unix_now();
+        let live_requests = self
+            .pending_pairing_requests
+            .values()
+            .filter(|request| request.expires_at > now);
         let mut device_records = self.device_records.clone();
-        for request in self.pending_pairing_requests.values() {
+        for request in live_requests.clone() {
             device_records.insert(
                 request.device_id.clone(),
                 DeviceRecord {
@@ -212,9 +217,7 @@ impl RelayState {
             .map(|device| device.to_view())
             .collect::<Vec<_>>();
         paired_devices.sort_by(|left, right| left.label.cmp(&right.label));
-        let mut pending_pairing_requests = self
-            .pending_pairing_requests
-            .values()
+        let mut pending_pairing_requests = live_requests
             .cloned()
             .map(|request| request.to_view())
             .collect::<Vec<_>>();

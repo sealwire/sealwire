@@ -38,7 +38,7 @@ export function ConversationComposer({
     disabled: inputDisabled,
     id: messageId,
     placeholder: messagePlaceholder,
-    rows: 3,
+    rows: 1,
   };
   const selectProps = {
     id: effortId,
@@ -121,6 +121,7 @@ export function ConversationComposer({
         {
           className: "send-button",
           disabled: submitDisabled,
+          hidden: stopVisible,
           id: sendButtonId,
           type: "submit",
         },

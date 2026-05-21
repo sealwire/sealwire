@@ -1168,9 +1168,7 @@ test("refreshRemoteThreads clears loading state and records an error when the re
     send() {},
   };
 
-  const pending = refreshRemoteThreads("unit-test refresh", {
-    filterValue: "/tmp/demo",
-  }).catch((error) => error);
+  const pending = refreshRemoteThreads("unit-test refresh").catch((error) => error);
 
   browser.runTimers();
   const result = await pending;

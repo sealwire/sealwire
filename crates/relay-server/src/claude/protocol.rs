@@ -79,6 +79,7 @@ pub(super) fn parse_claude_approval(
 
 pub(super) fn claude_permission_mode(approval_policy: &str, _sandbox: &str) -> &'static str {
     match approval_policy {
+        "bypass" => "bypassPermissions",
         "never" => "acceptEdits",
         _ => "default",
     }

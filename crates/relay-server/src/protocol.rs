@@ -548,6 +548,7 @@ pub struct PendingPairingRequestView {
     pub label: String,
     pub lifecycle_state: DeviceLifecycleState,
     pub requested_at: u64,
+    pub expires_at: u64,
     pub broker_peer_id: String,
     pub fingerprint: Option<String>,
 }
@@ -796,7 +797,6 @@ pub struct BulkRevokeDevicesReceipt {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreadsQuery {
-    pub cwd: Option<String>,
     pub limit: Option<usize>,
 }
 

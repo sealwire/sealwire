@@ -29,7 +29,6 @@ pub const DEFAULT_SANDBOX: &str = "workspace-write";
 pub const DEFAULT_EFFORT: &str = "medium";
 pub const CONTROLLER_LEASE_SECS: u64 = 15;
 const MAX_LOG_LINES: usize = 200;
-const THREAD_SCAN_LIMIT: usize = 200;
 const PERSISTED_STATE_VERSION: u32 = 2;
 const DEFAULT_STATE_FILE: &str = ".agent-relay/session.json";
 
@@ -57,20 +56,6 @@ fn short_device_id(device_id: &str) -> String {
     }
 }
 
-fn filter_threads(
-    threads: Vec<ThreadSummaryView>,
-    cwd: Option<&str>,
-    limit: usize,
-) -> Vec<ThreadSummaryView> {
-    let normalized_cwd = cwd.map(normalize_cwd);
-    let mut filtered = threads
-        .into_iter()
-        .filter(|thread| thread_matches_cwd_scope(&thread.cwd, normalized_cwd.as_deref()))
-        .collect::<Vec<_>>();
-    filtered.truncate(limit);
-    filtered
-}
-
 fn sort_threads_by_recency(threads: &mut [ThreadSummaryView]) {
     threads.sort_by(|left, right| {
         right
@@ -79,17 +64,6 @@ fn sort_threads_by_recency(threads: &mut [ThreadSummaryView]) {
             .then_with(|| left.provider.cmp(&right.provider))
             .then_with(|| left.id.cmp(&right.id))
     });
-}
-
-fn thread_matches_cwd_scope(thread_cwd: &str, cwd: Option<&str>) -> bool {
-    let Some(cwd) = cwd else {
-        return true;
-    };
-
-    let normalized_thread_cwd = normalize_cwd(thread_cwd);
-    let thread_path = Path::new(&normalized_thread_cwd);
-    let selected_path = Path::new(cwd);
-    thread_path == selected_path || thread_path.starts_with(selected_path)
 }
 
 pub(super) fn path_within_allowed_roots(path: &str, allowed_roots: &[String]) -> bool {

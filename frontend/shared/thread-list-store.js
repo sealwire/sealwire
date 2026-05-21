@@ -5,7 +5,6 @@ import {
   failThreadListRefresh,
   finishThreadListRefresh,
   setThreadListDrawerOpen,
-  setThreadListFilterValue,
   setThreadListSelectedCwd,
   startThreadListRefresh,
   toggleThreadListCollapsedGroup,
@@ -33,11 +32,6 @@ export function createThreadListStore(initialThreadList = {}) {
     finishRefresh() {
       set((state) => ({
         threadList: finishThreadListRefresh(state.threadList),
-      }));
-    },
-    setFilterValue(value) {
-      set((state) => ({
-        threadList: setThreadListFilterValue(state.threadList, value),
       }));
     },
     setDrawerOpen(open) {

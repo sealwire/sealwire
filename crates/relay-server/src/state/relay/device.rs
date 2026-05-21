@@ -17,7 +17,7 @@ use crate::protocol::{
 
 use super::RelayState;
 
-const DEFAULT_PAIRING_TTL_SECS: u64 = 90;
+const DEFAULT_PAIRING_TTL_SECS: u64 = 30;
 const MAX_PAIRING_TTL_SECS: u64 = 600;
 const CLAIM_CHALLENGE_TTL_SECS: u64 = 60;
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -109,6 +109,7 @@ pub(crate) struct PendingPairingRequest {
     pub(crate) device_id: String,
     pub(crate) label: String,
     pub(crate) requested_at: u64,
+    pub(crate) expires_at: u64,
     pub(crate) broker_peer_id: String,
     pub(crate) device_verify_key: String,
 }
@@ -140,6 +141,7 @@ impl PendingPairingRequest {
             label: self.label.clone(),
             lifecycle_state: DeviceLifecycleState::Pending,
             requested_at: self.requested_at,
+            expires_at: self.expires_at,
             broker_peer_id: self.broker_peer_id.clone(),
             fingerprint: device_fingerprint(Some(&self.device_verify_key)),
         }
@@ -353,9 +355,11 @@ impl RelayState {
         now: u64,
     ) -> Result<PendingPairingRequestView, String> {
         self.prune_expired_pairings(now);
-        if !self.pending_pairings.contains_key(pairing_id) {
-            return Err("pairing request is missing or expired".to_string());
-        }
+        let ticket_expires_at = self
+            .pending_pairings
+            .get(pairing_id)
+            .map(|pairing| pairing.expires_at)
+            .ok_or_else(|| "pairing request is missing or expired".to_string())?;
         if let Some(existing) = self.pending_pairing_requests.get_mut(pairing_id) {
             let label_fallback = requested_device_id
                 .as_deref()
@@ -386,6 +390,7 @@ impl RelayState {
             device_id,
             label,
             requested_at: now,
+            expires_at: ticket_expires_at,
             broker_peer_id: peer_id.to_string(),
             device_verify_key,
         };

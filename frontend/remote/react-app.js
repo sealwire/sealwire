@@ -22,7 +22,7 @@ import {
   providerSettings,
 } from "../shared/provider-settings.js";
 import { RefreshButton } from "../shared/refresh-button.js";
-import { ThemePicker } from "../shared/theme-picker.js";
+import { ThemePickerRow } from "../shared/theme-picker.js";
 import { selectWorkspaceSuggestionsModel } from "../shared/workspace-suggestions.js";
 import {
   selectDeviceChromeRenderModel,
@@ -101,11 +101,8 @@ import {
   createThreadListStore,
 } from "../shared/thread-list-store.js";
 import { TranscriptPane } from "../shared/transcript-pane.js";
-import {
-  setRemoteCwdInputElement,
-  setRemoteTranscriptElement,
-} from "./ui-refs.js";
-import { formatTimestamp, shortId } from "./utils.js";
+import { setRemoteTranscriptElement } from "./ui-refs.js";
+import { formatRelativeTime, formatTimestamp, shortId } from "./utils.js";
 
 const h = React.createElement;
 const LIVE_TRANSCRIPT_DETAIL_REFRESH_MS = 1000;
@@ -165,7 +162,6 @@ function RemoteApp() {
   ).state;
   const relayNicknames = useRelayNicknames();
   const previousSessionRef = useRef(null);
-  const remoteCwdInputRef = useRef(null);
   const [transcriptUiState, dispatchTranscriptUi] = useReducer(
     reduceRemoteTranscriptUiState,
     undefined,
@@ -278,7 +274,6 @@ function RemoteApp() {
         sendPending: remoteUi.sendPending,
         session,
         sessionView,
-        threadsFilterValue: threadListUi.filterValue,
       })
     : null;
   const emptyStateModel = selectEmptyStateRenderModel({
@@ -300,7 +295,6 @@ function RemoteApp() {
   const threadsModel = selectThreadsRenderModel({
     activeThreadId: session?.active_thread_id || null,
     error: threadListUi.error,
-    filterValue: threadListUi.filterValue,
     loading: threadListUi.loading,
     relayDirectory: currentState.relayDirectory,
     remoteAuth: currentState.remoteAuth,
@@ -406,7 +400,6 @@ function RemoteApp() {
   const runningExpandedItemIdsSignature = runningExpandedItemIds.join("|");
 
   useLayoutEffect(() => {
-    setRemoteCwdInputElement(remoteCwdInputRef.current);
     if (document.body?.dataset) {
       document.body.dataset.remoteNavOpen = String(
         currentState.remoteNavMode === "drawer" && currentState.remoteNavOpen
@@ -536,14 +529,14 @@ function RemoteApp() {
     };
   }, []);
 
-  async function runThreadRefresh(reason, { filterValue, silent = false } = {}) {
+  async function runThreadRefresh(reason, { silent = false } = {}) {
     let completed = false;
     if (!silent) {
       threadListStore.getState().startRefresh();
     }
 
     try {
-      await handlers.onRefreshThreads(filterValue, { reason, silent });
+      await handlers.onRefreshThreads({ reason, silent });
       completed = true;
     } catch (error) {
       if (!silent) {
@@ -565,10 +558,7 @@ function RemoteApp() {
       if (started) {
         closeRemoteNavigation();
         remoteUiStore.getState().setSessionPanelOpen(false);
-        await runThreadRefresh("post-start refresh", {
-          filterValue: threadListUi.filterValue,
-          silent: true,
-        });
+        await runThreadRefresh("post-start refresh", { silent: true });
       }
       return started;
     } finally {
@@ -583,10 +573,7 @@ function RemoteApp() {
     }
     const resumed = await handlers.onResumeThread(threadId, remoteUi.sessionDraft);
     if (resumed) {
-      await runThreadRefresh("post-resume refresh", {
-        filterValue: threadListUi.filterValue,
-        silent: true,
-      });
+      await runThreadRefresh("post-resume refresh", { silent: true });
     }
   }
 
@@ -718,16 +705,18 @@ function RemoteApp() {
         currentState,
         hasRelay,
         hasUsableRelay,
+        onOpenInfo() {
+          closeRemoteNavigation();
+          remoteUiStore.getState().setRemoteInfoModalOpen(true);
+        },
         onOpenPairing() {
           remoteUiStore.getState().setPairingModalOpen(true);
         },
         onRefreshRelayDirectory() {
           void handlers.onRefreshRelayDirectory();
         },
-        onRefreshThreads(filterValue) {
-          void runThreadRefresh("manual refresh", {
-            filterValue,
-          });
+        onRefreshThreads() {
+          void runThreadRefresh("manual refresh");
         },
         onResumeThread: handleResumeThread,
         onSelectRelay(relayId) {
@@ -744,13 +733,11 @@ function RemoteApp() {
           threadListStore.getState().toggleExpandedGroup(cwd);
         },
         relayDirectoryModel,
-        remoteCwdInputRef,
         remoteUiState: remoteUi,
         sessionPanelModel,
         sessionPanelOpen: remoteUi.sessionPanelOpen,
         sessionToggleLabel,
         threadListUi,
-        threadsFilterHint: sessionRuntime?.threadsFilterHint || null,
         threadsModel,
         updateSessionDraft(nextPatch) {
           for (const [field, value] of Object.entries(nextPatch)) {
@@ -759,9 +746,6 @@ function RemoteApp() {
         },
         setSessionPanelOpenLocal(open) {
           remoteUiStore.getState().setSessionPanelOpen(open);
-        },
-        setThreadsFilterValueLocal(value) {
-          threadListStore.getState().setFilterValue(value);
         },
       }),
       h("div", {
@@ -783,7 +767,12 @@ function RemoteApp() {
           currentState,
           deviceChromeModel,
           headerModel,
+          headerOverflowOpen: remoteUi.headerOverflowOpen,
+          onCloseOverflow() {
+            remoteUiStore.getState().closeHeaderOverflow();
+          },
           onOpenInfo() {
+            remoteUiStore.getState().closeHeaderOverflow();
             remoteUiStore.getState().setRemoteInfoModalOpen(true);
           },
           onReturnHome() {
@@ -791,6 +780,9 @@ function RemoteApp() {
           },
           onToggleNavigation() {
             toggleRemoteNavigation();
+          },
+          onToggleOverflow() {
+            remoteUiStore.getState().toggleHeaderOverflow();
           },
           statusBadgeModel,
         }),
@@ -883,6 +875,7 @@ function RemoteSidebar({
   currentState,
   hasRelay,
   hasUsableRelay,
+  onOpenInfo,
   onOpenPairing,
   onRefreshRelayDirectory,
   onRefreshThreads,
@@ -893,19 +886,16 @@ function RemoteSidebar({
   onToggleExpandedGroup,
   onToggleGroup,
   relayDirectoryModel,
-  remoteCwdInputRef,
   sessionPanelModel,
   sessionPanelOpen,
   sessionToggleLabel,
   threadListUi,
-  threadsFilterHint,
   threadsModel,
   updateSessionDraft,
   setSessionPanelOpenLocal,
-  setThreadsFilterValueLocal,
 }) {
+  const usesDrawer = currentState.remoteNavMode === "drawer";
   const navOpen = currentState.remoteNavMode !== "drawer" || currentState.remoteNavOpen;
-  const threadsFilterValue = threadListUi?.filterValue || "";
 
   return h(
     "aside",
@@ -1003,27 +993,7 @@ function RemoteSidebar({
           id: "remote-threads-refresh-button",
           label: "Refresh threads",
           disabled: threadsModel.loading || !hasUsableRelay,
-          onClick: () => onRefreshThreads(threadsFilterValue),
-        })
-      ),
-      h(
-        "label",
-        { className: "sidebar-label", htmlFor: "remote-threads-cwd-input" },
-        "Workspace Filter"
-      ),
-      h(
-        "div",
-        { className: "workspace-picker" },
-        h("input", {
-          disabled: !hasUsableRelay,
-          id: "remote-threads-cwd-input",
-          onChange: (event) => {
-            setThreadsFilterValueLocal(event.target.value);
-          },
-          placeholder: threadsFilterHint?.placeholder || "Optional exact workspace path",
-          title: threadsFilterHint?.title || "",
-          type: "text",
-          value: threadsFilterValue,
+          onClick: () => onRefreshThreads(),
         })
       ),
       h(
@@ -1036,7 +1006,7 @@ function RemoteSidebar({
           emptyMessage: threadsModel.emptyMessage,
           expandedGroupCwds: threadListUi?.expandedGroupCwds || new Set(),
           formatThreadMeta(thread) {
-            return formatTimestamp(thread.updated_at);
+            return formatRelativeTime(thread.updated_at);
           },
           groups: threadsModel.groups || [],
           includePreview: true,
@@ -1046,12 +1016,33 @@ function RemoteSidebar({
         })
       )
     ),
-    h(
-      "section",
-      { className: "sidebar-footer" },
-      h("p", { className: "sidebar-caption" }, "Appearance"),
-      h(ThemePicker)
-    )
+    usesDrawer
+      ? h(
+          "section",
+          { className: "sidebar-footer remote-sidebar-actions" },
+          h(
+            "button",
+            {
+              className: "sidebar-link-button",
+              id: "remote-sidebar-open-session-details",
+              onClick: onOpenInfo,
+              type: "button",
+            },
+            "Session details"
+          ),
+          h(ThemePickerRow)
+        )
+      : null
+  );
+}
+
+function RemoteHeaderOverflowIcon() {
+  return h(
+    "svg",
+    { "aria-hidden": "true", fill: "none", height: "16", viewBox: "0 0 16 16", width: "16" },
+    h("circle", { cx: "3", cy: "8", fill: "currentColor", r: "1.5" }),
+    h("circle", { cx: "8", cy: "8", fill: "currentColor", r: "1.5" }),
+    h("circle", { cx: "13", cy: "8", fill: "currentColor", r: "1.5" })
   );
 }
 
@@ -1059,14 +1050,39 @@ function RemoteHeader({
   currentState,
   deviceChromeModel,
   headerModel,
+  headerOverflowOpen,
+  onCloseOverflow,
   onOpenInfo,
   onReturnHome,
   onToggleNavigation,
+  onToggleOverflow,
   statusBadgeModel,
 }) {
   const usesDrawer = currentState.remoteNavMode === "drawer";
   const navOpen = currentState.remoteNavOpen;
   const navLabel = navOpen ? "Close sidebar" : "Open sidebar";
+  const overflowWrapRef = useRef(null);
+
+  useEffect(() => {
+    if (usesDrawer && headerOverflowOpen) onCloseOverflow?.();
+  }, [usesDrawer, headerOverflowOpen, onCloseOverflow]);
+
+  useEffect(() => {
+    if (!headerOverflowOpen) return undefined;
+    function handlePointerDown(event) {
+      if (overflowWrapRef.current?.contains(event.target)) return;
+      onCloseOverflow?.();
+    }
+    function handleKey(event) {
+      if (event.key === "Escape") onCloseOverflow?.();
+    }
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKey);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKey);
+    };
+  }, [headerOverflowOpen, onCloseOverflow]);
 
   return h(
     "header",
@@ -1120,17 +1136,43 @@ function RemoteHeader({
         "All relays"
       ),
       h(
-        "button",
-        {
-          "aria-label": "Open session details",
-          className: "header-button remote-info-button",
-          id: "remote-info-button",
-          onClick: onOpenInfo,
-          title: "Open session details",
-          type: "button",
-        },
-        h("span", { className: "remote-info-icon", "aria-hidden": "true" }, "i"),
-        h("span", { className: "sr-only" }, "Open session details")
+        "div",
+        { className: "header-overflow-wrap", hidden: usesDrawer, ref: overflowWrapRef },
+        h(
+          "button",
+          {
+            "aria-expanded": String(Boolean(headerOverflowOpen)),
+            "aria-haspopup": "menu",
+            "aria-label": "More options",
+            className: "header-button header-overflow-button",
+            id: "remote-header-overflow-button",
+            onClick: onToggleOverflow,
+            title: "More options",
+            type: "button",
+          },
+          h(RemoteHeaderOverflowIcon)
+        ),
+        h(
+          "div",
+          {
+            className: "header-overflow-menu",
+            hidden: !headerOverflowOpen,
+            id: "remote-header-overflow-menu",
+            role: "menu",
+          },
+          h(
+            "button",
+            {
+              className: "overflow-menu-item",
+              id: "remote-open-session-details",
+              onClick: onOpenInfo,
+              role: "menuitem",
+              type: "button",
+            },
+            "Session details"
+          ),
+          h(ThemePickerRow)
+        )
       )
     )
   );

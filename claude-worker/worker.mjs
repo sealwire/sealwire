@@ -40,6 +40,7 @@ import {
   mapSessionInfo,
   mapSessionMessages,
 } from "./sdk-mapping.mjs";
+import { buildSessionOptionsBase } from "./session-options.mjs";
 
 const DEFAULT_SETTING_SOURCES = ["user", "project", "local"];
 
@@ -93,18 +94,10 @@ async function enrichEvent(event, fileDiffTracker) {
 }
 
 function buildSessionOptions(cmd, pendingApprovals, nextApprovalId) {
-  const options = {
-    cwd: cmd.cwd ?? process.cwd(),
-    permissionMode: cmd.permissionMode ?? "default",
-    settingSources: cmd.settingSources ?? DEFAULT_SETTING_SOURCES,
+  return buildSessionOptionsBase(cmd, {
     canUseTool: createPermissionHandler(pendingApprovals, nextApprovalId),
-  };
-
-  if (cmd.model) {
-    options.model = cmd.model;
-  }
-
-  return options;
+    defaultSettingSources: DEFAULT_SETTING_SOURCES,
+  });
 }
 
 function fallbackThread(sessionId, cmd) {

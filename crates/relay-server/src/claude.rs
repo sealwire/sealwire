@@ -931,6 +931,21 @@ mod tests {
     }
 
     #[test]
+    fn bypass_policy_maps_to_bypass_permissions() {
+        // The unified "Full access" UI option must reach the SDK as
+        // `bypassPermissions` so Bash and every other tool runs without a
+        // prompt. Sandbox is ignored in this mode.
+        assert_eq!(
+            claude_permission_mode("bypass", "workspace-write"),
+            "bypassPermissions"
+        );
+        assert_eq!(
+            claude_permission_mode("bypass", "danger-full-access"),
+            "bypassPermissions"
+        );
+    }
+
+    #[test]
     fn provider_name_is_claude_code() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()

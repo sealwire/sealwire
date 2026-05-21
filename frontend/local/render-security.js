@@ -5,6 +5,7 @@ import {
   allowedRootsList,
   allowedRootsSummary,
   pairedDevicesList,
+  pairingApprovalList,
   pairingExpiry,
   pairingLinkInput,
   pairingPanel,
@@ -99,6 +100,17 @@ export function renderDeviceRecords(records = []) {
 export function renderPendingPairingRequests(requests = []) {
   renderReactContent(
     pendingPairingsList,
+    h(PendingPairingRequestsList, {
+      formatTimestamp: helpers.formatTimestamp,
+      requests,
+      shortId: helpers.shortId,
+    })
+  );
+}
+
+export function renderPairingApprovalModal(requests = []) {
+  renderReactContent(
+    pairingApprovalList,
     h(PendingPairingRequestsList, {
       formatTimestamp: helpers.formatTimestamp,
       requests,

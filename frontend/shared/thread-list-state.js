@@ -24,7 +24,6 @@ export function createThreadListUiState({
   drawerOpen = false,
   error = null,
   expandedGroupCwds = new Set(),
-  filterValue = "",
   loading = false,
   selectedCwd = "",
 } = {}) {
@@ -33,7 +32,6 @@ export function createThreadListUiState({
     drawerOpen: Boolean(drawerOpen),
     error,
     expandedGroupCwds: copyCwdSet(expandedGroupCwds),
-    filterValue,
     loading: Boolean(loading),
     selectedCwd,
   };
@@ -50,13 +48,6 @@ export function setThreadListSelectedCwd(threadList, cwd) {
   return {
     ...threadList,
     selectedCwd: cwd || "",
-  };
-}
-
-export function setThreadListFilterValue(threadList, value) {
-  return {
-    ...threadList,
-    filterValue: value || "",
   };
 }
 

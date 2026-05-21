@@ -6,13 +6,22 @@ const DEFAULT_MODELS = {
   codex: "gpt-5.5",
 };
 
+// Permission mode options are kept symmetric across providers so the UI
+// is consistent. Underlying semantics still differ a bit (e.g. Claude's
+// `never` only auto-accepts edits, while Codex's auto-approves any
+// non-destructive action), so the labels call that out.
+//
+// `bypass` is the unified YOLO knob: the rust shim translates it to
+// `permissionMode=bypassPermissions` for Claude and to
+// `approvalPolicy=never` + `sandbox=danger-full-access` for Codex.
 const PROVIDER_SETTINGS = {
   claude_code: {
     approvalLabel: "Permission mode",
     approvalOptions: [
-      { label: "Default", value: "untrusted" },
-      { label: "Ask first", value: "on-request" },
-      { label: "Accept edits", value: "never" },
+      { label: "Ask first", value: "untrusted" },
+      { label: "Ask when needed", value: "on-request" },
+      { label: "Auto-approve edits", value: "never" },
+      { label: "Full access (YOLO)", value: "bypass" },
     ],
     effortLabel: "Thinking",
     effortLabels: {
@@ -28,9 +37,10 @@ const PROVIDER_SETTINGS = {
   codex: {
     approvalLabel: "Permission mode",
     approvalOptions: [
-      { label: "Ask for untrusted actions", value: "untrusted" },
+      { label: "Ask first", value: "untrusted" },
       { label: "Ask when needed", value: "on-request" },
-      { label: "Never ask", value: "never" },
+      { label: "Auto-approve", value: "never" },
+      { label: "Full access (YOLO)", value: "bypass" },
     ],
     effortLabel: "Reasoning effort",
     effortLabels: {
@@ -48,9 +58,10 @@ const PROVIDER_SETTINGS = {
 const DEFAULT_SETTINGS = {
   approvalLabel: "Permission mode",
   approvalOptions: [
-    { label: "untrusted", value: "untrusted" },
-    { label: "on-request", value: "on-request" },
-    { label: "never", value: "never" },
+    { label: "Ask first", value: "untrusted" },
+    { label: "Ask when needed", value: "on-request" },
+    { label: "Auto-approve", value: "never" },
+    { label: "Full access (YOLO)", value: "bypass" },
   ],
   effortLabel: "Effort",
   effortLabels: {},

@@ -161,7 +161,6 @@ async function main() {
     logStep("local session ready", { threadId });
 
     await selectFirstRelayIfNeeded(remotePage);
-    await remotePage.fill("#remote-threads-cwd-input", workspaceDir);
     await remotePage.click("#remote-threads-refresh-button");
     logStep("remote threads refresh requested");
 

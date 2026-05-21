@@ -421,6 +421,12 @@ function SecurityModal() {
     h(
       "section",
       { className: "remote-access-shell" },
+      hSecuritySection("Pending Pairing Requests", "Approve or reject devices that are asking to pair."),
+      h(
+        "div",
+        { className: "paired-devices-list", id: "pending-pairings-list" },
+        h("p", { className: "sidebar-empty" }, "No devices are waiting for local approval.")
+      ),
       h(
         "div",
         { className: "sidebar-row" },
@@ -457,12 +463,6 @@ function SecurityModal() {
         "div",
         { className: "paired-devices-list", id: "paired-devices-list" },
         h("p", { className: "sidebar-empty" }, "No remote devices have touched this relay yet.")
-      ),
-      hSecuritySection("Pending Pairing Requests", "Approve or reject devices that are asking to pair."),
-      h(
-        "div",
-        { className: "paired-devices-list", id: "pending-pairings-list" },
-        h("p", { className: "sidebar-empty" }, "No devices are waiting for local approval.")
       )
     )
   );
@@ -500,6 +500,30 @@ function hAllowedRootsForm() {
   );
 }
 
+function PairingApprovalModal() {
+  return h(
+    "dialog",
+    { className: "panel-modal pairing-approval-modal", id: "pairing-approval-modal" },
+    h(
+      "div",
+      { className: "modal-header" },
+      h("h2", null, "Approve pairing"),
+      h("button", {
+        className: "header-button close-modal-btn",
+        id: "close-pairing-approval-modal",
+        type: "button",
+      }, "×")
+    ),
+    h(
+      "section",
+      { className: "panel-modal-body pairing-approval-shell" },
+      h("p", { className: "panel-modal-copy", id: "pairing-approval-hint" },
+        "A remote device is requesting access. Approve or reject before the request times out."),
+      h("div", { className: "paired-devices-list", id: "pairing-approval-list" })
+    )
+  );
+}
+
 export function LocalShell({ launchModel = null, onLaunchFieldChange = null, onLaunchStart = null }) {
   return h(
     React.Fragment,
@@ -511,6 +535,7 @@ export function LocalShell({ launchModel = null, onLaunchFieldChange = null, onL
       h(ChatShell)
     ),
     h(SessionDetailsModal),
-    h(SecurityModal)
+    h(SecurityModal),
+    h(PairingApprovalModal)
   );
 }

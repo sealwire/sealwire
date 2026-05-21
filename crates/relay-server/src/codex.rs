@@ -264,6 +264,7 @@ impl CodexBridge {
         approval_policy: &str,
         sandbox: &str,
     ) -> Result<ThreadSummaryView, String> {
+        let (approval_policy, sandbox) = resolve_codex_policy(approval_policy, sandbox);
         let result = self
             .send_request(
                 "thread/start",
@@ -289,6 +290,7 @@ impl CodexBridge {
         approval_policy: &str,
         sandbox: &str,
     ) -> Result<(), String> {
+        let (approval_policy, sandbox) = resolve_codex_policy(approval_policy, sandbox);
         self.send_request(
             "thread/resume",
             json!({
@@ -494,6 +496,19 @@ impl CodexBridge {
             .flush()
             .await
             .map_err(|error| format!("failed to flush codex app-server stdin: {error}"))
+    }
+}
+
+/// Translate the relay-level approval_policy + sandbox pair into the
+/// concrete values codex's app-server expects. Today only one relay-level
+/// value needs reshaping: `"bypass"` is the unified YOLO knob and maps to
+/// codex's `approvalPolicy=never` + `sandbox=danger-full-access` combo
+/// regardless of what sandbox the user previously had selected.
+fn resolve_codex_policy<'a>(approval_policy: &'a str, sandbox: &'a str) -> (&'a str, &'a str) {
+    if approval_policy == "bypass" {
+        ("never", "danger-full-access")
+    } else {
+        (approval_policy, sandbox)
     }
 }
 

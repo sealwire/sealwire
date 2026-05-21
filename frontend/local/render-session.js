@@ -13,6 +13,8 @@ import {
   messageInput,
   openSessionDetailsButton,
   overviewSecurityBadges,
+  pairingApprovalHint,
+  pairingApprovalModal,
   pendingActionBanner,
   resumeLatestButton,
   sendButton,
@@ -44,6 +46,12 @@ import {
   readLocalUiState,
 } from "./ui-store.js";
 import { providerLabel } from "../shared/provider-labels.js";
+import {
+  earliestPairingExpiry,
+  filterActivePairings,
+  formatPendingPairingsBannerLabel,
+  pairingNowSeconds,
+} from "../shared/pairing-helpers.js";
 import { buildExpandedTranscriptDetailEntries } from "./transcript/details.js";
 import { shouldShowTranscriptLoading } from "./transcript-loading.js";
 import {
@@ -121,6 +129,7 @@ export function createSessionRenderer({
   renderPairingPanel,
   renderDeviceRecords,
   renderPendingPairingRequests,
+  renderPairingApprovalModal,
   resolveActiveThread,
   setSelectedCwd,
   resumeSession,
@@ -156,7 +165,7 @@ export function createSessionRenderer({
     state.session = session;
 
     const approval = session.pending_approvals[0] || null;
-    const pendingPairings = session.pending_pairing_requests || [];
+    const pendingPairings = filterActivePairings(session.pending_pairing_requests || []);
     const activeThread = resolveActiveThread(session.active_thread_id);
     const hasActiveSession = Boolean(session.active_thread_id);
     const viewingConversation = isViewingConversation(session);
@@ -232,7 +241,10 @@ export function createSessionRenderer({
       renderDeviceRecords(session.device_records || []);
       renderPendingPairingRequests(pendingPairings);
     }
+    renderPairingApprovalModal(pendingPairings);
     announceNewPendingPairings(pendingPairings);
+    syncPairingApprovalDialog(pendingPairings);
+    schedulePairingExpiryTick(pendingPairings);
     renderControlBanner(session);
     renderSessionSettingsPanel(session);
     renderPendingActionBanner(approval, pendingPairings);
@@ -256,9 +268,11 @@ export function createSessionRenderer({
       goConsoleHomeSidebarButton.hidden = !viewingConversation;
     }
     messageForm.hidden = !viewingConversation;
-    sendButton.disabled = !hasActiveSession || !canWrite || !viewingConversation || turnRunning;
+    const composerReady = hasActiveSession && canWrite && viewingConversation;
+    sendButton.disabled = !composerReady || turnRunning;
+    sendButton.hidden = composerReady && turnRunning;
     if (stopButton) {
-      stopButton.hidden = !hasActiveSession || !canWrite || !viewingConversation || !turnRunning;
+      stopButton.hidden = !composerReady || !turnRunning;
       stopButton.disabled = stopButton.hidden;
     }
     messageInput.disabled = !hasActiveSession || !canWrite || !viewingConversation;
@@ -320,6 +334,61 @@ export function createSessionRenderer({
     );
   }
 
+  let pairingExpiryTimer = null;
+  let pairingHintTimer = null;
+  function schedulePairingExpiryTick(requests) {
+    if (pairingExpiryTimer) {
+      clearTimeout(pairingExpiryTimer);
+      pairingExpiryTimer = null;
+    }
+    if (!requests.length) {
+      return;
+    }
+    const earliest = earliestPairingExpiry(requests);
+    if (earliest === null) {
+      return;
+    }
+    // +250ms buffer so the request is past its deadline when we re-render.
+    const delay = Math.max(50, (earliest - pairingNowSeconds()) * 1000 + 250);
+    pairingExpiryTimer = setTimeout(() => {
+      pairingExpiryTimer = null;
+      if (state.session) {
+        renderSession(state.session);
+      }
+    }, delay);
+  }
+
+  function updatePairingHint(requests) {
+    if (!pairingApprovalHint) {
+      return;
+    }
+    const earliest = earliestPairingExpiry(requests);
+    const remaining = earliest !== null ? Math.max(0, earliest - pairingNowSeconds()) : null;
+    pairingApprovalHint.textContent = remaining !== null
+      ? `A remote device is requesting access. ${remaining}s remaining before this request expires.`
+      : "A remote device is requesting access.";
+  }
+
+  function syncPairingApprovalDialog(requests) {
+    if (!pairingApprovalModal) {
+      return;
+    }
+    if (pairingHintTimer) {
+      clearInterval(pairingHintTimer);
+      pairingHintTimer = null;
+    }
+    if (requests.length === 0) {
+      if (pairingApprovalModal.open) {
+        pairingApprovalModal.close();
+      }
+      return;
+    }
+    updatePairingHint(requests);
+    if (pairingApprovalModal.open) {
+      pairingHintTimer = setInterval(() => updatePairingHint(requests), 1000);
+    }
+  }
+
   function announceNewPendingPairings(requests) {
     const pendingIds = requests.map((request) => request.pairing_id);
     const localUi = readLocalUiState(state.localUiStore);
@@ -335,6 +404,14 @@ export function createSessionRenderer({
     const labels = newRequests.map((request) => request.label || shortId(request.device_id));
     const summary = labels.length === 1 ? labels[0] : `${labels.length} devices`;
     logLine(`Local pairing approval required for ${summary}.`);
+
+    if (pairingApprovalModal && !pairingApprovalModal.open) {
+      try {
+        pairingApprovalModal.showModal();
+      } catch (error) {
+        logLine(`Unable to surface pairing approval modal: ${error.message}`);
+      }
+    }
   }
 
   function renderHeaderModelBadge(session) {
@@ -643,9 +720,7 @@ export function createSessionRenderer({
     }
 
     if (pendingPairings.length > 0) {
-      const label = pendingPairings.length === 1
-        ? `Device "${pendingPairings[0].label || shortId(pendingPairings[0].device_id)}" wants to pair`
-        : `${pendingPairings.length} devices waiting to pair`;
+      const label = formatPendingPairingsBannerLabel(pendingPairings, shortId);
       pendingActionBanner.hidden = false;
       renderReactContent(
         pendingActionBanner,
@@ -657,7 +732,7 @@ export function createSessionRenderer({
             "button",
             {
               className: "pending-action-btn",
-              "data-open-security": "true",
+              "data-open-pairing-approval": "true",
               type: "button",
             },
             "Review"

@@ -39,12 +39,24 @@ const {
 } = await import("../surface-state.js");
 const { state } = await import("../state.js");
 
-test("createClearedRemoteSurfaceSessionStatePatch clears session, threads, and current approval", () => {
-  assert.deepEqual(createClearedRemoteSurfaceSessionStatePatch(), {
-    currentApprovalId: null,
-    session: null,
-    threads: [],
-  });
+function assertClearedSessionPatch(patch) {
+  assert.equal(patch.currentApprovalId, null);
+  assert.equal(patch.session, null);
+  assert.deepEqual(patch.threads, []);
+  // The cleared session patch also wipes the transcript entry detail
+  // caches so a fresh session does not surface stale tool diffs from the
+  // previous one. Pin those fields here so we notice if the cleanup is
+  // dropped.
+  assert.ok(patch.transcriptEntryDetailCache instanceof Map);
+  assert.equal(patch.transcriptEntryDetailCache.size, 0);
+  assert.deepEqual(patch.transcriptEntryDetailOrder, []);
+  assert.ok(patch.transcriptLiveEntryDetails instanceof Map);
+  assert.equal(patch.transcriptLiveEntryDetails.size, 0);
+  assert.equal(patch.transcriptLiveEntryThreadId, null);
+}
+
+test("createClearedRemoteSurfaceSessionStatePatch clears session, threads, current approval, and transcript caches", () => {
+  assertClearedSessionPatch(createClearedRemoteSurfaceSessionStatePatch());
 });
 
 test("createResetRemoteSurfaceStatePatch returns reset state and runs lifecycle hooks", () => {
@@ -64,11 +76,7 @@ test("createResetRemoteSurfaceStatePatch returns reset state and runs lifecycle 
   });
 
   assert.deepEqual(calls, ["claim", "runtime", "reject:unit-test reset"]);
-  assert.deepEqual(patch, {
-    currentApprovalId: null,
-    session: null,
-    threads: [],
-  });
+  assertClearedSessionPatch(patch);
 });
 
 test("createRemoteThreadsPatch returns the canonical thread list patch", () => {

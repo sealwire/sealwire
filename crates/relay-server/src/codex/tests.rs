@@ -926,3 +926,35 @@ async fn handle_server_request_enriches_file_change_approval_preview() {
     assert!(context_preview.contains("crates/relay-server/src/protocol.rs"));
     assert!(context_preview.contains("frontend/shared/transcript-render.js"));
 }
+
+#[test]
+fn resolve_codex_policy_translates_bypass_to_yolo_pair() {
+    // The relay-level "bypass" knob is the unified YOLO option. Codex's
+    // app-server only understands its own (approvalPolicy, sandbox) pair,
+    // so the shim must rewrite "bypass" into the danger-full-access combo
+    // before talking to it — regardless of what sandbox the user set.
+    assert_eq!(
+        resolve_codex_policy("bypass", "workspace-write"),
+        ("never", "danger-full-access")
+    );
+    assert_eq!(
+        resolve_codex_policy("bypass", "read-only"),
+        ("never", "danger-full-access")
+    );
+}
+
+#[test]
+fn resolve_codex_policy_passes_through_non_bypass_values() {
+    assert_eq!(
+        resolve_codex_policy("untrusted", "workspace-write"),
+        ("untrusted", "workspace-write")
+    );
+    assert_eq!(
+        resolve_codex_policy("on-request", "read-only"),
+        ("on-request", "read-only")
+    );
+    assert_eq!(
+        resolve_codex_policy("never", "danger-full-access"),
+        ("never", "danger-full-access")
+    );
+}

@@ -25,10 +25,10 @@ use crate::{
 
 use super::persistence::{spawn_persistence_task, PersistedRelayState, PersistenceStore};
 use super::{
-    ensure_path_within_allowed_roots, expire_controller_if_needed, filter_threads, non_empty,
+    ensure_path_within_allowed_roots, expire_controller_if_needed, non_empty,
     normalize_allowed_roots, normalize_cwd, path_within_allowed_roots, require_device_id,
     short_device_id, sort_threads_by_recency, unix_now, CachedRemoteActionResult, RelayState,
-    RemoteActionReplayDecision, SecurityProfile, THREAD_SCAN_LIMIT,
+    RemoteActionReplayDecision, SecurityProfile,
 };
 
 #[derive(Clone)]
@@ -216,20 +216,10 @@ impl AppState {
         ))
     }
 
-    pub async fn list_threads(
-        &self,
-        limit: usize,
-        cwd: Option<String>,
-    ) -> Result<ThreadsResponse, String> {
-        let cwd = non_empty(cwd).map(|path| normalize_cwd(&path));
-        let scan_limit = if cwd.is_some() {
-            limit.max(THREAD_SCAN_LIMIT)
-        } else {
-            limit
-        };
+    pub async fn list_threads(&self, limit: usize) -> Result<ThreadsResponse, String> {
         let mut all_threads = Vec::new();
         for (provider_name, bridge) in &self.providers {
-            match bridge.list_threads(scan_limit).await {
+            match bridge.list_threads(limit).await {
                 Ok(mut threads) => {
                     for thread in &mut threads {
                         thread.provider = provider_name.clone();
@@ -246,9 +236,6 @@ impl AppState {
             }
         }
         let mut relay = self.relay.write().await;
-        if let Some(selected_cwd) = cwd.as_deref() {
-            ensure_path_within_allowed_roots(selected_cwd, &relay.allowed_roots)?;
-        }
         let allowed_roots = relay.allowed_roots.clone();
         let mut threads = relay
             .filter_deleted_threads(all_threads)
@@ -256,7 +243,8 @@ impl AppState {
             .filter(|thread| path_within_allowed_roots(&thread.cwd, &allowed_roots))
             .collect::<Vec<_>>();
         sort_threads_by_recency(&mut threads);
-        let response_threads = filter_threads(threads.clone(), cwd.as_deref(), limit);
+        threads.truncate(limit);
+        let response_threads = threads.clone();
         relay.threads = threads;
         relay.notify();
         Ok(ThreadsResponse {
@@ -338,7 +326,7 @@ impl AppState {
             }
         }
 
-        let _ = self.list_threads(20, None).await;
+        let _ = self.list_threads(20).await;
 
         Ok(ThreadArchiveReceipt {
             thread_id: thread_id.to_string(),
@@ -385,7 +373,7 @@ impl AppState {
             relay.notify();
         }
 
-        let _ = self.list_threads(20, None).await;
+        let _ = self.list_threads(20).await;
 
         Ok(ThreadDeleteReceipt {
             thread_id: thread_id.to_string(),
@@ -468,7 +456,7 @@ impl AppState {
                 .await;
         }
 
-        let _ = self.list_threads(20, None).await;
+        let _ = self.list_threads(20).await;
         Ok(self.snapshot().await)
     }
 
@@ -517,7 +505,7 @@ impl AppState {
             relay.notify();
         }
 
-        let _ = self.list_threads(20, None).await;
+        let _ = self.list_threads(20).await;
         Ok(self.snapshot().await)
     }
 

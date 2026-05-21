@@ -428,16 +428,10 @@ async fn list_threads(
     let limit = query.limit.unwrap_or(100).clamp(1, 200);
     context
         .app
-        .list_threads(limit, query.cwd)
+        .list_threads(limit)
         .await
         .map(|threads| Json(ApiEnvelope::ok(threads)))
-        .map_err(|error| {
-            if is_path_policy_error(&error) {
-                bad_request(error)
-            } else {
-                bad_gateway(error)
-            }
-        })
+        .map_err(bad_gateway)
 }
 
 async fn thread_transcript(

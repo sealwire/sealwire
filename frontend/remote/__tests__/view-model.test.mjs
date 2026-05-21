@@ -30,10 +30,6 @@ test("selectSessionRenderModel derives composer state from controller/session fl
   assert.equal(model.canWrite, false);
   assert.equal(model.composerDisabled, true);
   assert.match(model.messagePlaceholder, /Another device has control/);
-  assert.deepEqual(model.cwdFilterHint, {
-    placeholder: "Optional exact path filter (current: agent-relay)",
-    title: "/Users/luchi/git/agent-relay",
-  });
   assert.deepEqual(model.scrollDebug, {
     thread: "thread-1",
     prevThread: "thread-0",
@@ -43,10 +39,9 @@ test("selectSessionRenderModel derives composer state from controller/session fl
   });
 });
 
-test("selectThreadsRenderModel returns empty copy for unauthenticated and filtered states", () => {
+test("selectThreadsRenderModel returns empty copy for unauthenticated state", () => {
   const unauthenticated = selectThreadsRenderModel({
     threads: [],
-    filterValue: "",
     activeThreadId: null,
     remoteAuth: null,
     relayDirectory: [{ relayId: "relay-1" }],
@@ -54,20 +49,18 @@ test("selectThreadsRenderModel returns empty copy for unauthenticated and filter
   assert.equal(unauthenticated.countLabel, "Remote session history");
   assert.match(unauthenticated.emptyMessage, /Open a relay/);
 
-  const filtered = selectThreadsRenderModel({
+  const empty = selectThreadsRenderModel({
     threads: [],
-    filterValue: "/tmp/workspace",
     activeThreadId: "thread-1",
     remoteAuth: { relayId: "relay-1" },
     relayDirectory: [],
   });
-  assert.match(filtered.emptyMessage, /workspace filter/);
+  assert.match(empty.emptyMessage, /No remote sessions/);
 });
 
 test("selectThreadsRenderModel injects the active session thread until remote history catches up", () => {
   const model = selectThreadsRenderModel({
     threads: [],
-    filterValue: "",
     activeThreadId: "thread-1",
     remoteAuth: { relayId: "relay-1" },
     relayDirectory: [],
@@ -99,7 +92,6 @@ test("selectThreadsRenderModel keeps provider threads that do not report a cwd",
         updated_at: 1700000000,
       },
     ],
-    filterValue: "",
     activeThreadId: null,
     remoteAuth: { relayId: "relay-1" },
     relayDirectory: [],

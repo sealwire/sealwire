@@ -27,6 +27,7 @@ export function createPermissionHandler(pendingApprovals, nextApprovalId) {
         resolve,
         suggestions: options.suggestions ?? [],
         toolUseID: options.toolUseID,
+        input: input ?? {},
       });
     });
   };
@@ -43,6 +44,7 @@ export function resolveApprovalDecision(pending, decision, scope) {
   if (decision === "approve") {
     return {
       behavior: "allow",
+      updatedInput: pending.input ?? {},
       ...(scope === "session" && pending.suggestions?.length
         ? { updatedPermissions: pending.suggestions }
         : {}),

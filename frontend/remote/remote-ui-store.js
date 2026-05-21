@@ -20,6 +20,7 @@ export function createRemoteUiStore(initialState = {}) {
     composerEffort: "medium",
     composerModel: "",
     deviceLabelDraft: loadDeviceLabel(),
+    headerOverflowOpen: false,
     pairingInputValue: "",
     pairingModalOpen: false,
     remoteInfoModalOpen: false,
@@ -74,6 +75,21 @@ export function createRemoteUiStore(initialState = {}) {
       set({
         remoteInfoModalOpen: Boolean(open),
       });
+    },
+    closeHeaderOverflow() {
+      set({
+        headerOverflowOpen: false,
+      });
+    },
+    setHeaderOverflowOpen(open) {
+      set({
+        headerOverflowOpen: Boolean(open),
+      });
+    },
+    toggleHeaderOverflow() {
+      set((state) => ({
+        headerOverflowOpen: !state.headerOverflowOpen,
+      }));
     },
     setProviderModels(provider, models) {
       set((state) => ({

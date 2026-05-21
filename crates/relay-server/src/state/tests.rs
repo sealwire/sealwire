@@ -477,25 +477,6 @@ fn normalize_cwd_expands_home_directory() {
 }
 
 #[test]
-fn filter_threads_matches_tilde_scoped_workspace() {
-    let home = env::var("HOME").expect("HOME should be set for tests");
-    let project_root = PathBuf::from(home).join("git/agent-relay");
-    let nested_root = project_root.join("crates/relay-server");
-
-    let threads = vec![
-        test_thread("thread-1", &project_root.display().to_string()),
-        test_thread("thread-2", &nested_root.display().to_string()),
-        test_thread("thread-3", "/tmp/other-project"),
-    ];
-
-    let filtered = filter_threads(threads, Some("~/git/agent-relay"), 20);
-
-    assert_eq!(filtered.len(), 2);
-    assert_eq!(filtered[0].id, "thread-1");
-    assert_eq!(filtered[1].id, "thread-2");
-}
-
-#[test]
 fn normalize_allowed_roots_expands_home_and_deduplicates() {
     let home = env::var("HOME").expect("HOME should be set for tests");
     let unique = format!(

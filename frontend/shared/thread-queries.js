@@ -1,5 +1,4 @@
 export function threadListQueryKey({
-  filterValue = "",
   limit = null,
   scope = "default",
   surface,
@@ -8,10 +7,7 @@ export function threadListQueryKey({
     "thread-list",
     surface,
     scope,
-    {
-      cwd: normalizeFilterValue(filterValue),
-      limit,
-    },
+    { limit },
   ];
 }
 
@@ -32,23 +28,13 @@ export function threadTranscriptPageQueryKey({
 
 export function createThreadListQueryOptions({
   fetchThreads,
-  filterValue = "",
   limit = null,
   scope = "default",
   surface,
 }) {
-  const cwd = normalizeFilterValue(filterValue);
   return {
-    queryKey: threadListQueryKey({
-      filterValue: cwd,
-      limit,
-      scope,
-      surface,
-    }),
-    queryFn: () => fetchThreads({
-      filterValue: cwd,
-      limit,
-    }),
+    queryKey: threadListQueryKey({ limit, scope, surface }),
+    queryFn: () => fetchThreads({ limit }),
   };
 }
 
@@ -71,8 +57,4 @@ export function createThreadTranscriptPageQueryOptions({
       threadId,
     }),
   };
-}
-
-function normalizeFilterValue(value) {
-  return String(value || "").trim();
 }
