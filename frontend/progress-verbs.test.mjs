@@ -77,8 +77,8 @@ test("isProgressStalled flips once we've been silent past the threshold", () => 
     server_time: 1010,
   };
   assert.equal(isProgressStalled(session), false);
-  assert.equal(isProgressStalled(session, { now: 1014 }), false);
-  assert.equal(isProgressStalled(session, { now: 1016 }), true);
+  assert.equal(isProgressStalled(session, { now: 1029 }), false);
+  assert.equal(isProgressStalled(session, { now: 1031 }), true);
 });
 
 test("isProgressStalled returns false when no phase is active", () => {

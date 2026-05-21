@@ -658,6 +658,7 @@ async fn handle_server_request(payload: Value, state: &Arc<RwLock<RelayState>>) 
         relay
             .pending_approvals
             .insert(pending.request_id.clone(), pending.clone());
+        relay.touch_progress(Some("waiting_approval"), None);
         relay.push_log(
             "approval",
             format!("Approval requested for {}.", pending.kind.as_str()),
@@ -707,6 +708,7 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
             }
             if let Some(turn_id) = string_at(&params, &["turn", "id"]) {
                 relay.set_active_turn(Some(turn_id));
+                relay.touch_progress(Some("thinking"), None);
                 changed = true;
             }
         }
@@ -716,6 +718,7 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
                 return;
             }
             relay.set_active_turn(None);
+            relay.clear_progress();
             changed = true;
             if let Some(turn_id) = string_at(&params, &["turn", "id"]) {
                 changed |=
@@ -766,6 +769,7 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
                     string_at(&params, &["turnId"]),
                 ) {
                     relay.start_agent_message(item_id, turn_id);
+                    relay.touch_progress(Some("streaming"), None);
                     changed = true;
                 }
             }
@@ -790,6 +794,7 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
                             .unwrap_or_else(|| "running".to_string()),
                         turn_id,
                     );
+                    relay.touch_progress(Some("tool"), Some("Bash"));
                     relay.push_log("command", format!("Command started: {command}"));
                     changed = true;
                 }
@@ -803,6 +808,9 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
                     );
                     return;
                 }
+                let tool_name = string_at(&params, &["item", "name"])
+                    .or_else(|| string_at(&params, &["item", "tool"]));
+                relay.touch_progress(Some("tool"), tool_name.as_deref());
                 changed |= upsert_transcript_item_from_value(
                     &mut relay,
                     value_at(&params, &["item"]),
@@ -821,6 +829,7 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
                 string_at(&params, &["turnId"]),
                 string_at(&params, &["delta"]),
             ) {
+                relay.touch_progress(Some("streaming"), None);
                 let delta_len = delta.len();
                 let mutation = relay.append_agent_delta(&item_id, &delta, &turn_id);
                 let thread_id = notification_thread_id
@@ -870,6 +879,7 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
                     parse_user_text(value_at(&params, &["item"])),
                 ) {
                     relay.upsert_user_message(item_id, text, turn_id);
+                    relay.touch_progress(Some("thinking"), None);
                     changed = true;
                 }
             }
@@ -888,6 +898,7 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
                     string_at(&params, &["item", "text"]),
                 ) {
                     relay.complete_agent_message(item_id, text, turn_id);
+                    relay.touch_progress(Some("thinking"), None);
                     changed = true;
                 }
             }
@@ -913,6 +924,9 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
                             .unwrap_or_else(|| "completed".to_string()),
                         turn_id,
                     );
+                    // Defer phase changes — the next event (or the next turn)
+                    // will refine. Just keep the heartbeat fresh.
+                    relay.touch_progress(None, None);
                     changed = true;
                 }
             }
@@ -925,6 +939,7 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
                     );
                     return;
                 }
+                relay.touch_progress(None, None);
                 changed |= upsert_transcript_item_from_value(
                     &mut relay,
                     value_at(&params, &["item"]),
@@ -955,6 +970,7 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
                 if let Some(item_id) =
                     string_at(&params, &["itemId"]).or_else(|| string_at(&params, &["item", "id"]))
                 {
+                    relay.touch_progress(None, None);
                     let delta_len = delta.len();
                     let mutation = relay.append_command_delta(&item_id, &delta);
                     let thread_id = notification_thread_id

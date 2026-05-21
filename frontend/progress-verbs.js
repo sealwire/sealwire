@@ -21,7 +21,11 @@ export const PROGRESS_VERBS = [
   "Noodling",
 ];
 
-const STALL_THRESHOLD_SECONDS = 15;
+// Default stall window. Has to absorb the longest realistic silent gap
+// during a turn — model "thinking" between events on Codex (no tick), or a
+// long tool call running without output. 30s gives us a clear "something
+// is wrong" signal without false-alarming on normal pauses.
+const STALL_THRESHOLD_SECONDS = 30;
 
 export function createVerbCycler(opts = {}) {
   const verbs = opts.verbs ?? PROGRESS_VERBS;

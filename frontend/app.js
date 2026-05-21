@@ -636,15 +636,18 @@ modelInput?.addEventListener("change", () => {
 });
 
 messageModel?.addEventListener("change", () => {
+  // Effort is no longer in the composer; the popover owns it. Just react
+  // to model changes so an effort default can still be persisted for this
+  // provider+model pair.
+  const provider = state.session?.provider;
+  if (!provider) return;
   const models = state.session?.available_models || [];
-  syncEffortSuggestions(messageEffort, models, messageModel.value, messageEffort.value, state.session?.provider || "");
-  const provider = state.session?.provider;
-  if (provider && messageEffort?.value) saveLastEffort(provider, messageEffort.value);
-});
-
-messageEffort?.addEventListener("change", () => {
-  const provider = state.session?.provider;
-  if (provider && messageEffort.value) saveLastEffort(provider, messageEffort.value);
+  const resolved = resolveReasoningEffortValue(
+    models,
+    messageModel.value,
+    loadLastEffort(provider) || state.session?.reasoning_effort || ""
+  );
+  if (resolved) saveLastEffort(provider, resolved);
 });
 
 stopButton?.addEventListener("click", () => {
@@ -987,17 +990,21 @@ function seedDefaults(session) {
     if (messageModel) {
       messageModel.value = session.model || defaultModelForProvider(activeProvider);
     }
-    messageEffort.value = session.reasoning_effort;
     state.defaultsSeeded = true;
   }
 
-  syncEffortSuggestions(
-    messageEffort,
-    session.available_models || [],
-    messageModel?.value || session.model,
-    messageEffort?.value || session.reasoning_effort,
-    session.provider || ""
-  );
+  // Effort is no longer rendered in the composer (it lives in the settings
+  // popover and persists via localStorage). If a stale messageEffort element
+  // is still in the DOM, keep it in sync for backwards-compat.
+  if (messageEffort) {
+    syncEffortSuggestions(
+      messageEffort,
+      session.available_models || [],
+      messageModel?.value || session.model,
+      messageEffort.value || session.reasoning_effort,
+      session.provider || ""
+    );
+  }
 
   syncLaunchSettingsModal(session, launchProvider, launchModels, activeProvider);
 

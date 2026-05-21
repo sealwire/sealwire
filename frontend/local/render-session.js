@@ -22,6 +22,7 @@ import {
   sessionMeta,
   sessionDetailsPath,
   composerSettingsMount,
+  messageEffort,
   statusBadge,
   stopButton,
   threadsCount,
@@ -59,6 +60,7 @@ import {
   ConversationEmptyState,
 } from "../shared/conversation.js";
 import { SessionSettingsButton } from "../shared/session-settings-panel.js";
+import { saveLastEffort } from "../shared/last-used-settings.js";
 import {
   AuditList,
   ControlBannerContent,
@@ -653,7 +655,12 @@ export function createSessionRenderer({
       composerSettingsMount,
       h(SessionSettingsButton, {
         session,
+        composerEffort: messageEffort?.value || session.reasoning_effort || "",
         onUpdate: (payload) => updateSessionSettings?.(payload),
+        onChangeEffort: (value) => {
+          if (messageEffort) messageEffort.value = value;
+          if (session.provider) saveLastEffort(session.provider, value);
+        },
       })
     );
   }

@@ -24,7 +24,10 @@ import {
 } from "./dom.js";
 import { renderAllowedRoots, renderPairingPanel } from "./render-security.js";
 import { openSessionStream, sessionStreamUrl } from "../session-stream.js";
-import { saveLastApprovalPolicy } from "../shared/last-used-settings.js";
+import {
+  loadLastEffort,
+  saveLastApprovalPolicy,
+} from "../shared/last-used-settings.js";
 import { buildThreadGroups, findLatestThread } from "../shared/thread-groups.js";
 import {
   fetchTranscriptEntryDetailViaRequester,
@@ -1017,7 +1020,10 @@ export function createSessionController({
         body: JSON.stringify({
           text,
           model: messageModel?.value,
-          effort: messageEffort.value,
+          effort: messageEffort?.value
+            || loadLastEffort(state.session?.provider || "")
+            || state.session?.reasoning_effort
+            || "",
           device_id: state.deviceId,
         }),
       });

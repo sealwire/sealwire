@@ -119,6 +119,97 @@ test("selectStatusBadgeRenderModel falls back to home and pairing states without
   );
 });
 
+test("selectSessionChromeRenderModel surfaces phase verb in the status badge", () => {
+  const state = {
+    pairingError: null,
+    pairingPhase: null,
+    pairingTicket: null,
+    relayDirectory: [],
+    remoteAuth: { relayId: "relay-1", payloadSecret: "x" },
+    session: null,
+    socketConnected: true,
+    progressVerb: "Pondering",
+  };
+  const session = {
+    active_thread_id: "thread-1",
+    current_cwd: "/tmp",
+    current_status: "active",
+    current_phase: "thinking",
+    current_tool: null,
+    last_progress_at: Math.floor(Date.now() / 1000),
+    provider: "claude_code",
+    model: "claude-sonnet-4-6",
+    reasoning_effort: "medium",
+    provider_connected: true,
+    broker_connected: true,
+    broker_channel_id: "room",
+    broker_peer_id: "peer",
+    security_mode: "private",
+    e2ee_enabled: true,
+    broker_can_read_content: false,
+    audit_enabled: false,
+    pending_approvals: [],
+  };
+
+  const model = selectSessionChromeRenderModel(state, session);
+  assert.equal(model.statusBadge.label, "Pondering…");
+  assert.equal(model.statusBadge.tone, "ready");
+});
+
+test("selectSessionChromeRenderModel surfaces tool gerund in the status badge", () => {
+  const state = {
+    relayDirectory: [],
+    remoteAuth: { relayId: "relay-1", payloadSecret: "x" },
+    session: null,
+    socketConnected: true,
+    progressVerb: "Pondering",
+  };
+  const session = {
+    active_thread_id: "thread-1",
+    current_cwd: "/tmp",
+    current_status: "active",
+    current_phase: "tool",
+    current_tool: "Bash",
+    last_progress_at: Math.floor(Date.now() / 1000),
+    provider: "claude_code",
+    model: "claude-sonnet-4-6",
+    reasoning_effort: "medium",
+    provider_connected: true,
+    pending_approvals: [],
+  };
+
+  const model = selectSessionChromeRenderModel(state, session);
+  assert.equal(model.statusBadge.label, "Bashing…");
+});
+
+test("selectSessionChromeRenderModel flips to Stalled? when last_progress_at goes stale", () => {
+  const state = {
+    relayDirectory: [],
+    remoteAuth: { relayId: "relay-1", payloadSecret: "x" },
+    session: null,
+    socketConnected: true,
+    progressVerb: "Pondering",
+  };
+  const session = {
+    active_thread_id: "thread-1",
+    current_cwd: "/tmp",
+    current_status: "active",
+    current_phase: "thinking",
+    current_tool: null,
+    last_progress_at: 1000,
+    server_time: 1100,
+    provider: "claude_code",
+    model: "claude-sonnet-4-6",
+    reasoning_effort: "medium",
+    provider_connected: true,
+    pending_approvals: [],
+  };
+
+  const model = selectSessionChromeRenderModel(state, session);
+  assert.equal(model.statusBadge.label, "Stalled?");
+  assert.equal(model.statusBadge.tone, "alert");
+});
+
 test("selectStatusBadgeRenderModel shows disconnected server state", () => {
   assert.deepEqual(
     selectStatusBadgeRenderModel({

@@ -18,10 +18,10 @@ const PROVIDER_SETTINGS = {
   claude_code: {
     approvalLabel: "Permission mode",
     approvalOptions: [
-      { label: "Ask first", value: "untrusted" },
-      { label: "Ask when needed", value: "on-request" },
-      { label: "Auto-approve edits", value: "never" },
-      { label: "Full access (YOLO)", value: "bypass" },
+      { label: "Ask first", value: "untrusted", description: "Every tool call needs your OK.", tone: "safe" },
+      { label: "Ask when needed", value: "on-request", description: "Claude only asks for risky actions.", tone: "neutral" },
+      { label: "Auto-approve edits", value: "never", description: "Edits go through without asking. Shell commands still prompt.", tone: "elevated" },
+      { label: "Full access (YOLO)", value: "bypass", description: "No prompts for anything. Use only on tasks you can throw away.", tone: "danger" },
     ],
     effortLabel: "Thinking",
     effortLabels: {
@@ -37,10 +37,10 @@ const PROVIDER_SETTINGS = {
   codex: {
     approvalLabel: "Permission mode",
     approvalOptions: [
-      { label: "Ask first", value: "untrusted" },
-      { label: "Ask when needed", value: "on-request" },
-      { label: "Auto-approve", value: "never" },
-      { label: "Full access (YOLO)", value: "bypass" },
+      { label: "Ask first", value: "untrusted", description: "Every tool call needs your OK.", tone: "safe" },
+      { label: "Ask when needed", value: "on-request", description: "Codex only asks for risky actions.", tone: "neutral" },
+      { label: "Auto-approve", value: "never", description: "Non-destructive actions run without asking.", tone: "elevated" },
+      { label: "Full access (YOLO)", value: "bypass", description: "No prompts for anything. Use only on tasks you can throw away.", tone: "danger" },
     ],
     effortLabel: "Reasoning effort",
     effortLabels: {
@@ -58,10 +58,10 @@ const PROVIDER_SETTINGS = {
 const DEFAULT_SETTINGS = {
   approvalLabel: "Permission mode",
   approvalOptions: [
-    { label: "Ask first", value: "untrusted" },
-    { label: "Ask when needed", value: "on-request" },
-    { label: "Auto-approve", value: "never" },
-    { label: "Full access (YOLO)", value: "bypass" },
+    { label: "Ask first", value: "untrusted", description: "Every tool call needs your OK.", tone: "safe" },
+    { label: "Ask when needed", value: "on-request", description: "Only asks for risky actions.", tone: "neutral" },
+    { label: "Auto-approve", value: "never", description: "Non-destructive actions run without asking.", tone: "elevated" },
+    { label: "Full access (YOLO)", value: "bypass", description: "No prompts for anything. Use only on tasks you can throw away.", tone: "danger" },
   ],
   effortLabel: "Effort",
   effortLabels: {},

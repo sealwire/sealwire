@@ -840,7 +840,7 @@ function ToolEntry({ entry, isJustPrepended = false, options = null }) {
     "article",
     transcriptEntryDomAttrs(
       entry,
-      `chat-message chat-message-system${isFileChange ? " chat-message-file-change" : ""}`,
+      `chat-message chat-message-system chat-message-tool${isFileChange ? " chat-message-file-change" : ""}`,
       null,
       { justPrepended: isJustPrepended }
     ),

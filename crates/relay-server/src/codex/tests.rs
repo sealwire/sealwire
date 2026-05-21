@@ -958,3 +958,122 @@ fn resolve_codex_policy_passes_through_non_bypass_values() {
         ("never", "danger-full-access")
     );
 }
+
+async fn codex_test_state_with_thread(thread_id: &str) -> std::sync::Arc<RwLock<RelayState>> {
+    let (change_tx, _) = watch::channel(0_u64);
+    let state = std::sync::Arc::new(RwLock::new(RelayState::new(
+        "/tmp/project".to_string(),
+        change_tx,
+        SecurityProfile::private(),
+    )));
+    {
+        let mut relay = state.write().await;
+        relay.active_thread_id = Some(thread_id.to_string());
+    }
+    state
+}
+
+#[tokio::test]
+async fn turn_started_sets_phase_thinking() {
+    let state = codex_test_state_with_thread("thread-1").await;
+
+    handle_notification(
+        json!({
+            "method": "turn/started",
+            "params": {
+                "threadId": "thread-1",
+                "turn": { "id": "turn-1" }
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    let relay = state.read().await;
+    assert_eq!(relay.current_phase.as_deref(), Some("thinking"));
+    assert!(relay.last_progress_at.is_some());
+}
+
+#[tokio::test]
+async fn command_execution_marks_tool_phase() {
+    let state = codex_test_state_with_thread("thread-1").await;
+
+    handle_notification(
+        json!({
+            "method": "item/started",
+            "params": {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "item": {
+                    "id": "item-cmd",
+                    "type": "commandExecution",
+                    "command": "npm test",
+                    "status": "running"
+                }
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    let relay = state.read().await;
+    assert_eq!(relay.current_phase.as_deref(), Some("tool"));
+    assert_eq!(relay.current_tool.as_deref(), Some("Bash"));
+}
+
+#[tokio::test]
+async fn agent_delta_switches_to_streaming() {
+    let state = codex_test_state_with_thread("thread-1").await;
+
+    handle_notification(
+        json!({
+            "method": "item/agentMessage/delta",
+            "params": {
+                "threadId": "thread-1",
+                "itemId": "item-msg",
+                "turnId": "turn-1",
+                "delta": "hi "
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    let relay = state.read().await;
+    assert_eq!(relay.current_phase.as_deref(), Some("streaming"));
+}
+
+#[tokio::test]
+async fn turn_completed_clears_progress_state() {
+    let state = codex_test_state_with_thread("thread-1").await;
+
+    handle_notification(
+        json!({
+            "method": "turn/started",
+            "params": {
+                "threadId": "thread-1",
+                "turn": { "id": "turn-1" }
+            }
+        }),
+        &state,
+    )
+    .await;
+    assert!(state.read().await.last_progress_at.is_some());
+
+    handle_notification(
+        json!({
+            "method": "turn/completed",
+            "params": {
+                "threadId": "thread-1",
+                "turn": { "id": "turn-1" }
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    let relay = state.read().await;
+    assert_eq!(relay.current_phase, None);
+    assert_eq!(relay.current_tool, None);
+    assert_eq!(relay.last_progress_at, None);
+}

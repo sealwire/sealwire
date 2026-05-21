@@ -1,5 +1,9 @@
 import { formatTimestamp, shortId, workspaceBasename } from "./utils.js";
 import { providerLabel } from "../shared/provider-labels.js";
+import {
+  isProgressStalled,
+  progressPhaseLabel,
+} from "../progress-verbs.js";
 
 export function isCurrentDeviceActiveController({ remoteAuth, session }) {
   return Boolean(
@@ -39,17 +43,34 @@ export function selectSessionChromeRenderModel(currentState, session) {
       titleTitle: session.current_cwd || "",
     },
     sessionMeta: selectSessionMetaRenderModel(currentState, session),
-    statusBadge: approval
-      ? { label: "Approval required", tone: "alert" }
-      : (
-        currentState.serverConnectionState === "disconnected"
-        || currentState.serverConnectionMessage
-        || !currentState.socketConnected
-        || !session.provider_connected
-      )
-        ? { label: "Offline", tone: "offline" }
-        : { label: session.current_status || "Ready", tone: "ready" },
+    statusBadge: deriveStatusBadge(currentState, session, approval),
   };
+}
+
+function deriveStatusBadge(currentState, session, approval) {
+  if (approval) {
+    return { label: "Approval required", tone: "alert" };
+  }
+  if (
+    currentState.serverConnectionState === "disconnected"
+    || currentState.serverConnectionMessage
+    || !currentState.socketConnected
+    || !session.provider_connected
+  ) {
+    return { label: "Offline", tone: "offline" };
+  }
+  if (isProgressStalled(session)) {
+    return { label: "Stalled?", tone: "alert" };
+  }
+  const phaseLabel = progressPhaseLabel(
+    session.current_phase,
+    session.current_tool,
+    currentState.progressVerb ?? null,
+  );
+  if (phaseLabel) {
+    return { label: phaseLabel, tone: "ready" };
+  }
+  return { label: session.current_status || "Ready", tone: "ready" };
 }
 
 export function selectDeviceChromeRenderModel(currentState) {

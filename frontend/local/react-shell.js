@@ -328,12 +328,9 @@ function ComposerShell() {
     { className: "composer-shell", hidden: true, id: "message-form" },
     h(ConversationComposer, {
       actionsBeforeSend: h("span", { id: "composer-settings-mount" }),
-      effortId: "message-effort",
-      effortLabel: "Response mode",
       messageId: "message-input",
       messagePlaceholder: "Start or resume a session first.",
       modelId: "message-model",
-      modelLabel: "Model",
       models: [{ display_name: "gpt-5.4", model: "gpt-5.4" }],
       sendButtonId: "send-button",
       stopButtonId: "stop-button",

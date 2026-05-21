@@ -675,6 +675,12 @@
   margin-top: -24px;
 }
 
+/* Consecutive tool-call entries (e.g. a chain of Bash/Read/Grep) should sit
+ * close together as a log, not be pried apart by the conversation's 24px gap. */
+.chat-message-tool + .chat-message-tool {
+  margin-top: -18px;
+}
+
 .tool-file-actions {
   display: flex;
   gap: 6px;

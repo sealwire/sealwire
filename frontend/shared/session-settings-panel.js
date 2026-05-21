@@ -1,5 +1,6 @@
 import React from "react";
-import { providerSettings } from "./provider-settings.js";
+import { providerSettings, sandboxOptions } from "./provider-settings.js";
+import { buildReasoningEffortOptions } from "./reasoning-efforts.js";
 
 const h = React.createElement;
 
@@ -34,16 +35,18 @@ export function sessionBusyReason(session) {
   return null;
 }
 
-function lookupOptionLabel(options, value) {
-  if (!Array.isArray(options)) return value || "";
-  const hit = options.find((option) => option.value === value);
-  return hit?.label || value || "";
+function approvalTone(approvalOptions, value) {
+  if (!Array.isArray(approvalOptions)) return "neutral";
+  const hit = approvalOptions.find((option) => option.value === value);
+  return hit?.tone || "neutral";
 }
 
 export function SessionSettingsButton({
   session,
   busy = false,
   onUpdate = null,
+  onChangeEffort = null,
+  composerEffort = "",
   buttonId = "session-settings-button",
 }) {
   const [open, setOpen] = React.useState(false);
@@ -78,10 +81,15 @@ export function SessionSettingsButton({
   const idle = isSessionIdle(session);
   const disabled = !idle || busy;
   const hint = busy ? "Applying…" : sessionBusyReason(session);
-  const approvalShort = lookupOptionLabel(
-    settings.approvalOptions,
-    session.approval_policy
+  const showSandbox = provider !== "claude_code";
+  const currentApproval = session.approval_policy || "";
+  const tone = approvalTone(settings.approvalOptions, currentApproval);
+  const effortOptions = buildReasoningEffortOptions(
+    session.available_models || [],
+    session.model || "",
+    provider
   );
+  const currentEffort = composerEffort || session.reasoning_effort || "";
 
   function emit(next) {
     if (disabled || !onUpdate) return;
@@ -93,6 +101,7 @@ export function SessionSettingsButton({
     {
       ref: wrapperRef,
       className: "session-settings-control" + (open ? " is-open" : ""),
+      "data-approval-tone": tone,
     },
     h(
       "button",
@@ -102,19 +111,14 @@ export function SessionSettingsButton({
         className: "session-settings-toggle",
         "aria-expanded": open ? "true" : "false",
         "aria-haspopup": "dialog",
-        "aria-label": "Session permissions",
-        title: hint || "Adjust session permissions",
+        "aria-label": "Session settings",
+        title: hint || `Session settings — ${currentApproval || "permissions"}`,
         onClick: () => setOpen((prev) => !prev),
       },
       h(
         "span",
         { className: "session-settings-toggle-icon", "aria-hidden": "true" },
-        disabled ? "🔒" : "🔓"
-      ),
-      h(
-        "span",
-        { className: "session-settings-toggle-label" },
-        approvalShort || "Permissions"
+        disabled ? "🔒" : "⚙"
       )
     ),
     open
@@ -123,49 +127,110 @@ export function SessionSettingsButton({
           {
             className: "session-settings-popover",
             role: "dialog",
-            "aria-label": "Session permissions",
+            "aria-label": "Session settings",
           },
           h(
             "div",
-            { className: "session-settings-fields" },
-            h(InlineSelect, {
-              id: "session-settings-approval",
-              label: settings.approvalLabel || "Permission mode",
+            { className: "session-settings-section" },
+            h("h3", { className: "session-settings-section-title" },
+              settings.approvalLabel || "Permission mode"),
+            h(ApprovalCards, {
               options: settings.approvalOptions || [],
-              value: session.approval_policy || "",
+              value: currentApproval,
               disabled,
               onChange: (value) => emit({ approval_policy: value }),
             })
           ),
+          effortOptions.length
+            ? h(
+                "div",
+                { className: "session-settings-section" },
+                h("h3", { className: "session-settings-section-title" },
+                  settings.effortLabel || "Effort"),
+                h(SegmentedControl, {
+                  id: "session-settings-effort",
+                  options: effortOptions,
+                  value: currentEffort,
+                  disabled,
+                  onChange: (value) => onChangeEffort?.(value),
+                })
+              )
+            : null,
+          showSandbox
+            ? h(
+                "div",
+                { className: "session-settings-section" },
+                h("h3", { className: "session-settings-section-title" },
+                  settings.sandboxLabel || "File access"),
+                h(SegmentedControl, {
+                  id: "session-settings-sandbox",
+                  options: sandboxOptions(),
+                  value: session.sandbox || "",
+                  disabled,
+                  onChange: (value) => emit({ sandbox: value }),
+                })
+              )
+            : null,
           hint ? h("p", { className: "session-settings-hint" }, hint) : null
         )
       : null
   );
 }
 
-function InlineSelect({ id, label, options = [], value, disabled, onChange }) {
+function ApprovalCards({ options = [], value, disabled, onChange }) {
   return h(
-    "label",
-    { className: "session-settings-field", htmlFor: id },
-    h("span", { className: "session-settings-label" }, label),
-    h(
-      "select",
-      {
-        id,
-        className: "session-settings-select",
-        disabled,
-        onChange: (event) => onChange?.(event.target.value),
-        value,
-      },
-      ...(options.length
-        ? options.map((option) =>
-            h(
-              "option",
-              { key: option.value, value: option.value },
-              option.label
-            )
-          )
-        : [h("option", { key: "_blank", value: "" }, value || "—")])
-    )
+    "div",
+    { className: "approval-cards", role: "radiogroup", "aria-label": "Permission mode" },
+    ...options.map((option) => {
+      const selected = option.value === value;
+      return h(
+        "button",
+        {
+          key: option.value,
+          type: "button",
+          role: "radio",
+          "aria-checked": selected ? "true" : "false",
+          className: "approval-card"
+            + (selected ? " is-selected" : "")
+            + (disabled ? " is-disabled" : ""),
+          "data-tone": option.tone || "neutral",
+          disabled,
+          onClick: () => {
+            if (disabled || selected) return;
+            onChange?.(option.value);
+          },
+        },
+        h("span", { className: "approval-card-label" }, option.label),
+        option.description
+          ? h("span", { className: "approval-card-description" }, option.description)
+          : null
+      );
+    })
+  );
+}
+
+function SegmentedControl({ id, options = [], value, disabled, onChange }) {
+  return h(
+    "div",
+    { id, className: "settings-segmented" + (disabled ? " is-disabled" : ""), role: "radiogroup" },
+    ...options.map((option) => {
+      const selected = option.value === value;
+      return h(
+        "button",
+        {
+          key: option.value,
+          type: "button",
+          role: "radio",
+          "aria-checked": selected ? "true" : "false",
+          className: "settings-segmented-option" + (selected ? " is-selected" : ""),
+          disabled,
+          onClick: () => {
+            if (disabled || selected) return;
+            onChange?.(option.value);
+          },
+        },
+        option.label
+      );
+    })
   );
 }

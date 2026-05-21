@@ -30,6 +30,7 @@ import {
 import { RefreshButton } from "../shared/refresh-button.js";
 import { ThemePickerRow } from "../shared/theme-picker.js";
 import { selectWorkspaceSuggestionsModel } from "../shared/workspace-suggestions.js";
+import { createVerbCycler } from "../progress-verbs.js";
 import {
   selectDeviceChromeRenderModel,
   selectResetChromeRenderModel,
@@ -177,6 +178,22 @@ function RemoteApp() {
   const remoteUi = useRemoteUiStoreState(remoteUiStore);
   const [threadListStore] = useState(() => createThreadListStore());
   const threadListUi = useThreadListStoreState(threadListStore);
+  const [progressVerb, setProgressVerb] = useState(null);
+  const verbCyclerRef = useRef(null);
+  if (!verbCyclerRef.current) verbCyclerRef.current = createVerbCycler();
+  const sessionPhase = currentState.session?.current_phase ?? null;
+  useEffect(() => {
+    if (!sessionPhase) {
+      setProgressVerb(null);
+      verbCyclerRef.current?.reset?.();
+      return undefined;
+    }
+    setProgressVerb(verbCyclerRef.current.next());
+    const timer = setInterval(() => {
+      setProgressVerb(verbCyclerRef.current.next());
+    }, 2500);
+    return () => clearInterval(timer);
+  }, [sessionPhase]);
   const handlers = createRemoteAppHandlers();
   const selectedProvider = remoteUi.sessionDraft.provider || defaultProvider(remoteUi.providers);
   const selectedProviderModels = remoteUi.providerModels[selectedProvider] || [];
@@ -318,7 +335,7 @@ function RemoteApp() {
   const hasRelay = Boolean(currentState.remoteAuth);
   const hasUsableRelay = Boolean(currentState.remoteAuth?.payloadSecret);
   const sessionChromeModel = session
-    ? selectSessionChromeRenderModel(currentState, session)
+    ? selectSessionChromeRenderModel({ ...currentState, progressVerb }, session)
     : null;
   const resetChromeModel = selectResetChromeRenderModel(currentState);
   const deviceChromeModel = selectDeviceChromeRenderModel(currentState);
@@ -1280,6 +1297,10 @@ function RemoteThreadPanel({
           ? h(SessionSettingsButton, {
               session,
               buttonId: "remote-session-settings-button",
+              composerEffort,
+              onChangeEffort: (value) => {
+                onComposerEffortChange?.(value);
+              },
               onUpdate: (payload) => {
                 void onUpdateSessionSettings?.(payload);
               },

@@ -1308,94 +1308,164 @@ input:focus, textarea:focus, select:focus {
   color: var(--text-faint);
 }
 
-/* SESSION SETTINGS (composer toolbar chip + popover) */
+/* SESSION SETTINGS (composer toolbar icon + popover) */
 .session-settings-control {
   position: relative;
   display: inline-flex;
   flex: 0 0 auto;
+  --settings-tone-color: var(--text-secondary);
 }
+.session-settings-control[data-approval-tone="safe"]     { --settings-tone-color: #6b7280; }
+.session-settings-control[data-approval-tone="neutral"]  { --settings-tone-color: #3b82f6; }
+.session-settings-control[data-approval-tone="elevated"] { --settings-tone-color: #f59e0b; }
+.session-settings-control[data-approval-tone="danger"]   { --settings-tone-color: #ef4444; }
+
 .session-settings-toggle {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 10px;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
   font: inherit;
-  font-size: 12px;
-  line-height: 1.4;
-  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1;
+  color: var(--settings-tone-color);
   background: var(--bg-surface);
-  border: 1px solid var(--border-faint);
+  border: 1.5px solid var(--settings-tone-color);
   border-radius: 999px;
   cursor: pointer;
-  transition: border-color 120ms ease, background 120ms ease;
+  transition: background 120ms ease, transform 120ms ease;
 }
 .session-settings-toggle:hover,
 .session-settings-control.is-open .session-settings-toggle {
-  border-color: var(--border-prominent);
-  background: var(--surface-1, var(--bg-surface));
-  color: var(--text-primary);
+  background: color-mix(in srgb, var(--settings-tone-color) 14%, var(--bg-surface));
+  transform: translateY(-1px);
 }
 .session-settings-toggle-icon {
   font-size: 13px;
   line-height: 1;
-}
-.session-settings-toggle-label {
-  font-weight: 600;
-  color: var(--text-primary);
-  white-space: nowrap;
-  max-width: 14ch;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  display: inline-flex;
 }
 .session-settings-popover {
   position: absolute;
   bottom: calc(100% + 8px);
   left: 0;
   z-index: 30;
-  min-width: 240px;
-  padding: 10px 12px;
+  min-width: 280px;
+  padding: 12px 14px;
   border-radius: var(--radius-md);
   border: 1px solid var(--border-prominent);
   background: var(--bg-surface);
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 14px;
 }
-.session-settings-fields {
+.session-settings-section {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
 }
-.session-settings-field {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-.session-settings-label {
+.session-settings-section-title {
+  margin: 0;
+  font-size: 11px;
   font-weight: 600;
-  color: var(--text-primary);
-}
-.session-settings-select {
-  font: inherit;
-  font-size: 13px;
-  padding: 4px 8px;
-  border-radius: 6px;
-  border: 1px solid var(--border-faint);
-  background: var(--bg-input, var(--bg-surface));
-  color: var(--text-primary);
-}
-.session-settings-select:disabled {
-  cursor: not-allowed;
-  opacity: 0.65;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
 }
 .session-settings-hint {
   margin: 0;
   font-size: 11px;
   color: var(--text-secondary);
 }
+
+.approval-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.approval-card {
+  appearance: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border-faint);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+  --card-tone-color: var(--text-secondary);
+}
+.approval-card[data-tone="safe"]     { --card-tone-color: #6b7280; }
+.approval-card[data-tone="neutral"]  { --card-tone-color: #3b82f6; }
+.approval-card[data-tone="elevated"] { --card-tone-color: #f59e0b; }
+.approval-card[data-tone="danger"]   { --card-tone-color: #ef4444; }
+.approval-card:hover {
+  border-color: var(--card-tone-color);
+}
+.approval-card.is-selected {
+  border-color: var(--card-tone-color);
+  background: color-mix(in srgb, var(--card-tone-color) 12%, var(--bg-surface));
+  box-shadow: inset 3px 0 0 var(--card-tone-color);
+  padding-left: 12px;
+}
+.approval-card.is-disabled,
+.approval-card:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+.approval-card-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--card-tone-color);
+}
+.approval-card.is-selected .approval-card-label { color: var(--card-tone-color); }
+.approval-card-description {
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-secondary);
+}
+
+.settings-segmented {
+  display: inline-flex;
+  align-items: stretch;
+  padding: 2px;
+  border-radius: 999px;
+  background: var(--surface-2, var(--bg-surface));
+  border: 1px solid var(--border-faint);
+  width: fit-content;
+  max-width: 100%;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.settings-segmented::-webkit-scrollbar { display: none; }
+.settings-segmented-option {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  padding: 4px 12px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text-secondary);
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 120ms ease, color 120ms ease;
+}
+.settings-segmented-option:hover { color: var(--text-primary); }
+.settings-segmented-option.is-selected {
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+}
+.settings-segmented.is-disabled .settings-segmented-option { cursor: not-allowed; opacity: 0.6; }
 
 @media (max-width: 600px) {
   .session-settings-popover {
@@ -1406,9 +1476,10 @@ input:focus, textarea:focus, select:focus {
     bottom: 0;
     border-radius: var(--radius-md) var(--radius-md) 0 0;
     border-bottom: none;
-    padding: 14px 16px env(safe-area-inset-bottom, 14px);
+    padding: 16px 18px env(safe-area-inset-bottom, 16px);
     min-width: 0;
     box-shadow: 0 -10px 30px rgba(0, 0, 0, 0.25);
+    gap: 16px;
   }
 }
 
@@ -2139,46 +2210,35 @@ input:focus, textarea:focus, select:focus {
   gap: 6px;
   min-width: 0;
 }
-.composer-select {
+.composer-model-chip {
+  appearance: none;
+  -webkit-appearance: none;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 10px;
-  border-radius: 999px;
-  border: 1px solid transparent;
-  background: transparent;
+  padding: 4px 22px 4px 12px;
+  font: inherit;
   font-size: 12px;
-  color: var(--text-secondary);
-  cursor: pointer;
-  min-width: 0;
-  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
-}
-.composer-select:hover,
-.composer-select:focus-within {
-  background: var(--surface-2);
-  border-color: var(--border-soft);
+  font-weight: 500;
   color: var(--text-primary);
-}
-.composer-select > span {
-  white-space: nowrap;
-  flex: 0 0 auto;
-}
-.composer-select select {
-  font-size: 12px;
-  padding: 0;
-  margin: 0;
-  background: transparent;
-  border: none;
-  width: auto;
-  max-width: 12ch;
+  background: var(--surface-2, var(--bg-surface));
+  border: 1px solid var(--border-faint);
+  border-radius: 999px;
   cursor: pointer;
-  color: inherit;
+  max-width: 18ch;
   text-overflow: ellipsis;
   overflow: hidden;
+  white-space: nowrap;
+  background-image: linear-gradient(45deg, transparent 50%, var(--text-secondary) 50%),
+    linear-gradient(135deg, var(--text-secondary) 50%, transparent 50%);
+  background-position: calc(100% - 11px) center, calc(100% - 7px) center;
+  background-size: 4px 4px, 4px 4px;
+  background-repeat: no-repeat;
+  transition: border-color 120ms ease, background-color 120ms ease;
 }
-.composer-select select:focus {
-  background: transparent;
-  border-color: transparent;
+.composer-model-chip:hover,
+.composer-model-chip:focus {
+  border-color: var(--border-prominent);
+  outline: none;
 }
 .composer-actions .send-button,
 .composer-actions .stop-button { margin-left: auto; }
