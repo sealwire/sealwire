@@ -5,6 +5,15 @@ import {
   progressPhaseLabel,
 } from "../progress-verbs.js";
 
+function isSessionOffline(currentState, session) {
+  return Boolean(
+    currentState.serverConnectionState === "disconnected"
+      || currentState.serverConnectionMessage
+      || !currentState.socketConnected
+      || !session.provider_connected
+  );
+}
+
 export function isCurrentDeviceActiveController({ remoteAuth, session }) {
   return Boolean(
     session?.active_thread_id &&
@@ -31,6 +40,7 @@ export function selectSessionChromeRenderModel(currentState, session) {
   const headerSubtitle = headerPath || workspaceSubtitle(currentState);
 
   return {
+    agentWorkingIndicator: deriveAgentWorkingIndicator(currentState, session, approval),
     controlBanner: selectControlBannerRenderModel(currentState, session),
     header: {
       modelLabel: sessionModelLabel(session),
@@ -51,26 +61,31 @@ function deriveStatusBadge(currentState, session, approval) {
   if (approval) {
     return { label: "Approval required", tone: "alert" };
   }
-  if (
-    currentState.serverConnectionState === "disconnected"
-    || currentState.serverConnectionMessage
-    || !currentState.socketConnected
-    || !session.provider_connected
-  ) {
+  if (isSessionOffline(currentState, session)) {
     return { label: "Offline", tone: "offline" };
   }
-  if (isProgressStalled(session)) {
-    return { label: "Stalled?", tone: "alert" };
+  if (!session.active_thread_id) {
+    return { label: "Standby", tone: "ready" };
   }
-  const phaseLabel = progressPhaseLabel(
+  return { label: "Live", tone: "ready" };
+}
+
+function deriveAgentWorkingIndicator(currentState, session, approval) {
+  if (approval) return { hidden: true, label: "", tone: "ready" };
+  if (isSessionOffline(currentState, session)) return { hidden: true, label: "", tone: "ready" };
+  if (!session.active_thread_id || !session.current_phase) {
+    return { hidden: true, label: "", tone: "ready" };
+  }
+  if (isProgressStalled(session)) {
+    return { hidden: false, label: "Stalled?", tone: "alert" };
+  }
+  const label = progressPhaseLabel(
     session.current_phase,
     session.current_tool,
     currentState.progressVerb ?? null,
   );
-  if (phaseLabel) {
-    return { label: phaseLabel, tone: "ready" };
-  }
-  return { label: session.current_status || "Ready", tone: "ready" };
+  if (!label) return { hidden: true, label: "", tone: "ready" };
+  return { hidden: false, label, tone: "ready" };
 }
 
 export function selectDeviceChromeRenderModel(currentState) {

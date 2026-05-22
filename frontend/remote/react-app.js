@@ -29,6 +29,7 @@ import {
 } from "../shared/provider-settings.js";
 import { RefreshButton } from "../shared/refresh-button.js";
 import { ThemePickerRow } from "../shared/theme-picker.js";
+import { installThreadListWheelProxy } from "../shared/thread-list-scroll.js";
 import { selectWorkspaceSuggestionsModel } from "../shared/workspace-suggestions.js";
 import { createVerbCycler } from "../progress-verbs.js";
 import {
@@ -99,6 +100,7 @@ import {
   WorkspaceHeading,
 } from "./react-renderer.js";
 import {
+  AgentWorkingIndicator,
   ConversationEmptyState,
 } from "../shared/conversation.js";
 import { SessionSettingsButton } from "../shared/session-settings-panel.js";
@@ -347,6 +349,8 @@ function RemoteApp() {
   const controlBannerModel = session
     ? sessionChromeModel.controlBanner
     : resetChromeModel.controlBanner;
+  const agentWorkingIndicatorModel = sessionChromeModel?.agentWorkingIndicator
+    ?? { hidden: true, label: "", tone: "ready" };
   const sessionToggleLabel = !hasRelay
     ? "Select a relay first"
     : remoteUi.sessionPanelOpen
@@ -555,8 +559,18 @@ function RemoteApp() {
   useEffect(() => {
     void bootRemoteRuntime();
     const cleanupSidebarDebug = installSidebarGestureDebug();
+    const cleanupThreadsWheel = installThreadListWheelProxy({
+      root: document.querySelector(".remote-history-shell"),
+      scrollElement: document.querySelector("#remote-threads-list"),
+    });
+    const cleanupRelaysWheel = installThreadListWheelProxy({
+      root: document.querySelector(".remote-relay-shell"),
+      scrollElement: document.querySelector("#remote-relays-list"),
+    });
     return () => {
       cleanupSidebarDebug?.();
+      cleanupThreadsWheel?.();
+      cleanupRelaysWheel?.();
     };
   }, []);
 
@@ -818,6 +832,7 @@ function RemoteApp() {
           statusBadgeModel,
         }),
         h(RemoteThreadPanel, {
+          agentWorkingIndicatorModel,
           composerModel,
           composerDraft: remoteUi.composerDraft,
           composerEffort: remoteUi.composerEffort,
@@ -855,6 +870,9 @@ function RemoteApp() {
           onToggleTranscriptItem: handleTranscriptToggle,
           onSubmitDecision(decision, scope) {
             void handlers.onSubmitDecision(decision, scope);
+          },
+          onApplyFileChange(itemId, direction) {
+            void handlers.onApplyFileChange?.(itemId, direction);
           },
           onTakeOver() {
             void handlers.onTakeOver();
@@ -1228,12 +1246,14 @@ function RemoteHeader({
 }
 
 function RemoteThreadPanel({
+  agentWorkingIndicatorModel,
   composerModel,
   composerDraft,
   composerEffort,
   controlBannerModel,
   currentState,
   emptyStateModel,
+  onApplyFileChange,
   onComposerDraftChange,
   onComposerEffortChange,
   onComposerModelChange,
@@ -1271,6 +1291,7 @@ function RemoteThreadPanel({
       h(RemoteTranscriptPanel, {
         currentState,
         emptyStateModel,
+        onApplyFileChange,
         onSelectRelay,
         onToggleExpandableBlock,
         onToggleTranscriptItem,
@@ -1281,6 +1302,7 @@ function RemoteThreadPanel({
         sessionView,
       })
     ),
+    h(AgentWorkingIndicator, { model: agentWorkingIndicatorModel }),
     h(
       "form",
       {
@@ -1327,6 +1349,7 @@ function RemoteThreadPanel({
 function RemoteTranscriptPanel({
   currentState,
   emptyStateModel,
+  onApplyFileChange,
   onSelectRelay,
   onToggleExpandableBlock,
   onSubmitDecision,
@@ -1438,11 +1461,23 @@ function RemoteTranscriptPanel({
       transcriptOptions: {
         currentCwd: session?.current_cwd || "",
         detailEntries: transcriptDetailEntries,
+        enableFileChangeActions: true,
         expandedItemIds: uiState.transcriptExpandedItemIds,
         expandedKeys: uiState.transcriptExpandedItemIds,
         loadingItemIds: uiState.transcriptLoadingItemIds,
       },
       onTranscriptInteract: (event) => {
+        const fileChangeButton = event.target.closest?.("[data-file-change-action]");
+        if (fileChangeButton) {
+          event.preventDefault();
+          const action = fileChangeButton.dataset.fileChangeAction;
+          const itemId = fileChangeButton.dataset.itemId || "";
+          if (itemId && (action === "rollback" || action === "reapply")) {
+            void onApplyFileChange?.(itemId, action);
+          }
+          return;
+        }
+
         const approvalButton = event.target.closest?.("[data-approval-decision]");
         if (!approvalButton) {
           const expandSummary = event.target.closest?.("[data-expand-key]");

@@ -346,6 +346,22 @@ function ChatShell() {
     h(OverviewStrip),
     h(ConsoleGrid),
     h("div", { className: "pending-action-banner", id: "pending-action-banner", hidden: true }),
+    h(
+      "div",
+      {
+        className: "agent-working-indicator agent-working-indicator-ready",
+        id: "agent-working-indicator",
+        role: "status",
+        "aria-live": "polite",
+        hidden: true,
+      },
+      h("span", { className: "agent-working-indicator-dot", "aria-hidden": "true" }),
+      h(
+        "span",
+        { className: "agent-working-indicator-label", id: "agent-working-indicator-label" },
+        ""
+      )
+    ),
     h(ComposerShell)
   );
 }

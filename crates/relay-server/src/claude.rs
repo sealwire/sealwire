@@ -792,14 +792,20 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                 }
                 let turn_id =
                     string_at(&payload, &["turn_id"]).or_else(|| relay.active_turn_id.clone());
+                let is_file_change = tool.item_type == "fileChange";
                 relay.upsert_transcript_item(
                     item_id,
                     TranscriptEntryKind::ToolCall,
                     None,
                     "completed".to_string(),
-                    turn_id,
+                    turn_id.clone(),
                     Some(tool),
                 );
+                if is_file_change {
+                    if let Some(turn_id) = turn_id {
+                        ensure_claude_turn_diff_entry(&mut relay, &turn_id, "running");
+                    }
+                }
             }
             // Bump last_progress_at but defer phase changes to the next
             // worker event (or progress_tick) — multiple tools may still
@@ -838,10 +844,14 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
 
         "done" => {
             let tid = relay.active_thread_id.clone().unwrap_or_default();
+            let completed_turn_id = relay.active_turn_id.clone();
             relay.set_active_turn(None);
             relay.set_thread_status(&tid, "idle".to_string(), Vec::new());
             relay.clear_progress();
             relay.push_log("info", "Claude turn completed.");
+            if let Some(turn_id) = completed_turn_id {
+                relay.set_transcript_item_status(&format!("turn-diff:{turn_id}"), "completed");
+            }
             relay.notify();
         }
 
@@ -868,6 +878,47 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
 
         _ => {}
     }
+}
+
+/// Build (or refresh) the synthetic `turn-diff:<turn_id>` transcript entry
+/// for the current Claude turn. Mirrors the codex flow but synthesizes the
+/// entry from `fileChange` tool results since Claude does not emit a
+/// dedicated `turn/diff/updated` notification. No-op if the turn has no
+/// file-change tools yet.
+fn ensure_claude_turn_diff_entry(relay: &mut RelayState, turn_id: &str, status: &str) -> bool {
+    let fallback_file_changes = relay.turn_file_change_summary(turn_id);
+    if fallback_file_changes.is_empty() {
+        return false;
+    }
+
+    let turn_diff_item_id = format!("turn-diff:{turn_id}");
+    let existing_diff = relay
+        .snapshot()
+        .transcript
+        .into_iter()
+        .find(|entry| entry.item_id.as_deref() == Some(turn_diff_item_id.as_str()))
+        .and_then(|entry| entry.tool)
+        .and_then(|tool| tool.diff);
+
+    let entry = crate::codex::build_turn_diff_entry_with_fallback(
+        turn_id.to_string(),
+        existing_diff,
+        status,
+        fallback_file_changes,
+        "Claude",
+    );
+    let Some(item_id) = entry.item_id.clone() else {
+        return false;
+    };
+    relay.upsert_transcript_item(
+        item_id,
+        entry.kind,
+        entry.text,
+        entry.status,
+        entry.turn_id,
+        entry.tool,
+    );
+    true
 }
 
 #[cfg(test)]

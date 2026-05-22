@@ -75,6 +75,21 @@ export function ReadyConversationState({
   });
 }
 
+export function AgentWorkingIndicator({ model }) {
+  if (!model || model.hidden) return null;
+  const tone = model.tone === "alert" ? "alert" : "ready";
+  return h(
+    "div",
+    {
+      "aria-live": "polite",
+      className: `agent-working-indicator agent-working-indicator-${tone}`,
+      role: "status",
+    },
+    h("span", { className: "agent-working-indicator-dot", "aria-hidden": "true" }),
+    h("span", { className: "agent-working-indicator-label" }, model.label)
+  );
+}
+
 export function TranscriptState({
   approval = null,
   entries = [],

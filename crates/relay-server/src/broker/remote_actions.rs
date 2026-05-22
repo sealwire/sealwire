@@ -7,11 +7,12 @@ use tracing::{info, warn};
 
 use crate::{
     protocol::{
-        ApprovalDecisionInput, ApprovalReceipt, HeartbeatInput, ModelOptionView,
-        ReadThreadEntriesInput, ReadThreadEntryDetailInput, ReadThreadTranscriptInput,
-        ResumeSessionInput, SendMessageInput, SessionSnapshot, StartSessionInput, StopTurnInput,
-        TakeOverInput, ThreadEntriesResponse, ThreadEntryDetailResponse, ThreadTranscriptResponse,
-        ThreadsQuery, ThreadsResponse, UpdateSessionSettingsInput,
+        ApplyFileChangeInput, ApplyFileChangeReceipt, ApprovalDecisionInput, ApprovalReceipt,
+        HeartbeatInput, ModelOptionView, ReadThreadEntriesInput, ReadThreadEntryDetailInput,
+        ReadThreadTranscriptInput, ResumeSessionInput, SendMessageInput, SessionSnapshot,
+        StartSessionInput, StopTurnInput, TakeOverInput, ThreadEntriesResponse,
+        ThreadEntryDetailResponse, ThreadTranscriptResponse, ThreadsQuery, ThreadsResponse,
+        UpdateSessionSettingsInput,
     },
     state::{AppState, ApprovalError, CachedRemoteActionResult, RemoteActionReplayDecision},
 };
@@ -82,6 +83,10 @@ pub(super) enum RemoteActionRequest {
         request_id: String,
         input: ApprovalDecisionInput,
     },
+    ApplyFileChange {
+        item_id: String,
+        input: ApplyFileChangeInput,
+    },
 }
 
 impl RemoteActionRequest {
@@ -103,6 +108,7 @@ impl RemoteActionRequest {
             Self::FetchThreadEntryDetail { .. } => RemoteActionKind::FetchThreadEntryDetail,
             Self::FetchThreadTranscript { .. } => RemoteActionKind::FetchThreadTranscript,
             Self::DecideApproval { .. } => RemoteActionKind::DecideApproval,
+            Self::ApplyFileChange { .. } => RemoteActionKind::ApplyFileChange,
         }
     }
 
@@ -157,6 +163,10 @@ impl RemoteActionRequest {
                 input.device_id = Some(device_id);
                 Self::DecideApproval { request_id, input }
             }
+            Self::ApplyFileChange { item_id, mut input } => {
+                input.device_id = Some(device_id);
+                Self::ApplyFileChange { item_id, input }
+            }
         }
     }
 }
@@ -180,6 +190,7 @@ pub(super) enum RemoteActionKind {
     FetchThreadEntryDetail,
     FetchThreadTranscript,
     DecideApproval,
+    ApplyFileChange,
 }
 
 impl RemoteActionKind {
@@ -201,6 +212,7 @@ impl RemoteActionKind {
             Self::FetchThreadEntryDetail => "fetch_thread_entry_detail",
             Self::FetchThreadTranscript => "fetch_thread_transcript",
             Self::DecideApproval => "decide_approval",
+            Self::ApplyFileChange => "apply_file_change",
         }
     }
 }
@@ -925,11 +937,18 @@ async fn execute_remote_action(
                 ..RemoteActionOutcome::default()
             })
             .map_err(approval_error_message),
+        RemoteActionRequest::ApplyFileChange { item_id, input } => state
+            .apply_file_change(&item_id, input)
+            .await
+            .map(|_| RemoteActionOutcome::default()),
     }
 }
 
 fn requires_session_claim(action: RemoteActionKind) -> bool {
-    matches!(action, RemoteActionKind::SendMessage)
+    matches!(
+        action,
+        RemoteActionKind::SendMessage | RemoteActionKind::ApplyFileChange
+    )
 }
 
 fn remote_action_emits_info_log(action: RemoteActionKind) -> bool {
@@ -1971,7 +1990,9 @@ fn remote_action_result_kind(action: RemoteActionKind) -> RemoteActionResultKind
         | RemoteActionKind::FetchThreadEntryDetail
         | RemoteActionKind::FetchThreadTranscript => RemoteActionResultKind::RemoteTranscriptResult,
         RemoteActionKind::DecideApproval => RemoteActionResultKind::RemoteApprovalResult,
-        RemoteActionKind::SendMessage => RemoteActionResultKind::RemoteActionAck,
+        RemoteActionKind::SendMessage | RemoteActionKind::ApplyFileChange => {
+            RemoteActionResultKind::RemoteActionAck
+        }
     }
 }
 

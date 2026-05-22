@@ -83,3 +83,5 @@ export const controlSummary = document.querySelector("#control-summary");
 export const controlHint = document.querySelector("#control-hint");
 export const takeOverButton = document.querySelector("#take-over-button");
 export const pendingActionBanner = document.querySelector("#pending-action-banner");
+export const agentWorkingIndicator = document.querySelector("#agent-working-indicator");
+export const agentWorkingIndicatorLabel = document.querySelector("#agent-working-indicator-label");

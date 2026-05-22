@@ -1,4 +1,5 @@
 mod approval;
+mod background;
 mod device;
 mod transcript;
 
@@ -20,6 +21,7 @@ use super::{
 };
 
 pub use self::approval::{ApprovalKind, PendingApproval};
+pub use self::background::BackgroundThreadStream;
 pub(crate) use self::device::{
     BrokerPendingMessage, ClaimChallenge, CompletedPairing, CompletedRemoteClaim, DeviceRecord,
     IssuedClaimChallenge, PairedDevice, PendingPairing, PendingPairingRequest,
@@ -110,6 +112,7 @@ pub struct RelayState {
     locally_deleted_thread_ids: HashSet<String>,
     pub pending_approvals: HashMap<String, PendingApproval>,
     pub(super) transcript: Vec<TranscriptRecord>,
+    pub(super) background_streams: HashMap<String, BackgroundThreadStream>,
     pub(super) logs: Vec<LogEntryView>,
     recent_remote_actions: HashMap<String, CachedRemoteActionState>,
 }
@@ -160,6 +163,7 @@ impl RelayState {
             locally_deleted_thread_ids: HashSet::new(),
             pending_approvals: HashMap::new(),
             transcript: Vec::new(),
+            background_streams: HashMap::new(),
             logs: Vec::new(),
             recent_remote_actions: HashMap::new(),
         };
@@ -290,8 +294,12 @@ impl RelayState {
         effort: &str,
         device_id: &str,
     ) {
+        let now = unix_now();
+        if self.active_thread_id.as_deref() != Some(&thread.id) {
+            self.stash_active_into_background(now);
+        }
         self.active_thread_id = Some(thread.id.clone());
-        self.assign_active_controller(device_id, unix_now());
+        self.assign_active_controller(device_id, now);
         self.active_turn_id = None;
         self.current_status = thread.status.clone();
         self.active_flags.clear();
@@ -350,8 +358,12 @@ impl RelayState {
         effort: &str,
         device_id: &str,
     ) {
+        let now = unix_now();
+        if self.active_thread_id.as_deref() != Some(&data.thread.id) {
+            self.stash_active_into_background(now);
+        }
         self.active_thread_id = Some(data.thread.id.clone());
-        self.assign_active_controller(device_id, unix_now());
+        self.assign_active_controller(device_id, now);
         self.active_turn_id = None;
         self.current_status = data.status;
         self.active_flags = data.active_flags;
@@ -374,6 +386,7 @@ impl RelayState {
             })
             .collect();
         self.bump_transcript_revision();
+        self.restore_background_for_active();
         self.upsert_thread(data.thread);
     }
 
@@ -468,6 +481,7 @@ impl RelayState {
         self.locally_deleted_thread_ids
             .insert(thread_id.to_string());
         self.remove_thread(thread_id);
+        self.drop_background_stream(thread_id);
     }
 
     pub fn filter_deleted_threads(

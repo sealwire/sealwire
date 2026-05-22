@@ -61,13 +61,25 @@ export async function startPairingFromLocalPage(
 }
 
 export async function approvePairing(localPage, timeoutMs) {
+  const approveSelector = "[data-pairing-id][data-pairing-decision='approve']";
+  const modalApproveSelector = `#pairing-approval-modal[open] ${approveSelector}`;
   await localPage.waitForFunction(
-    () =>
-      Boolean(document.querySelector("[data-pairing-id][data-pairing-decision='approve']")),
-    null,
+    ({ approveSelector, modalApproveSelector }) =>
+      Boolean(
+        document.querySelector(modalApproveSelector) ||
+          document.querySelector(approveSelector)
+      ),
+    { approveSelector, modalApproveSelector },
     { timeout: timeoutMs }
   );
-  await localPage.click("[data-pairing-id][data-pairing-decision='approve']");
+
+  const modalApproveButton = localPage.locator(modalApproveSelector).first();
+  if ((await modalApproveButton.count()) > 0) {
+    await modalApproveButton.click({ timeout: timeoutMs });
+    return;
+  }
+
+  await localPage.locator(approveSelector).first().click({ timeout: timeoutMs });
 }
 
 export async function waitForPairedRemote(remotePage, timeoutMs) {

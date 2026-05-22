@@ -64,6 +64,8 @@ import {
   startPromptInput,
   startSessionButton,
   statusBadge,
+  agentWorkingIndicator,
+  agentWorkingIndicatorLabel,
   stopButton,
   threadContextMenu,
   threadsCount,
@@ -214,9 +216,10 @@ fetchBuildInfo("relay").then((info) => {
 // --- progress verb cycler --------------------------------------------------
 //
 // While `session.current_phase` is set we rotate through a small pool of
-// gerund verbs every 2.5s so the badge animates and proves the UI is live.
-// The timer is fully driven by phase transitions reported in session
-// snapshots — when phase clears we tear it down.
+// gerund verbs every 2.5s so the inline working indicator above the composer
+// keeps moving and proves the UI is live. The timer is fully driven by phase
+// transitions reported in session snapshots — when phase clears we tear it
+// down.
 
 const VERB_CYCLE_MS = 2500;
 const verbCycler = createVerbCycler();
@@ -230,7 +233,7 @@ function syncVerbTimer(session) {
       currentProgressVerb = verbCycler.next();
       verbTimer = setInterval(() => {
         currentProgressVerb = verbCycler.next();
-        refreshStatusBadgeForVerb();
+        refreshAgentWorkingIndicator();
       }, VERB_CYCLE_MS);
     }
   } else if (verbTimer) {
@@ -239,23 +242,32 @@ function syncVerbTimer(session) {
     currentProgressVerb = null;
     verbCycler.reset();
   }
+  refreshAgentWorkingIndicator();
 }
 
-function refreshStatusBadgeForVerb() {
+function refreshAgentWorkingIndicator() {
   const session = state.session;
-  if (!session || !statusBadge) return;
-  const approval = session.pending_approvals?.[0] || null;
-  if (approval) return;
-  if (!session.provider_connected) return;
-  if ((session.pending_pairing_requests || []).length > 0) return;
-  if (!session.current_phase) return;
-
-  if (isProgressStalled(session)) {
-    statusBadge.textContent = "Stalled?";
-    statusBadge.className = "status-badge status-badge-alert";
-  } else {
-    statusBadge.textContent = sessionStatusLabel(session, approval);
-    statusBadge.className = "status-badge status-badge-ready";
+  if (!agentWorkingIndicator) return;
+  const approval = session?.pending_approvals?.[0] || null;
+  const phase = session?.current_phase ?? null;
+  const offline = !session || approval || !session.provider_connected || !session.active_thread_id || !phase;
+  if (offline) {
+    agentWorkingIndicator.hidden = true;
+    return;
+  }
+  const stalled = isProgressStalled(session);
+  const label = stalled
+    ? "Stalled?"
+    : progressPhaseLabel(phase, session.current_tool, currentProgressVerb);
+  if (!label) {
+    agentWorkingIndicator.hidden = true;
+    return;
+  }
+  agentWorkingIndicator.hidden = false;
+  const tone = stalled ? "alert" : "ready";
+  agentWorkingIndicator.className = `agent-working-indicator agent-working-indicator-${tone}`;
+  if (agentWorkingIndicatorLabel) {
+    agentWorkingIndicatorLabel.textContent = label;
   }
 }
 
@@ -392,7 +404,7 @@ installThreadListWheelProxy({
   root: sessionHistoryDrawer,
   scrollElement: threadsList,
   shouldProxyWheel() {
-    return appShell?.dataset.view === "conversation";
+    return Boolean(sessionHistoryDrawer?.open);
   },
 });
 
@@ -1413,20 +1425,7 @@ function sessionStatusLabel(session, approval) {
     return "Standby";
   }
 
-  const phaseLabel = progressPhaseLabel(
-    session.current_phase,
-    session.current_tool,
-    currentProgressVerb,
-  );
-  if (phaseLabel) {
-    return phaseLabel;
-  }
-
-  if (!session.active_controller_device_id && (session.current_status || "idle") === "idle") {
-    return "Live";
-  }
-
-  return humanizeLabel(session.current_status || "ready");
+  return "Live";
 }
 
 function securityModeLabel(session) {

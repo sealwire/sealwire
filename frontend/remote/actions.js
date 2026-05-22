@@ -851,7 +851,7 @@ function isSessionClaimError(message) {
 }
 
 function requiresSessionClaim(actionType) {
-  return actionType === "send_message";
+  return actionType === "send_message" || actionType === "apply_file_change";
 }
 
 function shouldAutoReclaimSession() {

@@ -482,6 +482,9 @@
 .message-body h3 { font-size: 1.05em; }
 .message-body h4, .message-body h5, .message-body h6 { font-size: 1em; }
 .message-body table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
   margin: 8px 0;
   border-collapse: collapse;
   font-size: 13px;

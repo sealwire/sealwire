@@ -688,6 +688,26 @@ export async function submitDecision(decision, scope) {
   }
 }
 
+export async function applyFileChange(itemId, direction) {
+  if (!itemId) {
+    renderLog("No file change selected.");
+    return;
+  }
+
+  renderLog(`${direction === "rollback" ? "Rolling back" : "Reapplying"} file change ${itemId}`);
+
+  try {
+    await dispatchOrRecover("apply_file_change", {
+      item_id: itemId,
+      input: {
+        direction,
+      },
+    });
+  } catch (error) {
+    renderLog(`File change action failed: ${error.message}`);
+  }
+}
+
 export function clearSessionRuntime() {
   clearTranscriptHydration(state);
 }

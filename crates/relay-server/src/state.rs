@@ -219,7 +219,7 @@ fn collapse_lexical_components(path: PathBuf) -> PathBuf {
     normalized
 }
 
-fn unix_now() -> u64 {
+pub(crate) fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

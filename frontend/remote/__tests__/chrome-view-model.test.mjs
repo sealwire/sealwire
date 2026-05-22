@@ -81,7 +81,8 @@ test("selectSessionChromeRenderModel derives header, status, and control banner"
   assert.equal(model.header.subtitle, "/Users/luchi/git/agent-relay");
   assert.equal(model.header.modelLabel, "Codex · gpt-5.4");
   assert.equal(model.header.modelTitle, "Codex · gpt-5.4 · effort medium");
-  assert.equal(model.statusBadge.label, "idle");
+  assert.equal(model.statusBadge.label, "Live");
+  assert.equal(model.agentWorkingIndicator.hidden, true);
   assert.equal(model.controlBanner.hidden, false);
   assert.match(model.controlBanner.hint, /Approvals can still be handled here/i);
   assert.equal(model.controlBanner.summary, "Controlled by device-2");
@@ -119,7 +120,7 @@ test("selectStatusBadgeRenderModel falls back to home and pairing states without
   );
 });
 
-test("selectSessionChromeRenderModel surfaces phase verb in the status badge", () => {
+test("selectSessionChromeRenderModel surfaces phase verb in the working indicator", () => {
   const state = {
     pairingError: null,
     pairingPhase: null,
@@ -152,11 +153,14 @@ test("selectSessionChromeRenderModel surfaces phase verb in the status badge", (
   };
 
   const model = selectSessionChromeRenderModel(state, session);
-  assert.equal(model.statusBadge.label, "Pondering…");
+  assert.equal(model.statusBadge.label, "Live");
   assert.equal(model.statusBadge.tone, "ready");
+  assert.equal(model.agentWorkingIndicator.hidden, false);
+  assert.equal(model.agentWorkingIndicator.label, "Pondering…");
+  assert.equal(model.agentWorkingIndicator.tone, "ready");
 });
 
-test("selectSessionChromeRenderModel surfaces tool gerund in the status badge", () => {
+test("selectSessionChromeRenderModel surfaces tool gerund in the working indicator", () => {
   const state = {
     relayDirectory: [],
     remoteAuth: { relayId: "relay-1", payloadSecret: "x" },
@@ -179,7 +183,8 @@ test("selectSessionChromeRenderModel surfaces tool gerund in the status badge", 
   };
 
   const model = selectSessionChromeRenderModel(state, session);
-  assert.equal(model.statusBadge.label, "Bashing…");
+  assert.equal(model.statusBadge.label, "Live");
+  assert.equal(model.agentWorkingIndicator.label, "Bashing…");
 });
 
 test("selectSessionChromeRenderModel flips to Stalled? when last_progress_at goes stale", () => {
@@ -206,8 +211,11 @@ test("selectSessionChromeRenderModel flips to Stalled? when last_progress_at goe
   };
 
   const model = selectSessionChromeRenderModel(state, session);
-  assert.equal(model.statusBadge.label, "Stalled?");
-  assert.equal(model.statusBadge.tone, "alert");
+  assert.equal(model.statusBadge.label, "Live");
+  assert.equal(model.statusBadge.tone, "ready");
+  assert.equal(model.agentWorkingIndicator.hidden, false);
+  assert.equal(model.agentWorkingIndicator.label, "Stalled?");
+  assert.equal(model.agentWorkingIndicator.tone, "alert");
 });
 
 test("selectStatusBadgeRenderModel shows disconnected server state", () => {

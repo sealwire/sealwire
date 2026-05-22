@@ -702,37 +702,63 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
             changed = true;
         }
         "turn/started" => {
-            if !should_apply_session_notification(&relay, notification_thread_id.as_deref()) {
+            let route = thread_route(&relay, notification_thread_id.as_deref());
+            if matches!(route, ThreadRoute::Drop) {
                 log_ignored_session_notification(method, notification_thread_id.as_deref(), &relay);
                 return;
             }
             if let Some(turn_id) = string_at(&params, &["turn", "id"]) {
-                relay.set_active_turn(Some(turn_id));
-                relay.touch_progress(Some("thinking"), None);
-                changed = true;
+                if let ThreadRoute::Background(bg_thread_id) = route {
+                    relay.bg_set_active_turn(
+                        &bg_thread_id,
+                        Some(turn_id),
+                        crate::state::unix_now(),
+                    );
+                    changed = true;
+                } else {
+                    relay.set_active_turn(Some(turn_id));
+                    relay.touch_progress(Some("thinking"), None);
+                    changed = true;
+                }
             }
         }
         "turn/completed" => {
-            if !should_apply_session_notification(&relay, notification_thread_id.as_deref()) {
+            let route = thread_route(&relay, notification_thread_id.as_deref());
+            if matches!(route, ThreadRoute::Drop) {
                 log_ignored_session_notification(method, notification_thread_id.as_deref(), &relay);
                 return;
             }
-            relay.set_active_turn(None);
-            relay.clear_progress();
-            changed = true;
-            if let Some(turn_id) = string_at(&params, &["turn", "id"]) {
-                changed |=
-                    relay.set_transcript_item_status(&format!("turn-diff:{turn_id}"), "completed");
-            }
-            if let Some(turn_error) =
-                value_at(&params, &["turn", "error", "message"]).and_then(Value::as_str)
-            {
-                relay.push_log("error", turn_error.to_string());
+            if let ThreadRoute::Background(bg_thread_id) = route {
+                let now = crate::state::unix_now();
+                relay.bg_set_active_turn(&bg_thread_id, None, now);
+                if let Some(turn_id) = string_at(&params, &["turn", "id"]) {
+                    relay.bg_set_transcript_item_status(
+                        &bg_thread_id,
+                        &format!("turn-diff:{turn_id}"),
+                        "completed",
+                        now,
+                    );
+                }
                 changed = true;
+            } else {
+                relay.set_active_turn(None);
+                relay.clear_progress();
+                changed = true;
+                if let Some(turn_id) = string_at(&params, &["turn", "id"]) {
+                    changed |= relay
+                        .set_transcript_item_status(&format!("turn-diff:{turn_id}"), "completed");
+                }
+                if let Some(turn_error) =
+                    value_at(&params, &["turn", "error", "message"]).and_then(Value::as_str)
+                {
+                    relay.push_log("error", turn_error.to_string());
+                    changed = true;
+                }
             }
         }
         "turn/diff/updated" => {
-            if !should_apply_session_notification(&relay, notification_thread_id.as_deref()) {
+            let route = thread_route(&relay, notification_thread_id.as_deref());
+            if matches!(route, ThreadRoute::Drop) {
                 log_ignored_session_notification(method, notification_thread_id.as_deref(), &relay);
                 return;
             }
@@ -742,15 +768,28 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
             ) {
                 let entry = build_turn_diff_entry(turn_id, diff, "running");
                 if let Some(item_id) = entry.item_id.clone() {
-                    relay.upsert_transcript_item(
-                        item_id,
-                        entry.kind,
-                        entry.text,
-                        entry.status,
-                        entry.turn_id,
-                        entry.tool,
-                    );
-                    changed = true;
+                    if let ThreadRoute::Background(bg_thread_id) = route {
+                        relay.bg_upsert_turn_diff_item(
+                            &bg_thread_id,
+                            item_id,
+                            entry.text,
+                            entry.status,
+                            entry.turn_id,
+                            entry.tool,
+                            crate::state::unix_now(),
+                        );
+                        changed = true;
+                    } else {
+                        relay.upsert_transcript_item(
+                            item_id,
+                            entry.kind,
+                            entry.text,
+                            entry.status,
+                            entry.turn_id,
+                            entry.tool,
+                        );
+                        changed = true;
+                    }
                 }
             }
         }
@@ -820,7 +859,8 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
             }
         },
         "item/agentMessage/delta" => {
-            if !should_apply_session_notification(&relay, notification_thread_id.as_deref()) {
+            let route = thread_route(&relay, notification_thread_id.as_deref());
+            if matches!(route, ThreadRoute::Drop) {
                 log_ignored_session_notification(method, notification_thread_id.as_deref(), &relay);
                 return;
             }
@@ -829,38 +869,58 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
                 string_at(&params, &["turnId"]),
                 string_at(&params, &["delta"]),
             ) {
-                relay.touch_progress(Some("streaming"), None);
-                let delta_len = delta.len();
-                let mutation = relay.append_agent_delta(&item_id, &delta, &turn_id);
-                let thread_id = notification_thread_id
-                    .clone()
-                    .or_else(|| relay.active_thread_id.clone())
-                    .unwrap_or_default();
-                info!(
-                    method,
-                    thread_id = %thread_id,
-                    item_id = %item_id,
-                    turn_id = %turn_id,
-                    delta_len,
-                    pending_broker_messages = relay.pending_broker_messages.len() + 1,
-                    "queued broker transcript delta"
-                );
-                relay
-                    .pending_broker_messages
-                    .push(BrokerPendingMessage::TranscriptDelta(
-                        PendingTranscriptDelta {
-                            thread_id,
-                            base_revision: mutation.base_revision,
-                            revision: mutation.revision,
-                            entry_seq: mutation.entry_seq,
-                            server_time: mutation.server_time,
-                            item_id,
-                            turn_id: Some(turn_id),
-                            delta,
-                            kind: TranscriptDeltaKind::AgentText,
-                        },
-                    ));
-                changed = true;
+                if let ThreadRoute::Background(bg_thread_id) = route {
+                    let delta_len = delta.len();
+                    relay.bg_append_agent_delta(
+                        &bg_thread_id,
+                        &item_id,
+                        &delta,
+                        &turn_id,
+                        crate::state::unix_now(),
+                    );
+                    info!(
+                        method,
+                        thread_id = %bg_thread_id,
+                        item_id = %item_id,
+                        turn_id = %turn_id,
+                        delta_len,
+                        "buffered transcript delta for non-active thread"
+                    );
+                    changed = true;
+                } else {
+                    relay.touch_progress(Some("streaming"), None);
+                    let delta_len = delta.len();
+                    let mutation = relay.append_agent_delta(&item_id, &delta, &turn_id);
+                    let thread_id = notification_thread_id
+                        .clone()
+                        .or_else(|| relay.active_thread_id.clone())
+                        .unwrap_or_default();
+                    info!(
+                        method,
+                        thread_id = %thread_id,
+                        item_id = %item_id,
+                        turn_id = %turn_id,
+                        delta_len,
+                        pending_broker_messages = relay.pending_broker_messages.len() + 1,
+                        "queued broker transcript delta"
+                    );
+                    relay
+                        .pending_broker_messages
+                        .push(BrokerPendingMessage::TranscriptDelta(
+                            PendingTranscriptDelta {
+                                thread_id,
+                                base_revision: mutation.base_revision,
+                                revision: mutation.revision,
+                                entry_seq: mutation.entry_seq,
+                                server_time: mutation.server_time,
+                                item_id,
+                                turn_id: Some(turn_id),
+                                delta,
+                                kind: TranscriptDeltaKind::AgentText,
+                            },
+                        ));
+                    changed = true;
+                }
             }
         }
         "item/completed" => match string_at(&params, &["item", "type"]).as_deref() {
@@ -962,7 +1022,8 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
             }
         }
         "item/commandExecution/outputDelta" => {
-            if !should_apply_session_notification(&relay, notification_thread_id.as_deref()) {
+            let route = thread_route(&relay, notification_thread_id.as_deref());
+            if matches!(route, ThreadRoute::Drop) {
                 log_ignored_session_notification(method, notification_thread_id.as_deref(), &relay);
                 return;
             }
@@ -970,39 +1031,49 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
                 if let Some(item_id) =
                     string_at(&params, &["itemId"]).or_else(|| string_at(&params, &["item", "id"]))
                 {
-                    relay.touch_progress(None, None);
-                    let delta_len = delta.len();
-                    let mutation = relay.append_command_delta(&item_id, &delta);
-                    let thread_id = notification_thread_id
-                        .clone()
-                        .or_else(|| relay.active_thread_id.clone())
-                        .unwrap_or_default();
-                    info!(
-                        method,
-                        thread_id = %thread_id,
-                        item_id = %item_id,
-                        delta_len,
-                        pending_broker_messages = relay.pending_broker_messages.len() + 1,
-                        "queued broker transcript delta"
-                    );
-                    relay
-                        .pending_broker_messages
-                        .push(BrokerPendingMessage::TranscriptDelta(
-                            PendingTranscriptDelta {
-                                thread_id,
-                                base_revision: mutation.base_revision,
-                                revision: mutation.revision,
-                                entry_seq: mutation.entry_seq,
-                                server_time: mutation.server_time,
-                                item_id,
-                                turn_id: None,
-                                delta: delta.clone(),
-                                kind: TranscriptDeltaKind::CommandOutput,
-                            },
-                        ));
+                    if let ThreadRoute::Background(bg_thread_id) = route {
+                        relay.bg_append_command_delta(
+                            &bg_thread_id,
+                            &item_id,
+                            &delta,
+                            crate::state::unix_now(),
+                        );
+                        changed = true;
+                    } else {
+                        relay.touch_progress(None, None);
+                        let delta_len = delta.len();
+                        let mutation = relay.append_command_delta(&item_id, &delta);
+                        let thread_id = notification_thread_id
+                            .clone()
+                            .or_else(|| relay.active_thread_id.clone())
+                            .unwrap_or_default();
+                        info!(
+                            method,
+                            thread_id = %thread_id,
+                            item_id = %item_id,
+                            delta_len,
+                            pending_broker_messages = relay.pending_broker_messages.len() + 1,
+                            "queued broker transcript delta"
+                        );
+                        relay
+                            .pending_broker_messages
+                            .push(BrokerPendingMessage::TranscriptDelta(
+                                PendingTranscriptDelta {
+                                    thread_id,
+                                    base_revision: mutation.base_revision,
+                                    revision: mutation.revision,
+                                    entry_seq: mutation.entry_seq,
+                                    server_time: mutation.server_time,
+                                    item_id,
+                                    turn_id: None,
+                                    delta: delta.clone(),
+                                    kind: TranscriptDeltaKind::CommandOutput,
+                                },
+                            ));
+                        relay.push_log("command", delta);
+                        changed = true;
+                    }
                 }
-                relay.push_log("command", delta);
-                changed = true;
             }
         }
         "item/fileChange/outputDelta" => {
@@ -1054,6 +1125,25 @@ fn should_apply_session_notification(relay: &RelayState, thread_id: Option<&str>
         (_, None) => true,
         (None, Some(_)) => false,
         (Some(active_thread_id), Some(thread_id)) => active_thread_id == thread_id,
+    }
+}
+
+#[derive(Debug, Clone)]
+enum ThreadRoute {
+    /// Apply to the currently-active thread (current behavior).
+    Active,
+    /// Buffer for a background thread; the user is viewing something else.
+    Background(String),
+    /// No active thread at all — drop.
+    Drop,
+}
+
+fn thread_route(relay: &RelayState, thread_id: Option<&str>) -> ThreadRoute {
+    match (relay.active_thread_id.as_deref(), thread_id) {
+        (_, None) => ThreadRoute::Active,
+        (None, Some(_)) => ThreadRoute::Drop,
+        (Some(active), Some(t)) if active == t => ThreadRoute::Active,
+        (Some(_), Some(t)) => ThreadRoute::Background(t.to_string()),
     }
 }
 
@@ -1162,6 +1252,7 @@ fn refresh_turn_diff_entry(relay: &mut RelayState, turn_id: &str) -> bool {
         existing_tool.diff,
         &existing_entry.status,
         fallback_file_changes,
+        "Codex",
     );
     let Some(item_id) = entry.item_id.clone() else {
         return false;
@@ -1463,18 +1554,20 @@ fn build_turn_file_summary(
         joined_file_change_diff(&file_changes),
         "completed",
         file_changes,
+        "Codex",
     ))
 }
 
 fn build_turn_diff_entry(turn_id: String, diff: String, status: &str) -> TranscriptEntryView {
-    build_turn_diff_entry_with_fallback(turn_id, Some(diff), status, Vec::new())
+    build_turn_diff_entry_with_fallback(turn_id, Some(diff), status, Vec::new(), "Codex")
 }
 
-fn build_turn_diff_entry_with_fallback(
+pub(crate) fn build_turn_diff_entry_with_fallback(
     turn_id: String,
     diff: Option<String>,
     status: &str,
     fallback_file_changes: Vec<FileChangeDiffView>,
+    agent_label: &str,
 ) -> TranscriptEntryView {
     let mut file_changes = diff
         .as_deref()
@@ -1514,7 +1607,7 @@ fn build_turn_diff_entry_with_fallback(
         tool: Some(ToolCallView {
             item_type: "turnDiff".to_string(),
             name: "File summary".to_string(),
-            title: summarize_turn_diff(&paths),
+            title: summarize_turn_diff(&paths, agent_label),
             detail,
             query: None,
             path: (paths.len() == 1).then(|| paths[0].clone()),
@@ -1715,14 +1808,14 @@ fn file_change_paths_preview(paths: &[String]) -> Option<String> {
     ))
 }
 
-fn summarize_turn_diff(paths: &[String]) -> String {
+fn summarize_turn_diff(paths: &[String], agent_label: &str) -> String {
     match paths {
-        [] => "Codex changed files in this turn.".to_string(),
+        [] => format!("{agent_label} changed files in this turn."),
         [path] => format!(
-            "Codex changed {} in this turn.",
+            "{agent_label} changed {} in this turn.",
             inline_snippet(path, MAX_APPROVAL_SUMMARY_CHARS)
         ),
-        _ => format!("Codex changed {} files in this turn.", paths.len()),
+        _ => format!("{agent_label} changed {} files in this turn.", paths.len()),
     }
 }
 

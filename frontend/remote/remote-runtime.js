@@ -4,7 +4,7 @@ import { initializeRemoteNavigation, openRemoteNavigation } from "./navigation.j
 import { applyPairingQuery, beginPairing, forgetCurrentDevice, handleEncryptedPairingResult, sendPairingRequest } from "./pairing.js";
 import { registerRemotePwa } from "./pwa.js";
 import { renderLog } from "./session-surface.js";
-import { applySessionSnapshot, applyTranscriptDelta, applyTranscriptEvent, clearSessionRuntime, fetchRemoteProviderModels, fetchRemoteProviders, fetchTranscriptEntryDetail, refreshRemoteThreads, resumeRemoteSession, sendMessage, startRemoteSession, stopActiveTurn, submitDecision, syncRemoteSnapshot, takeOverControl, updateRemoteSessionSettings } from "./session-ops.js";
+import { applyFileChange, applySessionSnapshot, applyTranscriptDelta, applyTranscriptEvent, clearSessionRuntime, fetchRemoteProviderModels, fetchRemoteProviders, fetchTranscriptEntryDetail, refreshRemoteThreads, resumeRemoteSession, sendMessage, startRemoteSession, stopActiveTurn, submitDecision, syncRemoteSnapshot, takeOverControl, updateRemoteSessionSettings } from "./session-ops.js";
 import { clearActiveRelaySelection, ensureDeviceIdentity, hydrateStoredRemoteSecrets, selectRelayProfile, state } from "./state.js";
 import { applyRemoteSurfacePatch, createResetRemoteSurfaceStatePatch } from "./surface-state.js";
 
@@ -185,6 +185,9 @@ export function createRemoteAppHandlers() {
     },
     onSubmitDecision(decision, scope) {
       return submitDecision(decision, scope);
+    },
+    onApplyFileChange(itemId, direction) {
+      return applyFileChange(itemId, direction);
     },
     onTakeOver() {
       return takeOverControl();

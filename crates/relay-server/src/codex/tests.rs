@@ -1077,3 +1077,498 @@ async fn turn_completed_clears_progress_state() {
     assert_eq!(relay.current_tool, None);
     assert_eq!(relay.last_progress_at, None);
 }
+
+fn test_thread_summary(id: &str) -> ThreadSummaryView {
+    ThreadSummaryView {
+        id: id.to_string(),
+        name: None,
+        preview: String::new(),
+        cwd: "/tmp/project".to_string(),
+        updated_at: 1,
+        source: "codex".to_string(),
+        status: "idle".to_string(),
+        model_provider: "openai".to_string(),
+        provider: "codex".to_string(),
+    }
+}
+
+#[tokio::test]
+async fn handle_notification_buffers_late_delta_for_prior_thread() {
+    let (change_tx, _) = watch::channel(0_u64);
+    let state = std::sync::Arc::new(RwLock::new(RelayState::new(
+        "/tmp/project".to_string(),
+        change_tx,
+        SecurityProfile::private(),
+    )));
+
+    {
+        let mut relay = state.write().await;
+        relay.active_thread_id = Some("thread-A".to_string());
+    }
+
+    handle_notification(
+        json!({
+            "method": "item/started",
+            "params": {
+                "threadId": "thread-A",
+                "turnId": "turn-A1",
+                "item": { "id": "msg-1", "type": "agentMessage" }
+            }
+        }),
+        &state,
+    )
+    .await;
+    handle_notification(
+        json!({
+            "method": "item/agentMessage/delta",
+            "params": {
+                "threadId": "thread-A",
+                "itemId": "msg-1",
+                "turnId": "turn-A1",
+                "delta": "Hello"
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    {
+        let relay = state.read().await;
+        let entry = relay
+            .snapshot()
+            .transcript
+            .into_iter()
+            .find(|entry| entry.item_id.as_deref() == Some("msg-1"))
+            .expect("msg-1 should exist on thread A");
+        assert_eq!(entry.text.as_deref(), Some("Hello"));
+    }
+
+    {
+        let mut relay = state.write().await;
+        relay.load_thread_data(
+            ThreadSyncData {
+                thread: test_thread_summary("thread-B"),
+                status: "idle".to_string(),
+                active_flags: Vec::new(),
+                transcript: Vec::new(),
+            },
+            "untrusted",
+            "workspace-write",
+            "medium",
+            "device-a",
+        );
+    }
+
+    handle_notification(
+        json!({
+            "method": "item/agentMessage/delta",
+            "params": {
+                "threadId": "thread-A",
+                "itemId": "msg-1",
+                "turnId": "turn-A1",
+                "delta": " world"
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    {
+        let relay = state.read().await;
+        assert!(
+            relay.snapshot().transcript.is_empty(),
+            "thread B's transcript should not absorb thread A's delta"
+        );
+    }
+
+    {
+        let mut relay = state.write().await;
+        relay.load_thread_data(
+            ThreadSyncData {
+                thread: test_thread_summary("thread-A"),
+                status: "running".to_string(),
+                active_flags: Vec::new(),
+                transcript: vec![TranscriptEntryView {
+                    item_id: Some("msg-1".to_string()),
+                    kind: TranscriptEntryKind::AgentText,
+                    text: Some("Hello".to_string()),
+                    status: "running".to_string(),
+                    turn_id: Some("turn-A1".to_string()),
+                    tool: None,
+                }],
+            },
+            "untrusted",
+            "workspace-write",
+            "medium",
+            "device-a",
+        );
+    }
+
+    let relay = state.read().await;
+    let entry = relay
+        .snapshot()
+        .transcript
+        .into_iter()
+        .find(|entry| entry.item_id.as_deref() == Some("msg-1"))
+        .expect("thread A's msg-1 should be present after switching back");
+    assert_eq!(
+        entry.text.as_deref(),
+        Some("Hello world"),
+        "late delta from prior thread must be replayed on switch-back"
+    );
+}
+
+#[tokio::test]
+async fn handle_notification_does_not_leak_late_delta_into_new_thread() {
+    let (change_tx, _) = watch::channel(0_u64);
+    let state = std::sync::Arc::new(RwLock::new(RelayState::new(
+        "/tmp/project".to_string(),
+        change_tx,
+        SecurityProfile::private(),
+    )));
+
+    {
+        let mut relay = state.write().await;
+        relay.active_thread_id = Some("thread-A".to_string());
+    }
+
+    handle_notification(
+        json!({
+            "method": "item/started",
+            "params": {
+                "threadId": "thread-A",
+                "turnId": "turn-A1",
+                "item": { "id": "msg-1", "type": "agentMessage" }
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    {
+        let mut relay = state.write().await;
+        relay.load_thread_data(
+            ThreadSyncData {
+                thread: test_thread_summary("thread-B"),
+                status: "idle".to_string(),
+                active_flags: Vec::new(),
+                transcript: Vec::new(),
+            },
+            "untrusted",
+            "workspace-write",
+            "medium",
+            "device-a",
+        );
+    }
+
+    handle_notification(
+        json!({
+            "method": "item/agentMessage/delta",
+            "params": {
+                "threadId": "thread-A",
+                "itemId": "msg-1",
+                "turnId": "turn-A1",
+                "delta": "leaked"
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    let relay = state.read().await;
+    assert!(
+        relay.snapshot().transcript.is_empty(),
+        "thread B's transcript must not absorb a delta belonging to thread A"
+    );
+    assert_eq!(
+        relay.active_thread_id.as_deref(),
+        Some("thread-B"),
+        "active thread must remain B"
+    );
+}
+
+#[tokio::test]
+async fn handle_notification_buffers_late_command_output_for_prior_thread() {
+    let (change_tx, _) = watch::channel(0_u64);
+    let state = std::sync::Arc::new(RwLock::new(RelayState::new(
+        "/tmp/project".to_string(),
+        change_tx,
+        SecurityProfile::private(),
+    )));
+
+    {
+        let mut relay = state.write().await;
+        relay.active_thread_id = Some("thread-A".to_string());
+    }
+
+    handle_notification(
+        json!({
+            "method": "item/started",
+            "params": {
+                "threadId": "thread-A",
+                "turnId": "turn-A1",
+                "item": {
+                    "id": "cmd-1",
+                    "type": "commandExecution",
+                    "command": "npm test",
+                    "status": "running"
+                }
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    {
+        let mut relay = state.write().await;
+        relay.load_thread_data(
+            ThreadSyncData {
+                thread: test_thread_summary("thread-B"),
+                status: "idle".to_string(),
+                active_flags: Vec::new(),
+                transcript: Vec::new(),
+            },
+            "untrusted",
+            "workspace-write",
+            "medium",
+            "device-a",
+        );
+    }
+
+    handle_notification(
+        json!({
+            "method": "item/commandExecution/outputDelta",
+            "params": {
+                "threadId": "thread-A",
+                "itemId": "cmd-1",
+                "delta": "line 1"
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    {
+        let relay = state.read().await;
+        assert!(
+            relay.snapshot().transcript.is_empty(),
+            "command output delta for thread A must not leak into thread B"
+        );
+    }
+
+    {
+        let mut relay = state.write().await;
+        relay.load_thread_data(
+            ThreadSyncData {
+                thread: test_thread_summary("thread-A"),
+                status: "running".to_string(),
+                active_flags: Vec::new(),
+                transcript: vec![TranscriptEntryView {
+                    item_id: Some("cmd-1".to_string()),
+                    kind: TranscriptEntryKind::Command,
+                    text: Some("npm test".to_string()),
+                    status: "running".to_string(),
+                    turn_id: Some("turn-A1".to_string()),
+                    tool: None,
+                }],
+            },
+            "untrusted",
+            "workspace-write",
+            "medium",
+            "device-a",
+        );
+    }
+
+    let relay = state.read().await;
+    let entry = relay
+        .snapshot()
+        .transcript
+        .into_iter()
+        .find(|entry| entry.item_id.as_deref() == Some("cmd-1"))
+        .expect("cmd-1 should be present after switch-back");
+    assert_eq!(
+        entry.text.as_deref(),
+        Some("npm test\nline 1"),
+        "buffered command output must replay onto the freshly-read item"
+    );
+}
+
+#[tokio::test]
+async fn handle_notification_buffers_late_turn_started_for_prior_thread() {
+    let (change_tx, _) = watch::channel(0_u64);
+    let state = std::sync::Arc::new(RwLock::new(RelayState::new(
+        "/tmp/project".to_string(),
+        change_tx,
+        SecurityProfile::private(),
+    )));
+
+    {
+        let mut relay = state.write().await;
+        relay.active_thread_id = Some("thread-A".to_string());
+    }
+
+    {
+        let mut relay = state.write().await;
+        relay.load_thread_data(
+            ThreadSyncData {
+                thread: test_thread_summary("thread-B"),
+                status: "idle".to_string(),
+                active_flags: Vec::new(),
+                transcript: Vec::new(),
+            },
+            "untrusted",
+            "workspace-write",
+            "medium",
+            "device-a",
+        );
+    }
+
+    handle_notification(
+        json!({
+            "method": "turn/started",
+            "params": {
+                "threadId": "thread-A",
+                "turn": { "id": "turn-A2" }
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    {
+        let relay = state.read().await;
+        assert_eq!(
+            relay.active_turn_id, None,
+            "thread B (active) must NOT inherit a turn id intended for thread A"
+        );
+    }
+
+    {
+        let mut relay = state.write().await;
+        relay.load_thread_data(
+            ThreadSyncData {
+                thread: test_thread_summary("thread-A"),
+                status: "thinking".to_string(),
+                active_flags: Vec::new(),
+                transcript: Vec::new(),
+            },
+            "untrusted",
+            "workspace-write",
+            "medium",
+            "device-a",
+        );
+    }
+
+    let relay = state.read().await;
+    assert_eq!(
+        relay.active_turn_id.as_deref(),
+        Some("turn-A2"),
+        "active_turn_id must be restored from the buffered turn/started on switch-back"
+    );
+}
+
+#[tokio::test]
+async fn handle_notification_buffers_full_turn_lifecycle_for_prior_thread() {
+    // Exercises turn/diff/updated + turn/completed routed via the background
+    // buffer. On switch-back, the synthetic turn-diff entry must exist AND
+    // be marked completed — neither would survive without buffering since
+    // the worker's `read_thread` has no concept of synthetic turn-diff
+    // items and ThreadSyncData carries no active_turn_id.
+    let (change_tx, _) = watch::channel(0_u64);
+    let state = std::sync::Arc::new(RwLock::new(RelayState::new(
+        "/tmp/project".to_string(),
+        change_tx,
+        SecurityProfile::private(),
+    )));
+
+    {
+        let mut relay = state.write().await;
+        relay.active_thread_id = Some("thread-A".to_string());
+    }
+
+    {
+        let mut relay = state.write().await;
+        relay.load_thread_data(
+            ThreadSyncData {
+                thread: test_thread_summary("thread-B"),
+                status: "idle".to_string(),
+                active_flags: Vec::new(),
+                transcript: Vec::new(),
+            },
+            "untrusted",
+            "workspace-write",
+            "medium",
+            "device-a",
+        );
+    }
+
+    handle_notification(
+        json!({
+            "method": "turn/diff/updated",
+            "params": {
+                "threadId": "thread-A",
+                "turnId": "turn-A1",
+                "diff": "diff --git a/src/x.rs b/src/x.rs\n@@ -1 +1 @@\n-a\n+b"
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    {
+        let relay = state.read().await;
+        let any_diff_entry = relay
+            .snapshot()
+            .transcript
+            .iter()
+            .any(|entry| entry.item_id.as_deref() == Some("turn-diff:turn-A1"));
+        assert!(
+            !any_diff_entry,
+            "turn diff for thread A must not appear in thread B's transcript"
+        );
+    }
+
+    handle_notification(
+        json!({
+            "method": "turn/completed",
+            "params": {
+                "threadId": "thread-A",
+                "turn": { "id": "turn-A1" }
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    {
+        let mut relay = state.write().await;
+        relay.load_thread_data(
+            ThreadSyncData {
+                thread: test_thread_summary("thread-A"),
+                status: "idle".to_string(),
+                active_flags: Vec::new(),
+                transcript: Vec::new(),
+            },
+            "untrusted",
+            "workspace-write",
+            "medium",
+            "device-a",
+        );
+    }
+
+    let relay = state.read().await;
+    let diff_entry = relay
+        .snapshot()
+        .transcript
+        .into_iter()
+        .find(|entry| entry.item_id.as_deref() == Some("turn-diff:turn-A1"))
+        .expect("turn-diff entry must be restored from background buffer on switch-back");
+    assert_eq!(
+        diff_entry.status, "completed",
+        "buffered turn/completed must flip the buffered turn-diff status"
+    );
+    assert_eq!(
+        relay.active_turn_id, None,
+        "active_turn_id must reflect the buffered turn/completed"
+    );
+}

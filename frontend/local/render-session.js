@@ -1106,11 +1106,7 @@ export function createSessionRenderer({
       return "Standby";
     }
 
-    if (!session.active_controller_device_id && (session.current_status || "idle") === "idle") {
-      return "Live";
-    }
-
-    return humanizeLabel(session.current_status || "ready");
+    return "Live";
   }
 
   function classifyAuditEntry(entry) {

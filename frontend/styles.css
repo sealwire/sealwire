@@ -201,6 +201,7 @@ html, body {
   margin: 0;
   min-height: 100%;
   width: 100%;
+  overflow-x: clip;
 }
 
 body {
@@ -1902,23 +1903,23 @@ input:focus, textarea:focus, select:focus {
   padding-right: 0;
 }
 
-.app-shell[data-view="conversation"] .sidebar-drawer {
+.app-shell .sidebar-drawer[open] {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   flex: 1 1 auto;
-  height: calc(100dvh - 40px);
   min-height: 0;
   overflow: hidden;
 }
 
-.app-shell[data-view="conversation"] .sidebar-drawer-body {
+.app-shell .sidebar-drawer[open] .sidebar-drawer-body {
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);
   min-height: 0;
+  height: 100%;
   overflow: hidden;
 }
 
-.app-shell[data-view="conversation"] .conversation-list {
+.app-shell .sidebar-drawer[open] .conversation-list {
   height: auto;
   max-height: none;
   min-height: 0;
@@ -2134,6 +2135,55 @@ input:focus, textarea:focus, select:focus {
   font-weight: 600;
   font-size: 12px;
   color: var(--text-secondary);
+}
+
+/* AGENT WORKING INDICATOR */
+.agent-working-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 4px 24px 0;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--text-secondary);
+  pointer-events: none;
+}
+
+.agent-working-indicator[hidden] {
+  display: none;
+}
+
+.agent-working-indicator-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent-primary, #4c8bf5);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent-primary, #4c8bf5) 60%, transparent);
+  animation: agent-working-indicator-pulse 1.4s ease-in-out infinite;
+}
+
+.agent-working-indicator-alert .agent-working-indicator-dot {
+  background: var(--status-alert, #e07a5f);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--status-alert, #e07a5f) 60%, transparent);
+}
+
+.agent-working-indicator-label {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+}
+
+@keyframes agent-working-indicator-pulse {
+  0%   { opacity: 0.55; transform: scale(0.85); }
+  50%  { opacity: 1;    transform: scale(1.05); }
+  100% { opacity: 0.55; transform: scale(0.85); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-working-indicator-dot { animation: none; }
 }
 
 /* COMPOSER */
