@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::{LogEntryView, ToolCallView, TranscriptEntryKind, TranscriptEntryView};
+use crate::protocol::{
+    FileChangeApplyState, LogEntryView, ToolCallView, TranscriptEntryKind, TranscriptEntryView,
+};
 
 use super::RelayState;
 
@@ -283,6 +285,19 @@ impl RelayState {
         )
     }
 
+    pub fn set_file_change_apply_state(
+        &mut self,
+        item_id: &str,
+        state: FileChangeApplyState,
+    ) -> bool {
+        if !self.transcript.iter().any(|entry| entry.item_id == item_id) {
+            return false;
+        }
+        self.apply_states.insert(item_id.to_string(), state);
+        self.bump_transcript_revision();
+        true
+    }
+
     pub fn set_transcript_item_status(&mut self, item_id: &str, status: &str) -> bool {
         let Some(index) = self
             .transcript
@@ -374,6 +389,7 @@ fn merge_tool_call_view(
                 } else {
                     incoming.file_changes
                 },
+                apply_state: incoming.apply_state.or(existing.apply_state),
             })
         }
     }

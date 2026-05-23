@@ -310,17 +310,40 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   min-width: 0;
 }
 
+:root {
+  --sidebar-width: 300px;
+  --right-rail-width: 320px;
+}
+
 .app-shell {
   min-height: 100dvh;
   width: 100%;
   min-width: 0;
   display: grid;
-  grid-template-columns: 300px minmax(0, 1fr);
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+}
+
+.app-shell-with-rail {
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(--right-rail-width);
 }
 
 .app-shell[data-view="conversation"] {
-  grid-template-columns: 300px minmax(0, 1fr);
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
 }
+
+.app-shell-with-rail[data-view="conversation"] {
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(--right-rail-width);
+}
+
+/* When the panel width is 0 the column collapses; clip horizontal overflow
+ * so padding/border don't leak into the chat column. (Box-sizing is already
+ * border-box globally; vertical scrolling is preserved.) */
+.sidebar,
+.right-rail {
+  min-width: 0;
+  overflow-x: hidden;
+}
+
 
 /* SIDEBAR */
 .sidebar {
@@ -2629,4 +2652,291 @@ input:focus, textarea:focus, select:focus {
   .suggestion-button { width: 100%; }
   .surface-list,
   .audit-list { overflow: visible; max-height: none; }
+}
+
+#workspace-diff-modal {
+  max-width: min(960px, 92vw);
+  width: min(960px, 92vw);
+}
+.modal-header-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.workspace-diff-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.workspace-diff-cwd {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 480px;
+}
+.workspace-diff-warning {
+  color: var(--text-warning, #b54708);
+}
+.workspace-diff-hint {
+  font-style: italic;
+}
+.workspace-diff-error {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+/* Panel toggle header buttons */
+.header-panel-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+  line-height: 0;
+  color: var(--text-secondary);
+}
+.header-panel-toggle:hover {
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+}
+.header-panel-toggle.is-active {
+  color: var(--text-primary);
+}
+.header-panel-toggle[aria-pressed="false"] {
+  opacity: 0.7;
+}
+@media (max-width: 960px) {
+  .header-panel-toggle-left,
+  .header-panel-toggle-right {
+    display: none;
+  }
+}
+
+/* Resize handles — left edge of right rail, right edge of left sidebar */
+.sidebar,
+.right-rail {
+  position: relative;
+}
+.sidebar-resize,
+.right-rail-resize {
+  position: absolute;
+  top: 0;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+  background: transparent;
+  z-index: 5;
+  transition: background-color 120ms ease;
+}
+.sidebar-resize { right: -3px; }
+.right-rail-resize { left: -3px; }
+.sidebar-resize:hover,
+.sidebar-resize:focus-visible,
+.right-rail-resize:hover,
+.right-rail-resize:focus-visible,
+body.is-resizing-panel .sidebar-resize,
+body.is-resizing-panel .right-rail-resize {
+  background: var(--accent, #6366f1);
+  outline: none;
+}
+body.is-resizing-panel {
+  cursor: col-resize;
+  user-select: none;
+}
+
+/* Right rail (workspace changes) */
+.right-rail {
+  border-left: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.workspace-changes-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+.workspace-changes-header {
+  position: sticky;
+  top: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-base);
+  z-index: 2;
+  /* Match the natural height of `.chat-header` (with h1 + subtitle present)
+   * so the rail's "ENVIRONMENT" label lines up with the chat heading and
+   * the first entry below it ("Changes") lands at the same y as the
+   * post-header strip in the middle column. */
+  min-height: 67px;
+  box-sizing: border-box;
+}
+.workspace-changes-title {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-3, var(--text-secondary));
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.workspace-changes-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+}
+.workspace-changes-entry {
+  display: flex;
+  flex-direction: column;
+  border-radius: 8px;
+}
+.workspace-changes-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: transparent;
+  border: none;
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  color: inherit;
+  text-align: left;
+  box-shadow: none;
+}
+.workspace-changes-row:hover {
+  background: var(--bg-elevated);
+}
+.workspace-changes-row:focus-visible {
+  outline: 2px solid var(--accent, #6366f1);
+  outline-offset: -1px;
+}
+.workspace-changes-row-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.workspace-changes-row-icon {
+  width: 16px;
+  text-align: center;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+.workspace-changes-row-label {
+  font-size: 14px;
+  font-weight: 500;
+}
+.workspace-changes-row-stats {
+  display: inline-flex;
+  gap: 6px;
+  margin-left: 4px;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  font-size: 12px;
+}
+.workspace-changes-add { color: var(--diff-add-fg, #22c55e); }
+.workspace-changes-del { color: var(--diff-del-fg, #ef4444); }
+.workspace-changes-row-pending,
+.workspace-changes-row-empty {
+  font-size: 12px;
+  color: var(--text-tertiary, var(--text-secondary));
+}
+.workspace-changes-row-chevron {
+  color: var(--text-secondary);
+}
+.workspace-changes-refresh {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-radius: 4px;
+  box-shadow: none;
+  opacity: 0;
+  transition: opacity 120ms ease, color 120ms ease, background-color 120ms ease;
+}
+.workspace-changes-entry:hover .workspace-changes-refresh,
+.workspace-changes-refresh:focus-visible,
+.workspace-changes-refresh.is-loading {
+  opacity: 1;
+}
+.workspace-changes-refresh:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+}
+.workspace-changes-refresh:disabled {
+  cursor: default;
+}
+.workspace-changes-refresh.is-loading svg {
+  animation: workspace-diff-spin 900ms linear infinite;
+}
+@keyframes workspace-diff-spin {
+  to { transform: rotate(360deg); }
+}
+.workspace-changes-body {
+  padding: 4px 4px 12px;
+  border-top: 1px solid var(--border-subtle);
+  margin-top: 4px;
+}
+.workspace-changes-body .file-diff-panel {
+  font-size: 12px;
+}
+.workspace-changes-body .diff-file-section { font-size: 12px; }
+.workspace-changes-error-inline {
+  margin: 0 10px 8px;
+  font-size: 12px;
+  color: var(--text-warning, #b54708);
+}
+
+/* Mobile composer chip */
+.workspace-diff-chip-host {
+  padding: 0 16px;
+}
+.workspace-diff-chip {
+  display: none;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  margin: 6px 0 4px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  box-shadow: none;
+}
+.workspace-diff-chip:hover { background: var(--bg-surface-2, var(--bg-elevated)); }
+.workspace-diff-chip-label { flex: 1; text-align: left; min-width: 0; }
+.workspace-diff-chip-add { color: var(--diff-add-fg, #22c55e); font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace); }
+.workspace-diff-chip-del { color: var(--diff-del-fg, #ef4444); font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace); }
+
+/* Responsive: hide right rail and show chip on mobile */
+@media (max-width: 960px) {
+  .app-shell-with-rail {
+    grid-template-columns: 1fr;
+  }
+  .app-shell-with-rail[data-view="conversation"] {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .right-rail { display: none; }
+  .sidebar-resize,
+  .right-rail-resize { display: none; }
+  .workspace-diff-chip { display: inline-flex; }
 }

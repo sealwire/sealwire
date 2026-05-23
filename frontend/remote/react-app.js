@@ -89,6 +89,14 @@ import {
 } from "./transcript-scroll.js";
 import { useRemoteSessionRuntime } from "./use-remote-session-runtime.js";
 import {
+  RemoteWorkspaceChangesRail,
+  RemoteWorkspaceDiffChip,
+  RemoteWorkspaceDiffModal,
+  notifyRemoteSessionUpdated,
+  triggerRemoteWorkspaceDiffRefresh,
+} from "./workspace-diff-host.js";
+import { createPanelControl } from "../local/panel-controls.js";
+import {
   Composer,
   ControlBanner,
   DeviceMetaPanel,
@@ -557,6 +565,10 @@ function RemoteApp() {
   });
 
   useEffect(() => {
+    notifyRemoteSessionUpdated(session);
+  }, [session]);
+
+  useEffect(() => {
     void bootRemoteRuntime();
     const cleanupSidebarDebug = installSidebarGestureDebug();
     const cleanupThreadsWheel = installThreadListWheelProxy({
@@ -567,10 +579,62 @@ function RemoteApp() {
       root: document.querySelector(".remote-relay-shell"),
       scrollElement: document.querySelector("#remote-relays-list"),
     });
+
+    const leftPanelControl = createPanelControl({
+      cssVarName: "--sidebar-width",
+      widthStorageKey: "agent-relay:remote-sidebar-width",
+      openWidthStorageKey: "agent-relay:remote-sidebar-open-width",
+      minOpenWidth: 220,
+      maxOpenWidth: 520,
+      defaultOpenWidth: 300,
+      side: "left",
+    });
+    const rightPanelControl = createPanelControl({
+      cssVarName: "--right-rail-width",
+      widthStorageKey: "agent-relay:remote-rail-width",
+      openWidthStorageKey: "agent-relay:remote-rail-open-width",
+      minOpenWidth: 260,
+      maxOpenWidth: 560,
+      defaultOpenWidth: 320,
+      side: "right",
+    });
+    const leftResize = leftPanelControl.attachResizeHandle(
+      document.getElementById("remote-sidebar-resize")
+    );
+    const leftToggle = leftPanelControl.attachToggleButton(
+      document.getElementById("remote-toggle-left-panel")
+    );
+    const rightResize = rightPanelControl.attachResizeHandle(
+      document.getElementById("remote-right-rail-resize")
+    );
+    const rightToggle = rightPanelControl.attachToggleButton(
+      document.getElementById("remote-toggle-right-panel")
+    );
+
+    function onKeyDown(event) {
+      const isKeyB = event.key === "b" || event.key === "B" || event.code === "KeyB";
+      if (!isKeyB) return;
+      const metaLike = event.metaKey || event.ctrlKey;
+      if (!metaLike || event.shiftKey) return;
+      if (event.altKey) {
+        event.preventDefault();
+        rightPanelControl.toggle();
+      } else {
+        event.preventDefault();
+        leftPanelControl.toggle();
+      }
+    }
+    document.addEventListener("keydown", onKeyDown);
+
     return () => {
       cleanupSidebarDebug?.();
       cleanupThreadsWheel?.();
       cleanupRelaysWheel?.();
+      leftResize?.destroy?.();
+      leftToggle?.destroy?.();
+      rightResize?.destroy?.();
+      rightToggle?.destroy?.();
+      document.removeEventListener("keydown", onKeyDown);
     };
   }, []);
 
@@ -741,7 +805,7 @@ function RemoteApp() {
     h(
       "div",
       {
-        className: "app-shell remote-app-shell",
+        className: "app-shell app-shell-with-rail remote-app-shell",
         "data-remote-nav-mode": currentState.remoteNavMode,
         "data-remote-nav-state": currentState.remoteNavOpen ? "open" : "closed",
         "data-view": "conversation",
@@ -893,8 +957,10 @@ function RemoteApp() {
         h(RemoteClientLogDrawer, {
           lines: currentState.clientLogs,
         })
-      )
+      ),
+      h(RemoteWorkspaceChangesRail, null)
     ),
+    h(RemoteWorkspaceDiffModal),
     h(PairingModal, {
       deviceChromeModel,
       deviceLabel: remoteUi.deviceLabelDraft,
@@ -1099,7 +1165,33 @@ function RemoteSidebar({
           ),
           h(ThemePickerRow)
         )
-      : null
+      : null,
+    h("div", {
+      className: "sidebar-resize",
+      id: "remote-sidebar-resize",
+      role: "separator",
+      "aria-orientation": "vertical",
+      "aria-label": "Resize navigation panel",
+      tabIndex: 0,
+    })
+  );
+}
+
+function RemoteToggleLeftPanelIcon() {
+  return h(
+    "svg",
+    { "aria-hidden": "true", fill: "none", height: "16", viewBox: "0 0 16 16", width: "16", stroke: "currentColor", strokeWidth: "1.4" },
+    h("rect", { x: "1.5", y: "2.5", width: "13", height: "11", rx: "2" }),
+    h("line", { x1: "6", y1: "2.5", x2: "6", y2: "13.5" })
+  );
+}
+
+function RemoteToggleRightPanelIcon() {
+  return h(
+    "svg",
+    { "aria-hidden": "true", fill: "none", height: "16", viewBox: "0 0 16 16", width: "16", stroke: "currentColor", strokeWidth: "1.4" },
+    h("rect", { x: "1.5", y: "2.5", width: "13", height: "11", rx: "2" }),
+    h("line", { x1: "10", y1: "2.5", x2: "10", y2: "13.5" })
   );
 }
 
@@ -1180,6 +1272,17 @@ function RemoteHeader({
         h("span", { className: "sr-only" }, "Toggle sidebar")
       ),
       h(
+        "button",
+        {
+          "aria-label": "Toggle navigation panel",
+          className: "header-button header-panel-toggle header-panel-toggle-left",
+          id: "remote-toggle-left-panel",
+          title: "Toggle navigation panel (⌘B)",
+          type: "button",
+        },
+        h(RemoteToggleLeftPanelIcon)
+      ),
+      h(
         "div",
         { className: "chat-heading", id: "remote-chat-heading" },
         h(WorkspaceHeading, {
@@ -1201,6 +1304,17 @@ function RemoteHeader({
           type: "button",
         },
         "All relays"
+      ),
+      h(
+        "button",
+        {
+          "aria-label": "Toggle side panel",
+          className: "header-button header-panel-toggle header-panel-toggle-right",
+          id: "remote-toggle-right-panel",
+          title: "Toggle side panel (⌥⌘B)",
+          type: "button",
+        },
+        h(RemoteToggleRightPanelIcon)
       ),
       h(
         "div",
@@ -1303,6 +1417,17 @@ function RemoteThreadPanel({
       })
     ),
     h(AgentWorkingIndicator, { model: agentWorkingIndicatorModel }),
+    h(
+      "div",
+      { className: "workspace-diff-chip-host" },
+      h(RemoteWorkspaceDiffChip, {
+        onTap: () => {
+          triggerRemoteWorkspaceDiffRefresh();
+          const dialog = document.getElementById("remote-workspace-diff-modal");
+          dialog?.showModal?.();
+        },
+      })
+    ),
     h(
       "form",
       {

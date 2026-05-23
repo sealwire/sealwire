@@ -1476,6 +1476,7 @@ fn build_tool_call_view(item: &Value, item_type: &str) -> ToolCallView {
             .or_else(|| preview_json_field(item, "output")),
         diff,
         file_changes,
+        apply_state: None,
     }
 }
 
@@ -1536,6 +1537,7 @@ fn build_tool_call_detail_view(item: &Value, item_type: &str) -> ToolCallView {
         result_preview: full_json_field(item, "result").or_else(|| full_json_field(item, "output")),
         diff,
         file_changes,
+        apply_state: None,
     }
 }
 
@@ -1617,6 +1619,7 @@ pub(crate) fn build_turn_diff_entry_with_fallback(
             result_preview: None,
             diff,
             file_changes,
+            apply_state: None,
         }),
     }
 }
@@ -1948,7 +1951,7 @@ fn joined_file_change_diff(file_changes: &[FileChangeDiffView]) -> Option<String
     }
 }
 
-fn split_unified_diff_by_file(diff: &str) -> Vec<FileChangeDiffView> {
+pub(crate) fn split_unified_diff_by_file(diff: &str) -> Vec<FileChangeDiffView> {
     let mut changes = Vec::new();
     let mut current = Vec::new();
     let mut current_path: Option<String> = None;

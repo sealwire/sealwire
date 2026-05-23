@@ -144,6 +144,7 @@ fn plain_remote_action_result_payload_splits_control_results_from_session_result
         thread_entries: None,
         thread_entry_detail: None,
         thread_transcript: None,
+        workspace_diff: None,
         session_claim: None,
         session_claim_expires_at: None,
         claim_challenge_id: None,
@@ -173,6 +174,7 @@ fn plain_remote_action_result_payload_splits_control_results_from_session_result
         thread_entries: None,
         thread_entry_detail: None,
         thread_transcript: None,
+        workspace_diff: None,
         session_claim: Some("claim-1".to_string()),
         session_claim_expires_at: Some(123),
         claim_challenge_id: None,
@@ -270,6 +272,7 @@ fn remote_action_result_size_breakdown_reports_large_thread_transcript_payloads(
         None,
         None,
         None,
+        None,
     );
 
     assert!(breakdown.thread_transcript_bytes > breakdown.thread_entries_bytes);
@@ -307,6 +310,7 @@ fn make_large_thread_transcript_plaintext() -> RemoteActionResultPlaintext {
             next_cursor: None,
             prev_cursor: Some(1),
         }),
+        workspace_diff: None,
         session_claim: None,
         session_claim_expires_at: None,
         claim_challenge_id: None,

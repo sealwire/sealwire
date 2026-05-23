@@ -41,7 +41,7 @@ use protocol::{
     SendMessageInput, SessionSnapshot, SessionSnapshotCompactProfile, StartSessionInput,
     StopTurnInput, TakeOverInput, ThreadArchiveReceipt, ThreadDeleteReceipt,
     ThreadEntryDetailResponse, ThreadTranscriptResponse, ThreadsQuery, ThreadsResponse,
-    UpdateSessionSettingsInput,
+    UpdateSessionSettingsInput, WorkspaceDiffResponse,
 };
 use relay_http::{
     apply_standard_security_headers, header_origin, parse_optional_string_env, request_origin,
@@ -164,6 +164,7 @@ fn build_router(context: AppContext, web_assets: WebAssets) -> Router {
                 .delete(auth_session_logout),
         )
         .route("/api/session", get(session_snapshot))
+        .route("/api/workspace/diff", get(workspace_diff))
         .route("/api/stream", get(session_stream))
         .route("/api/threads", get(list_threads))
         .route("/api/threads/:thread_id/transcript", get(thread_transcript))
@@ -374,6 +375,26 @@ async fn session_snapshot(
     Ok(Json(ApiEnvelope::ok(compact_local_snapshot(
         context.app.snapshot().await,
     ))))
+}
+
+async fn workspace_diff(
+    State(context): State<AppContext>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<ApiEnvelope<WorkspaceDiffResponse>>, (StatusCode, Json<ApiError>)> {
+    authorize_api(&context, &headers, &uri)?;
+    context
+        .app
+        .workspace_diff()
+        .await
+        .map(|response| Json(ApiEnvelope::ok(response)))
+        .map_err(|error| {
+            if is_path_policy_error(&error) {
+                bad_request(error)
+            } else {
+                bad_gateway(error)
+            }
+        })
 }
 
 async fn session_stream(

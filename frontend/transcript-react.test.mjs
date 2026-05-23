@@ -252,7 +252,7 @@ test("renderEntryMarkup derives file chips from detail JSON changes when file pr
   assert.doesNotMatch(markup, /Codex wants to edit 1 file\./);
 });
 
-test("renderEntryMarkup expands file change diffs with rollback controls", () => {
+test("renderEntryMarkup never attaches undo controls to individual file change entries", () => {
   const markup = renderEntryMarkup({
     item_id: "fc-2",
     kind: "tool_call",
@@ -271,16 +271,93 @@ test("renderEntryMarkup expands file change diffs with rollback controls", () =>
   }, {
     enableFileChangeActions: true,
     expandedKeys: new Set(["entry:fc-2"]),
+    lastTurnDiffItemId: "fc-2",
   });
 
   assert.match(markup, /diff-file-section-chevron/);
-  assert.match(markup, /data-file-change-action="rollback"/);
-  assert.match(markup, /data-file-change-action="reapply"/);
+  assert.doesNotMatch(markup, /data-file-change-action/);
   assert.match(markup, /diff-line-delete/);
   assert.match(markup, /diff-line-add/);
   assert.match(markup, /diff-line-number">1</);
   assert.doesNotMatch(markup, /@@ -1 \+1 @@/);
   assert.match(markup, /frontend\/app\.js/);
+});
+
+test("renderEntryMarkup shows a single Undo button on the last turn-diff entry by default", () => {
+  const markup = renderEntryMarkup({
+    item_id: "turn-diff:42",
+    kind: "tool_call",
+    status: "completed",
+    tool: {
+      name: "File summary",
+      title: "Codex changed frontend/app.js in this turn.",
+      item_type: "turnDiff",
+      file_changes: [{
+        path: "frontend/app.js",
+        change_type: "update",
+        diff: "diff --git a/frontend/app.js b/frontend/app.js\n@@ -1 +1 @@\n-old\n+new",
+      }],
+    },
+  }, {
+    enableFileChangeActions: true,
+    expandedKeys: new Set(),
+    lastTurnDiffItemId: "turn-diff:42",
+  });
+
+  assert.match(markup, /data-file-change-action="rollback"/);
+  assert.match(markup, />Undo</);
+  assert.doesNotMatch(markup, /data-file-change-action="reapply"/);
+});
+
+test("renderEntryMarkup shows Reapply on a rolled-back turn-diff entry", () => {
+  const markup = renderEntryMarkup({
+    item_id: "turn-diff:43",
+    kind: "tool_call",
+    status: "completed",
+    tool: {
+      name: "File summary",
+      title: "Codex changed frontend/app.js in this turn.",
+      item_type: "turnDiff",
+      apply_state: "rolled_back",
+      file_changes: [{
+        path: "frontend/app.js",
+        change_type: "update",
+        diff: "diff --git a/frontend/app.js b/frontend/app.js\n@@ -1 +1 @@\n-old\n+new",
+      }],
+    },
+  }, {
+    enableFileChangeActions: true,
+    expandedKeys: new Set(),
+    lastTurnDiffItemId: "turn-diff:43",
+  });
+
+  assert.match(markup, /data-file-change-action="reapply"/);
+  assert.match(markup, />Reapply</);
+  assert.doesNotMatch(markup, /data-file-change-action="rollback"/);
+});
+
+test("renderEntryMarkup omits undo controls on non-last turn-diff entries", () => {
+  const markup = renderEntryMarkup({
+    item_id: "turn-diff:older",
+    kind: "tool_call",
+    status: "completed",
+    tool: {
+      name: "File summary",
+      title: "Codex changed frontend/app.js in this turn.",
+      item_type: "turnDiff",
+      file_changes: [{
+        path: "frontend/app.js",
+        change_type: "update",
+        diff: "diff --git a/frontend/app.js b/frontend/app.js\n@@ -1 +1 @@\n-old\n+new",
+      }],
+    },
+  }, {
+    enableFileChangeActions: true,
+    expandedKeys: new Set(),
+    lastTurnDiffItemId: "turn-diff:newer",
+  });
+
+  assert.doesNotMatch(markup, /data-file-change-action/);
 });
 
 test("renderEntryMarkup expands turn diff entries into per-file sections", () => {

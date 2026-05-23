@@ -166,6 +166,9 @@ export function createSessionRenderer({
 }) {
   function renderSession(session) {
     state.session = session;
+    if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
+      window.dispatchEvent(new CustomEvent("agent-relay:session-updated"));
+    }
 
     const approval = session.pending_approvals[0] || null;
     const pendingPairings = filterActivePairings(session.pending_pairing_requests || []);

@@ -74,6 +74,17 @@ import {
   transcript,
   workspaceTitle,
   workspaceSubtitle,
+  workspaceDiffModal,
+  closeWorkspaceDiffModalButton,
+  workspaceDiffRefreshButton,
+  workspaceDiffMount,
+  workspaceChangesMount,
+  workspaceDiffChipMount,
+  sidebarElement,
+  sidebarResizeHandle,
+  rightRailResizeHandle,
+  toggleLeftPanelButton,
+  toggleRightPanelButton,
 } from "./local/dom.js";
 import React from "react";
 import { flushSync } from "react-dom";
@@ -84,6 +95,13 @@ import {
   deleteAuthSession,
   fetchAuthSession,
 } from "./local/api.js";
+import {
+  createWorkspaceDiffStore,
+  createWorkspaceDiffSheet,
+  mountChangesPanel,
+  mountChip,
+} from "./local/workspace-diff.js";
+import { createPanelControl } from "./local/panel-controls.js";
 import {
   createVerbCycler,
   isProgressStalled,
@@ -195,6 +213,91 @@ const apiFetch = createApiFetch({
     handleUnauthorized(message);
   },
 });
+
+const workspaceDiffStore = createWorkspaceDiffStore({ apiFetch });
+const workspaceDiffSheet = createWorkspaceDiffSheet({
+  store: workspaceDiffStore,
+  mount: workspaceDiffMount,
+  modal: workspaceDiffModal,
+  closeButton: closeWorkspaceDiffModalButton,
+  refreshButton: workspaceDiffRefreshButton,
+});
+mountChangesPanel({ store: workspaceDiffStore, mount: workspaceChangesMount });
+mountChip({
+  store: workspaceDiffStore,
+  mount: workspaceDiffChipMount,
+  onTap: () => workspaceDiffSheet?.open(),
+});
+void workspaceDiffStore.refresh();
+
+const leftPanelControl = createPanelControl({
+  cssVarName: "--sidebar-width",
+  widthStorageKey: "agent-relay:local-sidebar-width",
+  openWidthStorageKey: "agent-relay:local-sidebar-open-width",
+  minOpenWidth: 220,
+  maxOpenWidth: 520,
+  defaultOpenWidth: 300,
+  side: "left",
+});
+leftPanelControl.attachResizeHandle(sidebarResizeHandle);
+leftPanelControl.attachToggleButton(toggleLeftPanelButton);
+
+const rightPanelControl = createPanelControl({
+  cssVarName: "--right-rail-width",
+  widthStorageKey: "agent-relay:local-rail-width",
+  openWidthStorageKey: "agent-relay:local-rail-open-width",
+  minOpenWidth: 260,
+  maxOpenWidth: 560,
+  defaultOpenWidth: 320,
+  side: "right",
+});
+rightPanelControl.attachResizeHandle(rightRailResizeHandle);
+rightPanelControl.attachToggleButton(toggleRightPanelButton);
+document.addEventListener("keydown", (event) => {
+  const isKeyB = event.key === "b" || event.key === "B" || event.code === "KeyB";
+  if (!isKeyB) return;
+  const metaLike = event.metaKey || event.ctrlKey;
+  if (!metaLike || event.shiftKey) return;
+  if (event.altKey) {
+    event.preventDefault();
+    rightPanelControl.toggle();
+  } else {
+    event.preventDefault();
+    leftPanelControl.toggle();
+  }
+});
+
+let lastTurnDiffItemId = null;
+let lastWorkspaceCwd = null;
+window.addEventListener("agent-relay:session-updated", () => {
+  refreshWorkspaceDiffIfChanged();
+});
+function refreshWorkspaceDiffIfChanged() {
+  const session = state.session;
+  if (!session) return;
+  const cwd = session.current_cwd || "";
+  if (lastWorkspaceCwd !== null && cwd !== lastWorkspaceCwd) {
+    lastWorkspaceCwd = cwd;
+    lastTurnDiffItemId = null;
+    void workspaceDiffStore.refresh();
+    return;
+  }
+  lastWorkspaceCwd = cwd;
+  const entries = session.transcript || [];
+  let latest = null;
+  for (let i = entries.length - 1; i >= 0; i -= 1) {
+    if (entries[i]?.tool?.item_type === "turnDiff") {
+      latest = entries[i].item_id || null;
+      break;
+    }
+  }
+  if (latest && latest !== lastTurnDiffItemId) {
+    lastTurnDiffItemId = latest;
+    void workspaceDiffStore.refresh();
+  } else if (!latest) {
+    lastTurnDiffItemId = null;
+  }
+}
 
 configureSecurityRenderers({
   escapeHtml,

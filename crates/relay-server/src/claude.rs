@@ -399,6 +399,7 @@ impl ProviderBridge for ClaudeCodeBridge {
                     .collect::<Vec<TranscriptEntryView>>()
             })
             .unwrap_or_default();
+        let transcript = inject_turn_diff_entries(transcript);
         Ok(ThreadSyncData {
             thread,
             status: "idle".to_string(),
@@ -752,6 +753,7 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                         result_preview: None,
                         diff: None,
                         file_changes: Vec::new(),
+                        apply_state: None,
                     });
                 relay.upsert_transcript_item(
                     item_id,
@@ -786,6 +788,7 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                         result_preview: None,
                         diff: None,
                         file_changes: Vec::new(),
+                        apply_state: None,
                     });
                 if tool.result_preview.is_none() {
                     tool.result_preview = string_at(&payload, &["content"]);
@@ -878,6 +881,68 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
 
         _ => {}
     }
+}
+
+/// Walk a hydrated Claude transcript and insert a synthetic
+/// `turn-diff:<turn_id>` entry at the end of every turn that contains at
+/// least one `fileChange` tool item. Mirrors what codex `parse_transcript`
+/// does at hydration time so reopening an old thread shows the same
+/// per-turn diff summary that lived on the wire.
+fn inject_turn_diff_entries(transcript: Vec<TranscriptEntryView>) -> Vec<TranscriptEntryView> {
+    let mut out: Vec<TranscriptEntryView> = Vec::with_capacity(transcript.len() + 4);
+    let mut current_turn: Option<String> = None;
+    let mut current_changes: Vec<crate::protocol::FileChangeDiffView> = Vec::new();
+
+    fn flush(
+        out: &mut Vec<TranscriptEntryView>,
+        turn_id: Option<String>,
+        mut changes: Vec<crate::protocol::FileChangeDiffView>,
+    ) {
+        let Some(turn_id) = turn_id else { return };
+        if changes.is_empty() {
+            return;
+        }
+        let mut merged: Vec<crate::protocol::FileChangeDiffView> = Vec::new();
+        for change in changes.drain(..) {
+            crate::file_changes::merge_file_change_view(&mut merged, change);
+        }
+        let entry = crate::codex::build_turn_diff_entry_with_fallback(
+            turn_id,
+            None,
+            "completed",
+            merged,
+            "Claude",
+        );
+        out.push(entry);
+    }
+
+    for entry in transcript {
+        if current_turn.as_deref() != entry.turn_id.as_deref() {
+            flush(
+                &mut out,
+                current_turn.take(),
+                std::mem::take(&mut current_changes),
+            );
+            current_turn = entry.turn_id.clone();
+        }
+        if let Some(tool) = entry.tool.as_ref() {
+            if tool.item_type == "fileChange" {
+                current_changes.extend(tool.file_changes.iter().cloned());
+                if current_changes.is_empty() {
+                    if let Some(path) = tool.path.clone() {
+                        current_changes.push(crate::protocol::FileChangeDiffView {
+                            path,
+                            change_type: "update".to_string(),
+                            diff: String::new(),
+                        });
+                    }
+                }
+            }
+        }
+        out.push(entry);
+    }
+    flush(&mut out, current_turn, current_changes);
+    out
 }
 
 /// Build (or refresh) the synthetic `turn-diff:<turn_id>` transcript entry

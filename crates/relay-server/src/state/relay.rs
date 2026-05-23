@@ -9,8 +9,9 @@ use tokio::sync::watch;
 
 use crate::{
     protocol::{
-        ApprovalReceipt, LogEntryView, ModelOptionView, SessionSnapshot, ThreadEntriesResponse,
-        ThreadEntryDetailResponse, ThreadSummaryView, ThreadTranscriptResponse, ThreadsResponse,
+        ApprovalReceipt, FileChangeApplyState, LogEntryView, ModelOptionView, SessionSnapshot,
+        ThreadEntriesResponse, ThreadEntryDetailResponse, ThreadSummaryView,
+        ThreadTranscriptResponse, ThreadsResponse,
     },
     provider::ThreadSyncData,
 };
@@ -44,6 +45,7 @@ pub(crate) struct CachedRemoteActionResult {
     pub(crate) thread_entries: Option<ThreadEntriesResponse>,
     pub(crate) thread_entry_detail: Option<ThreadEntryDetailResponse>,
     pub(crate) thread_transcript: Option<ThreadTranscriptResponse>,
+    pub(crate) workspace_diff: Option<crate::protocol::WorkspaceDiffResponse>,
     pub(crate) session_claim: Option<String>,
     pub(crate) session_claim_expires_at: Option<u64>,
     pub(crate) claim_challenge_id: Option<String>,
@@ -114,6 +116,10 @@ pub struct RelayState {
     pub(super) transcript: Vec<TranscriptRecord>,
     pub(super) background_streams: HashMap<String, BackgroundThreadStream>,
     pub(super) logs: Vec<LogEntryView>,
+    /// In-memory file-change apply state keyed by transcript `item_id`
+    /// (typically `turn-diff:<turn_id>`). Never persisted: lost on relay
+    /// restart, which resets entries to the default "applied" state.
+    pub(super) apply_states: HashMap<String, FileChangeApplyState>,
     recent_remote_actions: HashMap<String, CachedRemoteActionState>,
 }
 
@@ -165,6 +171,7 @@ impl RelayState {
             transcript: Vec::new(),
             background_streams: HashMap::new(),
             logs: Vec::new(),
+            apply_states: HashMap::new(),
             recent_remote_actions: HashMap::new(),
         };
         state.push_log("info", "Relay booted. Waiting for Codex app-server.");
@@ -278,7 +285,16 @@ impl RelayState {
             transcript: self
                 .transcript
                 .iter()
-                .map(TranscriptRecord::to_view)
+                .map(|record| {
+                    let mut view = record.to_view();
+                    if let (Some(item_id), Some(tool)) = (view.item_id.as_ref(), view.tool.as_mut())
+                    {
+                        if let Some(state) = self.apply_states.get(item_id) {
+                            tool.apply_state = Some(*state);
+                        }
+                    }
+                    view
+                })
                 .collect(),
             logs: self.logs.clone(),
         }
@@ -310,6 +326,7 @@ impl RelayState {
         self.reasoning_effort = effort.to_string();
         self.pending_approvals.clear();
         self.transcript.clear();
+        self.apply_states.clear();
         self.bump_transcript_revision();
         self.upsert_thread(thread);
     }
@@ -372,6 +389,7 @@ impl RelayState {
         self.sandbox = sandbox.to_string();
         self.reasoning_effort = effort.to_string();
         self.pending_approvals.clear();
+        self.apply_states.clear();
         self.transcript = data
             .transcript
             .into_iter()
@@ -420,6 +438,7 @@ impl RelayState {
         self.pending_approvals.clear();
         self.recent_remote_actions.clear();
         self.locally_deleted_thread_ids.clear();
+        self.apply_states.clear();
         self.transcript = data
             .transcript
             .into_iter()

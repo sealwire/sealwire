@@ -275,6 +275,7 @@ enum OutboundBrokerPayload {
         thread_entries: Option<ThreadEntriesResponse>,
         thread_entry_detail: Option<ThreadEntryDetailResponse>,
         thread_transcript: Option<ThreadTranscriptResponse>,
+        workspace_diff: Option<crate::protocol::WorkspaceDiffResponse>,
         error: Option<String>,
     },
     RemoteActionResultChunk {

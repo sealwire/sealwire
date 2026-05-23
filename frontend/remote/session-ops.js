@@ -708,6 +708,11 @@ export async function applyFileChange(itemId, direction) {
   }
 }
 
+export async function fetchRemoteWorkspaceDiff() {
+  const result = await dispatchOrRecover("fetch_workspace_diff", {});
+  return result.workspace_diff;
+}
+
 export function clearSessionRuntime() {
   clearTranscriptHydration(state);
 }

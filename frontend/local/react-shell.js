@@ -23,7 +23,15 @@ function Sidebar({ launchModel = null, onLaunchFieldChange = null, onLaunchStart
     h(AuthForm),
     h(LaunchPanel, { launchModel, onLaunchFieldChange, onLaunchStart }),
     h(ThreadDrawer),
-    h(ThreadContextMenu)
+    h(ThreadContextMenu),
+    h("div", {
+      className: "sidebar-resize",
+      id: "sidebar-resize",
+      role: "separator",
+      "aria-orientation": "vertical",
+      "aria-label": "Resize navigation panel",
+      tabIndex: 0,
+    })
   );
 }
 
@@ -159,15 +167,48 @@ function HeaderOverflowIcon() {
   );
 }
 
+function ToggleLeftPanelIcon() {
+  return h(
+    "svg",
+    { "aria-hidden": "true", fill: "none", height: "16", viewBox: "0 0 16 16", width: "16", stroke: "currentColor", strokeWidth: "1.4" },
+    h("rect", { x: "1.5", y: "2.5", width: "13", height: "11", rx: "2" }),
+    h("line", { x1: "6", y1: "2.5", x2: "6", y2: "13.5" })
+  );
+}
+
+function ToggleRightPanelIcon() {
+  return h(
+    "svg",
+    { "aria-hidden": "true", fill: "none", height: "16", viewBox: "0 0 16 16", width: "16", stroke: "currentColor", strokeWidth: "1.4" },
+    h("rect", { x: "1.5", y: "2.5", width: "13", height: "11", rx: "2" }),
+    h("line", { x1: "10", y1: "2.5", x2: "10", y2: "13.5" })
+  );
+}
+
 function ChatHeader() {
   return h(
     "header",
     { className: "chat-header" },
     h(
       "div",
-      { className: "chat-heading" },
-      h("h1", { id: "workspace-title" }, "Relay console"),
-      h("p", { className: "chat-subtitle", id: "workspace-subtitle" })
+      { className: "chat-header-leading" },
+      h(
+        "button",
+        {
+          "aria-label": "Toggle navigation panel",
+          className: "header-button header-panel-toggle header-panel-toggle-left",
+          id: "toggle-left-panel",
+          type: "button",
+          title: "Toggle navigation panel (⌘B)",
+        },
+        h(ToggleLeftPanelIcon)
+      ),
+      h(
+        "div",
+        { className: "chat-heading" },
+        h("h1", { id: "workspace-title" }, "Relay console"),
+        h("p", { className: "chat-subtitle", id: "workspace-subtitle" })
+      )
     ),
     h(
       "div",
@@ -187,6 +228,17 @@ function ChatHeader() {
         "button",
         { className: "header-button", id: "open-security-header", type: "button" },
         "Devices"
+      ),
+      h(
+        "button",
+        {
+          "aria-label": "Toggle side panel",
+          className: "header-button header-panel-toggle header-panel-toggle-right",
+          id: "toggle-right-panel",
+          type: "button",
+          title: "Toggle side panel (⌥⌘B)",
+        },
+        h(ToggleRightPanelIcon)
       ),
       h(
         "div",
@@ -324,9 +376,13 @@ function ThreadPanel() {
 
 function ComposerShell() {
   return h(
-    "form",
-    { className: "composer-shell", hidden: true, id: "message-form" },
-    h(ConversationComposer, {
+    React.Fragment,
+    null,
+    h("div", { className: "workspace-diff-chip-host", id: "workspace-diff-chip-mount" }),
+    h(
+      "form",
+      { className: "composer-shell", hidden: true, id: "message-form" },
+      h(ConversationComposer, {
       actionsBeforeSend: h("span", { id: "composer-settings-mount" }),
       messageId: "message-input",
       messagePlaceholder: "Start or resume a session first.",
@@ -335,6 +391,27 @@ function ComposerShell() {
       sendButtonId: "send-button",
       stopButtonId: "stop-button",
     })
+  )
+  );
+}
+
+function WorkspaceChangesRail() {
+  return h(
+    "aside",
+    {
+      className: "right-rail",
+      id: "workspace-changes-rail",
+      "aria-label": "Workspace overview",
+    },
+    h("div", {
+      className: "right-rail-resize",
+      id: "right-rail-resize",
+      role: "separator",
+      "aria-orientation": "vertical",
+      "aria-label": "Resize workspace panel",
+      tabIndex: 0,
+    }),
+    h("div", { id: "workspace-changes-mount" })
   );
 }
 
@@ -413,6 +490,45 @@ function SessionDetailsModal() {
         h("h3", { className: "details-heading" }, "Build"),
         h("p", { className: "build-info-inline", id: "build-info-local" }, "Loading...")
       )
+    )
+  );
+}
+
+function WorkspaceDiffModal() {
+  return h(
+    "dialog",
+    { className: "panel-modal panel-modal-wide", id: "workspace-diff-modal" },
+    h(
+      "div",
+      { className: "modal-header" },
+      h("h2", null, "Workspace diff"),
+      h(
+        "div",
+        { className: "modal-header-actions" },
+        h(
+          "button",
+          {
+            className: "load-button",
+            id: "workspace-diff-refresh",
+            type: "button",
+          },
+          "Refresh"
+        ),
+        h(
+          "button",
+          {
+            className: "header-button close-modal-btn",
+            id: "close-workspace-diff-modal",
+            type: "button",
+          },
+          "×"
+        )
+      )
+    ),
+    h(
+      "section",
+      { className: "panel-modal-body" },
+      h("div", { id: "workspace-diff-mount" })
     )
   );
 }
@@ -543,11 +659,13 @@ export function LocalShell({ launchModel = null, onLaunchFieldChange = null, onL
     null,
     h(
       "div",
-      { className: "app-shell" },
+      { className: "app-shell app-shell-with-rail" },
       h(Sidebar, { launchModel, onLaunchFieldChange, onLaunchStart }),
-      h(ChatShell)
+      h(ChatShell),
+      h(WorkspaceChangesRail)
     ),
     h(SessionDetailsModal),
+    h(WorkspaceDiffModal),
     h(SecurityModal),
     h(PairingApprovalModal)
   );

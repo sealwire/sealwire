@@ -628,7 +628,7 @@ function getFileChanges(tool) {
     }));
 }
 
-function FileChangeDiff({ tool }) {
+export function FileChangeDiff({ tool }) {
   const fileChanges = getFileChanges(tool);
   const displayPaths = buildFileDisplayPathMap(fileChanges, tool?.display_options || null);
   const fileChangesWithDiff = fileChanges.filter((change) => change?.diff);
@@ -868,14 +868,31 @@ function ToolEntry({ entry, isJustPrepended = false, options = null }) {
             React.Fragment,
             null,
             h(FileChangeDiff, { tool: displayTool }),
-            options?.enableFileChangeActions && itemId
-              ? h(
-                  "div",
-                  { className: "tool-file-actions" },
-                  h("button", { className: "tool-toggle-button tool-action-button", "data-item-id": itemId, "data-file-change-action": "rollback", type: "button" }, "Rollback"),
-                  h("button", { className: "tool-toggle-button tool-action-button", "data-item-id": itemId, "data-file-change-action": "reapply", type: "button" }, "Reapply")
+            (() => {
+              const isTurnDiff = tool.item_type === "turnDiff";
+              const isLastTurnDiff =
+                isTurnDiff && itemId && itemId === options?.lastTurnDiffItemId;
+              if (!options?.enableFileChangeActions || !isLastTurnDiff) {
+                return null;
+              }
+              const rolledBack = tool.apply_state === "rolled_back";
+              const action = rolledBack ? "reapply" : "rollback";
+              const label = rolledBack ? "Reapply" : "Undo";
+              return h(
+                "div",
+                { className: "tool-file-actions" },
+                h(
+                  "button",
+                  {
+                    className: "tool-toggle-button tool-action-button",
+                    "data-item-id": itemId,
+                    "data-file-change-action": action,
+                    type: "button",
+                  },
+                  label
                 )
-              : null
+              );
+            })()
           )
         : !expanded
           ? h(
@@ -1275,6 +1292,19 @@ export function TranscriptContent({
     }
     return "";
   }, [entries]);
+  const lastTurnDiffItemId = React.useMemo(() => {
+    for (let index = entries.length - 1; index >= 0; index -= 1) {
+      const entry = entries[index];
+      if (entry?.tool?.item_type === "turnDiff") {
+        return entry.item_id || "";
+      }
+    }
+    return "";
+  }, [entries]);
+  const effectiveOptions = React.useMemo(() => {
+    if (!options) return { lastTurnDiffItemId };
+    return { ...options, lastTurnDiffItemId };
+  }, [options, lastTurnDiffItemId]);
   const justPrependedItemIds = useJustPrependedItemIds(entries);
   const nodes = [];
 
@@ -1297,10 +1327,10 @@ export function TranscriptContent({
   groupedItems.forEach((item, index) => {
     if (item?.type === "tool-group") {
       const expandKey = groupExpandKey(item);
-      const expanded = Boolean(expandKey && options?.expandedKeys?.has(expandKey));
+      const expanded = Boolean(expandKey && effectiveOptions?.expandedKeys?.has(expandKey));
       const groupKey = expandKey || `tool-group:${index}`;
       nodes.push(
-        h(ToolGroupEntry, { group: item, key: groupKey, options })
+        h(ToolGroupEntry, { group: item, key: groupKey, options: effectiveOptions })
       );
       if (expanded) {
         item.entries.forEach((memberEntry, memberIndex) => {
@@ -1314,7 +1344,7 @@ export function TranscriptContent({
                 memberId
                 || memberEntry.id
                 || `${groupKey}:member:${memberIndex}`,
-              options,
+              options: effectiveOptions,
             })
           );
         });
@@ -1330,13 +1360,13 @@ export function TranscriptContent({
         isLatestUser:
           item.kind === "user_text" && entryId && entryId === latestUserEntryId,
         key: entryId || `${item.kind || "entry"}:${index}`,
-        options,
+        options: effectiveOptions,
       })
     );
   });
 
   if (approval) {
-    nodes.push(h(ApprovalCard, { approval, key: "approval", options }));
+    nodes.push(h(ApprovalCard, { approval, key: "approval", options: effectiveOptions }));
   }
 
   // The trailing bottom spacer (CSS `.thread-content[data-bottom-spacer]::after`)

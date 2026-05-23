@@ -31,7 +31,7 @@
     "dev:restart": "sh scripts/restart-dev.sh",
     "dev:restart:local": "sh scripts/restart-dev.sh --local",
     "dev:restart:public": "sh scripts/restart-dev-public.sh",
-    "test": "node --test claude-worker/*.test.mjs frontend/*.test.mjs frontend/remote/*.test.mjs scripts/e2e/harness/*.test.mjs && vite build",
+    "test": "node --test claude-worker/*.test.mjs frontend/*.test.mjs frontend/local/*.test.mjs frontend/remote/*.test.mjs scripts/e2e/harness/*.test.mjs && vite build",
     "test:harness": "node --test scripts/e2e/harness/*.test.mjs",
     "build": "vite build",
     "prepack": "npm run build",

@@ -9,16 +9,18 @@ use tracing::warn;
 
 use crate::{
     broker::BrokerConfig,
+    codex::split_unified_diff_by_file,
     protocol::{
         AllowedRootsInput, AllowedRootsReceipt, ApplyFileChangeInput, ApplyFileChangeReceipt,
         ApprovalDecision, ApprovalDecisionInput, ApprovalReceipt, BulkRevokeDevicesReceipt,
-        FileChangeApplyDirection, HeartbeatInput, ModelOptionView, PairingDecision,
-        PairingDecisionInput, PairingDecisionReceipt, PairingStartInput, PairingTicketView,
-        ReadThreadEntriesInput, ReadThreadEntryDetailInput, ReadThreadTranscriptInput,
-        ResumeSessionInput, RevokeDeviceReceipt, SendMessageInput, SessionSnapshot,
-        StartSessionInput, StopTurnInput, TakeOverInput, ThreadArchiveReceipt, ThreadDeleteReceipt,
-        ThreadEntriesResponse, ThreadEntryDetailResponse, ThreadTranscriptResponse,
-        ThreadsResponse, UpdateSessionSettingsInput,
+        FileChangeApplyDirection, FileChangeDiffView, HeartbeatInput, ModelOptionView,
+        PairingDecision, PairingDecisionInput, PairingDecisionReceipt, PairingStartInput,
+        PairingTicketView, ReadThreadEntriesInput, ReadThreadEntryDetailInput,
+        ReadThreadTranscriptInput, ResumeSessionInput, RevokeDeviceReceipt, SendMessageInput,
+        SessionSnapshot, StartSessionInput, StopTurnInput, TakeOverInput, ThreadArchiveReceipt,
+        ThreadDeleteReceipt, ThreadEntriesResponse, ThreadEntryDetailResponse,
+        ThreadTranscriptResponse, ThreadsResponse, UpdateSessionSettingsInput,
+        WorkspaceDiffResponse,
     },
     provider::{spawn_providers, ProviderBridge},
 };
@@ -897,6 +899,15 @@ impl AppState {
         })
     }
 
+    pub async fn workspace_diff(&self) -> Result<WorkspaceDiffResponse, String> {
+        let cwd = {
+            let relay = self.relay.read().await;
+            ensure_path_within_allowed_roots(&relay.current_cwd, &relay.allowed_roots)?;
+            relay.current_cwd.clone()
+        };
+        collect_workspace_diff(&cwd).await
+    }
+
     pub async fn apply_file_change(
         &self,
         item_id: &str,
@@ -936,6 +947,15 @@ impl AppState {
         apply_unified_diff(&cwd, &diff, input.direction).await?;
 
         let mut relay = self.relay.write().await;
+        relay.set_file_change_apply_state(
+            item_id,
+            match input.direction {
+                FileChangeApplyDirection::Rollback => {
+                    crate::protocol::FileChangeApplyState::RolledBack
+                }
+                FileChangeApplyDirection::Reapply => crate::protocol::FileChangeApplyState::Applied,
+            },
+        );
         relay.push_log(
             "info",
             format!(
@@ -1524,6 +1544,161 @@ async fn apply_unified_diff(
     })
 }
 
+const WORKSPACE_DIFF_MAX_BYTES: usize = 4 * 1024 * 1024;
+const WORKSPACE_DIFF_UNTRACKED_MAX_BYTES: usize = 64 * 1024;
+
+async fn collect_workspace_diff(cwd: &str) -> Result<WorkspaceDiffResponse, String> {
+    let generated_at = unix_now();
+    let inside = run_git_capture(cwd, &["rev-parse", "--is-inside-work-tree"]).await?;
+    if !inside.status.success() {
+        return Ok(WorkspaceDiffResponse {
+            cwd: cwd.to_string(),
+            file_changes: Vec::new(),
+            diff: String::new(),
+            truncated: false,
+            not_a_git_repo: true,
+            generated_at,
+        });
+    }
+
+    let tracked = run_git_capture(cwd, &["diff", "--no-color", "HEAD"]).await?;
+    if !tracked.status.success() {
+        let stderr = String::from_utf8_lossy(&tracked.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "git diff HEAD failed".to_string()
+        } else {
+            format!("git diff HEAD failed: {stderr}")
+        });
+    }
+    let (tracked_diff, tracked_truncated) =
+        truncate_to_char_boundary(tracked.stdout, WORKSPACE_DIFF_MAX_BYTES);
+    let mut file_changes = split_unified_diff_by_file(&tracked_diff);
+
+    let untracked_listing =
+        run_git_capture(cwd, &["ls-files", "--others", "--exclude-standard", "-z"]).await?;
+    let mut untracked_truncated = false;
+    if untracked_listing.status.success() {
+        for raw_path in untracked_listing.stdout.split(|byte| *byte == 0) {
+            if raw_path.is_empty() {
+                continue;
+            }
+            let path = match std::str::from_utf8(raw_path) {
+                Ok(value) => value.to_string(),
+                Err(_) => continue,
+            };
+            match synthesize_untracked_diff(cwd, &path).await {
+                Ok((diff, file_truncated)) => {
+                    if file_truncated {
+                        untracked_truncated = true;
+                    }
+                    file_changes.push(FileChangeDiffView {
+                        path,
+                        change_type: "add".to_string(),
+                        diff,
+                    });
+                }
+                Err(_) => {
+                    file_changes.push(FileChangeDiffView {
+                        path,
+                        change_type: "add".to_string(),
+                        diff: String::new(),
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(WorkspaceDiffResponse {
+        cwd: cwd.to_string(),
+        diff: tracked_diff,
+        file_changes,
+        truncated: tracked_truncated || untracked_truncated,
+        not_a_git_repo: false,
+        generated_at,
+    })
+}
+
+async fn run_git_capture(cwd: &str, args: &[&str]) -> Result<std::process::Output, String> {
+    Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .map_err(|error| format!("failed to run git {}: {error}", args.join(" ")))
+}
+
+fn truncate_to_char_boundary(mut bytes: Vec<u8>, limit: usize) -> (String, bool) {
+    if bytes.len() <= limit {
+        return (String::from_utf8_lossy(&bytes).into_owned(), false);
+    }
+    bytes.truncate(limit);
+    while !bytes.is_empty() && std::str::from_utf8(&bytes).is_err() {
+        bytes.pop();
+    }
+    (String::from_utf8_lossy(&bytes).into_owned(), true)
+}
+
+async fn synthesize_untracked_diff(cwd: &str, rel_path: &str) -> Result<(String, bool), String> {
+    use tokio::io::AsyncReadExt;
+
+    let abs = std::path::Path::new(cwd).join(rel_path);
+    let metadata = tokio::fs::metadata(&abs)
+        .await
+        .map_err(|error| format!("stat failed for {rel_path}: {error}"))?;
+    if !metadata.is_file() {
+        return Ok((String::new(), false));
+    }
+    let mut file = tokio::fs::File::open(&abs)
+        .await
+        .map_err(|error| format!("open failed for {rel_path}: {error}"))?;
+    let mut buf = Vec::with_capacity(
+        metadata
+            .len()
+            .min(WORKSPACE_DIFF_UNTRACKED_MAX_BYTES as u64) as usize,
+    );
+    let mut take = (&mut file).take(WORKSPACE_DIFF_UNTRACKED_MAX_BYTES as u64);
+    take.read_to_end(&mut buf)
+        .await
+        .map_err(|error| format!("read failed for {rel_path}: {error}"))?;
+    let truncated = (metadata.len() as usize) > buf.len();
+    if buf.contains(&0) {
+        return Ok((String::new(), truncated));
+    }
+    let text = match std::str::from_utf8(&buf) {
+        Ok(value) => value,
+        Err(_) => return Ok((String::new(), truncated)),
+    };
+    let mut lines: Vec<&str> = text.split('\n').collect();
+    let trailing_newline = matches!(lines.last(), Some(&""));
+    if trailing_newline {
+        lines.pop();
+    }
+    let line_count = lines.len();
+
+    let mut diff = String::new();
+    diff.push_str(&format!("diff --git a/{rel_path} b/{rel_path}\n"));
+    diff.push_str("new file mode 100644\n");
+    diff.push_str("--- /dev/null\n");
+    diff.push_str(&format!("+++ b/{rel_path}\n"));
+    if line_count > 0 {
+        diff.push_str(&format!("@@ -0,0 +1,{line_count} @@\n"));
+        for (idx, line) in lines.iter().enumerate() {
+            diff.push('+');
+            diff.push_str(line);
+            if idx + 1 < line_count || trailing_newline {
+                diff.push('\n');
+            }
+        }
+        if !trailing_newline {
+            diff.push_str("\n\\ No newline at end of file\n");
+        }
+    }
+    Ok((diff, truncated))
+}
+
 #[derive(Debug)]
 pub enum ApprovalError {
     NoPendingRequest,
@@ -1564,4 +1739,151 @@ pub(crate) struct BrokerTarget {
     pub(crate) device_id: String,
     pub(crate) peer_id: String,
     pub(crate) payload_secret: String,
+}
+
+#[cfg(test)]
+mod workspace_diff_tests {
+    use super::{collect_workspace_diff, synthesize_untracked_diff, truncate_to_char_boundary};
+    use tempfile::TempDir;
+    use tokio::process::Command;
+
+    async fn run(cmd: &mut Command) {
+        let output = cmd.output().await.expect("git command should run");
+        assert!(
+            output.status.success(),
+            "git failed: stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    async fn init_repo() -> TempDir {
+        let dir = TempDir::new().expect("tmpdir");
+        let path = dir.path().to_path_buf();
+        run(Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(&path))
+        .await;
+        run(Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(&path))
+        .await;
+        run(Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&path))
+        .await;
+        std::fs::write(path.join("seed.txt"), "line1\nline2\n").unwrap();
+        run(Command::new("git")
+            .args(["add", "seed.txt"])
+            .current_dir(&path))
+        .await;
+        run(Command::new("git")
+            .args(["commit", "-q", "-m", "seed"])
+            .current_dir(&path))
+        .await;
+        dir
+    }
+
+    #[test]
+    fn truncate_caps_and_marks_truncated() {
+        let bytes = vec![b'a'; 10];
+        let (text, truncated) = truncate_to_char_boundary(bytes, 4);
+        assert_eq!(text, "aaaa");
+        assert!(truncated);
+    }
+
+    #[test]
+    fn truncate_under_limit_is_not_truncated() {
+        let (text, truncated) = truncate_to_char_boundary(b"hello".to_vec(), 100);
+        assert_eq!(text, "hello");
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn truncate_respects_utf8_boundary() {
+        // "héllo" — 'é' is 2 bytes (0xC3 0xA9). Limit 2 should drop into mid-char,
+        // then back off to "h".
+        let bytes = "héllo".as_bytes().to_vec();
+        let (text, truncated) = truncate_to_char_boundary(bytes, 2);
+        assert_eq!(text, "h");
+        assert!(truncated);
+    }
+
+    #[tokio::test]
+    async fn synthesize_untracked_emits_added_lines() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("new.txt"), "alpha\nbeta\n").unwrap();
+        let (diff, truncated) = synthesize_untracked_diff(&dir.path().to_string_lossy(), "new.txt")
+            .await
+            .unwrap();
+        assert!(!truncated);
+        assert!(diff.contains("new file mode 100644"));
+        assert!(diff.contains("+++ b/new.txt"));
+        assert!(diff.contains("@@ -0,0 +1,2 @@"));
+        assert!(diff.contains("+alpha"));
+        assert!(diff.contains("+beta"));
+    }
+
+    #[tokio::test]
+    async fn synthesize_untracked_skips_binary() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("blob.bin"), [0u8, 1, 2, 3, 0]).unwrap();
+        let (diff, _truncated) =
+            synthesize_untracked_diff(&dir.path().to_string_lossy(), "blob.bin")
+                .await
+                .unwrap();
+        assert_eq!(diff, "");
+    }
+
+    #[tokio::test]
+    async fn collect_returns_not_a_git_repo_outside_git() {
+        let dir = TempDir::new().unwrap();
+        let response = collect_workspace_diff(&dir.path().to_string_lossy())
+            .await
+            .unwrap();
+        assert!(response.not_a_git_repo);
+        assert!(response.file_changes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn collect_shows_tracked_modification() {
+        let dir = init_repo().await;
+        std::fs::write(dir.path().join("seed.txt"), "line1\nLINE2\n").unwrap();
+        let response = collect_workspace_diff(&dir.path().to_string_lossy())
+            .await
+            .unwrap();
+        assert!(!response.not_a_git_repo);
+        assert_eq!(response.file_changes.len(), 1);
+        let change = &response.file_changes[0];
+        assert_eq!(change.path, "seed.txt");
+        assert_eq!(change.change_type, "update");
+        assert!(change.diff.contains("-line2"));
+        assert!(change.diff.contains("+LINE2"));
+    }
+
+    #[tokio::test]
+    async fn collect_includes_untracked_files_as_adds() {
+        let dir = init_repo().await;
+        std::fs::write(dir.path().join("fresh.txt"), "hello\nworld\n").unwrap();
+        let response = collect_workspace_diff(&dir.path().to_string_lossy())
+            .await
+            .unwrap();
+        let fresh = response
+            .file_changes
+            .iter()
+            .find(|change| change.path == "fresh.txt")
+            .expect("fresh.txt should appear");
+        assert_eq!(fresh.change_type, "add");
+        assert!(fresh.diff.contains("+hello"));
+        assert!(fresh.diff.contains("+world"));
+    }
+
+    #[tokio::test]
+    async fn collect_clean_tree_returns_no_changes() {
+        let dir = init_repo().await;
+        let response = collect_workspace_diff(&dir.path().to_string_lossy())
+            .await
+            .unwrap();
+        assert!(!response.not_a_git_repo);
+        assert!(response.file_changes.is_empty());
+    }
 }

@@ -12,7 +12,7 @@ use crate::{
         ReadThreadTranscriptInput, ResumeSessionInput, SendMessageInput, SessionSnapshot,
         StartSessionInput, StopTurnInput, TakeOverInput, ThreadEntriesResponse,
         ThreadEntryDetailResponse, ThreadTranscriptResponse, ThreadsQuery, ThreadsResponse,
-        UpdateSessionSettingsInput,
+        UpdateSessionSettingsInput, WorkspaceDiffResponse,
     },
     state::{AppState, ApprovalError, CachedRemoteActionResult, RemoteActionReplayDecision},
 };
@@ -87,6 +87,7 @@ pub(super) enum RemoteActionRequest {
         item_id: String,
         input: ApplyFileChangeInput,
     },
+    FetchWorkspaceDiff,
 }
 
 impl RemoteActionRequest {
@@ -109,6 +110,7 @@ impl RemoteActionRequest {
             Self::FetchThreadTranscript { .. } => RemoteActionKind::FetchThreadTranscript,
             Self::DecideApproval { .. } => RemoteActionKind::DecideApproval,
             Self::ApplyFileChange { .. } => RemoteActionKind::ApplyFileChange,
+            Self::FetchWorkspaceDiff => RemoteActionKind::FetchWorkspaceDiff,
         }
     }
 
@@ -167,6 +169,7 @@ impl RemoteActionRequest {
                 input.device_id = Some(device_id);
                 Self::ApplyFileChange { item_id, input }
             }
+            Self::FetchWorkspaceDiff => Self::FetchWorkspaceDiff,
         }
     }
 }
@@ -191,6 +194,7 @@ pub(super) enum RemoteActionKind {
     FetchThreadTranscript,
     DecideApproval,
     ApplyFileChange,
+    FetchWorkspaceDiff,
 }
 
 impl RemoteActionKind {
@@ -213,6 +217,7 @@ impl RemoteActionKind {
             Self::FetchThreadTranscript => "fetch_thread_transcript",
             Self::DecideApproval => "decide_approval",
             Self::ApplyFileChange => "apply_file_change",
+            Self::FetchWorkspaceDiff => "fetch_workspace_diff",
         }
     }
 }
@@ -231,6 +236,7 @@ struct RemoteActionResultPlaintext {
     thread_entries: Option<ThreadEntriesResponse>,
     thread_entry_detail: Option<ThreadEntryDetailResponse>,
     thread_transcript: Option<ThreadTranscriptResponse>,
+    workspace_diff: Option<WorkspaceDiffResponse>,
     session_claim: Option<String>,
     session_claim_expires_at: Option<u64>,
     claim_challenge_id: Option<String>,
@@ -267,6 +273,7 @@ struct RemoteActionResultSizeBreakdown {
     thread_entries_bytes: usize,
     thread_entry_detail_bytes: usize,
     thread_transcript_bytes: usize,
+    workspace_diff_bytes: usize,
     session_claim_bytes: usize,
     claim_challenge_bytes: usize,
     error_bytes: usize,
@@ -282,6 +289,7 @@ pub(super) struct RemoteActionOutcome {
     pub(super) thread_entries: Option<ThreadEntriesResponse>,
     pub(super) thread_entry_detail: Option<ThreadEntryDetailResponse>,
     pub(super) thread_transcript: Option<ThreadTranscriptResponse>,
+    pub(super) workspace_diff: Option<WorkspaceDiffResponse>,
     pub(super) session_claim: Option<String>,
     pub(super) session_claim_expires_at: Option<u64>,
     pub(super) claim_challenge_id: Option<String>,
@@ -941,6 +949,15 @@ async fn execute_remote_action(
             .apply_file_change(&item_id, input)
             .await
             .map(|_| RemoteActionOutcome::default()),
+        RemoteActionRequest::FetchWorkspaceDiff => {
+            state
+                .workspace_diff()
+                .await
+                .map(|workspace_diff| RemoteActionOutcome {
+                    workspace_diff: Some(workspace_diff),
+                    ..RemoteActionOutcome::default()
+                })
+        }
     }
 }
 
@@ -959,6 +976,7 @@ fn remote_action_emits_info_log(action: RemoteActionKind) -> bool {
             | RemoteActionKind::FetchThreadEntries
             | RemoteActionKind::FetchThreadEntryDetail
             | RemoteActionKind::FetchThreadTranscript
+            | RemoteActionKind::FetchWorkspaceDiff
     )
 }
 
@@ -1239,6 +1257,7 @@ async fn publish_plain_remote_action_result(
         thread_entries,
         thread_entry_detail,
         thread_transcript,
+        workspace_diff,
         session_claim,
         session_claim_expires_at,
         claim_challenge_id,
@@ -1257,6 +1276,7 @@ async fn publish_plain_remote_action_result(
         thread_entries.as_ref(),
         thread_entry_detail.as_ref(),
         thread_transcript.as_ref(),
+        workspace_diff.as_ref(),
         session_claim.as_ref(),
         session_claim_expires_at,
         claim_challenge_id.as_ref(),
@@ -1276,6 +1296,7 @@ async fn publish_plain_remote_action_result(
         thread_entries,
         thread_entry_detail,
         thread_transcript,
+        workspace_diff,
         session_claim,
         session_claim_expires_at,
         claim_challenge_id,
@@ -1409,6 +1430,7 @@ fn build_plain_remote_action_result_payload(
                 thread_entries: result.thread_entries.clone(),
                 thread_entry_detail: result.thread_entry_detail.clone(),
                 thread_transcript: result.thread_transcript.clone(),
+                workspace_diff: result.workspace_diff.clone(),
                 error: result.error.clone(),
             }
         }
@@ -1436,6 +1458,7 @@ async fn replay_plain_remote_action_result(
             thread_entries: cached.thread_entries,
             thread_entry_detail: cached.thread_entry_detail,
             thread_transcript: cached.thread_transcript,
+            workspace_diff: cached.workspace_diff,
             session_claim: cached.session_claim,
             session_claim_expires_at: cached.session_claim_expires_at,
             claim_challenge_id: cached.claim_challenge_id,
@@ -1497,6 +1520,7 @@ async fn publish_remote_action_result_private(
         thread_entries,
         thread_entry_detail,
         thread_transcript,
+        workspace_diff,
         session_claim,
         session_claim_expires_at,
         claim_challenge_id,
@@ -1519,6 +1543,7 @@ async fn publish_remote_action_result_private(
         thread_entries.as_ref(),
         thread_entry_detail.as_ref(),
         thread_transcript.as_ref(),
+        workspace_diff.as_ref(),
         session_claim.as_ref(),
         session_claim_expires_at,
         claim_challenge_id.as_ref(),
@@ -1538,6 +1563,7 @@ async fn publish_remote_action_result_private(
         thread_entries,
         thread_entry_detail,
         thread_transcript,
+        workspace_diff,
         session_claim,
         session_claim_expires_at,
         claim_challenge_id,
@@ -1614,6 +1640,7 @@ async fn replay_encrypted_remote_action_result(
             thread_entries: cached.thread_entries,
             thread_entry_detail: cached.thread_entry_detail,
             thread_transcript: cached.thread_transcript,
+            workspace_diff: cached.workspace_diff,
             session_claim: cached.session_claim,
             session_claim_expires_at: cached.session_claim_expires_at,
             claim_challenge_id: cached.claim_challenge_id,
@@ -1802,6 +1829,7 @@ fn cached_remote_action_result(
         thread_entries: outcome.thread_entries,
         thread_entry_detail: outcome.thread_entry_detail,
         thread_transcript: outcome.thread_transcript,
+        workspace_diff: outcome.workspace_diff,
         session_claim: outcome.session_claim,
         session_claim_expires_at: outcome.session_claim_expires_at,
         claim_challenge_id: outcome.claim_challenge_id,
@@ -1823,6 +1851,7 @@ fn measure_remote_action_result_sizes(
     thread_entries: Option<&ThreadEntriesResponse>,
     thread_entry_detail: Option<&ThreadEntryDetailResponse>,
     thread_transcript: Option<&ThreadTranscriptResponse>,
+    workspace_diff: Option<&WorkspaceDiffResponse>,
     session_claim: Option<&String>,
     session_claim_expires_at: Option<u64>,
     claim_challenge_id: Option<&String>,
@@ -1842,6 +1871,7 @@ fn measure_remote_action_result_sizes(
         thread_entries,
         thread_entry_detail,
         thread_transcript,
+        workspace_diff,
         session_claim,
         session_claim_expires_at,
         claim_challenge_id,
@@ -1856,6 +1886,7 @@ fn measure_remote_action_result_sizes(
         thread_entries_bytes: maybe_serialized_json_bytes(thread_entries),
         thread_entry_detail_bytes: maybe_serialized_json_bytes(thread_entry_detail),
         thread_transcript_bytes: maybe_serialized_json_bytes(thread_transcript),
+        workspace_diff_bytes: maybe_serialized_json_bytes(workspace_diff),
         session_claim_bytes: session_claim
             .map(|claim| serialized_json_bytes(&(claim, session_claim_expires_at)))
             .unwrap_or(0),
@@ -1892,6 +1923,7 @@ fn log_remote_action_result_sizes(
         thread_entries_bytes = breakdown.thread_entries_bytes,
         thread_entry_detail_bytes = breakdown.thread_entry_detail_bytes,
         thread_transcript_bytes = breakdown.thread_transcript_bytes,
+        workspace_diff_bytes = breakdown.workspace_diff_bytes,
         session_claim_bytes = breakdown.session_claim_bytes,
         claim_challenge_bytes = breakdown.claim_challenge_bytes,
         error_bytes = breakdown.error_bytes,
@@ -1917,6 +1949,7 @@ fn log_remote_action_result_sizes(
             thread_entries_bytes = breakdown.thread_entries_bytes,
             thread_entry_detail_bytes = breakdown.thread_entry_detail_bytes,
             thread_transcript_bytes = breakdown.thread_transcript_bytes,
+            workspace_diff_bytes = breakdown.workspace_diff_bytes,
             session_claim_bytes = breakdown.session_claim_bytes,
             claim_challenge_bytes = breakdown.claim_challenge_bytes,
             error_bytes = breakdown.error_bytes,
@@ -1958,6 +1991,7 @@ struct RemoteActionResultPlaintextRef<'a> {
     thread_entries: Option<&'a ThreadEntriesResponse>,
     thread_entry_detail: Option<&'a ThreadEntryDetailResponse>,
     thread_transcript: Option<&'a ThreadTranscriptResponse>,
+    workspace_diff: Option<&'a WorkspaceDiffResponse>,
     session_claim: Option<&'a String>,
     session_claim_expires_at: Option<u64>,
     claim_challenge_id: Option<&'a String>,
@@ -1988,7 +2022,8 @@ fn remote_action_result_kind(action: RemoteActionKind) -> RemoteActionResultKind
         | RemoteActionKind::ListProviderModels => RemoteActionResultKind::RemoteThreadsResult,
         RemoteActionKind::FetchThreadEntries
         | RemoteActionKind::FetchThreadEntryDetail
-        | RemoteActionKind::FetchThreadTranscript => RemoteActionResultKind::RemoteTranscriptResult,
+        | RemoteActionKind::FetchThreadTranscript
+        | RemoteActionKind::FetchWorkspaceDiff => RemoteActionResultKind::RemoteTranscriptResult,
         RemoteActionKind::DecideApproval => RemoteActionResultKind::RemoteApprovalResult,
         RemoteActionKind::SendMessage | RemoteActionKind::ApplyFileChange => {
             RemoteActionResultKind::RemoteActionAck

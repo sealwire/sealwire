@@ -618,6 +618,16 @@ pub struct FileChangeDiffView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceDiffResponse {
+    pub cwd: String,
+    pub file_changes: Vec<FileChangeDiffView>,
+    pub diff: String,
+    pub truncated: bool,
+    pub not_a_git_repo: bool,
+    pub generated_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ToolCallView {
     pub item_type: String,
     pub name: String,
@@ -633,6 +643,18 @@ pub struct ToolCallView {
     pub diff: Option<String>,
     #[serde(default)]
     pub file_changes: Vec<FileChangeDiffView>,
+    /// Current apply state for `turnDiff` entries. Populated at snapshot time
+    /// from the relay's in-memory `apply_states` map; never persisted to disk.
+    /// Absent on the wire means "applied" (the default after the agent edits).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apply_state: Option<FileChangeApplyState>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FileChangeApplyState {
+    Applied,
+    RolledBack,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
