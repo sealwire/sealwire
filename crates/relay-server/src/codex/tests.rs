@@ -1,5 +1,5 @@
 use super::*;
-use crate::state::SecurityProfile;
+use crate::{protocol::SessionSnapshot, state::SecurityProfile};
 use tokio::sync::{watch, RwLock};
 
 #[test]
@@ -1090,6 +1090,275 @@ fn test_thread_summary(id: &str) -> ThreadSummaryView {
         model_provider: "openai".to_string(),
         provider: "codex".to_string(),
     }
+}
+
+struct CodexReplayHarness {
+    state: std::sync::Arc<RwLock<RelayState>>,
+}
+
+impl CodexReplayHarness {
+    async fn new(active_thread_id: &str) -> Self {
+        let (change_tx, _) = watch::channel(0_u64);
+        let state = std::sync::Arc::new(RwLock::new(RelayState::new(
+            "/tmp/project".to_string(),
+            change_tx,
+            SecurityProfile::private(),
+        )));
+
+        {
+            let mut relay = state.write().await;
+            relay.active_thread_id = Some(active_thread_id.to_string());
+        }
+
+        Self { state }
+    }
+
+    async fn notify(&self, payload: serde_json::Value) {
+        handle_notification(payload, &self.state).await;
+    }
+
+    async fn switch_to(&self, thread_id: &str, status: &str, transcript: Vec<TranscriptEntryView>) {
+        let mut relay = self.state.write().await;
+        relay.load_thread_data(
+            ThreadSyncData {
+                thread: test_thread_summary(thread_id),
+                status: status.to_string(),
+                active_flags: Vec::new(),
+                transcript,
+            },
+            "untrusted",
+            "workspace-write",
+            "medium",
+            "device-a",
+        );
+    }
+
+    async fn snapshot(&self) -> SessionSnapshot {
+        self.state.read().await.snapshot()
+    }
+}
+
+fn agent_entry(item_id: &str, text: &str, status: &str, turn_id: &str) -> TranscriptEntryView {
+    TranscriptEntryView {
+        item_id: Some(item_id.to_string()),
+        kind: TranscriptEntryKind::AgentText,
+        text: Some(text.to_string()),
+        status: status.to_string(),
+        turn_id: Some(turn_id.to_string()),
+        tool: None,
+    }
+}
+
+fn assert_agent_entry(snapshot: &SessionSnapshot, item_id: &str, text: &str, status: &str) {
+    let entry = snapshot
+        .transcript
+        .iter()
+        .find(|entry| entry.item_id.as_deref() == Some(item_id))
+        .unwrap_or_else(|| panic!("missing transcript item {item_id}"));
+    assert_eq!(entry.kind, TranscriptEntryKind::AgentText);
+    assert_eq!(entry.text.as_deref(), Some(text));
+    assert_eq!(entry.status, status);
+}
+
+fn assert_no_streaming_agent_entries(snapshot: &SessionSnapshot) {
+    let streaming = snapshot
+        .transcript
+        .iter()
+        .find(|entry| entry.kind == TranscriptEntryKind::AgentText && entry.status == "streaming");
+    assert!(
+        streaming.is_none(),
+        "snapshot must not leave assistant entries streaming after turn completion: {streaming:?}"
+    );
+}
+
+fn turn_started(thread_id: &str, turn_id: &str) -> serde_json::Value {
+    json!({
+        "method": "turn/started",
+        "params": {
+            "threadId": thread_id,
+            "turn": { "id": turn_id }
+        }
+    })
+}
+
+fn turn_completed(thread_id: &str, turn_id: &str) -> serde_json::Value {
+    json!({
+        "method": "turn/completed",
+        "params": {
+            "threadId": thread_id,
+            "turn": { "id": turn_id }
+        }
+    })
+}
+
+fn agent_started(thread_id: &str, turn_id: &str, item_id: &str) -> serde_json::Value {
+    json!({
+        "method": "item/started",
+        "params": {
+            "threadId": thread_id,
+            "turnId": turn_id,
+            "item": {
+                "id": item_id,
+                "type": "agentMessage"
+            }
+        }
+    })
+}
+
+fn agent_delta(thread_id: &str, turn_id: &str, item_id: &str, delta: &str) -> serde_json::Value {
+    json!({
+        "method": "item/agentMessage/delta",
+        "params": {
+            "threadId": thread_id,
+            "itemId": item_id,
+            "turnId": turn_id,
+            "delta": delta
+        }
+    })
+}
+
+fn agent_completed(thread_id: &str, turn_id: &str, item_id: &str, text: &str) -> serde_json::Value {
+    json!({
+        "method": "item/completed",
+        "params": {
+            "threadId": thread_id,
+            "turnId": turn_id,
+            "item": {
+                "id": item_id,
+                "type": "agentMessage",
+                "text": text
+            }
+        }
+    })
+}
+
+#[tokio::test]
+async fn replay_harness_prevents_stuck_state_after_background_completion() {
+    let harness = CodexReplayHarness::new("thread-A").await;
+
+    harness.notify(turn_started("thread-A", "turn-A1")).await;
+    harness
+        .notify(agent_started("thread-A", "turn-A1", "msg-A1"))
+        .await;
+    harness
+        .notify(agent_delta("thread-A", "turn-A1", "msg-A1", "Hello"))
+        .await;
+
+    harness.switch_to("thread-B", "idle", Vec::new()).await;
+
+    harness
+        .notify(agent_delta("thread-A", "turn-A1", "msg-A1", " world"))
+        .await;
+    harness
+        .notify(agent_completed(
+            "thread-A",
+            "turn-A1",
+            "msg-A1",
+            "Hello world",
+        ))
+        .await;
+    harness.notify(turn_completed("thread-A", "turn-A1")).await;
+
+    let thread_b = harness.snapshot().await;
+    assert_eq!(thread_b.active_thread_id.as_deref(), Some("thread-B"));
+    assert!(
+        thread_b.transcript.is_empty(),
+        "background events must not leak into the visible thread"
+    );
+
+    harness
+        .switch_to(
+            "thread-A",
+            "idle",
+            vec![agent_entry("msg-A1", "Hello world", "completed", "turn-A1")],
+        )
+        .await;
+
+    let thread_a = harness.snapshot().await;
+    assert_eq!(thread_a.active_thread_id.as_deref(), Some("thread-A"));
+    assert_eq!(thread_a.active_turn_id, None);
+    assert_eq!(thread_a.current_status, "idle");
+    assert_agent_entry(&thread_a, "msg-A1", "Hello world", "completed");
+    assert_no_streaming_agent_entries(&thread_a);
+}
+
+#[tokio::test]
+async fn replay_harness_keeps_interleaved_thread_streams_isolated() {
+    let harness = CodexReplayHarness::new("thread-A").await;
+
+    harness.notify(turn_started("thread-A", "turn-A1")).await;
+    harness
+        .notify(agent_started("thread-A", "turn-A1", "msg-A1"))
+        .await;
+    harness
+        .notify(agent_delta("thread-A", "turn-A1", "msg-A1", "A: one"))
+        .await;
+
+    harness.switch_to("thread-B", "idle", Vec::new()).await;
+    harness.notify(turn_started("thread-B", "turn-B1")).await;
+    harness
+        .notify(agent_started("thread-B", "turn-B1", "msg-B1"))
+        .await;
+    harness
+        .notify(agent_delta("thread-B", "turn-B1", "msg-B1", "B: one"))
+        .await;
+    harness
+        .notify(agent_delta("thread-A", "turn-A1", "msg-A1", " two"))
+        .await;
+    harness
+        .notify(agent_completed(
+            "thread-A",
+            "turn-A1",
+            "msg-A1",
+            "A: one two",
+        ))
+        .await;
+    harness.notify(turn_completed("thread-A", "turn-A1")).await;
+    harness
+        .notify(agent_delta("thread-B", "turn-B1", "msg-B1", " two"))
+        .await;
+    harness
+        .notify(agent_completed(
+            "thread-B",
+            "turn-B1",
+            "msg-B1",
+            "B: one two",
+        ))
+        .await;
+    harness.notify(turn_completed("thread-B", "turn-B1")).await;
+
+    let thread_b = harness.snapshot().await;
+    assert_eq!(thread_b.active_thread_id.as_deref(), Some("thread-B"));
+    assert_eq!(thread_b.active_turn_id, None);
+    assert_agent_entry(&thread_b, "msg-B1", "B: one two", "completed");
+    assert!(
+        !thread_b
+            .transcript
+            .iter()
+            .any(|entry| entry.item_id.as_deref() == Some("msg-A1")),
+        "thread A entries must stay out of thread B while B is visible"
+    );
+
+    harness
+        .switch_to(
+            "thread-A",
+            "idle",
+            vec![agent_entry("msg-A1", "A: one two", "completed", "turn-A1")],
+        )
+        .await;
+
+    let thread_a = harness.snapshot().await;
+    assert_eq!(thread_a.active_thread_id.as_deref(), Some("thread-A"));
+    assert_eq!(thread_a.active_turn_id, None);
+    assert_agent_entry(&thread_a, "msg-A1", "A: one two", "completed");
+    assert!(
+        !thread_a
+            .transcript
+            .iter()
+            .any(|entry| entry.item_id.as_deref() == Some("msg-B1")),
+        "thread B entries must stay out of thread A after switching back"
+    );
+    assert_no_streaming_agent_entries(&thread_a);
 }
 
 #[tokio::test]

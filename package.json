@@ -33,6 +33,7 @@
     "dev:restart:public": "sh scripts/restart-dev-public.sh",
     "test": "node --test claude-worker/*.test.mjs frontend/*.test.mjs frontend/local/*.test.mjs frontend/remote/*.test.mjs scripts/e2e/harness/*.test.mjs && vite build",
     "test:harness": "node --test scripts/e2e/harness/*.test.mjs",
+    "test:message-drop-harness": "cargo test -p relay-server replay_harness -- --nocapture && cargo test -p relay-server compact_for_broker_trims_many_file_changes_without_clearing_transcript -- --nocapture",
     "build": "vite build",
     "prepack": "npm run build",
     "preview": "vite preview --host",
