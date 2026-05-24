@@ -898,12 +898,7 @@ function RemoteApp() {
           currentState,
           deviceChromeModel,
           headerModel,
-          headerOverflowOpen: remoteUi.headerOverflowOpen,
-          onCloseOverflow() {
-            remoteUiStore.getState().closeHeaderOverflow();
-          },
           onOpenInfo() {
-            remoteUiStore.getState().closeHeaderOverflow();
             remoteUiStore.getState().setRemoteInfoModalOpen(true);
           },
           onReturnHome() {
@@ -911,9 +906,6 @@ function RemoteApp() {
           },
           onToggleNavigation() {
             toggleRemoteNavigation();
-          },
-          onToggleOverflow() {
-            remoteUiStore.getState().toggleHeaderOverflow();
           },
           onOpenStartSession() {
             remoteUiStore.getState().setSessionPanelOpen(true);
@@ -1189,23 +1181,11 @@ function RemoteSidebar({
         })
       )
     ),
-    usesDrawer
-      ? h(
-          "section",
-          { className: "sidebar-footer remote-sidebar-actions" },
-          h(
-            "button",
-            {
-              className: "sidebar-link-button",
-              id: "remote-sidebar-open-session-details",
-              onClick: onOpenInfo,
-              type: "button",
-            },
-            "Session details"
-          ),
-          h(ThemePickerRow)
-        )
-      : null,
+    h(
+      "div",
+      { className: "sidebar-bottom-bar" },
+      h(ThemePickerRow)
+    ),
     h("div", {
       className: "sidebar-resize",
       id: "remote-sidebar-resize",
@@ -1254,13 +1234,21 @@ function RemoteComposeIcon() {
   );
 }
 
-function RemoteHeaderOverflowIcon() {
+function RemoteBackArrowIcon() {
   return h(
     "svg",
-    { "aria-hidden": "true", fill: "none", height: "16", viewBox: "0 0 16 16", width: "16" },
-    h("circle", { cx: "3", cy: "8", fill: "currentColor", r: "1.5" }),
-    h("circle", { cx: "8", cy: "8", fill: "currentColor", r: "1.5" }),
-    h("circle", { cx: "13", cy: "8", fill: "currentColor", r: "1.5" })
+    {
+      "aria-hidden": "true",
+      fill: "none",
+      height: "14",
+      viewBox: "0 0 16 16",
+      width: "14",
+      stroke: "currentColor",
+      strokeWidth: "1.6",
+      strokeLinecap: "round",
+      strokeLinejoin: "round",
+    },
+    h("path", { d: "M10 3.5L5.5 8L10 12.5" })
   );
 }
 
@@ -1268,40 +1256,15 @@ function RemoteHeader({
   currentState,
   deviceChromeModel,
   headerModel,
-  headerOverflowOpen,
-  onCloseOverflow,
   onOpenInfo,
   onOpenStartSession,
   onReturnHome,
   onToggleNavigation,
-  onToggleOverflow,
   statusBadgeModel,
 }) {
   const usesDrawer = currentState.remoteNavMode === "drawer";
   const navOpen = currentState.remoteNavOpen;
   const navLabel = navOpen ? "Close sidebar" : "Open sidebar";
-  const overflowWrapRef = useRef(null);
-
-  useEffect(() => {
-    if (usesDrawer && headerOverflowOpen) onCloseOverflow?.();
-  }, [usesDrawer, headerOverflowOpen, onCloseOverflow]);
-
-  useEffect(() => {
-    if (!headerOverflowOpen) return undefined;
-    function handlePointerDown(event) {
-      if (overflowWrapRef.current?.contains(event.target)) return;
-      onCloseOverflow?.();
-    }
-    function handleKey(event) {
-      if (event.key === "Escape") onCloseOverflow?.();
-    }
-    document.addEventListener("pointerdown", handlePointerDown);
-    document.addEventListener("keydown", handleKey);
-    return () => {
-      document.removeEventListener("pointerdown", handlePointerDown);
-      document.removeEventListener("keydown", handleKey);
-    };
-  }, [headerOverflowOpen, onCloseOverflow]);
 
   return h(
     "header",
@@ -1359,28 +1322,31 @@ function RemoteHeader({
         )
       ),
       h(
+        "button",
+        {
+          className: "header-icon-button chat-heading-back-button",
+          hidden: deviceChromeModel.homeButton.hidden,
+          id: "remote-home-button",
+          onClick: onReturnHome,
+          title: "All relays",
+          "aria-label": "All relays",
+          type: "button",
+        },
+        h(RemoteBackArrowIcon)
+      ),
+      h(
         "div",
         { className: "chat-heading", id: "remote-chat-heading" },
         h(WorkspaceHeading, {
           header: headerModel,
           statusBadge: statusBadgeModel,
+          onOpenInfo,
         })
       )
     ),
     h(
       "div",
       { className: "chat-header-actions" },
-      h(
-        "button",
-        {
-          className: "header-button",
-          hidden: deviceChromeModel.homeButton.hidden,
-          id: "remote-home-button",
-          onClick: onReturnHome,
-          type: "button",
-        },
-        "All relays"
-      ),
       h(
         "button",
         {
@@ -1391,45 +1357,6 @@ function RemoteHeader({
           type: "button",
         },
         h(RemoteToggleRightPanelIcon)
-      ),
-      h(
-        "div",
-        { className: "header-overflow-wrap", hidden: usesDrawer, ref: overflowWrapRef },
-        h(
-          "button",
-          {
-            "aria-expanded": String(Boolean(headerOverflowOpen)),
-            "aria-haspopup": "menu",
-            "aria-label": "More options",
-            className: "header-button header-overflow-button",
-            id: "remote-header-overflow-button",
-            onClick: onToggleOverflow,
-            title: "More options",
-            type: "button",
-          },
-          h(RemoteHeaderOverflowIcon)
-        ),
-        h(
-          "div",
-          {
-            className: "header-overflow-menu",
-            hidden: !headerOverflowOpen,
-            id: "remote-header-overflow-menu",
-            role: "menu",
-          },
-          h(
-            "button",
-            {
-              className: "overflow-menu-item",
-              id: "remote-open-session-details",
-              onClick: onOpenInfo,
-              role: "menuitem",
-              type: "button",
-            },
-            "Session details"
-          ),
-          h(ThemePickerRow)
-        )
       )
     )
   );

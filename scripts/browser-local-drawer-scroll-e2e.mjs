@@ -44,13 +44,37 @@ async function main() {
     }));
     page = await context.newPage();
     await page.goto(`http://127.0.0.1:${relayPort}`, { waitUntil: "domcontentloaded" });
-    await page.waitForSelector(".sidebar-drawer", { timeout: TIMEOUT_MS });
+    await page.waitForFunction(
+      () =>
+        document.querySelector(".sidebar-drawer") &&
+        document.querySelector(".app-shell")?.dataset.view === "console" &&
+        document.querySelector(".chat-shell")?.dataset.view === "console",
+      null,
+      { timeout: TIMEOUT_MS },
+    );
+    await page.waitForFunction(
+      () => {
+        const count = document.querySelector("#threads-count")?.textContent || "";
+        return document.querySelector("#threads-list") && !/loading/i.test(count);
+      },
+      null,
+      { timeout: TIMEOUT_MS },
+    );
 
     const initialView = await page.evaluate(() => document.querySelector(".app-shell")?.dataset.view);
     assert.equal(initialView, "console", "should land in console view with no thread selected");
 
-    // Fill the thread list with enough fake rows that, if scroll-viewport sizing
-    // breaks, scrollHeight will dwarf clientHeight and scrollTop will stay at 0.
+    await page.click(".sidebar-drawer-summary");
+    await page.waitForFunction(() => document.querySelector(".sidebar-drawer")?.open === true, null, {
+      timeout: TIMEOUT_MS,
+    });
+
+    // Drawer should NOT have flipped the app into conversation view just by opening.
+    const viewAfterOpen = await page.evaluate(() => document.querySelector(".app-shell")?.dataset.view);
+    assert.equal(viewAfterOpen, "console", "opening the drawer must not change app-shell view");
+
+    // Fill after the initial session/thread render settles. Otherwise a slow CI
+    // render can replace these probe rows before the layout assertion runs.
     await page.evaluate(() => {
       const list = document.querySelector("#threads-list");
       list.innerHTML = "";
@@ -62,15 +86,6 @@ async function main() {
         list.appendChild(row);
       }
     });
-
-    await page.click(".sidebar-drawer-summary");
-    await page.waitForFunction(() => document.querySelector(".sidebar-drawer")?.open === true, null, {
-      timeout: TIMEOUT_MS,
-    });
-
-    // Drawer should NOT have flipped the app into conversation view just by opening.
-    const viewAfterOpen = await page.evaluate(() => document.querySelector(".app-shell")?.dataset.view);
-    assert.equal(viewAfterOpen, "console", "opening the drawer must not change app-shell view");
 
     const layout = await page.evaluate(() => {
       const drawer = document.querySelector(".sidebar-drawer");
@@ -119,7 +134,12 @@ async function main() {
     console.log("drawer scroll e2e: PASS", JSON.stringify(layout));
   } catch (err) {
     if (page) {
-      await writeFailureArtifacts({ page, name: "browser-local-drawer-scroll" }).catch(() => {});
+      await writeFailureArtifacts({
+        scenario: "browser-local-drawer-scroll",
+        relay,
+        relayPort,
+        localPage: page,
+      }).catch(() => {});
     }
     throw err;
   } finally {

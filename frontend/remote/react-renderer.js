@@ -50,7 +50,27 @@ function relaySubtitle(relay) {
   return "Grant exists, but this browser does not have local encrypted access yet.";
 }
 
-export function WorkspaceHeading({ header, statusBadge }) {
+function InfoIcon() {
+  return h(
+    "svg",
+    {
+      "aria-hidden": "true",
+      fill: "none",
+      height: "14",
+      viewBox: "0 0 16 16",
+      width: "14",
+      stroke: "currentColor",
+      strokeWidth: "1.4",
+      strokeLinecap: "round",
+      strokeLinejoin: "round",
+    },
+    h("circle", { cx: "8", cy: "8", r: "6.25" }),
+    h("line", { x1: "8", y1: "7.3", x2: "8", y2: "11.5" }),
+    h("circle", { cx: "8", cy: "5", r: "0.7", fill: "currentColor", stroke: "none" })
+  );
+}
+
+export function WorkspaceHeading({ header, statusBadge, onOpenInfo }) {
   const statusTone = statusBadge?.tone || "offline";
   const statusLabel = statusBadge?.label || "Offline";
   const subtitle = header?.subtitle || "";
@@ -88,6 +108,20 @@ export function WorkspaceHeading({ header, statusBadge }) {
               title: header.modelTitle || header.modelLabel,
             },
             header.modelLabel
+          )
+        : null,
+      onOpenInfo
+        ? h(
+            "button",
+            {
+              "aria-label": "Session details",
+              className: "header-icon-button chat-heading-info-button",
+              id: "remote-open-session-details",
+              onClick: onOpenInfo,
+              title: "Session details",
+              type: "button",
+            },
+            h(InfoIcon)
           )
         : null
     ),

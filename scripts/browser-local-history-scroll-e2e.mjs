@@ -73,8 +73,12 @@ async function main() {
       null,
       { timeout: LOCAL_TIMEOUT_MS }
     );
-    await page.click("#header-overflow-button");
-    await page.click("#refresh-button");
+    if (await page.locator("#header-overflow-button").count()) {
+      await page.click("#header-overflow-button");
+      await page.click("#refresh-button");
+    } else {
+      await page.click("#threads-refresh-button");
+    }
     await delay(500);
     await page.waitForFunction(
       () => document.querySelector(".sidebar-drawer")?.open === true,

@@ -100,8 +100,11 @@ async function main() {
       path.basename(ROOT),
       { timeout: LOCAL_TIMEOUT_MS }
     );
-    // Session details is a secondary action behind the header overflow menu — open it first.
-    await page.click("#header-overflow-button");
+    // Session details used to live behind the header overflow menu. Newer
+    // shells expose it as the inline title info button.
+    if (await page.locator("#header-overflow-button").count()) {
+      await page.click("#header-overflow-button");
+    }
     await page.click("#open-session-details");
     await page.waitForFunction(() => {
       const modal = document.querySelector("#session-details-modal");

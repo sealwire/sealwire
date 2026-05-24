@@ -2714,6 +2714,53 @@ input:focus, textarea:focus, select:focus {
   align-items: flex-start;
 }
 
+/* Inline info icon next to chat title — replaces the old "..." overflow
+ * menu. Subdued by default, brightens on hover. */
+.chat-heading-title-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.header-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-radius: 4px;
+  box-shadow: none;
+  flex-shrink: 0;
+}
+.header-icon-button:hover {
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+}
+.chat-heading-info-button {
+  opacity: 0.65;
+  transition: opacity 120ms ease;
+}
+.chat-heading-info-button:hover {
+  opacity: 1;
+}
+.chat-heading-back-button {
+  margin-right: 4px;
+  flex-shrink: 0;
+}
+
+/* Sidebar footer — settings-y things (theme picker, etc.) live here,
+ * pushed to the bottom of the column. */
+.sidebar-bottom-bar {
+  margin-top: auto;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-subtle);
+}
+
 /* Panel toggle header buttons */
 .header-panel-toggle,
 .header-compose-button {

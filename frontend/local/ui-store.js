@@ -30,7 +30,6 @@ export function createLocalUiStore(initialState = {}) {
   return createStore((set) => ({
     ...initialState,
     allowedRootsDraftDirty: false,
-    headerOverflowOpen: false,
     pendingPairingIds: [],
     sessionDraft: {
       approvalPolicy: loadLastApprovalPolicy("codex") || "untrusted",
@@ -51,11 +50,6 @@ export function createLocalUiStore(initialState = {}) {
         },
       }));
     },
-    closeHeaderOverflow() {
-      set({
-        headerOverflowOpen: false,
-      });
-    },
     clearTranscriptDetailLoading() {
       set({
         transcriptLoadingItemIds: new Set(),
@@ -75,11 +69,6 @@ export function createLocalUiStore(initialState = {}) {
         allowedRootsDraftDirty: Boolean(value),
       });
     },
-    setHeaderOverflowOpen(open) {
-      set({
-        headerOverflowOpen: Boolean(open),
-      });
-    },
     setPendingPairingIds(ids) {
       set({
         pendingPairingIds: copyStringList(ids),
@@ -90,11 +79,6 @@ export function createLocalUiStore(initialState = {}) {
         transcriptLoadingItemIds: copyStringSet(state.transcriptLoadingItemIds).add(
           String(itemId || "")
         ),
-      }));
-    },
-    toggleHeaderOverflow() {
-      set((state) => ({
-        headerOverflowOpen: !state.headerOverflowOpen,
       }));
     },
     toggleTranscriptExpandedItem(expandKey) {
@@ -109,7 +93,6 @@ export function readLocalUiState(store) {
   const state = store?.getState?.() || {};
   return {
     allowedRootsDraftDirty: Boolean(state.allowedRootsDraftDirty),
-    headerOverflowOpen: Boolean(state.headerOverflowOpen),
     pendingPairingIds: copyStringList(state.pendingPairingIds),
     sessionDraft: state.sessionDraft ? { ...state.sessionDraft } : null,
     transcriptExpandedItemIds: copyStringSet(state.transcriptExpandedItemIds),

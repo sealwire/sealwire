@@ -24,8 +24,6 @@ import {
   directoryForm,
   goConsoleHomeButton,
   goConsoleHomeSidebarButton,
-  headerOverflowButton,
-  headerOverflowMenu,
   launchSettingsModal,
   liveSurfacesList,
   liveSurfacesSummary,
@@ -49,7 +47,6 @@ import {
   pendingActionBanner,
   pendingPairingsList,
   providerInput,
-  refreshButton,
   resumeLatestButton,
   sandboxInput,
   saveAllowedRootsButton,
@@ -629,25 +626,6 @@ allowedRootsInput?.addEventListener("input", () => {
 allowedRootsForm?.addEventListener("submit", (event) => {
   event.preventDefault();
   void saveAllowedRoots();
-});
-
-headerOverflowButton?.addEventListener("click", (event) => {
-  event.stopPropagation();
-  if (headerOverflowMenu) {
-    state.localUiStore.getState().toggleHeaderOverflow();
-    headerOverflowMenu.hidden = !readLocalUiState(state.localUiStore).headerOverflowOpen;
-  }
-});
-
-document.addEventListener("click", () => {
-  if (headerOverflowMenu && !headerOverflowMenu.hidden) {
-    state.localUiStore.getState().closeHeaderOverflow();
-    headerOverflowMenu.hidden = true;
-  }
-});
-
-refreshButton.addEventListener("click", () => {
-  void loadSession("manual refresh");
 });
 
 goConsoleHomeButton?.addEventListener("click", () => {

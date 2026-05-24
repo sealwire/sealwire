@@ -39,6 +39,11 @@ function Sidebar({ launchModel = null, onLaunchFieldChange = null, onLaunchStart
     h(LaunchPanel, { launchModel, onLaunchFieldChange, onLaunchStart }),
     h(ThreadDrawer),
     h(ThreadContextMenu),
+    h(
+      "div",
+      { className: "sidebar-bottom-bar" },
+      h(ThemePickerRow)
+    ),
     h("div", {
       className: "sidebar-resize",
       id: "sidebar-resize",
@@ -176,13 +181,41 @@ function ThreadContextMenu() {
   );
 }
 
-function HeaderOverflowIcon() {
+function InfoIcon() {
   return h(
     "svg",
-    { "aria-hidden": "true", fill: "none", height: "16", viewBox: "0 0 16 16", width: "16" },
-    h("circle", { cx: "3", cy: "8", fill: "currentColor", r: "1.5" }),
-    h("circle", { cx: "8", cy: "8", fill: "currentColor", r: "1.5" }),
-    h("circle", { cx: "13", cy: "8", fill: "currentColor", r: "1.5" })
+    {
+      "aria-hidden": "true",
+      fill: "none",
+      height: "14",
+      viewBox: "0 0 16 16",
+      width: "14",
+      stroke: "currentColor",
+      strokeWidth: "1.4",
+      strokeLinecap: "round",
+      strokeLinejoin: "round",
+    },
+    h("circle", { cx: "8", cy: "8", r: "6.25" }),
+    h("line", { x1: "8", y1: "7.3", x2: "8", y2: "11.5" }),
+    h("circle", { cx: "8", cy: "5", r: "0.7", fill: "currentColor", stroke: "none" })
+  );
+}
+
+function BackArrowIcon() {
+  return h(
+    "svg",
+    {
+      "aria-hidden": "true",
+      fill: "none",
+      height: "14",
+      viewBox: "0 0 16 16",
+      width: "14",
+      stroke: "currentColor",
+      strokeWidth: "1.6",
+      strokeLinecap: "round",
+      strokeLinejoin: "round",
+    },
+    h("path", { d: "M10 3.5L5.5 8L10 12.5" })
   );
 }
 
@@ -257,9 +290,36 @@ function ChatHeader() {
         )
       ),
       h(
+        "button",
+        {
+          className: "header-icon-button chat-heading-back-button",
+          hidden: true,
+          id: "go-console-home",
+          title: "Back to console",
+          "aria-label": "Back to console",
+          type: "button",
+        },
+        h(BackArrowIcon)
+      ),
+      h(
         "div",
         { className: "chat-heading" },
-        h("h1", { id: "workspace-title" }, "Relay console"),
+        h(
+          "div",
+          { className: "chat-heading-title-row" },
+          h("h1", { id: "workspace-title" }, "Relay console"),
+          h(
+            "button",
+            {
+              "aria-label": "Session details",
+              className: "header-icon-button chat-heading-info-button",
+              id: "open-session-details",
+              type: "button",
+              title: "Session details",
+            },
+            h(InfoIcon)
+          )
+        ),
         h("p", { className: "chat-subtitle", id: "workspace-subtitle" })
       )
     ),
@@ -272,11 +332,6 @@ function ChatHeader() {
         id: "local-model-badge",
       }),
       h("span", { className: "status-badge", id: "status-badge" }, "Idle"),
-      h(
-        "button",
-        { className: "header-button", hidden: true, id: "go-console-home", type: "button" },
-        "Back"
-      ),
       h(
         "button",
         { className: "header-button", id: "open-security-header", type: "button" },
@@ -292,27 +347,6 @@ function ChatHeader() {
           title: "Toggle side panel (⌥⌘B)",
         },
         h(ToggleRightPanelIcon)
-      ),
-      h(
-        "div",
-        { className: "header-overflow-wrap" },
-        h(
-          "button",
-          {
-            "aria-label": "More options",
-            className: "header-button header-overflow-button",
-            id: "header-overflow-button",
-            type: "button",
-          },
-          h(HeaderOverflowIcon)
-        ),
-        h(
-          "div",
-          { className: "header-overflow-menu", hidden: true, id: "header-overflow-menu" },
-          h("button", { className: "overflow-menu-item", id: "open-session-details", type: "button" }, "Session details"),
-          h("button", { className: "overflow-menu-item", id: "refresh-button", type: "button" }, "Refresh"),
-          h(ThemePickerRow)
-        )
       )
     )
   );
@@ -482,7 +516,7 @@ function WorkspaceChangesRail() {
 function ChatShell() {
   return h(
     "main",
-    { className: "chat-shell" },
+    { className: "chat-shell", "data-view": "console" },
     h(ChatHeader),
     h(OverviewStrip),
     h(ConsoleGrid),
@@ -723,7 +757,7 @@ export function LocalShell({ launchModel = null, onLaunchFieldChange = null, onL
     null,
     h(
       "div",
-      { className: "app-shell app-shell-with-rail" },
+      { className: "app-shell app-shell-with-rail", "data-view": "console" },
       h(Sidebar, { launchModel, onLaunchFieldChange, onLaunchStart }),
       h(ChatShell),
       h(WorkspaceChangesRail)
