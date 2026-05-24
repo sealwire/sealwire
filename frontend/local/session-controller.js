@@ -1080,7 +1080,7 @@ export function createSessionController({
     logLine("Creating a broker pairing ticket.");
 
     const path_scope = (pairingPathScopeInput?.value || "")
-      .split("\n")
+      .split(/[\n,]/)
       .map((line) => line.trim())
       .filter(Boolean);
 

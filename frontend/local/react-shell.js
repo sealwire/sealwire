@@ -672,12 +672,14 @@ function SecurityModal() {
         "div",
         { className: "pairing-scope-row" },
         h("label", { className: "sidebar-label", htmlFor: "pairing-path-scope-input" }, "Pairing path scope (optional)"),
-        h("textarea", {
+        h("input", {
+          autoComplete: "off",
           id: "pairing-path-scope-input",
+          list: "workspace-suggestions",
           placeholder: "/Users/me/projects/specific-repo",
-          rows: "2",
+          type: "text",
         }),
-        h("p", { className: "sidebar-hint" }, "Limit the next QR's paired device to these paths. Empty = no per-device restriction (relay roots still apply).")
+        h("p", { className: "sidebar-hint" }, "Limit the next QR's paired device to this path. Empty = no per-device restriction (relay roots still apply).")
       ),
       h(
         "section",
