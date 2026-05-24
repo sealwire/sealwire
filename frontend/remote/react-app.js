@@ -1392,18 +1392,6 @@ function RemoteThreadPanel({
     { className: "remote-thread-panel" },
     h(
       "section",
-      {
-        className: "control-banner",
-        hidden: controlBannerModel.hidden,
-        id: "remote-control-banner",
-      },
-      h(ControlBanner, {
-        model: controlBannerModel,
-        onTakeOver,
-      })
-    ),
-    h(
-      "section",
       { className: "thread-shell" },
       h(RemoteTranscriptPanel, {
         currentState,
@@ -1429,6 +1417,18 @@ function RemoteThreadPanel({
           const dialog = document.getElementById("remote-workspace-diff-modal");
           dialog?.showModal?.();
         },
+      })
+    ),
+    h(
+      "section",
+      {
+        className: "control-banner control-banner-compact",
+        hidden: controlBannerModel.hidden,
+        id: "remote-control-banner",
+      },
+      h(ControlBanner, {
+        model: controlBannerModel,
+        onTakeOver,
       })
     ),
     h(

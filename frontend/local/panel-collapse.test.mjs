@@ -143,14 +143,17 @@ test("both panels collapsed still keeps 3 columns (0, 1fr, 0)", () => {
 // responsive layout always wins.
 
 function extractMobileMediaBlock() {
-  // We look for the @media block at line 3086-ish that contains the
-  // workspace-diff chip rule — that's the one we recently extended.
-  const marker = ".workspace-diff-chip { display: inline-flex; }";
+  // Locate the @media (max-width: 960px) block that contains our recent
+  // mobile responsive rules. Anchor on a marker that's unique to that
+  // specific block — the `:not(.remote-app-shell)` rule for hiding the
+  // sidebar-bottom-bar only appears there, so we won't accidentally pick
+  // up an older @media block.
+  const marker = ".app-shell:not(.remote-app-shell) .sidebar-bottom-bar";
   const markerIdx = styles.indexOf(marker);
-  assert.ok(markerIdx > 0, "expected to find the mobile chip rule");
+  assert.ok(markerIdx > 0, "expected to find the mobile-only sidebar-bottom-bar rule");
   // Walk back to find the enclosing @media (max-width: 960px) { ... } block.
   const atMediaIdx = styles.lastIndexOf("@media (max-width: 960px)", markerIdx);
-  assert.ok(atMediaIdx >= 0, "expected @media (max-width: 960px) before chip rule");
+  assert.ok(atMediaIdx >= 0, "expected @media (max-width: 960px) before mobile rule");
   const openBrace = styles.indexOf("{", atMediaIdx);
   let depth = 1;
   let scan = openBrace + 1;

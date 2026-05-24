@@ -802,7 +802,166 @@ function FileChangeSummary({ tool, fallback }) {
   return h("span", { className: "tool-collapsed-preview" }, fallback || tool.detail || "");
 }
 
-function ToolEntry({ entry, isJustPrepended = false, options = null }) {
+function isAskUserQuestionTool(tool) {
+  return Boolean(tool) && tool.name === "AskUserQuestion";
+}
+
+function parseAskUserQuestions(inputPreview) {
+  const text = String(inputPreview || "").trim();
+  if (!text) {
+    return null;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  const questions = Array.isArray(parsed?.questions) ? parsed.questions : [];
+  if (!questions.length) {
+    return null;
+  }
+  return questions
+    .map((raw) => {
+      if (!raw || typeof raw !== "object") return null;
+      const options = Array.isArray(raw.options) ? raw.options : [];
+      return {
+        question: typeof raw.question === "string" ? raw.question : "",
+        header: typeof raw.header === "string" ? raw.header : "",
+        multiSelect: Boolean(raw.multiSelect),
+        options: options
+          .map((opt) => {
+            if (!opt || typeof opt !== "object") return null;
+            return {
+              label: typeof opt.label === "string" ? opt.label : "",
+              description: typeof opt.description === "string" ? opt.description : "",
+            };
+          })
+          .filter(Boolean),
+      };
+    })
+    .filter(Boolean);
+}
+
+// The Claude SDK's AskUserQuestion result_preview looks like:
+//   Your questions have been answered: "Q1"="A1", "Q2"="A2". You can now ...
+// We extract the per-question answers so each question card can highlight
+// the option that matches. Free-text answers (label not in the option list)
+// are kept verbatim and shown as a free-form answer line.
+export function parseAskUserAnswers(resultPreview) {
+  const text = String(resultPreview || "");
+  if (!text) {
+    return new Map();
+  }
+  const answers = new Map();
+  const pattern = /"((?:[^"\\]|\\.)*)"\s*=\s*"((?:[^"\\]|\\.)*)"/g;
+  let match;
+  while ((match = pattern.exec(text)) !== null) {
+    const question = match[1].replace(/\\"/g, "\"").replace(/\\\\/g, "\\");
+    const answer = match[2].replace(/\\"/g, "\"").replace(/\\\\/g, "\\");
+    answers.set(question, answer);
+  }
+  return answers;
+}
+
+function AskUserEntry({ entry, isJustPrepended = false, options = null }) {
+  const itemId = entry.item_id || "";
+  const detailEntry = resolveTranscriptDetailEntry(entry, options);
+  const toolEntry = detailEntry || entry;
+  const tool = toolEntry.tool || entry.tool || {};
+  const status = entry.status || "running";
+  const questions = parseAskUserQuestions(tool.input_preview);
+  // If the input JSON was truncated mid-string or otherwise malformed, fall
+  // back to the generic ToolEntry path so the user at least sees the raw
+  // preview rather than a blank card.
+  if (!questions) {
+    return h(GenericToolEntry, { entry, isJustPrepended, options });
+  }
+  const answers = parseAskUserAnswers(tool.result_preview);
+  const answered = answers.size > 0 || status === "completed";
+
+  return h(
+    "article",
+    transcriptEntryDomAttrs(
+      entry,
+      "chat-message chat-message-system chat-message-ask-user",
+      null,
+      { justPrepended: isJustPrepended }
+    ),
+    h(
+      "div",
+      { className: "message-card message-card-system message-card-ask-user" },
+      h(
+        "div",
+        { className: "ask-user-meta" },
+        h("span", { className: "ask-user-tag" }, "Claude asked"),
+        h(
+          "span",
+          { className: "ask-user-status" },
+          answered ? "Answered" : "Waiting for answer"
+        )
+      ),
+      ...questions.map((q, qIndex) => {
+        const answerLabel = answers.get(q.question) || "";
+        const matchedOption = answerLabel
+          ? q.options.find((opt) => opt.label === answerLabel)
+          : null;
+        return h(
+          "section",
+          {
+            className: "ask-user-question",
+            key: itemId ? `${itemId}:q:${qIndex}` : `ask-user:q:${qIndex}`,
+          },
+          q.header
+            ? h("div", { className: "ask-user-question-header" }, q.header)
+            : null,
+          h("p", { className: "ask-user-question-text" }, q.question || "(no question)"),
+          q.options.length
+            ? h(
+                "div",
+                { className: "ask-user-options" },
+                ...q.options.map((opt, oIndex) => {
+                  const isChosen = answerLabel && opt.label === answerLabel;
+                  return h(
+                    "div",
+                    {
+                      className: `ask-user-option${isChosen ? " is-chosen" : ""}`,
+                      key: `${qIndex}:opt:${oIndex}`,
+                    },
+                    h(
+                      "div",
+                      { className: "ask-user-option-label" },
+                      isChosen
+                        ? h("span", { className: "ask-user-option-check", "aria-hidden": "true" }, "✓ ")
+                        : null,
+                      opt.label || "(no label)"
+                    ),
+                    opt.description
+                      ? h(
+                          "div",
+                          { className: "ask-user-option-description" },
+                          opt.description
+                        )
+                      : null
+                  );
+                })
+              )
+            : null,
+          answerLabel && !matchedOption
+            ? h(
+                "div",
+                { className: "ask-user-freeform-answer" },
+                h("span", { className: "ask-user-freeform-answer-label" }, "Answer: "),
+                answerLabel
+              )
+            : null
+        );
+      })
+    )
+  );
+}
+
+function GenericToolEntry({ entry, isJustPrepended = false, options = null }) {
   const itemId = entry.item_id || "";
   const expandKey = itemId ? `entry:${itemId}` : "";
   const expanded = Boolean(expandKey && options?.expandedKeys?.has(expandKey));

@@ -435,17 +435,6 @@ function ThreadPanel() {
     { className: "thread-panel" },
     h(
       "section",
-      { className: "control-banner", hidden: true, id: "control-banner" },
-      h(
-        "div",
-        null,
-        h("p", { className: "control-summary", id: "control-summary" }, "This device has control"),
-        h("p", { className: "control-hint", id: "control-hint" }, "Only the active device can type, but any owner device can approve.")
-      ),
-      h("button", { className: "header-button control-button", id: "take-over-button", type: "button" }, "Take over")
-    ),
-    h(
-      "section",
       { className: "thread-shell" },
       h(
         "div",
@@ -466,6 +455,20 @@ function ComposerShell() {
     React.Fragment,
     null,
     h("div", { className: "workspace-diff-chip-host", id: "workspace-diff-chip-mount" }),
+    h(
+      "section",
+      { className: "control-banner control-banner-compact", hidden: true, id: "control-banner" },
+      h("span", { className: "control-summary", id: "control-summary" }, "Another device has control"),
+      h(
+        "button",
+        {
+          className: "control-button",
+          id: "take-over-button",
+          type: "button",
+        },
+        "Take over"
+      )
+    ),
     h(
       "form",
       { className: "composer-shell", hidden: true, id: "message-form" },

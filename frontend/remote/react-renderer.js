@@ -239,16 +239,11 @@ export function ControlBanner({ model, onTakeOver = null }) {
   return h(
     React.Fragment,
     null,
-    h(
-      "div",
-      null,
-      h("p", { className: "control-summary" }, model.summary),
-      h("p", { className: "control-hint" }, model.hint)
-    ),
+    h("span", { className: "control-summary" }, model.summary),
     h(
       "button",
       {
-        className: "header-button control-button",
+        className: "control-button",
         hidden: model.takeOverHidden,
         id: "remote-take-over-button",
         onClick: onTakeOver,

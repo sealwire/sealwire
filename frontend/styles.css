@@ -1529,7 +1529,10 @@ input:focus, textarea:focus, select:focus {
   }
 }
 
-/* CONTROL BANNER */
+/* CONTROL BANNER — compact bar that sits just above the composer when
+ * another device has control. The composer's message input is already
+ * disabled by the session renderer in that state, so the only path forward
+ * is to tap "Take over". */
 .control-banner {
   margin: 0;
   padding: 14px 24px;
@@ -1541,8 +1544,36 @@ input:focus, textarea:focus, select:focus {
   justify-content: space-between;
   animation: surface-enter 300ms ease both;
 }
-.control-summary { margin: 0; font-weight: 600; font-size: 14px; }
+.control-banner-compact {
+  margin: 0 16px;
+  padding: 8px 12px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  animation: none;
+  font-size: 13px;
+}
+.control-summary { margin: 0; font-weight: 500; font-size: 13px; color: var(--text-primary); }
 .control-hint { margin: 4px 0 0; font-size: 12px; color: var(--text-secondary); }
+.control-banner-compact .control-button {
+  font-size: 12px;
+  padding: 4px 10px;
+  font-weight: 500;
+  background: var(--accent, #6366f1);
+  color: var(--accent-on, #fff);
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  flex-shrink: 0;
+  box-shadow: none;
+}
+.control-banner-compact .control-button:hover {
+  filter: brightness(1.05);
+}
 
 /* THREAD SHELL */
 .thread-shell {
@@ -2660,8 +2691,16 @@ input:focus, textarea:focus, select:focus {
   .thread-panel { overflow: visible; }
   .chat-shell[data-view="conversation"] .console-grid { grid-template-columns: 1fr; }
   .launch-footer { flex-wrap: wrap; }
-  .control-banner { flex-direction: column; align-items: flex-start; }
-  .control-button { width: 100%; margin-top: 12px; }
+  /* Compact banner stays single-line on mobile (it sits above composer);
+   * only the legacy full-width banner stacks. */
+  .control-banner:not(.control-banner-compact) {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .control-banner:not(.control-banner-compact) .control-button {
+    width: 100%;
+    margin-top: 12px;
+  }
   .composer-shell { padding: 12px; }
   .remote-chat-shell .composer-shell {
     padding: 12px 12px calc(12px + env(safe-area-inset-bottom, 0px));
@@ -3059,29 +3098,42 @@ body.is-resizing-panel {
   color: var(--text-warning, #b54708);
 }
 
-/* Mobile composer chip */
-.workspace-diff-chip-host {
-  padding: 0 16px;
+/* Mobile composer chip — all styles scoped to <=960px since the chip itself
+ * doesn't exist visually on desktop. Sits above the take-over banner and the
+ * composer. Right-aligned so it doesn't dominate the already-busy bottom
+ * area. Tap opens the workspace-diff modal (file list with per-file expand
+ * and per-line drill-down). */
+.workspace-diff-chip { display: none; }
+@media (max-width: 960px) {
+  .workspace-diff-chip-host {
+    padding: 4px 16px 0;
+    display: flex;
+    justify-content: center;
+  }
+  .workspace-diff-chip {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 6px 14px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-subtle);
+    border-radius: 999px;
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--text-secondary);
+    cursor: pointer;
+    box-shadow: none;
+    width: 70vw;
+    max-width: 100%;
+    min-width: 200px;
+  }
+  .workspace-diff-chip:hover { background: var(--bg-surface-2, var(--bg-elevated)); }
+  .workspace-diff-chip-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .workspace-diff-chip-sep { color: var(--text-tertiary, var(--text-secondary)); opacity: 0.6; }
+  .workspace-diff-chip-add { color: var(--diff-add-fg, #22c55e); font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace); font-size: 11px; }
+  .workspace-diff-chip-del { color: var(--diff-del-fg, #ef4444); font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace); font-size: 11px; }
 }
-.workspace-diff-chip {
-  display: none;
-  width: 100%;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  margin: 6px 0 4px;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
-  border-radius: 999px;
-  font-size: 13px;
-  color: var(--text-secondary);
-  cursor: pointer;
-  box-shadow: none;
-}
-.workspace-diff-chip:hover { background: var(--bg-surface-2, var(--bg-elevated)); }
-.workspace-diff-chip-label { flex: 1; text-align: left; min-width: 0; }
-.workspace-diff-chip-add { color: var(--diff-add-fg, #22c55e); font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace); }
-.workspace-diff-chip-del { color: var(--diff-del-fg, #ef4444); font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace); }
 
 /* Responsive: hide right rail and show chip on mobile */
 @media (max-width: 960px) {
@@ -3094,7 +3146,7 @@ body.is-resizing-panel {
   .right-rail { display: none; }
   .sidebar-resize,
   .right-rail-resize { display: none; }
-  .workspace-diff-chip { display: inline-flex; }
+  /* `.workspace-diff-chip` is shown via its own mobile block above. */
 
   /* Neutralize any persisted collapsed state from desktop — on mobile the
    * panels are managed by the responsive layout (sidebar stacks above chat,

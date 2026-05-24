@@ -359,17 +359,17 @@ export function WorkspaceDiffChip({ store, onTap }) {
       type: "button",
       className: "workspace-diff-chip",
       onClick: () => onTap?.(),
+      title: "Tap to view file diffs",
     },
     h("span", { className: "workspace-diff-chip-label" },
-      stats.fileCount === 1
-        ? "1 file changed"
-        : `${stats.fileCount} files changed`
+      stats.fileCount === 1 ? "1 file" : `${stats.fileCount} files`
     ),
+    h("span", { className: "workspace-diff-chip-sep" }, "·"),
     stats.added > 0
       ? h("span", { className: "workspace-diff-chip-add" }, `+${stats.added}`)
       : null,
     stats.removed > 0
-      ? h("span", { className: "workspace-diff-chip-del" }, `-${stats.removed}`)
+      ? h("span", { className: "workspace-diff-chip-del" }, `−${stats.removed}`)
       : null
   );
 }

@@ -111,23 +111,18 @@ export function SessionMetaPanel({ chips = [], emptyMessage = "" }) {
 }
 
 export function ControlBannerContent({
-  hint,
+  hint: _hint,
   showTakeOver = false,
   summary,
 }) {
   return h(
     React.Fragment,
     null,
-    h(
-      "div",
-      null,
-      h("p", { className: "control-summary", id: "control-summary" }, summary),
-      h("p", { className: "control-hint", id: "control-hint" }, hint)
-    ),
+    h("span", { className: "control-summary", id: "control-summary" }, summary),
     h(
       "button",
       {
-        className: "header-button control-button",
+        className: "control-button",
         hidden: !showTakeOver,
         id: "take-over-button",
         type: "button",
