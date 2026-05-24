@@ -1219,6 +1219,236 @@ async fn handle_notification_buffers_late_delta_for_prior_thread() {
 }
 
 #[tokio::test]
+async fn handle_notification_buffers_late_agent_completion_for_prior_thread() {
+    let (change_tx, _) = watch::channel(0_u64);
+    let state = std::sync::Arc::new(RwLock::new(RelayState::new(
+        "/tmp/project".to_string(),
+        change_tx,
+        SecurityProfile::private(),
+    )));
+
+    {
+        let mut relay = state.write().await;
+        relay.active_thread_id = Some("thread-A".to_string());
+    }
+
+    handle_notification(
+        json!({
+            "method": "item/started",
+            "params": {
+                "threadId": "thread-A",
+                "turnId": "turn-A1",
+                "item": { "id": "msg-1", "type": "agentMessage" }
+            }
+        }),
+        &state,
+    )
+    .await;
+    handle_notification(
+        json!({
+            "method": "item/agentMessage/delta",
+            "params": {
+                "threadId": "thread-A",
+                "itemId": "msg-1",
+                "turnId": "turn-A1",
+                "delta": "Hello"
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    {
+        let mut relay = state.write().await;
+        relay.load_thread_data(
+            ThreadSyncData {
+                thread: test_thread_summary("thread-B"),
+                status: "idle".to_string(),
+                active_flags: Vec::new(),
+                transcript: Vec::new(),
+            },
+            "untrusted",
+            "workspace-write",
+            "medium",
+            "device-a",
+        );
+    }
+
+    handle_notification(
+        json!({
+            "method": "item/agentMessage/delta",
+            "params": {
+                "threadId": "thread-A",
+                "itemId": "msg-1",
+                "turnId": "turn-A1",
+                "delta": " world"
+            }
+        }),
+        &state,
+    )
+    .await;
+    handle_notification(
+        json!({
+            "method": "item/completed",
+            "params": {
+                "threadId": "thread-A",
+                "turnId": "turn-A1",
+                "item": {
+                    "id": "msg-1",
+                    "type": "agentMessage",
+                    "text": "Hello world"
+                }
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    {
+        let mut relay = state.write().await;
+        relay.load_thread_data(
+            ThreadSyncData {
+                thread: test_thread_summary("thread-A"),
+                status: "idle".to_string(),
+                active_flags: Vec::new(),
+                transcript: vec![TranscriptEntryView {
+                    item_id: Some("msg-1".to_string()),
+                    kind: TranscriptEntryKind::AgentText,
+                    text: Some("Hello world".to_string()),
+                    status: "completed".to_string(),
+                    turn_id: Some("turn-A1".to_string()),
+                    tool: None,
+                }],
+            },
+            "untrusted",
+            "workspace-write",
+            "medium",
+            "device-a",
+        );
+    }
+
+    let relay = state.read().await;
+    let entry = relay
+        .snapshot()
+        .transcript
+        .into_iter()
+        .find(|entry| entry.item_id.as_deref() == Some("msg-1"))
+        .expect("thread A's msg-1 should be present after switching back");
+    assert_eq!(entry.text.as_deref(), Some("Hello world"));
+    assert_eq!(
+        entry.status, "completed",
+        "background item/completed must prevent a restored streaming entry"
+    );
+}
+
+#[tokio::test]
+async fn restore_background_does_not_downgrade_fresh_completed_agent_message() {
+    let (change_tx, _) = watch::channel(0_u64);
+    let state = std::sync::Arc::new(RwLock::new(RelayState::new(
+        "/tmp/project".to_string(),
+        change_tx,
+        SecurityProfile::private(),
+    )));
+
+    {
+        let mut relay = state.write().await;
+        relay.active_thread_id = Some("thread-A".to_string());
+    }
+
+    handle_notification(
+        json!({
+            "method": "item/started",
+            "params": {
+                "threadId": "thread-A",
+                "turnId": "turn-A1",
+                "item": { "id": "msg-1", "type": "agentMessage" }
+            }
+        }),
+        &state,
+    )
+    .await;
+    handle_notification(
+        json!({
+            "method": "item/agentMessage/delta",
+            "params": {
+                "threadId": "thread-A",
+                "itemId": "msg-1",
+                "turnId": "turn-A1",
+                "delta": "Hello"
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    {
+        let mut relay = state.write().await;
+        relay.load_thread_data(
+            ThreadSyncData {
+                thread: test_thread_summary("thread-B"),
+                status: "idle".to_string(),
+                active_flags: Vec::new(),
+                transcript: Vec::new(),
+            },
+            "untrusted",
+            "workspace-write",
+            "medium",
+            "device-a",
+        );
+    }
+
+    handle_notification(
+        json!({
+            "method": "item/agentMessage/delta",
+            "params": {
+                "threadId": "thread-A",
+                "itemId": "msg-1",
+                "turnId": "turn-A1",
+                "delta": " world"
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    {
+        let mut relay = state.write().await;
+        relay.load_thread_data(
+            ThreadSyncData {
+                thread: test_thread_summary("thread-A"),
+                status: "idle".to_string(),
+                active_flags: Vec::new(),
+                transcript: vec![TranscriptEntryView {
+                    item_id: Some("msg-1".to_string()),
+                    kind: TranscriptEntryKind::AgentText,
+                    text: Some("Hello world".to_string()),
+                    status: "completed".to_string(),
+                    turn_id: Some("turn-A1".to_string()),
+                    tool: None,
+                }],
+            },
+            "untrusted",
+            "workspace-write",
+            "medium",
+            "device-a",
+        );
+    }
+
+    let relay = state.read().await;
+    let entry = relay
+        .snapshot()
+        .transcript
+        .into_iter()
+        .find(|entry| entry.item_id.as_deref() == Some("msg-1"))
+        .expect("thread A's msg-1 should be present after switching back");
+    assert_eq!(entry.text.as_deref(), Some("Hello world"));
+    assert_eq!(
+        entry.status, "completed",
+        "fresh worker state must not be downgraded by a stale background stream"
+    );
+}
+
+#[tokio::test]
 async fn handle_notification_does_not_leak_late_delta_into_new_thread() {
     let (change_tx, _) = watch::channel(0_u64);
     let state = std::sync::Arc::new(RwLock::new(RelayState::new(

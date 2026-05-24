@@ -7,8 +7,8 @@ use tracing::{info, warn};
 
 use crate::{
     protocol::{
-        ApplyFileChangeInput, ApplyFileChangeReceipt, ApprovalDecisionInput, ApprovalReceipt,
-        HeartbeatInput, ModelOptionView, ReadThreadEntriesInput, ReadThreadEntryDetailInput,
+        ApplyFileChangeInput, ApprovalDecisionInput, ApprovalReceipt, HeartbeatInput,
+        ModelOptionView, ReadThreadEntriesInput, ReadThreadEntryDetailInput,
         ReadThreadTranscriptInput, ResumeSessionInput, SendMessageInput, SessionSnapshot,
         StartSessionInput, StopTurnInput, TakeOverInput, ThreadEntriesResponse,
         ThreadEntryDetailResponse, ThreadTranscriptResponse, ThreadsQuery, ThreadsResponse,

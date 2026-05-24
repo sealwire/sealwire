@@ -795,7 +795,8 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
         }
         "item/started" => match string_at(&params, &["item", "type"]).as_deref() {
             Some("agentMessage") => {
-                if !should_apply_session_notification(&relay, notification_thread_id.as_deref()) {
+                let route = thread_route(&relay, notification_thread_id.as_deref());
+                if matches!(route, ThreadRoute::Drop) {
                     log_ignored_session_notification(
                         method,
                         notification_thread_id.as_deref(),
@@ -807,13 +808,23 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
                     string_at(&params, &["item", "id"]),
                     string_at(&params, &["turnId"]),
                 ) {
-                    relay.start_agent_message(item_id, turn_id);
-                    relay.touch_progress(Some("streaming"), None);
+                    if let ThreadRoute::Background(bg_thread_id) = route {
+                        relay.bg_start_agent_message(
+                            &bg_thread_id,
+                            item_id,
+                            turn_id,
+                            crate::state::unix_now(),
+                        );
+                    } else {
+                        relay.start_agent_message(item_id, turn_id);
+                        relay.touch_progress(Some("streaming"), None);
+                    }
                     changed = true;
                 }
             }
             Some("commandExecution") => {
-                if !should_apply_session_notification(&relay, notification_thread_id.as_deref()) {
+                let route = thread_route(&relay, notification_thread_id.as_deref());
+                if matches!(route, ThreadRoute::Drop) {
                     log_ignored_session_notification(
                         method,
                         notification_thread_id.as_deref(),
@@ -826,20 +837,28 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
                     string_at(&params, &["turnId"]),
                     string_at(&params, &["item", "command"]),
                 ) {
-                    relay.start_command_execution(
-                        item_id,
-                        command.clone(),
-                        string_at(&params, &["item", "status"])
-                            .unwrap_or_else(|| "running".to_string()),
-                        turn_id,
-                    );
-                    relay.touch_progress(Some("tool"), Some("Bash"));
-                    relay.push_log("command", format!("Command started: {command}"));
+                    let status = string_at(&params, &["item", "status"])
+                        .unwrap_or_else(|| "running".to_string());
+                    if let ThreadRoute::Background(bg_thread_id) = route {
+                        relay.bg_start_command_execution(
+                            &bg_thread_id,
+                            item_id,
+                            command,
+                            status,
+                            turn_id,
+                            crate::state::unix_now(),
+                        );
+                    } else {
+                        relay.start_command_execution(item_id, command.clone(), status, turn_id);
+                        relay.touch_progress(Some("tool"), Some("Bash"));
+                        relay.push_log("command", format!("Command started: {command}"));
+                    }
                     changed = true;
                 }
             }
             _ => {
-                if !should_apply_session_notification(&relay, notification_thread_id.as_deref()) {
+                let route = thread_route(&relay, notification_thread_id.as_deref());
+                if matches!(route, ThreadRoute::Drop) {
                     log_ignored_session_notification(
                         method,
                         notification_thread_id.as_deref(),
@@ -847,15 +866,35 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
                     );
                     return;
                 }
-                let tool_name = string_at(&params, &["item", "name"])
-                    .or_else(|| string_at(&params, &["item", "tool"]));
-                relay.touch_progress(Some("tool"), tool_name.as_deref());
-                changed |= upsert_transcript_item_from_value(
-                    &mut relay,
-                    value_at(&params, &["item"]),
-                    string_at(&params, &["turnId"]),
-                    "running",
-                );
+                if let ThreadRoute::Background(bg_thread_id) = route {
+                    if let Some(entry) = value_at(&params, &["item"]).and_then(|item| {
+                        parse_transcript_item(item, string_at(&params, &["turnId"]), "running")
+                    }) {
+                        if let Some(item_id) = entry.item_id {
+                            relay.bg_upsert_transcript_item(
+                                &bg_thread_id,
+                                item_id,
+                                entry.kind,
+                                entry.text,
+                                entry.status,
+                                entry.turn_id,
+                                entry.tool,
+                                crate::state::unix_now(),
+                            );
+                            changed = true;
+                        }
+                    }
+                } else {
+                    let tool_name = string_at(&params, &["item", "name"])
+                        .or_else(|| string_at(&params, &["item", "tool"]));
+                    relay.touch_progress(Some("tool"), tool_name.as_deref());
+                    changed |= upsert_transcript_item_from_value(
+                        &mut relay,
+                        value_at(&params, &["item"]),
+                        string_at(&params, &["turnId"]),
+                        "running",
+                    );
+                }
             }
         },
         "item/agentMessage/delta" => {
@@ -925,7 +964,8 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
         }
         "item/completed" => match string_at(&params, &["item", "type"]).as_deref() {
             Some("userMessage") => {
-                if !should_apply_session_notification(&relay, notification_thread_id.as_deref()) {
+                let route = thread_route(&relay, notification_thread_id.as_deref());
+                if matches!(route, ThreadRoute::Drop) {
                     log_ignored_session_notification(
                         method,
                         notification_thread_id.as_deref(),
@@ -938,13 +978,24 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
                     string_at(&params, &["turnId"]),
                     parse_user_text(value_at(&params, &["item"])),
                 ) {
-                    relay.upsert_user_message(item_id, text, turn_id);
-                    relay.touch_progress(Some("thinking"), None);
+                    if let ThreadRoute::Background(bg_thread_id) = route {
+                        relay.bg_upsert_user_message(
+                            &bg_thread_id,
+                            item_id,
+                            text,
+                            turn_id,
+                            crate::state::unix_now(),
+                        );
+                    } else {
+                        relay.upsert_user_message(item_id, text, turn_id);
+                        relay.touch_progress(Some("thinking"), None);
+                    }
                     changed = true;
                 }
             }
             Some("agentMessage") => {
-                if !should_apply_session_notification(&relay, notification_thread_id.as_deref()) {
+                let route = thread_route(&relay, notification_thread_id.as_deref());
+                if matches!(route, ThreadRoute::Drop) {
                     log_ignored_session_notification(
                         method,
                         notification_thread_id.as_deref(),
@@ -957,13 +1008,24 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
                     string_at(&params, &["turnId"]),
                     string_at(&params, &["item", "text"]),
                 ) {
-                    relay.complete_agent_message(item_id, text, turn_id);
-                    relay.touch_progress(Some("thinking"), None);
+                    if let ThreadRoute::Background(bg_thread_id) = route {
+                        relay.bg_complete_agent_message(
+                            &bg_thread_id,
+                            item_id,
+                            text,
+                            turn_id,
+                            crate::state::unix_now(),
+                        );
+                    } else {
+                        relay.complete_agent_message(item_id, text, turn_id);
+                        relay.touch_progress(Some("thinking"), None);
+                    }
                     changed = true;
                 }
             }
             Some("commandExecution") => {
-                if !should_apply_session_notification(&relay, notification_thread_id.as_deref()) {
+                let route = thread_route(&relay, notification_thread_id.as_deref());
+                if matches!(route, ThreadRoute::Drop) {
                     log_ignored_session_notification(
                         method,
                         notification_thread_id.as_deref(),
@@ -976,22 +1038,31 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
                     string_at(&params, &["turnId"]),
                     string_at(&params, &["item", "command"]),
                 ) {
-                    relay.add_command_result(
-                        item_id,
-                        command,
-                        string_at(&params, &["item", "aggregatedOutput"]),
-                        string_at(&params, &["item", "status"])
-                            .unwrap_or_else(|| "completed".to_string()),
-                        turn_id,
-                    );
-                    // Defer phase changes — the next event (or the next turn)
-                    // will refine. Just keep the heartbeat fresh.
-                    relay.touch_progress(None, None);
+                    let output = string_at(&params, &["item", "aggregatedOutput"]);
+                    let status = string_at(&params, &["item", "status"])
+                        .unwrap_or_else(|| "completed".to_string());
+                    if let ThreadRoute::Background(bg_thread_id) = route {
+                        relay.bg_add_command_result(
+                            &bg_thread_id,
+                            item_id,
+                            command,
+                            output,
+                            status,
+                            turn_id,
+                            crate::state::unix_now(),
+                        );
+                    } else {
+                        relay.add_command_result(item_id, command, output, status, turn_id);
+                        // Defer phase changes — the next event (or the next turn)
+                        // will refine. Just keep the heartbeat fresh.
+                        relay.touch_progress(None, None);
+                    }
                     changed = true;
                 }
             }
             _ => {
-                if !should_apply_session_notification(&relay, notification_thread_id.as_deref()) {
+                let route = thread_route(&relay, notification_thread_id.as_deref());
+                if matches!(route, ThreadRoute::Drop) {
                     log_ignored_session_notification(
                         method,
                         notification_thread_id.as_deref(),
@@ -999,13 +1070,33 @@ async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
                     );
                     return;
                 }
-                relay.touch_progress(None, None);
-                changed |= upsert_transcript_item_from_value(
-                    &mut relay,
-                    value_at(&params, &["item"]),
-                    string_at(&params, &["turnId"]),
-                    "completed",
-                );
+                if let ThreadRoute::Background(bg_thread_id) = route {
+                    if let Some(entry) = value_at(&params, &["item"]).and_then(|item| {
+                        parse_transcript_item(item, string_at(&params, &["turnId"]), "completed")
+                    }) {
+                        if let Some(item_id) = entry.item_id {
+                            relay.bg_upsert_transcript_item(
+                                &bg_thread_id,
+                                item_id,
+                                entry.kind,
+                                entry.text,
+                                entry.status,
+                                entry.turn_id,
+                                entry.tool,
+                                crate::state::unix_now(),
+                            );
+                            changed = true;
+                        }
+                    }
+                } else {
+                    relay.touch_progress(None, None);
+                    changed |= upsert_transcript_item_from_value(
+                        &mut relay,
+                        value_at(&params, &["item"]),
+                        string_at(&params, &["turnId"]),
+                        "completed",
+                    );
+                }
             }
         },
         "serverRequest/resolved" => {
@@ -1118,14 +1209,6 @@ fn is_session_notification_method(method: &str) -> bool {
             | "item/fileChange/outputDelta"
             | "item/commandExecution/terminalInteraction"
     )
-}
-
-fn should_apply_session_notification(relay: &RelayState, thread_id: Option<&str>) -> bool {
-    match (relay.active_thread_id.as_deref(), thread_id) {
-        (_, None) => true,
-        (None, Some(_)) => false,
-        (Some(active_thread_id), Some(thread_id)) => active_thread_id == thread_id,
-    }
 }
 
 #[derive(Debug, Clone)]

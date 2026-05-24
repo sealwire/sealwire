@@ -1,6 +1,6 @@
 use crate::protocol::{ToolCallView, TranscriptEntryKind};
 
-use super::transcript::TranscriptRecord;
+use super::transcript::{merge_tool_call_view, TranscriptRecord};
 use super::RelayState;
 
 /// Hard cap on how many backgrounded thread streams the relay keeps before
@@ -66,7 +66,7 @@ impl RelayState {
                     .iter()
                     .position(|entry| entry.item_id == bg_entry.item_id)
                 {
-                    Some(index) => self.transcript[index] = bg_entry,
+                    Some(index) => merge_background_entry(&mut self.transcript[index], bg_entry),
                     None => self.transcript.push(bg_entry),
                 }
             }
@@ -127,6 +127,89 @@ impl RelayState {
         self.evict_oldest_background_if_over_cap();
     }
 
+    pub fn bg_start_agent_message(
+        &mut self,
+        thread_id: &str,
+        item_id: String,
+        turn_id: String,
+        now: u64,
+    ) {
+        let bg = self.touch_background_entry(thread_id, now);
+        if let Some(entry) = bg.transcript.iter_mut().find(|e| e.item_id == item_id) {
+            entry.kind = TranscriptEntryKind::AgentText;
+            entry.text.get_or_insert_with(String::new);
+            entry.status = "streaming".to_string();
+            entry.turn_id = Some(turn_id);
+            entry.tool = None;
+        } else {
+            bg.transcript.push(TranscriptRecord {
+                item_id,
+                kind: TranscriptEntryKind::AgentText,
+                text: Some(String::new()),
+                status: "streaming".to_string(),
+                turn_id: Some(turn_id),
+                tool: None,
+            });
+        }
+        self.evict_oldest_background_if_over_cap();
+    }
+
+    pub fn bg_complete_agent_message(
+        &mut self,
+        thread_id: &str,
+        item_id: String,
+        text: String,
+        turn_id: String,
+        now: u64,
+    ) {
+        let bg = self.touch_background_entry(thread_id, now);
+        if let Some(entry) = bg.transcript.iter_mut().find(|e| e.item_id == item_id) {
+            entry.kind = TranscriptEntryKind::AgentText;
+            entry.text = Some(text);
+            entry.status = "completed".to_string();
+            entry.turn_id = Some(turn_id);
+            entry.tool = None;
+        } else {
+            bg.transcript.push(TranscriptRecord {
+                item_id,
+                kind: TranscriptEntryKind::AgentText,
+                text: Some(text),
+                status: "completed".to_string(),
+                turn_id: Some(turn_id),
+                tool: None,
+            });
+        }
+        self.evict_oldest_background_if_over_cap();
+    }
+
+    pub fn bg_upsert_user_message(
+        &mut self,
+        thread_id: &str,
+        item_id: String,
+        text: String,
+        turn_id: String,
+        now: u64,
+    ) {
+        let bg = self.touch_background_entry(thread_id, now);
+        if let Some(entry) = bg.transcript.iter_mut().find(|e| e.item_id == item_id) {
+            entry.kind = TranscriptEntryKind::UserText;
+            entry.text = Some(text);
+            entry.status = "completed".to_string();
+            entry.turn_id = Some(turn_id);
+            entry.tool = None;
+        } else {
+            bg.transcript.push(TranscriptRecord {
+                item_id,
+                kind: TranscriptEntryKind::UserText,
+                text: Some(text),
+                status: "completed".to_string(),
+                turn_id: Some(turn_id),
+                tool: None,
+            });
+        }
+        self.evict_oldest_background_if_over_cap();
+    }
+
     /// Buffer an `item/commandExecution/outputDelta` notification. Same
     /// streaming-shape as agent deltas: worker doesn't persist
     /// intermediate output.
@@ -162,6 +245,71 @@ impl RelayState {
         self.evict_oldest_background_if_over_cap();
     }
 
+    pub fn bg_start_command_execution(
+        &mut self,
+        thread_id: &str,
+        item_id: String,
+        command: String,
+        status: String,
+        turn_id: String,
+        now: u64,
+    ) {
+        let bg = self.touch_background_entry(thread_id, now);
+        if let Some(entry) = bg.transcript.iter_mut().find(|e| e.item_id == item_id) {
+            entry.kind = TranscriptEntryKind::Command;
+            entry.text = Some(command);
+            entry.status = status;
+            entry.turn_id = Some(turn_id);
+            entry.tool = None;
+        } else {
+            bg.transcript.push(TranscriptRecord {
+                item_id,
+                kind: TranscriptEntryKind::Command,
+                text: Some(command),
+                status,
+                turn_id: Some(turn_id),
+                tool: None,
+            });
+        }
+        self.evict_oldest_background_if_over_cap();
+    }
+
+    pub fn bg_add_command_result(
+        &mut self,
+        thread_id: &str,
+        item_id: String,
+        command: String,
+        output: Option<String>,
+        status: String,
+        turn_id: String,
+        now: u64,
+    ) {
+        let mut text = command;
+        if let Some(output) = super::super::non_empty(Some(output.unwrap_or_default())) {
+            text.push('\n');
+            text.push_str(&output);
+        }
+
+        let bg = self.touch_background_entry(thread_id, now);
+        if let Some(entry) = bg.transcript.iter_mut().find(|e| e.item_id == item_id) {
+            entry.kind = TranscriptEntryKind::Command;
+            entry.text = Some(text);
+            entry.status = status;
+            entry.turn_id = Some(turn_id);
+            entry.tool = None;
+        } else {
+            bg.transcript.push(TranscriptRecord {
+                item_id,
+                kind: TranscriptEntryKind::Command,
+                text: Some(text),
+                status,
+                turn_id: Some(turn_id),
+                tool: None,
+            });
+        }
+        self.evict_oldest_background_if_over_cap();
+    }
+
     /// Buffer a synthetic turn-diff transcript entry. These are constructed
     /// entirely by the relay (the worker has no concept of them), so they
     /// are pure relay-side state and cannot be recovered from
@@ -187,6 +335,41 @@ impl RelayState {
             bg.transcript.push(TranscriptRecord {
                 item_id,
                 kind: TranscriptEntryKind::ToolCall,
+                text,
+                status,
+                turn_id,
+                tool,
+            });
+        }
+        self.evict_oldest_background_if_over_cap();
+    }
+
+    pub fn bg_upsert_transcript_item(
+        &mut self,
+        thread_id: &str,
+        item_id: String,
+        kind: TranscriptEntryKind,
+        text: Option<String>,
+        status: String,
+        turn_id: Option<String>,
+        tool: Option<ToolCallView>,
+        now: u64,
+    ) {
+        let bg = self.touch_background_entry(thread_id, now);
+        if let Some(entry) = bg.transcript.iter_mut().find(|e| e.item_id == item_id) {
+            entry.kind = kind;
+            entry.text = text.or(entry.text.take());
+            entry.status = status;
+            entry.turn_id = turn_id;
+            entry.tool = if kind == TranscriptEntryKind::ToolCall {
+                merge_tool_call_view(entry.tool.take(), tool)
+            } else {
+                tool
+            };
+        } else {
+            bg.transcript.push(TranscriptRecord {
+                item_id,
+                kind,
                 text,
                 status,
                 turn_id,
@@ -246,4 +429,31 @@ impl RelayState {
             }
         }
     }
+}
+
+fn merge_background_entry(fresh: &mut TranscriptRecord, bg: TranscriptRecord) {
+    if is_completed_status(&fresh.status) && !is_completed_status(&bg.status) {
+        if fresh.kind == bg.kind && background_text_is_better(fresh.text.as_ref(), bg.text.as_ref())
+        {
+            fresh.text = bg.text;
+        }
+        if fresh.tool.is_none() {
+            fresh.tool = bg.tool;
+        }
+        return;
+    }
+
+    *fresh = bg;
+}
+
+fn background_text_is_better(fresh: Option<&String>, bg: Option<&String>) -> bool {
+    match (fresh, bg) {
+        (None, Some(_)) => true,
+        (Some(fresh), Some(bg)) => bg.chars().count() > fresh.chars().count(),
+        _ => false,
+    }
+}
+
+fn is_completed_status(status: &str) -> bool {
+    status.eq_ignore_ascii_case("completed")
 }
