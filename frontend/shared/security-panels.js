@@ -138,7 +138,13 @@ function DeviceRecordCard({ formatTimestamp, record, shortId }) {
         hDeviceField("Last Peer", lastPeer),
         hDeviceField("Broker Ticket", ticketExpiry),
         hDeviceField("Fingerprint", fingerprint, "paired-device-fingerprint"),
-        hDeviceField("State Updated", formatTimestamp(record.state_changed_at))
+        hDeviceField("State Updated", formatTimestamp(record.state_changed_at)),
+        hDeviceField(
+          "Path Scope",
+          Array.isArray(record.path_scope) && record.path_scope.length
+            ? record.path_scope.join(", ")
+            : "Unrestricted (relay roots only)"
+        )
       )
     ),
     canManage
@@ -203,7 +209,14 @@ export function PendingPairingRequestsList({
             `${shortId(request.device_id)} · requested ${formatTimestamp(request.requested_at)}`
           ),
           h("p", { className: "paired-device-meta" }, `Broker peer ${shortId(request.broker_peer_id)}`),
-          h("p", { className: "paired-device-meta" }, `Fingerprint ${request.fingerprint || "Unavailable"}`)
+          h("p", { className: "paired-device-meta" }, `Fingerprint ${request.fingerprint || "Unavailable"}`),
+          h(
+            "p",
+            { className: "paired-device-meta" },
+            Array.isArray(request.path_scope) && request.path_scope.length
+              ? `Path scope: ${request.path_scope.join(", ")}`
+              : "Path scope: unrestricted (relay roots only)"
+          )
         ),
         h(
           "div",

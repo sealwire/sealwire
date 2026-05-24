@@ -592,6 +592,8 @@ pub struct PairedDeviceView {
     pub last_peer_id: Option<String>,
     pub broker_join_ticket_expires_at: Option<u64>,
     pub fingerprint: Option<String>,
+    #[serde(default)]
+    pub path_scope: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -604,6 +606,8 @@ pub struct PendingPairingRequestView {
     pub expires_at: u64,
     pub broker_peer_id: String,
     pub fingerprint: Option<String>,
+    #[serde(default)]
+    pub path_scope: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -722,12 +726,16 @@ pub struct ReadThreadTranscriptInput {
     pub thread_id: String,
     pub cursor: Option<usize>,
     pub before: Option<usize>,
+    #[serde(default)]
+    pub device_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadThreadEntriesInput {
     pub thread_id: String,
     pub item_ids: Vec<String>,
+    #[serde(default)]
+    pub device_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -736,6 +744,8 @@ pub struct ReadThreadEntryDetailInput {
     pub item_id: String,
     pub field: Option<String>,
     pub cursor: Option<usize>,
+    #[serde(default)]
+    pub device_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -820,6 +830,8 @@ pub struct ThreadDeleteReceipt {
 #[derive(Debug, Clone, Deserialize)]
 pub struct PairingStartInput {
     pub expires_in_seconds: Option<u64>,
+    #[serde(default)]
+    pub path_scope: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -835,6 +847,8 @@ pub struct PairingTicketView {
     pub pairing_payload: String,
     pub pairing_url: String,
     pub pairing_qr_svg: String,
+    #[serde(default)]
+    pub path_scope: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -873,6 +887,8 @@ pub struct BulkRevokeDevicesReceipt {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreadsQuery {
     pub limit: Option<usize>,
+    #[serde(default)]
+    pub device_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

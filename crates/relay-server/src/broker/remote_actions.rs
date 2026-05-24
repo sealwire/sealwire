@@ -87,7 +87,10 @@ pub(super) enum RemoteActionRequest {
         item_id: String,
         input: ApplyFileChangeInput,
     },
-    FetchWorkspaceDiff,
+    FetchWorkspaceDiff {
+        #[serde(default)]
+        device_id: Option<String>,
+    },
 }
 
 impl RemoteActionRequest {
@@ -110,7 +113,7 @@ impl RemoteActionRequest {
             Self::FetchThreadTranscript { .. } => RemoteActionKind::FetchThreadTranscript,
             Self::DecideApproval { .. } => RemoteActionKind::DecideApproval,
             Self::ApplyFileChange { .. } => RemoteActionKind::ApplyFileChange,
-            Self::FetchWorkspaceDiff => RemoteActionKind::FetchWorkspaceDiff,
+            Self::FetchWorkspaceDiff { .. } => RemoteActionKind::FetchWorkspaceDiff,
         }
     }
 
@@ -153,11 +156,23 @@ impl RemoteActionRequest {
                 Self::Heartbeat { input }
             }
             Self::ListProviders => Self::ListProviders,
-            Self::ListThreads { query } => Self::ListThreads { query },
+            Self::ListThreads { mut query } => {
+                query.device_id = Some(device_id);
+                Self::ListThreads { query }
+            }
             Self::ListProviderModels { provider } => Self::ListProviderModels { provider },
-            Self::FetchThreadEntries { input } => Self::FetchThreadEntries { input },
-            Self::FetchThreadEntryDetail { input } => Self::FetchThreadEntryDetail { input },
-            Self::FetchThreadTranscript { input } => Self::FetchThreadTranscript { input },
+            Self::FetchThreadEntries { mut input } => {
+                input.device_id = Some(device_id);
+                Self::FetchThreadEntries { input }
+            }
+            Self::FetchThreadEntryDetail { mut input } => {
+                input.device_id = Some(device_id);
+                Self::FetchThreadEntryDetail { input }
+            }
+            Self::FetchThreadTranscript { mut input } => {
+                input.device_id = Some(device_id);
+                Self::FetchThreadTranscript { input }
+            }
             Self::DecideApproval {
                 request_id,
                 mut input,
@@ -169,7 +184,9 @@ impl RemoteActionRequest {
                 input.device_id = Some(device_id);
                 Self::ApplyFileChange { item_id, input }
             }
-            Self::FetchWorkspaceDiff => Self::FetchWorkspaceDiff,
+            Self::FetchWorkspaceDiff { .. } => Self::FetchWorkspaceDiff {
+                device_id: Some(device_id),
+            },
         }
     }
 }
@@ -857,7 +874,10 @@ async fn execute_remote_action(
             ..RemoteActionOutcome::default()
         }),
         RemoteActionRequest::ListThreads { query } => state
-            .list_threads(query.limit.unwrap_or(80).clamp(1, 200))
+            .list_threads(
+                query.limit.unwrap_or(80).clamp(1, 200),
+                query.device_id.clone(),
+            )
             .await
             .map(|threads| RemoteActionOutcome {
                 receipt: None,
@@ -949,15 +969,13 @@ async fn execute_remote_action(
             .apply_file_change(&item_id, input)
             .await
             .map(|_| RemoteActionOutcome::default()),
-        RemoteActionRequest::FetchWorkspaceDiff => {
-            state
-                .workspace_diff()
-                .await
-                .map(|workspace_diff| RemoteActionOutcome {
-                    workspace_diff: Some(workspace_diff),
-                    ..RemoteActionOutcome::default()
-                })
-        }
+        RemoteActionRequest::FetchWorkspaceDiff { device_id } => state
+            .workspace_diff(device_id)
+            .await
+            .map(|workspace_diff| RemoteActionOutcome {
+                workspace_diff: Some(workspace_diff),
+                ..RemoteActionOutcome::default()
+            }),
     }
 }
 

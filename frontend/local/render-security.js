@@ -10,6 +10,7 @@ import {
   pairingLinkInput,
   pairingPanel,
   pairingQr,
+  pairingScopeSummary,
   pendingPairingsList,
 } from "./dom.js";
 import { svgDataUrl } from "../svg.js";
@@ -49,6 +50,7 @@ export function renderPairingPanel(pairing) {
     renderReactContent(pairingQr, null);
     pairingLinkInput.value = "";
     renderText(pairingExpiry, "Pairing ticket not created yet.");
+    renderText(pairingScopeSummary, "");
     return;
   }
 
@@ -60,6 +62,14 @@ export function renderPairingPanel(pairing) {
   );
   pairingLinkInput.value = pairing.pairing_url;
   renderText(pairingExpiry, `Expires ${helpers.formatTimestamp(pairing.expires_at)}`);
+
+  const scope = Array.isArray(pairing.path_scope) ? pairing.path_scope : [];
+  renderText(
+    pairingScopeSummary,
+    scope.length
+      ? `This pairing is limited to: ${scope.join(", ")}`
+      : "No per-device path restriction (relay roots still apply)."
+  );
 }
 
 export function renderAllowedRoots(roots, { draftDirty = false } = {}) {

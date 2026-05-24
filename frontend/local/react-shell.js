@@ -666,10 +666,22 @@ function SecurityModal() {
         h("button", { className: "sidebar-link-button", id: "start-pairing-button", type: "button" }, "New QR")
       ),
       h(
+        "div",
+        { className: "pairing-scope-row" },
+        h("label", { className: "sidebar-label", htmlFor: "pairing-path-scope-input" }, "Pairing path scope (optional)"),
+        h("textarea", {
+          id: "pairing-path-scope-input",
+          placeholder: "/Users/me/projects/specific-repo",
+          rows: "2",
+        }),
+        h("p", { className: "sidebar-hint" }, "Limit the next QR's paired device to these paths. Empty = no per-device restriction (relay roots still apply).")
+      ),
+      h(
         "section",
         { className: "pairing-panel", hidden: true, id: "pairing-panel" },
         h("div", { "aria-live": "polite", className: "pairing-qr", id: "pairing-qr" }),
         h("p", { className: "pairing-copy", id: "pairing-expiry" }, "Pairing ticket not created yet."),
+        h("p", { className: "pairing-copy", id: "pairing-scope-summary" }),
         h("label", { className: "sidebar-label", htmlFor: "pairing-link-input" }, "Pairing Link"),
         h(
           "div",

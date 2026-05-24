@@ -385,7 +385,7 @@ async fn workspace_diff(
     authorize_api(&context, &headers, &uri)?;
     context
         .app
-        .workspace_diff()
+        .workspace_diff(None)
         .await
         .map(|response| Json(ApiEnvelope::ok(response)))
         .map_err(|error| {
@@ -449,7 +449,7 @@ async fn list_threads(
     let limit = query.limit.unwrap_or(100).clamp(1, 200);
     context
         .app
-        .list_threads(limit)
+        .list_threads(limit, None)
         .await
         .map(|threads| Json(ApiEnvelope::ok(threads)))
         .map_err(bad_gateway)
@@ -469,6 +469,7 @@ async fn thread_transcript(
             thread_id,
             cursor: query.cursor,
             before: query.before,
+            device_id: None,
         })
         .await
         .map(|transcript| Json(ApiEnvelope::ok(transcript)))
@@ -496,6 +497,7 @@ async fn thread_entry_detail(
             item_id,
             field: query.field,
             cursor: query.cursor,
+            device_id: None,
         })
         .await
         .map(|detail| Json(ApiEnvelope::ok(detail)))

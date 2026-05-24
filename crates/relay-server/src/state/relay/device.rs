@@ -27,6 +27,8 @@ pub(crate) struct PendingPairing {
     pub(crate) secret_hash: String,
     pub(crate) created_at: u64,
     pub(crate) expires_at: u64,
+    #[serde(default)]
+    pub(crate) path_scope: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -41,6 +43,8 @@ pub(crate) struct PairedDevice {
     pub(crate) last_peer_id: Option<String>,
     #[serde(default)]
     pub(crate) broker_join_ticket_expires_at: Option<u64>,
+    #[serde(default)]
+    pub(crate) path_scope: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -69,6 +73,7 @@ impl PairedDevice {
             last_peer_id: self.last_peer_id.clone(),
             broker_join_ticket_expires_at: self.broker_join_ticket_expires_at,
             fingerprint: device_fingerprint(Some(&self.device_verify_key)),
+            path_scope: self.path_scope.clone(),
         }
     }
 }
@@ -112,6 +117,7 @@ pub(crate) struct PendingPairingRequest {
     pub(crate) expires_at: u64,
     pub(crate) broker_peer_id: String,
     pub(crate) device_verify_key: String,
+    pub(crate) path_scope: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -144,6 +150,7 @@ impl PendingPairingRequest {
             expires_at: self.expires_at,
             broker_peer_id: self.broker_peer_id.clone(),
             fingerprint: device_fingerprint(Some(&self.device_verify_key)),
+            path_scope: self.path_scope.clone(),
         }
     }
 }
@@ -164,6 +171,7 @@ pub(crate) struct CompletedPairing {
     pub(crate) device_join_ticket: Option<String>,
     pub(crate) device_join_ticket_expires_at: Option<u64>,
     pub(crate) error: Option<String>,
+    pub(crate) path_scope: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -213,12 +221,14 @@ pub(crate) struct PreparedPairingTicket {
     pub(crate) pairing_id: String,
     pub(crate) pairing_secret: String,
     pub(crate) expires_at: u64,
+    pub(crate) path_scope: Vec<String>,
 }
 
 impl RelayState {
     pub fn prepare_pairing_ticket(
         &mut self,
         requested_ttl_secs: Option<u64>,
+        path_scope: Vec<String>,
     ) -> Result<PreparedPairingTicket, String> {
         let now = super::super::unix_now();
         self.prune_expired_pairings(now);
@@ -238,12 +248,14 @@ impl RelayState {
                 secret_hash: sha256_hex(&pairing_secret),
                 created_at: now,
                 expires_at,
+                path_scope: path_scope.clone(),
             },
         );
         Ok(PreparedPairingTicket {
             pairing_id,
             pairing_secret,
             expires_at,
+            path_scope,
         })
     }
 
@@ -264,6 +276,7 @@ impl RelayState {
             pairing_join_ticket,
             relay_peer_id,
             self.security.mode(),
+            &prepared.path_scope,
         );
         let pairing_url = pairing_url(broker_url, &pairing_payload);
         let pairing_qr_svg = pairing_qr_svg(&pairing_url);
@@ -280,6 +293,7 @@ impl RelayState {
             pairing_payload,
             pairing_url,
             pairing_qr_svg,
+            path_scope: prepared.path_scope.clone(),
         }
     }
 
@@ -329,6 +343,7 @@ impl RelayState {
                     last_seen_at: Some(now),
                     last_peer_id: Some(peer_id.to_string()),
                     broker_join_ticket_expires_at,
+                    path_scope: pending.path_scope.clone(),
                 });
 
             device.label = label;
@@ -337,6 +352,7 @@ impl RelayState {
             device.last_seen_at = Some(now);
             device.last_peer_id = Some(peer_id.to_string());
             device.broker_join_ticket_expires_at = broker_join_ticket_expires_at;
+            device.path_scope = pending.path_scope.clone();
             device.clone()
         };
         self.bind_surface_peer_to_device(&approved_device.device_id, peer_id);
@@ -355,10 +371,10 @@ impl RelayState {
         now: u64,
     ) -> Result<PendingPairingRequestView, String> {
         self.prune_expired_pairings(now);
-        let ticket_expires_at = self
+        let (ticket_expires_at, ticket_path_scope) = self
             .pending_pairings
             .get(pairing_id)
-            .map(|pairing| pairing.expires_at)
+            .map(|pairing| (pairing.expires_at, pairing.path_scope.clone()))
             .ok_or_else(|| "pairing request is missing or expired".to_string())?;
         if let Some(existing) = self.pending_pairing_requests.get_mut(pairing_id) {
             let label_fallback = requested_device_id
@@ -373,6 +389,7 @@ impl RelayState {
             existing.label = normalize_device_label(device_label, label_fallback);
             existing.broker_peer_id = peer_id.to_string();
             existing.device_verify_key = device_verify_key;
+            existing.path_scope = ticket_path_scope;
             return Ok(existing.to_view());
         }
 
@@ -393,6 +410,7 @@ impl RelayState {
             expires_at: ticket_expires_at,
             broker_peer_id: peer_id.to_string(),
             device_verify_key,
+            path_scope: ticket_path_scope,
         };
         let view = request.to_view();
         self.pending_pairing_requests
@@ -447,6 +465,7 @@ impl RelayState {
                     device_join_ticket: None,
                     device_join_ticket_expires_at,
                     error: None,
+                    path_scope: pending.path_scope.clone(),
                 },
             );
             return Ok(PendingPairingResult {
@@ -492,6 +511,7 @@ impl RelayState {
                 device_join_ticket: None,
                 device_join_ticket_expires_at: None,
                 error: Some("pairing request was rejected on the local relay".to_string()),
+                path_scope: pending.path_scope.clone(),
             },
         );
         Ok(PendingPairingResult {
@@ -678,6 +698,13 @@ impl RelayState {
             .get(device_id)
             .map(|device| device.payload_secret.clone())
             .ok_or_else(|| "device is not paired".to_string())
+    }
+
+    pub fn device_path_scope(&self, device_id: &str) -> Vec<String> {
+        self.paired_devices
+            .get(device_id)
+            .map(|device| device.path_scope.clone())
+            .unwrap_or_default()
     }
 
     pub fn paired_device_verify_key(&self, device_id: &str) -> Result<String, String> {
@@ -931,6 +958,7 @@ fn pairing_payload(
     pairing_join_ticket: &str,
     relay_peer_id: &str,
     security_mode: crate::protocol::SecurityMode,
+    path_scope: &[String],
 ) -> String {
     let payload = json!({
         "version": 1,
@@ -942,6 +970,7 @@ fn pairing_payload(
         "pairing_join_ticket": pairing_join_ticket,
         "relay_peer_id": relay_peer_id,
         "security_mode": security_mode,
+        "path_scope": path_scope,
     });
 
     URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).expect("pairing payload should serialize"))

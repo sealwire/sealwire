@@ -46,6 +46,7 @@ fn test_persisted_state() -> PersistedRelayState {
             last_seen_at: Some(9),
             last_peer_id: Some("surface-1".to_string()),
             broker_join_ticket_expires_at: None,
+            path_scope: Vec::new(),
         },
     );
     PersistedRelayState {
@@ -119,13 +120,31 @@ fn issue_test_pairing_ticket(
     peer_id: &str,
     expires_in_seconds: Option<u64>,
 ) -> crate::protocol::PairingTicketView {
+    issue_test_pairing_ticket_with_scope(
+        relay,
+        broker_url,
+        channel_id,
+        peer_id,
+        expires_in_seconds,
+        Vec::new(),
+    )
+}
+
+fn issue_test_pairing_ticket_with_scope(
+    relay: &mut RelayState,
+    broker_url: &str,
+    channel_id: &str,
+    peer_id: &str,
+    expires_in_seconds: Option<u64>,
+    path_scope: Vec<String>,
+) -> crate::protocol::PairingTicketView {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("test runtime should build");
     let broker = runtime.block_on(test_broker_config(broker_url, channel_id, peer_id));
     let prepared = relay
-        .prepare_pairing_ticket(expires_in_seconds)
+        .prepare_pairing_ticket(expires_in_seconds, path_scope)
         .expect("pairing ticket should prepare");
     relay.render_pairing_ticket_view(
         &prepared,
@@ -1005,6 +1024,7 @@ fn paired_device_requires_a_verify_key() {
             last_seen_at: Some(9),
             last_peer_id: Some("surface-1".to_string()),
             broker_join_ticket_expires_at: None,
+            path_scope: Vec::new(),
         },
     );
 
@@ -1795,4 +1815,208 @@ fn remote_action_replay_cache_expires_old_entries() {
         .reserve_remote_action("device-a", "act-3", "send_message", 100 + 601)
         .expect("expired replay entry should allow a new execution");
     assert!(matches!(decision, RemoteActionReplayDecision::Execute));
+}
+
+#[test]
+fn ensure_path_within_device_scope_blocks_outside_device_scope() {
+    let unique = format!(
+        "agent-relay-scope-block-{}-{}",
+        std::process::id(),
+        unix_now()
+    );
+    let root = std::env::temp_dir().join(unique);
+    let allowed = root.join("project");
+    let device_dir = allowed.join("only");
+    let outside_device = allowed.join("other");
+    std::fs::create_dir_all(&device_dir).expect("device dir should be creatable");
+    std::fs::create_dir_all(&outside_device).expect("outside dir should be creatable");
+    let allowed_roots = normalize_allowed_roots(vec![allowed.display().to_string()])
+        .expect("allowed roots should normalize");
+    let device_scope = normalize_allowed_roots(vec![device_dir.display().to_string()])
+        .expect("device scope should normalize");
+
+    assert!(ensure_path_within_device_scope(
+        &device_dir.display().to_string(),
+        &device_scope,
+        &allowed_roots,
+    )
+    .is_ok());
+    let error = ensure_path_within_device_scope(
+        &outside_device.display().to_string(),
+        &device_scope,
+        &allowed_roots,
+    )
+    .expect_err("path outside device scope should be rejected");
+    assert!(error.contains("device's allowed paths"));
+
+    std::fs::remove_dir_all(&root).expect("temp scope dir should be removable");
+}
+
+#[test]
+fn ensure_path_within_device_scope_blocks_outside_relay_roots_even_when_in_device_scope() {
+    let unique = format!(
+        "agent-relay-scope-relay-{}-{}",
+        std::process::id(),
+        unix_now()
+    );
+    let root = std::env::temp_dir().join(unique);
+    let allowed = root.join("project");
+    let outside_relay = root.join("other-project");
+    std::fs::create_dir_all(&allowed).expect("allowed dir should be creatable");
+    std::fs::create_dir_all(&outside_relay).expect("outside dir should be creatable");
+    let allowed_roots = normalize_allowed_roots(vec![allowed.display().to_string()])
+        .expect("allowed roots should normalize");
+    // Device scope claims a path outside the relay's allowed roots — defense in depth
+    // means the relay roots check still fires first.
+    let device_scope = vec![outside_relay.display().to_string()];
+
+    let error = ensure_path_within_device_scope(
+        &outside_relay.display().to_string(),
+        &device_scope,
+        &allowed_roots,
+    )
+    .expect_err("path outside relay roots should be rejected even if device scope allows");
+    assert!(error.contains("relay's allowed roots"));
+
+    std::fs::remove_dir_all(&root).expect("temp scope dir should be removable");
+}
+
+#[test]
+fn ensure_path_within_device_scope_passes_when_device_scope_empty() {
+    let unique = format!(
+        "agent-relay-scope-empty-{}-{}",
+        std::process::id(),
+        unix_now()
+    );
+    let root = std::env::temp_dir().join(unique);
+    let allowed = root.join("project");
+    let nested = allowed.join("anywhere");
+    std::fs::create_dir_all(&nested).expect("nested dir should be creatable");
+    let allowed_roots = normalize_allowed_roots(vec![allowed.display().to_string()])
+        .expect("allowed roots should normalize");
+
+    assert!(
+        ensure_path_within_device_scope(&nested.display().to_string(), &[], &allowed_roots,)
+            .is_ok()
+    );
+
+    std::fs::remove_dir_all(&root).expect("temp scope dir should be removable");
+}
+
+#[test]
+fn prepare_pairing_ticket_carries_path_scope() {
+    let mut relay = test_state();
+    let scope = vec![
+        "/tmp/project/foo".to_string(),
+        "/tmp/project/bar".to_string(),
+    ];
+    let ticket = issue_test_pairing_ticket_with_scope(
+        &mut relay,
+        "ws://127.0.0.1:8789",
+        "room-a",
+        "relay-a",
+        Some(60),
+        scope.clone(),
+    );
+
+    assert_eq!(ticket.path_scope, scope);
+    let pending = relay
+        .pending_pairings
+        .get(&ticket.pairing_id)
+        .expect("pending pairing should be present");
+    assert_eq!(pending.path_scope, scope);
+
+    // QR payload contains the scope so paired clients see what they're accepting.
+    let decoded = URL_SAFE_NO_PAD
+        .decode(&ticket.pairing_payload)
+        .expect("pairing payload should decode");
+    let value: serde_json::Value =
+        serde_json::from_slice(&decoded).expect("pairing payload should be valid JSON");
+    assert_eq!(
+        value["path_scope"],
+        serde_json::to_value(&scope).expect("scope should serialize")
+    );
+}
+
+#[test]
+fn consume_pairing_ticket_overwrites_path_scope_on_repair() {
+    let mut relay = test_state();
+    let first_ticket = issue_test_pairing_ticket_with_scope(
+        &mut relay,
+        "ws://127.0.0.1:8789",
+        "room-a",
+        "relay-a",
+        Some(60),
+        vec!["/tmp/project/initial".to_string()],
+    );
+
+    let (device, _) = relay
+        .consume_pairing_ticket(
+            &first_ticket.pairing_id,
+            &first_ticket.pairing_secret,
+            Some("my-phone".to_string()),
+            Some("Phone".to_string()),
+            TEST_VERIFY_KEY_B64.to_string(),
+            None,
+            "surface-a",
+            100,
+        )
+        .expect("first pairing should succeed");
+    assert_eq!(device.path_scope, vec!["/tmp/project/initial".to_string()]);
+    assert_eq!(
+        relay.device_path_scope(&device.device_id),
+        vec!["/tmp/project/initial".to_string()]
+    );
+
+    // Re-pair the same device with a different scope — latest QR should win.
+    let second_ticket = issue_test_pairing_ticket_with_scope(
+        &mut relay,
+        "ws://127.0.0.1:8789",
+        "room-a",
+        "relay-a",
+        Some(60),
+        vec!["/tmp/project/updated".to_string()],
+    );
+    let (device_after, _) = relay
+        .consume_pairing_ticket(
+            &second_ticket.pairing_id,
+            &second_ticket.pairing_secret,
+            Some("my-phone".to_string()),
+            Some("Phone".to_string()),
+            TEST_VERIFY_KEY_B64.to_string(),
+            None,
+            "surface-a",
+            200,
+        )
+        .expect("re-pair should succeed");
+    assert_eq!(
+        device_after.path_scope,
+        vec!["/tmp/project/updated".to_string()]
+    );
+    assert_eq!(
+        relay.device_path_scope(&device_after.device_id),
+        vec!["/tmp/project/updated".to_string()]
+    );
+    assert_eq!(
+        relay.paired_devices.len(),
+        1,
+        "still one device after re-pair"
+    );
+}
+
+#[test]
+fn paired_device_path_scope_loads_default_empty_from_legacy_state() {
+    // Legacy on-disk PairedDevice JSON has no `path_scope` field — serde should default to empty.
+    let legacy = r#"{
+        "device_id": "phone-1",
+        "label": "Primary Phone",
+        "payload_secret": "payload-secret",
+        "device_verify_key": "dGVzdC12ZXJpZnkta2V5",
+        "created_at": 7,
+        "last_seen_at": 9,
+        "last_peer_id": "surface-1"
+    }"#;
+    let device: PairedDevice =
+        serde_json::from_str(legacy).expect("legacy paired device JSON should deserialize");
+    assert_eq!(device.path_scope, Vec::<String>::new());
 }
