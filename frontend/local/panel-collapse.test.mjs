@@ -134,3 +134,94 @@ test("both panels collapsed still keeps 3 columns (0, 1fr, 0)", () => {
   assert.equal(columns[0], "0");
   assert.equal(columns[2], "0");
 });
+
+// --- Mobile responsive guards ---------------------------------------------
+// The desktop persisted collapsed state (saved width=0 from a previous
+// session) used to leak onto mobile, leaving the sidebar invisible and the
+// grid stuck on the 3-column template. The mobile media query must override
+// both the column template and the visibility/opacity properties so the
+// responsive layout always wins.
+
+function extractMobileMediaBlock() {
+  // We look for the @media block at line 3086-ish that contains the
+  // workspace-diff chip rule — that's the one we recently extended.
+  const marker = ".workspace-diff-chip { display: inline-flex; }";
+  const markerIdx = styles.indexOf(marker);
+  assert.ok(markerIdx > 0, "expected to find the mobile chip rule");
+  // Walk back to find the enclosing @media (max-width: 960px) { ... } block.
+  const atMediaIdx = styles.lastIndexOf("@media (max-width: 960px)", markerIdx);
+  assert.ok(atMediaIdx >= 0, "expected @media (max-width: 960px) before chip rule");
+  const openBrace = styles.indexOf("{", atMediaIdx);
+  let depth = 1;
+  let scan = openBrace + 1;
+  while (scan < styles.length && depth > 0) {
+    const ch = styles[scan];
+    if (ch === "{") depth += 1;
+    else if (ch === "}") depth -= 1;
+    scan += 1;
+  }
+  return styles.slice(openBrace + 1, scan - 1);
+}
+
+test("mobile media query forces single-column grid even when body.sidebar-collapsed", () => {
+  const block = extractMobileMediaBlock();
+  // Must override the desktop body.sidebar-collapsed 3-column rule, otherwise
+  // the desktop rule wins on specificity and the layout breaks on phones.
+  assert.match(
+    block,
+    /body\.sidebar-collapsed\s+\.app-shell-with-rail\s*[,{]/,
+    "mobile media query must include a `body.sidebar-collapsed .app-shell-with-rail` override"
+  );
+  assert.match(
+    block,
+    /grid-template-columns\s*:\s*1fr\s*;/,
+    "mobile override should collapse to single column"
+  );
+});
+
+test("mobile media query restores sidebar visibility when desktop state says collapsed", () => {
+  const block = extractMobileMediaBlock();
+  assert.match(
+    block,
+    /body\.sidebar-collapsed\s+\.sidebar\s*\{[^}]*visibility\s*:\s*visible/s,
+    "must reset visibility on collapsed sidebar at mobile breakpoint"
+  );
+  assert.match(
+    block,
+    /body\.sidebar-collapsed\s+\.sidebar\s*\{[^}]*opacity\s*:\s*1/s,
+    "must reset opacity on collapsed sidebar at mobile breakpoint"
+  );
+  assert.match(
+    block,
+    /body\.sidebar-collapsed\s+\.sidebar\s*\{[^}]*pointer-events\s*:\s*auto/s,
+    "must restore pointer-events on collapsed sidebar at mobile breakpoint"
+  );
+});
+
+test("mobile media query bumps icon-button touch target to at least 32px", () => {
+  const block = extractMobileMediaBlock();
+  const match = block.match(/\.header-icon-button\s*\{([^}]+)\}/);
+  assert.ok(match, ".header-icon-button must be sized for touch on mobile");
+  const decls = match[1];
+  const widthMatch = decls.match(/width\s*:\s*(\d+)px/);
+  const heightMatch = decls.match(/height\s*:\s*(\d+)px/);
+  assert.ok(widthMatch, "expected explicit width");
+  assert.ok(heightMatch, "expected explicit height");
+  assert.ok(
+    Number(widthMatch[1]) >= 32,
+    `icon button width should be ≥32px on mobile, got ${widthMatch[1]}px`
+  );
+  assert.ok(
+    Number(heightMatch[1]) >= 32,
+    `icon button height should be ≥32px on mobile, got ${heightMatch[1]}px`
+  );
+});
+
+test("mobile media query hides desktop-only chrome (rail, resize handles, toggle buttons)", () => {
+  const block = extractMobileMediaBlock();
+  assert.match(block, /\.right-rail\s*\{\s*display\s*:\s*none\s*;?\s*\}/);
+  assert.match(
+    block,
+    /\.sidebar-resize\s*,\s*\.right-rail-resize\s*\{\s*display\s*:\s*none\s*;?\s*\}/
+  );
+});

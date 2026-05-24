@@ -2676,7 +2676,8 @@ input:focus, textarea:focus, select:focus {
   .audit-list { overflow: visible; max-height: none; }
 }
 
-#workspace-diff-modal {
+#workspace-diff-modal,
+#remote-workspace-diff-modal {
   max-width: min(960px, 92vw);
   width: min(960px, 92vw);
 }
@@ -3094,4 +3095,43 @@ body.is-resizing-panel {
   .sidebar-resize,
   .right-rail-resize { display: none; }
   .workspace-diff-chip { display: inline-flex; }
+
+  /* Neutralize any persisted collapsed state from desktop — on mobile the
+   * panels are managed by the responsive layout (sidebar stacks above chat,
+   * rail hidden), not by the toggle buttons. Without these overrides a user
+   * who collapsed the sidebar on desktop would land on mobile with an
+   * invisible sidebar and a leftover 3-column grid template. */
+  body.sidebar-collapsed .app-shell,
+  body.sidebar-collapsed .app-shell-with-rail,
+  body.sidebar-collapsed .app-shell[data-view="conversation"],
+  body.sidebar-collapsed .app-shell-with-rail[data-view="conversation"],
+  body.rail-collapsed .app-shell-with-rail,
+  body.rail-collapsed .app-shell-with-rail[data-view="conversation"],
+  body.sidebar-collapsed.rail-collapsed .app-shell-with-rail,
+  body.sidebar-collapsed.rail-collapsed .app-shell-with-rail[data-view="conversation"] {
+    grid-template-columns: 1fr;
+  }
+  body.sidebar-collapsed .sidebar {
+    visibility: visible;
+    opacity: 1;
+    pointer-events: auto;
+    overflow: visible;
+  }
+
+  /* Bump icon buttons to a tappable size (~36px) — desktop default 22px is
+   * too small for fingers. */
+  .header-icon-button {
+    width: 36px;
+    height: 36px;
+  }
+  .workspace-changes-refresh {
+    width: 36px;
+    height: 36px;
+  }
+
+  /* Local mobile uses a stacked layout (no drawer), so the sidebar-bottom-bar
+   * lands awkwardly between sidebar content and chat. Hide there. Remote
+   * mobile keeps it because the sidebar is a slide-in drawer where settings
+   * at the bottom make sense. */
+  .app-shell:not(.remote-app-shell) .sidebar-bottom-bar { display: none; }
 }
