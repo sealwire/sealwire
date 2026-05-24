@@ -68,6 +68,26 @@ export async function deleteAuthSession({ fetchImpl = fetch } = {}) {
   return parseEnvelope(payload, "Failed to clear local auth session");
 }
 
+// Submit the user's answer to a pending AskUserQuestion. `answers` is a
+// {questionText: optionLabel | optionLabel[] | freeText} map matching the
+// SDK contract (see claude-worker/ask-user-question.mjs). Returns the
+// receipt body on success; throws on error.
+export async function submitAskUserAnswer(apiFetch, requestId, answers, deviceId) {
+  const response = await apiFetch(
+    `/api/ask-user-questions/${encodeURIComponent(requestId)}/answer`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ answers, device_id: deviceId }),
+    }
+  );
+  const payload = await response.json();
+  if (!response.ok || !payload?.ok) {
+    throw new Error(payload?.error?.message || "AskUserQuestion submission failed");
+  }
+  return payload.data;
+}
+
 export function createApiFetch({ getApiToken, onUnauthorized, fetchImpl = fetch }) {
   return async function apiFetch(input, init = {}) {
     const method = (init.method || "GET").toUpperCase();

@@ -138,6 +138,17 @@ impl ProviderBridge for CodexBridge {
         self.respond_to_approval(pending, input).await
     }
 
+    async fn respond_to_ask_user_question(
+        &self,
+        _request_id: &str,
+        _answers: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), String> {
+        // Codex does not surface AskUserQuestion through its bridge — the
+        // tool is Claude-specific. Returning an error keeps callers honest
+        // rather than swallowing a misrouted request.
+        Err("Codex does not support AskUserQuestion".to_string())
+    }
+
     fn provider_name(&self) -> &'static str {
         self.provider_name
     }

@@ -50,6 +50,7 @@ fn make_snapshot() -> SessionSnapshot {
         device_records: vec![],
         paired_devices: vec![],
         pending_pairing_requests: vec![],
+        pending_ask_user_questions: vec![],
         pending_approvals: vec![ApprovalRequestView {
             request_id: "approval-1".to_string(),
             kind: "file_change".to_string(),

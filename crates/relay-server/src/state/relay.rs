@@ -1,4 +1,5 @@
 mod approval;
+mod ask_user_question;
 mod background;
 mod device;
 mod transcript;
@@ -22,6 +23,7 @@ use super::{
 };
 
 pub use self::approval::{ApprovalKind, PendingApproval};
+pub use self::ask_user_question::{parse_ask_user_questions, PendingAskUserQuestion};
 pub use self::background::BackgroundThreadStream;
 pub(crate) use self::device::{
     BrokerPendingMessage, ClaimChallenge, CompletedPairing, CompletedRemoteClaim, DeviceRecord,
@@ -39,6 +41,7 @@ pub(crate) struct CachedRemoteActionResult {
     pub(crate) ok: bool,
     pub(crate) snapshot: Option<SessionSnapshot>,
     pub(crate) receipt: Option<ApprovalReceipt>,
+    pub(crate) ask_user_answer_receipt: Option<crate::protocol::AskUserAnswerReceipt>,
     pub(crate) providers: Option<Vec<String>>,
     pub(crate) models: Option<Vec<ModelOptionView>>,
     pub(crate) threads: Option<ThreadsResponse>,
@@ -113,6 +116,7 @@ pub struct RelayState {
     pub threads: Vec<ThreadSummaryView>,
     locally_deleted_thread_ids: HashSet<String>,
     pub pending_approvals: HashMap<String, PendingApproval>,
+    pub pending_ask_user_questions: HashMap<String, PendingAskUserQuestion>,
     pub(super) transcript: Vec<TranscriptRecord>,
     pub(super) background_streams: HashMap<String, BackgroundThreadStream>,
     pub(super) logs: Vec<LogEntryView>,
@@ -168,6 +172,7 @@ impl RelayState {
             threads: Vec::new(),
             locally_deleted_thread_ids: HashSet::new(),
             pending_approvals: HashMap::new(),
+            pending_ask_user_questions: HashMap::new(),
             transcript: Vec::new(),
             background_streams: HashMap::new(),
             logs: Vec::new(),
@@ -281,6 +286,22 @@ impl RelayState {
                 .cloned()
                 .map(|approval| approval.to_view())
                 .collect(),
+            pending_ask_user_questions: {
+                let mut views = self
+                    .pending_ask_user_questions
+                    .values()
+                    .cloned()
+                    .map(|pending| pending.to_view())
+                    .collect::<Vec<_>>();
+                // Stable ordering keeps the UI from reshuffling cards as
+                // unrelated state updates trigger snapshot recomputations.
+                views.sort_by(|a, b| {
+                    a.requested_at
+                        .cmp(&b.requested_at)
+                        .then_with(|| a.request_id.cmp(&b.request_id))
+                });
+                views
+            },
             transcript_truncated: false,
             transcript: self
                 .transcript
@@ -325,6 +346,7 @@ impl RelayState {
         self.sandbox = sandbox.to_string();
         self.reasoning_effort = effort.to_string();
         self.pending_approvals.clear();
+        self.pending_ask_user_questions.clear();
         self.transcript.clear();
         self.apply_states.clear();
         self.bump_transcript_revision();
@@ -389,6 +411,7 @@ impl RelayState {
         self.sandbox = sandbox.to_string();
         self.reasoning_effort = effort.to_string();
         self.pending_approvals.clear();
+        self.pending_ask_user_questions.clear();
         self.apply_states.clear();
         self.transcript = data
             .transcript
@@ -436,6 +459,7 @@ impl RelayState {
         self.pending_claim_challenges.clear();
         self.pending_broker_messages.clear();
         self.pending_approvals.clear();
+        self.pending_ask_user_questions.clear();
         self.recent_remote_actions.clear();
         self.locally_deleted_thread_ids.clear();
         self.apply_states.clear();
@@ -693,6 +717,7 @@ impl RelayState {
         self.completed_pairings.clear();
         self.pending_broker_messages.clear();
         self.pending_approvals.clear();
+        self.pending_ask_user_questions.clear();
         self.recent_remote_actions.clear();
         self.locally_deleted_thread_ids.clear();
         self.transcript = persisted.transcript.clone();
@@ -710,6 +735,7 @@ impl RelayState {
         self.last_progress_at = None;
         self.active_flags.clear();
         self.pending_approvals.clear();
+        self.pending_ask_user_questions.clear();
     }
 
     /// Worker emitted a real event or a progress_tick. `phase` and `tool`

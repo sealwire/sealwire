@@ -7,14 +7,17 @@ use tracing::{info, warn};
 
 use crate::{
     protocol::{
-        ApplyFileChangeInput, ApprovalDecisionInput, ApprovalReceipt, HeartbeatInput,
-        ModelOptionView, ReadThreadEntriesInput, ReadThreadEntryDetailInput,
+        ApplyFileChangeInput, ApprovalDecisionInput, ApprovalReceipt, AskUserAnswerReceipt,
+        HeartbeatInput, ModelOptionView, ReadThreadEntriesInput, ReadThreadEntryDetailInput,
         ReadThreadTranscriptInput, ResumeSessionInput, SendMessageInput, SessionSnapshot,
-        StartSessionInput, StopTurnInput, TakeOverInput, ThreadEntriesResponse,
-        ThreadEntryDetailResponse, ThreadTranscriptResponse, ThreadsQuery, ThreadsResponse,
-        UpdateSessionSettingsInput, WorkspaceDiffResponse,
+        StartSessionInput, StopTurnInput, SubmitAskUserAnswerInput, TakeOverInput,
+        ThreadEntriesResponse, ThreadEntryDetailResponse, ThreadTranscriptResponse, ThreadsQuery,
+        ThreadsResponse, UpdateSessionSettingsInput, WorkspaceDiffResponse,
     },
-    state::{AppState, ApprovalError, CachedRemoteActionResult, RemoteActionReplayDecision},
+    state::{
+        AppState, ApprovalError, AskUserAnswerError, CachedRemoteActionResult,
+        RemoteActionReplayDecision,
+    },
 };
 
 use super::{
@@ -91,6 +94,10 @@ pub(super) enum RemoteActionRequest {
         #[serde(default)]
         device_id: Option<String>,
     },
+    SubmitAskUserAnswer {
+        request_id: String,
+        input: SubmitAskUserAnswerInput,
+    },
 }
 
 impl RemoteActionRequest {
@@ -114,6 +121,7 @@ impl RemoteActionRequest {
             Self::DecideApproval { .. } => RemoteActionKind::DecideApproval,
             Self::ApplyFileChange { .. } => RemoteActionKind::ApplyFileChange,
             Self::FetchWorkspaceDiff { .. } => RemoteActionKind::FetchWorkspaceDiff,
+            Self::SubmitAskUserAnswer { .. } => RemoteActionKind::SubmitAskUserAnswer,
         }
     }
 
@@ -187,6 +195,13 @@ impl RemoteActionRequest {
             Self::FetchWorkspaceDiff { .. } => Self::FetchWorkspaceDiff {
                 device_id: Some(device_id),
             },
+            Self::SubmitAskUserAnswer {
+                request_id,
+                mut input,
+            } => {
+                input.device_id = Some(device_id);
+                Self::SubmitAskUserAnswer { request_id, input }
+            }
         }
     }
 }
@@ -212,6 +227,7 @@ pub(super) enum RemoteActionKind {
     DecideApproval,
     ApplyFileChange,
     FetchWorkspaceDiff,
+    SubmitAskUserAnswer,
 }
 
 impl RemoteActionKind {
@@ -235,6 +251,7 @@ impl RemoteActionKind {
             Self::DecideApproval => "decide_approval",
             Self::ApplyFileChange => "apply_file_change",
             Self::FetchWorkspaceDiff => "fetch_workspace_diff",
+            Self::SubmitAskUserAnswer => "submit_ask_user_answer",
         }
     }
 }
@@ -247,6 +264,8 @@ struct RemoteActionResultPlaintext {
     #[serde(skip_serializing_if = "Option::is_none")]
     snapshot: Option<SessionSnapshot>,
     receipt: Option<ApprovalReceipt>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ask_user_answer_receipt: Option<AskUserAnswerReceipt>,
     providers: Option<Vec<String>>,
     models: Option<Vec<ModelOptionView>>,
     threads: Option<ThreadsResponse>,
@@ -300,6 +319,7 @@ struct RemoteActionResultSizeBreakdown {
 #[derive(Debug, Default)]
 pub(super) struct RemoteActionOutcome {
     pub(super) receipt: Option<ApprovalReceipt>,
+    pub(super) ask_user_answer_receipt: Option<AskUserAnswerReceipt>,
     pub(super) providers: Option<Vec<String>>,
     pub(super) models: Option<Vec<ModelOptionView>>,
     pub(super) threads: Option<ThreadsResponse>,
@@ -976,6 +996,14 @@ async fn execute_remote_action(
                 workspace_diff: Some(workspace_diff),
                 ..RemoteActionOutcome::default()
             }),
+        RemoteActionRequest::SubmitAskUserAnswer { request_id, input } => state
+            .submit_ask_user_answer(&request_id, input)
+            .await
+            .map(|receipt| RemoteActionOutcome {
+                ask_user_answer_receipt: Some(receipt),
+                ..RemoteActionOutcome::default()
+            })
+            .map_err(ask_user_answer_error_message),
     }
 }
 
@@ -1229,6 +1257,16 @@ fn approval_error_message(error: ApprovalError) -> String {
     }
 }
 
+fn ask_user_answer_error_message(error: AskUserAnswerError) -> String {
+    match error {
+        AskUserAnswerError::NoPendingRequest => {
+            "there is no AskUserQuestion waiting for a remote answer".to_string()
+        }
+        AskUserAnswerError::NoAnswers => "answers must include at least one entry".to_string(),
+        AskUserAnswerError::Bridge(message) => message,
+    }
+}
+
 async fn publish_plain_remote_action_result(
     sender: &mut SplitSink<BrokerSocket, Message>,
     target_peer_id: String,
@@ -1270,6 +1308,7 @@ async fn publish_plain_remote_action_result(
     });
     let RemoteActionOutcome {
         receipt,
+        ask_user_answer_receipt,
         providers,
         models,
         thread_entries,
@@ -1308,6 +1347,7 @@ async fn publish_plain_remote_action_result(
         ok,
         snapshot,
         receipt,
+        ask_user_answer_receipt,
         providers,
         models,
         threads,
@@ -1470,6 +1510,7 @@ async fn replay_plain_remote_action_result(
         cached.snapshot,
         RemoteActionOutcome {
             receipt: cached.receipt,
+            ask_user_answer_receipt: cached.ask_user_answer_receipt,
             providers: cached.providers,
             models: cached.models,
             threads: cached.threads,
@@ -1533,6 +1574,7 @@ async fn publish_remote_action_result_private(
     });
     let RemoteActionOutcome {
         receipt,
+        ask_user_answer_receipt,
         providers,
         models,
         thread_entries,
@@ -1575,6 +1617,7 @@ async fn publish_remote_action_result_private(
         ok,
         snapshot,
         receipt,
+        ask_user_answer_receipt,
         providers,
         models,
         threads,
@@ -1652,6 +1695,7 @@ async fn replay_encrypted_remote_action_result(
         cached.snapshot,
         RemoteActionOutcome {
             receipt: cached.receipt,
+            ask_user_answer_receipt: cached.ask_user_answer_receipt,
             providers: cached.providers,
             models: cached.models,
             threads: cached.threads,
@@ -1838,6 +1882,7 @@ fn cached_remote_action_result(
         ok,
         snapshot: remote_action_result_snapshot(action, snapshot),
         receipt: outcome.receipt,
+        ask_user_answer_receipt: outcome.ask_user_answer_receipt,
         providers: outcome.providers,
         models: outcome.models,
         // Snapshots and thread lists are compacted at the remote-surface publish
@@ -2042,7 +2087,9 @@ fn remote_action_result_kind(action: RemoteActionKind) -> RemoteActionResultKind
         | RemoteActionKind::FetchThreadEntryDetail
         | RemoteActionKind::FetchThreadTranscript
         | RemoteActionKind::FetchWorkspaceDiff => RemoteActionResultKind::RemoteTranscriptResult,
-        RemoteActionKind::DecideApproval => RemoteActionResultKind::RemoteApprovalResult,
+        RemoteActionKind::DecideApproval | RemoteActionKind::SubmitAskUserAnswer => {
+            RemoteActionResultKind::RemoteApprovalResult
+        }
         RemoteActionKind::SendMessage | RemoteActionKind::ApplyFileChange => {
             RemoteActionResultKind::RemoteActionAck
         }

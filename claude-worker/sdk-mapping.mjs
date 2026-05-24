@@ -31,6 +31,18 @@ function previewJson(value, max = 1000) {
   return text.length > max ? text.slice(0, max - 3) + "..." : text;
 }
 
+// AskUserQuestion payloads embed the full questions+options structure that
+// the transcript renders as an interactive card. Truncating mid-JSON breaks
+// parsing, so allow a much larger budget for this tool specifically.
+const ASK_USER_QUESTION_PREVIEW_MAX = 8000;
+
+function previewToolInput(name, value) {
+  if (name === "AskUserQuestion") {
+    return previewJson(value, ASK_USER_QUESTION_PREVIEW_MAX);
+  }
+  return previewJson(value);
+}
+
 function toolTitle(name) {
   if (!name) return "Tool call";
   return name
@@ -54,7 +66,7 @@ function mapToolCall(block, msg, status = "running") {
       path: typeof block.input?.file_path === "string" ? block.input.file_path : null,
       url: typeof block.input?.url === "string" ? block.input.url : null,
       command: typeof block.input?.command === "string" ? block.input.command : null,
-      input_preview: previewJson(block.input ?? {}),
+      input_preview: previewToolInput(block.name, block.input ?? {}),
       result_preview: null,
       diff: null,
       file_changes: [],

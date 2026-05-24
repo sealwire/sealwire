@@ -9,6 +9,7 @@
  *   {"type":"list_sessions","id":"...","cwd":"...","limit":80}
  *   {"type":"read_session","id":"...","provider_session_id":"...","cwd":"..."}
  *   {"type":"approval_decision","id":"...","approval_id":"...","decision":"approve|deny|cancel","scope":"once|session"}
+ *   {"type":"ask_user_question_answer","id":"...","request_id":"...","answers":{"<question text>":"<chosen label>"}}
  *   {"type":"cancel"}
  *   {"type":"shutdown"}
  *
@@ -18,6 +19,7 @@
  *   {"type":"tool_call_requested","id":"...","name":"...","args":{}}
  *   {"type":"tool_call_result", "id":"...","content":"..."}
  *   {"type":"approval_requested","id":"...","action":"...","data":{}}
+ *   {"type":"ask_user_question_requested","id":"...","tool_use_id":"...","questions":[...]}
  *   {"type":"error",           "message":"..."}
  *   {"type":"done"}
  */
@@ -28,6 +30,10 @@ import {
   rejectAllPendingApprovals,
   resolveApprovalDecision,
 } from "./permissions.mjs";
+import {
+  rejectAllPendingAskUserQuestions,
+  resolveAskUserAnswers,
+} from "./ask-user-question.mjs";
 import { createFileDiffTracker } from "./file-diff.mjs";
 import {
   emit as rawEmit,
@@ -104,9 +110,18 @@ async function enrichEvent(event, fileDiffTracker) {
   return event;
 }
 
-function buildSessionOptions(cmd, pendingApprovals, nextApprovalId) {
+function buildSessionOptions(
+  cmd,
+  pendingApprovals,
+  nextApprovalId,
+  pendingAskUserQuestions,
+  nextAskUserRequestId,
+) {
   return buildSessionOptionsBase(cmd, {
-    canUseTool: createPermissionHandler(pendingApprovals, nextApprovalId),
+    canUseTool: createPermissionHandler(pendingApprovals, nextApprovalId, {
+      pendingAskUserQuestions,
+      nextAskUserRequestId,
+    }),
     defaultSettingSources: DEFAULT_SETTING_SOURCES,
   });
 }
@@ -142,9 +157,11 @@ async function main() {
   let streamTask = null;
   let nextLocalTurn = 1;
   let nextApproval = 1;
+  let nextAskUserRequest = 1;
   let pendingSessionResponse = null;
   let fileDiffTracker = null;
   const pendingApprovals = new Map();
+  const pendingAskUserQuestions = new Map();
   const cancelFlag = { current: false };
 
   // Tracker emits its own ticks via rawEmit so they don't recurse through
@@ -182,6 +199,7 @@ async function main() {
         cancelFlag.current = true;
         if (session) session.close();
         rejectAllPendingApprovals(pendingApprovals);
+        rejectAllPendingAskUserQuestions(pendingAskUserQuestions);
         emit({ type: "done" });
         break;
       }
@@ -197,7 +215,13 @@ async function main() {
         pendingSessionResponse = cmd.id
           ? { id: cmd.id, cwd: cmd.cwd ?? process.cwd(), model: cmd.model ?? "claude-sonnet-4-6" }
           : null;
-        const options = buildSessionOptions(cmd, pendingApprovals, () => nextApproval++);
+        const options = buildSessionOptions(
+          cmd,
+          pendingApprovals,
+          () => nextApproval++,
+          pendingAskUserQuestions,
+          () => nextAskUserRequest++,
+        );
         fileDiffTracker = createFileDiffTracker(options.cwd);
 
         try {
@@ -258,7 +282,13 @@ async function main() {
 
         cancelFlag.current = false;
         pendingSessionResponse = null;
-        const options = buildSessionOptions(cmd, pendingApprovals, () => nextApproval++);
+        const options = buildSessionOptions(
+          cmd,
+          pendingApprovals,
+          () => nextApproval++,
+          pendingAskUserQuestions,
+          () => nextAskUserRequest++,
+        );
         fileDiffTracker = createFileDiffTracker(options.cwd);
 
         try {
@@ -359,6 +389,20 @@ async function main() {
         pendingApprovals.delete(approvalId);
         pending.resolve(resolveApprovalDecision(pending, cmd.decision, cmd.scope));
         emitResponse(cmd.id, { id: approvalId });
+        break;
+      }
+
+      case "ask_user_question_answer": {
+        const requestId = cmd.request_id ?? cmd.id;
+        const pending = pendingAskUserQuestions.get(requestId);
+        if (!pending) {
+          emitErrorResponse(cmd.id, `ask_user_question ${requestId} is not pending`);
+          break;
+        }
+        pendingAskUserQuestions.delete(requestId);
+        const answers = cmd.answers && typeof cmd.answers === "object" ? cmd.answers : {};
+        pending.resolve(resolveAskUserAnswers(pending, answers));
+        emitResponse(cmd.id, { id: requestId });
         break;
       }
 

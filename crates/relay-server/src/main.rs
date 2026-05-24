@@ -34,21 +34,21 @@ use axum::{
 use futures_util::stream::{self, StreamExt};
 use protocol::{
     AllowedRootsInput, AllowedRootsReceipt, ApiEnvelope, ApiError, ApplyFileChangeInput,
-    ApplyFileChangeReceipt, ApprovalDecisionInput, ApprovalReceipt, AuthSessionInput,
-    AuthSessionView, BulkRevokeDevicesReceipt, HealthResponse, HeartbeatInput, ModelOptionView,
-    PairingDecisionInput, PairingDecisionReceipt, PairingStartInput, PairingTicketView,
-    ReadThreadEntryDetailInput, ReadThreadTranscriptInput, ResumeSessionInput, RevokeDeviceReceipt,
-    SendMessageInput, SessionSnapshot, SessionSnapshotCompactProfile, StartSessionInput,
-    StopTurnInput, TakeOverInput, ThreadArchiveReceipt, ThreadDeleteReceipt,
-    ThreadEntryDetailResponse, ThreadTranscriptResponse, ThreadsQuery, ThreadsResponse,
-    UpdateSessionSettingsInput, WorkspaceDiffResponse,
+    ApplyFileChangeReceipt, ApprovalDecisionInput, ApprovalReceipt, AskUserAnswerReceipt,
+    AuthSessionInput, AuthSessionView, BulkRevokeDevicesReceipt, HealthResponse, HeartbeatInput,
+    ModelOptionView, PairingDecisionInput, PairingDecisionReceipt, PairingStartInput,
+    PairingTicketView, ReadThreadEntryDetailInput, ReadThreadTranscriptInput, ResumeSessionInput,
+    RevokeDeviceReceipt, SendMessageInput, SessionSnapshot, SessionSnapshotCompactProfile,
+    StartSessionInput, StopTurnInput, SubmitAskUserAnswerInput, TakeOverInput,
+    ThreadArchiveReceipt, ThreadDeleteReceipt, ThreadEntryDetailResponse, ThreadTranscriptResponse,
+    ThreadsQuery, ThreadsResponse, UpdateSessionSettingsInput, WorkspaceDiffResponse,
 };
 use relay_http::{
     apply_standard_security_headers, header_origin, parse_optional_string_env, request_origin,
     request_uses_https, SecurityHeadersConfig,
 };
 use serde::Deserialize;
-use state::{AppState, ApprovalError};
+use state::{AppState, ApprovalError, AskUserAnswerError};
 use tower_http::{
     services::{ServeDir, ServeFile},
     trace::TraceLayer,
@@ -196,7 +196,11 @@ fn build_router(context: AppContext, web_assets: WebAssets) -> Router {
             "/api/devices/:device_id/revoke-others",
             post(revoke_other_devices),
         )
-        .route("/api/approvals/:request_id", post(decide_approval));
+        .route("/api/approvals/:request_id", post(decide_approval))
+        .route(
+            "/api/ask-user-questions/:request_id/answer",
+            post(submit_ask_user_answer),
+        );
 
     let router = match web_assets {
         WebAssets::Embedded => router
@@ -708,6 +712,41 @@ async fn decide_approval(
             ApprovalError::Bridge(message) => (
                 StatusCode::BAD_GATEWAY,
                 Json(ApiError::new("approval_failed", message)),
+            ),
+        })
+}
+
+async fn submit_ask_user_answer(
+    Path(request_id): Path<String>,
+    State(context): State<AppContext>,
+    headers: HeaderMap,
+    uri: Uri,
+    Json(input): Json<SubmitAskUserAnswerInput>,
+) -> Result<Json<ApiEnvelope<AskUserAnswerReceipt>>, impl IntoResponse> {
+    authorize_api(&context, &headers, &uri)?;
+    context
+        .app
+        .submit_ask_user_answer(&request_id, input)
+        .await
+        .map(|receipt| Json(ApiEnvelope::ok(receipt)))
+        .map_err(|error| match error {
+            AskUserAnswerError::NoPendingRequest => (
+                StatusCode::NOT_FOUND,
+                Json(ApiError::new(
+                    "no_pending_ask_user_question",
+                    "There is no AskUserQuestion waiting for a remote answer.",
+                )),
+            ),
+            AskUserAnswerError::NoAnswers => (
+                StatusCode::BAD_REQUEST,
+                Json(ApiError::new(
+                    "no_answers",
+                    "answers must include at least one entry",
+                )),
+            ),
+            AskUserAnswerError::Bridge(message) => (
+                StatusCode::BAD_GATEWAY,
+                Json(ApiError::new("ask_user_question_failed", message)),
             ),
         })
 }

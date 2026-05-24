@@ -297,6 +297,14 @@ impl ProviderBridge for FakeProviderBridge {
         Err("fake provider does not request approvals".to_string())
     }
 
+    async fn respond_to_ask_user_question(
+        &self,
+        _request_id: &str,
+        _answers: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), String> {
+        Err("fake provider does not surface AskUserQuestion".to_string())
+    }
+
     fn provider_name(&self) -> &'static str {
         "fake"
     }

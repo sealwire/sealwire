@@ -111,6 +111,8 @@ pub struct SessionSnapshot {
     pub paired_devices: Vec<PairedDeviceView>,
     pub pending_pairing_requests: Vec<PendingPairingRequestView>,
     pub pending_approvals: Vec<ApprovalRequestView>,
+    #[serde(default)]
+    pub pending_ask_user_questions: Vec<AskUserQuestionRequestView>,
     pub transcript_truncated: bool,
     pub transcript: Vec<TranscriptEntryView>,
     pub logs: Vec<LogEntryView>,
@@ -608,6 +610,52 @@ pub struct PendingPairingRequestView {
     pub fingerprint: Option<String>,
     #[serde(default)]
     pub path_scope: Vec<String>,
+}
+
+// AskUserQuestion is Claude's built-in "ask the user a structured question"
+// tool. The worker intercepts it via canUseTool and the frontend renders the
+// pending request as a clickable card. These types mirror the SDK schema in
+// `@anthropic-ai/claude-agent-sdk/sdk-tools.d.ts#AskUserQuestionInput` so the
+// frontend can render the question text + options without a separate type
+// translation step.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AskUserQuestionRequestView {
+    pub request_id: String,
+    pub tool_use_id: String,
+    pub thread_id: String,
+    pub requested_at: u64,
+    pub questions: Vec<AskUserQuestionView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AskUserQuestionView {
+    pub question: String,
+    pub header: String,
+    pub multi_select: bool,
+    pub options: Vec<AskUserOptionView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AskUserOptionView {
+    pub label: String,
+    pub description: String,
+}
+
+// Input the frontend POSTs to /api/ask-user-questions/:request_id/answer.
+// `answers` is keyed by the question text — that's the same shape the SDK
+// expects in updatedInput.answers (see ask-user-question.mjs in the worker).
+// A single-select question's value is a string; a multi-select question's
+// value is an array of strings; a free-text "Other" response is a string.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubmitAskUserAnswerInput {
+    pub answers: serde_json::Map<String, Value>,
+    pub device_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AskUserAnswerReceipt {
+    pub request_id: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

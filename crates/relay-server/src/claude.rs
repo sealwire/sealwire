@@ -537,6 +537,22 @@ impl ProviderBridge for ClaudeCodeBridge {
         .map(|_| ())
     }
 
+    async fn respond_to_ask_user_question(
+        &self,
+        request_id: &str,
+        answers: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), String> {
+        self.send_request(
+            "ask_user_question_answer",
+            json!({
+                "request_id": request_id,
+                "answers": Value::Object(answers.clone()),
+            }),
+        )
+        .await
+        .map(|_| ())
+    }
+
     fn provider_name(&self) -> &'static str {
         "claude_code"
     }
@@ -834,6 +850,39 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
             relay.push_log(
                 "approval",
                 format!("Claude requests approval for: {action}"),
+            );
+            relay.notify();
+        }
+
+        "ask_user_question_requested" => {
+            let Some(request_id) = string_at(&payload, &["id"]) else {
+                relay.push_log("error", "ask_user_question_requested missing id");
+                return;
+            };
+            let tool_use_id = string_at(&payload, &["tool_use_id"]).unwrap_or_default();
+            let thread_id = relay.active_thread_id.clone().unwrap_or_default();
+            let questions = crate::state::parse_ask_user_questions(payload.get("questions"));
+            let pending = crate::state::PendingAskUserQuestion {
+                request_id: request_id.clone(),
+                tool_use_id,
+                thread_id: thread_id.clone(),
+                requested_at: crate::state::unix_now(),
+                questions,
+            };
+            if !thread_id.is_empty() {
+                relay.set_thread_status(
+                    &thread_id,
+                    "active".to_string(),
+                    vec!["waitingOnAskUser".to_string()],
+                );
+            }
+            relay
+                .pending_ask_user_questions
+                .insert(request_id.clone(), pending);
+            relay.touch_progress(Some("waiting_user"), None);
+            relay.push_log(
+                "ask_user",
+                format!("Claude asked a question ({request_id})."),
             );
             relay.notify();
         }

@@ -42,6 +42,33 @@ export function createLocalUiStore(initialState = {}) {
     },
     transcriptExpandedItemIds: new Set(),
     transcriptLoadingItemIds: new Set(),
+    askUserSubmittingRequestId: "",
+    askUserErrors: new Map(),
+    startAskUserSubmission(requestId) {
+      set({ askUserSubmittingRequestId: String(requestId || "") });
+    },
+    finishAskUserSubmission(requestId) {
+      set((state) => {
+        if (state.askUserSubmittingRequestId === String(requestId || "")) {
+          return { askUserSubmittingRequestId: "" };
+        }
+        return {};
+      });
+    },
+    setAskUserError(requestId, message) {
+      set((state) => {
+        const next = new Map(state.askUserErrors || []);
+        next.set(String(requestId || ""), String(message || ""));
+        return { askUserErrors: next };
+      });
+    },
+    clearAskUserError(requestId) {
+      set((state) => {
+        const next = new Map(state.askUserErrors || []);
+        next.delete(String(requestId || ""));
+        return { askUserErrors: next };
+      });
+    },
     setSessionDraftField(field, value) {
       set((state) => ({
         sessionDraft: {
@@ -97,5 +124,7 @@ export function readLocalUiState(store) {
     sessionDraft: state.sessionDraft ? { ...state.sessionDraft } : null,
     transcriptExpandedItemIds: copyStringSet(state.transcriptExpandedItemIds),
     transcriptLoadingItemIds: copyStringSet(state.transcriptLoadingItemIds),
+    askUserSubmittingRequestId: String(state.askUserSubmittingRequestId || ""),
+    askUserErrors: new Map(state.askUserErrors || []),
   };
 }

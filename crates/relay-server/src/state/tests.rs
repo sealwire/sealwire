@@ -193,6 +193,30 @@ fn sort_threads_by_recency_orders_threads_across_providers() {
     );
 }
 
+fn test_pending_ask_user_question(thread_id: &str) -> crate::state::PendingAskUserQuestion {
+    crate::state::PendingAskUserQuestion {
+        request_id: "ask:1".to_string(),
+        tool_use_id: "toolu_x".to_string(),
+        thread_id: thread_id.to_string(),
+        requested_at: 100,
+        questions: vec![crate::protocol::AskUserQuestionView {
+            question: "Which?".to_string(),
+            header: "Pick".to_string(),
+            multi_select: false,
+            options: vec![
+                crate::protocol::AskUserOptionView {
+                    label: "A".to_string(),
+                    description: "alpha".to_string(),
+                },
+                crate::protocol::AskUserOptionView {
+                    label: "B".to_string(),
+                    description: "beta".to_string(),
+                },
+            ],
+        }],
+    }
+}
+
 fn test_pending_approval(thread_id: &str) -> PendingApproval {
     PendingApproval {
         request_id: "req-1".to_string(),
@@ -250,6 +274,7 @@ fn test_cached_remote_action_result(action_kind: &str, ok: bool) -> CachedRemote
             paired_devices: Vec::new(),
             pending_pairing_requests: Vec::new(),
             pending_approvals: Vec::new(),
+            pending_ask_user_questions: Vec::new(),
             transcript_truncated: false,
             transcript: Vec::new(),
             logs: Vec::new(),
@@ -260,6 +285,7 @@ fn test_cached_remote_action_result(action_kind: &str, ok: bool) -> CachedRemote
             resulting_state: "approval_response_sent".to_string(),
             message: "approved".to_string(),
         }),
+        ask_user_answer_receipt: None,
         providers: None,
         models: None,
         threads: Some(ThreadsResponse {
@@ -2002,6 +2028,75 @@ fn consume_pairing_ticket_overwrites_path_scope_on_repair() {
         1,
         "still one device after re-pair"
     );
+}
+
+#[test]
+fn snapshot_includes_pending_ask_user_questions_sorted_by_requested_at() {
+    let mut relay = test_state();
+    relay.activate_thread(
+        test_thread("thread-1", "/tmp/project"),
+        "/tmp/project",
+        DEFAULT_MODEL,
+        DEFAULT_APPROVAL_POLICY,
+        DEFAULT_SANDBOX,
+        DEFAULT_EFFORT,
+        "device-a",
+    );
+
+    let mut earlier = test_pending_ask_user_question("thread-1");
+    earlier.request_id = "ask:1".to_string();
+    earlier.requested_at = 100;
+    let mut later = test_pending_ask_user_question("thread-1");
+    later.request_id = "ask:2".to_string();
+    later.requested_at = 200;
+    relay
+        .pending_ask_user_questions
+        .insert(later.request_id.clone(), later);
+    relay
+        .pending_ask_user_questions
+        .insert(earlier.request_id.clone(), earlier);
+
+    let snapshot = relay.snapshot();
+    let ids: Vec<&str> = snapshot
+        .pending_ask_user_questions
+        .iter()
+        .map(|q| q.request_id.as_str())
+        .collect();
+    // Earlier requested_at sorts first so the UI doesn't reshuffle the cards
+    // when an unrelated revision bump triggers a re-render.
+    assert_eq!(ids, vec!["ask:1", "ask:2"]);
+}
+
+#[test]
+fn activate_thread_clears_pending_ask_user_questions() {
+    let mut relay = test_state();
+    relay.activate_thread(
+        test_thread("thread-1", "/tmp/project"),
+        "/tmp/project",
+        DEFAULT_MODEL,
+        DEFAULT_APPROVAL_POLICY,
+        DEFAULT_SANDBOX,
+        DEFAULT_EFFORT,
+        "device-a",
+    );
+    relay.pending_ask_user_questions.insert(
+        "ask:1".to_string(),
+        test_pending_ask_user_question("thread-1"),
+    );
+    assert_eq!(relay.pending_ask_user_questions.len(), 1);
+
+    // Activating a different thread must drop pending questions — they're
+    // tied to the previous turn and can't be answered after a thread switch.
+    relay.activate_thread(
+        test_thread("thread-2", "/tmp/project"),
+        "/tmp/project",
+        DEFAULT_MODEL,
+        DEFAULT_APPROVAL_POLICY,
+        DEFAULT_SANDBOX,
+        DEFAULT_EFFORT,
+        "device-a",
+    );
+    assert!(relay.pending_ask_user_questions.is_empty());
 }
 
 #[test]

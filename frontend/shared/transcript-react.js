@@ -864,6 +864,24 @@ export function parseAskUserAnswers(resultPreview) {
   return answers;
 }
 
+// Find the pending AskUserQuestion request (from the live snapshot) that
+// matches the transcript entry the user is looking at. We match on tool_use_id
+// because the transcript entry's item_id (`tool:<tool_use_id>`) and the
+// snapshot's pending list both carry the same id.
+function findPendingAskUserRequest(itemId, pendingList) {
+  if (!itemId || !Array.isArray(pendingList) || !pendingList.length) {
+    return null;
+  }
+  const toolUseId = itemId.startsWith("tool:") ? itemId.slice(5) : itemId;
+  return pendingList.find((pending) => pending?.tool_use_id === toolUseId) || null;
+}
+
+// Render Claude's clickable AskUserQuestion card. Two modes:
+//   - Interactive (pending request still open): option rows become <button>s.
+//     Single-select submits immediately on click; multi-select toggles and
+//     reveals a Submit button.
+//   - Read-only (answered or no pending request): renders the recorded answer
+//     (parsed from result_preview) and highlights the chosen option(s).
 function AskUserEntry({ entry, isJustPrepended = false, options = null }) {
   const itemId = entry.item_id || "";
   const detailEntry = resolveTranscriptDetailEntry(entry, options);
@@ -878,13 +896,76 @@ function AskUserEntry({ entry, isJustPrepended = false, options = null }) {
     return h(GenericToolEntry, { entry, isJustPrepended, options });
   }
   const answers = parseAskUserAnswers(tool.result_preview);
-  const answered = answers.size > 0 || status === "completed";
+  const pendingRequest = findPendingAskUserRequest(itemId, options?.pendingAskUserQuestions);
+  // Local UI may pass an explicit `interactiveAskUserRequestId` to force the
+  // card into interactive mode for storybook/tests; otherwise we derive it
+  // from the snapshot.
+  const interactive = Boolean(pendingRequest) && status !== "completed";
+  const requestId = pendingRequest?.request_id || "";
+  const submittingRequestId = options?.askUserSubmittingRequestId || "";
+  const isSubmitting = Boolean(requestId) && submittingRequestId === requestId;
+  const submitAnswers = options?.onSubmitAskUserAnswers || null;
+  const askUserError =
+    requestId && options?.askUserErrors instanceof Map
+      ? options.askUserErrors.get(requestId) || ""
+      : "";
+
+  // Multi-select needs per-question selection state. We key by question text
+  // since that's also the answer-map key the SDK expects. Single-select cards
+  // submit immediately so they never read this state.
+  const [multiSelectChoices, setMultiSelectChoices] = React.useState(
+    () => new Map()
+  );
+
+  function toggleMultiSelect(questionText, optionLabel) {
+    setMultiSelectChoices((prev) => {
+      const next = new Map(prev);
+      const current = new Set(next.get(questionText) || []);
+      if (current.has(optionLabel)) {
+        current.delete(optionLabel);
+      } else {
+        current.add(optionLabel);
+      }
+      next.set(questionText, current);
+      return next;
+    });
+  }
+
+  function submitSingleSelect(questionText, optionLabel) {
+    if (!interactive || !submitAnswers || isSubmitting) return;
+    submitAnswers(requestId, { [questionText]: optionLabel });
+  }
+
+  function submitMultiSelectAll() {
+    if (!interactive || !submitAnswers || isSubmitting) return;
+    const payload = {};
+    for (const q of questions) {
+      if (!q.multiSelect) continue;
+      const choices = Array.from(multiSelectChoices.get(q.question) || []);
+      if (!choices.length) return;
+      payload[q.question] = choices;
+    }
+    if (!Object.keys(payload).length) return;
+    submitAnswers(requestId, payload);
+  }
+
+  const headerStatus = interactive
+    ? isSubmitting
+      ? "Sending answer…"
+      : "Tap an option"
+    : answers.size > 0 || status === "completed"
+      ? "Answered"
+      : "Waiting for answer";
+
+  const allMultiSelect =
+    questions.length > 0 && questions.every((q) => q.multiSelect);
+  const showSubmitButton = interactive && allMultiSelect;
 
   return h(
     "article",
     transcriptEntryDomAttrs(
       entry,
-      "chat-message chat-message-system chat-message-ask-user",
+      `chat-message chat-message-system chat-message-ask-user${interactive ? " chat-message-ask-user-interactive" : ""}`,
       null,
       { justPrepended: isJustPrepended }
     ),
@@ -895,17 +976,14 @@ function AskUserEntry({ entry, isJustPrepended = false, options = null }) {
         "div",
         { className: "ask-user-meta" },
         h("span", { className: "ask-user-tag" }, "Claude asked"),
-        h(
-          "span",
-          { className: "ask-user-status" },
-          answered ? "Answered" : "Waiting for answer"
-        )
+        h("span", { className: "ask-user-status" }, headerStatus)
       ),
       ...questions.map((q, qIndex) => {
         const answerLabel = answers.get(q.question) || "";
         const matchedOption = answerLabel
           ? q.options.find((opt) => opt.label === answerLabel)
           : null;
+        const multiSelected = multiSelectChoices.get(q.question) || new Set();
         return h(
           "section",
           {
@@ -921,13 +999,46 @@ function AskUserEntry({ entry, isJustPrepended = false, options = null }) {
                 "div",
                 { className: "ask-user-options" },
                 ...q.options.map((opt, oIndex) => {
-                  const isChosen = answerLabel && opt.label === answerLabel;
+                  const isChosenByAnswer = answerLabel && opt.label === answerLabel;
+                  const isPickedMulti = interactive && q.multiSelect && multiSelected.has(opt.label);
+                  const isChosen = isChosenByAnswer || isPickedMulti;
+                  const baseClass = `ask-user-option${isChosen ? " is-chosen" : ""}`;
+                  // Interactive buttons replace the plain <div> rows so the
+                  // user can tap anywhere on the row. role=button keeps
+                  // screen readers happy when we use <button>.
+                  if (interactive) {
+                    return h(
+                      "button",
+                      {
+                        type: "button",
+                        className: `${baseClass} ask-user-option-button`,
+                        key: `${qIndex}:opt:${oIndex}`,
+                        disabled: isSubmitting,
+                        "aria-pressed": q.multiSelect ? isPickedMulti : undefined,
+                        onClick: q.multiSelect
+                          ? () => toggleMultiSelect(q.question, opt.label)
+                          : () => submitSingleSelect(q.question, opt.label),
+                      },
+                      h(
+                        "div",
+                        { className: "ask-user-option-label" },
+                        isChosen
+                          ? h("span", { className: "ask-user-option-check", "aria-hidden": "true" }, "✓ ")
+                          : null,
+                        opt.label || "(no label)"
+                      ),
+                      opt.description
+                        ? h(
+                            "div",
+                            { className: "ask-user-option-description" },
+                            opt.description
+                          )
+                        : null
+                    );
+                  }
                   return h(
                     "div",
-                    {
-                      className: `ask-user-option${isChosen ? " is-chosen" : ""}`,
-                      key: `${qIndex}:opt:${oIndex}`,
-                    },
+                    { className: baseClass, key: `${qIndex}:opt:${oIndex}` },
                     h(
                       "div",
                       { className: "ask-user-option-label" },
@@ -956,7 +1067,29 @@ function AskUserEntry({ entry, isJustPrepended = false, options = null }) {
               )
             : null
         );
-      })
+      }),
+      showSubmitButton
+        ? h(
+            "div",
+            { className: "ask-user-submit-row" },
+            h(
+              "button",
+              {
+                type: "button",
+                className: "ask-user-submit-button",
+                disabled: isSubmitting
+                  || questions.some(
+                    (q) => q.multiSelect && !(multiSelectChoices.get(q.question)?.size > 0)
+                  ),
+                onClick: submitMultiSelectAll,
+              },
+              isSubmitting ? "Sending…" : "Submit answers"
+            )
+          )
+        : null,
+      askUserError
+        ? h("div", { className: "ask-user-error", role: "alert" }, askUserError)
+        : null
     )
   );
 }
@@ -1107,6 +1240,15 @@ function GenericToolEntry({ entry, isJustPrepended = false, options = null }) {
   );
 }
 
+function ToolEntry({ entry, isJustPrepended = false, options = null }) {
+  const detailEntry = resolveTranscriptDetailEntry(entry, options);
+  const tool = (detailEntry || entry)?.tool || entry?.tool || {};
+  if (isAskUserQuestionTool(tool)) {
+    return h(AskUserEntry, { entry, isJustPrepended, options });
+  }
+  return h(GenericToolEntry, { entry, isJustPrepended, options });
+}
+
 function FallbackEntry({ entry, isJustPrepended = false }) {
   return h(
     "article",
@@ -1137,6 +1279,9 @@ function isGroupableCompletedTool(entry) {
   }
   const itemType = entry?.tool?.item_type || "";
   if (itemType === "fileChange" || itemType === "turnDiff") {
+    return false;
+  }
+  if (isAskUserQuestionTool(entry?.tool)) {
     return false;
   }
   return true;

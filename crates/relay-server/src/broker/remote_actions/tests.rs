@@ -41,6 +41,7 @@ fn make_snapshot() -> SessionSnapshot {
         paired_devices: vec![],
         pending_pairing_requests: vec![],
         pending_approvals: vec![],
+        pending_ask_user_questions: vec![],
         transcript_truncated: false,
         transcript: (0..12)
             .map(|index| TranscriptEntryView {
@@ -138,6 +139,7 @@ fn plain_remote_action_result_payload_splits_control_results_from_session_result
         ok: true,
         snapshot: Some(make_snapshot()),
         receipt: None,
+        ask_user_answer_receipt: None,
         providers: None,
         models: None,
         threads: None,
@@ -168,6 +170,7 @@ fn plain_remote_action_result_payload_splits_control_results_from_session_result
         ok: true,
         snapshot: Some(make_snapshot()),
         receipt: None,
+        ask_user_answer_receipt: None,
         providers: None,
         models: None,
         threads: None,
@@ -288,6 +291,7 @@ fn make_large_thread_transcript_plaintext() -> RemoteActionResultPlaintext {
         ok: true,
         snapshot: None,
         receipt: None,
+        ask_user_answer_receipt: None,
         providers: None,
         models: None,
         threads: None,

@@ -1,7 +1,27 @@
 import { emit } from "./protocol.mjs";
+import {
+  createAskUserQuestionHandler,
+  isAskUserQuestionTool,
+} from "./ask-user-question.mjs";
 
-export function createPermissionHandler(pendingApprovals, nextApprovalId) {
+export function createPermissionHandler(
+  pendingApprovals,
+  nextApprovalId,
+  { pendingAskUserQuestions, nextAskUserRequestId } = {},
+) {
+  // AskUserQuestion routes through canUseTool just like a normal permission
+  // request, but it's a structured "answer a question" UX, not an approve/deny.
+  // Split it off into its own pending pool + event so the frontend can render
+  // a clickable card instead of an approval modal.
+  const askUserHandler =
+    pendingAskUserQuestions && nextAskUserRequestId
+      ? createAskUserQuestionHandler(pendingAskUserQuestions, nextAskUserRequestId)
+      : null;
+
   return (toolName, input, options) => {
+    if (askUserHandler && isAskUserQuestionTool(toolName)) {
+      return askUserHandler(input, options);
+    }
     const id = `approval:${nextApprovalId()}`;
     emit({
       type: "approval_requested",

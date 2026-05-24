@@ -474,6 +474,10 @@ controller = createSessionController({
   runViewTransition: renderer.runViewTransition,
   handleUnauthorized,
 });
+// Stash on state so React render paths (e.g. transcript-react.js's
+// AskUserEntry onClick) can call back into the controller without an
+// additional prop-drilling layer through every render entrypoint.
+state.controller = controller;
 
 const {
   renderAuthRequiredState,

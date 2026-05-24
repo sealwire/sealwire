@@ -1344,6 +1344,41 @@ export function createSessionController({
     }
   }
 
+  async function submitAskUserQuestionAnswer(requestId, answers) {
+    if (!requestId) {
+      logLine("No pending AskUserQuestion to answer.");
+      return;
+    }
+    state.localUiStore.getState().startAskUserSubmission(requestId);
+    try {
+      const response = await apiFetch(
+        `/api/ask-user-questions/${encodeURIComponent(requestId)}/answer`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ answers, device_id: state.deviceId }),
+        }
+      );
+      const payload = await response.json();
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload?.error?.message || "AskUserQuestion submission failed");
+      }
+      state.localUiStore.getState().clearAskUserError(requestId);
+      logLine(payload.data.message);
+      await loadSession("post-ask-user-answer refresh");
+    } catch (error) {
+      state.localUiStore
+        .getState()
+        .setAskUserError(requestId, error.message || String(error));
+      logLine(`AskUserQuestion submit failed: ${error.message}`);
+    } finally {
+      state.localUiStore.getState().finishAskUserSubmission(requestId);
+      if (state.session) {
+        renderSession(state.session);
+      }
+    }
+  }
+
   async function applyFileChange(itemId, direction) {
     if (!itemId) {
       logLine("No file change selected.");
@@ -1402,6 +1437,7 @@ export function createSessionController({
     stopActiveTurn,
     startPairing,
     startSession,
+    submitAskUserQuestionAnswer,
     submitDecision,
     takeOverControl,
     toggleTranscriptEntry,

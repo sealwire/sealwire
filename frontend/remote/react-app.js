@@ -952,6 +952,9 @@ function RemoteApp() {
           onSubmitDecision(decision, scope) {
             void handlers.onSubmitDecision(decision, scope);
           },
+          onSubmitAskUserAnswers(requestId, answers) {
+            void handlers.onSubmitAskUserAnswers?.(requestId, answers);
+          },
           onApplyFileChange(itemId, direction) {
             void handlers.onApplyFileChange?.(itemId, direction);
           },
@@ -1380,6 +1383,7 @@ function RemoteThreadPanel({
   onToggleExpandableBlock,
   onToggleTranscriptItem,
   onSubmitDecision,
+  onSubmitAskUserAnswers,
   onTakeOver,
   onUpdateSessionSettings,
   session,
@@ -1401,6 +1405,7 @@ function RemoteThreadPanel({
         onToggleExpandableBlock,
         onToggleTranscriptItem,
         onSubmitDecision,
+        onSubmitAskUserAnswers,
         session,
         transcriptDetailEntries,
         uiState,
@@ -1481,6 +1486,7 @@ function RemoteTranscriptPanel({
   onSelectRelay,
   onToggleExpandableBlock,
   onSubmitDecision,
+  onSubmitAskUserAnswers,
   onToggleTranscriptItem,
   session,
   sessionView,
@@ -1593,6 +1599,12 @@ function RemoteTranscriptPanel({
         expandedItemIds: uiState.transcriptExpandedItemIds,
         expandedKeys: uiState.transcriptExpandedItemIds,
         loadingItemIds: uiState.transcriptLoadingItemIds,
+        pendingAskUserQuestions: session?.pending_ask_user_questions || [],
+        onSubmitAskUserAnswers: (requestId, answers) => {
+          void onSubmitAskUserAnswers?.(requestId, answers);
+        },
+        askUserSubmittingRequestId: uiState.askUserSubmittingRequestId || "",
+        askUserErrors: uiState.askUserErrors instanceof Map ? uiState.askUserErrors : new Map(),
       },
       onTranscriptInteract: (event) => {
         const fileChangeButton = event.target.closest?.("[data-file-change-action]");

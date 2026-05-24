@@ -89,6 +89,63 @@ test("cancel marks interrupt true", () => {
   assert.equal(result.interrupt, true);
 });
 
+test("createPermissionHandler routes AskUserQuestion to the ask-user handler, not the approval pool", () => {
+  const pendingApprovals = new Map();
+  const pendingAskUserQuestions = new Map();
+  const captured = [];
+  const originalWrite = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (chunk) => {
+    captured.push(String(chunk));
+    return true;
+  };
+  try {
+    const handler = createPermissionHandler(
+      pendingApprovals,
+      () => 1,
+      { pendingAskUserQuestions, nextAskUserRequestId: () => 1 }
+    );
+    handler(
+      "AskUserQuestion",
+      { questions: [{ question: "Q?", options: [{ label: "A" }] }] },
+      { toolUseID: "tool-1" }
+    );
+    // Approval pool stays empty
+    assert.equal(pendingApprovals.size, 0);
+    assert.equal(pendingAskUserQuestions.size, 1);
+    // Event emitted is the new kind, not approval_requested
+    const lines = captured.join("").split("\n").filter(Boolean);
+    const types = lines.map((line) => JSON.parse(line).type);
+    assert.deepEqual(types, ["ask_user_question_requested"]);
+  } finally {
+    process.stdout.write = originalWrite;
+  }
+});
+
+test("createPermissionHandler still routes non-AskUserQuestion tools to the approval pool when ask-user handler is configured", () => {
+  const pendingApprovals = new Map();
+  const pendingAskUserQuestions = new Map();
+  const captured = [];
+  const originalWrite = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (chunk) => {
+    captured.push(String(chunk));
+    return true;
+  };
+  try {
+    const handler = createPermissionHandler(
+      pendingApprovals,
+      () => 1,
+      { pendingAskUserQuestions, nextAskUserRequestId: () => 1 }
+    );
+    handler("Bash", { command: "ls" }, { toolUseID: "tool-2", title: "Bash" });
+    assert.equal(pendingAskUserQuestions.size, 0);
+    assert.equal(pendingApprovals.size, 1);
+    const lines = captured.join("").split("\n").filter(Boolean);
+    assert.equal(JSON.parse(lines[0]).type, "approval_requested");
+  } finally {
+    process.stdout.write = originalWrite;
+  }
+});
+
 test("createPermissionHandler stores input so approve can echo it back", async () => {
   const pendingApprovals = new Map();
   let counter = 0;

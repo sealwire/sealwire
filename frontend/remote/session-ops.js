@@ -688,6 +688,25 @@ export async function submitDecision(decision, scope) {
   }
 }
 
+// Submit the user's answer to a pending AskUserQuestion via the broker
+// remote_action channel. `answers` is the {questionText: label | label[] | freeText}
+// map the SDK expects in updatedInput.answers.
+export async function submitAskUserAnswer(requestId, answers) {
+  if (!requestId) {
+    renderLog("No pending AskUserQuestion to answer.");
+    return;
+  }
+  try {
+    await dispatchOrRecover("submit_ask_user_answer", {
+      request_id: requestId,
+      input: { answers },
+    });
+  } catch (error) {
+    renderLog(`AskUserQuestion submit failed: ${error.message}`);
+    throw error;
+  }
+}
+
 export async function applyFileChange(itemId, direction) {
   if (!itemId) {
     renderLog("No file change selected.");

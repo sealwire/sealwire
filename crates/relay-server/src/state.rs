@@ -11,13 +11,13 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-pub use self::app::{AppState, ApprovalError};
+pub use self::app::{AppState, ApprovalError, AskUserAnswerError};
 use self::relay::TranscriptRecord;
 pub(crate) use self::relay::{
-    ApprovalKind, BrokerPendingMessage, CachedRemoteActionResult, ClaimChallenge,
-    CompletedRemoteClaim, DeviceRecord, IssuedClaimChallenge, PairedDevice, PendingApproval,
-    PendingPairingResult, PendingTranscriptDelta, RelayState, RemoteActionReplayDecision,
-    TranscriptDeltaKind,
+    parse_ask_user_questions, ApprovalKind, BrokerPendingMessage, CachedRemoteActionResult,
+    ClaimChallenge, CompletedRemoteClaim, DeviceRecord, IssuedClaimChallenge, PairedDevice,
+    PendingApproval, PendingAskUserQuestion, PendingPairingResult, PendingTranscriptDelta,
+    RelayState, RemoteActionReplayDecision, TranscriptDeltaKind,
 };
 pub(crate) use self::security::SecurityProfile;
 

@@ -9,6 +9,7 @@ import {
   TranscriptEntry,
   diffPrependedItemIds,
   groupToolEntries,
+  parseAskUserAnswers,
 } from "./shared/transcript-react.js";
 import { TranscriptPane } from "./shared/transcript-pane.js";
 
@@ -1014,6 +1015,249 @@ test("transcript loading skeleton includes a circular spinner affordance", () =>
   );
   assert.match(markup, /transcript-history-spinner/);
   assert.match(markup, /transcript-history-skeletons/);
+});
+
+function makeAskUserEntry(overrides = {}) {
+  const { tool: toolOverrides, ...rest } = overrides;
+  return {
+    item_id: "tool:askuser-1",
+    kind: "tool_call",
+    status: "completed",
+    tool: {
+      item_type: "toolCall",
+      name: "AskUserQuestion",
+      title: "AskUserQuestion",
+      input_preview: JSON.stringify({
+        questions: [
+          {
+            question: "Which approach should we take?",
+            header: "Approach",
+            multiSelect: false,
+            options: [
+              { label: "Option A", description: "Do A because reasons" },
+              { label: "Option B", description: "Do B because <other> reasons" },
+            ],
+          },
+        ],
+      }),
+      result_preview:
+        'Your questions have been answered: "Which approach should we take?"="Option B". You can now continue.',
+      ...(toolOverrides || {}),
+    },
+    ...rest,
+  };
+}
+
+test("renderEntryMarkup renders AskUserQuestion as a structured card with questions and options", () => {
+  const markup = renderEntryMarkup(makeAskUserEntry());
+  assert.match(markup, /message-card-ask-user/);
+  assert.match(markup, /Claude asked/);
+  // Question header + text
+  assert.match(markup, /ask-user-question-header[^>]*>Approach</);
+  assert.match(markup, /Which approach should we take\?/);
+  // Both options rendered
+  assert.match(markup, /ask-user-option-label[^>]*>(?:[^<]|<span[^>]*>[^<]*<\/span>\s*)*Option A</);
+  assert.match(markup, /Do A because reasons/);
+  assert.match(markup, /Do B because &lt;other&gt; reasons/);
+  // Should NOT render the raw JSON preview block (the symptom we're fixing)
+  assert.doesNotMatch(markup, /tool-log-pre/);
+});
+
+test("renderEntryMarkup highlights the chosen option for an answered AskUserQuestion", () => {
+  const markup = renderEntryMarkup(makeAskUserEntry());
+  // The chosen option carries the is-chosen modifier and the check glyph
+  assert.match(markup, /ask-user-option is-chosen[^>]*>[\s\S]*?Option B/);
+  assert.match(markup, /ask-user-option-check[^>]*>✓/);
+  assert.match(markup, /ask-user-status[^>]*>Answered</);
+  // The non-chosen option must NOT carry is-chosen
+  assert.doesNotMatch(markup, /ask-user-option is-chosen[^>]*>[\s\S]*?Option A/);
+});
+
+test("renderEntryMarkup shows free-form answer text when the user typed a custom response", () => {
+  const entry = makeAskUserEntry({
+    tool: {
+      input_preview: JSON.stringify({
+        questions: [
+          {
+            question: "How often should we refresh?",
+            header: "Refresh",
+            multiSelect: false,
+            options: [
+              { label: "Every 10s", description: "Frequent" },
+              { label: "On demand", description: "Lazy" },
+            ],
+          },
+        ],
+      }),
+      result_preview:
+        'Your questions have been answered: "How often should we refresh?"="Only when I click the button manually".',
+    },
+  });
+  const markup = renderEntryMarkup(entry);
+  assert.match(markup, /ask-user-freeform-answer/);
+  assert.match(markup, /Only when I click the button manually/);
+  // None of the structured options should be marked chosen
+  assert.doesNotMatch(markup, /ask-user-option is-chosen/);
+});
+
+test("renderEntryMarkup marks running AskUserQuestion as waiting for an answer", () => {
+  const entry = makeAskUserEntry({
+    status: "running",
+    tool: { result_preview: null },
+  });
+  const markup = renderEntryMarkup(entry);
+  assert.match(markup, /ask-user-status[^>]*>Waiting for answer</);
+  assert.doesNotMatch(markup, /ask-user-option is-chosen/);
+});
+
+test("renderEntryMarkup switches AskUserQuestion to interactive buttons when a matching pending request is in the snapshot", () => {
+  const entry = makeAskUserEntry({
+    item_id: "tool:toolu_abc",
+    status: "running",
+    tool: { result_preview: null },
+  });
+  const markup = renderEntryMarkup(entry, {
+    pendingAskUserQuestions: [
+      { request_id: "ask:1", tool_use_id: "toolu_abc", thread_id: "t" },
+    ],
+  });
+  // Container picks up the interactive modifier so CSS can target it
+  assert.match(markup, /chat-message-ask-user chat-message-ask-user-interactive/);
+  // Each option becomes a <button>, not a <div>
+  assert.match(markup, /<button[^>]*class="ask-user-option[^"]*ask-user-option-button[^"]*"[^>]*>/);
+  // Single-select question means NO Submit button — clicks submit immediately
+  assert.doesNotMatch(markup, /ask-user-submit-button/);
+  // Header status reflects interactive readiness
+  assert.match(markup, /ask-user-status[^>]*>Tap an option</);
+});
+
+test("renderEntryMarkup disables AskUserQuestion buttons while a submission is in flight", () => {
+  const entry = makeAskUserEntry({
+    item_id: "tool:toolu_abc",
+    status: "running",
+    tool: { result_preview: null },
+  });
+  const markup = renderEntryMarkup(entry, {
+    pendingAskUserQuestions: [
+      { request_id: "ask:1", tool_use_id: "toolu_abc", thread_id: "t" },
+    ],
+    askUserSubmittingRequestId: "ask:1",
+  });
+  assert.match(markup, /ask-user-status[^>]*>Sending answer…</);
+  // Buttons render the disabled attribute (React serializes disabled as `disabled=""`)
+  assert.match(markup, /<button[^>]*class="ask-user-option[^"]*ask-user-option-button[^"]*"[^>]*disabled=""[^>]*>/);
+});
+
+test("renderEntryMarkup surfaces ask-user submission errors keyed by request_id", () => {
+  const entry = makeAskUserEntry({
+    item_id: "tool:toolu_abc",
+    status: "running",
+    tool: { result_preview: null },
+  });
+  const errors = new Map([["ask:1", "Server said: no pending question"]]);
+  const markup = renderEntryMarkup(entry, {
+    pendingAskUserQuestions: [
+      { request_id: "ask:1", tool_use_id: "toolu_abc", thread_id: "t" },
+    ],
+    askUserErrors: errors,
+  });
+  assert.match(markup, /ask-user-error[^>]*>Server said: no pending question</);
+});
+
+test("renderEntryMarkup renders a Submit button only when every question is multi-select", () => {
+  const entry = makeAskUserEntry({
+    item_id: "tool:toolu_abc",
+    status: "running",
+    tool: {
+      result_preview: null,
+      input_preview: JSON.stringify({
+        questions: [
+          {
+            question: "Which features?",
+            header: "Features",
+            multiSelect: true,
+            options: [
+              { label: "A", description: "alpha" },
+              { label: "B", description: "beta" },
+            ],
+          },
+        ],
+      }),
+    },
+  });
+  const markup = renderEntryMarkup(entry, {
+    pendingAskUserQuestions: [
+      { request_id: "ask:1", tool_use_id: "toolu_abc", thread_id: "t" },
+    ],
+  });
+  // Multi-select cards need a Submit button to commit selections
+  assert.match(markup, /ask-user-submit-button[^>]*>Submit answers</);
+  // The submit button starts disabled because nothing has been picked yet
+  assert.match(markup, /<button[^>]*ask-user-submit-button[^>]*disabled=""/);
+  // Multi-select option buttons advertise aria-pressed for accessibility
+  assert.match(markup, /aria-pressed="false"/);
+});
+
+test("renderEntryMarkup keeps the read-only card when no pending request matches the entry", () => {
+  // Snapshot has a pending request, but for a DIFFERENT tool_use_id
+  const entry = makeAskUserEntry({
+    item_id: "tool:toolu_abc",
+    status: "running",
+    tool: { result_preview: null },
+  });
+  const markup = renderEntryMarkup(entry, {
+    pendingAskUserQuestions: [
+      { request_id: "ask:1", tool_use_id: "toolu_other", thread_id: "t" },
+    ],
+  });
+  assert.doesNotMatch(markup, /chat-message-ask-user-interactive/);
+  assert.doesNotMatch(markup, /ask-user-option-button/);
+  assert.match(markup, /ask-user-status[^>]*>Waiting for answer</);
+});
+
+test("renderEntryMarkup falls back to generic tool rendering when AskUserQuestion JSON is truncated", () => {
+  // Simulate the worker truncating mid-string (legacy 1KB cap behavior)
+  const entry = makeAskUserEntry({
+    tool: {
+      input_preview: '{"questions":[{"question":"Which approach","options":[{"label":"Option A","desc...',
+    },
+  });
+  const markup = renderEntryMarkup(entry);
+  // Should NOT render the structured card
+  assert.doesNotMatch(markup, /message-card-ask-user/);
+  // Should fall back to the generic tool layout
+  assert.match(markup, /message-card-tool/);
+  assert.match(markup, /tool-log-name[^>]*>AskUserQuestion</);
+});
+
+test("groupToolEntries keeps AskUserQuestion ungrouped so the card stays visible", () => {
+  const ask = makeAskUserEntry({ item_id: "tool:askuser-1" });
+  const result = groupToolEntries([
+    makeTool("a"),
+    ask,
+    makeTool("b"),
+  ]);
+  // a -> group; ask -> standalone; b -> group
+  assert.equal(result.length, 3);
+  assert.equal(result[0].type, "tool-group");
+  assert.equal(result[1].kind, "tool_call");
+  assert.equal(result[1].tool.name, "AskUserQuestion");
+  assert.equal(result[2].type, "tool-group");
+});
+
+test("parseAskUserAnswers extracts per-question answers from a Claude result_preview", () => {
+  const result = parseAskUserAnswers(
+    'Your questions have been answered: "Q one"="A one", "Q two"="A two". You can now continue.'
+  );
+  assert.equal(result.size, 2);
+  assert.equal(result.get("Q one"), "A one");
+  assert.equal(result.get("Q two"), "A two");
+});
+
+test("parseAskUserAnswers returns an empty map when the result_preview is missing or malformed", () => {
+  assert.equal(parseAskUserAnswers("").size, 0);
+  assert.equal(parseAskUserAnswers(null).size, 0);
+  assert.equal(parseAskUserAnswers("no quoted pairs here").size, 0);
 });
 
 test("UserEntry and AgentEntry are React.memo'd to skip re-render on prepend", async () => {

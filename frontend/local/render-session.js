@@ -887,6 +887,12 @@ export function createSessionRenderer({
           enableFileChangeActions: true,
           expandedKeys: localUi.transcriptExpandedItemIds,
           loadingItemIds: localUi.transcriptLoadingItemIds,
+          pendingAskUserQuestions: session?.pending_ask_user_questions || [],
+          onSubmitAskUserAnswers: (requestId, answers) => {
+            void state.controller?.submitAskUserQuestionAnswer?.(requestId, answers);
+          },
+          askUserSubmittingRequestId: localUi.askUserSubmittingRequestId || "",
+          askUserErrors: localUi.askUserErrors instanceof Map ? localUi.askUserErrors : new Map(),
         },
       })
     );

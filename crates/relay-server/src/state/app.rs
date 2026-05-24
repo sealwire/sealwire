@@ -12,15 +12,15 @@ use crate::{
     codex::split_unified_diff_by_file,
     protocol::{
         AllowedRootsInput, AllowedRootsReceipt, ApplyFileChangeInput, ApplyFileChangeReceipt,
-        ApprovalDecision, ApprovalDecisionInput, ApprovalReceipt, BulkRevokeDevicesReceipt,
-        FileChangeApplyDirection, FileChangeDiffView, HeartbeatInput, ModelOptionView,
-        PairingDecision, PairingDecisionInput, PairingDecisionReceipt, PairingStartInput,
-        PairingTicketView, ReadThreadEntriesInput, ReadThreadEntryDetailInput,
+        ApprovalDecision, ApprovalDecisionInput, ApprovalReceipt, AskUserAnswerReceipt,
+        BulkRevokeDevicesReceipt, FileChangeApplyDirection, FileChangeDiffView, HeartbeatInput,
+        ModelOptionView, PairingDecision, PairingDecisionInput, PairingDecisionReceipt,
+        PairingStartInput, PairingTicketView, ReadThreadEntriesInput, ReadThreadEntryDetailInput,
         ReadThreadTranscriptInput, ResumeSessionInput, RevokeDeviceReceipt, SendMessageInput,
-        SessionSnapshot, StartSessionInput, StopTurnInput, TakeOverInput, ThreadArchiveReceipt,
-        ThreadDeleteReceipt, ThreadEntriesResponse, ThreadEntryDetailResponse,
-        ThreadTranscriptResponse, ThreadsResponse, UpdateSessionSettingsInput,
-        WorkspaceDiffResponse,
+        SessionSnapshot, StartSessionInput, StopTurnInput, SubmitAskUserAnswerInput, TakeOverInput,
+        ThreadArchiveReceipt, ThreadDeleteReceipt, ThreadEntriesResponse,
+        ThreadEntryDetailResponse, ThreadTranscriptResponse, ThreadsResponse,
+        UpdateSessionSettingsInput, WorkspaceDiffResponse,
     },
     provider::{spawn_providers, ProviderBridge},
 };
@@ -977,6 +977,57 @@ impl AppState {
         })
     }
 
+    pub async fn submit_ask_user_answer(
+        &self,
+        request_id: &str,
+        input: SubmitAskUserAnswerInput,
+    ) -> Result<AskUserAnswerReceipt, AskUserAnswerError> {
+        let device_id =
+            require_device_id(input.device_id.clone()).map_err(AskUserAnswerError::Bridge)?;
+        if input.answers.is_empty() {
+            return Err(AskUserAnswerError::NoAnswers);
+        }
+        let exists = {
+            let relay = self.relay.read().await;
+            relay
+                .ensure_device_can_approve(&device_id)
+                .map_err(AskUserAnswerError::Bridge)?;
+            relay.pending_ask_user_questions.contains_key(request_id)
+        };
+        if !exists {
+            return Err(AskUserAnswerError::NoPendingRequest);
+        }
+
+        self.require_active_provider()
+            .map_err(AskUserAnswerError::Bridge)?
+            .1
+            .respond_to_ask_user_question(request_id, &input.answers)
+            .await
+            .map_err(AskUserAnswerError::Bridge)?;
+
+        let mut relay = self.relay.write().await;
+        relay.pending_ask_user_questions.remove(request_id);
+        if relay.pending_ask_user_questions.is_empty() {
+            let tid = relay.active_thread_id.clone().unwrap_or_default();
+            if !tid.is_empty() {
+                relay.set_thread_status(&tid, "active".to_string(), Vec::new());
+            }
+        }
+        relay.push_log(
+            "info",
+            format!(
+                "AskUserQuestion {request_id} answered by {}.",
+                short_device_id(&device_id)
+            ),
+        );
+        relay.notify();
+
+        Ok(AskUserAnswerReceipt {
+            request_id: request_id.to_string(),
+            message: "Answer sent to Claude.".to_string(),
+        })
+    }
+
     pub async fn workspace_diff(
         &self,
         device_id: Option<String>,
@@ -1805,6 +1856,13 @@ async fn synthesize_untracked_diff(cwd: &str, rel_path: &str) -> Result<(String,
 #[derive(Debug)]
 pub enum ApprovalError {
     NoPendingRequest,
+    Bridge(String),
+}
+
+#[derive(Debug)]
+pub enum AskUserAnswerError {
+    NoPendingRequest,
+    NoAnswers,
     Bridge(String),
 }
 

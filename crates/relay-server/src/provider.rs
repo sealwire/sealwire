@@ -67,6 +67,15 @@ pub trait ProviderBridge: Send + Sync {
         pending: &PendingApproval,
         input: &ApprovalDecisionInput,
     ) -> Result<(), String>;
+    /// Submit an answer to a pending AskUserQuestion. The `answers` map is
+    /// keyed by question text (matching the SDK's expected
+    /// `updatedInput.answers` shape). Providers that don't support
+    /// AskUserQuestion should return an error rather than silently no-op.
+    async fn respond_to_ask_user_question(
+        &self,
+        request_id: &str,
+        answers: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), String>;
     fn provider_name(&self) -> &'static str;
 }
 
