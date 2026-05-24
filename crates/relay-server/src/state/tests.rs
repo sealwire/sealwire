@@ -32,6 +32,7 @@ fn test_persisted_state() -> PersistedRelayState {
             last_peer_id: Some("surface-1".to_string()),
             device_verify_key: TEST_VERIFY_KEY_B64.to_string(),
             broker_join_ticket_expires_at: None,
+            path_scope: Vec::new(),
         },
     );
     let mut paired_devices = std::collections::HashMap::new();
