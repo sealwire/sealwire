@@ -96,6 +96,7 @@ import {
   triggerRemoteWorkspaceDiffRefresh,
 } from "./workspace-diff-host.js";
 import { createPanelControl } from "../local/panel-controls.js";
+import { setupHeaderBandSync } from "../local/header-band-sync.js";
 import {
   Composer,
   ControlBanner,
@@ -604,12 +605,28 @@ function RemoteApp() {
     const leftToggle = leftPanelControl.attachToggleButton(
       document.getElementById("remote-toggle-left-panel")
     );
+    const leftTopToggle = leftPanelControl.attachToggleButton(
+      document.getElementById("remote-sidebar-top-toggle")
+    );
+    const sidebarCollapseSync = leftPanelControl.subscribe(({ isOpen }) => {
+      document.body.classList.toggle("sidebar-collapsed", !isOpen);
+    });
     const rightResize = rightPanelControl.attachResizeHandle(
       document.getElementById("remote-right-rail-resize")
     );
     const rightToggle = rightPanelControl.attachToggleButton(
       document.getElementById("remote-toggle-right-panel")
     );
+    const rightTopToggle = rightPanelControl.attachToggleButton(
+      document.getElementById("remote-rail-top-toggle")
+    );
+    const railCollapseSync = rightPanelControl.subscribe(({ isOpen }) => {
+      document.body.classList.toggle("rail-collapsed", !isOpen);
+    });
+
+    const headerBandSync = setupHeaderBandSync({
+      chatHeader: document.querySelector(".remote-chat-shell > .chat-header"),
+    });
 
     function onKeyDown(event) {
       const isKeyB = event.key === "b" || event.key === "B" || event.code === "KeyB";
@@ -632,8 +649,13 @@ function RemoteApp() {
       cleanupRelaysWheel?.();
       leftResize?.destroy?.();
       leftToggle?.destroy?.();
+      leftTopToggle?.destroy?.();
+      sidebarCollapseSync?.();
       rightResize?.destroy?.();
       rightToggle?.destroy?.();
+      rightTopToggle?.destroy?.();
+      railCollapseSync?.();
+      headerBandSync?.destroy?.();
       document.removeEventListener("keydown", onKeyDown);
     };
   }, []);
@@ -893,6 +915,9 @@ function RemoteApp() {
           onToggleOverflow() {
             remoteUiStore.getState().toggleHeaderOverflow();
           },
+          onOpenStartSession() {
+            remoteUiStore.getState().setSessionPanelOpen(true);
+          },
           statusBadgeModel,
         }),
         h(RemoteThreadPanel, {
@@ -1025,6 +1050,21 @@ function RemoteSidebar({
       "aria-hidden": String(!navOpen),
       className: "sidebar",
     },
+    h(
+      "div",
+      { className: "sidebar-top-bar" },
+      h(
+        "button",
+        {
+          "aria-label": "Hide navigation panel",
+          className: "header-button header-panel-toggle sidebar-top-toggle",
+          id: "remote-sidebar-top-toggle",
+          title: "Hide navigation panel (⌘B)",
+          type: "button",
+        },
+        h(RemoteToggleLeftPanelIcon)
+      )
+    ),
     h(
       "div",
       { className: "sidebar-row" },
@@ -1195,6 +1235,25 @@ function RemoteToggleRightPanelIcon() {
   );
 }
 
+function RemoteComposeIcon() {
+  return h(
+    "svg",
+    {
+      "aria-hidden": "true",
+      fill: "none",
+      height: "16",
+      viewBox: "0 0 16 16",
+      width: "16",
+      stroke: "currentColor",
+      strokeWidth: "1.4",
+      strokeLinecap: "round",
+      strokeLinejoin: "round",
+    },
+    h("path", { d: "M2.5 13.5h4l6.5-6.5a1.8 1.8 0 0 0-2.5-2.5L4 11v2.5z" }),
+    h("path", { d: "M10 5.5l2 2" })
+  );
+}
+
 function RemoteHeaderOverflowIcon() {
   return h(
     "svg",
@@ -1212,6 +1271,7 @@ function RemoteHeader({
   headerOverflowOpen,
   onCloseOverflow,
   onOpenInfo,
+  onOpenStartSession,
   onReturnHome,
   onToggleNavigation,
   onToggleOverflow,
@@ -1272,15 +1332,31 @@ function RemoteHeader({
         h("span", { className: "sr-only" }, "Toggle sidebar")
       ),
       h(
-        "button",
-        {
-          "aria-label": "Toggle navigation panel",
-          className: "header-button header-panel-toggle header-panel-toggle-left",
-          id: "remote-toggle-left-panel",
-          title: "Toggle navigation panel (⌘B)",
-          type: "button",
-        },
-        h(RemoteToggleLeftPanelIcon)
+        "div",
+        { className: "chat-header-collapsed-actions" },
+        h(
+          "button",
+          {
+            "aria-label": "Show navigation panel",
+            className: "header-button header-panel-toggle header-panel-toggle-left",
+            id: "remote-toggle-left-panel",
+            title: "Show navigation panel (⌘B)",
+            type: "button",
+          },
+          h(RemoteToggleLeftPanelIcon)
+        ),
+        h(
+          "button",
+          {
+            "aria-label": "Start new session",
+            className: "header-button header-compose-button",
+            id: "remote-new-session-compose-button",
+            type: "button",
+            title: "Start new session",
+            onClick: onOpenStartSession,
+          },
+          h(RemoteComposeIcon)
+        )
       ),
       h(
         "div",

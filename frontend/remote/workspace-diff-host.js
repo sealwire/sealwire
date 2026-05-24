@@ -56,6 +56,15 @@ export function notifyRemoteSessionUpdated(session) {
   }
 }
 
+function RemoteRailToggleIcon() {
+  return h(
+    "svg",
+    { "aria-hidden": "true", fill: "none", height: "16", viewBox: "0 0 16 16", width: "16", stroke: "currentColor", strokeWidth: "1.4" },
+    h("rect", { x: "1.5", y: "2.5", width: "13", height: "11", rx: "2" }),
+    h("line", { x1: "10", y1: "2.5", x2: "10", y2: "13.5" })
+  );
+}
+
 export function RemoteWorkspaceChangesRail() {
   const store = getRemoteWorkspaceDiffStore();
   return h(
@@ -73,6 +82,17 @@ export function RemoteWorkspaceChangesRail() {
       "aria-label": "Resize workspace panel",
       tabIndex: 0,
     }),
+    h(
+      "button",
+      {
+        "aria-label": "Hide workspace panel",
+        className: "header-button header-panel-toggle rail-top-toggle",
+        id: "remote-rail-top-toggle",
+        title: "Hide workspace panel (⌥⌘B)",
+        type: "button",
+      },
+      h(RemoteRailToggleIcon)
+    ),
     h(WorkspaceChangesPanel, { store })
   );
 }

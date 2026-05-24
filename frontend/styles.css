@@ -321,6 +321,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   min-width: 0;
   display: grid;
   grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+  transition: grid-template-columns 220ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .app-shell-with-rail {
@@ -335,6 +336,12 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(--right-rail-width);
 }
 
+/* Suppress the column transition while the user is actively dragging a
+ * resize handle — otherwise the column lags behind the cursor. */
+body.is-resizing-panel .app-shell {
+  transition: none;
+}
+
 /* When the panel width is 0 the column collapses; clip horizontal overflow
  * so padding/border don't leak into the chat column. (Box-sizing is already
  * border-box globally; vertical scrolling is preserved.) */
@@ -342,6 +349,21 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .right-rail {
   min-width: 0;
   overflow-x: hidden;
+  opacity: 1;
+  visibility: visible;
+  transition: opacity 180ms ease, visibility 0s linear 0s;
+}
+body.is-resizing-panel .sidebar,
+body.is-resizing-panel .right-rail {
+  transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-shell,
+  .sidebar,
+  .right-rail {
+    transition: none !important;
+  }
 }
 
 
@@ -2693,7 +2715,8 @@ input:focus, textarea:focus, select:focus {
 }
 
 /* Panel toggle header buttons */
-.header-panel-toggle {
+.header-panel-toggle,
+.header-compose-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -2701,21 +2724,105 @@ input:focus, textarea:focus, select:focus {
   line-height: 0;
   color: var(--text-secondary);
 }
-.header-panel-toggle:hover {
+.header-panel-toggle:hover,
+.header-compose-button:hover {
   color: var(--text-primary);
   background: var(--bg-elevated);
 }
 .header-panel-toggle.is-active {
   color: var(--text-primary);
 }
-.header-panel-toggle[aria-pressed="false"] {
-  opacity: 0.7;
+
+/* Sidebar-top toggle: visible while sidebar is open.
+ * Collapsed-actions in the chat header: visible only when sidebar is closed. */
+.sidebar-top-bar {
+  display: flex;
+  align-items: center;
+  padding-bottom: 4px;
 }
+.chat-header-leading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.chat-header-collapsed-actions {
+  display: none;
+  align-items: center;
+  gap: 4px;
+}
+body.sidebar-collapsed .chat-header-collapsed-actions {
+  display: inline-flex;
+}
+body.sidebar-collapsed .sidebar-top-toggle {
+  display: none;
+}
+
+/* Symmetric pattern for the right rail: when the rail is open the toggle
+ * lives in the rail header (top-right), mirroring the sidebar-top-toggle.
+ * When collapsed the chat-header's right-toggle takes over so the user can
+ * still bring the rail back. */
+.rail-top-toggle {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 3;
+}
+body.rail-collapsed .rail-top-toggle {
+  display: none;
+}
+.header-panel-toggle-right { display: none; }
+body.rail-collapsed .header-panel-toggle-right {
+  display: inline-flex;
+}
+
+/* Collapsed state — force the grid column to 0 and clip the panel's
+ * intrinsic content. We use `visibility: hidden` + `pointer-events: none`
+ * rather than `display: none` so the panel KEEPS its grid slot — removing
+ * it from layout would let auto-placement reflow ChatShell / Rail into the
+ * wrong columns. */
+body.sidebar-collapsed .app-shell {
+  grid-template-columns: 0 minmax(0, 1fr);
+}
+body.sidebar-collapsed .app-shell-with-rail {
+  grid-template-columns: 0 minmax(0, 1fr) var(--right-rail-width);
+}
+body.sidebar-collapsed .app-shell[data-view="conversation"] {
+  grid-template-columns: 0 minmax(0, 1fr);
+}
+body.sidebar-collapsed .app-shell-with-rail[data-view="conversation"] {
+  grid-template-columns: 0 minmax(0, 1fr) var(--right-rail-width);
+}
+body.sidebar-collapsed .sidebar {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  overflow: hidden;
+  transition: opacity 180ms ease, visibility 0s linear 200ms;
+}
+
+body.rail-collapsed .app-shell-with-rail,
+body.rail-collapsed .app-shell-with-rail[data-view="conversation"] {
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr) 0;
+}
+body.rail-collapsed.sidebar-collapsed .app-shell-with-rail,
+body.rail-collapsed.sidebar-collapsed .app-shell-with-rail[data-view="conversation"] {
+  grid-template-columns: 0 minmax(0, 1fr) 0;
+}
+body.rail-collapsed .right-rail {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  overflow: hidden;
+  transition: opacity 180ms ease, visibility 0s linear 200ms;
+}
+
 @media (max-width: 960px) {
   .header-panel-toggle-left,
-  .header-panel-toggle-right {
-    display: none;
-  }
+  .header-panel-toggle-right,
+  .chat-header-collapsed-actions,
+  .sidebar-top-bar { display: none; }
+  body.sidebar-collapsed .chat-header-collapsed-actions { display: none; }
 }
 
 /* Resize handles — left edge of right rail, right edge of left sidebar */
@@ -2773,11 +2880,12 @@ body.is-resizing-panel {
   border-bottom: 1px solid var(--border-subtle);
   background: var(--bg-base);
   z-index: 2;
-  /* Match the natural height of `.chat-header` (with h1 + subtitle present)
-   * so the rail's "ENVIRONMENT" label lines up with the chat heading and
-   * the first entry below it ("Changes") lands at the same y as the
-   * post-header strip in the middle column. */
-  min-height: 67px;
+  /* Match the natural height of `.chat-header` so the rail's bottom border
+   * lines up with the chat-header's bottom border. The variable is set by
+   * `header-band-sync.js`, measured from the live chat-header element so
+   * subtitle / path changes don't desync the rule. Fallback covers the
+   * pre-JS render. */
+  min-height: var(--header-band-height, 67px);
   box-sizing: border-box;
 }
 .workspace-changes-title {

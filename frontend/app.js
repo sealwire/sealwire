@@ -85,6 +85,9 @@ import {
   rightRailResizeHandle,
   toggleLeftPanelButton,
   toggleRightPanelButton,
+  sidebarTopToggleButton,
+  railTopToggleButton,
+  newSessionComposeButton,
 } from "./local/dom.js";
 import React from "react";
 import { flushSync } from "react-dom";
@@ -102,6 +105,7 @@ import {
   mountChip,
 } from "./local/workspace-diff.js";
 import { createPanelControl } from "./local/panel-controls.js";
+import { setupHeaderBandSync } from "./local/header-band-sync.js";
 import {
   createVerbCycler,
   isProgressStalled,
@@ -215,6 +219,9 @@ const apiFetch = createApiFetch({
 });
 
 const workspaceDiffStore = createWorkspaceDiffStore({ apiFetch });
+let clientLogRootHandle = null;
+let clientLogRootElement = null;
+
 const workspaceDiffSheet = createWorkspaceDiffSheet({
   store: workspaceDiffStore,
   mount: workspaceDiffMount,
@@ -223,6 +230,9 @@ const workspaceDiffSheet = createWorkspaceDiffSheet({
   refreshButton: workspaceDiffRefreshButton,
 });
 mountChangesPanel({ store: workspaceDiffStore, mount: workspaceChangesMount });
+setupHeaderBandSync({
+  chatHeader: document.querySelector(".chat-shell > .chat-header"),
+});
 mountChip({
   store: workspaceDiffStore,
   mount: workspaceDiffChipMount,
@@ -241,6 +251,13 @@ const leftPanelControl = createPanelControl({
 });
 leftPanelControl.attachResizeHandle(sidebarResizeHandle);
 leftPanelControl.attachToggleButton(toggleLeftPanelButton);
+leftPanelControl.attachToggleButton(sidebarTopToggleButton);
+leftPanelControl.subscribe(({ isOpen }) => {
+  document.body.classList.toggle("sidebar-collapsed", !isOpen);
+});
+newSessionComposeButton?.addEventListener("click", () => {
+  document.getElementById("launch-start-session-dialog")?.setAttribute("open", "");
+});
 
 const rightPanelControl = createPanelControl({
   cssVarName: "--right-rail-width",
@@ -253,6 +270,10 @@ const rightPanelControl = createPanelControl({
 });
 rightPanelControl.attachResizeHandle(rightRailResizeHandle);
 rightPanelControl.attachToggleButton(toggleRightPanelButton);
+rightPanelControl.attachToggleButton(railTopToggleButton);
+rightPanelControl.subscribe(({ isOpen }) => {
+  document.body.classList.toggle("rail-collapsed", !isOpen);
+});
 document.addEventListener("keydown", (event) => {
   const isKeyB = event.key === "b" || event.key === "B" || event.code === "KeyB";
   if (!isKeyB) return;
@@ -692,7 +713,7 @@ window.addEventListener("popstate", () => {
   renderThreads();
 });
 
-directoryForm.addEventListener("submit", (event) => {
+directoryForm?.addEventListener("submit", (event) => {
   event.preventDefault();
   clearThreadRoute();
   setSelectedCwd(cwdInput.value.trim());
@@ -1782,9 +1803,6 @@ function logLine(message) {
   state.clientLogLines = [`${time}  ${message}`, ...state.clientLogLines].slice(0, 400);
   renderClientLogLines(state.clientLogLines);
 }
-
-let clientLogRootHandle = null;
-let clientLogRootElement = null;
 
 function renderClientLogLines(lines) {
   if (!clientLogRoot) {

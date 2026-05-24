@@ -17,7 +17,8 @@ import {
 
 const ROOT = process.cwd();
 const TIMEOUT_MS = Number(process.env.BROWSER_E2E_TIMEOUT_MS || 45000);
-const FILE_CHANGE_ITEM_ID = "file-change-e2e";
+const TURN_ID = "turn-file-diff-e2e";
+const TURN_DIFF_ITEM_ID = `turn-diff:${TURN_ID}`;
 const THREAD_ID = "thread-file-diff-e2e";
 const TEST_FILE = "note.txt";
 
@@ -40,8 +41,23 @@ async function main() {
     "",
   ].join("\n");
 
-  await fs.writeFile(testFilePath, "new\n", "utf8");
   await runCommand("git", ["init"], { cwd: workspaceDir });
+  await fs.writeFile(testFilePath, "old\n", "utf8");
+  await runCommand("git", ["add", TEST_FILE], { cwd: workspaceDir });
+  await runCommand(
+    "git",
+    [
+      "-c",
+      "user.name=Agent Relay E2E",
+      "-c",
+      "user.email=e2e@example.invalid",
+      "commit",
+      "-m",
+      "seed file diff fixture",
+    ],
+    { cwd: workspaceDir }
+  );
+  await fs.writeFile(testFilePath, "new\n", "utf8");
   await writeSeedState(statePath, workspaceDir, diff);
 
   const relay = startLocalRelay({
@@ -77,19 +93,11 @@ async function main() {
       { timeout: TIMEOUT_MS }
     );
     await page.waitForFunction(
-      (itemId) => Boolean(document.querySelector(`[data-item-id="${itemId}"]`)),
-      FILE_CHANGE_ITEM_ID,
+      (itemId) => Boolean(document.querySelector(`[data-transcript-entry-id="${itemId}"]`)),
+      TURN_DIFF_ITEM_ID,
       { timeout: TIMEOUT_MS }
     );
 
-    await page.evaluate((itemId) => {
-      const toggle = document.querySelector(
-        `[data-transcript-toggle="entry"][data-item-id="${itemId}"]`
-      );
-      if (toggle instanceof HTMLElement) {
-        toggle.click();
-      }
-    }, FILE_CHANGE_ITEM_ID);
     await page.waitForFunction(
       () => {
         const transcript = document.querySelector("#transcript")?.textContent || "";
@@ -104,7 +112,13 @@ async function main() {
     );
 
     await assertActionButton(page, "rollback");
+    await clickActionButton(page, "rollback");
+    await waitForFileContents(testFilePath, "old\n");
+
     await assertActionButton(page, "reapply");
+    await clickActionButton(page, "reapply");
+    await waitForFileContents(testFilePath, "new\n");
+    await assertActionButton(page, "rollback");
     assert.equal(await fs.readFile(testFilePath, "utf8"), "new\n");
 
     console.log(
@@ -171,21 +185,21 @@ async function writeSeedState(statePath, workspaceDir, diff) {
         paired_devices: {},
         transcript: [
           {
-            item_id: FILE_CHANGE_ITEM_ID,
+            item_id: TURN_DIFF_ITEM_ID,
             kind: "tool_call",
             text: null,
             status: "completed",
-            turn_id: "turn-file-diff-e2e",
+            turn_id: TURN_ID,
             tool: {
-              item_type: "fileChange",
-              name: "File change",
-              title: "Codex changed note.txt.",
+              item_type: "turnDiff",
+              name: "File summary",
+              title: "Codex changed note.txt in this turn.",
               detail: "Target files: note.txt",
               query: null,
               path: TEST_FILE,
               url: null,
               command: null,
-              input_preview: null,
+              input_preview: "Files:\nnote.txt",
               result_preview: null,
               diff,
               file_changes: [
@@ -208,10 +222,32 @@ async function writeSeedState(statePath, workspaceDir, diff) {
 }
 
 async function assertActionButton(page, direction) {
-  await page.waitForSelector(`[data-file-change-action="${direction}"][data-item-id="${FILE_CHANGE_ITEM_ID}"]`, {
+  await page.waitForSelector(actionButtonSelector(direction), {
     state: "attached",
     timeout: TIMEOUT_MS,
   });
+}
+
+async function clickActionButton(page, direction) {
+  await assertActionButton(page, direction);
+  await page.click(actionButtonSelector(direction));
+}
+
+function actionButtonSelector(direction) {
+  return `[data-file-change-action="${direction}"][data-item-id="${TURN_DIFF_ITEM_ID}"]`;
+}
+
+async function waitForFileContents(filePath, expected) {
+  const deadline = Date.now() + TIMEOUT_MS;
+  let lastContents = null;
+  while (Date.now() < deadline) {
+    lastContents = await fs.readFile(filePath, "utf8");
+    if (lastContents === expected) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.equal(lastContents, expected);
 }
 
 async function dumpBrowserState(page) {

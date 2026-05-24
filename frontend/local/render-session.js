@@ -41,6 +41,7 @@ import {
 } from "../shared/thread-groups.js";
 import { selectWorkspaceSuggestionsModel } from "../shared/workspace-suggestions.js";
 import {
+  readThreadListContextMenu,
   readThreadListUi,
 } from "../shared/thread-list-store.js";
 import {
@@ -917,7 +918,10 @@ export function createSessionRenderer({
         ? state.pendingThreadHistoryScrollTop ??
           Math.max(state.threadHistoryScrollTop, threadsList?.scrollTop || 0)
         : 0;
-    closeThreadContextMenu();
+    const openCtxThreadId = readThreadListContextMenu(state.threadListStore).threadId;
+    if (openCtxThreadId && !state.threads.some((entry) => entry.id === openCtxThreadId)) {
+      closeThreadContextMenu();
+    }
 
     const groups = state.threadGroups || [];
     const totalThreads = state.threads.length;

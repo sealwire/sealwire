@@ -20,6 +20,21 @@ function Sidebar({ launchModel = null, onLaunchFieldChange = null, onLaunchStart
   return h(
     "aside",
     { className: "sidebar" },
+    h(
+      "div",
+      { className: "sidebar-top-bar" },
+      h(
+        "button",
+        {
+          "aria-label": "Hide navigation panel",
+          className: "header-button header-panel-toggle sidebar-top-toggle",
+          id: "sidebar-top-toggle",
+          title: "Hide navigation panel (⌘B)",
+          type: "button",
+        },
+        h(ToggleLeftPanelIcon)
+      )
+    ),
     h(AuthForm),
     h(LaunchPanel, { launchModel, onLaunchFieldChange, onLaunchStart }),
     h(ThreadDrawer),
@@ -81,30 +96,34 @@ function LaunchPanel({ launchModel = null, onLaunchFieldChange = null, onLaunchS
         h("span", null, "Continue latest")
       )
     ),
-    h(StartSessionDialog, {
-      id: "launch-start-session-dialog",
-      cwd: m.fields?.cwd || "",
-      fields: m.fields || {},
-      onFieldChange: onLaunchFieldChange || (() => {}),
-      // StartSessionDialog auto-closes itself on Start click; the actual API
-      // call fires from app.js via the #start-session-button document listener.
-      onStart: null,
-      startPending: false,
-      providerOptions: m.providerOptions || [],
-      models: m.models || [],
-      approvalOptions: m.approvalOptions || [],
-      effortOptions: m.effortOptions || [],
-      workspaceInputId: "cwd-input",
-      suggestionsListId: "workspace-suggestions",
-      startButtonId: "start-session-button",
-      settingsPrefix: "",
-      directoryFormId: "directory-form",
-      loadButtonId: "load-directory-button",
-      // Claude supports deferred start — the relay accepts no initial prompt
-      // and promotes the session on the first composer message.
-      requireInitialPrompt: false,
-    })
   );
+}
+
+function LaunchStartSessionDialog({ launchModel, onLaunchFieldChange }) {
+  const m = launchModel || {};
+  return h(StartSessionDialog, {
+    id: "launch-start-session-dialog",
+    cwd: m.fields?.cwd || "",
+    fields: m.fields || {},
+    onFieldChange: onLaunchFieldChange || (() => {}),
+    // StartSessionDialog auto-closes itself on Start click; the actual API
+    // call fires from app.js via the #start-session-button document listener.
+    onStart: null,
+    startPending: false,
+    providerOptions: m.providerOptions || [],
+    models: m.models || [],
+    approvalOptions: m.approvalOptions || [],
+    effortOptions: m.effortOptions || [],
+    workspaceInputId: "cwd-input",
+    suggestionsListId: "workspace-suggestions",
+    startButtonId: "start-session-button",
+    settingsPrefix: "",
+    directoryFormId: "directory-form",
+    loadButtonId: "load-directory-button",
+    // Claude supports deferred start — the relay accepts no initial prompt
+    // and promotes the session on the first composer message.
+    requireInitialPrompt: false,
+  });
 }
 
 function ThreadDrawer() {
@@ -185,6 +204,25 @@ function ToggleRightPanelIcon() {
   );
 }
 
+function ComposeIcon() {
+  return h(
+    "svg",
+    {
+      "aria-hidden": "true",
+      fill: "none",
+      height: "16",
+      viewBox: "0 0 16 16",
+      width: "16",
+      stroke: "currentColor",
+      strokeWidth: "1.4",
+      strokeLinecap: "round",
+      strokeLinejoin: "round",
+    },
+    h("path", { d: "M2.5 13.5h4l6.5-6.5a1.8 1.8 0 0 0-2.5-2.5L4 11v2.5z" }),
+    h("path", { d: "M10 5.5l2 2" })
+  );
+}
+
 function ChatHeader() {
   return h(
     "header",
@@ -193,15 +231,30 @@ function ChatHeader() {
       "div",
       { className: "chat-header-leading" },
       h(
-        "button",
-        {
-          "aria-label": "Toggle navigation panel",
-          className: "header-button header-panel-toggle header-panel-toggle-left",
-          id: "toggle-left-panel",
-          type: "button",
-          title: "Toggle navigation panel (⌘B)",
-        },
-        h(ToggleLeftPanelIcon)
+        "div",
+        { className: "chat-header-collapsed-actions" },
+        h(
+          "button",
+          {
+            "aria-label": "Show navigation panel",
+            className: "header-button header-panel-toggle header-panel-toggle-left",
+            id: "toggle-left-panel",
+            type: "button",
+            title: "Show navigation panel (⌘B)",
+          },
+          h(ToggleLeftPanelIcon)
+        ),
+        h(
+          "button",
+          {
+            "aria-label": "Start new session",
+            className: "header-button header-compose-button",
+            id: "new-session-compose-button",
+            type: "button",
+            title: "Start new session",
+          },
+          h(ComposeIcon)
+        )
       ),
       h(
         "div",
@@ -411,6 +464,17 @@ function WorkspaceChangesRail() {
       "aria-label": "Resize workspace panel",
       tabIndex: 0,
     }),
+    h(
+      "button",
+      {
+        "aria-label": "Hide workspace panel",
+        className: "header-button header-panel-toggle rail-top-toggle",
+        id: "rail-top-toggle",
+        title: "Hide workspace panel (⌥⌘B)",
+        type: "button",
+      },
+      h(ToggleRightPanelIcon)
+    ),
     h("div", { id: "workspace-changes-mount" })
   );
 }
@@ -664,6 +728,7 @@ export function LocalShell({ launchModel = null, onLaunchFieldChange = null, onL
       h(ChatShell),
       h(WorkspaceChangesRail)
     ),
+    h(LaunchStartSessionDialog, { launchModel, onLaunchFieldChange }),
     h(SessionDetailsModal),
     h(WorkspaceDiffModal),
     h(SecurityModal),
