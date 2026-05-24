@@ -60,6 +60,8 @@ pub(crate) struct DeviceRecord {
     pub(crate) device_verify_key: String,
     #[serde(default)]
     pub(crate) broker_join_ticket_expires_at: Option<u64>,
+    #[serde(default)]
+    pub(crate) path_scope: Vec<String>,
 }
 
 impl PairedDevice {
@@ -90,6 +92,7 @@ impl DeviceRecord {
             last_peer_id: device.last_peer_id.clone(),
             device_verify_key: device.device_verify_key.clone(),
             broker_join_ticket_expires_at: device.broker_join_ticket_expires_at,
+            path_scope: device.path_scope.clone(),
         }
     }
 
@@ -104,6 +107,7 @@ impl DeviceRecord {
             last_peer_id: self.last_peer_id.clone(),
             broker_join_ticket_expires_at: self.broker_join_ticket_expires_at,
             fingerprint: device_fingerprint(Some(&self.device_verify_key)),
+            path_scope: self.path_scope.clone(),
         }
     }
 }
@@ -816,6 +820,7 @@ impl RelayState {
         record.last_peer_id = device.last_peer_id.clone();
         record.device_verify_key = device.device_verify_key.clone();
         record.broker_join_ticket_expires_at = device.broker_join_ticket_expires_at;
+        record.path_scope = device.path_scope.clone();
         record.state_changed_at = now;
     }
 
@@ -841,6 +846,7 @@ impl RelayState {
                 last_peer_id: Some(last_peer_id.to_string()),
                 device_verify_key: device_verify_key.to_string(),
                 broker_join_ticket_expires_at: None,
+                path_scope: Vec::new(),
             });
         record.label = label.to_string();
         record.lifecycle_state = DeviceLifecycleState::Rejected;

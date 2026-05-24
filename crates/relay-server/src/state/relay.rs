@@ -213,6 +213,7 @@ impl RelayState {
                     last_peer_id: Some(request.broker_peer_id.clone()),
                     device_verify_key: request.device_verify_key.clone(),
                     broker_join_ticket_expires_at: None,
+                    path_scope: request.path_scope.clone(),
                 },
             );
         }

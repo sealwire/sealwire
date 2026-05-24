@@ -580,6 +580,8 @@ pub struct DeviceRecordView {
     pub last_peer_id: Option<String>,
     pub broker_join_ticket_expires_at: Option<u64>,
     pub fingerprint: Option<String>,
+    #[serde(default)]
+    pub path_scope: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
