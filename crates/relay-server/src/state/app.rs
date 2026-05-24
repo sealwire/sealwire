@@ -41,6 +41,19 @@ pub struct AppState {
 }
 
 impl AppState {
+    #[cfg(test)]
+    pub(crate) fn from_parts(
+        relay: Arc<RwLock<RelayState>>,
+        providers: HashMap<String, Arc<dyn ProviderBridge>>,
+        change_tx: watch::Sender<u64>,
+    ) -> Self {
+        Self {
+            relay,
+            providers,
+            change_tx,
+        }
+    }
+
     pub async fn new() -> Result<Self, String> {
         let security = SecurityProfile::from_env()?;
         let cwd = std::env::current_dir()
@@ -2046,5 +2059,279 @@ mod workspace_diff_tests {
             .unwrap();
         assert!(!response.not_a_git_repo);
         assert!(response.file_changes.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod path_scope_tests {
+    use super::*;
+    use crate::fake_provider::FakeProviderBridge;
+    use crate::protocol::{
+        ReadThreadTranscriptInput, ResumeSessionInput, SendMessageInput, StartSessionInput,
+    };
+    use crate::state::security::SecurityProfile;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+    use tokio::sync::{watch, RwLock};
+
+    async fn build_app(cwd: &str) -> (AppState, TempDir, TempDir) {
+        let project = TempDir::new().expect("project tempdir");
+        let outside = TempDir::new().expect("outside tempdir");
+        let (change_tx, _) = watch::channel(0_u64);
+        let relay = Arc::new(RwLock::new(RelayState::new(
+            cwd.to_string(),
+            change_tx.clone(),
+            SecurityProfile::private(),
+        )));
+        let bridge = FakeProviderBridge::spawn(relay.clone())
+            .await
+            .expect("fake provider should spawn");
+        let mut providers: HashMap<String, Arc<dyn ProviderBridge>> = HashMap::new();
+        providers.insert("fake".to_string(), Arc::new(bridge));
+        (
+            AppState::from_parts(relay, providers, change_tx),
+            project,
+            outside,
+        )
+    }
+
+    async fn pair_device(app: &AppState, device_id: &str, path_scope: Vec<String>) {
+        // Normalize the scope the same way start_pairing does in production, so symlinked
+        // tmpdirs on macOS (/var/folders → /private/var/folders) don't produce false misses.
+        let path_scope = if path_scope.is_empty() {
+            Vec::new()
+        } else {
+            normalize_allowed_roots(path_scope).expect("test scope should normalize")
+        };
+        let mut relay = app.relay.write().await;
+        relay.paired_devices.insert(
+            device_id.to_string(),
+            crate::state::relay::PairedDevice {
+                device_id: device_id.to_string(),
+                label: device_id.to_string(),
+                payload_secret: "test-payload-secret".to_string(),
+                device_verify_key: "test-verify-key".to_string(),
+                created_at: 1,
+                last_seen_at: Some(1),
+                last_peer_id: Some("peer-test".to_string()),
+                broker_join_ticket_expires_at: None,
+                path_scope,
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn start_session_rejects_cwd_outside_device_scope() {
+        let project = TempDir::new().expect("project tempdir");
+        let scoped = project.path().join("scoped");
+        let other = project.path().join("other");
+        std::fs::create_dir_all(&scoped).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+
+        let (app, _p, _o) = build_app(scoped.to_str().unwrap()).await;
+        pair_device(&app, "scoped-device", vec![scoped.display().to_string()]).await;
+
+        let error = app
+            .start_session(StartSessionInput {
+                device_id: Some("scoped-device".to_string()),
+                cwd: Some(other.display().to_string()),
+                model: None,
+                effort: None,
+                approval_policy: None,
+                sandbox: None,
+                provider: Some("fake".to_string()),
+                initial_prompt: None,
+            })
+            .await
+            .expect_err("start_session outside scope should fail");
+        assert!(
+            error.contains("device's allowed paths"),
+            "expected device-scope rejection, got: {error}"
+        );
+
+        // Same call with cwd inside scope succeeds.
+        app.start_session(StartSessionInput {
+            device_id: Some("scoped-device".to_string()),
+            cwd: Some(scoped.display().to_string()),
+            model: None,
+            effort: None,
+            approval_policy: None,
+            sandbox: None,
+            provider: Some("fake".to_string()),
+            initial_prompt: None,
+        })
+        .await
+        .expect("start_session inside scope should succeed");
+    }
+
+    #[tokio::test]
+    async fn start_session_allows_unscoped_device_anywhere_within_relay_roots() {
+        let project = TempDir::new().expect("project tempdir");
+        let any = project.path().join("any");
+        std::fs::create_dir_all(&any).unwrap();
+
+        let (app, _p, _o) = build_app(any.to_str().unwrap()).await;
+        // No path_scope = inherit relay roots only.
+        pair_device(&app, "wide-device", Vec::new()).await;
+
+        app.start_session(StartSessionInput {
+            device_id: Some("wide-device".to_string()),
+            cwd: Some(any.display().to_string()),
+            model: None,
+            effort: None,
+            approval_policy: None,
+            sandbox: None,
+            provider: Some("fake".to_string()),
+            initial_prompt: None,
+        })
+        .await
+        .expect("unscoped device should succeed within relay roots");
+    }
+
+    #[tokio::test]
+    async fn send_message_rejects_when_active_thread_cwd_outside_device_scope() {
+        let project = TempDir::new().expect("project tempdir");
+        let scoped = project.path().join("scoped");
+        let other = project.path().join("other");
+        std::fs::create_dir_all(&scoped).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+
+        // Relay starts at `other` — outside the scoped device's path.
+        let (app, _p, _o) = build_app(other.to_str().unwrap()).await;
+        pair_device(&app, "scoped-device", vec![scoped.display().to_string()]).await;
+
+        // Manually plant an active thread at `other` so send_message has something to target.
+        // Use an unscoped device to start the session first (so we don't trip the scope at start).
+        pair_device(&app, "wide-device", Vec::new()).await;
+        app.start_session(StartSessionInput {
+            device_id: Some("wide-device".to_string()),
+            cwd: Some(other.display().to_string()),
+            model: None,
+            effort: None,
+            approval_policy: None,
+            sandbox: None,
+            provider: Some("fake".to_string()),
+            initial_prompt: None,
+        })
+        .await
+        .expect("wide device should start session");
+
+        // Hand controller to scoped device — required so ensure_device_can_send_message passes,
+        // then the scope check fires.
+        {
+            let mut relay = app.relay.write().await;
+            relay.assign_active_controller("scoped-device", unix_now());
+        }
+
+        let error = app
+            .send_message(SendMessageInput {
+                device_id: Some("scoped-device".to_string()),
+                text: "hello".to_string(),
+                model: None,
+                effort: None,
+            })
+            .await
+            .expect_err("scoped device should be rejected when active cwd is outside its scope");
+        assert!(
+            error.contains("device's allowed paths"),
+            "expected device-scope rejection, got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_thread_transcript_rejects_when_device_id_scopes_out_thread_cwd() {
+        let project = TempDir::new().expect("project tempdir");
+        let scoped = project.path().join("scoped");
+        let other = project.path().join("other");
+        std::fs::create_dir_all(&scoped).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+
+        let (app, _p, _o) = build_app(other.to_str().unwrap()).await;
+        pair_device(&app, "wide-device", Vec::new()).await;
+        pair_device(&app, "scoped-device", vec![scoped.display().to_string()]).await;
+
+        let snapshot = app
+            .start_session(StartSessionInput {
+                device_id: Some("wide-device".to_string()),
+                cwd: Some(other.display().to_string()),
+                model: None,
+                effort: None,
+                approval_policy: None,
+                sandbox: None,
+                provider: Some("fake".to_string()),
+                initial_prompt: None,
+            })
+            .await
+            .expect("wide device should start session");
+        let thread_id = snapshot.active_thread_id.expect("active thread");
+
+        // Wide device reads transcript: succeeds.
+        app.read_thread_transcript(ReadThreadTranscriptInput {
+            thread_id: thread_id.clone(),
+            cursor: None,
+            before: None,
+            device_id: Some("wide-device".to_string()),
+        })
+        .await
+        .expect("wide device should read transcript");
+
+        // Scoped device reads same transcript whose cwd is outside its scope: rejected.
+        let error = app
+            .read_thread_transcript(ReadThreadTranscriptInput {
+                thread_id,
+                cursor: None,
+                before: None,
+                device_id: Some("scoped-device".to_string()),
+            })
+            .await
+            .expect_err("scoped device should be rejected reading out-of-scope transcript");
+        assert!(
+            error.contains("device's allowed paths"),
+            "expected device-scope rejection, got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_session_rejects_when_thread_cwd_outside_device_scope() {
+        let project = TempDir::new().expect("project tempdir");
+        let scoped = project.path().join("scoped");
+        let other = project.path().join("other");
+        std::fs::create_dir_all(&scoped).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+
+        let (app, _p, _o) = build_app(other.to_str().unwrap()).await;
+        pair_device(&app, "wide-device", Vec::new()).await;
+        pair_device(&app, "scoped-device", vec![scoped.display().to_string()]).await;
+
+        let snapshot = app
+            .start_session(StartSessionInput {
+                device_id: Some("wide-device".to_string()),
+                cwd: Some(other.display().to_string()),
+                model: None,
+                effort: None,
+                approval_policy: None,
+                sandbox: None,
+                provider: Some("fake".to_string()),
+                initial_prompt: None,
+            })
+            .await
+            .expect("wide device should start session");
+        let thread_id = snapshot.active_thread_id.expect("active thread");
+
+        let error = app
+            .resume_session(ResumeSessionInput {
+                device_id: Some("scoped-device".to_string()),
+                thread_id,
+                approval_policy: None,
+                sandbox: None,
+                effort: None,
+                provider: Some("fake".to_string()),
+            })
+            .await
+            .expect_err("scoped device should not resume out-of-scope thread");
+        assert!(
+            error.contains("device's allowed paths"),
+            "expected device-scope rejection, got: {error}"
+        );
     }
 }
