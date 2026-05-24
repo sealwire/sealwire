@@ -2116,3 +2116,78 @@ fn paired_device_path_scope_loads_default_empty_from_legacy_state() {
         serde_json::from_str(legacy).expect("legacy paired device JSON should deserialize");
     assert_eq!(device.path_scope, Vec::<String>::new());
 }
+
+#[test]
+fn full_pairing_flow_carries_path_scope_to_paired_device() {
+    // Reproduces the operator-side flow end to end inside RelayState:
+    //   start_pairing → prepare_pairing_ticket(scope)
+    //   broker receives pairing_request → register_pairing_request
+    //   operator approves → decide_pairing_request(true) → consume_pairing_ticket
+    // Assert the scope made it onto the PairedDevice.
+    let mut relay = test_state();
+    let scope = vec!["/tmp/scoped".to_string()];
+    let ticket = issue_test_pairing_ticket_with_scope(
+        &mut relay,
+        "ws://127.0.0.1:8789",
+        "room-a",
+        "relay-a",
+        Some(60),
+        scope.clone(),
+    );
+
+    let pending_request = relay
+        .register_pairing_request(
+            &ticket.pairing_id,
+            Some("mobile-test-device".to_string()),
+            Some("Test Device".to_string()),
+            "broker-peer-1",
+            TEST_VERIFY_KEY_B64.to_string(),
+            50,
+        )
+        .expect("register should succeed");
+    assert_eq!(
+        pending_request.path_scope, scope,
+        "PendingPairingRequest should carry the scope from PendingPairing"
+    );
+
+    let result = relay
+        .decide_pairing_request(&ticket.pairing_id, true, None, 100)
+        .expect("decide should succeed");
+    let approved = result.device.expect("approval should yield a device");
+    assert_eq!(
+        approved.path_scope, scope,
+        "PendingPairingResult device view should carry the scope"
+    );
+
+    let on_disk = relay
+        .paired_devices
+        .get("mobile-test-device")
+        .expect("device should be persisted");
+    assert_eq!(
+        on_disk.path_scope, scope,
+        "PairedDevice on disk should carry the scope"
+    );
+    assert_eq!(
+        relay.device_path_scope("mobile-test-device"),
+        scope,
+        "device_path_scope accessor should agree"
+    );
+}
+
+#[test]
+fn pairing_start_input_deserializes_path_scope() {
+    use crate::protocol::PairingStartInput;
+    // Exactly what the frontend POSTs when the input is filled in.
+    let raw = r#"{"path_scope":["/Users/luchi/git/agent-relay"]}"#;
+    let input: PairingStartInput =
+        serde_json::from_str(raw).expect("PairingStartInput should deserialize");
+    assert_eq!(
+        input.path_scope,
+        Some(vec!["/Users/luchi/git/agent-relay".to_string()])
+    );
+
+    // What the frontend POSTs when the input is empty: body is `{}`.
+    let empty: PairingStartInput =
+        serde_json::from_str("{}").expect("empty body should deserialize");
+    assert!(empty.path_scope.is_none());
+}
