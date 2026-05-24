@@ -23,6 +23,7 @@ import {
   transcript,
   threadsList,
 } from "./dom.js";
+import { parsePairingPathScope } from "./pairing-scope-parse.js";
 import { renderAllowedRoots, renderPairingPanel } from "./render-security.js";
 import { openSessionStream, sessionStreamUrl } from "../session-stream.js";
 import {
@@ -1079,10 +1080,17 @@ export function createSessionController({
     startPairingButton.disabled = true;
     logLine("Creating a broker pairing ticket.");
 
-    const path_scope = (pairingPathScopeInput?.value || "")
-      .split(/[\n,]/)
-      .map((line) => line.trim())
-      .filter(Boolean);
+    const liveScopeInput = liveElement("pairing-path-scope-input", pairingPathScopeInput);
+    const rawScope = liveScopeInput?.value ?? "";
+    const path_scope = parsePairingPathScope(rawScope);
+    if (rawScope.trim() && path_scope.length === 0) {
+      logLine(`Path scope "${rawScope.trim()}" was empty after parsing; sending unscoped.`);
+    }
+    logLine(
+      path_scope.length
+        ? `Pairing scope: ${path_scope.join(", ")}`
+        : "Pairing scope: (unrestricted; relay roots only)"
+    );
 
     try {
       const response = await apiFetch("/api/pairing/start", {
