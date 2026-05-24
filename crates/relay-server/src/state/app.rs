@@ -27,10 +27,10 @@ use crate::{
 
 use super::persistence::{spawn_persistence_task, PersistedRelayState, PersistenceStore};
 use super::{
-    ensure_path_within_allowed_roots, expire_controller_if_needed, non_empty,
-    normalize_allowed_roots, normalize_cwd, path_within_allowed_roots, require_device_id,
-    short_device_id, sort_threads_by_recency, unix_now, CachedRemoteActionResult, RelayState,
-    RemoteActionReplayDecision, SecurityProfile,
+    ensure_path_within_allowed_roots, ensure_path_within_device_scope, expire_controller_if_needed,
+    non_empty, normalize_allowed_roots, normalize_cwd, path_within_allowed_roots,
+    path_within_device_scope, require_device_id, short_device_id, sort_threads_by_recency,
+    unix_now, CachedRemoteActionResult, RelayState, RemoteActionReplayDecision, SecurityProfile,
 };
 
 #[derive(Clone)]
@@ -218,7 +218,11 @@ impl AppState {
         ))
     }
 
-    pub async fn list_threads(&self, limit: usize) -> Result<ThreadsResponse, String> {
+    pub async fn list_threads(
+        &self,
+        limit: usize,
+        device_id: Option<String>,
+    ) -> Result<ThreadsResponse, String> {
         let mut all_threads = Vec::new();
         for (provider_name, bridge) in &self.providers {
             match bridge.list_threads(limit).await {
@@ -239,10 +243,14 @@ impl AppState {
         }
         let mut relay = self.relay.write().await;
         let allowed_roots = relay.allowed_roots.clone();
+        let device_scope = device_id
+            .as_deref()
+            .map(|id| relay.device_path_scope(id))
+            .unwrap_or_default();
         let mut threads = relay
             .filter_deleted_threads(all_threads)
             .into_iter()
-            .filter(|thread| path_within_allowed_roots(&thread.cwd, &allowed_roots))
+            .filter(|thread| path_within_device_scope(&thread.cwd, &device_scope, &allowed_roots))
             .collect::<Vec<_>>();
         sort_threads_by_recency(&mut threads);
         threads.truncate(limit);
@@ -328,7 +336,7 @@ impl AppState {
             }
         }
 
-        let _ = self.list_threads(20).await;
+        let _ = self.list_threads(20, None).await;
 
         Ok(ThreadArchiveReceipt {
             thread_id: thread_id.to_string(),
@@ -375,7 +383,7 @@ impl AppState {
             relay.notify();
         }
 
-        let _ = self.list_threads(20).await;
+        let _ = self.list_threads(20, None).await;
 
         Ok(ThreadDeleteReceipt {
             thread_id: thread_id.to_string(),
@@ -393,7 +401,8 @@ impl AppState {
         let cwd = normalize_cwd(&non_empty(input.cwd).unwrap_or(defaults.current_cwd));
         {
             let relay = self.relay.read().await;
-            ensure_path_within_allowed_roots(&cwd, &relay.allowed_roots)?;
+            let device_scope = relay.device_path_scope(&device_id);
+            ensure_path_within_device_scope(&cwd, &device_scope, &relay.allowed_roots)?;
         }
         let requested_model = non_empty(input.model);
         let approval_policy = non_empty(input.approval_policy).unwrap_or(defaults.approval_policy);
@@ -458,7 +467,7 @@ impl AppState {
                 .await;
         }
 
-        let _ = self.list_threads(20).await;
+        let _ = self.list_threads(20, Some(device_id.clone())).await;
         Ok(self.snapshot().await)
     }
 
@@ -481,7 +490,12 @@ impl AppState {
         let preview = bridge.read_thread(&input.thread_id).await?;
         {
             let relay = self.relay.read().await;
-            ensure_path_within_allowed_roots(&preview.thread.cwd, &relay.allowed_roots)?;
+            let device_scope = relay.device_path_scope(&device_id);
+            ensure_path_within_device_scope(
+                &preview.thread.cwd,
+                &device_scope,
+                &relay.allowed_roots,
+            )?;
         }
 
         bridge
@@ -507,7 +521,7 @@ impl AppState {
             relay.notify();
         }
 
-        let _ = self.list_threads(20).await;
+        let _ = self.list_threads(20, None).await;
         Ok(self.snapshot().await)
     }
 
@@ -583,8 +597,17 @@ impl AppState {
     ) -> Result<ThreadTranscriptResponse, String> {
         {
             let relay = self.relay.read().await;
+            let device_scope = input
+                .device_id
+                .as_deref()
+                .map(|id| relay.device_path_scope(id))
+                .unwrap_or_default();
             if relay.active_thread_id.as_deref() == Some(input.thread_id.as_str()) {
-                ensure_path_within_allowed_roots(&relay.current_cwd, &relay.allowed_roots)?;
+                ensure_path_within_device_scope(
+                    &relay.current_cwd,
+                    &device_scope,
+                    &relay.allowed_roots,
+                )?;
                 let transcript = relay
                     .transcript
                     .iter()
@@ -617,7 +640,16 @@ impl AppState {
             .await?;
         {
             let relay = self.relay.read().await;
-            ensure_path_within_allowed_roots(&thread_data.thread.cwd, &relay.allowed_roots)?;
+            let device_scope = input
+                .device_id
+                .as_deref()
+                .map(|id| relay.device_path_scope(id))
+                .unwrap_or_default();
+            ensure_path_within_device_scope(
+                &thread_data.thread.cwd,
+                &device_scope,
+                &relay.allowed_roots,
+            )?;
         }
 
         if input.before.is_some() {
@@ -642,8 +674,17 @@ impl AppState {
     ) -> Result<ThreadEntriesResponse, String> {
         {
             let relay = self.relay.read().await;
+            let device_scope = input
+                .device_id
+                .as_deref()
+                .map(|id| relay.device_path_scope(id))
+                .unwrap_or_default();
             if relay.active_thread_id.as_deref() == Some(input.thread_id.as_str()) {
-                ensure_path_within_allowed_roots(&relay.current_cwd, &relay.allowed_roots)?;
+                ensure_path_within_device_scope(
+                    &relay.current_cwd,
+                    &device_scope,
+                    &relay.allowed_roots,
+                )?;
                 let transcript = relay
                     .transcript
                     .iter()
@@ -666,7 +707,16 @@ impl AppState {
             .await?;
         {
             let relay = self.relay.read().await;
-            ensure_path_within_allowed_roots(&thread_data.thread.cwd, &relay.allowed_roots)?;
+            let device_scope = input
+                .device_id
+                .as_deref()
+                .map(|id| relay.device_path_scope(id))
+                .unwrap_or_default();
+            ensure_path_within_device_scope(
+                &thread_data.thread.cwd,
+                &device_scope,
+                &relay.allowed_roots,
+            )?;
         }
 
         Ok(ThreadEntriesResponse::from_item_ids(
@@ -682,8 +732,17 @@ impl AppState {
     ) -> Result<ThreadEntryDetailResponse, String> {
         let relay_entry = {
             let relay = self.relay.read().await;
+            let device_scope = input
+                .device_id
+                .as_deref()
+                .map(|id| relay.device_path_scope(id))
+                .unwrap_or_default();
             if relay.active_thread_id.as_deref() == Some(input.thread_id.as_str()) {
-                ensure_path_within_allowed_roots(&relay.current_cwd, &relay.allowed_roots)?;
+                ensure_path_within_device_scope(
+                    &relay.current_cwd,
+                    &device_scope,
+                    &relay.allowed_roots,
+                )?;
                 relay
                     .transcript
                     .iter()
@@ -706,7 +765,16 @@ impl AppState {
                 .await?;
             {
                 let relay = self.relay.read().await;
-                ensure_path_within_allowed_roots(&thread_data.thread.cwd, &relay.allowed_roots)?;
+                let device_scope = input
+                    .device_id
+                    .as_deref()
+                    .map(|id| relay.device_path_scope(id))
+                    .unwrap_or_default();
+                ensure_path_within_device_scope(
+                    &thread_data.thread.cwd,
+                    &device_scope,
+                    &relay.allowed_roots,
+                )?;
             }
 
             self.find_thread_provider(&input.thread_id)
@@ -745,7 +813,12 @@ impl AppState {
         let thread_id = {
             let relay = self.relay.read().await;
             relay.ensure_device_can_send_message(&device_id)?;
-            ensure_path_within_allowed_roots(&relay.current_cwd, &relay.allowed_roots)?;
+            let device_scope = relay.device_path_scope(&device_id);
+            ensure_path_within_device_scope(
+                &relay.current_cwd,
+                &device_scope,
+                &relay.allowed_roots,
+            )?;
             relay
                 .active_thread_id
                 .clone()
@@ -779,7 +852,12 @@ impl AppState {
         let (thread_id, turn_id) = {
             let relay = self.relay.read().await;
             relay.ensure_device_can_send_message(&device_id)?;
-            ensure_path_within_allowed_roots(&relay.current_cwd, &relay.allowed_roots)?;
+            let device_scope = relay.device_path_scope(&device_id);
+            ensure_path_within_device_scope(
+                &relay.current_cwd,
+                &device_scope,
+                &relay.allowed_roots,
+            )?;
             let thread_id = relay
                 .active_thread_id
                 .clone()
@@ -899,10 +977,21 @@ impl AppState {
         })
     }
 
-    pub async fn workspace_diff(&self) -> Result<WorkspaceDiffResponse, String> {
+    pub async fn workspace_diff(
+        &self,
+        device_id: Option<String>,
+    ) -> Result<WorkspaceDiffResponse, String> {
         let cwd = {
             let relay = self.relay.read().await;
-            ensure_path_within_allowed_roots(&relay.current_cwd, &relay.allowed_roots)?;
+            let device_scope = device_id
+                .as_deref()
+                .map(|id| relay.device_path_scope(id))
+                .unwrap_or_default();
+            ensure_path_within_device_scope(
+                &relay.current_cwd,
+                &device_scope,
+                &relay.allowed_roots,
+            )?;
             relay.current_cwd.clone()
         };
         collect_workspace_diff(&cwd).await
@@ -917,7 +1006,12 @@ impl AppState {
         let (cwd, diff) = {
             let relay = self.relay.read().await;
             relay.ensure_device_can_send_message(&device_id)?;
-            ensure_path_within_allowed_roots(&relay.current_cwd, &relay.allowed_roots)?;
+            let device_scope = relay.device_path_scope(&device_id);
+            ensure_path_within_device_scope(
+                &relay.current_cwd,
+                &device_scope,
+                &relay.allowed_roots,
+            )?;
             let entry = relay
                 .transcript
                 .iter()
@@ -987,9 +1081,18 @@ impl AppState {
         let broker = BrokerConfig::from_env().await?.ok_or_else(|| {
             "broker pairing is unavailable because RELAY_BROKER_URL is not configured".to_string()
         })?;
+        let path_scope = normalize_allowed_roots(input.path_scope.unwrap_or_default())?;
+        {
+            let relay = self.relay.read().await;
+            for root in &path_scope {
+                ensure_path_within_allowed_roots(root, &relay.allowed_roots).map_err(|err| {
+                    format!("pairing path scope {root} cannot exceed relay allowed roots: {err}")
+                })?;
+            }
+        }
         let prepared = {
             let mut relay = self.relay.write().await;
-            relay.prepare_pairing_ticket(input.expires_in_seconds)?
+            relay.prepare_pairing_ticket(input.expires_in_seconds, path_scope)?
         };
         let pairing_credential = match broker
             .pairing_join_credential(&prepared.pairing_id, prepared.expires_at)

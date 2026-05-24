@@ -9,6 +9,7 @@ import {
   modelInput,
   openLaunchSettingsButton,
   pairingLinkInput,
+  pairingPathScopeInput,
   providerInput,
   resumeLatestButton,
   saveAllowedRootsButton,
@@ -1078,13 +1079,18 @@ export function createSessionController({
     startPairingButton.disabled = true;
     logLine("Creating a broker pairing ticket.");
 
+    const path_scope = (pairingPathScopeInput?.value || "")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+
     try {
       const response = await apiFetch("/api/pairing/start", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({}),
+        body: JSON.stringify(path_scope.length > 0 ? { path_scope } : {}),
       });
       const payload = await response.json();
 

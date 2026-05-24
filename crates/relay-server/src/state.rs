@@ -99,6 +99,34 @@ pub(super) fn ensure_path_within_allowed_roots(
     ))
 }
 
+pub(super) fn path_within_device_scope(
+    path: &str,
+    device_scope: &[String],
+    relay_allowed_roots: &[String],
+) -> bool {
+    path_within_allowed_roots(path, relay_allowed_roots)
+        && (device_scope.is_empty() || path_within_allowed_roots(path, device_scope))
+}
+
+pub(super) fn ensure_path_within_device_scope(
+    path: &str,
+    device_scope: &[String],
+    relay_allowed_roots: &[String],
+) -> Result<(), String> {
+    ensure_path_within_allowed_roots(path, relay_allowed_roots)?;
+    if !device_scope.is_empty() && !path_within_allowed_roots(path, device_scope) {
+        let normalized_path = normalize_cwd(path);
+        let hint = match device_scope {
+            [one] => format!("choose a directory under {one}"),
+            _ => "choose a directory under one of this device's allowed paths".to_string(),
+        };
+        return Err(format!(
+            "workspace {normalized_path} is outside this device's allowed paths; {hint}"
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn normalize_allowed_roots(roots: Vec<String>) -> Result<Vec<String>, String> {
     let mut normalized = roots
         .into_iter()
