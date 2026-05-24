@@ -1,8 +1,8 @@
 use crate::protocol::{
-    truncate_with_ellipsis, ApprovalRequestView, LogEntryView, SecurityMode, SessionSnapshot,
-    SessionSnapshotCompactProfile, ThreadEntriesResponse, ThreadEntryDetailResponse,
-    ThreadSummaryView, ThreadTranscriptResponse, ThreadsResponse, ThreadsResponseCompactProfile,
-    TranscriptEntryKind, TranscriptEntryView,
+    truncate_with_ellipsis, ApprovalRequestView, FileChangeDiffView, LogEntryView, SecurityMode,
+    SessionSnapshot, SessionSnapshotCompactProfile, ThreadEntriesResponse,
+    ThreadEntryDetailResponse, ThreadSummaryView, ThreadTranscriptResponse, ThreadsResponse,
+    ThreadsResponseCompactProfile, ToolCallView, TranscriptEntryKind, TranscriptEntryView,
 };
 
 const MAX_BROKER_LOGS: usize = 8;
@@ -271,6 +271,56 @@ fn compact_for_broker_drops_logs_and_transcript_as_last_resort() {
     assert!(compacted.transcript.is_empty());
     assert!(compacted.transcript_truncated);
     assert!(compacted.current_cwd.starts_with("/tmp/"));
+}
+
+#[test]
+fn compact_for_broker_trims_many_file_changes_without_clearing_transcript() {
+    let mut snapshot = make_snapshot();
+    snapshot.pending_approvals.clear();
+    snapshot.logs.clear();
+    snapshot.transcript = vec![TranscriptEntryView {
+        item_id: Some("turn-diff:turn-1".to_string()),
+        kind: TranscriptEntryKind::ToolCall,
+        text: Some("Edited many files".to_string()),
+        status: "running".to_string(),
+        turn_id: Some("turn-1".to_string()),
+        tool: Some(ToolCallView {
+            item_type: "turnDiff".to_string(),
+            name: "turn_diff".to_string(),
+            title: "Changed files".to_string(),
+            detail: None,
+            query: None,
+            path: None,
+            url: None,
+            command: None,
+            input_preview: None,
+            result_preview: None,
+            diff: None,
+            file_changes: (0..40)
+                .map(|index| FileChangeDiffView {
+                    path: format!("src/file-{index}.rs"),
+                    change_type: "modify".to_string(),
+                    diff: format!(
+                        "@@ -1 +1 @@\n-{}\n+{}",
+                        "old".repeat(600),
+                        "new".repeat(600)
+                    ),
+                })
+                .collect(),
+            apply_state: None,
+        }),
+    }];
+
+    let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::RemoteSurface);
+
+    assert!(compacted.transcript_truncated);
+    assert_eq!(compacted.transcript.len(), 1);
+    assert!(compacted.transcript[0]
+        .tool
+        .as_ref()
+        .map(|tool| tool.file_changes.len() <= 4)
+        .unwrap_or(false));
+    assert!(serde_json::to_vec(&compacted).unwrap().len() <= SESSION_SNAPSHOT_TARGET_BYTES);
 }
 
 #[test]

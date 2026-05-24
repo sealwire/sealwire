@@ -353,7 +353,7 @@ impl RelayState {
     }
 }
 
-fn merge_tool_call_view(
+pub(super) fn merge_tool_call_view(
     existing: Option<ToolCallView>,
     incoming: Option<ToolCallView>,
 ) -> Option<ToolCallView> {

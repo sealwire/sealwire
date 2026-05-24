@@ -144,6 +144,8 @@ const SESSION_SNAPSHOT_REMOTE_SURFACE_BUDGET: SessionSnapshotCompactBudget =
         min_logs_before_text_shrink: 4,
         fallback_transcript_chars: 400,
         fallback_log_chars: 96,
+        max_file_changes: 12,
+        fallback_file_changes: 4,
     };
 
 const SESSION_SNAPSHOT_LOCAL_WEB_BUDGET: SessionSnapshotCompactBudget =
@@ -161,6 +163,8 @@ const SESSION_SNAPSHOT_LOCAL_WEB_BUDGET: SessionSnapshotCompactBudget =
         min_logs_before_text_shrink: 8,
         fallback_transcript_chars: 640,
         fallback_log_chars: 160,
+        max_file_changes: 16,
+        fallback_file_changes: 6,
     };
 
 const SESSION_SNAPSHOT_IOS_SURFACE_BUDGET: SessionSnapshotCompactBudget =
@@ -253,6 +257,8 @@ struct SessionSnapshotCompactBudget {
     min_logs_before_text_shrink: usize,
     fallback_transcript_chars: usize,
     fallback_log_chars: usize,
+    max_file_changes: usize,
+    fallback_file_changes: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -325,6 +331,10 @@ impl SessionSnapshot {
                     transcript_truncated |=
                         truncate_with_ellipsis(diff, budget.max_transcript_chars);
                 }
+                if tool.file_changes.len() > budget.max_file_changes {
+                    tool.file_changes.truncate(budget.max_file_changes);
+                    transcript_truncated = true;
+                }
                 for change in &mut tool.file_changes {
                     transcript_truncated |=
                         truncate_with_ellipsis(&mut change.diff, budget.max_transcript_chars);
@@ -362,10 +372,30 @@ impl SessionSnapshot {
                     .map(|text| text.chars().count() > budget.fallback_transcript_chars)
                     .unwrap_or(false)
                     || entry.tool.as_ref().is_some_and(|tool| {
-                        tool.diff
+                        tool.detail
                             .as_ref()
-                            .map(|diff| diff.chars().count() > budget.fallback_transcript_chars)
+                            .map(|detail| detail.chars().count() > budget.fallback_transcript_chars)
                             .unwrap_or(false)
+                            || tool
+                                .input_preview
+                                .as_ref()
+                                .map(|preview| {
+                                    preview.chars().count() > budget.fallback_transcript_chars
+                                })
+                                .unwrap_or(false)
+                            || tool
+                                .result_preview
+                                .as_ref()
+                                .map(|preview| {
+                                    preview.chars().count() > budget.fallback_transcript_chars
+                                })
+                                .unwrap_or(false)
+                            || tool
+                                .diff
+                                .as_ref()
+                                .map(|diff| diff.chars().count() > budget.fallback_transcript_chars)
+                                .unwrap_or(false)
+                            || tool.file_changes.len() > budget.fallback_file_changes
                             || tool.file_changes.iter().any(|change| {
                                 change.diff.chars().count() > budget.fallback_transcript_chars
                             })
@@ -377,9 +407,29 @@ impl SessionSnapshot {
                             truncate_with_ellipsis(text, budget.fallback_transcript_chars);
                     }
                     if let Some(tool) = &mut entry.tool {
+                        if let Some(detail) = &mut tool.detail {
+                            transcript_truncated |=
+                                truncate_with_ellipsis(detail, budget.fallback_transcript_chars);
+                        }
+                        if let Some(input_preview) = &mut tool.input_preview {
+                            transcript_truncated |= truncate_with_ellipsis(
+                                input_preview,
+                                budget.fallback_transcript_chars,
+                            );
+                        }
+                        if let Some(result_preview) = &mut tool.result_preview {
+                            transcript_truncated |= truncate_with_ellipsis(
+                                result_preview,
+                                budget.fallback_transcript_chars,
+                            );
+                        }
                         if let Some(diff) = &mut tool.diff {
                             transcript_truncated |=
                                 truncate_with_ellipsis(diff, budget.fallback_transcript_chars);
+                        }
+                        if tool.file_changes.len() > budget.fallback_file_changes {
+                            tool.file_changes.truncate(budget.fallback_file_changes);
+                            transcript_truncated = true;
                         }
                         for change in &mut tool.file_changes {
                             transcript_truncated |= truncate_with_ellipsis(
