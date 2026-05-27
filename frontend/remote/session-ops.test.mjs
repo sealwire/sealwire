@@ -681,6 +681,206 @@ test("hydrated transcript stays expanded when a later snapshot changes only the 
   );
 });
 
+test("remote hydration backfills a compact user-only tail until agent text is visible", async () => {
+  activeBrowser || installBrowserStubs();
+
+  const sentPayloads = [];
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { handleRemoteBrokerPayload } = await import("./actions.js");
+  const { applySessionSnapshot } = await import("./session-ops.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-1",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: null,
+    sessionClaimExpiresAt: null,
+  });
+  seedSocketState(state, {
+    socketConnected: true,
+    socketPeerId: "surface-peer-1",
+  });
+  state.pendingActions.clear();
+  seedTranscriptHydrationState(state);
+
+  const pages = new Map([
+    [
+      null,
+      {
+        entries: [
+          {
+            item_id: "user-346",
+            kind: "user_text",
+            text: "last user tail",
+            status: "completed",
+            turn_id: "turn-346",
+            tool: null,
+          },
+        ],
+        prev_cursor: 345,
+      },
+    ],
+    [
+      345,
+      {
+        entries: [
+          {
+            item_id: "user-345",
+            kind: "user_text",
+            text: "middle user tail",
+            status: "completed",
+            turn_id: "turn-345",
+            tool: null,
+          },
+        ],
+        prev_cursor: 344,
+      },
+    ],
+    [
+      344,
+      {
+        entries: [
+          {
+            item_id: "user-344",
+            kind: "user_text",
+            text: "first visible user tail",
+            status: "completed",
+            turn_id: "turn-344",
+            tool: null,
+          },
+        ],
+        prev_cursor: 343,
+      },
+    ],
+    [
+      343,
+      {
+        entries: [
+          {
+            item_id: "assistant-343",
+            kind: "agent_text",
+            text: "Recovered agent response before the compacted tail",
+            status: "completed",
+            turn_id: "turn-343",
+            tool: null,
+          },
+        ],
+        prev_cursor: null,
+      },
+    ],
+  ]);
+
+  state.socket = {
+    readyState: 1,
+    send(frameText) {
+      const frame = JSON.parse(frameText);
+      sentPayloads.push(frame.payload);
+      const before = frame.payload.request?.input?.before ?? null;
+      setImmediate(async () => {
+        const page = pages.get(before);
+        await handleRemoteBrokerPayload({
+          kind: "remote_action_result",
+          action_id: frame.payload.action_id,
+          action: "fetch_thread_transcript",
+          ok: true,
+          snapshot: {},
+          thread_transcript: {
+            thread_id: "thread-1",
+            entries: page?.entries || [],
+            prev_cursor: page?.prev_cursor ?? null,
+          },
+        });
+      });
+    },
+  };
+
+  applySessionSnapshot({
+    active_thread_id: "thread-1",
+    active_controller_device_id: null,
+    active_controller_last_seen_at: null,
+    active_flags: [],
+    active_turn_id: "turn-346",
+    allowed_roots: [],
+    approval_policy: "untrusted",
+    audit_enabled: false,
+    available_models: [],
+    broker_can_read_content: true,
+    broker_channel_id: "room-a",
+    broker_connected: true,
+    broker_peer_id: "relay-1",
+    codex_connected: true,
+    controller_lease_expires_at: null,
+    controller_lease_seconds: 15,
+    current_cwd: "/tmp/project",
+    current_status: "idle",
+    device_records: [],
+    e2ee_enabled: false,
+    logs: [],
+    model: "gpt-5.4",
+    paired_devices: [],
+    pending_approvals: [],
+    pending_pairing_requests: [],
+    provider: "codex",
+    reasoning_effort: "medium",
+    sandbox: "workspace-write",
+    security_mode: "managed",
+    service_ready: true,
+    transcript_truncated: true,
+    transcript: [
+      {
+        item_id: "user-344",
+        kind: "user_text",
+        text: "first visible user tail",
+        status: "completed",
+        turn_id: "turn-344",
+        tool: null,
+      },
+      {
+        item_id: "user-345",
+        kind: "user_text",
+        text: "middle user tail",
+        status: "completed",
+        turn_id: "turn-345",
+        tool: null,
+      },
+      {
+        item_id: "user-346",
+        kind: "user_text",
+        text: "last user tail",
+        status: "completed",
+        turn_id: "turn-346",
+        tool: null,
+      },
+    ],
+  });
+
+  await waitFor(() => state.transcriptHydrationPromise === null);
+
+  assert.deepEqual(
+    sentPayloads.map((payload) => payload.request?.input?.before ?? null),
+    [null, 345, 344, 343]
+  );
+  assert.deepEqual(
+    state.session.transcript.map((entry) => entry.item_id),
+    ["assistant-343", "user-344", "user-345", "user-346"]
+  );
+  assert.equal(
+    state.session.transcript.find((entry) => entry.kind === "agent_text")?.text,
+    "Recovered agent response before the compacted tail"
+  );
+  assert.equal(state.session.transcript_truncated, false);
+});
+
 test("reapplying the same compact snapshot while hydration is loading does not restart from tail", async () => {
   activeBrowser || installBrowserStubs();
 

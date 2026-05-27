@@ -59,6 +59,12 @@ async function main() {
     attachPageDebugLogging(page, "local", { prefix: "local-delete-e2e" });
 
     await page.goto(`http://127.0.0.1:${relayPort}`, { waitUntil: "domcontentloaded" });
+    await page.waitForSelector("#open-start-session-dialog", { timeout: LOCAL_TIMEOUT_MS });
+    await page.waitForFunction(
+      () => Boolean(localStorage.getItem("agent-relay.device-id")),
+      null,
+      { timeout: LOCAL_TIMEOUT_MS }
+    );
     const deviceId = await page.evaluate(() => localStorage.getItem("agent-relay.device-id"));
     assert.ok(deviceId, "local delete e2e should have a browser device id");
 

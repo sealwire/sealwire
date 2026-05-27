@@ -1531,6 +1531,7 @@ async fn publish_snapshot(
     state: &AppState,
 ) -> Result<(), String> {
     let snapshot = state.snapshot().await;
+    let broker_can_read_content = state.broker_can_read_content().await;
     let compacted = snapshot
         .clone()
         .compact_for(crate::protocol::SessionSnapshotCompactProfile::RemoteSurface);
@@ -1543,9 +1544,14 @@ async fn publish_snapshot(
         compacted_transcript_truncated = compacted.transcript_truncated,
         raw_logs = snapshot.logs.len(),
         compacted_logs = compacted.logs.len(),
+        delivery_mode = if broker_can_read_content {
+            "broker_readable_broadcast"
+        } else {
+            "e2ee_targeted"
+        },
         "publishing broker session snapshot"
     );
-    if state.broker_can_read_content().await {
+    if broker_can_read_content {
         publish_payload(
             sender,
             OutboundBrokerPayload::SessionSnapshot {
@@ -1572,7 +1578,8 @@ async fn publish_snapshot(
         scope = "session_snapshot",
         target_count = targets.len(),
         targets = %target_summary,
-        "resolved broker surface targets"
+        delivery_mode = "e2ee_targeted",
+        "resolved encrypted broker surface targets"
     );
     if targets.is_empty() {
         debug!(
@@ -1702,7 +1709,17 @@ async fn publish_transcript_delta(
         TranscriptDeltaKind::CommandOutput => "command_output",
     };
 
-    if state.broker_can_read_content().await {
+    let broker_can_read_content = state.broker_can_read_content().await;
+    if broker_can_read_content {
+        debug!(
+            scope = "transcript_delta",
+            item_id = %delta.item_id,
+            thread_id = %delta.thread_id,
+            turn_id = delta.turn_id.as_deref().unwrap_or("-"),
+            delta_kind = kind,
+            delivery_mode = "broker_readable_broadcast",
+            "publishing broker-readable transcript delta"
+        );
         publish_payload(
             sender,
             OutboundBrokerPayload::TranscriptDelta {
@@ -1739,7 +1756,8 @@ async fn publish_transcript_delta(
             thread_id = %delta.thread_id,
             turn_id = delta.turn_id.as_deref().unwrap_or("-"),
             delta_kind = kind,
-            "resolved broker surface targets"
+            delivery_mode = "e2ee_targeted",
+            "resolved encrypted broker surface targets"
         );
         if targets.is_empty() {
             debug!(

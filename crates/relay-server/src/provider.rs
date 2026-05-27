@@ -23,6 +23,7 @@ pub struct ThreadSyncData {
 pub struct StartThreadResult {
     pub thread: ThreadSummaryView,
     pub consumed_initial_prompt: bool,
+    pub initial_user_message: Option<TranscriptEntryView>,
 }
 
 #[async_trait]

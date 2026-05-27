@@ -126,6 +126,7 @@ impl ProviderBridge for FakeProviderBridge {
         Ok(StartThreadResult {
             thread,
             consumed_initial_prompt: false,
+            initial_user_message: None,
         })
     }
 

@@ -441,6 +441,8 @@ impl AppState {
                 initial_prompt.as_deref(),
             )
             .await?;
+        let consumed_initial_prompt = start_result.consumed_initial_prompt;
+        let initial_user_message = start_result.initial_user_message.clone();
 
         {
             let mut relay = self.relay.write().await;
@@ -457,6 +459,22 @@ impl AppState {
                 &effort,
                 &device_id,
             );
+            // Claude's `start` path consumes the first prompt before this relay
+            // activates the new thread, so any earlier worker event can be
+            // cleared by `activate_thread`. Reinsert the same SDK-backed entry
+            // after activation so live snapshots and later read_thread results
+            // share the same item_id.
+            if consumed_initial_prompt {
+                if let Some(entry) = initial_user_message {
+                    if let (Some(item_id), Some(text)) = (entry.item_id, entry.text) {
+                        relay.upsert_user_message(
+                            item_id,
+                            text,
+                            entry.turn_id.unwrap_or_else(|| "initial".to_string()),
+                        );
+                    }
+                }
+            }
             relay.push_log(
                 "info",
                 format!(
@@ -467,9 +485,7 @@ impl AppState {
             relay.notify();
         }
 
-        if let Some(initial_prompt) =
-            initial_prompt.filter(|_| !start_result.consumed_initial_prompt)
-        {
+        if let Some(initial_prompt) = initial_prompt.filter(|_| !consumed_initial_prompt) {
             return self
                 .send_message(SendMessageInput {
                     text: initial_prompt,
@@ -2070,9 +2086,12 @@ mod path_scope_tests {
         ReadThreadTranscriptInput, ResumeSessionInput, SendMessageInput, StartSessionInput,
     };
     use crate::state::security::SecurityProfile;
-    use std::sync::Arc;
+    use std::sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    };
     use tempfile::TempDir;
-    use tokio::sync::{watch, RwLock};
+    use tokio::sync::{watch, Mutex, RwLock};
 
     async fn build_app(cwd: &str) -> (AppState, TempDir, TempDir) {
         let project = TempDir::new().expect("project tempdir");
@@ -2088,6 +2107,27 @@ mod path_scope_tests {
             .expect("fake provider should spawn");
         let mut providers: HashMap<String, Arc<dyn ProviderBridge>> = HashMap::new();
         providers.insert("fake".to_string(), Arc::new(bridge));
+        (
+            AppState::from_parts(relay, providers, change_tx),
+            project,
+            outside,
+        )
+    }
+
+    async fn build_consumed_initial_prompt_app(cwd: &str) -> (AppState, TempDir, TempDir) {
+        let project = TempDir::new().expect("project tempdir");
+        let outside = TempDir::new().expect("outside tempdir");
+        let (change_tx, _) = watch::channel(0_u64);
+        let relay = Arc::new(RwLock::new(RelayState::new(
+            cwd.to_string(),
+            change_tx.clone(),
+            SecurityProfile::private(),
+        )));
+        let mut providers: HashMap<String, Arc<dyn ProviderBridge>> = HashMap::new();
+        providers.insert(
+            "consumed-initial".to_string(),
+            Arc::new(ConsumedInitialPromptProvider::default()),
+        );
         (
             AppState::from_parts(relay, providers, change_tx),
             project,
@@ -2118,6 +2158,227 @@ mod path_scope_tests {
                 path_scope,
             },
         );
+    }
+
+    #[derive(Clone)]
+    struct ConsumedInitialThread {
+        summary: crate::protocol::ThreadSummaryView,
+        transcript: Vec<crate::protocol::TranscriptEntryView>,
+    }
+
+    #[derive(Default)]
+    struct ConsumedInitialPromptProvider {
+        threads: Arc<Mutex<HashMap<String, ConsumedInitialThread>>>,
+        next_id: AtomicU64,
+    }
+
+    impl ConsumedInitialPromptProvider {
+        fn next_thread_id(&self) -> String {
+            format!(
+                "consumed-initial-thread-{}",
+                self.next_id.fetch_add(1, Ordering::Relaxed)
+            )
+        }
+
+        fn model() -> crate::protocol::ModelOptionView {
+            crate::protocol::ModelOptionView {
+                model: "consumed-initial-model".to_string(),
+                display_name: "Consumed Initial Model".to_string(),
+                provider: "consumed-initial".to_string(),
+                supported_reasoning_efforts: vec![
+                    "low".to_string(),
+                    "medium".to_string(),
+                    "high".to_string(),
+                ],
+                default_reasoning_effort: "medium".to_string(),
+                hidden: false,
+                is_default: true,
+            }
+        }
+
+        fn thread_summary(
+            thread_id: String,
+            cwd: &str,
+            preview: String,
+        ) -> crate::protocol::ThreadSummaryView {
+            crate::protocol::ThreadSummaryView {
+                id: thread_id,
+                name: Some("Consumed Initial Prompt Session".to_string()),
+                preview,
+                cwd: cwd.to_string(),
+                updated_at: unix_now(),
+                source: "consumed-initial".to_string(),
+                status: "idle".to_string(),
+                model_provider: "consumed-initial".to_string(),
+                provider: "consumed-initial".to_string(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ProviderBridge for ConsumedInitialPromptProvider {
+        async fn list_threads(
+            &self,
+            limit: usize,
+        ) -> Result<Vec<crate::protocol::ThreadSummaryView>, String> {
+            let mut threads = self
+                .threads
+                .lock()
+                .await
+                .values()
+                .map(|thread| thread.summary.clone())
+                .collect::<Vec<_>>();
+            threads.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+            threads.truncate(limit);
+            Ok(threads)
+        }
+
+        async fn list_models(&self) -> Result<Vec<crate::protocol::ModelOptionView>, String> {
+            Ok(vec![Self::model()])
+        }
+
+        async fn start_thread(
+            &self,
+            cwd: &str,
+            _model: &str,
+            _approval_policy: &str,
+            _sandbox: &str,
+            initial_prompt: Option<&str>,
+        ) -> Result<crate::provider::StartThreadResult, String> {
+            let thread_id = self.next_thread_id();
+            let preview = initial_prompt.unwrap_or_default().to_string();
+            let thread = Self::thread_summary(thread_id, cwd, preview.clone());
+            let initial_user_message =
+                initial_prompt.map(|prompt| crate::protocol::TranscriptEntryView {
+                    item_id: Some("user:provider-initial".to_string()),
+                    kind: crate::protocol::TranscriptEntryKind::UserText,
+                    text: Some(prompt.to_string()),
+                    status: "completed".to_string(),
+                    turn_id: Some("turn:provider-initial".to_string()),
+                    tool: None,
+                });
+            let mut transcript = Vec::new();
+            if let Some(entry) = initial_user_message.clone() {
+                transcript.push(entry);
+                transcript.push(crate::protocol::TranscriptEntryView {
+                    item_id: Some("assistant:provider-reply".to_string()),
+                    kind: crate::protocol::TranscriptEntryKind::AgentText,
+                    text: Some("provider reply".to_string()),
+                    status: "completed".to_string(),
+                    turn_id: Some("turn:provider-initial".to_string()),
+                    tool: None,
+                });
+            }
+
+            self.threads.lock().await.insert(
+                thread.id.clone(),
+                ConsumedInitialThread {
+                    summary: thread.clone(),
+                    transcript,
+                },
+            );
+
+            Ok(crate::provider::StartThreadResult {
+                thread,
+                consumed_initial_prompt: initial_prompt.is_some(),
+                initial_user_message,
+            })
+        }
+
+        async fn resume_thread(
+            &self,
+            thread_id: &str,
+            _approval_policy: &str,
+            _sandbox: &str,
+        ) -> Result<(), String> {
+            if self.threads.lock().await.contains_key(thread_id) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "consumed-initial thread '{thread_id}' was not found"
+                ))
+            }
+        }
+
+        async fn read_thread(
+            &self,
+            thread_id: &str,
+        ) -> Result<crate::provider::ThreadSyncData, String> {
+            let threads = self.threads.lock().await;
+            let thread = threads
+                .get(thread_id)
+                .ok_or_else(|| format!("consumed-initial thread '{thread_id}' was not found"))?;
+            Ok(crate::provider::ThreadSyncData {
+                thread: thread.summary.clone(),
+                status: thread.summary.status.clone(),
+                active_flags: Vec::new(),
+                transcript: thread.transcript.clone(),
+            })
+        }
+
+        async fn read_thread_entry_detail(
+            &self,
+            thread_id: &str,
+            item_id: &str,
+        ) -> Result<Option<crate::protocol::TranscriptEntryView>, String> {
+            Ok(self.threads.lock().await.get(thread_id).and_then(|thread| {
+                thread
+                    .transcript
+                    .iter()
+                    .find(|entry| entry.item_id.as_deref() == Some(item_id))
+                    .cloned()
+            }))
+        }
+
+        async fn archive_thread(&self, thread_id: &str) -> Result<(), String> {
+            self.threads.lock().await.remove(thread_id);
+            Ok(())
+        }
+
+        async fn delete_thread_permanently(
+            &self,
+            thread_id: &str,
+        ) -> Result<crate::codex_local::LocalThreadDeleteSummary, String> {
+            self.threads.lock().await.remove(thread_id);
+            Ok(crate::codex_local::LocalThreadDeleteSummary {
+                deleted_paths: Vec::new(),
+                deleted_thread_row: true,
+            })
+        }
+
+        async fn start_turn(
+            &self,
+            _thread_id: &str,
+            _text: &str,
+            _model: &str,
+            _effort: &str,
+        ) -> Result<Option<String>, String> {
+            Err("consumed-initial provider does not support follow-up turns".to_string())
+        }
+
+        async fn interrupt_turn(&self, _thread_id: &str, _turn_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn respond_to_approval(
+            &self,
+            _pending: &crate::state::PendingApproval,
+            _input: &crate::protocol::ApprovalDecisionInput,
+        ) -> Result<(), String> {
+            Err("consumed-initial provider does not request approvals".to_string())
+        }
+
+        async fn respond_to_ask_user_question(
+            &self,
+            _request_id: &str,
+            _answers: &serde_json::Map<String, serde_json::Value>,
+        ) -> Result<(), String> {
+            Err("consumed-initial provider does not surface AskUserQuestion".to_string())
+        }
+
+        fn provider_name(&self) -> &'static str {
+            "consumed-initial"
+        }
     }
 
     #[tokio::test]
@@ -2186,6 +2447,201 @@ mod path_scope_tests {
         })
         .await
         .expect("unscoped device should succeed within relay roots");
+    }
+
+    async fn wait_for_completed_agent_text(app: &AppState) {
+        for _ in 0..200 {
+            let snap = app.snapshot().await;
+            if snap.transcript.iter().any(|entry| {
+                entry.kind == crate::protocol::TranscriptEntryKind::AgentText
+                    && entry.status == "completed"
+            }) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("fake agent reply never landed in the active transcript");
+    }
+
+    // Reproduces the user-reported "agent message disappears after switching
+    // threads and coming back" bug: start a session, switch to another, switch
+    // back, and the agent reply must still be in the transcript.
+    #[tokio::test]
+    async fn switching_threads_and_back_keeps_the_agent_message() {
+        use crate::protocol::{ResumeSessionInput, TranscriptEntryKind};
+
+        let project = TempDir::new().expect("project tempdir");
+        let a_dir = project.path().join("a");
+        let b_dir = project.path().join("b");
+        std::fs::create_dir_all(&a_dir).unwrap();
+        std::fs::create_dir_all(&b_dir).unwrap();
+
+        let (app, _p, _o) = build_app(project.path().to_str().unwrap()).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        // Start session A with an initial prompt; the fake provider echoes it
+        // as a completed user + assistant turn.
+        let snap_a = app
+            .start_session(StartSessionInput {
+                device_id: Some("device-1".to_string()),
+                cwd: Some(a_dir.display().to_string()),
+                model: None,
+                effort: None,
+                approval_policy: None,
+                sandbox: None,
+                provider: Some("fake".to_string()),
+                initial_prompt: Some("Hellooo".to_string()),
+            })
+            .await
+            .expect("start A");
+        let thread_a = snap_a.active_thread_id.clone().expect("thread A id");
+        wait_for_completed_agent_text(&app).await;
+
+        // Two switch cycles — the user reported it vanishes "the second time".
+        for round in 1..=2 {
+            // Switch to a brand-new session B (stashes A into background).
+            app.start_session(StartSessionInput {
+                device_id: Some("device-1".to_string()),
+                cwd: Some(b_dir.display().to_string()),
+                model: None,
+                effort: None,
+                approval_policy: None,
+                sandbox: None,
+                provider: Some("fake".to_string()),
+                initial_prompt: None,
+            })
+            .await
+            .expect("start B");
+
+            // Switch back to A.
+            let snap = app
+                .resume_session(ResumeSessionInput {
+                    thread_id: thread_a.clone(),
+                    approval_policy: None,
+                    sandbox: None,
+                    effort: None,
+                    device_id: Some("device-1".to_string()),
+                    provider: Some("fake".to_string()),
+                })
+                .await
+                .expect("resume A");
+
+            assert_eq!(snap.active_thread_id.as_deref(), Some(thread_a.as_str()));
+            let has_user = snap
+                .transcript
+                .iter()
+                .any(|entry| entry.kind == TranscriptEntryKind::UserText);
+            let has_agent = snap
+                .transcript
+                .iter()
+                .any(|entry| entry.kind == TranscriptEntryKind::AgentText);
+            assert!(
+                has_user,
+                "round {round}: user message should survive switch-back, got {:?}",
+                snap.transcript
+            );
+            assert!(
+                has_agent,
+                "round {round}: agent message should survive switch-back, got {:?}",
+                snap.transcript
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn consumed_initial_prompt_keeps_provider_user_item_id_after_switchback() {
+        use crate::protocol::TranscriptEntryKind;
+
+        let project = TempDir::new().expect("project tempdir");
+        let a_dir = project.path().join("a");
+        let b_dir = project.path().join("b");
+        std::fs::create_dir_all(&a_dir).unwrap();
+        std::fs::create_dir_all(&b_dir).unwrap();
+
+        let (app, _p, _o) =
+            build_consumed_initial_prompt_app(project.path().to_str().unwrap()).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let snap_a = app
+            .start_session(StartSessionInput {
+                device_id: Some("device-1".to_string()),
+                cwd: Some(a_dir.display().to_string()),
+                model: None,
+                effort: None,
+                approval_policy: None,
+                sandbox: None,
+                provider: Some("consumed-initial".to_string()),
+                initial_prompt: Some("Hellooo".to_string()),
+            })
+            .await
+            .expect("start A");
+        let thread_a = snap_a.active_thread_id.clone().expect("thread A id");
+        let live_user_entries = snap_a
+            .transcript
+            .iter()
+            .filter(|entry| entry.kind == TranscriptEntryKind::UserText)
+            .collect::<Vec<_>>();
+        assert_eq!(live_user_entries.len(), 1, "{:?}", snap_a.transcript);
+        assert_eq!(
+            live_user_entries[0].item_id.as_deref(),
+            Some("user:provider-initial")
+        );
+        assert_eq!(live_user_entries[0].text.as_deref(), Some("Hellooo"));
+
+        app.start_session(StartSessionInput {
+            device_id: Some("device-1".to_string()),
+            cwd: Some(b_dir.display().to_string()),
+            model: None,
+            effort: None,
+            approval_policy: None,
+            sandbox: None,
+            provider: Some("consumed-initial".to_string()),
+            initial_prompt: None,
+        })
+        .await
+        .expect("start B");
+
+        let snap_back = app
+            .resume_session(ResumeSessionInput {
+                thread_id: thread_a.clone(),
+                approval_policy: None,
+                sandbox: None,
+                effort: None,
+                device_id: Some("device-1".to_string()),
+                provider: Some("consumed-initial".to_string()),
+            })
+            .await
+            .expect("resume A");
+
+        assert_eq!(
+            snap_back.active_thread_id.as_deref(),
+            Some(thread_a.as_str())
+        );
+        let user_entries = snap_back
+            .transcript
+            .iter()
+            .filter(|entry| entry.kind == TranscriptEntryKind::UserText)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            user_entries.len(),
+            1,
+            "switch-back should merge the live initial prompt with provider history: {:?}",
+            snap_back.transcript
+        );
+        assert_eq!(
+            user_entries[0].item_id.as_deref(),
+            Some("user:provider-initial")
+        );
+        assert_eq!(user_entries[0].text.as_deref(), Some("Hellooo"));
+        assert!(
+            snap_back.transcript.iter().any(|entry| {
+                entry.kind == TranscriptEntryKind::AgentText
+                    && entry.item_id.as_deref() == Some("assistant:provider-reply")
+                    && entry.text.as_deref() == Some("provider reply")
+            }),
+            "provider history should still load on switch-back: {:?}",
+            snap_back.transcript
+        );
     }
 
     #[tokio::test]

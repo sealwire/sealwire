@@ -5,7 +5,11 @@ import {
 import * as store from "./store.js";
 
 const INITIAL_TRANSCRIPT_MIN_ENTRIES = 12;
-const INITIAL_TRANSCRIPT_MAX_PAGES = 3;
+// Oversized transcript entries can force the relay to return only one entry per
+// page. Keep the page cap aligned with the minimum entry target so a compact
+// remote snapshot that only contains the user-message tail can still backfill
+// far enough to recover the preceding agent response.
+const INITIAL_TRANSCRIPT_MAX_PAGES = INITIAL_TRANSCRIPT_MIN_ENTRIES;
 
 export function hydrateRemoteTranscript(state, snapshot, options) {
   return hydrateTranscript(state, snapshot, store, {

@@ -308,6 +308,7 @@ impl ProviderBridge for ClaudeCodeBridge {
             return Ok(StartThreadResult {
                 thread,
                 consumed_initial_prompt: false,
+                initial_user_message: None,
             });
         }
 
@@ -322,9 +323,12 @@ impl ProviderBridge for ClaudeCodeBridge {
         }
         let result = self.send_request("start", cmd).await?;
         let thread = parse_thread_summary(value_at(&result, &["thread"]).unwrap_or(&Value::Null))?;
+        let initial_user_message = value_at(&result, &["initial_user_message"])
+            .and_then(|value| serde_json::from_value(value.clone()).ok());
         Ok(StartThreadResult {
             thread,
             consumed_initial_prompt: true,
+            initial_user_message,
         })
     }
 

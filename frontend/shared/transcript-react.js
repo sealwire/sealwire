@@ -876,12 +876,65 @@ function findPendingAskUserRequest(itemId, pendingList) {
   return pendingList.find((pending) => pending?.tool_use_id === toolUseId) || null;
 }
 
-// Render Claude's clickable AskUserQuestion card. Two modes:
-//   - Interactive (pending request still open): option rows become <button>s.
-//     Single-select submits immediately on click; multi-select toggles and
-//     reveals a Submit button.
-//   - Read-only (answered or no pending request): renders the recorded answer
-//     (parsed from result_preview) and highlights the chosen option(s).
+// Build the answer value the SDK should see for a single question. We support
+// three shapes (the SDK accepts string | string[] | free-text):
+//   - label only          → "<label>"
+//   - labels (multi)      → ["<label1>", "<label2>"]
+//   - notes only          → "<notes>"            (pure free-text)
+//   - label + notes       → "<label> — <notes>"  (joined free-text)
+//   - labels + notes      → "<label1>, <label2> — <notes>"
+// We collapse label+notes into a single free-text string because the SDK's
+// downstream consumer (Claude) reads answers as plain text it can quote back.
+// Joining preserves both the structured pick and the user's elaboration.
+export function buildAskUserAnswerValue({ labels = [], notes = "", multiSelect = false } = {}) {
+  const cleanLabels = (labels || []).map((l) => String(l).trim()).filter(Boolean);
+  const cleanNotes = String(notes || "").trim();
+  if (!cleanLabels.length && !cleanNotes) {
+    return null;
+  }
+  if (cleanNotes) {
+    const joinedLabels = cleanLabels.join(", ");
+    return joinedLabels ? `${joinedLabels} — ${cleanNotes}` : cleanNotes;
+  }
+  if (multiSelect) {
+    return cleanLabels;
+  }
+  return cleanLabels[0];
+}
+
+// Aggregate per-question selection state into the {question: answer} map the
+// worker forwards to the SDK. Returns null if any question has no answer
+// (forcing the UI to keep the user on the wizard step).
+export function buildAskUserAnswersPayload(questions, perQuestionState) {
+  const payload = {};
+  for (const q of questions || []) {
+    const state = perQuestionState?.get?.(q.question) || perQuestionState?.[q.question];
+    const labels = state?.labels ? Array.from(state.labels) : [];
+    const notes = state?.notes || "";
+    const value = buildAskUserAnswerValue({
+      labels,
+      notes,
+      multiSelect: Boolean(q.multiSelect),
+    });
+    if (value === null) {
+      return null;
+    }
+    payload[q.question] = value;
+  }
+  return payload;
+}
+
+// Render Claude's AskUserQuestion as a wizard:
+//   - Read-only (no pending request, or status==completed): every question
+//     stacked, recorded answers highlighted (used for past planning entries).
+//   - Interactive: one question at a time with progress + Back/Continue/Send.
+//     Each question card has option buttons AND an optional notes textarea.
+//   - Quick path: a SINGLE single-select question with empty notes submits
+//     immediately on option click — same one-tap feel as before for the
+//     common "pick one of N" prompt.
+// Final answer per question is built by buildAskUserAnswerValue: when notes
+// are present we collapse to free-text ("<label> — <notes>") so the model
+// reads both the structured pick and the user's elaboration.
 function AskUserEntry({ entry, isJustPrepended = false, options = null }) {
   const itemId = entry.item_id || "";
   const detailEntry = resolveTranscriptDetailEntry(entry, options);
@@ -889,17 +942,11 @@ function AskUserEntry({ entry, isJustPrepended = false, options = null }) {
   const tool = toolEntry.tool || entry.tool || {};
   const status = entry.status || "running";
   const questions = parseAskUserQuestions(tool.input_preview);
-  // If the input JSON was truncated mid-string or otherwise malformed, fall
-  // back to the generic ToolEntry path so the user at least sees the raw
-  // preview rather than a blank card.
   if (!questions) {
     return h(GenericToolEntry, { entry, isJustPrepended, options });
   }
   const answers = parseAskUserAnswers(tool.result_preview);
   const pendingRequest = findPendingAskUserRequest(itemId, options?.pendingAskUserQuestions);
-  // Local UI may pass an explicit `interactiveAskUserRequestId` to force the
-  // card into interactive mode for storybook/tests; otherwise we derive it
-  // from the snapshot.
   const interactive = Boolean(pendingRequest) && status !== "completed";
   const requestId = pendingRequest?.request_id || "";
   const submittingRequestId = options?.askUserSubmittingRequestId || "";
@@ -910,62 +957,37 @@ function AskUserEntry({ entry, isJustPrepended = false, options = null }) {
       ? options.askUserErrors.get(requestId) || ""
       : "";
 
-  // Multi-select needs per-question selection state. We key by question text
-  // since that's also the answer-map key the SDK expects. Single-select cards
-  // submit immediately so they never read this state.
-  const [multiSelectChoices, setMultiSelectChoices] = React.useState(
-    () => new Map()
-  );
-
-  function toggleMultiSelect(questionText, optionLabel) {
-    setMultiSelectChoices((prev) => {
-      const next = new Map(prev);
-      const current = new Set(next.get(questionText) || []);
-      if (current.has(optionLabel)) {
-        current.delete(optionLabel);
-      } else {
-        current.add(optionLabel);
-      }
-      next.set(questionText, current);
-      return next;
+  if (!interactive) {
+    return h(AskUserReadOnlyCard, {
+      entry,
+      isJustPrepended,
+      itemId,
+      questions,
+      answers,
+      status,
     });
   }
+  return h(AskUserWizard, {
+    entry,
+    isJustPrepended,
+    itemId,
+    questions,
+    requestId,
+    isSubmitting,
+    submitAnswers,
+    askUserError,
+  });
+}
 
-  function submitSingleSelect(questionText, optionLabel) {
-    if (!interactive || !submitAnswers || isSubmitting) return;
-    submitAnswers(requestId, { [questionText]: optionLabel });
-  }
-
-  function submitMultiSelectAll() {
-    if (!interactive || !submitAnswers || isSubmitting) return;
-    const payload = {};
-    for (const q of questions) {
-      if (!q.multiSelect) continue;
-      const choices = Array.from(multiSelectChoices.get(q.question) || []);
-      if (!choices.length) return;
-      payload[q.question] = choices;
-    }
-    if (!Object.keys(payload).length) return;
-    submitAnswers(requestId, payload);
-  }
-
-  const headerStatus = interactive
-    ? isSubmitting
-      ? "Sending answer…"
-      : "Tap an option"
-    : answers.size > 0 || status === "completed"
-      ? "Answered"
-      : "Waiting for answer";
-
-  const allMultiSelect =
-    questions.length > 0 && questions.every((q) => q.multiSelect);
-  const showSubmitButton = interactive && allMultiSelect;
-
+function AskUserReadOnlyCard({ entry, isJustPrepended, itemId, questions, answers, status }) {
+  const headerStatus = answers.size > 0 || status === "completed"
+    ? "Answered"
+    : "Waiting for answer";
   return h(
     "article",
     transcriptEntryDomAttrs(
       entry,
-      `chat-message chat-message-system chat-message-ask-user${interactive ? " chat-message-ask-user-interactive" : ""}`,
+      "chat-message chat-message-system chat-message-ask-user",
       null,
       { justPrepended: isJustPrepended }
     ),
@@ -983,7 +1005,6 @@ function AskUserEntry({ entry, isJustPrepended = false, options = null }) {
         const matchedOption = answerLabel
           ? q.options.find((opt) => opt.label === answerLabel)
           : null;
-        const multiSelected = multiSelectChoices.get(q.question) || new Set();
         return h(
           "section",
           {
@@ -999,46 +1020,13 @@ function AskUserEntry({ entry, isJustPrepended = false, options = null }) {
                 "div",
                 { className: "ask-user-options" },
                 ...q.options.map((opt, oIndex) => {
-                  const isChosenByAnswer = answerLabel && opt.label === answerLabel;
-                  const isPickedMulti = interactive && q.multiSelect && multiSelected.has(opt.label);
-                  const isChosen = isChosenByAnswer || isPickedMulti;
-                  const baseClass = `ask-user-option${isChosen ? " is-chosen" : ""}`;
-                  // Interactive buttons replace the plain <div> rows so the
-                  // user can tap anywhere on the row. role=button keeps
-                  // screen readers happy when we use <button>.
-                  if (interactive) {
-                    return h(
-                      "button",
-                      {
-                        type: "button",
-                        className: `${baseClass} ask-user-option-button`,
-                        key: `${qIndex}:opt:${oIndex}`,
-                        disabled: isSubmitting,
-                        "aria-pressed": q.multiSelect ? isPickedMulti : undefined,
-                        onClick: q.multiSelect
-                          ? () => toggleMultiSelect(q.question, opt.label)
-                          : () => submitSingleSelect(q.question, opt.label),
-                      },
-                      h(
-                        "div",
-                        { className: "ask-user-option-label" },
-                        isChosen
-                          ? h("span", { className: "ask-user-option-check", "aria-hidden": "true" }, "✓ ")
-                          : null,
-                        opt.label || "(no label)"
-                      ),
-                      opt.description
-                        ? h(
-                            "div",
-                            { className: "ask-user-option-description" },
-                            opt.description
-                          )
-                        : null
-                    );
-                  }
+                  const isChosen = answerLabel && opt.label === answerLabel;
                   return h(
                     "div",
-                    { className: baseClass, key: `${qIndex}:opt:${oIndex}` },
+                    {
+                      className: `ask-user-option${isChosen ? " is-chosen" : ""}`,
+                      key: `${qIndex}:opt:${oIndex}`,
+                    },
                     h(
                       "div",
                       { className: "ask-user-option-label" },
@@ -1067,29 +1055,259 @@ function AskUserEntry({ entry, isJustPrepended = false, options = null }) {
               )
             : null
         );
+      })
+    )
+  );
+}
+
+function makeEmptyPerQuestionState() {
+  return new Map();
+}
+
+function getQuestionState(stateMap, questionText) {
+  return stateMap.get(questionText) || { labels: new Set(), notes: "" };
+}
+
+function AskUserWizard({
+  entry,
+  isJustPrepended,
+  itemId,
+  questions,
+  requestId,
+  isSubmitting,
+  submitAnswers,
+  askUserError,
+}) {
+  const [currentIndex, setCurrentIndex] = React.useState(0);
+  // Map<questionText, {labels: Set<string>, notes: string}>
+  const [perQuestion, setPerQuestion] = React.useState(makeEmptyPerQuestionState);
+
+  // Quick path: a SINGLE single-select question with NO notes typed yet
+  // collapses to one-tap submission. Skips the wizard chrome entirely
+  // (no progress text, no Continue button).
+  const isQuickPath =
+    questions.length === 1
+      && !questions[0].multiSelect
+      && !(getQuestionState(perQuestion, questions[0].question).notes || "").trim();
+
+  const safeIndex = Math.min(Math.max(currentIndex, 0), questions.length - 1);
+  const currentQuestion = questions[safeIndex];
+  const currentState = getQuestionState(perQuestion, currentQuestion.question);
+  const isLastQuestion = safeIndex === questions.length - 1;
+  const isFirstQuestion = safeIndex === 0;
+
+  function updateNotes(questionText, value) {
+    setPerQuestion((prev) => {
+      const next = new Map(prev);
+      const existing = getQuestionState(prev, questionText);
+      next.set(questionText, {
+        labels: new Set(existing.labels),
+        notes: value,
+      });
+      return next;
+    });
+  }
+
+  function toggleOption(questionText, optionLabel, isMulti) {
+    setPerQuestion((prev) => {
+      const next = new Map(prev);
+      const existing = getQuestionState(prev, questionText);
+      const labels = new Set(isMulti ? existing.labels : []);
+      if (labels.has(optionLabel)) {
+        labels.delete(optionLabel);
+      } else {
+        labels.add(optionLabel);
+      }
+      next.set(questionText, {
+        labels,
+        notes: existing.notes,
+      });
+      return next;
+    });
+  }
+
+  function clickOption(question, optionLabel) {
+    if (isSubmitting) return;
+    if (isQuickPath && submitAnswers) {
+      // One-tap path: skip the wizard's Continue step.
+      submitAnswers(requestId, { [question.question]: optionLabel });
+      return;
+    }
+    toggleOption(question.question, optionLabel, Boolean(question.multiSelect));
+  }
+
+  function goPrev() {
+    if (isFirstQuestion || isSubmitting) return;
+    setCurrentIndex((i) => Math.max(0, i - 1));
+  }
+
+  function goNext() {
+    if (isLastQuestion || isSubmitting) return;
+    setCurrentIndex((i) => Math.min(questions.length - 1, i + 1));
+  }
+
+  function sendAll() {
+    if (!submitAnswers || isSubmitting) return;
+    const payload = buildAskUserAnswersPayload(questions, perQuestion);
+    if (!payload) return;
+    submitAnswers(requestId, payload);
+  }
+
+  // A question is "answerable" once it has either a picked option or notes.
+  const currentAnswerable =
+    currentState.labels.size > 0 || (currentState.notes || "").trim().length > 0;
+  const everyQuestionAnswerable = questions.every((q) => {
+    const s = getQuestionState(perQuestion, q.question);
+    return s.labels.size > 0 || (s.notes || "").trim().length > 0;
+  });
+
+  return h(
+    "article",
+    transcriptEntryDomAttrs(
+      entry,
+      "chat-message chat-message-system chat-message-ask-user chat-message-ask-user-interactive",
+      null,
+      { justPrepended: isJustPrepended }
+    ),
+    h(
+      "div",
+      { className: "message-card message-card-system message-card-ask-user" },
+      h(
+        "div",
+        { className: "ask-user-meta" },
+        h("span", { className: "ask-user-tag" }, "Claude asked"),
+        h(
+          "span",
+          { className: "ask-user-status" },
+          isSubmitting
+            ? "Sending answer…"
+            : questions.length > 1
+              ? `Question ${safeIndex + 1} of ${questions.length}`
+              : "Tap an option or add a note"
+        )
+      ),
+      h(AskUserQuestionStep, {
+        key: itemId ? `${itemId}:q:${safeIndex}` : `ask-user:q:${safeIndex}`,
+        question: currentQuestion,
+        currentState,
+        isSubmitting,
+        onToggleOption: (label) => clickOption(currentQuestion, label),
+        onNotesChange: (value) => updateNotes(currentQuestion.question, value),
       }),
-      showSubmitButton
-        ? h(
+      // Wizard footer: omitted on the quick-path so the card stays compact.
+      isQuickPath
+        ? null
+        : h(
             "div",
-            { className: "ask-user-submit-row" },
+            { className: "ask-user-wizard-footer" },
             h(
               "button",
               {
                 type: "button",
-                className: "ask-user-submit-button",
-                disabled: isSubmitting
-                  || questions.some(
-                    (q) => q.multiSelect && !(multiSelectChoices.get(q.question)?.size > 0)
-                  ),
-                onClick: submitMultiSelectAll,
+                className: "ask-user-wizard-back",
+                disabled: isFirstQuestion || isSubmitting,
+                onClick: goPrev,
               },
-              isSubmitting ? "Sending…" : "Submit answers"
-            )
-          )
-        : null,
+              "Back"
+            ),
+            isLastQuestion
+              ? h(
+                  "button",
+                  {
+                    type: "button",
+                    className: "ask-user-submit-button",
+                    disabled: isSubmitting || !everyQuestionAnswerable,
+                    onClick: sendAll,
+                  },
+                  isSubmitting ? "Sending…" : "Send to Claude"
+                )
+              : h(
+                  "button",
+                  {
+                    type: "button",
+                    className: "ask-user-wizard-next",
+                    disabled: !currentAnswerable || isSubmitting,
+                    onClick: goNext,
+                  },
+                  "Continue"
+                )
+          ),
       askUserError
         ? h("div", { className: "ask-user-error", role: "alert" }, askUserError)
         : null
+    )
+  );
+}
+
+function AskUserQuestionStep({
+  question,
+  currentState,
+  isSubmitting,
+  onToggleOption,
+  onNotesChange,
+}) {
+  const q = question;
+  const notesValue = currentState?.notes || "";
+  const selectedLabels = currentState?.labels || new Set();
+  return h(
+    "section",
+    { className: "ask-user-question" },
+    q.header
+      ? h("div", { className: "ask-user-question-header" }, q.header)
+      : null,
+    h("p", { className: "ask-user-question-text" }, q.question || "(no question)"),
+    q.options.length
+      ? h(
+          "div",
+          { className: "ask-user-options" },
+          ...q.options.map((opt, oIndex) => {
+            const isPicked = selectedLabels.has(opt.label);
+            return h(
+              "button",
+              {
+                type: "button",
+                className: `ask-user-option ask-user-option-button${isPicked ? " is-chosen" : ""}`,
+                key: `opt:${oIndex}`,
+                disabled: isSubmitting,
+                "aria-pressed": isPicked,
+                onClick: () => onToggleOption(opt.label),
+              },
+              h(
+                "div",
+                { className: "ask-user-option-label" },
+                isPicked
+                  ? h("span", { className: "ask-user-option-check", "aria-hidden": "true" }, "✓ ")
+                  : null,
+                opt.label || "(no label)"
+              ),
+              opt.description
+                ? h(
+                    "div",
+                    { className: "ask-user-option-description" },
+                    opt.description
+                  )
+                : null
+            );
+          })
+        )
+      : null,
+    h(
+      "div",
+      { className: "ask-user-notes-row" },
+      h(
+        "label",
+        { className: "ask-user-notes-label", htmlFor: `ask-user-notes-${q.question}` },
+        "Add a note (optional)"
+      ),
+      h("textarea", {
+        className: "ask-user-notes-input",
+        id: `ask-user-notes-${q.question}`,
+        rows: 2,
+        placeholder: "Optional: type more context, an \"Other\" answer, or specifics about your pick.",
+        value: notesValue,
+        disabled: isSubmitting,
+        onChange: (event) => onNotesChange(event.target.value),
+      })
     )
   );
 }

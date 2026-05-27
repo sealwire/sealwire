@@ -25,6 +25,7 @@
  */
 
 import { createInterface } from "node:readline";
+import { randomUUID } from "node:crypto";
 import {
   createPermissionHandler,
   rejectAllPendingApprovals,
@@ -140,6 +141,27 @@ function fallbackThread(sessionId, cmd) {
   };
 }
 
+function createUserTurn(prompt) {
+  const uuid = randomUUID();
+  return {
+    event: {
+      type: "user_message",
+      item_id: `user:${uuid}`,
+      turn_id: uuid,
+      text: prompt,
+    },
+    sdkMessage: {
+      type: "user",
+      uuid,
+      message: {
+        role: "user",
+        content: prompt,
+      },
+      parent_tool_use_id: null,
+    },
+  };
+}
+
 async function readThreadInfoOrFallback(sdk, sessionId, cmd) {
   try {
     const info = await sdk.getSessionInfo(sessionId, { dir: cmd.cwd || undefined });
@@ -155,7 +177,6 @@ async function main() {
   const sdk = await findSdk();
   let session = null;
   let streamTask = null;
-  let nextLocalTurn = 1;
   let nextApproval = 1;
   let nextAskUserRequest = 1;
   let pendingSessionResponse = null;
@@ -213,7 +234,12 @@ async function main() {
 
         cancelFlag.current = false;
         pendingSessionResponse = cmd.id
-          ? { id: cmd.id, cwd: cmd.cwd ?? process.cwd(), model: cmd.model ?? "claude-sonnet-4-6" }
+          ? {
+              id: cmd.id,
+              cwd: cmd.cwd ?? process.cwd(),
+              model: cmd.model ?? "claude-sonnet-4-6",
+              initialUserMessage: null,
+            }
           : null;
         const options = buildSessionOptions(
           cmd,
@@ -228,15 +254,13 @@ async function main() {
           session = sdk.unstable_v2_createSession(options);
 
           if (cmd.prompt) {
+            const userTurn = createUserTurn(cmd.prompt);
+            if (pendingSessionResponse) {
+              pendingSessionResponse.initialUserMessage = userTurn.event;
+            }
             progressTracker.start();
-            emit({
-              type: "user_message",
-              item_id: `user:local-${nextLocalTurn}`,
-              turn_id: `local-${nextLocalTurn}`,
-              text: cmd.prompt,
-            });
-            nextLocalTurn += 1;
-            await session.send(cmd.prompt);
+            emit(userTurn.event);
+            await session.send(userTurn.sdkMessage);
           }
 
           // Stream all messages. session.sessionId is populated once
@@ -244,7 +268,7 @@ async function main() {
           // maps to a session_started event.
           streamTask = flushEvents(session.stream(), cancelFlag, (event) => {
             if (event.type === "session_started" && pendingSessionResponse) {
-              emitResponse(pendingSessionResponse.id, {
+              const response = {
                 thread: {
                   id: event.provider_session_id,
                   name: null,
@@ -256,7 +280,18 @@ async function main() {
                   model_provider: "anthropic",
                   provider: "claude_code",
                 },
-              });
+              };
+              if (pendingSessionResponse.initialUserMessage) {
+                response.initial_user_message = {
+                  item_id: pendingSessionResponse.initialUserMessage.item_id,
+                  kind: "user_text",
+                  text: pendingSessionResponse.initialUserMessage.text,
+                  status: "completed",
+                  turn_id: pendingSessionResponse.initialUserMessage.turn_id,
+                  tool: null,
+                };
+              }
+              emitResponse(pendingSessionResponse.id, response);
               pendingSessionResponse = null;
             }
           }, fileDiffTracker).finally(() => {
@@ -301,15 +336,10 @@ async function main() {
           });
 
           if (cmd.prompt) {
+            const userTurn = createUserTurn(cmd.prompt);
             progressTracker.start();
-            emit({
-              type: "user_message",
-              item_id: `user:local-${nextLocalTurn}`,
-              turn_id: `local-${nextLocalTurn}`,
-              text: cmd.prompt,
-            });
-            nextLocalTurn += 1;
-            await session.send(cmd.prompt);
+            emit(userTurn.event);
+            await session.send(userTurn.sdkMessage);
           }
 
           streamTask = flushEvents(session.stream(), cancelFlag, (event) => {
@@ -355,14 +385,9 @@ async function main() {
         try {
           log("sending message to session");
           progressTracker.start();
-          emit({
-            type: "user_message",
-            item_id: `user:local-${nextLocalTurn}`,
-            turn_id: `local-${nextLocalTurn}`,
-            text: cmd.prompt,
-          });
-          nextLocalTurn += 1;
-          await session.send(cmd.prompt);
+          const userTurn = createUserTurn(cmd.prompt);
+          emit(userTurn.event);
+          await session.send(userTurn.sdkMessage);
           log("streaming response");
           if (!streamTask) {
             streamTask = flushEvents(session.stream(), cancelFlag, null, fileDiffTracker).finally(() => {

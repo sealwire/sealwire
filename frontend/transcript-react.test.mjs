@@ -7,6 +7,8 @@ import {
   ApprovalCard,
   TranscriptContent,
   TranscriptEntry,
+  buildAskUserAnswerValue,
+  buildAskUserAnswersPayload,
   diffPrependedItemIds,
   groupToolEntries,
   parseAskUserAnswers,
@@ -1110,7 +1112,7 @@ test("renderEntryMarkup marks running AskUserQuestion as waiting for an answer",
   assert.doesNotMatch(markup, /ask-user-option is-chosen/);
 });
 
-test("renderEntryMarkup switches AskUserQuestion to interactive buttons when a matching pending request is in the snapshot", () => {
+test("renderEntryMarkup switches AskUserQuestion to interactive buttons + notes when a matching pending request is in the snapshot", () => {
   const entry = makeAskUserEntry({
     item_id: "tool:toolu_abc",
     status: "running",
@@ -1125,10 +1127,14 @@ test("renderEntryMarkup switches AskUserQuestion to interactive buttons when a m
   assert.match(markup, /chat-message-ask-user chat-message-ask-user-interactive/);
   // Each option becomes a <button>, not a <div>
   assert.match(markup, /<button[^>]*class="ask-user-option[^"]*ask-user-option-button[^"]*"[^>]*>/);
-  // Single-select question means NO Submit button — clicks submit immediately
+  // Quick-path: a single single-select question with no notes typed keeps
+  // the wizard footer hidden — clicks submit immediately.
+  assert.doesNotMatch(markup, /ask-user-wizard-footer/);
   assert.doesNotMatch(markup, /ask-user-submit-button/);
-  // Header status reflects interactive readiness
-  assert.match(markup, /ask-user-status[^>]*>Tap an option</);
+  // The notes textarea is always present so the user can elaborate.
+  assert.match(markup, /<textarea[^>]*class="ask-user-notes-input"/);
+  // Header status reflects interactive readiness for a single-question card
+  assert.match(markup, /ask-user-status[^>]*>Tap an option or add a note</);
 });
 
 test("renderEntryMarkup disables AskUserQuestion buttons while a submission is in flight", () => {
@@ -1164,7 +1170,7 @@ test("renderEntryMarkup surfaces ask-user submission errors keyed by request_id"
   assert.match(markup, /ask-user-error[^>]*>Server said: no pending question</);
 });
 
-test("renderEntryMarkup renders a Submit button only when every question is multi-select", () => {
+test("renderEntryMarkup shows the wizard footer with Send to Claude on a multi-select question", () => {
   const entry = makeAskUserEntry({
     item_id: "tool:toolu_abc",
     status: "running",
@@ -1190,12 +1196,70 @@ test("renderEntryMarkup renders a Submit button only when every question is mult
       { request_id: "ask:1", tool_use_id: "toolu_abc", thread_id: "t" },
     ],
   });
-  // Multi-select cards need a Submit button to commit selections
-  assert.match(markup, /ask-user-submit-button[^>]*>Submit answers</);
-  // The submit button starts disabled because nothing has been picked yet
-  assert.match(markup, /<button[^>]*ask-user-submit-button[^>]*disabled=""/);
-  // Multi-select option buttons advertise aria-pressed for accessibility
+  // Multi-select can never use the quick path; wizard footer renders
+  assert.match(markup, /ask-user-wizard-footer/);
+  // Last (and only) question gets the Send button — disabled until an answer is provided
+  assert.match(markup, /ask-user-submit-button[^>]*disabled=""[^>]*>Send to Claude</);
+  // Back is disabled on the first question
+  assert.match(markup, /ask-user-wizard-back[^>]*disabled=""/);
+  // Option buttons advertise aria-pressed for accessibility
   assert.match(markup, /aria-pressed="false"/);
+});
+
+test("renderEntryMarkup wizard shows one question at a time with progress + Back/Continue for multi-question prompts", () => {
+  const entry = makeAskUserEntry({
+    item_id: "tool:toolu_abc",
+    status: "running",
+    tool: {
+      result_preview: null,
+      input_preview: JSON.stringify({
+        questions: [
+          { question: "Q1?", header: "First", options: [{ label: "A" }, { label: "B" }] },
+          { question: "Q2?", header: "Second", options: [{ label: "X" }, { label: "Y" }] },
+          { question: "Q3?", header: "Third", options: [{ label: "P" }, { label: "Q" }] },
+        ],
+      }),
+    },
+  });
+  const markup = renderEntryMarkup(entry, {
+    pendingAskUserQuestions: [
+      { request_id: "ask:1", tool_use_id: "toolu_abc", thread_id: "t" },
+    ],
+  });
+  // Wizard renders Q1 first, with progress text and the Continue button
+  assert.match(markup, /ask-user-status[^>]*>Question 1 of 3</);
+  assert.match(markup, /Q1\?/);
+  // Q2 and Q3 are NOT visible on the first step — only the active question
+  assert.doesNotMatch(markup, /Q2\?/);
+  assert.doesNotMatch(markup, /Q3\?/);
+  // Continue button on a non-last question, disabled until the user answers
+  assert.match(markup, /ask-user-wizard-next[^>]*disabled=""[^>]*>Continue</);
+  // Send button does NOT render on a non-last question
+  assert.doesNotMatch(markup, /Send to Claude/);
+  // Back is disabled on the first question
+  assert.match(markup, /ask-user-wizard-back[^>]*disabled=""[^>]*>Back</);
+});
+
+test("renderEntryMarkup wizard renders a notes textarea on every interactive step so users can elaborate", () => {
+  const entry = makeAskUserEntry({
+    item_id: "tool:toolu_abc",
+    status: "running",
+    tool: {
+      result_preview: null,
+      input_preview: JSON.stringify({
+        questions: [
+          { question: "How aggressive?", header: "Tone", options: [{ label: "Soft" }, { label: "Loud" }] },
+        ],
+      }),
+    },
+  });
+  const markup = renderEntryMarkup(entry, {
+    pendingAskUserQuestions: [
+      { request_id: "ask:1", tool_use_id: "toolu_abc", thread_id: "t" },
+    ],
+  });
+  assert.match(markup, /<label[^>]*class="ask-user-notes-label"[^>]*>Add a note \(optional\)</);
+  assert.match(markup, /<textarea[^>]*class="ask-user-notes-input"[^>]*placeholder=/);
 });
 
 test("renderEntryMarkup keeps the read-only card when no pending request matches the entry", () => {
@@ -1258,6 +1322,72 @@ test("parseAskUserAnswers returns an empty map when the result_preview is missin
   assert.equal(parseAskUserAnswers("").size, 0);
   assert.equal(parseAskUserAnswers(null).size, 0);
   assert.equal(parseAskUserAnswers("no quoted pairs here").size, 0);
+});
+
+test("buildAskUserAnswerValue returns the bare label for a single-select pick with no notes", () => {
+  assert.equal(buildAskUserAnswerValue({ labels: ["Option A"] }), "Option A");
+});
+
+test("buildAskUserAnswerValue returns the array for a multi-select pick with no notes", () => {
+  assert.deepEqual(
+    buildAskUserAnswerValue({ labels: ["A", "B"], multiSelect: true }),
+    ["A", "B"]
+  );
+});
+
+test("buildAskUserAnswerValue joins label and notes into a free-text string", () => {
+  // Notes elevate the answer to free-form so Claude reads both the structured
+  // pick AND the user's elaboration.
+  assert.equal(
+    buildAskUserAnswerValue({ labels: ["Option A"], notes: "specifically variant X" }),
+    "Option A — specifically variant X"
+  );
+  assert.equal(
+    buildAskUserAnswerValue({ labels: ["A", "B"], notes: "but ignore C", multiSelect: true }),
+    "A, B — but ignore C"
+  );
+});
+
+test("buildAskUserAnswerValue returns the notes alone when no option is selected", () => {
+  assert.equal(
+    buildAskUserAnswerValue({ labels: [], notes: "neither option fits — I want Z" }),
+    "neither option fits — I want Z"
+  );
+});
+
+test("buildAskUserAnswerValue returns null when neither labels nor notes are supplied", () => {
+  assert.equal(buildAskUserAnswerValue({}), null);
+  assert.equal(buildAskUserAnswerValue({ labels: [], notes: "  " }), null);
+});
+
+test("buildAskUserAnswersPayload returns null when any question is unanswered", () => {
+  const questions = [
+    { question: "Q1", multiSelect: false, options: [{ label: "A" }] },
+    { question: "Q2", multiSelect: false, options: [{ label: "B" }] },
+  ];
+  const state = new Map([
+    ["Q1", { labels: new Set(["A"]), notes: "" }],
+    // Q2 missing — payload should refuse to send a partial answer
+  ]);
+  assert.equal(buildAskUserAnswersPayload(questions, state), null);
+});
+
+test("buildAskUserAnswersPayload composes single + multi + notes into the SDK-shaped map", () => {
+  const questions = [
+    { question: "Single?", multiSelect: false, options: [{ label: "A" }, { label: "B" }] },
+    { question: "Multi?", multiSelect: true, options: [{ label: "X" }, { label: "Y" }] },
+    { question: "Free?", multiSelect: false, options: [{ label: "Z" }] },
+  ];
+  const state = new Map([
+    ["Single?", { labels: new Set(["A"]), notes: "" }],
+    ["Multi?", { labels: new Set(["X", "Y"]), notes: "in that order" }],
+    ["Free?", { labels: new Set(), notes: "actually I'd prefer something else entirely" }],
+  ]);
+  assert.deepEqual(buildAskUserAnswersPayload(questions, state), {
+    "Single?": "A",
+    "Multi?": "X, Y — in that order",
+    "Free?": "actually I'd prefer something else entirely",
+  });
 });
 
 test("UserEntry and AgentEntry are React.memo'd to skip re-render on prepend", async () => {

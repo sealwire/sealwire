@@ -763,6 +763,95 @@
   opacity: 0.6;
 }
 
+/* Wizard footer: Back on the left, Continue/Send on the right. Keep buttons
+ * comfortably tappable on phones. */
+.ask-user-wizard-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.ask-user-wizard-back,
+.ask-user-wizard-next {
+  appearance: none;
+  font: inherit;
+  font-weight: 500;
+  padding: 10px 14px;
+  min-height: 44px;
+  border-radius: 8px;
+  border: 1px solid var(--border-faint);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.ask-user-wizard-back:hover:not(:disabled),
+.ask-user-wizard-next:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.ask-user-wizard-next {
+  font-weight: 600;
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.ask-user-wizard-back:disabled,
+.ask-user-wizard-next:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Per-question notes input — lets users elaborate on a pick or supply a
+ * free-text "Other" answer when the predefined options don't fit. */
+.ask-user-notes-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.ask-user-notes-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-tertiary);
+}
+
+.ask-user-notes-input {
+  appearance: none;
+  font: inherit;
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border-faint);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  resize: vertical;
+  line-height: 1.4;
+}
+
+.ask-user-notes-input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-color: var(--accent);
+}
+
+.ask-user-notes-input::placeholder {
+  color: var(--text-tertiary);
+  opacity: 0.85;
+}
+
+.ask-user-notes-input:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
 .ask-user-submit-row {
   display: flex;
   justify-content: flex-end;
@@ -825,6 +914,18 @@
   .ask-user-submit-button {
     width: 100%;
     min-height: 48px;
+  }
+  .ask-user-wizard-footer {
+    gap: 10px;
+  }
+  .ask-user-wizard-back,
+  .ask-user-wizard-next {
+    min-height: 48px;
+    flex: 1;
+  }
+  .ask-user-notes-input {
+    min-height: 56px;
+    font-size: 16px; /* iOS zooms in on inputs <16px on focus; keep 16+ */
   }
 }
 
