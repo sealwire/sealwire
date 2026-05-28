@@ -10,8 +10,8 @@ use tracing::warn;
 use crate::protocol::LogEntryView;
 
 use super::{
-    DeviceRecord, PairedDevice, RelayState, TranscriptRecord, DEFAULT_STATE_FILE,
-    PERSISTED_STATE_VERSION,
+    DeviceRecord, PairedDevice, RelayState, ThreadSessionSettings, TranscriptRecord,
+    DEFAULT_STATE_FILE, PERSISTED_STATE_VERSION,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -27,6 +27,8 @@ pub(super) struct PersistedRelayState {
     pub(super) approval_policy: String,
     pub(super) sandbox: String,
     pub(super) reasoning_effort: String,
+    #[serde(default)]
+    pub(super) thread_settings: std::collections::HashMap<String, ThreadSessionSettings>,
     #[serde(default)]
     pub(super) allowed_roots: Vec<String>,
     #[serde(default)]
@@ -59,12 +61,26 @@ impl PersistedRelayState {
             approval_policy: relay.approval_policy.clone(),
             sandbox: relay.sandbox.clone(),
             reasoning_effort: relay.reasoning_effort.clone(),
+            thread_settings: relay.thread_settings.clone(),
             allowed_roots: relay.allowed_roots.clone(),
             device_records: relay.device_records.clone(),
             paired_devices: relay.paired_devices.clone(),
             transcript: relay.transcript.clone(),
             logs: relay.logs.clone(),
         }
+    }
+
+    pub(super) fn settings_for_thread(&self, thread_id: &str) -> ThreadSessionSettings {
+        self.thread_settings
+            .get(thread_id)
+            .cloned()
+            .unwrap_or_else(|| {
+                ThreadSessionSettings::new(
+                    &self.approval_policy,
+                    &self.sandbox,
+                    &self.reasoning_effort,
+                )
+            })
     }
 }
 

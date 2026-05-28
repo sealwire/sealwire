@@ -60,7 +60,10 @@ export async function waitForRemoteMessageInput(page, timeoutMs) {
   );
 }
 
-export async function startRemoteSession(page, { cwd, approvalPolicy = "never", timeoutMs }) {
+export async function startRemoteSession(
+  page,
+  { cwd, approvalPolicy = "never", effort, timeoutMs }
+) {
   await openRemoteSessionPanel(page, timeoutMs);
   await selectIfOptionExists(page, [
     "#remote-provider-input",
@@ -74,6 +77,12 @@ export async function startRemoteSession(page, { cwd, approvalPolicy = "never", 
     "#remote-approval-policy-input",
     "#remote-launch-approval-policy-input",
   ], approvalPolicy, timeoutMs);
+  if (effort) {
+    await selectIfOptionExists(page, [
+      "#remote-start-effort",
+      "#remote-launch-start-effort",
+    ], effort, timeoutMs);
+  }
   await fillFirstAvailable(page, [
     "#remote-cwd-input",
     "#remote-start-session-dialog-cwd",

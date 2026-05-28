@@ -50,6 +50,11 @@ fn test_persisted_state() -> PersistedRelayState {
             path_scope: Vec::new(),
         },
     );
+    let mut thread_settings = std::collections::HashMap::new();
+    thread_settings.insert(
+        "thread-1".to_string(),
+        ThreadSessionSettings::new(DEFAULT_APPROVAL_POLICY, DEFAULT_SANDBOX, DEFAULT_EFFORT),
+    );
     PersistedRelayState {
         schema_version: PERSISTED_STATE_VERSION,
         active_thread_id: Some("thread-1".to_string()),
@@ -62,6 +67,7 @@ fn test_persisted_state() -> PersistedRelayState {
         approval_policy: DEFAULT_APPROVAL_POLICY.to_string(),
         sandbox: DEFAULT_SANDBOX.to_string(),
         reasoning_effort: DEFAULT_EFFORT.to_string(),
+        thread_settings,
         allowed_roots: vec!["/tmp/project".to_string()],
         device_records,
         paired_devices,
@@ -459,6 +465,12 @@ fn load_thread_data_sets_active_controller_on_resume() {
         Some("phone-device")
     );
     assert_eq!(relay.current_status, "running");
+    assert_eq!(
+        relay
+            .thread_settings("thread-9")
+            .expect("thread settings should be remembered"),
+        ThreadSessionSettings::new(DEFAULT_APPROVAL_POLICY, DEFAULT_SANDBOX, DEFAULT_EFFORT)
+    );
 }
 
 #[test]
@@ -692,6 +704,12 @@ fn persisted_state_round_trip_drops_ephemeral_fields() {
     assert_eq!(restored.pending_approvals.len(), 0);
     assert_eq!(restored.paired_devices.len(), 0);
     assert_eq!(restored.allowed_roots, vec!["/tmp/project".to_string()]);
+    assert_eq!(
+        restored
+            .thread_settings("thread-1")
+            .expect("thread settings should persist"),
+        ThreadSessionSettings::new(DEFAULT_APPROVAL_POLICY, DEFAULT_SANDBOX, DEFAULT_EFFORT)
+    );
     assert_eq!(restored.transcript.len(), 1);
     assert_eq!(restored.logs.len(), persisted.logs.len());
     assert_eq!(restored.logs[0].message, persisted.logs[0].message);
@@ -704,7 +722,11 @@ fn restore_thread_data_keeps_persisted_controller_and_settings() {
         .pending_approvals
         .insert("req-1".to_string(), test_pending_approval("thread-1"));
 
-    let persisted = test_persisted_state();
+    let mut persisted = test_persisted_state();
+    persisted.thread_settings.insert(
+        "thread-1".to_string(),
+        ThreadSessionSettings::new("bypass", "danger-full-access", "high"),
+    );
     relay.restore_thread_data(
         ThreadSyncData {
             thread: test_thread("thread-1", "/tmp/project"),
@@ -729,9 +751,9 @@ fn restore_thread_data_keeps_persisted_controller_and_settings() {
     );
     assert_eq!(relay.active_controller_last_seen_at, Some(123));
     assert_eq!(relay.model, DEFAULT_MODEL);
-    assert_eq!(relay.approval_policy, DEFAULT_APPROVAL_POLICY);
-    assert_eq!(relay.sandbox, DEFAULT_SANDBOX);
-    assert_eq!(relay.reasoning_effort, DEFAULT_EFFORT);
+    assert_eq!(relay.approval_policy, "bypass");
+    assert_eq!(relay.sandbox, "danger-full-access");
+    assert_eq!(relay.reasoning_effort, "high");
     assert_eq!(relay.paired_devices.len(), 1);
     assert_eq!(relay.pending_approvals.len(), 0);
     assert_eq!(relay.transcript.len(), 1);
@@ -1192,6 +1214,7 @@ fn remove_thread_removes_non_active_thread_from_local_history() {
         test_thread("thread-2", "/tmp/project"),
     ];
     relay.active_thread_id = Some("thread-1".to_string());
+    relay.remember_thread_settings("thread-2", "bypass", "danger-full-access", "high");
 
     let removed = relay.remove_thread("thread-2");
 
@@ -1199,6 +1222,7 @@ fn remove_thread_removes_non_active_thread_from_local_history() {
     assert_eq!(relay.threads.len(), 1);
     assert_eq!(relay.threads[0].id, "thread-1");
     assert_eq!(relay.active_thread_id.as_deref(), Some("thread-1"));
+    assert!(relay.thread_settings("thread-2").is_none());
 }
 
 #[test]
@@ -1308,7 +1332,85 @@ async fn persistence_store_round_trips_to_disk() {
         loaded.active_controller_device_id,
         persisted.active_controller_device_id
     );
+    assert_eq!(
+        loaded
+            .thread_settings
+            .get("thread-1")
+            .expect("thread settings should load"),
+        &ThreadSessionSettings::new(DEFAULT_APPROVAL_POLICY, DEFAULT_SANDBOX, DEFAULT_EFFORT)
+    );
     assert_eq!(loaded.transcript.len(), 1);
+
+    tokio::fs::remove_dir_all(&directory)
+        .await
+        .expect("temp persisted state directory should be removable");
+}
+
+#[tokio::test]
+async fn persistence_store_loads_legacy_state_without_thread_settings() {
+    let unique = format!(
+        "agent-relay-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time should move forward")
+            .as_nanos()
+    );
+    let directory = std::env::temp_dir().join(unique);
+    let path = directory.join("session.json");
+    let store = PersistenceStore::from_path(path.clone());
+
+    tokio::fs::create_dir_all(&directory)
+        .await
+        .expect("temp persisted state directory should exist");
+    tokio::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": PERSISTED_STATE_VERSION,
+            "active_thread_id": "thread-legacy",
+            "active_controller_device_id": null,
+            "active_controller_last_seen_at": null,
+            "current_status": "idle",
+            "active_flags": [],
+            "current_cwd": "/tmp/project",
+            "model": DEFAULT_MODEL,
+            "approval_policy": "bypass",
+            "sandbox": "danger-full-access",
+            "reasoning_effort": "high",
+            "allowed_roots": [],
+            "device_records": {},
+            "paired_devices": {},
+            "transcript": [],
+            "logs": []
+        }))
+        .expect("json should serialize"),
+    )
+    .await
+    .expect("legacy state file should write");
+
+    let loaded = store
+        .load()
+        .await
+        .expect("legacy state should load")
+        .expect("state should exist");
+
+    assert!(loaded.thread_settings.is_empty());
+
+    let (change_tx, _) = watch::channel(0_u64);
+    let mut relay = RelayState::new(
+        "/tmp/other".to_string(),
+        change_tx,
+        SecurityProfile::private(),
+    );
+    relay.apply_persisted(&loaded);
+
+    assert_eq!(relay.active_thread_id.as_deref(), Some("thread-legacy"));
+    assert_eq!(
+        relay
+            .thread_settings("thread-legacy")
+            .expect("legacy active thread should be backfilled"),
+        ThreadSessionSettings::new("bypass", "danger-full-access", "high")
+    );
 
     tokio::fs::remove_dir_all(&directory)
         .await

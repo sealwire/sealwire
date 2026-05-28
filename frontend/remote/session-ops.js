@@ -516,13 +516,9 @@ export async function fetchRemoteThreads({ limit = 80 } = {}) {
   return result.threads?.threads || [];
 }
 
-export async function resumeRemoteSession(threadId, sessionDraftOverride = null) {
+export async function resumeRemoteSession(threadId, _sessionDraftOverride = null) {
   if (!threadId) {
     return;
-  }
-  const sessionDraft = sessionDraftOverride;
-  if (!sessionDraft) {
-    throw new Error("resumeRemoteSession requires a session draft");
   }
 
   renderLog(`Resuming remote thread ${threadId}.`);
@@ -531,9 +527,6 @@ export async function resumeRemoteSession(threadId, sessionDraftOverride = null)
     await dispatchOrRecover("resume_session", {
       input: {
         thread_id: threadId,
-        approval_policy: sessionDraft.approvalPolicy,
-        sandbox: sessionDraft.sandbox,
-        effort: sessionDraft.effort,
       },
     });
     return true;

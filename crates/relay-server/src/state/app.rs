@@ -506,14 +506,35 @@ impl AppState {
     ) -> Result<SessionSnapshot, String> {
         let device_id = require_device_id(input.device_id)?;
         let defaults = self.defaults().await;
-        let approval_policy = non_empty(input.approval_policy).unwrap_or(defaults.approval_policy);
-        let sandbox = non_empty(input.sandbox).unwrap_or(defaults.sandbox);
+        let remembered_settings = {
+            let relay = self.relay.read().await;
+            relay.thread_settings(&input.thread_id)
+        };
+        let approval_policy = non_empty(input.approval_policy)
+            .or_else(|| {
+                remembered_settings
+                    .as_ref()
+                    .map(|settings| settings.approval_policy.clone())
+            })
+            .unwrap_or(defaults.approval_policy);
+        let sandbox = non_empty(input.sandbox)
+            .or_else(|| {
+                remembered_settings
+                    .as_ref()
+                    .map(|settings| settings.sandbox.clone())
+            })
+            .unwrap_or(defaults.sandbox);
 
         let (provider_name, bridge) = self.find_thread_provider(&input.thread_id).await?;
         let provider_models = self
             .load_provider_model_catalog(provider_name, bridge)
             .await;
         let effort = non_empty(input.effort)
+            .or_else(|| {
+                remembered_settings
+                    .as_ref()
+                    .map(|settings| settings.reasoning_effort.clone())
+            })
             .or_else(|| default_effort_for_model(&provider_models, &defaults.model))
             .unwrap_or(defaults.reasoning_effort);
         let preview = bridge.read_thread(&input.thread_id).await?;
@@ -606,6 +627,7 @@ impl AppState {
             let mut relay = self.relay.write().await;
             relay.approval_policy = next_approval_policy.clone();
             relay.sandbox = next_sandbox.clone();
+            relay.remember_active_thread_settings();
             relay.assign_active_controller(&device_id, unix_now());
             relay.push_log(
                 "info",
@@ -865,6 +887,7 @@ impl AppState {
             relay.active_turn_id = turn_id;
             relay.model = model.clone();
             relay.reasoning_effort = effort.clone();
+            relay.remember_active_thread_settings();
             relay.push_log(
                 "info",
                 format!("Sent a prompt to thread {thread_id} with {model} / {effort}."),
@@ -1458,8 +1481,9 @@ impl AppState {
             Err(_) => return,
         };
 
+        let settings = persisted.settings_for_thread(&thread_id);
         let restore_result = match bridge
-            .resume_thread(&thread_id, &persisted.approval_policy, &persisted.sandbox)
+            .resume_thread(&thread_id, &settings.approval_policy, &settings.sandbox)
             .await
         {
             Ok(()) => bridge.read_thread(&thread_id).await,
@@ -2084,6 +2108,7 @@ mod path_scope_tests {
     use crate::fake_provider::FakeProviderBridge;
     use crate::protocol::{
         ReadThreadTranscriptInput, ResumeSessionInput, SendMessageInput, StartSessionInput,
+        UpdateSessionSettingsInput,
     };
     use crate::state::security::SecurityProfile;
     use std::sync::{
@@ -2546,6 +2571,101 @@ mod path_scope_tests {
                 snap.transcript
             );
         }
+    }
+
+    #[tokio::test]
+    async fn resume_session_remembers_settings_per_thread() {
+        let project = TempDir::new().expect("project tempdir");
+        let a_dir = project.path().join("a");
+        let b_dir = project.path().join("b");
+        std::fs::create_dir_all(&a_dir).unwrap();
+        std::fs::create_dir_all(&b_dir).unwrap();
+
+        let (app, _p, _o) = build_app(project.path().to_str().unwrap()).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let snap_a = app
+            .start_session(StartSessionInput {
+                device_id: Some("device-1".to_string()),
+                cwd: Some(a_dir.display().to_string()),
+                model: None,
+                effort: Some("high".to_string()),
+                approval_policy: Some("untrusted".to_string()),
+                sandbox: Some("workspace-write".to_string()),
+                provider: Some("fake".to_string()),
+                initial_prompt: None,
+            })
+            .await
+            .expect("start A");
+        let thread_a = snap_a.active_thread_id.clone().expect("thread A id");
+
+        let snap_a_bypass = app
+            .update_session_settings(UpdateSessionSettingsInput {
+                approval_policy: Some("bypass".to_string()),
+                sandbox: Some("danger-full-access".to_string()),
+                device_id: Some("device-1".to_string()),
+            })
+            .await
+            .expect("update A settings");
+        assert_eq!(snap_a_bypass.approval_policy, "bypass");
+        assert_eq!(snap_a_bypass.sandbox, "danger-full-access");
+        assert_eq!(snap_a_bypass.reasoning_effort, "high");
+
+        let snap_b = app
+            .start_session(StartSessionInput {
+                device_id: Some("device-1".to_string()),
+                cwd: Some(b_dir.display().to_string()),
+                model: None,
+                effort: Some("low".to_string()),
+                approval_policy: Some("untrusted".to_string()),
+                sandbox: Some("workspace-write".to_string()),
+                provider: Some("fake".to_string()),
+                initial_prompt: None,
+            })
+            .await
+            .expect("start B");
+        let thread_b = snap_b.active_thread_id.clone().expect("thread B id");
+        assert_eq!(snap_b.approval_policy, "untrusted");
+        assert_eq!(snap_b.sandbox, "workspace-write");
+        assert_eq!(snap_b.reasoning_effort, "low");
+
+        let snap_a_back = app
+            .resume_session(ResumeSessionInput {
+                thread_id: thread_a.clone(),
+                approval_policy: None,
+                sandbox: None,
+                effort: None,
+                device_id: Some("device-1".to_string()),
+                provider: Some("fake".to_string()),
+            })
+            .await
+            .expect("resume A");
+        assert_eq!(
+            snap_a_back.active_thread_id.as_deref(),
+            Some(thread_a.as_str())
+        );
+        assert_eq!(snap_a_back.approval_policy, "bypass");
+        assert_eq!(snap_a_back.sandbox, "danger-full-access");
+        assert_eq!(snap_a_back.reasoning_effort, "high");
+
+        let snap_b_back = app
+            .resume_session(ResumeSessionInput {
+                thread_id: thread_b.clone(),
+                approval_policy: None,
+                sandbox: None,
+                effort: None,
+                device_id: Some("device-1".to_string()),
+                provider: Some("fake".to_string()),
+            })
+            .await
+            .expect("resume B");
+        assert_eq!(
+            snap_b_back.active_thread_id.as_deref(),
+            Some(thread_b.as_str())
+        );
+        assert_eq!(snap_b_back.approval_policy, "untrusted");
+        assert_eq!(snap_b_back.sandbox, "workspace-write");
+        assert_eq!(snap_b_back.reasoning_effort, "low");
     }
 
     #[tokio::test]

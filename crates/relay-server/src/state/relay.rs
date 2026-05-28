@@ -6,6 +6,7 @@ mod transcript;
 
 use std::collections::{HashMap, HashSet};
 
+use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
 use crate::{
@@ -34,6 +35,23 @@ pub(crate) use self::transcript::TranscriptRecord;
 
 const REMOTE_ACTION_REPLAY_TTL_SECS: u64 = 600;
 const MAX_REMOTE_ACTION_REPLAY_ENTRIES: usize = 512;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct ThreadSessionSettings {
+    pub(crate) approval_policy: String,
+    pub(crate) sandbox: String,
+    pub(crate) reasoning_effort: String,
+}
+
+impl ThreadSessionSettings {
+    pub(crate) fn new(approval_policy: &str, sandbox: &str, reasoning_effort: &str) -> Self {
+        Self {
+            approval_policy: approval_policy.to_string(),
+            sandbox: sandbox.to_string(),
+            reasoning_effort: reasoning_effort.to_string(),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct CachedRemoteActionResult {
@@ -102,6 +120,7 @@ pub struct RelayState {
     pub approval_policy: String,
     pub sandbox: String,
     pub reasoning_effort: String,
+    pub(super) thread_settings: HashMap<String, ThreadSessionSettings>,
     pub allowed_roots: Vec<String>,
     pub available_models: Vec<ModelOptionView>,
     pub device_records: HashMap<String, DeviceRecord>,
@@ -158,6 +177,7 @@ impl RelayState {
             approval_policy: DEFAULT_APPROVAL_POLICY.to_string(),
             sandbox: DEFAULT_SANDBOX.to_string(),
             reasoning_effort: DEFAULT_EFFORT.to_string(),
+            thread_settings: HashMap::new(),
             allowed_roots: Vec::new(),
             available_models: Vec::new(),
             device_records: HashMap::new(),
@@ -346,6 +366,7 @@ impl RelayState {
         self.approval_policy = approval_policy.to_string();
         self.sandbox = sandbox.to_string();
         self.reasoning_effort = effort.to_string();
+        self.remember_thread_settings(&thread.id, approval_policy, sandbox, effort);
         self.pending_approvals.clear();
         self.pending_ask_user_questions.clear();
         self.transcript.clear();
@@ -411,6 +432,8 @@ impl RelayState {
         self.approval_policy = approval_policy.to_string();
         self.sandbox = sandbox.to_string();
         self.reasoning_effort = effort.to_string();
+        let thread_id = data.thread.id.clone();
+        self.remember_thread_settings(&thread_id, approval_policy, sandbox, effort);
         self.pending_approvals.clear();
         self.pending_ask_user_questions.clear();
         self.apply_states.clear();
@@ -445,9 +468,14 @@ impl RelayState {
         self.active_flags = data.active_flags;
         self.current_cwd = data.thread.cwd.clone();
         self.model = persisted.model.clone();
-        self.approval_policy = persisted.approval_policy.clone();
-        self.sandbox = persisted.sandbox.clone();
-        self.reasoning_effort = persisted.reasoning_effort.clone();
+        let settings = persisted.settings_for_thread(&data.thread.id);
+        self.approval_policy = settings.approval_policy.clone();
+        self.sandbox = settings.sandbox.clone();
+        self.reasoning_effort = settings.reasoning_effort.clone();
+        self.thread_settings = persisted.thread_settings.clone();
+        self.thread_settings
+            .entry(data.thread.id.clone())
+            .or_insert(settings);
         self.allowed_roots = persisted.allowed_roots.clone();
         self.device_records = persisted.device_records.clone();
         self.paired_devices = persisted.paired_devices.clone();
@@ -492,6 +520,33 @@ impl RelayState {
         }
     }
 
+    pub fn thread_settings(&self, thread_id: &str) -> Option<ThreadSessionSettings> {
+        self.thread_settings.get(thread_id).cloned()
+    }
+
+    pub fn remember_thread_settings(
+        &mut self,
+        thread_id: &str,
+        approval_policy: &str,
+        sandbox: &str,
+        effort: &str,
+    ) {
+        self.thread_settings.insert(
+            thread_id.to_string(),
+            ThreadSessionSettings::new(approval_policy, sandbox, effort),
+        );
+    }
+
+    pub fn remember_active_thread_settings(&mut self) {
+        let Some(thread_id) = self.active_thread_id.clone() else {
+            return;
+        };
+        let approval_policy = self.approval_policy.clone();
+        let sandbox = self.sandbox.clone();
+        let reasoning_effort = self.reasoning_effort.clone();
+        self.remember_thread_settings(&thread_id, &approval_policy, &sandbox, &reasoning_effort);
+    }
+
     pub fn can_archive_thread(&self, thread_id: &str) -> Result<bool, String> {
         let is_active = self.active_thread_id.as_deref() == Some(thread_id);
         if is_active && self.active_turn_id.is_some() {
@@ -518,6 +573,7 @@ impl RelayState {
     pub fn remove_thread(&mut self, thread_id: &str) -> bool {
         let before_len = self.threads.len();
         self.threads.retain(|thread| thread.id != thread_id);
+        self.thread_settings.remove(thread_id);
         self.threads.len() != before_len
     }
 
@@ -707,6 +763,24 @@ impl RelayState {
         self.approval_policy = persisted.approval_policy.clone();
         self.sandbox = persisted.sandbox.clone();
         self.reasoning_effort = persisted.reasoning_effort.clone();
+        self.thread_settings = persisted.thread_settings.clone();
+        if let Some(thread_id) = self.active_thread_id.clone() {
+            let settings = self
+                .thread_settings
+                .get(&thread_id)
+                .cloned()
+                .unwrap_or_else(|| {
+                    ThreadSessionSettings::new(
+                        &self.approval_policy,
+                        &self.sandbox,
+                        &self.reasoning_effort,
+                    )
+                });
+            self.approval_policy = settings.approval_policy.clone();
+            self.sandbox = settings.sandbox.clone();
+            self.reasoning_effort = settings.reasoning_effort.clone();
+            self.thread_settings.entry(thread_id).or_insert(settings);
+        }
         self.allowed_roots = persisted.allowed_roots.clone();
         self.device_records = persisted.device_records.clone();
         self.paired_devices = persisted.paired_devices.clone();

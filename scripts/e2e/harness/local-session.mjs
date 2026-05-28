@@ -1,6 +1,6 @@
 export async function startLocalSession(
   page,
-  { cwd, approvalPolicy = "never", provider, model, timeoutMs }
+  { cwd, approvalPolicy = "never", effort, provider, model, timeoutMs }
 ) {
   await openStartSessionDialog(page, timeoutMs);
   await fillFirstAvailable(page, ["#cwd-input"], cwd, timeoutMs);
@@ -11,6 +11,9 @@ export async function startLocalSession(
     await selectIfOptionExists(page, ["#model-input"], model, timeoutMs);
   }
   await selectFirstAvailable(page, ["#approval-policy-input"], approvalPolicy, timeoutMs);
+  if (effort) {
+    await selectIfOptionExists(page, ["#start-effort"], effort, timeoutMs);
+  }
   await clickFirstAvailable(page, ["#start-session-button"], timeoutMs);
 }
 
@@ -22,11 +25,15 @@ async function openStartSessionDialog(page, timeoutMs) {
     return;
   }
 
-  const hasDialogButton = await page.evaluate(() =>
-    Boolean(document.querySelector("#open-start-session-dialog"))
-  );
-  if (hasDialogButton) {
-    await page.click("#open-start-session-dialog");
+  const openedDialog = await page.evaluate(() => {
+    const dialog = document.querySelector("#launch-start-session-dialog");
+    if (!dialog) {
+      return false;
+    }
+    dialog.setAttribute("open", "");
+    return true;
+  });
+  if (openedDialog) {
     await page.waitForFunction(
       () => Boolean(document.querySelector("#launch-start-session-dialog")?.open),
       null,

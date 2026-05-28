@@ -8,6 +8,7 @@
       "local-history-scroll",
       "local-drawer-scroll",
       "local-transcript-load",
+      "local-thread-settings",
       "local-thread-groups"
     ],
     "local-full": [
@@ -18,6 +19,7 @@
       "local-history-scroll",
       "local-drawer-scroll",
       "local-transcript-load",
+      "local-thread-settings",
       "local-thread-groups",
       "local-delete"
     ],
@@ -26,6 +28,7 @@
       "public-broker",
       "public-enrollment",
       "public-refresh",
+      "public-thread-settings",
       "public-persistence",
       "public-revoke",
       "public-reclaim"
@@ -34,6 +37,7 @@
       "public-enrollment",
       "public-transcript-delta",
       "public-refresh",
+      "public-thread-settings",
       "public-persistence",
       "public-revoke",
       "public-reclaim",
@@ -99,6 +103,13 @@
       "transport": "local",
       "coverage": ["transcript-load"]
     },
+    "local-thread-settings": {
+      "script": "browser-local-thread-settings-e2e.mjs",
+      "tier": "core",
+      "provider": "fake-compatible",
+      "transport": "local",
+      "coverage": ["thread-settings"]
+    },
     "local-thread-groups": {
       "script": "browser-local-thread-groups-e2e.mjs",
       "tier": "core",
@@ -140,6 +151,13 @@
       "provider": "fake-compatible",
       "transport": "public-broker",
       "coverage": ["refresh"]
+    },
+    "public-thread-settings": {
+      "script": "browser-public-thread-settings-e2e.mjs",
+      "tier": "core",
+      "provider": "fake-compatible",
+      "transport": "public-broker",
+      "coverage": ["thread-settings"]
     },
     "public-persistence": {
       "script": "browser-public-persistence-e2e.mjs",

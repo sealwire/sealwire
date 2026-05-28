@@ -392,6 +392,101 @@ test("applySessionSnapshot hydrates truncated transcript with full tail entries"
   );
 });
 
+test("resumeRemoteSession sends only thread id so relay restores per-thread settings", async () => {
+  activeBrowser = installBrowserStubs();
+  const sentPayloads = [];
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { handleRemoteBrokerPayload } = await import("./actions.js");
+  const { resumeRemoteSession } = await import("./session-ops.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-1",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: "session-claim-1",
+    sessionClaimExpiresAt: Math.floor(Date.now() / 1000) + 300,
+  });
+  seedSocketState(state, {
+    socketConnected: true,
+    socketPeerId: "surface-peer-1",
+  });
+  state.pendingActions.clear();
+  state.socket = {
+    readyState: 1,
+    send(frameText) {
+      const frame = JSON.parse(frameText);
+      sentPayloads.push(frame.payload);
+      setImmediate(async () => {
+        await handleRemoteBrokerPayload({
+          kind: "remote_session_result",
+          action_id: frame.payload.action_id,
+          action: "resume_session",
+          ok: true,
+          snapshot: {
+            active_thread_id: "thread-a",
+            active_controller_device_id: "device-1",
+            active_controller_last_seen_at: 1,
+            active_flags: [],
+            active_turn_id: null,
+            allowed_roots: [],
+            approval_policy: "bypass",
+            audit_enabled: false,
+            available_models: [],
+            broker_can_read_content: true,
+            broker_channel_id: "room-a",
+            broker_connected: true,
+            broker_peer_id: "relay-1",
+            codex_connected: true,
+            controller_lease_expires_at: null,
+            controller_lease_seconds: 15,
+            current_cwd: "/tmp/project",
+            current_status: "idle",
+            device_records: [],
+            e2ee_enabled: false,
+            logs: [],
+            model: "fake-echo",
+            paired_devices: [],
+            pending_approvals: [],
+            pending_pairing_requests: [],
+            provider: "fake",
+            reasoning_effort: "high",
+            sandbox: "workspace-write",
+            security_mode: "managed",
+            service_ready: true,
+            transcript_truncated: false,
+            transcript: [],
+          },
+        });
+      });
+    },
+  };
+
+  const ok = await resumeRemoteSession("thread-a", {
+    approvalPolicy: "untrusted",
+    effort: "low",
+    sandbox: "read-only",
+  });
+
+  assert.equal(ok, true);
+  assert.equal(sentPayloads.length, 1);
+  assert.deepEqual(sentPayloads[0].request, {
+    type: "resume_session",
+    input: {
+      thread_id: "thread-a",
+    },
+  });
+});
+
 test("transcript hydration retries after an incomplete entry fetch", async () => {
   const browser = activeBrowser || installBrowserStubs();
   const sentPayloads = [];

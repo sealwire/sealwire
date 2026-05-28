@@ -112,19 +112,8 @@ async function main() {
     cleanupThreadIds.push(threadId);
     assert.notEqual(threadId, fallbackThreadId, "delete target should be different from fallback");
 
-    const target = page.locator(`[data-thread-id="${threadId}"]`);
-    await target.waitFor({ state: "visible", timeout: LOCAL_TIMEOUT_MS });
     page.once("dialog", (dialog) => dialog.accept());
-    await target.click({ button: "right" });
-    await page.waitForFunction(
-      () => {
-        const menu = document.querySelector("#thread-context-menu");
-        const button = document.querySelector("#delete-thread-button");
-        return Boolean(menu && !menu.hidden && button && !button.disabled);
-      },
-      null,
-      { timeout: LOCAL_TIMEOUT_MS }
-    );
+    await openThreadContextMenu(page, threadId, "#delete-thread-button");
     await page.click("#delete-thread-button");
 
     await waitForThreadMissing(relayPort, workspaceDir, threadId);
@@ -233,6 +222,43 @@ async function waitForThreadMissing(relayPort, cwd, threadId, timeoutMs = LOCAL_
   }
 
   throw new Error(`timed out waiting for deleted thread ${threadId} to disappear`);
+}
+
+async function openThreadContextMenu(page, threadId, actionSelector) {
+  const target = page.locator(`#threads-list [data-thread-id="${threadId}"]`);
+  await target.waitFor({ state: "visible", timeout: LOCAL_TIMEOUT_MS });
+  await target.scrollIntoViewIfNeeded({ timeout: LOCAL_TIMEOUT_MS });
+  await target.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    element.dispatchEvent(
+      new MouseEvent("contextmenu", {
+        bubbles: true,
+        button: 2,
+        buttons: 2,
+        cancelable: true,
+        clientX: rect.left + Math.min(rect.width / 2, 160),
+        clientY: rect.top + Math.min(rect.height / 2, 24),
+      })
+    );
+  });
+  await page.waitForFunction(
+    ({ actionSelector, threadId }) => {
+      const menu = document.querySelector("#thread-context-menu");
+      const button = document.querySelector(actionSelector);
+      const row = [...document.querySelectorAll("#threads-list [data-thread-id]")].find(
+        (element) => element.dataset.threadId === threadId
+      );
+      return Boolean(
+        menu &&
+          !menu.hidden &&
+          button &&
+          !button.disabled &&
+          row?.classList.contains("is-context-target")
+      );
+    },
+    { actionSelector, threadId },
+    { timeout: LOCAL_TIMEOUT_MS }
+  );
 }
 
 async function startThread(relayPort, { cwd, deviceId, initialPrompt, provider, model }) {

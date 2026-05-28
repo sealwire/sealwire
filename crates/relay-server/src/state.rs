@@ -17,7 +17,7 @@ pub(crate) use self::relay::{
     parse_ask_user_questions, ApprovalKind, BrokerPendingMessage, CachedRemoteActionResult,
     ClaimChallenge, CompletedRemoteClaim, DeviceRecord, IssuedClaimChallenge, PairedDevice,
     PendingApproval, PendingAskUserQuestion, PendingPairingResult, PendingTranscriptDelta,
-    RelayState, RemoteActionReplayDecision, TranscriptDeltaKind,
+    RelayState, RemoteActionReplayDecision, ThreadSessionSettings, TranscriptDeltaKind,
 };
 pub(crate) use self::security::SecurityProfile;
 
