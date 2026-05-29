@@ -32,8 +32,8 @@ use crate::{
 };
 
 use self::protocol::{
-    claude_permission_mode, compact_json, normalize_id, parse_claude_approval, parse_thread_array,
-    parse_thread_summary, string_at, unix_now, value_at,
+    bool_at, claude_permission_mode, compact_json, normalize_id, parse_claude_approval,
+    parse_thread_array, parse_thread_summary, string_at, unix_now, value_at,
 };
 
 type PendingResponses = Arc<Mutex<HashMap<String, oneshot::Sender<Result<Value, String>>>>>;
@@ -226,45 +226,28 @@ impl ProviderBridge for ClaudeCodeBridge {
     }
 
     async fn list_models(&self) -> Result<Vec<ModelOptionView>, String> {
-        Ok(vec![
-            ModelOptionView {
-                model: "claude-sonnet-4-6".to_string(),
-                display_name: "Sonnet".to_string(),
-                supported_reasoning_efforts: vec![
-                    "low".to_string(),
-                    "medium".to_string(),
-                    "high".to_string(),
-                ],
-                default_reasoning_effort: "high".to_string(),
-                provider: "anthropic".to_string(),
-                hidden: false,
-                is_default: true,
-            },
-            ModelOptionView {
-                model: "claude-opus-4-7".to_string(),
-                display_name: "Opus".to_string(),
-                supported_reasoning_efforts: vec![
-                    "low".to_string(),
-                    "medium".to_string(),
-                    "high".to_string(),
-                    "xhigh".to_string(),
-                    "max".to_string(),
-                ],
-                default_reasoning_effort: "xhigh".to_string(),
-                provider: "anthropic".to_string(),
-                hidden: false,
-                is_default: false,
-            },
-            ModelOptionView {
-                model: "claude-haiku-4-5".to_string(),
-                display_name: "Haiku".to_string(),
-                supported_reasoning_efforts: vec!["low".to_string(), "medium".to_string()],
-                default_reasoning_effort: "low".to_string(),
-                provider: "anthropic".to_string(),
-                hidden: false,
-                is_default: false,
-            },
-        ])
+        let result = self.send_request("model/list", json!({})).await?;
+        let data = value_at(&result, &["models"])
+            .and_then(Value::as_array)
+            .ok_or_else(|| "model/list did not return a models array".to_string())?;
+
+        let mut models = data
+            .iter()
+            .map(parse_claude_model_option)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        if !models.iter().any(|model| model.is_default) {
+            if let Some(index) = models
+                .iter()
+                .position(|model| is_sonnet_model(&model.model))
+            {
+                models[index].is_default = true;
+            } else if let Some(first) = models.first_mut() {
+                first.is_default = true;
+            }
+        }
+
+        Ok(models)
     }
 
     async fn start_thread(
@@ -608,6 +591,35 @@ fn spawn_stderr_reader(stderr: tokio::process::ChildStderr, state: Arc<RwLock<Re
             relay.notify();
         }
     });
+}
+
+fn parse_claude_model_option(model: &Value) -> Result<ModelOptionView, String> {
+    let supported_reasoning_efforts = value_at(model, &["supportedReasoningEfforts"])
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Ok(ModelOptionView {
+        model: string_at(model, &["model"])
+            .ok_or_else(|| "model/list item missing model".to_string())?,
+        display_name: string_at(model, &["displayName"])
+            .ok_or_else(|| "model/list item missing displayName".to_string())?,
+        provider: string_at(model, &["provider"]).unwrap_or_else(|| "anthropic".to_string()),
+        supported_reasoning_efforts,
+        default_reasoning_effort: string_at(model, &["defaultReasoningEffort"]).unwrap_or_default(),
+        hidden: bool_at(model, &["hidden"]).unwrap_or(false),
+        is_default: bool_at(model, &["isDefault"]).unwrap_or(false),
+    })
+}
+
+fn is_sonnet_model(model: &str) -> bool {
+    model == "sonnet" || model.starts_with("sonnet[") || model.starts_with("claude-sonnet")
 }
 
 async fn handle_worker_line(

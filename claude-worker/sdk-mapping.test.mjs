@@ -1,7 +1,136 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { mapSessionMessages } from "./sdk-mapping.mjs";
+import {
+  mapModelInfo,
+  mapModelInfos,
+  mapSessionMessages,
+} from "./sdk-mapping.mjs";
+
+test("mapModelInfo flattens Claude SDK model metadata for the relay", () => {
+  assert.deepEqual(
+    mapModelInfo({
+      value: "claude-opus-4-8",
+      displayName: "Opus",
+      description: "Most capable",
+      supportsEffort: true,
+      supportedEffortLevels: ["low", "medium", "high", "xhigh", "max"],
+    }),
+    {
+      model: "claude-opus-4-8",
+      displayName: "Opus 4.8",
+      provider: "anthropic",
+      supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
+      defaultReasoningEffort: "high",
+      hidden: false,
+      isDefault: false,
+    }
+  );
+});
+
+test("mapModelInfo falls back to the highest available effort when high is absent", () => {
+  const model = mapModelInfo({
+    value: "claude-haiku-4-5",
+    displayName: "Haiku",
+    supportedEffortLevels: ["low", "medium"],
+  });
+  assert.equal(model.defaultReasoningEffort, "medium");
+});
+
+test("mapModelInfo appends the Claude version from a versioned model id", () => {
+  assert.equal(
+    mapModelInfo({
+      value: "claude-sonnet-4-6",
+      displayName: "Sonnet",
+    }).displayName,
+    "Sonnet 4.6"
+  );
+  assert.equal(
+    mapModelInfo({
+      value: "claude-opus-5",
+      displayName: "Opus",
+    }).displayName,
+    "Opus 5"
+  );
+  assert.equal(
+    mapModelInfo({
+      value: "claude-haiku-4-5",
+    }).displayName,
+    "Haiku 4.5"
+  );
+});
+
+test("mapModelInfo leaves Claude SDK aliases unversioned", () => {
+  assert.equal(
+    mapModelInfo({
+      value: "sonnet",
+      displayName: "Sonnet",
+    }).displayName,
+    "Sonnet"
+  );
+});
+
+test("mapModelInfo appends the Claude version from SDK descriptions for aliases", () => {
+  assert.equal(
+    mapModelInfo({
+      value: "sonnet",
+      displayName: "Sonnet",
+      description: "Sonnet 4.6 · Best for everyday tasks · $3/$15 per Mtok",
+    }).displayName,
+    "Sonnet 4.6"
+  );
+  assert.equal(
+    mapModelInfo({
+      value: "sonnet[1m]",
+      displayName: "Sonnet (1M context)",
+      description: "Sonnet 4.6 for long sessions · $3/$15 per Mtok",
+    }).displayName,
+    "Sonnet 4.6 (1M context)"
+  );
+  assert.equal(
+    mapModelInfo({
+      value: "haiku",
+      displayName: "Haiku",
+      description: "Haiku 4.5 · Fastest for quick answers · $1/$5 per Mtok",
+    }).displayName,
+    "Haiku 4.5"
+  );
+});
+
+test("mapModelInfo includes the current concrete model in the default alias label", () => {
+  assert.equal(
+    mapModelInfo({
+      value: "default",
+      displayName: "Default (recommended)",
+      description: "Use the default model (currently Opus 4.7 (1M context)) · $5/$25 per Mtok",
+    }).displayName,
+    "Default (recommended, Opus 4.7)"
+  );
+});
+
+test("mapModelInfos marks exactly one default, preferring the first sonnet", () => {
+  const models = mapModelInfos([
+    { value: "claude-opus-4-8", displayName: "Opus" },
+    { value: "claude-sonnet-4-6", displayName: "Sonnet" },
+    { value: "claude-sonnet-4-7", displayName: "Sonnet" },
+  ]);
+  assert.deepEqual(
+    models.map((model) => model.isDefault),
+    [false, true, false]
+  );
+});
+
+test("mapModelInfos treats Claude SDK sonnet aliases as sonnet defaults", () => {
+  const models = mapModelInfos([
+    { value: "default", displayName: "Default (recommended)" },
+    { value: "sonnet", displayName: "Sonnet" },
+    { value: "sonnet[1m]", displayName: "Sonnet (1M context)" },
+  ]);
+  assert.deepEqual(
+    models.map((model) => model.isDefault),
+    [false, true, false]
+  );
+});
 
 test("mapSessionMessages emits transcript kinds using relay JSON names", () => {
   const entries = mapSessionMessages([

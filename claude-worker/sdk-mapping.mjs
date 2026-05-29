@@ -35,6 +35,7 @@ function previewJson(value, max = 1000) {
 // the transcript renders as an interactive card. Truncating mid-JSON breaks
 // parsing, so allow a much larger budget for this tool specifically.
 const ASK_USER_QUESTION_PREVIEW_MAX = 8000;
+const EFFORT_LEVELS = new Set(["low", "medium", "high", "xhigh", "max"]);
 
 function previewToolInput(name, value) {
   if (name === "AskUserQuestion") {
@@ -48,6 +49,101 @@ function toolTitle(name) {
   return name
     .replace(/_/g, " ")
     .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function supportedEffortLevels(modelInfo) {
+  if (!Array.isArray(modelInfo?.supportedEffortLevels)) return [];
+  return modelInfo.supportedEffortLevels
+    .filter((effort) => typeof effort === "string" && EFFORT_LEVELS.has(effort));
+}
+
+function isSonnetModel(model) {
+  return model === "sonnet"
+    || model.startsWith("sonnet[")
+    || model.startsWith("claude-sonnet");
+}
+
+function titleCase(value) {
+  return value.slice(0, 1).toUpperCase() + value.slice(1);
+}
+
+function parseClaudeModelVersion(model) {
+  const match = /^claude-(opus|sonnet|haiku)-(\d+)(?:-(\d+))?(?:$|-)/.exec(model);
+  if (!match) return null;
+  return {
+    family: match[1],
+    version: match[3] ? `${match[2]}.${match[3]}` : match[2],
+  };
+}
+
+function parseClaudeDescriptionVersion(description) {
+  if (typeof description !== "string") return null;
+  const match = /\b(opus|sonnet|haiku)\s+(\d+(?:\.\d+)?)/i.exec(description);
+  if (!match) return null;
+  return {
+    family: match[1].toLowerCase(),
+    version: match[2],
+  };
+}
+
+function appendModelVersion(base, parsed) {
+  const family = titleCase(parsed.family);
+  const versionLabel = `${family} ${parsed.version}`;
+  if (base.includes(parsed.version)) return base;
+  if (base === family) return `${base} ${parsed.version}`;
+  if (base.startsWith(`${family} (`)) {
+    return `${family} ${parsed.version}${base.slice(family.length)}`;
+  }
+  const parenthetical = /^(.*)\(([^)]*)\)$/.exec(base);
+  if (parenthetical) {
+    return `${parenthetical[1]}(${parenthetical[2]}, ${versionLabel})`;
+  }
+  return `${base} (${versionLabel})`;
+}
+
+function displayNameWithVersion(model, displayName, description) {
+  const parsed = parseClaudeModelVersion(model)
+    ?? parseClaudeDescriptionVersion(description);
+  const base = typeof displayName === "string" && displayName.trim()
+    ? displayName.trim()
+    : (parsed ? titleCase(parsed.family) : model);
+  return parsed ? appendModelVersion(base, parsed) : base;
+}
+
+export function mapModelInfo(modelInfo, options = {}) {
+  const efforts = supportedEffortLevels(modelInfo);
+  const defaultEffort = efforts.includes("high")
+    ? "high"
+    : (efforts.length > 0 ? efforts[efforts.length - 1] : "");
+  const model = typeof modelInfo?.value === "string" ? modelInfo.value : "";
+
+  return {
+    model,
+    displayName: displayNameWithVersion(
+      model,
+      modelInfo?.displayName,
+      modelInfo?.description,
+    ),
+    provider: "anthropic",
+    supportedReasoningEfforts: efforts,
+    defaultReasoningEffort: defaultEffort,
+    hidden: false,
+    isDefault: typeof options.isDefault === "boolean"
+      ? options.isDefault
+      : isSonnetModel(model),
+  };
+}
+
+export function mapModelInfos(modelInfos) {
+  const models = (Array.isArray(modelInfos) ? modelInfos : [])
+    .map((modelInfo) => mapModelInfo(modelInfo, { isDefault: false }));
+  const defaultIndex = models.findIndex((model) => isSonnetModel(model.model));
+  if (defaultIndex >= 0) {
+    models[defaultIndex].isDefault = true;
+  } else if (models.length > 0) {
+    models[0].isDefault = true;
+  }
+  return models;
 }
 
 function mapToolCall(block, msg, status = "running") {

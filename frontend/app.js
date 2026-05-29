@@ -1102,7 +1102,7 @@ function seedDefaults(session) {
   const launchProvider = providerInput?.value || activeProvider;
   const launchModels = modelsForProvider(launchProvider, session.available_models || []);
 
-  syncModelSuggestions(messageModel, session.available_models || [], messageModel?.value || session.model);
+  syncModelSuggestions(messageModel, session.available_models || [], messageModel?.value || session.model, true);
 
   if (!state.defaultsSeeded) {
     if (messageModel) {
@@ -1173,18 +1173,29 @@ async function refreshProviderCatalogs(session) {
   }
 }
 
-function syncModelSuggestions(select, models, selectedModel) {
+function syncModelSuggestions(select, models, selectedModel, allowForeign = false) {
   if (!select) {
     return;
   }
 
-  const currentValue = selectedModel || select.value || "gpt-5.4";
   const options = [...(models || [])];
-  if (currentValue && !options.some((model) => model.model === currentValue)) {
-    options.unshift({
-      model: currentValue,
-      display_name: currentValue,
-    });
+  let currentValue = selectedModel || select.value || "";
+  const known = options.some((model) => model.model === currentValue);
+
+  if (currentValue && !known) {
+    if (allowForeign || options.length === 0) {
+      // Preserve a value the catalog doesn't list — the active session's real
+      // model, or a catalog that hasn't loaded yet — by surfacing it directly.
+      options.unshift({
+        model: currentValue,
+        display_name: currentValue,
+      });
+    } else {
+      // Stale value from a different provider: snap to this provider's default
+      // instead of leaking a foreign model id (e.g. gpt-5.5 under Claude).
+      currentValue =
+        options.find((model) => model.is_default)?.model || options[0].model;
+    }
   }
 
   renderSelectOptions(

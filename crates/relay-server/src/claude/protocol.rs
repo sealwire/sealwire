@@ -99,6 +99,10 @@ pub(super) fn string_at(value: &Value, path: &[&str]) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+pub(super) fn bool_at(value: &Value, path: &[&str]) -> Option<bool> {
+    value_at(value, path).and_then(Value::as_bool)
+}
+
 pub(super) fn normalize_id(value: &Value) -> String {
     value
         .as_str()

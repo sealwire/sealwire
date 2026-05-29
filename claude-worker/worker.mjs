@@ -6,6 +6,7 @@
  * Commands (stdin, one JSON object per line):
  *   {"type":"start",  "cwd":"...", "model":"...", "prompt":"...", "permissionMode":"..."}
  *   {"type":"resume","cwd":"...", "provider_session_id":"...", "prompt":"...", "model":"..."}
+ *   {"type":"model/list","id":"...","cwd":"..."}
  *   {"type":"list_sessions","id":"...","cwd":"...","limit":80}
  *   {"type":"read_session","id":"...","provider_session_id":"...","cwd":"..."}
  *   {"type":"approval_decision","id":"...","approval_id":"...","decision":"approve|deny|cancel","scope":"once|session"}
@@ -43,6 +44,7 @@ import {
   log,
 } from "./protocol.mjs";
 import {
+  mapModelInfos,
   mapSdkMessage,
   mapSessionInfo,
   mapSessionMessages,
@@ -168,6 +170,29 @@ async function readThreadInfoOrFallback(sdk, sessionId, cmd) {
     return mapSessionInfo(info ?? { sessionId, cwd: cmd.cwd || process.cwd() });
   } catch {
     return fallbackThread(sessionId, cmd);
+  }
+}
+
+async function readSupportedModels(sdk, cmd) {
+  let releasePrompt = () => {};
+  async function* idlePrompt() {
+    await new Promise((resolve) => {
+      releasePrompt = resolve;
+    });
+  }
+
+  const query = sdk.query({
+    prompt: idlePrompt(),
+    options: { cwd: cmd.cwd || process.cwd() },
+  });
+
+  try {
+    return await query.supportedModels();
+  } finally {
+    releasePrompt();
+    if (typeof query.close === "function") {
+      query.close();
+    }
   }
 }
 
@@ -428,6 +453,16 @@ async function main() {
         const answers = cmd.answers && typeof cmd.answers === "object" ? cmd.answers : {};
         pending.resolve(resolveAskUserAnswers(pending, answers));
         emitResponse(cmd.id, { id: requestId });
+        break;
+      }
+
+      case "model/list": {
+        try {
+          const models = await readSupportedModels(sdk, cmd);
+          emitResponse(cmd.id, { models: mapModelInfos(models) });
+        } catch (err) {
+          emitErrorResponse(cmd.id, String(err));
+        }
         break;
       }
 
