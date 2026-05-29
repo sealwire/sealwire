@@ -53,7 +53,12 @@ fn test_persisted_state() -> PersistedRelayState {
     let mut thread_settings = std::collections::HashMap::new();
     thread_settings.insert(
         "thread-1".to_string(),
-        ThreadSessionSettings::new(DEFAULT_APPROVAL_POLICY, DEFAULT_SANDBOX, DEFAULT_EFFORT),
+        ThreadSessionSettings::new(
+            DEFAULT_APPROVAL_POLICY,
+            DEFAULT_SANDBOX,
+            DEFAULT_EFFORT,
+            DEFAULT_MODEL,
+        ),
     );
     PersistedRelayState {
         schema_version: PERSISTED_STATE_VERSION,
@@ -456,6 +461,7 @@ fn load_thread_data_sets_active_controller_on_resume() {
         DEFAULT_APPROVAL_POLICY,
         DEFAULT_SANDBOX,
         DEFAULT_EFFORT,
+        DEFAULT_MODEL,
         "phone-device",
     );
 
@@ -469,7 +475,12 @@ fn load_thread_data_sets_active_controller_on_resume() {
         relay
             .thread_settings("thread-9")
             .expect("thread settings should be remembered"),
-        ThreadSessionSettings::new(DEFAULT_APPROVAL_POLICY, DEFAULT_SANDBOX, DEFAULT_EFFORT)
+        ThreadSessionSettings::new(
+            DEFAULT_APPROVAL_POLICY,
+            DEFAULT_SANDBOX,
+            DEFAULT_EFFORT,
+            DEFAULT_MODEL
+        )
     );
 }
 
@@ -708,7 +719,12 @@ fn persisted_state_round_trip_drops_ephemeral_fields() {
         restored
             .thread_settings("thread-1")
             .expect("thread settings should persist"),
-        ThreadSessionSettings::new(DEFAULT_APPROVAL_POLICY, DEFAULT_SANDBOX, DEFAULT_EFFORT)
+        ThreadSessionSettings::new(
+            DEFAULT_APPROVAL_POLICY,
+            DEFAULT_SANDBOX,
+            DEFAULT_EFFORT,
+            DEFAULT_MODEL
+        )
     );
     assert_eq!(restored.transcript.len(), 1);
     assert_eq!(restored.logs.len(), persisted.logs.len());
@@ -725,7 +741,7 @@ fn restore_thread_data_keeps_persisted_controller_and_settings() {
     let mut persisted = test_persisted_state();
     persisted.thread_settings.insert(
         "thread-1".to_string(),
-        ThreadSessionSettings::new("bypass", "danger-full-access", "high"),
+        ThreadSessionSettings::new("bypass", "danger-full-access", "high", DEFAULT_MODEL),
     );
     relay.restore_thread_data(
         ThreadSyncData {
@@ -1214,7 +1230,13 @@ fn remove_thread_removes_non_active_thread_from_local_history() {
         test_thread("thread-2", "/tmp/project"),
     ];
     relay.active_thread_id = Some("thread-1".to_string());
-    relay.remember_thread_settings("thread-2", "bypass", "danger-full-access", "high");
+    relay.remember_thread_settings(
+        "thread-2",
+        "bypass",
+        "danger-full-access",
+        "high",
+        DEFAULT_MODEL,
+    );
 
     let removed = relay.remove_thread("thread-2");
 
@@ -1223,6 +1245,41 @@ fn remove_thread_removes_non_active_thread_from_local_history() {
     assert_eq!(relay.threads[0].id, "thread-1");
     assert_eq!(relay.active_thread_id.as_deref(), Some("thread-1"));
     assert!(relay.thread_settings("thread-2").is_none());
+}
+
+#[test]
+fn mark_thread_deleted_clears_settings_and_background_stream() {
+    let mut relay = test_state();
+    relay.threads = vec![
+        test_thread("thread-1", "/tmp/project"),
+        test_thread("thread-2", "/tmp/project"),
+    ];
+    relay.active_thread_id = Some("thread-1".to_string());
+    relay.remember_thread_settings(
+        "thread-2",
+        "bypass",
+        "danger-full-access",
+        "high",
+        DEFAULT_MODEL,
+    );
+    relay.bg_upsert_user_message(
+        "thread-2",
+        "item-1".to_string(),
+        "hello".to_string(),
+        "turn-1".to_string(),
+        0,
+    );
+    assert!(relay.thread_settings("thread-2").is_some());
+    assert!(relay.background_streams.contains_key("thread-2"));
+
+    relay.mark_thread_deleted("thread-2");
+
+    assert!(relay.thread_settings("thread-2").is_none());
+    assert!(!relay.background_streams.contains_key("thread-2"));
+    let filtered = relay.filter_deleted_threads(vec![test_thread("thread-2", "/tmp/project")]);
+    assert!(filtered.is_empty());
+    assert_eq!(relay.threads.len(), 1);
+    assert_eq!(relay.threads[0].id, "thread-1");
 }
 
 #[test]
@@ -1337,7 +1394,12 @@ async fn persistence_store_round_trips_to_disk() {
             .thread_settings
             .get("thread-1")
             .expect("thread settings should load"),
-        &ThreadSessionSettings::new(DEFAULT_APPROVAL_POLICY, DEFAULT_SANDBOX, DEFAULT_EFFORT)
+        &ThreadSessionSettings::new(
+            DEFAULT_APPROVAL_POLICY,
+            DEFAULT_SANDBOX,
+            DEFAULT_EFFORT,
+            DEFAULT_MODEL
+        )
     );
     assert_eq!(loaded.transcript.len(), 1);
 
@@ -1409,7 +1471,7 @@ async fn persistence_store_loads_legacy_state_without_thread_settings() {
         relay
             .thread_settings("thread-legacy")
             .expect("legacy active thread should be backfilled"),
-        ThreadSessionSettings::new("bypass", "danger-full-access", "high")
+        ThreadSessionSettings::new("bypass", "danger-full-access", "high", DEFAULT_MODEL)
     );
 
     tokio::fs::remove_dir_all(&directory)

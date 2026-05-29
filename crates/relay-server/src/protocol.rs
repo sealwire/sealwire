@@ -978,6 +978,8 @@ pub struct ResumeSessionInput {
 pub struct UpdateSessionSettingsInput {
     pub approval_policy: Option<String>,
     pub sandbox: Option<String>,
+    pub effort: Option<String>,
+    pub model: Option<String>,
     pub device_id: Option<String>,
 }
 

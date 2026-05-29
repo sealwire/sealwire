@@ -536,7 +536,7 @@ export async function resumeRemoteSession(threadId, _sessionDraftOverride = null
   }
 }
 
-export async function updateRemoteSessionSettings({ approval_policy, sandbox } = {}) {
+export async function updateRemoteSessionSettings({ approval_policy, sandbox, effort, model } = {}) {
   if (!state.session?.active_thread_id) {
     return false;
   }
@@ -547,7 +547,18 @@ export async function updateRemoteSessionSettings({ approval_policy, sandbox } =
   if (typeof sandbox === "string" && sandbox) {
     input.sandbox = sandbox;
   }
-  if (!("approval_policy" in input) && !("sandbox" in input)) {
+  if (typeof effort === "string" && effort) {
+    input.effort = effort;
+  }
+  if (typeof model === "string" && model) {
+    input.model = model;
+  }
+  if (
+    !("approval_policy" in input)
+    && !("sandbox" in input)
+    && !("effort" in input)
+    && !("model" in input)
+  ) {
     return false;
   }
 
@@ -556,6 +567,8 @@ export async function updateRemoteSessionSettings({ approval_policy, sandbox } =
     const parts = [];
     if (input.approval_policy) parts.push(`approval=${input.approval_policy}`);
     if (input.sandbox) parts.push(`sandbox=${input.sandbox}`);
+    if (input.effort) parts.push(`effort=${input.effort}`);
+    if (input.model) parts.push(`model=${input.model}`);
     renderLog(`Updated remote session settings: ${parts.join(", ")}`);
     return true;
   } catch (error) {

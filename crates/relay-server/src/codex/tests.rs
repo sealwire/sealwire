@@ -1129,6 +1129,7 @@ impl CodexReplayHarness {
             "untrusted",
             "workspace-write",
             "medium",
+            "fake-echo",
             "device-a",
         );
     }
@@ -1424,6 +1425,7 @@ async fn handle_notification_buffers_late_delta_for_prior_thread() {
             "untrusted",
             "workspace-write",
             "medium",
+            "fake-echo",
             "device-a",
         );
     }
@@ -1469,6 +1471,7 @@ async fn handle_notification_buffers_late_delta_for_prior_thread() {
             "untrusted",
             "workspace-write",
             "medium",
+            "fake-echo",
             "device-a",
         );
     }
@@ -1539,6 +1542,7 @@ async fn handle_notification_buffers_late_agent_completion_for_prior_thread() {
             "untrusted",
             "workspace-write",
             "medium",
+            "fake-echo",
             "device-a",
         );
     }
@@ -1592,6 +1596,7 @@ async fn handle_notification_buffers_late_agent_completion_for_prior_thread() {
             "untrusted",
             "workspace-write",
             "medium",
+            "fake-echo",
             "device-a",
         );
     }
@@ -1662,6 +1667,7 @@ async fn restore_background_does_not_downgrade_fresh_completed_agent_message() {
             "untrusted",
             "workspace-write",
             "medium",
+            "fake-echo",
             "device-a",
         );
     }
@@ -1699,6 +1705,7 @@ async fn restore_background_does_not_downgrade_fresh_completed_agent_message() {
             "untrusted",
             "workspace-write",
             "medium",
+            "fake-echo",
             "device-a",
         );
     }
@@ -1756,6 +1763,7 @@ async fn handle_notification_does_not_leak_late_delta_into_new_thread() {
             "untrusted",
             "workspace-write",
             "medium",
+            "fake-echo",
             "device-a",
         );
     }
@@ -1830,6 +1838,7 @@ async fn handle_notification_buffers_late_command_output_for_prior_thread() {
             "untrusted",
             "workspace-write",
             "medium",
+            "fake-echo",
             "device-a",
         );
     }
@@ -1874,6 +1883,7 @@ async fn handle_notification_buffers_late_command_output_for_prior_thread() {
             "untrusted",
             "workspace-write",
             "medium",
+            "fake-echo",
             "device-a",
         );
     }
@@ -1918,6 +1928,7 @@ async fn handle_notification_buffers_late_turn_started_for_prior_thread() {
             "untrusted",
             "workspace-write",
             "medium",
+            "fake-echo",
             "device-a",
         );
     }
@@ -1954,6 +1965,7 @@ async fn handle_notification_buffers_late_turn_started_for_prior_thread() {
             "untrusted",
             "workspace-write",
             "medium",
+            "fake-echo",
             "device-a",
         );
     }
@@ -1997,6 +2009,7 @@ async fn handle_notification_buffers_full_turn_lifecycle_for_prior_thread() {
             "untrusted",
             "workspace-write",
             "medium",
+            "fake-echo",
             "device-a",
         );
     }
@@ -2051,6 +2064,7 @@ async fn handle_notification_buffers_full_turn_lifecycle_for_prior_thread() {
             "untrusted",
             "workspace-write",
             "medium",
+            "fake-echo",
             "device-a",
         );
     }

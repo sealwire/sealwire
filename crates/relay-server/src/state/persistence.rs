@@ -71,7 +71,8 @@ impl PersistedRelayState {
     }
 
     pub(super) fn settings_for_thread(&self, thread_id: &str) -> ThreadSessionSettings {
-        self.thread_settings
+        let mut settings = self
+            .thread_settings
             .get(thread_id)
             .cloned()
             .unwrap_or_else(|| {
@@ -79,8 +80,13 @@ impl PersistedRelayState {
                     &self.approval_policy,
                     &self.sandbox,
                     &self.reasoning_effort,
+                    &self.model,
                 )
-            })
+            });
+        if settings.model.is_empty() {
+            settings.model = self.model.clone();
+        }
+        settings
     }
 }
 

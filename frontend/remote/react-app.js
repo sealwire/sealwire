@@ -933,6 +933,7 @@ function RemoteApp() {
             remoteUiStore.getState().setComposerModel(value);
             remoteUiStore.getState().setComposerEffort(nextEffort);
             if (session?.provider) saveLastEffort(session.provider, nextEffort);
+            void handlers.onUpdateSessionSettings?.({ model: value, effort: nextEffort });
           },
           controlBannerModel,
           currentState,
@@ -1455,6 +1456,7 @@ function RemoteThreadPanel({
               composerEffort,
               onChangeEffort: (value) => {
                 onComposerEffortChange?.(value);
+                void onUpdateSessionSettings?.({ effort: value });
               },
               onUpdate: (payload) => {
                 void onUpdateSessionSettings?.(payload);

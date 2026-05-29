@@ -537,6 +537,11 @@ impl AppState {
             })
             .or_else(|| default_effort_for_model(&provider_models, &defaults.model))
             .unwrap_or(defaults.reasoning_effort);
+        let model = remembered_settings
+            .as_ref()
+            .map(|settings| settings.model.clone())
+            .filter(|model| !model.is_empty())
+            .unwrap_or(defaults.model);
         let preview = bridge.read_thread(&input.thread_id).await?;
         {
             let relay = self.relay.read().await;
@@ -559,7 +564,14 @@ impl AppState {
             if let Some(models) = provider_models {
                 relay.set_available_models(models);
             }
-            relay.load_thread_data(thread_data, &approval_policy, &sandbox, &effort, &device_id);
+            relay.load_thread_data(
+                thread_data,
+                &approval_policy,
+                &sandbox,
+                &effort,
+                &model,
+                &device_id,
+            );
             relay.push_log(
                 "info",
                 format!(
@@ -582,7 +594,14 @@ impl AppState {
         let device_id = require_device_id(input.device_id)?;
         self.expire_stale_controller_if_needed().await;
 
-        let (thread_id, next_approval_policy, next_sandbox) = {
+        let (
+            thread_id,
+            next_approval_policy,
+            next_sandbox,
+            next_effort,
+            next_model,
+            needs_bridge_resume,
+        ) = {
             let relay = self.relay.read().await;
             relay.ensure_device_can_send_message(&device_id)?;
 
@@ -610,29 +629,48 @@ impl AppState {
             let next_approval_policy =
                 non_empty(input.approval_policy).unwrap_or_else(|| relay.approval_policy.clone());
             let next_sandbox = non_empty(input.sandbox).unwrap_or_else(|| relay.sandbox.clone());
+            let next_effort =
+                non_empty(input.effort).unwrap_or_else(|| relay.reasoning_effort.clone());
+            let next_model = non_empty(input.model).unwrap_or_else(|| relay.model.clone());
 
-            if next_approval_policy == relay.approval_policy && next_sandbox == relay.sandbox {
+            let needs_bridge_resume =
+                next_approval_policy != relay.approval_policy || next_sandbox != relay.sandbox;
+            let effort_changed = next_effort != relay.reasoning_effort;
+            let model_changed = next_model != relay.model;
+
+            if !needs_bridge_resume && !effort_changed && !model_changed {
                 return Ok(relay.snapshot());
             }
 
-            (thread_id, next_approval_policy, next_sandbox)
+            (
+                thread_id,
+                next_approval_policy,
+                next_sandbox,
+                next_effort,
+                next_model,
+                needs_bridge_resume,
+            )
         };
 
-        let (_provider_name, bridge) = self.find_thread_provider(&thread_id).await?;
-        bridge
-            .resume_thread(&thread_id, &next_approval_policy, &next_sandbox)
-            .await?;
+        if needs_bridge_resume {
+            let (_provider_name, bridge) = self.find_thread_provider(&thread_id).await?;
+            bridge
+                .resume_thread(&thread_id, &next_approval_policy, &next_sandbox)
+                .await?;
+        }
 
         {
             let mut relay = self.relay.write().await;
             relay.approval_policy = next_approval_policy.clone();
             relay.sandbox = next_sandbox.clone();
+            relay.reasoning_effort = next_effort.clone();
+            relay.model = next_model.clone();
             relay.remember_active_thread_settings();
             relay.assign_active_controller(&device_id, unix_now());
             relay.push_log(
                 "info",
                 format!(
-                    "Updated session settings on thread {thread_id}: approval={next_approval_policy}, sandbox={next_sandbox} (from {}).",
+                    "Updated session settings on thread {thread_id}: approval={next_approval_policy}, sandbox={next_sandbox}, effort={next_effort}, model={next_model} (from {}).",
                     short_device_id(&device_id)
                 ),
             );
@@ -2603,13 +2641,16 @@ mod path_scope_tests {
             .update_session_settings(UpdateSessionSettingsInput {
                 approval_policy: Some("bypass".to_string()),
                 sandbox: Some("danger-full-access".to_string()),
+                effort: Some("medium".to_string()),
+                model: Some("fake-pinned-a".to_string()),
                 device_id: Some("device-1".to_string()),
             })
             .await
             .expect("update A settings");
         assert_eq!(snap_a_bypass.approval_policy, "bypass");
         assert_eq!(snap_a_bypass.sandbox, "danger-full-access");
-        assert_eq!(snap_a_bypass.reasoning_effort, "high");
+        assert_eq!(snap_a_bypass.reasoning_effort, "medium");
+        assert_eq!(snap_a_bypass.model, "fake-pinned-a");
 
         let snap_b = app
             .start_session(StartSessionInput {
@@ -2646,7 +2687,8 @@ mod path_scope_tests {
         );
         assert_eq!(snap_a_back.approval_policy, "bypass");
         assert_eq!(snap_a_back.sandbox, "danger-full-access");
-        assert_eq!(snap_a_back.reasoning_effort, "high");
+        assert_eq!(snap_a_back.reasoning_effort, "medium");
+        assert_eq!(snap_a_back.model, "fake-pinned-a");
 
         let snap_b_back = app
             .resume_session(ResumeSessionInput {

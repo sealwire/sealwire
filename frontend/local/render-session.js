@@ -664,6 +664,7 @@ export function createSessionRenderer({
         onChangeEffort: (value) => {
           if (messageEffort) messageEffort.value = value;
           if (session.provider) saveLastEffort(session.provider, value);
+          updateSessionSettings?.({ effort: value });
         },
       })
     );

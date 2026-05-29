@@ -41,14 +41,22 @@ pub(crate) struct ThreadSessionSettings {
     pub(crate) approval_policy: String,
     pub(crate) sandbox: String,
     pub(crate) reasoning_effort: String,
+    #[serde(default)]
+    pub(crate) model: String,
 }
 
 impl ThreadSessionSettings {
-    pub(crate) fn new(approval_policy: &str, sandbox: &str, reasoning_effort: &str) -> Self {
+    pub(crate) fn new(
+        approval_policy: &str,
+        sandbox: &str,
+        reasoning_effort: &str,
+        model: &str,
+    ) -> Self {
         Self {
             approval_policy: approval_policy.to_string(),
             sandbox: sandbox.to_string(),
             reasoning_effort: reasoning_effort.to_string(),
+            model: model.to_string(),
         }
     }
 }
@@ -366,7 +374,7 @@ impl RelayState {
         self.approval_policy = approval_policy.to_string();
         self.sandbox = sandbox.to_string();
         self.reasoning_effort = effort.to_string();
-        self.remember_thread_settings(&thread.id, approval_policy, sandbox, effort);
+        self.remember_thread_settings(&thread.id, approval_policy, sandbox, effort, model);
         self.pending_approvals.clear();
         self.pending_ask_user_questions.clear();
         self.transcript.clear();
@@ -417,6 +425,7 @@ impl RelayState {
         approval_policy: &str,
         sandbox: &str,
         effort: &str,
+        model: &str,
         device_id: &str,
     ) {
         let now = unix_now();
@@ -432,8 +441,17 @@ impl RelayState {
         self.approval_policy = approval_policy.to_string();
         self.sandbox = sandbox.to_string();
         self.reasoning_effort = effort.to_string();
+        if !model.is_empty() {
+            self.model = model.to_string();
+        }
         let thread_id = data.thread.id.clone();
-        self.remember_thread_settings(&thread_id, approval_policy, sandbox, effort);
+        self.remember_thread_settings(
+            &thread_id,
+            approval_policy,
+            sandbox,
+            effort,
+            &self.model.clone(),
+        );
         self.pending_approvals.clear();
         self.pending_ask_user_questions.clear();
         self.apply_states.clear();
@@ -467,15 +485,23 @@ impl RelayState {
         self.current_status = data.status;
         self.active_flags = data.active_flags;
         self.current_cwd = data.thread.cwd.clone();
-        self.model = persisted.model.clone();
         let settings = persisted.settings_for_thread(&data.thread.id);
+        self.model = if settings.model.is_empty() {
+            persisted.model.clone()
+        } else {
+            settings.model.clone()
+        };
         self.approval_policy = settings.approval_policy.clone();
         self.sandbox = settings.sandbox.clone();
         self.reasoning_effort = settings.reasoning_effort.clone();
         self.thread_settings = persisted.thread_settings.clone();
+        let mut materialized = settings;
+        if materialized.model.is_empty() {
+            materialized.model = self.model.clone();
+        }
         self.thread_settings
             .entry(data.thread.id.clone())
-            .or_insert(settings);
+            .or_insert(materialized);
         self.allowed_roots = persisted.allowed_roots.clone();
         self.device_records = persisted.device_records.clone();
         self.paired_devices = persisted.paired_devices.clone();
@@ -530,10 +556,11 @@ impl RelayState {
         approval_policy: &str,
         sandbox: &str,
         effort: &str,
+        model: &str,
     ) {
         self.thread_settings.insert(
             thread_id.to_string(),
-            ThreadSessionSettings::new(approval_policy, sandbox, effort),
+            ThreadSessionSettings::new(approval_policy, sandbox, effort, model),
         );
     }
 
@@ -544,7 +571,14 @@ impl RelayState {
         let approval_policy = self.approval_policy.clone();
         let sandbox = self.sandbox.clone();
         let reasoning_effort = self.reasoning_effort.clone();
-        self.remember_thread_settings(&thread_id, &approval_policy, &sandbox, &reasoning_effort);
+        let model = self.model.clone();
+        self.remember_thread_settings(
+            &thread_id,
+            &approval_policy,
+            &sandbox,
+            &reasoning_effort,
+            &model,
+        );
     }
 
     pub fn can_archive_thread(&self, thread_id: &str) -> Result<bool, String> {
@@ -765,7 +799,7 @@ impl RelayState {
         self.reasoning_effort = persisted.reasoning_effort.clone();
         self.thread_settings = persisted.thread_settings.clone();
         if let Some(thread_id) = self.active_thread_id.clone() {
-            let settings = self
+            let mut settings = self
                 .thread_settings
                 .get(&thread_id)
                 .cloned()
@@ -774,11 +808,16 @@ impl RelayState {
                         &self.approval_policy,
                         &self.sandbox,
                         &self.reasoning_effort,
+                        &self.model,
                     )
                 });
+            if settings.model.is_empty() {
+                settings.model = self.model.clone();
+            }
             self.approval_policy = settings.approval_policy.clone();
             self.sandbox = settings.sandbox.clone();
             self.reasoning_effort = settings.reasoning_effort.clone();
+            self.model = settings.model.clone();
             self.thread_settings.entry(thread_id).or_insert(settings);
         }
         self.allowed_roots = persisted.allowed_roots.clone();

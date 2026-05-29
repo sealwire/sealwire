@@ -941,7 +941,7 @@ export function createSessionController({
     }
   }
 
-  async function updateSessionSettings({ approval_policy, sandbox } = {}) {
+  async function updateSessionSettings({ approval_policy, sandbox, effort, model } = {}) {
     if (!state.session?.active_thread_id) {
       return;
     }
@@ -952,7 +952,18 @@ export function createSessionController({
     if (typeof sandbox === "string" && sandbox) {
       body.sandbox = sandbox;
     }
-    if (!("approval_policy" in body) && !("sandbox" in body)) {
+    if (typeof effort === "string" && effort) {
+      body.effort = effort;
+    }
+    if (typeof model === "string" && model) {
+      body.model = model;
+    }
+    if (
+      !("approval_policy" in body)
+      && !("sandbox" in body)
+      && !("effort" in body)
+      && !("model" in body)
+    ) {
       return;
     }
 
@@ -973,6 +984,8 @@ export function createSessionController({
       const parts = [];
       if (body.approval_policy) parts.push(`approval=${body.approval_policy}`);
       if (body.sandbox) parts.push(`sandbox=${body.sandbox}`);
+      if (body.effort) parts.push(`effort=${body.effort}`);
+      if (body.model) parts.push(`model=${body.model}`);
       logLine(`Updated session settings: ${parts.join(", ")}`);
     } catch (error) {
       logLine(`Settings update failed: ${error.message}`);
