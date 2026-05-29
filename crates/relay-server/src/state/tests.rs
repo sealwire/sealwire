@@ -5,8 +5,8 @@ use tokio::sync::watch;
 
 use crate::{
     protocol::{
-        ApprovalReceipt, DeviceLifecycleState, LogEntryView, ModelOptionView, SessionSnapshot,
-        ThreadSummaryView, ThreadsResponse, TranscriptEntryKind, TranscriptEntryView,
+        ApprovalReceipt, DeviceLifecycleState, ModelOptionView, SessionSnapshot, ThreadSummaryView,
+        ThreadsResponse, TranscriptEntryKind, TranscriptEntryView,
     },
     provider::ThreadSyncData,
 };
@@ -76,19 +76,6 @@ fn test_persisted_state() -> PersistedRelayState {
         allowed_roots: vec!["/tmp/project".to_string()],
         device_records,
         paired_devices,
-        transcript: vec![TranscriptRecord {
-            item_id: "history-0".to_string(),
-            kind: TranscriptEntryKind::AgentText,
-            text: Some("hello".to_string()),
-            status: "completed".to_string(),
-            turn_id: Some("turn-1".to_string()),
-            tool: None,
-        }],
-        logs: vec![LogEntryView {
-            kind: "info".to_string(),
-            message: "persisted".to_string(),
-            created_at: 1,
-        }],
     }
 }
 
@@ -695,6 +682,7 @@ fn persisted_state_round_trip_drops_ephemeral_fields() {
     relay
         .pending_approvals
         .insert("req-1".to_string(), test_pending_approval("thread-1"));
+    relay.push_log("info", "runtime-only log");
 
     let persisted = PersistedRelayState::from_relay(&relay);
     let (change_tx, _) = watch::channel(0_u64);
@@ -714,6 +702,12 @@ fn persisted_state_round_trip_drops_ephemeral_fields() {
     assert_eq!(restored.active_turn_id, None);
     assert_eq!(restored.pending_approvals.len(), 0);
     assert_eq!(restored.paired_devices.len(), 0);
+    assert_eq!(restored.transcript.len(), 0);
+    assert_eq!(restored.logs.len(), 1);
+    assert_eq!(
+        restored.logs[0].message,
+        "Relay booted. Waiting for Codex app-server."
+    );
     assert_eq!(restored.allowed_roots, vec!["/tmp/project".to_string()]);
     assert_eq!(
         restored
@@ -726,9 +720,6 @@ fn persisted_state_round_trip_drops_ephemeral_fields() {
             DEFAULT_MODEL
         )
     );
-    assert_eq!(restored.transcript.len(), 1);
-    assert_eq!(restored.logs.len(), persisted.logs.len());
-    assert_eq!(restored.logs[0].message, persisted.logs[0].message);
 }
 
 #[test]
@@ -1378,6 +1369,21 @@ async fn persistence_store_round_trips_to_disk() {
     let persisted = test_persisted_state();
 
     store.save(&persisted).await.expect("state should save");
+    let saved_json: serde_json::Value = serde_json::from_slice(
+        &tokio::fs::read(&path)
+            .await
+            .expect("saved state file should read"),
+    )
+    .expect("saved state should be valid json");
+    assert!(
+        saved_json.get("transcript").is_none(),
+        "transcript is provider/cache data and should not be persisted in session.json"
+    );
+    assert!(
+        saved_json.get("logs").is_none(),
+        "logs are runtime UI cache and should not be persisted in session.json"
+    );
+
     let loaded = store
         .load()
         .await
@@ -1401,7 +1407,6 @@ async fn persistence_store_round_trips_to_disk() {
             DEFAULT_MODEL
         )
     );
-    assert_eq!(loaded.transcript.len(), 1);
 
     tokio::fs::remove_dir_all(&directory)
         .await

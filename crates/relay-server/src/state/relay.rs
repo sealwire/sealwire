@@ -834,8 +834,6 @@ impl RelayState {
         self.pending_ask_user_questions.clear();
         self.recent_remote_actions.clear();
         self.locally_deleted_thread_ids.clear();
-        self.transcript = persisted.transcript.clone();
-        self.logs = persisted.logs.clone();
     }
 
     pub fn clear_active_session(&mut self) {

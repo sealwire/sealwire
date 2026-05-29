@@ -1,18 +1,19 @@
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::{watch, RwLock};
 use tracing::warn;
 
-use crate::protocol::LogEntryView;
-
 use super::{
-    DeviceRecord, PairedDevice, RelayState, ThreadSessionSettings, TranscriptRecord,
-    DEFAULT_STATE_FILE, PERSISTED_STATE_VERSION,
+    DeviceRecord, PairedDevice, RelayState, ThreadSessionSettings, DEFAULT_STATE_FILE,
+    PERSISTED_STATE_VERSION,
 };
+
+const PERSISTENCE_DEBOUNCE: Duration = Duration::from_millis(150);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct PersistedRelayState {
@@ -35,8 +36,6 @@ pub(super) struct PersistedRelayState {
     pub(super) device_records: std::collections::HashMap<String, DeviceRecord>,
     #[serde(default)]
     pub(super) paired_devices: std::collections::HashMap<String, PairedDevice>,
-    pub(super) transcript: Vec<TranscriptRecord>,
-    pub(super) logs: Vec<LogEntryView>,
 }
 
 impl PersistedRelayState {
@@ -65,8 +64,6 @@ impl PersistedRelayState {
             allowed_roots: relay.allowed_roots.clone(),
             device_records: relay.device_records.clone(),
             paired_devices: relay.paired_devices.clone(),
-            transcript: relay.transcript.clone(),
-            logs: relay.logs.clone(),
         }
     }
 
@@ -163,6 +160,19 @@ pub(super) fn spawn_persistence_task(
 ) {
     tokio::spawn(async move {
         while receiver.changed().await.is_ok() {
+            tokio::time::sleep(PERSISTENCE_DEBOUNCE).await;
+            loop {
+                match receiver.has_changed() {
+                    Ok(true) => {
+                        if receiver.changed().await.is_err() {
+                            return;
+                        }
+                    }
+                    Ok(false) => break,
+                    Err(_) => return,
+                }
+            }
+
             let state = {
                 let relay = relay.read().await;
                 PersistedRelayState::from_relay(&relay)
