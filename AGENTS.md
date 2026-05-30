@@ -1,6 +1,6 @@
 # AGENTS.md
 
-agent-relay: a relay that bridges coding-agent providers (codex / claude_code /
+sealwire: a relay that bridges coding-agent providers (codex / claude_code /
 fake) to web/mobile frontends. Rust workspace + Node worker + Vite frontend.
 
 ## Code map

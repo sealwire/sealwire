@@ -1,4 +1,4 @@
-# agent-relay
+# sealwire
 
 **TL;DR** — Run a long-lived **Codex** or **Claude Code** session on your own
 machine, control it from any browser or phone (over LAN or the public
@@ -17,7 +17,7 @@ session.
 
 ---
 
-`agent-relay` is a local-first, privacy-first control plane for coding
+`sealwire` is a local-first, privacy-first control plane for coding
 agents.
 
 The goal is to keep one agent session controllable, resumable, and
@@ -36,7 +36,7 @@ execution:
 
 ## Quick start
 
-Today `agent-relay` runs from source. A published `npx agent-relay` package
+Today `sealwire` runs from source. A published `npx sealwire` package
 is planned but not on npm yet, so the steps below are the supported path.
 
 You will need:
@@ -52,8 +52,8 @@ You will need:
 Then:
 
 ```bash
-git clone https://github.com/YikaiLL/agent-relay.git
-cd agent-relay
+git clone https://github.com/sealwire/sealwire.git
+cd sealwire
 
 npm install                            # vite + frontend tooling
 (cd claude-worker && npm install)      # only needed for Claude Code sessions
@@ -84,7 +84,7 @@ README and in [`DEPLOYMENT.md`](DEPLOYMENT.md).
 
 ## Current status
 
-`agent-relay` is now usable as a single-owner self-hosted MVP with a
+`sealwire` is now usable as a single-owner self-hosted MVP with a
 privacy-first default.
 
 The recommended deployment shape today is:
@@ -99,7 +99,7 @@ The recommended deployment shape today is:
 
 ## Use cases
 
-`agent-relay` is built for cases where one coding session already exists
+`sealwire` is built for cases where one coding session already exists
 and the problem is control, continuity, and trust rather than raw execution.
 
 Good fits today:
@@ -258,7 +258,7 @@ Testing and CI coverage live in [`TESTING.md`](TESTING.md).
 Deployment guidance, including the self-hosted broker option, lives in
 [`DEPLOYMENT.md`](DEPLOYMENT.md).
 
-### Planned: `npx agent-relay`
+### Planned: `npx sealwire`
 
 A single-command npm release is on the roadmap but **not yet published**. The
 wrapper script and `npm Release` GitHub Actions workflow already exist in the
@@ -269,16 +269,16 @@ and Windows (with the web UI embedded), stages them under
 Once published, users will be able to skip the Rust toolchain entirely:
 
 ```bash
-npx agent-relay
+npx sealwire
 ```
 
 …with the CLI defaulting to the hosted public broker at
 <https://agent-relay.up.railway.app/>. Override flags will look like:
 
 ```bash
-agent-relay --broker https://agent-relay.up.railway.app/
-agent-relay --no-broker
-agent-relay --host 127.0.0.1 --port 8787
+sealwire --broker https://agent-relay.up.railway.app/
+sealwire --no-broker
+sealwire --host 127.0.0.1 --port 8787
 ```
 
 Until that release lands, use the from-source steps in
