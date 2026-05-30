@@ -5,6 +5,10 @@ on:
   release:
     types: [published]
 
+concurrency:
+  group: npm-release
+  cancel-in-progress: false
+
 jobs:
   build-binary:
     name: build-${{ matrix.target }}
@@ -118,7 +122,20 @@ jobs:
       - name: Verify package contents
         run: npm pack --dry-run
 
+      - name: Check version matches release tag
+        if: github.event_name == 'release'
+        shell: bash
+        run: |
+          set -euo pipefail
+          pkg_version="$(npm pkg get version | tr -d '"')"
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$pkg_version" != "$tag" ]; then
+            echo "::error::package.json version ($pkg_version) does not match release tag ($tag)"
+            exit 1
+          fi
+          echo "version $pkg_version matches release tag $tag"
+
       - name: Publish to npm
-        run: npm publish --access public
+        run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

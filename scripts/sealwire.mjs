@@ -25,8 +25,8 @@ if (args.help) {
 }
 
 if (args.rest.length > 0) {
-  console.error(`agent-relay: unknown argument: ${args.rest[0]}`);
-  console.error("Run `agent-relay --help` for usage.");
+  console.error(`sealwire: unknown argument: ${args.rest[0]}`);
+  console.error("Run `sealwire --help` for usage.");
   process.exit(2);
 }
 
@@ -37,7 +37,7 @@ if (!relayServerBinary) {
     "No prebuilt relay-server binary was found, and Rust/Cargo is required for the source fallback."
   );
 }
-ensureCommand("codex", "The Codex CLI must be installed and logged in before starting agent-relay.");
+ensureCommand("codex", "The Codex CLI must be installed and logged in before starting sealwire.");
 
 const brokerOrigin =
   args.broker ||
@@ -65,16 +65,16 @@ if (brokerConfig) {
   env.RELAY_BROKER_AUTH_MODE = process.env.RELAY_BROKER_AUTH_MODE || "public";
 } else {
   console.warn(
-    "agent-relay: no public broker configured; starting localhost-only relay. " +
+    "sealwire: no public broker configured; starting localhost-only relay. " +
       "Set AGENT_RELAY_PUBLIC_BROKER_URL or pass --broker to enable remote pairing."
   );
 }
 
-console.log(`agent-relay: serving local relay at http://${env.BIND_HOST}:${env.PORT}`);
+console.log(`sealwire: serving local relay at http://${env.BIND_HOST}:${env.PORT}`);
 if (brokerConfig) {
-  console.log(`agent-relay: using public broker ${brokerConfig.controlUrl}`);
+  console.log(`sealwire: using public broker ${brokerConfig.controlUrl}`);
 }
-console.log(`agent-relay: workspace/state directory is ${userCwd}`);
+console.log(`sealwire: workspace/state directory is ${userCwd}`);
 
 const command = relayServerBinary || "cargo";
 const commandArgs = relayServerBinary
@@ -88,9 +88,9 @@ const commandArgs = relayServerBinary
       "relay-server",
     ];
 if (relayServerBinary) {
-  console.log(`agent-relay: starting bundled relay-server binary ${relayServerBinary}`);
+  console.log(`sealwire: starting bundled relay-server binary ${relayServerBinary}`);
 } else {
-  console.warn("agent-relay: starting relay-server via cargo fallback; install a prebuilt package to avoid Rust/Cargo.");
+  console.warn("sealwire: starting relay-server via cargo fallback; install a prebuilt package to avoid Rust/Cargo.");
 }
 
 const child = spawn(command, commandArgs, {
@@ -146,7 +146,7 @@ function parseArgs(argv) {
 function requireValue(argv, index, flag) {
   const value = argv[index];
   if (!value || value.startsWith("--")) {
-    console.error(`agent-relay: ${flag} requires a value.`);
+    console.error(`sealwire: ${flag} requires a value.`);
     process.exit(2);
   }
   return value;
@@ -157,7 +157,7 @@ function normalizeBrokerOrigin(value) {
   try {
     parsed = new URL(value);
   } catch (error) {
-    console.error(`agent-relay: invalid broker URL \`${value}\`: ${error.message}`);
+    console.error(`sealwire: invalid broker URL \`${value}\`: ${error.message}`);
     process.exit(2);
   }
 
@@ -167,7 +167,7 @@ function normalizeBrokerOrigin(value) {
 
   const protocol = parsed.protocol.toLowerCase();
   if (!["http:", "https:", "ws:", "wss:"].includes(protocol)) {
-    console.error("agent-relay: broker URL must start with http://, https://, ws://, or wss://.");
+    console.error("sealwire: broker URL must start with http://, https://, ws://, or wss://.");
     process.exit(2);
   }
 
@@ -187,7 +187,7 @@ function normalizeBrokerOrigin(value) {
 function ensureCommand(command, message) {
   const result = spawnSync(command, ["--version"], { stdio: "ignore" });
   if (result.error?.code === "ENOENT") {
-    console.error(`agent-relay: ${message}`);
+    console.error(`sealwire: ${message}`);
     process.exit(1);
   }
 }
@@ -198,7 +198,7 @@ function resolveRelayServerBinary() {
     if (existsSync(override)) {
       return override;
     }
-    console.error(`agent-relay: AGENT_RELAY_SERVER_BIN does not exist: ${override}`);
+    console.error(`sealwire: AGENT_RELAY_SERVER_BIN does not exist: ${override}`);
     process.exit(1);
   }
 
@@ -233,7 +233,7 @@ function platformBinaryPackageName() {
   if (!target) {
     return null;
   }
-  return `@agent-relay/relay-${target}`;
+  return `@sealwire/relay-${target}`;
 }
 
 function platformBinaryTarget() {
@@ -279,12 +279,12 @@ function defaultCargoTargetDir() {
 }
 
 function printHelp() {
-  console.log(`agent-relay
+  console.log(`sealwire
 
 Run a local relay-server from the npm package.
 
 Usage:
-  agent-relay [--broker <url>] [--port <port>] [--host <ip>] [--no-broker]
+  sealwire [--broker <url>] [--port <port>] [--host <ip>] [--no-broker]
 
 Defaults:
   --host        127.0.0.1
@@ -293,13 +293,13 @@ Defaults:
 
 Binary resolution:
   Uses AGENT_RELAY_SERVER_BIN, a package-local bin/<platform>-<arch>/relay-server,
-  package-local bin/relay-server, or an installed @agent-relay/relay-<platform>-<arch>
+  package-local bin/relay-server, or an installed @sealwire/relay-<platform>-<arch>
   package. Falls back to Cargo only when no prebuilt binary is present.
 
 Examples:
-  agent-relay
-  agent-relay --broker https://broker.example.com
-  AGENT_RELAY_PUBLIC_BROKER_URL=https://broker.example.com npx agent-relay
-  agent-relay --no-broker
+  sealwire
+  sealwire --broker https://broker.example.com
+  AGENT_RELAY_PUBLIC_BROKER_URL=https://broker.example.com npx sealwire
+  sealwire --no-broker
 `);
 }

@@ -1,11 +1,18 @@
 {
-  "name": "agent-relay",
+  "name": "sealwire",
   "version": "0.1.0",
-  "description": "Local-first control plane for Codex sessions with optional public broker pairing.",
+  "description": "Local-first, privacy-first control plane for coding agents (Codex & Claude Code) with optional public broker pairing.",
   "license": "Elastic-2.0",
+  "author": "Yikai Lan <sealwire.dev@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sealwire/sealwire.git"
+  },
+  "homepage": "https://github.com/sealwire/sealwire#readme",
+  "bugs": "https://github.com/sealwire/sealwire/issues",
   "type": "module",
   "bin": {
-    "agent-relay": "./scripts/agent-relay.mjs"
+    "sealwire": "./scripts/sealwire.mjs"
   },
   "files": [
     "bin/**",
@@ -14,7 +21,7 @@
     "LICENSE",
     "README.md",
     "crates/**",
-    "scripts/agent-relay.mjs",
+    "scripts/sealwire.mjs",
     "web/**"
   ],
   "engines": {
@@ -24,7 +31,7 @@
     "public_broker_origin": ""
   },
   "scripts": {
-    "start": "node scripts/agent-relay.mjs",
+    "start": "node scripts/sealwire.mjs",
     "dev": "vite --host",
     "dev:full": "node scripts/dev-full.mjs",
     "dev:full:local": "RELAY_DEV_LOCALHOST_ONLY=1 node scripts/dev-full.mjs",
