@@ -32,6 +32,58 @@ const MAX_LOG_LINES: usize = 200;
 const PERSISTED_STATE_VERSION: u32 = 2;
 const DEFAULT_STATE_FILE: &str = ".agent-relay/session.json";
 
+/// Shared session-settings invariants for the test harness.
+///
+/// Every config bug we have hit was the same shape: a per-session setting
+/// (model / effort / approval / sandbox) flows through many layers — SDK
+/// events, relay state, persistence, the snapshot, and finally the UI — and
+/// some operation that should not touch it breaks one of these invariants.
+/// Call this after every operation in a scenario so the violation surfaces at
+/// the step that caused it rather than three layers downstream.
+#[cfg(test)]
+pub(crate) fn assert_settings_invariants(snap: &crate::protocol::SessionSnapshot, ctx: &str) {
+    // Invariants only apply once a session exists.
+    if snap.active_thread_id.is_none() {
+        return;
+    }
+
+    // I1 — matchable model: when the catalog is loaded, the selected model must
+    // be one of its options. Otherwise the model picker synthesizes a duplicate
+    // "ghost" row for the unmatched id (the claude-opus-4-8 bug).
+    if !snap.available_models.is_empty() {
+        assert!(
+            snap.available_models
+                .iter()
+                .any(|option| option.model == snap.model),
+            "[{ctx}] settings invariant I1 (matchable model) violated: model {:?} is not in catalog {:?}",
+            snap.model,
+            snap.available_models
+                .iter()
+                .map(|option| option.model.clone())
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    // I2 — populated: a control must never blank out. Empty values render as a
+    // selector with nothing chosen (the "max disappeared" symptom).
+    assert!(
+        !snap.model.is_empty(),
+        "[{ctx}] settings invariant I2 violated: model is empty"
+    );
+    assert!(
+        !snap.reasoning_effort.is_empty(),
+        "[{ctx}] settings invariant I2 violated: reasoning_effort is empty"
+    );
+    assert!(
+        !snap.approval_policy.is_empty(),
+        "[{ctx}] settings invariant I2 violated: approval_policy is empty"
+    );
+    assert!(
+        !snap.sandbox.is_empty(),
+        "[{ctx}] settings invariant I2 violated: sandbox is empty"
+    );
+}
+
 fn non_empty(value: Option<String>) -> Option<String> {
     value.and_then(|item| {
         let trimmed = item.trim().to_string();

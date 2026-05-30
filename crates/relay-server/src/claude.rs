@@ -728,7 +728,22 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
             let payload_cwd = payload.get("cwd").and_then(Value::as_str);
             if is_active_session {
                 if let Some(model) = payload.get("model").and_then(Value::as_str) {
-                    relay.model = model.to_string();
+                    // The SDK reports the concrete resolved model (e.g.
+                    // "claude-opus-4-8"), but the catalog may expose it via a
+                    // stable alias — the "default" entry labelled "Default
+                    // (recommended, Opus 4.8)". Adopting the concrete id would
+                    // leave session.model unmatched in the model picker and
+                    // surface a duplicate "ghost" option that vanishes only
+                    // once the user reselects a model. Keep the matchable value
+                    // we already have unless the catalog actually offers the
+                    // reported id (or hasn't loaded yet).
+                    let matches_catalog = relay
+                        .available_models
+                        .iter()
+                        .any(|option| option.model == model);
+                    if matches_catalog || relay.available_models.is_empty() {
+                        relay.model = model.to_string();
+                    }
                 }
                 if let Some(cwd) = payload_cwd {
                     relay.current_cwd = cwd.to_string();
@@ -1497,6 +1512,65 @@ mod tests {
         assert_eq!(relay.current_phase.as_deref(), Some("tool"));
         assert_eq!(relay.current_tool.as_deref(), Some("Read"));
         assert!(relay.last_progress_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn session_started_keeps_model_matched_to_catalog() {
+        let state = new_test_state();
+        {
+            let mut relay = state.write().await;
+            // Catalog exposes a stable "default" alias (shown in the picker as
+            // "Default (recommended, Opus 4.8)") alongside concrete ids.
+            relay.set_available_models(vec![
+                ModelOptionView {
+                    model: "default".to_string(),
+                    display_name: "Default (recommended, Opus 4.8)".to_string(),
+                    provider: "anthropic".to_string(),
+                    supported_reasoning_efforts: vec!["high".to_string(), "max".to_string()],
+                    default_reasoning_effort: "high".to_string(),
+                    hidden: false,
+                    is_default: true,
+                },
+                ModelOptionView {
+                    model: "claude-sonnet-4-6".to_string(),
+                    display_name: "Sonnet 4.6".to_string(),
+                    provider: "anthropic".to_string(),
+                    supported_reasoning_efforts: vec!["high".to_string()],
+                    default_reasoning_effort: "high".to_string(),
+                    hidden: false,
+                    is_default: false,
+                },
+            ]);
+            // User is on the default alias — a catalog value the picker matches.
+            relay.model = "default".to_string();
+            relay.active_thread_id = Some("sid-1".to_string());
+        }
+
+        // SDK init reports the concrete resolved model, which is NOT a catalog
+        // value (the catalog exposes it via the "default" alias instead).
+        handle_worker_event(
+            json!({ "type": "session_started", "model": "claude-opus-4-8" }),
+            &state,
+        )
+        .await;
+
+        let relay = state.read().await;
+        // session.model must stay matchable so the model picker doesn't sprout
+        // a duplicate "ghost" row for the concrete id.
+        assert!(
+            relay
+                .available_models
+                .iter()
+                .any(|option| option.model == relay.model),
+            "session model {:?} should match a catalog option, catalog = {:?}",
+            relay.model,
+            relay
+                .available_models
+                .iter()
+                .map(|option| option.model.clone())
+                .collect::<Vec<_>>(),
+        );
+        crate::state::assert_settings_invariants(&relay.snapshot(), "after session_started");
     }
 
     #[test]

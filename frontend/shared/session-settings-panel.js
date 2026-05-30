@@ -1,6 +1,6 @@
 import React from "react";
 import { providerSettings, sandboxOptions } from "./provider-settings.js";
-import { buildReasoningEffortOptions } from "./reasoning-efforts.js";
+import { buildReasoningEffortOptionsWithSelection } from "./reasoning-efforts.js";
 
 const h = React.createElement;
 
@@ -84,12 +84,15 @@ export function SessionSettingsButton({
   const showSandbox = provider !== "claude_code";
   const currentApproval = session.approval_policy || "";
   const tone = approvalTone(settings.approvalOptions, currentApproval);
-  const effortOptions = buildReasoningEffortOptions(
+  const currentEffort = composerEffort || session.reasoning_effort || "";
+  // Use the selection-preserving builder so the active effort never vanishes
+  // from the control when the catalog is empty/stale (see the helper for why).
+  const effortOptions = buildReasoningEffortOptionsWithSelection(
     session.available_models || [],
     session.model || "",
-    provider
+    provider,
+    currentEffort
   );
-  const currentEffort = composerEffort || session.reasoning_effort || "";
 
   function emit(next) {
     if (disabled || !onUpdate) return;

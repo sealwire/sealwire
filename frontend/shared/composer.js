@@ -4,6 +4,20 @@ import { SEND_SVG } from "../svg.js";
 
 const h = React.createElement;
 
+// Build the model picker's option list, guaranteeing the current model stays
+// visible even when it isn't in the catalog — an empty/stale catalog, or an id
+// the catalog only exposes via an alias (e.g. the "default" entry while the
+// session reports the concrete "claude-opus-4-8"). The backend is responsible
+// for keeping session.model matchable; this is the UI-side safety net so the
+// selection is never unrepresented.
+export function buildModelOptions(models = [], currentModelValue = "") {
+  const options = [...models];
+  if (currentModelValue && !options.some((model) => model.model === currentModelValue)) {
+    options.unshift({ display_name: currentModelValue, model: currentModelValue });
+  }
+  return options;
+}
+
 export function ConversationComposer({
   actionsBeforeSend = null,
   composerDisabled = false,
@@ -39,19 +53,13 @@ export function ConversationComposer({
     className: "composer-model-chip",
     "aria-label": "Model",
   };
-  const modelOptions = [...models];
+  const modelOptions = buildModelOptions(models, currentModelValue);
 
   if (currentDraft !== undefined) {
     textareaProps.value = currentDraft;
   }
   if (onDraftChange) {
     textareaProps.onChange = (event) => onDraftChange(event.target.value);
-  }
-  if (currentModelValue && !modelOptions.some((model) => model.model === currentModelValue)) {
-    modelOptions.unshift({
-      display_name: currentModelValue,
-      model: currentModelValue,
-    });
   }
   if (currentModelValue !== undefined) {
     modelSelectProps.value = currentModelValue;

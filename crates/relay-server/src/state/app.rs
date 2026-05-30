@@ -2838,6 +2838,146 @@ mod path_scope_tests {
         assert_eq!(snap_b_back.reasoning_effort, "low");
     }
 
+    // Settings harness: drive a realistic session lifecycle and assert the
+    // shared settings invariants (matchable model, no blank controls) after
+    // every step, plus that each setting is preserved/isolated as expected.
+    // Any future setting added to the snapshot is covered by the invariant
+    // checker for free; this scenario covers the interactions that have
+    // historically broken settings (catalog reload, thread switch, restart).
+    #[tokio::test]
+    async fn settings_harness_invariants_hold_across_lifecycle() {
+        use crate::state::assert_settings_invariants;
+
+        let project = TempDir::new().expect("project tempdir");
+        let a_dir = project.path().join("a");
+        let b_dir = project.path().join("b");
+        std::fs::create_dir_all(&a_dir).unwrap();
+        std::fs::create_dir_all(&b_dir).unwrap();
+
+        let (app, _p, _o) = build_app(project.path().to_str().unwrap()).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+        let dev = || Some("device-1".to_string());
+
+        // Start A with explicit, non-default settings.
+        let snap = app
+            .start_session(StartSessionInput {
+                device_id: dev(),
+                cwd: Some(a_dir.display().to_string()),
+                model: None,
+                effort: Some("high".to_string()),
+                approval_policy: Some("untrusted".to_string()),
+                sandbox: Some("workspace-write".to_string()),
+                provider: Some("fake".to_string()),
+                initial_prompt: None,
+            })
+            .await
+            .expect("start A");
+        assert_settings_invariants(&snap, "start A");
+        let thread_a = snap.active_thread_id.clone().expect("thread A");
+        assert_eq!(snap.reasoning_effort, "high");
+
+        // Update every mutable setting on A.
+        let snap = app
+            .update_session_settings(UpdateSessionSettingsInput {
+                approval_policy: Some("bypass".to_string()),
+                sandbox: Some("danger-full-access".to_string()),
+                effort: Some("low".to_string()),
+                model: Some("fake-echo".to_string()),
+                device_id: dev(),
+            })
+            .await
+            .expect("update A");
+        assert_settings_invariants(&snap, "update A");
+        assert_eq!(snap.approval_policy, "bypass");
+        assert_eq!(snap.sandbox, "danger-full-access");
+        assert_eq!(snap.reasoning_effort, "low");
+
+        // Start B with different settings; A's settings must not leak in.
+        let snap = app
+            .start_session(StartSessionInput {
+                device_id: dev(),
+                cwd: Some(b_dir.display().to_string()),
+                model: None,
+                effort: Some("high".to_string()),
+                approval_policy: Some("untrusted".to_string()),
+                sandbox: Some("workspace-write".to_string()),
+                provider: Some("fake".to_string()),
+                initial_prompt: None,
+            })
+            .await
+            .expect("start B");
+        assert_settings_invariants(&snap, "start B");
+        let thread_b = snap.active_thread_id.clone().expect("thread B");
+        assert_eq!(snap.reasoning_effort, "high");
+
+        // Reloading the model catalog while B is active must not rewrite B's
+        // settings (the set_available_models clobber class).
+        {
+            let mut relay = app.relay.write().await;
+            let catalog = relay.available_models.clone();
+            relay.set_available_models(catalog);
+        }
+        let snap = app.snapshot().await;
+        assert_settings_invariants(&snap, "catalog reload on B");
+        assert_eq!(snap.reasoning_effort, "high");
+        assert_eq!(snap.approval_policy, "untrusted");
+
+        // Switch back to A: A's settings are restored and isolated from B.
+        let snap = app
+            .resume_session(ResumeSessionInput {
+                thread_id: thread_a.clone(),
+                approval_policy: None,
+                sandbox: None,
+                effort: None,
+                device_id: dev(),
+                provider: Some("fake".to_string()),
+            })
+            .await
+            .expect("resume A");
+        assert_settings_invariants(&snap, "resume A");
+        assert_eq!(snap.approval_policy, "bypass");
+        assert_eq!(snap.sandbox, "danger-full-access");
+        assert_eq!(snap.reasoning_effort, "low");
+
+        // Restart: persist the live state and reload it into a fresh relay.
+        // available_models is not persisted, so the reloaded snapshot has an
+        // empty catalog — the invariants must still hold (no blank controls)
+        // and A's settings must survive.
+        let persisted = {
+            let relay = app.relay.read().await;
+            crate::state::persistence::PersistedRelayState::from_relay(&relay)
+        };
+        let (tx, _) = watch::channel(0_u64);
+        let mut reloaded = RelayState::new(
+            project.path().display().to_string(),
+            tx,
+            SecurityProfile::private(),
+        );
+        reloaded.apply_persisted(&persisted);
+        let snap = reloaded.snapshot();
+        assert_settings_invariants(&snap, "after restart");
+        assert_eq!(snap.active_thread_id.as_deref(), Some(thread_a.as_str()));
+        assert_eq!(snap.reasoning_effort, "low");
+        assert_eq!(snap.approval_policy, "bypass");
+        assert_eq!(snap.sandbox, "danger-full-access");
+
+        // Sanity: B retained its own distinct settings throughout.
+        let snap = app
+            .resume_session(ResumeSessionInput {
+                thread_id: thread_b.clone(),
+                approval_policy: None,
+                sandbox: None,
+                effort: None,
+                device_id: dev(),
+                provider: Some("fake".to_string()),
+            })
+            .await
+            .expect("resume B");
+        assert_settings_invariants(&snap, "resume B");
+        assert_eq!(snap.reasoning_effort, "high");
+        assert_eq!(snap.approval_policy, "untrusted");
+    }
+
     #[tokio::test]
     async fn consumed_initial_prompt_keeps_provider_user_item_id_after_switchback() {
         use crate::protocol::TranscriptEntryKind;

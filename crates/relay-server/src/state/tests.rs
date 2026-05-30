@@ -346,6 +346,37 @@ fn available_models_update_default_model_and_effort() {
 }
 
 #[test]
+fn set_available_models_preserves_user_chosen_effort_across_catalog_reload() {
+    let mut relay = test_state();
+    relay.active_thread_id = Some("thread-1".to_string());
+    // User deliberately picked a Claude model + "max" thinking effort (not the
+    // defaults). This is the state resume/switch/update leaves in the relay.
+    relay.model = "claude-opus-4".to_string();
+    relay.reasoning_effort = "max".to_string();
+
+    // A catalog (re)load fires — on resume, provider switch, or the startup
+    // refresh. The freshly-fetched catalog's default model does not list "max"
+    // (the active model isn't in this list, so it resolves to the default).
+    relay.set_available_models(vec![ModelOptionView {
+        model: "claude-sonnet-4".to_string(),
+        display_name: "Claude Sonnet 4".to_string(),
+        supported_reasoning_efforts: vec!["low".to_string(), "high".to_string()],
+        default_reasoning_effort: "high".to_string(),
+        provider: "claude_code".to_string(),
+        hidden: false,
+        is_default: true,
+    }]);
+
+    // BUG: merely loading the model list silently rewrote the user's choice.
+    assert_eq!(
+        relay.reasoning_effort, "max",
+        "loading the model catalog must not overwrite a user-chosen effort"
+    );
+    // The model still resolved to a catalog entry, so the picker stays matched.
+    assert_settings_invariants(&relay.snapshot(), "after catalog reload");
+}
+
+#[test]
 fn activate_thread_sets_active_controller_on_start() {
     let mut relay = test_state();
 

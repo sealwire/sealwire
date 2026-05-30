@@ -401,19 +401,13 @@ impl RelayState {
                 self.model = default_model.model.clone();
             }
 
-            let effort_supported = self
-                .available_models
-                .iter()
-                .find(|option| option.model == self.model)
-                .map(|option| {
-                    option
-                        .supported_reasoning_efforts
-                        .iter()
-                        .any(|effort| effort == &self.reasoning_effort)
-                })
-                .unwrap_or(false);
-
-            if self.reasoning_effort == DEFAULT_EFFORT || !effort_supported {
+            // Only resolve the effort when it is the unset sentinel. A
+            // deliberately chosen effort (e.g. Claude "max") must survive a
+            // catalog (re)load — otherwise switching/resuming, or a startup
+            // refresh, silently rewrites the user's choice to the model
+            // default. The send/resume paths handle the rare case where the
+            // chosen effort isn't valid for the active model.
+            if self.reasoning_effort == DEFAULT_EFFORT {
                 self.reasoning_effort = default_model.default_reasoning_effort;
             }
         }
