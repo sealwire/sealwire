@@ -23,6 +23,7 @@ export function createProgressTracker(opts = {}) {
   let lastEmitAt = 0;
   let phase = null;
   let currentTool = null;
+  let providerSessionId = null;
   const pendingTools = new Map();
 
   function setPhase(next) {
@@ -32,6 +33,9 @@ export function createProgressTracker(opts = {}) {
   function record(event) {
     if (!event || typeof event !== "object") return;
     lastEmitAt = now();
+    if (event.provider_session_id) {
+      providerSessionId = event.provider_session_id;
+    }
     switch (event.type) {
       case "user_message":
         setPhase("thinking");
@@ -80,6 +84,7 @@ export function createProgressTracker(opts = {}) {
     timer = setIntervalFn(() => {
       if (now() - lastEmitAt < silenceMs) return;
       const tick = { type: "progress_tick", phase: phase ?? "thinking" };
+      if (providerSessionId) tick.provider_session_id = providerSessionId;
       if (currentTool) tick.tool = currentTool;
       emit?.(tick);
       lastEmitAt = now();
@@ -93,6 +98,7 @@ export function createProgressTracker(opts = {}) {
     }
     phase = null;
     currentTool = null;
+    providerSessionId = null;
     pendingTools.clear();
   }
 

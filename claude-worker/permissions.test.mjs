@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   createPermissionHandler,
+  rejectAllPendingApprovals,
   resolveApprovalDecision,
 } from "./permissions.mjs";
 
@@ -178,4 +179,62 @@ test("createPermissionHandler stores input so approve can echo it back", async (
   } finally {
     process.stdout.write = originalWrite;
   }
+});
+
+test("createPermissionHandler stamps approval requests with provider session id", () => {
+  const pendingApprovals = new Map();
+  const captured = [];
+  const originalWrite = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (chunk) => {
+    captured.push(String(chunk));
+    return true;
+  };
+  try {
+    const handler = createPermissionHandler(
+      pendingApprovals,
+      () => 1,
+      { getProviderSessionId: () => "session-1" }
+    );
+    handler("Bash", { command: "pwd" }, { toolUseID: "tool-1", title: "Bash" });
+    const event = JSON.parse(captured.join("").split("\n").filter(Boolean)[0]);
+    assert.equal(event.provider_session_id, "session-1");
+    assert.equal(pendingApprovals.get("approval:1").providerSessionId, "session-1");
+  } finally {
+    process.stdout.write = originalWrite;
+  }
+});
+
+test("rejectAllPendingApprovals can reject only one provider session", async () => {
+  const pendingApprovals = new Map();
+  let resolveA;
+  let resolveB;
+  const promiseA = new Promise((resolve) => {
+    resolveA = resolve;
+  });
+  const promiseB = new Promise((resolve) => {
+    resolveB = resolve;
+  });
+  pendingApprovals.set("a", {
+    resolve: resolveA,
+    toolUseID: "tool-a",
+    providerSessionId: "session-a",
+  });
+  pendingApprovals.set("b", {
+    resolve: resolveB,
+    toolUseID: "tool-b",
+    providerSessionId: "session-b",
+  });
+
+  rejectAllPendingApprovals(
+    pendingApprovals,
+    (pending) => pending.providerSessionId === "session-a"
+  );
+
+  assert.equal(pendingApprovals.has("a"), false);
+  assert.equal(pendingApprovals.has("b"), true);
+  const resolvedA = await promiseA;
+  assert.equal(resolvedA.behavior, "deny");
+  assert.equal(resolvedA.toolUseID, "tool-a");
+  resolveB({ behavior: "allow" });
+  await promiseB;
 });

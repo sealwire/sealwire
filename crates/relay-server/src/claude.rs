@@ -466,6 +466,7 @@ impl ProviderBridge for ClaudeCodeBridge {
                 "cwd": config.cwd,
                 "model": config.model,
                 "permissionMode": config.permission_mode,
+                "pending_thread_id": thread_id,
                 "prompt": text,
             });
             if let Err(error) = self.send_request("start", cmd).await {
@@ -487,17 +488,39 @@ impl ProviderBridge for ClaudeCodeBridge {
             "claude-turn-{}",
             self.next_request_id.fetch_add(1, Ordering::Relaxed)
         );
-        let cmd = json!({
+        let settings = {
+            let relay = self.state.read().await;
+            relay.thread_settings(thread_id)
+        };
+        let permission_mode = settings
+            .as_ref()
+            .map(|settings| claude_permission_mode(&settings.approval_policy, &settings.sandbox))
+            .unwrap_or_else(|| claude_permission_mode("default", "workspace-write"));
+        let cwd = self.cwd_for_thread(thread_id).await;
+        let mut cmd = json!({
             "type": "send",
+            "provider_session_id": thread_id,
             "prompt": text,
             "turn_id": turn_id,
+            "model": _model,
+            "permissionMode": permission_mode,
         });
+        if let Some(cwd) = cwd {
+            if let Some(object) = cmd.as_object_mut() {
+                object.insert("cwd".to_string(), Value::String(cwd));
+            }
+        }
         self.send_command(cmd).await?;
         Ok(Some(turn_id))
     }
 
-    async fn interrupt_turn(&self, _thread_id: &str, _turn_id: &str) -> Result<(), String> {
-        self.send_command(json!({"type": "cancel"})).await
+    async fn interrupt_turn(&self, thread_id: &str, turn_id: &str) -> Result<(), String> {
+        self.send_command(json!({
+            "type": "cancel",
+            "provider_session_id": thread_id,
+            "turn_id": turn_id,
+        }))
+        .await
     }
 
     async fn respond_to_approval(
@@ -663,12 +686,10 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
     match event_type {
         "session_created" | "session_resumed" => {
             if let Some(sid) = payload.get("provider_session_id").and_then(Value::as_str) {
+                let pending_thread_id = string_at(&payload, &["pending_thread_id"]);
                 let should_activate = relay.active_thread_id.is_none()
                     || relay.active_thread_id.as_deref() == Some(sid)
-                    || relay
-                        .active_thread_id
-                        .as_deref()
-                        .is_some_and(|thread_id| thread_id.starts_with("claude-pending-"));
+                    || pending_thread_id.as_deref() == relay.active_thread_id.as_deref();
                 if should_activate {
                     relay.active_thread_id = Some(sid.to_string());
                     relay.push_log("info", format!("Claude session: {sid}"));
@@ -688,10 +709,11 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                 .and_then(Value::as_str)
                 .map(str::to_string);
             if let Some(sid) = provider_session_id.as_deref() {
+                let pending_thread_id = string_at(&payload, &["pending_thread_id"]);
                 let stale_pending_id = relay
                     .active_thread_id
                     .as_deref()
-                    .filter(|id| id.starts_with("claude-pending-"))
+                    .filter(|id| Some(*id) == pending_thread_id.as_deref())
                     .map(|id| id.to_string());
                 if stale_pending_id.is_some() || relay.active_thread_id.as_deref() == Some(sid) {
                     relay.active_thread_id = Some(sid.to_string());
@@ -746,7 +768,7 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                 string_at(&payload, &["turn_id"]),
                 string_at(&payload, &["text"]),
             ) {
-                if let ClaudeThreadRoute::Background(thread_id) = route {
+                if let ClaudeThreadRoute::Background(thread_id) = route.clone() {
                     relay.bg_upsert_user_message(
                         &thread_id,
                         item_id,
@@ -774,7 +796,7 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
             ) {
                 let status =
                     string_at(&payload, &["status"]).unwrap_or_else(|| "completed".to_string());
-                if let ClaudeThreadRoute::Background(thread_id) = route {
+                if let ClaudeThreadRoute::Background(thread_id) = route.clone() {
                     if status == "completed" {
                         relay.bg_complete_agent_message(
                             &thread_id,
@@ -823,6 +845,10 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
         }
 
         "tool_call_requested" => {
+            let route = claude_thread_route(&relay, event_thread_id.as_deref());
+            if matches!(route, ClaudeThreadRoute::Drop) {
+                return;
+            }
             let name = payload
                 .get("name")
                 .and_then(Value::as_str)
@@ -852,21 +878,42 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                         file_changes: Vec::new(),
                         apply_state: None,
                     });
-                relay.upsert_transcript_item(
-                    item_id,
-                    TranscriptEntryKind::ToolCall,
-                    None,
-                    string_at(&payload, &["status"]).unwrap_or_else(|| "running".to_string()),
-                    Some(turn_id),
-                    Some(tool),
-                );
+                let status =
+                    string_at(&payload, &["status"]).unwrap_or_else(|| "running".to_string());
+                if let ClaudeThreadRoute::Background(thread_id) = route.clone() {
+                    relay.bg_upsert_transcript_item(
+                        &thread_id,
+                        item_id,
+                        TranscriptEntryKind::ToolCall,
+                        None,
+                        status,
+                        Some(turn_id),
+                        Some(tool),
+                        crate::state::unix_now(),
+                    );
+                } else {
+                    relay.upsert_transcript_item(
+                        item_id,
+                        TranscriptEntryKind::ToolCall,
+                        None,
+                        status,
+                        Some(turn_id),
+                        Some(tool),
+                    );
+                }
             }
-            relay.touch_progress(Some("tool"), Some(name));
-            relay.push_log("tool", format!("Tool call: {name}"));
+            if matches!(route, ClaudeThreadRoute::Active) {
+                relay.touch_progress(Some("tool"), Some(name));
+                relay.push_log("tool", format!("Tool call: {name}"));
+            }
             relay.notify();
         }
 
         "tool_call_result" => {
+            let route = claude_thread_route(&relay, event_thread_id.as_deref());
+            if matches!(route, ClaudeThreadRoute::Drop) {
+                return;
+            }
             if let Some(item_id) = string_at(&payload, &["id"]).map(|id| format!("tool:{id}")) {
                 let mut tool = payload
                     .get("tool")
@@ -893,41 +940,70 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                 let turn_id =
                     string_at(&payload, &["turn_id"]).or_else(|| relay.active_turn_id.clone());
                 let is_file_change = tool.item_type == "fileChange";
-                relay.upsert_transcript_item(
-                    item_id,
-                    TranscriptEntryKind::ToolCall,
-                    None,
-                    "completed".to_string(),
-                    turn_id.clone(),
-                    Some(tool),
-                );
-                if is_file_change {
-                    if let Some(turn_id) = turn_id {
-                        ensure_claude_turn_diff_entry(&mut relay, &turn_id, "running");
+                if let ClaudeThreadRoute::Background(thread_id) = route.clone() {
+                    relay.bg_upsert_transcript_item(
+                        &thread_id,
+                        item_id,
+                        TranscriptEntryKind::ToolCall,
+                        None,
+                        "completed".to_string(),
+                        turn_id,
+                        Some(tool),
+                        crate::state::unix_now(),
+                    );
+                } else {
+                    relay.upsert_transcript_item(
+                        item_id,
+                        TranscriptEntryKind::ToolCall,
+                        None,
+                        "completed".to_string(),
+                        turn_id.clone(),
+                        Some(tool),
+                    );
+                    if is_file_change {
+                        if let Some(turn_id) = turn_id {
+                            ensure_claude_turn_diff_entry(&mut relay, &turn_id, "running");
+                        }
                     }
                 }
             }
             // Bump last_progress_at but defer phase changes to the next
             // worker event (or progress_tick) — multiple tools may still
             // be in flight and only the worker knows.
-            relay.touch_progress(None, None);
-            relay.push_log("tool", "Tool result received");
+            if matches!(route, ClaudeThreadRoute::Active) {
+                relay.touch_progress(None, None);
+                relay.push_log("tool", "Tool result received");
+            }
             relay.notify();
         }
 
         "approval_requested" => {
             if let Some(pending) = parse_claude_approval(&payload, &relay) {
+                let route = claude_thread_route(&relay, Some(&pending.thread_id));
                 relay.set_thread_status(
                     &pending.thread_id,
                     "active".to_string(),
                     vec!["waitingOnApproval".to_string()],
                 );
+                if let ClaudeThreadRoute::Background(thread_id) = route {
+                    relay.bg_set_thread_status(
+                        &thread_id,
+                        "active".to_string(),
+                        vec!["waitingOnApproval".to_string()],
+                        crate::state::unix_now(),
+                    );
+                }
                 relay
                     .pending_approvals
                     .insert(pending.request_id.clone(), pending.clone());
+                if matches!(
+                    claude_thread_route(&relay, Some(&pending.thread_id)),
+                    ClaudeThreadRoute::Active
+                ) {
+                    relay.touch_progress(Some("waiting_approval"), None);
+                }
             }
             let action = string_at(&payload, &["action"]).unwrap_or_else(|| "unknown".to_string());
-            relay.touch_progress(Some("waiting_approval"), None);
             relay.push_log(
                 "approval",
                 format!("Claude requests approval for: {action}"),
@@ -941,7 +1017,10 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                 return;
             };
             let tool_use_id = string_at(&payload, &["tool_use_id"]).unwrap_or_default();
-            let thread_id = relay.active_thread_id.clone().unwrap_or_default();
+            let thread_id = event_thread_id
+                .clone()
+                .or_else(|| relay.active_thread_id.clone())
+                .unwrap_or_default();
             let questions = crate::state::parse_ask_user_questions(payload.get("questions"));
             let pending = crate::state::PendingAskUserQuestion {
                 request_id: request_id.clone(),
@@ -951,16 +1030,30 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                 questions,
             };
             if !thread_id.is_empty() {
+                let route = claude_thread_route(&relay, Some(&thread_id));
                 relay.set_thread_status(
                     &thread_id,
                     "active".to_string(),
                     vec!["waitingOnAskUser".to_string()],
                 );
+                if let ClaudeThreadRoute::Background(bg_thread_id) = route {
+                    relay.bg_set_thread_status(
+                        &bg_thread_id,
+                        "active".to_string(),
+                        vec!["waitingOnAskUser".to_string()],
+                        crate::state::unix_now(),
+                    );
+                }
             }
             relay
                 .pending_ask_user_questions
                 .insert(request_id.clone(), pending);
-            relay.touch_progress(Some("waiting_user"), None);
+            if matches!(
+                claude_thread_route(&relay, Some(&thread_id)),
+                ClaudeThreadRoute::Active
+            ) {
+                relay.touch_progress(Some("waiting_user"), None);
+            }
             relay.push_log(
                 "ask_user",
                 format!("Claude asked a question ({request_id})."),
@@ -969,9 +1062,14 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
         }
 
         "progress_tick" => {
-            let phase = string_at(&payload, &["phase"]);
-            let tool = string_at(&payload, &["tool"]);
-            relay.touch_progress(phase.as_deref(), tool.as_deref());
+            if matches!(
+                claude_thread_route(&relay, event_thread_id.as_deref()),
+                ClaudeThreadRoute::Active
+            ) {
+                let phase = string_at(&payload, &["phase"]);
+                let tool = string_at(&payload, &["tool"]);
+                relay.touch_progress(phase.as_deref(), tool.as_deref());
+            }
             relay.notify();
         }
 
@@ -1211,6 +1309,98 @@ mod tests {
         std::env::var("AGENT_RELAY_LIVE_CLAUDE_E2E")
             .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
             .unwrap_or(false)
+    }
+
+    fn test_thread(id: &str, cwd: &str) -> ThreadSummaryView {
+        ThreadSummaryView {
+            id: id.to_string(),
+            name: None,
+            preview: String::new(),
+            cwd: cwd.to_string(),
+            updated_at: 1,
+            source: "claude_code".to_string(),
+            status: "idle".to_string(),
+            model_provider: "anthropic".to_string(),
+            provider: "claude_code".to_string(),
+        }
+    }
+
+    async fn test_relay_with_active_b() -> Arc<RwLock<RelayState>> {
+        let (tx, _) = tokio::sync::watch::channel(0);
+        let state = Arc::new(RwLock::new(RelayState::new(
+            "/tmp/b".to_string(),
+            tx,
+            crate::state::SecurityProfile::private(),
+        )));
+        {
+            let mut relay = state.write().await;
+            relay.upsert_thread(test_thread("thread-a", "/tmp/a"));
+            relay.activate_thread(
+                test_thread("thread-b", "/tmp/b"),
+                "/tmp/b",
+                "sonnet",
+                "default",
+                "workspace-write",
+                "medium",
+                "device-1",
+            );
+        }
+        state
+    }
+
+    #[tokio::test]
+    async fn background_claude_assistant_delta_does_not_mutate_active_transcript() {
+        let state = test_relay_with_active_b().await;
+
+        handle_worker_event(
+            json!({
+                "type": "assistant_delta",
+                "provider_session_id": "thread-a",
+                "item_id": "assistant-a",
+                "turn_id": "turn-a",
+                "text": "background text",
+                "status": "streaming"
+            }),
+            &state,
+        )
+        .await;
+
+        let snapshot = state.read().await.snapshot();
+        assert_eq!(snapshot.active_thread_id.as_deref(), Some("thread-b"));
+        assert!(
+            snapshot.transcript.is_empty(),
+            "active thread should not receive background Claude text: {:?}",
+            snapshot.transcript
+        );
+    }
+
+    #[tokio::test]
+    async fn background_claude_approval_keeps_thread_id() {
+        let state = test_relay_with_active_b().await;
+
+        handle_worker_event(
+            json!({
+                "type": "approval_requested",
+                "provider_session_id": "thread-a",
+                "id": "approval-a",
+                "tool_name": "Bash",
+                "action": "Run command",
+                "input": {"command": "echo hi"}
+            }),
+            &state,
+        )
+        .await;
+
+        let snapshot = state.read().await.snapshot();
+        assert_eq!(snapshot.active_thread_id.as_deref(), Some("thread-b"));
+        assert_eq!(snapshot.current_status, "idle");
+        assert_eq!(snapshot.pending_approvals.len(), 1);
+        let relay = state.read().await;
+        let pending = relay
+            .pending_approvals
+            .get("approval-a")
+            .expect("approval should be stored");
+        assert_eq!(pending.thread_id, "thread-a");
     }
 
     #[test]

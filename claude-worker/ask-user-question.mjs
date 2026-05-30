@@ -45,13 +45,18 @@ export function normalizeAskUserQuestions(input) {
     .filter((q) => q && q.question);
 }
 
-export function createAskUserQuestionHandler(pendingAskUserQuestions, nextRequestId) {
+export function createAskUserQuestionHandler(
+  pendingAskUserQuestions,
+  nextRequestId,
+  { getProviderSessionId = () => null, emitEvent = emit } = {},
+) {
   return (input, options) => {
     const requestId = `ask:${nextRequestId()}`;
     const questions = normalizeAskUserQuestions(input);
-    emit({
+    emitEvent({
       type: "ask_user_question_requested",
       id: requestId,
+      provider_session_id: getProviderSessionId() || undefined,
       tool_use_id: options.toolUseID,
       questions,
     });
@@ -65,6 +70,7 @@ export function createAskUserQuestionHandler(pendingAskUserQuestions, nextReques
       pendingAskUserQuestions.set(requestId, {
         resolve,
         toolUseID: options.toolUseID,
+        providerSessionId: getProviderSessionId() || null,
         // Keep the ORIGINAL input around — we must echo `questions` back
         // verbatim in updatedInput per the SDK contract.
         originalInput: input ?? {},
@@ -99,8 +105,12 @@ export function askUserQuestionAborted() {
   };
 }
 
-export function rejectAllPendingAskUserQuestions(pendingAskUserQuestions) {
+export function rejectAllPendingAskUserQuestions(
+  pendingAskUserQuestions,
+  predicate = () => true,
+) {
   for (const [id, pending] of pendingAskUserQuestions) {
+    if (!predicate(pending)) continue;
     pending.resolve(askUserQuestionAborted());
     pendingAskUserQuestions.delete(id);
   }

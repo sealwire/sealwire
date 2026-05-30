@@ -7,7 +7,12 @@ import {
 export function createPermissionHandler(
   pendingApprovals,
   nextApprovalId,
-  { pendingAskUserQuestions, nextAskUserRequestId } = {},
+  {
+    pendingAskUserQuestions,
+    nextAskUserRequestId,
+    getProviderSessionId = () => null,
+    emitEvent = emit,
+  } = {},
 ) {
   // AskUserQuestion routes through canUseTool just like a normal permission
   // request, but it's a structured "answer a question" UX, not an approve/deny.
@@ -15,7 +20,10 @@ export function createPermissionHandler(
   // a clickable card instead of an approval modal.
   const askUserHandler =
     pendingAskUserQuestions && nextAskUserRequestId
-      ? createAskUserQuestionHandler(pendingAskUserQuestions, nextAskUserRequestId)
+      ? createAskUserQuestionHandler(pendingAskUserQuestions, nextAskUserRequestId, {
+          getProviderSessionId,
+          emitEvent,
+        })
       : null;
 
   return (toolName, input, options) => {
@@ -23,9 +31,10 @@ export function createPermissionHandler(
       return askUserHandler(input, options);
     }
     const id = `approval:${nextApprovalId()}`;
-    emit({
+    emitEvent({
       type: "approval_requested",
       id,
+      provider_session_id: getProviderSessionId() || undefined,
       tool_use_id: options.toolUseID,
       action: options.title || options.displayName || toolName,
       tool_name: toolName,
@@ -48,13 +57,15 @@ export function createPermissionHandler(
         suggestions: options.suggestions ?? [],
         toolUseID: options.toolUseID,
         input: input ?? {},
+        providerSessionId: getProviderSessionId() || null,
       });
     });
   };
 }
 
-export function rejectAllPendingApprovals(pendingApprovals) {
+export function rejectAllPendingApprovals(pendingApprovals, predicate = () => true) {
   for (const [id, pending] of pendingApprovals) {
+    if (!predicate(pending)) continue;
     pending.resolve(denyPermission(pending.toolUseID, "Cancelled by user.", true));
     pendingApprovals.delete(id);
   }

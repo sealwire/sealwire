@@ -108,6 +108,54 @@ test("createAskUserQuestionHandler emits ask_user_question_requested and resolve
   assert.deepEqual(resolved.updatedInput.answers, { "Which?": "B" });
 });
 
+test("createAskUserQuestionHandler stamps requests with provider session id", () => {
+  const pending = new Map();
+  const handler = createAskUserQuestionHandler(pending, () => 2, {
+    getProviderSessionId: () => "session-ask",
+  });
+  const { lines } = captureStdout(() => {
+    handler(
+      { questions: [{ question: "Which?", options: [{ label: "A" }] }] },
+      { toolUseID: "toolu_session" }
+    );
+  });
+  const event = JSON.parse(lines[0]);
+  assert.equal(event.provider_session_id, "session-ask");
+  assert.equal(pending.get("ask:2").providerSessionId, "session-ask");
+});
+
+test("rejectAllPendingAskUserQuestions can reject only one provider session", async () => {
+  const pending = new Map();
+  let resolveA;
+  let resolveB;
+  const promiseA = new Promise((resolve) => {
+    resolveA = resolve;
+  });
+  const promiseB = new Promise((resolve) => {
+    resolveB = resolve;
+  });
+  pending.set("ask-a", {
+    resolve: resolveA,
+    providerSessionId: "session-a",
+  });
+  pending.set("ask-b", {
+    resolve: resolveB,
+    providerSessionId: "session-b",
+  });
+
+  rejectAllPendingAskUserQuestions(
+    pending,
+    (item) => item.providerSessionId === "session-a"
+  );
+
+  assert.equal(pending.has("ask-a"), false);
+  assert.equal(pending.has("ask-b"), true);
+  const resolvedA = await promiseA;
+  assert.equal(resolvedA.behavior, "deny");
+  resolveB({ behavior: "allow" });
+  await promiseB;
+});
+
 test("createAskUserQuestionHandler resolves with deny+interrupt when aborted", async () => {
   const pending = new Map();
   const handler = createAskUserQuestionHandler(pending, () => 7);

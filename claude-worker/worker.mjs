@@ -27,6 +27,7 @@
 
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
+import { pathToFileURL } from "node:url";
 import {
   createPermissionHandler,
   rejectAllPendingApprovals,
@@ -54,13 +55,9 @@ import { createProgressTracker } from "./progress-tracker.mjs";
 
 const DEFAULT_SETTING_SOURCES = ["user", "project", "local"];
 
-// Tracker is initialized in main() but referenced by the module-level emit
-// wrapper so that every event (including those emitted from inside
-// flushEvents) gets recorded for liveness purposes.
-let progressTracker = null;
-let activeProviderSessionId = null;
+const SESSION_LIMIT = 8;
 
-function emit(event) {
+function emit(event, progressTracker = null) {
   rawEmit(event);
   progressTracker?.record(event);
 }
@@ -81,6 +78,9 @@ async function flushEvents(
   onEvent = null,
   fileDiffTracker = null,
   initialProviderSessionId = null,
+  onProviderSessionId = null,
+  decorateEvent = null,
+  progressTracker = null,
 ) {
   let streamProviderSessionId = initialProviderSessionId;
   try {
@@ -94,33 +94,46 @@ async function flushEvents(
       if (Array.isArray(mapped)) {
         for (const ev of mapped) {
           const enriched = await enrichEvent(ev, fileDiffTracker);
-          stampProviderSession(enriched, streamProviderSessionId);
-          streamProviderSessionId = enriched.provider_session_id || streamProviderSessionId;
-          emit(enriched);
+          decorateEvent?.(enriched);
+          streamProviderSessionId = stampProviderSession(
+            enriched,
+            streamProviderSessionId,
+            onProviderSessionId,
+          );
+          emit(enriched, progressTracker);
           onEvent?.(enriched);
         }
       } else {
         const enriched = await enrichEvent(mapped, fileDiffTracker);
-        stampProviderSession(enriched, streamProviderSessionId);
-        streamProviderSessionId = enriched.provider_session_id || streamProviderSessionId;
-        emit(enriched);
+        decorateEvent?.(enriched);
+        streamProviderSessionId = stampProviderSession(
+          enriched,
+          streamProviderSessionId,
+          onProviderSessionId,
+        );
+        emit(enriched, progressTracker);
         onEvent?.(enriched);
       }
     }
   } catch (err) {
     if (!shouldCancel.current) {
-      emit({ type: "error", message: String(err) });
+      const errorEvent = { type: "error", message: String(err) };
+      stampProviderSession(errorEvent, streamProviderSessionId, onProviderSessionId);
+      emit(errorEvent, progressTracker);
+      onEvent?.(errorEvent);
     }
   }
 }
 
-function stampProviderSession(event, providerSessionId) {
+function stampProviderSession(event, providerSessionId, onProviderSessionId = null) {
   if (!event.provider_session_id && providerSessionId) {
     event.provider_session_id = providerSessionId;
   }
   if (event.provider_session_id) {
-    activeProviderSessionId = event.provider_session_id;
+    onProviderSessionId?.(event.provider_session_id);
+    return event.provider_session_id;
   }
+  return providerSessionId;
 }
 
 async function enrichEvent(event, fileDiffTracker) {
@@ -140,11 +153,15 @@ function buildSessionOptions(
   nextApprovalId,
   pendingAskUserQuestions,
   nextAskUserRequestId,
+  getProviderSessionId = () => null,
+  emitEvent = rawEmit,
 ) {
   return buildSessionOptionsBase(cmd, {
     canUseTool: createPermissionHandler(pendingApprovals, nextApprovalId, {
       pendingAskUserQuestions,
       nextAskUserRequestId,
+      getProviderSessionId,
+      emitEvent,
     }),
     defaultSettingSources: DEFAULT_SETTING_SOURCES,
   });
@@ -275,23 +292,212 @@ async function readSupportedModels(sdk, cmd) {
   }
 }
 
+function sessionKey(providerSessionId) {
+  return `session:${providerSessionId}`;
+}
+
+function pendingKey(id) {
+  return `pending:${id || randomUUID()}`;
+}
+
+function createSessionEntry({ key, providerSessionId = null, cmd, pendingStartResponse = null }) {
+  return {
+    key,
+    providerSessionId,
+    options: null,
+    session: null,
+    streamTask: null,
+    cancelFlag: { current: false },
+    fileDiffTracker: null,
+    progressTracker: createProgressTracker({ emit: rawEmit }),
+    pendingStartResponse,
+    initialUserMessage: null,
+    running: false,
+    lastUsedAt: Date.now(),
+    cwd: cmd.cwd ?? process.cwd(),
+    model: cmd.model ?? "claude-sonnet-4-6",
+    pendingThreadId: cmd.pending_thread_id || null,
+  };
+}
+
+function touchSessionEntry(entry) {
+  entry.lastUsedAt = Date.now();
+}
+
+function findSessionEntry(sessions, providerSessionId) {
+  if (!providerSessionId) return null;
+  return (
+    sessions.get(sessionKey(providerSessionId)) ||
+    [...sessions.values()].find((entry) => entry.pendingThreadId === providerSessionId) ||
+    null
+  );
+}
+
+function promoteSessionEntry(sessions, entry, providerSessionId) {
+  if (!providerSessionId || entry.providerSessionId === providerSessionId) return;
+  sessions.delete(entry.key);
+  entry.providerSessionId = providerSessionId;
+  entry.key = sessionKey(providerSessionId);
+  sessions.set(entry.key, entry);
+}
+
+function closeSessionEntry(entry) {
+  entry.cancelFlag.current = true;
+  entry.session?.close();
+  entry.progressTracker?.stop();
+  entry.session = null;
+  entry.streamTask = null;
+  entry.running = false;
+}
+
+function closeAndRemoveSession(sessions, entry, { pendingApprovals, pendingAskUserQuestions } = {}) {
+  closeSessionEntry(entry);
+  sessions.delete(entry.key);
+  if (entry.pendingStartResponse) {
+    emitErrorResponse(entry.pendingStartResponse.id, "Claude session evicted");
+    entry.pendingStartResponse = null;
+  }
+  const providerSessionId = entry.providerSessionId;
+  if (providerSessionId) {
+    rejectAllPendingApprovals(
+      pendingApprovals,
+      (pending) => pending.providerSessionId === providerSessionId,
+    );
+    rejectAllPendingAskUserQuestions(
+      pendingAskUserQuestions,
+      (pending) => pending.providerSessionId === providerSessionId,
+    );
+  }
+}
+
+function evictSessionsIfNeeded(sessions, context) {
+  while (sessions.size > SESSION_LIMIT) {
+    const candidates = [...sessions.values()]
+      .sort((left, right) => left.lastUsedAt - right.lastUsedAt);
+    const idle = candidates.find((entry) => !entry.running && !entry.pendingStartResponse);
+    const nonPending = candidates.find((entry) => !entry.pendingStartResponse);
+    const evict = idle || nonPending || candidates[0];
+    if (!evict) break;
+    const providerSessionId = evict.providerSessionId;
+    closeAndRemoveSession(sessions, evict, context);
+    if (providerSessionId) {
+      emit({
+        type: "error",
+        message: "Claude background session was evicted because the session limit was reached",
+        provider_session_id: providerSessionId,
+      });
+      emit({
+        type: "done",
+        provider_session_id: providerSessionId,
+      });
+    }
+  }
+}
+
+function startSessionStream(sessions, entry, context) {
+  if (!entry.session || entry.streamTask) return;
+  entry.cancelFlag.current = false;
+  entry.streamTask = flushEvents(
+    entry.session.stream(),
+    entry.cancelFlag,
+    (event) => handleSessionEvent(sessions, entry, event, context),
+    entry.fileDiffTracker,
+    entry.providerSessionId,
+    (providerSessionId) => promoteSessionEntry(sessions, entry, providerSessionId),
+    (event) => {
+      if (entry.pendingThreadId && !event.pending_thread_id) {
+        event.pending_thread_id = entry.pendingThreadId;
+      }
+    },
+    entry.progressTracker,
+  ).finally(() => {
+    entry.streamTask = null;
+  });
+}
+
+function handleSessionEvent(sessions, entry, event, context) {
+  touchSessionEntry(entry);
+  if (event.type === "session_started" && event.provider_session_id) {
+    promoteSessionEntry(sessions, entry, event.provider_session_id);
+    const initialUserMessage = entry.initialUserMessage;
+    if (entry.pendingStartResponse) {
+      const response = {
+        thread: {
+          id: event.provider_session_id,
+          name: null,
+          preview: "",
+          cwd: event.cwd || entry.pendingStartResponse.cwd,
+          updated_at: Math.floor(Date.now() / 1000),
+          source: "claude_code",
+          status: "active",
+          model_provider: "anthropic",
+          provider: "claude_code",
+        },
+      };
+      if (initialUserMessage) {
+        response.initial_user_message = {
+          item_id: initialUserMessage.item_id,
+          kind: "user_text",
+          text: initialUserMessage.text,
+          status: "completed",
+          turn_id: initialUserMessage.turn_id,
+          tool: null,
+        };
+      }
+      emitResponse(entry.pendingStartResponse.id, response);
+      entry.pendingStartResponse = null;
+    }
+    if (initialUserMessage) {
+      emit({
+        ...initialUserMessage,
+        provider_session_id: event.provider_session_id,
+      }, entry.progressTracker);
+      entry.initialUserMessage = null;
+    }
+  }
+  if (event.type === "error" && entry.pendingStartResponse) {
+    emitErrorResponse(entry.pendingStartResponse.id, event.message || "Claude stream failed");
+    entry.pendingStartResponse = null;
+  }
+  if (event.type === "done") {
+    entry.running = false;
+    evictSessionsIfNeeded(sessions, context);
+  }
+}
+
+function buildEntryOptions(entry, cmd, pendingApprovals, nextApprovalId, pendingAskUserQuestions, nextAskUserRequestId) {
+  return buildSessionOptions(
+    cmd,
+    pendingApprovals,
+    nextApprovalId,
+    pendingAskUserQuestions,
+    nextAskUserRequestId,
+    () => entry.providerSessionId,
+    (event) => emit(event, entry.progressTracker),
+  );
+}
+
+function ensureLiveSession(sdk, sessions, entry, context, resumeId = entry.providerSessionId) {
+  if (entry.session) {
+    startSessionStream(sessions, entry, context);
+    return;
+  }
+  entry.cancelFlag = { current: false };
+  entry.fileDiffTracker = createFileDiffTracker(entry.options.cwd || entry.cwd);
+  entry.session = createWorkerSession(sdk, entry.options, resumeId || undefined);
+  startSessionStream(sessions, entry, context);
+}
+
 // --- main loop --------------------------------------------------------------
 
 async function main() {
   const sdk = await findSdk();
-  let session = null;
-  let streamTask = null;
   let nextApproval = 1;
   let nextAskUserRequest = 1;
-  let pendingSessionResponse = null;
-  let fileDiffTracker = null;
+  const sessions = new Map();
   const pendingApprovals = new Map();
   const pendingAskUserQuestions = new Map();
-  const cancelFlag = { current: false };
-
-  // Tracker emits its own ticks via rawEmit so they don't recurse through
-  // the wrapper's record() call.
-  progressTracker = createProgressTracker({ emit: rawEmit });
+  const sessionContext = { pendingApprovals, pendingAskUserQuestions };
 
   const rl = createInterface({ input: process.stdin });
   log("claude-worker ready");
@@ -311,99 +517,87 @@ async function main() {
     switch (cmd.type) {
       case "shutdown": {
         log("shutting down");
-        progressTracker?.stop();
-        if (session) {
-          cancelFlag.current = true;
-          session.close();
+        for (const entry of sessions.values()) {
+          closeSessionEntry(entry);
         }
         process.exit(0);
       }
 
       case "cancel": {
-        log("cancelling current turn");
-        cancelFlag.current = true;
-        if (session) session.close();
-        rejectAllPendingApprovals(pendingApprovals);
-        rejectAllPendingAskUserQuestions(pendingAskUserQuestions);
-        emit({ type: "done" });
+        const providerSessionId = cmd.provider_session_id || null;
+        log(providerSessionId ? `cancelling session ${providerSessionId}` : "cancelling all sessions");
+        const targets = providerSessionId
+          ? [findSessionEntry(sessions, providerSessionId)].filter(Boolean)
+          : [...sessions.values()];
+        for (const entry of targets) {
+          closeSessionEntry(entry);
+          if (!entry.providerSessionId && entry.pendingThreadId) {
+            sessions.delete(entry.key);
+          }
+          if (entry.providerSessionId) {
+            rejectAllPendingApprovals(
+              pendingApprovals,
+              (pending) => pending.providerSessionId === entry.providerSessionId,
+            );
+            rejectAllPendingAskUserQuestions(
+              pendingAskUserQuestions,
+              (pending) => pending.providerSessionId === entry.providerSessionId,
+            );
+          }
+          const doneSessionId = entry.providerSessionId || entry.pendingThreadId || providerSessionId;
+          if (doneSessionId) {
+            emit({
+              type: "done",
+              provider_session_id: doneSessionId,
+            });
+          }
+        }
+        if (!providerSessionId) {
+          rejectAllPendingApprovals(pendingApprovals);
+          rejectAllPendingAskUserQuestions(pendingAskUserQuestions);
+        }
         break;
       }
 
       case "start": {
-        // Close previous session if any
-        if (session) {
-          cancelFlag.current = true;
-          session.close();
-        }
-
-        cancelFlag.current = false;
-        activeProviderSessionId = null;
-        pendingSessionResponse = cmd.id
+        const entry = createSessionEntry({
+          key: pendingKey(cmd.id),
+          cmd,
+          pendingStartResponse: cmd.id
           ? {
               id: cmd.id,
               cwd: cmd.cwd ?? process.cwd(),
               model: cmd.model ?? "claude-sonnet-4-6",
-              initialUserMessage: null,
             }
-          : null;
-        const options = buildSessionOptions(
+          : null,
+        });
+        entry.options = buildEntryOptions(
+          entry,
           cmd,
           pendingApprovals,
           () => nextApproval++,
           pendingAskUserQuestions,
           () => nextAskUserRequest++,
         );
-        fileDiffTracker = createFileDiffTracker(options.cwd);
+        entry.fileDiffTracker = createFileDiffTracker(entry.options.cwd);
+        sessions.set(entry.key, entry);
 
         try {
-          session = createWorkerSession(sdk, options);
+          entry.session = createWorkerSession(sdk, entry.options);
 
           if (cmd.prompt) {
             const userTurn = createUserTurn(cmd.prompt);
-            if (pendingSessionResponse) {
-              pendingSessionResponse.initialUserMessage = userTurn.event;
-            }
-            progressTracker.start();
-            emit(userTurn.event);
-            await session.send(userTurn.sdkMessage);
+            entry.initialUserMessage = userTurn.event;
+            entry.running = true;
+            entry.progressTracker.start();
+            await entry.session.send(userTurn.sdkMessage);
           }
 
-          // Stream all messages. session.sessionId is populated once
-          // the first system/init event arrives, which mapSdkMessage
-          // maps to a session_started event.
-          streamTask = flushEvents(session.stream(), cancelFlag, (event) => {
-            if (event.type === "session_started" && pendingSessionResponse) {
-              const response = {
-                thread: {
-                  id: event.provider_session_id,
-                  name: null,
-                  preview: "",
-                  cwd: event.cwd || pendingSessionResponse.cwd,
-                  updated_at: Math.floor(Date.now() / 1000),
-                  source: "claude_code",
-                  status: "active",
-                  model_provider: "anthropic",
-                  provider: "claude_code",
-                },
-              };
-              if (pendingSessionResponse.initialUserMessage) {
-                response.initial_user_message = {
-                  item_id: pendingSessionResponse.initialUserMessage.item_id,
-                  kind: "user_text",
-                  text: pendingSessionResponse.initialUserMessage.text,
-                  status: "completed",
-                  turn_id: pendingSessionResponse.initialUserMessage.turn_id,
-                  tool: null,
-                };
-              }
-              emitResponse(pendingSessionResponse.id, response);
-              pendingSessionResponse = null;
-            }
-          }, fileDiffTracker).finally(() => {
-            streamTask = null;
-          });
+          startSessionStream(sessions, entry, sessionContext);
+          evictSessionsIfNeeded(sessions, sessionContext);
         } catch (err) {
-          if (!cancelFlag.current) {
+          sessions.delete(entry.key);
+          if (!entry.cancelFlag.current) {
             emitErrorResponse(cmd.id, String(err));
           }
         }
@@ -415,25 +609,29 @@ async function main() {
           emit({ type: "error", message: "resume requires provider_session_id" });
           break;
         }
-        if (session) {
-          cancelFlag.current = true;
-          session.close();
+
+        let entry = findSessionEntry(sessions, cmd.provider_session_id);
+        if (!entry) {
+          entry = createSessionEntry({
+            key: sessionKey(cmd.provider_session_id),
+            providerSessionId: cmd.provider_session_id,
+            cmd,
+          });
+          entry.options = buildEntryOptions(
+            entry,
+            cmd,
+            pendingApprovals,
+            () => nextApproval++,
+            pendingAskUserQuestions,
+            () => nextAskUserRequest++,
+          );
+          sessions.set(entry.key, entry);
+        } else {
+          touchSessionEntry(entry);
         }
 
-        cancelFlag.current = false;
-        activeProviderSessionId = cmd.provider_session_id;
-        pendingSessionResponse = null;
-        const options = buildSessionOptions(
-          cmd,
-          pendingApprovals,
-          () => nextApproval++,
-          pendingAskUserQuestions,
-          () => nextAskUserRequest++,
-        );
-        fileDiffTracker = createFileDiffTracker(options.cwd);
-
         try {
-          session = createWorkerSession(sdk, options, cmd.provider_session_id);
+          ensureLiveSession(sdk, sessions, entry, sessionContext, cmd.provider_session_id);
           emitResponse(cmd.id, {
             thread: await readThreadInfoOrFallback(sdk, cmd.provider_session_id, cmd),
           });
@@ -441,33 +639,15 @@ async function main() {
           if (cmd.prompt) {
             const userTurn = createUserTurn(cmd.prompt);
             userTurn.event.provider_session_id = cmd.provider_session_id;
-            progressTracker.start();
-            emit(userTurn.event);
-            await session.send(userTurn.sdkMessage);
+            entry.running = true;
+            entry.progressTracker.start();
+            emit(userTurn.event, entry.progressTracker);
+            await entry.session.send(userTurn.sdkMessage);
           }
 
-          streamTask = flushEvents(session.stream(), cancelFlag, (event) => {
-            if (event.type === "session_started" && pendingSessionResponse) {
-              emitResponse(pendingSessionResponse.id, {
-                thread: {
-                  id: event.provider_session_id,
-                  name: null,
-                  preview: "",
-                  cwd: event.cwd || pendingSessionResponse.cwd,
-                  updated_at: Math.floor(Date.now() / 1000),
-                  source: "claude_code",
-                  status: "active",
-                  model_provider: "anthropic",
-                  provider: "claude_code",
-                },
-              });
-              pendingSessionResponse = null;
-            }
-          }, fileDiffTracker, cmd.provider_session_id).finally(() => {
-            streamTask = null;
-          });
+          evictSessionsIfNeeded(sessions, sessionContext);
         } catch (err) {
-          if (!cancelFlag.current) {
+          if (!entry.cancelFlag.current) {
             emitErrorResponse(cmd.id, String(err));
           }
         }
@@ -475,42 +655,49 @@ async function main() {
       }
 
       case "send": {
-        log(`send command received, has_session=${!!session}, prompt_len=${cmd.prompt?.length ?? 0}`);
-        if (!session) {
-          emit({ type: "error", message: "no active session" });
+        const providerSessionId = cmd.provider_session_id || null;
+        if (!providerSessionId) {
+          emit({ type: "error", message: "send requires provider_session_id" });
           break;
+        }
+        let entry = findSessionEntry(sessions, providerSessionId);
+        log(`send command received, session=${providerSessionId || "-"}, has_session=${!!entry?.session}, prompt_len=${cmd.prompt?.length ?? 0}`);
+        if (!entry) {
+          entry = createSessionEntry({
+            key: sessionKey(providerSessionId),
+            providerSessionId,
+            cmd,
+          });
+          entry.options = buildEntryOptions(
+            entry,
+            cmd,
+            pendingApprovals,
+            () => nextApproval++,
+            pendingAskUserQuestions,
+            () => nextAskUserRequest++,
+          );
+          sessions.set(entry.key, entry);
         }
         if (!cmd.prompt) {
           emit({ type: "error", message: "send requires prompt" });
           break;
         }
 
-        cancelFlag.current = false;
         try {
           log("sending message to session");
-          progressTracker.start();
+          ensureLiveSession(sdk, sessions, entry, sessionContext, providerSessionId);
+          entry.progressTracker.start();
           const userTurn = createUserTurn(cmd.prompt);
-          if (activeProviderSessionId) {
-            userTurn.event.provider_session_id = activeProviderSessionId;
-          }
-          emit(userTurn.event);
-          await session.send(userTurn.sdkMessage);
+          userTurn.event.provider_session_id = providerSessionId;
+          entry.running = true;
+          touchSessionEntry(entry);
+          emit(userTurn.event, entry.progressTracker);
+          await entry.session.send(userTurn.sdkMessage);
           log("streaming response");
-          if (!streamTask) {
-            streamTask = flushEvents(
-              session.stream(),
-              cancelFlag,
-              null,
-              fileDiffTracker,
-              activeProviderSessionId,
-            ).finally(() => {
-              streamTask = null;
-            });
-          }
           log("send complete");
         } catch (err) {
           log(`send error: ${err.message || err}`);
-          if (!cancelFlag.current) {
+          if (!entry.cancelFlag.current) {
             emit({ type: "error", message: String(err) });
           }
         }
@@ -597,6 +784,10 @@ async function main() {
         try {
           const sessionId = cmd.provider_session_id;
           if (!sessionId) throw new Error("delete_session requires provider_session_id");
+          const entry = findSessionEntry(sessions, sessionId);
+          if (entry) {
+            closeAndRemoveSession(sessions, entry, sessionContext);
+          }
           await sdk.deleteSession(sessionId, { dir: cmd.cwd || undefined });
           emitResponse(cmd.id, { provider_session_id: sessionId });
         } catch (err) {
@@ -611,7 +802,20 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  log(`FATAL: ${err}`);
-  process.exit(1);
-});
+export {
+  closeAndRemoveSession,
+  closeSessionEntry,
+  createSessionEntry,
+  evictSessionsIfNeeded,
+  findSessionEntry,
+  flushEvents,
+  handleSessionEvent,
+  promoteSessionEntry,
+};
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((err) => {
+    log(`FATAL: ${err}`);
+    process.exit(1);
+  });
+}

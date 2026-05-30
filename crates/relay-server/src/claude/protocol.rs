@@ -43,9 +43,19 @@ pub(super) fn parse_claude_approval(
     let command = value_at(payload, &["input", "command"])
         .and_then(Value::as_str)
         .map(ToOwned::to_owned);
+    let thread_id = string_at(payload, &["provider_session_id"])
+        .or_else(|| relay.active_thread_id.clone())
+        .unwrap_or_default();
     let cwd = value_at(payload, &["input", "cwd"])
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
+        .or_else(|| {
+            relay
+                .threads
+                .iter()
+                .find(|thread| thread.id == thread_id)
+                .map(|thread| thread.cwd.clone())
+        })
         .or_else(|| Some(relay.current_cwd.clone()));
     let context_preview = payload.get("input").map(compact_json);
 
@@ -53,7 +63,7 @@ pub(super) fn parse_claude_approval(
         request_id: request_id.clone(),
         raw_request_id: Value::String(request_id),
         kind: ApprovalKind::Permissions,
-        thread_id: relay.active_thread_id.clone().unwrap_or_default(),
+        thread_id,
         summary: action,
         detail: description
             .or_else(|| string_at(payload, &["decision_reason"]))

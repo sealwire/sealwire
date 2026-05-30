@@ -128,20 +128,19 @@ async function main() {
       { timeout: LOCAL_TIMEOUT_MS }
     );
 
-    const providerDotLabel = await renderedThread
-      .locator(".conversation-provider-dot")
+    const providerBadgeText = await renderedThread
+      .locator(".conversation-provider-badge")
       .first()
-      .getAttribute("aria-label");
-    assert.equal(providerDotLabel, "Claude Code");
+      .textContent();
+    assert.equal(providerBadgeText?.trim(), "Claude");
 
-    // Session details is a secondary action behind the header overflow menu — open it first.
-    await page.click("#header-overflow-button");
+    // Session details is a direct button in the chat header.
     await page.click("#open-session-details");
     await page.waitForFunction(
       () => {
         const modal = document.querySelector("#session-details-modal");
         const meta = document.querySelector("#session-meta")?.textContent || "";
-        return Boolean(modal?.open) && meta.includes("Claude Code");
+        return Boolean(modal?.open) && meta.includes("Claude");
       },
       null,
       { timeout: LOCAL_TIMEOUT_MS }
@@ -197,7 +196,7 @@ async function main() {
           threadId: thread.id,
           transcriptEntries: session.transcript.length,
           browser: {
-            providerBadge: "Claude Code",
+            providerBadge: "Claude",
             deleteConfirm: "provider-aware",
             archive: "unsupported",
           },

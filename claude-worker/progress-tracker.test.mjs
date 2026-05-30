@@ -94,6 +94,25 @@ test("tool_call_requested sets phase=tool and tool name", () => {
   assert.equal(tick.tool, "Bash");
 });
 
+test("progress_tick carries this tracker provider session id", () => {
+  const emits = [];
+  const fakes = fakeTimers();
+  const tracker = makeTracker(emits, fakes);
+
+  tracker.start();
+  tracker.record({
+    type: "assistant_delta",
+    text: "hi",
+    provider_session_id: "session-1",
+  });
+  fakes.advance(6000);
+  fakes.fireAll();
+
+  const tick = emits.find((event) => event.type === "progress_tick");
+  assert.ok(tick);
+  assert.equal(tick.provider_session_id, "session-1");
+});
+
 test("tool_call_result clears tool when no more are pending", () => {
   const fakes = fakeTimers();
   const tracker = makeTracker([], fakes);
