@@ -390,6 +390,19 @@ impl RelayState {
         self.evict_oldest_background_if_over_cap();
     }
 
+    pub fn bg_set_thread_status(
+        &mut self,
+        thread_id: &str,
+        status: String,
+        active_flags: Vec<String>,
+        now: u64,
+    ) {
+        let bg = self.touch_background_entry(thread_id, now);
+        bg.current_status = status;
+        bg.active_flags = active_flags;
+        self.evict_oldest_background_if_over_cap();
+    }
+
     /// Buffer a per-entry status change (e.g. `turn/completed` flipping a
     /// turn-diff item to `"completed"`).
     pub fn bg_set_transcript_item_status(

@@ -227,41 +227,87 @@ impl ProviderBridge for FakeProviderBridge {
 
             {
                 let mut relay = state.write().await;
-                relay.set_active_turn(Some(turn_id_for_task.clone()));
                 relay.set_thread_status(&thread_id, "active".to_string(), Vec::new());
-                relay.upsert_user_message(user_item_id, prompt, turn_id_for_task.clone());
-                relay.start_agent_message(assistant_item_id.clone(), turn_id_for_task.clone());
+                if relay.active_thread_id.as_deref() == Some(thread_id.as_str()) {
+                    relay.set_active_turn(Some(turn_id_for_task.clone()));
+                    relay.upsert_user_message(user_item_id, prompt, turn_id_for_task.clone());
+                    relay.start_agent_message(assistant_item_id.clone(), turn_id_for_task.clone());
+                } else {
+                    let now = unix_now();
+                    relay.bg_set_active_turn(&thread_id, Some(turn_id_for_task.clone()), now);
+                    relay.bg_set_thread_status(&thread_id, "active".to_string(), Vec::new(), now);
+                    relay.bg_upsert_user_message(
+                        &thread_id,
+                        user_item_id,
+                        prompt,
+                        turn_id_for_task.clone(),
+                        now,
+                    );
+                    relay.bg_start_agent_message(
+                        &thread_id,
+                        assistant_item_id.clone(),
+                        turn_id_for_task.clone(),
+                        now,
+                    );
+                }
                 relay.notify();
             }
 
             for chunk in reply_chunks(&reply) {
                 sleep(Duration::from_millis(20)).await;
                 let mut relay = state.write().await;
-                let mutation =
-                    relay.append_agent_delta(&assistant_item_id, &chunk, &turn_id_for_task);
-                relay
-                    .pending_broker_messages
-                    .push(BrokerPendingMessage::TranscriptDelta(
-                        PendingTranscriptDelta {
-                            thread_id: thread_id.clone(),
-                            base_revision: mutation.base_revision,
-                            revision: mutation.revision,
-                            entry_seq: mutation.entry_seq,
-                            server_time: mutation.server_time,
-                            item_id: assistant_item_id.clone(),
-                            turn_id: Some(turn_id_for_task.clone()),
-                            delta: chunk,
-                            kind: TranscriptDeltaKind::AgentText,
-                        },
-                    ));
+                if relay.active_thread_id.as_deref() == Some(thread_id.as_str()) {
+                    let mutation =
+                        relay.append_agent_delta(&assistant_item_id, &chunk, &turn_id_for_task);
+                    relay
+                        .pending_broker_messages
+                        .push(BrokerPendingMessage::TranscriptDelta(
+                            PendingTranscriptDelta {
+                                thread_id: thread_id.clone(),
+                                base_revision: mutation.base_revision,
+                                revision: mutation.revision,
+                                entry_seq: mutation.entry_seq,
+                                server_time: mutation.server_time,
+                                item_id: assistant_item_id.clone(),
+                                turn_id: Some(turn_id_for_task.clone()),
+                                delta: chunk,
+                                kind: TranscriptDeltaKind::AgentText,
+                            },
+                        ));
+                } else {
+                    relay.bg_append_agent_delta(
+                        &thread_id,
+                        &assistant_item_id,
+                        &chunk,
+                        &turn_id_for_task,
+                        unix_now(),
+                    );
+                }
                 relay.notify();
             }
 
             {
                 let mut relay = state.write().await;
-                relay.complete_agent_message(assistant_item_id, reply, turn_id_for_task.clone());
-                relay.set_active_turn(None);
                 relay.set_thread_status(&thread_id, "idle".to_string(), Vec::new());
+                if relay.active_thread_id.as_deref() == Some(thread_id.as_str()) {
+                    relay.complete_agent_message(
+                        assistant_item_id,
+                        reply,
+                        turn_id_for_task.clone(),
+                    );
+                    relay.set_active_turn(None);
+                } else {
+                    let now = unix_now();
+                    relay.bg_complete_agent_message(
+                        &thread_id,
+                        assistant_item_id,
+                        reply,
+                        turn_id_for_task.clone(),
+                        now,
+                    );
+                    relay.bg_set_active_turn(&thread_id, None, now);
+                    relay.bg_set_thread_status(&thread_id, "idle".to_string(), Vec::new(), now);
+                }
                 relay.push_log(
                     "info",
                     format!("Fake provider completed turn {turn_id_for_task}."),

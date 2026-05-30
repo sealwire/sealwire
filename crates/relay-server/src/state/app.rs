@@ -2526,6 +2526,134 @@ mod path_scope_tests {
         panic!("fake agent reply never landed in the active transcript");
     }
 
+    #[tokio::test]
+    async fn streaming_turn_does_not_bleed_into_thread_switched_to_mid_stream() {
+        use crate::protocol::TranscriptEntryKind;
+
+        let project = TempDir::new().expect("project tempdir");
+        let a_dir = project.path().join("a");
+        let b_dir = project.path().join("b");
+        std::fs::create_dir_all(&a_dir).unwrap();
+        std::fs::create_dir_all(&b_dir).unwrap();
+
+        let (app, _p, _o) = build_app(project.path().to_str().unwrap()).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let snap_a = app
+            .start_session(StartSessionInput {
+                device_id: Some("device-1".to_string()),
+                cwd: Some(a_dir.display().to_string()),
+                model: Some("fake-echo".to_string()),
+                effort: None,
+                approval_policy: Some("never".to_string()),
+                sandbox: Some("workspace-write".to_string()),
+                provider: Some("fake".to_string()),
+                initial_prompt: None,
+            })
+            .await
+            .expect("start A");
+        let thread_a = snap_a.active_thread_id.clone().expect("thread A id");
+
+        let snap_b = app
+            .start_session(StartSessionInput {
+                device_id: Some("device-1".to_string()),
+                cwd: Some(b_dir.display().to_string()),
+                model: Some("fake-echo".to_string()),
+                effort: None,
+                approval_policy: Some("never".to_string()),
+                sandbox: Some("workspace-write".to_string()),
+                provider: Some("fake".to_string()),
+                initial_prompt: None,
+            })
+            .await
+            .expect("start B");
+        let thread_b = snap_b.active_thread_id.clone().expect("thread B id");
+
+        app.resume_session(ResumeSessionInput {
+            thread_id: thread_a.clone(),
+            approval_policy: None,
+            sandbox: None,
+            effort: None,
+            device_id: Some("device-1".to_string()),
+            provider: Some("fake".to_string()),
+        })
+        .await
+        .expect("resume A");
+
+        let expected = (1..=20)
+            .map(|index| format!("STREAM-A-LINE-{index:02}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.send_message(SendMessageInput {
+            text: format!(
+                "Reply with exactly these 20 lines, one per line, and no extra text:\n{expected}"
+            ),
+            model: Some("fake-echo".to_string()),
+            effort: None,
+            device_id: Some("device-1".to_string()),
+        })
+        .await
+        .expect("send streaming message to A");
+
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+
+        let snap_b_active = app
+            .resume_session(ResumeSessionInput {
+                thread_id: thread_b.clone(),
+                approval_policy: None,
+                sandbox: None,
+                effort: None,
+                device_id: Some("device-1".to_string()),
+                provider: Some("fake".to_string()),
+            })
+            .await
+            .expect("resume B mid-stream");
+        assert_eq!(
+            snap_b_active.active_thread_id.as_deref(),
+            Some(thread_b.as_str())
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+        let snap_b_after_stream = app.snapshot().await;
+        assert_eq!(
+            snap_b_after_stream.active_thread_id.as_deref(),
+            Some(thread_b.as_str())
+        );
+        assert!(
+            !snap_b_after_stream.transcript.iter().any(|entry| entry
+                .text
+                .as_deref()
+                .unwrap_or("")
+                .contains("STREAM-A-LINE")),
+            "thread B should not contain thread A streaming output: {:?}",
+            snap_b_after_stream.transcript
+        );
+
+        let snap_a_back = app
+            .resume_session(ResumeSessionInput {
+                thread_id: thread_a.clone(),
+                approval_policy: None,
+                sandbox: None,
+                effort: None,
+                device_id: Some("device-1".to_string()),
+                provider: Some("fake".to_string()),
+            })
+            .await
+            .expect("resume A after background stream");
+        assert!(
+            snap_a_back.transcript.iter().any(|entry| {
+                entry.kind == TranscriptEntryKind::AgentText
+                    && entry
+                        .text
+                        .as_deref()
+                        .unwrap_or("")
+                        .contains("STREAM-A-LINE-20")
+            }),
+            "thread A should retain its completed background stream: {:?}",
+            snap_a_back.transcript
+        );
+    }
+
     // Reproduces the user-reported "agent message disappears after switching
     // threads and coming back" bug: start a session, switch to another, switch
     // back, and the agent reply must still be in the transcript.

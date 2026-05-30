@@ -58,6 +58,7 @@ const DEFAULT_SETTING_SOURCES = ["user", "project", "local"];
 // wrapper so that every event (including those emitted from inside
 // flushEvents) gets recorded for liveness purposes.
 let progressTracker = null;
+let activeProviderSessionId = null;
 
 function emit(event) {
   rawEmit(event);
@@ -74,7 +75,14 @@ async function findSdk() {
   }
 }
 
-async function flushEvents(stream, shouldCancel, onEvent = null, fileDiffTracker = null) {
+async function flushEvents(
+  stream,
+  shouldCancel,
+  onEvent = null,
+  fileDiffTracker = null,
+  initialProviderSessionId = null,
+) {
+  let streamProviderSessionId = initialProviderSessionId;
   try {
     for await (const msg of stream) {
       // Don't yield during cancelled stream — we already emitted done
@@ -86,11 +94,15 @@ async function flushEvents(stream, shouldCancel, onEvent = null, fileDiffTracker
       if (Array.isArray(mapped)) {
         for (const ev of mapped) {
           const enriched = await enrichEvent(ev, fileDiffTracker);
+          stampProviderSession(enriched, streamProviderSessionId);
+          streamProviderSessionId = enriched.provider_session_id || streamProviderSessionId;
           emit(enriched);
           onEvent?.(enriched);
         }
       } else {
         const enriched = await enrichEvent(mapped, fileDiffTracker);
+        stampProviderSession(enriched, streamProviderSessionId);
+        streamProviderSessionId = enriched.provider_session_id || streamProviderSessionId;
         emit(enriched);
         onEvent?.(enriched);
       }
@@ -99,6 +111,15 @@ async function flushEvents(stream, shouldCancel, onEvent = null, fileDiffTracker
     if (!shouldCancel.current) {
       emit({ type: "error", message: String(err) });
     }
+  }
+}
+
+function stampProviderSession(event, providerSessionId) {
+  if (!event.provider_session_id && providerSessionId) {
+    event.provider_session_id = providerSessionId;
+  }
+  if (event.provider_session_id) {
+    activeProviderSessionId = event.provider_session_id;
   }
 }
 
@@ -140,6 +161,64 @@ function fallbackThread(sessionId, cmd) {
     status: "active",
     model_provider: "anthropic",
     provider: "claude_code",
+  };
+}
+
+// claude-agent-sdk 0.3.x removed `unstable_v2_createSession`/`resumeSession`,
+// which returned a persistent session exposing `{ send, stream, close }`. The
+// streaming `query()` API replaces them: the returned Query is itself the
+// whole-session message generator (our `stream()`), driven by an async input
+// iterable we push user messages onto (our `send()`). This shim re-creates the
+// small surface the worker relies on so the command loop below is unchanged.
+// `resume` (a prior session id) is passed through `options.resume`.
+function createWorkerSession(sdk, options, resume) {
+  const queue = [];
+  let wake = null;
+  let ended = false;
+
+  // Single-threaded JS guarantees this generator's queue-drain and wait setup
+  // run atomically between awaits, so a `send()` can never slip in after the
+  // emptiness check but before `wake` is armed — no dropped/stuck messages.
+  async function* inputStream() {
+    while (true) {
+      while (queue.length > 0) {
+        yield queue.shift();
+      }
+      if (ended) return;
+      await new Promise((resolve) => {
+        wake = resolve;
+      });
+    }
+  }
+
+  const query = sdk.query({
+    prompt: inputStream(),
+    options: resume ? { ...options, resume } : options,
+  });
+
+  function flush() {
+    const resume = wake;
+    wake = null;
+    if (resume) resume();
+  }
+
+  return {
+    sessionId: undefined,
+    async send(sdkMessage) {
+      queue.push(sdkMessage);
+      flush();
+    },
+    stream() {
+      return query;
+    },
+    close() {
+      ended = true;
+      flush();
+      // Stop any in-flight turn; fire-and-forget (callers never await close()).
+      if (typeof query.interrupt === "function") {
+        Promise.resolve(query.interrupt()).catch(() => {});
+      }
+    },
   };
 }
 
@@ -258,6 +337,7 @@ async function main() {
         }
 
         cancelFlag.current = false;
+        activeProviderSessionId = null;
         pendingSessionResponse = cmd.id
           ? {
               id: cmd.id,
@@ -276,7 +356,7 @@ async function main() {
         fileDiffTracker = createFileDiffTracker(options.cwd);
 
         try {
-          session = sdk.unstable_v2_createSession(options);
+          session = createWorkerSession(sdk, options);
 
           if (cmd.prompt) {
             const userTurn = createUserTurn(cmd.prompt);
@@ -341,6 +421,7 @@ async function main() {
         }
 
         cancelFlag.current = false;
+        activeProviderSessionId = cmd.provider_session_id;
         pendingSessionResponse = null;
         const options = buildSessionOptions(
           cmd,
@@ -352,16 +433,14 @@ async function main() {
         fileDiffTracker = createFileDiffTracker(options.cwd);
 
         try {
-          session = sdk.unstable_v2_resumeSession(
-            cmd.provider_session_id,
-            options
-          );
+          session = createWorkerSession(sdk, options, cmd.provider_session_id);
           emitResponse(cmd.id, {
             thread: await readThreadInfoOrFallback(sdk, cmd.provider_session_id, cmd),
           });
 
           if (cmd.prompt) {
             const userTurn = createUserTurn(cmd.prompt);
+            userTurn.event.provider_session_id = cmd.provider_session_id;
             progressTracker.start();
             emit(userTurn.event);
             await session.send(userTurn.sdkMessage);
@@ -384,7 +463,7 @@ async function main() {
               });
               pendingSessionResponse = null;
             }
-          }, fileDiffTracker).finally(() => {
+          }, fileDiffTracker, cmd.provider_session_id).finally(() => {
             streamTask = null;
           });
         } catch (err) {
@@ -411,11 +490,20 @@ async function main() {
           log("sending message to session");
           progressTracker.start();
           const userTurn = createUserTurn(cmd.prompt);
+          if (activeProviderSessionId) {
+            userTurn.event.provider_session_id = activeProviderSessionId;
+          }
           emit(userTurn.event);
           await session.send(userTurn.sdkMessage);
           log("streaming response");
           if (!streamTask) {
-            streamTask = flushEvents(session.stream(), cancelFlag, null, fileDiffTracker).finally(() => {
+            streamTask = flushEvents(
+              session.stream(),
+              cancelFlag,
+              null,
+              fileDiffTracker,
+              activeProviderSessionId,
+            ).finally(() => {
               streamTask = null;
             });
           }
