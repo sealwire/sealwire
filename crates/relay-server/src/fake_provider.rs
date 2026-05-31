@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     time::{SystemTime, UNIX_EPOCH},
@@ -9,19 +9,19 @@ use std::{
 
 use async_trait::async_trait;
 use tokio::{
-    sync::{Mutex, RwLock},
+    sync::{oneshot, Mutex, RwLock},
     time::{sleep, Duration},
 };
 
 use crate::{
     codex_local::LocalThreadDeleteSummary,
     protocol::{
-        ApprovalDecisionInput, ModelOptionView, ThreadSummaryView, TranscriptEntryKind,
-        TranscriptEntryView,
+        ApprovalDecision, ApprovalDecisionInput, ModelOptionView, ThreadSummaryView,
+        TranscriptEntryKind, TranscriptEntryView,
     },
     provider::{ProviderBridge, StartThreadResult, ThreadSyncData},
     state::{
-        BrokerPendingMessage, PendingApproval, PendingTranscriptDelta, RelayState,
+        ApprovalKind, BrokerPendingMessage, PendingApproval, PendingTranscriptDelta, RelayState,
         TranscriptDeltaKind,
     },
 };
@@ -36,6 +36,13 @@ pub struct FakeProviderBridge {
     state: Arc<RwLock<RelayState>>,
     threads: Arc<Mutex<HashMap<String, FakeThread>>>,
     next_id: AtomicU64,
+    // When set, a non-`bypass` turn parks on an approval request (a fake Bash
+    // command) until respond_to_approval resolves it — letting tests exercise
+    // the real permission-modal path. Off by default so existing fake e2e
+    // suites (which send turns under various policies) stay unaffected; flipped
+    // on via FAKE_PROVIDER_ENFORCE_APPROVALS for the permission-mode e2e.
+    enforce_approvals: Arc<AtomicBool>,
+    approval_gates: Arc<Mutex<HashMap<String, oneshot::Sender<ApprovalDecision>>>>,
 }
 
 impl FakeProviderBridge {
@@ -49,11 +56,28 @@ impl FakeProviderBridge {
             relay.notify();
         }
 
+        let enforce_approvals = std::env::var("FAKE_PROVIDER_ENFORCE_APPROVALS")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
         Ok(Self {
             state,
             threads,
             next_id: AtomicU64::new(1),
+            enforce_approvals: Arc::new(AtomicBool::new(enforce_approvals)),
+            approval_gates: Arc::new(Mutex::new(HashMap::new())),
         })
+    }
+
+    /// Read the approval policy recorded for a thread, falling back to the
+    /// session-wide policy. Used to decide whether a turn must park on approval.
+    async fn approval_policy_for(&self, thread_id: &str) -> String {
+        let relay = self.state.read().await;
+        relay
+            .thread_settings(thread_id)
+            .map(|settings| settings.approval_policy)
+            .filter(|policy| !policy.is_empty())
+            .unwrap_or_else(|| relay.approval_policy.clone())
     }
 
     fn next_token(&self, prefix: &str) -> String {
@@ -207,6 +231,12 @@ impl ProviderBridge for FakeProviderBridge {
         let threads = self.threads.clone();
         let turn_id_for_task = turn_id.clone();
 
+        // Decide up front whether this turn must park on an approval request.
+        let needs_approval = self.enforce_approvals.load(Ordering::Relaxed)
+            && self.approval_policy_for(&thread_id).await != "bypass";
+        let approval_request_id = self.next_token("fake-approval");
+        let approval_gates = self.approval_gates.clone();
+
         tokio::spawn(async move {
             let user_entry = TranscriptEntryView {
                 item_id: Some(user_item_id.clone()),
@@ -225,29 +255,95 @@ impl ProviderBridge for FakeProviderBridge {
                 tool: None,
             };
 
+            // 1. Record the user's turn.
             {
                 let mut relay = state.write().await;
                 relay.set_thread_status(&thread_id, "active".to_string(), Vec::new());
                 if relay.active_thread_id.as_deref() == Some(thread_id.as_str()) {
                     relay.set_active_turn(Some(turn_id_for_task.clone()));
-                    relay.upsert_user_message(user_item_id, prompt, turn_id_for_task.clone());
-                    relay.start_agent_message(assistant_item_id.clone(), turn_id_for_task.clone());
+                    relay.upsert_user_message(
+                        user_item_id.clone(),
+                        prompt.clone(),
+                        turn_id_for_task.clone(),
+                    );
                 } else {
                     let now = unix_now();
                     relay.bg_set_active_turn(&thread_id, Some(turn_id_for_task.clone()), now);
                     relay.bg_set_thread_status(&thread_id, "active".to_string(), Vec::new(), now);
                     relay.bg_upsert_user_message(
                         &thread_id,
-                        user_item_id,
-                        prompt,
+                        user_item_id.clone(),
+                        prompt.clone(),
                         turn_id_for_task.clone(),
                         now,
                     );
+                }
+                relay.notify();
+            }
+
+            // 2. Park on an approval request when the policy requires it. Only
+            // foreground (active) turns gate; background fake turns auto-proceed.
+            if needs_approval
+                && state.read().await.active_thread_id.as_deref() == Some(thread_id.as_str())
+            {
+                let (decision_tx, decision_rx) = oneshot::channel();
+                approval_gates
+                    .lock()
+                    .await
+                    .insert(approval_request_id.clone(), decision_tx);
+                {
+                    let mut relay = state.write().await;
+                    relay.set_thread_status(
+                        &thread_id,
+                        "active".to_string(),
+                        vec!["waitingOnApproval".to_string()],
+                    );
+                    relay.pending_approvals.insert(
+                        approval_request_id.clone(),
+                        make_fake_approval(&approval_request_id, &thread_id, &prompt),
+                    );
+                    relay.touch_progress(Some("waiting_approval"), None);
+                    relay.push_log("approval", "Fake provider requests approval for: Bash");
+                    relay.notify();
+                }
+
+                let decision = decision_rx.await.unwrap_or(ApprovalDecision::Cancel);
+                approval_gates.lock().await.remove(&approval_request_id);
+
+                if !matches!(decision, ApprovalDecision::Approve) {
+                    let mut relay = state.write().await;
+                    relay.pending_approvals.remove(&approval_request_id);
+                    relay.set_thread_status(&thread_id, "idle".to_string(), Vec::new());
+                    if relay.active_thread_id.as_deref() == Some(thread_id.as_str()) {
+                        relay.set_active_turn(None);
+                    }
+                    relay.push_log("info", "Fake provider turn was denied.");
+                    relay.notify();
+                    if let Some(thread) = threads.lock().await.get_mut(&thread_id) {
+                        thread.summary.status = "idle".to_string();
+                        thread.summary.updated_at = unix_now();
+                        thread.transcript.push(user_entry);
+                    }
+                    return;
+                }
+
+                // Approved: drop the waiting flag before streaming the reply.
+                let mut relay = state.write().await;
+                relay.set_thread_status(&thread_id, "active".to_string(), Vec::new());
+                relay.notify();
+            }
+
+            // 3. Begin the agent reply.
+            {
+                let mut relay = state.write().await;
+                if relay.active_thread_id.as_deref() == Some(thread_id.as_str()) {
+                    relay.start_agent_message(assistant_item_id.clone(), turn_id_for_task.clone());
+                } else {
                     relay.bg_start_agent_message(
                         &thread_id,
                         assistant_item_id.clone(),
                         turn_id_for_task.clone(),
-                        now,
+                        unix_now(),
                     );
                 }
                 relay.notify();
@@ -338,10 +434,15 @@ impl ProviderBridge for FakeProviderBridge {
 
     async fn respond_to_approval(
         &self,
-        _pending: &PendingApproval,
-        _input: &ApprovalDecisionInput,
+        pending: &PendingApproval,
+        input: &ApprovalDecisionInput,
     ) -> Result<(), String> {
-        Err("fake provider does not request approvals".to_string())
+        // Unblock the parked turn (if any) with the user's decision. The app
+        // layer clears the pending approval from relay state after this returns.
+        if let Some(sender) = self.approval_gates.lock().await.remove(&pending.request_id) {
+            let _ = sender.send(input.decision);
+        }
+        Ok(())
     }
 
     async fn respond_to_ask_user_question(
@@ -390,6 +491,23 @@ async fn restore_threads_from_relay(
             transcript: snapshot.transcript,
         },
     )])
+}
+
+fn make_fake_approval(request_id: &str, thread_id: &str, prompt: &str) -> PendingApproval {
+    PendingApproval {
+        request_id: request_id.to_string(),
+        raw_request_id: serde_json::Value::String(request_id.to_string()),
+        kind: ApprovalKind::Command,
+        thread_id: thread_id.to_string(),
+        summary: format!("Run a shell command for: {prompt}"),
+        detail: None,
+        command: Some("echo fake-approval".to_string()),
+        cwd: None,
+        context_preview: None,
+        requested_permissions: None,
+        available_decisions: vec!["approve".to_string(), "deny".to_string()],
+        supports_session_scope: false,
+    }
 }
 
 fn fake_reply_for_prompt(prompt: &str) -> String {
@@ -524,5 +642,168 @@ mod tests {
             model_provider: "fake".to_string(),
             provider: "fake".to_string(),
         }
+    }
+
+    // --- approval-gating (permission-mode) behavior --------------------------
+
+    const ACTIVE_THREAD: &str = "fake-thread-active";
+
+    async fn relay_with_active_thread(policy: &str) -> Arc<RwLock<RelayState>> {
+        let (change_tx, _change_rx) = watch::channel(0);
+        let state = Arc::new(RwLock::new(RelayState::new(
+            "/tmp/project".to_string(),
+            change_tx,
+            SecurityProfile::private(),
+        )));
+        {
+            let mut relay = state.write().await;
+            relay.activate_thread(
+                test_thread(ACTIVE_THREAD, "/tmp/project"),
+                "/tmp/project",
+                "fake-echo",
+                policy,
+                "workspace-write",
+                "medium",
+                "device-1",
+            );
+        }
+        state
+    }
+
+    async fn wait_for_pending_approval(state: &Arc<RwLock<RelayState>>) -> Option<PendingApproval> {
+        for _ in 0..50 {
+            if let Some(pending) = state
+                .read()
+                .await
+                .pending_approvals
+                .values()
+                .next()
+                .cloned()
+            {
+                return Some(pending);
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        None
+    }
+
+    fn decision_input(decision: ApprovalDecision) -> ApprovalDecisionInput {
+        ApprovalDecisionInput {
+            decision,
+            scope: None,
+            device_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn bypass_policy_skips_the_approval_gate() {
+        let state = relay_with_active_thread("bypass").await;
+        let bridge = FakeProviderBridge::spawn(state.clone())
+            .await
+            .expect("fake provider");
+        bridge.enforce_approvals.store(true, Ordering::Relaxed);
+
+        bridge
+            .start_turn(
+                ACTIVE_THREAD,
+                "Reply with exactly: pong",
+                "fake-echo",
+                "medium",
+            )
+            .await
+            .expect("turn");
+
+        assert!(
+            wait_for_thread_text(&bridge, ACTIVE_THREAD, "pong").await,
+            "a bypass turn should reply without requesting approval",
+        );
+        assert!(
+            state.read().await.pending_approvals.is_empty(),
+            "a bypass turn must not park on an approval",
+        );
+    }
+
+    #[tokio::test]
+    async fn non_bypass_turn_parks_until_approved() {
+        let state = relay_with_active_thread("untrusted").await;
+        let bridge = FakeProviderBridge::spawn(state.clone())
+            .await
+            .expect("fake provider");
+        bridge.enforce_approvals.store(true, Ordering::Relaxed);
+
+        bridge
+            .start_turn(
+                ACTIVE_THREAD,
+                "Reply with exactly: pong",
+                "fake-echo",
+                "medium",
+            )
+            .await
+            .expect("turn");
+
+        let pending = wait_for_pending_approval(&state)
+            .await
+            .expect("a non-bypass turn should request approval");
+        // The reply must not land before the user approves.
+        let before = bridge.read_thread(ACTIVE_THREAD).await.expect("thread");
+        assert!(
+            !before
+                .transcript
+                .iter()
+                .any(|entry| entry.text.as_deref() == Some("pong")),
+            "reply must not arrive while the turn is parked on approval",
+        );
+
+        bridge
+            .respond_to_approval(&pending, &decision_input(ApprovalDecision::Approve))
+            .await
+            .expect("approve");
+        assert!(
+            wait_for_thread_text(&bridge, ACTIVE_THREAD, "pong").await,
+            "an approved turn should resume and reply",
+        );
+    }
+
+    #[tokio::test]
+    async fn denied_turn_yields_no_reply() {
+        let state = relay_with_active_thread("untrusted").await;
+        let bridge = FakeProviderBridge::spawn(state.clone())
+            .await
+            .expect("fake provider");
+        bridge.enforce_approvals.store(true, Ordering::Relaxed);
+
+        bridge
+            .start_turn(
+                ACTIVE_THREAD,
+                "Reply with exactly: pong",
+                "fake-echo",
+                "medium",
+            )
+            .await
+            .expect("turn");
+        let pending = wait_for_pending_approval(&state)
+            .await
+            .expect("approval requested");
+
+        bridge
+            .respond_to_approval(&pending, &decision_input(ApprovalDecision::Deny))
+            .await
+            .expect("deny");
+
+        // The denied turn settles without ever producing a reply, and the
+        // approval is cleared so the thread returns to idle.
+        sleep(Duration::from_millis(120)).await;
+        let data = bridge.read_thread(ACTIVE_THREAD).await.expect("thread");
+        assert!(
+            !data
+                .transcript
+                .iter()
+                .any(|entry| entry.text.as_deref() == Some("pong")),
+            "a denied turn must not reply",
+        );
+        assert!(
+            state.read().await.pending_approvals.is_empty(),
+            "the approval should be cleared after a denial",
+        );
     }
 }

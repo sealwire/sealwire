@@ -63,6 +63,12 @@ function emit(event, progressTracker = null) {
 }
 
 async function findSdk() {
+  // Test seam: point this at a stand-in module so integration tests can drive
+  // the real worker command loop without the real Anthropic SDK or an API key.
+  const override = process.env.CLAUDE_WORKER_SDK_MODULE;
+  if (override) {
+    return import(override);
+  }
   try {
     const sdk = await import("@anthropic-ai/claude-agent-sdk");
     return sdk;
@@ -477,10 +483,54 @@ function buildEntryOptions(entry, cmd, pendingApprovals, nextApprovalId, pending
   );
 }
 
-function ensureLiveSession(sdk, sessions, entry, context, resumeId = entry.providerSessionId) {
+// permissionMode/model/cwd are baked into the SDK query() at creation time and
+// the SDK exposes no setter that can switch *into* bypassPermissions, so a
+// settings change (e.g. flipping a thread to YOLO) can't be applied to a live
+// session — it has to be rebuilt. Report whether the baked options diverged.
+function sessionOptionsChanged(prev, next) {
+  if (!prev || !next) return false;
+  if (prev.permissionMode !== next.permissionMode) return true;
+  // `model` is only present when the command specified one; a resume omits it,
+  // so treat "unspecified" as "unchanged" rather than forcing a needless rebuild.
+  if (next.model && prev.model !== next.model) return true;
+  return false;
+}
+
+async function ensureLiveSession(
+  sdk,
+  sessions,
+  entry,
+  context,
+  resumeId = entry.providerSessionId,
+  desiredOptions = null,
+) {
   if (entry.session) {
-    startSessionStream(sessions, entry, context);
-    return;
+    if (desiredOptions && sessionOptionsChanged(entry.options, desiredOptions)) {
+      // Preserve a model the caller didn't re-send (resume commands omit it),
+      // otherwise the rebuilt session would silently drop to the default model.
+      if (!desiredOptions.model && entry.options?.model) {
+        desiredOptions.model = entry.options.model;
+      }
+      // Rebuilding reuses this same `entry`, so the old stream's finally (which
+      // nulls entry.streamTask) would race the new stream and clobber it. Tear
+      // the old session down and *await* its teardown before recreating. Safe to
+      // block here: the frontend only allows settings changes while idle, so no
+      // turn is in flight.
+      const oldTask = entry.streamTask;
+      closeSessionEntry(entry);
+      if (oldTask) {
+        try {
+          await oldTask;
+        } catch {
+          // close() interrupts the stream; teardown errors are expected here.
+        }
+      }
+      entry.options = desiredOptions;
+      // entry.session is null now — fall through to recreate it below.
+    } else {
+      startSessionStream(sessions, entry, context);
+      return;
+    }
   }
   entry.cancelFlag = { current: false };
   entry.fileDiffTracker = createFileDiffTracker(entry.options.cwd || entry.cwd);
@@ -617,21 +667,29 @@ async function main() {
             providerSessionId: cmd.provider_session_id,
             cmd,
           });
-          entry.options = buildEntryOptions(
-            entry,
-            cmd,
-            pendingApprovals,
-            () => nextApproval++,
-            pendingAskUserQuestions,
-            () => nextAskUserRequest++,
-          );
           sessions.set(entry.key, entry);
         } else {
           touchSessionEntry(entry);
         }
+        const desiredOptions = buildEntryOptions(
+          entry,
+          cmd,
+          pendingApprovals,
+          () => nextApproval++,
+          pendingAskUserQuestions,
+          () => nextAskUserRequest++,
+        );
+        if (!entry.options) entry.options = desiredOptions;
 
         try {
-          ensureLiveSession(sdk, sessions, entry, sessionContext, cmd.provider_session_id);
+          await ensureLiveSession(
+            sdk,
+            sessions,
+            entry,
+            sessionContext,
+            cmd.provider_session_id,
+            desiredOptions,
+          );
           emitResponse(cmd.id, {
             thread: await readThreadInfoOrFallback(sdk, cmd.provider_session_id, cmd),
           });
@@ -668,14 +726,6 @@ async function main() {
             providerSessionId,
             cmd,
           });
-          entry.options = buildEntryOptions(
-            entry,
-            cmd,
-            pendingApprovals,
-            () => nextApproval++,
-            pendingAskUserQuestions,
-            () => nextAskUserRequest++,
-          );
           sessions.set(entry.key, entry);
         }
         if (!cmd.prompt) {
@@ -683,9 +733,26 @@ async function main() {
           break;
         }
 
+        const desiredOptions = buildEntryOptions(
+          entry,
+          cmd,
+          pendingApprovals,
+          () => nextApproval++,
+          pendingAskUserQuestions,
+          () => nextAskUserRequest++,
+        );
+        if (!entry.options) entry.options = desiredOptions;
+
         try {
           log("sending message to session");
-          ensureLiveSession(sdk, sessions, entry, sessionContext, providerSessionId);
+          await ensureLiveSession(
+            sdk,
+            sessions,
+            entry,
+            sessionContext,
+            providerSessionId,
+            desiredOptions,
+          );
           entry.progressTracker.start();
           const userTurn = createUserTurn(cmd.prompt);
           userTurn.event.provider_session_id = providerSessionId;
@@ -806,11 +873,14 @@ export {
   closeAndRemoveSession,
   closeSessionEntry,
   createSessionEntry,
+  createWorkerSession,
+  ensureLiveSession,
   evictSessionsIfNeeded,
   findSessionEntry,
   flushEvents,
   handleSessionEvent,
   promoteSessionEntry,
+  sessionOptionsChanged,
 };
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

@@ -81,10 +81,20 @@ impl ClaudeCodeBridge {
                 .unwrap_or_else(|| ".".to_string());
             format!("{workspace_root}/claude-worker/worker.mjs")
         });
+        Self::spawn_with_worker_path(state, &worker_path).await
+    }
 
+    /// Like [`spawn`], but with an explicit worker path. Lets integration tests
+    /// point the bridge at a scripted fake worker without mutating the
+    /// process-global `CLAUDE_WORKER_PATH` env var (which would race other
+    /// tests running in parallel).
+    pub async fn spawn_with_worker_path(
+        state: Arc<RwLock<RelayState>>,
+        worker_path: &str,
+    ) -> Result<Self, String> {
         let mut command = Command::new("node");
         command
-            .arg(&worker_path)
+            .arg(worker_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1361,6 +1371,177 @@ mod tests {
             );
         }
         state
+    }
+
+    // --- bridge <-> scripted fake worker integration (B-layer) ---------------
+    //
+    // These spawn the REAL ClaudeCodeBridge against fake-claude-worker.mjs (via
+    // spawn_with_worker_path, no real SDK / API key). The fake echoes every
+    // command it receives to stderr, which lands in relay logs — so we can pin
+    // exactly what the bridge sent across settings changes. They need `node` on
+    // PATH and skip gracefully otherwise.
+
+    fn fake_worker_path() -> String {
+        let crate_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let workspace_root = crate_dir
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| ".".to_string());
+        format!("{workspace_root}/claude-worker/fake-claude-worker.mjs")
+    }
+
+    async fn spawn_fake_bridge() -> Option<(ClaudeCodeBridge, Arc<RwLock<RelayState>>)> {
+        let (tx, _) = tokio::sync::watch::channel(0);
+        let state = Arc::new(RwLock::new(RelayState::new(
+            "/tmp".to_string(),
+            tx,
+            crate::state::SecurityProfile::private(),
+        )));
+        match ClaudeCodeBridge::spawn_with_worker_path(state.clone(), &fake_worker_path()).await {
+            Ok(bridge) => Some((bridge, state)),
+            Err(_) => {
+                eprintln!("skipping bridge<->fake-worker test: node not available");
+                None
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn start_turn_sends_the_threads_current_permission_mode() {
+        // This is the Rust-side guard for the YOLO-still-prompts bug: a turn must
+        // carry the thread's *current* settings, freshly read, not a stale mode.
+        let Some((bridge, state)) = spawn_fake_bridge().await else {
+            return;
+        };
+        {
+            let mut relay = state.write().await;
+            relay.activate_thread(
+                test_thread("sess-1", "/tmp/x"),
+                "/tmp/x",
+                "claude-sonnet-4-6",
+                "bypass",
+                "workspace-write",
+                "high",
+                "device-1",
+            );
+        }
+
+        bridge
+            .start_turn("sess-1", "hello", "claude-sonnet-4-6", "high")
+            .await
+            .expect("start_turn should send");
+        assert!(
+            wait_for_log(&state, "type=send permissionMode=bypassPermissions", 5).await,
+            "first turn must reach the worker as bypassPermissions",
+        );
+
+        // The user flips the thread out of YOLO; the very next turn must carry the
+        // new mode, proving settings are re-read per turn rather than cached.
+        {
+            let mut relay = state.write().await;
+            relay.remember_thread_settings(
+                "sess-1",
+                "untrusted",
+                "workspace-write",
+                "high",
+                "claude-sonnet-4-6",
+            );
+        }
+        bridge
+            .start_turn("sess-1", "again", "claude-sonnet-4-6", "high")
+            .await
+            .expect("second start_turn should send");
+        assert!(
+            wait_for_log(&state, "type=send permissionMode=default", 5).await,
+            "after flipping to untrusted the next turn must reach the worker as default",
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_thread_sends_its_mapped_permission_mode() {
+        let Some((bridge, state)) = spawn_fake_bridge().await else {
+            return;
+        };
+        {
+            let mut relay = state.write().await;
+            relay.upsert_thread(test_thread("sess-7", "/tmp/y"));
+        }
+
+        bridge
+            .resume_thread("sess-7", "bypass", "workspace-write")
+            .await
+            .expect("resume should succeed");
+        assert!(
+            wait_for_log(
+                &state,
+                "type=resume permissionMode=bypassPermissions model=- session=sess-7",
+                5,
+            )
+            .await,
+            "resume must map its policy to bypassPermissions for the right session",
+        );
+    }
+
+    #[tokio::test]
+    async fn deferred_start_promotes_with_its_permission_mode() {
+        // A thread started without a prompt promotes on the first turn via a
+        // `start` command — that command must carry the mode chosen at creation.
+        let Some((bridge, state)) = spawn_fake_bridge().await else {
+            return;
+        };
+
+        let result = bridge
+            .start_thread(
+                "/tmp/d",
+                "claude-sonnet-4-6",
+                "bypass",
+                "workspace-write",
+                None,
+            )
+            .await
+            .expect("deferred start");
+        let pending_id = result.thread.id.clone();
+        assert!(
+            pending_id.starts_with("claude-pending-"),
+            "deferred start should yield a pending id, got {pending_id}",
+        );
+
+        bridge
+            .start_turn(&pending_id, "first message", "claude-sonnet-4-6", "high")
+            .await
+            .expect("first turn promotes the thread");
+        assert!(
+            wait_for_log(&state, "type=start permissionMode=bypassPermissions", 5).await,
+            "promotion `start` must carry the deferred thread's mode",
+        );
+        assert!(
+            wait_for_log(&state, "prompt=yes", 5).await,
+            "promotion `start` must include the first user message",
+        );
+    }
+
+    #[tokio::test]
+    async fn start_thread_with_prompt_sends_start_and_returns_a_thread() {
+        let Some((bridge, state)) = spawn_fake_bridge().await else {
+            return;
+        };
+
+        let result = bridge
+            .start_thread(
+                "/tmp/z",
+                "claude-sonnet-4-6",
+                "bypass",
+                "workspace-write",
+                Some("hi there"),
+            )
+            .await
+            .expect("start_thread with prompt");
+        assert!(!result.thread.id.is_empty());
+        assert!(
+            wait_for_log(&state, "type=start permissionMode=bypassPermissions", 5).await,
+            "an immediate start must reach the worker as a `start` with the mapped mode",
+        );
     }
 
     #[tokio::test]

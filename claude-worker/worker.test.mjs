@@ -2,10 +2,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  closeSessionEntry,
   createSessionEntry,
+  createWorkerSession,
+  ensureLiveSession,
   evictSessionsIfNeeded,
   findSessionEntry,
   flushEvents,
+  sessionOptionsChanged,
 } from "./worker.mjs";
 
 async function* streamMessages(messages) {
@@ -140,4 +144,163 @@ test("flushEvents records liveness against the owning session tracker", async ()
     trackerB.records.map((event) => event.provider_session_id),
     ["session-b", "session-b"],
   );
+});
+
+// A fake SDK whose query() records the options it was booted with and blocks
+// (like a live session awaiting input) until interrupt(), so we can observe
+// whether ensureLiveSession reuses or rebuilds the underlying query.
+function makeFakeSdk() {
+  const queries = [];
+  return {
+    queries,
+    query({ options }) {
+      let release = () => {};
+      const ended = new Promise((resolve) => {
+        release = resolve;
+      });
+      const record = { options, resume: options.resume ?? null, interrupted: false };
+      queries.push(record);
+      return {
+        async *[Symbol.asyncIterator]() {
+          await ended; // mimic an idle live session: yield nothing until closed
+        },
+        interrupt() {
+          record.interrupted = true;
+          release();
+        },
+      };
+    },
+  };
+}
+
+function rebuildContext() {
+  return { pendingApprovals: new Map(), pendingAskUserQuestions: new Map() };
+}
+
+test("sessionOptionsChanged flags permissionMode/model but ignores an omitted model", () => {
+  assert.equal(
+    sessionOptionsChanged({ permissionMode: "default" }, { permissionMode: "bypassPermissions" }),
+    true,
+  );
+  assert.equal(
+    sessionOptionsChanged(
+      { permissionMode: "default", model: "a" },
+      { permissionMode: "default", model: "b" },
+    ),
+    true,
+  );
+  // A resume command omits model — that must not be read as a change.
+  assert.equal(
+    sessionOptionsChanged(
+      { permissionMode: "default", model: "a" },
+      { permissionMode: "default" },
+    ),
+    false,
+  );
+  assert.equal(
+    sessionOptionsChanged(
+      { permissionMode: "default", model: "a" },
+      { permissionMode: "default", model: "a" },
+    ),
+    false,
+  );
+  assert.equal(sessionOptionsChanged(null, { permissionMode: "x" }), false);
+});
+
+test("ensureLiveSession rebuilds the SDK query when a thread flips to YOLO", async () => {
+  const sdk = makeFakeSdk();
+  const sessions = new Map();
+  const context = rebuildContext();
+  const entry = createSessionEntry({
+    key: "session:sess-1",
+    providerSessionId: "sess-1",
+    cmd: { cwd: "/tmp", model: "claude-sonnet-4-6" },
+  });
+  entry.options = {
+    cwd: "/tmp",
+    permissionMode: "default",
+    model: "claude-sonnet-4-6",
+    canUseTool: () => {},
+  };
+  sessions.set(entry.key, entry);
+
+  await captureStdout(async () => {
+    // Boot the initial default-mode session.
+    await ensureLiveSession(sdk, sessions, entry, context, "sess-1", entry.options);
+    assert.equal(sdk.queries.length, 1);
+    assert.equal(sdk.queries[0].options.permissionMode, "default");
+
+    // Re-sending with identical options must reuse the live session, not rebuild.
+    await ensureLiveSession(sdk, sessions, entry, context, "sess-1", {
+      cwd: "/tmp",
+      permissionMode: "default",
+      model: "claude-sonnet-4-6",
+      canUseTool: () => {},
+    });
+    assert.equal(sdk.queries.length, 1);
+
+    // Flip to bypassPermissions → tear down + rebuild, resuming the same session.
+    await ensureLiveSession(sdk, sessions, entry, context, "sess-1", {
+      cwd: "/tmp",
+      permissionMode: "bypassPermissions",
+      allowDangerouslySkipPermissions: true,
+      model: "claude-sonnet-4-6",
+      canUseTool: () => {},
+    });
+  });
+
+  assert.equal(sdk.queries.length, 2);
+  assert.equal(sdk.queries[0].interrupted, true);
+  assert.equal(sdk.queries[1].options.permissionMode, "bypassPermissions");
+  assert.equal(sdk.queries[1].options.allowDangerouslySkipPermissions, true);
+  assert.equal(sdk.queries[1].resume, "sess-1");
+  assert.equal(entry.options.permissionMode, "bypassPermissions");
+
+  closeSessionEntry(entry);
+});
+
+test("ensureLiveSession rebuilds on a model switch and preserves model when omitted", async () => {
+  const sdk = makeFakeSdk();
+  const sessions = new Map();
+  const context = rebuildContext();
+  const entry = createSessionEntry({
+    key: "session:sess-2",
+    providerSessionId: "sess-2",
+    cmd: { cwd: "/tmp", model: "claude-opus-4-6" },
+  });
+  entry.options = {
+    cwd: "/tmp",
+    permissionMode: "default",
+    model: "claude-opus-4-6",
+    canUseTool: () => {},
+  };
+  sessions.set(entry.key, entry);
+
+  await captureStdout(async () => {
+    await ensureLiveSession(sdk, sessions, entry, context, "sess-2", entry.options);
+
+    // Same mode, different model → rebuild with the new model.
+    await ensureLiveSession(sdk, sessions, entry, context, "sess-2", {
+      cwd: "/tmp",
+      permissionMode: "default",
+      model: "claude-sonnet-4-6",
+      canUseTool: () => {},
+    });
+    assert.equal(sdk.queries.length, 2);
+    assert.equal(sdk.queries[1].options.model, "claude-sonnet-4-6");
+
+    // Resume-style change (mode flips, model omitted) must keep the live model.
+    await ensureLiveSession(sdk, sessions, entry, context, "sess-2", {
+      cwd: "/tmp",
+      permissionMode: "bypassPermissions",
+      allowDangerouslySkipPermissions: true,
+      canUseTool: () => {},
+    });
+  });
+
+  assert.equal(sdk.queries.length, 3);
+  assert.equal(sdk.queries[2].options.permissionMode, "bypassPermissions");
+  assert.equal(sdk.queries[2].options.model, "claude-sonnet-4-6");
+
+  closeSessionEntry(entry);
 });
