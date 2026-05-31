@@ -63,10 +63,17 @@ async function main() {
       const log = document.querySelector("#client-log-root")?.textContent || "";
       return log.includes("Relay booted");
     });
-    assert.match(
-      (await page.textContent("#workspace-title")) || "",
-      /^(Relay console|Ready in .+|agent-relay)$/,
-      "workspace header should render the launch or active workspace state"
+    // The active-state title is the workspace name, which is the relay cwd's
+    // basename — "sealwire" in CI, whatever the checkout dir is locally — so
+    // derive it from ROOT instead of hardcoding the old repo name. (The
+    // post-launch check below already uses path.basename(ROOT) the same way.)
+    const launchWorkspaceTitle = (await page.textContent("#workspace-title")) || "";
+    const expectedWorkspaceName = path.basename(ROOT);
+    assert.ok(
+      launchWorkspaceTitle === "Relay console"
+        || /^Ready in .+$/.test(launchWorkspaceTitle)
+        || launchWorkspaceTitle === expectedWorkspaceName,
+      `workspace header should render the launch or active workspace state (got "${launchWorkspaceTitle}")`
     );
     assert.ok(
       ((await page.textContent("#overview-security-badges")) || "").trim().length > 0,
