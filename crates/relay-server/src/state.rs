@@ -12,6 +12,7 @@ use std::{
 };
 
 pub use self::app::{AppState, ApprovalError, AskUserAnswerError};
+#[cfg(test)]
 use self::relay::TranscriptRecord;
 pub(crate) use self::relay::{
     parse_ask_user_questions, ApprovalKind, BrokerPendingMessage, CachedRemoteActionResult,
