@@ -74,6 +74,7 @@
     "test:browser:public-long-transcript": "npm run build && node scripts/browser-public-long-transcript-e2e.mjs",
     "test:browser:public-transcript-delta": "npm run build && node scripts/browser-public-transcript-delta-e2e.mjs",
     "test:browser:public-thread-settings": "npm run build && AGENT_PROVIDERS=fake node scripts/browser-public-thread-settings-e2e.mjs",
+    "test:browser:public-settings-load": "npm run build && AGENT_PROVIDERS=fake node scripts/browser-public-settings-load-e2e.mjs",
     "test:browser:public-remote-follow": "npm run build && node scripts/browser-public-remote-follow-e2e.mjs",
     "test:browser:public-multi-remote-follow": "npm run build && node scripts/browser-public-multi-remote-follow-e2e.mjs",
     "test:browser:public-core": "node scripts/e2e/run-browser-suite.mjs --suite public-core",

@@ -845,6 +845,36 @@ mod path_scope_tests {
         assert_eq!(snap_b_back.reasoning_effort, "low");
     }
 
+    #[tokio::test]
+    async fn start_session_preserves_chosen_effort() {
+        // Regression for the "I start at high but the session runs medium" report.
+        // The neighboring test passes effort=high at start but only asserts it
+        // after an update — so a backend that dropped the start effort would slip
+        // through. Pin the post-start value directly.
+        let project = TempDir::new().expect("project tempdir");
+        let (app, _p, _o) = build_app(project.path().to_str().unwrap()).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let snap = app
+            .start_session(StartSessionInput {
+                device_id: Some("device-1".to_string()),
+                cwd: Some(project.path().display().to_string()),
+                model: None,
+                effort: Some("high".to_string()),
+                approval_policy: Some("untrusted".to_string()),
+                sandbox: Some("workspace-write".to_string()),
+                provider: Some("fake".to_string()),
+                initial_prompt: None,
+            })
+            .await
+            .expect("start");
+
+        assert_eq!(
+            snap.reasoning_effort, "high",
+            "start_session must keep the effort the caller chose",
+        );
+    }
+
     // Settings harness: drive a realistic session lifecycle and assert the
     // shared settings invariants (matchable model, no blank controls) after
     // every step, plus that each setting is preserved/isolated as expected.

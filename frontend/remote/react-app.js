@@ -533,13 +533,18 @@ function RemoteApp() {
 
   useEffect(() => {
     const availableModels = session?.available_models || [];
-    const nextComposerEffort = resolveReasoningEffortValue(
-      availableModels,
-      remoteUi.composerModel || session?.model || "",
-      remoteUi.composerEffort
-    );
-    if (nextComposerEffort !== remoteUi.composerEffort) {
-      remoteUiStore.getState().setComposerEffort(nextComposerEffort);
+    // Only re-validate an *explicitly chosen* composer effort against the
+    // current model. Leave an empty (unset) effort alone — turning it into a
+    // model default here would re-break the "follow the session" fallback.
+    if (remoteUi.composerEffort) {
+      const nextComposerEffort = resolveReasoningEffortValue(
+        availableModels,
+        remoteUi.composerModel || session?.model || "",
+        remoteUi.composerEffort
+      );
+      if (nextComposerEffort !== remoteUi.composerEffort) {
+        remoteUiStore.getState().setComposerEffort(nextComposerEffort);
+      }
     }
 
     const nextSessionEffort = resolveReasoningEffortValue(
@@ -558,6 +563,12 @@ function RemoteApp() {
     session?.available_models,
     session?.model,
   ]);
+
+  // Switching to a different session drops any per-surface effort override so
+  // the composer/panel/send fall back to the newly-active session's effort.
+  useEffect(() => {
+    remoteUiStore.getState().setComposerEffort("");
+  }, [session?.active_thread_id]);
 
   useRemoteSessionRuntime({
     remoteAuth: currentState.remoteAuth,
@@ -713,7 +724,7 @@ function RemoteApp() {
     try {
       const sent = await handlers.onSendMessage(
         remoteUi.composerDraft,
-        remoteUi.composerEffort,
+        remoteUi.composerEffort || session?.reasoning_effort || "",
         remoteUi.composerModel || session?.model || ""
       );
       if (sent) {

@@ -33,7 +33,8 @@
       "public-thread-settings",
       "public-persistence",
       "public-revoke",
-      "public-reclaim"
+      "public-reclaim",
+      "public-settings-load"
     ],
     "public-full": [
       "public-enrollment",
@@ -46,7 +47,8 @@
       "public-broker",
       "public-long-transcript",
       "public-remote-follow",
-      "public-multi-remote-follow"
+      "public-multi-remote-follow",
+      "public-settings-load"
     ],
     "self-hosted": [
       "self-hosted-pairing"
@@ -69,6 +71,13 @@
       "provider": "fake-compatible",
       "transport": "local",
       "coverage": ["permission-modes"]
+    },
+    "public-settings-load": {
+      "script": "browser-public-settings-load-e2e.mjs",
+      "tier": "core",
+      "provider": "fake-compatible",
+      "transport": "public",
+      "coverage": ["settings-load"]
     },
     "local-auth": {
       "script": "browser-local-auth-e2e.mjs",

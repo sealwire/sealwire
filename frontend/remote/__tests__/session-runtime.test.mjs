@@ -47,6 +47,86 @@ test("deriveSessionRuntime returns runtime state from the session view", () => {
   });
 });
 
+test("deriveSessionRuntime surfaces the session's effort on a fresh surface", () => {
+  // Repro for "I switched to my phone and the effort wasn't loaded": a fresh
+  // surface starts with no composer effort chosen, so the runtime must reflect
+  // the session's actual reasoning_effort instead of falling back to the model
+  // default (which silently downgrades a high session to medium). Provider
+  // agnostic — this is pure frontend state, identical for codex and claude.
+  const session = {
+    active_thread_id: "thread-1",
+    available_models: [
+      {
+        model: "gpt-5-codex",
+        display_name: "Codex",
+        supported_reasoning_efforts: ["low", "medium", "high", "xhigh"],
+        default_reasoning_effort: "medium",
+      },
+    ],
+    model: "gpt-5-codex",
+    reasoning_effort: "high",
+  };
+  const sessionView = {
+    composerDisabled: false,
+    currentApprovalId: null,
+    messagePlaceholder: "Message remotely...",
+  };
+
+  const runtime = deriveSessionRuntime({ composerEffort: "", session, sessionView });
+
+  assert.equal(
+    runtime.currentEffortValue,
+    "high",
+    "runtime effort must follow the session, not the device's local default",
+  );
+});
+
+test("deriveSessionRuntime uses the session's model on a fresh surface", () => {
+  // Same invariant for model: a fresh surface (composerModel unset) must show
+  // the session's model, not an empty/default.
+  const session = {
+    active_thread_id: "thread-1",
+    available_models: [
+      { model: "gpt-5-codex", supported_reasoning_efforts: ["low", "medium", "high"] },
+    ],
+    model: "gpt-5-codex",
+    reasoning_effort: "high",
+  };
+  const runtime = deriveSessionRuntime({
+    composerModel: "",
+    composerEffort: "",
+    session,
+    sessionView: { composerDisabled: false, currentApprovalId: null, messagePlaceholder: "" },
+  });
+
+  assert.equal(runtime.currentModelValue, "gpt-5-codex");
+});
+
+test("deriveSessionRuntime respects an explicit composer effort override", () => {
+  // The session-default fallback must not clobber a deliberate per-message
+  // choice: if the surface picked low, sending should stay low even on a high
+  // session.
+  const session = {
+    active_thread_id: "thread-1",
+    available_models: [
+      {
+        model: "gpt-5-codex",
+        supported_reasoning_efforts: ["low", "medium", "high", "xhigh"],
+        default_reasoning_effort: "medium",
+      },
+    ],
+    model: "gpt-5-codex",
+    reasoning_effort: "high",
+  };
+  const runtime = deriveSessionRuntime({
+    composerEffort: "low",
+    session,
+    sessionView: { composerDisabled: false, currentApprovalId: null, messagePlaceholder: "" },
+  });
+
+  assert.equal(runtime.currentEffortValue, "low");
+});
+
 test("deriveSessionRuntime disables send and shows stop for a running turn", () => {
   const runtime = deriveSessionRuntime({
     session: {

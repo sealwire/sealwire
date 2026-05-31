@@ -21,7 +21,10 @@ export function createDefaultSessionDraft(provider = "codex") {
 export function createRemoteUiStore(initialState = {}) {
   return createStore((set) => ({
     composerDraft: "",
-    composerEffort: "medium",
+    // Empty = "this surface hasn't overridden the session's effort". Readers
+    // fall back to session.reasoning_effort, so opening a session on a new
+    // device shows/sends its real effort instead of a hardcoded medium.
+    composerEffort: "",
     composerModel: "",
     deviceLabelDraft: loadDeviceLabel(),
     pairingInputValue: "",
@@ -51,7 +54,7 @@ export function createRemoteUiStore(initialState = {}) {
     },
     setComposerEffort(value) {
       set({
-        composerEffort: value || "medium",
+        composerEffort: value || "",
       });
     },
     setComposerModel(value) {
