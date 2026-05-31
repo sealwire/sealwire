@@ -133,6 +133,60 @@ fn compact_for_local_web_limits_snapshot_size() {
 }
 
 #[test]
+fn compact_for_surfaces_truncates_a_single_oversized_agent_message() {
+    // Where the streaming-tail bug begins: a single long final assistant message
+    // is ellipsis-truncated and flips transcript_truncated, so the surface can
+    // only recover the full text by re-hydrating. Short entries are left intact
+    // and nothing is dropped. Documents the exact per-entry threshold the
+    // frontend re-hydration gate must react to.
+    for (profile, max_chars) in [
+        (
+            SessionSnapshotCompactProfile::RemoteSurface,
+            MAX_BROKER_TRANSCRIPT_CHARS,
+        ),
+        (SessionSnapshotCompactProfile::LocalWeb, 1_600usize),
+    ] {
+        let mut snapshot = make_snapshot();
+        snapshot.logs = vec![];
+        snapshot.pending_approvals = vec![];
+        snapshot.transcript_truncated = false;
+        snapshot.transcript = vec![
+            TranscriptEntryView {
+                item_id: Some("u1".to_string()),
+                kind: TranscriptEntryKind::UserText,
+                text: Some("summarize the repo".to_string()),
+                status: "completed".to_string(),
+                turn_id: Some("turn-1".to_string()),
+                tool: None,
+            },
+            TranscriptEntryView {
+                item_id: Some("a1".to_string()),
+                kind: TranscriptEntryKind::AgentText,
+                text: Some("Z".repeat(max_chars * 4)),
+                status: "completed".to_string(),
+                turn_id: Some("turn-1".to_string()),
+                tool: None,
+            },
+        ];
+
+        let compacted = snapshot.compact_for(profile);
+
+        // Both entries survive — nothing is dropped at this size.
+        assert_eq!(compacted.transcript.len(), 2);
+        // The short user message is untouched.
+        assert_eq!(
+            compacted.transcript[0].text.as_deref(),
+            Some("summarize the repo")
+        );
+        // The long final message is ellipsis-truncated and the snapshot flagged.
+        assert!(compacted.transcript_truncated);
+        let agent_text = compacted.transcript[1].text.as_deref().unwrap();
+        assert!(agent_text.chars().count() <= max_chars);
+        assert!(agent_text.ends_with("..."));
+    }
+}
+
+#[test]
 fn compact_for_ios_surface_currently_reuses_remote_budget() {
     let ios = make_snapshot().compact_for(SessionSnapshotCompactProfile::IosSurface);
     let remote = make_snapshot().compact_for(SessionSnapshotCompactProfile::RemoteSurface);

@@ -1844,3 +1844,139 @@ test("sendHeartbeat dispatches a heartbeat when the current device holds control
   assert.equal(state.pendingActions.size, 0);
   await pending;
 });
+
+test("applySessionSnapshot re-hydrates a long final message added after the first hydration", async () => {
+  // Regression for the streaming-tail bug: an early oversized snapshot hydrates
+  // and marks the thread "complete"; the long FINAL assistant message then
+  // arrives as a new entry in a later truncated snapshot and must still be
+  // hydrated to full text (previously it stayed frozen on its "…" preview until
+  // the user switched threads and back).
+  const browser = activeBrowser || installBrowserStubs();
+  void browser;
+  const sentPayloads = [];
+  const replyOne = `${"A".repeat(4000)}${"B".repeat(2000)}`;
+  const replyTwo = `${"C".repeat(4000)}${"D".repeat(2000)}`;
+
+  // Authoritative full transcript on the "backend"; grows as the turn proceeds.
+  let backendEntries = [
+    { item_id: "item-1", kind: "agent_text", text: replyOne, status: "completed", turn_id: "turn-1", tool: null },
+  ];
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { handleRemoteBrokerPayload } = await import("./actions.js");
+  const { applySessionSnapshot } = await import("./session-ops.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-1",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: null,
+    sessionClaimExpiresAt: null,
+  });
+  seedSocketState(state, {
+    socketConnected: true,
+    socketPeerId: "surface-peer-1",
+  });
+  state.pendingActions.clear();
+  seedTranscriptHydrationState(state);
+  state.socket = {
+    readyState: 1,
+    send(frameText) {
+      const frame = JSON.parse(frameText);
+      sentPayloads.push(frame.payload);
+      if (frame.payload.request?.type !== "fetch_thread_transcript") {
+        return;
+      }
+      setImmediate(async () => {
+        await handleRemoteBrokerPayload({
+          kind: "remote_action_result",
+          action_id: frame.payload.action_id,
+          action: "fetch_thread_transcript",
+          ok: true,
+          snapshot: {},
+          thread_transcript: {
+            thread_id: "thread-1",
+            entries: backendEntries.map((entry) => ({ ...entry })),
+            prev_cursor: null,
+          },
+        });
+      });
+    },
+  };
+
+  const fetchCount = () =>
+    sentPayloads.filter((payload) => payload.request?.type === "fetch_thread_transcript").length;
+  const snap = (transcript) => ({
+    active_thread_id: "thread-1",
+    active_controller_device_id: null,
+    active_controller_last_seen_at: null,
+    active_flags: [],
+    active_turn_id: "turn-1",
+    allowed_roots: [],
+    approval_policy: "untrusted",
+    audit_enabled: false,
+    available_models: [],
+    broker_can_read_content: true,
+    broker_channel_id: "room-a",
+    broker_connected: true,
+    broker_peer_id: "relay-1",
+    codex_connected: true,
+    controller_lease_expires_at: null,
+    controller_lease_seconds: 15,
+    current_cwd: "/tmp/project",
+    current_status: "idle",
+    device_records: [],
+    e2ee_enabled: false,
+    logs: [],
+    model: "gpt-5.4",
+    paired_devices: [],
+    pending_approvals: [],
+    pending_pairing_requests: [],
+    provider: "codex",
+    reasoning_effort: "medium",
+    sandbox: "workspace-write",
+    security_mode: "managed",
+    service_ready: true,
+    transcript_truncated: true,
+    transcript,
+  });
+
+  // Snapshot 1: only the first long reply, truncated -> hydrates to full text.
+  applySessionSnapshot(
+    snap([
+      { item_id: "item-1", kind: "agent_text", text: `${"A".repeat(1200)}...`, status: "completed", turn_id: "turn-1", tool: null },
+    ])
+  );
+  await waitFor(() => state.transcriptHydrationTailReady === true);
+  await waitFor(() => state.transcriptHydrationPromise === null);
+  assert.equal(state.session.transcript.find((entry) => entry.item_id === "item-1")?.text, replyOne);
+  assert.equal(fetchCount(), 1);
+
+  // The long FINAL message arrives as a new entry.
+  backendEntries = [
+    { item_id: "item-1", kind: "agent_text", text: replyOne, status: "completed", turn_id: "turn-1", tool: null },
+    { item_id: "item-2", kind: "agent_text", text: replyTwo, status: "completed", turn_id: "turn-1", tool: null },
+  ];
+  applySessionSnapshot(
+    snap([
+      { item_id: "item-1", kind: "agent_text", text: `${"A".repeat(1200)}...`, status: "completed", turn_id: "turn-1", tool: null },
+      { item_id: "item-2", kind: "agent_text", text: `${"C".repeat(1200)}...`, status: "completed", turn_id: "turn-1", tool: null },
+    ])
+  );
+  await waitFor(
+    () => state.session.transcript.find((entry) => entry.item_id === "item-2")?.text === replyTwo
+  );
+
+  assert.equal(state.session.transcript.find((entry) => entry.item_id === "item-2")?.text, replyTwo);
+  assert.equal(state.session.transcript_truncated, false);
+  assert.equal(fetchCount(), 2, "the new final message triggered exactly one more fetch");
+});

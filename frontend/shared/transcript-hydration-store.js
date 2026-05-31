@@ -55,6 +55,28 @@ export function restoreHydratedTranscriptSnapshot(state, snapshot) {
   });
 }
 
+// True when the snapshot's tail contains a truncated ("…"-suffixed) entry whose
+// full text is not already held in the hydration cache. Used to decide whether a
+// structural change to a same-thread snapshot warrants re-fetching the tail.
+function snapshotTailNeedsFullText(state, snapshot) {
+  const entries = state.transcriptHydrationEntries;
+  for (const entry of snapshot.transcript || []) {
+    const text = entry?.text;
+    if (!looksTruncated(text)) {
+      continue;
+    }
+    const existingText = entries?.get?.(entry.item_id)?.text;
+    const haveFullText =
+      typeof existingText === "string"
+      && !looksTruncated(existingText)
+      && existingText.length >= text.length;
+    if (!haveFullText) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export function prepareTranscriptHydrationState(state, snapshot) {
   if (!snapshot?.active_thread_id || !snapshot.transcript_truncated) {
     return {
@@ -67,13 +89,31 @@ export function prepareTranscriptHydrationState(state, snapshot) {
   }
 
   const signature = transcriptHydrationSignature(snapshot);
-  const sameThreadWithVisibleEntries =
-    state.transcriptHydrationThreadId === snapshot.active_thread_id
-    && state.transcriptHydrationOrder.length > 0;
-  const patch = sameThreadWithVisibleEntries
+  const sameThread = state.transcriptHydrationThreadId === snapshot.active_thread_id;
+  const sameThreadWithVisibleEntries = sameThread && state.transcriptHydrationOrder.length > 0;
+
+  // Re-arm hydration when the visible tail changed shape AND that new shape
+  // carries a truncated entry we don't yet hold full text for — e.g. the long
+  // final assistant message that arrives after the tool work. Without this, the
+  // first oversized snapshot in a turn latches transcriptHydrationTailReady=true
+  // and every later truncated snapshot (including the one with the final long
+  // message) is skipped, leaving the UI stuck on the "…" preview until the
+  // thread is switched away and back.
+  //
+  // Both conditions matter:
+  //   * the signature change (it hashes ids/kinds/turn, NOT the entry text)
+  //     gates this to structural changes, so the repeated snapshots of a single
+  //     turn can't loop and a pure preview-text change never re-fetches;
+  //   * the truncated-and-uncovered check means adding a short, complete entry
+  //     (already fully present in the snapshot) does not trigger a needless
+  //     fetch, and an entry whose full text we already cached is left alone.
+  const tailShapeChanged = sameThread && state.transcriptHydrationSignature !== signature;
+  const reHydrateTail =
+    sameThreadWithVisibleEntries && tailShapeChanged && snapshotTailNeedsFullText(state, snapshot);
+
+  let patch = sameThreadWithVisibleEntries
     ? createMergedSnapshotTailPatch(state, snapshot, signature)
-    : state.transcriptHydrationThreadId !== snapshot.active_thread_id
-      || state.transcriptHydrationSignature !== signature
+    : !sameThread || state.transcriptHydrationSignature !== signature
         ? {
           ...createClearedTranscriptHydrationPatch(),
           transcriptHydrationBaseSnapshot: snapshot,
@@ -84,12 +124,25 @@ export function prepareTranscriptHydrationState(state, snapshot) {
           transcriptHydrationBaseSnapshot: snapshot,
         };
 
+  if (reHydrateTail) {
+    // Keep the already-hydrated entries/order for an instant render, but re-arm
+    // the fetch path so the new tail (with full text) is pulled exactly once.
+    patch = {
+      ...patch,
+      transcriptHydrationTailReady: false,
+      transcriptHydrationStatus: "idle",
+      transcriptHydrationPromise: null,
+    };
+  }
+
   return {
     signature,
-    shouldHydrate: !state.transcriptHydrationTailReady,
+    shouldHydrate: reHydrateTail || !state.transcriptHydrationTailReady,
     alreadyComplete:
-      state.transcriptHydrationTailReady && state.transcriptHydrationOlderCursor == null,
-    existingPromise: state.transcriptHydrationPromise,
+      !reHydrateTail
+      && state.transcriptHydrationTailReady
+      && state.transcriptHydrationOlderCursor == null,
+    existingPromise: reHydrateTail ? null : state.transcriptHydrationPromise,
     patch,
   };
 }

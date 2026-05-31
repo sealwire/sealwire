@@ -207,3 +207,75 @@ test("buildHydratedTranscriptProgress returns null when thread ids differ", () =
 
   assert.equal(progress, null);
 });
+
+test("prepareTranscriptHydrationState re-arms hydration when a new oversized entry joins a hydrated thread", () => {
+  // Already hydrated (tailReady) — exactly the steady state a few hundred ms into
+  // a turn. A new, truncated final message must re-arm the fetch path even though
+  // the thread was previously "complete".
+  const state = hydratedState();
+  const snapshot = {
+    active_thread_id: "thread-1",
+    active_turn_id: "turn-3",
+    transcript_truncated: true,
+    transcript: [
+      {
+        item_id: "item-3",
+        kind: "command",
+        text: "cargo test\npassed ...",
+        status: "completed",
+        turn_id: "turn-3",
+        tool: null,
+      },
+      {
+        item_id: "item-final",
+        kind: "agent_text",
+        text: `${"Z".repeat(1200)}...`,
+        status: "completed",
+        turn_id: "turn-3",
+        tool: null,
+      },
+    ],
+  };
+
+  const prepared = prepareTranscriptHydrationState(state, snapshot);
+
+  assert.equal(prepared.shouldHydrate, true);
+  assert.equal(prepared.alreadyComplete, false);
+  assert.equal(prepared.existingPromise, null);
+  // The fetch path is re-armed...
+  assert.equal(prepared.patch.transcriptHydrationTailReady, false);
+  // ...without discarding the already-hydrated history (instant render).
+  assert.deepEqual(prepared.patch.transcriptHydrationOrder, [
+    "item-1",
+    "item-2",
+    "item-3",
+    "item-final",
+  ]);
+});
+
+test("prepareTranscriptHydrationState does not re-hydrate when only an existing entry's preview shrinks", () => {
+  // Same shape as the signature already on file (single item-3), only the
+  // compacted preview text differs. The cached full text already covers it, so
+  // no re-fetch — this is what keeps repeated snapshots of one turn loop-safe.
+  const state = hydratedState();
+  const snapshot = {
+    active_thread_id: "thread-1",
+    active_turn_id: "turn-3",
+    transcript_truncated: true,
+    transcript: [
+      {
+        item_id: "item-3",
+        kind: "command",
+        text: "cargo test\npa ...",
+        status: "completed",
+        turn_id: "turn-3",
+        tool: null,
+      },
+    ],
+  };
+
+  const prepared = prepareTranscriptHydrationState(state, snapshot);
+
+  assert.equal(prepared.shouldHydrate, false);
+  assert.equal(prepared.alreadyComplete, true);
+});
