@@ -22,9 +22,10 @@ use crate::{
 
 use super::{
     crypto::{decrypt_json, encrypt_json, EncryptedEnvelope},
-    frame_bytes_for_payload, issue_session_claim, publish_payload,
-    verify_device_claim_challenge_proof, verify_device_claim_init_proof, verify_session_claim,
-    BrokerSocket, OutboundBrokerPayload, MAX_BROKER_TEXT_FRAME_BYTES,
+    issue_session_claim,
+    protocol::{frame_bytes_for_payload, OutboundBrokerPayload},
+    publish_payload, verify_device_claim_challenge_proof, verify_device_claim_init_proof,
+    verify_session_claim, BrokerSocket, MAX_BROKER_TEXT_FRAME_BYTES,
 };
 
 const SESSION_CONTROL_REQUIRED_ERROR: &str =
