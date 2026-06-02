@@ -158,8 +158,6 @@ import { attachTranscriptHistoryLoader } from "./shared/transcript-history-loade
 
 const DEVICE_STORAGE_KEY = "agent-relay.device-id";
 const API_TOKEN_STORAGE_KEY = "agent-relay.api-token";
-const CONTROL_HEARTBEAT_MS = 5000;
-const LEASE_EXPIRY_REFRESH_SKEW_MS = 250;
 
 const state = {
   apiToken: loadApiToken(),
@@ -371,7 +369,15 @@ function refreshAgentWorkingIndicator() {
   if (!agentWorkingIndicator) return;
   const approval = session?.pending_approvals?.[0] || null;
   const phase = session?.current_phase ?? null;
-  const offline = !session || approval || !session.provider_connected || !session.active_thread_id || !phase;
+  // The snapshot's phase describes only the active thread. Show the working
+  // indicator solely when the thread being viewed IS that active thread —
+  // otherwise the console home (or another thread's page) would light up for
+  // work happening elsewhere. Per-thread activity is surfaced by the sidebar
+  // badge (session.thread_activity) instead.
+  const viewingActive = Boolean(
+    session?.active_thread_id && state.viewThreadId === session.active_thread_id
+  );
+  const offline = !session || approval || !session.provider_connected || !viewingActive || !phase;
   if (offline) {
     agentWorkingIndicator.hidden = true;
     return;

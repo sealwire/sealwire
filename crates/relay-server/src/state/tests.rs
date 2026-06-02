@@ -262,6 +262,7 @@ fn test_cached_remote_action_result(action_kind: &str, ok: bool) -> CachedRemote
             current_tool: None,
             last_progress_at: None,
             active_flags: Vec::new(),
+            thread_activity: Vec::new(),
             current_cwd: "/tmp/project".to_string(),
             model: DEFAULT_MODEL.to_string(),
             available_models: Vec::new(),
@@ -397,6 +398,71 @@ fn activate_thread_sets_active_controller_on_start() {
     );
     assert!(relay.can_device_send_message("device-a"));
     assert!(!relay.can_device_send_message("device-b"));
+}
+
+#[test]
+fn snapshot_thread_activity_tracks_active_and_background_running_threads() {
+    let mut relay = test_state();
+    relay.activate_thread(
+        test_thread("thread-active", "/tmp/project"),
+        "/tmp/project",
+        DEFAULT_MODEL,
+        DEFAULT_APPROVAL_POLICY,
+        DEFAULT_SANDBOX,
+        DEFAULT_EFFORT,
+        "device-a",
+    );
+    relay.set_active_turn(Some("turn-active".to_string()));
+    relay.touch_progress(Some("tool"), Some("Bash"));
+
+    // A backgrounded thread mid-turn must surface as working...
+    relay.bg_set_active_turn("thread-bg", Some("turn-bg".to_string()), 1_000);
+    // ...while a backgrounded thread without an in-flight turn must not.
+    relay.bg_set_thread_status("thread-idle", "idle".to_string(), Vec::new(), 1_000);
+
+    let snapshot = relay.snapshot();
+    let ids: Vec<&str> = snapshot
+        .thread_activity
+        .iter()
+        .map(|activity| activity.thread_id.as_str())
+        .collect();
+    assert!(
+        ids.contains(&"thread-active"),
+        "active thread should be working"
+    );
+    assert!(
+        ids.contains(&"thread-bg"),
+        "backgrounded turn should be working"
+    );
+    assert!(
+        !ids.contains(&"thread-idle"),
+        "idle backgrounded thread must not appear as working"
+    );
+
+    let active = snapshot
+        .thread_activity
+        .iter()
+        .find(|activity| activity.thread_id == "thread-active")
+        .expect("active thread activity present");
+    assert_eq!(active.phase.as_deref(), Some("tool"));
+    assert_eq!(active.tool.as_deref(), Some("Bash"));
+}
+
+#[test]
+fn snapshot_thread_activity_empty_when_active_thread_idle() {
+    let mut relay = test_state();
+    relay.activate_thread(
+        test_thread("thread-1", "/tmp/project"),
+        "/tmp/project",
+        DEFAULT_MODEL,
+        DEFAULT_APPROVAL_POLICY,
+        DEFAULT_SANDBOX,
+        DEFAULT_EFFORT,
+        "device-a",
+    );
+
+    // No active turn and no progress phase => nothing is working.
+    assert!(relay.snapshot().thread_activity.is_empty());
 }
 
 #[test]

@@ -929,6 +929,18 @@ input:focus, textarea:focus, select:focus {
   align-items: center;
   gap: 6px;
 }
+.conversation-activity-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent-primary, #4c8bf5);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent-primary, #4c8bf5) 60%, transparent);
+  animation: agent-working-indicator-pulse 1.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .conversation-activity-dot { animation: none; }
+}
 .thread-provider-badge {
   flex: none;
   max-width: 92px;

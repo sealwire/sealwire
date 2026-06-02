@@ -116,6 +116,7 @@ import {
 import { SessionSettingsButton } from "../shared/session-settings-panel.js";
 import { attachTranscriptHistoryLoader } from "../shared/transcript-history-loader.js";
 import { ThreadGroupList } from "../shared/thread-list-react.js";
+import { buildThreadActivityMap } from "../shared/thread-activity.js";
 import {
   createThreadListStore,
 } from "../shared/thread-list-store.js";
@@ -1214,6 +1215,7 @@ function RemoteSidebar({
           onResumeThread,
           onToggleExpandedGroup,
           onToggleGroup,
+          threadActivity: buildThreadActivityMap(session),
         })
       )
     ),

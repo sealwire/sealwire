@@ -26,6 +26,7 @@ async function main() {
   const relayPort = await getFreePort();
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-file-diff-state-"));
   const statePath = path.join(stateDir, "session.json");
+  const seedPath = path.join(stateDir, "fake-transcript-seed.json");
   const workspaceDir = await fs.realpath(
     await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-file-diff-workspace-"))
   );
@@ -58,11 +59,16 @@ async function main() {
     { cwd: workspaceDir }
   );
   await fs.writeFile(testFilePath, "new\n", "utf8");
-  await writeSeedState(statePath, workspaceDir, diff);
+  await writeSeedState(statePath, workspaceDir);
+  await writeSeedTranscript(seedPath, diff);
 
   const relay = startLocalRelay({
     relayPort,
     relayStatePath: statePath,
+    // Transcript history is no longer persisted in relay state (it is restored
+    // from the provider on resume). The fake provider has no real session
+    // store, so we hand it the seeded turnDiff transcript via this fixture file.
+    extraEnv: { FAKE_PROVIDER_SEED_PATH: seedPath },
   });
 
   await waitForHealth(`http://127.0.0.1:${relayPort}/api/health`);
@@ -163,7 +169,7 @@ async function main() {
   }
 }
 
-async function writeSeedState(statePath, workspaceDir, diff) {
+async function writeSeedState(statePath, workspaceDir) {
   await fs.mkdir(path.dirname(statePath), { recursive: true });
   await fs.writeFile(
     statePath,
@@ -183,37 +189,52 @@ async function writeSeedState(statePath, workspaceDir, diff) {
         allowed_roots: [workspaceDir],
         device_records: {},
         paired_devices: {},
-        transcript: [
-          {
-            item_id: TURN_DIFF_ITEM_ID,
-            kind: "tool_call",
-            text: null,
-            status: "completed",
-            turn_id: TURN_ID,
-            tool: {
-              item_type: "turnDiff",
-              name: "File summary",
-              title: "Codex changed note.txt in this turn.",
-              detail: "Target files: note.txt",
-              query: null,
-              path: TEST_FILE,
-              url: null,
-              command: null,
-              input_preview: "Files:\nnote.txt",
-              result_preview: null,
-              diff,
-              file_changes: [
-                {
-                  path: TEST_FILE,
-                  change_type: "update",
-                  diff,
-                },
-              ],
-            },
-          },
-        ],
-        logs: [],
       },
+      null,
+      2
+    ),
+    "utf8"
+  );
+}
+
+// Transcript history is no longer persisted in relay state. The fake provider
+// reads this fixture (a JSON array of TranscriptEntryView) from
+// FAKE_PROVIDER_SEED_PATH and serves it as the resumed thread's transcript, so
+// the turnDiff entry renders without depending on relay-state persistence.
+async function writeSeedTranscript(seedPath, diff) {
+  await fs.mkdir(path.dirname(seedPath), { recursive: true });
+  await fs.writeFile(
+    seedPath,
+    JSON.stringify(
+      [
+        {
+          item_id: TURN_DIFF_ITEM_ID,
+          kind: "tool_call",
+          text: null,
+          status: "completed",
+          turn_id: TURN_ID,
+          tool: {
+            item_type: "turnDiff",
+            name: "File summary",
+            title: "Codex changed note.txt in this turn.",
+            detail: "Target files: note.txt",
+            query: null,
+            path: TEST_FILE,
+            url: null,
+            command: null,
+            input_preview: "Files:\nnote.txt",
+            result_preview: null,
+            diff,
+            file_changes: [
+              {
+                path: TEST_FILE,
+                change_type: "update",
+                diff,
+              },
+            ],
+          },
+        },
+      ],
       null,
       2
     ),

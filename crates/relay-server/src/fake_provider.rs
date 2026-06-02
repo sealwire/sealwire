@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    path::Path,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
@@ -466,8 +467,15 @@ async fn restore_threads_from_relay(
         return HashMap::new();
     };
 
-    let preview = snapshot
-        .transcript
+    // The relay no longer persists transcript history to disk (it is treated as
+    // ephemeral provider data, restored on resume from the provider's own
+    // store). The fake provider has no real session store, so tests that need a
+    // pre-existing transcript seed it via FAKE_PROVIDER_SEED_PATH — a JSON file
+    // holding a `Vec<TranscriptEntryView>`. Fall back to whatever the snapshot
+    // carries (normally empty on a cold boot) when no seed is configured.
+    let transcript = load_seed_transcript().unwrap_or(snapshot.transcript);
+
+    let preview = transcript
         .iter()
         .rev()
         .find_map(|entry| entry.text.clone())
@@ -488,9 +496,36 @@ async fn restore_threads_from_relay(
         thread_id,
         FakeThread {
             summary: thread,
-            transcript: snapshot.transcript,
+            transcript,
         },
     )])
+}
+
+/// Load a transcript fixture for the fake provider from `FAKE_PROVIDER_SEED_PATH`,
+/// if set. The file is a JSON array of `TranscriptEntryView`. Used by browser
+/// e2e tests that need to render a pre-existing transcript (e.g. file-diff
+/// rollback/reapply) without depending on relay-state persistence internals.
+fn load_seed_transcript() -> Option<Vec<TranscriptEntryView>> {
+    let path = std::env::var_os("FAKE_PROVIDER_SEED_PATH")?;
+    let contents = match std::fs::read(&path) {
+        Ok(contents) => contents,
+        Err(error) => {
+            eprintln!(
+                "fake provider: failed to read FAKE_PROVIDER_SEED_PATH {}: {error}",
+                Path::new(&path).display()
+            );
+            return None;
+        }
+    };
+    match serde_json::from_slice::<Vec<TranscriptEntryView>>(&contents) {
+        Ok(transcript) => Some(transcript),
+        Err(error) => {
+            eprintln!(
+                "fake provider: failed to decode FAKE_PROVIDER_SEED_PATH transcript: {error}"
+            );
+            None
+        }
+    }
 }
 
 fn make_fake_approval(request_id: &str, thread_id: &str, prompt: &str) -> PendingApproval {

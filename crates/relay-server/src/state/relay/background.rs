@@ -388,6 +388,13 @@ impl RelayState {
         let bg = self.touch_background_entry(thread_id, now);
         bg.active_turn_id = turn_id;
         self.evict_oldest_background_if_over_cap();
+        // A backgrounded thread just started or finished a turn, which changes
+        // the per-thread activity set surfaced in the snapshot. Unlike the other
+        // bg_* mutators (which only buffer transcript state for switch-back),
+        // this flips a thread's "working" badge, so re-publish the snapshot.
+        // This bumps `revision` only — never `transcript_revision` — so the
+        // active thread's transcript-delta contract is untouched.
+        self.notify();
     }
 
     pub fn bg_set_thread_status(

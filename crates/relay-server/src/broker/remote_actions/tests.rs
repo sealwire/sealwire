@@ -30,6 +30,7 @@ fn make_snapshot() -> SessionSnapshot {
         current_tool: None,
         last_progress_at: None,
         active_flags: vec![],
+        thread_activity: vec![],
         current_cwd: "/tmp/project".to_string(),
         model: "gpt-5.4".to_string(),
         available_models: vec![],

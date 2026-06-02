@@ -100,6 +100,11 @@ pub struct SessionSnapshot {
     pub current_tool: Option<String>,
     pub last_progress_at: Option<u64>,
     pub active_flags: Vec<String>,
+    /// Live per-thread activity: the active thread plus any backgrounded thread
+    /// that still has an in-flight turn. Lets clients badge exactly which
+    /// threads are working, independent of which thread is currently being
+    /// viewed (the rest of this snapshot describes only the active thread).
+    pub thread_activity: Vec<ThreadActivityView>,
     pub current_cwd: String,
     pub model: String,
     pub available_models: Vec<ModelOptionView>,
@@ -116,6 +121,16 @@ pub struct SessionSnapshot {
     pub transcript_truncated: bool,
     pub transcript: Vec<TranscriptEntryView>,
     pub logs: Vec<LogEntryView>,
+}
+
+/// One working thread, as surfaced to clients for per-thread activity badges.
+/// `phase`/`tool` mirror the active-thread progress fields but are scoped to
+/// this specific thread, so a backgrounded thread can show its own state.
+#[derive(Debug, Clone, Serialize)]
+pub struct ThreadActivityView {
+    pub thread_id: String,
+    pub phase: Option<String>,
+    pub tool: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

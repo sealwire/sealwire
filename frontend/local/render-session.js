@@ -71,6 +71,7 @@ import {
   TextContent,
 } from "./react-session-panels.js";
 import { ThreadGroupList } from "../shared/thread-list-react.js";
+import { buildThreadActivityMap } from "../shared/thread-activity.js";
 import { TranscriptPane } from "../shared/transcript-pane.js";
 import {
   captureTranscriptScrollSnapshot,
@@ -964,6 +965,7 @@ export function createSessionRenderer({
           renderThreads();
         },
         selectedCwd,
+        threadActivity: buildThreadActivityMap(state.session),
       })
     );
 

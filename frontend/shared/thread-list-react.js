@@ -41,6 +41,7 @@ export function ThreadGroupList({
   onToggleGroup = null,
   previewFallback = "No preview yet.",
   selectedCwd = "",
+  threadActivity = null,
 }) {
   if (!groups.length) {
     return h("p", { className: "sidebar-empty" }, emptyMessage);
@@ -102,6 +103,7 @@ export function ThreadGroupList({
             onToggleGroup,
             previewFallback,
             row,
+            threadActivity,
           })
         );
       })
@@ -121,6 +123,7 @@ function ThreadListRow({
   onToggleGroup,
   previewFallback,
   row,
+  threadActivity,
 }) {
   if (row.type === "group") {
     const isSelected = normalizedSelectedCwd && row.normalizedCwd === normalizedSelectedCwd;
@@ -144,6 +147,7 @@ function ThreadListRow({
   if (row.type === "thread") {
     return h(ThreadGroupItem, {
       active: activeThreadId === row.thread.id,
+      activity: threadActivity?.get?.(row.thread.id) || null,
       formatThreadMeta,
       group: row.group,
       includePreview,
@@ -321,6 +325,7 @@ function ThreadGroupHeader({
 
 function ThreadGroupItem({
   active,
+  activity = null,
   formatThreadMeta,
   group,
   includePreview,
@@ -332,6 +337,7 @@ function ThreadGroupItem({
   const title = thread.name || thread.preview || shortId(thread.id);
   const provider = providerLabel(thread.provider);
   const providerToneClass = `is-${providerTone(thread.provider)}`;
+  const activityLabel = activity ? (activity.tool ? `Working · ${activity.tool}` : "Working") : "";
 
   return h(
     "button",
@@ -359,6 +365,14 @@ function ThreadGroupItem({
     h(
       "span",
       { className: "conversation-title-row" },
+      activity
+        ? h("span", {
+            className: "conversation-activity-dot",
+            role: "img",
+            "aria-label": activityLabel,
+            title: activityLabel,
+          })
+        : null,
       h("span", { className: "conversation-title" }, title)
     ),
     includePreview

@@ -12,7 +12,7 @@ use tokio::sync::watch;
 use crate::{
     protocol::{
         ApprovalReceipt, FileChangeApplyState, LogEntryView, ModelOptionView, SessionSnapshot,
-        ThreadEntriesResponse, ThreadEntryDetailResponse, ThreadSummaryView,
+        ThreadActivityView, ThreadEntriesResponse, ThreadEntryDetailResponse, ThreadSummaryView,
         ThreadTranscriptResponse, ThreadsResponse,
     },
     provider::ThreadSyncData,
@@ -226,6 +226,37 @@ impl RelayState {
         (base_revision, self.transcript_revision)
     }
 
+    /// Live per-thread activity for the activity badges: the active thread (if
+    /// it has an in-flight turn or progress phase) plus every backgrounded
+    /// thread that still has a turn in flight. This is the only place the
+    /// snapshot describes threads other than the active one.
+    fn thread_activity_view(&self) -> Vec<ThreadActivityView> {
+        let mut activity = Vec::new();
+        if let Some(thread_id) = &self.active_thread_id {
+            if self.active_turn_id.is_some() || self.current_phase.is_some() {
+                activity.push(ThreadActivityView {
+                    thread_id: thread_id.clone(),
+                    phase: self.current_phase.clone(),
+                    tool: self.current_tool.clone(),
+                });
+            }
+        }
+        for (thread_id, bg) in &self.background_streams {
+            if bg.active_turn_id.is_none() {
+                continue;
+            }
+            if self.active_thread_id.as_deref() == Some(thread_id.as_str()) {
+                continue;
+            }
+            activity.push(ThreadActivityView {
+                thread_id: thread_id.clone(),
+                phase: bg.current_phase.clone(),
+                tool: bg.current_tool.clone(),
+            });
+        }
+        activity
+    }
+
     pub fn snapshot(&self) -> SessionSnapshot {
         let now = unix_now();
         let live_requests = self
@@ -299,6 +330,7 @@ impl RelayState {
             current_tool: self.current_tool.clone(),
             last_progress_at: self.last_progress_at,
             active_flags: self.active_flags.clone(),
+            thread_activity: self.thread_activity_view(),
             current_cwd: self.current_cwd.clone(),
             model: self.model.clone(),
             available_models: self.available_models.clone(),

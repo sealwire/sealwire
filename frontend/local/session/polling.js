@@ -1,3 +1,9 @@
+// Controller heartbeat cadence and lease-refresh skew. These moved here with
+// the controller heartbeat / lease-refresh logic when the local session
+// controller was split into modules; the originals in app.js are now unused.
+const CONTROL_HEARTBEAT_MS = 5000;
+const LEASE_EXPIRY_REFRESH_SKEW_MS = 250;
+
 export function createPollingController(ctx) {
   const {
     state,

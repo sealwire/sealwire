@@ -69,7 +69,7 @@ export function createLifecycleController(ctx) {
       }
 
       state.session = null;
-      resetTranscriptPaging(null);
+      resetTranscriptHydrationState();
       cancelControllerHeartbeat();
       cancelControllerLeaseRefresh();
       renderSessionUnavailable(error.message);
