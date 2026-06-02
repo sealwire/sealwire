@@ -14,6 +14,7 @@ export function StartSessionDialog({
   workspaceSuggestions,
   providerOptions,
   models,
+  modelsStatus = "ready",
   approvalOptions,
   effortOptions,
   workspaceInputId,
@@ -114,6 +115,19 @@ export function StartSessionDialog({
         },
         onFieldChange,
       }),
+      modelsStatus === "loading" || modelsStatus === "error"
+        ? h(
+            "p",
+            {
+              className: "control-hint",
+              id: `${id}-models-hint`,
+              "data-models-status": modelsStatus,
+            },
+            modelsStatus === "loading"
+              ? "Loading models…"
+              : "Couldn’t load the model list — switch provider or reconnect to retry."
+          )
+        : null,
       requiresInitialPrompt
         ? h(
             "p",

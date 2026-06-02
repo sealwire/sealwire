@@ -66,6 +66,14 @@ pub struct ClaudeCodeBridge {
     /// has never seen). On the first send we promote the thread by swapping
     /// the public id to the real SDK session id, then drop the entry here.
     pending_threads: Arc<Mutex<HashMap<String, PendingClaudeConfig>>>,
+    /// In-memory cache of the SDK model catalog. `list_models` is a live worker
+    /// round-trip (`supportedModels()`) that is cold/slow right after startup,
+    /// which is exactly when the client pulls it after a handshake. We prewarm
+    /// this at boot (see `spawn_model_catalog_prewarm`) so the client gets the
+    /// full list instantly instead of racing the cold worker. Process-lifetime
+    /// only — never persisted, so it is re-warmed on every restart (no stale
+    /// catalog surviving across versions).
+    cached_models: Arc<RwLock<Option<Vec<ModelOptionView>>>>,
 }
 
 impl ClaudeCodeBridge {
@@ -130,6 +138,7 @@ impl ClaudeCodeBridge {
             next_request_id: AtomicU64::new(1),
             state,
             pending_threads: Arc::new(Mutex::new(HashMap::new())),
+            cached_models: Arc::new(RwLock::new(None)),
         };
 
         {
@@ -236,6 +245,12 @@ impl ProviderBridge for ClaudeCodeBridge {
     }
 
     async fn list_models(&self) -> Result<Vec<ModelOptionView>, String> {
+        // Serve the prewarmed catalog if we have it, so the client's
+        // post-handshake pull doesn't race the cold worker round-trip.
+        if let Some(cached) = self.cached_models.read().await.clone() {
+            return Ok(cached);
+        }
+
         let result = self.send_request("model/list", json!({})).await?;
         let data = value_at(&result, &["models"])
             .and_then(Value::as_array)
@@ -255,6 +270,12 @@ impl ProviderBridge for ClaudeCodeBridge {
             } else if let Some(first) = models.first_mut() {
                 first.is_default = true;
             }
+        }
+
+        // Cache only a non-empty catalog; a transient failure must not pin an
+        // empty list for the rest of the process.
+        if !models.is_empty() {
+            *self.cached_models.write().await = Some(models.clone());
         }
 
         Ok(models)

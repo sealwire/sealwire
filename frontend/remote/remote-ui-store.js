@@ -31,6 +31,10 @@ export function createRemoteUiStore(initialState = {}) {
     pairingModalOpen: false,
     remoteInfoModalOpen: false,
     providerModels: {},
+    // Per-provider catalog fetch status: "loading" | "ready" | "error".
+    // Lets the new-session dialog show a truthful state instead of silently
+    // presenting a single fallback model when a fetch is pending or failed.
+    providerModelsStatus: {},
     providers: [],
     sendPending: false,
     sessionDraft: createDefaultSessionDraft(),
@@ -87,6 +91,14 @@ export function createRemoteUiStore(initialState = {}) {
         providerModels: {
           ...state.providerModels,
           [provider]: models || [],
+        },
+      }));
+    },
+    setProviderModelsStatus(provider, status) {
+      set((state) => ({
+        providerModelsStatus: {
+          ...state.providerModelsStatus,
+          [provider]: status,
         },
       }));
     },

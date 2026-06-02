@@ -80,6 +80,32 @@ impl AppState {
         ))
     }
 
+    /// Warm every provider's model catalog in the background at startup.
+    ///
+    /// The remote client pulls each provider's models right after the handshake
+    /// — exactly when a worker-backed provider like Claude is coldest. Without a
+    /// warm catalog that pull races a slow/failing `supportedModels()` round-trip
+    /// and the new-session dialog silently falls back to a single default model.
+    /// Prewarming fills each bridge's in-memory cache so the pull is instant.
+    /// Best-effort and non-blocking: failures are logged, never fatal.
+    pub(super) fn spawn_model_catalog_prewarm(&self) {
+        for (name, bridge) in &self.providers {
+            let name = name.clone();
+            let bridge = bridge.clone();
+            let relay = self.relay.clone();
+            tokio::spawn(async move {
+                if let Err(error) = bridge.list_models().await {
+                    let mut relay = relay.write().await;
+                    relay.push_log(
+                        "warn",
+                        format!("Model catalog prewarm for {name} failed: {error}"),
+                    );
+                    relay.notify();
+                }
+            });
+        }
+    }
+
     pub(super) async fn refresh_model_catalog(&self) {
         match self.require_active_provider() {
             Ok((provider_name, bridge)) => {

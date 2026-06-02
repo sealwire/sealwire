@@ -87,6 +87,7 @@ import {
   captureTranscriptScrollSnapshot,
   restoreTranscriptScrollPosition,
 } from "./transcript-scroll.js";
+import { fetchModelsWithRetry } from "./provider-model-fetch.js";
 import { useRemoteSessionRuntime } from "./use-remote-session-runtime.js";
 import {
   RemoteWorkspaceChangesRail,
@@ -222,13 +223,21 @@ function RemoteApp() {
         if (!draftProvider || !normalized.includes(draftProvider)) {
           remoteUiStore.getState().setSessionDraftField("provider", defaultProvider(normalized));
         }
-        // Pre-fetch models for all providers so the dropdown is populated immediately
+        // Pre-fetch models for all providers so the dropdown is populated
+        // immediately. Worker-backed providers (Claude) can be cold right after
+        // a restart, so retry with backoff and record the status instead of
+        // silently falling back to a single default.
         for (const provider of normalized) {
-          handlers.onFetchProviderModels?.(provider)
+          remoteUiStore.getState().setProviderModelsStatus(provider, "loading");
+          fetchModelsWithRetry((p) => handlers.onFetchProviderModels?.(p), provider)
             .then((models) => {
-              if (!cancelled) remoteUiStore.getState().setProviderModels(provider, models || []);
+              if (cancelled) return;
+              remoteUiStore.getState().setProviderModels(provider, models || []);
+              remoteUiStore.getState().setProviderModelsStatus(provider, "ready");
             })
-            .catch(() => {});
+            .catch(() => {
+              if (!cancelled) remoteUiStore.getState().setProviderModelsStatus(provider, "error");
+            });
         }
       })
       .catch(() => {});
@@ -241,10 +250,12 @@ function RemoteApp() {
     if (!currentState.remoteAuth?.payloadSecret || !selectedProvider) return;
     if (!remoteUi.providers.length || !remoteUi.providers.includes(selectedProvider)) return;
     let cancelled = false;
-    handlers.onFetchProviderModels?.(selectedProvider)
+    remoteUiStore.getState().setProviderModelsStatus(selectedProvider, "loading");
+    fetchModelsWithRetry((p) => handlers.onFetchProviderModels?.(p), selectedProvider)
       .then((models) => {
         if (cancelled) return;
         remoteUiStore.getState().setProviderModels(selectedProvider, models || []);
+        remoteUiStore.getState().setProviderModelsStatus(selectedProvider, "ready");
         const draft = remoteUiStore.getState().sessionDraft;
         const storedEffort = loadLastEffort(selectedProvider);
         const storedApproval = loadLastApprovalPolicy(selectedProvider);
@@ -274,7 +285,11 @@ function RemoteApp() {
           )
         );
       })
-      .catch(() => {});
+      .catch(() => {
+        if (!cancelled) {
+          remoteUiStore.getState().setProviderModelsStatus(selectedProvider, "error");
+        }
+      });
     return () => {
       cancelled = true;
     };
@@ -399,6 +414,12 @@ function RemoteApp() {
             model: remoteUi.sessionDraft.model || defaultModelForProvider(selectedProvider),
           },
         ],
+    // When we have a real catalog the picker is authoritative; otherwise expose
+    // the fetch status so the dialog can say "loading"/"failed" instead of
+    // presenting the single fallback model as if it were the only choice.
+    modelsStatus: selectedProviderModels.length
+      ? "ready"
+      : remoteUi.providerModelsStatus[selectedProvider] || "loading",
     startPending: remoteUi.sessionStartPending,
     workspaceSuggestions: selectWorkspaceSuggestionsModel({
       session,

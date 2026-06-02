@@ -167,6 +167,7 @@ export function SessionPanel({
     workspaceSuggestions: model.workspaceSuggestions,
     providerOptions: model.providerOptions,
     models: model.models,
+    modelsStatus: model.modelsStatus,
     approvalOptions: model.approvalOptions,
     effortOptions,
     settingsPrefix: "remote-launch",

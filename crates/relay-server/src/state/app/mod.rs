@@ -135,6 +135,10 @@ impl AppState {
         };
 
         state.refresh_model_catalog().await;
+        // Warm worker-backed catalogs (e.g. Claude) in the background so the
+        // client's post-handshake model pull hits a populated cache instead of
+        // racing a cold `supportedModels()` round-trip.
+        state.spawn_model_catalog_prewarm();
 
         if let Some(persisted) = restored_state {
             state.restore_persisted_session(persisted).await;
