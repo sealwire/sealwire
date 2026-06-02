@@ -234,11 +234,12 @@ export function applySessionSnapshot(snapshot) {
     console.log(message);
     return;
   }
+  const displaySnapshot = preserveVisibleTranscriptText(state.session, snapshot);
   const previousThreadId = state.session?.active_thread_id || "-";
-  syncLiveTranscriptEntryDetailsFromSnapshot(state, snapshot);
-  const effectiveSnapshot = restoreHydratedTranscript(state, snapshot);
+  syncLiveTranscriptEntryDetailsFromSnapshot(state, displaySnapshot);
+  const effectiveSnapshot = restoreHydratedTranscript(state, displaySnapshot);
   applyRenderedSession(effectiveSnapshot, {
-    hydrationSnapshot: snapshot,
+    hydrationSnapshot: displaySnapshot,
   });
   const scrollTop = remoteUiRefs.remoteTranscript?.scrollTop || 0;
   const scrollHeight = remoteUiRefs.remoteTranscript?.scrollHeight || 0;
@@ -250,14 +251,64 @@ export function applySessionSnapshot(snapshot) {
         ? window.pageYOffset
         : 0;
   const restored =
-    effectiveSnapshot !== snapshot
-      || (snapshot?.transcript_truncated && !effectiveSnapshot?.transcript_truncated)
+    effectiveSnapshot !== displaySnapshot
+      || (displaySnapshot?.transcript_truncated && !effectiveSnapshot?.transcript_truncated)
       ? "1"
       : "0";
-  const message = `[scroll] applySessionSnapshot prev=${previousThreadId} input=${snapshot?.active_thread_id || "-"} effective=${effectiveSnapshot?.active_thread_id || "-"} state=${state.session?.active_thread_id || "-"} in_truncated=${snapshot?.transcript_truncated ? "1" : "0"} out_truncated=${effectiveSnapshot?.transcript_truncated ? "1" : "0"} restored=${restored} hydration=${state.transcriptHydrationStatus} older_cursor=${state.transcriptHydrationOlderCursor ?? "-"} entries=${effectiveSnapshot?.transcript?.length || 0} top=${scrollTop} height=${scrollHeight} client=${clientHeight} winY=${windowY}`;
+  const message = `[scroll] applySessionSnapshot prev=${previousThreadId} input=${displaySnapshot?.active_thread_id || "-"} effective=${effectiveSnapshot?.active_thread_id || "-"} state=${state.session?.active_thread_id || "-"} in_truncated=${displaySnapshot?.transcript_truncated ? "1" : "0"} out_truncated=${effectiveSnapshot?.transcript_truncated ? "1" : "0"} restored=${restored} hydration=${state.transcriptHydrationStatus} older_cursor=${state.transcriptHydrationOlderCursor ?? "-"} entries=${effectiveSnapshot?.transcript?.length || 0} top=${scrollTop} height=${scrollHeight} client=${clientHeight} winY=${windowY}`;
   renderLog(message);
   // TODO(remote-monitor-debug): Remove this console mirror once snapshot scroll restoration is stable.
   console.log(message);
+}
+
+function preserveVisibleTranscriptText(currentSession, snapshot) {
+  if (
+    !currentSession?.active_thread_id
+    || !snapshot?.active_thread_id
+    || currentSession.active_thread_id !== snapshot.active_thread_id
+    || !Array.isArray(currentSession.transcript)
+    || !Array.isArray(snapshot.transcript)
+  ) {
+    return snapshot;
+  }
+
+  const currentByItemId = new Map(
+    currentSession.transcript
+      .filter((entry) => entry?.item_id)
+      .map((entry) => [entry.item_id, entry])
+  );
+  let changed = false;
+  const transcript = snapshot.transcript.map((entry) => {
+    const current = currentByItemId.get(entry?.item_id);
+    const text = selectVisibleSnapshotText(current?.text, entry?.text);
+    if (text === entry?.text) {
+      return entry;
+    }
+    changed = true;
+    return {
+      ...entry,
+      text,
+    };
+  });
+
+  return changed
+    ? {
+      ...snapshot,
+      transcript,
+    }
+    : snapshot;
+}
+
+function selectVisibleSnapshotText(currentText, incomingText) {
+  if (
+    typeof currentText === "string"
+    && typeof incomingText === "string"
+    && incomingText.endsWith("...")
+    && currentText.length >= incomingText.length
+  ) {
+    return currentText;
+  }
+  return incomingText;
 }
 
 function shouldAcceptSessionSnapshot(snapshot) {

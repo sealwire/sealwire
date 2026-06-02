@@ -91,6 +91,13 @@ struct SnapshotPublishGate {
     scheduled: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SnapshotPublishDecision {
+    PublishSnapshot,
+    FlushTranscriptDeltasThenPublishSnapshot,
+    DelayUntil(Instant),
+}
+
 impl SnapshotPublishGate {
     fn new(min_interval: Duration) -> Self {
         Self {
@@ -142,6 +149,20 @@ impl SnapshotPublishGate {
                 Err(last_published_at + self.min_interval)
             }
         }
+    }
+}
+
+fn snapshot_publish_decision(
+    gate: &mut SnapshotPublishGate,
+    now: Instant,
+    has_pending_transcript_deltas: bool,
+) -> SnapshotPublishDecision {
+    match gate.ready_or_deadline(now) {
+        Ok(()) if has_pending_transcript_deltas => {
+            SnapshotPublishDecision::FlushTranscriptDeltasThenPublishSnapshot
+        }
+        Ok(()) => SnapshotPublishDecision::PublishSnapshot,
+        Err(deadline) => SnapshotPublishDecision::DelayUntil(deadline),
     }
 }
 
@@ -726,13 +747,31 @@ async fn run_broker_session(
                         );
                     }
                 }
-                match snapshot_publish_gate.ready_or_deadline(Instant::now()) {
-                    Ok(()) => {
+                match snapshot_publish_decision(
+                    &mut snapshot_publish_gate,
+                    Instant::now(),
+                    !pending_transcript_deltas.is_empty(),
+                ) {
+                    SnapshotPublishDecision::PublishSnapshot => {
                         publish_snapshot(&mut sender, state)
                             .await
                             .map_err(|error| format!("broker publish failed: {error}"))?;
                     }
-                    Err(deadline) => {
+                    SnapshotPublishDecision::FlushTranscriptDeltasThenPublishSnapshot => {
+                        flush_pending_transcript_deltas(
+                            &mut sender,
+                            state,
+                            &mut pending_transcript_deltas,
+                        )
+                        .await
+                        .map_err(|error| {
+                            format!("broker transcript delta publish before snapshot failed: {error}")
+                        })?;
+                        publish_snapshot(&mut sender, state)
+                            .await
+                            .map_err(|error| format!("broker publish failed: {error}"))?;
+                    }
+                    SnapshotPublishDecision::DelayUntil(deadline) => {
                         pending_snapshot_timer.as_mut().reset(deadline);
                     }
                 }
@@ -750,13 +789,31 @@ async fn run_broker_session(
                 }
             }
             () = &mut pending_snapshot_timer, if snapshot_publish_gate.has_pending_publish() => {
-                match snapshot_publish_gate.ready_or_deadline(Instant::now()) {
-                    Ok(()) => {
+                match snapshot_publish_decision(
+                    &mut snapshot_publish_gate,
+                    Instant::now(),
+                    !pending_transcript_deltas.is_empty(),
+                ) {
+                    SnapshotPublishDecision::PublishSnapshot => {
                         publish_snapshot(&mut sender, state)
                             .await
                             .map_err(|error| format!("broker publish failed: {error}"))?;
                     }
-                    Err(deadline) => {
+                    SnapshotPublishDecision::FlushTranscriptDeltasThenPublishSnapshot => {
+                        flush_pending_transcript_deltas(
+                            &mut sender,
+                            state,
+                            &mut pending_transcript_deltas,
+                        )
+                        .await
+                        .map_err(|error| {
+                            format!("broker transcript delta publish before snapshot failed: {error}")
+                        })?;
+                        publish_snapshot(&mut sender, state)
+                            .await
+                            .map_err(|error| format!("broker publish failed: {error}"))?;
+                    }
+                    SnapshotPublishDecision::DelayUntil(deadline) => {
                         pending_snapshot_timer.as_mut().reset(deadline);
                     }
                 }
@@ -1196,6 +1253,18 @@ async fn publish_transcript_delta_batch(
         debug!(delta_count, "published coalesced broker transcript deltas");
     }
     Ok(remaining)
+}
+
+async fn flush_pending_transcript_deltas(
+    sender: &mut futures_util::stream::SplitSink<BrokerSocket, Message>,
+    state: &AppState,
+    pending_transcript_deltas: &mut Vec<PendingTranscriptDelta>,
+) -> Result<(), String> {
+    let mut deltas = std::mem::take(pending_transcript_deltas);
+    while !deltas.is_empty() {
+        deltas = publish_transcript_delta_batch(sender, state, deltas).await?;
+    }
+    Ok(())
 }
 
 fn coalesce_transcript_deltas(deltas: Vec<PendingTranscriptDelta>) -> Vec<PendingTranscriptDelta> {

@@ -1706,6 +1706,61 @@ test("applySessionSnapshot ignores stale snapshots for the active thread", async
   assert.equal(state.session.transcript[0].text, "fresh");
 });
 
+test("applySessionSnapshot does not replace longer live text with a compact preview", async () => {
+  activeBrowser || installBrowserStubs();
+
+  const { state } = await import("./state.js");
+  const { applySessionSnapshot, applyTranscriptDelta } = await import("./session-ops.js");
+
+  state.session = {
+    active_thread_id: "thread-1",
+    transcript_revision: 9,
+    transcript: [
+      {
+        item_id: "item-1",
+        kind: "agent_text",
+        status: "running",
+        text: "Hello partial full tail",
+        turn_id: "turn-1",
+        tool: null,
+      },
+    ],
+  };
+
+  applySessionSnapshot({
+    active_thread_id: "thread-1",
+    active_turn_id: "turn-1",
+    transcript_revision: 10,
+    transcript_truncated: true,
+    transcript: [
+      {
+        item_id: "item-1",
+        kind: "agent_text",
+        status: "running",
+        text: "Hello partial...",
+        turn_id: "turn-1",
+        tool: null,
+      },
+    ],
+  });
+
+  assert.equal(state.session.transcript_revision, 10);
+  assert.equal(state.session.transcript[0].text, "Hello partial full tail");
+
+  applyTranscriptDelta({
+    thread_id: "thread-1",
+    base_revision: 9,
+    revision: 10,
+    entry_seq: 1,
+    item_id: "item-1",
+    turn_id: "turn-1",
+    delta: " full tail",
+    delta_kind: "agent_text",
+  });
+
+  assert.equal(state.session.transcript[0].text, "Hello partial full tail");
+});
+
 test("applyTranscriptEvent patches entries without replacing visible transcript", async () => {
   activeBrowser || installBrowserStubs();
 

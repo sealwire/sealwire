@@ -448,6 +448,25 @@ fn snapshot_publish_gate_throttles_burst_snapshot_updates() {
 }
 
 #[test]
+fn snapshot_publish_decision_flushes_pending_deltas_before_ready_snapshot() {
+    let mut gate = SnapshotPublishGate::new(Duration::from_millis(500));
+    let start = Instant::now();
+
+    assert_eq!(
+        snapshot_publish_decision(&mut gate, start, true),
+        SnapshotPublishDecision::FlushTranscriptDeltasThenPublishSnapshot
+    );
+    assert!(!gate.has_pending_publish());
+
+    let delayed_until = start + Duration::from_millis(500);
+    assert_eq!(
+        snapshot_publish_decision(&mut gate, start + Duration::from_millis(100), true),
+        SnapshotPublishDecision::DelayUntil(delayed_until)
+    );
+    assert!(gate.has_pending_publish());
+}
+
+#[test]
 fn transcript_delta_coalescing_merges_contiguous_item_updates() {
     let first = PendingTranscriptDelta {
         thread_id: "thread-1".to_string(),
