@@ -1294,6 +1294,54 @@ test("renderEntryMarkup falls back to generic tool rendering when AskUserQuestio
   assert.match(markup, /tool-log-name[^>]*>AskUserQuestion</);
 });
 
+test("renderEntryMarkup uses pending AskUserQuestion data when the tool input preview is truncated", () => {
+  const entry = makeAskUserEntry({
+    item_id: "tool:toolu_abc",
+    status: "running",
+    tool: {
+      input_preview: '{"questions":[{"question":"What brand name should the visible title use?","options":[{"label":"Sealwire","desc...',
+      result_preview: null,
+    },
+  });
+  const markup = renderEntryMarkup(entry, {
+    pendingAskUserQuestions: [
+      {
+        request_id: "ask:1",
+        tool_use_id: "toolu_abc",
+        thread_id: "t",
+        questions: [
+          {
+            question: "What brand name should the visible title use?",
+            header: "Brand name",
+            multi_select: false,
+            options: [
+              { label: "Sealwire", description: "Capitalized" },
+              { label: "sealwire", description: "All lowercase" },
+            ],
+          },
+          {
+            question: "Change only visible copy, or internal identifiers too?",
+            header: "Scope",
+            multi_select: false,
+            options: [
+              { label: "Visible copy only (recommended)", description: "Touch only <title> and manifest" },
+              { label: "Internal identifiers too", description: "Also rename internal identifiers" },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+  assert.match(markup, /chat-message-ask-user chat-message-ask-user-interactive/);
+  assert.doesNotMatch(markup, /message-card-tool/);
+  assert.match(markup, /Brand name/);
+  assert.match(markup, /What brand name should the visible title use\?/);
+  assert.match(markup, /Sealwire/);
+  assert.match(markup, /Capitalized/);
+  assert.match(markup, /ask-user-status[^>]*>Question 1 of 2</);
+  assert.match(markup, /ask-user-wizard-next[^>]*disabled=""[^>]*>Continue</);
+});
+
 test("groupToolEntries keeps AskUserQuestion ungrouped so the card stays visible", () => {
   const ask = makeAskUserEntry({ item_id: "tool:askuser-1" });
   const result = groupToolEntries([

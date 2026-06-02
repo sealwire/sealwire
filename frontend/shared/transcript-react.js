@@ -405,29 +405,18 @@ function isAskUserQuestionTool(tool) {
   return Boolean(tool) && tool.name === "AskUserQuestion";
 }
 
-function parseAskUserQuestions(inputPreview) {
-  const text = String(inputPreview || "").trim();
-  if (!text) {
+function normalizeAskUserQuestions(rawQuestions) {
+  if (!Array.isArray(rawQuestions) || !rawQuestions.length) {
     return null;
   }
-  let parsed;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    return null;
-  }
-  const questions = Array.isArray(parsed?.questions) ? parsed.questions : [];
-  if (!questions.length) {
-    return null;
-  }
-  return questions
+  const questions = rawQuestions
     .map((raw) => {
       if (!raw || typeof raw !== "object") return null;
       const options = Array.isArray(raw.options) ? raw.options : [];
       return {
         question: typeof raw.question === "string" ? raw.question : "",
         header: typeof raw.header === "string" ? raw.header : "",
-        multiSelect: Boolean(raw.multiSelect),
+        multiSelect: Boolean(raw.multiSelect ?? raw.multi_select),
         options: options
           .map((opt) => {
             if (!opt || typeof opt !== "object") return null;
@@ -440,6 +429,22 @@ function parseAskUserQuestions(inputPreview) {
       };
     })
     .filter(Boolean);
+  return questions.length ? questions : null;
+}
+
+function parseAskUserQuestions(inputPreview) {
+  const text = String(inputPreview || "").trim();
+  if (!text) {
+    return null;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  const questions = Array.isArray(parsed?.questions) ? parsed.questions : [];
+  return normalizeAskUserQuestions(questions);
 }
 
 // The Claude SDK's AskUserQuestion result_preview looks like:
@@ -540,12 +545,14 @@ function AskUserEntry({ entry, isJustPrepended = false, options = null }) {
   const toolEntry = detailEntry || entry;
   const tool = toolEntry.tool || entry.tool || {};
   const status = entry.status || "running";
-  const questions = parseAskUserQuestions(tool.input_preview);
+  const pendingRequest = findPendingAskUserRequest(itemId, options?.pendingAskUserQuestions);
+  const questions =
+    normalizeAskUserQuestions(pendingRequest?.questions)
+    || parseAskUserQuestions(tool.input_preview);
   if (!questions) {
     return h(GenericToolEntry, { entry, isJustPrepended, options });
   }
   const answers = parseAskUserAnswers(tool.result_preview);
-  const pendingRequest = findPendingAskUserRequest(itemId, options?.pendingAskUserQuestions);
   const interactive = Boolean(pendingRequest) && status !== "completed";
   const requestId = pendingRequest?.request_id || "";
   const submittingRequestId = options?.askUserSubmittingRequestId || "";

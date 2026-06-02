@@ -1,8 +1,9 @@
 use crate::protocol::{
-    truncate_with_ellipsis, ApprovalRequestView, FileChangeDiffView, LogEntryView, SecurityMode,
-    SessionSnapshot, SessionSnapshotCompactProfile, ThreadEntriesResponse,
-    ThreadEntryDetailResponse, ThreadSummaryView, ThreadTranscriptResponse, ThreadsResponse,
-    ThreadsResponseCompactProfile, ToolCallView, TranscriptEntryKind, TranscriptEntryView,
+    truncate_with_ellipsis, ApprovalRequestView, AskUserOptionView, AskUserQuestionRequestView,
+    AskUserQuestionView, FileChangeDiffView, LogEntryView, SecurityMode, SessionSnapshot,
+    SessionSnapshotCompactProfile, ThreadEntriesResponse, ThreadEntryDetailResponse,
+    ThreadSummaryView, ThreadTranscriptResponse, ThreadsResponse, ThreadsResponseCompactProfile,
+    ToolCallView, TranscriptEntryKind, TranscriptEntryView,
 };
 
 const MAX_BROKER_LOGS: usize = 8;
@@ -376,6 +377,75 @@ fn compact_for_broker_trims_many_file_changes_without_clearing_transcript() {
         .map(|tool| tool.file_changes.len() <= 4)
         .unwrap_or(false));
     assert!(serde_json::to_vec(&compacted).unwrap().len() <= SESSION_SNAPSHOT_TARGET_BYTES);
+}
+
+#[test]
+fn compact_for_broker_preserves_large_pending_ask_user_question_losslessly() {
+    let long_question = format!(
+        "用户可见的标题要改成什么品牌名? {}",
+        "请保留这段问题正文不要截断。".repeat(450)
+    );
+    let long_description = format!(
+        "首字母大写, 标签页显示 Sealwire / Sealwire Remote, PWA 名同步。{}",
+        "描述也必须完整保留。".repeat(220)
+    );
+    let mut snapshot = make_snapshot();
+    snapshot.pending_approvals.clear();
+    snapshot.pending_ask_user_questions = vec![AskUserQuestionRequestView {
+        request_id: "ask:large".to_string(),
+        tool_use_id: "toolu_large".to_string(),
+        thread_id: "thread-1".to_string(),
+        requested_at: 123,
+        questions: vec![
+            AskUserQuestionView {
+                question: long_question.clone(),
+                header: "品牌名".to_string(),
+                multi_select: false,
+                options: vec![
+                    AskUserOptionView {
+                        label: "Sealwire".to_string(),
+                        description: long_description.clone(),
+                    },
+                    AskUserOptionView {
+                        label: "sealwire".to_string(),
+                        description: "全小写, 与 AGENTS.md 里描述保持一致的写法。".to_string(),
+                    },
+                ],
+            },
+            AskUserQuestionView {
+                question: "只改可见文案,还是也处理内部标识符?".to_string(),
+                header: "改动范围".to_string(),
+                multi_select: false,
+                options: vec![AskUserOptionView {
+                    label: "只改可见文案(推荐)".to_string(),
+                    description: "只动 <title> 和 manifest, 内部 agent-relay 标识不动。"
+                        .to_string(),
+                }],
+            },
+        ],
+    }];
+
+    let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::RemoteSurface);
+
+    assert_eq!(compacted.pending_ask_user_questions.len(), 1);
+    let pending = &compacted.pending_ask_user_questions[0];
+    assert_eq!(pending.request_id, "ask:large");
+    assert_eq!(pending.tool_use_id, "toolu_large");
+    assert_eq!(pending.questions.len(), 2);
+    assert_eq!(pending.questions[0].question, long_question);
+    assert_eq!(pending.questions[0].header, "品牌名");
+    assert!(!pending.questions[0].multi_select);
+    assert_eq!(pending.questions[0].options.len(), 2);
+    assert_eq!(pending.questions[0].options[0].label, "Sealwire");
+    assert_eq!(
+        pending.questions[0].options[0].description,
+        long_description
+    );
+    assert_eq!(
+        pending.questions[1].question,
+        "只改可见文案,还是也处理内部标识符?"
+    );
+    assert!(serde_json::to_vec(&compacted).unwrap().len() > SESSION_SNAPSHOT_TARGET_BYTES);
 }
 
 #[test]

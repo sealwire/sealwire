@@ -298,6 +298,10 @@ impl SessionSnapshot {
     fn compact_for_budget(mut self, budget: SessionSnapshotCompactBudget) -> Self {
         let mut transcript_truncated = self.transcript_truncated;
 
+        // Pending AskUserQuestion payloads are active interaction data, not
+        // transcript previews. Keep them lossless even if that means the
+        // compacted snapshot exceeds the soft target size; truncating question
+        // text or option labels would break answer submission.
         if self.logs.len() > budget.max_logs {
             self.logs.truncate(budget.max_logs);
         }

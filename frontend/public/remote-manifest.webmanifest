@@ -1,6 +1,6 @@
 {
-  "name": "Agent Relay Remote",
-  "short_name": "Relay Remote",
+  "name": "Sealwire Remote",
+  "short_name": "Sealwire",
   "description": "Pair a remote device, resume Codex threads, and approve actions away from the terminal.",
   "start_url": "/",
   "scope": "/",
