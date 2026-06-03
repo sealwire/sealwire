@@ -51,14 +51,21 @@ async function main() {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-page-smoke-"));
   const statePath = path.join(stateDir, "session.json");
 
-  const relay = startLocalRelay({ relayPort, relayStatePath: statePath });
-  await waitForHealth(`http://127.0.0.1:${relayPort}/api/health`);
+  // Use the in-binary fake provider so startup never waits on codex/claude
+  // binaries (which don't exist in CI). The relay initializes providers before
+  // it binds its HTTP port, so without this the health endpoint never comes up.
+  const relay = startLocalRelay({
+    relayPort,
+    relayStatePath: statePath,
+    extraEnv: { AGENT_PROVIDERS: "fake" },
+  });
 
   let browser;
   let context;
   const failures = [];
 
   try {
+    await waitForHealth(`http://127.0.0.1:${relayPort}/api/health`);
     ({ browser, context } = await launchBrowser());
     // Record CSP violations from inside the page; they surface as a DOM event
     // (and as a console error, captured separately below).
