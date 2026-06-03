@@ -1,6 +1,26 @@
 use super::*;
 
 impl AppState {
+    pub async fn read_ask_user_question_detail(
+        &self,
+        request_id: &str,
+        device_id: Option<String>,
+    ) -> Result<AskUserQuestionDetailResponse, String> {
+        let device_id = require_device_id(device_id)?;
+        let request = {
+            let relay = self.relay.read().await;
+            relay.ensure_device_can_approve(&device_id)?;
+            relay
+                .pending_ask_user_questions
+                .get(request_id)
+                .cloned()
+                .ok_or_else(|| "there is no AskUserQuestion waiting for remote detail".to_string())?
+                .to_view()
+        };
+
+        Ok(AskUserQuestionDetailResponse { request })
+    }
+
     pub async fn decide_approval(
         &self,
         request_id: &str,

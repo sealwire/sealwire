@@ -1,5 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use relay_util::sha256_hex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -163,6 +164,7 @@ const SESSION_SNAPSHOT_REMOTE_SURFACE_BUDGET: SessionSnapshotCompactBudget =
         fallback_log_chars: 96,
         max_file_changes: 12,
         fallback_file_changes: 4,
+        max_pending_ask_user_question_inline_bytes: Some(4_000),
     };
 
 const SESSION_SNAPSHOT_LOCAL_WEB_BUDGET: SessionSnapshotCompactBudget =
@@ -182,6 +184,7 @@ const SESSION_SNAPSHOT_LOCAL_WEB_BUDGET: SessionSnapshotCompactBudget =
         fallback_log_chars: 160,
         max_file_changes: 16,
         fallback_file_changes: 6,
+        max_pending_ask_user_question_inline_bytes: None,
     };
 
 const SESSION_SNAPSHOT_IOS_SURFACE_BUDGET: SessionSnapshotCompactBudget =
@@ -276,6 +279,7 @@ struct SessionSnapshotCompactBudget {
     fallback_log_chars: usize,
     max_file_changes: usize,
     fallback_file_changes: usize,
+    max_pending_ask_user_question_inline_bytes: Option<usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -313,10 +317,12 @@ impl SessionSnapshot {
     fn compact_for_budget(mut self, budget: SessionSnapshotCompactBudget) -> Self {
         let mut transcript_truncated = self.transcript_truncated;
 
-        // Pending AskUserQuestion payloads are active interaction data, not
-        // transcript previews. Keep them lossless even if that means the
-        // compacted snapshot exceeds the soft target size; truncating question
-        // text or option labels would break answer submission.
+        if let Some(max_inline_bytes) = budget.max_pending_ask_user_question_inline_bytes {
+            for pending in &mut self.pending_ask_user_questions {
+                pending.externalize_questions_if_over(max_inline_bytes);
+            }
+        }
+
         if self.logs.len() > budget.max_logs {
             self.logs.truncate(budget.max_logs);
         }
@@ -470,6 +476,13 @@ impl SessionSnapshot {
                 for entry in &mut self.logs {
                     truncate_with_ellipsis(&mut entry.message, budget.fallback_log_chars);
                 }
+                continue;
+            }
+            if budget.max_pending_ask_user_question_inline_bytes.is_some()
+                && externalize_largest_pending_ask_user_question(
+                    &mut self.pending_ask_user_questions,
+                )
+            {
                 continue;
             }
             self.logs.clear();
@@ -645,7 +658,59 @@ pub struct AskUserQuestionRequestView {
     pub tool_use_id: String,
     pub thread_id: String,
     pub requested_at: u64,
+    #[serde(default)]
+    pub question_count: usize,
+    #[serde(default = "default_true")]
+    pub questions_inline_complete: bool,
+    #[serde(default)]
+    pub detail_available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_hash: Option<String>,
+    #[serde(default)]
     pub questions: Vec<AskUserQuestionView>,
+}
+
+impl AskUserQuestionRequestView {
+    pub fn with_inline_questions(
+        request_id: String,
+        tool_use_id: String,
+        thread_id: String,
+        requested_at: u64,
+        questions: Vec<AskUserQuestionView>,
+    ) -> Self {
+        let question_count = questions.len();
+        let content_hash = Some(ask_user_questions_content_hash(&questions));
+        Self {
+            request_id,
+            tool_use_id,
+            thread_id,
+            requested_at,
+            question_count,
+            questions_inline_complete: true,
+            detail_available: true,
+            content_hash,
+            questions,
+        }
+    }
+
+    fn externalize_questions_if_over(&mut self, max_inline_bytes: usize) {
+        if !self.questions_inline_complete || self.questions.is_empty() {
+            return;
+        }
+        if serialized_json_bytes(self) <= max_inline_bytes {
+            return;
+        }
+
+        self.externalize_questions();
+    }
+
+    fn externalize_questions(&mut self) {
+        self.question_count = self.questions.len();
+        self.content_hash = Some(ask_user_questions_content_hash(&self.questions));
+        self.questions.clear();
+        self.questions_inline_complete = false;
+        self.detail_available = true;
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -660,6 +725,42 @@ pub struct AskUserQuestionView {
 pub struct AskUserOptionView {
     pub label: String,
     pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AskUserQuestionDetailResponse {
+    pub request: AskUserQuestionRequestView,
+}
+
+fn ask_user_questions_content_hash(questions: &[AskUserQuestionView]) -> String {
+    let serialized = serde_json::to_string(questions).unwrap_or_default();
+    sha256_hex(&serialized)
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn serialized_json_bytes<T: Serialize>(value: &T) -> usize {
+    serde_json::to_vec(value)
+        .map(|bytes| bytes.len())
+        .unwrap_or(usize::MAX)
+}
+
+fn externalize_largest_pending_ask_user_question(
+    requests: &mut [AskUserQuestionRequestView],
+) -> bool {
+    let Some(index) = requests
+        .iter()
+        .enumerate()
+        .filter(|(_, request)| request.questions_inline_complete && !request.questions.is_empty())
+        .max_by_key(|(_, request)| serialized_json_bytes(request))
+        .map(|(index, _)| index)
+    else {
+        return false;
+    };
+    requests[index].externalize_questions();
+    true
 }
 
 // Input the frontend POSTs to /api/ask-user-questions/:request_id/answer.

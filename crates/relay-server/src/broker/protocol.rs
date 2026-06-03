@@ -3,8 +3,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::protocol::{
-    ApprovalReceipt, ModelOptionView, PairedDeviceView, SessionSnapshot, ThreadEntriesResponse,
-    ThreadEntryDetailResponse, ThreadTranscriptResponse, ThreadsResponse,
+    ApprovalReceipt, AskUserQuestionDetailResponse, ModelOptionView, PairedDeviceView,
+    SessionSnapshot, ThreadEntriesResponse, ThreadEntryDetailResponse, ThreadTranscriptResponse,
+    ThreadsResponse,
 };
 
 use super::{
@@ -120,6 +121,7 @@ pub(super) enum OutboundBrokerPayload {
         thread_entry_detail: Option<ThreadEntryDetailResponse>,
         thread_transcript: Option<ThreadTranscriptResponse>,
         workspace_diff: Option<crate::protocol::WorkspaceDiffResponse>,
+        ask_user_question_detail: Option<AskUserQuestionDetailResponse>,
         error: Option<String>,
     },
     RemoteActionResultChunk {

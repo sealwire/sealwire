@@ -13,13 +13,13 @@ pub struct PendingAskUserQuestion {
 
 impl PendingAskUserQuestion {
     pub fn to_view(&self) -> AskUserQuestionRequestView {
-        AskUserQuestionRequestView {
-            request_id: self.request_id.clone(),
-            tool_use_id: self.tool_use_id.clone(),
-            thread_id: self.thread_id.clone(),
-            requested_at: self.requested_at,
-            questions: self.questions.clone(),
-        }
+        AskUserQuestionRequestView::with_inline_questions(
+            self.request_id.clone(),
+            self.tool_use_id.clone(),
+            self.thread_id.clone(),
+            self.requested_at,
+            self.questions.clone(),
+        )
     }
 }
 

@@ -152,10 +152,14 @@ mod path_scope_tests {
     use super::super::*;
     use crate::fake_provider::FakeProviderBridge;
     use crate::protocol::{
-        ReadThreadTranscriptInput, ResumeSessionInput, SendMessageInput, StartSessionInput,
-        UpdateSessionSettingsInput,
+        AskUserOptionView, AskUserQuestionView, ReadThreadTranscriptInput, ResumeSessionInput,
+        SendMessageInput, StartSessionInput, UpdateSessionSettingsInput,
     };
     use crate::state::security::SecurityProfile;
+    use crate::state::{
+        PendingAskUserQuestion, DEFAULT_APPROVAL_POLICY, DEFAULT_EFFORT, DEFAULT_MODEL,
+        DEFAULT_SANDBOX,
+    };
     use std::sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -227,6 +231,70 @@ mod path_scope_tests {
                 broker_join_ticket_expires_at: None,
                 path_scope,
             },
+        );
+    }
+
+    #[tokio::test]
+    async fn read_ask_user_question_detail_returns_full_pending_question() {
+        let (app, _project, _outside) = build_app("/tmp/project").await;
+        pair_device(&app, "device-a", Vec::new()).await;
+        let long_question = "Which brand should the visible title use? ".repeat(400);
+        let long_description =
+            "Keep the complete option description available remotely. ".repeat(200);
+        {
+            let mut relay = app.relay.write().await;
+            relay.activate_thread(
+                crate::protocol::ThreadSummaryView {
+                    id: "thread-1".to_string(),
+                    name: Some("AskUser thread".to_string()),
+                    preview: "pending ask-user".to_string(),
+                    cwd: "/tmp/project".to_string(),
+                    updated_at: 1,
+                    source: "fake".to_string(),
+                    status: "active".to_string(),
+                    model_provider: "fake".to_string(),
+                    provider: "fake".to_string(),
+                },
+                "/tmp/project",
+                DEFAULT_MODEL,
+                DEFAULT_APPROVAL_POLICY,
+                DEFAULT_SANDBOX,
+                DEFAULT_EFFORT,
+                "device-a",
+            );
+            relay.pending_ask_user_questions.insert(
+                "ask:large".to_string(),
+                PendingAskUserQuestion {
+                    request_id: "ask:large".to_string(),
+                    tool_use_id: "toolu_large".to_string(),
+                    thread_id: "thread-1".to_string(),
+                    requested_at: 123,
+                    questions: vec![AskUserQuestionView {
+                        question: long_question.clone(),
+                        header: "Brand".to_string(),
+                        multi_select: false,
+                        options: vec![AskUserOptionView {
+                            label: "Sealwire".to_string(),
+                            description: long_description.clone(),
+                        }],
+                    }],
+                },
+            );
+        }
+
+        let detail = app
+            .read_ask_user_question_detail("ask:large", Some("device-a".to_string()))
+            .await
+            .expect("pending ask-user detail should load");
+
+        assert_eq!(detail.request.request_id, "ask:large");
+        assert!(detail.request.questions_inline_complete);
+        assert!(detail.request.detail_available);
+        assert_eq!(detail.request.question_count, 1);
+        assert_eq!(detail.request.questions[0].question, long_question);
+        assert_eq!(
+            detail.request.questions[0].options[0].description,
+            long_description
         );
     }
 

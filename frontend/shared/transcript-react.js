@@ -549,12 +549,36 @@ function AskUserEntry({ entry, isJustPrepended = false, options = null }) {
   const questions =
     normalizeAskUserQuestions(pendingRequest?.questions)
     || parseAskUserQuestions(tool.input_preview);
+  const requestId = pendingRequest?.request_id || "";
+  const detailIncomplete = Boolean(
+    pendingRequest
+    && pendingRequest.questions_inline_complete === false
+    && !questions
+  );
+  const detailLoading = Boolean(
+    requestId
+    && options?.askUserDetailLoadingRequestIds instanceof Set
+    && options.askUserDetailLoadingRequestIds.has(requestId)
+  );
+  const detailError =
+    requestId && options?.askUserDetailErrors instanceof Map
+      ? options.askUserDetailErrors.get(requestId) || ""
+      : "";
+  if (!questions && detailIncomplete) {
+    return h(AskUserDetailPendingCard, {
+      entry,
+      isJustPrepended,
+      itemId,
+      questionCount: pendingRequest?.question_count || 0,
+      detailLoading,
+      detailError,
+    });
+  }
   if (!questions) {
     return h(GenericToolEntry, { entry, isJustPrepended, options });
   }
   const answers = parseAskUserAnswers(tool.result_preview);
   const interactive = Boolean(pendingRequest) && status !== "completed";
-  const requestId = pendingRequest?.request_id || "";
   const submittingRequestId = options?.askUserSubmittingRequestId || "";
   const isSubmitting = Boolean(requestId) && submittingRequestId === requestId;
   const submitAnswers = options?.onSubmitAskUserAnswers || null;
@@ -583,6 +607,57 @@ function AskUserEntry({ entry, isJustPrepended = false, options = null }) {
     submitAnswers,
     askUserError,
   });
+}
+
+function AskUserDetailPendingCard({
+  entry,
+  isJustPrepended,
+  itemId,
+  questionCount,
+  detailLoading,
+  detailError,
+}) {
+  const status = detailError
+    ? "Question detail failed"
+    : detailLoading
+      ? "Loading question detail"
+      : "Waiting for question detail";
+  return h(
+    "article",
+    transcriptEntryDomAttrs(
+      entry,
+      "chat-message chat-message-system chat-message-ask-user",
+      null,
+      { justPrepended: isJustPrepended }
+    ),
+    h(
+      "div",
+      { className: "message-card message-card-system message-card-ask-user" },
+      h(
+        "div",
+        { className: "ask-user-meta" },
+        h("span", { className: "ask-user-tag" }, "Claude asked"),
+        h("span", { className: "ask-user-status" }, status)
+      ),
+      h(
+        "section",
+        {
+          className: "ask-user-question",
+          key: itemId ? `${itemId}:detail-pending` : "ask-user:detail-pending",
+        },
+        h(
+          "p",
+          { className: "ask-user-question-text" },
+          questionCount > 1
+            ? `${questionCount} questions are loading.`
+            : "The question is loading."
+        ),
+        detailError
+          ? h("div", { className: "ask-user-error", role: "alert" }, detailError)
+          : null
+      )
+    )
+  );
 }
 
 function AskUserReadOnlyCard({ entry, isJustPrepended, itemId, questions, answers, status }) {
