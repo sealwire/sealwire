@@ -764,6 +764,16 @@ export async function submitAskUserAnswer(requestId, answers) {
   }
 }
 
+export async function fetchAskUserQuestionDetail(requestId) {
+  if (!requestId) {
+    return null;
+  }
+  const result = await dispatchOrRecover("fetch_ask_user_question_detail", {
+    request_id: requestId,
+  });
+  return result.ask_user_question_detail?.request || null;
+}
+
 export async function applyFileChange(itemId, direction) {
   if (!itemId) {
     renderLog("No file change selected.");

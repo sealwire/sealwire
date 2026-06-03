@@ -174,6 +174,51 @@ function useRelayNicknames() {
   );
 }
 
+function mergeAskUserQuestionDetails(pendingRequests, detailByRequestId) {
+  if (!Array.isArray(pendingRequests) || !pendingRequests.length) {
+    return [];
+  }
+  return pendingRequests.map((request) => {
+    const detail = detailByRequestId?.get?.(request?.request_id);
+    if (!detail?.questions?.length) {
+      return request;
+    }
+    return {
+      ...request,
+      ...detail,
+      questions: detail.questions,
+      questions_inline_complete: true,
+      detail_available: true,
+    };
+  });
+}
+
+function filterAskUserDetailMap(map, activeRequestIds) {
+  let changed = false;
+  const next = new Map();
+  for (const [requestId, value] of map || []) {
+    if (activeRequestIds.has(requestId)) {
+      next.set(requestId, value);
+    } else {
+      changed = true;
+    }
+  }
+  return changed ? next : map;
+}
+
+function filterAskUserDetailSet(set, activeRequestIds) {
+  let changed = false;
+  const next = new Set();
+  for (const requestId of set || []) {
+    if (activeRequestIds.has(requestId)) {
+      next.add(requestId);
+    } else {
+      changed = true;
+    }
+  }
+  return changed ? next : set;
+}
+
 function RemoteApp() {
   const currentState = useSyncExternalStore(
     subscribeRemoteState,
@@ -186,6 +231,9 @@ function RemoteApp() {
     undefined,
     createInitialRemoteTranscriptUiState
   );
+  const [askUserQuestionDetails, setAskUserQuestionDetails] = useState(() => new Map());
+  const [askUserQuestionDetailLoading, setAskUserQuestionDetailLoading] = useState(() => new Set());
+  const [askUserQuestionDetailErrors, setAskUserQuestionDetailErrors] = useState(() => new Map());
   const [remoteUiStore] = useState(() => createRemoteUiStore());
   const remoteUi = useRemoteUiStoreState(remoteUiStore);
   const [threadListStore] = useState(() => createThreadListStore());
@@ -446,6 +494,19 @@ function RemoteApp() {
     threadId: session?.active_thread_id || null,
     transientDetails: transcriptUiState.transcriptExpandedDetails,
   });
+  const pendingAskUserQuestions = session?.pending_ask_user_questions || [];
+  const pendingAskUserSignature = pendingAskUserQuestions
+    .map((request) => [
+      request?.request_id || "",
+      request?.content_hash || "",
+      request?.questions_inline_complete === false ? "0" : "1",
+      Array.isArray(request?.questions) ? request.questions.length : 0,
+    ].join(":"))
+    .join("|");
+  const mergedPendingAskUserQuestions = mergeAskUserQuestionDetails(
+    pendingAskUserQuestions,
+    askUserQuestionDetails
+  );
   const transcriptEntriesByItemId = new Map(
     (session?.transcript || [])
       .filter((entry) => entry?.item_id)
@@ -480,7 +541,81 @@ function RemoteApp() {
     dispatchTranscriptUi({
       type: "transcript/reset",
     });
+    setAskUserQuestionDetails(new Map());
+    setAskUserQuestionDetailLoading(new Set());
+    setAskUserQuestionDetailErrors(new Map());
   }, [session?.active_thread_id]);
+
+  useEffect(() => {
+    const activeRequestIds = new Set(
+      pendingAskUserQuestions
+        .map((request) => request?.request_id)
+        .filter(Boolean)
+    );
+    setAskUserQuestionDetails((prev) => filterAskUserDetailMap(prev, activeRequestIds));
+    setAskUserQuestionDetailErrors((prev) => filterAskUserDetailMap(prev, activeRequestIds));
+    setAskUserQuestionDetailLoading((prev) => filterAskUserDetailSet(prev, activeRequestIds));
+
+    const requestsToLoad = pendingAskUserQuestions.filter((request) => (
+      request?.request_id
+      && request.questions_inline_complete === false
+      && request.detail_available !== false
+      && !askUserQuestionDetails.has(request.request_id)
+      && !askUserQuestionDetailLoading.has(request.request_id)
+    ));
+    if (!requestsToLoad.length) {
+      return undefined;
+    }
+
+    let cancelled = false;
+    for (const request of requestsToLoad) {
+      const requestId = request.request_id;
+      setAskUserQuestionDetailLoading((prev) => {
+        const next = new Set(prev);
+        next.add(requestId);
+        return next;
+      });
+      handlers.onFetchAskUserQuestionDetail?.(requestId)
+        .then((detail) => {
+          if (cancelled || !detail?.request_id) return;
+          setAskUserQuestionDetails((prev) => {
+            const next = new Map(prev);
+            next.set(requestId, detail);
+            return next;
+          });
+          setAskUserQuestionDetailErrors((prev) => {
+            if (!prev.has(requestId)) return prev;
+            const next = new Map(prev);
+            next.delete(requestId);
+            return next;
+          });
+        })
+        .catch((error) => {
+          if (cancelled) return;
+          setAskUserQuestionDetailErrors((prev) => {
+            const next = new Map(prev);
+            next.set(requestId, error?.message || "Failed to load question details.");
+            return next;
+          });
+        })
+        .finally(() => {
+          if (cancelled) return;
+          setAskUserQuestionDetailLoading((prev) => {
+            const next = new Set(prev);
+            next.delete(requestId);
+            return next;
+          });
+        });
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    pendingAskUserSignature,
+    askUserQuestionDetails,
+    askUserQuestionDetailLoading,
+  ]);
 
   useEffect(() => {
     if (!session?.active_thread_id) {
@@ -1005,6 +1140,9 @@ function RemoteApp() {
           session,
           sessionView,
           transcriptDetailEntries,
+          pendingAskUserQuestions: mergedPendingAskUserQuestions,
+          askUserDetailLoadingRequestIds: askUserQuestionDetailLoading,
+          askUserDetailErrors: askUserQuestionDetailErrors,
           uiState: transcriptUiState,
         }),
         h(RemoteClientLogDrawer, {
@@ -1419,9 +1557,12 @@ function RemoteThreadPanel({
   onSubmitAskUserAnswers,
   onTakeOver,
   onUpdateSessionSettings,
+  pendingAskUserQuestions,
   session,
   sessionView,
   transcriptDetailEntries,
+  askUserDetailErrors,
+  askUserDetailLoadingRequestIds,
   uiState,
 }) {
   return h(
@@ -1439,8 +1580,11 @@ function RemoteThreadPanel({
         onToggleTranscriptItem,
         onSubmitDecision,
         onSubmitAskUserAnswers,
+        pendingAskUserQuestions,
         session,
         transcriptDetailEntries,
+        askUserDetailErrors,
+        askUserDetailLoadingRequestIds,
         uiState,
         sessionView,
       })
@@ -1522,9 +1666,12 @@ function RemoteTranscriptPanel({
   onSubmitDecision,
   onSubmitAskUserAnswers,
   onToggleTranscriptItem,
+  pendingAskUserQuestions,
   session,
   sessionView,
   transcriptDetailEntries,
+  askUserDetailErrors,
+  askUserDetailLoadingRequestIds,
   uiState,
 }) {
   const relayNicknames = useRelayNicknames();
@@ -1633,12 +1780,17 @@ function RemoteTranscriptPanel({
         expandedItemIds: uiState.transcriptExpandedItemIds,
         expandedKeys: uiState.transcriptExpandedItemIds,
         loadingItemIds: uiState.transcriptLoadingItemIds,
-        pendingAskUserQuestions: session?.pending_ask_user_questions || [],
+        pendingAskUserQuestions,
         onSubmitAskUserAnswers: (requestId, answers) => {
           void onSubmitAskUserAnswers?.(requestId, answers);
         },
         askUserSubmittingRequestId: uiState.askUserSubmittingRequestId || "",
         askUserErrors: uiState.askUserErrors instanceof Map ? uiState.askUserErrors : new Map(),
+        askUserDetailErrors: askUserDetailErrors instanceof Map ? askUserDetailErrors : new Map(),
+        askUserDetailLoadingRequestIds:
+          askUserDetailLoadingRequestIds instanceof Set
+            ? askUserDetailLoadingRequestIds
+            : new Set(),
       },
       onTranscriptInteract: (event) => {
         const fileChangeButton = event.target.closest?.("[data-file-change-action]");

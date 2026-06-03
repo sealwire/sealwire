@@ -1,7 +1,8 @@
 use super::*;
 use crate::protocol::{
-    SecurityMode, ThreadEntriesResponse, ThreadSummaryView, ThreadTranscriptResponse,
-    ThreadsResponse, TranscriptEntryKind, TranscriptEntryView,
+    AskUserOptionView, AskUserQuestionDetailResponse, AskUserQuestionRequestView,
+    AskUserQuestionView, SecurityMode, ThreadEntriesResponse, ThreadSummaryView,
+    ThreadTranscriptResponse, ThreadsResponse, TranscriptEntryKind, TranscriptEntryView,
 };
 
 fn make_snapshot() -> SessionSnapshot {
@@ -147,6 +148,7 @@ fn plain_remote_action_result_payload_splits_control_results_from_session_result
         thread_entry_detail: None,
         thread_transcript: None,
         workspace_diff: None,
+        ask_user_question_detail: None,
         session_claim: None,
         session_claim_expires_at: None,
         claim_challenge_id: None,
@@ -178,6 +180,7 @@ fn plain_remote_action_result_payload_splits_control_results_from_session_result
         thread_entry_detail: None,
         thread_transcript: None,
         workspace_diff: None,
+        ask_user_question_detail: None,
         session_claim: Some("claim-1".to_string()),
         session_claim_expires_at: Some(123),
         claim_challenge_id: None,
@@ -276,6 +279,7 @@ fn remote_action_result_size_breakdown_reports_large_thread_transcript_payloads(
         None,
         None,
         None,
+        None,
     );
 
     assert!(breakdown.thread_transcript_bytes > breakdown.thread_entries_bytes);
@@ -315,6 +319,54 @@ fn make_large_thread_transcript_plaintext() -> RemoteActionResultPlaintext {
             prev_cursor: Some(1),
         }),
         workspace_diff: None,
+        ask_user_question_detail: None,
+        session_claim: None,
+        session_claim_expires_at: None,
+        claim_challenge_id: None,
+        claim_challenge: None,
+        claim_challenge_expires_at: None,
+        error: None,
+    }
+}
+
+fn make_large_ask_user_detail_plaintext() -> RemoteActionResultPlaintext {
+    RemoteActionResultPlaintext {
+        kind: RemoteActionResultKind::RemoteTranscriptResult,
+        action: RemoteActionKind::FetchAskUserQuestionDetail,
+        ok: true,
+        snapshot: None,
+        receipt: None,
+        ask_user_answer_receipt: None,
+        providers: None,
+        models: None,
+        threads: None,
+        thread_entries: None,
+        thread_entry_detail: None,
+        thread_transcript: None,
+        workspace_diff: None,
+        ask_user_question_detail: Some(AskUserQuestionDetailResponse {
+            request: AskUserQuestionRequestView::with_inline_questions(
+                "ask:large".to_string(),
+                "toolu_large".to_string(),
+                "thread-1".to_string(),
+                123,
+                vec![AskUserQuestionView {
+                    question: "Which large option should be sent back to Claude? ".repeat(800),
+                    header: "Large question".to_string(),
+                    multi_select: false,
+                    options: vec![
+                        AskUserOptionView {
+                            label: "Option A".to_string(),
+                            description: "Detailed option A. ".repeat(1_500),
+                        },
+                        AskUserOptionView {
+                            label: "Option B".to_string(),
+                            description: "Detailed option B. ".repeat(1_500),
+                        },
+                    ],
+                }],
+            ),
+        }),
         session_claim: None,
         session_claim_expires_at: None,
         claim_challenge_id: None,
@@ -351,6 +403,31 @@ fn encrypted_remote_action_result_chunk_payloads_fit_within_broker_limit() {
 
     assert!(payloads.len() > 1);
     assert!(payloads
+        .iter()
+        .all(|payload| frame_bytes_for_payload(payload) <= MAX_BROKER_TEXT_FRAME_BYTES));
+}
+
+#[test]
+fn large_ask_user_detail_result_chunks_fit_within_broker_limit() {
+    let plaintext = make_large_ask_user_detail_plaintext();
+    let plain_payloads =
+        build_plain_remote_action_result_chunk_payloads("action-1", "surface-1", &plaintext)
+            .expect("plain ask-user detail chunks");
+    let encrypted_payloads = build_encrypted_remote_action_result_chunk_payloads(
+        "action-1",
+        "surface-1",
+        "device-1",
+        "payload-secret",
+        &plaintext,
+    )
+    .expect("encrypted ask-user detail chunks");
+
+    assert!(plain_payloads.len() > 1);
+    assert!(encrypted_payloads.len() > 1);
+    assert!(plain_payloads
+        .iter()
+        .all(|payload| frame_bytes_for_payload(payload) <= MAX_BROKER_TEXT_FRAME_BYTES));
+    assert!(encrypted_payloads
         .iter()
         .all(|payload| frame_bytes_for_payload(payload) <= MAX_BROKER_TEXT_FRAME_BYTES));
 }

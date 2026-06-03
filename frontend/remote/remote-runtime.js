@@ -4,7 +4,7 @@ import { initializeRemoteNavigation, openRemoteNavigation } from "./navigation.j
 import { applyPairingQuery, beginPairing, forgetCurrentDevice, handleEncryptedPairingResult, sendPairingRequest } from "./pairing.js";
 import { registerRemotePwa } from "./pwa.js";
 import { renderLog } from "./session-surface.js";
-import { applyFileChange, applySessionSnapshot, applyTranscriptDelta, applyTranscriptEvent, clearSessionRuntime, fetchRemoteProviderModels, fetchRemoteProviders, fetchTranscriptEntryDetail, refreshRemoteThreads, resumeRemoteSession, sendMessage, startRemoteSession, stopActiveTurn, submitAskUserAnswer, submitDecision, syncRemoteSnapshot, takeOverControl, updateRemoteSessionSettings } from "./session-ops.js";
+import { applyFileChange, applySessionSnapshot, applyTranscriptDelta, applyTranscriptEvent, clearSessionRuntime, fetchAskUserQuestionDetail, fetchRemoteProviderModels, fetchRemoteProviders, fetchTranscriptEntryDetail, refreshRemoteThreads, resumeRemoteSession, sendMessage, startRemoteSession, stopActiveTurn, submitAskUserAnswer, submitDecision, syncRemoteSnapshot, takeOverControl, updateRemoteSessionSettings } from "./session-ops.js";
 import { clearActiveRelaySelection, ensureDeviceIdentity, hydrateStoredRemoteSecrets, selectRelayProfile, state } from "./state.js";
 import { applyRemoteSurfacePatch, createResetRemoteSurfaceStatePatch } from "./surface-state.js";
 
@@ -164,6 +164,9 @@ export function createRemoteAppHandlers() {
     },
     onFetchTranscriptEntryDetail(threadId, itemId) {
       return fetchTranscriptEntryDetail(threadId, itemId);
+    },
+    onFetchAskUserQuestionDetail(requestId) {
+      return fetchAskUserQuestionDetail(requestId);
     },
     onResumeThread(threadId, sessionDraft) {
       return resumeRemoteSession(threadId, sessionDraft);

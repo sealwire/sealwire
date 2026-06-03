@@ -75,6 +75,7 @@ pub(crate) struct CachedRemoteActionResult {
     pub(crate) thread_entry_detail: Option<ThreadEntryDetailResponse>,
     pub(crate) thread_transcript: Option<ThreadTranscriptResponse>,
     pub(crate) workspace_diff: Option<crate::protocol::WorkspaceDiffResponse>,
+    pub(crate) ask_user_question_detail: Option<crate::protocol::AskUserQuestionDetailResponse>,
     pub(crate) session_claim: Option<String>,
     pub(crate) session_claim_expires_at: Option<u64>,
     pub(crate) claim_challenge_id: Option<String>,

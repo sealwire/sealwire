@@ -1342,6 +1342,70 @@ test("renderEntryMarkup uses pending AskUserQuestion data when the tool input pr
   assert.match(markup, /ask-user-wizard-next[^>]*disabled=""[^>]*>Continue</);
 });
 
+test("renderEntryMarkup renders incomplete pending AskUserQuestion as a loading card", () => {
+  const entry = makeAskUserEntry({
+    item_id: "tool:toolu_large",
+    status: "running",
+    tool: {
+      input_preview: '{"questions":[{"question":"Large question","options":[{"label":"A","desc...',
+      result_preview: null,
+    },
+  });
+  const markup = renderEntryMarkup(entry, {
+    pendingAskUserQuestions: [
+      {
+        request_id: "ask:large",
+        tool_use_id: "toolu_large",
+        thread_id: "t",
+        question_count: 2,
+        questions_inline_complete: false,
+        detail_available: true,
+        content_hash: "hash-large",
+        questions: [],
+      },
+    ],
+    askUserDetailLoadingRequestIds: new Set(["ask:large"]),
+  });
+
+  assert.match(markup, /message-card-ask-user/);
+  assert.doesNotMatch(markup, /message-card-tool/);
+  assert.match(markup, /Loading question detail/);
+  assert.match(markup, /2 questions are loading\./);
+  assert.doesNotMatch(markup, /Send to Claude/);
+});
+
+test("renderEntryMarkup surfaces pending AskUserQuestion detail load errors", () => {
+  const entry = makeAskUserEntry({
+    item_id: "tool:toolu_large",
+    status: "running",
+    tool: {
+      input_preview: '{"questions":[{"question":"Large question","options":[{"label":"A","desc...',
+      result_preview: null,
+    },
+  });
+  const markup = renderEntryMarkup(entry, {
+    pendingAskUserQuestions: [
+      {
+        request_id: "ask:large",
+        tool_use_id: "toolu_large",
+        thread_id: "t",
+        question_count: 1,
+        questions_inline_complete: false,
+        detail_available: true,
+        content_hash: "hash-large",
+        questions: [],
+      },
+    ],
+    askUserDetailErrors: new Map([
+      ["ask:large", "Question detail is too large to load remotely."],
+    ]),
+  });
+
+  assert.match(markup, /Question detail failed/);
+  assert.match(markup, /role="alert"[^>]*>Question detail is too large to load remotely\./);
+  assert.doesNotMatch(markup, /message-card-tool/);
+});
+
 test("groupToolEntries keeps AskUserQuestion ungrouped so the card stays visible", () => {
   const ask = makeAskUserEntry({ item_id: "tool:askuser-1" });
   const result = groupToolEntries([

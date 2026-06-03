@@ -380,7 +380,7 @@ fn compact_for_broker_trims_many_file_changes_without_clearing_transcript() {
 }
 
 #[test]
-fn compact_for_broker_preserves_large_pending_ask_user_question_losslessly() {
+fn compact_for_local_web_preserves_large_pending_ask_user_question_losslessly() {
     let long_question = format!(
         "用户可见的标题要改成什么品牌名? {}",
         "请保留这段问题正文不要截断。".repeat(450)
@@ -391,12 +391,12 @@ fn compact_for_broker_preserves_large_pending_ask_user_question_losslessly() {
     );
     let mut snapshot = make_snapshot();
     snapshot.pending_approvals.clear();
-    snapshot.pending_ask_user_questions = vec![AskUserQuestionRequestView {
-        request_id: "ask:large".to_string(),
-        tool_use_id: "toolu_large".to_string(),
-        thread_id: "thread-1".to_string(),
-        requested_at: 123,
-        questions: vec![
+    snapshot.pending_ask_user_questions = vec![AskUserQuestionRequestView::with_inline_questions(
+        "ask:large".to_string(),
+        "toolu_large".to_string(),
+        "thread-1".to_string(),
+        123,
+        vec![
             AskUserQuestionView {
                 question: long_question.clone(),
                 header: "品牌名".to_string(),
@@ -423,9 +423,9 @@ fn compact_for_broker_preserves_large_pending_ask_user_question_losslessly() {
                 }],
             },
         ],
-    }];
+    )];
 
-    let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::RemoteSurface);
+    let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::LocalWeb);
 
     assert_eq!(compacted.pending_ask_user_questions.len(), 1);
     let pending = &compacted.pending_ask_user_questions[0];
@@ -445,7 +445,88 @@ fn compact_for_broker_preserves_large_pending_ask_user_question_losslessly() {
         pending.questions[1].question,
         "只改可见文案,还是也处理内部标识符?"
     );
-    assert!(serde_json::to_vec(&compacted).unwrap().len() > SESSION_SNAPSHOT_TARGET_BYTES);
+    assert!(serde_json::to_vec(&compacted).unwrap().len() > LOCAL_SESSION_SNAPSHOT_TARGET_BYTES);
+}
+
+#[test]
+fn compact_for_broker_externalizes_large_pending_ask_user_question_detail() {
+    let long_question = format!(
+        "用户可见的标题要改成什么品牌名? {}",
+        "问题正文通过详情接口加载。".repeat(450)
+    );
+    let long_description = format!(
+        "首字母大写, 标签页显示 Sealwire / Sealwire Remote, PWA 名同步。{}",
+        "描述也通过详情接口加载。".repeat(220)
+    );
+    let mut snapshot = make_snapshot();
+    snapshot.pending_approvals.clear();
+    snapshot.pending_ask_user_questions = vec![AskUserQuestionRequestView::with_inline_questions(
+        "ask:large".to_string(),
+        "toolu_large".to_string(),
+        "thread-1".to_string(),
+        123,
+        vec![AskUserQuestionView {
+            question: long_question,
+            header: "品牌名".to_string(),
+            multi_select: false,
+            options: vec![AskUserOptionView {
+                label: "Sealwire".to_string(),
+                description: long_description,
+            }],
+        }],
+    )];
+
+    let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::RemoteSurface);
+
+    assert_eq!(compacted.pending_ask_user_questions.len(), 1);
+    let pending = &compacted.pending_ask_user_questions[0];
+    assert_eq!(pending.request_id, "ask:large");
+    assert_eq!(pending.tool_use_id, "toolu_large");
+    assert_eq!(pending.question_count, 1);
+    assert!(!pending.questions_inline_complete);
+    assert!(pending.detail_available);
+    assert!(pending.content_hash.is_some());
+    assert!(pending.questions.is_empty());
+    assert!(serde_json::to_vec(&compacted).unwrap().len() < SESSION_SNAPSHOT_TARGET_BYTES);
+}
+
+#[test]
+fn compact_for_broker_externalizes_pending_ask_user_questions_until_snapshot_fits() {
+    let mut snapshot = make_snapshot();
+    snapshot.pending_approvals.clear();
+    snapshot.transcript.clear();
+    snapshot.logs.clear();
+    snapshot.pending_ask_user_questions = (0..4)
+        .map(|index| {
+            AskUserQuestionRequestView::with_inline_questions(
+                format!("ask:{index}"),
+                format!("toolu_{index}"),
+                "thread-1".to_string(),
+                index,
+                vec![AskUserQuestionView {
+                    question: format!("Question {index}: {}", "q".repeat(2_200)),
+                    header: "Pick".to_string(),
+                    multi_select: false,
+                    options: vec![AskUserOptionView {
+                        label: "A".to_string(),
+                        description: "d".repeat(200),
+                    }],
+                }],
+            )
+        })
+        .collect();
+
+    let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::RemoteSurface);
+
+    assert!(serde_json::to_vec(&compacted).unwrap().len() < SESSION_SNAPSHOT_TARGET_BYTES);
+    assert!(compacted
+        .pending_ask_user_questions
+        .iter()
+        .any(|request| !request.questions_inline_complete));
+    assert!(compacted.pending_ask_user_questions.iter().all(|request| {
+        request.questions_inline_complete
+            || (request.detail_available && request.questions.is_empty())
+    }));
 }
 
 #[test]
