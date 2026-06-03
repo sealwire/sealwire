@@ -32,19 +32,21 @@
   },
   "scripts": {
     "start": "node scripts/sealwire.mjs",
+    "lint": "eslint .",
     "dev": "vite --host",
     "dev:full": "node scripts/dev-full.mjs",
     "dev:full:local": "RELAY_DEV_LOCALHOST_ONLY=1 node scripts/dev-full.mjs",
     "dev:restart": "sh scripts/restart-dev.sh",
     "dev:restart:local": "sh scripts/restart-dev.sh --local",
     "dev:restart:public": "sh scripts/restart-dev-public.sh",
-    "test": "node --test claude-worker/*.test.mjs frontend/*.test.mjs frontend/local/*.test.mjs frontend/local/transcript/*.test.mjs frontend/remote/*.test.mjs frontend/remote/__tests__/*.test.mjs frontend/remote/transcript/*.test.mjs scripts/e2e/harness/*.test.mjs && vite build",
+    "test": "node --test claude-worker/*.test.mjs frontend/*.test.mjs frontend/local/*.test.mjs frontend/local/transcript/*.test.mjs frontend/remote/*.test.mjs frontend/remote/__tests__/*.test.mjs frontend/remote/transcript/*.test.mjs scripts/*.test.mjs scripts/e2e/harness/*.test.mjs && vite build",
     "test:harness": "node --test scripts/e2e/harness/*.test.mjs",
     "test:message-drop-harness": "cargo test -p relay-server replay_harness -- --nocapture && cargo test -p relay-server compact_for_broker_trims_many_file_changes_without_clearing_transcript -- --nocapture",
     "build": "vite build",
     "prepack": "npm run build",
     "preview": "vite preview --host",
     "smoke:pairing": "node scripts/pairing-smoke.mjs",
+    "test:browser:smoke": "npm run build && node scripts/browser-page-smoke-e2e.mjs",
     "test:claude:provider": "node scripts/claude-provider-e2e.mjs",
     "test:claude:browser": "node scripts/e2e/run-browser-suite.mjs --suite real-provider",
     "test:claude": "npm run test:claude:provider && npm run test:claude:browser",
@@ -94,6 +96,8 @@
     "zustand": "^5.0.12"
   },
   "devDependencies": {
+    "eslint": "^9.39.4",
+    "globals": "^17.6.0",
     "playwright": "^1.58.2",
     "vite": "^7.2.1"
   }

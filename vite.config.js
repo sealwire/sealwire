@@ -1,6 +1,8 @@
 import { defineConfig } from "vite";
 import { resolve } from "node:path";
 
+import { devReloadPlugin } from "./scripts/vite-dev-reload-plugin.mjs";
+
 const relayPort = Number(process.env.RELAY_DEV_SERVER_PORT || 8787);
 const vitePort = Number(process.env.RELAY_DEV_VITE_PORT || 5173);
 
@@ -29,51 +31,6 @@ function buildMetaPlugin() {
         fileName: "build-meta.json",
         source: `${JSON.stringify(buildMeta, null, 2)}\n`,
       });
-    },
-  };
-}
-
-function devReloadPlugin() {
-  const enabled = process.env.RELAY_DEV_RELOAD === "1";
-  const reloadPort = process.env.RELAY_DEV_RELOAD_PORT || "5174";
-  if (!enabled) {
-    return { name: "agent-relay-dev-reload-disabled" };
-  }
-  const clientScript = `(() => {
-  const port = ${JSON.stringify(reloadPort)};
-  let lastId = null;
-  let es = null;
-  function connect() {
-    const url = "http://" + location.hostname + ":" + port + "/dev/reload";
-    es = new EventSource(url);
-    es.addEventListener("reload", (ev) => {
-      if (lastId === null) {
-        lastId = ev.data;
-        return;
-      }
-      if (ev.data !== lastId) {
-        console.info("[dev:reload] new build " + ev.data + ", reloading");
-        location.reload();
-      }
-    });
-    es.addEventListener("error", () => {
-      try { es.close(); } catch {}
-      setTimeout(connect, 1000);
-    });
-  }
-  connect();
-})();`;
-  return {
-    name: "agent-relay-dev-reload",
-    transformIndexHtml() {
-      return [
-        {
-          tag: "script",
-          attrs: { type: "module" },
-          children: clientScript,
-          injectTo: "head",
-        },
-      ];
     },
   };
 }

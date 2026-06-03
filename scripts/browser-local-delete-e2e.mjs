@@ -111,6 +111,7 @@ async function main() {
     assert.ok(threadId, "local delete e2e should create an active thread");
     cleanupThreadIds.push(threadId);
     assert.notEqual(threadId, fallbackThreadId, "delete target should be different from fallback");
+    await waitForThreadIdle(relayPort, threadId);
 
     page.once("dialog", (dialog) => dialog.accept());
     await openThreadContextMenu(page, threadId, "#delete-thread-button");
@@ -224,22 +225,32 @@ async function waitForThreadMissing(relayPort, cwd, threadId, timeoutMs = LOCAL_
   throw new Error(`timed out waiting for deleted thread ${threadId} to disappear`);
 }
 
+async function waitForThreadIdle(relayPort, threadId, timeoutMs = LOCAL_TIMEOUT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const session = await fetchSession(relayPort);
+    if (session.active_thread_id === threadId && !session.active_turn_id) {
+      return session;
+    }
+    await delay(250);
+  }
+
+  throw new Error(`timed out waiting for thread ${threadId} to become idle before deletion`);
+}
+
 async function openThreadContextMenu(page, threadId, actionSelector) {
   const target = page.locator(`#threads-list [data-thread-id="${threadId}"]`);
   await target.waitFor({ state: "visible", timeout: LOCAL_TIMEOUT_MS });
   await target.scrollIntoViewIfNeeded({ timeout: LOCAL_TIMEOUT_MS });
-  await target.evaluate((element) => {
-    const rect = element.getBoundingClientRect();
-    element.dispatchEvent(
-      new MouseEvent("contextmenu", {
-        bubbles: true,
-        button: 2,
-        buttons: 2,
-        cancelable: true,
-        clientX: rect.left + Math.min(rect.width / 2, 160),
-        clientY: rect.top + Math.min(rect.height / 2, 24),
-      })
-    );
+  const box = await target.boundingBox({ timeout: LOCAL_TIMEOUT_MS });
+  assert.ok(box, `thread row ${threadId} should have a bounding box before opening menu`);
+  await target.click({
+    button: "right",
+    position: {
+      x: Math.min(box.width / 2, 160),
+      y: Math.min(box.height / 2, 24),
+    },
+    timeout: LOCAL_TIMEOUT_MS,
   });
   await page.waitForFunction(
     ({ actionSelector, threadId }) => {

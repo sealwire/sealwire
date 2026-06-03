@@ -28,6 +28,29 @@ jobs:
       - name: npm test
         run: npm test
 
+  lint:
+    name: eslint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: npm ci
+        run: npm ci
+
+      # Static `no-undef` guard: catches free/undefined identifiers (e.g. a stray
+      # `session` reference) that `vite build` happily emits and only throw at
+      # runtime.
+      - name: npm run lint
+        run: npm run lint
+
   rust:
     name: fmt-check-test
     runs-on: ubuntu-latest
@@ -59,6 +82,43 @@ jobs:
 
       - name: cargo test
         run: cargo test --workspace
+
+  browser-smoke:
+    name: browser-page-smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: npm ci
+        run: npm ci
+
+      - name: Install Playwright
+        run: npm run test:browser:install:ci
+
+      - name: Build relay-server
+        run: cargo build -p relay-server
+
+      # Build the frontend, serve it through the relay, load every entry point in
+      # a real browser, and fail on any uncaught error / CSP violation / root
+      # that never mounts. This is the guard that catches render crashes
+      # (e.g. `session is not defined`) which `vite build` does not.
+      - name: Page smoke test
+        run: npm run test:browser:smoke
 
   browser-e2e:
     name: browser-public-core-fake
