@@ -52,6 +52,14 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      # Build the broker image's frontend stage in the SAME minimal Docker
+      # context Railway uses (only the files docker/broker.Dockerfile COPYs).
+      # A repo-wide `vite build` can't catch a build input that lives outside
+      # that context (e.g. importing a helper from scripts/) — this can, before
+      # we ever call `railway up`.
+      - name: Verify broker image builds (frontend stage)
+        run: docker build --target frontend-build -f docker/broker.Dockerfile .
+
       - name: Unit tests
         run: npm test
 
@@ -101,14 +109,21 @@ jobs:
         if: steps.railway_inputs.outputs.ready == 'true'
         shell: bash
         run: |
+          status=1
           for attempt in 1 2 3; do
             if railway up --service "$RAILWAY_SERVICE_ID"; then
               exit 0
+            else
+              # Capture railway's real exit code here: `$?` read as the first
+              # command of the else branch is the failed condition's status.
+              # (After `fi`, `$?` would be the if-statement's status — 0 when no
+              # branch ran — which previously masked failures as success.)
+              status=$?
             fi
-            status=$?
             echo "::warning::railway up failed on attempt ${attempt} with exit code ${status}."
             if [ "$attempt" -lt 3 ]; then
               sleep $((attempt * 20))
             fi
           done
+          echo "::error::railway up failed after 3 attempts (exit ${status})."
           exit "$status"

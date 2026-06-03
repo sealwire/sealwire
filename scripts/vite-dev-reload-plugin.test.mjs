@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { devReloadPlugin } from "./vite-dev-reload-plugin.mjs";
+// devReloadPlugin lives inline in vite.config.js (it MUST, so the broker
+// Dockerfile — which copies only vite.config.js + frontend/ — can build it).
+import { devReloadPlugin } from "../vite.config.js";
 
 function withEnv(env, fn) {
   const previous = {};
