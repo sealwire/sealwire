@@ -52,13 +52,12 @@ jobs:
       - name: Lint
         run: npm run lint
 
-      # Build the broker image's frontend stage in the SAME minimal Docker
-      # context Railway uses (only the files docker/broker.Dockerfile COPYs).
-      # A repo-wide `vite build` can't catch a build input that lives outside
-      # that context (e.g. importing a helper from scripts/) — this can, before
-      # we ever call `railway up`.
-      - name: Verify broker image builds (frontend stage)
-        run: docker build --target frontend-build -f docker/broker.Dockerfile .
+      # Build the broker image in the SAME minimal Docker context Railway uses
+      # (only the files docker/broker.Dockerfile COPYs). This catches both
+      # frontend-context issues and Rust image/toolchain mismatches before we
+      # ever call `railway up`.
+      - name: Verify broker image builds
+        run: docker build -f docker/broker.Dockerfile .
 
       - name: Unit tests
         run: npm test
