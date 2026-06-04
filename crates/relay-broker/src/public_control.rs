@@ -10,13 +10,21 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use rand::{distributions::Alphanumeric, Rng};
 use relay_util::{sha256_hex, trimmed_option_string};
 use serde::{Deserialize, Serialize};
-use tokio::{fs, sync::Mutex};
+use sqlx::{
+    postgres::{PgPoolOptions, PgRow},
+    PgPool, Row,
+};
+use tokio::{
+    fs,
+    sync::{Mutex, MutexGuard},
+};
 
 use crate::join_ticket::{unix_now, JoinTicketClaims, JoinTicketKey};
 
 pub const PUBLIC_ISSUER_SECRET_ENV: &str = "RELAY_BROKER_PUBLIC_ISSUER_SECRET";
 pub const PUBLIC_RELAY_REGISTRATIONS_ENV: &str = "RELAY_BROKER_PUBLIC_RELAYS_JSON";
 pub const PUBLIC_STATE_PATH_ENV: &str = "RELAY_BROKER_PUBLIC_STATE_PATH";
+pub const PUBLIC_POSTGRES_URL_ENV: &str = "RELAY_BROKER_PUBLIC_POSTGRES_URL";
 pub const PUBLIC_RELAY_WS_TTL_SECS_ENV: &str = "RELAY_BROKER_PUBLIC_RELAY_WS_TTL_SECS";
 pub const PUBLIC_DEVICE_WS_TTL_SECS_ENV: &str = "RELAY_BROKER_PUBLIC_DEVICE_WS_TTL_SECS";
 
@@ -233,9 +241,16 @@ struct PublicControlPlaneInner {
     issuer_key: JoinTicketKey,
     relay_ws_ttl_secs: u64,
     device_ws_ttl_secs: u64,
-    state_path: Option<PathBuf>,
+    persistence: PublicControlPersistence,
     state: Mutex<PublicControlStateStore>,
     relay_enrollment_challenges: Mutex<HashMap<String, PendingRelayEnrollmentChallenge>>,
+}
+
+#[derive(Clone)]
+enum PublicControlPersistence {
+    InMemory,
+    Json(PathBuf),
+    Postgres(PgPool),
 }
 
 #[derive(Debug, Clone)]
@@ -317,10 +332,11 @@ struct PublicControlStateStore {
 
 impl PublicControlPlane {
     pub async fn from_env() -> Result<Self, String> {
-        Self::from_parts(
+        Self::from_parts_with_postgres(
             std::env::var(PUBLIC_ISSUER_SECRET_ENV).ok(),
             std::env::var(PUBLIC_RELAY_REGISTRATIONS_ENV).ok(),
             std::env::var(PUBLIC_STATE_PATH_ENV).ok(),
+            std::env::var(PUBLIC_POSTGRES_URL_ENV).ok(),
             std::env::var(PUBLIC_RELAY_WS_TTL_SECS_ENV).ok(),
             std::env::var(PUBLIC_DEVICE_WS_TTL_SECS_ENV).ok(),
         )
@@ -334,19 +350,42 @@ impl PublicControlPlane {
         relay_ws_ttl_secs: Option<String>,
         device_ws_ttl_secs: Option<String>,
     ) -> Result<Self, String> {
+        Self::from_parts_with_postgres(
+            issuer_secret,
+            relay_registrations_json,
+            state_path,
+            None,
+            relay_ws_ttl_secs,
+            device_ws_ttl_secs,
+        )
+        .await
+    }
+
+    pub async fn from_parts_with_postgres(
+        issuer_secret: Option<String>,
+        relay_registrations_json: Option<String>,
+        state_path: Option<String>,
+        postgres_url: Option<String>,
+        relay_ws_ttl_secs: Option<String>,
+        device_ws_ttl_secs: Option<String>,
+    ) -> Result<Self, String> {
         let issuer_secret = trimmed_option_string(issuer_secret).ok_or_else(|| {
             format!("{PUBLIC_ISSUER_SECRET_ENV} is required in public broker auth mode")
         })?;
         let issuer_key = JoinTicketKey::from_secret(issuer_secret.as_bytes())?;
-        let state_path = trimmed_option_string(state_path).map(PathBuf::from);
-        if state_path.is_none() && public_mode_requires_persistent_state() {
+        let persistence = PublicControlPersistence::from_config(state_path, postgres_url).await?;
+        if !persistence.has_persistent_state() && public_mode_requires_persistent_state() {
             return Err(format!(
-                "{PUBLIC_STATE_PATH_ENV} is required when {}=public and BIND_HOST is not loopback",
+                "{PUBLIC_STATE_PATH_ENV} or {PUBLIC_POSTGRES_URL_ENV} is required when {}=public and BIND_HOST is not loopback",
                 crate::auth::BROKER_AUTH_MODE_ENV
             ));
         }
-        let mut state = PublicControlStateStore::load(state_path.as_deref()).await?;
-        state.seed_relay_registrations(parse_relay_registrations(relay_registrations_json)?);
+        let mut state = persistence.load().await?;
+        let seeded =
+            state.seed_relay_registrations(parse_relay_registrations(relay_registrations_json)?);
+        if seeded {
+            persistence.save(&state).await?;
+        }
 
         Ok(Self {
             inner: Arc::new(PublicControlPlaneInner {
@@ -361,7 +400,7 @@ impl PublicControlPlane {
                     device_ws_ttl_secs,
                 )?
                 .unwrap_or(DEFAULT_PUBLIC_DEVICE_WS_TTL_SECS),
-                state_path,
+                persistence,
                 state: Mutex::new(state),
                 relay_enrollment_challenges: Mutex::new(HashMap::new()),
             }),
@@ -373,7 +412,7 @@ impl PublicControlPlane {
     }
 
     pub fn has_persistent_state(&self) -> bool {
-        self.inner.state_path.is_some()
+        self.inner.persistence.has_persistent_state()
     }
 
     pub fn health_message(&self) -> Option<String> {
@@ -382,7 +421,7 @@ impl PublicControlPlane {
         }
 
         Some(format!(
-            "public broker device grants are in-memory only; set {PUBLIC_STATE_PATH_ENV} before exposing this broker outside localhost"
+            "public broker device grants are in-memory only; set {PUBLIC_STATE_PATH_ENV} or {PUBLIC_POSTGRES_URL_ENV} before exposing this broker outside localhost"
         ))
     }
 
@@ -517,7 +556,7 @@ impl PublicControlPlane {
         let refresh_token_hash = sha256_hex(&refresh_token);
         let created_at = unix_now();
 
-        let mut store = self.inner.state.lock().await;
+        let mut store = self.lock_state().await?;
         store.remove_device_grants(&registration.relay_id, None, Some(&request.device_id));
         store.grants_by_hash.insert(
             refresh_token_hash.clone(),
@@ -529,7 +568,7 @@ impl PublicControlPlane {
                 created_at,
             },
         );
-        store.save(self.inner.state_path.as_deref()).await?;
+        self.inner.persistence.save(&store).await?;
 
         let issued =
             self.issue_device_ws_token_for_registration(&registration, &request.device_id)?;
@@ -563,7 +602,7 @@ impl PublicControlPlane {
             .and_then(|label| trimmed_option_string(Some(label)))
             .filter(|label| !label.is_empty());
         let created_at = unix_now();
-        let mut store = self.inner.state.lock().await;
+        let mut store = self.lock_state().await?;
         let (client_id, client_refresh_token) =
             store.issue_or_rotate_client_identity(&client_verify_key, client_label, created_at);
         store.upsert_client_relay_grant(PersistedClientRelayGrant {
@@ -575,7 +614,7 @@ impl PublicControlPlane {
             relay_label: registration.relay_label.clone(),
             device_label,
         });
-        store.save(self.inner.state_path.as_deref()).await?;
+        self.inner.persistence.save(&store).await?;
         Ok(ClientGrantResponse {
             client_id,
             client_refresh_token,
@@ -591,7 +630,7 @@ impl PublicControlPlane {
         bearer_token: &str,
     ) -> Result<ClientRelaysResponse, String> {
         let client = self.authenticate_client(bearer_token).await?;
-        let store = self.inner.state.lock().await;
+        let store = self.lock_state().await?;
         let mut relays = store.client_relays(&client.client_id);
         relays.sort_by(|left, right| {
             right
@@ -633,9 +672,9 @@ impl PublicControlPlane {
         bearer_token: &str,
     ) -> Result<(String, String), String> {
         let client = self.authenticate_client(bearer_token).await?;
-        let mut store = self.inner.state.lock().await;
+        let mut store = self.lock_state().await?;
         let refreshed_token = store.rotate_client_identity(&client);
-        store.save(self.inner.state_path.as_deref()).await?;
+        self.inner.persistence.save(&store).await?;
         Ok((client.client_id, refreshed_token))
     }
 
@@ -644,11 +683,11 @@ impl PublicControlPlane {
         bearer_token: &str,
     ) -> Result<ClientIdentityRevokeResponse, String> {
         let client = self.authenticate_client(bearer_token).await?;
-        let mut store = self.inner.state.lock().await;
+        let mut store = self.lock_state().await?;
         let revoked_identity_count = store.remove_client_identity_by_client_id(&client.client_id);
         let revoked_grant_count = store.remove_client_relay_grants_by_client_id(&client.client_id);
         if revoked_identity_count > 0 || revoked_grant_count > 0 {
-            store.save(self.inner.state_path.as_deref()).await?;
+            self.inner.persistence.save(&store).await?;
         }
         Ok(ClientIdentityRevokeResponse {
             client_id: client.client_id,
@@ -683,7 +722,7 @@ impl PublicControlPlane {
         let registration = self
             .authenticate_relay(bearer_token, &request.relay_id, &request.broker_room_id)
             .await?;
-        let mut store = self.inner.state.lock().await;
+        let mut store = self.lock_state().await?;
         let revoked_grant_count = store.remove_device_grants(
             &registration.relay_id,
             Some(&registration.broker_room_id),
@@ -695,7 +734,7 @@ impl PublicControlPlane {
             Some(device_id),
         );
         if revoked_grant_count > 0 {
-            store.save(self.inner.state_path.as_deref()).await?;
+            self.inner.persistence.save(&store).await?;
         }
         Ok(DeviceGrantRevokeResponse {
             relay_id: registration.relay_id.clone(),
@@ -714,7 +753,7 @@ impl PublicControlPlane {
         let registration = self
             .authenticate_relay(bearer_token, &request.relay_id, &request.broker_room_id)
             .await?;
-        let mut store = self.inner.state.lock().await;
+        let mut store = self.lock_state().await?;
         let revoked_device_ids = store.remove_all_other_device_grants(
             &registration.relay_id,
             &registration.broker_room_id,
@@ -726,7 +765,7 @@ impl PublicControlPlane {
             &request.keep_device_id,
         );
         if !revoked_device_ids.is_empty() {
-            store.save(self.inner.state_path.as_deref()).await?;
+            self.inner.persistence.save(&store).await?;
         }
         Ok(DeviceGrantBulkRevokeResponse {
             relay_id: registration.relay_id.clone(),
@@ -737,13 +776,21 @@ impl PublicControlPlane {
         })
     }
 
+    async fn lock_state(&self) -> Result<MutexGuard<'_, PublicControlStateStore>, String> {
+        let mut store = self.inner.state.lock().await;
+        if self.inner.persistence.reload_before_use() {
+            *store = self.inner.persistence.load().await?;
+        }
+        Ok(store)
+    }
+
     async fn authenticate_relay(
         &self,
         bearer_token: &str,
         relay_id: &str,
         broker_room_id: &str,
     ) -> Result<PersistedRelayRegistration, String> {
-        let store = self.inner.state.lock().await;
+        let store = self.lock_state().await?;
         let registration = clone_entry_from_bearer_token(
             &store.relay_registrations_by_hash,
             bearer_token,
@@ -762,7 +809,7 @@ impl PublicControlPlane {
         &self,
         bearer_token: &str,
     ) -> Result<PersistedClientIdentity, String> {
-        let store = self.inner.state.lock().await;
+        let store = self.lock_state().await?;
         clone_entry_from_bearer_token(
             &store.client_registrations_by_hash,
             bearer_token,
@@ -795,7 +842,7 @@ impl PublicControlPlane {
         &self,
         bearer_token: &str,
     ) -> Result<PersistedDeviceGrant, String> {
-        let store = self.inner.state.lock().await;
+        let store = self.lock_state().await?;
         clone_entry_from_bearer_token(
             &store.grants_by_hash,
             bearer_token,
@@ -809,7 +856,7 @@ impl PublicControlPlane {
         relay_label: Option<String>,
     ) -> Result<RelayEnrollmentResponse, String> {
         let created_at = unix_now();
-        let mut store = self.inner.state.lock().await;
+        let mut store = self.lock_state().await?;
         let (relay_id, broker_room_id) =
             if let Some(existing) = store.registration_for_verify_key(relay_verify_key) {
                 let relay_id = existing.relay_id.clone();
@@ -833,7 +880,7 @@ impl PublicControlPlane {
         store
             .relay_registrations_by_hash
             .insert(refresh_token_hash, registration);
-        store.save(self.inner.state_path.as_deref()).await?;
+        self.inner.persistence.save(&store).await?;
         Ok(RelayEnrollmentResponse {
             relay_id,
             broker_room_id,
@@ -853,35 +900,64 @@ impl PublicControlPlane {
     }
 }
 
+impl PublicControlPersistence {
+    async fn from_config(
+        state_path: Option<String>,
+        postgres_url: Option<String>,
+    ) -> Result<Self, String> {
+        let state_path = trimmed_option_string(state_path).map(PathBuf::from);
+        let postgres_url = trimmed_option_string(postgres_url);
+        match (state_path, postgres_url) {
+            (Some(_), Some(_)) => Err(format!(
+                "set only one of {PUBLIC_STATE_PATH_ENV} or {PUBLIC_POSTGRES_URL_ENV}"
+            )),
+            (Some(path), None) => Ok(Self::Json(path)),
+            (None, Some(url)) => {
+                let pool = PgPoolOptions::new()
+                    .max_connections(5)
+                    .connect(&url)
+                    .await
+                    .map_err(|error| {
+                        format!("failed to connect to {PUBLIC_POSTGRES_URL_ENV}: {error}")
+                    })?;
+                initialize_postgres_public_control_schema(&pool).await?;
+                Ok(Self::Postgres(pool))
+            }
+            (None, None) => Ok(Self::InMemory),
+        }
+    }
+
+    fn has_persistent_state(&self) -> bool {
+        !matches!(self, Self::InMemory)
+    }
+
+    async fn load(&self) -> Result<PublicControlStateStore, String> {
+        match self {
+            Self::InMemory => Ok(PublicControlStateStore::default()),
+            Self::Json(path) => load_public_control_json(path).await,
+            Self::Postgres(pool) => load_public_control_postgres(pool).await,
+        }
+    }
+
+    async fn save(&self, state: &PublicControlStateStore) -> Result<(), String> {
+        match self {
+            Self::InMemory => Ok(()),
+            Self::Json(path) => save_public_control_json(path, state).await,
+            Self::Postgres(pool) => save_public_control_postgres(pool, state).await,
+        }
+    }
+
+    fn reload_before_use(&self) -> bool {
+        matches!(self, Self::Postgres(_))
+    }
+}
+
 impl PublicControlStateStore {
-    async fn load(path: Option<&Path>) -> Result<Self, String> {
-        let Some(path) = path else {
-            return Ok(Self::default());
-        };
-        let bytes = match fs::read(path).await {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Self::default())
-            }
-            Err(error) => {
-                return Err(format!(
-                    "failed to read public control-plane state {}: {error}",
-                    path.display()
-                ))
-            }
-        };
-        let persisted: PersistedPublicControlState =
-            serde_json::from_slice(&bytes).map_err(|error| {
-                format!(
-                    "failed to decode public control-plane state {}: {error}",
-                    path.display()
-                )
-            })?;
+    fn from_persisted(persisted: PersistedPublicControlState) -> Result<Self, String> {
         if persisted.schema_version != PUBLIC_CONTROL_STATE_VERSION {
             return Err(format!(
-                "unsupported public control-plane state schema {} in {}",
-                persisted.schema_version,
-                path.display()
+                "unsupported public control-plane state schema {}",
+                persisted.schema_version
             ));
         }
         Ok(Self {
@@ -913,16 +989,8 @@ impl PublicControlStateStore {
         })
     }
 
-    async fn save(&self, path: Option<&Path>) -> Result<(), String> {
-        let Some(path) = path else {
-            return Ok(());
-        };
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .await
-                .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
-        }
-        let payload = serde_json::to_vec_pretty(&PersistedPublicControlState {
+    fn to_persisted(&self) -> PersistedPublicControlState {
+        PersistedPublicControlState {
             schema_version: PUBLIC_CONTROL_STATE_VERSION,
             relay_registrations: self.relay_registrations_by_hash.values().cloned().collect(),
             client_registrations: self
@@ -932,16 +1000,7 @@ impl PublicControlStateStore {
                 .collect(),
             device_grants: self.grants_by_hash.values().cloned().collect(),
             client_relay_grants: self.client_relay_grants_by_key.values().cloned().collect(),
-        })
-        .map_err(|error| format!("failed to encode public control-plane state: {error}"))?;
-        let temp_path = path.with_extension("tmp");
-        fs::write(&temp_path, payload)
-            .await
-            .map_err(|error| format!("failed to write {}: {error}", temp_path.display()))?;
-        fs::rename(&temp_path, path)
-            .await
-            .map_err(|error| format!("failed to replace {}: {error}", path.display()))?;
-        Ok(())
+        }
     }
 
     fn remove_device_grants(
@@ -1082,12 +1141,15 @@ impl PublicControlStateStore {
             .collect()
     }
 
-    fn seed_relay_registrations(&mut self, registrations: Vec<RelayRegistrationConfig>) {
+    fn seed_relay_registrations(&mut self, registrations: Vec<RelayRegistrationConfig>) -> bool {
+        let mut seeded = false;
         for registration in registrations {
             let refresh_token_hash = sha256_hex(&registration.refresh_token);
-            self.relay_registrations_by_hash
+            if let std::collections::hash_map::Entry::Vacant(entry) = self
+                .relay_registrations_by_hash
                 .entry(refresh_token_hash.clone())
-                .or_insert_with(|| PersistedRelayRegistration {
+            {
+                entry.insert(PersistedRelayRegistration {
                     relay_id: registration.relay_id,
                     broker_room_id: registration.broker_room_id,
                     refresh_token_hash,
@@ -1095,7 +1157,10 @@ impl PublicControlStateStore {
                     relay_label: None,
                     relay_verify_key: None,
                 });
+                seeded = true;
+            }
         }
+        seeded
     }
 
     fn issue_new_relay_ids(&self) -> (String, String) {
@@ -1167,6 +1232,368 @@ impl PublicControlStateStore {
         });
         removed
     }
+}
+
+async fn load_public_control_json(path: &Path) -> Result<PublicControlStateStore, String> {
+    let bytes = match fs::read(path).await {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(PublicControlStateStore::default())
+        }
+        Err(error) => {
+            return Err(format!(
+                "failed to read public control-plane state {}: {error}",
+                path.display()
+            ))
+        }
+    };
+    let persisted: PersistedPublicControlState =
+        serde_json::from_slice(&bytes).map_err(|error| {
+            format!(
+                "failed to decode public control-plane state {}: {error}",
+                path.display()
+            )
+        })?;
+    PublicControlStateStore::from_persisted(persisted)
+        .map_err(|error| format!("{} in public control-plane state {}", error, path.display()))
+}
+
+async fn save_public_control_json(
+    path: &Path,
+    state: &PublicControlStateStore,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .await
+            .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+    }
+    let payload = serde_json::to_vec_pretty(&state.to_persisted())
+        .map_err(|error| format!("failed to encode public control-plane state: {error}"))?;
+    let temp_path = path.with_extension("tmp");
+    fs::write(&temp_path, payload)
+        .await
+        .map_err(|error| format!("failed to write {}: {error}", temp_path.display()))?;
+    fs::rename(&temp_path, path)
+        .await
+        .map_err(|error| format!("failed to replace {}: {error}", path.display()))?;
+    Ok(())
+}
+
+async fn initialize_postgres_public_control_schema(pool: &PgPool) -> Result<(), String> {
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS public_control_schema (
+            singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+            schema_version INTEGER NOT NULL
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|error| format!("failed to create public_control_schema: {error}"))?;
+    sqlx::query(
+        r#"
+        INSERT INTO public_control_schema (singleton, schema_version)
+        VALUES (TRUE, $1)
+        ON CONFLICT (singleton) DO NOTHING
+        "#,
+    )
+    .bind(PUBLIC_CONTROL_STATE_VERSION as i32)
+    .execute(pool)
+    .await
+    .map_err(|error| format!("failed to initialize public_control_schema: {error}"))?;
+    let schema_version: i32 =
+        sqlx::query("SELECT schema_version FROM public_control_schema WHERE singleton = TRUE")
+            .fetch_one(pool)
+            .await
+            .map_err(|error| format!("failed to inspect public_control_schema: {error}"))?
+            .try_get("schema_version")
+            .map_err(|error| format!("failed to read public_control_schema version: {error}"))?;
+    if schema_version != PUBLIC_CONTROL_STATE_VERSION as i32 {
+        return Err(format!(
+            "unsupported Postgres public control-plane schema {schema_version}"
+        ));
+    }
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS public_relay_registrations (
+            refresh_token_hash TEXT PRIMARY KEY,
+            relay_id TEXT NOT NULL UNIQUE,
+            broker_room_id TEXT NOT NULL UNIQUE,
+            created_at BIGINT NOT NULL,
+            relay_label TEXT,
+            relay_verify_key TEXT UNIQUE
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|error| format!("failed to create public_relay_registrations: {error}"))?;
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS public_client_identities (
+            refresh_token_hash TEXT PRIMARY KEY,
+            client_id TEXT NOT NULL UNIQUE,
+            client_verify_key TEXT NOT NULL UNIQUE,
+            created_at BIGINT NOT NULL,
+            client_label TEXT
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|error| format!("failed to create public_client_identities: {error}"))?;
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS public_device_grants (
+            refresh_token_hash TEXT PRIMARY KEY,
+            relay_id TEXT NOT NULL,
+            broker_room_id TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            created_at BIGINT NOT NULL,
+            UNIQUE (relay_id, broker_room_id, device_id)
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|error| format!("failed to create public_device_grants: {error}"))?;
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS public_client_relay_grants (
+            client_id TEXT NOT NULL,
+            relay_id TEXT NOT NULL,
+            broker_room_id TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            granted_at BIGINT NOT NULL,
+            relay_label TEXT,
+            device_label TEXT,
+            PRIMARY KEY (client_id, relay_id)
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|error| format!("failed to create public_client_relay_grants: {error}"))?;
+    Ok(())
+}
+
+async fn load_public_control_postgres(pool: &PgPool) -> Result<PublicControlStateStore, String> {
+    let relay_rows = sqlx::query(
+        r#"
+        SELECT relay_id, broker_room_id, refresh_token_hash, created_at, relay_label, relay_verify_key
+        FROM public_relay_registrations
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|error| format!("failed to load public_relay_registrations: {error}"))?;
+    let client_rows = sqlx::query(
+        r#"
+        SELECT client_id, client_verify_key, refresh_token_hash, created_at, client_label
+        FROM public_client_identities
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|error| format!("failed to load public_client_identities: {error}"))?;
+    let device_rows = sqlx::query(
+        r#"
+        SELECT relay_id, broker_room_id, device_id, refresh_token_hash, created_at
+        FROM public_device_grants
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|error| format!("failed to load public_device_grants: {error}"))?;
+    let client_grant_rows = sqlx::query(
+        r#"
+        SELECT client_id, relay_id, broker_room_id, device_id, granted_at, relay_label, device_label
+        FROM public_client_relay_grants
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|error| format!("failed to load public_client_relay_grants: {error}"))?;
+
+    PublicControlStateStore::from_persisted(PersistedPublicControlState {
+        schema_version: PUBLIC_CONTROL_STATE_VERSION,
+        relay_registrations: relay_rows
+            .into_iter()
+            .map(|row| {
+                Ok(PersistedRelayRegistration {
+                    relay_id: row.try_get("relay_id").map_err(postgres_decode_error)?,
+                    broker_room_id: row
+                        .try_get("broker_room_id")
+                        .map_err(postgres_decode_error)?,
+                    refresh_token_hash: row
+                        .try_get("refresh_token_hash")
+                        .map_err(postgres_decode_error)?,
+                    created_at: row_i64_to_u64(&row, "created_at")?,
+                    relay_label: row.try_get("relay_label").map_err(postgres_decode_error)?,
+                    relay_verify_key: row
+                        .try_get("relay_verify_key")
+                        .map_err(postgres_decode_error)?,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?,
+        client_registrations: client_rows
+            .into_iter()
+            .map(|row| {
+                Ok(PersistedClientIdentity {
+                    client_id: row.try_get("client_id").map_err(postgres_decode_error)?,
+                    client_verify_key: row
+                        .try_get("client_verify_key")
+                        .map_err(postgres_decode_error)?,
+                    refresh_token_hash: row
+                        .try_get("refresh_token_hash")
+                        .map_err(postgres_decode_error)?,
+                    created_at: row_i64_to_u64(&row, "created_at")?,
+                    client_label: row.try_get("client_label").map_err(postgres_decode_error)?,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?,
+        device_grants: device_rows
+            .into_iter()
+            .map(|row| {
+                Ok(PersistedDeviceGrant {
+                    relay_id: row.try_get("relay_id").map_err(postgres_decode_error)?,
+                    broker_room_id: row
+                        .try_get("broker_room_id")
+                        .map_err(postgres_decode_error)?,
+                    device_id: row.try_get("device_id").map_err(postgres_decode_error)?,
+                    refresh_token_hash: row
+                        .try_get("refresh_token_hash")
+                        .map_err(postgres_decode_error)?,
+                    created_at: row_i64_to_u64(&row, "created_at")?,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?,
+        client_relay_grants: client_grant_rows
+            .into_iter()
+            .map(|row| {
+                Ok(PersistedClientRelayGrant {
+                    client_id: row.try_get("client_id").map_err(postgres_decode_error)?,
+                    relay_id: row.try_get("relay_id").map_err(postgres_decode_error)?,
+                    broker_room_id: row
+                        .try_get("broker_room_id")
+                        .map_err(postgres_decode_error)?,
+                    device_id: row.try_get("device_id").map_err(postgres_decode_error)?,
+                    granted_at: row_i64_to_u64(&row, "granted_at")?,
+                    relay_label: row.try_get("relay_label").map_err(postgres_decode_error)?,
+                    device_label: row.try_get("device_label").map_err(postgres_decode_error)?,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?,
+    })
+}
+
+async fn save_public_control_postgres(
+    pool: &PgPool,
+    state: &PublicControlStateStore,
+) -> Result<(), String> {
+    let persisted = state.to_persisted();
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| format!("failed to begin public control-plane transaction: {error}"))?;
+    sqlx::query("DELETE FROM public_client_relay_grants")
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("failed to clear public_client_relay_grants: {error}"))?;
+    sqlx::query("DELETE FROM public_device_grants")
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("failed to clear public_device_grants: {error}"))?;
+    sqlx::query("DELETE FROM public_client_identities")
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("failed to clear public_client_identities: {error}"))?;
+    sqlx::query("DELETE FROM public_relay_registrations")
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("failed to clear public_relay_registrations: {error}"))?;
+
+    for registration in persisted.relay_registrations {
+        sqlx::query(
+            r#"
+            INSERT INTO public_relay_registrations (
+                refresh_token_hash, relay_id, broker_room_id, created_at, relay_label, relay_verify_key
+            )
+            VALUES ($1, $2, $3, $4, $5, $6)
+            "#,
+        )
+        .bind(registration.refresh_token_hash)
+        .bind(registration.relay_id)
+        .bind(registration.broker_room_id)
+        .bind(u64_to_i64(registration.created_at, "created_at")?)
+        .bind(registration.relay_label)
+        .bind(registration.relay_verify_key)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("failed to insert public_relay_registrations: {error}"))?;
+    }
+    for client in persisted.client_registrations {
+        sqlx::query(
+            r#"
+            INSERT INTO public_client_identities (
+                refresh_token_hash, client_id, client_verify_key, created_at, client_label
+            )
+            VALUES ($1, $2, $3, $4, $5)
+            "#,
+        )
+        .bind(client.refresh_token_hash)
+        .bind(client.client_id)
+        .bind(client.client_verify_key)
+        .bind(u64_to_i64(client.created_at, "created_at")?)
+        .bind(client.client_label)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("failed to insert public_client_identities: {error}"))?;
+    }
+    for grant in persisted.device_grants {
+        sqlx::query(
+            r#"
+            INSERT INTO public_device_grants (
+                refresh_token_hash, relay_id, broker_room_id, device_id, created_at
+            )
+            VALUES ($1, $2, $3, $4, $5)
+            "#,
+        )
+        .bind(grant.refresh_token_hash)
+        .bind(grant.relay_id)
+        .bind(grant.broker_room_id)
+        .bind(grant.device_id)
+        .bind(u64_to_i64(grant.created_at, "created_at")?)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("failed to insert public_device_grants: {error}"))?;
+    }
+    for grant in persisted.client_relay_grants {
+        sqlx::query(
+            r#"
+            INSERT INTO public_client_relay_grants (
+                client_id, relay_id, broker_room_id, device_id, granted_at, relay_label, device_label
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            "#,
+        )
+        .bind(grant.client_id)
+        .bind(grant.relay_id)
+        .bind(grant.broker_room_id)
+        .bind(grant.device_id)
+        .bind(u64_to_i64(grant.granted_at, "granted_at")?)
+        .bind(grant.relay_label)
+        .bind(grant.device_label)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("failed to insert public_client_relay_grants: {error}"))?;
+    }
+    tx.commit()
+        .await
+        .map_err(|error| format!("failed to commit public control-plane transaction: {error}"))?;
+    Ok(())
 }
 
 fn parse_relay_registrations(
@@ -1254,6 +1681,21 @@ fn matches_optional_relay_target(
         && device_id
             .map(|value| value == actual_device_id)
             .unwrap_or(true)
+}
+
+fn row_i64_to_u64(row: &PgRow, column: &str) -> Result<u64, String> {
+    let value = row
+        .try_get::<i64, _>(column)
+        .map_err(postgres_decode_error)?;
+    u64::try_from(value).map_err(|_| format!("Postgres column {column} is negative"))
+}
+
+fn u64_to_i64(value: u64, column: &str) -> Result<i64, String> {
+    i64::try_from(value).map_err(|_| format!("value for {column} exceeds Postgres BIGINT"))
+}
+
+fn postgres_decode_error(error: sqlx::Error) -> String {
+    format!("failed to decode Postgres public control-plane row: {error}")
 }
 
 fn parse_optional_u64(name: &str, value: Option<String>) -> Result<Option<u64>, String> {

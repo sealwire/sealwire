@@ -862,10 +862,34 @@ async fn public_auth_plane_health_reports_ready() {
         .message
         .as_deref()
         .is_some_and(|message| message.contains("RELAY_BROKER_PUBLIC_STATE_PATH")));
+    assert!(parsed
+        .message
+        .as_deref()
+        .is_some_and(|message| message.contains("RELAY_BROKER_PUBLIC_POSTGRES_URL")));
     assert_eq!(
         parsed.public_monitoring,
         Some(PublicBrokerMonitoring::default())
     );
+}
+
+#[tokio::test]
+async fn public_control_plane_rejects_multiple_persistence_backends() {
+    let result = PublicControlPlane::from_parts_with_postgres(
+        Some("public-broker-issuer-secret".to_string()),
+        None,
+        Some(temp_state_path("public-control-conflict")),
+        Some("postgres://localhost/agent_relay".to_string()),
+        Some("300".to_string()),
+        Some("300".to_string()),
+    )
+    .await;
+
+    let error = match result {
+        Ok(_) => panic!("multiple persistence backends should be rejected"),
+        Err(error) => error,
+    };
+    assert!(error.contains("RELAY_BROKER_PUBLIC_STATE_PATH"));
+    assert!(error.contains("RELAY_BROKER_PUBLIC_POSTGRES_URL"));
 }
 
 #[tokio::test]

@@ -201,7 +201,8 @@ The current implementation supports:
 - security mode plumbing for `private` and `managed`
 - broker-backed remote pairing with signed device claims
 - public broker enrollment, refresh, revoke, and revoke-others flows
-- persisted public broker device grants for restart-safe remote access
+- persisted public broker device grants for restart-safe remote access, backed
+  by JSON for small/self-hosted deployments or Postgres for public broker deployments
 - broker message compaction so large session snapshots fit websocket frame limits
 - browser-managed remote device keys with `WebCrypto` + `IndexedDB` when available,
   with a compatibility fallback for weaker browser contexts
