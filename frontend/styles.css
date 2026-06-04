@@ -2656,7 +2656,13 @@ input:focus, textarea:focus, select:focus {
   }
   .sidebar { border-right: 0; border-bottom: 1px solid var(--border-subtle); height: auto; overflow: visible; padding: 16px; }
   .chat-shell { height: auto; overflow: visible; }
-  .remote-chat-shell {
+  /* Must out-specify `.chat-shell[data-view="conversation"] { height: 100% }`
+   * (specificity 0,2,0). On mobile the parent .app-shell is height:auto, so
+   * height:100% collapses to auto and the shell grows to full content height —
+   * which makes the whole page scroll and carries the sticky header (with the
+   * nav burger) off the top. Pinning the shell to one viewport restores the
+   * inner transcript scroll and keeps the header fixed. */
+  .remote-chat-shell[data-view="conversation"] {
     min-height: 100dvh;
     height: 100dvh;
     overflow: hidden;
