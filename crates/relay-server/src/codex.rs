@@ -80,6 +80,7 @@ impl ProviderBridge for CodexBridge {
             thread,
             consumed_initial_prompt: false,
             initial_user_message: None,
+            started_turn_id: None,
         })
     }
 

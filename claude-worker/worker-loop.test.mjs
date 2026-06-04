@@ -216,6 +216,57 @@ test("send emits user_message with relay-provided transcript ids", async () => {
   }
 });
 
+test("send streams a user id that a later history read reproduces", async () => {
+  // Regression for the duplicate-user-message bug: the live `user_message`
+  // event id and a later `read_session` history read MUST resolve to the same
+  // item_id. The relay supplies one uuid as both `user_item_id` (user:<uuid>)
+  // and `user_message_uuid`; the worker stamps that uuid onto the SDK message,
+  // so getSessionMessages -> mapSessionMessages yields the very same id. If they
+  // diverge, the background buffer re-injects the live copy on a thread
+  // switch-away-and-back and the message shows up twice.
+  const worker = spawnWorker();
+  try {
+    worker.send(START_DEFAULT);
+    await worker.waitFor(isStarted("sess-1"), { label: "session_started" });
+    await worker.waitFor(isDone, { label: "done#1" });
+
+    worker.send({
+      type: "send",
+      provider_session_id: "sess-1",
+      model: "claude-sonnet-4-6",
+      permissionMode: "default",
+      prompt: "second turn",
+      turn_id: "claude-turn-7",
+      user_item_id: "user:7b3c1d04-1111-4222-8333-444455556666",
+      user_message_uuid: "7b3c1d04-1111-4222-8333-444455556666",
+    });
+
+    const liveEvent = await worker.waitFor(
+      (event) => event.type === "user_message" && event.text === "second turn",
+      { label: "live user_message" },
+    );
+    assert.equal(liveEvent.item_id, "user:7b3c1d04-1111-4222-8333-444455556666");
+
+    worker.send({ type: "read_session", id: "read-1", provider_session_id: "sess-1" });
+    const response = await worker.waitFor(
+      (event) => event.type === "response" && event.id === "read-1",
+      { label: "read_session response" },
+    );
+    assert.equal(response.ok, true);
+    const historyEntry = response.result.transcript.find(
+      (entry) => entry.kind === "user_text" && entry.text === "second turn",
+    );
+    assert.ok(historyEntry, "history read must contain the sent user message");
+    assert.equal(
+      historyEntry.item_id,
+      liveEvent.item_id,
+      "live id and history id must match so the message is not duplicated",
+    );
+  } finally {
+    await worker.close();
+  }
+});
+
 test("switching the model on a live session rebuilds the query", async () => {
   const worker = spawnWorker();
   try {

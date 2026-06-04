@@ -418,6 +418,12 @@ fn snapshot_thread_activity_tracks_active_and_background_running_threads() {
 
     // A backgrounded thread mid-turn must surface as working...
     relay.bg_set_active_turn("thread-bg", Some("turn-bg".to_string()), 1_000);
+    relay.bg_set_thread_status(
+        "thread-bg-phase-only",
+        "active".to_string(),
+        Vec::new(),
+        1_000,
+    );
     // ...while a backgrounded thread without an in-flight turn must not.
     relay.bg_set_thread_status("thread-idle", "idle".to_string(), Vec::new(), 1_000);
 
@@ -434,6 +440,10 @@ fn snapshot_thread_activity_tracks_active_and_background_running_threads() {
     assert!(
         ids.contains(&"thread-bg"),
         "backgrounded turn should be working"
+    );
+    assert!(
+        ids.contains(&"thread-bg-phase-only"),
+        "backgrounded active status without a turn id should still be working"
     );
     assert!(
         !ids.contains(&"thread-idle"),
@@ -605,6 +615,98 @@ fn load_thread_data_preserves_pending_requests_from_other_threads() {
 
     assert!(relay.pending_approvals.contains_key("req-1"));
     assert!(relay.pending_ask_user_questions.contains_key("ask:1"));
+}
+
+#[test]
+fn thread_switch_back_keeps_single_user_message_when_ids_agree() {
+    // Regression for the reported "duplicate user message when Claude asks a
+    // question" hydration bug.
+    //
+    // When Claude asks a question the turn stays in-flight, so users often
+    // switch to another thread and come back. On switch-away the live transcript
+    // is stashed into the background buffer; on switch-back load_thread_data
+    // replaces the transcript with a fresh worker history read and then
+    // restore_background_for_active merges the buffered copy on top, keyed by
+    // item_id.
+    //
+    // The bug was that the live send path used a relay-only id
+    // (`user:claude-turn-N`) while the history read mapped the SAME message to
+    // the SDK uuid (`user:<sdk-uuid>`), so the merge could not dedupe them and
+    // pushed the live copy as a second entry. The fix makes both paths share one
+    // uuid (claude.rs send_message + worker createUserTurn), so the id below is
+    // identical in the live transcript and the history read, and the merge keeps
+    // a single entry.
+    let user_item_id = "user:7b3c1d04-1111-4222-8333-444455556666";
+    let mut relay = test_state();
+    relay.activate_thread(
+        test_thread("thread-1", "/tmp/project"),
+        "/tmp/project",
+        DEFAULT_MODEL,
+        DEFAULT_APPROVAL_POLICY,
+        DEFAULT_SANDBOX,
+        DEFAULT_EFFORT,
+        "device-a",
+    );
+
+    // Live turn: relay records the prompt under the canonical uuid id. turn_id
+    // stays the per-turn counter; only the message identity is the uuid.
+    relay.upsert_user_message(
+        user_item_id.to_string(),
+        "what should I name this?".to_string(),
+        "claude-turn-1".to_string(),
+    );
+
+    // Switch away while the question is pending -> thread-1's live transcript is
+    // stashed into the background buffer.
+    relay.load_thread_data(
+        ThreadSyncData {
+            thread: test_thread("thread-2", "/tmp/project"),
+            status: "idle".to_string(),
+            active_flags: Vec::new(),
+            transcript: Vec::new(),
+        },
+        DEFAULT_APPROVAL_POLICY,
+        DEFAULT_SANDBOX,
+        DEFAULT_EFFORT,
+        DEFAULT_MODEL,
+        "device-a",
+    );
+
+    // Switch back to thread-1. The fresh worker read reproduces the SAME id the
+    // worker stamped onto the SDK message, so it matches the buffered live copy.
+    relay.load_thread_data(
+        ThreadSyncData {
+            thread: test_thread("thread-1", "/tmp/project"),
+            status: "active".to_string(),
+            active_flags: vec!["waitingOnAskUser".to_string()],
+            transcript: vec![TranscriptEntryView {
+                item_id: Some(user_item_id.to_string()),
+                kind: TranscriptEntryKind::UserText,
+                text: Some("what should I name this?".to_string()),
+                status: "completed".to_string(),
+                turn_id: Some("7b3c1d04-1111-4222-8333-444455556666".to_string()),
+                tool: None,
+            }],
+        },
+        DEFAULT_APPROVAL_POLICY,
+        DEFAULT_SANDBOX,
+        DEFAULT_EFFORT,
+        DEFAULT_MODEL,
+        "device-a",
+    );
+
+    let user_messages = relay
+        .transcript
+        .iter()
+        .filter(|entry| {
+            entry.kind == TranscriptEntryKind::UserText
+                && entry.text.as_deref() == Some("what should I name this?")
+        })
+        .count();
+    assert_eq!(
+        user_messages, 1,
+        "user message duplicated on switch-back: live id and history id diverged"
+    );
 }
 
 #[test]

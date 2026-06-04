@@ -98,7 +98,7 @@ pub(super) fn spawn_stdout_reader(
         loop {
             match lines.next_line().await {
                 Ok(Some(line)) => {
-                    handle_stdout_line(&line, &pending_responses, &state).await;
+                    handle_stdout_line(&line, &pending_responses, &state, provider_key).await;
                 }
                 Ok(None) => {
                     let mut relay = state.write().await;
@@ -149,6 +149,7 @@ async fn handle_stdout_line(
     line: &str,
     pending_responses: &PendingResponses,
     state: &Arc<RwLock<RelayState>>,
+    provider_key: &'static str,
 ) {
     let payload: Value = match serde_json::from_str(line) {
         Ok(value) => value,
@@ -161,7 +162,7 @@ async fn handle_stdout_line(
     };
 
     if payload.get("method").is_some() && payload.get("id").is_some() {
-        handle_server_request(payload, state).await;
+        handle_server_request_for_provider(payload, state, provider_key).await;
         return;
     }
 
@@ -185,7 +186,7 @@ async fn handle_stdout_line(
     }
 
     if payload.get("method").is_some() {
-        handle_notification(payload, state).await;
+        handle_notification_for_provider(payload, state, provider_key).await;
         return;
     }
 
@@ -194,7 +195,16 @@ async fn handle_stdout_line(
     relay.notify();
 }
 
+#[cfg(test)]
 pub(super) async fn handle_server_request(payload: Value, state: &Arc<RwLock<RelayState>>) {
+    handle_server_request_for_provider(payload, state, "codex").await;
+}
+
+async fn handle_server_request_for_provider(
+    payload: Value,
+    state: &Arc<RwLock<RelayState>>,
+    provider_key: &'static str,
+) {
     let method = payload
         .get("method")
         .and_then(Value::as_str)
@@ -224,15 +234,32 @@ pub(super) async fn handle_server_request(payload: Value, state: &Arc<RwLock<Rel
 
     if let Some(pending) = pending {
         let mut relay = state.write().await;
-        relay.set_thread_status(
-            &pending.thread_id,
-            "active".to_string(),
-            vec!["waitingOnApproval".to_string()],
-        );
+        let route = if pending.thread_id.is_empty() {
+            ThreadRoute::Drop
+        } else {
+            thread_route(&relay, Some(&pending.thread_id), provider_key)
+        };
+        if !pending.thread_id.is_empty() {
+            relay.set_thread_status(
+                &pending.thread_id,
+                "active".to_string(),
+                vec!["waitingOnApproval".to_string()],
+            );
+        }
+        if let ThreadRoute::Background(thread_id) = route.clone() {
+            relay.bg_set_thread_status(
+                &thread_id,
+                "active".to_string(),
+                vec!["waitingOnApproval".to_string()],
+                crate::state::unix_now(),
+            );
+        }
         relay
             .pending_approvals
             .insert(pending.request_id.clone(), pending.clone());
-        relay.touch_progress(Some("waiting_approval"), None);
+        if matches!(route, ThreadRoute::Active) {
+            relay.touch_progress(Some("waiting_approval"), None);
+        }
         relay.push_log(
             "approval",
             format!("Approval requested for {}.", pending.kind.as_str()),
@@ -241,7 +268,16 @@ pub(super) async fn handle_server_request(payload: Value, state: &Arc<RwLock<Rel
     }
 }
 
+#[cfg(test)]
 pub(super) async fn handle_notification(payload: Value, state: &Arc<RwLock<RelayState>>) {
+    handle_notification_for_provider(payload, state, "codex").await;
+}
+
+async fn handle_notification_for_provider(
+    payload: Value,
+    state: &Arc<RwLock<RelayState>>,
+    provider_key: &'static str,
+) {
     let method = payload
         .get("method")
         .and_then(Value::as_str)
@@ -271,12 +307,24 @@ pub(super) async fn handle_notification(payload: Value, state: &Arc<RwLock<Relay
         }
         "thread/status/changed" => {
             let thread_id = string_at(&params, &["threadId"]).unwrap_or_default();
+            if thread_id.is_empty() {
+                return;
+            }
             let (status, active_flags) = parse_status(value_at(&params, &["status"]));
-            relay.set_thread_status(&thread_id, status, active_flags);
+            let route = thread_route(&relay, Some(&thread_id), provider_key);
+            relay.set_thread_status(&thread_id, status.clone(), active_flags.clone());
+            if let ThreadRoute::Background(bg_thread_id) = route {
+                relay.bg_set_thread_status(
+                    &bg_thread_id,
+                    status,
+                    active_flags,
+                    crate::state::unix_now(),
+                );
+            }
             changed = true;
         }
         "turn/started" => {
-            let route = thread_route(&relay, notification_thread_id.as_deref());
+            let route = thread_route(&relay, notification_thread_id.as_deref(), provider_key);
             if matches!(route, ThreadRoute::Drop) {
                 log_ignored_session_notification(method, notification_thread_id.as_deref(), &relay);
                 return;
@@ -297,7 +345,7 @@ pub(super) async fn handle_notification(payload: Value, state: &Arc<RwLock<Relay
             }
         }
         "turn/completed" => {
-            let route = thread_route(&relay, notification_thread_id.as_deref());
+            let route = thread_route(&relay, notification_thread_id.as_deref(), provider_key);
             if matches!(route, ThreadRoute::Drop) {
                 log_ignored_session_notification(method, notification_thread_id.as_deref(), &relay);
                 return;
@@ -331,7 +379,7 @@ pub(super) async fn handle_notification(payload: Value, state: &Arc<RwLock<Relay
             }
         }
         "turn/diff/updated" => {
-            let route = thread_route(&relay, notification_thread_id.as_deref());
+            let route = thread_route(&relay, notification_thread_id.as_deref(), provider_key);
             if matches!(route, ThreadRoute::Drop) {
                 log_ignored_session_notification(method, notification_thread_id.as_deref(), &relay);
                 return;
@@ -369,7 +417,7 @@ pub(super) async fn handle_notification(payload: Value, state: &Arc<RwLock<Relay
         }
         "item/started" => match string_at(&params, &["item", "type"]).as_deref() {
             Some("agentMessage") => {
-                let route = thread_route(&relay, notification_thread_id.as_deref());
+                let route = thread_route(&relay, notification_thread_id.as_deref(), provider_key);
                 if matches!(route, ThreadRoute::Drop) {
                     log_ignored_session_notification(
                         method,
@@ -397,7 +445,7 @@ pub(super) async fn handle_notification(payload: Value, state: &Arc<RwLock<Relay
                 }
             }
             Some("commandExecution") => {
-                let route = thread_route(&relay, notification_thread_id.as_deref());
+                let route = thread_route(&relay, notification_thread_id.as_deref(), provider_key);
                 if matches!(route, ThreadRoute::Drop) {
                     log_ignored_session_notification(
                         method,
@@ -431,7 +479,7 @@ pub(super) async fn handle_notification(payload: Value, state: &Arc<RwLock<Relay
                 }
             }
             _ => {
-                let route = thread_route(&relay, notification_thread_id.as_deref());
+                let route = thread_route(&relay, notification_thread_id.as_deref(), provider_key);
                 if matches!(route, ThreadRoute::Drop) {
                     log_ignored_session_notification(
                         method,
@@ -472,7 +520,7 @@ pub(super) async fn handle_notification(payload: Value, state: &Arc<RwLock<Relay
             }
         },
         "item/agentMessage/delta" => {
-            let route = thread_route(&relay, notification_thread_id.as_deref());
+            let route = thread_route(&relay, notification_thread_id.as_deref(), provider_key);
             if matches!(route, ThreadRoute::Drop) {
                 log_ignored_session_notification(method, notification_thread_id.as_deref(), &relay);
                 return;
@@ -538,7 +586,7 @@ pub(super) async fn handle_notification(payload: Value, state: &Arc<RwLock<Relay
         }
         "item/completed" => match string_at(&params, &["item", "type"]).as_deref() {
             Some("userMessage") => {
-                let route = thread_route(&relay, notification_thread_id.as_deref());
+                let route = thread_route(&relay, notification_thread_id.as_deref(), provider_key);
                 if matches!(route, ThreadRoute::Drop) {
                     log_ignored_session_notification(
                         method,
@@ -568,7 +616,7 @@ pub(super) async fn handle_notification(payload: Value, state: &Arc<RwLock<Relay
                 }
             }
             Some("agentMessage") => {
-                let route = thread_route(&relay, notification_thread_id.as_deref());
+                let route = thread_route(&relay, notification_thread_id.as_deref(), provider_key);
                 if matches!(route, ThreadRoute::Drop) {
                     log_ignored_session_notification(
                         method,
@@ -598,7 +646,7 @@ pub(super) async fn handle_notification(payload: Value, state: &Arc<RwLock<Relay
                 }
             }
             Some("commandExecution") => {
-                let route = thread_route(&relay, notification_thread_id.as_deref());
+                let route = thread_route(&relay, notification_thread_id.as_deref(), provider_key);
                 if matches!(route, ThreadRoute::Drop) {
                     log_ignored_session_notification(
                         method,
@@ -635,7 +683,7 @@ pub(super) async fn handle_notification(payload: Value, state: &Arc<RwLock<Relay
                 }
             }
             _ => {
-                let route = thread_route(&relay, notification_thread_id.as_deref());
+                let route = thread_route(&relay, notification_thread_id.as_deref(), provider_key);
                 if matches!(route, ThreadRoute::Drop) {
                     log_ignored_session_notification(
                         method,
@@ -687,7 +735,7 @@ pub(super) async fn handle_notification(payload: Value, state: &Arc<RwLock<Relay
             }
         }
         "item/commandExecution/outputDelta" => {
-            let route = thread_route(&relay, notification_thread_id.as_deref());
+            let route = thread_route(&relay, notification_thread_id.as_deref(), provider_key);
             if matches!(route, ThreadRoute::Drop) {
                 log_ignored_session_notification(method, notification_thread_id.as_deref(), &relay);
                 return;
@@ -795,13 +843,27 @@ enum ThreadRoute {
     Drop,
 }
 
-fn thread_route(relay: &RelayState, thread_id: Option<&str>) -> ThreadRoute {
+fn thread_route(relay: &RelayState, thread_id: Option<&str>, provider_key: &str) -> ThreadRoute {
     match (relay.active_thread_id.as_deref(), thread_id) {
-        (_, None) => ThreadRoute::Active,
+        (None, None) => ThreadRoute::Active,
+        (Some(active), None) if thread_belongs_to_provider(relay, active, provider_key) => {
+            ThreadRoute::Active
+        }
+        (_, None) => ThreadRoute::Drop,
         (None, Some(_)) => ThreadRoute::Drop,
         (Some(active), Some(t)) if active == t => ThreadRoute::Active,
         (Some(_), Some(t)) => ThreadRoute::Background(t.to_string()),
     }
+}
+
+fn thread_belongs_to_provider(relay: &RelayState, thread_id: &str, provider_key: &str) -> bool {
+    if let Some(thread) = relay.threads.iter().find(|thread| thread.id == thread_id) {
+        return thread.provider == provider_key
+            || thread.source == provider_key
+            || thread.model_provider == provider_key;
+    }
+
+    relay.provider_name.is_empty() || relay.provider_name == provider_key
 }
 
 fn log_ignored_session_notification(method: &str, thread_id: Option<&str>, relay: &RelayState) {

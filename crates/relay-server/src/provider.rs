@@ -27,6 +27,7 @@ pub struct StartThreadResult {
     pub thread: ThreadSummaryView,
     pub consumed_initial_prompt: bool,
     pub initial_user_message: Option<TranscriptEntryView>,
+    pub started_turn_id: Option<String>,
 }
 
 #[async_trait]

@@ -245,8 +245,15 @@ function createWorkerSession(sdk, options, resume) {
   };
 }
 
-function createUserTurn(prompt, { itemId = null, turnId = null } = {}) {
-  const uuid = randomUUID();
+function createUserTurn(prompt, { itemId = null, turnId = null, messageUuid = null } = {}) {
+  // The uuid we hand the SDK becomes the message's identity in the persisted
+  // transcript, so a later getSessionMessages()/mapSessionMessages() reproduces
+  // `user:${uuid}`. The relay derives `itemId` from this same uuid (passed as
+  // `messageUuid`), keeping the live id (relay-provided) and the history id
+  // (sdk uuid) in sync. If they diverge, the same user message duplicates on a
+  // thread switch-away-and-back. When no uuid is supplied (e.g. the start path),
+  // we mint one and derive the item id from it so the two paths still agree.
+  const uuid = messageUuid || randomUUID();
   const eventTurnId = turnId || uuid;
   return {
     event: {
@@ -640,6 +647,7 @@ async function main() {
             const userTurn = createUserTurn(cmd.prompt, {
               itemId: cmd.user_item_id || null,
               turnId: cmd.turn_id || null,
+              messageUuid: cmd.user_message_uuid || null,
             });
             entry.initialUserMessage = userTurn.event;
             entry.running = true;
@@ -702,6 +710,7 @@ async function main() {
             const userTurn = createUserTurn(cmd.prompt, {
               itemId: cmd.user_item_id || null,
               turnId: cmd.turn_id || null,
+              messageUuid: cmd.user_message_uuid || null,
             });
             userTurn.event.provider_session_id = cmd.provider_session_id;
             entry.running = true;
@@ -764,6 +773,7 @@ async function main() {
           const userTurn = createUserTurn(cmd.prompt, {
             itemId: cmd.user_item_id || null,
             turnId: cmd.turn_id || null,
+            messageUuid: cmd.user_message_uuid || null,
           });
           userTurn.event.provider_session_id = providerSessionId;
           entry.running = true;

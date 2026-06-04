@@ -829,6 +829,157 @@ async fn handle_notification_ignores_session_updates_for_other_threads() {
 }
 
 #[tokio::test]
+async fn handle_notification_drops_unthreaded_codex_events_when_active_thread_is_other_provider() {
+    let (change_tx, _) = watch::channel(0_u64);
+    let state = std::sync::Arc::new(RwLock::new(RelayState::new(
+        "/tmp/project".to_string(),
+        change_tx,
+        SecurityProfile::private(),
+    )));
+
+    {
+        let mut relay = state.write().await;
+        relay.set_provider_name("claude_code".to_string());
+        relay.active_thread_id = Some("claude-thread".to_string());
+        relay.active_turn_id = Some("claude-turn".to_string());
+        relay.upsert_thread(ThreadSummaryView {
+            id: "claude-thread".to_string(),
+            name: None,
+            preview: String::new(),
+            cwd: "/tmp/project".to_string(),
+            updated_at: 1,
+            source: "claude_code".to_string(),
+            status: "active".to_string(),
+            model_provider: "anthropic".to_string(),
+            provider: "claude_code".to_string(),
+        });
+    }
+
+    handle_notification(
+        json!({
+            "method": "item/agentMessage/delta",
+            "params": {
+                "turnId": "codex-turn",
+                "itemId": "codex-agent",
+                "delta": "must not land on Claude"
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    let snapshot = state.read().await.snapshot();
+    assert_eq!(snapshot.active_thread_id.as_deref(), Some("claude-thread"));
+    assert_eq!(snapshot.active_turn_id.as_deref(), Some("claude-turn"));
+    assert!(
+        snapshot.transcript.is_empty(),
+        "unthreaded Codex event must not mutate a Claude active transcript: {:?}",
+        snapshot.transcript
+    );
+}
+
+#[tokio::test]
+async fn handle_notification_tracks_background_thread_status_activity() {
+    let (change_tx, _) = watch::channel(0_u64);
+    let state = std::sync::Arc::new(RwLock::new(RelayState::new(
+        "/tmp/project".to_string(),
+        change_tx,
+        SecurityProfile::private(),
+    )));
+
+    {
+        let mut relay = state.write().await;
+        relay.set_provider_name("claude_code".to_string());
+        relay.active_thread_id = Some("claude-thread".to_string());
+        relay.upsert_thread(ThreadSummaryView {
+            id: "codex-thread".to_string(),
+            name: None,
+            preview: String::new(),
+            cwd: "/tmp/project".to_string(),
+            updated_at: 1,
+            source: "codex".to_string(),
+            status: "idle".to_string(),
+            model_provider: "codex".to_string(),
+            provider: "codex".to_string(),
+        });
+    }
+
+    handle_notification(
+        json!({
+            "method": "thread/status/changed",
+            "params": {
+                "threadId": "codex-thread",
+                "status": {"type": "active", "activeFlags": []}
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    let snapshot = state.read().await.snapshot();
+    assert!(
+        snapshot
+            .thread_activity
+            .iter()
+            .any(|activity| activity.thread_id == "codex-thread"),
+        "background active Codex status should surface as thread activity: {:?}",
+        snapshot.thread_activity
+    );
+}
+
+#[tokio::test]
+async fn handle_server_request_for_background_thread_does_not_touch_active_progress() {
+    let (change_tx, _) = watch::channel(0_u64);
+    let state = std::sync::Arc::new(RwLock::new(RelayState::new(
+        "/tmp/project".to_string(),
+        change_tx,
+        SecurityProfile::private(),
+    )));
+
+    {
+        let mut relay = state.write().await;
+        relay.set_provider_name("claude_code".to_string());
+        relay.active_thread_id = Some("claude-thread".to_string());
+        relay.upsert_thread(ThreadSummaryView {
+            id: "codex-thread".to_string(),
+            name: None,
+            preview: String::new(),
+            cwd: "/tmp/project".to_string(),
+            updated_at: 1,
+            source: "codex".to_string(),
+            status: "idle".to_string(),
+            model_provider: "codex".to_string(),
+            provider: "codex".to_string(),
+        });
+    }
+
+    handle_server_request(
+        json!({
+            "id": 9,
+            "method": "item/commandExecution/requestApproval",
+            "params": {
+                "threadId": "codex-thread",
+                "command": "echo hi",
+                "cwd": "/tmp/project"
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    let snapshot = state.read().await.snapshot();
+    assert_eq!(snapshot.current_phase, None);
+    assert_eq!(snapshot.pending_approvals.len(), 1);
+    assert!(
+        snapshot
+            .thread_activity
+            .iter()
+            .any(|activity| activity.thread_id == "codex-thread"),
+        "background approval should surface the Codex thread as active"
+    );
+}
+
+#[tokio::test]
 async fn handle_server_request_enriches_command_approval_preview() {
     let (change_tx, _) = watch::channel(0_u64);
     let state = std::sync::Arc::new(RwLock::new(RelayState::new(

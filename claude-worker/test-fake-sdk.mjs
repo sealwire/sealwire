@@ -14,6 +14,25 @@
 
 let freshCounter = 0;
 
+// Per-session record of the user messages the worker streamed in, shaped like
+// the SDK's persisted `SessionMessage`s (so `getSessionMessages` can replay
+// them). This models the one behavior the live==history id fix depends on: the
+// uuid the worker stamps onto a user message is what a later history read sees.
+const sessionMessages = new Map();
+
+function recordUserMessage(sessionId, message) {
+  if (!sessionId || message?.type !== "user") return;
+  const list = sessionMessages.get(sessionId) ?? [];
+  list.push({
+    type: "user",
+    uuid: message.uuid,
+    session_id: sessionId,
+    message: message.message,
+    parent_tool_use_id: message.parent_tool_use_id ?? null,
+  });
+  sessionMessages.set(sessionId, list);
+}
+
 function writeLine(obj) {
   process.stdout.write(`${JSON.stringify(obj)}\n`);
 }
@@ -61,6 +80,7 @@ export function query({ prompt, options = {} }) {
     try {
       for await (const message of prompt) {
         if (message?.type === "user") {
+          recordUserMessage(sessionId, message);
           pushOut({ type: "system", subtype: "session_state_changed", state: "idle" });
         }
       }
@@ -105,8 +125,8 @@ export async function getSessionInfo(sessionId, _options) {
   return { sessionId, cwd: process.cwd() };
 }
 
-export async function getSessionMessages(_sessionId, _options) {
-  return [];
+export async function getSessionMessages(sessionId, _options) {
+  return sessionMessages.get(sessionId) ?? [];
 }
 
 export async function listSessions(_options) {

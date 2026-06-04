@@ -67,6 +67,7 @@ impl RelayState {
                     .position(|entry| entry.item_id == bg_entry.item_id)
                 {
                     Some(index) => merge_background_entry(&mut self.transcript[index], bg_entry),
+                    None if self.has_equivalent_user_message(&bg_entry) => {}
                     None => self.transcript.push(bg_entry),
                 }
             }
@@ -94,6 +95,14 @@ impl RelayState {
     /// switch.
     pub fn drop_background_stream(&mut self, thread_id: &str) {
         self.background_streams.remove(thread_id);
+    }
+
+    fn has_equivalent_user_message(&self, entry: &TranscriptRecord) -> bool {
+        entry.kind == TranscriptEntryKind::UserText
+            && entry.text.is_some()
+            && self.transcript.iter().any(|candidate| {
+                candidate.kind == TranscriptEntryKind::UserText && candidate.text == entry.text
+            })
     }
 
     /// Buffer an `item/agentMessage/delta` notification destined for a

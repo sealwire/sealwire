@@ -36,6 +36,11 @@ pub(crate) use self::transcript::TranscriptRecord;
 const REMOTE_ACTION_REPLAY_TTL_SECS: u64 = 600;
 const MAX_REMOTE_ACTION_REPLAY_ENTRIES: usize = 512;
 
+fn thread_status_is_working(status: &str) -> bool {
+    let status = status.trim();
+    !status.is_empty() && status != "idle" && status != "viewing"
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct ThreadSessionSettings {
     pub(crate) approval_policy: String,
@@ -234,7 +239,10 @@ impl RelayState {
     fn thread_activity_view(&self) -> Vec<ThreadActivityView> {
         let mut activity = Vec::new();
         if let Some(thread_id) = &self.active_thread_id {
-            if self.active_turn_id.is_some() || self.current_phase.is_some() {
+            if self.active_turn_id.is_some()
+                || self.current_phase.is_some()
+                || thread_status_is_working(&self.current_status)
+            {
                 activity.push(ThreadActivityView {
                     thread_id: thread_id.clone(),
                     phase: self.current_phase.clone(),
@@ -243,7 +251,10 @@ impl RelayState {
             }
         }
         for (thread_id, bg) in &self.background_streams {
-            if bg.active_turn_id.is_none() {
+            if bg.active_turn_id.is_none()
+                && bg.current_phase.is_none()
+                && !thread_status_is_working(&bg.current_status)
+            {
                 continue;
             }
             if self.active_thread_id.as_deref() == Some(thread_id.as_str()) {

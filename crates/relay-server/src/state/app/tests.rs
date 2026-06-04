@@ -318,6 +318,7 @@ mod path_scope_tests {
                 thread,
                 consumed_initial_prompt: false,
                 initial_user_message: None,
+                started_turn_id: None,
             })
         }
 
@@ -829,6 +830,9 @@ mod path_scope_tests {
             Ok(crate::provider::StartThreadResult {
                 thread,
                 consumed_initial_prompt: initial_prompt.is_some(),
+                started_turn_id: initial_user_message
+                    .as_ref()
+                    .and_then(|entry| entry.turn_id.clone()),
                 initial_user_message,
             })
         }
@@ -1521,6 +1525,18 @@ mod path_scope_tests {
             .await
             .expect("start A");
         let thread_a = snap_a.active_thread_id.clone().expect("thread A id");
+        assert_eq!(
+            snap_a.active_turn_id.as_deref(),
+            Some("turn:provider-initial"),
+            "provider-consumed initial prompt should mark the started turn as active"
+        );
+        assert!(
+            snap_a
+                .thread_activity
+                .iter()
+                .any(|activity| activity.thread_id == thread_a),
+            "provider-consumed initial prompt should surface as live activity"
+        );
         let live_user_entries = snap_a
             .transcript
             .iter()
@@ -1533,18 +1549,26 @@ mod path_scope_tests {
         );
         assert_eq!(live_user_entries[0].text.as_deref(), Some("Hellooo"));
 
-        app.start_session(StartSessionInput {
-            device_id: Some("device-1".to_string()),
-            cwd: Some(b_dir.display().to_string()),
-            model: None,
-            effort: None,
-            approval_policy: None,
-            sandbox: None,
-            provider: Some("consumed-initial".to_string()),
-            initial_prompt: None,
-        })
-        .await
-        .expect("start B");
+        let snap_b = app
+            .start_session(StartSessionInput {
+                device_id: Some("device-1".to_string()),
+                cwd: Some(b_dir.display().to_string()),
+                model: None,
+                effort: None,
+                approval_policy: None,
+                sandbox: None,
+                provider: Some("consumed-initial".to_string()),
+                initial_prompt: None,
+            })
+            .await
+            .expect("start B");
+        assert!(
+            snap_b
+                .thread_activity
+                .iter()
+                .any(|activity| activity.thread_id == thread_a),
+            "switching away must keep provider-consumed initial turn in background activity"
+        );
 
         let snap_back = app
             .resume_session(ResumeSessionInput {

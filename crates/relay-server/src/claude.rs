@@ -32,8 +32,8 @@ use crate::{
 };
 
 use self::protocol::{
-    bool_at, claude_permission_mode, compact_json, normalize_id, parse_claude_approval,
-    parse_thread_array, parse_thread_summary, string_at, unix_now, value_at,
+    bool_at, claude_permission_mode, compact_json, new_user_message_uuid, normalize_id,
+    parse_claude_approval, parse_thread_array, parse_thread_summary, string_at, unix_now, value_at,
 };
 
 type PendingResponses = Arc<Mutex<HashMap<String, oneshot::Sender<Result<Value, String>>>>>;
@@ -344,6 +344,7 @@ impl ProviderBridge for ClaudeCodeBridge {
                 thread,
                 consumed_initial_prompt: false,
                 initial_user_message: None,
+                started_turn_id: None,
             });
         }
 
@@ -360,10 +361,14 @@ impl ProviderBridge for ClaudeCodeBridge {
         let thread = parse_thread_summary(value_at(&result, &["thread"]).unwrap_or(&Value::Null))?;
         let initial_user_message = value_at(&result, &["initial_user_message"])
             .and_then(|value| serde_json::from_value(value.clone()).ok());
+        let started_turn_id = initial_user_message
+            .as_ref()
+            .and_then(|entry: &TranscriptEntryView| entry.turn_id.clone());
         Ok(StartThreadResult {
             thread,
             consumed_initial_prompt: true,
             initial_user_message,
+            started_turn_id,
         })
     }
 
@@ -540,7 +545,20 @@ impl ProviderBridge for ClaudeCodeBridge {
             "claude-turn-{}",
             self.next_request_id.fetch_add(1, Ordering::Relaxed)
         );
-        let user_item_id = format!("user:{turn_id}");
+        // The user message's identity must be ONE value shared by both the live
+        // stream and any later history re-read. The worker stamps this uuid onto
+        // the SDK message, so `getSessionMessages` -> `mapSessionMessages` later
+        // reproduces exactly `user:{uuid}` — the same id we record live below.
+        //
+        // We used to use the relay turn_id (`user:claude-turn-N`) here, which
+        // diverged from the SDK's own message uuid. On a thread switch-away-and
+        // -back the background buffer re-injected the live (`user:claude-turn-N`)
+        // copy on top of the fresh history read (`user:<sdk-uuid>`), so the same
+        // user message appeared twice. A real, unique uuid keeps the two paths in
+        // sync and is collision-safe across relay restarts (unlike the per-process
+        // turn counter, which resets to 1).
+        let user_message_uuid = new_user_message_uuid();
+        let user_item_id = format!("user:{user_message_uuid}");
         let settings = {
             let relay = self.state.read().await;
             relay.thread_settings(thread_id)
@@ -556,6 +574,7 @@ impl ProviderBridge for ClaudeCodeBridge {
             "prompt": text,
             "turn_id": turn_id,
             "user_item_id": user_item_id,
+            "user_message_uuid": user_message_uuid,
             "model": _model,
             "permissionMode": permission_mode,
         });
@@ -780,7 +799,7 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
             }
             let is_active_session = provider_session_id
                 .as_deref()
-                .map_or(true, |sid| relay.active_thread_id.as_deref() == Some(sid));
+                .map_or(false, |sid| relay.active_thread_id.as_deref() == Some(sid));
             let payload_cwd = payload.get("cwd").and_then(Value::as_str);
             if is_active_session {
                 if let Some(model) = payload.get("model").and_then(Value::as_str) {
@@ -805,7 +824,9 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                     relay.current_cwd = cwd.to_string();
                 }
             }
-            relay.set_provider_name("claude_code".to_string());
+            if is_active_session {
+                relay.set_provider_name("claude_code".to_string());
+            }
             let thread_id = provider_session_id
                 .clone()
                 .or_else(|| relay.active_thread_id.clone())
@@ -1318,17 +1339,63 @@ enum ClaudeThreadRoute {
 
 fn claude_thread_route(relay: &RelayState, thread_id: Option<&str>) -> ClaudeThreadRoute {
     match (relay.active_thread_id.as_deref(), thread_id) {
-        (_, None) => ClaudeThreadRoute::Active,
+        (None, None) => ClaudeThreadRoute::Active,
+        (Some(active), None) if thread_belongs_to_claude(relay, active) => {
+            ClaudeThreadRoute::Active
+        }
+        (_, None) => ClaudeThreadRoute::Drop,
         (None, Some(_)) => ClaudeThreadRoute::Drop,
         (Some(active), Some(thread_id)) if active == thread_id => ClaudeThreadRoute::Active,
         (Some(_), Some(thread_id)) => ClaudeThreadRoute::Background(thread_id.to_string()),
     }
 }
 
+fn thread_belongs_to_claude(relay: &RelayState, thread_id: &str) -> bool {
+    if let Some(thread) = relay.threads.iter().find(|thread| thread.id == thread_id) {
+        return thread.provider == "claude_code" || thread.source == "claude_code";
+    }
+
+    relay.provider_name.is_empty() || relay.provider_name == "claude_code"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn new_user_message_uuid_is_rfc4122_v4() {
+        // The SDK accepts the uuid we stamp onto the user message and persists it
+        // verbatim, so it must be a valid RFC 4122 v4 string (not the old
+        // `claude-turn-N`). If this layout drifts, the live id and the
+        // history-read id can diverge again.
+        let id = new_user_message_uuid();
+        let groups: Vec<&str> = id.split('-').collect();
+        assert_eq!(groups.len(), 5, "uuid needs five groups: {id}");
+        assert_eq!(
+            groups.iter().map(|g| g.len()).collect::<Vec<_>>(),
+            vec![8, 4, 4, 4, 12],
+            "uuid groups must be 8-4-4-4-12: {id}"
+        );
+        assert!(
+            id.chars().all(|c| c.is_ascii_hexdigit() || c == '-'),
+            "uuid must be hex + dashes: {id}"
+        );
+        assert_eq!(
+            groups[2].as_bytes()[0],
+            b'4',
+            "version nibble must be 4: {id}"
+        );
+        assert!(
+            matches!(groups[3].as_bytes()[0], b'8' | b'9' | b'a' | b'b'),
+            "variant nibble must be RFC 4122: {id}"
+        );
+        assert_ne!(
+            new_user_message_uuid(),
+            new_user_message_uuid(),
+            "two draws must differ"
+        );
+    }
 
     async fn spawn_or_skip() -> Option<(ClaudeCodeBridge, Arc<RwLock<RelayState>>)> {
         let (tx, _) = tokio::sync::watch::channel(0);
@@ -1829,6 +1896,53 @@ mod tests {
             "active thread should not receive background Claude text: {:?}",
             snapshot.transcript
         );
+    }
+
+    #[tokio::test]
+    async fn background_claude_session_started_does_not_steal_active_provider() {
+        let (tx, _) = tokio::sync::watch::channel(0);
+        let state = Arc::new(RwLock::new(RelayState::new(
+            "/tmp/codex".to_string(),
+            tx,
+            crate::state::SecurityProfile::private(),
+        )));
+        {
+            let mut relay = state.write().await;
+            relay.set_provider_name("codex".to_string());
+            relay.activate_thread(
+                ThreadSummaryView {
+                    id: "codex-thread".to_string(),
+                    name: None,
+                    preview: String::new(),
+                    cwd: "/tmp/codex".to_string(),
+                    updated_at: 1,
+                    source: "codex".to_string(),
+                    status: "active".to_string(),
+                    model_provider: "codex".to_string(),
+                    provider: "codex".to_string(),
+                },
+                "/tmp/codex",
+                "gpt-5.5",
+                "default",
+                "workspace-write",
+                "medium",
+                "device-1",
+            );
+        }
+
+        handle_worker_event(
+            json!({
+                "type": "session_started",
+                "provider_session_id": "claude-thread",
+                "cwd": "/tmp/claude"
+            }),
+            &state,
+        )
+        .await;
+
+        let snapshot = state.read().await.snapshot();
+        assert_eq!(snapshot.provider, "codex");
+        assert_eq!(snapshot.active_thread_id.as_deref(), Some("codex-thread"));
     }
 
     #[tokio::test]

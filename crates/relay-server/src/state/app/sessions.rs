@@ -36,6 +36,7 @@ impl AppState {
             .await?;
         let consumed_initial_prompt = start_result.consumed_initial_prompt;
         let initial_user_message = start_result.initial_user_message.clone();
+        let started_turn_id = start_result.started_turn_id.clone();
 
         {
             let mut relay = self.relay.write().await;
@@ -67,6 +68,13 @@ impl AppState {
                         );
                     }
                 }
+            }
+            if let Some(turn_id) = started_turn_id {
+                relay.set_active_turn(Some(turn_id));
+                if let Some(active_thread_id) = relay.active_thread_id.clone() {
+                    relay.set_thread_status(&active_thread_id, "active".to_string(), Vec::new());
+                }
+                relay.touch_progress(Some("thinking"), None);
             }
             relay.push_log(
                 "info",
