@@ -47,6 +47,71 @@ impl RelayState {
         turn_id: Option<String>,
         tool: Option<ToolCallView>,
     ) -> TranscriptMutationMeta {
+        let Some(thread_id) = self.active_thread_id.clone() else {
+            return self.upsert_transcript_item_legacy(item_id, kind, text, status, turn_id, tool);
+        };
+        self.upsert_transcript_item_for_thread(
+            &thread_id, item_id, kind, text, status, turn_id, tool,
+        )
+    }
+
+    pub fn upsert_transcript_item_for_thread(
+        &mut self,
+        thread_id: &str,
+        item_id: String,
+        kind: TranscriptEntryKind,
+        text: Option<String>,
+        status: String,
+        turn_id: Option<String>,
+        tool: Option<ToolCallView>,
+    ) -> TranscriptMutationMeta {
+        let entry_seq = {
+            let runtime = self.ensure_runtime_for_thread(thread_id);
+            if let Some(index) = runtime
+                .transcript
+                .iter()
+                .position(|entry| entry.item_id == item_id)
+            {
+                let entry = &mut runtime.transcript[index];
+                entry.kind = kind;
+                entry.text = text.or(entry.text.take());
+                entry.status = status;
+                entry.turn_id = turn_id;
+                entry.tool = if kind == TranscriptEntryKind::ToolCall {
+                    merge_tool_call_view(entry.tool.take(), tool)
+                } else {
+                    tool
+                };
+                index as u64 + 1
+            } else {
+                let entry_seq = runtime.transcript.len() as u64 + 1;
+                runtime.transcript.push(TranscriptRecord {
+                    item_id,
+                    kind,
+                    text,
+                    status,
+                    turn_id,
+                    tool,
+                });
+                entry_seq
+            }
+        };
+        let (base_revision, revision) = self.bump_thread_transcript_revision(thread_id);
+        if self.active_thread_id.as_deref() == Some(thread_id) {
+            self.sync_selected_runtime_to_fields();
+        }
+        transcript_mutation_meta(base_revision, revision, entry_seq)
+    }
+
+    fn upsert_transcript_item_legacy(
+        &mut self,
+        item_id: String,
+        kind: TranscriptEntryKind,
+        text: Option<String>,
+        status: String,
+        turn_id: Option<String>,
+        tool: Option<ToolCallView>,
+    ) -> TranscriptMutationMeta {
         if let Some(index) = self
             .transcript
             .iter()
@@ -94,7 +159,28 @@ impl RelayState {
     }
 
     pub fn start_agent_message(&mut self, item_id: String, turn_id: String) {
-        self.upsert_transcript_item(
+        if let Some(thread_id) = self.active_thread_id.clone() {
+            self.start_agent_message_for_thread(&thread_id, item_id, turn_id);
+            return;
+        }
+        self.upsert_transcript_item_legacy(
+            item_id,
+            TranscriptEntryKind::AgentText,
+            Some(String::new()),
+            "streaming".to_string(),
+            Some(turn_id),
+            None,
+        );
+    }
+
+    pub fn start_agent_message_for_thread(
+        &mut self,
+        thread_id: &str,
+        item_id: String,
+        turn_id: String,
+    ) {
+        self.upsert_transcript_item_for_thread(
+            thread_id,
             item_id,
             TranscriptEntryKind::AgentText,
             Some(String::new()),
@@ -105,6 +191,59 @@ impl RelayState {
     }
 
     pub fn append_agent_delta(
+        &mut self,
+        item_id: &str,
+        delta: &str,
+        turn_id: &str,
+    ) -> TranscriptMutationMeta {
+        let Some(thread_id) = self.active_thread_id.clone() else {
+            return self.append_agent_delta_legacy(item_id, delta, turn_id);
+        };
+        self.append_agent_delta_for_thread(&thread_id, item_id, delta, turn_id)
+    }
+
+    pub fn append_agent_delta_for_thread(
+        &mut self,
+        thread_id: &str,
+        item_id: &str,
+        delta: &str,
+        turn_id: &str,
+    ) -> TranscriptMutationMeta {
+        let entry_seq = {
+            let runtime = self.ensure_runtime_for_thread(thread_id);
+            if let Some(index) = runtime
+                .transcript
+                .iter()
+                .position(|entry| entry.item_id == item_id)
+            {
+                let entry = &mut runtime.transcript[index];
+                entry.kind = TranscriptEntryKind::AgentText;
+                entry.text.get_or_insert_with(String::new).push_str(delta);
+                entry.status = "streaming".to_string();
+                entry.turn_id.get_or_insert_with(|| turn_id.to_string());
+                entry.tool = None;
+                index as u64 + 1
+            } else {
+                let entry_seq = runtime.transcript.len() as u64 + 1;
+                runtime.transcript.push(TranscriptRecord {
+                    item_id: item_id.to_string(),
+                    kind: TranscriptEntryKind::AgentText,
+                    text: Some(delta.to_string()),
+                    status: "streaming".to_string(),
+                    turn_id: Some(turn_id.to_string()),
+                    tool: None,
+                });
+                entry_seq
+            }
+        };
+        let (base_revision, revision) = self.bump_thread_transcript_revision(thread_id);
+        if self.active_thread_id.as_deref() == Some(thread_id) {
+            self.sync_selected_runtime_to_fields();
+        }
+        transcript_mutation_meta(base_revision, revision, entry_seq)
+    }
+
+    fn append_agent_delta_legacy(
         &mut self,
         item_id: &str,
         delta: &str,
@@ -135,6 +274,32 @@ impl RelayState {
     }
 
     pub fn upsert_user_message(&mut self, item_id: String, text: String, turn_id: String) {
+        if let Some(thread_id) = self.active_thread_id.clone() {
+            self.upsert_user_message_for_thread(&thread_id, item_id, text, turn_id);
+            return;
+        }
+        self.upsert_user_message_legacy(item_id, text, turn_id);
+    }
+
+    pub fn upsert_user_message_for_thread(
+        &mut self,
+        thread_id: &str,
+        item_id: String,
+        text: String,
+        turn_id: String,
+    ) {
+        self.upsert_transcript_item_for_thread(
+            thread_id,
+            item_id,
+            TranscriptEntryKind::UserText,
+            Some(text),
+            "completed".to_string(),
+            Some(turn_id),
+            None,
+        );
+    }
+
+    fn upsert_user_message_legacy(&mut self, item_id: String, text: String, turn_id: String) {
         if let Some(index) = self
             .transcript
             .iter()
@@ -160,6 +325,32 @@ impl RelayState {
     }
 
     pub fn complete_agent_message(&mut self, item_id: String, text: String, turn_id: String) {
+        if let Some(thread_id) = self.active_thread_id.clone() {
+            self.complete_agent_message_for_thread(&thread_id, item_id, text, turn_id);
+            return;
+        }
+        self.complete_agent_message_legacy(item_id, text, turn_id);
+    }
+
+    pub fn complete_agent_message_for_thread(
+        &mut self,
+        thread_id: &str,
+        item_id: String,
+        text: String,
+        turn_id: String,
+    ) {
+        self.upsert_transcript_item_for_thread(
+            thread_id,
+            item_id,
+            TranscriptEntryKind::AgentText,
+            Some(text),
+            "completed".to_string(),
+            Some(turn_id),
+            None,
+        );
+    }
+
+    fn complete_agent_message_legacy(&mut self, item_id: String, text: String, turn_id: String) {
         if let Some(index) = self
             .transcript
             .iter()
@@ -198,6 +389,19 @@ impl RelayState {
             text.push_str(&output);
         }
 
+        if let Some(thread_id) = self.active_thread_id.clone() {
+            self.upsert_transcript_item_for_thread(
+                &thread_id,
+                item_id,
+                TranscriptEntryKind::Command,
+                Some(text),
+                status,
+                Some(turn_id),
+                None,
+            );
+            return;
+        }
+
         if let Some(index) = self
             .transcript
             .iter()
@@ -223,6 +427,39 @@ impl RelayState {
     }
 
     pub fn start_command_execution(
+        &mut self,
+        item_id: String,
+        command: String,
+        status: String,
+        turn_id: String,
+    ) {
+        if let Some(thread_id) = self.active_thread_id.clone() {
+            self.start_command_execution_for_thread(&thread_id, item_id, command, status, turn_id);
+            return;
+        }
+        self.start_command_execution_legacy(item_id, command, status, turn_id);
+    }
+
+    pub fn start_command_execution_for_thread(
+        &mut self,
+        thread_id: &str,
+        item_id: String,
+        command: String,
+        status: String,
+        turn_id: String,
+    ) {
+        self.upsert_transcript_item_for_thread(
+            thread_id,
+            item_id,
+            TranscriptEntryKind::Command,
+            Some(command),
+            status,
+            Some(turn_id),
+            None,
+        );
+    }
+
+    fn start_command_execution_legacy(
         &mut self,
         item_id: String,
         command: String,
@@ -255,6 +492,62 @@ impl RelayState {
     }
 
     pub fn append_command_delta(&mut self, item_id: &str, delta: &str) -> TranscriptMutationMeta {
+        let Some(thread_id) = self.active_thread_id.clone() else {
+            return self.append_command_delta_legacy(item_id, delta);
+        };
+        self.append_command_delta_for_thread(&thread_id, item_id, delta)
+    }
+
+    pub fn append_command_delta_for_thread(
+        &mut self,
+        thread_id: &str,
+        item_id: &str,
+        delta: &str,
+    ) -> TranscriptMutationMeta {
+        let entry_seq = {
+            let runtime = self.ensure_runtime_for_thread(thread_id);
+            if let Some(index) = runtime
+                .transcript
+                .iter()
+                .position(|entry| entry.item_id == item_id)
+            {
+                let entry = &mut runtime.transcript[index];
+                entry.kind = TranscriptEntryKind::Command;
+                let text = entry.text.get_or_insert_with(String::new);
+                if !text.is_empty() && !text.ends_with('\n') && !delta.starts_with('\n') {
+                    text.push('\n');
+                }
+                text.push_str(delta);
+                if entry.status.trim().is_empty() || entry.status == "completed" {
+                    entry.status = "running".to_string();
+                }
+                entry.tool = None;
+                index as u64 + 1
+            } else {
+                let entry_seq = runtime.transcript.len() as u64 + 1;
+                runtime.transcript.push(TranscriptRecord {
+                    item_id: item_id.to_string(),
+                    kind: TranscriptEntryKind::Command,
+                    text: Some(delta.to_string()),
+                    status: "running".to_string(),
+                    turn_id: None,
+                    tool: None,
+                });
+                entry_seq
+            }
+        };
+        let (base_revision, revision) = self.bump_thread_transcript_revision(thread_id);
+        if self.active_thread_id.as_deref() == Some(thread_id) {
+            self.sync_selected_runtime_to_fields();
+        }
+        transcript_mutation_meta(base_revision, revision, entry_seq)
+    }
+
+    fn append_command_delta_legacy(
+        &mut self,
+        item_id: &str,
+        delta: &str,
+    ) -> TranscriptMutationMeta {
         if let Some(index) = self
             .transcript
             .iter()
@@ -290,15 +583,61 @@ impl RelayState {
         item_id: &str,
         state: FileChangeApplyState,
     ) -> bool {
-        if !self.transcript.iter().any(|entry| entry.item_id == item_id) {
+        let Some(thread_id) = self.active_thread_id.clone() else {
+            if !self.transcript.iter().any(|entry| entry.item_id == item_id) {
+                return false;
+            }
+            self.apply_states.insert(item_id.to_string(), state);
+            self.bump_transcript_revision();
+            return true;
+        };
+        let runtime = self.ensure_runtime_for_thread(&thread_id);
+        if !runtime
+            .transcript
+            .iter()
+            .any(|entry| entry.item_id == item_id)
+        {
             return false;
         }
-        self.apply_states.insert(item_id.to_string(), state);
-        self.bump_transcript_revision();
+        runtime.apply_states.insert(item_id.to_string(), state);
+        self.bump_thread_transcript_revision(&thread_id);
+        self.sync_selected_runtime_to_fields();
         true
     }
 
     pub fn set_transcript_item_status(&mut self, item_id: &str, status: &str) -> bool {
+        let Some(thread_id) = self.active_thread_id.clone() else {
+            return self.set_transcript_item_status_legacy(item_id, status);
+        };
+        self.set_transcript_item_status_for_thread(&thread_id, item_id, status)
+    }
+
+    pub fn set_transcript_item_status_for_thread(
+        &mut self,
+        thread_id: &str,
+        item_id: &str,
+        status: &str,
+    ) -> bool {
+        let Some(index) = self
+            .ensure_runtime_for_thread(thread_id)
+            .transcript
+            .iter()
+            .position(|entry| entry.item_id == item_id)
+        else {
+            return false;
+        };
+        {
+            let runtime = self.ensure_runtime_for_thread(thread_id);
+            runtime.transcript[index].status = status.to_string();
+        }
+        self.bump_thread_transcript_revision(thread_id);
+        if self.active_thread_id.as_deref() == Some(thread_id) {
+            self.sync_selected_runtime_to_fields();
+        }
+        true
+    }
+
+    fn set_transcript_item_status_legacy(&mut self, item_id: &str, status: &str) -> bool {
         let Some(index) = self
             .transcript
             .iter()
@@ -318,7 +657,12 @@ impl RelayState {
     ) -> Vec<crate::protocol::FileChangeDiffView> {
         let mut file_changes = Vec::new();
 
-        for entry in &self.transcript {
+        let entries = self
+            .selected_runtime()
+            .map(|runtime| runtime.transcript.as_slice())
+            .unwrap_or(self.transcript.as_slice());
+
+        for entry in entries {
             if entry.turn_id.as_deref() != Some(turn_id) {
                 continue;
             }

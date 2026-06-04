@@ -313,7 +313,7 @@ impl AppState {
         {
             let mut relay = self.relay.write().await;
             relay.assign_active_controller(&device_id, unix_now());
-            relay.active_turn_id = turn_id;
+            relay.set_active_turn(turn_id);
             relay.model = model.clone();
             relay.reasoning_effort = effort.clone();
             relay.remember_active_thread_settings();

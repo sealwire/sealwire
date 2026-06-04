@@ -1128,7 +1128,7 @@ mod path_scope_tests {
                 provider: Some("fake".to_string()),
             })
             .await
-            .expect("resume A after background stream");
+            .expect("resume A after non-selected stream");
         assert!(
             snap_a_back.transcript.iter().any(|entry| {
                 entry.kind == TranscriptEntryKind::AgentText
@@ -1138,7 +1138,7 @@ mod path_scope_tests {
                         .unwrap_or("")
                         .contains("STREAM-A-LINE-20")
             }),
-            "thread A should retain its completed background stream: {:?}",
+            "thread A should retain its completed non-selected stream: {:?}",
             snap_a_back.transcript
         );
     }
@@ -1179,7 +1179,7 @@ mod path_scope_tests {
 
         // Two switch cycles — the user reported it vanishes "the second time".
         for round in 1..=2 {
-            // Switch to a brand-new session B (stashes A into background).
+            // Switch to a brand-new session B while A remains in its runtime.
             app.start_session(StartSessionInput {
                 device_id: Some("device-1".to_string()),
                 cwd: Some(b_dir.display().to_string()),

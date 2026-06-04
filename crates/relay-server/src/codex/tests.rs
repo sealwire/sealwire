@@ -1514,7 +1514,7 @@ async fn replay_harness_keeps_interleaved_thread_streams_isolated() {
 }
 
 #[tokio::test]
-async fn handle_notification_buffers_late_delta_for_prior_thread() {
+async fn handle_notification_keeps_late_delta_for_prior_thread() {
     let (change_tx, _) = watch::channel(0_u64);
     let state = std::sync::Arc::new(RwLock::new(RelayState::new(
         "/tmp/project".to_string(),
@@ -1642,7 +1642,7 @@ async fn handle_notification_buffers_late_delta_for_prior_thread() {
 }
 
 #[tokio::test]
-async fn handle_notification_buffers_late_agent_completion_for_prior_thread() {
+async fn handle_notification_keeps_late_agent_completion_for_prior_thread() {
     let (change_tx, _) = watch::channel(0_u64);
     let state = std::sync::Arc::new(RwLock::new(RelayState::new(
         "/tmp/project".to_string(),
@@ -1767,7 +1767,7 @@ async fn handle_notification_buffers_late_agent_completion_for_prior_thread() {
 }
 
 #[tokio::test]
-async fn restore_background_does_not_downgrade_fresh_completed_agent_message() {
+async fn runtime_merge_does_not_downgrade_fresh_completed_agent_message() {
     let (change_tx, _) = watch::channel(0_u64);
     let state = std::sync::Arc::new(RwLock::new(RelayState::new(
         "/tmp/project".to_string(),
@@ -1946,7 +1946,7 @@ async fn handle_notification_does_not_leak_late_delta_into_new_thread() {
 }
 
 #[tokio::test]
-async fn handle_notification_buffers_late_command_output_for_prior_thread() {
+async fn handle_notification_keeps_late_command_output_for_prior_thread() {
     let (change_tx, _) = watch::channel(0_u64);
     let state = std::sync::Arc::new(RwLock::new(RelayState::new(
         "/tmp/project".to_string(),
@@ -2049,12 +2049,12 @@ async fn handle_notification_buffers_late_command_output_for_prior_thread() {
     assert_eq!(
         entry.text.as_deref(),
         Some("npm test\nline 1"),
-        "buffered command output must replay onto the freshly-read item"
+        "runtime command output must merge onto the freshly-read item"
     );
 }
 
 #[tokio::test]
-async fn handle_notification_buffers_late_turn_started_for_prior_thread() {
+async fn handle_notification_keeps_late_turn_started_for_prior_thread() {
     let (change_tx, _) = watch::channel(0_u64);
     let state = std::sync::Arc::new(RwLock::new(RelayState::new(
         "/tmp/project".to_string(),
@@ -2125,17 +2125,17 @@ async fn handle_notification_buffers_late_turn_started_for_prior_thread() {
     assert_eq!(
         relay.active_turn_id.as_deref(),
         Some("turn-A2"),
-        "active_turn_id must be restored from the buffered turn/started on switch-back"
+        "active_turn_id must remain in the thread runtime on switch-back"
     );
 }
 
 #[tokio::test]
-async fn handle_notification_buffers_full_turn_lifecycle_for_prior_thread() {
-    // Exercises turn/diff/updated + turn/completed routed via the background
-    // buffer. On switch-back, the synthetic turn-diff entry must exist AND
-    // be marked completed — neither would survive without buffering since
-    // the worker's `read_thread` has no concept of synthetic turn-diff
-    // items and ThreadSyncData carries no active_turn_id.
+async fn handle_notification_keeps_full_turn_lifecycle_for_prior_thread() {
+    // Exercises turn/diff/updated + turn/completed routed to a non-selected
+    // thread runtime. On switch-back, the synthetic turn-diff entry must exist AND
+    // be marked completed. The worker's fresh `read_thread` alone cannot recover
+    // that because it has no concept of synthetic turn-diff items and
+    // ThreadSyncData carries no active_turn_id.
     let (change_tx, _) = watch::channel(0_u64);
     let state = std::sync::Arc::new(RwLock::new(RelayState::new(
         "/tmp/project".to_string(),
@@ -2226,13 +2226,13 @@ async fn handle_notification_buffers_full_turn_lifecycle_for_prior_thread() {
         .transcript
         .into_iter()
         .find(|entry| entry.item_id.as_deref() == Some("turn-diff:turn-A1"))
-        .expect("turn-diff entry must be restored from background buffer on switch-back");
+        .expect("turn-diff entry must remain in the thread runtime on switch-back");
     assert_eq!(
         diff_entry.status, "completed",
-        "buffered turn/completed must flip the buffered turn-diff status"
+        "runtime turn/completed must flip the runtime turn-diff status"
     );
     assert_eq!(
         relay.active_turn_id, None,
-        "active_turn_id must reflect the buffered turn/completed"
+        "active_turn_id must reflect the runtime turn/completed"
     );
 }

@@ -300,10 +300,11 @@ impl ProviderBridge for FakeProviderBridge {
                         "active".to_string(),
                         vec!["waitingOnApproval".to_string()],
                     );
-                    relay.pending_approvals.insert(
-                        approval_request_id.clone(),
-                        make_fake_approval(&approval_request_id, &thread_id, &prompt),
-                    );
+                    relay.add_pending_approval(make_fake_approval(
+                        &approval_request_id,
+                        &thread_id,
+                        &prompt,
+                    ));
                     relay.touch_progress(Some("waiting_approval"), None);
                     relay.push_log("approval", "Fake provider requests approval for: Bash");
                     relay.notify();
@@ -314,7 +315,7 @@ impl ProviderBridge for FakeProviderBridge {
 
                 if !matches!(decision, ApprovalDecision::Approve) {
                     let mut relay = state.write().await;
-                    relay.pending_approvals.remove(&approval_request_id);
+                    relay.remove_pending_approval(&approval_request_id);
                     relay.set_thread_status(&thread_id, "idle".to_string(), Vec::new());
                     if relay.active_thread_id.as_deref() == Some(thread_id.as_str()) {
                         relay.set_active_turn(None);

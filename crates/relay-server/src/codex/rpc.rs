@@ -254,9 +254,7 @@ async fn handle_server_request_for_provider(
                 crate::state::unix_now(),
             );
         }
-        relay
-            .pending_approvals
-            .insert(pending.request_id.clone(), pending.clone());
+        relay.add_pending_approval(pending.clone());
         if matches!(route, ThreadRoute::Active) {
             relay.touch_progress(Some("waiting_approval"), None);
         }
@@ -545,7 +543,7 @@ async fn handle_notification_for_provider(
                         item_id = %item_id,
                         turn_id = %turn_id,
                         delta_len,
-                        "buffered transcript delta for non-active thread"
+                        "updated runtime transcript delta for non-active thread"
                     );
                     changed = true;
                 } else {
@@ -723,7 +721,7 @@ async fn handle_notification_for_provider(
         },
         "serverRequest/resolved" => {
             if let Some(request_id) = params.get("requestId") {
-                relay.pending_approvals.remove(&normalize_id(request_id));
+                relay.remove_pending_approval(&normalize_id(request_id));
                 changed = true;
             }
         }

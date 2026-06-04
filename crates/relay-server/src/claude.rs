@@ -552,8 +552,8 @@ impl ProviderBridge for ClaudeCodeBridge {
         //
         // We used to use the relay turn_id (`user:claude-turn-N`) here, which
         // diverged from the SDK's own message uuid. On a thread switch-away-and
-        // -back the background buffer re-injected the live (`user:claude-turn-N`)
-        // copy on top of the fresh history read (`user:<sdk-uuid>`), so the same
+        // -back the per-thread runtime merged the live (`user:claude-turn-N`)
+        // copy with the fresh history read (`user:<sdk-uuid>`), so the same
         // user message appeared twice. A real, unique uuid keeps the two paths in
         // sync and is collision-safe across relay restarts (unlike the per-process
         // turn counter, which resets to 1).
@@ -1085,9 +1085,7 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                         crate::state::unix_now(),
                     );
                 }
-                relay
-                    .pending_approvals
-                    .insert(pending.request_id.clone(), pending.clone());
+                relay.add_pending_approval(pending.clone());
                 if matches!(
                     claude_thread_route(&relay, Some(&pending.thread_id)),
                     ClaudeThreadRoute::Active
@@ -1137,9 +1135,7 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                     );
                 }
             }
-            relay
-                .pending_ask_user_questions
-                .insert(request_id.clone(), pending);
+            relay.add_pending_ask_user_question(pending);
             if matches!(
                 claude_thread_route(&relay, Some(&thread_id)),
                 ClaudeThreadRoute::Active

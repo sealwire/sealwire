@@ -57,7 +57,7 @@ impl AppState {
             .map_err(ApprovalError::Bridge)?;
 
         let mut relay = self.relay.write().await;
-        relay.pending_approvals.remove(request_id);
+        relay.remove_pending_approval(request_id);
         relay.push_log(
             "info",
             format!(
@@ -116,7 +116,7 @@ impl AppState {
             .map_err(AskUserAnswerError::Bridge)?;
 
         let mut relay = self.relay.write().await;
-        relay.pending_ask_user_questions.remove(request_id);
+        relay.remove_pending_ask_user_question(request_id);
         if relay.pending_ask_user_questions.is_empty() {
             let tid = pending.thread_id;
             if !tid.is_empty() {

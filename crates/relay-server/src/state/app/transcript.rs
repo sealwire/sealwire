@@ -12,18 +12,14 @@ impl AppState {
                 .as_deref()
                 .map(|id| relay.device_path_scope(id))
                 .unwrap_or_default();
-            if relay.active_thread_id.as_deref() == Some(input.thread_id.as_str()) {
+            if let Some(runtime) = relay.runtime_for_thread(&input.thread_id) {
                 ensure_path_within_device_scope(
-                    &relay.current_cwd,
+                    &runtime.current_cwd,
                     &device_scope,
                     &relay.allowed_roots,
                 )?;
-                let transcript = relay
-                    .transcript
-                    .iter()
-                    .map(|entry| entry.to_view())
-                    .collect::<Vec<_>>();
-                let revision = relay.transcript_revision();
+                let transcript = runtime.transcript_views();
+                let revision = runtime.transcript_revision;
 
                 if input.before.is_some() {
                     return Ok(ThreadTranscriptResponse::from_transcript_before(
@@ -89,17 +85,13 @@ impl AppState {
                 .as_deref()
                 .map(|id| relay.device_path_scope(id))
                 .unwrap_or_default();
-            if relay.active_thread_id.as_deref() == Some(input.thread_id.as_str()) {
+            if let Some(runtime) = relay.runtime_for_thread(&input.thread_id) {
                 ensure_path_within_device_scope(
-                    &relay.current_cwd,
+                    &runtime.current_cwd,
                     &device_scope,
                     &relay.allowed_roots,
                 )?;
-                let transcript = relay
-                    .transcript
-                    .iter()
-                    .map(|entry| entry.to_view())
-                    .collect::<Vec<_>>();
+                let transcript = runtime.transcript_views();
 
                 return Ok(ThreadEntriesResponse::from_item_ids(
                     input.thread_id,
@@ -147,13 +139,13 @@ impl AppState {
                 .as_deref()
                 .map(|id| relay.device_path_scope(id))
                 .unwrap_or_default();
-            if relay.active_thread_id.as_deref() == Some(input.thread_id.as_str()) {
+            if let Some(runtime) = relay.runtime_for_thread(&input.thread_id) {
                 ensure_path_within_device_scope(
-                    &relay.current_cwd,
+                    &runtime.current_cwd,
                     &device_scope,
                     &relay.allowed_roots,
                 )?;
-                relay
+                runtime
                     .transcript
                     .iter()
                     .find(|entry| entry.item_id == input.item_id)

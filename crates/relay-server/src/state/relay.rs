@@ -2,6 +2,7 @@ mod approval;
 mod ask_user_question;
 mod background;
 mod device;
+mod runtime;
 mod transcript;
 
 use std::collections::{HashMap, HashSet};
@@ -25,12 +26,12 @@ use super::{
 
 pub use self::approval::{ApprovalKind, PendingApproval};
 pub use self::ask_user_question::{parse_ask_user_questions, PendingAskUserQuestion};
-pub use self::background::BackgroundThreadStream;
 pub(crate) use self::device::{
     BrokerPendingMessage, ClaimChallenge, CompletedPairing, CompletedRemoteClaim, DeviceRecord,
     IssuedClaimChallenge, PairedDevice, PendingPairing, PendingPairingRequest,
     PendingPairingResult, PendingTranscriptDelta, TranscriptDeltaKind,
 };
+pub(crate) use self::runtime::ThreadRuntime;
 pub(crate) use self::transcript::TranscriptRecord;
 
 const REMOTE_ACTION_REPLAY_TTL_SECS: u64 = 600;
@@ -150,8 +151,8 @@ pub struct RelayState {
     locally_deleted_thread_ids: HashSet<String>,
     pub pending_approvals: HashMap<String, PendingApproval>,
     pub pending_ask_user_questions: HashMap<String, PendingAskUserQuestion>,
+    pub(super) runtimes: HashMap<String, ThreadRuntime>,
     pub(super) transcript: Vec<TranscriptRecord>,
-    pub(super) background_streams: HashMap<String, BackgroundThreadStream>,
     pub(super) logs: Vec<LogEntryView>,
     /// In-memory file-change apply state keyed by transcript `item_id`
     /// (typically `turn-diff:<turn_id>`). Never persisted: lost on relay
@@ -207,8 +208,8 @@ impl RelayState {
             locally_deleted_thread_ids: HashSet::new(),
             pending_approvals: HashMap::new(),
             pending_ask_user_questions: HashMap::new(),
+            runtimes: HashMap::new(),
             transcript: Vec::new(),
-            background_streams: HashMap::new(),
             logs: Vec::new(),
             apply_states: HashMap::new(),
             recent_remote_actions: HashMap::new(),
@@ -222,14 +223,145 @@ impl RelayState {
         let _ = self.change_tx.send(self.revision);
     }
 
-    pub fn transcript_revision(&self) -> u64 {
-        self.transcript_revision
+    pub(super) fn bump_transcript_revision(&mut self) -> (u64, u64) {
+        let Some(thread_id) = self.active_thread_id.clone() else {
+            let base_revision = self.transcript_revision;
+            self.transcript_revision = self.transcript_revision.wrapping_add(1);
+            return (base_revision, self.transcript_revision);
+        };
+
+        self.bump_thread_transcript_revision(&thread_id)
     }
 
-    pub(super) fn bump_transcript_revision(&mut self) -> (u64, u64) {
-        let base_revision = self.transcript_revision;
-        self.transcript_revision = self.transcript_revision.wrapping_add(1);
-        (base_revision, self.transcript_revision)
+    pub(super) fn bump_thread_transcript_revision(&mut self, thread_id: &str) -> (u64, u64) {
+        let runtime = self.ensure_runtime_for_thread(thread_id);
+        let base_revision = runtime.transcript_revision;
+        runtime.transcript_revision = runtime.transcript_revision.wrapping_add(1);
+        let revision = runtime.transcript_revision;
+        if self.active_thread_id.as_deref() == Some(thread_id) {
+            self.transcript_revision = revision;
+        }
+        (base_revision, revision)
+    }
+
+    pub(crate) fn selected_runtime(&self) -> Option<&ThreadRuntime> {
+        self.active_thread_id
+            .as_deref()
+            .and_then(|thread_id| self.runtimes.get(thread_id))
+    }
+
+    pub(crate) fn runtime_for_thread(&self, thread_id: &str) -> Option<&ThreadRuntime> {
+        self.runtimes.get(thread_id)
+    }
+
+    pub(crate) fn ensure_runtime_for_thread(&mut self, thread_id: &str) -> &mut ThreadRuntime {
+        if self.active_thread_id.as_deref() == Some(thread_id)
+            && !self.runtimes.contains_key(thread_id)
+        {
+            self.materialize_selected_runtime_from_fields();
+        }
+        let now = unix_now();
+        let summary = self
+            .threads
+            .iter()
+            .find(|thread| thread.id == thread_id)
+            .cloned();
+        self.runtimes
+            .entry(thread_id.to_string())
+            .or_insert_with(|| {
+                let mut runtime = ThreadRuntime::placeholder(thread_id, now);
+                if let Some(summary) = summary {
+                    runtime.current_status = summary.status.clone();
+                    runtime.current_cwd = summary.cwd.clone();
+                    runtime.summary = Some(summary);
+                }
+                runtime.model = self.model.clone();
+                runtime.approval_policy = self.approval_policy.clone();
+                runtime.sandbox = self.sandbox.clone();
+                runtime.reasoning_effort = self.reasoning_effort.clone();
+                runtime
+            })
+    }
+
+    pub(crate) fn sync_selected_runtime_to_fields(&mut self) {
+        let Some(runtime) = self.selected_runtime().cloned() else {
+            self.transcript_revision = 0;
+            self.active_turn_id = None;
+            self.current_status = "idle".to_string();
+            self.current_phase = None;
+            self.current_tool = None;
+            self.last_progress_at = None;
+            self.active_flags.clear();
+            self.transcript.clear();
+            self.apply_states.clear();
+            return;
+        };
+        self.transcript_revision = runtime.transcript_revision;
+        self.active_turn_id = runtime.active_turn_id;
+        self.current_status = runtime.current_status;
+        self.current_phase = runtime.current_phase;
+        self.current_tool = runtime.current_tool;
+        self.last_progress_at = runtime.last_progress_at;
+        self.active_flags = runtime.active_flags;
+        self.current_cwd = runtime.current_cwd;
+        self.model = runtime.model;
+        self.approval_policy = runtime.approval_policy;
+        self.sandbox = runtime.sandbox;
+        self.reasoning_effort = runtime.reasoning_effort;
+        self.transcript = runtime.transcript;
+        self.apply_states = runtime.apply_states;
+    }
+
+    pub(crate) fn materialize_selected_runtime_from_fields(&mut self) {
+        let Some(thread_id) = self.active_thread_id.clone() else {
+            return;
+        };
+        if self.runtimes.contains_key(&thread_id) {
+            return;
+        }
+        let now = unix_now();
+        let mut runtime = ThreadRuntime::placeholder(&thread_id, now);
+        if let Some(summary) = self
+            .threads
+            .iter()
+            .find(|thread| thread.id == thread_id)
+            .cloned()
+        {
+            runtime.summary = Some(summary.clone());
+            runtime.current_cwd = if self.current_cwd.is_empty() {
+                summary.cwd
+            } else {
+                self.current_cwd.clone()
+            };
+        } else {
+            runtime.current_cwd = self.current_cwd.clone();
+        }
+        runtime.active_turn_id = self.active_turn_id.clone();
+        runtime.current_status = self.current_status.clone();
+        runtime.current_phase = self.current_phase.clone();
+        runtime.current_tool = self.current_tool.clone();
+        runtime.last_progress_at = self.last_progress_at;
+        runtime.active_flags = self.active_flags.clone();
+        runtime.model = self.model.clone();
+        runtime.approval_policy = self.approval_policy.clone();
+        runtime.sandbox = self.sandbox.clone();
+        runtime.reasoning_effort = self.reasoning_effort.clone();
+        runtime.transcript_revision = self.transcript_revision;
+        runtime.transcript = self.transcript.clone();
+        runtime.apply_states = self.apply_states.clone();
+        runtime.pending_approvals = self
+            .pending_approvals
+            .iter()
+            .filter(|(_, pending)| pending.thread_id == thread_id)
+            .map(|(key, pending)| (key.clone(), pending.clone()))
+            .collect();
+        runtime.pending_ask_user_questions = self
+            .pending_ask_user_questions
+            .iter()
+            .filter(|(_, pending)| pending.thread_id == thread_id)
+            .map(|(key, pending)| (key.clone(), pending.clone()))
+            .collect();
+        self.runtimes.insert(thread_id, runtime);
     }
 
     /// Live per-thread activity for the activity badges: the active thread (if
@@ -238,32 +370,14 @@ impl RelayState {
     /// snapshot describes threads other than the active one.
     fn thread_activity_view(&self) -> Vec<ThreadActivityView> {
         let mut activity = Vec::new();
-        if let Some(thread_id) = &self.active_thread_id {
-            if self.active_turn_id.is_some()
-                || self.current_phase.is_some()
-                || thread_status_is_working(&self.current_status)
-            {
-                activity.push(ThreadActivityView {
-                    thread_id: thread_id.clone(),
-                    phase: self.current_phase.clone(),
-                    tool: self.current_tool.clone(),
-                });
-            }
-        }
-        for (thread_id, bg) in &self.background_streams {
-            if bg.active_turn_id.is_none()
-                && bg.current_phase.is_none()
-                && !thread_status_is_working(&bg.current_status)
-            {
-                continue;
-            }
-            if self.active_thread_id.as_deref() == Some(thread_id.as_str()) {
+        for (thread_id, runtime) in &self.runtimes {
+            if !runtime.is_working() {
                 continue;
             }
             activity.push(ThreadActivityView {
                 thread_id: thread_id.clone(),
-                phase: bg.current_phase.clone(),
-                tool: bg.current_tool.clone(),
+                phase: runtime.current_phase.clone(),
+                tool: runtime.current_tool.clone(),
             });
         }
         activity
@@ -317,9 +431,65 @@ impl RelayState {
             .collect::<Vec<_>>();
         pending_pairing_requests.sort_by(|left, right| left.requested_at.cmp(&right.requested_at));
 
+        let selected = self.selected_runtime();
+        let transcript_revision = selected
+            .map(|runtime| runtime.transcript_revision)
+            .unwrap_or(self.transcript_revision);
+        let active_turn_id = selected
+            .and_then(|runtime| runtime.active_turn_id.clone())
+            .or_else(|| self.active_turn_id.clone());
+        let current_status = selected
+            .map(|runtime| runtime.current_status.clone())
+            .unwrap_or_else(|| self.current_status.clone());
+        let current_phase = selected
+            .and_then(|runtime| runtime.current_phase.clone())
+            .or_else(|| self.current_phase.clone());
+        let current_tool = selected
+            .and_then(|runtime| runtime.current_tool.clone())
+            .or_else(|| self.current_tool.clone());
+        let last_progress_at = selected
+            .and_then(|runtime| runtime.last_progress_at)
+            .or(self.last_progress_at);
+        let active_flags = selected
+            .map(|runtime| runtime.active_flags.clone())
+            .unwrap_or_else(|| self.active_flags.clone());
+        let current_cwd = selected
+            .map(|runtime| runtime.current_cwd.clone())
+            .unwrap_or_else(|| self.current_cwd.clone());
+        let model = selected
+            .map(|runtime| runtime.model.clone())
+            .unwrap_or_else(|| self.model.clone());
+        let approval_policy = selected
+            .map(|runtime| runtime.approval_policy.clone())
+            .unwrap_or_else(|| self.approval_policy.clone());
+        let sandbox = selected
+            .map(|runtime| runtime.sandbox.clone())
+            .unwrap_or_else(|| self.sandbox.clone());
+        let reasoning_effort = selected
+            .map(|runtime| runtime.reasoning_effort.clone())
+            .unwrap_or_else(|| self.reasoning_effort.clone());
+        let transcript = selected
+            .map(|runtime| runtime.transcript_views())
+            .unwrap_or_else(|| {
+                self.transcript
+                    .iter()
+                    .map(|record| {
+                        let mut view = record.to_view();
+                        if let (Some(item_id), Some(tool)) =
+                            (view.item_id.as_ref(), view.tool.as_mut())
+                        {
+                            if let Some(state) = self.apply_states.get(item_id) {
+                                tool.apply_state = Some(*state);
+                            }
+                        }
+                        view
+                    })
+                    .collect()
+            });
+
         SessionSnapshot {
             revision: self.revision,
-            transcript_revision: self.transcript_revision,
+            transcript_revision,
             server_time: unix_now(),
             provider: self.provider_name.clone(),
             service_ready: true,
@@ -336,19 +506,19 @@ impl RelayState {
             active_controller_last_seen_at: self.active_controller_last_seen_at,
             controller_lease_expires_at: self.controller_lease_expires_at(),
             controller_lease_seconds: CONTROLLER_LEASE_SECS,
-            active_turn_id: self.active_turn_id.clone(),
-            current_status: self.current_status.clone(),
-            current_phase: self.current_phase.clone(),
-            current_tool: self.current_tool.clone(),
-            last_progress_at: self.last_progress_at,
-            active_flags: self.active_flags.clone(),
+            active_turn_id,
+            current_status,
+            current_phase,
+            current_tool,
+            last_progress_at,
+            active_flags,
             thread_activity: self.thread_activity_view(),
-            current_cwd: self.current_cwd.clone(),
-            model: self.model.clone(),
+            current_cwd,
+            model,
             available_models: self.available_models.clone(),
-            approval_policy: self.approval_policy.clone(),
-            sandbox: self.sandbox.clone(),
-            reasoning_effort: self.reasoning_effort.clone(),
+            approval_policy,
+            sandbox,
+            reasoning_effort,
             allowed_roots: self.allowed_roots.clone(),
             device_records,
             paired_devices,
@@ -376,20 +546,7 @@ impl RelayState {
                 views
             },
             transcript_truncated: false,
-            transcript: self
-                .transcript
-                .iter()
-                .map(|record| {
-                    let mut view = record.to_view();
-                    if let (Some(item_id), Some(tool)) = (view.item_id.as_ref(), view.tool.as_mut())
-                    {
-                        if let Some(state) = self.apply_states.get(item_id) {
-                            tool.apply_state = Some(*state);
-                        }
-                    }
-                    view
-                })
-                .collect(),
+            transcript,
             logs: self.logs.clone(),
         }
     }
@@ -405,23 +562,24 @@ impl RelayState {
         device_id: &str,
     ) {
         let now = unix_now();
-        if self.active_thread_id.as_deref() != Some(&thread.id) {
-            self.stash_active_into_background(now);
-        }
-        self.active_thread_id = Some(thread.id.clone());
+        let thread_id = thread.id.clone();
+        self.materialize_selected_runtime_from_fields();
         self.assign_active_controller(device_id, now);
-        self.active_turn_id = None;
-        self.current_status = thread.status.clone();
-        self.active_flags.clear();
-        self.current_cwd = cwd.to_string();
-        self.model = model.to_string();
-        self.approval_policy = approval_policy.to_string();
-        self.sandbox = sandbox.to_string();
-        self.reasoning_effort = effort.to_string();
-        self.remember_thread_settings(&thread.id, approval_policy, sandbox, effort, model);
-        self.transcript.clear();
-        self.apply_states.clear();
-        self.bump_transcript_revision();
+        self.active_thread_id = Some(thread_id.clone());
+        self.runtimes.insert(
+            thread_id.clone(),
+            ThreadRuntime::new(
+                thread.clone(),
+                cwd,
+                model,
+                approval_policy,
+                sandbox,
+                effort,
+                now,
+            ),
+        );
+        self.remember_thread_settings(&thread_id, approval_policy, sandbox, effort, model);
+        self.sync_selected_runtime_to_fields();
         self.upsert_thread(thread);
     }
 
@@ -453,6 +611,14 @@ impl RelayState {
                 self.reasoning_effort = default_model.default_reasoning_effort;
             }
         }
+        if let Some(thread_id) = self.active_thread_id.clone() {
+            let model = self.model.clone();
+            let effort = self.reasoning_effort.clone();
+            if let Some(runtime) = self.runtimes.get_mut(&thread_id) {
+                runtime.model = model;
+                runtime.reasoning_effort = effort;
+            }
+        }
     }
 
     pub fn load_thread_data(
@@ -465,45 +631,36 @@ impl RelayState {
         device_id: &str,
     ) {
         let now = unix_now();
-        if self.active_thread_id.as_deref() != Some(&data.thread.id) {
-            self.stash_active_into_background(now);
-        }
-        self.active_thread_id = Some(data.thread.id.clone());
-        self.assign_active_controller(device_id, now);
-        self.active_turn_id = None;
-        self.current_status = data.status;
-        self.active_flags = data.active_flags;
-        self.current_cwd = data.thread.cwd.clone();
-        self.approval_policy = approval_policy.to_string();
-        self.sandbox = sandbox.to_string();
-        self.reasoning_effort = effort.to_string();
-        if !model.is_empty() {
-            self.model = model.to_string();
-        }
         let thread_id = data.thread.id.clone();
+        let model_for_runtime = if model.is_empty() {
+            self.model.clone()
+        } else {
+            model.to_string()
+        };
+        self.materialize_selected_runtime_from_fields();
+        self.assign_active_controller(device_id, now);
+        self.active_thread_id = Some(thread_id.clone());
+        let runtime = ThreadRuntime::from_sync_data(
+            data.clone(),
+            approval_policy,
+            sandbox,
+            effort,
+            &model_for_runtime,
+            now,
+        );
+        if let Some(existing) = self.runtimes.get_mut(&thread_id) {
+            existing.merge_fresh_history(runtime);
+        } else {
+            self.runtimes.insert(thread_id.clone(), runtime);
+        }
         self.remember_thread_settings(
             &thread_id,
             approval_policy,
             sandbox,
             effort,
-            &self.model.clone(),
+            &model_for_runtime,
         );
-        self.apply_states.clear();
-        self.transcript = data
-            .transcript
-            .into_iter()
-            .enumerate()
-            .map(|(index, entry)| TranscriptRecord {
-                item_id: entry.item_id.unwrap_or_else(|| format!("history-{index}")),
-                kind: entry.kind,
-                text: entry.text,
-                status: entry.status,
-                turn_id: entry.turn_id,
-                tool: entry.tool,
-            })
-            .collect();
-        self.bump_transcript_revision();
-        self.restore_background_for_active();
+        self.sync_selected_runtime_to_fields();
         self.upsert_thread(data.thread);
     }
 
@@ -512,26 +669,30 @@ impl RelayState {
         data: ThreadSyncData,
         persisted: &PersistedRelayState,
     ) {
-        self.active_thread_id = Some(data.thread.id.clone());
+        let now = unix_now();
+        let thread_id = data.thread.id.clone();
+        self.active_thread_id = Some(thread_id.clone());
         self.active_controller_device_id = persisted.active_controller_device_id.clone();
         self.active_controller_last_seen_at = persisted.active_controller_last_seen_at;
-        self.active_turn_id = None;
-        self.current_status = data.status;
-        self.active_flags = data.active_flags;
-        self.current_cwd = data.thread.cwd.clone();
         let settings = persisted.settings_for_thread(&data.thread.id);
-        self.model = if settings.model.is_empty() {
+        let model = if settings.model.is_empty() {
             persisted.model.clone()
         } else {
             settings.model.clone()
         };
-        self.approval_policy = settings.approval_policy.clone();
-        self.sandbox = settings.sandbox.clone();
-        self.reasoning_effort = settings.reasoning_effort.clone();
+        let runtime = ThreadRuntime::from_sync_data(
+            data.clone(),
+            &settings.approval_policy,
+            &settings.sandbox,
+            &settings.reasoning_effort,
+            &model,
+            now,
+        );
+        self.runtimes.insert(thread_id.clone(), runtime);
         self.thread_settings = persisted.thread_settings.clone();
         let mut materialized = settings;
         if materialized.model.is_empty() {
-            materialized.model = self.model.clone();
+            materialized.model = model;
         }
         self.thread_settings
             .entry(data.thread.id.clone())
@@ -551,27 +712,20 @@ impl RelayState {
         self.pending_ask_user_questions.clear();
         self.recent_remote_actions.clear();
         self.locally_deleted_thread_ids.clear();
-        self.apply_states.clear();
-        self.transcript = data
-            .transcript
-            .into_iter()
-            .enumerate()
-            .map(|(index, entry)| TranscriptRecord {
-                item_id: entry.item_id.unwrap_or_else(|| format!("history-{index}")),
-                kind: entry.kind,
-                text: entry.text,
-                status: entry.status,
-                turn_id: entry.turn_id,
-                tool: entry.tool,
-            })
-            .collect();
-        self.bump_transcript_revision();
+        self.sync_selected_runtime_to_fields();
         self.upsert_thread(data.thread);
     }
 
     pub fn upsert_thread(&mut self, thread: ThreadSummaryView) {
         if self.locally_deleted_thread_ids.contains(&thread.id) {
             return;
+        }
+        if let Some(runtime) = self.runtimes.get_mut(&thread.id) {
+            runtime.summary = Some(thread.clone());
+            runtime.current_status = thread.status.clone();
+            if runtime.current_cwd.is_empty() {
+                runtime.current_cwd = thread.cwd.clone();
+            }
         }
         if let Some(existing) = self.threads.iter_mut().find(|item| item.id == thread.id) {
             *existing = thread;
@@ -581,7 +735,10 @@ impl RelayState {
     }
 
     pub fn thread_settings(&self, thread_id: &str) -> Option<ThreadSessionSettings> {
-        self.thread_settings.get(thread_id).cloned()
+        self.thread_settings
+            .get(thread_id)
+            .cloned()
+            .or_else(|| self.runtimes.get(thread_id).map(ThreadRuntime::settings))
     }
 
     pub fn remember_thread_settings(
@@ -596,6 +753,12 @@ impl RelayState {
             thread_id.to_string(),
             ThreadSessionSettings::new(approval_policy, sandbox, effort, model),
         );
+        if let Some(runtime) = self.runtimes.get_mut(thread_id) {
+            runtime.approval_policy = approval_policy.to_string();
+            runtime.sandbox = sandbox.to_string();
+            runtime.reasoning_effort = effort.to_string();
+            runtime.model = model.to_string();
+        }
     }
 
     pub fn remember_active_thread_settings(&mut self) {
@@ -617,7 +780,13 @@ impl RelayState {
 
     pub fn can_archive_thread(&self, thread_id: &str) -> Result<bool, String> {
         let is_active = self.active_thread_id.as_deref() == Some(thread_id);
-        if is_active && self.active_turn_id.is_some() {
+        let running = self
+            .runtimes
+            .get(thread_id)
+            .and_then(|runtime| runtime.active_turn_id.as_ref())
+            .is_some()
+            || (is_active && self.active_turn_id.is_some());
+        if running {
             return Err(
                 "cannot archive the active session while Codex is still running".to_string(),
             );
@@ -628,7 +797,13 @@ impl RelayState {
 
     pub fn can_delete_thread(&self, thread_id: &str) -> Result<bool, String> {
         let is_active = self.active_thread_id.as_deref() == Some(thread_id);
-        if is_active && self.active_turn_id.is_some() {
+        let running = self
+            .runtimes
+            .get(thread_id)
+            .and_then(|runtime| runtime.active_turn_id.as_ref())
+            .is_some()
+            || (is_active && self.active_turn_id.is_some());
+        if running {
             return Err(
                 "cannot permanently delete the active session while Codex is still running"
                     .to_string(),
@@ -642,6 +817,7 @@ impl RelayState {
         let before_len = self.threads.len();
         self.threads.retain(|thread| thread.id != thread_id);
         self.thread_settings.remove(thread_id);
+        self.runtimes.remove(thread_id);
         self.drop_pending_requests_for_thread(thread_id);
         self.threads.len() != before_len
     }
@@ -650,7 +826,6 @@ impl RelayState {
         self.locally_deleted_thread_ids
             .insert(thread_id.to_string());
         self.remove_thread(thread_id);
-        self.drop_background_stream(thread_id);
     }
 
     fn drop_pending_requests_for_thread(&mut self, thread_id: &str) {
@@ -658,6 +833,53 @@ impl RelayState {
             .retain(|_, pending| pending.thread_id != thread_id);
         self.pending_ask_user_questions
             .retain(|_, pending| pending.thread_id != thread_id);
+        if let Some(runtime) = self.runtimes.get_mut(thread_id) {
+            runtime.pending_approvals.clear();
+            runtime.pending_ask_user_questions.clear();
+        }
+    }
+
+    pub fn add_pending_approval(&mut self, pending: PendingApproval) {
+        if !pending.thread_id.is_empty() {
+            self.ensure_runtime_for_thread(&pending.thread_id)
+                .pending_approvals
+                .insert(pending.request_id.clone(), pending.clone());
+        }
+        self.pending_approvals
+            .insert(pending.request_id.clone(), pending);
+    }
+
+    pub fn remove_pending_approval(&mut self, request_id: &str) -> Option<PendingApproval> {
+        let pending = self.pending_approvals.remove(request_id)?;
+        if !pending.thread_id.is_empty() {
+            if let Some(runtime) = self.runtimes.get_mut(&pending.thread_id) {
+                runtime.pending_approvals.remove(request_id);
+            }
+        }
+        Some(pending)
+    }
+
+    pub fn add_pending_ask_user_question(&mut self, pending: PendingAskUserQuestion) {
+        if !pending.thread_id.is_empty() {
+            self.ensure_runtime_for_thread(&pending.thread_id)
+                .pending_ask_user_questions
+                .insert(pending.request_id.clone(), pending.clone());
+        }
+        self.pending_ask_user_questions
+            .insert(pending.request_id.clone(), pending);
+    }
+
+    pub fn remove_pending_ask_user_question(
+        &mut self,
+        request_id: &str,
+    ) -> Option<PendingAskUserQuestion> {
+        let pending = self.pending_ask_user_questions.remove(request_id)?;
+        if !pending.thread_id.is_empty() {
+            if let Some(runtime) = self.runtimes.get_mut(&pending.thread_id) {
+                runtime.pending_ask_user_questions.remove(request_id);
+            }
+        }
+        Some(pending)
     }
 
     pub fn filter_deleted_threads(
@@ -694,7 +916,12 @@ impl RelayState {
     }
 
     pub fn set_active_turn(&mut self, turn_id: Option<String>) {
-        self.active_turn_id = turn_id;
+        if let Some(thread_id) = self.active_thread_id.clone() {
+            let runtime = self.ensure_runtime_for_thread(&thread_id);
+            runtime.active_turn_id = turn_id;
+            runtime.touch(unix_now());
+        }
+        self.sync_selected_runtime_to_fields();
     }
 
     pub fn mark_surface_peer_online(&mut self, peer_id: &str) -> bool {
@@ -814,13 +1041,18 @@ impl RelayState {
         status: String,
         active_flags: Vec<String>,
     ) {
-        if self.active_thread_id.as_deref() == Some(thread_id) {
-            self.current_status = status.clone();
-            self.active_flags = active_flags;
+        {
+            let runtime = self.ensure_runtime_for_thread(thread_id);
+            runtime.current_status = status.clone();
+            runtime.active_flags = active_flags.clone();
+            runtime.touch(unix_now());
         }
 
         if let Some(thread) = self.threads.iter_mut().find(|item| item.id == thread_id) {
             thread.status = status;
+        }
+        if self.active_thread_id.as_deref() == Some(thread_id) {
+            self.sync_selected_runtime_to_fields();
         }
     }
 
@@ -828,12 +1060,6 @@ impl RelayState {
         self.active_thread_id = persisted.active_thread_id.clone();
         self.active_controller_device_id = persisted.active_controller_device_id.clone();
         self.active_controller_last_seen_at = persisted.active_controller_last_seen_at;
-        self.active_turn_id = None;
-        self.current_status = persisted.current_status.clone();
-        self.current_phase = None;
-        self.current_tool = None;
-        self.last_progress_at = None;
-        self.active_flags = persisted.active_flags.clone();
         self.current_cwd = persisted.current_cwd.clone();
         self.model = persisted.model.clone();
         self.approval_policy = persisted.approval_policy.clone();
@@ -876,9 +1102,13 @@ impl RelayState {
         self.pending_ask_user_questions.clear();
         self.recent_remote_actions.clear();
         self.locally_deleted_thread_ids.clear();
+        self.runtimes.clear();
     }
 
     pub fn clear_active_session(&mut self) {
+        if let Some(thread_id) = self.active_thread_id.clone() {
+            self.runtimes.remove(&thread_id);
+        }
         self.active_thread_id = None;
         self.active_controller_device_id = None;
         self.active_controller_last_seen_at = None;
@@ -888,6 +1118,9 @@ impl RelayState {
         self.current_tool = None;
         self.last_progress_at = None;
         self.active_flags.clear();
+        self.transcript_revision = 0;
+        self.transcript.clear();
+        self.apply_states.clear();
         self.pending_approvals.clear();
         self.pending_ask_user_questions.clear();
     }
@@ -895,19 +1128,59 @@ impl RelayState {
     /// Worker emitted a real event or a progress_tick. `phase` and `tool`
     /// are advisory; pass None to leave them unchanged.
     pub fn touch_progress(&mut self, phase: Option<&str>, tool: Option<&str>) {
-        self.last_progress_at = Some(unix_now());
+        if let Some(thread_id) = self.active_thread_id.clone() {
+            self.touch_thread_progress(&thread_id, phase, tool);
+        } else {
+            self.last_progress_at = Some(unix_now());
+            if let Some(p) = phase {
+                self.current_phase = Some(p.to_string());
+            }
+            if let Some(t) = tool {
+                self.current_tool = Some(t.to_string());
+            }
+        }
+    }
+
+    pub fn touch_thread_progress(
+        &mut self,
+        thread_id: &str,
+        phase: Option<&str>,
+        tool: Option<&str>,
+    ) {
+        let now = unix_now();
+        let runtime = self.ensure_runtime_for_thread(thread_id);
+        runtime.last_progress_at = Some(now);
+        runtime.touch(now);
         if let Some(p) = phase {
-            self.current_phase = Some(p.to_string());
+            runtime.current_phase = Some(p.to_string());
         }
         if let Some(t) = tool {
-            self.current_tool = Some(t.to_string());
+            runtime.current_tool = Some(t.to_string());
+        }
+        if self.active_thread_id.as_deref() == Some(thread_id) {
+            self.sync_selected_runtime_to_fields();
         }
     }
 
     pub fn clear_progress(&mut self) {
-        self.current_phase = None;
-        self.current_tool = None;
-        self.last_progress_at = None;
+        if let Some(thread_id) = self.active_thread_id.clone() {
+            self.clear_thread_progress(&thread_id);
+        } else {
+            self.current_phase = None;
+            self.current_tool = None;
+            self.last_progress_at = None;
+        }
+    }
+
+    pub fn clear_thread_progress(&mut self, thread_id: &str) {
+        let runtime = self.ensure_runtime_for_thread(thread_id);
+        runtime.current_phase = None;
+        runtime.current_tool = None;
+        runtime.last_progress_at = None;
+        runtime.touch(unix_now());
+        if self.active_thread_id.as_deref() == Some(thread_id) {
+            self.sync_selected_runtime_to_fields();
+        }
     }
 
     pub(super) fn assign_active_controller(&mut self, device_id: &str, now: u64) -> bool {

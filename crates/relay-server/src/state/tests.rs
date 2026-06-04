@@ -618,16 +618,41 @@ fn load_thread_data_preserves_pending_requests_from_other_threads() {
 }
 
 #[test]
+fn clear_active_session_clears_selected_runtime_mirror() {
+    let mut relay = test_state();
+    relay.activate_thread(
+        test_thread("thread-1", "/tmp/project"),
+        "/tmp/project",
+        DEFAULT_MODEL,
+        DEFAULT_APPROVAL_POLICY,
+        DEFAULT_SANDBOX,
+        DEFAULT_EFFORT,
+        "device-a",
+    );
+    relay.upsert_user_message(
+        "user:1".to_string(),
+        "hello".to_string(),
+        "turn-1".to_string(),
+    );
+    assert_eq!(relay.snapshot().transcript.len(), 1);
+
+    relay.clear_active_session();
+
+    let snapshot = relay.snapshot();
+    assert!(snapshot.active_thread_id.is_none());
+    assert!(snapshot.transcript.is_empty());
+    assert_eq!(snapshot.transcript_revision, 0);
+}
+
+#[test]
 fn thread_switch_back_keeps_single_user_message_when_ids_agree() {
     // Regression for the reported "duplicate user message when Claude asks a
     // question" hydration bug.
     //
     // When Claude asks a question the turn stays in-flight, so users often
-    // switch to another thread and come back. On switch-away the live transcript
-    // is stashed into the background buffer; on switch-back load_thread_data
-    // replaces the transcript with a fresh worker history read and then
-    // restore_background_for_active merges the buffered copy on top, keyed by
-    // item_id.
+    // switch to another thread and come back. The relay keeps each thread's live
+    // transcript in its own runtime; on switch-back load_thread_data merges a
+    // fresh worker history read into that runtime, keyed by item_id.
     //
     // The bug was that the live send path used a relay-only id
     // (`user:claude-turn-N`) while the history read mapped the SAME message to
@@ -656,8 +681,8 @@ fn thread_switch_back_keeps_single_user_message_when_ids_agree() {
         "claude-turn-1".to_string(),
     );
 
-    // Switch away while the question is pending -> thread-1's live transcript is
-    // stashed into the background buffer.
+    // Switch away while the question is pending. thread-1's live transcript stays
+    // in its per-thread runtime.
     relay.load_thread_data(
         ThreadSyncData {
             thread: test_thread("thread-2", "/tmp/project"),
@@ -673,7 +698,7 @@ fn thread_switch_back_keeps_single_user_message_when_ids_agree() {
     );
 
     // Switch back to thread-1. The fresh worker read reproduces the SAME id the
-    // worker stamped onto the SDK message, so it matches the buffered live copy.
+    // worker stamped onto the SDK message, so it matches the runtime live copy.
     relay.load_thread_data(
         ThreadSyncData {
             thread: test_thread("thread-1", "/tmp/project"),
@@ -1477,7 +1502,7 @@ fn remove_thread_removes_non_active_thread_from_local_history() {
 }
 
 #[test]
-fn mark_thread_deleted_clears_settings_and_background_stream() {
+fn mark_thread_deleted_clears_settings_and_runtime() {
     let mut relay = test_state();
     relay.threads = vec![
         test_thread("thread-1", "/tmp/project"),
@@ -1499,7 +1524,7 @@ fn mark_thread_deleted_clears_settings_and_background_stream() {
         0,
     );
     assert!(relay.thread_settings("thread-2").is_some());
-    assert!(relay.background_streams.contains_key("thread-2"));
+    assert!(relay.runtime_for_thread("thread-2").is_some());
     relay
         .pending_approvals
         .insert("req-1".to_string(), test_pending_approval("thread-2"));
@@ -1511,7 +1536,7 @@ fn mark_thread_deleted_clears_settings_and_background_stream() {
     relay.mark_thread_deleted("thread-2");
 
     assert!(relay.thread_settings("thread-2").is_none());
-    assert!(!relay.background_streams.contains_key("thread-2"));
+    assert!(relay.runtime_for_thread("thread-2").is_none());
     assert!(relay.pending_approvals.is_empty());
     assert!(relay.pending_ask_user_questions.is_empty());
     let filtered = relay.filter_deleted_threads(vec![test_thread("thread-2", "/tmp/project")]);
@@ -2507,7 +2532,7 @@ fn activate_thread_preserves_pending_requests_from_other_threads() {
     assert_eq!(relay.pending_ask_user_questions.len(), 1);
 
     // Pending approvals/questions are owned by the worker turn, not by the
-    // currently viewed thread. Dropping them on switch leaves background
+    // currently viewed thread. Dropping them on switch leaves non-selected
     // Claude turns blocked with no request the UI can answer.
     relay.activate_thread(
         test_thread("thread-2", "/tmp/project"),
