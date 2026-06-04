@@ -74,6 +74,7 @@
     "test:browser:public-persistence": "npm run build && node scripts/browser-public-persistence-e2e.mjs",
     "test:browser:public-revoke": "npm run build && node scripts/browser-public-revoke-e2e.mjs",
     "test:browser:public-long-transcript": "npm run build && node scripts/browser-public-long-transcript-e2e.mjs",
+    "test:browser:remote-mobile-header": "npm run build && node scripts/browser-remote-mobile-header-e2e.mjs",
     "test:browser:public-transcript-delta": "npm run build && node scripts/browser-public-transcript-delta-e2e.mjs",
     "test:browser:public-thread-settings": "npm run build && AGENT_PROVIDERS=fake node scripts/browser-public-thread-settings-e2e.mjs",
     "test:browser:public-settings-load": "npm run build && AGENT_PROVIDERS=fake node scripts/browser-public-settings-load-e2e.mjs",
