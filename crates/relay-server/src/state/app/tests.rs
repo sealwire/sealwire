@@ -152,13 +152,14 @@ mod path_scope_tests {
     use super::super::*;
     use crate::fake_provider::FakeProviderBridge;
     use crate::protocol::{
-        AskUserOptionView, AskUserQuestionView, ReadThreadTranscriptInput, ResumeSessionInput,
-        SendMessageInput, StartSessionInput, UpdateSessionSettingsInput,
+        ApprovalDecision, ApprovalDecisionInput, ApprovalScope, AskUserOptionView,
+        AskUserQuestionView, ReadThreadTranscriptInput, ResumeSessionInput, SendMessageInput,
+        StartSessionInput, SubmitAskUserAnswerInput, UpdateSessionSettingsInput,
     };
     use crate::state::security::SecurityProfile;
     use crate::state::{
-        PendingAskUserQuestion, DEFAULT_APPROVAL_POLICY, DEFAULT_EFFORT, DEFAULT_MODEL,
-        DEFAULT_SANDBOX,
+        ApprovalKind, PendingApproval, PendingAskUserQuestion, DEFAULT_APPROVAL_POLICY,
+        DEFAULT_EFFORT, DEFAULT_MODEL, DEFAULT_SANDBOX,
     };
     use std::sync::{
         atomic::{AtomicU64, Ordering},
@@ -231,6 +232,415 @@ mod path_scope_tests {
                 broker_join_ticket_expires_at: None,
                 path_scope,
             },
+        );
+    }
+
+    #[derive(Clone)]
+    struct RecordingProvider {
+        name: &'static str,
+        threads: Arc<Mutex<HashMap<String, crate::protocol::ThreadSummaryView>>>,
+        approval_thread_ids: Arc<Mutex<Vec<String>>>,
+        ask_request_ids: Arc<Mutex<Vec<String>>>,
+        turn_thread_ids: Arc<Mutex<Vec<String>>>,
+        interrupt_thread_ids: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl RecordingProvider {
+        fn new(name: &'static str) -> Self {
+            Self {
+                name,
+                threads: Arc::new(Mutex::new(HashMap::new())),
+                approval_thread_ids: Arc::new(Mutex::new(Vec::new())),
+                ask_request_ids: Arc::new(Mutex::new(Vec::new())),
+                turn_thread_ids: Arc::new(Mutex::new(Vec::new())),
+                interrupt_thread_ids: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn thread_summary(&self, id: &str, cwd: &str) -> crate::protocol::ThreadSummaryView {
+            crate::protocol::ThreadSummaryView {
+                id: id.to_string(),
+                name: Some(format!("{} thread", self.name)),
+                preview: String::new(),
+                cwd: cwd.to_string(),
+                updated_at: unix_now(),
+                source: self.name.to_string(),
+                status: "idle".to_string(),
+                model_provider: self.name.to_string(),
+                provider: self.name.to_string(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ProviderBridge for RecordingProvider {
+        async fn list_threads(
+            &self,
+            limit: usize,
+        ) -> Result<Vec<crate::protocol::ThreadSummaryView>, String> {
+            let mut threads = self
+                .threads
+                .lock()
+                .await
+                .values()
+                .cloned()
+                .collect::<Vec<_>>();
+            threads.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+            threads.truncate(limit);
+            Ok(threads)
+        }
+
+        async fn list_models(&self) -> Result<Vec<crate::protocol::ModelOptionView>, String> {
+            Ok(vec![crate::protocol::ModelOptionView {
+                model: format!("{}-model", self.name),
+                display_name: format!("{} Model", self.name),
+                provider: self.name.to_string(),
+                supported_reasoning_efforts: vec!["medium".to_string()],
+                default_reasoning_effort: "medium".to_string(),
+                hidden: false,
+                is_default: true,
+            }])
+        }
+
+        async fn start_thread(
+            &self,
+            cwd: &str,
+            _model: &str,
+            _approval_policy: &str,
+            _sandbox: &str,
+            _initial_prompt: Option<&str>,
+        ) -> Result<crate::provider::StartThreadResult, String> {
+            let mut threads = self.threads.lock().await;
+            let id = format!("{}-thread-{}", self.name, threads.len() + 1);
+            let thread = self.thread_summary(&id, cwd);
+            threads.insert(id, thread.clone());
+            Ok(crate::provider::StartThreadResult {
+                thread,
+                consumed_initial_prompt: false,
+                initial_user_message: None,
+            })
+        }
+
+        async fn resume_thread(
+            &self,
+            thread_id: &str,
+            _approval_policy: &str,
+            _sandbox: &str,
+        ) -> Result<(), String> {
+            if self.threads.lock().await.contains_key(thread_id) {
+                Ok(())
+            } else {
+                Err(format!("{} thread '{thread_id}' was not found", self.name))
+            }
+        }
+
+        async fn read_thread(
+            &self,
+            thread_id: &str,
+        ) -> Result<crate::provider::ThreadSyncData, String> {
+            let thread = self
+                .threads
+                .lock()
+                .await
+                .get(thread_id)
+                .cloned()
+                .ok_or_else(|| format!("{} thread '{thread_id}' was not found", self.name))?;
+            Ok(crate::provider::ThreadSyncData {
+                thread,
+                status: "idle".to_string(),
+                active_flags: Vec::new(),
+                transcript: Vec::new(),
+            })
+        }
+
+        async fn read_thread_entry_detail(
+            &self,
+            _thread_id: &str,
+            _item_id: &str,
+        ) -> Result<Option<crate::protocol::TranscriptEntryView>, String> {
+            Ok(None)
+        }
+
+        async fn archive_thread(&self, thread_id: &str) -> Result<(), String> {
+            self.threads.lock().await.remove(thread_id);
+            Ok(())
+        }
+
+        async fn delete_thread_permanently(
+            &self,
+            thread_id: &str,
+        ) -> Result<crate::codex_local::LocalThreadDeleteSummary, String> {
+            self.threads.lock().await.remove(thread_id);
+            Ok(crate::codex_local::LocalThreadDeleteSummary {
+                deleted_paths: Vec::new(),
+                deleted_thread_row: true,
+            })
+        }
+
+        async fn start_turn(
+            &self,
+            thread_id: &str,
+            _text: &str,
+            _model: &str,
+            _effort: &str,
+        ) -> Result<Option<String>, String> {
+            self.turn_thread_ids
+                .lock()
+                .await
+                .push(thread_id.to_string());
+            Ok(Some(format!("turn:{thread_id}")))
+        }
+
+        async fn interrupt_turn(&self, thread_id: &str, _turn_id: &str) -> Result<(), String> {
+            self.interrupt_thread_ids
+                .lock()
+                .await
+                .push(thread_id.to_string());
+            Ok(())
+        }
+
+        async fn respond_to_approval(
+            &self,
+            pending: &PendingApproval,
+            _input: &ApprovalDecisionInput,
+        ) -> Result<(), String> {
+            self.approval_thread_ids
+                .lock()
+                .await
+                .push(pending.thread_id.clone());
+            Ok(())
+        }
+
+        async fn respond_to_ask_user_question(
+            &self,
+            request_id: &str,
+            _answers: &serde_json::Map<String, serde_json::Value>,
+        ) -> Result<(), String> {
+            self.ask_request_ids
+                .lock()
+                .await
+                .push(request_id.to_string());
+            Ok(())
+        }
+
+        fn provider_name(&self) -> &'static str {
+            self.name
+        }
+    }
+
+    async fn build_recording_provider_app(
+        cwd: &str,
+    ) -> (AppState, RecordingProvider, RecordingProvider) {
+        let (change_tx, _) = watch::channel(0_u64);
+        let relay = Arc::new(RwLock::new(RelayState::new(
+            cwd.to_string(),
+            change_tx.clone(),
+            SecurityProfile::private(),
+        )));
+        let codex = RecordingProvider::new("codex");
+        let claude = RecordingProvider::new("claude_code");
+        let mut providers: HashMap<String, Arc<dyn ProviderBridge>> = HashMap::new();
+        providers.insert("codex".to_string(), Arc::new(codex.clone()));
+        providers.insert("claude_code".to_string(), Arc::new(claude.clone()));
+        (
+            AppState::from_parts(relay, providers, change_tx),
+            codex,
+            claude,
+        )
+    }
+
+    #[tokio::test]
+    async fn approval_response_routes_to_pending_thread_provider() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, codex, claude) = build_recording_provider_app(cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let codex_thread = codex.thread_summary("codex-thread", cwd);
+        let claude_thread = claude.thread_summary("claude-thread", cwd);
+        codex
+            .threads
+            .lock()
+            .await
+            .insert(codex_thread.id.clone(), codex_thread.clone());
+        claude
+            .threads
+            .lock()
+            .await
+            .insert(claude_thread.id.clone(), claude_thread.clone());
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("codex".to_string());
+            relay.active_thread_id = Some(codex_thread.id.clone());
+            relay.threads = vec![codex_thread, claude_thread];
+            relay.pending_approvals.insert(
+                "approval-claude".to_string(),
+                PendingApproval {
+                    request_id: "approval-claude".to_string(),
+                    raw_request_id: serde_json::json!("raw-approval-claude"),
+                    kind: ApprovalKind::Command,
+                    thread_id: "claude-thread".to_string(),
+                    summary: "Run command".to_string(),
+                    detail: None,
+                    command: Some("true".to_string()),
+                    cwd: Some(cwd.to_string()),
+                    context_preview: None,
+                    requested_permissions: None,
+                    available_decisions: vec!["approve".to_string(), "deny".to_string()],
+                    supports_session_scope: false,
+                },
+            );
+        }
+
+        app.decide_approval(
+            "approval-claude",
+            ApprovalDecisionInput {
+                decision: ApprovalDecision::Approve,
+                scope: Some(ApprovalScope::Once),
+                device_id: Some("device-1".to_string()),
+            },
+        )
+        .await
+        .expect("approval response should route to claude provider");
+
+        assert!(codex.approval_thread_ids.lock().await.is_empty());
+        assert_eq!(
+            *claude.approval_thread_ids.lock().await,
+            vec!["claude-thread".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn ask_user_answer_routes_to_pending_thread_provider() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, codex, claude) = build_recording_provider_app(cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let codex_thread = codex.thread_summary("codex-thread", cwd);
+        let claude_thread = claude.thread_summary("claude-thread", cwd);
+        codex
+            .threads
+            .lock()
+            .await
+            .insert(codex_thread.id.clone(), codex_thread.clone());
+        claude
+            .threads
+            .lock()
+            .await
+            .insert(claude_thread.id.clone(), claude_thread.clone());
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("codex".to_string());
+            relay.active_thread_id = Some(codex_thread.id.clone());
+            relay.threads = vec![codex_thread, claude_thread];
+            relay.pending_ask_user_questions.insert(
+                "ask-claude".to_string(),
+                PendingAskUserQuestion {
+                    request_id: "ask-claude".to_string(),
+                    tool_use_id: "toolu-ask-claude".to_string(),
+                    thread_id: "claude-thread".to_string(),
+                    requested_at: 123,
+                    questions: vec![AskUserQuestionView {
+                        question: "Pick one".to_string(),
+                        header: "Choice".to_string(),
+                        multi_select: false,
+                        options: vec![AskUserOptionView {
+                            label: "A".to_string(),
+                            description: String::new(),
+                        }],
+                    }],
+                },
+            );
+        }
+        let mut answers = serde_json::Map::new();
+        answers.insert(
+            "Pick one".to_string(),
+            serde_json::Value::String("A".to_string()),
+        );
+
+        app.submit_ask_user_answer(
+            "ask-claude",
+            SubmitAskUserAnswerInput {
+                answers,
+                device_id: Some("device-1".to_string()),
+            },
+        )
+        .await
+        .expect("AskUser answer should route to claude provider");
+
+        assert!(codex.ask_request_ids.lock().await.is_empty());
+        assert_eq!(
+            *claude.ask_request_ids.lock().await,
+            vec!["ask-claude".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn send_message_routes_by_active_thread_provider_not_global_provider_name() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, codex, claude) = build_recording_provider_app(cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let claude_thread = claude.thread_summary("claude-thread", cwd);
+        claude
+            .threads
+            .lock()
+            .await
+            .insert(claude_thread.id.clone(), claude_thread.clone());
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("codex".to_string());
+            relay.active_thread_id = Some(claude_thread.id.clone());
+            relay.current_cwd = cwd.to_string();
+            relay.threads = vec![claude_thread];
+        }
+
+        app.send_message(SendMessageInput {
+            text: "hello".to_string(),
+            model: Some("claude_code-model".to_string()),
+            effort: Some("medium".to_string()),
+            device_id: Some("device-1".to_string()),
+        })
+        .await
+        .expect("message should route to claude provider");
+
+        assert!(codex.turn_thread_ids.lock().await.is_empty());
+        assert_eq!(
+            *claude.turn_thread_ids.lock().await,
+            vec!["claude-thread".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn send_message_routes_new_active_thread_before_provider_list_syncs() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, codex, claude) = build_recording_provider_app(cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("claude_code".to_string());
+            relay.active_thread_id = Some("claude-thread-new".to_string());
+            relay.current_cwd = cwd.to_string();
+            relay.threads.clear();
+        }
+
+        app.send_message(SendMessageInput {
+            text: "hello".to_string(),
+            model: Some("claude_code-model".to_string()),
+            effort: Some("medium".to_string()),
+            device_id: Some("device-1".to_string()),
+        })
+        .await
+        .expect("new active thread should route through the current provider before list sync");
+
+        assert!(codex.turn_thread_ids.lock().await.is_empty());
+        assert_eq!(
+            *claude.turn_thread_ids.lock().await,
+            vec!["claude-thread-new".to_string()]
         );
     }
 

@@ -578,7 +578,15 @@ function AskUserEntry({ entry, isJustPrepended = false, options = null }) {
     return h(GenericToolEntry, { entry, isJustPrepended, options });
   }
   const answers = parseAskUserAnswers(tool.result_preview);
-  const interactive = Boolean(pendingRequest) && status !== "completed";
+  // A matching pending request (live relay state) is the authoritative signal
+  // that the question is still waiting for an answer — the relay drops it the
+  // moment it's answered. The transcript entry's own `status` is secondary and
+  // can desync: on the remote surface the entry arrives via snapshots and can
+  // show up as `completed` while the question is genuinely still pending. We
+  // must NOT let that stale status downgrade a pending question to the
+  // read-only card, which makes the options unclickable and mislabels it
+  // "Answered" even though the user never picked anything.
+  const interactive = Boolean(pendingRequest);
   const submittingRequestId = options?.askUserSubmittingRequestId || "";
   const isSubmitting = Boolean(requestId) && submittingRequestId === requestId;
   const submitAnswers = options?.onSubmitAskUserAnswers || null;

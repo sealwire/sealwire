@@ -58,9 +58,23 @@ impl AppState {
             let relay = self.relay.read().await;
             for thread in &relay.threads {
                 if thread.id == thread_id {
-                    if let Some((name, bridge)) = self.providers.get_key_value(&thread.provider) {
-                        return Ok((name.as_str(), bridge));
+                    for candidate in [&thread.provider, &thread.source, &thread.model_provider] {
+                        if let Some((name, bridge)) = self.providers.get_key_value(candidate) {
+                            return Ok((name.as_str(), bridge));
+                        }
                     }
+                    if relay.active_thread_id.as_deref() == Some(thread_id) {
+                        if let Some((name, bridge)) =
+                            self.providers.get_key_value(&relay.provider_name)
+                        {
+                            return Ok((name.as_str(), bridge));
+                        }
+                    }
+                }
+            }
+            if relay.active_thread_id.as_deref() == Some(thread_id) {
+                if let Some((name, bridge)) = self.providers.get_key_value(&relay.provider_name) {
+                    return Ok((name.as_str(), bridge));
                 }
             }
         }
@@ -120,6 +134,13 @@ impl AppState {
             }
             Err(_) => {}
         }
+    }
+
+    pub(super) fn spawn_initial_model_catalog_refresh(&self) {
+        let state = self.clone();
+        tokio::spawn(async move {
+            state.refresh_model_catalog().await;
+        });
     }
 
     pub(super) async fn load_provider_model_catalog(

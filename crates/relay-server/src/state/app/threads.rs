@@ -35,6 +35,29 @@ impl AppState {
             .into_iter()
             .filter(|thread| path_within_device_scope(&thread.cwd, &device_scope, &allowed_roots))
             .collect::<Vec<_>>();
+
+        // Preserve the active thread even when no provider lists it yet. A
+        // deferred-start Claude session lives under a synthetic `claude-pending-`
+        // id until its first turn promotes it to a real SDK session, so the
+        // bridge's `list_threads` can't return it. Without this, starting a blank
+        // session (or any later thread-list refresh) would drop the conversation
+        // the user is actively viewing — it would never appear in the sidebar.
+        if let Some(active_id) = relay.active_thread_id.clone() {
+            if !threads.iter().any(|thread| thread.id == active_id) {
+                if let Some(active_thread) = relay
+                    .threads
+                    .iter()
+                    .find(|thread| thread.id == active_id)
+                    .filter(|thread| {
+                        path_within_device_scope(&thread.cwd, &device_scope, &allowed_roots)
+                    })
+                    .cloned()
+                {
+                    threads.push(active_thread);
+                }
+            }
+        }
+
         sort_threads_by_recency(&mut threads);
         threads.truncate(limit);
         let response_threads = threads.clone();

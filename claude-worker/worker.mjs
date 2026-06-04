@@ -245,13 +245,14 @@ function createWorkerSession(sdk, options, resume) {
   };
 }
 
-function createUserTurn(prompt) {
+function createUserTurn(prompt, { itemId = null, turnId = null } = {}) {
   const uuid = randomUUID();
+  const eventTurnId = turnId || uuid;
   return {
     event: {
       type: "user_message",
-      item_id: `user:${uuid}`,
-      turn_id: uuid,
+      item_id: itemId || `user:${uuid}`,
+      turn_id: eventTurnId,
       text: prompt,
     },
     sdkMessage: {
@@ -636,7 +637,10 @@ async function main() {
           entry.session = createWorkerSession(sdk, entry.options);
 
           if (cmd.prompt) {
-            const userTurn = createUserTurn(cmd.prompt);
+            const userTurn = createUserTurn(cmd.prompt, {
+              itemId: cmd.user_item_id || null,
+              turnId: cmd.turn_id || null,
+            });
             entry.initialUserMessage = userTurn.event;
             entry.running = true;
             entry.progressTracker.start();
@@ -695,7 +699,10 @@ async function main() {
           });
 
           if (cmd.prompt) {
-            const userTurn = createUserTurn(cmd.prompt);
+            const userTurn = createUserTurn(cmd.prompt, {
+              itemId: cmd.user_item_id || null,
+              turnId: cmd.turn_id || null,
+            });
             userTurn.event.provider_session_id = cmd.provider_session_id;
             entry.running = true;
             entry.progressTracker.start();
@@ -754,7 +761,10 @@ async function main() {
             desiredOptions,
           );
           entry.progressTracker.start();
-          const userTurn = createUserTurn(cmd.prompt);
+          const userTurn = createUserTurn(cmd.prompt, {
+            itemId: cmd.user_item_id || null,
+            turnId: cmd.turn_id || null,
+          });
           userTurn.event.provider_session_id = providerSessionId;
           entry.running = true;
           touchSessionEntry(entry);

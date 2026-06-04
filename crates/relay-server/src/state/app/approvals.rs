@@ -40,9 +40,18 @@ impl AppState {
                 .ok_or(ApprovalError::NoPendingRequest)?
         };
 
-        self.require_active_provider()
-            .map_err(ApprovalError::Bridge)?
-            .1
+        let bridge = if pending.thread_id.is_empty() {
+            self.require_active_provider()
+                .map_err(ApprovalError::Bridge)?
+                .1
+        } else {
+            self.find_thread_provider(&pending.thread_id)
+                .await
+                .map_err(ApprovalError::Bridge)?
+                .1
+        };
+
+        bridge
             .respond_to_approval(&pending, &input)
             .await
             .map_err(ApprovalError::Bridge)?;
@@ -81,20 +90,27 @@ impl AppState {
         if input.answers.is_empty() {
             return Err(AskUserAnswerError::NoAnswers);
         }
-        let exists = {
+        let pending = {
             let relay = self.relay.read().await;
             relay
                 .ensure_device_can_approve(&device_id)
                 .map_err(AskUserAnswerError::Bridge)?;
-            relay.pending_ask_user_questions.contains_key(request_id)
+            relay.pending_ask_user_questions.get(request_id).cloned()
         };
-        if !exists {
-            return Err(AskUserAnswerError::NoPendingRequest);
-        }
+        let pending = pending.ok_or(AskUserAnswerError::NoPendingRequest)?;
 
-        self.require_active_provider()
-            .map_err(AskUserAnswerError::Bridge)?
-            .1
+        let bridge = if pending.thread_id.is_empty() {
+            self.require_active_provider()
+                .map_err(AskUserAnswerError::Bridge)?
+                .1
+        } else {
+            self.find_thread_provider(&pending.thread_id)
+                .await
+                .map_err(AskUserAnswerError::Bridge)?
+                .1
+        };
+
+        bridge
             .respond_to_ask_user_question(request_id, &input.answers)
             .await
             .map_err(AskUserAnswerError::Bridge)?;
@@ -102,9 +118,17 @@ impl AppState {
         let mut relay = self.relay.write().await;
         relay.pending_ask_user_questions.remove(request_id);
         if relay.pending_ask_user_questions.is_empty() {
-            let tid = relay.active_thread_id.clone().unwrap_or_default();
+            let tid = pending.thread_id;
             if !tid.is_empty() {
                 relay.set_thread_status(&tid, "active".to_string(), Vec::new());
+                if relay.active_thread_id.as_deref() != Some(tid.as_str()) {
+                    relay.bg_set_thread_status(
+                        &tid,
+                        "active".to_string(),
+                        Vec::new(),
+                        crate::state::unix_now(),
+                    );
+                }
             }
         }
         relay.push_log(

@@ -1137,6 +1137,25 @@ test("renderEntryMarkup switches AskUserQuestion to interactive buttons + notes 
   assert.match(markup, /ask-user-status[^>]*>Tap an option or add a note</);
 });
 
+test("renderEntryMarkup stays interactive when a pending request matches even if the entry status is completed (status can desync on the remote surface)", () => {
+  const entry = makeAskUserEntry({
+    item_id: "tool:toolu_abc",
+    // A stale/desynced `completed` status must not downgrade a still-pending
+    // question to the read-only card. The pending request is authoritative.
+    status: "completed",
+    tool: { result_preview: null },
+  });
+  const markup = renderEntryMarkup(entry, {
+    pendingAskUserQuestions: [
+      { request_id: "ask:1", tool_use_id: "toolu_abc", thread_id: "t" },
+    ],
+  });
+  // Interactive wizard, not the read-only "Answered" card.
+  assert.match(markup, /chat-message-ask-user chat-message-ask-user-interactive/);
+  assert.match(markup, /<button[^>]*class="ask-user-option[^"]*ask-user-option-button[^"]*"[^>]*>/);
+  assert.doesNotMatch(markup, /ask-user-status[^>]*>Answered</);
+});
+
 test("renderEntryMarkup disables AskUserQuestion buttons while a submission is in flight", () => {
   const entry = makeAskUserEntry({
     item_id: "tool:toolu_abc",

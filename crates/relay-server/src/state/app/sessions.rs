@@ -297,7 +297,8 @@ impl AppState {
         };
 
         let turn_id = self
-            .require_active_provider()?
+            .find_thread_provider(&thread_id)
+            .await?
             .1
             .start_turn(&thread_id, &text, &model, &effort)
             .await?;
@@ -341,7 +342,8 @@ impl AppState {
             (thread_id, turn_id)
         };
 
-        self.require_active_provider()?
+        self.find_thread_provider(&thread_id)
+            .await?
             .1
             .interrupt_turn(&thread_id, &turn_id)
             .await?;

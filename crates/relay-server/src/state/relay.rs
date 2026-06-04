@@ -408,8 +408,6 @@ impl RelayState {
         self.sandbox = sandbox.to_string();
         self.reasoning_effort = effort.to_string();
         self.remember_thread_settings(&thread.id, approval_policy, sandbox, effort, model);
-        self.pending_approvals.clear();
-        self.pending_ask_user_questions.clear();
         self.transcript.clear();
         self.apply_states.clear();
         self.bump_transcript_revision();
@@ -479,8 +477,6 @@ impl RelayState {
             effort,
             &self.model.clone(),
         );
-        self.pending_approvals.clear();
-        self.pending_ask_user_questions.clear();
         self.apply_states.clear();
         self.transcript = data
             .transcript
@@ -635,6 +631,7 @@ impl RelayState {
         let before_len = self.threads.len();
         self.threads.retain(|thread| thread.id != thread_id);
         self.thread_settings.remove(thread_id);
+        self.drop_pending_requests_for_thread(thread_id);
         self.threads.len() != before_len
     }
 
@@ -643,6 +640,13 @@ impl RelayState {
             .insert(thread_id.to_string());
         self.remove_thread(thread_id);
         self.drop_background_stream(thread_id);
+    }
+
+    fn drop_pending_requests_for_thread(&mut self, thread_id: &str) {
+        self.pending_approvals
+            .retain(|_, pending| pending.thread_id != thread_id);
+        self.pending_ask_user_questions
+            .retain(|_, pending| pending.thread_id != thread_id);
     }
 
     pub fn filter_deleted_threads(

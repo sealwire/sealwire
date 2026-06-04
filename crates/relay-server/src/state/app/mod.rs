@@ -134,7 +134,7 @@ impl AppState {
             change_tx,
         };
 
-        state.refresh_model_catalog().await;
+        state.spawn_initial_model_catalog_refresh();
         // Warm worker-backed catalogs (e.g. Claude) in the background so the
         // client's post-handshake model pull hits a populated cache instead of
         // racing a cold `supportedModels()` round-trip.

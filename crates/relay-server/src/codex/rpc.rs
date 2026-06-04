@@ -5,12 +5,15 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{ChildStderr, ChildStdout},
     sync::RwLock,
+    time::{timeout, Duration},
 };
 use tracing::info;
 
 use crate::state::{BrokerPendingMessage, PendingTranscriptDelta, RelayState, TranscriptDeltaKind};
 
 use super::*;
+
+const CODEX_REQUEST_TIMEOUT_SECS: u64 = 30;
 
 impl CodexBridge {
     pub(super) async fn initialize(&self) -> Result<(), String> {
@@ -39,18 +42,29 @@ impl CodexBridge {
         self.pending_responses
             .lock()
             .await
-            .insert(request_id_key, sender);
+            .insert(request_id_key.clone(), sender);
 
-        self.send_json(json!({
-            "id": request_id,
-            "method": method,
-            "params": params,
-        }))
-        .await?;
-
-        receiver
+        if let Err(error) = self
+            .send_json(json!({
+                "id": request_id,
+                "method": method,
+                "params": params,
+            }))
             .await
-            .map_err(|_| format!("Codex app-server dropped the response channel for `{method}`"))?
+        {
+            self.pending_responses.lock().await.remove(&request_id_key);
+            return Err(error);
+        }
+
+        match timeout(Duration::from_secs(CODEX_REQUEST_TIMEOUT_SECS), receiver).await {
+            Ok(result) => result.map_err(|_| {
+                format!("Codex app-server dropped the response channel for `{method}`")
+            })?,
+            Err(_) => {
+                self.pending_responses.lock().await.remove(&request_id_key);
+                return Err(format!("Codex app-server timed out waiting for `{method}`"));
+            }
+        }
     }
 
     pub(super) async fn send_json(&self, value: Value) -> Result<(), String> {

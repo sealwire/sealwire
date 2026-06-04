@@ -570,6 +570,44 @@ fn load_thread_data_sets_active_controller_on_resume() {
 }
 
 #[test]
+fn load_thread_data_preserves_pending_requests_from_other_threads() {
+    let mut relay = test_state();
+    relay.activate_thread(
+        test_thread("thread-1", "/tmp/project"),
+        "/tmp/project",
+        DEFAULT_MODEL,
+        DEFAULT_APPROVAL_POLICY,
+        DEFAULT_SANDBOX,
+        DEFAULT_EFFORT,
+        "device-a",
+    );
+    relay
+        .pending_approvals
+        .insert("req-1".to_string(), test_pending_approval("thread-1"));
+    relay.pending_ask_user_questions.insert(
+        "ask:1".to_string(),
+        test_pending_ask_user_question("thread-1"),
+    );
+
+    relay.load_thread_data(
+        ThreadSyncData {
+            thread: test_thread("thread-2", "/tmp/project"),
+            status: "idle".to_string(),
+            active_flags: Vec::new(),
+            transcript: Vec::new(),
+        },
+        DEFAULT_APPROVAL_POLICY,
+        DEFAULT_SANDBOX,
+        DEFAULT_EFFORT,
+        DEFAULT_MODEL,
+        "device-a",
+    );
+
+    assert!(relay.pending_approvals.contains_key("req-1"));
+    assert!(relay.pending_ask_user_questions.contains_key("ask:1"));
+}
+
+#[test]
 fn stale_controller_lease_expires_and_releases_session() {
     let mut relay = test_state();
     relay.activate_thread(
@@ -1360,11 +1398,20 @@ fn mark_thread_deleted_clears_settings_and_background_stream() {
     );
     assert!(relay.thread_settings("thread-2").is_some());
     assert!(relay.background_streams.contains_key("thread-2"));
+    relay
+        .pending_approvals
+        .insert("req-1".to_string(), test_pending_approval("thread-2"));
+    relay.pending_ask_user_questions.insert(
+        "ask:1".to_string(),
+        test_pending_ask_user_question("thread-2"),
+    );
 
     relay.mark_thread_deleted("thread-2");
 
     assert!(relay.thread_settings("thread-2").is_none());
     assert!(!relay.background_streams.contains_key("thread-2"));
+    assert!(relay.pending_approvals.is_empty());
+    assert!(relay.pending_ask_user_questions.is_empty());
     let filtered = relay.filter_deleted_threads(vec![test_thread("thread-2", "/tmp/project")]);
     assert!(filtered.is_empty());
     assert_eq!(relay.threads.len(), 1);
@@ -2336,7 +2383,7 @@ fn snapshot_includes_pending_ask_user_questions_sorted_by_requested_at() {
 }
 
 #[test]
-fn activate_thread_clears_pending_ask_user_questions() {
+fn activate_thread_preserves_pending_requests_from_other_threads() {
     let mut relay = test_state();
     relay.activate_thread(
         test_thread("thread-1", "/tmp/project"),
@@ -2347,14 +2394,19 @@ fn activate_thread_clears_pending_ask_user_questions() {
         DEFAULT_EFFORT,
         "device-a",
     );
+    relay
+        .pending_approvals
+        .insert("req-1".to_string(), test_pending_approval("thread-1"));
     relay.pending_ask_user_questions.insert(
         "ask:1".to_string(),
         test_pending_ask_user_question("thread-1"),
     );
+    assert_eq!(relay.pending_approvals.len(), 1);
     assert_eq!(relay.pending_ask_user_questions.len(), 1);
 
-    // Activating a different thread must drop pending questions — they're
-    // tied to the previous turn and can't be answered after a thread switch.
+    // Pending approvals/questions are owned by the worker turn, not by the
+    // currently viewed thread. Dropping them on switch leaves background
+    // Claude turns blocked with no request the UI can answer.
     relay.activate_thread(
         test_thread("thread-2", "/tmp/project"),
         "/tmp/project",
@@ -2364,7 +2416,8 @@ fn activate_thread_clears_pending_ask_user_questions() {
         DEFAULT_EFFORT,
         "device-a",
     );
-    assert!(relay.pending_ask_user_questions.is_empty());
+    assert!(relay.pending_approvals.contains_key("req-1"));
+    assert!(relay.pending_ask_user_questions.contains_key("ask:1"));
 }
 
 #[test]

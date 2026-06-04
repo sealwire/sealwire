@@ -185,6 +185,37 @@ test("re-sending with unchanged settings reuses the live session (no churn)", as
   }
 });
 
+test("send emits user_message with relay-provided transcript ids", async () => {
+  const worker = spawnWorker();
+  try {
+    worker.send(START_DEFAULT);
+    await worker.waitFor(isStarted("sess-1"), { label: "session_started" });
+    await worker.waitFor(isDone, { label: "done#1" });
+
+    worker.send({
+      type: "send",
+      provider_session_id: "sess-1",
+      model: "claude-sonnet-4-6",
+      permissionMode: "default",
+      prompt: "second",
+      turn_id: "relay-turn-1",
+      user_item_id: "user:relay-turn-1",
+    });
+
+    const userMessage = await worker.waitFor(
+      (event) =>
+        event.type === "user_message" &&
+        event.provider_session_id === "sess-1" &&
+        event.text === "second",
+      { label: "second user_message" },
+    );
+    assert.equal(userMessage.item_id, "user:relay-turn-1");
+    assert.equal(userMessage.turn_id, "relay-turn-1");
+  } finally {
+    await worker.close();
+  }
+});
+
 test("switching the model on a live session rebuilds the query", async () => {
   const worker = spawnWorker();
   try {

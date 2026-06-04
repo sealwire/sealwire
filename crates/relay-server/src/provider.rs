@@ -2,7 +2,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::sync::RwLock;
+use tokio::{
+    sync::RwLock,
+    time::{timeout, Duration},
+};
 use tracing::warn;
 
 use crate::{
@@ -105,6 +108,15 @@ const FAKE_PROVIDER: ProviderEntry = ProviderEntry {
     provider_key: "fake",
 };
 
+const PROVIDER_START_TIMEOUT_SECS: u64 = 30;
+
+fn provider_start_timeout_secs() -> u64 {
+    std::env::var("AGENT_RELAY_PROVIDER_START_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(PROVIDER_START_TIMEOUT_SECS)
+}
+
 fn configured_providers() -> Vec<&'static ProviderEntry> {
     let names = std::env::var("AGENT_PROVIDERS")
         .ok()
@@ -143,26 +155,18 @@ pub async fn spawn_providers(
     let mut providers: HashMap<String, Arc<dyn ProviderBridge>> = HashMap::new();
 
     for entry in configured_providers() {
-        let result: Result<Arc<dyn ProviderBridge>, String> = match entry.provider_key {
-            "fake" => match crate::fake_provider::FakeProviderBridge::spawn(state.clone()).await {
-                Ok(bridge) => Ok(Arc::new(bridge)),
-                Err(e) => Err(e),
-            },
-            "claude_code" => match crate::claude::ClaudeCodeBridge::spawn(state.clone()).await {
-                Ok(bridge) => Ok(Arc::new(bridge)),
-                Err(e) => Err(e),
-            },
-            _ => match crate::codex::CodexBridge::spawn(
-                state.clone(),
-                entry.binary_name,
-                entry.display_name,
-                entry.provider_key,
-            )
-            .await
-            {
-                Ok(bridge) => Ok(Arc::new(bridge)),
-                Err(e) => Err(e),
-            },
+        let timeout_secs = provider_start_timeout_secs();
+        let result = match timeout(
+            Duration::from_secs(timeout_secs),
+            spawn_provider(entry, state.clone()),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(format!(
+                "timed out after {timeout_secs}s while starting {}",
+                entry.display_name
+            )),
         };
 
         match result {
@@ -180,4 +184,30 @@ pub async fn spawn_providers(
     }
 
     providers
+}
+
+async fn spawn_provider(
+    entry: &'static ProviderEntry,
+    state: Arc<RwLock<RelayState>>,
+) -> Result<Arc<dyn ProviderBridge>, String> {
+    match entry.provider_key {
+        "fake" => bridge_arc(crate::fake_provider::FakeProviderBridge::spawn(state).await),
+        "claude_code" => bridge_arc(crate::claude::ClaudeCodeBridge::spawn(state).await),
+        _ => bridge_arc(
+            crate::codex::CodexBridge::spawn(
+                state,
+                entry.binary_name,
+                entry.display_name,
+                entry.provider_key,
+            )
+            .await,
+        ),
+    }
+}
+
+fn bridge_arc<T>(result: Result<T, String>) -> Result<Arc<dyn ProviderBridge>, String>
+where
+    T: ProviderBridge + 'static,
+{
+    result.map(|bridge| Arc::new(bridge) as Arc<dyn ProviderBridge>)
 }

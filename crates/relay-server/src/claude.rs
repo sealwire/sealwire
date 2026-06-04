@@ -228,6 +228,27 @@ impl ClaudeCodeBridge {
             self.next_request_id.fetch_add(1, Ordering::Relaxed)
         )
     }
+
+    async fn record_local_user_message(
+        &self,
+        thread_id: &str,
+        item_id: String,
+        text: String,
+        turn_id: String,
+    ) {
+        let mut relay = self.state.write().await;
+        match claude_thread_route(&relay, Some(thread_id)) {
+            ClaudeThreadRoute::Active => {
+                relay.upsert_user_message(item_id, text, turn_id);
+                relay.touch_progress(Some("thinking"), None);
+            }
+            ClaudeThreadRoute::Background(bg_thread_id) => {
+                relay.bg_upsert_user_message(&bg_thread_id, item_id, text, turn_id, unix_now());
+            }
+            ClaudeThreadRoute::Drop => return,
+        }
+        relay.notify();
+    }
 }
 
 #[async_trait]
@@ -519,6 +540,7 @@ impl ProviderBridge for ClaudeCodeBridge {
             "claude-turn-{}",
             self.next_request_id.fetch_add(1, Ordering::Relaxed)
         );
+        let user_item_id = format!("user:{turn_id}");
         let settings = {
             let relay = self.state.read().await;
             relay.thread_settings(thread_id)
@@ -533,6 +555,7 @@ impl ProviderBridge for ClaudeCodeBridge {
             "provider_session_id": thread_id,
             "prompt": text,
             "turn_id": turn_id,
+            "user_item_id": user_item_id,
             "model": _model,
             "permissionMode": permission_mode,
         });
@@ -542,6 +565,8 @@ impl ProviderBridge for ClaudeCodeBridge {
             }
         }
         self.send_command(cmd).await?;
+        self.record_local_user_message(thread_id, user_item_id, text.to_string(), turn_id.clone())
+            .await;
         Ok(Some(turn_id))
     }
 
@@ -1344,6 +1369,62 @@ mod tests {
         }
     }
 
+    async fn wait_for_threads_idle(
+        state: &Arc<RwLock<RelayState>>,
+        thread_ids: &[String],
+        timeout_secs: u64,
+    ) -> bool {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+        loop {
+            {
+                let relay = state.read().await;
+                let all_idle = thread_ids.iter().all(|thread_id| {
+                    relay
+                        .threads
+                        .iter()
+                        .find(|thread| thread.id == *thread_id)
+                        .map(|thread| thread.status == "idle")
+                        .unwrap_or(false)
+                });
+                if all_idle {
+                    return true;
+                }
+            }
+            if tokio::time::Instant::now() > deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
+    async fn wait_for_thread_agent_text(
+        bridge: &ClaudeCodeBridge,
+        thread_id: &str,
+        contains: &str,
+        timeout_secs: u64,
+    ) -> bool {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+        loop {
+            if let Ok(data) = bridge.read_thread(thread_id).await {
+                let found = data.transcript.iter().any(|entry| {
+                    entry.kind == TranscriptEntryKind::AgentText
+                        && entry
+                            .text
+                            .as_deref()
+                            .map(|text| text.contains(contains))
+                            .unwrap_or(false)
+                });
+                if found {
+                    return true;
+                }
+            }
+            if tokio::time::Instant::now() > deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
     fn claude_auth_unavailable(snapshot: &crate::protocol::SessionSnapshot) -> bool {
         snapshot
             .logs
@@ -1355,6 +1436,36 @@ mod tests {
         std::env::var("AGENT_RELAY_LIVE_CLAUDE_E2E")
             .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
             .unwrap_or(false)
+    }
+
+    fn live_claude_e2e_timeout_secs(default_secs: u64) -> u64 {
+        std::env::var("AGENT_RELAY_LIVE_CLAUDE_E2E_TIMEOUT_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(default_secs)
+    }
+
+    async fn activate_test_thread(
+        state: &Arc<RwLock<RelayState>>,
+        thread: ThreadSummaryView,
+        device_id: &str,
+    ) {
+        let cwd = if thread.cwd.is_empty() {
+            "/tmp".to_string()
+        } else {
+            thread.cwd.clone()
+        };
+        let mut relay = state.write().await;
+        relay.activate_thread(
+            thread,
+            &cwd,
+            "claude-sonnet-4-6",
+            "never",
+            "workspace-write",
+            "high",
+            device_id,
+        );
+        relay.notify();
     }
 
     fn test_thread(id: &str, cwd: &str) -> ThreadSummaryView {
@@ -1480,6 +1591,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn start_turn_immediately_records_the_user_message_for_existing_session() {
+        let Some((bridge, state)) = spawn_fake_bridge().await else {
+            return;
+        };
+        let prompt = "long Claude follow-up ".repeat(512);
+        {
+            let mut relay = state.write().await;
+            relay.activate_thread(
+                test_thread("sess-1", "/tmp/x"),
+                "/tmp/x",
+                "claude-sonnet-4-6",
+                "default",
+                "workspace-write",
+                "high",
+                "device-1",
+            );
+        }
+
+        let turn_id = bridge
+            .start_turn("sess-1", &prompt, "claude-sonnet-4-6", "high")
+            .await
+            .expect("start_turn should send")
+            .expect("claude turn id");
+
+        let snapshot = state.read().await.snapshot();
+        let user_entry = snapshot
+            .transcript
+            .iter()
+            .find(|entry| {
+                entry.kind == TranscriptEntryKind::UserText
+                    && entry.turn_id.as_deref() == Some(turn_id.as_str())
+            })
+            .expect("the user's message should be visible before worker replay events");
+        assert_eq!(user_entry.text.as_deref(), Some(prompt.as_str()));
+        assert_eq!(user_entry.status, "completed");
+    }
+
+    #[tokio::test]
     async fn resume_thread_sends_its_mapped_permission_mode() {
         let Some((bridge, state)) = spawn_fake_bridge().await else {
             return;
@@ -1539,6 +1688,97 @@ mod tests {
         assert!(
             wait_for_log(&state, "prompt=yes", 5).await,
             "promotion `start` must include the first user message",
+        );
+    }
+
+    #[tokio::test]
+    async fn blank_new_claude_session_sends_its_first_message_through_appstate() {
+        // Reproduces the browser flow for a "blank new session": the UI starts a
+        // Claude thread with no initial prompt (deferred start -> pending id),
+        // then the user types the first message into the composer and hits send,
+        // which POSTs /api/session/message -> AppState::send_message. This must
+        // route to the claude bridge by the active pending thread and succeed.
+        use std::collections::HashMap;
+
+        let (tx, _rx) = tokio::sync::watch::channel(0_u64);
+        let relay = Arc::new(RwLock::new(RelayState::new(
+            "/tmp".to_string(),
+            tx.clone(),
+            crate::state::SecurityProfile::private(),
+        )));
+        let bridge = match ClaudeCodeBridge::spawn_with_worker_path(
+            relay.clone(),
+            &fake_worker_path(),
+        )
+        .await
+        {
+            Ok(bridge) => bridge,
+            Err(_) => {
+                eprintln!("skipping: claude worker not available (node missing)");
+                return;
+            }
+        };
+        let mut providers: HashMap<String, Arc<dyn crate::provider::ProviderBridge>> =
+            HashMap::new();
+        providers.insert("claude_code".to_string(), Arc::new(bridge));
+        let app = crate::state::AppState::from_parts(relay.clone(), providers, tx);
+
+        // 1. Blank new session: deferred start with no initial prompt.
+        let start = app
+            .start_session(crate::protocol::StartSessionInput {
+                cwd: Some("/tmp".to_string()),
+                initial_prompt: None,
+                model: None,
+                approval_policy: None,
+                sandbox: None,
+                effort: None,
+                device_id: Some("device-1".to_string()),
+                provider: Some("claude_code".to_string()),
+            })
+            .await
+            .expect("deferred start should succeed");
+        let pending_id = start
+            .active_thread_id
+            .clone()
+            .expect("a blank session must leave a pending active thread");
+        assert!(
+            pending_id.starts_with("claude-pending-"),
+            "blank start should yield a pending id, got {pending_id}",
+        );
+
+        // Regression: the blank conversation must show up in the thread list even
+        // though the claude bridge can't list a not-yet-promoted pending session
+        // (the fake worker returns no sessions). Without preserving the active
+        // thread, `list_threads` would overwrite it away and the new session would
+        // "never appear" in the sidebar.
+        let listed = app
+            .list_threads(50, Some("device-1".to_string()))
+            .await
+            .expect("list_threads should succeed");
+        assert!(
+            listed.threads.iter().any(|thread| thread.id == pending_id),
+            "blank/pending claude session must remain in the thread list, got {:?}",
+            listed
+                .threads
+                .iter()
+                .map(|thread| thread.id.as_str())
+                .collect::<Vec<_>>(),
+        );
+
+        // 2. Type the first message into the blank composer and send it.
+        let result = app
+            .send_message(crate::protocol::SendMessageInput {
+                text: "first message".to_string(),
+                model: None,
+                effort: None,
+                device_id: Some("device-1".to_string()),
+            })
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "sending the first message to a blank claude session failed: {:?}",
+            result.err(),
         );
     }
 
@@ -1909,6 +2149,124 @@ mod tests {
         assert!(
             agent_logs.len() >= 2,
             "should have at least 2 agent responses"
+        );
+    }
+
+    #[tokio::test]
+    async fn e2e_concurrent_long_outputs_complete_without_pending_requests() {
+        if !live_claude_e2e_enabled() {
+            eprintln!("skipping live Claude e2e; set AGENT_RELAY_LIVE_CLAUDE_E2E=1 to run");
+            return;
+        }
+        let Some((bridge, state)) = spawn_or_skip().await else {
+            return;
+        };
+
+        let prompt_a = "Do not use tools or commands. Write exactly 160 numbered lines. Every line must contain AGENT_RELAY_CONCURRENCY_A and its line number. No markdown, no summary.";
+        let start_a = match bridge
+            .start_thread(
+                "/tmp",
+                "claude-sonnet-4-6",
+                "never",
+                "workspace-write",
+                Some(prompt_a),
+            )
+            .await
+        {
+            Ok(result) => result,
+            Err(error) if error.to_ascii_lowercase().contains("not logged in") => {
+                eprintln!("skipping live Claude concurrency e2e: Claude is not logged in");
+                return;
+            }
+            Err(error) => panic!("failed to start concurrent Claude thread A: {error}"),
+        };
+        let thread_a = start_a.thread.clone();
+        activate_test_thread(&state, thread_a.clone(), "device-a").await;
+
+        let prompt_b = "Do not use tools or commands. Write exactly 160 numbered lines. Every line must contain AGENT_RELAY_CONCURRENCY_B and its line number. No markdown, no summary.";
+        let start_b = match bridge
+            .start_thread(
+                "/tmp",
+                "claude-sonnet-4-6",
+                "never",
+                "workspace-write",
+                Some(prompt_b),
+            )
+            .await
+        {
+            Ok(result) => result,
+            Err(error) if error.to_ascii_lowercase().contains("not logged in") => {
+                eprintln!("skipping live Claude concurrency e2e: Claude is not logged in");
+                return;
+            }
+            Err(error) => panic!("failed to start concurrent Claude thread B: {error}"),
+        };
+        let thread_b = start_b.thread.clone();
+        activate_test_thread(&state, thread_b.clone(), "device-a").await;
+
+        {
+            let relay = state.read().await;
+            let snapshot = relay.snapshot();
+            if claude_auth_unavailable(&snapshot) {
+                eprintln!("skipping live Claude concurrency e2e: Claude is not logged in");
+                return;
+            }
+            assert!(
+                snapshot.pending_approvals.is_empty(),
+                "concurrency prompt should not create approval requests: {:?}",
+                snapshot.pending_approvals
+            );
+            assert!(
+                snapshot.pending_ask_user_questions.is_empty(),
+                "concurrency prompt should not create AskUserQuestion requests: {:?}",
+                snapshot.pending_ask_user_questions
+            );
+        }
+
+        let timeout_secs = live_claude_e2e_timeout_secs(120);
+        let both_idle = wait_for_threads_idle(
+            &state,
+            &[thread_a.id.clone(), thread_b.id.clone()],
+            timeout_secs,
+        )
+        .await;
+        {
+            let relay = state.read().await;
+            let snapshot = relay.snapshot();
+            if claude_auth_unavailable(&snapshot) {
+                eprintln!("skipping live Claude concurrency e2e: Claude is not logged in");
+                return;
+            }
+            assert!(
+                both_idle,
+                "both concurrent Claude threads should reach idle within {timeout_secs}s; statuses = {:?}; logs = {:?}",
+                relay
+                    .threads
+                    .iter()
+                    .filter(|thread| thread.id == thread_a.id || thread.id == thread_b.id)
+                    .map(|thread| (thread.id.clone(), thread.status.clone()))
+                    .collect::<Vec<_>>(),
+                snapshot.logs
+            );
+            assert!(
+                snapshot.pending_approvals.is_empty(),
+                "no approval requests should remain after concurrent text-only turns"
+            );
+            assert!(
+                snapshot.pending_ask_user_questions.is_empty(),
+                "no AskUserQuestion requests should remain after concurrent text-only turns"
+            );
+        }
+
+        assert!(
+            wait_for_thread_agent_text(&bridge, &thread_a.id, "AGENT_RELAY_CONCURRENCY_A", 20)
+                .await,
+            "thread A should persist an assistant response with its marker"
+        );
+        assert!(
+            wait_for_thread_agent_text(&bridge, &thread_b.id, "AGENT_RELAY_CONCURRENCY_B", 20)
+                .await,
+            "thread B should persist an assistant response with its marker"
         );
     }
 
