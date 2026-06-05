@@ -5,8 +5,9 @@ use tokio::sync::watch;
 
 use crate::{
     protocol::{
-        ApprovalReceipt, DeviceLifecycleState, ModelOptionView, SessionSnapshot, ThreadSummaryView,
-        ThreadsResponse, TranscriptEntryKind, TranscriptEntryView,
+        ApprovalReceipt, DeviceLifecycleState, FileChangeDiffView, ModelOptionView,
+        SessionSnapshot, ThreadSummaryView, ThreadsResponse, ToolCallView, TranscriptEntryKind,
+        TranscriptEntryView,
     },
     provider::ThreadSyncData,
 };
@@ -449,6 +450,78 @@ fn append_command_delta_has_no_text_offset() {
     // offset and let the client fall back to base_revision gap detection.
     let meta = relay.append_command_delta("cmd-1", "output");
     assert_eq!(meta.text_offset, None);
+}
+
+#[test]
+fn snapshot_strips_file_change_diffs_but_keeps_stored_diffs() {
+    let mut relay = test_state();
+    relay.activate_thread(
+        test_thread("thread-1", "/tmp/project"),
+        "/tmp/project",
+        DEFAULT_MODEL,
+        DEFAULT_APPROVAL_POLICY,
+        DEFAULT_SANDBOX,
+        DEFAULT_EFFORT,
+        "device-a",
+    );
+
+    let tool = ToolCallView {
+        item_type: "turnDiff".to_string(),
+        name: "turn_diff".to_string(),
+        title: "Changed files".to_string(),
+        detail: None,
+        query: None,
+        path: None,
+        url: None,
+        command: None,
+        input_preview: None,
+        result_preview: None,
+        diff: Some("@@ big joined diff @@".to_string()),
+        file_changes: vec![FileChangeDiffView {
+            path: "src/a.rs".to_string(),
+            change_type: "modify".to_string(),
+            diff: "-old\n+new".to_string(),
+        }],
+        apply_state: None,
+        file_changes_omitted: false,
+    };
+    relay.upsert_transcript_item(
+        "turn-diff:turn-1".to_string(),
+        TranscriptEntryKind::ToolCall,
+        Some("Edited files".to_string()),
+        "completed".to_string(),
+        Some("turn-1".to_string()),
+        Some(tool),
+    );
+
+    // The snapshot projection carries only the file-change summary.
+    let snapshot = relay.snapshot();
+    let entry = snapshot
+        .transcript
+        .iter()
+        .find(|entry| entry.item_id.as_deref() == Some("turn-diff:turn-1"))
+        .expect("turn-diff entry in snapshot");
+    let snap_tool = entry.tool.as_ref().expect("tool in snapshot");
+    assert!(snap_tool.file_changes_omitted);
+    assert!(snap_tool.diff.is_none());
+    assert_eq!(snap_tool.file_changes.len(), 1);
+    assert_eq!(snap_tool.file_changes[0].path, "src/a.rs");
+    assert_eq!(snap_tool.file_changes[0].change_type, "modify");
+    assert!(snap_tool.file_changes[0].diff.is_empty());
+
+    // The authoritative stored record keeps the full diffs (the detail-fetch
+    // source), so snapshotting is non-destructive.
+    let stored = relay
+        .selected_runtime()
+        .expect("runtime")
+        .transcript
+        .iter()
+        .find(|record| record.item_id == "turn-diff:turn-1")
+        .expect("stored record");
+    let stored_tool = stored.tool.as_ref().expect("stored tool");
+    assert!(!stored_tool.file_changes_omitted);
+    assert_eq!(stored_tool.diff.as_deref(), Some("@@ big joined diff @@"));
+    assert_eq!(stored_tool.file_changes[0].diff, "-old\n+new");
 }
 
 #[test]

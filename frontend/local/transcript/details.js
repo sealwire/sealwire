@@ -1,9 +1,11 @@
 import {
   buildExpandedTranscriptDetailEntries,
   cacheTranscriptEntryDetail as cacheTranscriptEntryDetailPatch,
+  collectFileChangeDetailItemIds,
   createClearedTranscriptEntryDetailsPatch,
   getCachedTranscriptEntryDetail,
   getLiveTranscriptEntryDetail,
+  isOmittedFileChangeDetail,
   setLiveTranscriptEntryDetail as setLiveTranscriptEntryDetailPatch,
   syncLiveTranscriptEntryDetailsFromSnapshot as syncLiveTranscriptEntryDetailsFromSnapshotPatch,
 } from "../../shared/transcript-entry-details-state.js";
@@ -18,8 +20,10 @@ function applyLocalTranscriptDetailPatch(state, patch) {
 
 export {
   buildExpandedTranscriptDetailEntries,
+  collectFileChangeDetailItemIds,
   getCachedTranscriptEntryDetail,
   getLiveTranscriptEntryDetail,
+  isOmittedFileChangeDetail,
 };
 
 export function clearTranscriptEntryDetails(state) {

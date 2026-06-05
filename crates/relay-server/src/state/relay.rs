@@ -468,7 +468,7 @@ impl RelayState {
         let reasoning_effort = selected
             .map(|runtime| runtime.reasoning_effort.clone())
             .unwrap_or_else(|| self.reasoning_effort.clone());
-        let transcript = selected
+        let mut transcript = selected
             .map(|runtime| runtime.transcript_views())
             .unwrap_or_else(|| {
                 self.transcript
@@ -486,6 +486,10 @@ impl RelayState {
                     })
                     .collect()
             });
+        // Snapshots carry only a file-change summary; the full diffs ride the
+        // entry-detail fetch so a large diff can't bloat the size-bounded
+        // snapshot. The authoritative read/detail paths keep full diffs.
+        crate::protocol::strip_file_change_diffs_for_snapshot(&mut transcript);
 
         SessionSnapshot {
             revision: self.revision,

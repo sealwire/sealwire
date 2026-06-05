@@ -533,9 +533,14 @@ async fn handle_notification_enriches_turn_diff_from_same_turn_file_changes() {
     .await;
 
     let relay = state.read().await;
-    let snapshot = relay.snapshot();
-    let summary = snapshot
-        .transcript
+    // The full diff lives on the authoritative view (what the entry-detail fetch
+    // returns); the snapshot projection only carries the file-change summary, so
+    // assert enrichment against the view, not the snapshot.
+    let views = relay
+        .selected_runtime()
+        .expect("runtime")
+        .transcript_views();
+    let summary = views
         .iter()
         .find(|entry| entry.item_id.as_deref() == Some("turn-diff:turn-1"))
         .and_then(|entry| entry.tool.as_ref())
@@ -606,9 +611,14 @@ async fn handle_notification_enriches_turn_diff_from_added_file_content() {
     .await;
 
     let relay = state.read().await;
-    let snapshot = relay.snapshot();
-    let summary = snapshot
-        .transcript
+    // The full diff lives on the authoritative view (what the entry-detail fetch
+    // returns); the snapshot projection only carries the file-change summary, so
+    // assert enrichment against the view, not the snapshot.
+    let views = relay
+        .selected_runtime()
+        .expect("runtime")
+        .transcript_views();
+    let summary = views
         .iter()
         .find(|entry| entry.item_id.as_deref() == Some("turn-diff:turn-1"))
         .and_then(|entry| entry.tool.as_ref())
@@ -699,9 +709,14 @@ async fn handle_notification_turn_diff_accumulates_multiple_hunks_for_same_file(
     .await;
 
     let relay = state.read().await;
-    let snapshot = relay.snapshot();
-    let summary = snapshot
-        .transcript
+    // The full diff lives on the authoritative view (what the entry-detail fetch
+    // returns); the snapshot projection only carries the file-change summary, so
+    // assert enrichment against the view, not the snapshot.
+    let views = relay
+        .selected_runtime()
+        .expect("runtime")
+        .transcript_views();
+    let summary = views
         .iter()
         .find(|entry| entry.item_id.as_deref() == Some("turn-diff:turn-1"))
         .and_then(|entry| entry.tool.as_ref())

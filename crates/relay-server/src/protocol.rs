@@ -910,6 +910,45 @@ pub struct ToolCallView {
     /// Absent on the wire means "applied" (the default after the agent edits).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub apply_state: Option<FileChangeApplyState>,
+    /// Snapshot-only marker: the file-change diff bodies were stripped to keep
+    /// the size-bounded snapshot small, leaving only the summary (path /
+    /// change_type). The client loads the full diffs on demand via the
+    /// entry-detail fetch. Never persisted to disk and never set on the
+    /// authoritative read/detail paths.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub file_changes_omitted: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// Reduce a snapshot's transcript to a file-change SUMMARY: drop the diff bodies
+/// (`tool.diff` and each `file_changes[].diff`) while keeping path / change_type,
+/// and flag affected entries with `file_changes_omitted`. Snapshots are
+/// size-bounded projections; the full diffs are fetched on demand via the
+/// entry-detail path, so a large diff can never bloat a snapshot. This only runs
+/// on the snapshot's cloned views — the authoritative transcript records (and
+/// the read/detail responses built from them) keep their full diffs.
+pub(crate) fn strip_file_change_diffs_for_snapshot(transcript: &mut [TranscriptEntryView]) {
+    for entry in transcript.iter_mut() {
+        let Some(tool) = entry.tool.as_mut() else {
+            continue;
+        };
+        let has_diff_body = tool.diff.is_some()
+            || tool
+                .file_changes
+                .iter()
+                .any(|change| !change.diff.is_empty());
+        if !has_diff_body {
+            continue;
+        }
+        tool.diff = None;
+        for change in &mut tool.file_changes {
+            change.diff.clear();
+        }
+        tool.file_changes_omitted = true;
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

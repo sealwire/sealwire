@@ -55,7 +55,10 @@ import {
   formatPendingPairingsBannerLabel,
   pairingNowSeconds,
 } from "../shared/pairing-helpers.js";
-import { buildExpandedTranscriptDetailEntries } from "./transcript/details.js";
+import {
+  buildExpandedTranscriptDetailEntries,
+  collectFileChangeDetailItemIds,
+} from "./transcript/details.js";
 import { shouldShowTranscriptLoading } from "./transcript-loading.js";
 import {
   ConversationEmptyState,
@@ -768,6 +771,7 @@ export function createSessionRenderer({
     const transcriptDetailEntries = buildExpandedTranscriptDetailEntries(state, {
       expandedItemIds: localUi.transcriptExpandedItemIds,
       threadId: session?.active_thread_id || null,
+      autoDetailItemIds: collectFileChangeDetailItemIds(entries),
     });
 
     if (!viewingConversation) {
@@ -889,6 +893,9 @@ export function createSessionRenderer({
           enableFileChangeActions: true,
           expandedKeys: localUi.transcriptExpandedItemIds,
           loadingItemIds: localUi.transcriptLoadingItemIds,
+          onEnsureFileChangeDetail: (itemId) => {
+            void state.controller?.ensureFileChangeDetail?.(itemId);
+          },
           pendingAskUserQuestions: session?.pending_ask_user_questions || [],
           onSubmitAskUserAnswers: (requestId, answers) => {
             void state.controller?.submitAskUserQuestionAnswer?.(requestId, answers);

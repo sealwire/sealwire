@@ -361,6 +361,15 @@ function UnifiedDiff({ value }) {
   );
 }
 
+// True when a file-change entry's snapshot carries only the summary
+// (file_changes_omitted) and we don't yet hold the fetched full detail — the
+// surface should pull the diffs on demand.
+export function shouldAutoLoadFileChangeDiffs(tool, hasResolvedDetail) {
+  const isFileChange =
+    tool?.item_type === "fileChange" || tool?.item_type === "turnDiff";
+  return Boolean(isFileChange && tool?.file_changes_omitted && !hasResolvedDetail);
+}
+
 export function FileChangeDiff({ tool }) {
   const fileChanges = getFileChanges(tool);
   const displayPaths = buildFileDisplayPathMap(fileChanges, tool?.display_options || null);
@@ -369,6 +378,13 @@ export function FileChangeDiff({ tool }) {
     .map((change) => change?.diff)
     .filter(Boolean)
     .join("\n");
+  // Snapshots only carry the file-change summary; the diff bodies load on
+  // demand. While that fetch is in flight (or pending), show a loading hint
+  // instead of the "unavailable" copy used for genuinely missing diffs.
+  const diffsOmitted = Boolean(tool?.file_changes_omitted);
+  const emptyDiffMessage = diffsOmitted
+    ? "Loading diff…"
+    : "Diff unavailable for this file.";
 
   if (!fallbackDiff && !fileChanges.length) {
     return null;
@@ -408,7 +424,7 @@ export function FileChangeDiff({ tool }) {
                 { className: "diff-file-section-body" },
                 change.diff
                   ? h(UnifiedDiff, { value: change.diff })
-                  : h("p", { className: "diff-file-empty" }, "Diff unavailable for this file.")
+                  : h("p", { className: "diff-file-empty" }, emptyDiffMessage)
               )
             );
           })
@@ -1053,6 +1069,28 @@ function GenericToolEntry({ entry, isJustPrepended = false, options = null }) {
   const displayTool = isFileChange
     ? { ...tool, display_options: options || null }
     : tool;
+
+  // File-change entries render diffs inline and have no expand control, so when
+  // the snapshot only carries the summary (file_changes_omitted) we auto-load
+  // the full diffs via a surface-injected fetch. resolveTranscriptDetailEntry
+  // returns the fetched full entry once cached, which clears the flag.
+  const needsFileChangeDetail = shouldAutoLoadFileChangeDiffs(tool, Boolean(detailEntry));
+  // Hold the latest fetch handler in a ref so the effect does NOT depend on its
+  // identity. Both surfaces rebuild this callback every render, and a failed
+  // fetch re-renders (via finishLoadingDetail); depending on the handler would
+  // re-fire the fetch on every such render — a self-exciting retry loop. Instead
+  // the effect fires once per (needsFileChangeDetail, itemId) edge.
+  const ensureFileChangeDetailRef = React.useRef(options?.onEnsureFileChangeDetail);
+  ensureFileChangeDetailRef.current = options?.onEnsureFileChangeDetail;
+  React.useEffect(() => {
+    if (!needsFileChangeDetail || !itemId) {
+      return;
+    }
+    const ensure = ensureFileChangeDetailRef.current;
+    if (typeof ensure === "function") {
+      ensure(itemId);
+    }
+  }, [needsFileChangeDetail, itemId]);
   const status = entry.status || "completed";
   const nameLabel = tool.name || "Tool";
   const fallbackTitle = tool.title || toolEntry.text || entry.text || "Tool call";

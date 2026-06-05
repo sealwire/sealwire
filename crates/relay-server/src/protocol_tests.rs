@@ -1,3 +1,4 @@
+use crate::protocol::strip_file_change_diffs_for_snapshot;
 use crate::protocol::{
     truncate_with_ellipsis, ApprovalRequestView, AskUserOptionView, AskUserQuestionRequestView,
     AskUserQuestionView, FileChangeDiffView, LogEntryView, SecurityMode, SessionSnapshot,
@@ -390,6 +391,7 @@ fn compact_for_broker_shells_tool_entries_dropping_heavy_content() {
                 })
                 .collect(),
             apply_state: None,
+            file_changes_omitted: false,
         }),
     }];
 
@@ -406,6 +408,71 @@ fn compact_for_broker_shells_tool_entries_dropping_heavy_content() {
     assert!(tool.detail.is_none());
     assert!(tool.input_preview.is_none());
     assert!(tool.result_preview.is_none());
+}
+
+#[test]
+fn strip_file_change_diffs_keeps_summary_and_flags_entry() {
+    let mut transcript = vec![
+        // A turn-diff entry with full diffs — must be reduced to a summary.
+        TranscriptEntryView {
+            item_id: Some("turn-diff:turn-1".to_string()),
+            kind: TranscriptEntryKind::ToolCall,
+            text: Some("Edited files".to_string()),
+            status: "completed".to_string(),
+            turn_id: Some("turn-1".to_string()),
+            tool: Some(ToolCallView {
+                item_type: "turnDiff".to_string(),
+                name: "turn_diff".to_string(),
+                title: "Changed files".to_string(),
+                detail: None,
+                query: None,
+                path: None,
+                url: None,
+                command: None,
+                input_preview: None,
+                result_preview: None,
+                diff: Some("@@ joined @@".to_string()),
+                file_changes: vec![
+                    FileChangeDiffView {
+                        path: "src/a.rs".to_string(),
+                        change_type: "modify".to_string(),
+                        diff: "-old\n+new".to_string(),
+                    },
+                    FileChangeDiffView {
+                        path: "src/b.rs".to_string(),
+                        change_type: "add".to_string(),
+                        diff: "+added".to_string(),
+                    },
+                ],
+                apply_state: None,
+                file_changes_omitted: false,
+            }),
+        },
+        // A plain agent-text entry with no diff body — must be left untouched.
+        TranscriptEntryView {
+            item_id: Some("a1".to_string()),
+            kind: TranscriptEntryKind::AgentText,
+            text: Some("hello".to_string()),
+            status: "completed".to_string(),
+            turn_id: Some("turn-1".to_string()),
+            tool: None,
+        },
+    ];
+
+    strip_file_change_diffs_for_snapshot(&mut transcript);
+
+    let tool = transcript[0].tool.as_ref().expect("tool survives");
+    assert!(tool.file_changes_omitted);
+    assert!(tool.diff.is_none());
+    assert_eq!(tool.file_changes.len(), 2);
+    assert_eq!(tool.file_changes[0].path, "src/a.rs");
+    assert_eq!(tool.file_changes[0].change_type, "modify");
+    assert!(tool.file_changes[0].diff.is_empty());
+    assert_eq!(tool.file_changes[1].path, "src/b.rs");
+    assert!(tool.file_changes[1].diff.is_empty());
+
+    // The non-tool entry is unchanged.
+    assert_eq!(transcript[1].text.as_deref(), Some("hello"));
 }
 
 #[test]
@@ -445,6 +512,7 @@ fn compact_for_broker_shells_bring_oversized_transcript_under_budget() {
                     })
                     .collect(),
                 apply_state: None,
+                file_changes_omitted: false,
             }),
         })
         .collect();
@@ -509,6 +577,7 @@ fn compact_for_broker_trims_many_file_changes_without_clearing_transcript() {
                 })
                 .collect(),
             apply_state: None,
+            file_changes_omitted: false,
         }),
     }];
 

@@ -32,7 +32,7 @@ use super::{
     path_within_device_scope, require_device_id, short_device_id, sort_threads_by_recency,
     unix_now, BrokerPendingMessage, CachedRemoteActionResult, ClaimChallenge, CompletedRemoteClaim,
     IssuedClaimChallenge, PendingPairingResult, RelayState, RemoteActionReplayDecision,
-    SecurityProfile,
+    SecurityProfile, DEFAULT_MODEL,
 };
 
 #[derive(Clone)]
@@ -463,6 +463,10 @@ struct SessionDefaults {
 
 fn preferred_model(models: &Option<Vec<ModelOptionView>>) -> Option<&ModelOptionView> {
     let models = models.as_ref()?;
+    preferred_model_from_slice(models)
+}
+
+fn preferred_model_from_slice(models: &[ModelOptionView]) -> Option<&ModelOptionView> {
     models
         .iter()
         .find(|model| model.is_default)
@@ -479,6 +483,34 @@ fn default_effort_for_model(
         .find(|model| model.model == model_name)
         .map(|model| model.default_reasoning_effort.clone())
         .or_else(|| preferred_model(models).map(|model| model.default_reasoning_effort.clone()))
+}
+
+fn resolve_provider_model(
+    provider_name: &str,
+    models: &Option<Vec<ModelOptionView>>,
+    requested_model: Option<String>,
+    default_model: String,
+) -> String {
+    let explicit_model = requested_model.is_some();
+    let candidate = requested_model
+        .or_else(|| preferred_model(models).map(|model| model.model.clone()))
+        .unwrap_or(default_model);
+
+    if provider_name == "codex" && candidate == "default" {
+        return preferred_model(models)
+            .map(|model| model.model.clone())
+            .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    }
+
+    if let Some(catalog) = models.as_ref().filter(|models| !models.is_empty()) {
+        if !explicit_model && !catalog.iter().any(|model| model.model == candidate) {
+            if let Some(preferred) = preferred_model_from_slice(catalog) {
+                return preferred.model.clone();
+            }
+        }
+    }
+
+    candidate
 }
 
 #[derive(Clone)]

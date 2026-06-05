@@ -970,6 +970,7 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                         diff: None,
                         file_changes: Vec::new(),
                         apply_state: None,
+                        file_changes_omitted: false,
                     });
                 let status =
                     string_at(&payload, &["status"]).unwrap_or_else(|| "running".to_string());
@@ -1026,6 +1027,7 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                         diff: None,
                         file_changes: Vec::new(),
                         apply_state: None,
+                        file_changes_omitted: false,
                     });
                 if tool.result_preview.is_none() {
                     tool.result_preview = string_at(&payload, &["content"]);

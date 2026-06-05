@@ -200,6 +200,7 @@ export function createSessionController({
     takeOverControl: controller.takeOverControl,
     toggleTranscriptEntry: controller.toggleTranscriptEntry,
     toggleTranscriptExpandKey: controller.toggleTranscriptExpandKey,
+    ensureFileChangeDetail: controller.ensureFileChangeDetail,
     applyFileChange: controller.applyFileChange,
     updateSessionSettings: controller.updateSessionSettings,
   };

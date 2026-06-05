@@ -7,6 +7,7 @@ import {
   cacheTranscriptEntryDetail,
   getCachedTranscriptEntryDetail,
   getLiveTranscriptEntryDetail,
+  isOmittedFileChangeDetail,
   setLiveTranscriptEntryDetail,
 } from "../transcript/details.js";
 import { hydrateLocalTranscript, loadOlderLocalTranscript } from "../transcript/hydration.js";
@@ -206,6 +207,49 @@ export function createTranscriptController(ctx) {
     }
   }
 
+  // File-change entries render diffs inline and have no expand control, so when
+  // the snapshot only carries the file-change summary (file_changes_omitted) the
+  // shared renderer calls this to pull the full diffs on demand. Idempotent.
+  async function ensureFileChangeDetail(itemId) {
+    if (!itemId || !state.session?.active_thread_id) {
+      return;
+    }
+    const threadId = state.session.active_thread_id;
+    const localUi = readLocalUiState(state.localUiStore);
+    // Skip only when we already hold the FULL detail — a stripped summary parked
+    // in the live store (running turnDiff) must not block the fetch.
+    const cached = getCachedTranscriptEntryDetail(state, threadId, itemId);
+    const live = getLiveTranscriptEntryDetail(state, threadId, itemId);
+    const hasFullDetail =
+      (cached && !isOmittedFileChangeDetail(cached))
+      || (live && !isOmittedFileChangeDetail(live));
+    if (hasFullDetail || localUi.transcriptLoadingItemIds.has(itemId)) {
+      return;
+    }
+
+    state.localUiStore.getState().startTranscriptDetailLoading(itemId);
+    if (state.session) {
+      renderSession(state.session);
+    }
+    try {
+      const detail = await fetchTranscriptEntryDetail(threadId, itemId);
+      if (!detail || state.session?.active_thread_id !== threadId) {
+        return;
+      }
+      const { cached } = cacheTranscriptEntryDetail(state, threadId, detail);
+      if (!cached) {
+        setLiveTranscriptEntryDetail(state, threadId, detail);
+      }
+    } catch (error) {
+      logLine(`File change diff load failed: ${error.message}`);
+    } finally {
+      state.localUiStore.getState().finishTranscriptDetailLoading(itemId);
+      if (state.session) {
+        renderSession(state.session);
+      }
+    }
+  }
+
   async function applyFileChange(itemId, direction) {
     if (!itemId) {
       logLine("No file change selected.");
@@ -247,6 +291,7 @@ export function createTranscriptController(ctx) {
     resetTranscriptHydrationState,
     toggleTranscriptExpandKey,
     toggleTranscriptEntry,
+    ensureFileChangeDetail,
     applyFileChange,
   };
 }

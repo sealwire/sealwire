@@ -12,8 +12,10 @@ import {
   diffPrependedItemIds,
   groupToolEntries,
   parseAskUserAnswers,
+  shouldAutoLoadFileChangeDiffs,
 } from "./shared/transcript-react.js";
 import { TranscriptPane } from "./shared/transcript-pane.js";
+import { collectFileChangeDetailItemIds } from "./shared/transcript-entry-details-state.js";
 
 const h = React.createElement;
 
@@ -75,6 +77,133 @@ test("renderEntryMarkup renders typed session items safely", () => {
   assert.match(toolMarkup, /tool-log-name">Read</);
   assert.match(toolMarkup, /message-card-tool/);
   assert.match(toolMarkup, /tool-log-primary">frontend\/remote\/main\.js</);
+});
+
+test("shouldAutoLoadFileChangeDiffs triggers only for omitted file-change tools without detail", () => {
+  assert.equal(
+    shouldAutoLoadFileChangeDiffs({ item_type: "turnDiff", file_changes_omitted: true }, false),
+    true
+  );
+  assert.equal(
+    shouldAutoLoadFileChangeDiffs({ item_type: "fileChange", file_changes_omitted: true }, false),
+    true
+  );
+  // The fetched full detail is already resolved -> no auto-load.
+  assert.equal(
+    shouldAutoLoadFileChangeDiffs({ item_type: "turnDiff", file_changes_omitted: true }, true),
+    false
+  );
+  // Diffs are inline (not omitted) -> no auto-load.
+  assert.equal(
+    shouldAutoLoadFileChangeDiffs({ item_type: "turnDiff", file_changes_omitted: false }, false),
+    false
+  );
+  // Not a file-change tool -> no auto-load.
+  assert.equal(
+    shouldAutoLoadFileChangeDiffs({ item_type: "mcpToolCall", file_changes_omitted: true }, false),
+    false
+  );
+});
+
+test("file-change entry with omitted diffs renders the file summary and a loading hint", () => {
+  const markup = renderEntryMarkup({
+    item_id: "turn-diff:turn-1",
+    kind: "tool_call",
+    status: "completed",
+    tool: {
+      item_type: "turnDiff",
+      name: "turn_diff",
+      title: "Changed files",
+      file_changes: [
+        { path: "src/a.rs", change_type: "modify", diff: "" },
+        { path: "src/b.rs", change_type: "add", diff: "" },
+      ],
+      file_changes_omitted: true,
+      diff: null,
+    },
+  });
+
+  // The file list (summary) is shown even though diff bodies were stripped...
+  assert.match(markup, /src\/a\.rs/);
+  assert.match(markup, /src\/b\.rs/);
+  // ...with a loading hint, not the "unavailable" copy used for missing diffs.
+  assert.match(markup, /Loading diff/);
+  assert.doesNotMatch(markup, /Diff unavailable for this file/);
+});
+
+test("file-change entry with inline diffs still renders the diff (no loading hint)", () => {
+  const markup = renderEntryMarkup({
+    item_id: "turn-diff:turn-2",
+    kind: "tool_call",
+    status: "completed",
+    tool: {
+      item_type: "turnDiff",
+      name: "turn_diff",
+      title: "Changed files",
+      file_changes: [{ path: "src/a.rs", change_type: "modify", diff: "-old\n+new" }],
+      file_changes_omitted: false,
+      diff: null,
+    },
+  });
+
+  assert.match(markup, /src\/a\.rs/);
+  assert.doesNotMatch(markup, /Loading diff/);
+});
+
+test("file-change entry renders the fetched full diff once detail is resolved", () => {
+  // The visible (snapshot) entry is the stripped summary; the fetched full entry
+  // is supplied via options.detailEntries (as buildExpandedTranscriptDetailEntries
+  // now does for omitted file-change entries). The renderer must show the diff,
+  // not stay on "Loading diff…".
+  const summaryEntry = {
+    item_id: "turn-diff:turn-1",
+    kind: "tool_call",
+    status: "completed",
+    tool: {
+      item_type: "turnDiff",
+      name: "turn_diff",
+      title: "Changed files",
+      file_changes: [{ path: "src/a.rs", change_type: "modify", diff: "" }],
+      file_changes_omitted: true,
+      diff: null,
+    },
+  };
+  const fullDetail = {
+    item_id: "turn-diff:turn-1",
+    kind: "tool_call",
+    status: "completed",
+    tool: {
+      item_type: "turnDiff",
+      name: "turn_diff",
+      title: "Changed files",
+      file_changes: [{ path: "src/a.rs", change_type: "modify", diff: "-old\n+new" }],
+      file_changes_omitted: false,
+      diff: null,
+    },
+  };
+  const markup = renderEntryMarkup(summaryEntry, {
+    detailEntries: new Map([["turn-diff:turn-1", fullDetail]]),
+  });
+
+  assert.match(markup, /src\/a\.rs/);
+  assert.doesNotMatch(markup, /Loading diff/);
+  // The fetched diff body is what renders now (added "new" line present).
+  assert.match(markup, /new/);
+});
+
+test("collectFileChangeDetailItemIds returns only omitted file-change entries", () => {
+  const ids = collectFileChangeDetailItemIds([
+    { item_id: "td-1", tool: { item_type: "turnDiff", file_changes_omitted: true } },
+    { item_id: "fc-1", tool: { item_type: "fileChange", file_changes_omitted: true } },
+    // inline diffs (not omitted) — no detail fetch needed
+    { item_id: "td-2", tool: { item_type: "turnDiff", file_changes_omitted: false } },
+    // not a file-change tool
+    { item_id: "tool-1", tool: { item_type: "mcpToolCall", file_changes_omitted: true } },
+    // no tool / no id
+    { item_id: "txt-1", tool: null },
+    { tool: { item_type: "turnDiff", file_changes_omitted: true } },
+  ]);
+  assert.deepEqual(ids, ["td-1", "fc-1"]);
 });
 
 test("renderEntryMarkup adds a copy-response button to agent messages only", () => {

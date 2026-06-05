@@ -61,6 +61,34 @@ function mergeToolDetail(existing, incoming) {
     return existing;
   }
 
+  // Prefer whichever side actually carries per-file diff bodies (a side is
+  // "full" only when it has file_changes AND isn't a stripped summary). Without
+  // this, a running turnDiff re-synced each snapshot would re-stamp the entry
+  // back to a summary and force an endless re-fetch.
+  const incomingHasFullFileChanges =
+    !incoming.file_changes_omitted
+    && Array.isArray(incoming.file_changes)
+    && incoming.file_changes.some((change) => Boolean(change?.diff));
+  const existingHasFullFileChanges =
+    !existing.file_changes_omitted
+    && Array.isArray(existing.file_changes)
+    && existing.file_changes.some((change) => Boolean(change?.diff));
+  const mergedFileChanges = incomingHasFullFileChanges
+    ? incoming.file_changes
+    : existingHasFullFileChanges
+      ? existing.file_changes
+      : Array.isArray(incoming.file_changes) && incoming.file_changes.length
+        ? incoming.file_changes
+        : existing.file_changes || [];
+  const mergedDiff = selectLongerString(existing.diff, incoming.diff);
+  // Decide "omitted" from actual CONTENT, not just the flag: a flagless-but-empty
+  // side must not be mistaken for a full detail. The merged entry stays a summary
+  // only when it still has no real diff content and at least one source was one.
+  const mergedHasDiffContent =
+    Boolean(mergedDiff) || mergedFileChanges.some((change) => Boolean(change?.diff));
+  const eitherOmitted =
+    Boolean(existing.file_changes_omitted) || Boolean(incoming.file_changes_omitted);
+
   return {
     ...existing,
     ...incoming,
@@ -73,10 +101,9 @@ function mergeToolDetail(existing, incoming) {
     command: selectLongerString(existing.command, incoming.command),
     input_preview: selectLongerString(existing.input_preview, incoming.input_preview),
     result_preview: selectLongerString(existing.result_preview, incoming.result_preview),
-    diff: selectLongerString(existing.diff, incoming.diff),
-    file_changes: Array.isArray(incoming.file_changes) && incoming.file_changes.length
-      ? incoming.file_changes
-      : (existing.file_changes || []),
+    diff: mergedDiff,
+    file_changes: mergedFileChanges,
+    file_changes_omitted: mergedHasDiffContent ? false : eitherOmitted,
   };
 }
 
@@ -253,35 +280,84 @@ export function prepareTranscriptEntryForSurface(state, threadId, entry) {
   };
 }
 
+// A detail record that is itself just a stripped file-change summary
+// (file_changes_omitted) — NOT the fetched full diff. A running turnDiff summary
+// can be parked in the live-detail store, so callers must not treat it as a
+// resolved full detail (else they'd block the fetch and stay on "Loading diff…").
+export function isOmittedFileChangeDetail(entry) {
+  return Boolean(entry?.tool?.file_changes_omitted);
+}
+
+// Visible file-change entries whose snapshot only carries the summary
+// (file_changes_omitted). They have no expand control, so their fetched full
+// detail must be folded into the detail map regardless of expansion — otherwise
+// the renderer keeps showing the summary and the UI stays on "Loading diff…".
+export function collectFileChangeDetailItemIds(transcript) {
+  const itemIds = [];
+  for (const entry of transcript || []) {
+    const tool = entry?.tool;
+    if (!entry?.item_id || !tool) {
+      continue;
+    }
+    const isFileChange = tool.item_type === "fileChange" || tool.item_type === "turnDiff";
+    if (isFileChange && tool.file_changes_omitted) {
+      itemIds.push(entry.item_id);
+    }
+  }
+  return itemIds;
+}
+
 export function buildExpandedTranscriptDetailEntries(
   state,
   {
     expandedItemIds,
     threadId,
     transientDetails = null,
+    autoDetailItemIds = null,
   } = {}
 ) {
   const detailEntries = new Map();
+  // `requireFull` is for the auto (file-change summary) pass: a stripped summary
+  // parked in the live/cache store is NOT the fetched full diff, so skip it and
+  // keep looking — if only a summary exists, set nothing so the renderer's
+  // effect keeps fetching.
+  const pickDetail = (itemId, { requireFull = false } = {}) => {
+    const candidates = [
+      transientDetails?.get?.(itemId) || null,
+      getLiveTranscriptEntryDetail(state, threadId, itemId),
+      getCachedTranscriptEntryDetail(state, threadId, itemId),
+    ];
+    for (const candidate of candidates) {
+      if (!candidate) {
+        continue;
+      }
+      if (requireFull && isOmittedFileChangeDetail(candidate)) {
+        continue;
+      }
+      return candidate;
+    }
+    return null;
+  };
+  const resolveInto = (itemId, opts) => {
+    if (!itemId || detailEntries.has(itemId)) {
+      return;
+    }
+    const detail = pickDetail(itemId, opts);
+    if (detail) {
+      detailEntries.set(itemId, detail);
+    }
+  };
+
   for (const expandedKey of expandedItemIds || []) {
     if (!String(expandedKey || "").startsWith("entry:")) {
       continue;
     }
-    const itemId = String(expandedKey).slice("entry:".length);
-    const transientDetail = transientDetails?.get?.(itemId) || null;
-    const liveDetail = getLiveTranscriptEntryDetail(state, threadId, itemId);
-    if (transientDetail) {
-      detailEntries.set(itemId, transientDetail);
-      continue;
-    }
-    if (liveDetail) {
-      detailEntries.set(itemId, liveDetail);
-      continue;
-    }
-
-    const cachedDetail = getCachedTranscriptEntryDetail(state, threadId, itemId);
-    if (cachedDetail) {
-      detailEntries.set(itemId, cachedDetail);
-    }
+    resolveInto(String(expandedKey).slice("entry:".length));
+  }
+  // File-change entries that were stripped to a summary auto-load their detail
+  // even without an expand toggle; fold in only the fetched FULL detail.
+  for (const itemId of autoDetailItemIds || []) {
+    resolveInto(itemId, { requireFull: true });
   }
 
   return detailEntries;

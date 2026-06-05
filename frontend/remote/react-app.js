@@ -80,8 +80,10 @@ import {
 import {
   buildExpandedTranscriptDetailEntries,
   cacheTranscriptEntryDetail,
+  collectFileChangeDetailItemIds,
   getCachedTranscriptEntryDetail,
   getLiveTranscriptEntryDetail,
+  isOmittedFileChangeDetail,
   setLiveTranscriptEntryDetail,
 } from "./transcript/details.js";
 import {
@@ -495,6 +497,7 @@ function RemoteApp() {
     expandedItemIds: transcriptUiState.transcriptExpandedItemIds,
     threadId: session?.active_thread_id || null,
     transientDetails: transcriptUiState.transcriptExpandedDetails,
+    autoDetailItemIds: collectFileChangeDetailItemIds(session?.transcript),
   });
   const pendingAskUserQuestions = session?.pending_ask_user_questions || [];
   const pendingAskUserSignature = pendingAskUserQuestions
@@ -968,6 +971,47 @@ function RemoteApp() {
     }
   }
 
+  // File-change entries render diffs inline and have no expand control, so when
+  // the snapshot only carries the file-change summary (file_changes_omitted) the
+  // shared renderer calls this to pull the full diffs on demand. Idempotent:
+  // skips when the detail is already cached/live or a fetch is in flight.
+  async function ensureFileChangeDetail(itemId) {
+    if (!itemId || !session?.active_thread_id) {
+      return;
+    }
+    const threadId = session.active_thread_id;
+    // Skip only when we already hold the FULL detail — a stripped summary parked
+    // in the live store (running turnDiff) must not block the fetch.
+    const cached = getCachedTranscriptEntryDetail(currentState, threadId, itemId);
+    const live = getLiveTranscriptEntryDetail(currentState, threadId, itemId);
+    const hasFullDetail =
+      (cached && !isOmittedFileChangeDetail(cached))
+      || (live && !isOmittedFileChangeDetail(live));
+    if (hasFullDetail || transcriptUiState.transcriptLoadingItemIds.has(itemId)) {
+      return;
+    }
+
+    dispatchTranscriptUi({ type: "transcript/startLoadingDetail", itemId });
+    try {
+      const detail = await fetchRemoteTranscriptEntryDetail(threadId, itemId);
+      if (!detail || session?.active_thread_id !== threadId) {
+        return;
+      }
+      const { cached } = cacheTranscriptEntryDetail(currentState, threadId, detail);
+      if (!cached) {
+        setLiveTranscriptEntryDetail(currentState, threadId, detail);
+      }
+    } catch (error) {
+      // The shared renderer fires this without awaiting, so swallow the
+      // rejection here to avoid an unhandled promise rejection; the entry stays
+      // on its "Loading diff…" summary until a new load edge (such as remounting
+      // the entry) tries again.
+      console.warn(`[file-change] diff load failed for ${itemId}:`, error);
+    } finally {
+      dispatchTranscriptUi({ type: "transcript/finishLoadingDetail", itemId });
+    }
+  }
+
   function handleExpandableBlockToggle(expandKey) {
     if (!expandKey) {
       return;
@@ -1120,6 +1164,7 @@ function RemoteApp() {
           },
           onToggleExpandableBlock: handleExpandableBlockToggle,
           onToggleTranscriptItem: handleTranscriptToggle,
+          onEnsureFileChangeDetail: ensureFileChangeDetail,
           onSubmitDecision(decision, scope) {
             void handlers.onSubmitDecision(decision, scope);
           },
@@ -1558,6 +1603,7 @@ function RemoteThreadPanel({
   onStopTurn,
   onToggleExpandableBlock,
   onToggleTranscriptItem,
+  onEnsureFileChangeDetail,
   onSubmitDecision,
   onSubmitAskUserAnswers,
   onTakeOver,
@@ -1583,6 +1629,7 @@ function RemoteThreadPanel({
         onSelectRelay,
         onToggleExpandableBlock,
         onToggleTranscriptItem,
+        onEnsureFileChangeDetail,
         onSubmitDecision,
         onSubmitAskUserAnswers,
         pendingAskUserQuestions,
@@ -1671,6 +1718,7 @@ function RemoteTranscriptPanel({
   onSubmitDecision,
   onSubmitAskUserAnswers,
   onToggleTranscriptItem,
+  onEnsureFileChangeDetail,
   pendingAskUserQuestions,
   session,
   sessionView,
@@ -1785,6 +1833,7 @@ function RemoteTranscriptPanel({
         expandedItemIds: uiState.transcriptExpandedItemIds,
         expandedKeys: uiState.transcriptExpandedItemIds,
         loadingItemIds: uiState.transcriptLoadingItemIds,
+        onEnsureFileChangeDetail,
         pendingAskUserQuestions,
         onSubmitAskUserAnswers: (requestId, answers) => {
           void onSubmitAskUserAnswers?.(requestId, answers);

@@ -1759,4 +1759,274 @@ mod path_scope_tests {
             "expected device-scope rejection, got: {error}"
         );
     }
+
+    // ---- Regression: codex normalizes the "default" model alias ------------
+    //
+    // Mirrors the real codex `app-server`, which only accepts concrete model
+    // ids (e.g. "gpt-5.5") and rejects the non-concrete string "default" with a
+    // "model not supported, pick a specific model" error. Claude's worker, by
+    // contrast, resolves "default" to a concrete model, so the same value works
+    // there. `accepts_default` captures exactly that provider difference.
+    #[derive(Clone)]
+    struct ModelStrictProvider {
+        name: &'static str,
+        accepts_default: bool,
+        threads: Arc<Mutex<HashMap<String, crate::protocol::ThreadSummaryView>>>,
+        seen_models: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl ModelStrictProvider {
+        fn new(name: &'static str, accepts_default: bool) -> Self {
+            Self {
+                name,
+                accepts_default,
+                threads: Arc::new(Mutex::new(HashMap::new())),
+                seen_models: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        async fn models_seen(&self) -> Vec<String> {
+            self.seen_models.lock().await.clone()
+        }
+
+        fn reject(&self, model: &str) -> Option<String> {
+            if !self.accepts_default && model == "default" {
+                Some(
+                    "model `default` is not supported, please select a specific model (e.g. 5.5)"
+                        .to_string(),
+                )
+            } else {
+                None
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ProviderBridge for ModelStrictProvider {
+        async fn list_threads(
+            &self,
+            _limit: usize,
+        ) -> Result<Vec<crate::protocol::ThreadSummaryView>, String> {
+            Ok(Vec::new())
+        }
+
+        // Simulate a transient catalog miss so the relay falls back to the
+        // session default model (the inherited "default" alias) instead of a
+        // concrete catalog id.
+        async fn list_models(&self) -> Result<Vec<crate::protocol::ModelOptionView>, String> {
+            Err("model catalog temporarily unavailable".to_string())
+        }
+
+        async fn start_thread(
+            &self,
+            cwd: &str,
+            model: &str,
+            _approval_policy: &str,
+            _sandbox: &str,
+            _initial_prompt: Option<&str>,
+        ) -> Result<crate::provider::StartThreadResult, String> {
+            self.seen_models.lock().await.push(model.to_string());
+            if let Some(err) = self.reject(model) {
+                return Err(err);
+            }
+            let id = format!("{}-thread-1", self.name);
+            let thread = crate::protocol::ThreadSummaryView {
+                id: id.clone(),
+                name: Some(format!("{} thread", self.name)),
+                preview: String::new(),
+                cwd: cwd.to_string(),
+                updated_at: unix_now(),
+                source: self.name.to_string(),
+                status: "idle".to_string(),
+                model_provider: self.name.to_string(),
+                provider: self.name.to_string(),
+            };
+            self.threads.lock().await.insert(id, thread.clone());
+            Ok(crate::provider::StartThreadResult {
+                thread,
+                consumed_initial_prompt: false,
+                initial_user_message: None,
+                started_turn_id: None,
+            })
+        }
+
+        async fn resume_thread(&self, _t: &str, _a: &str, _s: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn read_thread(
+            &self,
+            thread_id: &str,
+        ) -> Result<crate::provider::ThreadSyncData, String> {
+            let thread = self
+                .threads
+                .lock()
+                .await
+                .get(thread_id)
+                .cloned()
+                .ok_or_else(|| format!("thread '{thread_id}' not found"))?;
+            Ok(crate::provider::ThreadSyncData {
+                thread,
+                status: "idle".to_string(),
+                active_flags: Vec::new(),
+                transcript: Vec::new(),
+            })
+        }
+
+        async fn read_thread_entry_detail(
+            &self,
+            _t: &str,
+            _i: &str,
+        ) -> Result<Option<crate::protocol::TranscriptEntryView>, String> {
+            Ok(None)
+        }
+
+        async fn archive_thread(&self, _thread_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn delete_thread_permanently(
+            &self,
+            _thread_id: &str,
+        ) -> Result<crate::codex_local::LocalThreadDeleteSummary, String> {
+            Ok(crate::codex_local::LocalThreadDeleteSummary {
+                deleted_paths: Vec::new(),
+                deleted_thread_row: true,
+            })
+        }
+
+        async fn start_turn(
+            &self,
+            _t: &str,
+            _text: &str,
+            model: &str,
+            _e: &str,
+        ) -> Result<Option<String>, String> {
+            self.seen_models.lock().await.push(model.to_string());
+            if let Some(err) = self.reject(model) {
+                return Err(err);
+            }
+            Ok(Some("turn:1".to_string()))
+        }
+
+        async fn interrupt_turn(&self, _t: &str, _turn: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn respond_to_approval(
+            &self,
+            _p: &PendingApproval,
+            _i: &ApprovalDecisionInput,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn respond_to_ask_user_question(
+            &self,
+            _r: &str,
+            _a: &serde_json::Map<String, serde_json::Value>,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn provider_name(&self) -> &'static str {
+            self.name
+        }
+    }
+
+    // Regression for: "codex default model is rejected (model not supported,
+    // pick 5.5), but default works fine on claude." When the session's current
+    // model is the stable "default" alias (set/persisted while on Claude) and
+    // the codex catalog isn't available to reconcile it, the relay must not
+    // forward "default" verbatim to codex.
+    #[tokio::test]
+    async fn codex_normalizes_default_model_inherited_from_claude() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+
+        let (change_tx, _) = watch::channel(0_u64);
+        let relay = Arc::new(RwLock::new(RelayState::new(
+            cwd.to_string(),
+            change_tx.clone(),
+            SecurityProfile::private(),
+        )));
+        let mut providers: HashMap<String, Arc<dyn ProviderBridge>> = HashMap::new();
+        let codex_provider = Arc::new(ModelStrictProvider::new("codex", false));
+        let claude_provider = Arc::new(ModelStrictProvider::new("claude_code", true));
+        providers.insert("codex".to_string(), codex_provider.clone());
+        providers.insert("claude_code".to_string(), claude_provider.clone());
+        let app = AppState::from_parts(relay.clone(), providers, change_tx);
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        // A prior Claude session left the stable "default" alias as the current
+        // (and persisted) model.
+        relay.write().await.model = "default".to_string();
+
+        // User starts a codex session WITHOUT picking a model. The codex
+        // catalog momentarily fails to load, so the inherited "default" is
+        // normalized before reaching codex.
+        let snap = app
+            .start_session(StartSessionInput {
+                device_id: Some("device-1".to_string()),
+                cwd: Some(cwd.to_string()),
+                model: None,
+                effort: None,
+                approval_policy: None,
+                sandbox: None,
+                provider: Some("codex".to_string()),
+                initial_prompt: None,
+            })
+            .await
+            .expect("codex inherited default alias should normalize to a concrete model");
+        assert_eq!(snap.model, DEFAULT_MODEL);
+        assert_eq!(codex_provider.models_seen().await, vec![DEFAULT_MODEL]);
+
+        // Settings updates should also never persist the cross-provider alias
+        // onto a codex thread when codex cannot load its catalog.
+        relay.write().await.model = "default".to_string();
+        let snap = app
+            .update_session_settings(UpdateSessionSettingsInput {
+                approval_policy: None,
+                sandbox: None,
+                effort: None,
+                model: None,
+                device_id: Some("device-1".to_string()),
+            })
+            .await
+            .expect("codex settings update should normalize the inherited default alias");
+        assert_eq!(snap.model, DEFAULT_MODEL);
+
+        // The same guard is needed for subsequent turns, because send_message
+        // also resolves its model from the relay's current default when the
+        // caller does not pick one explicitly.
+        relay.write().await.model = "default".to_string();
+        app.send_message(SendMessageInput {
+            text: "hello".to_string(),
+            model: None,
+            effort: None,
+            device_id: Some("device-1".to_string()),
+        })
+        .await
+        .expect("codex send_message should normalize the inherited default alias");
+        assert_eq!(
+            codex_provider.models_seen().await,
+            vec![DEFAULT_MODEL, DEFAULT_MODEL]
+        );
+
+        // Identical conditions, but claude resolves "default" → it starts fine.
+        relay.write().await.model = "default".to_string();
+        app.start_session(StartSessionInput {
+            device_id: Some("device-1".to_string()),
+            cwd: Some(cwd.to_string()),
+            model: None,
+            effort: None,
+            approval_policy: None,
+            sandbox: None,
+            provider: Some("claude_code".to_string()),
+            initial_prompt: None,
+        })
+        .await
+        .expect("claude resolves \"default\" and should start successfully");
+        assert_eq!(claude_provider.models_seen().await, vec!["default"]);
+    }
 }

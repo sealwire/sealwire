@@ -784,6 +784,7 @@ fn build_tool_call_view(item: &Value, item_type: &str) -> ToolCallView {
         diff,
         file_changes,
         apply_state: None,
+        file_changes_omitted: false,
     }
 }
 
@@ -845,6 +846,7 @@ fn build_tool_call_detail_view(item: &Value, item_type: &str) -> ToolCallView {
         diff,
         file_changes,
         apply_state: None,
+        file_changes_omitted: false,
     }
 }
 
@@ -927,6 +929,7 @@ pub(crate) fn build_turn_diff_entry_with_fallback(
             diff,
             file_changes,
             apply_state: None,
+            file_changes_omitted: false,
         }),
     }
 }

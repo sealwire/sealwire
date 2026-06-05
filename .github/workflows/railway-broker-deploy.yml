@@ -77,7 +77,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       RAILWAY_SERVICE_ID: ${{ vars.RAILWAY_SERVICE_ID }}
-      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      RAILWAY_PROJECT_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      RAILWAY_ACCOUNT_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
 
     steps:
       - name: Checkout
@@ -87,11 +88,17 @@ jobs:
         id: railway_inputs
         shell: bash
         run: |
-          if [ -n "${RAILWAY_TOKEN:-}" ] && [ -n "${RAILWAY_SERVICE_ID:-}" ]; then
-            echo "ready=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "::notice::Skipping Railway deploy. Set repository secret RAILWAY_TOKEN and repository variable RAILWAY_SERVICE_ID to enable this workflow."
+          if [ -z "${RAILWAY_SERVICE_ID:-}" ]; then
+            echo "::notice::Skipping Railway deploy. Set repository variable RAILWAY_SERVICE_ID to enable this workflow."
             echo "ready=false" >> "$GITHUB_OUTPUT"
+          elif [ -z "${RAILWAY_PROJECT_TOKEN:-}" ] && [ -z "${RAILWAY_ACCOUNT_TOKEN:-}" ]; then
+            echo "::notice::Skipping Railway deploy. Set repository secret RAILWAY_TOKEN (project token) or RAILWAY_API_TOKEN (account/workspace token) to enable this workflow."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          elif [ -n "${RAILWAY_PROJECT_TOKEN:-}" ] && [ -n "${RAILWAY_ACCOUNT_TOKEN:-}" ]; then
+            echo "::error::Set only one Railway auth secret. Railway CLI supports either RAILWAY_TOKEN or RAILWAY_API_TOKEN, not both."
+            exit 1
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Setup Node
@@ -110,7 +117,15 @@ jobs:
         run: |
           status=1
           for attempt in 1 2 3; do
-            if railway up --service "$RAILWAY_SERVICE_ID"; then
+            if [ -n "${RAILWAY_ACCOUNT_TOKEN:-}" ]; then
+              export RAILWAY_API_TOKEN="$RAILWAY_ACCOUNT_TOKEN"
+              unset RAILWAY_TOKEN
+            else
+              export RAILWAY_TOKEN="$RAILWAY_PROJECT_TOKEN"
+              unset RAILWAY_API_TOKEN
+            fi
+
+            if railway up --ci --service "$RAILWAY_SERVICE_ID"; then
               exit 0
             else
               # Capture railway's real exit code here: `$?` read as the first

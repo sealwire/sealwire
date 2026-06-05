@@ -2,9 +2,11 @@ import { applyRemoteSurfacePatch } from "../surface-state.js";
 import {
   buildExpandedTranscriptDetailEntries,
   cacheTranscriptEntryDetail as cacheTranscriptEntryDetailPatch,
+  collectFileChangeDetailItemIds,
   createClearedTranscriptEntryDetailsPatch,
   getCachedTranscriptEntryDetail,
   getLiveTranscriptEntryDetail,
+  isOmittedFileChangeDetail,
   prepareTranscriptEntryForSurface as prepareTranscriptEntryForSurfacePatch,
   setLiveTranscriptEntryDetail as setLiveTranscriptEntryDetailPatch,
   syncLiveTranscriptEntryDetailsFromSnapshot as syncLiveTranscriptEntryDetailsFromSnapshotPatch,
@@ -14,8 +16,10 @@ import {
 
 export {
   buildExpandedTranscriptDetailEntries,
+  collectFileChangeDetailItemIds,
   getCachedTranscriptEntryDetail,
   getLiveTranscriptEntryDetail,
+  isOmittedFileChangeDetail,
   TRANSCRIPT_ENTRY_DETAIL_CACHE_MAX_BYTES,
   TRANSCRIPT_ENTRY_DETAIL_INLINE_CACHE_MAX_BYTES,
 };
