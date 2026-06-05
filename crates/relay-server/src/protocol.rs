@@ -147,6 +147,13 @@ pub struct ModelOptionView {
 
 const ELLIPSIS_LEN: usize = 3;
 
+/// When even per-field fallback truncation can't get a snapshot under budget
+/// (e.g. an oversized non-transcript field such as a very long cwd), the
+/// surviving transcript tail is reduced to identity shells whose text is clipped
+/// to this many characters — instead of being cleared. A non-empty thread must
+/// never serialize as an empty transcript.
+pub(crate) const EMERGENCY_TRANSCRIPT_SHELL_CHARS: usize = 24;
+
 const SESSION_SNAPSHOT_REMOTE_SURFACE_BUDGET: SessionSnapshotCompactBudget =
     SessionSnapshotCompactBudget {
         max_logs: 8,
@@ -487,8 +494,39 @@ impl SessionSnapshot {
             }
             self.logs.clear();
             if !self.transcript.is_empty() {
+                // Honesty rule: a non-empty thread must never serialize as an
+                // empty transcript — `[]` is indistinguishable from a genuinely
+                // empty thread and makes surfaces drop real visible history.
+                // Reduce the surviving tail to identity shells (keep
+                // item_id/kind/status/turn_id and a lightweight tool shell, drop
+                // the heavy text/diff/file_changes) and flag the snapshot
+                // truncated so the client fetches full detail instead.
                 transcript_truncated = true;
-                self.transcript.clear();
+                for entry in &mut self.transcript {
+                    if let Some(text) = &mut entry.text {
+                        truncate_with_ellipsis(text, EMERGENCY_TRANSCRIPT_SHELL_CHARS);
+                    }
+                    if let Some(tool) = &mut entry.tool {
+                        tool.detail = None;
+                        tool.input_preview = None;
+                        tool.result_preview = None;
+                        tool.diff = None;
+                        tool.file_changes.clear();
+                        // command/query/url are not guaranteed small by the type,
+                        // so clip them to the shell budget too — otherwise a fat
+                        // command (or query/url) could keep the shelled snapshot
+                        // heavy. path/title/name are kept as identity.
+                        if let Some(command) = &mut tool.command {
+                            truncate_with_ellipsis(command, EMERGENCY_TRANSCRIPT_SHELL_CHARS);
+                        }
+                        if let Some(query) = &mut tool.query {
+                            truncate_with_ellipsis(query, EMERGENCY_TRANSCRIPT_SHELL_CHARS);
+                        }
+                        if let Some(url) = &mut tool.url {
+                            truncate_with_ellipsis(url, EMERGENCY_TRANSCRIPT_SHELL_CHARS);
+                        }
+                    }
+                }
             }
             break;
         }

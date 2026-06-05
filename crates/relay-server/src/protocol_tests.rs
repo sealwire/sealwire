@@ -3,7 +3,7 @@ use crate::protocol::{
     AskUserQuestionView, FileChangeDiffView, LogEntryView, SecurityMode, SessionSnapshot,
     SessionSnapshotCompactProfile, ThreadEntriesResponse, ThreadEntryDetailResponse,
     ThreadSummaryView, ThreadTranscriptResponse, ThreadsResponse, ThreadsResponseCompactProfile,
-    ToolCallView, TranscriptEntryKind, TranscriptEntryView,
+    ToolCallView, TranscriptEntryKind, TranscriptEntryView, EMERGENCY_TRANSCRIPT_SHELL_CHARS,
 };
 
 const MAX_BROKER_LOGS: usize = 8;
@@ -301,7 +301,11 @@ fn truncate_with_ellipsis_preserves_utf8_boundaries() {
 }
 
 #[test]
-fn compact_for_broker_drops_logs_and_transcript_as_last_resort() {
+fn compact_for_broker_shells_transcript_tail_as_last_resort_without_clearing() {
+    // Even when an oversized non-transcript field (here, a giant cwd that
+    // compaction never truncates) keeps the snapshot over budget after every
+    // other reduction, the transcript must NOT be cleared: a non-empty thread
+    // serialized as `[]` is indistinguishable from a genuinely empty thread.
     let mut snapshot = make_snapshot();
     snapshot.current_cwd = "/tmp/".to_string() + &"超长路径".repeat(3_000);
     snapshot.logs = (0..4)
@@ -325,9 +329,149 @@ fn compact_for_broker_drops_logs_and_transcript_as_last_resort() {
     let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::RemoteSurface);
 
     assert!(compacted.logs.is_empty());
-    assert!(compacted.transcript.is_empty());
+    // The tail survives as identity shells, not an empty transcript.
+    assert_eq!(compacted.transcript.len(), 3);
     assert!(compacted.transcript_truncated);
+    for (index, entry) in compacted.transcript.iter().enumerate() {
+        assert_eq!(
+            entry.item_id.as_deref(),
+            Some(format!("item-{index}").as_str())
+        );
+        assert_eq!(
+            entry.turn_id.as_deref(),
+            Some(format!("turn-{index}").as_str())
+        );
+        assert_eq!(entry.status, "completed");
+        // Heavy text is clipped down to a small stub, not preserved in full.
+        let text_len = entry
+            .text
+            .as_ref()
+            .map(|text| text.chars().count())
+            .unwrap_or(0);
+        assert!(
+            text_len <= EMERGENCY_TRANSCRIPT_SHELL_CHARS,
+            "shell text should be clipped, got {text_len} chars"
+        );
+    }
     assert!(compacted.current_cwd.starts_with("/tmp/"));
+}
+
+#[test]
+fn compact_for_broker_shells_tool_entries_dropping_heavy_content() {
+    // The terminal shell path must also strip heavy tool fields (diff /
+    // file_changes / previews) while keeping the entry identity.
+    let mut snapshot = make_snapshot();
+    snapshot.current_cwd = "/tmp/".to_string() + &"超长路径".repeat(3_000);
+    snapshot.logs.clear();
+    snapshot.pending_approvals.clear();
+    snapshot.transcript = vec![TranscriptEntryView {
+        item_id: Some("turn-diff:turn-1".to_string()),
+        kind: TranscriptEntryKind::ToolCall,
+        text: Some("内容".repeat(1_500)),
+        status: "running".to_string(),
+        turn_id: Some("turn-1".to_string()),
+        tool: Some(ToolCallView {
+            item_type: "turnDiff".to_string(),
+            name: "turn_diff".to_string(),
+            title: "Changed files".to_string(),
+            detail: Some("详情".repeat(1_000)),
+            query: None,
+            path: None,
+            url: None,
+            command: None,
+            input_preview: Some("输入".repeat(1_000)),
+            result_preview: Some("结果".repeat(1_000)),
+            diff: Some("差异".repeat(1_000)),
+            file_changes: (0..40)
+                .map(|index| FileChangeDiffView {
+                    path: format!("src/file-{index}.rs"),
+                    change_type: "modify".to_string(),
+                    diff: format!("-{}\n+{}", "old".repeat(600), "new".repeat(600)),
+                })
+                .collect(),
+            apply_state: None,
+        }),
+    }];
+
+    let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::RemoteSurface);
+
+    assert_eq!(compacted.transcript.len(), 1);
+    assert!(compacted.transcript_truncated);
+    let entry = &compacted.transcript[0];
+    assert_eq!(entry.item_id.as_deref(), Some("turn-diff:turn-1"));
+    let tool = entry.tool.as_ref().expect("tool shell should survive");
+    assert_eq!(tool.name, "turn_diff");
+    assert!(tool.file_changes.is_empty());
+    assert!(tool.diff.is_none());
+    assert!(tool.detail.is_none());
+    assert!(tool.input_preview.is_none());
+    assert!(tool.result_preview.is_none());
+}
+
+#[test]
+fn compact_for_broker_shells_bring_oversized_transcript_under_budget() {
+    // When the over-budget bulk is transcript content (not an unfixable giant
+    // non-transcript field), reducing the tail to shells must actually get the
+    // snapshot under the target — proving shelling is an effective last resort,
+    // not just non-destructive.
+    let mut snapshot = make_snapshot();
+    snapshot.current_cwd = "/tmp/project".to_string();
+    snapshot.logs.clear();
+    snapshot.pending_approvals.clear();
+    snapshot.transcript = (0..3)
+        .map(|index| TranscriptEntryView {
+            item_id: Some(format!("item-{index}")),
+            kind: TranscriptEntryKind::ToolCall,
+            text: Some("内容".repeat(2_000)),
+            status: "running".to_string(),
+            turn_id: Some(format!("turn-{index}")),
+            tool: Some(ToolCallView {
+                item_type: "turnDiff".to_string(),
+                name: "turn_diff".to_string(),
+                title: "Changed files".to_string(),
+                detail: Some("详情".repeat(2_000)),
+                query: None,
+                path: None,
+                url: None,
+                command: Some("c".repeat(4_000)),
+                input_preview: Some("输入".repeat(2_000)),
+                result_preview: Some("结果".repeat(2_000)),
+                diff: Some("差异".repeat(2_000)),
+                file_changes: (0..40)
+                    .map(|i| FileChangeDiffView {
+                        path: format!("src/file-{i}.rs"),
+                        change_type: "modify".to_string(),
+                        diff: format!("-{}\n+{}", "old".repeat(600), "new".repeat(600)),
+                    })
+                    .collect(),
+                apply_state: None,
+            }),
+        })
+        .collect();
+
+    let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::RemoteSurface);
+
+    assert!(compacted.transcript_truncated);
+    assert_eq!(compacted.transcript.len(), 3);
+    let serialized = serde_json::to_vec(&compacted).unwrap().len();
+    assert!(
+        serialized <= SESSION_SNAPSHOT_TARGET_BYTES,
+        "shelled snapshot should fit budget, got {serialized} bytes"
+    );
+    // The fat command is clipped to the shell budget rather than kept whole.
+    let tool = compacted.transcript[0]
+        .tool
+        .as_ref()
+        .expect("tool shell should survive");
+    let command_len = tool
+        .command
+        .as_ref()
+        .map(|command| command.chars().count())
+        .unwrap_or(0);
+    assert!(
+        command_len <= EMERGENCY_TRANSCRIPT_SHELL_CHARS,
+        "command shell should be clipped, got {command_len} chars"
+    );
 }
 
 #[test]
