@@ -155,6 +155,7 @@ import {
 } from "./shared/provider-settings.js";
 import { localQueryClient } from "./local/query-client.js";
 import { attachTranscriptHistoryLoader } from "./shared/transcript-history-loader.js";
+import { copyTextToClipboard } from "./shared/clipboard.js";
 
 const DEVICE_STORAGE_KEY = "agent-relay.device-id";
 const API_TOKEN_STORAGE_KEY = "agent-relay.api-token";
@@ -779,6 +780,12 @@ stopButton?.addEventListener("click", () => {
 });
 
 transcript.addEventListener("click", (event) => {
+  const copyButton = event.target.closest("[data-copy-message]");
+  if (copyButton) {
+    void copyTextToClipboard(copyButton.dataset.copyMessage || "", copyButton);
+    return;
+  }
+
   const approvalButton = event.target.closest("[data-approval-decision]");
   if (approvalButton) {
     void submitDecision(

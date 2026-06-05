@@ -1665,6 +1665,773 @@ test("applyTranscriptDelta ignores deltas for a different active thread", async 
   assert.equal(state.session.transcript[0].status, "completed");
 });
 
+test("applyTranscriptDelta appends agent text contiguously using text_offset", async () => {
+  activeBrowser || installBrowserStubs();
+
+  const { state } = await import("./state.js");
+  const { applyTranscriptDelta } = await import("./session-ops.js");
+
+  state.session = {
+    active_thread_id: "thread-1",
+    transcript_revision: 5,
+    transcript: [
+      {
+        item_id: "item-1",
+        kind: "agent_text",
+        status: "running",
+        text: "Hello",
+        turn_id: "turn-1",
+        tool: null,
+      },
+    ],
+  };
+
+  applyTranscriptDelta({
+    thread_id: "thread-1",
+    base_revision: 5,
+    revision: 6,
+    item_id: "item-1",
+    turn_id: "turn-1",
+    delta: " world",
+    delta_kind: "agent_text",
+    text_offset: 5,
+  });
+
+  assert.equal(state.session.transcript[0].text, "Hello world");
+  assert.equal(state.session.transcript[0].status, "running");
+  assert.equal(state.session.transcript_revision, 6);
+});
+
+test("applyTranscriptDelta applies agent deltas by text_offset even when base_revision is not contiguous", async () => {
+  activeBrowser || installBrowserStubs();
+
+  const { state } = await import("./state.js");
+  const { applyTranscriptDelta } = await import("./session-ops.js");
+
+  // A snapshot (or an interleaved command stream) bumped the revision far past
+  // this delta's base_revision. The offset still matches our text, so the delta
+  // must apply instead of being rejected as a base_revision mismatch.
+  state.session = {
+    active_thread_id: "thread-1",
+    transcript_revision: 40,
+    transcript: [
+      {
+        item_id: "item-1",
+        kind: "agent_text",
+        status: "running",
+        text: "Hello",
+        turn_id: "turn-1",
+        tool: null,
+      },
+    ],
+  };
+
+  applyTranscriptDelta({
+    thread_id: "thread-1",
+    base_revision: 6,
+    revision: 41,
+    item_id: "item-1",
+    turn_id: "turn-1",
+    delta: " world",
+    delta_kind: "agent_text",
+    text_offset: 5,
+  });
+
+  assert.equal(state.session.transcript[0].text, "Hello world");
+  assert.equal(state.session.transcript_revision, 41);
+});
+
+test("applyTranscriptDelta ignores a duplicate agent delta by text_offset", async () => {
+  activeBrowser || installBrowserStubs();
+
+  const { state } = await import("./state.js");
+  const { applyTranscriptDelta } = await import("./session-ops.js");
+
+  state.session = {
+    active_thread_id: "thread-1",
+    transcript_revision: 6,
+    transcript: [
+      {
+        item_id: "item-1",
+        kind: "agent_text",
+        status: "running",
+        text: "Hello world",
+        turn_id: "turn-1",
+        tool: null,
+      },
+    ],
+  };
+
+  // Re-delivery of a chunk we already hold (offset 5 + " world" ends at 11 == have).
+  applyTranscriptDelta({
+    thread_id: "thread-1",
+    base_revision: 5,
+    revision: 6,
+    item_id: "item-1",
+    turn_id: "turn-1",
+    delta: " world",
+    delta_kind: "agent_text",
+    text_offset: 5,
+  });
+
+  assert.equal(state.session.transcript[0].text, "Hello world");
+});
+
+test("applyTranscriptDelta appends only the missing tail on a partial re-delivery", async () => {
+  activeBrowser || installBrowserStubs();
+
+  const { state } = await import("./state.js");
+  const { applyTranscriptDelta } = await import("./session-ops.js");
+
+  state.session = {
+    active_thread_id: "thread-1",
+    transcript_revision: 6,
+    transcript: [
+      {
+        item_id: "item-1",
+        kind: "agent_text",
+        status: "running",
+        text: "Hello wor",
+        turn_id: "turn-1",
+        tool: null,
+      },
+    ],
+  };
+
+  // Have 9 chars; delta starts at offset 5 (" world"), so only "ld" is missing.
+  applyTranscriptDelta({
+    thread_id: "thread-1",
+    base_revision: 5,
+    revision: 7,
+    item_id: "item-1",
+    turn_id: "turn-1",
+    delta: " world",
+    delta_kind: "agent_text",
+    text_offset: 5,
+  });
+
+  assert.equal(state.session.transcript[0].text, "Hello world");
+});
+
+test("applyTranscriptDelta repairs when the text_offset overlap does not match local text", async () => {
+  activeBrowser || installBrowserStubs();
+
+  const { state } = await import("./state.js");
+  const { applyTranscriptDelta } = await import("./session-ops.js");
+
+  window.__transcriptGapRepairCount = 0;
+
+  // Local text is long enough to look like a duplicate by length, but its bytes
+  // diverged from the server. Length-only logic would silently keep the wrong
+  // text; the overlap check must catch it and force a repair.
+  state.session = {
+    active_thread_id: "thread-1",
+    transcript_revision: 5,
+    transcript: [
+      {
+        item_id: "item-1",
+        kind: "agent_text",
+        status: "running",
+        text: "Hello XXXXX",
+        turn_id: "turn-1",
+        tool: null,
+      },
+    ],
+  };
+  state.socket = null;
+
+  applyTranscriptDelta({
+    thread_id: "thread-1",
+    base_revision: 5,
+    revision: 6,
+    item_id: "item-1",
+    turn_id: "turn-1",
+    delta: " world",
+    delta_kind: "agent_text",
+    text_offset: 5,
+  });
+
+  // Corrupted text is neither extended nor accepted as a duplicate...
+  assert.equal(state.session.transcript[0].text, "Hello XXXXX");
+  // ...the mismatch forces an authoritative repair.
+  assert.equal(window.__transcriptGapRepairCount, 1);
+
+  delete window.__transcriptGapRepairCount;
+});
+
+test("applyTranscriptDelta repairs instead of freezing on a text_offset gap", async () => {
+  activeBrowser || installBrowserStubs();
+
+  const { state } = await import("./state.js");
+  const { applyTranscriptDelta } = await import("./session-ops.js");
+
+  window.__transcriptGapRepairCount = 0;
+
+  state.session = {
+    active_thread_id: "thread-1",
+    transcript_revision: 5,
+    transcript: [
+      {
+        item_id: "item-1",
+        kind: "agent_text",
+        status: "running",
+        text: "Hello",
+        turn_id: "turn-1",
+        tool: null,
+      },
+    ],
+  };
+
+  // No responding socket here: this test only asserts the gap is detected and a
+  // repair is scheduled. The full fetch -> converge path has its own test below;
+  // nulling the socket keeps the best-effort repair fetch from mutating state
+  // asynchronously.
+  state.socket = null;
+
+  // A chunk was dropped on the wire: this delta starts at offset 11 but we only
+  // hold 5 chars. The old code silently froze here; now it must request repair.
+  applyTranscriptDelta({
+    thread_id: "thread-1",
+    base_revision: 10,
+    revision: 11,
+    item_id: "item-1",
+    turn_id: "turn-1",
+    delta: " again",
+    delta_kind: "agent_text",
+    text_offset: 11,
+  });
+
+  // Never splice the delta in at the wrong offset...
+  assert.equal(state.session.transcript[0].text, "Hello");
+  // ...and detect the gap + request an authoritative repair pull.
+  assert.equal(window.__transcriptGapRepairCount, 1);
+
+  delete window.__transcriptGapRepairCount;
+});
+
+test("applyTranscriptDelta repairs instead of dropping on a base_revision gap when no offset is present", async () => {
+  activeBrowser || installBrowserStubs();
+
+  const { state } = await import("./state.js");
+  const { applyTranscriptDelta } = await import("./session-ops.js");
+
+  window.__transcriptGapRepairCount = 0;
+
+  // Command-output / legacy deltas carry no text_offset; a broken base_revision
+  // chain (a dropped command chunk) must trigger repair, not the old silent drop.
+  state.session = {
+    active_thread_id: "thread-1",
+    transcript_revision: 5,
+    transcript: [
+      {
+        item_id: "cmd-1",
+        kind: "command",
+        status: "running",
+        text: "$ ls",
+        turn_id: null,
+        tool: null,
+      },
+    ],
+  };
+
+  state.socket = null;
+
+  applyTranscriptDelta({
+    thread_id: "thread-1",
+    base_revision: 7,
+    revision: 8,
+    item_id: "cmd-1",
+    delta: "\noutput",
+    delta_kind: "command_output",
+  });
+
+  assert.equal(state.session.transcript[0].text, "$ ls");
+  assert.equal(window.__transcriptGapRepairCount, 1);
+
+  delete window.__transcriptGapRepairCount;
+});
+
+test("applyTranscriptDelta gap repair fetches the authoritative tail and converges on a non-truncated session", async () => {
+  activeBrowser || installBrowserStubs();
+  const sentPayloads = [];
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { handleRemoteBrokerPayload } = await import("./actions.js");
+  const { applyTranscriptDelta } = await import("./session-ops.js");
+  const { remoteQueryClient } = await import("./query-client.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-1",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: null,
+    sessionClaimExpiresAt: null,
+  });
+  seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
+  state.pendingActions.clear();
+  remoteQueryClient.clear();
+  seedTranscriptHydrationState(state);
+  window.__transcriptGapRepairCount = 0;
+
+  state.socket = {
+    readyState: 1,
+    send(frameText) {
+      const frame = JSON.parse(frameText);
+      sentPayloads.push(frame.payload);
+      if (frame.payload.request?.type !== "fetch_thread_transcript") {
+        return;
+      }
+      setImmediate(async () => {
+        await handleRemoteBrokerPayload({
+          kind: "remote_action_result",
+          action_id: frame.payload.action_id,
+          action: "fetch_thread_transcript",
+          ok: true,
+          snapshot: {},
+          thread_transcript: {
+            thread_id: "thread-1",
+            revision: 12,
+            entries: [
+              {
+                item_id: "item-1",
+                kind: "agent_text",
+                text: "Hello world again",
+                status: "completed",
+                turn_id: "turn-1",
+                tool: null,
+              },
+            ],
+            prev_cursor: null,
+          },
+        });
+      });
+    },
+  };
+
+  // A non-truncated live session with an in-flight agent message.
+  state.session = {
+    active_thread_id: "thread-1",
+    transcript_truncated: false,
+    transcript_revision: 5,
+    transcript: [
+      {
+        item_id: "item-1",
+        kind: "agent_text",
+        status: "running",
+        text: "Hello",
+        turn_id: "turn-1",
+        tool: null,
+      },
+    ],
+  };
+
+  // A dropped chunk: the delta sits at text_offset 11 but we hold only 5 chars.
+  // Repair must actually dispatch fetch_thread_transcript (NOT no-op through the
+  // truncated-snapshot hydration gate) and converge to the authoritative text.
+  applyTranscriptDelta({
+    thread_id: "thread-1",
+    base_revision: 10,
+    revision: 11,
+    item_id: "item-1",
+    turn_id: "turn-1",
+    delta: " again",
+    delta_kind: "agent_text",
+    text_offset: 11,
+  });
+
+  await waitFor(() => state.session.transcript[0].text === "Hello world again");
+
+  assert.equal(
+    sentPayloads.filter((payload) => payload.request?.type === "fetch_thread_transcript").length,
+    1
+  );
+  assert.equal(sentPayloads[0].request.input.thread_id, "thread-1");
+  assert.equal(sentPayloads[0].request.input.before, null);
+  assert.equal(state.session.transcript[0].text, "Hello world again");
+  assert.equal(state.session.transcript_revision, 12);
+  assert.equal(state.session.transcript_truncated, false);
+
+  delete window.__transcriptGapRepairCount;
+  // Don't leak a thread-1 query/socket into later shared-state tests.
+  state.socket = null;
+  state.pendingActions.clear();
+  remoteQueryClient.clear();
+});
+
+test("applyTranscriptDelta gap repair retries after a transient fetch failure and still converges", async () => {
+  activeBrowser || installBrowserStubs();
+  const sentPayloads = [];
+  let fetchAttempts = 0;
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { handleRemoteBrokerPayload } = await import("./actions.js");
+  const { applyTranscriptDelta } = await import("./session-ops.js");
+  const { remoteQueryClient } = await import("./query-client.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-1",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: null,
+    sessionClaimExpiresAt: null,
+  });
+  seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
+  state.pendingActions.clear();
+  remoteQueryClient.clear();
+  seedTranscriptHydrationState(state);
+  window.__transcriptGapRepairCount = 0;
+
+  state.socket = {
+    readyState: 1,
+    send(frameText) {
+      const frame = JSON.parse(frameText);
+      sentPayloads.push(frame.payload);
+      if (frame.payload.request?.type !== "fetch_thread_transcript") {
+        return;
+      }
+      fetchAttempts += 1;
+      const attempt = fetchAttempts;
+      setImmediate(async () => {
+        if (attempt === 1) {
+          // First repair fetch fails transiently; the loop must retry, not bail.
+          await handleRemoteBrokerPayload({
+            kind: "remote_action_result",
+            action_id: frame.payload.action_id,
+            action: "fetch_thread_transcript",
+            ok: false,
+            error: "transient broker hiccup",
+          });
+          return;
+        }
+        await handleRemoteBrokerPayload({
+          kind: "remote_action_result",
+          action_id: frame.payload.action_id,
+          action: "fetch_thread_transcript",
+          ok: true,
+          snapshot: {},
+          thread_transcript: {
+            thread_id: "thread-1",
+            revision: 12,
+            entries: [
+              {
+                item_id: "item-1",
+                kind: "agent_text",
+                text: "Hello world again",
+                status: "completed",
+                turn_id: "turn-1",
+                tool: null,
+              },
+            ],
+            prev_cursor: null,
+          },
+        });
+      });
+    },
+  };
+
+  state.session = {
+    active_thread_id: "thread-1",
+    transcript_truncated: false,
+    transcript_revision: 5,
+    transcript: [
+      {
+        item_id: "item-1",
+        kind: "agent_text",
+        status: "running",
+        text: "Hello",
+        turn_id: "turn-1",
+        tool: null,
+      },
+    ],
+  };
+
+  applyTranscriptDelta({
+    thread_id: "thread-1",
+    base_revision: 10,
+    revision: 11,
+    item_id: "item-1",
+    turn_id: "turn-1",
+    delta: " again",
+    delta_kind: "agent_text",
+    text_offset: 11,
+  });
+
+  await waitFor(() => state.session.transcript[0].text === "Hello world again");
+
+  // The first fetch failed, so the loop must have issued at least a second one.
+  assert.ok(fetchAttempts >= 2, `expected a retry after the transient failure, got ${fetchAttempts}`);
+  assert.equal(state.session.transcript[0].text, "Hello world again");
+
+  delete window.__transcriptGapRepairCount;
+  state.socket = null;
+  state.pendingActions.clear();
+  remoteQueryClient.clear();
+});
+
+test("applyTranscriptDelta gap repair honors a higher-revision gap that arrives while a repair is in flight", async () => {
+  activeBrowser || installBrowserStubs();
+  const sentPayloads = [];
+  let fetchAttempts = 0;
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { handleRemoteBrokerPayload } = await import("./actions.js");
+  const { applyTranscriptDelta } = await import("./session-ops.js");
+  const { remoteQueryClient } = await import("./query-client.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-1",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: null,
+    sessionClaimExpiresAt: null,
+  });
+  seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
+  state.pendingActions.clear();
+  remoteQueryClient.clear();
+  seedTranscriptHydrationState(state);
+  window.__transcriptGapRepairCount = 0;
+
+  // First fetch returns a partial tail at revision 11; the second (driven by the
+  // higher-revision gap injected mid-flight) returns the fuller tail at rev 20.
+  const tailByAttempt = [
+    { revision: 11, text: "Hello world" },
+    { revision: 20, text: "Hello world again!!" },
+  ];
+
+  let injectedHigherGap = false;
+  state.socket = {
+    readyState: 1,
+    send(frameText) {
+      const frame = JSON.parse(frameText);
+      sentPayloads.push(frame.payload);
+      if (frame.payload.request?.type !== "fetch_thread_transcript") {
+        return;
+      }
+      fetchAttempts += 1;
+      const attempt = fetchAttempts;
+      // While the FIRST repair fetch is still in flight, a higher-revision gap
+      // arrives. It must not be swallowed by the in-flight repair.
+      if (attempt === 1 && !injectedHigherGap) {
+        injectedHigherGap = true;
+        applyTranscriptDelta({
+          thread_id: "thread-1",
+          base_revision: 19,
+          revision: 20,
+          item_id: "item-1",
+          turn_id: "turn-1",
+          delta: "!!",
+          delta_kind: "agent_text",
+          text_offset: 17,
+        });
+      }
+      const tail = tailByAttempt[Math.min(attempt, tailByAttempt.length) - 1];
+      setImmediate(async () => {
+        await handleRemoteBrokerPayload({
+          kind: "remote_action_result",
+          action_id: frame.payload.action_id,
+          action: "fetch_thread_transcript",
+          ok: true,
+          snapshot: {},
+          thread_transcript: {
+            thread_id: "thread-1",
+            revision: tail.revision,
+            entries: [
+              {
+                item_id: "item-1",
+                kind: "agent_text",
+                text: tail.text,
+                status: "completed",
+                turn_id: "turn-1",
+                tool: null,
+              },
+            ],
+            prev_cursor: null,
+          },
+        });
+      });
+    },
+  };
+
+  state.session = {
+    active_thread_id: "thread-1",
+    transcript_truncated: false,
+    transcript_revision: 5,
+    transcript: [
+      {
+        item_id: "item-1",
+        kind: "agent_text",
+        status: "running",
+        text: "Hello",
+        turn_id: "turn-1",
+        tool: null,
+      },
+    ],
+  };
+
+  // First gap (rev 11) starts a repair; the mock injects a rev-20 gap while it
+  // is in flight.
+  applyTranscriptDelta({
+    thread_id: "thread-1",
+    base_revision: 10,
+    revision: 11,
+    item_id: "item-1",
+    turn_id: "turn-1",
+    delta: " world",
+    delta_kind: "agent_text",
+    text_offset: 11,
+  });
+
+  // Must end on the HIGHER target's content, proving the in-flight gap drove a
+  // second fetch rather than being dropped.
+  await waitFor(() => state.session.transcript[0].text === "Hello world again!!");
+
+  assert.equal(fetchAttempts, 2);
+  assert.equal(state.session.transcript[0].text, "Hello world again!!");
+  assert.equal(state.session.transcript_revision, 20);
+
+  delete window.__transcriptGapRepairCount;
+  state.socket = null;
+  state.pendingActions.clear();
+  remoteQueryClient.clear();
+});
+
+test("applyTranscriptDelta gap repair retries when fetch returns an incomplete (wrong-thread) page", async () => {
+  activeBrowser || installBrowserStubs();
+  const sentPayloads = [];
+  let fetchAttempts = 0;
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { handleRemoteBrokerPayload } = await import("./actions.js");
+  const { applyTranscriptDelta } = await import("./session-ops.js");
+  const { remoteQueryClient } = await import("./query-client.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-1",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: null,
+    sessionClaimExpiresAt: null,
+  });
+  seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
+  state.pendingActions.clear();
+  remoteQueryClient.clear();
+  seedTranscriptHydrationState(state);
+  window.__transcriptGapRepairCount = 0;
+
+  state.socket = {
+    readyState: 1,
+    send(frameText) {
+      const frame = JSON.parse(frameText);
+      sentPayloads.push(frame.payload);
+      if (frame.payload.request?.type !== "fetch_thread_transcript") {
+        return;
+      }
+      fetchAttempts += 1;
+      const attempt = fetchAttempts;
+      setImmediate(async () => {
+        await handleRemoteBrokerPayload({
+          kind: "remote_action_result",
+          action_id: frame.payload.action_id,
+          action: "fetch_thread_transcript",
+          ok: true,
+          snapshot: {},
+          thread_transcript: {
+            // First response is for the WRONG thread — an incomplete/garbled
+            // page that must NOT be treated as a successful repair.
+            thread_id: attempt === 1 ? "thread-OTHER" : "thread-1",
+            revision: 12,
+            entries: [
+              {
+                item_id: "item-1",
+                kind: "agent_text",
+                text: "Hello world again",
+                status: "completed",
+                turn_id: "turn-1",
+                tool: null,
+              },
+            ],
+            prev_cursor: null,
+          },
+        });
+      });
+    },
+  };
+
+  state.session = {
+    active_thread_id: "thread-1",
+    transcript_truncated: false,
+    transcript_revision: 5,
+    transcript: [
+      {
+        item_id: "item-1",
+        kind: "agent_text",
+        status: "running",
+        text: "Hello",
+        turn_id: "turn-1",
+        tool: null,
+      },
+    ],
+  };
+
+  applyTranscriptDelta({
+    thread_id: "thread-1",
+    base_revision: 10,
+    revision: 11,
+    item_id: "item-1",
+    turn_id: "turn-1",
+    delta: " again",
+    delta_kind: "agent_text",
+    text_offset: 11,
+  });
+
+  await waitFor(() => state.session.transcript[0].text === "Hello world again");
+
+  // The wrong-thread page was rejected (not silently accepted), so a retry ran.
+  assert.equal(fetchAttempts, 2);
+  assert.equal(state.session.transcript[0].text, "Hello world again");
+
+  delete window.__transcriptGapRepairCount;
+  state.socket = null;
+  state.pendingActions.clear();
+  remoteQueryClient.clear();
+});
+
 test("applySessionSnapshot ignores stale snapshots for the active thread", async () => {
   activeBrowser || installBrowserStubs();
 

@@ -371,6 +371,7 @@ impl ProviderBridge for FakeProviderBridge {
                                 turn_id: Some(turn_id_for_task.clone()),
                                 delta: chunk,
                                 kind: TranscriptDeltaKind::AgentText,
+                                text_offset: mutation.text_offset,
                             },
                         ));
                 } else {

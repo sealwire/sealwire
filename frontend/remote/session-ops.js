@@ -78,6 +78,7 @@ export function applyTranscriptDelta({
   delta,
   delta_kind,
   kind,
+  text_offset,
 }) {
   if (typeof window !== "undefined" && typeof window.__transcriptDeltaCount === "number") {
     window.__transcriptDeltaCount++;
@@ -104,23 +105,108 @@ export function applyTranscriptDelta({
     console.log(message);
     return;
   }
+
+  const transcript = state.session.transcript;
+  if (!Array.isArray(transcript)) return;
+  const resolvedKind = transcriptDeltaKindToEntryKind(delta_kind || kind);
+  const entryIndex = transcript.findIndex((e) => e.item_id === item_id);
+  const deltaText = delta ?? "";
+  const offset = numericOffset(text_offset);
+
+  // Offset-based path (agent-text deltas carry text_offset): the entry's own
+  // text length is the cursor, so a single dropped/coalesced chunk no longer
+  // freezes the whole message. We can tell apart a contiguous append, a
+  // duplicate re-delivery, and a genuine gap — and only the gap needs an
+  // authoritative repair fetch. This tolerates a non-contiguous base_revision
+  // chain (interleaved streams, snapshot-bumped revisions). Deltas whose
+  // revision is strictly behind the current revision are still dropped above as
+  // superseded before reaching here — that is intentional (a newer snapshot
+  // already covers them).
+  if (offset != null) {
+    const haveText = entryIndex >= 0 ? (transcript[entryIndex].text ?? "") : "";
+    const have = haveText.length;
+    if (have < offset) {
+      // Missing earlier text: appending here would splice the stream out of
+      // order. Pull the authoritative tail instead of silently freezing.
+      scheduleTranscriptGapRepair(currentThreadId || thread_id || null, "offset_gap", deltaRevision, {
+        item: item_id,
+        offset,
+        have,
+      });
+      return;
+    }
+    // Length alone can't prove the overlap is the SAME text. If the bytes we
+    // already hold in [offset, offset+overlap) disagree with this delta, local
+    // text has diverged — treating it as a duplicate / appending the tail would
+    // silently keep or extend corrupted text, so force an authoritative repair.
+    const overlapLen = Math.min(have - offset, deltaText.length);
+    if (overlapLen > 0 && haveText.slice(offset, offset + overlapLen) !== deltaText.slice(0, overlapLen)) {
+      scheduleTranscriptGapRepair(currentThreadId || thread_id || null, "offset_mismatch", deltaRevision, {
+        item: item_id,
+        offset,
+        have,
+      });
+      return;
+    }
+    if (have >= offset + deltaText.length) {
+      // Duplicate re-delivery: we already hold this delta's whole range.
+      return;
+    }
+    // Contiguous, or partially-overlapping re-delivery: append only the tail we
+    // are missing so re-delivery stays idempotent.
+    commitTranscriptDeltaAppend({
+      transcript,
+      entryIndex,
+      item_id,
+      appendText: deltaText.slice(have - offset),
+      resolvedKind,
+      turn_id,
+      entry_seq,
+      deltaRevision,
+      server_time,
+    });
+    return;
+  }
+
+  // Fallback path (command output / legacy deltas with no offset): rely on the
+  // base_revision chain, but on a mismatch repair instead of dropping — the old
+  // silent drop is exactly what left the last message permanently incomplete.
   if (
     deltaBaseRevision != null
     && currentRevision != null
     && deltaBaseRevision !== currentRevision
   ) {
-    const message = `[transcript-delta] ignored base_revision=${deltaBaseRevision} current=${currentRevision} thread=${thread_id || "-"} item=${item_id || "-"}`;
-    renderLog(message);
-    console.log(message);
+    scheduleTranscriptGapRepair(currentThreadId || thread_id || null, "base_revision_gap", deltaRevision, {
+      item: item_id,
+      base_revision: deltaBaseRevision,
+      current: currentRevision,
+    });
     return;
   }
+  commitTranscriptDeltaAppend({
+    transcript,
+    entryIndex,
+    item_id,
+    appendText: deltaText,
+    resolvedKind,
+    turn_id,
+    entry_seq,
+    deltaRevision,
+    server_time,
+  });
+}
 
-  const currentSession = state.session;
-  const transcript = currentSession.transcript;
-  if (!Array.isArray(transcript)) return;
-  const resolvedKind = transcriptDeltaKindToEntryKind(delta_kind || kind);
-
-  const entryIndex = transcript.findIndex((e) => e.item_id === item_id);
+function commitTranscriptDeltaAppend({
+  transcript,
+  entryIndex,
+  item_id,
+  appendText,
+  resolvedKind,
+  turn_id,
+  entry_seq,
+  deltaRevision,
+  server_time,
+}) {
   const nextTranscript = entryIndex >= 0
     ? transcript.map((entry, index) => {
         if (index !== entryIndex) {
@@ -133,7 +219,7 @@ export function applyTranscriptDelta({
             : entry.entry_seq,
           kind: entry.kind || resolvedKind,
           status: "running",
-          text: `${entry.text ?? ""}${delta ?? ""}`,
+          text: `${entry.text ?? ""}${appendText}`,
           turn_id: entry.turn_id || turn_id || null,
         };
       })
@@ -142,7 +228,7 @@ export function applyTranscriptDelta({
         {
           item_id,
           turn_id: turn_id ?? null,
-          text: delta ?? "",
+          text: appendText,
           kind: resolvedKind,
           status: "running",
           tool: null,
@@ -150,16 +236,149 @@ export function applyTranscriptDelta({
         },
       ];
   const nextSession = {
-    ...currentSession,
+    ...state.session,
     transcript: nextTranscript,
   };
+  // Always advance the revision cursor when we apply a delta, even though the
+  // offset path ignores base_revision for the apply decision. This keeps the
+  // shared per-thread revision monotonic so the command-output base_revision
+  // chain (and snapshot freshness checks) stay intact across interleaving.
   if (deltaRevision != null) {
     nextSession.transcript_revision = deltaRevision;
   }
   if (Number.isSafeInteger(server_time)) {
     nextSession.server_time = server_time;
   }
+  renderSession(nextSession);
+}
 
+// Highest target revision we still owe a repair for, per thread. A Map (not a
+// Set) so a gap detected *while* a repair is already in flight is not swallowed:
+// we remember the newest revision and the loop re-fetches if it is past what the
+// in-flight pass covered.
+const pendingGapRepairThreads = new Map();
+
+function scheduleTranscriptGapRepair(threadId, reason, targetRevision, detail = {}) {
+  if (typeof window !== "undefined" && typeof window.__transcriptGapRepairCount === "number") {
+    window.__transcriptGapRepairCount++;
+  }
+  const detailText = Object.entries(detail)
+    .map(([key, value]) => `${key}=${value ?? "-"}`)
+    .join(" ");
+  const message = `[transcript-delta] gap -> repair thread=${threadId || "-"} reason=${reason} target=${targetRevision ?? "-"} ${detailText}`.trimEnd();
+  renderLog(message);
+  // TODO(remote-monitor-debug): Remove this console mirror once gap repair is stable.
+  console.log(message);
+  if (!threadId) {
+    return;
+  }
+  const target = numericRevision(targetRevision) ?? 0;
+  const existingTarget = pendingGapRepairThreads.get(threadId);
+  if (existingTarget != null) {
+    if (target > existingTarget) {
+      pendingGapRepairThreads.set(threadId, target);
+    }
+    return;
+  }
+  pendingGapRepairThreads.set(threadId, target);
+  void runTranscriptRepairLoop(threadId);
+}
+
+const MAX_TRANSCRIPT_REPAIR_FAILURES = 3;
+
+async function runTranscriptRepairLoop(threadId) {
+  let repairedToRevision = -1;
+  let consecutiveFailures = 0;
+  try {
+    while (state.session?.active_thread_id === threadId) {
+      const target = pendingGapRepairThreads.get(threadId) ?? 0;
+      if (target <= repairedToRevision) {
+        break;
+      }
+      try {
+        await repairActiveTranscriptTail(threadId, target);
+        repairedToRevision = target;
+        consecutiveFailures = 0;
+      } catch (error) {
+        // A single failed fetch must NOT abandon the loop: do not advance
+        // repairedToRevision, and re-read pendingGapRepairThreads on the next
+        // iteration so a higher-revision gap that arrived while this attempt was
+        // in flight is still honored instead of being dropped on the failure.
+        consecutiveFailures += 1;
+        renderLog(
+          `[transcript-delta] gap repair attempt failed thread=${threadId} (${consecutiveFailures}/${MAX_TRANSCRIPT_REPAIR_FAILURES}): ${error?.message || error}`
+        );
+        if (consecutiveFailures >= MAX_TRANSCRIPT_REPAIR_FAILURES) {
+          // Give up for now; the next delta or snapshot re-arms repair.
+          break;
+        }
+      }
+    }
+  } finally {
+    pendingGapRepairThreads.delete(threadId);
+  }
+}
+
+// Pull the authoritative transcript tail and overlay it onto the visible
+// transcript. This deliberately bypasses the snapshot-truncation hydration gate
+// (`prepareTranscriptHydrationState` no-ops when `transcript_truncated` is
+// false, which is exactly the normal live-gap case) and the query cache, so a
+// dropped live chunk is actually re-fetched and healed rather than only logged.
+async function repairActiveTranscriptTail(threadId, targetRevision) {
+  const page = await fetchRawTranscriptPage({ threadId, before: null });
+  // The active thread may have changed while the fetch was in flight — a
+  // legitimate no-op (the user moved on), not a failure to retry.
+  if (!state.session || state.session.active_thread_id !== threadId) {
+    return;
+  }
+  // A missing or wrong-thread page is an incomplete/garbled response: throw so
+  // runTranscriptRepairLoop retries instead of silently treating the gap as
+  // repaired and advancing past it.
+  if (!page || page.thread_id !== threadId) {
+    throw new Error("remote transcript repair page response is incomplete");
+  }
+
+  const pageEntries = Array.isArray(page.entries) ? page.entries : [];
+  const pageItemIds = new Set(pageEntries.map((entry) => entry?.item_id).filter(Boolean));
+  const current = Array.isArray(state.session.transcript) ? state.session.transcript : [];
+  const currentByItemId = new Map(
+    current.filter((entry) => entry?.item_id).map((entry) => [entry.item_id, entry])
+  );
+
+  // Older entries the bounded tail page did not reach keep their place; the
+  // page's entries (server-authoritative) replace the visible tail.
+  const olderKept = current.filter(
+    (entry) => !entry?.item_id || !pageItemIds.has(entry.item_id)
+  );
+  const repairedTail = pageEntries.map((entry) => {
+    const existing = currentByItemId.get(entry?.item_id);
+    if (!existing) {
+      return entry;
+    }
+    return {
+      ...existing,
+      ...entry,
+      // Never let an unexpectedly-truncated page entry shorten visible text.
+      text: selectVisibleSnapshotText(existing.text, entry.text),
+    };
+  });
+
+  const currentRevision = numericRevision(state.session.transcript_revision) ?? 0;
+  const pageRevision = numericRevision(page.revision) ?? 0;
+  const nextRevision = Math.max(
+    currentRevision,
+    pageRevision,
+    numericRevision(targetRevision) ?? 0
+  );
+
+  const nextSession = {
+    ...state.session,
+    transcript: [...olderKept, ...repairedTail],
+    transcript_truncated: page.prev_cursor != null,
+  };
+  if (nextRevision > 0) {
+    nextSession.transcript_revision = nextRevision;
+  }
   renderSession(nextSession);
 }
 
@@ -458,6 +677,10 @@ function upsertApproval(approvals, incoming) {
 
 function numericRevision(value) {
   return Number.isSafeInteger(value) ? value : null;
+}
+
+function numericOffset(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
 export async function syncRemoteSnapshot(reason, silent = false) {

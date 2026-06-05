@@ -59,6 +59,7 @@ pub(super) enum OutboundBrokerPayload {
         turn_id: Option<String>,
         delta: String,
         delta_kind: String,
+        text_offset: Option<u64>,
     },
     EncryptedTranscriptDelta {
         target_peer_id: String,

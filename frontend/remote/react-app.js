@@ -28,6 +28,7 @@ import {
   providerSettings,
 } from "../shared/provider-settings.js";
 import { RefreshButton } from "../shared/refresh-button.js";
+import { copyTextToClipboard } from "../shared/clipboard.js";
 import { ThemePickerRow } from "../shared/theme-picker.js";
 import { installThreadListWheelProxy } from "../shared/thread-list-scroll.js";
 import { selectWorkspaceSuggestionsModel } from "../shared/workspace-suggestions.js";
@@ -1797,6 +1798,13 @@ function RemoteTranscriptPanel({
             : new Set(),
       },
       onTranscriptInteract: (event) => {
+        const copyButton = event.target.closest?.("[data-copy-message]");
+        if (copyButton) {
+          event.preventDefault();
+          void copyTextToClipboard(copyButton.dataset.copyMessage || "", copyButton);
+          return;
+        }
+
         const fileChangeButton = event.target.closest?.("[data-file-change-action]");
         if (fileChangeButton) {
           event.preventDefault();

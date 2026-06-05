@@ -1328,6 +1328,7 @@ async fn publish_transcript_delta(
                 turn_id: delta.turn_id,
                 delta: delta.delta,
                 delta_kind: kind.to_string(),
+                text_offset: delta.text_offset,
             },
         )
         .await
@@ -1378,6 +1379,7 @@ async fn publish_transcript_delta(
                     "turn_id": delta.turn_id,
                     "delta": delta.delta,
                     "delta_kind": kind,
+                    "text_offset": delta.text_offset,
                 }),
             )?;
             messages.push(TargetedBrokerMessage {

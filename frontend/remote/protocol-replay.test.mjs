@@ -206,6 +206,21 @@ test("protocol replay patches duplicate transcript events in place", async () =>
   assertNoDuplicateEntries(state.session);
 });
 
+test("protocol replay reassembles offset deltas, ignores duplicates, and refuses to corrupt on a gap", async () => {
+  const runtime = await createReplayRuntime();
+  await replayFixture("transcript_delta_offset_reducer.jsonl", runtime);
+
+  const { state } = runtime;
+  assert.equal(state.session.active_thread_id, "thread-1");
+  assert.equal(state.session.transcript.length, 2);
+  // Contiguous offset deltas reassemble "hel" + "lo" + " world"; the duplicate
+  // " world" re-delivery is idempotent; the final delta sits at text_offset 99
+  // (a dropped chunk) and must NOT be spliced onto the 11-char tail.
+  assert.equal(entryText(state.session, "assistant-1"), "hello world");
+  assert.equal(state.session.transcript_revision, 3);
+  assertNoDuplicateEntries(state.session);
+});
+
 async function createReplayRuntime() {
   installBrowserStubs();
   const { state } = await import("./state.js");

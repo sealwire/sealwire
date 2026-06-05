@@ -295,6 +295,78 @@
   line-height: 1.65;
 }
 
+/* "Copy response" affordance — kept subtle and revealed on hover/focus so it
+   doesn't clutter the transcript. Always tappable on touch devices. */
+.message-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.message-copy-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms ease, color 120ms ease, background 120ms ease,
+    border-color 120ms ease;
+}
+
+.chat-message-assistant:hover .message-copy-button,
+.message-copy-button:focus-visible,
+.message-copy-button[data-copied="true"] {
+  opacity: 1;
+}
+
+.message-copy-button:hover:not(:disabled) {
+  color: var(--text-1);
+  background: var(--surface-2);
+  border-color: var(--border-soft);
+}
+
+.message-copy-button[data-copied="true"] {
+  color: var(--ok-fg);
+}
+
+.message-copy-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.message-copy-icon svg {
+  width: 15px;
+  height: 15px;
+}
+
+.message-copy-icon-done {
+  display: none;
+}
+
+.message-copy-button[data-copied="true"] .message-copy-icon-default {
+  display: none;
+}
+
+.message-copy-button[data-copied="true"] .message-copy-icon-done {
+  display: inline-flex;
+}
+
+/* Touch devices have no hover, so keep the button gently visible. */
+@media (hover: none) {
+  .message-copy-button {
+    opacity: 0.55;
+  }
+}
+
 /* System / approval / tool / reasoning / command — contained cards with semantic left stripe */
 .chat-message-system {
   align-self: stretch;

@@ -402,6 +402,56 @@ fn activate_thread_sets_active_controller_on_start() {
 }
 
 #[test]
+fn append_agent_delta_reports_utf16_text_offset() {
+    let mut relay = test_state();
+    relay.activate_thread(
+        test_thread("thread-1", "/tmp/project"),
+        "/tmp/project",
+        DEFAULT_MODEL,
+        DEFAULT_APPROVAL_POLICY,
+        DEFAULT_SANDBOX,
+        DEFAULT_EFFORT,
+        "device-a",
+    );
+
+    // The first chunk creates the entry, so its append offset is 0.
+    let first = relay.append_agent_delta("item-1", "Hello", "turn-1");
+    assert_eq!(first.text_offset, Some(0));
+
+    // The second chunk appends after "Hello" (5 chars).
+    let second = relay.append_agent_delta("item-1", " world", "turn-1");
+    assert_eq!(second.text_offset, Some(5));
+
+    // text_offset counts UTF-16 code units so it lines up with the browser's
+    // String.length. An astral emoji is one Unicode scalar value but two UTF-16
+    // code units, so the following chunk must report offset 13, not 12.
+    let third = relay.append_agent_delta("item-1", "💡", "turn-1");
+    assert_eq!(third.text_offset, Some(11));
+    let fourth = relay.append_agent_delta("item-1", "!", "turn-1");
+    assert_eq!(fourth.text_offset, Some(13));
+}
+
+#[test]
+fn append_command_delta_has_no_text_offset() {
+    let mut relay = test_state();
+    relay.activate_thread(
+        test_thread("thread-1", "/tmp/project"),
+        "/tmp/project",
+        DEFAULT_MODEL,
+        DEFAULT_APPROVAL_POLICY,
+        DEFAULT_SANDBOX,
+        DEFAULT_EFFORT,
+        "device-a",
+    );
+
+    // Command output joins chunks with a server-side separator, so its on-wire
+    // text diverges from a plain client-side append; we deliberately omit the
+    // offset and let the client fall back to base_revision gap detection.
+    let meta = relay.append_command_delta("cmd-1", "output");
+    assert_eq!(meta.text_offset, None);
+}
+
+#[test]
 fn snapshot_thread_activity_tracks_active_and_background_running_threads() {
     let mut relay = test_state();
     relay.activate_thread(

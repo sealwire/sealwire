@@ -1,5 +1,5 @@
 import React from "react";
-import { SPARKLES_SVG } from "../svg.js";
+import { CHECK_SVG, COPY_SVG, SPARKLES_SVG } from "../svg.js";
 import {
   buildFileDisplayPathMap,
   diffStats,
@@ -135,6 +135,41 @@ function renderMessageBody(text) {
   return renderMarkdown(text);
 }
 
+// "Copy response" affordance for agent messages. The raw answer text is stashed
+// on the button via `data-copy-message`; the transcript click delegators in
+// app.js (local) and react-app.js (remote) read it and write to the clipboard.
+// Both icons are rendered up front and toggled by CSS off `data-copied`.
+function renderCopyMessageButton(text) {
+  const value = String(text ?? "");
+  if (!value.trim()) {
+    return null;
+  }
+  return h(
+    "div",
+    { className: "message-actions" },
+    h(
+      "button",
+      {
+        type: "button",
+        className: "message-copy-button",
+        "data-copy-message": value,
+        title: "Copy response",
+        "aria-label": "Copy response",
+      },
+      h("span", {
+        className: "message-copy-icon message-copy-icon-default",
+        "aria-hidden": "true",
+        dangerouslySetInnerHTML: { __html: COPY_SVG },
+      }),
+      h("span", {
+        className: "message-copy-icon message-copy-icon-done",
+        "aria-hidden": "true",
+        dangerouslySetInnerHTML: { __html: CHECK_SVG },
+      })
+    )
+  );
+}
+
 function UserEntryImpl({ entry, isLatestUser = false, isJustPrepended = false }) {
   // `data-latest-user-message` is the anchor that the scroll layer uses to
   // pin a freshly sent user message to the top of the viewport.
@@ -167,7 +202,12 @@ function AgentEntryImpl({ entry, isJustPrepended = false }) {
       "aria-hidden": "true",
       dangerouslySetInnerHTML: { __html: SPARKLES_SVG },
     }),
-    h("div", { className: "message-card" }, h("div", { className: "message-body" }, renderMessageBody(entry.text)))
+    h(
+      "div",
+      { className: "message-card" },
+      h("div", { className: "message-body" }, renderMessageBody(entry.text)),
+      renderCopyMessageButton(entry.text)
+    )
   );
 }
 

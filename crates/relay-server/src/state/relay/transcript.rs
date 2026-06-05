@@ -12,6 +12,13 @@ pub(crate) struct TranscriptMutationMeta {
     pub(crate) revision: u64,
     pub(crate) entry_seq: u64,
     pub(crate) server_time: u64,
+    /// Length (in UTF-16 code units, matching JS `String.length`) of the
+    /// entry's text *before* this delta was appended. Only set for pure-append
+    /// agent-text deltas, where the client can use it to detect a missing chunk
+    /// (`have < text_offset` => gap) and repair instead of silently freezing.
+    /// `None` for mutations where append offset is undefined (command output
+    /// inserts separators server-side, snapshots, completions, etc.).
+    pub(crate) text_offset: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -209,7 +216,7 @@ impl RelayState {
         delta: &str,
         turn_id: &str,
     ) -> TranscriptMutationMeta {
-        let entry_seq = {
+        let (entry_seq, text_offset) = {
             let runtime = self.ensure_runtime_for_thread(thread_id);
             if let Some(index) = runtime
                 .transcript
@@ -218,11 +225,13 @@ impl RelayState {
             {
                 let entry = &mut runtime.transcript[index];
                 entry.kind = TranscriptEntryKind::AgentText;
-                entry.text.get_or_insert_with(String::new).push_str(delta);
+                let text = entry.text.get_or_insert_with(String::new);
+                let text_offset = text.encode_utf16().count() as u64;
+                text.push_str(delta);
                 entry.status = "streaming".to_string();
                 entry.turn_id.get_or_insert_with(|| turn_id.to_string());
                 entry.tool = None;
-                index as u64 + 1
+                (index as u64 + 1, text_offset)
             } else {
                 let entry_seq = runtime.transcript.len() as u64 + 1;
                 runtime.transcript.push(TranscriptRecord {
@@ -233,14 +242,14 @@ impl RelayState {
                     turn_id: Some(turn_id.to_string()),
                     tool: None,
                 });
-                entry_seq
+                (entry_seq, 0)
             }
         };
         let (base_revision, revision) = self.bump_thread_transcript_revision(thread_id);
         if self.active_thread_id.as_deref() == Some(thread_id) {
             self.sync_selected_runtime_to_fields();
         }
-        transcript_mutation_meta(base_revision, revision, entry_seq)
+        transcript_mutation_meta_with_text_offset(base_revision, revision, entry_seq, text_offset)
     }
 
     fn append_agent_delta_legacy(
@@ -257,20 +266,32 @@ impl RelayState {
             let (base_revision, revision) = self.bump_transcript_revision();
             let entry = &mut self.transcript[index];
             entry.kind = TranscriptEntryKind::AgentText;
-            entry.text.get_or_insert_with(String::new).push_str(delta);
+            let text = entry.text.get_or_insert_with(String::new);
+            let text_offset = text.encode_utf16().count() as u64;
+            text.push_str(delta);
             entry.status = "streaming".to_string();
             entry.tool = None;
-            return transcript_mutation_meta(base_revision, revision, index as u64 + 1);
+            return transcript_mutation_meta_with_text_offset(
+                base_revision,
+                revision,
+                index as u64 + 1,
+                text_offset,
+            );
         }
 
-        self.upsert_transcript_item(
+        let meta = self.upsert_transcript_item(
             item_id.to_string(),
             TranscriptEntryKind::AgentText,
             Some(delta.to_string()),
             "streaming".to_string(),
             Some(turn_id.to_string()),
             None,
-        )
+        );
+        // Brand-new entry: this delta is the whole text, so its append offset is 0.
+        TranscriptMutationMeta {
+            text_offset: Some(0),
+            ..meta
+        }
     }
 
     pub fn upsert_user_message(&mut self, item_id: String, text: String, turn_id: String) {
@@ -749,6 +770,22 @@ fn transcript_mutation_meta(
         revision,
         entry_seq,
         server_time: super::super::unix_now(),
+        text_offset: None,
+    }
+}
+
+fn transcript_mutation_meta_with_text_offset(
+    base_revision: u64,
+    revision: u64,
+    entry_seq: u64,
+    text_offset: u64,
+) -> TranscriptMutationMeta {
+    TranscriptMutationMeta {
+        base_revision,
+        revision,
+        entry_seq,
+        server_time: super::super::unix_now(),
+        text_offset: Some(text_offset),
     }
 }
 

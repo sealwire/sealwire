@@ -77,6 +77,42 @@ test("renderEntryMarkup renders typed session items safely", () => {
   assert.match(toolMarkup, /tool-log-primary">frontend\/remote\/main\.js</);
 });
 
+test("renderEntryMarkup adds a copy-response button to agent messages only", () => {
+  const agentMarkup = renderEntryMarkup({
+    kind: "agent_text",
+    status: "completed",
+    text: "Here is the answer.",
+  });
+  // Agent answers get a copy button carrying the raw text for the clipboard.
+  assert.match(agentMarkup, /message-copy-button/);
+  assert.match(agentMarkup, /data-copy-message="Here is the answer\."/);
+  assert.match(agentMarkup, /aria-label="Copy response"/);
+
+  // User messages and reasoning blocks must not get the copy affordance.
+  const userMarkup = renderEntryMarkup({
+    kind: "user_text",
+    status: "completed",
+    text: "What is the answer?",
+  });
+  assert.doesNotMatch(userMarkup, /message-copy-button/);
+
+  const reasoningMarkup = renderEntryMarkup({
+    kind: "reasoning",
+    status: "completed",
+    text: "thinking it through",
+  });
+  assert.doesNotMatch(reasoningMarkup, /message-copy-button/);
+});
+
+test("renderEntryMarkup omits the copy button when the agent text is empty", () => {
+  const markup = renderEntryMarkup({
+    kind: "agent_text",
+    status: "completed",
+    text: "",
+  });
+  assert.doesNotMatch(markup, /message-copy-button/);
+});
+
 test("TranscriptPane renders empty, ready, and transcript states", () => {
   const emptyMarkup = renderTranscriptPaneMarkup({
     emptyContent: h("p", { className: "empty-marker" }, "No session"),

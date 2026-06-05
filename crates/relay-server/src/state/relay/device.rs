@@ -195,6 +195,9 @@ pub(crate) struct PendingTranscriptDelta {
     pub(crate) turn_id: Option<String>,
     pub(crate) delta: String,
     pub(crate) kind: TranscriptDeltaKind,
+    /// UTF-16 length of the entry text before this delta (see
+    /// `TranscriptMutationMeta::text_offset`). `None` for command output.
+    pub(crate) text_offset: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

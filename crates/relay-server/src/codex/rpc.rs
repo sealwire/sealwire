@@ -576,6 +576,7 @@ async fn handle_notification_for_provider(
                                 turn_id: Some(turn_id),
                                 delta,
                                 kind: TranscriptDeltaKind::AgentText,
+                                text_offset: mutation.text_offset,
                             },
                         ));
                     changed = true;
@@ -779,6 +780,7 @@ async fn handle_notification_for_provider(
                                     turn_id: None,
                                     delta: delta.clone(),
                                     kind: TranscriptDeltaKind::CommandOutput,
+                                    text_offset: mutation.text_offset,
                                 },
                             ));
                         relay.push_log("command", delta);

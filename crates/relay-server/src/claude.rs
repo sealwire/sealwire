@@ -927,6 +927,7 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                                     turn_id: Some(turn_id),
                                     delta: text.clone(),
                                     kind: TranscriptDeltaKind::AgentText,
+                                    text_offset: mutation.text_offset,
                                 },
                             ));
                     }

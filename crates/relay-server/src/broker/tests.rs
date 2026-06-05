@@ -478,6 +478,7 @@ fn transcript_delta_coalescing_merges_contiguous_item_updates() {
         turn_id: Some("turn-1".to_string()),
         delta: "hel".to_string(),
         kind: TranscriptDeltaKind::AgentText,
+        text_offset: Some(0),
     };
     let second = PendingTranscriptDelta {
         base_revision: 11,
@@ -502,6 +503,9 @@ fn transcript_delta_coalescing_merges_contiguous_item_updates() {
     assert_eq!(coalesced[0].revision, 12);
     assert_eq!(coalesced[0].server_time, 101);
     assert_eq!(coalesced[0].delta, "hello");
+    // The coalesced delta begins where the first chunk began, so it keeps the
+    // first chunk's text_offset (not the second's).
+    assert_eq!(coalesced[0].text_offset, Some(0));
     assert_eq!(coalesced[1].delta, "!");
 }
 
