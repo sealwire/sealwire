@@ -416,6 +416,52 @@ fn request_review_action_round_trips_and_binds_device() {
 }
 
 #[test]
+fn resolve_and_dismiss_review_actions_round_trip_and_bind_device() {
+    // resolve_review
+    let resolve: RemoteActionRequest =
+        serde_json::from_value(serde_json::json!({ "type": "resolve_review" }))
+            .expect("resolve_review should parse");
+    assert_eq!(resolve.kind(), RemoteActionKind::ResolveReview);
+    assert_eq!(RemoteActionKind::ResolveReview.as_str(), "resolve_review");
+    match resolve.bind_device("device-9".to_string()) {
+        RemoteActionRequest::ResolveReview { device_id } => {
+            assert_eq!(device_id.as_deref(), Some("device-9"));
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+
+    // dismiss_review
+    let dismiss: RemoteActionRequest = serde_json::from_value(
+        serde_json::json!({ "type": "dismiss_review", "review_id": "review-1" }),
+    )
+    .expect("dismiss_review should parse");
+    assert_eq!(dismiss.kind(), RemoteActionKind::DismissReview);
+    assert_eq!(RemoteActionKind::DismissReview.as_str(), "dismiss_review");
+    match dismiss.bind_device("device-9".to_string()) {
+        RemoteActionRequest::DismissReview {
+            review_id,
+            device_id,
+        } => {
+            assert_eq!(review_id, "review-1");
+            assert_eq!(device_id.as_deref(), Some("device-9"));
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+
+    // Both are ack-style and gated behind a session claim.
+    for kind in [
+        RemoteActionKind::ResolveReview,
+        RemoteActionKind::DismissReview,
+    ] {
+        assert!(matches!(
+            remote_action_result_kind(kind),
+            RemoteActionResultKind::RemoteActionAck
+        ));
+        assert!(requires_session_claim(kind));
+    }
+}
+
+#[test]
 fn plain_remote_action_result_chunk_payloads_fit_within_broker_limit() {
     let plaintext = make_large_thread_transcript_plaintext();
     let payloads =

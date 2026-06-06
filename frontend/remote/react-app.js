@@ -1,6 +1,7 @@
 import React, {
   useEffect,
   useLayoutEffect,
+  useMemo,
   useReducer,
   useRef,
   useState,
@@ -93,12 +94,20 @@ import {
 import { fetchModelsWithRetry } from "./provider-model-fetch.js";
 import { useRemoteSessionRuntime } from "./use-remote-session-runtime.js";
 import {
+  RemoteReviewerChip,
   RemoteWorkspaceChangesRail,
   RemoteWorkspaceDiffChip,
   RemoteWorkspaceDiffModal,
+  getRemoteWorkspaceDiffStore,
   notifyRemoteSessionUpdated,
   triggerRemoteWorkspaceDiffRefresh,
 } from "./workspace-diff-host.js";
+import {
+  canRequestReview,
+  isReviewBlocked,
+  selectReviewLaunchModel,
+} from "../shared/review-state.js";
+import { ReviewLauncher } from "../shared/review-panel.js";
 import { createPanelControl } from "../local/panel-controls.js";
 import { setupHeaderBandSync } from "../local/header-band-sync.js";
 import {
@@ -741,6 +750,52 @@ function RemoteApp() {
     notifyRemoteSessionUpdated(session);
   }, [session]);
 
+  // Reviewer-tab actions, bound to the broker-backed remote handlers. `handlers`
+  // is rebuilt every render, so we keep the latest in a ref and expose a STABLE
+  // action object via useMemo([]). Stability matters: `fetchReviewerTranscript`
+  // is a useEffect dependency in ReviewerJobCard, so a fresh identity each render
+  // would re-dispatch full transcript fetches on every routine remote render.
+  const handlersRef = useRef(handlers);
+  handlersRef.current = handlers;
+  const reviewerActions = useMemo(
+    () => ({
+      onRequestReview: (values) => handlersRef.current.onRequestReview?.(values),
+      onResolveReview: () => handlersRef.current.onResolveReview?.(),
+      onDismissReview: (reviewId) => handlersRef.current.onDismissReview?.(reviewId),
+      fetchReviewerTranscript: (threadId) =>
+        Promise.resolve(handlersRef.current.onFetchReviewerTranscript?.(threadId)).then(
+          (entries) => entries || []
+        ),
+    }),
+    []
+  );
+
+  // Push the review slice onto the remote workspace-diff store so the Reviewer
+  // tab (rail + modal) and the mobile chip badge stay in sync with the session.
+  const remoteDeviceId = currentState.remoteAuth?.deviceId;
+  useEffect(() => {
+    getRemoteWorkspaceDiffStore().setReview({
+      reviewJobs: session?.active_review_jobs || [],
+      reviewModel: selectReviewLaunchModel({
+        providers: remoteUi.providers,
+        providerModels: remoteUi.providerModels,
+        session,
+      }),
+      canRequest: canRequestReview(session, remoteDeviceId),
+      blocked: isReviewBlocked(session),
+    });
+  }, [session, remoteUi.providers, remoteUi.providerModels, remoteDeviceId]);
+
+  // Inputs for the composer idle nudge ("Want a second opinion on these
+  // changes?"), mirroring the local surface. Plain render-time derivations — not
+  // effect deps — so recomputing each render is fine.
+  const reviewLaunchModel = selectReviewLaunchModel({
+    providers: remoteUi.providers,
+    providerModels: remoteUi.providerModels,
+    session,
+  });
+  const canRequestRemoteReview = canRequestReview(session, remoteDeviceId);
+
   useEffect(() => {
     void bootRemoteRuntime();
     const cleanupSidebarDebug = installSidebarGestureDebug();
@@ -1185,6 +1240,11 @@ function RemoteApp() {
             }
             return handlers.onUpdateSessionSettings?.(payload);
           },
+          reviewNudgeModel: {
+            canRequest: canRequestRemoteReview,
+            reviewModel: reviewLaunchModel,
+            onRequestReview: reviewerActions.onRequestReview,
+          },
           session,
           sessionView,
           transcriptDetailEntries,
@@ -1197,9 +1257,9 @@ function RemoteApp() {
           lines: currentState.clientLogs,
         })
       ),
-      h(RemoteWorkspaceChangesRail, null)
+      h(RemoteWorkspaceChangesRail, { reviewer: reviewerActions })
     ),
-    h(RemoteWorkspaceDiffModal),
+    h(RemoteWorkspaceDiffModal, { reviewer: reviewerActions }),
     h(PairingModal, {
       deviceChromeModel,
       deviceLabel: remoteUi.deviceLabelDraft,
@@ -1609,6 +1669,7 @@ function RemoteThreadPanel({
   onTakeOver,
   onUpdateSessionSettings,
   pendingAskUserQuestions,
+  reviewNudgeModel,
   session,
   sessionView,
   transcriptDetailEntries,
@@ -1645,13 +1706,30 @@ function RemoteThreadPanel({
     h(
       "div",
       { className: "workspace-diff-chip-host" },
-      h(RemoteWorkspaceDiffChip, {
-        onTap: () => {
-          triggerRemoteWorkspaceDiffRefresh();
-          const dialog = document.getElementById("remote-workspace-diff-modal");
-          dialog?.showModal?.();
-        },
-      })
+      h(
+        "div",
+        { className: "workspace-diff-chip-slot" },
+        h(RemoteWorkspaceDiffChip, {
+          onTap: () => {
+            triggerRemoteWorkspaceDiffRefresh();
+            const dialog = document.getElementById("remote-workspace-diff-modal");
+            dialog?.showModal?.();
+          },
+        })
+      ),
+      h(
+        "div",
+        { className: "workspace-diff-chip-slot" },
+        h(RemoteReviewerChip, {
+          onTap: () => {
+            // Open the panel straight on the Reviewer tab.
+            getRemoteWorkspaceDiffStore().setActiveTab("reviewer");
+            triggerRemoteWorkspaceDiffRefresh();
+            const dialog = document.getElementById("remote-workspace-diff-modal");
+            dialog?.showModal?.();
+          },
+        })
+      )
     ),
     h(
       "section",
@@ -1665,6 +1743,30 @@ function RemoteThreadPanel({
         onTakeOver,
       })
     ),
+    reviewNudgeModel?.canRequest
+      ? h(
+          "div",
+          { className: "review-idle-nudge", id: "remote-review-idle-nudge" },
+          h(
+            "div",
+            { className: "review-idle-nudge-inner" },
+            h(
+              "span",
+              { className: "review-idle-nudge-copy" },
+              "Want a second opinion on these changes?"
+            ),
+            h(ReviewLauncher, {
+              panelId: "review-panel-remote-nudge",
+              label: "Request review",
+              providerOptions: reviewNudgeModel.reviewModel?.providerOptions || [],
+              models: reviewNudgeModel.reviewModel?.models || [],
+              defaultProvider: reviewNudgeModel.reviewModel?.defaultProvider || "",
+              disabled: false,
+              onSubmit: (values) => reviewNudgeModel.onRequestReview?.(values),
+            })
+          )
+        )
+      : null,
     h(
       "form",
       {

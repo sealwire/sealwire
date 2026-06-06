@@ -12,7 +12,11 @@ import {
   startPromptInput,
   threadsList,
 } from "../dom.js";
-import { requestReview as requestReviewApi, resolveReview as resolveReviewApi } from "../api.js";
+import {
+  requestReview as requestReviewApi,
+  resolveReview as resolveReviewApi,
+  dismissReview as dismissReviewApi,
+} from "../api.js";
 import { loadLastEffort, saveLastApprovalPolicy } from "../../shared/last-used-settings.js";
 import { buildThreadGroups, findLatestThread } from "../../shared/thread-groups.js";
 import { createThreadListQueryOptions } from "../../shared/thread-queries.js";
@@ -394,6 +398,23 @@ export function createLifecycleController(ctx) {
     }
   }
 
+  async function dismissReview(reviewId) {
+    if (!reviewId) {
+      logLine("No review to dismiss.");
+      return null;
+    }
+    logLine("Dismissing review…");
+    try {
+      const receipt = await dismissReviewApi(apiFetch, reviewId, state.deviceId);
+      logLine(receipt?.message || "Review dismissed.");
+      await loadSession("post-review-dismiss");
+      return receipt;
+    } catch (error) {
+      logLine(`Dismiss failed: ${error.message}`);
+      return null;
+    }
+  }
+
   async function stopActiveTurn() {
     if (!state.session?.active_thread_id || !state.session.active_turn_id) {
       logLine("There is no running Codex turn to stop.");
@@ -489,6 +510,7 @@ export function createLifecycleController(ctx) {
     sendMessage,
     requestReview,
     resolveReview,
+    dismissReview,
     stopActiveTurn,
     applySessionSnapshot,
     fetchThreadList,

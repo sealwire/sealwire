@@ -3116,17 +3116,158 @@ body.is-resizing-panel {
   color: var(--text-warning, #b54708);
 }
 
+/* Right-panel tabs (Changes | Reviewer) ---------------------------------- */
+.right-panel-tabs {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+.right-panel-tabs-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-base);
+}
+.right-panel-tabs-header .settings-segmented {
+  width: 100%;
+}
+.right-panel-tabs-header .settings-segmented-option {
+  flex: 1 1 0;
+  text-align: center;
+}
+
+/* Reviewer tab body ------------------------------------------------------- */
+.reviewer-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+}
+.reviewer-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.reviewer-panel-title {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-3, var(--text-secondary));
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.reviewer-panel-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.reviewer-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 8px 4px;
+}
+.reviewer-empty-copy {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+.reviewer-empty-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-tertiary, var(--text-secondary));
+}
+.reviewer-job {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  background: var(--bg-elevated);
+}
+.reviewer-job-alert { border-color: var(--text-warning, #b54708); }
+.reviewer-job-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.reviewer-job-provider {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.reviewer-job-status {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--bg-surface-2, var(--bg-base));
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.reviewer-job-status-alert { color: var(--text-warning, #b54708); }
+.reviewer-job-status-ready { color: var(--diff-add-fg, #22c55e); }
+.reviewer-job-review {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  max-height: 320px;
+  overflow-y: auto;
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 8px;
+}
+.reviewer-job-loading,
+.reviewer-job-error {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.reviewer-job-error { color: var(--text-warning, #b54708); }
+.reviewer-job-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* Idle nudge above the composer ------------------------------------------ */
+.review-idle-nudge {
+  padding: 0 16px 6px;
+}
+.review-idle-nudge-inner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
 /* Mobile composer chip — all styles scoped to <=960px since the chip itself
  * doesn't exist visually on desktop. Sits above the take-over banner and the
  * composer. Right-aligned so it doesn't dominate the already-busy bottom
  * area. Tap opens the workspace-diff modal (file list with per-file expand
  * and per-line drill-down). */
 .workspace-diff-chip { display: none; }
+/* Slots let both chip buttons be direct flex children of the host row. */
+.workspace-diff-chip-slot { display: contents; }
 @media (max-width: 960px) {
   .workspace-diff-chip-host {
     padding: 4px 16px 0;
     display: flex;
     justify-content: center;
+    flex-wrap: wrap;
+    gap: 8px;
   }
   .workspace-diff-chip {
     display: inline-flex;
@@ -3142,15 +3283,23 @@ body.is-resizing-panel {
     color: var(--text-secondary);
     cursor: pointer;
     box-shadow: none;
-    width: 70vw;
-    max-width: 100%;
-    min-width: 200px;
+    max-width: 70vw;
+    min-width: 0;
   }
   .workspace-diff-chip:hover { background: var(--bg-surface-2, var(--bg-elevated)); }
   .workspace-diff-chip-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .workspace-diff-chip-sep { color: var(--text-tertiary, var(--text-secondary)); opacity: 0.6; }
   .workspace-diff-chip-add { color: var(--diff-add-fg, #22c55e); font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace); font-size: 11px; }
   .workspace-diff-chip-del { color: var(--diff-del-fg, #ef4444); font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace); font-size: 11px; }
+  .workspace-diff-chip-review { font-size: 12px; line-height: 1; }
+  .workspace-diff-chip-review.is-active { color: var(--accent, #3b82f6); }
+  .workspace-diff-chip-review.is-blocked { color: var(--text-warning, #b54708); }
+  .workspace-diff-chip-review.is-done { color: var(--diff-add-fg, #22c55e); }
+  /* Dedicated Reviewer pill: a clear, labeled tap target with a status accent. */
+  .reviewer-chip-icon { font-size: 12px; line-height: 1; }
+  .reviewer-chip.is-active { border-color: var(--accent, #3b82f6); color: var(--text-primary); }
+  .reviewer-chip.is-blocked { border-color: var(--text-warning, #b54708); color: var(--text-warning, #b54708); }
+  .reviewer-chip.is-done { border-color: var(--diff-add-fg, #22c55e); }
 }
 
 /* Responsive: hide right rail and show chip on mobile */

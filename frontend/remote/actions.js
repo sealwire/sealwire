@@ -851,7 +851,11 @@ function isSessionClaimError(message) {
 }
 
 function requiresSessionClaim(actionType) {
-  return actionType === "send_message" || actionType === "apply_file_change";
+  return actionType === "send_message"
+    || actionType === "apply_file_change"
+    || actionType === "request_review"
+    || actionType === "resolve_review"
+    || actionType === "dismiss_review";
 }
 
 function shouldAutoReclaimSession() {

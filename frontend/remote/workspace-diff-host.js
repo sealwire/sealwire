@@ -1,10 +1,12 @@
 import React from "react";
 import {
   createWorkspaceDiffStore,
+  ReviewerChip,
   WorkspaceChangesPanel,
   WorkspaceDiffChip,
   WorkspaceDiffSheetBody,
 } from "../local/workspace-diff.js";
+import { RightPanelTabs } from "../shared/right-panel-tabs.js";
 import { fetchRemoteWorkspaceDiff } from "./session-ops.js";
 
 const h = React.createElement;
@@ -17,6 +19,7 @@ export function getRemoteWorkspaceDiffStore() {
   if (!sharedStore) {
     sharedStore = createWorkspaceDiffStore({
       apiFetch: null,
+      surface: "remote",
       fetchDiff: async () => {
         const data = await fetchRemoteWorkspaceDiff();
         if (!data) {
@@ -65,7 +68,7 @@ function RemoteRailToggleIcon() {
   );
 }
 
-export function RemoteWorkspaceChangesRail() {
+export function RemoteWorkspaceChangesRail({ reviewer = {} } = {}) {
   const store = getRemoteWorkspaceDiffStore();
   return h(
     "aside",
@@ -93,7 +96,12 @@ export function RemoteWorkspaceChangesRail() {
       },
       h(RemoteRailToggleIcon)
     ),
-    h(WorkspaceChangesPanel, { store })
+    h(RightPanelTabs, {
+      store,
+      panelId: "review-panel-remote-rail",
+      reviewer,
+      changes: h(WorkspaceChangesPanel, { store }),
+    })
   );
 }
 
@@ -102,12 +110,17 @@ export function RemoteWorkspaceDiffChip({ onTap }) {
   return h(WorkspaceDiffChip, { store, onTap });
 }
 
+export function RemoteReviewerChip({ onTap }) {
+  const store = getRemoteWorkspaceDiffStore();
+  return h(ReviewerChip, { store, onTap });
+}
+
 export function triggerRemoteWorkspaceDiffRefresh() {
   if (!sharedStore) return;
   void sharedStore.refresh();
 }
 
-export function RemoteWorkspaceDiffModal() {
+export function RemoteWorkspaceDiffModal({ reviewer = {} } = {}) {
   const store = getRemoteWorkspaceDiffStore();
   function close() {
     const dialog = document.getElementById("remote-workspace-diff-modal");
@@ -149,6 +162,15 @@ export function RemoteWorkspaceDiffModal() {
         )
       )
     ),
-    h("section", { className: "panel-modal-body" }, h(WorkspaceDiffSheetBody, { store }))
+    h(
+      "section",
+      { className: "panel-modal-body" },
+      h(RightPanelTabs, {
+        store,
+        panelId: "review-panel-remote-modal",
+        reviewer,
+        changes: h(WorkspaceDiffSheetBody, { store }),
+      })
+    )
   );
 }

@@ -77,6 +77,7 @@ import {
   workspaceDiffMount,
   workspaceChangesMount,
   workspaceDiffChipMount,
+  reviewerChipMount,
   sidebarElement,
   sidebarResizeHandle,
   rightRailResizeHandle,
@@ -100,6 +101,7 @@ import {
   createWorkspaceDiffSheet,
   mountChangesPanel,
   mountChip,
+  mountReviewerChip,
 } from "./local/workspace-diff.js";
 import { createPanelControl } from "./local/panel-controls.js";
 import { setupHeaderBandSync } from "./local/header-band-sync.js";
@@ -214,9 +216,22 @@ const apiFetch = createApiFetch({
   },
 });
 
-const workspaceDiffStore = createWorkspaceDiffStore({ apiFetch });
+const workspaceDiffStore = createWorkspaceDiffStore({ apiFetch, surface: "local" });
 let clientLogRootHandle = null;
 let clientLogRootElement = null;
+
+// Reviewer-tab actions. Bound late through `state.controller` (assigned after
+// the controller is built) so these can be wired into the rail + sheet mounts
+// that run at module load; they only ever fire on user interaction.
+const reviewerActions = {
+  onRequestReview: (values) => state.controller?.requestReview(values),
+  onResolveReview: () => state.controller?.resolveReview(),
+  onDismissReview: (reviewId) => state.controller?.dismissReview(reviewId),
+  fetchReviewerTranscript: (threadId) =>
+    Promise.resolve(state.controller?.fetchTranscriptPage(threadId, {})).then(
+      (page) => page?.entries || (Array.isArray(page) ? page : [])
+    ),
+};
 
 const workspaceDiffSheet = createWorkspaceDiffSheet({
   store: workspaceDiffStore,
@@ -224,8 +239,15 @@ const workspaceDiffSheet = createWorkspaceDiffSheet({
   modal: workspaceDiffModal,
   closeButton: closeWorkspaceDiffModalButton,
   refreshButton: workspaceDiffRefreshButton,
+  reviewer: reviewerActions,
+  panelId: "review-panel-sheet",
 });
-mountChangesPanel({ store: workspaceDiffStore, mount: workspaceChangesMount });
+mountChangesPanel({
+  store: workspaceDiffStore,
+  mount: workspaceChangesMount,
+  reviewer: reviewerActions,
+  panelId: "review-panel-rail",
+});
 setupHeaderBandSync({
   chatHeader: document.querySelector(".chat-shell > .chat-header"),
 });
@@ -233,6 +255,15 @@ mountChip({
   store: workspaceDiffStore,
   mount: workspaceDiffChipMount,
   onTap: () => workspaceDiffSheet?.open(),
+});
+mountReviewerChip({
+  store: workspaceDiffStore,
+  mount: reviewerChipMount,
+  onTap: () => {
+    // Land the user straight on the Reviewer tab rather than whatever was last open.
+    workspaceDiffStore.setActiveTab("reviewer");
+    workspaceDiffSheet?.open();
+  },
 });
 void workspaceDiffStore.refresh();
 
@@ -453,8 +484,8 @@ const renderer = createSessionRenderer({
   requestReview(values) {
     return controller?.requestReview(values);
   },
-  resolveReview() {
-    return controller?.resolveReview();
+  setReviewSlice(slice) {
+    workspaceDiffStore.setReview(slice);
   },
 });
 

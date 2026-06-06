@@ -15,8 +15,8 @@
 use tokio::time::{Duration, Instant};
 
 use crate::protocol::{
-    RequestReviewInput, RequestReviewReceipt, ReviewJobView, TranscriptEntryKind,
-    TranscriptEntryView,
+    RequestReviewInput, RequestReviewReceipt, ReviewDismissReceipt, ReviewJobView,
+    TranscriptEntryKind, TranscriptEntryView,
 };
 use crate::state::{
     parent_recap_prompt, post_back_message, reviewer_prompt, ReviewJob, ReviewJobStatus, ReviewMode,
@@ -181,6 +181,69 @@ to this thread."
     pub async fn list_review_jobs(&self) -> Vec<ReviewJobView> {
         let relay = self.relay.read().await;
         relay.active_review_jobs_view()
+    }
+
+    /// Dismiss a finished review: drop its job record and archive the reviewer
+    /// thread (so it leaves history). Only allowed on terminal reviews — an active
+    /// or blocked review must be stopped/resolved first.
+    pub async fn dismiss_review(
+        &self,
+        job_id: String,
+        device_id: Option<String>,
+    ) -> Result<ReviewDismissReceipt, String> {
+        // Dismiss is cleanup of an already-finished review: the workspace is
+        // unlocked and no turn is running, so any authenticated device may do it.
+        // We deliberately do NOT call `ensure_device_can_send_message` here
+        // (unlike `request_review`/`resolve_blocked_review`, which mutate a live
+        // session) — clearing a completed review card is not controller-gated.
+        let _device_id = require_device_id(device_id)?;
+        let (is_terminal, reviewer_thread_id) = {
+            let relay = self.relay.read().await;
+            match relay.review_job(&job_id) {
+                Some(job) => (job.status.is_terminal(), job.reviewer_thread_id.clone()),
+                None => return Err("there is no such review to dismiss".to_string()),
+            }
+        };
+        if !is_terminal {
+            return Err(
+                "the review is still active; stop the reviewer before dismissing it".to_string(),
+            );
+        }
+        // Remove the reviewer thread from the history list. We try the least
+        // destructive option first (archive), fall back to permanent deletion (the
+        // only option for Claude, which does not support archive), and if both
+        // fail we add a tombstone so the thread stays hidden from `list_threads`
+        // even though its job is gone. Tombstones are cleared when the thread is
+        // later archived/deleted successfully through another code path.
+        if let Some(ref thread_id) = reviewer_thread_id {
+            let archive_result = self.archive_thread(thread_id).await;
+            if archive_result.is_err() {
+                let delete_result = self.delete_thread_permanently(thread_id).await;
+                if delete_result.is_err() {
+                    // Neither worked — install a tombstone so the filtering
+                    // outlives the job record and the thread stays out of nav.
+                    let mut relay = self.relay.write().await;
+                    relay.tombstone_reviewer_thread(thread_id.clone());
+                    relay.push_log(
+                        "warn",
+                        format!(
+                            "Dismiss {job_id}: could not archive or delete reviewer thread \
+{thread_id}; it is tombstoned and will remain hidden from navigation."
+                        ),
+                    );
+                }
+            }
+        }
+        {
+            let mut relay = self.relay.write().await;
+            relay.remove_review_job(&job_id);
+            relay.push_log("info", format!("Dismissed review {job_id}."));
+            relay.notify();
+        }
+        Ok(ReviewDismissReceipt {
+            review_job_id: job_id,
+            message: "Review dismissed.".to_string(),
+        })
     }
 
     #[cfg(test)]

@@ -36,13 +36,13 @@ pub(crate) use self::transcript::TranscriptRecord;
 
 const REMOTE_ACTION_REPLAY_TTL_SECS: u64 = 600;
 const MAX_REMOTE_ACTION_REPLAY_ENTRIES: usize = 512;
-/// How long a terminal (complete/failed/cancelled) review job keeps appearing in
-/// the snapshot's `active_review_jobs`, so the UI can flash "complete"/"failed"
-/// before the chip disappears.
-const REVIEW_JOB_VIEW_RETENTION_SECS: u64 = 120;
 /// Backstop on retained review jobs so a long-lived relay can't accumulate every
-/// recap/review body in memory.
+/// recap/review body in memory. Terminal jobs otherwise persist until the user
+/// dismisses them (the Reviewer panel is a persistent surface), so this cap — not
+/// a timer — is what eventually evicts old completed reviews.
 const MAX_REVIEW_JOBS: usize = 64;
+/// Public alias for tests.
+pub const MAX_REVIEW_JOBS_PUB: usize = MAX_REVIEW_JOBS;
 
 fn thread_status_is_working(status: &str) -> bool {
     let status = status.trim();
@@ -169,6 +169,10 @@ pub struct RelayState {
     /// Relay-owned cross-agent review jobs, keyed by job id. In-memory only for
     /// v1 (lost on restart).
     review_jobs: HashMap<String, ReviewJob>,
+    /// Thread ids whose reviewer hiding must persist even after their job has been
+    /// removed (e.g. dismissed while archival and deletion both failed). Cleared
+    /// when the thread is later successfully removed by another code path.
+    dismissed_reviewer_thread_ids: HashSet<String>,
 }
 
 impl RelayState {
@@ -224,6 +228,7 @@ impl RelayState {
             apply_states: HashMap::new(),
             recent_remote_actions: HashMap::new(),
             review_jobs: HashMap::new(),
+            dismissed_reviewer_thread_ids: HashSet::new(),
         };
         state.push_log("info", "Relay booted. Waiting for Codex app-server.");
         state
@@ -279,15 +284,46 @@ impl RelayState {
         self.review_jobs.insert(job.id.clone(), job);
     }
 
-    /// Drop terminal jobs past the view-retention window, and hard-cap the total
-    /// (evicting the oldest terminal jobs first) so review bodies can't pile up.
+    pub(crate) fn remove_review_job(&mut self, id: &str) -> Option<ReviewJob> {
+        self.review_jobs.remove(id)
+    }
+
+    /// Thread ids that are reviewer threads of some review job. The thread list
+    /// filters these out so a reviewer never shows up as a peer session — it is
+    /// owned by its review (surfaced through the Reviewer panel).
+    ///
+    /// NOTE: this is derived purely from the in-memory `review_jobs`, which are
+    /// not persisted. After a relay restart (or once a job is evicted by the
+    /// `MAX_REVIEW_JOBS` backstop) its reviewer thread is no longer hidden and
+    /// can reappear in navigation. Durable hiding would need the reviewer ids in
+    /// the persistence layer (see state/persistence.rs) — deferred for now.
+    pub(crate) fn reviewer_thread_ids(&self) -> HashSet<String> {
+        self.review_jobs
+            .values()
+            .filter_map(|job| job.reviewer_thread_id.clone())
+            .chain(self.dismissed_reviewer_thread_ids.iter().cloned())
+            .collect()
+    }
+
+    /// Record a reviewer thread id whose hiding must survive job removal.
+    /// Called when dismiss cannot remove the thread (archive + delete both fail).
+    pub(crate) fn tombstone_reviewer_thread(&mut self, thread_id: String) {
+        self.dismissed_reviewer_thread_ids.insert(thread_id);
+    }
+
+    /// Remove a thread id from the tombstone set (called when the thread is
+    /// later successfully archived or deleted by some other code path).
+    pub(crate) fn clear_reviewer_tombstone(&mut self, thread_id: &str) {
+        self.dismissed_reviewer_thread_ids.remove(thread_id);
+    }
+
+    /// Hard-cap the total retained review jobs (evicting the oldest terminal jobs
+    /// first) so review bodies can't pile up. Terminal jobs are NOT dropped by age
+    /// — the persistent Reviewer panel keeps them until the user dismisses them.
     fn prune_review_jobs(&mut self) {
-        let now = unix_now();
-        self.review_jobs.retain(|_, job| {
-            !job.status.is_terminal()
-                || now.saturating_sub(job.updated_at) <= REVIEW_JOB_VIEW_RETENTION_SECS
-        });
-        if self.review_jobs.len() <= MAX_REVIEW_JOBS {
+        // Use strict `<` so there is always room for the caller's insertion:
+        // prune when len == MAX_REVIEW_JOBS (not only when it exceeds it).
+        if self.review_jobs.len() < MAX_REVIEW_JOBS {
             return;
         }
         let mut terminal: Vec<(String, u64)> = self
@@ -298,7 +334,7 @@ impl RelayState {
             .collect();
         terminal.sort_by_key(|(_, updated_at)| *updated_at);
         for (id, _) in terminal {
-            if self.review_jobs.len() <= MAX_REVIEW_JOBS {
+            if self.review_jobs.len() < MAX_REVIEW_JOBS {
                 break;
             }
             self.review_jobs.remove(&id);
@@ -323,20 +359,11 @@ impl RelayState {
         self.review_jobs.get(id)
     }
 
-    /// Compact views of review jobs to surface in the snapshot: every non-terminal
-    /// job plus terminal jobs that finished recently (so the UI can flash a final
-    /// "complete"/"failed" state). Ordered oldest-updated first for a stable UI.
+    /// Compact views of every retained review job for the snapshot. Terminal jobs
+    /// persist here (the Reviewer panel keeps them until dismissed), so this no
+    /// longer filters by age. Ordered oldest-updated first for a stable UI.
     pub(crate) fn active_review_jobs_view(&self) -> Vec<crate::protocol::ReviewJobView> {
-        let now = unix_now();
-        let mut views: Vec<_> = self
-            .review_jobs
-            .values()
-            .filter(|job| {
-                !job.status.is_terminal()
-                    || now.saturating_sub(job.updated_at) <= REVIEW_JOB_VIEW_RETENTION_SECS
-            })
-            .map(|job| job.view())
-            .collect();
+        let mut views: Vec<_> = self.review_jobs.values().map(|job| job.view()).collect();
         views.sort_by(|left, right| {
             left.updated_at
                 .cmp(&right.updated_at)

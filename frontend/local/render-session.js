@@ -22,6 +22,7 @@ import {
   sessionMeta,
   sessionDetailsPath,
   composerSettingsMount,
+  reviewIdleNudge,
   messageEffort,
   statusBadge,
   stopButton,
@@ -68,11 +69,13 @@ import {
   ReviewLauncher,
 } from "../shared/review-panel.js";
 import {
+  canRequestReview,
   isReviewBlocked,
   isReviewInProgress,
+  isReviewInProgressForThread,
   reviewStatusLabel,
+  selectReviewLaunchModel,
 } from "../shared/review-state.js";
-import { providerOptions as toProviderOptions } from "../shared/provider-settings.js";
 import { saveLastEffort } from "../shared/last-used-settings.js";
 import {
   AuditList,
@@ -178,7 +181,7 @@ export function createSessionRenderer({
   ensureConversationTranscript,
   updateSessionSettings,
   requestReview,
-  resolveReview,
+  setReviewSlice,
 }) {
   function reviewChips(session) {
     return (session?.active_review_jobs || []).map((job) =>
@@ -187,21 +190,11 @@ export function createSessionRenderer({
   }
 
   function reviewLaunchModel(session) {
-    const providers = state.providers || [];
-    const models = [].concat(
-      ...Object.values(state.providerModels || {}),
-      session?.available_models || []
-    );
-    const defaultProvider =
-      providers.find((provider) => provider !== session?.provider) ||
-      providers[0] ||
-      session?.provider ||
-      "";
-    return {
-      providerOptions: toProviderOptions(providers),
-      models,
-      defaultProvider,
-    };
+    return selectReviewLaunchModel({
+      providers: state.providers || [],
+      providerModels: state.providerModels || {},
+      session,
+    });
   }
 
   function renderSession(session) {
@@ -218,6 +211,7 @@ export function createSessionRenderer({
     const canWrite = canCurrentDeviceWrite(session);
     const turnRunning = Boolean(session.active_turn_id);
     const reviewInProgress = isReviewInProgress(session);
+    const reviewBlocked = isReviewBlocked(session);
     const workspace = session.current_cwd || state.selectedCwd || "";
     const workspaceName = workspace ? workspaceBasename(workspace) : "";
     const viewingSessionDetails = Boolean(sessionMeta?.closest("dialog")?.open);
@@ -266,6 +260,11 @@ export function createSessionRenderer({
     } else if (!session.provider_connected) {
       statusBadge.textContent = "Offline";
       statusBadge.className = "status-badge status-badge-offline";
+    } else if (reviewBlocked) {
+      // A blocked review locks the workspace until the user stops the reviewer —
+      // surface it globally (not just inside the Reviewer tab) so it can't be missed.
+      statusBadge.textContent = "Review blocked — action needed";
+      statusBadge.className = "status-badge status-badge-alert";
     } else if (isProgressStalled(session)) {
       statusBadge.textContent = "Stalled?";
       statusBadge.className = "status-badge status-badge-alert";
@@ -300,6 +299,8 @@ export function createSessionRenderer({
     schedulePairingExpiryTick(pendingPairings);
     renderControlBanner(session);
     renderSessionSettingsPanel(session);
+    renderReviewSlice(session);
+    renderReviewIdleNudge(session);
     renderPendingActionBanner(approval, pendingPairings);
     renderWorkspaceSuggestions(session);
     renderTranscript(session, approval);
@@ -369,6 +370,11 @@ export function createSessionRenderer({
     state.threadGroups = [];
     cancelControllerHeartbeat();
     cancelControllerLeaseRefresh();
+    // Clear the independently-mounted Reviewer tab so it does not retain job
+    // metadata or already-fetched review text after the user signs out.
+    if (typeof setReviewSlice === "function") {
+      setReviewSlice({ reviewJobs: [], reviewModel: {}, canRequest: false, blocked: false });
+    }
     openSessionDetailsButton.disabled = true;
     renderOverviewState(null, message);
     renderWorkspaceSuggestions(null);
@@ -703,51 +709,71 @@ export function createSessionRenderer({
       renderReactContent(composerSettingsMount, null);
       return;
     }
-    const reviewModel = reviewLaunchModel(session);
-    const turnRunning = Boolean(session.active_turn_id);
-    const canReview =
-      typeof requestReview === "function" &&
-      isCurrentDeviceActiveController(session) &&
-      !turnRunning &&
-      !isReviewInProgress(session) &&
-      session.current_status === "idle";
+    // The review trigger/progress/resolve now live in the right-panel Reviewer
+    // tab (co-located with the diff). The composer keeps only the settings gear.
     renderReactContent(
       composerSettingsMount,
+      h(SessionSettingsButton, {
+        session,
+        composerEffort: messageEffort?.value || session.reasoning_effort || "",
+        onUpdate: (payload) => updateSessionSettings?.(payload),
+        onChangeEffort: (value) => {
+          if (messageEffort) messageEffort.value = value;
+          if (session.provider) saveLastEffort(session.provider, value);
+          updateSessionSettings?.({ effort: value });
+        },
+      })
+    );
+  }
+
+  // Push the review slice onto the shared workspace-diff store so the Reviewer
+  // tab (rail + mobile sheet) can render jobs, the launcher model, and gating.
+  function renderReviewSlice(session) {
+    if (typeof setReviewSlice !== "function") {
+      return;
+    }
+    setReviewSlice({
+      reviewJobs: session?.active_review_jobs || [],
+      reviewModel: reviewLaunchModel(session),
+      canRequest:
+        typeof requestReview === "function" &&
+        canRequestReview(session, state.deviceId),
+      blocked: isReviewBlocked(session),
+    });
+  }
+
+  // A lightweight idle prompt in the conversation footer: only when this device
+  // can start a review (idle + controller). Points users at the relocated
+  // feature without re-cluttering the composer. Its own modal id keeps it from
+  // colliding with the rail/sheet launchers.
+  function renderReviewIdleNudge(session) {
+    if (!reviewIdleNudge) {
+      return;
+    }
+    const show =
+      typeof requestReview === "function" &&
+      isViewingConversation(session) &&
+      canRequestReview(session, state.deviceId);
+    reviewIdleNudge.hidden = !show;
+    if (!show) {
+      renderReactContent(reviewIdleNudge, null);
+      return;
+    }
+    const reviewModel = reviewLaunchModel(session);
+    renderReactContent(
+      reviewIdleNudge,
       h(
-        React.Fragment,
-        null,
-        h(SessionSettingsButton, {
-          session,
-          composerEffort: messageEffort?.value || session.reasoning_effort || "",
-          onUpdate: (payload) => updateSessionSettings?.(payload),
-          onChangeEffort: (value) => {
-            if (messageEffort) messageEffort.value = value;
-            if (session.provider) saveLastEffort(session.provider, value);
-            updateSessionSettings?.({ effort: value });
-          },
-        }),
-        typeof requestReview === "function"
-          ? h(ReviewLauncher, {
-              providerOptions: reviewModel.providerOptions,
-              models: reviewModel.models,
-              defaultProvider: reviewModel.defaultProvider,
-              disabled: !canReview,
-              onSubmit: (values) => requestReview(values),
-            })
-          : null,
-        isReviewBlocked(session) && typeof resolveReview === "function"
-          ? h(
-              "button",
-              {
-                type: "button",
-                className: "header-button review-resolve-button",
-                title:
-                  "A review is blocked: the reviewer turn could not be stopped and the workspace is locked. Stop it to unlock.",
-                onClick: () => resolveReview(),
-              },
-              "Stop reviewer & unlock"
-            )
-          : null
+        "div",
+        { className: "review-idle-nudge-inner" },
+        h("span", { className: "review-idle-nudge-copy" }, "Want a second opinion on these changes?"),
+        h(ReviewLauncher, {
+          panelId: "review-panel-nudge",
+          providerOptions: reviewModel.providerOptions,
+          models: reviewModel.models,
+          defaultProvider: reviewModel.defaultProvider,
+          disabled: false,
+          onSubmit: (values) => requestReview(values),
+        })
       )
     );
   }
@@ -862,6 +888,22 @@ export function createSessionRenderer({
       const requestedThread =
         resolveActiveThread(state.viewThreadId) ||
         state.threads.find((thread) => thread.id === state.viewThreadId);
+
+      // A review briefly hands the active thread to the (hidden) reviewer. If the
+      // user is sitting on the thread being reviewed, keep the page calm instead
+      // of flashing the "attached to a different session" message — the reviewer
+      // lives in the Reviewer panel and the review posts back here when it's done.
+      if (isReviewInProgressForThread(session, state.viewThreadId)) {
+        renderConversationContent(
+          h(ConversationEmptyState, {
+            badge: "Review",
+            className: "thread-empty-ready",
+            copy: "Another agent is reviewing this conversation. Its progress and result show up in the Reviewer panel, and the review is posted back here when it finishes.",
+            title: "Review in progress",
+          })
+        );
+        return;
+      }
 
       if (state.viewThreadId && state.viewThreadId !== session.active_thread_id) {
         renderConversationContent(

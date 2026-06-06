@@ -350,8 +350,19 @@ impl SessionSnapshot {
         }
 
         for entry in &mut self.transcript {
-            if let Some(text) = &mut entry.text {
-                transcript_truncated |= truncate_with_ellipsis(text, budget.max_transcript_chars);
+            // The user's own message is the one thing they typed and expect to
+            // see echoed back verbatim. Truncating it to a "…" preview — and so
+            // making its visibility depend on a follow-up hydration fetch — is
+            // exactly what made long first messages "disappear" on the remote
+            // surface (a snapshot that wasn't redelivered left no repair path).
+            // Ship user text in full here; the byte-budget pass below still
+            // bounds a pathologically large snapshot, clipping even user text
+            // only as a last resort, so the honesty invariant holds.
+            if entry.kind != TranscriptEntryKind::UserText {
+                if let Some(text) = &mut entry.text {
+                    transcript_truncated |=
+                        truncate_with_ellipsis(text, budget.max_transcript_chars);
+                }
             }
             if let Some(tool) = &mut entry.tool {
                 if let Some(detail) = &mut tool.detail {
@@ -1232,6 +1243,12 @@ pub struct RequestReviewReceipt {
     pub parent_thread_id: String,
     pub reviewer_thread_id: Option<String>,
     pub status: ReviewJobStatusView,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReviewDismissReceipt {
+    pub review_job_id: String,
     pub message: String,
 }
 

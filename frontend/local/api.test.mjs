@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { getReviews, requestReview, resolveReview, submitAskUserAnswer } from "./api.js";
+import { dismissReview, getReviews, requestReview, resolveReview, submitAskUserAnswer } from "./api.js";
 
 function makeFetchStub(response) {
   const calls = [];
@@ -94,6 +94,31 @@ test("resolveReview POSTs the device id to the resolve endpoint", async () => {
   assert.equal(calls[0].input, "/api/session/review/resolve");
   assert.equal(calls[0].init.method, "POST");
   assert.deepEqual(JSON.parse(calls[0].init.body), { device_id: "device-a" });
+});
+
+test("dismissReview POSTs the device id to the per-review dismiss endpoint", async () => {
+  const receipt = { review_job_id: "review-1", message: "Review dismissed." };
+  const { apiFetch, calls } = makeFetchStub(jsonResponse({ ok: true, data: receipt }));
+
+  const result = await dismissReview(apiFetch, "review-1", "device-a");
+  assert.deepEqual(result, receipt);
+  assert.equal(calls[0].input, "/api/session/reviews/review-1/dismiss");
+  assert.equal(calls[0].init.method, "POST");
+  assert.deepEqual(JSON.parse(calls[0].init.body), { device_id: "device-a" });
+});
+
+test("dismissReview escapes the review id and surfaces server errors", async () => {
+  const { apiFetch, calls } = makeFetchStub(
+    jsonResponse(
+      { ok: false, error: { message: "the review is still active; stop the reviewer before dismissing it" } },
+      { status: 409 }
+    )
+  );
+  await assert.rejects(
+    () => dismissReview(apiFetch, "review/active", "device-a"),
+    /still active/i
+  );
+  assert.equal(calls[0].input, "/api/session/reviews/review%2Factive/dismiss");
 });
 
 test("getReviews GETs the reviews endpoint with the device id and returns the list", async () => {

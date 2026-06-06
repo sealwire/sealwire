@@ -1,6 +1,7 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { FileChangeDiff } from "../shared/transcript-react.js";
+import { RightPanelTabs } from "../shared/right-panel-tabs.js";
 
 const h = React.createElement;
 
@@ -12,12 +13,15 @@ function useStoreState(store) {
   );
 }
 
-export function createWorkspaceDiffStore({ apiFetch, fetchDiff = null }) {
+export function createWorkspaceDiffStore({ apiFetch, fetchDiff = null, surface = "local" }) {
+  const tabStorageKey = `agent-relay:right-panel-tab:${surface}`;
   let state = {
     status: "idle",
     data: null,
     error: null,
     expanded: false,
+    activeTab: readStoredTab(tabStorageKey),
+    review: { reviewJobs: [], reviewModel: {}, canRequest: false, blocked: false },
   };
   const listeners = new Set();
 
@@ -63,8 +67,37 @@ export function createWorkspaceDiffStore({ apiFetch, fetchDiff = null }) {
     toggleExpanded() {
       setState({ expanded: !state.expanded });
     },
+    setActiveTab(tab) {
+      const next = tab === "reviewer" ? "reviewer" : "changes";
+      if (next === state.activeTab) return;
+      writeStoredTab(tabStorageKey, next);
+      setState({ activeTab: next });
+    },
+    setReview(patch) {
+      const next = { ...state.review, ...patch };
+      // Avoid churn: only emit when the review slice actually changed.
+      if (JSON.stringify(next) === JSON.stringify(state.review)) return;
+      setState({ review: next });
+    },
     refresh,
   };
+}
+
+function readStoredTab(key) {
+  try {
+    if (typeof localStorage === "undefined") return "changes";
+    return localStorage.getItem(key) === "reviewer" ? "reviewer" : "changes";
+  } catch {
+    return "changes";
+  }
+}
+
+function writeStoredTab(key, value) {
+  try {
+    if (typeof localStorage !== "undefined") localStorage.setItem(key, value);
+  } catch {
+    // ignore persistence failures (private mode, etc.)
+  }
 }
 
 async function fetchViaApi(apiFetch) {
@@ -99,10 +132,17 @@ function countDiffLines(diff) {
   return { added, removed };
 }
 
-export function mountChangesPanel({ store, mount }) {
+export function mountChangesPanel({ store, mount, reviewer = {}, panelId = "review-panel-rail" }) {
   if (!mount) return null;
   const root = createRoot(mount);
-  root.render(h(WorkspaceChangesPanel, { store }));
+  root.render(
+    h(RightPanelTabs, {
+      store,
+      panelId,
+      reviewer,
+      changes: h(WorkspaceChangesPanel, { store }),
+    })
+  );
   return {
     destroy() {
       root.unmount();
@@ -127,10 +167,19 @@ export function createWorkspaceDiffSheet({
   modal,
   closeButton,
   refreshButton,
+  reviewer = {},
+  panelId = "review-panel-sheet",
 }) {
   if (!mount || !modal) return null;
   const root = createRoot(mount);
-  root.render(h(WorkspaceDiffSheetBody, { store }));
+  root.render(
+    h(RightPanelTabs, {
+      store,
+      panelId,
+      reviewer,
+      changes: h(WorkspaceDiffSheetBody, { store }),
+    })
+  );
 
   function open() {
     if (typeof modal.showModal === "function") {
@@ -345,6 +394,10 @@ function renderDiffContent(state) {
   });
 }
 
+const TERMINAL_REVIEW = new Set(["complete", "failed", "cancelled"]);
+
+// The "Changes" entry point on mobile — pure file-diff stats. Review state lives
+// on the separate ReviewerChip so each pill is a single, self-describing target.
 export function WorkspaceDiffChip({ store, onTap }) {
   const state = useStoreState(store);
   const stats = computeChangeStats(state.data);
@@ -361,7 +414,9 @@ export function WorkspaceDiffChip({ store, onTap }) {
       onClick: () => onTap?.(),
       title: "Tap to view file diffs",
     },
-    h("span", { className: "workspace-diff-chip-label" },
+    h(
+      "span",
+      { className: "workspace-diff-chip-label" },
       stats.fileCount === 1 ? "1 file" : `${stats.fileCount} files`
     ),
     h("span", { className: "workspace-diff-chip-sep" }, "·"),
@@ -372,6 +427,66 @@ export function WorkspaceDiffChip({ store, onTap }) {
       ? h("span", { className: "workspace-diff-chip-del" }, `−${stats.removed}`)
       : null
   );
+}
+
+// A dedicated, self-describing "Reviewer" pill for mobile (the desktop rail has
+// the tab instead). It surfaces whenever there's a review to see OR one can be
+// started, and tapping it opens the right panel straight on the Reviewer tab.
+// Shares `.workspace-diff-chip` base styles so it's mobile-only and pill-shaped.
+export function ReviewerChip({ store, onTap }) {
+  const state = useStoreState(store);
+  const review = state.review || {};
+  const reviewJobs = review.reviewJobs || [];
+  const blocked = Boolean(review.blocked);
+  const active = reviewJobs.some((job) => !TERMINAL_REVIEW.has(job.status));
+  const hasReviews = reviewJobs.length > 0;
+  const canRequest = Boolean(review.canRequest);
+  // Don't clutter the composer when there's nothing to see and nothing to start.
+  if (!hasReviews && !canRequest) return null;
+  const badge = blocked ? "⚠" : active ? "•" : hasReviews ? "✓" : null;
+  const modifier = blocked
+    ? "is-blocked"
+    : active
+    ? "is-active"
+    : hasReviews
+    ? "is-done"
+    : "is-idle";
+  const title = blocked
+    ? "Review blocked — tap to resolve"
+    : active
+    ? "Review in progress — tap to view"
+    : hasReviews
+    ? "Review complete — tap to view findings"
+    : "Ask another agent to review — tap to start";
+  return h(
+    "button",
+    {
+      type: "button",
+      className: `workspace-diff-chip reviewer-chip ${modifier}`,
+      onClick: () => onTap?.(),
+      title,
+    },
+    h("span", { className: "reviewer-chip-icon", "aria-hidden": "true" }, "🔍"),
+    h("span", { className: "workspace-diff-chip-label" }, "Reviewer"),
+    badge
+      ? h(
+          "span",
+          { className: `workspace-diff-chip-review ${modifier}`, "aria-hidden": "true" },
+          badge
+        )
+      : null
+  );
+}
+
+export function mountReviewerChip({ store, mount, onTap }) {
+  if (!mount) return null;
+  const root = createRoot(mount);
+  root.render(h(ReviewerChip, { store, onTap }));
+  return {
+    destroy() {
+      root.unmount();
+    },
+  };
 }
 
 export function WorkspaceDiffSheetBody({ store }) {

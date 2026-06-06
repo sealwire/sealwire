@@ -6,9 +6,18 @@ impl AppState {
         limit: usize,
         device_id: Option<String>,
     ) -> Result<ThreadsResponse, String> {
+        // Read reviewer ids before the provider fetch so we can request a larger
+        // page from each provider. If the newest N slots are all reviewer threads
+        // we would return fewer than `limit` normal threads otherwise.
+        let reviewer_count = {
+            let relay = self.relay.read().await;
+            relay.reviewer_thread_ids().len()
+        };
+        let fetch_limit = limit.saturating_add(reviewer_count);
+
         let mut all_threads = Vec::new();
         for (provider_name, bridge) in &self.providers {
-            match bridge.list_threads(limit).await {
+            match bridge.list_threads(fetch_limit).await {
                 Ok(mut threads) => {
                     for thread in &mut threads {
                         thread.provider = provider_name.clone();
@@ -30,10 +39,19 @@ impl AppState {
             .as_deref()
             .map(|id| relay.device_path_scope(id))
             .unwrap_or_default();
+        // Reviewer threads are owned by their review (surfaced through the
+        // Reviewer panel), not peer sessions — keep them out of the thread list
+        // ENTIRELY, even while the reviewer is briefly the active thread during
+        // the review handoff. The user should never see a transient reviewer
+        // "conversation" pop into navigation; the review's status and result live
+        // only in the Reviewer tab (which fetches the reviewer transcript by id
+        // directly when you click in).
+        let reviewer_ids = relay.reviewer_thread_ids();
         let mut threads = relay
             .filter_deleted_threads(all_threads)
             .into_iter()
             .filter(|thread| path_within_device_scope(&thread.cwd, &device_scope, &allowed_roots))
+            .filter(|thread| !reviewer_ids.contains(&thread.id))
             .collect::<Vec<_>>();
 
         // Preserve the active thread even when no provider lists it yet. A
@@ -42,8 +60,12 @@ impl AppState {
         // bridge's `list_threads` can't return it. Without this, starting a blank
         // session (or any later thread-list refresh) would drop the conversation
         // the user is actively viewing — it would never appear in the sidebar.
+        // ...but never re-add a reviewer thread: it must stay hidden from nav even
+        // when it is the active thread mid-review.
         if let Some(active_id) = relay.active_thread_id.clone() {
-            if !threads.iter().any(|thread| thread.id == active_id) {
+            if !reviewer_ids.contains(&active_id)
+                && !threads.iter().any(|thread| thread.id == active_id)
+            {
                 if let Some(active_thread) = relay
                     .threads
                     .iter()
@@ -129,6 +151,7 @@ impl AppState {
         {
             let mut relay = self.relay.write().await;
             let removed = relay.remove_thread(thread_id);
+            relay.clear_reviewer_tombstone(thread_id);
             if archived_active_thread {
                 relay.clear_active_session();
             }
@@ -176,6 +199,7 @@ impl AppState {
                 relay.clear_active_session();
             }
             relay.mark_thread_deleted(thread_id);
+            relay.clear_reviewer_tombstone(thread_id);
             relay.push_log(
                 "info",
                 format!(

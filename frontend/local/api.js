@@ -119,6 +119,24 @@ export async function resolveReview(apiFetch, deviceId) {
   return payload.data;
 }
 
+// Dismiss a terminal review: archive its reviewer thread and drop the job from
+// the snapshot. The relay rejects this while the review is still active.
+export async function dismissReview(apiFetch, reviewId, deviceId) {
+  const response = await apiFetch(
+    `/api/session/reviews/${encodeURIComponent(reviewId)}/dismiss`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ device_id: deviceId }),
+    }
+  );
+  const payload = await response.json();
+  if (!response.ok || !payload?.ok) {
+    throw new Error(payload?.error?.message || "Failed to dismiss the review");
+  }
+  return payload.data;
+}
+
 // List active (and recently finished) review jobs. The same data also rides the
 // session snapshot as `active_review_jobs`; this endpoint is a direct poll.
 export async function getReviews(apiFetch, deviceId) {

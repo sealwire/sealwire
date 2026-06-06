@@ -2186,6 +2186,12 @@ mod review_tests {
         // Simulate losing/rejecting the reviewer turn-start response after the
         // reviewer thread became active.
         fail_reviewer_start: Arc<AtomicBool>,
+        // When true, `archive_thread` errors — exercises the dismiss path where
+        // the reviewer thread can't be archived but the job is still dropped.
+        fail_archive: Arc<AtomicBool>,
+        // When true, `delete_thread_permanently` also errors — forces the tombstone
+        // path when both archive and delete fail.
+        fail_delete: Arc<AtomicBool>,
         // Delay before a turn completes (ms). Lets tests complete a turn *after* a
         // short step timeout, exercising the drain path.
         complete_delay_ms: Arc<AtomicU64>,
@@ -2212,6 +2218,8 @@ mod review_tests {
                 raise_ask_user: Arc::new(AtomicBool::new(false)),
                 approval_on_reviewer_turn: Arc::new(AtomicBool::new(false)),
                 fail_reviewer_start: Arc::new(AtomicBool::new(false)),
+                fail_archive: Arc::new(AtomicBool::new(false)),
+                fail_delete: Arc::new(AtomicBool::new(false)),
                 complete_delay_ms: Arc::new(AtomicU64::new(15)),
                 next_id: Arc::new(AtomicU64::new(1)),
             }
@@ -2343,6 +2351,9 @@ mod review_tests {
         }
 
         async fn archive_thread(&self, thread_id: &str) -> Result<(), String> {
+            if self.fail_archive.load(Ordering::Relaxed) {
+                return Err("archive failed (simulated)".to_string());
+            }
             self.threads.lock().await.remove(thread_id);
             Ok(())
         }
@@ -2351,6 +2362,9 @@ mod review_tests {
             &self,
             thread_id: &str,
         ) -> Result<crate::codex_local::LocalThreadDeleteSummary, String> {
+            if self.fail_delete.load(Ordering::Relaxed) {
+                return Err("delete failed (simulated)".to_string());
+            }
             self.threads.lock().await.remove(thread_id);
             Ok(crate::codex_local::LocalThreadDeleteSummary {
                 deleted_paths: Vec::new(),
@@ -3408,6 +3422,370 @@ mod review_tests {
             Some(parent.id.as_str()),
             "the parent can be restored only after the reviewer is stopped"
         );
+    }
+
+    #[tokio::test]
+    async fn dismiss_review_removes_terminal_job_and_archives_reviewer_thread() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        start_parent(&app, cwd, "codex").await;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
+        let reviewer_thread = job.reviewer_thread_id.clone().expect("reviewer thread id");
+        assert!(providers
+            .get("codex")
+            .unwrap()
+            .threads
+            .lock()
+            .await
+            .contains_key(&reviewer_thread));
+
+        let dismissed = app
+            .dismiss_review(receipt.review_job_id.clone(), Some("device-1".to_string()))
+            .await
+            .expect("dismiss should succeed for a terminal review");
+        assert_eq!(dismissed.review_job_id, receipt.review_job_id);
+        assert!(
+            app.list_review_jobs()
+                .await
+                .iter()
+                .all(|job| job.id != receipt.review_job_id),
+            "the dismissed job must be gone"
+        );
+        assert!(
+            !providers
+                .get("codex")
+                .unwrap()
+                .threads
+                .lock()
+                .await
+                .contains_key(&reviewer_thread),
+            "dismiss must archive the reviewer thread"
+        );
+    }
+
+    #[tokio::test]
+    async fn dismiss_review_falls_back_to_delete_when_archive_fails() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        start_parent(&app, cwd, "codex").await;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
+        let reviewer_thread = job.reviewer_thread_id.clone().expect("reviewer thread id");
+
+        // Archive fails; delete should succeed and remove the thread.
+        providers
+            .get("codex")
+            .unwrap()
+            .fail_archive
+            .store(true, Ordering::Relaxed);
+
+        app.dismiss_review(receipt.review_job_id.clone(), Some("device-1".to_string()))
+            .await
+            .expect("dismiss should succeed");
+
+        // Thread was removed via delete, not archive.
+        assert!(
+            !providers
+                .get("codex")
+                .unwrap()
+                .threads
+                .lock()
+                .await
+                .contains_key(&reviewer_thread),
+            "reviewer thread must be deleted when archive fails"
+        );
+        // Job is gone.
+        assert!(app
+            .list_review_jobs()
+            .await
+            .iter()
+            .all(|j| j.id != receipt.review_job_id));
+    }
+
+    #[tokio::test]
+    async fn dismiss_review_tombstones_thread_when_both_archive_and_delete_fail() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        start_parent(&app, cwd, "codex").await;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
+        let reviewer_thread = job.reviewer_thread_id.clone().expect("reviewer thread id");
+
+        // Both archive and delete fail — the thread must be tombstoned.
+        let codex = providers.get("codex").unwrap();
+        codex.fail_archive.store(true, Ordering::Relaxed);
+        codex.fail_delete.store(true, Ordering::Relaxed);
+
+        app.dismiss_review(receipt.review_job_id.clone(), Some("device-1".to_string()))
+            .await
+            .expect("dismiss should still succeed");
+
+        // Job removed; thread still hidden via tombstone.
+        assert!(app
+            .list_review_jobs()
+            .await
+            .iter()
+            .all(|j| j.id != receipt.review_job_id));
+        let listed = app.list_threads(50, None).await.expect("list_threads");
+        assert!(
+            listed.threads.iter().all(|t| t.id != reviewer_thread),
+            "tombstoned reviewer thread must remain hidden from nav after job removal"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_threads_fetches_extra_slots_to_avoid_reviewer_starvation() {
+        // This test verifies that reviewer threads don't crowd out normal threads
+        // when the provider's page is exactly `limit` entries.
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        start_parent(&app, cwd, "codex").await;
+
+        // Run a review so there is one reviewer thread in flight.
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "complete");
+        let reviewer_thread = job.reviewer_thread_id.clone().expect("reviewer thread id");
+
+        // Verify the reviewer thread is present in the provider but absent from
+        // the listed threads — proving the fetch-limit buffer is working (the
+        // reviewer thread was fetched but then filtered, leaving room for normal
+        // threads to fill the result).
+        assert!(
+            providers
+                .get("codex")
+                .unwrap()
+                .threads
+                .lock()
+                .await
+                .contains_key(&reviewer_thread),
+            "reviewer thread should still be in the provider"
+        );
+        let listed = app.list_threads(50, None).await.expect("list_threads");
+        assert!(
+            listed.threads.iter().all(|t| t.id != reviewer_thread),
+            "reviewer thread must be excluded from listed results"
+        );
+    }
+
+    #[tokio::test]
+    async fn review_job_cap_is_exact_at_max_review_jobs() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, _providers) = build_review_app(cwd, &["codex"]).await;
+        start_parent(&app, cwd, "codex").await;
+
+        // Run one review to completion so we have a terminal job to evict.
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("first review");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "complete");
+
+        // Fill remaining slots with synthetic terminal jobs up to the cap.
+        {
+            let mut relay = app.relay.write().await;
+            let existing = relay.active_review_jobs_view().len();
+            for i in existing..crate::state::relay::MAX_REVIEW_JOBS_PUB {
+                let mut synthetic = crate::state::ReviewJob::new(
+                    format!("synthetic-{i}"),
+                    "parent".to_string(),
+                    "codex".to_string(),
+                    "codex".to_string(),
+                    None,
+                    crate::state::ReviewMode::CleanThread,
+                    cwd.to_string(),
+                    "device-1".to_string(),
+                    None,
+                );
+                synthetic.set_status(crate::state::ReviewJobStatus::Complete);
+                relay.insert_review_job(synthetic);
+            }
+            assert_eq!(
+                relay.active_review_jobs_view().len(),
+                crate::state::relay::MAX_REVIEW_JOBS_PUB,
+                "should be exactly at cap after filling"
+            );
+        }
+
+        // Inserting one more must evict exactly one and stay at the cap.
+        {
+            let mut relay = app.relay.write().await;
+            let mut extra = crate::state::ReviewJob::new(
+                "extra-job".to_string(),
+                "parent".to_string(),
+                "codex".to_string(),
+                "codex".to_string(),
+                None,
+                crate::state::ReviewMode::CleanThread,
+                cwd.to_string(),
+                "device-1".to_string(),
+                None,
+            );
+            extra.set_status(crate::state::ReviewJobStatus::Complete);
+            relay.insert_review_job(extra);
+            assert_eq!(
+                relay.active_review_jobs_view().len(),
+                crate::state::relay::MAX_REVIEW_JOBS_PUB,
+                "inserting beyond cap must evict exactly one to stay at exactly MAX_REVIEW_JOBS"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn dismiss_review_drops_the_job_even_when_archival_fails() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        start_parent(&app, cwd, "codex").await;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
+
+        // The reviewer thread can't be archived, but dismiss must still drop the
+        // job (the user asked to clear the card) rather than silently no-op.
+        providers
+            .get("codex")
+            .unwrap()
+            .fail_archive
+            .store(true, Ordering::Relaxed);
+
+        let dismissed = app
+            .dismiss_review(receipt.review_job_id.clone(), Some("device-1".to_string()))
+            .await
+            .expect("dismiss should still succeed when archival fails");
+        assert_eq!(dismissed.review_job_id, receipt.review_job_id);
+        assert!(
+            app.list_review_jobs()
+                .await
+                .iter()
+                .all(|job| job.id != receipt.review_job_id),
+            "the dismissed job must be gone even though archival failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_review_jobs_persist_until_dismissed() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, _providers) = build_review_app(cwd, &["codex"]).await;
+        start_parent(&app, cwd, "codex").await;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
+
+        // Backdate the terminal job far past the old 120s retention window: it must
+        // still surface, since the persistent Reviewer panel keeps it until dismiss.
+        {
+            let mut relay = app.relay.write().await;
+            relay.update_review_job(&receipt.review_job_id, |job| {
+                job.updated_at = job.updated_at.saturating_sub(10_000);
+            });
+        }
+        assert!(
+            app.list_review_jobs()
+                .await
+                .iter()
+                .any(|job| job.id == receipt.review_job_id),
+            "a long-finished terminal review must remain visible until dismissed"
+        );
+        assert!(
+            app.snapshot()
+                .await
+                .active_review_jobs
+                .iter()
+                .any(|job| job.id == receipt.review_job_id),
+            "the snapshot must keep surfacing the terminal review job"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_threads_hides_the_reviewer_thread_even_while_it_is_active() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, _providers) = build_review_app(cwd, &["codex"]).await;
+        start_parent(&app, cwd, "codex").await;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
+        let reviewer_thread = job.reviewer_thread_id.clone().expect("reviewer thread id");
+
+        // Simulate the mid-review handoff where the reviewer is the active thread:
+        // it must STILL be hidden from the nav (the user should never see it as a
+        // transient conversation).
+        {
+            let mut relay = app.relay.write().await;
+            relay.active_thread_id = Some(reviewer_thread.clone());
+        }
+
+        let listed = app.list_threads(50, None).await.expect("list_threads");
+        assert!(
+            listed
+                .threads
+                .iter()
+                .all(|thread| thread.id != reviewer_thread),
+            "the reviewer thread must stay hidden from nav even while it is active"
+        );
+    }
+
+    #[tokio::test]
+    async fn dismiss_review_rejects_an_active_review() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        // The recap never completes, so the review stays non-terminal.
+        providers
+            .get("codex")
+            .unwrap()
+            .complete_turns
+            .store(false, Ordering::Relaxed);
+        start_parent(&app, cwd, "codex").await;
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+
+        let error = app
+            .dismiss_review(receipt.review_job_id.clone(), Some("device-1".to_string()))
+            .await
+            .expect_err("an active review must not be dismissable");
+        assert!(error.contains("stop the reviewer"), "got: {error}");
     }
 
     #[tokio::test]

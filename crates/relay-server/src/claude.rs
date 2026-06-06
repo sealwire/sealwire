@@ -518,6 +518,20 @@ impl ProviderBridge for ClaudeCodeBridge {
         // no mapping needs to live past this turn.
         let pending = self.pending_threads.lock().await.remove(thread_id);
         if let Some(config) = pending {
+            // Mint the user message's identity up front and hand it to the
+            // worker. The `start` command accepts the same
+            // `turn_id`/`user_item_id`/`user_message_uuid` triple the `send`
+            // path uses (worker.mjs createUserTurn), so the worker stamps the SDK
+            // message with our uuid. That lets us record the message locally now
+            // with ids the worker will reuse when it later replays `user_message`
+            // (and that a history re-read reproduces), collapsing all three into
+            // one idempotent transcript entry instead of a duplicate.
+            let turn_id = format!(
+                "claude-turn-{}",
+                self.next_request_id.fetch_add(1, Ordering::Relaxed)
+            );
+            let user_message_uuid = new_user_message_uuid();
+            let user_item_id = format!("user:{user_message_uuid}");
             let cmd = json!({
                 "type": "start",
                 "cwd": config.cwd,
@@ -525,19 +539,38 @@ impl ProviderBridge for ClaudeCodeBridge {
                 "permissionMode": config.permission_mode,
                 "pending_thread_id": thread_id,
                 "prompt": text,
+                "turn_id": turn_id,
+                "user_item_id": user_item_id,
+                "user_message_uuid": user_message_uuid,
             });
-            if let Err(error) = self.send_request("start", cmd).await {
-                // Restore pending state so a retry can succeed.
-                self.pending_threads
-                    .lock()
-                    .await
-                    .insert(thread_id.to_string(), config);
-                return Err(error);
-            }
-            let turn_id = format!(
-                "claude-turn-{}",
-                self.next_request_id.fetch_add(1, Ordering::Relaxed)
-            );
+            let result = match self.send_request("start", cmd).await {
+                Ok(result) => result,
+                Err(error) => {
+                    // Restore pending state so a retry can succeed.
+                    self.pending_threads
+                        .lock()
+                        .await
+                        .insert(thread_id.to_string(), config);
+                    return Err(error);
+                }
+            };
+            // The worker emits `session_started` before the `start` response and
+            // the relay reads stdout strictly in order, so by the time this
+            // resolves the synthetic pending id has already been promoted to the
+            // real SDK session id — which the worker hands back on the response
+            // thread. Record the first user message against that real id NOW, so
+            // the very next snapshot already carries it instead of waiting on the
+            // worker's later async `user_message` replay (the projection window
+            // the remote surface had no repair path for).
+            let real_session_id =
+                string_at(&result, &["thread", "id"]).unwrap_or_else(|| thread_id.to_string());
+            self.record_local_user_message(
+                &real_session_id,
+                user_item_id,
+                text.to_string(),
+                turn_id.clone(),
+            )
+            .await;
             return Ok(Some(turn_id));
         }
 
@@ -1603,6 +1636,19 @@ mod tests {
         format!("{workspace_root}/claude-worker/fake-claude-worker.mjs")
     }
 
+    // Faithful pending-promotion fake: unlike the dumb fake above it replays the
+    // first user message asynchronously (after the start response), so it can
+    // reproduce the timing window the remote "first message invisible" bug needs.
+    fn pending_repro_worker_path() -> String {
+        let crate_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let workspace_root = crate_dir
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| ".".to_string());
+        format!("{workspace_root}/claude-worker/fake-claude-worker-pending-repro.mjs")
+    }
+
     async fn spawn_fake_bridge() -> Option<(ClaudeCodeBridge, Arc<RwLock<RelayState>>)> {
         let (tx, _) = tokio::sync::watch::channel(0);
         let state = Arc::new(RwLock::new(RelayState::new(
@@ -1859,6 +1905,238 @@ mod tests {
             result.is_ok(),
             "sending the first message to a blank claude session failed: {:?}",
             result.err(),
+        );
+    }
+
+    // ----------------------------------------------------------------------
+    // Regression for the Claude remote "first message invisible until refresh"
+    // bug. See CLAUDE_REMOTE_PENDING_MESSAGE_VISIBILITY.md. The pending path now
+    // records the first user message synchronously (like an existing-session
+    // send), so it is in the very first snapshot rather than only arriving via
+    // the worker's async replay. The faithful fake worker still replays the
+    // message afterwards, which lets us prove the live record and the replay
+    // collapse to ONE idempotent entry.
+    // ----------------------------------------------------------------------
+
+    /// The pending first message is projected the instant `send_message`
+    /// returns — and the worker's later `user_message` replay does not duplicate
+    /// it, because both carry the relay-minted ids.
+    #[tokio::test]
+    async fn pending_first_message_is_recorded_synchronously_without_duplicate() {
+        use std::collections::HashMap;
+
+        let (tx, _rx) = tokio::sync::watch::channel(0_u64);
+        let relay = Arc::new(RwLock::new(RelayState::new(
+            "/tmp".to_string(),
+            tx.clone(),
+            crate::state::SecurityProfile::private(),
+        )));
+        let bridge = match ClaudeCodeBridge::spawn_with_worker_path(
+            relay.clone(),
+            &pending_repro_worker_path(),
+        )
+        .await
+        {
+            Ok(bridge) => bridge,
+            Err(_) => {
+                eprintln!("skipping: claude worker not available (node missing)");
+                return;
+            }
+        };
+        let mut providers: HashMap<String, Arc<dyn crate::provider::ProviderBridge>> =
+            HashMap::new();
+        providers.insert("claude_code".to_string(), Arc::new(bridge));
+        let app = crate::state::AppState::from_parts(relay.clone(), providers, tx);
+
+        // Blank new session -> pending id (no initial prompt).
+        let start = app
+            .start_session(crate::protocol::StartSessionInput {
+                cwd: Some("/tmp".to_string()),
+                initial_prompt: None,
+                model: None,
+                approval_policy: None,
+                sandbox: None,
+                effort: None,
+                device_id: Some("device-1".to_string()),
+                provider: Some("claude_code".to_string()),
+            })
+            .await
+            .expect("deferred start should succeed");
+        let pending_id = start
+            .active_thread_id
+            .clone()
+            .expect("a blank session must leave a pending active thread");
+        assert!(
+            pending_id.starts_with("claude-pending-"),
+            "blank start should yield a pending id, got {pending_id}",
+        );
+
+        // The user types a LONG first message (their empirical trigger) and sends.
+        let first_message = "This is the user's first long message. ".repeat(64);
+        assert!(first_message.chars().count() > 1_200);
+        app.send_message(crate::protocol::SendMessageInput {
+            text: first_message.clone(),
+            model: None,
+            effort: None,
+            device_id: Some("device-1".to_string()),
+        })
+        .await
+        .expect("sending the first message should succeed");
+
+        // FIXED: the very first snapshot after send already carries the user's
+        // message — no waiting on the worker's async replay, no refresh.
+        let immediate = relay.read().await.snapshot();
+        let immediate_match = immediate.transcript.iter().find(|entry| {
+            entry.kind == TranscriptEntryKind::UserText
+                && entry.text.as_deref().map(str::trim) == Some(first_message.trim())
+        });
+        let immediate_turn_id = immediate_match
+            .expect(
+                "REGRESSION: the pending first message must be projected \
+                 synchronously, in the snapshot available the moment send returns",
+            )
+            .turn_id
+            .clone();
+
+        // It carries the relay-minted turn id (claude-turn-N), matching the
+        // active turn — not the worker's own replay id. (Fixes the divergence
+        // the investigation flagged as doc finding #2.)
+        assert!(
+            immediate_turn_id
+                .as_deref()
+                .is_some_and(|id| id.starts_with("claude-turn-")),
+            "the projected message must carry the relay turn id, got {immediate_turn_id:?}",
+        );
+
+        // Let the worker's async `user_message` replay land, then prove it did
+        // NOT create a second copy: same ids in -> one idempotent entry.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let after_replay = relay.read().await.snapshot();
+        let user_entries = after_replay
+            .transcript
+            .iter()
+            .filter(|entry| {
+                entry.kind == TranscriptEntryKind::UserText
+                    && entry.text.as_deref().map(str::trim) == Some(first_message.trim())
+            })
+            .count();
+        assert_eq!(
+            user_entries, 1,
+            "the worker's replay must upsert onto the live entry, not duplicate it",
+        );
+    }
+
+    fn relay_with_active_thread() -> RelayState {
+        let (tx, _rx) = tokio::sync::watch::channel(0_u64);
+        let mut relay = RelayState::new(
+            "/tmp".to_string(),
+            tx,
+            crate::state::SecurityProfile::private(),
+        );
+        relay.activate_thread(
+            test_thread("sess-1", "/tmp"),
+            "/tmp",
+            "claude-sonnet-4-6",
+            "default",
+            "workspace-write",
+            "high",
+            "device-1",
+        );
+        relay
+    }
+
+    /// The length amplifier, fixed: a long user message used to be clipped to a
+    /// 1200-char "…"-preview in the remote snapshot (so it depended on a
+    /// follow-up hydration fetch, the second leg of the disappearance). Now the
+    /// remote-surface compaction ships the user's own text in full, so the phone
+    /// shows it straight from the snapshot — short OR long.
+    #[tokio::test]
+    async fn remote_surface_keeps_user_message_text_in_full() {
+        let mut relay = relay_with_active_thread();
+
+        let short_message = "hi there, one quick question about the build".to_string();
+        // Well over the old 1200-char per-entry cap, but small enough that the
+        // whole snapshot still fits the remote byte budget.
+        let long_message = "word ".repeat(400); // 2000 chars
+        assert!(short_message.chars().count() < 1_200);
+        assert!(long_message.chars().count() > 1_200);
+
+        relay.upsert_user_message(
+            "user:short".to_string(),
+            short_message.clone(),
+            "turn-short".to_string(),
+        );
+        relay.upsert_user_message(
+            "user:long".to_string(),
+            long_message.clone(),
+            "turn-long".to_string(),
+        );
+
+        let remote = relay
+            .snapshot()
+            .compact_for(crate::protocol::SessionSnapshotCompactProfile::RemoteSurface);
+
+        let short_entry = remote
+            .transcript
+            .iter()
+            .find(|entry| entry.item_id.as_deref() == Some("user:short"))
+            .expect("short entry present");
+        let long_entry = remote
+            .transcript
+            .iter()
+            .find(|entry| entry.item_id.as_deref() == Some("user:long"))
+            .expect("long entry present");
+
+        assert_eq!(
+            short_entry.text.as_deref(),
+            Some(short_message.as_str()),
+            "short user message must reach the remote surface intact",
+        );
+        assert_eq!(
+            long_entry.text.as_deref(),
+            Some(long_message.as_str()),
+            "FIX: a long user message must now reach the remote surface in full, \
+             not as a clipped preview",
+        );
+        assert!(
+            !remote.transcript_truncated,
+            "with only (full) user messages the remote snapshot is not truncated, \
+             so the phone needs no hydration to show them",
+        );
+    }
+
+    /// Backstop: the byte-budget pass still bounds a pathologically large user
+    /// message, so exempting user text from the per-entry cap can't blow the
+    /// remote frame. Such a giant message clips and flags the snapshot truncated
+    /// (the phone then hydrates the rest) — the honesty invariant holds.
+    #[tokio::test]
+    async fn remote_surface_still_bounds_a_pathologically_long_user_message() {
+        let mut relay = relay_with_active_thread();
+
+        let giant_message = "word ".repeat(8_000); // 40k chars, far over the byte budget
+        relay.upsert_user_message(
+            "user:giant".to_string(),
+            giant_message.clone(),
+            "turn-giant".to_string(),
+        );
+
+        let remote = relay
+            .snapshot()
+            .compact_for(crate::protocol::SessionSnapshotCompactProfile::RemoteSurface);
+        let giant_entry = remote
+            .transcript
+            .iter()
+            .find(|entry| entry.item_id.as_deref() == Some("user:giant"))
+            .expect("giant entry present");
+
+        assert!(
+            giant_entry.text.as_deref().map(str::len).unwrap_or(0) < giant_message.len(),
+            "an over-budget user message must still be clipped by the byte-budget backstop",
+        );
+        assert!(
+            remote.transcript_truncated,
+            "clipping the giant message must flag the snapshot truncated so the \
+             phone hydrates the remainder",
         );
     }
 

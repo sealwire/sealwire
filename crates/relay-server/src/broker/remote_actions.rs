@@ -108,6 +108,15 @@ pub(super) enum RemoteActionRequest {
     RequestReview {
         input: RequestReviewInput,
     },
+    ResolveReview {
+        #[serde(default)]
+        device_id: Option<String>,
+    },
+    DismissReview {
+        review_id: String,
+        #[serde(default)]
+        device_id: Option<String>,
+    },
 }
 
 impl RemoteActionRequest {
@@ -134,6 +143,8 @@ impl RemoteActionRequest {
             Self::FetchAskUserQuestionDetail { .. } => RemoteActionKind::FetchAskUserQuestionDetail,
             Self::SubmitAskUserAnswer { .. } => RemoteActionKind::SubmitAskUserAnswer,
             Self::RequestReview { .. } => RemoteActionKind::RequestReview,
+            Self::ResolveReview { .. } => RemoteActionKind::ResolveReview,
+            Self::DismissReview { .. } => RemoteActionKind::DismissReview,
         }
     }
 
@@ -224,6 +235,13 @@ impl RemoteActionRequest {
                 input.device_id = Some(device_id);
                 Self::RequestReview { input }
             }
+            Self::ResolveReview { .. } => Self::ResolveReview {
+                device_id: Some(device_id),
+            },
+            Self::DismissReview { review_id, .. } => Self::DismissReview {
+                review_id,
+                device_id: Some(device_id),
+            },
         }
     }
 }
@@ -252,6 +270,8 @@ pub(super) enum RemoteActionKind {
     FetchAskUserQuestionDetail,
     SubmitAskUserAnswer,
     RequestReview,
+    ResolveReview,
+    DismissReview,
 }
 
 impl RemoteActionKind {
@@ -278,6 +298,8 @@ impl RemoteActionKind {
             Self::FetchAskUserQuestionDetail => "fetch_ask_user_question_detail",
             Self::SubmitAskUserAnswer => "submit_ask_user_answer",
             Self::RequestReview => "request_review",
+            Self::ResolveReview => "resolve_review",
+            Self::DismissReview => "dismiss_review",
         }
     }
 }
@@ -903,6 +925,17 @@ async fn execute_remote_action(
             .request_review(input)
             .await
             .map(|_| RemoteActionOutcome::default()),
+        RemoteActionRequest::ResolveReview { device_id } => state
+            .resolve_blocked_review(device_id)
+            .await
+            .map(|_| RemoteActionOutcome::default()),
+        RemoteActionRequest::DismissReview {
+            review_id,
+            device_id,
+        } => state
+            .dismiss_review(review_id, device_id)
+            .await
+            .map(|_| RemoteActionOutcome::default()),
         RemoteActionRequest::StopTurn { input } => state
             .stop_active_turn(input)
             .await
@@ -1057,6 +1090,8 @@ fn requires_session_claim(action: RemoteActionKind) -> bool {
         RemoteActionKind::SendMessage
             | RemoteActionKind::ApplyFileChange
             | RemoteActionKind::RequestReview
+            | RemoteActionKind::ResolveReview
+            | RemoteActionKind::DismissReview
     )
 }
 
@@ -2158,7 +2193,9 @@ fn remote_action_result_kind(action: RemoteActionKind) -> RemoteActionResultKind
         }
         RemoteActionKind::SendMessage
         | RemoteActionKind::ApplyFileChange
-        | RemoteActionKind::RequestReview => RemoteActionResultKind::RemoteActionAck,
+        | RemoteActionKind::RequestReview
+        | RemoteActionKind::ResolveReview
+        | RemoteActionKind::DismissReview => RemoteActionResultKind::RemoteActionAck,
     }
 }
 

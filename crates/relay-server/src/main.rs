@@ -38,11 +38,11 @@ use protocol::{
     AuthSessionInput, AuthSessionView, BulkRevokeDevicesReceipt, HealthResponse, HeartbeatInput,
     ModelOptionView, PairingDecisionInput, PairingDecisionReceipt, PairingStartInput,
     PairingTicketView, ReadThreadEntryDetailInput, ReadThreadTranscriptInput, RequestReviewInput,
-    RequestReviewReceipt, ResumeSessionInput, ReviewJobView, RevokeDeviceReceipt, SendMessageInput,
-    SessionSnapshot, SessionSnapshotCompactProfile, StartSessionInput, StopTurnInput,
-    SubmitAskUserAnswerInput, TakeOverInput, ThreadArchiveReceipt, ThreadDeleteReceipt,
-    ThreadEntryDetailResponse, ThreadTranscriptResponse, ThreadsQuery, ThreadsResponse,
-    UpdateSessionSettingsInput, WorkspaceDiffResponse,
+    RequestReviewReceipt, ResumeSessionInput, ReviewDismissReceipt, ReviewJobView,
+    RevokeDeviceReceipt, SendMessageInput, SessionSnapshot, SessionSnapshotCompactProfile,
+    StartSessionInput, StopTurnInput, SubmitAskUserAnswerInput, TakeOverInput,
+    ThreadArchiveReceipt, ThreadDeleteReceipt, ThreadEntryDetailResponse, ThreadTranscriptResponse,
+    ThreadsQuery, ThreadsResponse, UpdateSessionSettingsInput, WorkspaceDiffResponse,
 };
 use relay_http::{
     apply_standard_security_headers, header_origin, parse_optional_string_env, request_origin,
@@ -190,6 +190,10 @@ fn build_router(context: AppContext, web_assets: WebAssets) -> Router {
         .route("/api/session/review", post(request_review))
         .route("/api/session/review/resolve", post(resolve_review))
         .route("/api/session/reviews", get(list_reviews))
+        .route(
+            "/api/session/reviews/:review_id/dismiss",
+            post(dismiss_review),
+        )
         .route("/api/pairing/start", post(start_pairing))
         .route(
             "/api/pairings/:pairing_id/decision",
@@ -699,6 +703,22 @@ async fn list_reviews(
 ) -> Result<Json<ApiEnvelope<Vec<ReviewJobView>>>, (StatusCode, Json<ApiError>)> {
     authorize_api(&context, &headers, &uri)?;
     Ok(Json(ApiEnvelope::ok(context.app.list_review_jobs().await)))
+}
+
+async fn dismiss_review(
+    State(context): State<AppContext>,
+    headers: HeaderMap,
+    uri: Uri,
+    Path(review_id): Path<String>,
+    Json(input): Json<StopTurnInput>,
+) -> Result<Json<ApiEnvelope<ReviewDismissReceipt>>, (StatusCode, Json<ApiError>)> {
+    authorize_api(&context, &headers, &uri)?;
+    context
+        .app
+        .dismiss_review(review_id, input.device_id)
+        .await
+        .map(|receipt| Json(ApiEnvelope::ok(receipt)))
+        .map_err(bad_request)
 }
 
 async fn session_heartbeat(

@@ -8,10 +8,13 @@ import {
   ReviewPanel,
 } from "../shared/review-panel.js";
 import {
+  canRequestReview,
   isReviewBlocked,
   isReviewInProgress,
+  isReviewInProgressForThread,
   reviewChipTone,
   reviewStatusLabel,
+  selectReviewLaunchModel,
 } from "../shared/review-state.js";
 
 const h = React.createElement;
@@ -67,6 +70,75 @@ test("isReviewBlocked detects the persistent blocked state", () => {
   // A blocked review still reads as in-progress (controls stay disabled).
   assert.equal(isReviewInProgress({ active_review_jobs: [{ status: "blocked" }] }), true);
   assert.equal(reviewStatusLabel("blocked"), "Review blocked — action needed");
+});
+
+test("selectReviewLaunchModel offers a different default provider and flattens the model catalog", () => {
+  const model = selectReviewLaunchModel({
+    providers: ["codex", "claude_code"],
+    providerModels: {
+      codex: [{ model: "gpt-5.5", display_name: "GPT-5.5" }],
+      claude_code: [{ model: "sonnet", display_name: "Sonnet" }],
+    },
+    session: { provider: "codex", available_models: [] },
+  });
+  // Default reviewer should be the OTHER provider (cross-agent review).
+  assert.equal(model.defaultProvider, "claude_code");
+  assert.deepEqual(
+    model.providerOptions.map((option) => option.value),
+    ["codex", "claude_code"]
+  );
+  assert.equal(model.models.length, 2);
+});
+
+test("selectReviewLaunchModel falls back to the session provider when it is the only one", () => {
+  const model = selectReviewLaunchModel({
+    providers: ["codex"],
+    providerModels: {},
+    session: { provider: "codex", available_models: [{ model: "gpt-5.5" }] },
+  });
+  assert.equal(model.defaultProvider, "codex");
+  assert.equal(model.models.length, 1);
+});
+
+test("canRequestReview requires controller + idle + no active review", () => {
+  const base = {
+    active_thread_id: "t1",
+    active_controller_device_id: "device-a",
+    active_turn_id: null,
+    current_status: "idle",
+    active_review_jobs: [],
+  };
+  assert.equal(canRequestReview(base, "device-a"), true);
+  // Not the controller.
+  assert.equal(canRequestReview(base, "device-b"), false);
+  // A turn is running.
+  assert.equal(canRequestReview({ ...base, active_turn_id: "turn-1" }, "device-a"), false);
+  // Status not idle.
+  assert.equal(canRequestReview({ ...base, current_status: "working" }, "device-a"), false);
+  // A review already in progress.
+  assert.equal(
+    canRequestReview({ ...base, active_review_jobs: [{ status: "waiting_for_reviewer" }] }, "device-a"),
+    false
+  );
+  // No active thread.
+  assert.equal(canRequestReview({ ...base, active_thread_id: null }, "device-a"), false);
+});
+
+test("isReviewInProgressForThread only matches the reviewed parent while non-terminal", () => {
+  const session = {
+    active_review_jobs: [
+      { parent_thread_id: "parent-1", status: "waiting_for_reviewer" },
+      { parent_thread_id: "parent-2", status: "complete" },
+    ],
+  };
+  // The thread currently under (non-terminal) review.
+  assert.equal(isReviewInProgressForThread(session, "parent-1"), true);
+  // A thread whose only review already finished must NOT show the placeholder.
+  assert.equal(isReviewInProgressForThread(session, "parent-2"), false);
+  // Unrelated threads / no thread.
+  assert.equal(isReviewInProgressForThread(session, "other"), false);
+  assert.equal(isReviewInProgressForThread(session, null), false);
+  assert.equal(isReviewInProgressForThread({}, "parent-1"), false);
 });
 
 test("reviewChipTone flags failed and complete distinctly from in-progress", () => {

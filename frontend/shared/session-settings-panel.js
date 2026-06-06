@@ -212,7 +212,7 @@ function ApprovalCards({ options = [], value, disabled, onChange }) {
   );
 }
 
-function SegmentedControl({ id, options = [], value, disabled, onChange }) {
+export function SegmentedControl({ id, options = [], value, disabled, onChange }) {
   return h(
     "div",
     { id, className: "settings-segmented" + (disabled ? " is-disabled" : ""), role: "radiogroup" },

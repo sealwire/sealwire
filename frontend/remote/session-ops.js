@@ -1022,6 +1022,68 @@ export async function fetchRemoteWorkspaceDiff() {
   return result.workspace_diff;
 }
 
+// Cross-agent review actions over the broker. Each ack carries no snapshot, so
+// we follow up with syncRemoteSnapshot to refresh active_review_jobs.
+export async function requestRemoteReview({ reviewerProvider, reviewerModel, instructions } = {}) {
+  if (!reviewerProvider) {
+    renderLog("Pick a reviewer provider before starting a review.");
+    return false;
+  }
+  renderLog(`Requesting ${reviewerProvider} review.`);
+  try {
+    await dispatchOrRecover("request_review", {
+      input: {
+        reviewer_provider: reviewerProvider,
+        reviewer_model: reviewerModel || null,
+        instructions: instructions || null,
+      },
+    });
+    await syncRemoteSnapshot("post-review-request", true);
+    return true;
+  } catch (error) {
+    renderLog(`Remote review request failed: ${error.message}`);
+    return false;
+  }
+}
+
+export async function resolveRemoteReview() {
+  renderLog("Stopping the blocked reviewer…");
+  try {
+    await dispatchOrRecover("resolve_review", {});
+    await syncRemoteSnapshot("post-review-resolve", true);
+    return true;
+  } catch (error) {
+    renderLog(`Remote resolve failed: ${error.message}`);
+    return false;
+  }
+}
+
+export async function dismissRemoteReview(reviewId) {
+  if (!reviewId) {
+    renderLog("No review to dismiss.");
+    return false;
+  }
+  renderLog("Dismissing review…");
+  try {
+    await dispatchOrRecover("dismiss_review", { review_id: reviewId });
+    await syncRemoteSnapshot("post-review-dismiss", true);
+    return true;
+  } catch (error) {
+    renderLog(`Remote dismiss failed: ${error.message}`);
+    return false;
+  }
+}
+
+// Load a reviewer thread's transcript so the Reviewer tab can show its findings.
+// Reuses the standard transcript page fetch (fetch_thread_transcript).
+export async function fetchRemoteThreadTranscript(threadId) {
+  if (!threadId) {
+    return [];
+  }
+  const page = await fetchTranscriptPage({ threadId, before: null });
+  return page?.entries || [];
+}
+
 export function clearSessionRuntime() {
   clearTranscriptHydration(state);
 }

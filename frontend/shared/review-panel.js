@@ -186,6 +186,8 @@ export function ReviewLauncher({
   models = [],
   defaultProvider = "",
   disabled = false,
+  label = "Review",
+  title = "Ask another agent to review the current changes",
   onSubmit,
 }) {
   return h(
@@ -197,10 +199,10 @@ export function ReviewLauncher({
         type: "button",
         className: "header-button review-launch-button",
         disabled,
-        title: "Ask another agent to review the current changes",
+        title,
         onClick: () => document.getElementById(panelId)?.showModal?.(),
       },
-      "Review"
+      label
     ),
     h(ReviewPanel, {
       id: panelId,

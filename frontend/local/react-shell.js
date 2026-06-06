@@ -454,7 +454,12 @@ function ComposerShell() {
   return h(
     React.Fragment,
     null,
-    h("div", { className: "workspace-diff-chip-host", id: "workspace-diff-chip-mount" }),
+    h(
+      "div",
+      { className: "workspace-diff-chip-host" },
+      h("div", { className: "workspace-diff-chip-slot", id: "workspace-diff-chip-mount" }),
+      h("div", { className: "workspace-diff-chip-slot", id: "reviewer-chip-mount" })
+    ),
     h(
       "section",
       { className: "control-banner control-banner-compact", hidden: true, id: "control-banner" },
@@ -540,6 +545,7 @@ function ChatShell() {
         ""
       )
     ),
+    h("div", { className: "review-idle-nudge", id: "review-idle-nudge", hidden: true }),
     h(ComposerShell)
   );
 }
