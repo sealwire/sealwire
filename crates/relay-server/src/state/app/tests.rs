@@ -392,7 +392,11 @@ mod path_scope_tests {
             Ok(Some(format!("turn:{thread_id}")))
         }
 
-        async fn interrupt_turn(&self, thread_id: &str, _turn_id: &str) -> Result<(), String> {
+        async fn request_turn_stop(
+            &self,
+            thread_id: &str,
+            _turn_id: Option<&str>,
+        ) -> Result<(), String> {
             self.interrupt_thread_ids
                 .lock()
                 .await
@@ -612,6 +616,99 @@ mod path_scope_tests {
             *claude.turn_thread_ids.lock().await,
             vec!["claude-thread".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn stop_request_does_not_forge_provider_completion() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, codex, claude) = build_recording_provider_app(cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let claude_thread = claude.thread_summary("claude-thread", cwd);
+        claude
+            .threads
+            .lock()
+            .await
+            .insert(claude_thread.id.clone(), claude_thread.clone());
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("claude_code".to_string());
+            relay.active_thread_id = Some(claude_thread.id.clone());
+            relay.active_turn_id = Some("turn-1".to_string());
+            relay.current_status = "active".to_string();
+            relay.threads = vec![claude_thread];
+            relay.set_active_controller("device-1");
+        }
+
+        let snapshot = app
+            .stop_active_turn(StopTurnInput {
+                device_id: Some("device-1".to_string()),
+            })
+            .await
+            .expect("provider should accept the stop request");
+
+        assert!(codex.interrupt_thread_ids.lock().await.is_empty());
+        assert_eq!(
+            *claude.interrupt_thread_ids.lock().await,
+            vec!["claude-thread".to_string()]
+        );
+        assert_eq!(
+            snapshot.active_turn_id.as_deref(),
+            Some("turn-1"),
+            "the relay must wait for a provider completion event"
+        );
+        assert_eq!(snapshot.current_status, "active");
+    }
+
+    #[tokio::test]
+    async fn stop_falls_back_to_idle_when_provider_never_confirms() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, _codex, claude) = build_recording_provider_app(cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+        app.set_stop_fallback_ms(80);
+
+        let claude_thread = claude.thread_summary("claude-thread", cwd);
+        claude
+            .threads
+            .lock()
+            .await
+            .insert(claude_thread.id.clone(), claude_thread.clone());
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("claude_code".to_string());
+            relay.active_thread_id = Some(claude_thread.id.clone());
+            relay.active_turn_id = Some("turn-1".to_string());
+            relay.current_status = "active".to_string();
+            relay.threads = vec![claude_thread];
+            relay.set_active_controller("device-1");
+        }
+
+        // The recording provider accepts the stop but never emits a completion.
+        let snapshot = app
+            .stop_active_turn(StopTurnInput {
+                device_id: Some("device-1".to_string()),
+            })
+            .await
+            .expect("provider should accept the stop request");
+        // Immediately, the relay still waits (does not forge completion).
+        assert_eq!(snapshot.active_turn_id.as_deref(), Some("turn-1"));
+
+        // After the bounded fallback window, it marks the turn idle locally.
+        let mut idled = false;
+        for _ in 0..50 {
+            if app.snapshot().await.active_turn_id.is_none() {
+                idled = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            idled,
+            "the bounded fallback must mark idle when no completion arrives"
+        );
+        assert_eq!(app.snapshot().await.current_status, "idle");
     }
 
     #[tokio::test]
@@ -908,7 +1005,11 @@ mod path_scope_tests {
             Err("consumed-initial provider does not support follow-up turns".to_string())
         }
 
-        async fn interrupt_turn(&self, _thread_id: &str, _turn_id: &str) -> Result<(), String> {
+        async fn request_turn_stop(
+            &self,
+            _thread_id: &str,
+            _turn_id: Option<&str>,
+        ) -> Result<(), String> {
             Ok(())
         }
 
@@ -1909,7 +2010,7 @@ mod path_scope_tests {
             Ok(Some("turn:1".to_string()))
         }
 
-        async fn interrupt_turn(&self, _t: &str, _turn: &str) -> Result<(), String> {
+        async fn request_turn_stop(&self, _t: &str, _turn: Option<&str>) -> Result<(), String> {
             Ok(())
         }
 
@@ -2071,7 +2172,7 @@ mod review_tests {
         raise_approval: Arc<AtomicBool>,
         // When true, `respond_to_approval` errors (provider rejects the denial).
         deny_fails: Arc<AtomicBool>,
-        // When true, `interrupt_turn` errors.
+        // When true, `request_turn_stop` errors.
         interrupt_fails: Arc<AtomicBool>,
         interrupts: Arc<Mutex<Vec<String>>>,
         // When set, the first completing turn also injects a pending approval for
@@ -2082,6 +2183,9 @@ mod review_tests {
         // When true, only the *reviewer* turn parks on an approval (recap completes
         // normally) — exercises the reviewer-handoff cleanup path.
         approval_on_reviewer_turn: Arc<AtomicBool>,
+        // Simulate losing/rejecting the reviewer turn-start response after the
+        // reviewer thread became active.
+        fail_reviewer_start: Arc<AtomicBool>,
         // Delay before a turn completes (ms). Lets tests complete a turn *after* a
         // short step timeout, exercising the drain path.
         complete_delay_ms: Arc<AtomicU64>,
@@ -2107,6 +2211,7 @@ mod review_tests {
                 inject_unrelated_approval: Arc::new(AtomicBool::new(false)),
                 raise_ask_user: Arc::new(AtomicBool::new(false)),
                 approval_on_reviewer_turn: Arc::new(AtomicBool::new(false)),
+                fail_reviewer_start: Arc::new(AtomicBool::new(false)),
                 complete_delay_ms: Arc::new(AtomicU64::new(15)),
                 next_id: Arc::new(AtomicU64::new(1)),
             }
@@ -2264,6 +2369,17 @@ mod review_tests {
                 .lock()
                 .await
                 .push((thread_id.to_string(), text.to_string()));
+            if text.contains("You are reviewing another agent's work")
+                && self.fail_reviewer_start.load(Ordering::Relaxed)
+            {
+                // Model a response-loss race: the provider has started work and
+                // published liveness, but the start request itself returns an
+                // error to the orchestrator.
+                let mut relay = self.state.write().await;
+                relay.set_thread_status(thread_id, "active".to_string(), Vec::new());
+                relay.notify();
+                return Err("reviewer turn start response was lost".to_string());
+            }
             let turn_id = self.next_token("turn");
             if !self.complete_turns.load(Ordering::Relaxed) {
                 return Ok(Some(turn_id));
@@ -2431,7 +2547,11 @@ mod review_tests {
             Ok(Some(turn_id))
         }
 
-        async fn interrupt_turn(&self, thread_id: &str, _turn_id: &str) -> Result<(), String> {
+        async fn request_turn_stop(
+            &self,
+            thread_id: &str,
+            _turn_id: Option<&str>,
+        ) -> Result<(), String> {
             self.interrupts.lock().await.push(thread_id.to_string());
             if self.interrupt_fails.load(Ordering::Relaxed) {
                 return Err("interrupt rejected".to_string());
@@ -3256,6 +3376,38 @@ mod review_tests {
             .expect("resolve should unblock");
         let job = wait_for_review_status(&app, &receipt.review_job_id, &["failed"]).await;
         assert_eq!(job.status, "failed");
+    }
+
+    #[tokio::test]
+    async fn reviewer_start_error_stops_before_handing_back_to_parent() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let codex = providers.get("codex").unwrap();
+        codex.fail_reviewer_start.store(true, Ordering::Relaxed);
+        let parent = start_parent(&app, cwd, "codex").await;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+
+        assert_eq!(job.status, "failed");
+        assert!(job
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("reviewer turn start response was lost"));
+        assert!(
+            !codex.interrupts.lock().await.is_empty(),
+            "an uncertain reviewer start must go through confirmed stop"
+        );
+        assert_eq!(
+            app.snapshot().await.active_thread_id.as_deref(),
+            Some(parent.id.as_str()),
+            "the parent can be restored only after the reviewer is stopped"
+        );
     }
 
     #[tokio::test]

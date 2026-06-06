@@ -65,11 +65,13 @@ import {
 } from "../shared/conversation.js";
 import { SessionSettingsButton } from "../shared/session-settings-panel.js";
 import {
+  ReviewLauncher,
+} from "../shared/review-panel.js";
+import {
   isReviewBlocked,
   isReviewInProgress,
-  ReviewLauncher,
   reviewStatusLabel,
-} from "../shared/review-panel.js";
+} from "../shared/review-state.js";
 import { providerOptions as toProviderOptions } from "../shared/provider-settings.js";
 import { saveLastEffort } from "../shared/last-used-settings.js";
 import {

@@ -427,7 +427,11 @@ impl ProviderBridge for FakeProviderBridge {
         Ok(Some(turn_id))
     }
 
-    async fn interrupt_turn(&self, thread_id: &str, _turn_id: &str) -> Result<(), String> {
+    async fn request_turn_stop(
+        &self,
+        thread_id: &str,
+        _turn_id: Option<&str>,
+    ) -> Result<(), String> {
         let mut relay = self.state.write().await;
         relay.set_active_turn(None);
         relay.set_thread_status(thread_id, "idle".to_string(), Vec::new());

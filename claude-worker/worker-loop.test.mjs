@@ -22,9 +22,13 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WORKER = path.join(HERE, "worker.mjs");
 const FAKE_SDK = path.join(HERE, "test-fake-sdk.mjs");
 
-function spawnWorker() {
+function spawnWorker(extraEnv = {}) {
   const child = spawn(process.execPath, [WORKER], {
-    env: { ...process.env, CLAUDE_WORKER_SDK_MODULE: FAKE_SDK },
+    env: {
+      ...process.env,
+      CLAUDE_WORKER_SDK_MODULE: FAKE_SDK,
+      ...extraEnv,
+    },
     stdio: ["pipe", "pipe", "pipe"],
   });
   child.stderr.resume(); // drain diagnostics so the pipe never blocks
@@ -101,6 +105,7 @@ function spawnWorker() {
 const isStarted = (sid) => (event) =>
   event.type === "session_started" && event.provider_session_id === sid;
 const isDone = (event) => event.type === "done";
+const isStopped = (event) => event.type === "session_stopped";
 
 const START_DEFAULT = {
   type: "start",
@@ -292,18 +297,83 @@ test("switching the model on a live session rebuilds the query", async () => {
   }
 });
 
-test("cancel tears the live session down and emits a done", async () => {
+test("cancel tears the live session down and emits session_stopped", async () => {
   const worker = spawnWorker();
   try {
     worker.send(START_DEFAULT);
     await worker.waitFor(isStarted("sess-1"), { label: "session_started" });
     await worker.waitFor(isDone, { label: "turn done" });
 
-    worker.send({ type: "cancel", provider_session_id: "sess-1" });
-    await worker.waitFor(isDone, { count: 2, label: "cancel done" });
+    worker.send({ type: "cancel", id: "cancel-1", provider_session_id: "sess-1" });
+    await worker.waitFor(isStopped, { label: "session_stopped" });
+    const response = await worker.waitFor(
+      (event) => event.type === "response" && event.id === "cancel-1",
+      { label: "cancel response" },
+    );
+    assert.equal(response.ok, true);
 
     // No rebuild happened — cancel just tears the one session down.
     assert.equal(worker.queries().length, 1);
+  } finally {
+    await worker.close();
+  }
+});
+
+test("duplicate cancel commands share one drain and emit one stopped event", async () => {
+  const worker = spawnWorker({
+    CLAUDE_FAKE_HOLD_TURNS: "1",
+    CLAUDE_FAKE_INTERRUPT_DELAY_MS: "150",
+  });
+  try {
+    worker.send(START_DEFAULT);
+    await worker.waitFor(isStarted("sess-1"), { label: "session_started" });
+
+    worker.send({ type: "cancel", id: "cancel-1", provider_session_id: "sess-1" });
+    worker.send({ type: "cancel", id: "cancel-2", provider_session_id: "sess-1" });
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(
+      worker.events.filter(isStopped).length,
+      0,
+      "a repeated cancel must not report stopped before the shared drain finishes",
+    );
+
+    await worker.waitFor(isStopped, { label: "session_stopped" });
+    await worker.waitFor(
+      (event) => event.type === "response" && event.id === "cancel-1" && event.ok,
+      { label: "first cancel response" },
+    );
+    await worker.waitFor(
+      (event) => event.type === "response" && event.id === "cancel-2" && event.ok,
+      { label: "second cancel response" },
+    );
+    assert.equal(worker.events.filter(isStopped).length, 1);
+  } finally {
+    await worker.close();
+  }
+});
+
+test("cancel timeout returns an error but emits stopped only after the real drain", async () => {
+  const worker = spawnWorker({
+    CLAUDE_FAKE_HOLD_TURNS: "1",
+    CLAUDE_FAKE_INTERRUPT_DELAY_MS: "200",
+    CLAUDE_WORKER_CANCEL_DRAIN_TIMEOUT_MS: "40",
+  });
+  try {
+    worker.send(START_DEFAULT);
+    await worker.waitFor(isStarted("sess-1"), { label: "session_started" });
+    worker.send({ type: "cancel", id: "cancel-timeout", provider_session_id: "sess-1" });
+
+    const response = await worker.waitFor(
+      (event) => event.type === "response" && event.id === "cancel-timeout",
+      { label: "cancel timeout response" },
+    );
+    assert.equal(response.ok, false);
+    assert.match(response.error.message, /did not stop/i);
+    assert.equal(worker.events.filter(isStopped).length, 0);
+
+    await worker.waitFor(isStopped, { label: "eventual session_stopped" });
+    assert.equal(worker.events.filter(isStopped).length, 1);
   } finally {
     await worker.close();
   }

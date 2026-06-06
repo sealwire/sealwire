@@ -23,6 +23,7 @@
  *   {"type":"ask_user_question_requested","id":"...","tool_use_id":"...","questions":[...]}
  *   {"type":"error",           "message":"..."}
  *   {"type":"done"}
+ *   {"type":"session_stopped", "provider_session_id":"..."}
  */
 
 import { createInterface } from "node:readline";
@@ -56,9 +57,15 @@ import { createProgressTracker } from "./progress-tracker.mjs";
 const DEFAULT_SETTING_SOURCES = ["user", "project", "local"];
 
 const SESSION_LIMIT = 8;
-// Upper bound on how long `cancel` waits for the SDK to actually stop before it
-// reports `done` anyway, so an unresponsive SDK can't wedge the cancel path.
-const CANCEL_DRAIN_TIMEOUT_MS = 10_000;
+const DEFAULT_CANCEL_DRAIN_TIMEOUT_MS = 10_000;
+const configuredCancelDrainTimeout = Number.parseInt(
+  process.env.CLAUDE_WORKER_CANCEL_DRAIN_TIMEOUT_MS || "",
+  10,
+);
+const CANCEL_DRAIN_TIMEOUT_MS =
+  Number.isFinite(configuredCancelDrainTimeout) && configuredCancelDrainTimeout > 0
+    ? configuredCancelDrainTimeout
+    : DEFAULT_CANCEL_DRAIN_TIMEOUT_MS;
 
 function emit(event, progressTracker = null) {
   rawEmit(event);
@@ -94,7 +101,8 @@ async function flushEvents(
   let streamProviderSessionId = initialProviderSessionId;
   try {
     for await (const msg of stream) {
-      // Don't yield during cancelled stream — we already emitted done
+      // Suppress late provider events during cancellation. Returning closes the
+      // consumer; the stop operation emits `session_stopped` after this task ends.
       if (shouldCancel.current) return;
 
       const mapped = mapSdkMessage(msg);
@@ -240,9 +248,8 @@ function createWorkerSession(sdk, options, resume) {
     close() {
       ended = true;
       flush();
-      // Stop any in-flight turn. Returns a promise that resolves once the SDK has
-      // processed the interrupt, so the cancel path can await a *real* stop before
-      // telling the relay the turn is done (interrupt is otherwise fire-and-forget).
+      // Stop any in-flight turn. The cancel lifecycle awaits this request together
+      // with the stream consumer before emitting the authoritative stopped event.
       if (typeof query.interrupt === "function") {
         return Promise.resolve(query.interrupt()).catch(() => {});
       }
@@ -333,6 +340,8 @@ function createSessionEntry({ key, providerSessionId = null, cmd, pendingStartRe
     pendingStartResponse,
     initialUserMessage: null,
     running: false,
+    stopGeneration: 0,
+    stopOperation: null,
     lastUsedAt: Date.now(),
     cwd: cmd.cwd ?? process.cwd(),
     model: cmd.model ?? "claude-sonnet-4-6",
@@ -362,6 +371,8 @@ function promoteSessionEntry(sessions, entry, providerSessionId) {
 }
 
 function closeSessionEntry(entry) {
+  entry.stopGeneration += 1;
+  entry.stopOperation = null;
   entry.cancelFlag.current = true;
   entry.session?.close();
   entry.progressTracker?.stop();
@@ -370,33 +381,68 @@ function closeSessionEntry(entry) {
   entry.running = false;
 }
 
-// Like closeSessionEntry, but awaits the SDK actually stopping: the interrupt()
-// promise resolving AND the stream consumer finishing. Bounded by a timeout so an
-// unresponsive SDK can't hang the cancel path. Used by `cancel` so the relay only
-// learns the turn is `done` once it has really stopped.
-async function closeSessionEntryAndDrain(entry) {
+// Start one idempotent stop operation for this live SDK query. Repeated cancel
+// commands reuse the same operation; they cannot clear the captured session/task
+// or emit an early completion. The operation itself has no timeout: if the SDK
+// eventually drains, the worker still emits the authoritative stopped event.
+function beginSessionStop(entry, onStopped) {
+  if (entry.stopOperation) {
+    return entry.stopOperation;
+  }
+
+  const generation = entry.stopGeneration + 1;
+  entry.stopGeneration = generation;
   entry.cancelFlag.current = true;
   const session = entry.session;
   const streamTask = entry.streamTask;
   entry.progressTracker?.stop();
-  entry.session = null;
-  entry.streamTask = null;
-  entry.running = false;
-  await Promise.race([
-    (async () => {
-      try {
-        if (session) await session.close();
-      } catch {
-        // interrupt rejected — best effort.
-      }
-      try {
-        if (streamTask) await streamTask;
-      } catch {
-        // stream consumer errored on teardown — expected.
-      }
-    })(),
-    new Promise((resolve) => setTimeout(resolve, CANCEL_DRAIN_TIMEOUT_MS)),
-  ]);
+
+  const operation = {
+    generation,
+    state: "cancelling",
+    promise: null,
+  };
+  operation.promise = (async () => {
+    try {
+      if (session) await session.close();
+    } catch {
+      // The stream consumer is still the authoritative drain signal.
+    }
+    try {
+      if (streamTask) await streamTask;
+    } catch {
+      // A settled stream task means the consumer is no longer running.
+    }
+
+    // A later query generation must never be cleared by an old stop operation.
+    if (entry.stopOperation !== operation || entry.stopGeneration !== generation) {
+      return;
+    }
+    if (entry.session === session) entry.session = null;
+    if (entry.streamTask === streamTask) entry.streamTask = null;
+    entry.running = false;
+    operation.state = "stopped";
+    onStopped?.();
+  })();
+  entry.stopOperation = operation;
+  return operation;
+}
+
+async function waitForSessionStop(operation) {
+  let timer = null;
+  try {
+    await Promise.race([
+      operation.promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("Claude session did not stop before the cancel timeout")),
+          CANCEL_DRAIN_TIMEOUT_MS,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function closeAndRemoveSession(sessions, entry, { pendingApprovals, pendingAskUserQuestions } = {}) {
@@ -422,7 +468,9 @@ function closeAndRemoveSession(sessions, entry, { pendingApprovals, pendingAskUs
 function evictSessionsIfNeeded(sessions, context) {
   while (sessions.size > SESSION_LIMIT) {
     const candidates = [...sessions.values()]
+      .filter((entry) => entry.stopOperation?.state !== "cancelling")
       .sort((left, right) => left.lastUsedAt - right.lastUsedAt);
+    if (candidates.length === 0) break;
     const idle = candidates.find((entry) => !entry.running && !entry.pendingStartResponse);
     const nonPending = candidates.find((entry) => !entry.pendingStartResponse);
     const evict = idle || nonPending || candidates[0];
@@ -446,7 +494,7 @@ function evictSessionsIfNeeded(sessions, context) {
 function startSessionStream(sessions, entry, context) {
   if (!entry.session || entry.streamTask) return;
   entry.cancelFlag.current = false;
-  entry.streamTask = flushEvents(
+  const streamTask = flushEvents(
     entry.session.stream(),
     entry.cancelFlag,
     (event) => handleSessionEvent(sessions, entry, event, context),
@@ -460,8 +508,11 @@ function startSessionStream(sessions, entry, context) {
     },
     entry.progressTracker,
   ).finally(() => {
-    entry.streamTask = null;
+    if (entry.streamTask === streamTask) {
+      entry.streamTask = null;
+    }
   });
+  entry.streamTask = streamTask;
 }
 
 function handleSessionEvent(sessions, entry, event, context) {
@@ -547,6 +598,9 @@ async function ensureLiveSession(
   resumeId = entry.providerSessionId,
   desiredOptions = null,
 ) {
+  if (entry.stopOperation?.state === "cancelling") {
+    throw new Error("Claude session is still stopping");
+  }
   if (entry.session) {
     if (desiredOptions && sessionOptionsChanged(entry.options, desiredOptions)) {
       // Preserve a model the caller didn't re-send (resume commands omit it),
@@ -575,6 +629,8 @@ async function ensureLiveSession(
       return;
     }
   }
+  entry.stopGeneration += 1;
+  entry.stopOperation = null;
   entry.cancelFlag = { current: false };
   entry.fileDiffTracker = createFileDiffTracker(entry.options.cwd || entry.cwd);
   entry.session = createWorkerSession(sdk, entry.options, resumeId || undefined);
@@ -622,10 +678,14 @@ async function main() {
         const targets = providerSessionId
           ? [findSessionEntry(sessions, providerSessionId)].filter(Boolean)
           : [...sessions.values()];
+        if (targets.length === 0 && cmd.id) {
+          emitErrorResponse(cmd.id, `Claude session ${providerSessionId || "(all)"} was not found`);
+          break;
+        }
+        const stopWaits = [];
         for (const entry of targets) {
           const doneSessionId =
             entry.providerSessionId || entry.pendingThreadId || providerSessionId;
-          const key = entry.key;
           const isPending = !entry.providerSessionId && entry.pendingThreadId;
           // Reject any pending interactions immediately so the relay isn't left
           // waiting on them.
@@ -639,30 +699,34 @@ async function main() {
               (pending) => pending.providerSessionId === entry.providerSessionId,
             );
           }
-          // Drain the real stop (await interrupt + stream end) BEFORE signalling
-          // done, but off the main loop so other commands keep flowing. The relay
-          // only marks the turn idle / releases a review lock once `done` arrives,
-          // so `done` must mean "actually stopped", not "cancel sent".
-          void (async () => {
-            try {
-              await closeSessionEntryAndDrain(entry);
-            } catch {
-              // best effort
-            }
+          const operation = beginSessionStop(entry, () => {
             if (isPending) {
-              sessions.delete(key);
+              sessions.delete(entry.key);
             }
             if (doneSessionId) {
               emit({
-                type: "done",
+                type: "session_stopped",
                 provider_session_id: doneSessionId,
               });
             }
-          })();
+          });
+          stopWaits.push(waitForSessionStop(operation));
         }
         if (!providerSessionId) {
           rejectAllPendingApprovals(pendingApprovals);
           rejectAllPendingAskUserQuestions(pendingAskUserQuestions);
+        }
+        // Keep the command loop responsive while callers wait for the shared
+        // operation(s). A timeout is only a failed request; it does not mutate
+        // lifecycle state or emit a false stopped event.
+        if (cmd.id) {
+          void Promise.all(stopWaits).then(
+            () => emitResponse(cmd.id, {
+              provider_session_id: providerSessionId,
+              stopped: true,
+            }),
+            (error) => emitErrorResponse(cmd.id, String(error)),
+          );
         }
         break;
       }

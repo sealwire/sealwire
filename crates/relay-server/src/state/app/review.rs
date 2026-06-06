@@ -225,13 +225,18 @@ to this thread."
         {
             Ok(Some(turn_id)) => Some(turn_id),
             Ok(None) => {
-                self.fail_job(&job_id, "parent did not start a recap turn")
-                    .await;
+                self.fail_after_uncertain_turn_start(
+                    &job_id,
+                    &mut guard,
+                    "parent did not return a recap turn id",
+                )
+                .await;
                 return;
             }
             Err(error) => {
-                self.fail_job(
+                self.fail_after_uncertain_turn_start(
                     &job_id,
+                    &mut guard,
                     format!("failed to ask the parent for a recap: {error}"),
                 )
                 .await;
@@ -358,18 +363,29 @@ to this thread."
         {
             Ok(Some(_)) => {}
             Ok(None) => {
-                self.fail_job(&job_id, "reviewer did not start a turn")
-                    .await;
-                let _ = self.re_activate_parent(&parent_thread_id, &device_id).await;
+                if self
+                    .fail_after_uncertain_turn_start(
+                        &job_id,
+                        &mut guard,
+                        "reviewer did not return a turn id",
+                    )
+                    .await
+                {
+                    let _ = self.re_activate_parent(&parent_thread_id, &device_id).await;
+                }
                 return;
             }
             Err(error) => {
-                self.fail_job(
-                    &job_id,
-                    format!("failed to send the reviewer prompt: {error}"),
-                )
-                .await;
-                let _ = self.re_activate_parent(&parent_thread_id, &device_id).await;
+                if self
+                    .fail_after_uncertain_turn_start(
+                        &job_id,
+                        &mut guard,
+                        format!("failed to send the reviewer prompt: {error}"),
+                    )
+                    .await
+                {
+                    let _ = self.re_activate_parent(&parent_thread_id, &device_id).await;
+                }
                 return;
             }
         }
@@ -440,8 +456,9 @@ to this thread."
         {
             Ok(turn_id) => turn_id,
             Err(error) => {
-                self.fail_job(
+                self.fail_after_uncertain_turn_start(
                     &job_id,
+                    &mut guard,
                     format!("failed to post the review back to the parent: {error}"),
                 )
                 .await;
@@ -735,28 +752,22 @@ thread {parent_thread_id}."
         })
     }
 
-    /// Fire a cancel for a thread's turn. This is best-effort and fire-and-forget
-    /// at the provider (e.g. Claude only writes the cancel to the worker), so it
-    /// does NOT mutate local turn state — a real stop is confirmed only by the
-    /// provider's completion event clearing `is_working`. Returns whether the
-    /// bridge accepted the cancel.
-    async fn send_interrupt(&self, thread_id: &str, turn_id: &str) -> bool {
+    /// Request provider cancellation without mutating local runtime state. A
+    /// provider completion event remains the only proof that work stopped.
+    async fn request_provider_stop(&self, thread_id: &str, turn_id: Option<&str>) -> bool {
         match self.find_thread_provider(thread_id).await {
             Ok((_, bridge)) => bridge
                 .clone()
-                .interrupt_turn(thread_id, turn_id)
+                .request_turn_stop(thread_id, turn_id)
                 .await
                 .is_ok(),
             Err(_) => false,
         }
     }
 
-    /// Fire a cancel for the active thread's current turn (best-effort). The turn
-    /// id may be absent — e.g. a Claude clean reviewer that is working but whose
-    /// real turn id isn't surfaced yet — and that's fine: Claude cancels by session
-    /// id, so we still send the cancel (with an empty turn id) rather than giving
-    /// up, which would otherwise wedge the review in Blocked forever.
-    async fn send_interrupt_to_active(&self) -> bool {
+    /// Request cancellation for the active thread. Providers decide whether the
+    /// optional turn id is required.
+    async fn request_active_thread_stop(&self) -> bool {
         let (thread_id, turn_id) = {
             let relay = self.relay.read().await;
             match relay.active_thread_id.clone() {
@@ -764,7 +775,7 @@ thread {parent_thread_id}."
                 None => return false,
             }
         };
-        self.send_interrupt(&thread_id, turn_id.as_deref().unwrap_or(""))
+        self.request_provider_stop(&thread_id, turn_id.as_deref())
             .await
     }
 
@@ -804,13 +815,33 @@ thread {parent_thread_id}."
         false
     }
 
+    /// A failed/empty turn-start response is not proof that the provider did not
+    /// begin work. If runtime state indicates possible in-flight work, stop it
+    /// through the same confirmed-stop path before making the job terminal.
+    /// Returns false when cleanup entered persistent Blocked state.
+    async fn fail_after_uncertain_turn_start(
+        &self,
+        job_id: &str,
+        guard: &mut Option<tokio::sync::OwnedMutexGuard<()>>,
+        message: impl Into<String>,
+    ) -> bool {
+        let message = message.into();
+        if self.active_thread_working().await
+            && !self.stop_active_thread_or_block(job_id, guard).await
+        {
+            return false;
+        }
+        self.fail_job(job_id, message).await;
+        true
+    }
+
     /// Fire a cancel for the active turn, then wait for the provider's *real*
     /// completion (never trust the cancel ack). Returns true only once the runtime
     /// reports the turn actually stopped; false if it doesn't stop within the
     /// drain window. While waiting, the job shows the non-terminal `Interrupting`
     /// status so the UI stays disabled.
     async fn interrupt_then_drain_active_turn(&self, job_id: &str) -> bool {
-        let _ = self.send_interrupt_to_active().await;
+        let _ = self.request_active_thread_stop().await;
         if !self.active_thread_working().await {
             return true;
         }
@@ -875,7 +906,7 @@ workspace stays locked. Resolve the review (stop the reviewer) to unlock."
                 return false;
             }
             if Instant::now() >= next_retry {
-                let _ = self.send_interrupt_to_active().await;
+                let _ = self.request_active_thread_stop().await;
                 next_retry = Instant::now() + INTERRUPT_RETRY_INTERVAL;
             }
             tokio::select! {
@@ -908,10 +939,8 @@ workspace stays locked. Resolve the review (stop the reviewer) to unlock."
                 return false;
             }
             if Instant::now() >= next_retry {
-                // Re-send the cancel. A missing turn id is fine — Claude cancels by
-                // session id (an empty turn id is ignored by the worker).
                 let _ = self
-                    .send_interrupt(thread_id, turn_id.as_deref().unwrap_or(""))
+                    .request_provider_stop(thread_id, turn_id.as_deref())
                     .await;
                 next_retry = Instant::now() + INTERRUPT_RETRY_INTERVAL;
             }
@@ -992,11 +1021,8 @@ workspace stays locked. Resolve the review (stop the reviewer) to unlock."
         if !working {
             return true;
         }
-        // Fire the cancel. A missing turn id is not fatal: Claude cancels by
-        // session id, so we still try (and confirm via the real completion below)
-        // rather than wedging the review in Blocked forever.
         let _ = self
-            .send_interrupt(thread_id, turn_id.as_deref().unwrap_or(""))
+            .request_provider_stop(thread_id, turn_id.as_deref())
             .await;
         let deadline = Instant::now()
             + Duration::from_millis(

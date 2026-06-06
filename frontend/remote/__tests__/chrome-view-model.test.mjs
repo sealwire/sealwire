@@ -85,11 +85,32 @@ test("selectSessionChromeRenderModel derives header, status, and control banner"
   assert.equal(model.agentWorkingIndicator.hidden, true);
   assert.equal(model.controlBanner.hidden, false);
   assert.match(model.controlBanner.hint, /Approvals can still be handled here/i);
+  assert.equal(model.controlBanner.takeOverHidden, false);
   assert.equal(model.controlBanner.summary, "Controlled by device-2");
   assert.equal(model.sessionMeta.chips.find((chip) => chip.label === "Thread").value, "thread-1");
   assert.equal(model.sessionMeta.chips.find((chip) => chip.label === "Provider").value, "Codex");
   assert.equal(model.sessionMeta.chips.find((chip) => chip.label === "Model").value, "gpt-5.4");
   assert.equal(model.sessionMeta.chips.find((chip) => chip.label === "Effort").value, "medium");
+});
+
+test("remote control banner hides take over while a review owns the session", () => {
+  const state = {
+    remoteAuth: { deviceId: "device-1" },
+    socketConnected: true,
+  };
+  const session = {
+    active_thread_id: "thread-1",
+    active_controller_device_id: "device-2",
+    active_review_jobs: [{ id: "review-1", status: "waiting_for_reviewer" }],
+    pending_approvals: [],
+    provider_connected: true,
+  };
+
+  const model = selectSessionChromeRenderModel(state, session);
+
+  assert.equal(model.controlBanner.hidden, false);
+  assert.equal(model.controlBanner.takeOverHidden, true);
+  assert.match(model.controlBanner.hint, /control returns automatically/i);
 });
 
 test("selectStatusBadgeRenderModel falls back to home and pairing states without a session", () => {

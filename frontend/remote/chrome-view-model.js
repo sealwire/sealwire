@@ -1,5 +1,6 @@
 import { formatTimestamp, shortId, workspaceBasename } from "./utils.js";
 import { providerLabel } from "../shared/provider-labels.js";
+import { isReviewInProgress } from "../shared/review-state.js";
 import {
   isProgressStalled,
   progressPhaseLabel,
@@ -304,11 +305,14 @@ function selectControlBannerRenderModel(currentState, session) {
     };
   }
 
+  const reviewRunning = isReviewInProgress(session);
   return {
     hidden: false,
-    hint: "Read-only for sending until you take over. Approvals can still be handled here.",
+    hint: reviewRunning
+      ? "A review is in progress; control returns automatically when it finishes."
+      : "Read-only for sending until you take over. Approvals can still be handled here.",
     summary: `Controlled by ${controllerLabel(currentState, session.active_controller_device_id)}`,
-    takeOverHidden: false,
+    takeOverHidden: reviewRunning,
   };
 }
 

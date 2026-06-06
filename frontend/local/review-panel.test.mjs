@@ -4,13 +4,15 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import {
-  isReviewBlocked,
-  isReviewInProgress,
   ReviewLauncher,
   ReviewPanel,
+} from "../shared/review-panel.js";
+import {
+  isReviewBlocked,
+  isReviewInProgress,
   reviewChipTone,
   reviewStatusLabel,
-} from "../shared/review-panel.js";
+} from "../shared/review-state.js";
 
 const h = React.createElement;
 

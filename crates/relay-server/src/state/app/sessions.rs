@@ -416,29 +416,83 @@ impl AppState {
         self.find_thread_provider(&thread_id)
             .await?
             .1
-            .interrupt_turn(&thread_id, &turn_id)
+            .request_turn_stop(&thread_id, Some(&turn_id))
             .await?;
 
         {
             let mut relay = self.relay.write().await;
             relay.assign_active_controller(&device_id, unix_now());
-            if relay.active_thread_id.as_deref() == Some(thread_id.as_str())
-                && relay.active_turn_id.as_deref() == Some(turn_id.as_str())
-            {
-                relay.set_active_turn(None);
-                relay.set_thread_status(&thread_id, "idle".to_string(), Vec::new());
-            }
             relay.push_log(
                 "info",
                 format!(
-                    "Stop requested for turn {turn_id} in thread {thread_id} from {}.",
+                    "Stop requested for turn {turn_id} in thread {thread_id} from {}; waiting for \
+provider completion.",
                     short_device_id(&device_id)
                 ),
             );
             relay.notify();
         }
 
+        // Bounded fallback: trust the provider's completion event, but if it never
+        // arrives, mark the turn idle locally so a provider that accepts the stop
+        // yet never confirms can't wedge the session. The review path deliberately
+        // has no such fallback (it drains to a user-resolvable Blocked state).
+        let app = self.clone();
+        tokio::spawn(async move {
+            app.await_stop_or_mark_idle(thread_id, turn_id).await;
+        });
+
         Ok(self.snapshot().await)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_stop_fallback_ms(&self, ms: u64) {
+        self.stop_fallback_ms
+            .store(ms, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Wait for the provider to clear `turn_id` on `thread_id`. If it doesn't
+    /// within the fallback window, mark the turn idle locally and warn.
+    async fn await_stop_or_mark_idle(&self, thread_id: String, turn_id: String) {
+        let deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_millis(
+                self.stop_fallback_ms
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            );
+        let mut rx = self.subscribe();
+        loop {
+            {
+                let relay = self.relay.read().await;
+                // The provider confirmed (or the active turn changed) — done.
+                if relay.active_thread_id.as_deref() != Some(thread_id.as_str())
+                    || relay.active_turn_id.as_deref() != Some(turn_id.as_str())
+                {
+                    return;
+                }
+            }
+            tokio::select! {
+                _ = rx.changed() => {}
+                _ = tokio::time::sleep_until(deadline) => break,
+            }
+        }
+
+        let mut relay = self.relay.write().await;
+        // Still the same in-flight turn after the window: the provider never
+        // confirmed the stop. Reflect idle locally rather than wedging the session.
+        if relay.active_thread_id.as_deref() == Some(thread_id.as_str())
+            && relay.active_turn_id.as_deref() == Some(turn_id.as_str())
+        {
+            relay.set_active_turn(None);
+            relay.set_thread_status(&thread_id, "idle".to_string(), Vec::new());
+            relay.push_log(
+                "warn",
+                format!(
+                    "Provider did not confirm the stop of turn {turn_id} in thread {thread_id}; \
+marking idle locally."
+                ),
+            );
+            relay.notify();
+        }
     }
 
     pub async fn heartbeat_session(

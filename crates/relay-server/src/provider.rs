@@ -66,7 +66,14 @@ pub trait ProviderBridge: Send + Sync {
         model: &str,
         effort: &str,
     ) -> Result<Option<String>, String>;
-    async fn interrupt_turn(&self, thread_id: &str, turn_id: &str) -> Result<(), String>;
+    /// Request that the provider stop the in-flight work for `thread_id`.
+    ///
+    /// Providers with turn-scoped cancellation (Codex) require `turn_id`.
+    /// Providers with session-scoped cancellation (Claude) may stop by thread
+    /// alone. Acceptance is not proof of completion; provider lifecycle events
+    /// remain the source of truth for relay runtime state.
+    async fn request_turn_stop(&self, thread_id: &str, turn_id: Option<&str>)
+        -> Result<(), String>;
     async fn respond_to_approval(
         &self,
         pending: &PendingApproval,

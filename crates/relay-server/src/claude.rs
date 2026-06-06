@@ -589,13 +589,19 @@ impl ProviderBridge for ClaudeCodeBridge {
         Ok(Some(turn_id))
     }
 
-    async fn interrupt_turn(&self, thread_id: &str, turn_id: &str) -> Result<(), String> {
-        self.send_command(json!({
-            "type": "cancel",
-            "provider_session_id": thread_id,
-            "turn_id": turn_id,
-        }))
+    async fn request_turn_stop(
+        &self,
+        thread_id: &str,
+        _turn_id: Option<&str>,
+    ) -> Result<(), String> {
+        self.send_request(
+            "cancel",
+            json!({
+                "provider_session_id": thread_id,
+            }),
+        )
         .await
+        .map(|_| ())
     }
 
     async fn respond_to_approval(
@@ -1164,7 +1170,8 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
             relay.notify();
         }
 
-        "done" => {
+        "done" | "session_stopped" => {
+            let stopped_explicitly = event_type == "session_stopped";
             match claude_thread_route(&relay, event_thread_id.as_deref()) {
                 ClaudeThreadRoute::Active => {
                     let tid = relay.active_thread_id.clone().unwrap_or_default();
@@ -1172,7 +1179,14 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                     relay.set_active_turn(None);
                     relay.set_thread_status(&tid, "idle".to_string(), Vec::new());
                     relay.clear_progress();
-                    relay.push_log("info", "Claude turn completed.");
+                    relay.push_log(
+                        "info",
+                        if stopped_explicitly {
+                            "Claude session stopped."
+                        } else {
+                            "Claude turn completed."
+                        },
+                    );
                     if let Some(turn_id) = completed_turn_id {
                         relay.set_transcript_item_status(
                             &format!("turn-diff:{turn_id}"),
@@ -2050,6 +2064,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_stopped_event_is_the_authoritative_cancel_completion() {
+        let state = new_test_state();
+        {
+            let mut relay = state.write().await;
+            relay.set_provider_name("claude_code".to_string());
+            relay.active_thread_id = Some("claude-thread".to_string());
+            relay.active_turn_id = Some("claude-turn".to_string());
+            relay.current_status = "active".to_string();
+        }
+
+        handle_worker_event(
+            json!({
+                "type": "session_stopped",
+                "provider_session_id": "claude-thread"
+            }),
+            &state,
+        )
+        .await;
+
+        let relay = state.read().await;
+        assert_eq!(relay.active_turn_id, None);
+        assert_eq!(relay.current_status, "idle");
+        assert!(relay
+            .snapshot()
+            .logs
+            .iter()
+            .any(|entry| entry.message == "Claude session stopped."));
+    }
+
+    #[tokio::test]
     async fn tool_call_requested_marks_phase_and_records_tool() {
         let state = new_test_state();
         handle_worker_event(
@@ -2409,9 +2453,9 @@ mod tests {
             .await
             .expect("cancel should succeed");
 
-        // Should get done event from cancel
-        let _done = wait_for_log(&state, "Claude turn completed", 5).await;
-        // Cancel may or may not produce done — just verify no crash
+        // A successful cancel reports the distinct stopped lifecycle event.
+        let _stopped = wait_for_log(&state, "Claude session stopped", 5).await;
+        // The live provider may have no promoted session yet; just verify no crash.
         let relay = state.read().await;
         let snap = relay.snapshot();
         assert!(!snap

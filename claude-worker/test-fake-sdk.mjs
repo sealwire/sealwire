@@ -39,6 +39,11 @@ function writeLine(obj) {
 
 export function query({ prompt, options = {} }) {
   const sessionId = options.resume ?? `sess-${(freshCounter += 1)}`;
+  const holdTurns = process.env.CLAUDE_FAKE_HOLD_TURNS === "1";
+  const interruptDelayMs = Number.parseInt(
+    process.env.CLAUDE_FAKE_INTERRUPT_DELAY_MS || "0",
+    10,
+  );
 
   writeLine({
     type: "__query",
@@ -81,7 +86,9 @@ export function query({ prompt, options = {} }) {
       for await (const message of prompt) {
         if (message?.type === "user") {
           recordUserMessage(sessionId, message);
-          pushOut({ type: "system", subtype: "session_state_changed", state: "idle" });
+          if (!holdTurns) {
+            pushOut({ type: "system", subtype: "session_state_changed", state: "idle" });
+          }
         }
       }
     } catch {
@@ -101,7 +108,10 @@ export function query({ prompt, options = {} }) {
         });
       }
     },
-    interrupt() {
+    async interrupt() {
+      if (interruptDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, interruptDelayMs));
+      }
       ended = true;
       drain();
     },

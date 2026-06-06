@@ -127,7 +127,13 @@ impl ProviderBridge for CodexBridge {
         self.start_turn(thread_id, text, model, effort).await
     }
 
-    async fn interrupt_turn(&self, thread_id: &str, turn_id: &str) -> Result<(), String> {
+    async fn request_turn_stop(
+        &self,
+        thread_id: &str,
+        turn_id: Option<&str>,
+    ) -> Result<(), String> {
+        let turn_id =
+            turn_id.ok_or_else(|| "Codex requires a turn id to stop a turn".to_string())?;
         self.interrupt_turn(thread_id, turn_id).await
     }
 
