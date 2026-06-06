@@ -1,6 +1,7 @@
 mod app;
 mod persistence;
 mod relay;
+mod review;
 mod security;
 #[cfg(test)]
 mod tests;
@@ -19,6 +20,9 @@ pub(crate) use self::relay::{
     ClaimChallenge, CompletedRemoteClaim, DeviceRecord, IssuedClaimChallenge, PairedDevice,
     PendingApproval, PendingAskUserQuestion, PendingPairingResult, PendingTranscriptDelta,
     RelayState, RemoteActionReplayDecision, ThreadSessionSettings, TranscriptDeltaKind,
+};
+pub(crate) use self::review::{
+    parent_recap_prompt, post_back_message, reviewer_prompt, ReviewJob, ReviewJobStatus, ReviewMode,
 };
 pub(crate) use self::security::SecurityProfile;
 

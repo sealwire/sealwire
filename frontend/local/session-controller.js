@@ -192,6 +192,8 @@ export function createSessionController({
     scheduleSessionPoll: controller.scheduleSessionPoll,
     scheduleThreadsPoll: controller.scheduleThreadsPoll,
     sendMessage: controller.sendMessage,
+    requestReview: controller.requestReview,
+    resolveReview: controller.resolveReview,
     stopActiveTurn: controller.stopActiveTurn,
     startPairing: controller.startPairing,
     startSession: controller.startSession,

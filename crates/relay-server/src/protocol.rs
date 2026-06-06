@@ -122,6 +122,11 @@ pub struct SessionSnapshot {
     pub transcript_truncated: bool,
     pub transcript: Vec<TranscriptEntryView>,
     pub logs: Vec<LogEntryView>,
+    /// Active (and recently-finished) cross-agent review jobs. Lets the UI render
+    /// a small progress chip that updates live over the snapshot stream. Bounded:
+    /// review jobs are serialized one at a time and terminal jobs age out.
+    #[serde(default)]
+    pub active_review_jobs: Vec<ReviewJobView>,
 }
 
 /// One working thread, as surfaced to clients for per-thread activity badges.
@@ -1201,6 +1206,45 @@ pub struct TakeOverInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeartbeatInput {
     pub device_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RequestReviewInput {
+    /// Thread whose work is being reviewed. Defaults to the active thread; v1
+    /// requires it to be the active thread.
+    pub parent_thread_id: Option<String>,
+    pub reviewer_provider: String,
+    pub reviewer_model: Option<String>,
+    /// Reserved for Phase 3 (reviewer-thread reuse). v1 rejects when set.
+    pub reviewer_thread_id: Option<String>,
+    pub instructions: Option<String>,
+    pub device_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReviewJobStatusView {
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RequestReviewReceipt {
+    pub review_job_id: String,
+    pub parent_thread_id: String,
+    pub reviewer_thread_id: Option<String>,
+    pub status: ReviewJobStatusView,
+    pub message: String,
+}
+
+/// Compact view of a review job for snapshots and the reviews listing.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReviewJobView {
+    pub id: String,
+    pub parent_thread_id: String,
+    pub reviewer_provider: String,
+    pub reviewer_thread_id: Option<String>,
+    pub status: String,
+    pub error: Option<String>,
+    pub updated_at: u64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

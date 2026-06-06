@@ -28,6 +28,10 @@ impl AppState {
     ) -> Result<ApprovalReceipt, ApprovalError> {
         let device_id =
             require_device_id(input.device_id.clone()).map_err(ApprovalError::Bridge)?;
+        // During a review the only pending approvals belong to the reviewer, which
+        // the orchestrator auto-denies — block user decisions so a write can't be
+        // approved out from under it.
+        let _slot = self.acquire_session_slot().map_err(ApprovalError::Bridge)?;
         let pending = {
             let relay = self.relay.read().await;
             relay
@@ -87,6 +91,11 @@ impl AppState {
     ) -> Result<AskUserAnswerReceipt, AskUserAnswerError> {
         let device_id =
             require_device_id(input.device_id.clone()).map_err(AskUserAnswerError::Bridge)?;
+        // A review is single-round and non-interactive; block answering questions
+        // (the orchestrator dismisses the reviewer's own).
+        let _slot = self
+            .acquire_session_slot()
+            .map_err(AskUserAnswerError::Bridge)?;
         if input.answers.is_empty() {
             return Err(AskUserAnswerError::NoAnswers);
         }
@@ -172,6 +181,9 @@ impl AppState {
         input: ApplyFileChangeInput,
     ) -> Result<ApplyFileChangeReceipt, String> {
         let device_id = require_device_id(input.device_id)?;
+        // Rollback/reapply mutates the working tree; block it while a review reads
+        // that same tree.
+        let _slot = self.acquire_session_slot()?;
         let (cwd, diff) = {
             let relay = self.relay.read().await;
             relay.ensure_device_can_send_message(&device_id)?;

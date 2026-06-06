@@ -56,6 +56,7 @@ fn make_snapshot() -> SessionSnapshot {
             })
             .collect(),
         logs: vec![],
+        active_review_jobs: vec![],
     }
 }
 
@@ -375,6 +376,43 @@ fn make_large_ask_user_detail_plaintext() -> RemoteActionResultPlaintext {
         claim_challenge_expires_at: None,
         error: None,
     }
+}
+
+#[test]
+fn request_review_action_round_trips_and_binds_device() {
+    let json = serde_json::json!({
+        "type": "request_review",
+        "input": {
+            "reviewer_provider": "codex",
+            "instructions": "look at the tests",
+        }
+    });
+    let request: RemoteActionRequest =
+        serde_json::from_value(json).expect("request_review should parse");
+    assert_eq!(request.kind(), RemoteActionKind::RequestReview);
+    assert_eq!(RemoteActionKind::RequestReview.as_str(), "request_review");
+
+    // Re-serializing keeps the snake_case tag.
+    let serialized = serde_json::to_value(&request).expect("serialize request_review");
+    assert_eq!(serialized["type"], "request_review");
+    assert_eq!(serialized["input"]["reviewer_provider"], "codex");
+
+    // bind_device stamps the requesting device onto the input.
+    match request.bind_device("device-9".to_string()) {
+        RemoteActionRequest::RequestReview { input } => {
+            assert_eq!(input.device_id.as_deref(), Some("device-9"));
+            assert_eq!(input.reviewer_provider, "codex");
+            assert_eq!(input.instructions.as_deref(), Some("look at the tests"));
+        }
+        other => panic!("unexpected bound request: {other:?}"),
+    }
+
+    // It is an ack-style action gated behind a session claim.
+    assert!(matches!(
+        remote_action_result_kind(RemoteActionKind::RequestReview),
+        RemoteActionResultKind::RemoteActionAck
+    ));
+    assert!(requires_session_claim(RemoteActionKind::RequestReview));
 }
 
 #[test]

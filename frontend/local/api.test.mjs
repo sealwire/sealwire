@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { submitAskUserAnswer } from "./api.js";
+import { getReviews, requestReview, resolveReview, submitAskUserAnswer } from "./api.js";
 
 function makeFetchStub(response) {
   const calls = [];
@@ -50,4 +50,58 @@ test("submitAskUserAnswer escapes the request_id in the URL path", async () => {
   await submitAskUserAnswer(apiFetch, "ask:with/slash", { Q: "A" }, "device-a");
   // encodeURIComponent must run so the colon and slash don't change routing
   assert.equal(calls[0].input, "/api/ask-user-questions/ask%3Awith%2Fslash/answer");
+});
+
+test("requestReview POSTs the reviewer config plus device_id and returns the receipt", async () => {
+  const receipt = { review_job_id: "review-1", status: { status: "pending_parent_recap" } };
+  const { apiFetch, calls } = makeFetchStub(jsonResponse({ ok: true, data: receipt }));
+
+  const result = await requestReview(
+    apiFetch,
+    { reviewer_provider: "codex", reviewer_model: null, instructions: "focus on tests" },
+    "device-a"
+  );
+
+  assert.deepEqual(result, receipt);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].input, "/api/session/review");
+  assert.equal(calls[0].init.method, "POST");
+  const body = JSON.parse(calls[0].init.body);
+  assert.deepEqual(body, {
+    reviewer_provider: "codex",
+    reviewer_model: null,
+    instructions: "focus on tests",
+    device_id: "device-a",
+  });
+});
+
+test("requestReview surfaces the server error message when the envelope says !ok", async () => {
+  const { apiFetch } = makeFetchStub(
+    jsonResponse({ ok: false, error: { message: "cannot start a review while a turn is in progress" } }, { status: 400 })
+  );
+  await assert.rejects(
+    () => requestReview(apiFetch, { reviewer_provider: "codex" }, "device-a"),
+    /turn is in progress/i
+  );
+});
+
+test("resolveReview POSTs the device id to the resolve endpoint", async () => {
+  const receipt = { review_job_id: "review-1", status: { status: "failed" } };
+  const { apiFetch, calls } = makeFetchStub(jsonResponse({ ok: true, data: receipt }));
+
+  const result = await resolveReview(apiFetch, "device-a");
+  assert.deepEqual(result, receipt);
+  assert.equal(calls[0].input, "/api/session/review/resolve");
+  assert.equal(calls[0].init.method, "POST");
+  assert.deepEqual(JSON.parse(calls[0].init.body), { device_id: "device-a" });
+});
+
+test("getReviews GETs the reviews endpoint with the device id and returns the list", async () => {
+  const jobs = [{ id: "review-1", status: "waiting_for_reviewer" }];
+  const { apiFetch, calls } = makeFetchStub(jsonResponse({ ok: true, data: jobs }));
+
+  const result = await getReviews(apiFetch, "device-a");
+  assert.deepEqual(result, jobs);
+  assert.equal(calls[0].input, "/api/session/reviews?device_id=device-a");
+  assert.equal(calls[0].init.method, "GET");
 });

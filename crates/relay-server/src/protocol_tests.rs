@@ -84,6 +84,7 @@ fn make_snapshot() -> SessionSnapshot {
                 created_at: index,
             })
             .collect(),
+        active_review_jobs: vec![],
     }
 }
 

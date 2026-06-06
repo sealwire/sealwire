@@ -64,6 +64,13 @@ import {
   ConversationEmptyState,
 } from "../shared/conversation.js";
 import { SessionSettingsButton } from "../shared/session-settings-panel.js";
+import {
+  isReviewBlocked,
+  isReviewInProgress,
+  ReviewLauncher,
+  reviewStatusLabel,
+} from "../shared/review-panel.js";
+import { providerOptions as toProviderOptions } from "../shared/provider-settings.js";
 import { saveLastEffort } from "../shared/last-used-settings.js";
 import {
   AuditList,
@@ -168,7 +175,33 @@ export function createSessionRenderer({
   pairedDeviceCountLabel,
   ensureConversationTranscript,
   updateSessionSettings,
+  requestReview,
+  resolveReview,
 }) {
+  function reviewChips(session) {
+    return (session?.active_review_jobs || []).map((job) =>
+      metaChip("Review", reviewStatusLabel(job.status))
+    );
+  }
+
+  function reviewLaunchModel(session) {
+    const providers = state.providers || [];
+    const models = [].concat(
+      ...Object.values(state.providerModels || {}),
+      session?.available_models || []
+    );
+    const defaultProvider =
+      providers.find((provider) => provider !== session?.provider) ||
+      providers[0] ||
+      session?.provider ||
+      "";
+    return {
+      providerOptions: toProviderOptions(providers),
+      models,
+      defaultProvider,
+    };
+  }
+
   function renderSession(session) {
     state.session = session;
     if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
@@ -182,6 +215,7 @@ export function createSessionRenderer({
     const viewingConversation = isViewingConversation(session);
     const canWrite = canCurrentDeviceWrite(session);
     const turnRunning = Boolean(session.active_turn_id);
+    const reviewInProgress = isReviewInProgress(session);
     const workspace = session.current_cwd || state.selectedCwd || "";
     const workspaceName = workspace ? workspaceBasename(workspace) : "";
     const viewingSessionDetails = Boolean(sessionMeta?.closest("dialog")?.open);
@@ -233,6 +267,9 @@ export function createSessionRenderer({
     } else if (isProgressStalled(session)) {
       statusBadge.textContent = "Stalled?";
       statusBadge.className = "status-badge status-badge-alert";
+    } else if (reviewInProgress) {
+      statusBadge.textContent = "Review in progress";
+      statusBadge.className = "status-badge status-badge-alert";
     } else {
       statusBadge.textContent = sessionStatusLabel(session, approval);
       statusBadge.className = "status-badge status-badge-ready";
@@ -283,14 +320,18 @@ export function createSessionRenderer({
     }
     messageForm.hidden = !viewingConversation;
     const composerReady = hasActiveSession && canWrite && viewingConversation;
-    sendButton.disabled = !composerReady || turnRunning;
+    sendButton.disabled = !composerReady || turnRunning || reviewInProgress;
     sendButton.hidden = composerReady && turnRunning;
     if (stopButton) {
-      stopButton.hidden = !composerReady || !turnRunning;
+      // Don't let the user stop the reviewer's turn mid-review.
+      stopButton.hidden = !composerReady || !turnRunning || reviewInProgress;
       stopButton.disabled = stopButton.hidden;
     }
-    messageInput.disabled = !hasActiveSession || !canWrite || !viewingConversation;
-    messageInput.placeholder = !hasActiveSession
+    messageInput.disabled =
+      !hasActiveSession || !canWrite || !viewingConversation || reviewInProgress;
+    messageInput.placeholder = reviewInProgress
+      ? "Review in progress…"
+      : !hasActiveSession
       ? "Start or resume a session first."
       : !viewingConversation
         ? "Open the thread page to send a message."
@@ -623,6 +664,7 @@ export function createSessionRenderer({
           metaChip("Effort", session.reasoning_effort),
           metaChip("Control", controllerStateLabel(session)),
           metaChip("Thread", shortId(session.active_thread_id)),
+          ...reviewChips(session),
         ],
       })
     );
@@ -659,18 +701,52 @@ export function createSessionRenderer({
       renderReactContent(composerSettingsMount, null);
       return;
     }
+    const reviewModel = reviewLaunchModel(session);
+    const turnRunning = Boolean(session.active_turn_id);
+    const canReview =
+      typeof requestReview === "function" &&
+      isCurrentDeviceActiveController(session) &&
+      !turnRunning &&
+      !isReviewInProgress(session) &&
+      session.current_status === "idle";
     renderReactContent(
       composerSettingsMount,
-      h(SessionSettingsButton, {
-        session,
-        composerEffort: messageEffort?.value || session.reasoning_effort || "",
-        onUpdate: (payload) => updateSessionSettings?.(payload),
-        onChangeEffort: (value) => {
-          if (messageEffort) messageEffort.value = value;
-          if (session.provider) saveLastEffort(session.provider, value);
-          updateSessionSettings?.({ effort: value });
-        },
-      })
+      h(
+        React.Fragment,
+        null,
+        h(SessionSettingsButton, {
+          session,
+          composerEffort: messageEffort?.value || session.reasoning_effort || "",
+          onUpdate: (payload) => updateSessionSettings?.(payload),
+          onChangeEffort: (value) => {
+            if (messageEffort) messageEffort.value = value;
+            if (session.provider) saveLastEffort(session.provider, value);
+            updateSessionSettings?.({ effort: value });
+          },
+        }),
+        typeof requestReview === "function"
+          ? h(ReviewLauncher, {
+              providerOptions: reviewModel.providerOptions,
+              models: reviewModel.models,
+              defaultProvider: reviewModel.defaultProvider,
+              disabled: !canReview,
+              onSubmit: (values) => requestReview(values),
+            })
+          : null,
+        isReviewBlocked(session) && typeof resolveReview === "function"
+          ? h(
+              "button",
+              {
+                type: "button",
+                className: "header-button review-resolve-button",
+                title:
+                  "A review is blocked: the reviewer turn could not be stopped and the workspace is locked. Stop it to unlock.",
+                onClick: () => resolveReview(),
+              },
+              "Stop reviewer & unlock"
+            )
+          : null
+      )
     );
   }
 
@@ -686,11 +762,16 @@ export function createSessionRenderer({
     }
 
     controlBanner.hidden = false;
+    const reviewRunning = isReviewInProgress(session);
     renderReactContent(
       controlBanner,
       h(ControlBannerContent, {
-        hint: "You can still approve from this device. Take over when you want to type or continue the session.",
-        showTakeOver: true,
+        hint: reviewRunning
+          ? "A review is in progress; control returns automatically when it finishes."
+          : "You can still approve from this device. Take over when you want to type or continue the session.",
+        // A review owns the active thread and hands control back itself — don't
+        // let a take-over reassign the controller mid-review.
+        showTakeOver: !reviewRunning,
         summary: `Another device has control (${controllerLabel(session.active_controller_device_id)})`,
       })
     );
@@ -890,13 +971,18 @@ export function createSessionRenderer({
         transcriptOptions: {
           currentCwd: session?.current_cwd || state.selectedCwd || "",
           detailEntries: transcriptDetailEntries,
-          enableFileChangeActions: true,
+          // Hide rollback/reapply while a review reads the working tree.
+          enableFileChangeActions: !isReviewInProgress(session),
           expandedKeys: localUi.transcriptExpandedItemIds,
           loadingItemIds: localUi.transcriptLoadingItemIds,
           onEnsureFileChangeDetail: (itemId) => {
             void state.controller?.ensureFileChangeDetail?.(itemId);
           },
-          pendingAskUserQuestions: session?.pending_ask_user_questions || [],
+          // Suppress the answer entry during a review (the orchestrator dismisses
+          // the reviewer's own questions; v1 reviews are non-interactive).
+          pendingAskUserQuestions: isReviewInProgress(session)
+            ? []
+            : session?.pending_ask_user_questions || [],
           onSubmitAskUserAnswers: (requestId, answers) => {
             void state.controller?.submitAskUserQuestionAnswer?.(requestId, answers);
           },
@@ -944,7 +1030,7 @@ export function createSessionRenderer({
     renderWorkspaceSuggestions(state.session);
     threadsCount.textContent = summarizeThreadGroups(groups);
     threadsCount.title = groups.map((group) => group.cwd).join("\n");
-    resumeLatestButton.disabled = totalThreads === 0;
+    resumeLatestButton.disabled = totalThreads === 0 || isReviewInProgress(state.session);
 
     renderReactContent(
       threadsList,

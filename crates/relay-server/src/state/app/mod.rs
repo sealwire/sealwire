@@ -40,12 +40,30 @@ pub struct AppState {
     relay: Arc<RwLock<RelayState>>,
     providers: HashMap<String, Arc<dyn ProviderBridge>>,
     change_tx: watch::Sender<u64>,
+    /// Serializes review orchestration against user session operations. A review
+    /// job holds this guard for its entire lifetime; session-mutating ops
+    /// (send/start/resume/settings/stop/approve/archive/delete) acquire it for
+    /// their full duration. Because both sides hold the *same* guard, a review and
+    /// a session op can never interleave — closing the check-then-act race — and
+    /// it auto-releases when the holder drops (including on panic).
+    session_guard: Arc<tokio::sync::Mutex<()>>,
+    /// Per-turn timeout (ms) for review steps. Overridable in tests so the
+    /// timeout-interrupt path can be exercised without a 10-minute wait.
+    review_step_timeout_ms: Arc<std::sync::atomic::AtomicU64>,
+    /// Max time (ms) to drain a turn that won't stop before declaring the review
+    /// `Blocked`. Overridable in tests.
+    review_drain_max_ms: Arc<std::sync::atomic::AtomicU64>,
+    /// Holds the session guard of a review that became `Blocked` (cleanup failed).
+    /// While `Some`, the session lock stays held — every session op and new review
+    /// is rejected — until `resolve_blocked_review` stops the reviewer and drops it.
+    blocked_review: Arc<tokio::sync::Mutex<Option<review::BlockedReview>>>,
 }
 
 mod approvals;
 mod broker;
 mod pairing;
 mod providers;
+mod review;
 mod sessions;
 #[cfg(test)]
 mod tests;
@@ -63,6 +81,10 @@ impl AppState {
             relay,
             providers,
             change_tx,
+            session_guard: Arc::new(tokio::sync::Mutex::new(())),
+            review_step_timeout_ms: Arc::new(std::sync::atomic::AtomicU64::new(600_000)),
+            review_drain_max_ms: Arc::new(std::sync::atomic::AtomicU64::new(300_000)),
+            blocked_review: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
@@ -132,6 +154,10 @@ impl AppState {
             relay,
             providers,
             change_tx,
+            session_guard: Arc::new(tokio::sync::Mutex::new(())),
+            review_step_timeout_ms: Arc::new(std::sync::atomic::AtomicU64::new(600_000)),
+            review_drain_max_ms: Arc::new(std::sync::atomic::AtomicU64::new(300_000)),
+            blocked_review: Arc::new(tokio::sync::Mutex::new(None)),
         };
 
         state.spawn_initial_model_catalog_refresh();

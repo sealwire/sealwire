@@ -20,7 +20,7 @@ use crate::{
 };
 
 use super::{
-    persistence::PersistedRelayState, unix_now, SecurityProfile, CONTROLLER_LEASE_SECS,
+    persistence::PersistedRelayState, unix_now, ReviewJob, SecurityProfile, CONTROLLER_LEASE_SECS,
     DEFAULT_APPROVAL_POLICY, DEFAULT_EFFORT, DEFAULT_MODEL, DEFAULT_SANDBOX,
 };
 
@@ -36,6 +36,13 @@ pub(crate) use self::transcript::TranscriptRecord;
 
 const REMOTE_ACTION_REPLAY_TTL_SECS: u64 = 600;
 const MAX_REMOTE_ACTION_REPLAY_ENTRIES: usize = 512;
+/// How long a terminal (complete/failed/cancelled) review job keeps appearing in
+/// the snapshot's `active_review_jobs`, so the UI can flash "complete"/"failed"
+/// before the chip disappears.
+const REVIEW_JOB_VIEW_RETENTION_SECS: u64 = 120;
+/// Backstop on retained review jobs so a long-lived relay can't accumulate every
+/// recap/review body in memory.
+const MAX_REVIEW_JOBS: usize = 64;
 
 fn thread_status_is_working(status: &str) -> bool {
     let status = status.trim();
@@ -159,6 +166,9 @@ pub struct RelayState {
     /// restart, which resets entries to the default "applied" state.
     pub(super) apply_states: HashMap<String, FileChangeApplyState>,
     recent_remote_actions: HashMap<String, CachedRemoteActionState>,
+    /// Relay-owned cross-agent review jobs, keyed by job id. In-memory only for
+    /// v1 (lost on restart).
+    review_jobs: HashMap<String, ReviewJob>,
 }
 
 impl RelayState {
@@ -213,6 +223,7 @@ impl RelayState {
             logs: Vec::new(),
             apply_states: HashMap::new(),
             recent_remote_actions: HashMap::new(),
+            review_jobs: HashMap::new(),
         };
         state.push_log("info", "Relay booted. Waiting for Codex app-server.");
         state
@@ -252,6 +263,86 @@ impl RelayState {
 
     pub(crate) fn runtime_for_thread(&self, thread_id: &str) -> Option<&ThreadRuntime> {
         self.runtimes.get(thread_id)
+    }
+
+    /// True if any thread runtime (e.g. a backgrounded thread) is still working in
+    /// `cwd`. A review reads the live working tree, so a concurrent turn in the
+    /// same workspace could mutate files mid-review; v1 refuses rather than racing.
+    pub(crate) fn has_working_thread_in_cwd(&self, cwd: &str) -> bool {
+        self.runtimes
+            .values()
+            .any(|runtime| runtime.current_cwd == cwd && runtime.is_working())
+    }
+
+    pub(crate) fn insert_review_job(&mut self, job: ReviewJob) {
+        self.prune_review_jobs();
+        self.review_jobs.insert(job.id.clone(), job);
+    }
+
+    /// Drop terminal jobs past the view-retention window, and hard-cap the total
+    /// (evicting the oldest terminal jobs first) so review bodies can't pile up.
+    fn prune_review_jobs(&mut self) {
+        let now = unix_now();
+        self.review_jobs.retain(|_, job| {
+            !job.status.is_terminal()
+                || now.saturating_sub(job.updated_at) <= REVIEW_JOB_VIEW_RETENTION_SECS
+        });
+        if self.review_jobs.len() <= MAX_REVIEW_JOBS {
+            return;
+        }
+        let mut terminal: Vec<(String, u64)> = self
+            .review_jobs
+            .iter()
+            .filter(|(_, job)| job.status.is_terminal())
+            .map(|(id, job)| (id.clone(), job.updated_at))
+            .collect();
+        terminal.sort_by_key(|(_, updated_at)| *updated_at);
+        for (id, _) in terminal {
+            if self.review_jobs.len() <= MAX_REVIEW_JOBS {
+                break;
+            }
+            self.review_jobs.remove(&id);
+        }
+    }
+
+    pub(crate) fn update_review_job<F: FnOnce(&mut ReviewJob)>(
+        &mut self,
+        id: &str,
+        update: F,
+    ) -> bool {
+        match self.review_jobs.get_mut(id) {
+            Some(job) => {
+                update(job);
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub(crate) fn review_job(&self, id: &str) -> Option<&ReviewJob> {
+        self.review_jobs.get(id)
+    }
+
+    /// Compact views of review jobs to surface in the snapshot: every non-terminal
+    /// job plus terminal jobs that finished recently (so the UI can flash a final
+    /// "complete"/"failed" state). Ordered oldest-updated first for a stable UI.
+    pub(crate) fn active_review_jobs_view(&self) -> Vec<crate::protocol::ReviewJobView> {
+        let now = unix_now();
+        let mut views: Vec<_> = self
+            .review_jobs
+            .values()
+            .filter(|job| {
+                !job.status.is_terminal()
+                    || now.saturating_sub(job.updated_at) <= REVIEW_JOB_VIEW_RETENTION_SECS
+            })
+            .map(|job| job.view())
+            .collect();
+        views.sort_by(|left, right| {
+            left.updated_at
+                .cmp(&right.updated_at)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        views
     }
 
     pub(crate) fn ensure_runtime_for_thread(&mut self, thread_id: &str) -> &mut ThreadRuntime {
@@ -552,6 +643,7 @@ impl RelayState {
             transcript_truncated: false,
             transcript,
             logs: self.logs.clone(),
+            active_review_jobs: self.active_review_jobs_view(),
         }
     }
 

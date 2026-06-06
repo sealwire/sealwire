@@ -37,11 +37,12 @@ use protocol::{
     ApplyFileChangeReceipt, ApprovalDecisionInput, ApprovalReceipt, AskUserAnswerReceipt,
     AuthSessionInput, AuthSessionView, BulkRevokeDevicesReceipt, HealthResponse, HeartbeatInput,
     ModelOptionView, PairingDecisionInput, PairingDecisionReceipt, PairingStartInput,
-    PairingTicketView, ReadThreadEntryDetailInput, ReadThreadTranscriptInput, ResumeSessionInput,
-    RevokeDeviceReceipt, SendMessageInput, SessionSnapshot, SessionSnapshotCompactProfile,
-    StartSessionInput, StopTurnInput, SubmitAskUserAnswerInput, TakeOverInput,
-    ThreadArchiveReceipt, ThreadDeleteReceipt, ThreadEntryDetailResponse, ThreadTranscriptResponse,
-    ThreadsQuery, ThreadsResponse, UpdateSessionSettingsInput, WorkspaceDiffResponse,
+    PairingTicketView, ReadThreadEntryDetailInput, ReadThreadTranscriptInput, RequestReviewInput,
+    RequestReviewReceipt, ResumeSessionInput, ReviewJobView, RevokeDeviceReceipt, SendMessageInput,
+    SessionSnapshot, SessionSnapshotCompactProfile, StartSessionInput, StopTurnInput,
+    SubmitAskUserAnswerInput, TakeOverInput, ThreadArchiveReceipt, ThreadDeleteReceipt,
+    ThreadEntryDetailResponse, ThreadTranscriptResponse, ThreadsQuery, ThreadsResponse,
+    UpdateSessionSettingsInput, WorkspaceDiffResponse,
 };
 use relay_http::{
     apply_standard_security_headers, header_origin, parse_optional_string_env, request_origin,
@@ -186,6 +187,9 @@ fn build_router(context: AppContext, web_assets: WebAssets) -> Router {
         .route("/api/session/take-over", post(take_over_session))
         .route("/api/session/message", post(send_message))
         .route("/api/session/stop", post(stop_active_turn))
+        .route("/api/session/review", post(request_review))
+        .route("/api/session/review/resolve", post(resolve_review))
+        .route("/api/session/reviews", get(list_reviews))
         .route("/api/pairing/start", post(start_pairing))
         .route(
             "/api/pairings/:pairing_id/decision",
@@ -656,6 +660,45 @@ async fn stop_active_turn(
         .await
         .map(|snapshot| Json(ApiEnvelope::ok(compact_local_snapshot(snapshot))))
         .map_err(bad_request)
+}
+
+async fn request_review(
+    State(context): State<AppContext>,
+    headers: HeaderMap,
+    uri: Uri,
+    Json(input): Json<RequestReviewInput>,
+) -> Result<Json<ApiEnvelope<RequestReviewReceipt>>, (StatusCode, Json<ApiError>)> {
+    authorize_api(&context, &headers, &uri)?;
+    context
+        .app
+        .request_review(input)
+        .await
+        .map(|receipt| Json(ApiEnvelope::ok(receipt)))
+        .map_err(bad_request)
+}
+
+async fn resolve_review(
+    State(context): State<AppContext>,
+    headers: HeaderMap,
+    uri: Uri,
+    Json(input): Json<StopTurnInput>,
+) -> Result<Json<ApiEnvelope<RequestReviewReceipt>>, (StatusCode, Json<ApiError>)> {
+    authorize_api(&context, &headers, &uri)?;
+    context
+        .app
+        .resolve_blocked_review(input.device_id)
+        .await
+        .map(|receipt| Json(ApiEnvelope::ok(receipt)))
+        .map_err(bad_request)
+}
+
+async fn list_reviews(
+    State(context): State<AppContext>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<ApiEnvelope<Vec<ReviewJobView>>>, (StatusCode, Json<ApiError>)> {
+    authorize_api(&context, &headers, &uri)?;
+    Ok(Json(ApiEnvelope::ok(context.app.list_review_jobs().await)))
 }
 
 async fn session_heartbeat(

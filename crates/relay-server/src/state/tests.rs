@@ -279,6 +279,7 @@ fn test_cached_remote_action_result(action_kind: &str, ok: bool) -> CachedRemote
             transcript_truncated: false,
             transcript: Vec::new(),
             logs: Vec::new(),
+            active_review_jobs: Vec::new(),
         }),
         receipt: Some(ApprovalReceipt {
             request_id: "req-1".to_string(),

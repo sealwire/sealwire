@@ -9,8 +9,8 @@ use crate::{
     protocol::{
         ApplyFileChangeInput, ApprovalDecisionInput, ApprovalReceipt, AskUserAnswerReceipt,
         AskUserQuestionDetailResponse, HeartbeatInput, ModelOptionView, ReadThreadEntriesInput,
-        ReadThreadEntryDetailInput, ReadThreadTranscriptInput, ResumeSessionInput,
-        SendMessageInput, SessionSnapshot, StartSessionInput, StopTurnInput,
+        ReadThreadEntryDetailInput, ReadThreadTranscriptInput, RequestReviewInput,
+        ResumeSessionInput, SendMessageInput, SessionSnapshot, StartSessionInput, StopTurnInput,
         SubmitAskUserAnswerInput, TakeOverInput, ThreadEntriesResponse, ThreadEntryDetailResponse,
         ThreadTranscriptResponse, ThreadsQuery, ThreadsResponse, UpdateSessionSettingsInput,
         WorkspaceDiffResponse,
@@ -105,6 +105,9 @@ pub(super) enum RemoteActionRequest {
         request_id: String,
         input: SubmitAskUserAnswerInput,
     },
+    RequestReview {
+        input: RequestReviewInput,
+    },
 }
 
 impl RemoteActionRequest {
@@ -130,6 +133,7 @@ impl RemoteActionRequest {
             Self::FetchWorkspaceDiff { .. } => RemoteActionKind::FetchWorkspaceDiff,
             Self::FetchAskUserQuestionDetail { .. } => RemoteActionKind::FetchAskUserQuestionDetail,
             Self::SubmitAskUserAnswer { .. } => RemoteActionKind::SubmitAskUserAnswer,
+            Self::RequestReview { .. } => RemoteActionKind::RequestReview,
         }
     }
 
@@ -216,6 +220,10 @@ impl RemoteActionRequest {
                 input.device_id = Some(device_id);
                 Self::SubmitAskUserAnswer { request_id, input }
             }
+            Self::RequestReview { mut input } => {
+                input.device_id = Some(device_id);
+                Self::RequestReview { input }
+            }
         }
     }
 }
@@ -243,6 +251,7 @@ pub(super) enum RemoteActionKind {
     FetchWorkspaceDiff,
     FetchAskUserQuestionDetail,
     SubmitAskUserAnswer,
+    RequestReview,
 }
 
 impl RemoteActionKind {
@@ -268,6 +277,7 @@ impl RemoteActionKind {
             Self::FetchWorkspaceDiff => "fetch_workspace_diff",
             Self::FetchAskUserQuestionDetail => "fetch_ask_user_question_detail",
             Self::SubmitAskUserAnswer => "submit_ask_user_answer",
+            Self::RequestReview => "request_review",
         }
     }
 }
@@ -889,6 +899,10 @@ async fn execute_remote_action(
             .send_message(input)
             .await
             .map(|_| RemoteActionOutcome::default()),
+        RemoteActionRequest::RequestReview { input } => state
+            .request_review(input)
+            .await
+            .map(|_| RemoteActionOutcome::default()),
         RemoteActionRequest::StopTurn { input } => state
             .stop_active_turn(input)
             .await
@@ -1040,7 +1054,9 @@ async fn execute_remote_action(
 fn requires_session_claim(action: RemoteActionKind) -> bool {
     matches!(
         action,
-        RemoteActionKind::SendMessage | RemoteActionKind::ApplyFileChange
+        RemoteActionKind::SendMessage
+            | RemoteActionKind::ApplyFileChange
+            | RemoteActionKind::RequestReview
     )
 }
 
@@ -2140,9 +2156,9 @@ fn remote_action_result_kind(action: RemoteActionKind) -> RemoteActionResultKind
         RemoteActionKind::DecideApproval | RemoteActionKind::SubmitAskUserAnswer => {
             RemoteActionResultKind::RemoteApprovalResult
         }
-        RemoteActionKind::SendMessage | RemoteActionKind::ApplyFileChange => {
-            RemoteActionResultKind::RemoteActionAck
-        }
+        RemoteActionKind::SendMessage
+        | RemoteActionKind::ApplyFileChange
+        | RemoteActionKind::RequestReview => RemoteActionResultKind::RemoteActionAck,
     }
 }
 

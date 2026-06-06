@@ -2030,3 +2030,1435 @@ mod path_scope_tests {
         assert_eq!(claude_provider.models_seen().await, vec!["default"]);
     }
 }
+
+#[cfg(test)]
+mod review_tests {
+    use super::super::*;
+    use crate::protocol::{
+        ModelOptionView, RequestReviewInput, StartSessionInput, ThreadSummaryView,
+        TranscriptEntryKind, TranscriptEntryView,
+    };
+    use crate::state::security::SecurityProfile;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Arc;
+    use tempfile::TempDir;
+    use tokio::sync::{watch, Mutex, RwLock};
+    use tokio::time::{sleep, Duration};
+
+    const REVIEW_REPLY: &str = "AGENT_REVIEW_REPLY";
+
+    /// A provider that records the prompts/cwds it is asked to run and (unless
+    /// `complete_turns` is cleared) completes each turn by writing a fixed
+    /// assistant reply back into relay state — enough to drive the orchestrator
+    /// end to end and assert what it sent to whom.
+    #[derive(Clone)]
+    struct ReviewTestProvider {
+        name: &'static str,
+        state: Arc<RwLock<RelayState>>,
+        threads: Arc<Mutex<HashMap<String, ThreadSummaryView>>>,
+        transcripts: Arc<Mutex<HashMap<String, Vec<TranscriptEntryView>>>>,
+        start_thread_cwds: Arc<Mutex<Vec<(String, String)>>>,
+        // (thread_id, approval_policy, sandbox) recorded at start_thread.
+        start_thread_settings: Arc<Mutex<Vec<(String, String, String)>>>,
+        turns: Arc<Mutex<Vec<(String, String)>>>,
+        complete_turns: Arc<AtomicBool>,
+        // When false, turns still complete (clearing the active turn) but emit no
+        // assistant message — exercising the "no recap text" path.
+        emit_assistant: Arc<AtomicBool>,
+        // When true, a turn parks on a pending approval instead of replying —
+        // exercising the reviewer-approval auto-deny path.
+        raise_approval: Arc<AtomicBool>,
+        // When true, `respond_to_approval` errors (provider rejects the denial).
+        deny_fails: Arc<AtomicBool>,
+        // When true, `interrupt_turn` errors.
+        interrupt_fails: Arc<AtomicBool>,
+        interrupts: Arc<Mutex<Vec<String>>>,
+        // When set, the first completing turn also injects a pending approval for
+        // an unrelated background thread — it must NOT fail the review.
+        inject_unrelated_approval: Arc<AtomicBool>,
+        // When true, a turn parks on an AskUserQuestion instead of replying.
+        raise_ask_user: Arc<AtomicBool>,
+        // When true, only the *reviewer* turn parks on an approval (recap completes
+        // normally) — exercises the reviewer-handoff cleanup path.
+        approval_on_reviewer_turn: Arc<AtomicBool>,
+        // Delay before a turn completes (ms). Lets tests complete a turn *after* a
+        // short step timeout, exercising the drain path.
+        complete_delay_ms: Arc<AtomicU64>,
+        next_id: Arc<AtomicU64>,
+    }
+
+    impl ReviewTestProvider {
+        fn new(name: &'static str, state: Arc<RwLock<RelayState>>) -> Self {
+            Self {
+                name,
+                state,
+                threads: Arc::new(Mutex::new(HashMap::new())),
+                transcripts: Arc::new(Mutex::new(HashMap::new())),
+                start_thread_cwds: Arc::new(Mutex::new(Vec::new())),
+                start_thread_settings: Arc::new(Mutex::new(Vec::new())),
+                turns: Arc::new(Mutex::new(Vec::new())),
+                complete_turns: Arc::new(AtomicBool::new(true)),
+                emit_assistant: Arc::new(AtomicBool::new(true)),
+                raise_approval: Arc::new(AtomicBool::new(false)),
+                deny_fails: Arc::new(AtomicBool::new(false)),
+                interrupt_fails: Arc::new(AtomicBool::new(false)),
+                interrupts: Arc::new(Mutex::new(Vec::new())),
+                inject_unrelated_approval: Arc::new(AtomicBool::new(false)),
+                raise_ask_user: Arc::new(AtomicBool::new(false)),
+                approval_on_reviewer_turn: Arc::new(AtomicBool::new(false)),
+                complete_delay_ms: Arc::new(AtomicU64::new(15)),
+                next_id: Arc::new(AtomicU64::new(1)),
+            }
+        }
+
+        fn next_token(&self, prefix: &str) -> String {
+            format!(
+                "{}-{prefix}-{}",
+                self.name,
+                self.next_id.fetch_add(1, Ordering::Relaxed)
+            )
+        }
+
+        fn summary(&self, id: &str, cwd: &str) -> ThreadSummaryView {
+            ThreadSummaryView {
+                id: id.to_string(),
+                name: Some(format!("{} thread", self.name)),
+                preview: String::new(),
+                cwd: cwd.to_string(),
+                updated_at: unix_now(),
+                source: self.name.to_string(),
+                status: "idle".to_string(),
+                model_provider: self.name.to_string(),
+                provider: self.name.to_string(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ProviderBridge for ReviewTestProvider {
+        async fn list_threads(&self, limit: usize) -> Result<Vec<ThreadSummaryView>, String> {
+            let mut threads = self
+                .threads
+                .lock()
+                .await
+                .values()
+                .cloned()
+                .collect::<Vec<_>>();
+            threads.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+            threads.truncate(limit);
+            Ok(threads)
+        }
+
+        async fn list_models(&self) -> Result<Vec<ModelOptionView>, String> {
+            Ok(vec![ModelOptionView {
+                model: format!("{}-model", self.name),
+                display_name: format!("{} Model", self.name),
+                provider: self.name.to_string(),
+                supported_reasoning_efforts: vec!["medium".to_string()],
+                default_reasoning_effort: "medium".to_string(),
+                hidden: false,
+                is_default: true,
+            }])
+        }
+
+        async fn start_thread(
+            &self,
+            cwd: &str,
+            _model: &str,
+            approval_policy: &str,
+            sandbox: &str,
+            _initial_prompt: Option<&str>,
+        ) -> Result<crate::provider::StartThreadResult, String> {
+            let id = self.next_token("thread");
+            let thread = self.summary(&id, cwd);
+            self.threads.lock().await.insert(id.clone(), thread.clone());
+            self.start_thread_cwds
+                .lock()
+                .await
+                .push((id.clone(), cwd.to_string()));
+            self.start_thread_settings.lock().await.push((
+                id,
+                approval_policy.to_string(),
+                sandbox.to_string(),
+            ));
+            Ok(crate::provider::StartThreadResult {
+                thread,
+                consumed_initial_prompt: false,
+                initial_user_message: None,
+                started_turn_id: None,
+            })
+        }
+
+        async fn resume_thread(
+            &self,
+            thread_id: &str,
+            _approval_policy: &str,
+            _sandbox: &str,
+        ) -> Result<(), String> {
+            if self.threads.lock().await.contains_key(thread_id) {
+                Ok(())
+            } else {
+                Err(format!("{} thread '{thread_id}' was not found", self.name))
+            }
+        }
+
+        async fn read_thread(
+            &self,
+            thread_id: &str,
+        ) -> Result<crate::provider::ThreadSyncData, String> {
+            let thread = self
+                .threads
+                .lock()
+                .await
+                .get(thread_id)
+                .cloned()
+                .ok_or_else(|| format!("{} thread '{thread_id}' was not found", self.name))?;
+            let transcript = self
+                .transcripts
+                .lock()
+                .await
+                .get(thread_id)
+                .cloned()
+                .unwrap_or_default();
+            Ok(crate::provider::ThreadSyncData {
+                thread,
+                status: "idle".to_string(),
+                active_flags: Vec::new(),
+                transcript,
+            })
+        }
+
+        async fn read_thread_entry_detail(
+            &self,
+            _thread_id: &str,
+            _item_id: &str,
+        ) -> Result<Option<TranscriptEntryView>, String> {
+            Ok(None)
+        }
+
+        async fn archive_thread(&self, thread_id: &str) -> Result<(), String> {
+            self.threads.lock().await.remove(thread_id);
+            Ok(())
+        }
+
+        async fn delete_thread_permanently(
+            &self,
+            thread_id: &str,
+        ) -> Result<crate::codex_local::LocalThreadDeleteSummary, String> {
+            self.threads.lock().await.remove(thread_id);
+            Ok(crate::codex_local::LocalThreadDeleteSummary {
+                deleted_paths: Vec::new(),
+                deleted_thread_row: true,
+            })
+        }
+
+        async fn start_turn(
+            &self,
+            thread_id: &str,
+            text: &str,
+            _model: &str,
+            _effort: &str,
+        ) -> Result<Option<String>, String> {
+            self.turns
+                .lock()
+                .await
+                .push((thread_id.to_string(), text.to_string()));
+            let turn_id = self.next_token("turn");
+            if !self.complete_turns.load(Ordering::Relaxed) {
+                return Ok(Some(turn_id));
+            }
+
+            let state = self.state.clone();
+            let transcripts = self.transcripts.clone();
+            let thread_id = thread_id.to_string();
+            let user_text = text.to_string();
+            let turn = turn_id.clone();
+            let user_item = self.next_token("user");
+            let assistant_item = self.next_token("assistant");
+            let emit_assistant = self.emit_assistant.load(Ordering::Relaxed);
+            let is_reviewer_turn = text.contains("You are reviewing another agent's work");
+            let raise_approval = self.raise_approval.load(Ordering::Relaxed)
+                || (is_reviewer_turn && self.approval_on_reviewer_turn.load(Ordering::Relaxed));
+            let inject_unrelated = self
+                .inject_unrelated_approval
+                .swap(false, Ordering::Relaxed);
+            let raise_ask_user = self.raise_ask_user.load(Ordering::Relaxed);
+            let complete_delay_ms = self.complete_delay_ms.load(Ordering::Relaxed);
+            let approval_id = self.next_token("approval");
+            let ask_id = self.next_token("ask");
+            let unrelated_approval_id = self.next_token("unrelated-approval");
+            tokio::spawn(async move {
+                // Let the orchestrator seed the active-turn marker first so the
+                // wait loop observes "working" before we clear it.
+                sleep(Duration::from_millis(complete_delay_ms)).await;
+                if raise_ask_user {
+                    // Park on an AskUserQuestion instead of replying.
+                    let mut relay = state.write().await;
+                    relay.pending_ask_user_questions.insert(
+                        ask_id.clone(),
+                        crate::state::PendingAskUserQuestion {
+                            request_id: ask_id.clone(),
+                            tool_use_id: format!("toolu-{ask_id}"),
+                            thread_id: thread_id.clone(),
+                            requested_at: 1,
+                            questions: vec![crate::protocol::AskUserQuestionView {
+                                question: "Which approach?".to_string(),
+                                header: "Choice".to_string(),
+                                multi_select: false,
+                                options: vec![crate::protocol::AskUserOptionView {
+                                    label: "A".to_string(),
+                                    description: String::new(),
+                                }],
+                            }],
+                        },
+                    );
+                    relay.notify();
+                    return;
+                }
+                if inject_unrelated {
+                    // An unrelated background thread parks on its own approval. The
+                    // review must ignore it (not fail, not auto-deny).
+                    let mut relay = state.write().await;
+                    relay.add_pending_approval(crate::state::PendingApproval {
+                        request_id: unrelated_approval_id.clone(),
+                        raw_request_id: serde_json::json!(unrelated_approval_id),
+                        kind: crate::state::ApprovalKind::Command,
+                        thread_id: "unrelated-bg-thread".to_string(),
+                        summary: "unrelated background command".to_string(),
+                        detail: None,
+                        command: Some("true".to_string()),
+                        cwd: None,
+                        context_preview: None,
+                        requested_permissions: None,
+                        available_decisions: vec!["approve".to_string(), "deny".to_string()],
+                        supports_session_scope: false,
+                    });
+                    relay.notify();
+                }
+                if raise_approval {
+                    // Park on an approval request instead of replying. The wait
+                    // loop checks pending approvals before liveness.
+                    let mut relay = state.write().await;
+                    relay.add_pending_approval(crate::state::PendingApproval {
+                        request_id: approval_id.clone(),
+                        raw_request_id: serde_json::json!(approval_id),
+                        kind: crate::state::ApprovalKind::Command,
+                        thread_id: thread_id.clone(),
+                        summary: "edit a file".to_string(),
+                        detail: None,
+                        command: None,
+                        cwd: None,
+                        context_preview: None,
+                        requested_permissions: None,
+                        available_decisions: vec!["approve".to_string(), "deny".to_string()],
+                        supports_session_scope: false,
+                    });
+                    relay.notify();
+                    return;
+                }
+                {
+                    let mut relay = state.write().await;
+                    let is_active = relay.active_thread_id.as_deref() == Some(thread_id.as_str());
+                    if is_active {
+                        relay.set_active_turn(Some(turn.clone()));
+                        relay.upsert_user_message(
+                            user_item.clone(),
+                            user_text.clone(),
+                            turn.clone(),
+                        );
+                        if emit_assistant {
+                            relay.start_agent_message(assistant_item.clone(), turn.clone());
+                            relay.complete_agent_message(
+                                assistant_item.clone(),
+                                REVIEW_REPLY.to_string(),
+                                turn.clone(),
+                            );
+                        }
+                        relay.set_active_turn(None);
+                        relay.set_thread_status(&thread_id, "idle".to_string(), Vec::new());
+                    } else {
+                        let now = unix_now();
+                        relay.bg_set_active_turn(&thread_id, Some(turn.clone()), now);
+                        relay.bg_upsert_user_message(
+                            &thread_id,
+                            user_item.clone(),
+                            user_text.clone(),
+                            turn.clone(),
+                            now,
+                        );
+                        if emit_assistant {
+                            relay.bg_start_agent_message(
+                                &thread_id,
+                                assistant_item.clone(),
+                                turn.clone(),
+                                now,
+                            );
+                            relay.bg_complete_agent_message(
+                                &thread_id,
+                                assistant_item.clone(),
+                                REVIEW_REPLY.to_string(),
+                                turn.clone(),
+                                now,
+                            );
+                        }
+                        relay.bg_set_active_turn(&thread_id, None, now);
+                        relay.bg_set_thread_status(&thread_id, "idle".to_string(), Vec::new(), now);
+                    }
+                    relay.notify();
+                }
+                let mut transcripts = transcripts.lock().await;
+                let entries = transcripts.entry(thread_id).or_default();
+                entries.push(TranscriptEntryView {
+                    item_id: Some(user_item),
+                    kind: TranscriptEntryKind::UserText,
+                    text: Some(user_text),
+                    status: "completed".to_string(),
+                    turn_id: Some(turn.clone()),
+                    tool: None,
+                });
+                if emit_assistant {
+                    entries.push(TranscriptEntryView {
+                        item_id: Some(assistant_item),
+                        kind: TranscriptEntryKind::AgentText,
+                        text: Some(REVIEW_REPLY.to_string()),
+                        status: "completed".to_string(),
+                        turn_id: Some(turn),
+                        tool: None,
+                    });
+                }
+            });
+            Ok(Some(turn_id))
+        }
+
+        async fn interrupt_turn(&self, thread_id: &str, _turn_id: &str) -> Result<(), String> {
+            self.interrupts.lock().await.push(thread_id.to_string());
+            if self.interrupt_fails.load(Ordering::Relaxed) {
+                return Err("interrupt rejected".to_string());
+            }
+            // Simulate the provider acknowledging the cancel by ending the turn — a
+            // real provider clears `active_turn` via a turn/completed event, which
+            // is the only signal the orchestrator trusts as "stopped".
+            let mut relay = self.state.write().await;
+            if relay.active_thread_id.as_deref() == Some(thread_id) {
+                relay.set_active_turn(None);
+                relay.set_thread_status(thread_id, "idle".to_string(), Vec::new());
+            } else {
+                let now = unix_now();
+                relay.bg_set_active_turn(thread_id, None, now);
+                relay.bg_set_thread_status(thread_id, "idle".to_string(), Vec::new(), now);
+            }
+            relay.notify();
+            Ok(())
+        }
+
+        async fn respond_to_approval(
+            &self,
+            _pending: &crate::state::PendingApproval,
+            _input: &crate::protocol::ApprovalDecisionInput,
+        ) -> Result<(), String> {
+            if self.deny_fails.load(Ordering::Relaxed) {
+                Err("provider rejected the approval response".to_string())
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn respond_to_ask_user_question(
+            &self,
+            _request_id: &str,
+            _answers: &serde_json::Map<String, serde_json::Value>,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn provider_name(&self) -> &'static str {
+            self.name
+        }
+    }
+
+    async fn build_review_app(
+        cwd: &str,
+        provider_names: &[&'static str],
+    ) -> (AppState, HashMap<&'static str, ReviewTestProvider>) {
+        let (change_tx, _rx) = watch::channel(0_u64);
+        let relay = Arc::new(RwLock::new(RelayState::new(
+            cwd.to_string(),
+            change_tx.clone(),
+            SecurityProfile::private(),
+        )));
+        let mut bridges: HashMap<String, Arc<dyn ProviderBridge>> = HashMap::new();
+        let mut map = HashMap::new();
+        for name in provider_names {
+            let provider = ReviewTestProvider::new(name, relay.clone());
+            bridges.insert(name.to_string(), Arc::new(provider.clone()));
+            map.insert(*name, provider);
+        }
+        (AppState::from_parts(relay, bridges, change_tx), map)
+    }
+
+    async fn start_parent(app: &AppState, cwd: &str, provider: &str) -> ThreadSummaryView {
+        let snap = app
+            .start_session(StartSessionInput {
+                device_id: Some("device-1".to_string()),
+                cwd: Some(cwd.to_string()),
+                model: None,
+                effort: None,
+                approval_policy: None,
+                sandbox: None,
+                provider: Some(provider.to_string()),
+                initial_prompt: None,
+            })
+            .await
+            .expect("parent session should start");
+        let thread_id = snap.active_thread_id.clone().expect("parent thread id");
+        ThreadSummaryView {
+            id: thread_id,
+            name: None,
+            preview: String::new(),
+            cwd: snap.current_cwd.clone(),
+            updated_at: 0,
+            source: provider.to_string(),
+            status: snap.current_status.clone(),
+            model_provider: provider.to_string(),
+            provider: provider.to_string(),
+        }
+    }
+
+    async fn wait_for_review(app: &AppState, job_id: &str) -> crate::protocol::ReviewJobView {
+        wait_for_review_status(app, job_id, &["complete", "failed", "blocked"]).await
+    }
+
+    async fn wait_for_review_status(
+        app: &AppState,
+        job_id: &str,
+        statuses: &[&str],
+    ) -> crate::protocol::ReviewJobView {
+        for _ in 0..400 {
+            if let Some(job) = app
+                .list_review_jobs()
+                .await
+                .into_iter()
+                .find(|job| job.id == job_id)
+            {
+                if statuses.contains(&job.status.as_str()) {
+                    return job;
+                }
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        panic!("review job {job_id} never reached {statuses:?}");
+    }
+
+    fn review_input(reviewer_provider: &str) -> RequestReviewInput {
+        RequestReviewInput {
+            parent_thread_id: None,
+            reviewer_provider: reviewer_provider.to_string(),
+            reviewer_model: None,
+            reviewer_thread_id: None,
+            instructions: Some("focus on the tests".to_string()),
+            device_id: Some("device-1".to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn review_runs_recap_then_reviewer_then_posts_back() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+        let parent_cwd = app.snapshot().await.current_cwd;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        assert_eq!(receipt.parent_thread_id, parent.id);
+        assert_eq!(receipt.status.status, "pending_parent_recap");
+
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
+
+        let provider = providers.get("codex").unwrap();
+        let turns = provider.turns.lock().await.clone();
+        assert_eq!(
+            turns.len(),
+            3,
+            "expected recap, review, post-back: {turns:?}"
+        );
+
+        // Recap goes to the parent first.
+        assert_eq!(turns[0].0, parent.id);
+        assert!(
+            turns[0].1.contains("recap the changes"),
+            "recap prompt: {}",
+            turns[0].1
+        );
+
+        // Reviewer prompt is a separate thread and carries recap + diff metadata.
+        let reviewer_thread = job.reviewer_thread_id.clone().expect("reviewer thread id");
+        assert_ne!(reviewer_thread, parent.id);
+        assert_eq!(turns[1].0, reviewer_thread);
+        assert!(
+            turns[1]
+                .1
+                .contains("Workspace diff collected by the relay at"),
+            "reviewer prompt missing diff metadata: {}",
+            turns[1].1
+        );
+        assert!(
+            turns[1].1.contains(REVIEW_REPLY),
+            "reviewer prompt should embed the parent recap: {}",
+            turns[1].1
+        );
+        assert!(
+            turns[1].1.contains("focus on the tests"),
+            "reviewer prompt should carry user instructions: {}",
+            turns[1].1
+        );
+
+        // The review is posted back into the parent thread.
+        assert_eq!(turns[2].0, parent.id);
+        assert!(
+            turns[2].1.contains("review result from reviewer thread"),
+            "post-back message: {}",
+            turns[2].1
+        );
+
+        // The clean reviewer thread was created against the parent cwd.
+        let cwds = provider.start_thread_cwds.lock().await.clone();
+        assert!(
+            cwds.iter()
+                .any(|(tid, c)| tid == &reviewer_thread && c == &parent_cwd),
+            "reviewer thread cwd mismatch: {cwds:?} (parent cwd {parent_cwd})"
+        );
+    }
+
+    #[tokio::test]
+    async fn review_rejects_when_no_active_parent() {
+        let dir = TempDir::new().expect("tmpdir");
+        let (app, _providers) = build_review_app(dir.path().to_str().unwrap(), &["codex"]).await;
+        let error = app
+            .request_review(review_input("codex"))
+            .await
+            .expect_err("review without an active parent should fail");
+        assert!(error.contains("no active"), "got: {error}");
+    }
+
+    #[tokio::test]
+    async fn review_rejects_when_parent_running() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, _providers) = build_review_app(cwd, &["codex"]).await;
+        start_parent(&app, cwd, "codex").await;
+        app.relay.write().await.active_turn_id = Some("turn-in-flight".to_string());
+
+        let error = app
+            .request_review(review_input("codex"))
+            .await
+            .expect_err("review with a running parent should fail");
+        assert!(error.contains("turn is in progress"), "got: {error}");
+    }
+
+    #[tokio::test]
+    async fn review_rejects_with_pending_approval() {
+        use crate::state::{ApprovalKind, PendingApproval};
+
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, _providers) = build_review_app(cwd, &["codex"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+        app.relay.write().await.pending_approvals.insert(
+            "approval-1".to_string(),
+            PendingApproval {
+                request_id: "approval-1".to_string(),
+                raw_request_id: serde_json::json!("approval-1"),
+                kind: ApprovalKind::Command,
+                thread_id: parent.id.clone(),
+                summary: "run".to_string(),
+                detail: None,
+                command: Some("true".to_string()),
+                cwd: Some(cwd.to_string()),
+                context_preview: None,
+                requested_permissions: None,
+                available_decisions: vec!["approve".to_string()],
+                supports_session_scope: false,
+            },
+        );
+
+        let error = app
+            .request_review(review_input("codex"))
+            .await
+            .expect_err("review with a pending approval should fail");
+        assert!(error.contains("approvals are pending"), "got: {error}");
+    }
+
+    #[tokio::test]
+    async fn review_rejects_unavailable_reviewer_provider() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, _providers) = build_review_app(cwd, &["codex"]).await;
+        start_parent(&app, cwd, "codex").await;
+
+        let error = app
+            .request_review(review_input("claude_code"))
+            .await
+            .expect_err("unavailable reviewer provider should fail");
+        assert!(error.contains("claude_code"), "got: {error}");
+    }
+
+    #[tokio::test]
+    async fn review_rejects_existing_reviewer_thread() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, _providers) = build_review_app(cwd, &["codex"]).await;
+        start_parent(&app, cwd, "codex").await;
+
+        let mut input = review_input("codex");
+        input.reviewer_thread_id = Some("some-existing-thread".to_string());
+        let error = app
+            .request_review(input)
+            .await
+            .expect_err("existing reviewer thread should be rejected in v1");
+        assert!(error.contains("clean reviewer"), "got: {error}");
+    }
+
+    #[tokio::test]
+    async fn review_rejects_concurrent_requests() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        // The reviewer/recap turns never complete, so the first job holds the
+        // serialization guard while we issue a second request.
+        providers
+            .get("codex")
+            .unwrap()
+            .complete_turns
+            .store(false, Ordering::Relaxed);
+        start_parent(&app, cwd, "codex").await;
+
+        app.request_review(review_input("codex"))
+            .await
+            .expect("first review should start");
+        let error = app
+            .request_review(review_input("codex"))
+            .await
+            .expect_err("second concurrent review should be rejected");
+        assert!(error.contains("already running"), "got: {error}");
+    }
+
+    #[tokio::test]
+    async fn send_message_to_thread_routes_by_target_provider() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex", "claude_code"]).await;
+        let codex = providers.get("codex").unwrap();
+        let claude = providers.get("claude_code").unwrap();
+
+        let codex_thread = codex.summary("codex-active", cwd);
+        let claude_thread = claude.summary("claude-bg", cwd);
+        codex
+            .threads
+            .lock()
+            .await
+            .insert(codex_thread.id.clone(), codex_thread.clone());
+        claude
+            .threads
+            .lock()
+            .await
+            .insert(claude_thread.id.clone(), claude_thread.clone());
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("codex".to_string());
+            relay.active_thread_id = Some(codex_thread.id.clone());
+            relay.current_cwd = cwd.to_string();
+            relay.threads = vec![codex_thread, claude_thread.clone()];
+        }
+
+        app.send_message_to_thread(&claude_thread.id, "route me", None, None)
+            .await
+            .expect("send should route to the target thread's provider");
+
+        assert!(
+            codex.turns.lock().await.is_empty(),
+            "codex provider should not receive a turn for a claude target"
+        );
+        assert_eq!(
+            claude.turns.lock().await.clone(),
+            vec![(claude_thread.id.clone(), "route me".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn reviewer_thread_is_created_read_only_for_codex() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        start_parent(&app, cwd, "codex").await;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
+
+        let reviewer_thread = job.reviewer_thread_id.clone().expect("reviewer thread id");
+        let settings = providers
+            .get("codex")
+            .unwrap()
+            .start_thread_settings
+            .lock()
+            .await
+            .clone();
+        let reviewer = settings
+            .iter()
+            .find(|(id, _, _)| id == &reviewer_thread)
+            .expect("reviewer thread settings recorded");
+        assert_eq!(reviewer.1, "never", "reviewer approval policy");
+        assert_eq!(
+            reviewer.2, "read-only",
+            "reviewer sandbox must be read-only"
+        );
+    }
+
+    #[tokio::test]
+    async fn review_in_progress_blocks_user_session_ops() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        // Hold the review guard open: the recap turn never completes.
+        providers
+            .get("codex")
+            .unwrap()
+            .complete_turns
+            .store(false, Ordering::Relaxed);
+        let parent = start_parent(&app, cwd, "codex").await;
+
+        app.request_review(review_input("codex"))
+            .await
+            .expect("review should start and hold the guard");
+
+        let send_err = app
+            .send_message(crate::protocol::SendMessageInput {
+                text: "hi".to_string(),
+                model: None,
+                effort: None,
+                device_id: Some("device-1".to_string()),
+            })
+            .await
+            .expect_err("send should be blocked during a review");
+        assert!(
+            send_err.contains("review is in progress"),
+            "got: {send_err}"
+        );
+
+        let start_err = app
+            .start_session(StartSessionInput {
+                device_id: Some("device-1".to_string()),
+                cwd: Some(cwd.to_string()),
+                model: None,
+                effort: None,
+                approval_policy: None,
+                sandbox: None,
+                provider: Some("codex".to_string()),
+                initial_prompt: None,
+            })
+            .await
+            .expect_err("start should be blocked during a review");
+        assert!(
+            start_err.contains("review is in progress"),
+            "got: {start_err}"
+        );
+
+        let resume_err = app
+            .resume_session(crate::protocol::ResumeSessionInput {
+                thread_id: parent.id.clone(),
+                approval_policy: None,
+                sandbox: None,
+                effort: None,
+                device_id: Some("device-1".to_string()),
+                provider: Some("codex".to_string()),
+            })
+            .await
+            .expect_err("resume should be blocked during a review");
+        assert!(
+            resume_err.contains("review is in progress"),
+            "got: {resume_err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn review_fails_when_recap_has_no_assistant_text() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        // The recap turn completes but produces no assistant message; the
+        // orchestrator must not reuse a stale reply.
+        providers
+            .get("codex")
+            .unwrap()
+            .emit_assistant
+            .store(false, Ordering::Relaxed);
+        start_parent(&app, cwd, "codex").await;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "failed", "expected the review to fail");
+        assert!(
+            job.error.as_deref().unwrap_or_default().contains("recap"),
+            "error should mention the missing recap: {:?}",
+            job.error
+        );
+    }
+
+    #[tokio::test]
+    async fn decide_approval_is_blocked_during_review() {
+        use crate::protocol::{ApprovalDecision, ApprovalDecisionInput};
+
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        // Hold the session guard open for the whole test.
+        providers
+            .get("codex")
+            .unwrap()
+            .complete_turns
+            .store(false, Ordering::Relaxed);
+        start_parent(&app, cwd, "codex").await;
+        app.request_review(review_input("codex"))
+            .await
+            .expect("review should start and hold the guard");
+
+        let error = app
+            .decide_approval(
+                "any-request",
+                ApprovalDecisionInput {
+                    decision: ApprovalDecision::Approve,
+                    scope: None,
+                    device_id: Some("device-1".to_string()),
+                },
+            )
+            .await
+            .expect_err("approving during a review must be blocked");
+        let message = match error {
+            crate::state::ApprovalError::Bridge(message) => message,
+            other => panic!("unexpected approval error: {other:?}"),
+        };
+        assert!(message.contains("review is in progress"), "got: {message}");
+    }
+
+    #[tokio::test]
+    async fn reviewer_approval_is_auto_denied() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        // The (recap) turn parks on an approval instead of replying.
+        providers
+            .get("codex")
+            .unwrap()
+            .raise_approval
+            .store(true, Ordering::Relaxed);
+        start_parent(&app, cwd, "codex").await;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+
+        assert_eq!(job.status, "failed", "review must fail on an approval");
+        assert!(
+            job.error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("approval"),
+            "error should mention the approval: {:?}",
+            job.error
+        );
+        // The reviewer's approval was auto-denied, not left pending.
+        assert!(
+            app.relay.read().await.pending_approvals.is_empty(),
+            "pending approvals must be cleared after auto-deny"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_file_change_is_blocked_during_review() {
+        use crate::protocol::{ApplyFileChangeInput, FileChangeApplyDirection};
+
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        providers
+            .get("codex")
+            .unwrap()
+            .complete_turns
+            .store(false, Ordering::Relaxed);
+        start_parent(&app, cwd, "codex").await;
+        app.request_review(review_input("codex"))
+            .await
+            .expect("review should start and hold the guard");
+
+        let error = app
+            .apply_file_change(
+                "turn-diff:whatever",
+                ApplyFileChangeInput {
+                    device_id: Some("device-1".to_string()),
+                    direction: FileChangeApplyDirection::Rollback,
+                },
+            )
+            .await
+            .expect_err("apply_file_change must be blocked during a review");
+        assert!(error.contains("review is in progress"), "got: {error}");
+    }
+
+    #[tokio::test]
+    async fn auto_deny_failure_interrupts_the_parked_turn() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let codex = providers.get("codex").unwrap();
+        codex.raise_approval.store(true, Ordering::Relaxed);
+        codex.deny_fails.store(true, Ordering::Relaxed); // provider rejects the denial
+        start_parent(&app, cwd, "codex").await;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "failed");
+        // Deny failed, so the orchestrator interrupted the parked turn instead and
+        // then cleared the approval.
+        assert!(
+            !codex.interrupts.lock().await.is_empty(),
+            "a failed deny must fall back to interrupting the turn"
+        );
+        assert!(
+            app.relay.read().await.pending_approvals.is_empty(),
+            "an interrupted turn's approval should be cleared"
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_double_failure_blocks_and_holds_the_lock_until_resolved() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        app.set_review_drain_max_ms(200);
+        let codex = providers.get("codex").unwrap();
+        codex.raise_approval.store(true, Ordering::Relaxed);
+        codex.deny_fails.store(true, Ordering::Relaxed);
+        codex.interrupt_fails.store(true, Ordering::Relaxed);
+        start_parent(&app, cwd, "codex").await;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        let job = wait_for_review_status(&app, &receipt.review_job_id, &["blocked"]).await;
+        assert_eq!(
+            job.status, "blocked",
+            "unrecoverable cleanup must block, not fail"
+        );
+        // The approval is retained and the session lock stays held: no new work.
+        assert!(!app.relay.read().await.pending_approvals.is_empty());
+        let send_err = app
+            .send_message(crate::protocol::SendMessageInput {
+                text: "hi".to_string(),
+                model: None,
+                effort: None,
+                device_id: Some("device-1".to_string()),
+            })
+            .await
+            .expect_err("the lock must stay held while blocked");
+        assert!(
+            send_err.contains("review is in progress"),
+            "got: {send_err}"
+        );
+
+        // A passive (non-controller) device must not be able to resolve.
+        let scope_err = app
+            .resolve_blocked_review(Some("other-device".to_string()))
+            .await
+            .expect_err("a non-controller device must not resolve");
+        assert!(scope_err.contains("control"), "got: {scope_err}");
+
+        // A resolve that can't stop the turn stays blocked (guard never leaves the
+        // slot), and the lock is still held.
+        let resolve_err = app
+            .resolve_blocked_review(Some("device-1".to_string()))
+            .await
+            .expect_err("resolve must fail while the turn can't be stopped");
+        assert!(resolve_err.contains("still running"), "got: {resolve_err}");
+        assert_eq!(
+            app.list_review_jobs()
+                .await
+                .into_iter()
+                .find(|job| job.id == receipt.review_job_id)
+                .map(|job| job.status),
+            Some("blocked".to_string()),
+            "a failed resolve must stay blocked"
+        );
+        app.send_message(crate::protocol::SendMessageInput {
+            text: "hi".to_string(),
+            model: None,
+            effort: None,
+            device_id: Some("device-1".to_string()),
+        })
+        .await
+        .expect_err("the lock must still be held after a failed resolve");
+
+        // Now the provider can stop the turn; resolving unlocks the workspace.
+        codex.interrupt_fails.store(false, Ordering::Relaxed);
+        let resolved = app
+            .resolve_blocked_review(Some("device-1".to_string()))
+            .await
+            .expect("resolve should unblock");
+        assert_eq!(resolved.status.status, "failed");
+
+        let job = wait_for_review_status(&app, &receipt.review_job_id, &["failed"]).await;
+        assert_eq!(job.status, "failed");
+        assert!(
+            app.relay.read().await.pending_approvals.is_empty(),
+            "resolve clears the reviewer's approval"
+        );
+        // The lock is released: a send now passes the guard (no active thread, so
+        // it fails for a different reason — never the review-lock error).
+        let after = app
+            .send_message(crate::protocol::SendMessageInput {
+                text: "hi".to_string(),
+                model: None,
+                effort: None,
+                device_id: Some("device-1".to_string()),
+            })
+            .await;
+        if let Err(error) = after {
+            assert!(
+                !error.contains("review is in progress"),
+                "lock should be released after resolve: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_stops_a_working_thread_with_no_turn_id() {
+        // A Claude clean reviewer can be `working` (status) with no surfaced turn
+        // id during the pending→promotion window. Cancel-by-session must still work
+        // so the review doesn't wedge in Blocked forever.
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        app.set_review_drain_max_ms(200);
+        let codex = providers.get("codex").unwrap();
+        codex.raise_approval.store(true, Ordering::Relaxed);
+        codex.deny_fails.store(true, Ordering::Relaxed);
+        codex.interrupt_fails.store(true, Ordering::Relaxed);
+        let parent = start_parent(&app, cwd, "codex").await;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        wait_for_review_status(&app, &receipt.review_job_id, &["blocked"]).await;
+
+        // Reshape the blocked thread into "working, but no turn id".
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_active_turn(None);
+            relay.set_thread_status(&parent.id, "active".to_string(), Vec::new());
+        }
+        assert!(app.relay.read().await.active_turn_id.is_none());
+
+        // The provider can now stop on a session-level cancel (empty turn id).
+        codex.interrupt_fails.store(false, Ordering::Relaxed);
+        app.resolve_blocked_review(Some("device-1".to_string()))
+            .await
+            .expect("a working-but-turn-id-less thread must still be resolvable");
+        let job = wait_for_review_status(&app, &receipt.review_job_id, &["failed"]).await;
+        assert_eq!(job.status, "failed");
+        assert!(!codex.interrupts.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn take_over_control_is_blocked_during_review() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        providers
+            .get("codex")
+            .unwrap()
+            .complete_turns
+            .store(false, Ordering::Relaxed);
+        start_parent(&app, cwd, "codex").await;
+        app.request_review(review_input("codex"))
+            .await
+            .expect("review should start and hold the guard");
+
+        let error = app
+            .take_over_control(crate::protocol::TakeOverInput {
+                device_id: Some("other-device".to_string()),
+            })
+            .await
+            .expect_err("take-over must be blocked during a review");
+        assert!(error.contains("review is in progress"), "got: {error}");
+    }
+
+    #[tokio::test]
+    async fn resolve_without_a_blocked_review_errors() {
+        let dir = TempDir::new().expect("tmpdir");
+        let (app, _providers) = build_review_app(dir.path().to_str().unwrap(), &["codex"]).await;
+        let error = app
+            .resolve_blocked_review(Some("device-1".to_string()))
+            .await
+            .expect_err("nothing to resolve");
+        assert!(error.contains("no blocked review"), "got: {error}");
+    }
+
+    #[tokio::test]
+    async fn reviewer_handoff_block_keeps_reviewer_active_until_resolved() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        app.set_review_drain_max_ms(200);
+        let codex = providers.get("codex").unwrap();
+        // Recap completes; the REVIEWER turn parks on an approval that can't be
+        // denied or interrupted — so the block happens during the handoff.
+        codex
+            .approval_on_reviewer_turn
+            .store(true, Ordering::Relaxed);
+        codex.deny_fails.store(true, Ordering::Relaxed);
+        codex.interrupt_fails.store(true, Ordering::Relaxed);
+        let parent = start_parent(&app, cwd, "codex").await;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        let job = wait_for_review_status(&app, &receipt.review_job_id, &["blocked"]).await;
+        assert_eq!(job.status, "blocked");
+
+        // Control was NOT handed back to the parent — the reviewer is still active
+        // and gated, never running unobserved against the parent thread.
+        let reviewer_thread = job.reviewer_thread_id.clone().expect("reviewer thread id");
+        let active = app.snapshot().await.active_thread_id;
+        assert_eq!(active.as_deref(), Some(reviewer_thread.as_str()));
+        assert_ne!(active.as_deref(), Some(parent.id.as_str()));
+
+        // Resolve (now stoppable) → reviewer stopped, lock released, job failed.
+        codex.interrupt_fails.store(false, Ordering::Relaxed);
+        app.resolve_blocked_review(Some("device-1".to_string()))
+            .await
+            .expect("resolve should unblock");
+        let job = wait_for_review_status(&app, &receipt.review_job_id, &["failed"]).await;
+        assert_eq!(job.status, "failed");
+    }
+
+    #[tokio::test]
+    async fn timeout_interrupts_the_running_turn() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        app.set_review_step_timeout_ms(150);
+        let codex = providers.get("codex").unwrap();
+        // The recap turn never completes, so the step times out.
+        codex.complete_turns.store(false, Ordering::Relaxed);
+        start_parent(&app, cwd, "codex").await;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+
+        assert_eq!(job.status, "failed");
+        assert!(
+            job.error.as_deref().unwrap_or_default().contains("stop"),
+            "timeout error should mention the turn was stopped: {:?}",
+            job.error
+        );
+        assert!(
+            !codex.interrupts.lock().await.is_empty(),
+            "a timed-out turn must be interrupted"
+        );
+    }
+
+    #[tokio::test]
+    async fn unrelated_background_approval_does_not_fail_the_review() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        providers
+            .get("codex")
+            .unwrap()
+            .inject_unrelated_approval
+            .store(true, Ordering::Relaxed);
+        start_parent(&app, cwd, "codex").await;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+
+        // The review completed despite an unrelated background-thread approval...
+        assert_eq!(
+            job.status, "complete",
+            "an unrelated approval must not fail the review: {:?}",
+            job.error
+        );
+        // ...and that approval was left untouched (not auto-denied).
+        let pending = app.relay.read().await;
+        assert!(
+            pending
+                .pending_approvals
+                .values()
+                .any(|approval| approval.thread_id == "unrelated-bg-thread"),
+            "the unrelated approval must survive the review"
+        );
+    }
+
+    #[tokio::test]
+    async fn review_rejected_when_background_thread_works_same_cwd() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, _providers) = build_review_app(cwd, &["codex"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+        let parent_cwd = app.snapshot().await.current_cwd;
+
+        // A backgrounded thread is still running a turn in the same workspace.
+        {
+            let mut relay = app.relay.write().await;
+            relay.threads.push(ThreadSummaryView {
+                id: "bg-thread".to_string(),
+                name: None,
+                preview: String::new(),
+                cwd: parent_cwd.clone(),
+                updated_at: 0,
+                source: "codex".to_string(),
+                status: "active".to_string(),
+                model_provider: "codex".to_string(),
+                provider: "codex".to_string(),
+            });
+            relay.bg_set_active_turn("bg-thread", Some("bg-turn".to_string()), unix_now());
+        }
+
+        let error = app
+            .request_review(review_input("codex"))
+            .await
+            .expect_err("review must be refused while another thread works the cwd");
+        assert!(
+            error.contains("another thread is running in this workspace"),
+            "got: {error}"
+        );
+        // Sanity: the parent itself is the active idle thread.
+        assert_eq!(
+            app.snapshot().await.active_thread_id.as_deref(),
+            Some(parent.id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn timeout_drains_until_turn_ends_when_interrupt_fails() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        app.set_review_step_timeout_ms(120);
+        let codex = providers.get("codex").unwrap();
+        // Interrupt fails, but the turn finishes shortly after the timeout — the
+        // orchestrator must hold the lock and drain until it ends.
+        codex.interrupt_fails.store(true, Ordering::Relaxed);
+        codex.complete_delay_ms.store(280, Ordering::Relaxed);
+        start_parent(&app, cwd, "codex").await;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+
+        assert_eq!(job.status, "failed");
+        assert!(
+            job.error.as_deref().unwrap_or_default().contains("stop"),
+            "drained timeout should report the turn stopped: {:?}",
+            job.error
+        );
+        // The turn really did finish (active turn cleared) before we went terminal.
+        assert!(app.relay.read().await.active_turn_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn review_fails_when_reviewer_asks_a_question() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        // The (recap) turn parks on an AskUserQuestion instead of replying.
+        providers
+            .get("codex")
+            .unwrap()
+            .raise_ask_user
+            .store(true, Ordering::Relaxed);
+        start_parent(&app, cwd, "codex").await;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+
+        assert_eq!(job.status, "failed");
+        assert!(
+            job.error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("question"),
+            "error should mention the question: {:?}",
+            job.error
+        );
+        // The reviewer's question was dismissed, not left for the user to answer.
+        assert!(
+            app.relay.read().await.pending_ask_user_questions.is_empty(),
+            "pending questions must be cleared"
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_ask_user_answer_is_blocked_during_review() {
+        use crate::protocol::SubmitAskUserAnswerInput;
+
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        providers
+            .get("codex")
+            .unwrap()
+            .complete_turns
+            .store(false, Ordering::Relaxed);
+        start_parent(&app, cwd, "codex").await;
+        app.request_review(review_input("codex"))
+            .await
+            .expect("review should start and hold the guard");
+
+        let mut answers = serde_json::Map::new();
+        answers.insert("Q?".to_string(), serde_json::Value::String("A".to_string()));
+        let error = app
+            .submit_ask_user_answer(
+                "ask:any",
+                SubmitAskUserAnswerInput {
+                    answers,
+                    device_id: Some("device-1".to_string()),
+                },
+            )
+            .await
+            .expect_err("answering during a review must be blocked");
+        let message = match error {
+            crate::state::AskUserAnswerError::Bridge(message) => message,
+            other => panic!("unexpected error: {other:?}"),
+        };
+        assert!(message.contains("review is in progress"), "got: {message}");
+    }
+}

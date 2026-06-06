@@ -450,6 +450,12 @@ const renderer = createSessionRenderer({
   updateSessionSettings(payload) {
     return controller?.updateSessionSettings(payload);
   },
+  requestReview(values) {
+    return controller?.requestReview(values);
+  },
+  resolveReview() {
+    return controller?.resolveReview();
+  },
 });
 
 // Wrap renderer.renderSession so every full render also reconciles the

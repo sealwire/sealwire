@@ -112,6 +112,9 @@ impl AppState {
     }
 
     pub async fn archive_thread(&self, thread_id: &str) -> Result<ThreadArchiveReceipt, String> {
+        // A review holds the active thread; don't let archive remove the parent
+        // out from under an in-flight review.
+        let _slot = self.acquire_session_slot()?;
         let archived_active_thread = {
             let relay = self.relay.read().await;
             relay.can_archive_thread(thread_id)?
@@ -154,6 +157,7 @@ impl AppState {
         &self,
         thread_id: &str,
     ) -> Result<ThreadDeleteReceipt, String> {
+        let _slot = self.acquire_session_slot()?;
         let deleted_active_thread = {
             let relay = self.relay.read().await;
             relay.can_delete_thread(thread_id)?

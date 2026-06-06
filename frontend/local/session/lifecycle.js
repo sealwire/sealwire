@@ -12,6 +12,7 @@ import {
   startPromptInput,
   threadsList,
 } from "../dom.js";
+import { requestReview as requestReviewApi, resolveReview as resolveReviewApi } from "../api.js";
 import { loadLastEffort, saveLastApprovalPolicy } from "../../shared/last-used-settings.js";
 import { buildThreadGroups, findLatestThread } from "../../shared/thread-groups.js";
 import { createThreadListQueryOptions } from "../../shared/thread-queries.js";
@@ -352,6 +353,47 @@ export function createLifecycleController(ctx) {
     }
   }
 
+  async function requestReview({ reviewerProvider, reviewerModel, instructions } = {}) {
+    if (!reviewerProvider) {
+      logLine("Pick a reviewer provider before starting a review.");
+      return null;
+    }
+
+    logLine(`Requesting ${reviewerProvider} review`);
+
+    try {
+      const receipt = await requestReviewApi(
+        apiFetch,
+        {
+          reviewer_provider: reviewerProvider,
+          reviewer_model: reviewerModel || null,
+          instructions: instructions || null,
+        },
+        state.deviceId
+      );
+      logLine(receipt?.message || "Review started.");
+      // Reflect the new review chip immediately; the stream keeps it updated.
+      await loadSession("post-review-request");
+      return receipt;
+    } catch (error) {
+      logLine(`Review request failed: ${error.message}`);
+      return null;
+    }
+  }
+
+  async function resolveReview() {
+    logLine("Stopping the blocked reviewer…");
+    try {
+      const receipt = await resolveReviewApi(apiFetch, state.deviceId);
+      logLine(receipt?.message || "Reviewer stopped; workspace unlocked.");
+      await loadSession("post-review-resolve");
+      return receipt;
+    } catch (error) {
+      logLine(`Resolve failed: ${error.message}`);
+      return null;
+    }
+  }
+
   async function stopActiveTurn() {
     if (!state.session?.active_thread_id || !state.session.active_turn_id) {
       logLine("There is no running Codex turn to stop.");
@@ -445,6 +487,8 @@ export function createLifecycleController(ctx) {
     updateSessionSettings,
     resumeLatestSession,
     sendMessage,
+    requestReview,
+    resolveReview,
     stopActiveTurn,
     applySessionSnapshot,
     fetchThreadList,

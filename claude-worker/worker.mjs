@@ -56,6 +56,9 @@ import { createProgressTracker } from "./progress-tracker.mjs";
 const DEFAULT_SETTING_SOURCES = ["user", "project", "local"];
 
 const SESSION_LIMIT = 8;
+// Upper bound on how long `cancel` waits for the SDK to actually stop before it
+// reports `done` anyway, so an unresponsive SDK can't wedge the cancel path.
+const CANCEL_DRAIN_TIMEOUT_MS = 10_000;
 
 function emit(event, progressTracker = null) {
   rawEmit(event);
@@ -237,10 +240,13 @@ function createWorkerSession(sdk, options, resume) {
     close() {
       ended = true;
       flush();
-      // Stop any in-flight turn; fire-and-forget (callers never await close()).
+      // Stop any in-flight turn. Returns a promise that resolves once the SDK has
+      // processed the interrupt, so the cancel path can await a *real* stop before
+      // telling the relay the turn is done (interrupt is otherwise fire-and-forget).
       if (typeof query.interrupt === "function") {
-        Promise.resolve(query.interrupt()).catch(() => {});
+        return Promise.resolve(query.interrupt()).catch(() => {});
       }
+      return Promise.resolve();
     },
   };
 }
@@ -362,6 +368,35 @@ function closeSessionEntry(entry) {
   entry.session = null;
   entry.streamTask = null;
   entry.running = false;
+}
+
+// Like closeSessionEntry, but awaits the SDK actually stopping: the interrupt()
+// promise resolving AND the stream consumer finishing. Bounded by a timeout so an
+// unresponsive SDK can't hang the cancel path. Used by `cancel` so the relay only
+// learns the turn is `done` once it has really stopped.
+async function closeSessionEntryAndDrain(entry) {
+  entry.cancelFlag.current = true;
+  const session = entry.session;
+  const streamTask = entry.streamTask;
+  entry.progressTracker?.stop();
+  entry.session = null;
+  entry.streamTask = null;
+  entry.running = false;
+  await Promise.race([
+    (async () => {
+      try {
+        if (session) await session.close();
+      } catch {
+        // interrupt rejected — best effort.
+      }
+      try {
+        if (streamTask) await streamTask;
+      } catch {
+        // stream consumer errored on teardown — expected.
+      }
+    })(),
+    new Promise((resolve) => setTimeout(resolve, CANCEL_DRAIN_TIMEOUT_MS)),
+  ]);
 }
 
 function closeAndRemoveSession(sessions, entry, { pendingApprovals, pendingAskUserQuestions } = {}) {
@@ -588,10 +623,12 @@ async function main() {
           ? [findSessionEntry(sessions, providerSessionId)].filter(Boolean)
           : [...sessions.values()];
         for (const entry of targets) {
-          closeSessionEntry(entry);
-          if (!entry.providerSessionId && entry.pendingThreadId) {
-            sessions.delete(entry.key);
-          }
+          const doneSessionId =
+            entry.providerSessionId || entry.pendingThreadId || providerSessionId;
+          const key = entry.key;
+          const isPending = !entry.providerSessionId && entry.pendingThreadId;
+          // Reject any pending interactions immediately so the relay isn't left
+          // waiting on them.
           if (entry.providerSessionId) {
             rejectAllPendingApprovals(
               pendingApprovals,
@@ -602,13 +639,26 @@ async function main() {
               (pending) => pending.providerSessionId === entry.providerSessionId,
             );
           }
-          const doneSessionId = entry.providerSessionId || entry.pendingThreadId || providerSessionId;
-          if (doneSessionId) {
-            emit({
-              type: "done",
-              provider_session_id: doneSessionId,
-            });
-          }
+          // Drain the real stop (await interrupt + stream end) BEFORE signalling
+          // done, but off the main loop so other commands keep flowing. The relay
+          // only marks the turn idle / releases a review lock once `done` arrives,
+          // so `done` must mean "actually stopped", not "cancel sent".
+          void (async () => {
+            try {
+              await closeSessionEntryAndDrain(entry);
+            } catch {
+              // best effort
+            }
+            if (isPending) {
+              sessions.delete(key);
+            }
+            if (doneSessionId) {
+              emit({
+                type: "done",
+                provider_session_id: doneSessionId,
+              });
+            }
+          })();
         }
         if (!providerSessionId) {
           rejectAllPendingApprovals(pendingApprovals);

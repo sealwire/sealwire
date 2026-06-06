@@ -3,6 +3,9 @@ use super::*;
 impl AppState {
     pub async fn start_session(&self, input: StartSessionInput) -> Result<SessionSnapshot, String> {
         let device_id = require_device_id(input.device_id)?;
+        // Hold the session guard for the whole start (incl. the optional initial
+        // turn below), so a review can't interleave.
+        let _slot = self.acquire_session_slot()?;
         let defaults = self.defaults().await;
         let cwd = normalize_cwd(&non_empty(input.cwd).unwrap_or(defaults.current_cwd));
         {
@@ -90,8 +93,9 @@ impl AppState {
         }
 
         if let Some(initial_prompt) = initial_prompt.filter(|_| !consumed_initial_prompt) {
+            // Slot-free: `start_session` already holds the session guard.
             return self
-                .send_message(SendMessageInput {
+                .send_message_inner(SendMessageInput {
                     text: initial_prompt,
                     model: Some(model),
                     effort: Some(effort),
@@ -105,6 +109,14 @@ impl AppState {
     }
 
     pub async fn resume_session(
+        &self,
+        input: ResumeSessionInput,
+    ) -> Result<SessionSnapshot, String> {
+        let _slot = self.acquire_session_slot()?;
+        self.resume_session_inner(input).await
+    }
+
+    pub(super) async fn resume_session_inner(
         &self,
         input: ResumeSessionInput,
     ) -> Result<SessionSnapshot, String> {
@@ -196,6 +208,7 @@ impl AppState {
         input: UpdateSessionSettingsInput,
     ) -> Result<SessionSnapshot, String> {
         let device_id = require_device_id(input.device_id)?;
+        let _slot = self.acquire_session_slot()?;
         self.expire_stale_controller_if_needed().await;
         let requested_model = non_empty(input.model);
         let requested_effort = non_empty(input.effort);
@@ -309,6 +322,14 @@ impl AppState {
     }
 
     pub async fn send_message(&self, input: SendMessageInput) -> Result<SessionSnapshot, String> {
+        let _slot = self.acquire_session_slot()?;
+        self.send_message_inner(input).await
+    }
+
+    pub(super) async fn send_message_inner(
+        &self,
+        input: SendMessageInput,
+    ) -> Result<SessionSnapshot, String> {
         let device_id = require_device_id(input.device_id)?;
         self.expire_stale_controller_if_needed().await;
         let defaults = self.defaults().await;
@@ -370,6 +391,7 @@ impl AppState {
 
     pub async fn stop_active_turn(&self, input: StopTurnInput) -> Result<SessionSnapshot, String> {
         let device_id = require_device_id(input.device_id)?;
+        let _slot = self.acquire_session_slot()?;
         self.expire_stale_controller_if_needed().await;
         let (thread_id, turn_id) = {
             let relay = self.relay.read().await;
@@ -432,6 +454,10 @@ impl AppState {
 
     pub async fn take_over_control(&self, input: TakeOverInput) -> Result<SessionSnapshot, String> {
         let device_id = require_device_id(input.device_id)?;
+        // A review owns the active thread and hands control back itself; don't let
+        // a take-over reassign the controller mid-review (it could strand the
+        // resolve action or clobber the post-review handoff).
+        let _slot = self.acquire_session_slot()?;
         let mut relay = self.relay.write().await;
         expire_controller_if_needed(&mut relay);
         if relay.active_thread_id.is_none() {
