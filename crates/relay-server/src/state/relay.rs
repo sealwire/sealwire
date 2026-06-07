@@ -1170,9 +1170,37 @@ impl RelayState {
         self.upsert_thread(data.thread);
     }
 
-    pub fn upsert_thread(&mut self, thread: ThreadSummaryView) {
+    pub fn upsert_thread(&mut self, mut thread: ThreadSummaryView) {
         if self.locally_deleted_thread_ids.contains(&thread.id) {
             return;
+        }
+        // Codex thread summaries carry an empty `provider` key (see codex.rs
+        // `parse_thread_summary`). Routing a BACKGROUND thread relies on that key —
+        // a reviewer thread is never the active thread, so the active-provider
+        // fallback in `find_thread_provider` can't save it. We stamp the provider
+        // when a reviewer thread is registered, but the provider's own event stream
+        // later upserts the same thread with an empty provider, which would clobber
+        // the stamp and make the reviewer unroutable mid-review ("thread '…' was not
+        // found on any provider"). Preserve a previously-known provider whenever the
+        // incoming summary doesn't carry one. (A thread never changes providers, so
+        // this can only ever restore the correct value.)
+        if thread.provider.is_empty() {
+            if let Some(known) = self
+                .runtimes
+                .get(&thread.id)
+                .and_then(|runtime| runtime.summary.as_ref())
+                .map(|summary| summary.provider.clone())
+                .filter(|provider| !provider.is_empty())
+                .or_else(|| {
+                    self.threads
+                        .iter()
+                        .find(|existing| existing.id == thread.id)
+                        .map(|existing| existing.provider.clone())
+                        .filter(|provider| !provider.is_empty())
+                })
+            {
+                thread.provider = known;
+            }
         }
         if let Some(runtime) = self.runtimes.get_mut(&thread.id) {
             runtime.summary = Some(thread.clone());

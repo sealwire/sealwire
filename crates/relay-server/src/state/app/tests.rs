@@ -2923,6 +2923,74 @@ mod review_tests {
     }
 
     #[tokio::test]
+    async fn upsert_thread_preserves_a_stamped_reviewer_provider_against_codex_refresh() {
+        // Root cause of "thread '…' was not found on any provider": Codex thread
+        // summaries carry an empty `provider`, so when the codex event loop upserts a
+        // freshly-created reviewer thread mid-review it would clobber the "codex"
+        // provider stamped at registration — leaving the background reviewer
+        // unroutable. upsert_thread must preserve the known provider.
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, _providers) = build_review_app(cwd, &["codex"]).await;
+
+        let reviewer_id = "reviewer-codex-clobber";
+        {
+            let mut relay = app.relay.write().await;
+            let mut thread = crate::protocol::ThreadSummaryView {
+                id: reviewer_id.to_string(),
+                name: None,
+                preview: String::new(),
+                cwd: cwd.to_string(),
+                updated_at: unix_now(),
+                source: "codex".to_string(),
+                status: "idle".to_string(),
+                model_provider: "codex".to_string(),
+                provider: "codex".to_string(),
+            };
+            relay.register_background_thread(
+                thread.clone(),
+                cwd,
+                "model",
+                "never",
+                "read-only",
+                "low",
+            );
+
+            // Simulate a codex event-loop refresh: the same thread, but with the empty
+            // provider/`unknown` source codex actually returns (see parse_thread_summary).
+            thread.provider = String::new();
+            thread.source = "unknown".to_string();
+            thread.model_provider = "unknown".to_string();
+            relay.upsert_thread(thread);
+
+            // The stamped provider must survive on BOTH the routing row and runtime.
+            assert_eq!(
+                relay
+                    .threads
+                    .iter()
+                    .find(|t| t.id == reviewer_id)
+                    .map(|t| t.provider.as_str()),
+                Some("codex"),
+                "routing-cache row must keep the stamped provider"
+            );
+            assert_eq!(
+                relay
+                    .runtime_for_thread(reviewer_id)
+                    .and_then(|r| r.summary.as_ref())
+                    .map(|s| s.provider.as_str()),
+                Some("codex"),
+                "runtime summary must keep the stamped provider"
+            );
+        }
+
+        let (name, _bridge) = app
+            .find_thread_provider(reviewer_id)
+            .await
+            .expect("a clobbering refresh must not make the reviewer unroutable");
+        assert_eq!(name, "codex");
+    }
+
+    #[tokio::test]
     async fn snapshot_review_jobs_are_scoped_to_the_active_thread() {
         // A review belongs to its parent thread. Terminal jobs persist until dismissed,
         // so without scoping a finished/failed review would keep showing in the Reviewer
