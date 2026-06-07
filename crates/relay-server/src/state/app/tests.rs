@@ -2196,6 +2196,15 @@ mod review_tests {
         // other thread deletes fine. Lets a test fail ONLY a reviewer delete while
         // the parent delete still succeeds (the F1 un-hide-on-failure path).
         fail_delete_thread_ids: Arc<Mutex<std::collections::HashSet<String>>>,
+        // (thread_id, model, effort) recorded at each start_turn, so a test can
+        // assert the model/effort a reviewer turn actually ran with (reuse must keep
+        // the reviewer's own model, not the parent's).
+        turn_models: Arc<Mutex<Vec<(String, String, String)>>>,
+        // When true, a REVIEWER turn (its prompt carries the relay's workspace diff)
+        // completes WITHOUT emitting an assistant reply — exercising the read-back
+        // guard that must refuse to reuse a thread's PRIOR review as this turn's
+        // result. Recap/other turns still reply normally.
+        suppress_reviewer_reply: Arc<AtomicBool>,
         // Delay before a turn completes (ms). Lets tests complete a turn *after* a
         // short step timeout, exercising the drain path.
         complete_delay_ms: Arc<AtomicU64>,
@@ -2225,6 +2234,8 @@ mod review_tests {
                 fail_archive: Arc::new(AtomicBool::new(false)),
                 fail_delete: Arc::new(AtomicBool::new(false)),
                 fail_delete_thread_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
+                turn_models: Arc::new(Mutex::new(Vec::new())),
+                suppress_reviewer_reply: Arc::new(AtomicBool::new(false)),
                 complete_delay_ms: Arc::new(AtomicU64::new(15)),
                 next_id: Arc::new(AtomicU64::new(1)),
             }
@@ -2383,13 +2394,18 @@ mod review_tests {
             &self,
             thread_id: &str,
             text: &str,
-            _model: &str,
-            _effort: &str,
+            model: &str,
+            effort: &str,
         ) -> Result<Option<String>, String> {
             self.turns
                 .lock()
                 .await
                 .push((thread_id.to_string(), text.to_string()));
+            self.turn_models.lock().await.push((
+                thread_id.to_string(),
+                model.to_string(),
+                effort.to_string(),
+            ));
             if text.contains("You are reviewing another agent's work")
                 && self.fail_reviewer_start.load(Ordering::Relaxed)
             {
@@ -2413,7 +2429,11 @@ mod review_tests {
             let turn = turn_id.clone();
             let user_item = self.next_token("user");
             let assistant_item = self.next_token("assistant");
-            let emit_assistant = self.emit_assistant.load(Ordering::Relaxed);
+            // A reviewer/re-review turn always carries the relay-collected workspace
+            // diff; recap/other turns do not.
+            let is_reviewer_diff_turn = text.contains("Workspace diff collected by the relay");
+            let emit_assistant = self.emit_assistant.load(Ordering::Relaxed)
+                && !(is_reviewer_diff_turn && self.suppress_reviewer_reply.load(Ordering::Relaxed));
             let is_reviewer_turn = text.contains("You are reviewing another agent's work");
             let raise_approval = self.raise_approval.load(Ordering::Relaxed)
                 || (is_reviewer_turn && self.approval_on_reviewer_turn.load(Ordering::Relaxed));
@@ -2956,6 +2976,236 @@ mod review_tests {
             .request_review(input)
             .await
             .expect_err("a provider mismatch should be rejected");
+        assert!(error.contains("does not match"), "got: {error}");
+    }
+
+    // R1: a reused reviewer that produces no fresh reply this turn must FAIL — never
+    // replay its prior review as the current result.
+    #[tokio::test]
+    async fn review_reuse_fails_when_no_fresh_review() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+
+        let first = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("first review should start");
+        let first_job = wait_for_review(&app, &first.review_job_id).await;
+        let reviewer = first_job
+            .reviewer_thread_id
+            .clone()
+            .expect("reviewer thread id");
+        wait_for_active_turn_idle(&app).await;
+        let turns_before = providers.get("codex").unwrap().turns.lock().await.len();
+
+        // The reviewer turn completes but emits NO new assistant reply.
+        providers
+            .get("codex")
+            .unwrap()
+            .suppress_reviewer_reply
+            .store(true, Ordering::Relaxed);
+
+        let mut reuse = review_input("codex");
+        reuse.reviewer_thread_id = Some(reviewer.clone());
+        let second = app
+            .request_review(reuse)
+            .await
+            .expect("reuse review should start");
+        let second_job = wait_for_review(&app, &second.review_job_id).await;
+
+        assert_eq!(
+            second_job.status, "failed",
+            "reuse with no fresh reply must fail, not post the prior review"
+        );
+        assert!(
+            second_job
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("no review for this turn"),
+            "unexpected error: {:?}",
+            second_job.error
+        );
+        // Recap + reviewer turns ran, but NO post-back to the parent (it would have
+        // carried the stale review).
+        let turns = providers.get("codex").unwrap().turns.lock().await.clone();
+        assert_eq!(
+            turns.len(),
+            turns_before + 2,
+            "expected only recap + reviewer: {turns:?}"
+        );
+        assert!(
+            !turns[turns_before..]
+                .iter()
+                .any(|(tid, text)| tid == &parent.id
+                    && text.contains("review result from reviewer thread")),
+            "a stale review must not be posted back: {turns:?}"
+        );
+    }
+
+    // R2: after a restart the reused reviewer has no runtime; the orchestrator must
+    // re-attach it and actually wait for the turn (not read the prior review early).
+    #[tokio::test]
+    async fn review_reuse_after_restart_waits_for_fresh_review() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+
+        let first = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("first review should start");
+        let first_job = wait_for_review(&app, &first.review_job_id).await;
+        let reviewer = first_job
+            .reviewer_thread_id
+            .clone()
+            .expect("reviewer thread id");
+        wait_for_active_turn_idle(&app).await;
+
+        // Simulate a restart: the reviewer's runtime is gone, but the durable map +
+        // its persisted settings + the provider's thread survive. Delay completion so
+        // a non-waiting orchestrator would read the prior review before the new one.
+        {
+            let mut relay = app.relay.write().await;
+            relay.runtimes.remove(&reviewer);
+        }
+        providers
+            .get("codex")
+            .unwrap()
+            .complete_delay_ms
+            .store(60, Ordering::Relaxed);
+
+        let mut reuse = review_input("codex");
+        reuse.reviewer_thread_id = Some(reviewer.clone());
+        let second = app
+            .request_review(reuse)
+            .await
+            .expect("reuse review should start");
+        let second_job = wait_for_review(&app, &second.review_job_id).await;
+
+        assert_eq!(
+            second_job.status, "complete",
+            "post-restart reuse must re-attach + wait, then complete: {:?}",
+            second_job.error
+        );
+        // The reviewer thread was re-attached (has a runtime again).
+        assert!(
+            app.relay
+                .read()
+                .await
+                .runtime_for_thread(&reviewer)
+                .is_some(),
+            "the reused reviewer thread should be re-attached with a runtime"
+        );
+        // The review was posted back to the parent.
+        let turns = providers.get("codex").unwrap().turns.lock().await.clone();
+        assert!(
+            turns.iter().any(|(tid, text)| tid == &parent.id
+                && text.contains("review result from reviewer thread")),
+            "the fresh review should be posted back: {turns:?}"
+        );
+    }
+
+    // R3: a reused reviewer keeps its OWN model/effort, not the parent's session model.
+    #[tokio::test]
+    async fn review_reuse_keeps_reviewer_model() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        start_parent(&app, cwd, "codex").await;
+
+        // The reviewer thread is created with a distinct, explicit model.
+        let mut first_input = review_input("codex");
+        first_input.reviewer_model = Some("codex-special".to_string());
+        let first = app
+            .request_review(first_input)
+            .await
+            .expect("first review should start");
+        let first_job = wait_for_review(&app, &first.review_job_id).await;
+        let reviewer = first_job
+            .reviewer_thread_id
+            .clone()
+            .expect("reviewer thread id");
+        wait_for_active_turn_idle(&app).await;
+
+        // Reuse with NO model in the request.
+        let mut reuse = review_input("codex");
+        reuse.reviewer_thread_id = Some(reviewer.clone());
+        let second = app
+            .request_review(reuse)
+            .await
+            .expect("reuse review should start");
+        let second_job = wait_for_review(&app, &second.review_job_id).await;
+        assert_eq!(
+            second_job.status, "complete",
+            "reuse job failed: {:?}",
+            second_job.error
+        );
+
+        // The reuse turn on the reviewer thread ran with the reviewer's OWN model,
+        // not the parent's session model.
+        let turn_models = providers
+            .get("codex")
+            .unwrap()
+            .turn_models
+            .lock()
+            .await
+            .clone();
+        let reviewer_turn_model = turn_models
+            .iter()
+            .filter(|(tid, _, _)| tid == &reviewer)
+            .last()
+            .map(|(_, model, _)| model.clone())
+            .expect("a reviewer turn should have run");
+        assert_eq!(
+            reviewer_turn_model, "codex-special",
+            "the reuse turn must keep the reviewer's own model: {turn_models:?}"
+        );
+    }
+
+    // R4: after a restart, a wrong provider hint must still be rejected even though
+    // the provider is re-derived by probing.
+    #[tokio::test]
+    async fn review_reuse_after_restart_rejects_provider_mismatch() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, _providers) = build_review_app(cwd, &["codex", "claude_code"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+
+        let first = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("first review should start");
+        let first_job = wait_for_review(&app, &first.review_job_id).await;
+        let reviewer = first_job
+            .reviewer_thread_id
+            .clone()
+            .expect("reviewer thread id");
+        wait_for_active_turn_idle(&app).await;
+
+        // Simulate a restart where the in-process summary is gone (runtime + cache
+        // row), so the provider must be re-derived by probing.
+        {
+            let mut relay = app.relay.write().await;
+            relay.runtimes.remove(&reviewer);
+            relay.threads.retain(|thread| thread.id != reviewer);
+            assert!(relay.reviewer_thread_provider(&reviewer).is_none());
+            // Still owned by the parent in the durable map.
+            assert!(relay
+                .reviewer_threads_of_parent(&parent.id)
+                .contains(&reviewer));
+        }
+
+        // The reviewer actually runs on codex; a claude_code hint must be rejected.
+        let mut input = review_input("claude_code");
+        input.reviewer_thread_id = Some(reviewer.clone());
+        let error = app
+            .request_review(input)
+            .await
+            .expect_err("a post-restart provider mismatch should be rejected");
         assert!(error.contains("does not match"), "got: {error}");
     }
 

@@ -896,6 +896,39 @@ impl RelayState {
         self.upsert_thread(thread);
     }
 
+    /// Re-attach a BACKGROUND runtime for an existing thread from freshly-read
+    /// provider data, WITHOUT touching the active thread/controller. Used to revive
+    /// a reused reviewer thread that lost its runtime (e.g. after a relay restart):
+    /// the orchestrator needs a runtime so `wait_for_thread_idle_outcome` can
+    /// observe the re-review turn and the read-back can bind to a *fresh* assistant
+    /// message instead of replaying the thread's prior review. No-op if a runtime
+    /// already exists. The hydrated transcript supplies the read-back baseline.
+    pub(crate) fn hydrate_background_runtime(
+        &mut self,
+        data: ThreadSyncData,
+        approval_policy: &str,
+        sandbox: &str,
+        effort: &str,
+        model: &str,
+    ) {
+        let thread_id = data.thread.id.clone();
+        if self.runtimes.contains_key(&thread_id) {
+            return;
+        }
+        let now = unix_now();
+        let runtime = ThreadRuntime::from_sync_data(
+            data.clone(),
+            approval_policy,
+            sandbox,
+            effort,
+            model,
+            now,
+        );
+        self.runtimes.insert(thread_id.clone(), runtime);
+        self.remember_thread_settings(&thread_id, approval_policy, sandbox, effort, model);
+        self.upsert_thread(data.thread);
+    }
+
     pub fn set_available_models(&mut self, models: Vec<ModelOptionView>) {
         let preferred = models
             .iter()

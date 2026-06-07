@@ -207,7 +207,9 @@ reviewer thread"
 
         // Finalize the reviewer provider. Clean reviews always have it (validated
         // above). A reused thread without an in-process summary (post-restart) is
-        // re-derived by probing the provider registry.
+        // re-derived by probing the provider registry — and the request's provider
+        // hint (if any) must STILL match it, so the UI can never run a reviewer
+        // under a provider different from the one it displayed/locked.
         let reviewer_provider = match locked_provider {
             Some(provider) => provider,
             None => {
@@ -215,7 +217,15 @@ reviewer thread"
                     .as_deref()
                     .ok_or_else(|| "reviewer_provider is required".to_string())?;
                 let (provider_name, _bridge) = self.find_thread_provider(reviewer_id).await?;
-                provider_name.to_string()
+                let provider_name = provider_name.to_string();
+                if let Some(requested) = &requested_provider {
+                    if requested != &provider_name {
+                        return Err("the reviewer provider does not match the selected \
+reviewer thread"
+                            .to_string());
+                    }
+                }
+                provider_name
             }
         };
 
@@ -500,8 +510,32 @@ to this thread."
         self.set_job_status(&job_id, ReviewJobStatus::StartingReviewer)
             .await;
         let is_reuse = matches!(reviewer_mode, ReviewMode::ExistingThread { .. });
-        let reviewer_thread_id = match &reviewer_mode {
-            ReviewMode::ExistingThread { thread_id } => thread_id.clone(),
+        // (reviewer_turn_model, reviewer_turn_effort): a CLEAN reviewer turn uses the
+        // requested model (resolved when the thread was created). A REUSED thread
+        // keeps its OWN persisted model/effort — passing `None` would resolve to the
+        // *parent's* session model and silently override the reviewer (Codex puts the
+        // value in `turn/start.model`).
+        let (reviewer_thread_id, reviewer_turn_model, reviewer_turn_effort) = match &reviewer_mode {
+            ReviewMode::ExistingThread { thread_id } => {
+                let reviewer_thread_id = thread_id.clone();
+                // Re-attach the reviewer thread if it lost its runtime (e.g. after a
+                // restart) so the wait loop can observe this turn, and recover its own
+                // model/effort for the turn.
+                match self
+                    .prepare_reused_reviewer_thread(&reviewer_thread_id)
+                    .await
+                {
+                    Ok((model, effort)) => (reviewer_thread_id, model, effort),
+                    Err(error) => {
+                        self.fail_job(
+                            &job_id,
+                            format!("failed to prepare the reviewer thread: {error}"),
+                        )
+                        .await;
+                        return;
+                    }
+                }
+            }
             ReviewMode::CleanThread => {
                 match self
                     .start_background_reviewer_thread(
@@ -515,7 +549,7 @@ to this thread."
                     // reviewer_thread_id is already recorded on the job by
                     // start_background_reviewer_thread (atomically, under one write
                     // lock).
-                    Ok(thread_id) => thread_id,
+                    Ok(thread_id) => (thread_id, reviewer_model.clone(), None),
                     Err(error) => {
                         self.fail_job(
                             &job_id,
@@ -532,18 +566,24 @@ to this thread."
         self.set_job_status(&job_id, ReviewJobStatus::WaitingForReviewer)
             .await;
         // A reused thread already holds its prior review; frame a delta re-review.
-        // It also keeps its own session model, so never pass a model override.
         let prompt = if is_reuse {
             re_review_prompt(&recap, &diff, instructions.as_deref())
         } else {
             reviewer_prompt(&recap, &diff, instructions.as_deref())
         };
+        // Bind the read-back to a FRESH reviewer message: remember the reviewer's
+        // current last reply so a reused thread can't replay its PRIOR review as this
+        // turn's result. A clean thread has no prior reply, so this is `None`.
+        let reviewer_baseline = self
+            .latest_assistant_entry(&reviewer_thread_id)
+            .await
+            .map(|(item_id, _)| item_id);
         match self
             .send_message_to_thread(
                 &reviewer_thread_id,
                 &prompt,
-                reviewer_model.as_deref(),
-                None,
+                reviewer_turn_model.as_deref(),
+                reviewer_turn_effort.as_deref(),
             )
             .await
         {
@@ -603,9 +643,12 @@ to this thread."
             .await
             .unwrap_or(reviewer_thread_id);
         let review = match self.latest_assistant_entry(&reviewer_thread_id).await {
-            Some((_, text)) => text,
-            None => {
-                self.fail_job(&job_id, "the reviewer produced no review text")
+            Some((item_id, text)) if reviewer_baseline.as_deref() != Some(item_id.as_str()) => text,
+            _ => {
+                // The reviewer turn settled without a fresh reply (no output, an
+                // abnormal end, or — for a reused thread — only its prior review is
+                // present). Never post a stale review back as this turn's result.
+                self.fail_job(&job_id, "the reviewer produced no review for this turn")
                     .await;
                 return;
             }
@@ -837,6 +880,65 @@ thread {parent_thread_id}."
         }
 
         Ok(reviewer_thread_id)
+    }
+
+    /// Prepare a REUSED reviewer thread for its re-review turn. Returns the
+    /// reviewer's own `(model, effort)` so the turn keeps the reviewer's settings
+    /// rather than inheriting the parent's session model. If the thread lost its
+    /// runtime (e.g. after a relay restart), re-attaches a background runtime from
+    /// freshly-read provider data so `wait_for_thread_idle_outcome` actually waits
+    /// for this turn (a missing runtime reads as "idle") and the read-back can bind
+    /// to a fresh message instead of replaying the prior review.
+    async fn prepare_reused_reviewer_thread(
+        &self,
+        reviewer_thread_id: &str,
+    ) -> Result<(Option<String>, Option<String>), String> {
+        // The reviewer thread's own settings (persisted, so they survive a restart;
+        // falls back to the runtime when only that is present).
+        let settings = {
+            let relay = self.relay.read().await;
+            relay.thread_settings(reviewer_thread_id)
+        };
+        let has_runtime = {
+            let relay = self.relay.read().await;
+            relay.runtime_for_thread(reviewer_thread_id).is_some()
+        };
+        if !has_runtime {
+            let (provider_name, bridge) = self.find_thread_provider(reviewer_thread_id).await?;
+            let mut data = bridge.read_thread(reviewer_thread_id).await?;
+            // Keep the row routable + nav-hidden (reviewer_thread_ids still filters it).
+            data.thread.provider = provider_name.to_string();
+            data.thread.source = provider_name.to_string();
+            let defaults = self.defaults().await;
+            let (approval_policy, sandbox, effort, model) = match &settings {
+                Some(s) => (
+                    s.approval_policy.clone(),
+                    s.sandbox.clone(),
+                    s.reasoning_effort.clone(),
+                    s.model.clone(),
+                ),
+                None => (
+                    defaults.approval_policy.clone(),
+                    defaults.sandbox.clone(),
+                    defaults.reasoning_effort.clone(),
+                    defaults.model.clone(),
+                ),
+            };
+            let mut relay = self.relay.write().await;
+            relay.hydrate_background_runtime(data, &approval_policy, &sandbox, &effort, &model);
+            relay.notify();
+        }
+        // Non-empty settings only; an empty model/effort falls back to the provider
+        // default in `send_message_to_thread` (never to the parent's model).
+        let model = settings
+            .as_ref()
+            .map(|s| s.model.clone())
+            .filter(|value| !value.is_empty());
+        let effort = settings
+            .as_ref()
+            .map(|s| s.reasoning_effort.clone())
+            .filter(|value| !value.is_empty());
+        Ok((model, effort))
     }
 
     /// The current reviewer thread id recorded on the job (re-read because a
