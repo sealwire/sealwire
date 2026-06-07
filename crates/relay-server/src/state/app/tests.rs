@@ -2205,6 +2205,13 @@ mod review_tests {
         // guard that must refuse to reuse a thread's PRIOR review as this turn's
         // result. Recap/other turns still reply normally.
         suppress_reviewer_reply: Arc<AtomicBool>,
+        // Threads "evicted" by a simulated provider/app-server restart: a turn can't
+        // start on one until it is re-loaded via `resume_thread`. Models Codex, where
+        // approvalPolicy/sandbox attach on thread/resume, not turn/start.
+        unloaded_threads: Arc<Mutex<std::collections::HashSet<String>>>,
+        // (thread_id, approval_policy, sandbox) recorded at each resume_thread, so a
+        // test can assert a reused reviewer is resumed with its read-only sandbox.
+        resumes: Arc<Mutex<Vec<(String, String, String)>>>,
         // Delay before a turn completes (ms). Lets tests complete a turn *after* a
         // short step timeout, exercising the drain path.
         complete_delay_ms: Arc<AtomicU64>,
@@ -2236,6 +2243,8 @@ mod review_tests {
                 fail_delete_thread_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
                 turn_models: Arc::new(Mutex::new(Vec::new())),
                 suppress_reviewer_reply: Arc::new(AtomicBool::new(false)),
+                unloaded_threads: Arc::new(Mutex::new(std::collections::HashSet::new())),
+                resumes: Arc::new(Mutex::new(Vec::new())),
                 complete_delay_ms: Arc::new(AtomicU64::new(15)),
                 next_id: Arc::new(AtomicU64::new(1)),
             }
@@ -2322,14 +2331,21 @@ mod review_tests {
         async fn resume_thread(
             &self,
             thread_id: &str,
-            _approval_policy: &str,
-            _sandbox: &str,
+            approval_policy: &str,
+            sandbox: &str,
         ) -> Result<(), String> {
-            if self.threads.lock().await.contains_key(thread_id) {
-                Ok(())
-            } else {
-                Err(format!("{} thread '{thread_id}' was not found", self.name))
+            if !self.threads.lock().await.contains_key(thread_id) {
+                return Err(format!("{} thread '{thread_id}' was not found", self.name));
             }
+            // Record the resume settings and re-load the thread into the (simulated)
+            // app-server so a turn can start on it.
+            self.resumes.lock().await.push((
+                thread_id.to_string(),
+                approval_policy.to_string(),
+                sandbox.to_string(),
+            ));
+            self.unloaded_threads.lock().await.remove(thread_id);
+            Ok(())
         }
 
         async fn read_thread(
@@ -2397,6 +2413,14 @@ mod review_tests {
             model: &str,
             effort: &str,
         ) -> Result<Option<String>, String> {
+            // A thread evicted by a simulated restart can't run a turn until it has
+            // been re-loaded via resume_thread (mirrors Codex needing thread/resume).
+            if self.unloaded_threads.lock().await.contains(thread_id) {
+                return Err(format!(
+                    "{} thread '{thread_id}' is not loaded; resume it first",
+                    self.name
+                ));
+            }
             self.turns
                 .lock()
                 .await
@@ -3065,18 +3089,17 @@ mod review_tests {
             .expect("reviewer thread id");
         wait_for_active_turn_idle(&app).await;
 
-        // Simulate a restart: the reviewer's runtime is gone, but the durable map +
-        // its persisted settings + the provider's thread survive. Delay completion so
-        // a non-waiting orchestrator would read the prior review before the new one.
+        // Simulate a FULL restart: the relay runtime is gone AND the provider's
+        // app-server evicted the thread (a turn can't start on it until it's resumed),
+        // but the durable map + persisted settings + the on-disk thread survive. Delay
+        // completion so a non-waiting orchestrator would read the prior review early.
         {
             let mut relay = app.relay.write().await;
             relay.runtimes.remove(&reviewer);
         }
-        providers
-            .get("codex")
-            .unwrap()
-            .complete_delay_ms
-            .store(60, Ordering::Relaxed);
+        let codex = providers.get("codex").unwrap();
+        codex.unloaded_threads.lock().await.insert(reviewer.clone());
+        codex.complete_delay_ms.store(60, Ordering::Relaxed);
 
         let mut reuse = review_input("codex");
         reuse.reviewer_thread_id = Some(reviewer.clone());
@@ -3088,7 +3111,7 @@ mod review_tests {
 
         assert_eq!(
             second_job.status, "complete",
-            "post-restart reuse must re-attach + wait, then complete: {:?}",
+            "post-restart reuse must resume + re-attach + wait, then complete: {:?}",
             second_job.error
         );
         // The reviewer thread was re-attached (has a runtime again).
@@ -3099,6 +3122,21 @@ mod review_tests {
                 .runtime_for_thread(&reviewer)
                 .is_some(),
             "the reused reviewer thread should be re-attached with a runtime"
+        );
+        // It was resumed with the reviewer's READ-ONLY sandbox before the turn — not
+        // the parent's writable settings. (Codex applies the sandbox on thread/resume.)
+        let resumes = codex.resumes.lock().await.clone();
+        let resumed = resumes
+            .iter()
+            .find(|(tid, _, _)| tid == &reviewer)
+            .expect("the reviewer thread must be resumed after a restart");
+        assert_eq!(
+            resumed.1, "never",
+            "reviewer must resume with `never` approval"
+        );
+        assert_eq!(
+            resumed.2, "read-only",
+            "reviewer must resume with the read-only sandbox"
         );
         // The review was posted back to the parent.
         let turns = providers.get("codex").unwrap().turns.lock().await.clone();

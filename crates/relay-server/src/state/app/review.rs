@@ -905,25 +905,47 @@ thread {parent_thread_id}."
         };
         if !has_runtime {
             let (provider_name, bridge) = self.find_thread_provider(reviewer_thread_id).await?;
+            let defaults = self.defaults().await;
+            // The reviewer's read-only policy. Prefer the persisted per-thread
+            // settings; otherwise recompute the provider's reviewer policy — NEVER
+            // fall back to the parent's (writable) sandbox.
+            let (approval_policy, sandbox) = match &settings {
+                Some(s) if !s.approval_policy.is_empty() => {
+                    (s.approval_policy.clone(), s.sandbox.clone())
+                }
+                _ => {
+                    let (approval, sandbox, _) = reviewer_thread_settings(
+                        provider_name,
+                        &defaults.approval_policy,
+                        &defaults.sandbox,
+                    );
+                    (approval, sandbox)
+                }
+            };
+            // After a restart the provider's app-server is fresh: the reviewer thread
+            // is not loaded and its sandbox is not attached. Codex (and Claude) only
+            // (re)apply approvalPolicy + sandbox via thread/resume — turn/start carries
+            // only model/effort — so RESUME before reading/hydrating, both to load the
+            // thread (so its turn can start at all) and to re-attach the reviewer's
+            // read-only safety. Without this a reused reviewer could run with the
+            // parent's writable sandbox, or fail to start.
+            bridge
+                .resume_thread(reviewer_thread_id, &approval_policy, &sandbox)
+                .await?;
             let mut data = bridge.read_thread(reviewer_thread_id).await?;
             // Keep the row routable + nav-hidden (reviewer_thread_ids still filters it).
             data.thread.provider = provider_name.to_string();
             data.thread.source = provider_name.to_string();
-            let defaults = self.defaults().await;
-            let (approval_policy, sandbox, effort, model) = match &settings {
-                Some(s) => (
-                    s.approval_policy.clone(),
-                    s.sandbox.clone(),
-                    s.reasoning_effort.clone(),
-                    s.model.clone(),
-                ),
-                None => (
-                    defaults.approval_policy.clone(),
-                    defaults.sandbox.clone(),
-                    defaults.reasoning_effort.clone(),
-                    defaults.model.clone(),
-                ),
-            };
+            let effort = settings
+                .as_ref()
+                .map(|s| s.reasoning_effort.clone())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| defaults.reasoning_effort.clone());
+            let model = settings
+                .as_ref()
+                .map(|s| s.model.clone())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| defaults.model.clone());
             let mut relay = self.relay.write().await;
             relay.hydrate_background_runtime(data, &approval_policy, &sandbox, &effort, &model);
             relay.notify();
