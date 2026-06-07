@@ -2882,6 +2882,93 @@ mod review_tests {
     }
 
     #[tokio::test]
+    async fn find_thread_provider_resolves_a_background_thread_missing_from_the_cache() {
+        // Regression: a freshly-created background reviewer thread lives in `runtimes`,
+        // but a thread-list refresh can transiently drop its row from `relay.threads`
+        // (it's hidden from navigation), and a provider's own `list_threads` doesn't
+        // yet include a brand-new thread with no persisted turn (Codex persists a
+        // session on its first turn). find_thread_provider must still route it via the
+        // authoritative live runtime — otherwise sending the reviewer prompt fails with
+        // "thread '…' was not found on any provider" and the review dies before it runs.
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, _providers) = build_review_app(cwd, &["codex"]).await;
+
+        let reviewer_id = "reviewer-codex-orphan";
+        {
+            let mut relay = app.relay.write().await;
+            let thread = crate::protocol::ThreadSummaryView {
+                id: reviewer_id.to_string(),
+                name: None,
+                preview: String::new(),
+                cwd: cwd.to_string(),
+                updated_at: unix_now(),
+                source: "codex".to_string(),
+                status: "idle".to_string(),
+                model_provider: "codex".to_string(),
+                provider: "codex".to_string(),
+            };
+            relay.register_background_thread(thread, cwd, "model", "never", "read-only", "low");
+            // Drop the routing-cache row while the live runtime survives (and the
+            // provider never persisted it), reproducing the production race.
+            relay.threads.retain(|thread| thread.id != reviewer_id);
+            assert!(relay.runtime_for_thread(reviewer_id).is_some());
+        }
+
+        let (name, _bridge) = app
+            .find_thread_provider(reviewer_id)
+            .await
+            .expect("runtime fallback must resolve the provider");
+        assert_eq!(name, "codex");
+    }
+
+    #[tokio::test]
+    async fn snapshot_review_jobs_are_scoped_to_the_active_thread() {
+        // A review belongs to its parent thread. Terminal jobs persist until dismissed,
+        // so without scoping a finished/failed review would keep showing in the Reviewer
+        // panel of whatever thread the user later switches to.
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, _providers) = build_review_app(cwd, &["codex"]).await;
+        start_parent(&app, cwd, "codex").await;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
+
+        // The parent is the active thread: its review surfaces in the snapshot.
+        assert!(
+            app.snapshot()
+                .await
+                .active_review_jobs
+                .iter()
+                .any(|job| job.id == receipt.review_job_id),
+            "the parent thread's own review must be visible"
+        );
+
+        // Navigate to an unrelated thread: the review must NOT bleed into its panel.
+        {
+            let mut relay = app.relay.write().await;
+            relay.active_thread_id = Some("some-unrelated-thread".to_string());
+        }
+        assert!(
+            app.snapshot().await.active_review_jobs.is_empty(),
+            "a review must not surface on a thread that is not its parent"
+        );
+        // ...but it stays globally retrievable, so it can still be dismissed.
+        assert!(
+            app.list_review_jobs()
+                .await
+                .iter()
+                .any(|job| job.id == receipt.review_job_id),
+            "the management list stays global"
+        );
+    }
+
+    #[tokio::test]
     async fn review_runs_recap_then_reviewer_then_posts_back() {
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();

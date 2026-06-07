@@ -56,6 +56,23 @@ impl AppState {
         // First check the relay's cached thread list
         {
             let relay = self.relay.read().await;
+            // A live runtime is the authoritative record of a thread's provider, for the
+            // active thread AND background threads (e.g. a just-created reviewer thread).
+            // Prefer it: a thread-list refresh can transiently drop a background reviewer
+            // row from `relay.threads` (it's filtered out of navigation), and a provider's
+            // own `list_threads` may not yet include a brand-new thread that has no
+            // persisted turn (Codex persists a session on its first turn). Without this,
+            // sending the reviewer prompt fails with "not found on any provider".
+            if let Some(summary) = relay
+                .runtime_for_thread(thread_id)
+                .and_then(|runtime| runtime.summary.as_ref())
+            {
+                for candidate in [&summary.provider, &summary.source, &summary.model_provider] {
+                    if let Some((name, bridge)) = self.providers.get_key_value(candidate) {
+                        return Ok((name.as_str(), bridge));
+                    }
+                }
+            }
             for thread in &relay.threads {
                 if thread.id == thread_id {
                     for candidate in [&thread.provider, &thread.source, &thread.model_provider] {
