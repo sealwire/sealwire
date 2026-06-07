@@ -243,3 +243,26 @@ test("ReviewerPanel hides round/verdict for a single-shot review", () => {
   // An "unknown" verdict is not surfaced.
   assert.doesNotMatch(html, /Verdict:/);
 });
+
+test("ReviewerPanel treats an escalated review as terminal (Delete enabled)", () => {
+  const html = renderToStaticMarkup(
+    h(ReviewerPanel, {
+      reviewJobs: [
+        {
+          id: "r-esc",
+          reviewer_provider: "codex",
+          status: "escalated",
+          reviewer_thread_id: "rev-1",
+          round: 3,
+          max_rounds: 3,
+          verdict: "needs_changes",
+        },
+      ],
+      canRequest: false,
+    })
+  );
+  // The Delete button shows its TERMINAL title only when the job is terminal — so an
+  // escalated job is dismissible (and its transcript is fetched, gated by the same flag).
+  assert.match(html, /Delete this review and its reviewer thread/);
+  assert.doesNotMatch(html, /Stop the reviewer before deleting/);
+});

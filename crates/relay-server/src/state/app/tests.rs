@@ -3630,6 +3630,59 @@ mod review_tests {
     }
 
     #[tokio::test]
+    async fn review_loop_author_fix_uses_parent_thread_model() {
+        // The automated author fix turn must run under the PARENT thread's own
+        // model/effort, not the relay default.
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+        {
+            let mut relay = app.relay.write().await;
+            relay.remember_thread_settings(
+                &parent.id,
+                "bypass",
+                "workspace-write",
+                "high",
+                "parent-special-model",
+            );
+        }
+        queue_verdicts(
+            providers.get("codex").unwrap(),
+            &["NEEDS_CHANGES", "APPROVE"],
+        )
+        .await;
+
+        let mut input = review_input("codex");
+        input.max_rounds = Some(3);
+        let receipt = app
+            .request_review(input)
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
+
+        let codex = providers.get("codex").unwrap();
+        let turns = codex.turns.lock().await.clone();
+        let turn_models = codex.turn_models.lock().await.clone();
+        // `turns` and `turn_models` are pushed together per start_turn, so indices align.
+        let fix_index = turns
+            .iter()
+            .position(|(tid, text)| {
+                tid == &parent.id && text.contains("Address the findings below")
+            })
+            .expect("a fix turn ran on the parent");
+        assert_eq!(
+            turn_models[fix_index].1, "parent-special-model",
+            "the author fix turn must use the parent thread's model"
+        );
+        assert_eq!(
+            turn_models[fix_index].2, "high",
+            "the author fix turn must use the parent thread's effort"
+        );
+    }
+
+    #[tokio::test]
     async fn review_single_round_completes_even_when_not_approved() {
         // max_rounds = 1 keeps today's behavior: post the review and complete,
         // regardless of verdict — no escalation, no author fix turn.

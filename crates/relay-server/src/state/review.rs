@@ -368,27 +368,34 @@ impl Verdict {
 }
 
 /// Parse the reviewer's verdict from the LAST `VERDICT:` line in its review text
-/// (case-insensitive). Tolerant of extra words after the keyword.
+/// (case-insensitive). Reads only the LEADING keyword token after `VERDICT:` — so a
+/// negated line (`VERDICT: NOT APPROVED`, `VERDICT: NEEDS_CHANGES — not approved`)
+/// is never read as approve, and a buried "approved" in an explanation is ignored.
+/// `APPROVE` must be unhedged (a trailing `?` makes it `Unknown`), and only an
+/// explicit approval keyword ends the iterative loop early.
 pub(crate) fn parse_verdict(review: &str) -> Verdict {
-    let verdict_line = review.lines().rev().find_map(|line| {
-        let trimmed = line.trim();
-        let lower = trimmed.to_ascii_lowercase();
-        lower.strip_prefix("verdict:").map(|rest| rest.to_string())
-    });
-    match verdict_line {
-        None => Verdict::Unknown,
-        Some(rest) => {
-            let rest = rest.trim();
-            if rest.contains("approve") {
-                Verdict::Approve
-            } else if rest.contains("needs_changes") || rest.contains("needs changes") {
-                Verdict::NeedsChanges
-            } else if rest.contains("unsure") {
-                Verdict::Unsure
-            } else {
-                Verdict::Unknown
-            }
-        }
+    let Some(rest) = review.lines().rev().find_map(|line| {
+        line.trim()
+            .to_ascii_lowercase()
+            .strip_prefix("verdict:")
+            .map(|rest| rest.trim().to_string())
+    }) else {
+        return Verdict::Unknown;
+    };
+    // Leading keyword = the first run of letters/underscore (stops at space, `—`,
+    // `?`, etc.), so "not approved" -> "not", "needs_changes — …" -> "needs_changes".
+    let token: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphabetic() || *c == '_')
+        .collect();
+    // A `?` immediately after the keyword signals a hedge ("APPROVE?") — not a clean
+    // verdict.
+    let hedged = rest[token.len()..].trim_start().starts_with('?');
+    match token.as_str() {
+        "approve" | "approved" if !hedged => Verdict::Approve,
+        "needs" | "needs_changes" | "needs_change" => Verdict::NeedsChanges,
+        "unsure" | "uncertain" | "unclear" => Verdict::Unsure,
+        _ => Verdict::Unknown,
     }
 }
 
@@ -421,17 +428,19 @@ pub(crate) fn review_approved_message(reviewer_provider: &str, round: u32, revie
     )
 }
 
-/// Message posted to the parent when a multi-round review exhausts its budget
-/// without approval (control returns to the user).
+/// Message posted to the parent when a multi-round review ends without approval and
+/// control returns to the user. `rounds` is the number of rounds ACTUALLY run (so an
+/// early hand-off — e.g. the author's fix needs approval — doesn't claim the whole
+/// budget ran).
 pub(crate) fn review_escalated_message(
     reviewer_provider: &str,
-    max_rounds: u32,
+    rounds: u32,
     review: &str,
 ) -> String {
     format!(
-        "After {max_rounds} round{plural} the {provider} reviewer still has concerns — over \
+        "After {rounds} round{plural} the {provider} reviewer still has concerns — over \
 to you. Latest review:\n\n{review}",
-        plural = if max_rounds == 1 { "" } else { "s" },
+        plural = if rounds == 1 { "" } else { "s" },
         provider = provider_label(reviewer_provider),
         review = review.trim(),
     )

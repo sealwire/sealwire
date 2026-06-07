@@ -5,7 +5,7 @@ import { reviewChipTone, reviewStatusLabel } from "./review-state.js";
 
 const h = React.createElement;
 
-const TERMINAL = new Set(["complete", "failed", "cancelled"]);
+const TERMINAL = new Set(["complete", "failed", "escalated", "cancelled"]);
 
 function entryText(entry) {
   if (entry?.text && entry.text.trim()) return entry.text.trim();

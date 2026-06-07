@@ -1331,6 +1331,19 @@ fn parse_verdict_reads_the_trailing_verdict_line() {
     assert_eq!(parse_verdict("VERDICT: maybe"), Verdict::Unknown);
     assert!(!parse_verdict("VERDICT: maybe").is_approved());
     assert!(!parse_verdict("looks fine to me").is_approved());
+
+    // NEGATED verdicts must never read as approve (only the LEADING keyword counts).
+    assert_eq!(parse_verdict("VERDICT: NOT APPROVED"), Verdict::Unknown);
+    assert!(!parse_verdict("VERDICT: NOT APPROVED").is_approved());
+    assert_eq!(
+        parse_verdict("VERDICT: NEEDS_CHANGES — not approved"),
+        Verdict::NeedsChanges
+    );
+    // A hedged approval ("APPROVE?") is not a clean approve.
+    assert_eq!(parse_verdict("VERDICT: APPROVE?"), Verdict::Unknown);
+    assert!(!parse_verdict("VERDICT: APPROVE?").is_approved());
+    // A buried "approved" after a non-approve keyword is ignored.
+    assert!(!parse_verdict("VERDICT: unsure, but could be approved later").is_approved());
 }
 
 #[test]

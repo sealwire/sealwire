@@ -682,7 +682,7 @@ to this thread."
                 return;
             }
             if round >= max_rounds {
-                let message = review_escalated_message(&reviewer_provider, max_rounds, &review);
+                let message = review_escalated_message(&reviewer_provider, round, &review);
                 self.finish_review_to_parent(
                     &job_id,
                     &parent_thread_id,
@@ -733,8 +733,7 @@ to this thread."
                     // The author's fix needs a human (its sandbox prompts on a write,
                     // or it asked a question). Stop the turn and escalate to the user.
                     if self.stop_thread_or_block(&job_id, &parent_thread_id).await {
-                        let message =
-                            review_escalated_message(&reviewer_provider, max_rounds, &review);
+                        let message = review_escalated_message(&reviewer_provider, round, &review);
                         self.finish_review_to_parent(
                             &job_id,
                             &parent_thread_id,
@@ -753,7 +752,7 @@ to this thread."
                 None => false,
             };
             if !author_responded {
-                let message = review_escalated_message(&reviewer_provider, max_rounds, &review);
+                let message = review_escalated_message(&reviewer_provider, round, &review);
                 self.finish_review_to_parent(
                     &job_id,
                     &parent_thread_id,
@@ -852,6 +851,30 @@ to this thread."
         effort: Option<&str>,
     ) -> Result<Option<String>, String> {
         let defaults = self.defaults().await;
+        // When the caller doesn't pin a model/effort, use the TARGET thread's OWN
+        // remembered settings — not the active session's — passed as the EXPLICIT
+        // model so it's honored verbatim (resolve_provider_model otherwise prefers the
+        // provider catalog default over a fallback). This keeps a background turn on
+        // the thread's configured model: the iterative author fix turn (which writes
+        // code) and the parent recap must run under the parent's model, never silently
+        // the relay/provider default. Only when neither caller nor thread has a model
+        // does it fall back to the session default.
+        let thread_settings = {
+            let relay = self.relay.read().await;
+            relay.thread_settings(thread_id)
+        };
+        let target_model = model.map(str::to_string).or_else(|| {
+            thread_settings
+                .as_ref()
+                .map(|settings| settings.model.clone())
+                .filter(|value| !value.is_empty())
+        });
+        let target_effort = effort.map(str::to_string).or_else(|| {
+            thread_settings
+                .as_ref()
+                .map(|settings| settings.reasoning_effort.clone())
+                .filter(|value| !value.is_empty())
+        });
         let (provider_name, bridge) = {
             let (name, bridge) = self.find_thread_provider(thread_id).await?;
             (name.to_string(), bridge.clone())
@@ -862,11 +885,10 @@ to this thread."
         let model = resolve_provider_model(
             &provider_name,
             &provider_models,
-            model.map(str::to_string),
+            target_model,
             defaults.model.clone(),
         );
-        let effort = effort
-            .map(str::to_string)
+        let effort = target_effort
             .or_else(|| default_effort_for_model(&provider_models, &model))
             .unwrap_or(defaults.reasoning_effort);
 
