@@ -8,13 +8,20 @@ const REVIEW_STATUS_LABELS = {
   waiting_to_post_back: "Posting review back",
   posting_back: "Posting review back",
   interrupting: "Stopping review…",
+  addressing_findings: "Author addressing findings…",
   blocked: "Review blocked — action needed",
   complete: "Review complete",
   failed: "Review failed",
+  escalated: "Reviewer still has concerns — over to you",
   cancelled: "Review cancelled",
 };
 
-const TERMINAL_REVIEW_STATUSES = new Set(["complete", "failed", "cancelled"]);
+const TERMINAL_REVIEW_STATUSES = new Set([
+  "complete",
+  "failed",
+  "escalated",
+  "cancelled",
+]);
 
 export function reviewStatusLabel(status) {
   return REVIEW_STATUS_LABELS[status] || status || "Reviewing";
@@ -43,7 +50,7 @@ export function isReviewInProgressForThread(session, threadId) {
 }
 
 export function reviewChipTone(status) {
-  if (status === "failed") return "alert";
+  if (status === "failed" || status === "escalated") return "alert";
   if (status === "complete") return "ready";
   return "active";
 }

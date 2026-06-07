@@ -156,8 +156,19 @@ function ReviewerJobCard({ job, onResolveReview, onDismissReview, fetchReviewerT
         "span",
         { className: `reviewer-job-status reviewer-job-status-${reviewChipTone(job.status)}` },
         reviewStatusLabel(job.status)
-      )
+      ),
+      // Iterative review loop progress (only meaningful when a budget was set).
+      job.max_rounds > 1
+        ? h(
+            "span",
+            { className: "reviewer-job-round" },
+            `Round ${job.round || 0}/${job.max_rounds}`
+          )
+        : null
     ),
+    job.verdict && job.verdict !== "unknown"
+      ? h("p", { className: "reviewer-job-verdict" }, `Verdict: ${job.verdict}`)
+      : null,
     job.error ? h("p", { className: "reviewer-job-error" }, job.error) : null,
     terminal && review.status === "loading"
       ? h("p", { className: "reviewer-job-loading" }, "Loading review…")

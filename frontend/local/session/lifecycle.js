@@ -362,6 +362,7 @@ export function createLifecycleController(ctx) {
     reviewerModel,
     instructions,
     reviewerThreadId,
+    maxRounds,
   } = {}) {
     if (!reviewerProvider) {
       logLine("Pick a reviewer provider before starting a review.");
@@ -383,6 +384,8 @@ export function createLifecycleController(ctx) {
           instructions: instructions || null,
           // Phase 3: reuse an existing reviewer thread when chosen.
           reviewer_thread_id: reviewerThreadId || null,
+          // Phase 5: round budget for the iterative reviewer↔author loop.
+          max_rounds: maxRounds || 1,
         },
         state.deviceId
       );

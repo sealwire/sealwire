@@ -18,6 +18,7 @@ export function reviewSubmitPayload({
   reviewerModel,
   instructions,
   reviewerThreadId,
+  maxRounds,
 } = {}) {
   const isReuse = Boolean(reviewerThreadId) && reviewerThreadId !== "clean";
   return {
@@ -25,7 +26,17 @@ export function reviewSubmitPayload({
     reviewerModel: isReuse ? null : reviewerModel || null,
     instructions: (instructions || "").trim() || null,
     reviewerThreadId: isReuse ? reviewerThreadId : null,
+    // 1 = single review (default); >1 enables the iterative reviewer↔author loop.
+    // Clamped to 1..=10 (the backend re-clamps too).
+    maxRounds: clampReviewRounds(maxRounds),
   };
+}
+
+// Clamp the round budget to a sane integer in 1..=10 (default 1).
+export function clampReviewRounds(value) {
+  const n = Math.round(Number(value));
+  if (!Number.isFinite(n)) return 1;
+  return Math.min(10, Math.max(1, n));
 }
 
 // Self-contained modal for requesting a cross-agent review. Manages its own
@@ -49,6 +60,8 @@ export function ReviewPanel({
   const [instructions, setInstructions] = React.useState("");
   // "clean" for a new reviewer, or an existing reviewer thread id to reuse.
   const [reviewerThreadId, setReviewerThreadId] = React.useState("clean");
+  // Round budget for the iterative review loop (1 = single review).
+  const [maxRounds, setMaxRounds] = React.useState(1);
 
   React.useEffect(() => {
     if (!reviewerProvider && defaultProvider) {
@@ -104,6 +117,7 @@ export function ReviewPanel({
         reviewerModel,
         instructions,
         reviewerThreadId,
+        maxRounds,
       })
     );
     close();
@@ -230,7 +244,28 @@ export function ReviewPanel({
         placeholder: "e.g. focus on the storage refactor and its tests",
         value: instructions,
         onChange: (event) => setInstructions(event.target.value),
-      })
+      }),
+      h(
+        "label",
+        { className: "sidebar-label", htmlFor: `${id}-max-rounds` },
+        "Maximum rounds"
+      ),
+      h("input", {
+        id: `${id}-max-rounds`,
+        type: "number",
+        className: "control-input",
+        min: 1,
+        max: 10,
+        value: maxRounds,
+        onChange: (event) => setMaxRounds(clampReviewRounds(event.target.value)),
+      }),
+      maxRounds > 1
+        ? h(
+            "p",
+            { className: "panel-modal-copy" },
+            "The reviewer and the author iterate until the reviewer approves or the rounds run out (then it's handed back to you). The author thread must be able to edit without approval prompts."
+          )
+        : null
     ),
     h(
       "div",

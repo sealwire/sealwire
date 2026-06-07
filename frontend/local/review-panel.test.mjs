@@ -7,6 +7,7 @@ import {
   ReviewLauncher,
   ReviewPanel,
   reviewSubmitPayload,
+  clampReviewRounds,
 } from "../shared/review-panel.js";
 import {
   canRequestReview,
@@ -85,6 +86,7 @@ test("reviewSubmitPayload carries the reuse thread id and nulls the model on reu
       reviewerModel: null,
       instructions: "look again",
       reviewerThreadId: "rev-1",
+      maxRounds: 1,
     }
   );
 });
@@ -104,9 +106,55 @@ test("reviewSubmitPayload sends a clean reviewer (null thread id) otherwise", ()
         reviewerModel: "gpt-5.5",
         instructions: null,
         reviewerThreadId: null,
+        maxRounds: 1,
       }
     );
   }
+});
+
+test("reviewSubmitPayload carries and clamps the round budget", () => {
+  assert.equal(
+    reviewSubmitPayload({ reviewerProvider: "codex", maxRounds: 3 }).maxRounds,
+    3
+  );
+  // Default is single-shot.
+  assert.equal(reviewSubmitPayload({ reviewerProvider: "codex" }).maxRounds, 1);
+  // Out-of-range / garbage clamps into 1..=10.
+  assert.equal(
+    reviewSubmitPayload({ reviewerProvider: "codex", maxRounds: 99 }).maxRounds,
+    10
+  );
+  assert.equal(
+    reviewSubmitPayload({ reviewerProvider: "codex", maxRounds: 0 }).maxRounds,
+    1
+  );
+  assert.equal(
+    reviewSubmitPayload({ reviewerProvider: "codex", maxRounds: "abc" }).maxRounds,
+    1
+  );
+});
+
+test("clampReviewRounds bounds the round budget to 1..=10", () => {
+  assert.equal(clampReviewRounds(1), 1);
+  assert.equal(clampReviewRounds(10), 10);
+  assert.equal(clampReviewRounds(2.6), 3);
+  assert.equal(clampReviewRounds(-5), 1);
+  assert.equal(clampReviewRounds(50), 10);
+  assert.equal(clampReviewRounds(undefined), 1);
+  assert.equal(clampReviewRounds("4"), 4);
+});
+
+test("ReviewPanel renders a maximum-rounds input", () => {
+  const html = renderToStaticMarkup(
+    h(ReviewPanel, {
+      providerOptions: [{ label: "Codex", value: "codex" }],
+      models: [],
+      defaultProvider: "codex",
+    })
+  );
+  assert.match(html, /Maximum rounds/);
+  assert.match(html, /id="review-panel-max-rounds"/);
+  assert.match(html, /type="number"/);
 });
 
 test("ReviewLauncher renders a Review button alongside the panel", () => {
@@ -129,8 +177,21 @@ test("reviewStatusLabel maps each job status to a human label", () => {
   assert.equal(reviewStatusLabel("posting_back"), "Posting review back");
   assert.equal(reviewStatusLabel("complete"), "Review complete");
   assert.equal(reviewStatusLabel("failed"), "Review failed");
+  // Phase 5 iterative-loop statuses.
+  assert.equal(reviewStatusLabel("addressing_findings"), "Author addressing findings…");
+  assert.equal(
+    reviewStatusLabel("escalated"),
+    "Reviewer still has concerns — over to you"
+  );
   // Unknown statuses fall back to a sane default.
   assert.equal(reviewStatusLabel("something_new"), "something_new");
+});
+
+test("reviewChipTone flags escalated as an alert", () => {
+  assert.equal(reviewChipTone("escalated"), "alert");
+  assert.equal(reviewChipTone("failed"), "alert");
+  assert.equal(reviewChipTone("complete"), "ready");
+  assert.equal(reviewChipTone("waiting_for_reviewer"), "active");
 });
 
 test("isReviewBlocked detects the persistent blocked state", () => {

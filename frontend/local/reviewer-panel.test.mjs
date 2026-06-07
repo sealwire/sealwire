@@ -100,15 +100,28 @@ test("ReviewerPanel surfaces the unlock action when a review is blocked", () => 
   assert.match(html, /Stop reviewer &amp; unlock/);
 });
 
-test("ReviewerChip stays hidden when there is no review and none can be requested", () => {
-  const html = renderToStaticMarkup(
+test("ReviewerChip stays hidden when there is no review (idle), regardless of canRequest", () => {
+  // No reviews + can't request → hidden.
+  const cannot = renderToStaticMarkup(
     h(ReviewerChip, {
       store: makeStore({
         review: { reviewJobs: [], reviewModel: {}, canRequest: false, blocked: false },
       }),
     })
   );
-  assert.equal(html, "");
+  assert.equal(cannot, "");
+
+  // No reviews + COULD request → still hidden. The composer already carries the
+  // "Want a second opinion?" idle nudge for launching; a badge-less pill here
+  // would just be a second, signal-less Reviewer affordance competing for space.
+  const idle = renderToStaticMarkup(
+    h(ReviewerChip, {
+      store: makeStore({
+        review: { reviewJobs: [], reviewModel: {}, canRequest: true, blocked: false },
+      }),
+    })
+  );
+  assert.equal(idle, "");
 });
 
 test("ReviewerChip is a labeled pill that surfaces review status", () => {
@@ -135,18 +148,18 @@ test("ReviewerChip is a labeled pill that surfaces review status", () => {
   assert.match(blocked, /⚠/);
 });
 
-test("ReviewerChip appears (badge-less) when a review can be requested but none exist", () => {
+test("ReviewerChip surfaces a running review with a badge", () => {
   const html = renderToStaticMarkup(
     h(ReviewerChip, {
       store: makeStore({
-        review: { reviewJobs: [], canRequest: true, blocked: false },
+        review: { reviewJobs: [{ id: "r1", status: "waiting_for_reviewer" }], canRequest: false, blocked: false },
       }),
     })
   );
   assert.match(html, /reviewer-chip/);
   assert.match(html, />Reviewer</);
-  // No status badge when there are no jobs yet.
-  assert.doesNotMatch(html, /workspace-diff-chip-review/);
+  assert.match(html, /is-active/);
+  assert.match(html, /workspace-diff-chip-review/);
 });
 
 test("RightPanelTabs shows the Changes body by default and both tab labels", () => {
@@ -188,4 +201,45 @@ test("RightPanelTabs flags the Reviewer tab when a review is blocked, and render
   );
   assert.match(reviewerBody, /Ask another agent to review/);
   assert.doesNotMatch(reviewerBody, /CHANGES-BODY/);
+});
+
+test("ReviewerPanel shows round progress + verdict for an iterative review", () => {
+  const html = renderToStaticMarkup(
+    h(ReviewerPanel, {
+      reviewJobs: [
+        {
+          id: "r1",
+          reviewer_provider: "codex",
+          status: "addressing_findings",
+          round: 1,
+          max_rounds: 3,
+          verdict: "needs_changes",
+        },
+      ],
+      canRequest: false,
+    })
+  );
+  assert.match(html, /Round 1\/3/);
+  assert.match(html, /Verdict: needs_changes/);
+});
+
+test("ReviewerPanel hides round/verdict for a single-shot review", () => {
+  const html = renderToStaticMarkup(
+    h(ReviewerPanel, {
+      reviewJobs: [
+        {
+          id: "r2",
+          reviewer_provider: "codex",
+          status: "complete",
+          round: 1,
+          max_rounds: 1,
+          verdict: "unknown",
+        },
+      ],
+      canRequest: false,
+    })
+  );
+  assert.doesNotMatch(html, /Round 1\/1/);
+  // An "unknown" verdict is not surfaced.
+  assert.doesNotMatch(html, /Verdict:/);
 });

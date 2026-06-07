@@ -1260,6 +1260,7 @@ fn reviewers_to_evict_protects_active_review_reviewer() {
         "/tmp/project".to_string(),
         "device-1".to_string(),
         None,
+        1,
     );
     job.reviewer_thread_id = Some("rev-1".to_string());
     relay.insert_review_job(job);
@@ -1297,6 +1298,39 @@ fn reviewer_thread_seq_resumes_past_restored_max() {
         vec!["rev-1".to_string()],
         "the pre-restart oldest is evicted before the post-restart reviewer"
     );
+}
+
+#[test]
+fn parse_verdict_reads_the_trailing_verdict_line() {
+    // Approve only from an explicit APPROVE keyword.
+    assert_eq!(
+        parse_verdict("findings...\n\nVERDICT: APPROVE"),
+        Verdict::Approve
+    );
+    assert_eq!(
+        parse_verdict("VERDICT: needs_changes"),
+        Verdict::NeedsChanges
+    );
+    assert_eq!(
+        parse_verdict("VERDICT: needs changes"),
+        Verdict::NeedsChanges
+    );
+    assert_eq!(parse_verdict("blah\nverdict: Unsure\n"), Verdict::Unsure);
+    // The LAST verdict line wins.
+    assert_eq!(
+        parse_verdict("VERDICT: NEEDS_CHANGES\nmore\nVERDICT: APPROVE"),
+        Verdict::Approve
+    );
+    // Tolerates trailing words.
+    assert_eq!(
+        parse_verdict("VERDICT: approve — ship it"),
+        Verdict::Approve
+    );
+    // Missing / garbled → Unknown, and never reads as approved.
+    assert_eq!(parse_verdict("no verdict at all"), Verdict::Unknown);
+    assert_eq!(parse_verdict("VERDICT: maybe"), Verdict::Unknown);
+    assert!(!parse_verdict("VERDICT: maybe").is_approved());
+    assert!(!parse_verdict("looks fine to me").is_approved());
 }
 
 #[test]

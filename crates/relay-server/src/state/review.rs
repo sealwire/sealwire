@@ -37,12 +37,20 @@ pub(crate) enum ReviewJobStatus {
     /// (still holding the session lock) until the turn actually ends. Non-terminal,
     /// so the UI stays disabled.
     Interrupting,
+    /// Between rounds of a multi-round review: the parent agent is addressing the
+    /// reviewer's findings before the next re-review. Non-terminal.
+    AddressingFindings,
     /// Cleanup failed (a reviewer turn/approval could not be stopped). The session
     /// lock is held indefinitely and the job will not release it on its own — the
     /// user must run `resolve` to stop the reviewer. Non-terminal on purpose.
     Blocked,
     Complete,
     Failed,
+    /// A multi-round review used up its round budget without the reviewer approving
+    /// (or the author's fix needs the user). The latest review is posted to the
+    /// parent and control returns to the user. TERMINAL — threads unlock so the user
+    /// can continue manually.
+    Escalated,
     // No cancel path in v1; retained as a documented terminal state for later.
     #[allow(dead_code)]
     Cancelled,
@@ -58,9 +66,11 @@ impl ReviewJobStatus {
             ReviewJobStatus::WaitingToPostBack => "waiting_to_post_back",
             ReviewJobStatus::PostingBack => "posting_back",
             ReviewJobStatus::Interrupting => "interrupting",
+            ReviewJobStatus::AddressingFindings => "addressing_findings",
             ReviewJobStatus::Blocked => "blocked",
             ReviewJobStatus::Complete => "complete",
             ReviewJobStatus::Failed => "failed",
+            ReviewJobStatus::Escalated => "escalated",
             ReviewJobStatus::Cancelled => "cancelled",
         }
     }
@@ -68,7 +78,10 @@ impl ReviewJobStatus {
     pub(crate) fn is_terminal(self) -> bool {
         matches!(
             self,
-            ReviewJobStatus::Complete | ReviewJobStatus::Failed | ReviewJobStatus::Cancelled
+            ReviewJobStatus::Complete
+                | ReviewJobStatus::Failed
+                | ReviewJobStatus::Escalated
+                | ReviewJobStatus::Cancelled
         )
     }
 }
@@ -90,6 +103,13 @@ pub(crate) struct ReviewJob {
     pub(crate) reviewer_mode: ReviewMode,
     pub(crate) cwd: String,
     pub(crate) status: ReviewJobStatus,
+    /// Round budget for the iterative review loop. `1` = single-shot (today's
+    /// behavior); `>1` enables reviewer↔author negotiation until approval or budget.
+    pub(crate) max_rounds: u32,
+    /// Completed review rounds so far (0 until the first review lands).
+    pub(crate) round: u32,
+    /// The reviewer's last parsed verdict ("approve" / "needs_changes" / "unsure").
+    pub(crate) verdict: Option<String>,
     #[allow(dead_code)]
     pub(crate) requested_at: u64,
     pub(crate) updated_at: u64,
@@ -117,6 +137,7 @@ impl ReviewJob {
         cwd: String,
         requested_by_device_id: String,
         instructions: Option<String>,
+        max_rounds: u32,
     ) -> Self {
         let now = unix_now();
         Self {
@@ -130,6 +151,9 @@ impl ReviewJob {
             reviewer_mode,
             cwd,
             status: ReviewJobStatus::PendingParentRecap,
+            max_rounds: max_rounds.max(1),
+            round: 0,
+            verdict: None,
             requested_at: now,
             updated_at: now,
             recap_text: None,
@@ -168,6 +192,9 @@ impl ReviewJob {
             status: self.status.as_str().to_string(),
             error: self.error.clone(),
             updated_at: self.updated_at,
+            round: self.round,
+            max_rounds: self.max_rounds,
+            verdict: self.verdict.clone(),
         }
     }
 }
@@ -278,7 +305,12 @@ Return:\n\
 1. Findings, highest severity first, with file/line references where possible.\n\
 2. Open questions or assumptions.\n\
 3. Test gaps or checks you recommend.\n\
-4. A short verdict: approve / needs changes / unsure.",
+4. A short verdict.\n\n\
+End your reply with exactly one line, on its own, one of:\n\
+VERDICT: APPROVE\n\
+VERDICT: NEEDS_CHANGES\n\
+VERDICT: UNSURE\n\
+Use APPROVE only if the changes are good to merge as-is.",
         generated_at = diff.generated_at,
     );
 
@@ -305,6 +337,102 @@ Please decide whether to make changes, explain disagreement, or ask me before \
 continuing if the review raises ambiguous tradeoffs.",
         provider = provider_label(reviewer_provider),
         thread = reviewer_thread_id,
+        review = review.trim(),
+    )
+}
+
+/// The reviewer's machine-readable verdict, parsed from the trailing `VERDICT:`
+/// line of its review. `Unknown` covers a missing/garbled verdict — only `Approve`
+/// ends the iterative loop early, so ambiguity never auto-approves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Verdict {
+    Approve,
+    NeedsChanges,
+    Unsure,
+    Unknown,
+}
+
+impl Verdict {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Verdict::Approve => "approve",
+            Verdict::NeedsChanges => "needs_changes",
+            Verdict::Unsure => "unsure",
+            Verdict::Unknown => "unknown",
+        }
+    }
+
+    pub(crate) fn is_approved(self) -> bool {
+        matches!(self, Verdict::Approve)
+    }
+}
+
+/// Parse the reviewer's verdict from the LAST `VERDICT:` line in its review text
+/// (case-insensitive). Tolerant of extra words after the keyword.
+pub(crate) fn parse_verdict(review: &str) -> Verdict {
+    let verdict_line = review.lines().rev().find_map(|line| {
+        let trimmed = line.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        lower.strip_prefix("verdict:").map(|rest| rest.to_string())
+    });
+    match verdict_line {
+        None => Verdict::Unknown,
+        Some(rest) => {
+            let rest = rest.trim();
+            if rest.contains("approve") {
+                Verdict::Approve
+            } else if rest.contains("needs_changes") || rest.contains("needs changes") {
+                Verdict::NeedsChanges
+            } else if rest.contains("unsure") {
+                Verdict::Unsure
+            } else {
+                Verdict::Unknown
+            }
+        }
+    }
+}
+
+/// Prompt that drives the PARENT agent to address a reviewer's findings between
+/// rounds of a multi-round review. The review rides along, so the parent thread
+/// shows the back-and-forth inline.
+pub(crate) fn parent_fix_prompt(
+    reviewer_provider: &str,
+    review: &str,
+    round: u32,
+    max_rounds: u32,
+) -> String {
+    format!(
+        "Cross-agent code review — round {round} of {max_rounds}. The {provider} reviewer \
+looked at your changes and did NOT approve them yet. Address the findings below: make \
+the code changes you agree with, and briefly note anything you disagree with and why. \
+After this turn the reviewer will look again.\n\n{review}",
+        provider = provider_label(reviewer_provider),
+        review = review.trim(),
+    )
+}
+
+/// Message posted to the parent when the reviewer approves.
+pub(crate) fn review_approved_message(reviewer_provider: &str, round: u32, review: &str) -> String {
+    format!(
+        "The {provider} reviewer APPROVED your changes after {round} round{plural}.\n\n{review}",
+        provider = provider_label(reviewer_provider),
+        plural = if round == 1 { "" } else { "s" },
+        review = review.trim(),
+    )
+}
+
+/// Message posted to the parent when a multi-round review exhausts its budget
+/// without approval (control returns to the user).
+pub(crate) fn review_escalated_message(
+    reviewer_provider: &str,
+    max_rounds: u32,
+    review: &str,
+) -> String {
+    format!(
+        "After {max_rounds} round{plural} the {provider} reviewer still has concerns — over \
+to you. Latest review:\n\n{review}",
+        plural = if max_rounds == 1 { "" } else { "s" },
+        provider = provider_label(reviewer_provider),
         review = review.trim(),
     )
 }

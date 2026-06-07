@@ -1285,6 +1285,11 @@ pub struct RequestReviewInput {
     /// Reserved for Phase 3 (reviewer-thread reuse). v1 rejects when set.
     pub reviewer_thread_id: Option<String>,
     pub instructions: Option<String>,
+    /// Round budget for the iterative review loop (Phase 5). `None`/`1` = single
+    /// review (today's behavior); `>1` enables reviewer↔author negotiation. Clamped
+    /// to 1..=10 server-side.
+    #[serde(default)]
+    pub max_rounds: Option<u32>,
     pub device_id: Option<String>,
 }
 
@@ -1318,6 +1323,10 @@ pub struct ReviewJobView {
     pub status: String,
     pub error: Option<String>,
     pub updated_at: u64,
+    /// Iterative review loop progress (Phase 5).
+    pub round: u32,
+    pub max_rounds: u32,
+    pub verdict: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

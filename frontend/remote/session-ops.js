@@ -1071,6 +1071,7 @@ export async function requestRemoteReview({
   reviewerModel,
   instructions,
   reviewerThreadId,
+  maxRounds,
 } = {}) {
   if (!reviewerProvider) {
     renderLog("Pick a reviewer provider before starting a review.");
@@ -1087,9 +1088,10 @@ export async function requestRemoteReview({
         reviewer_provider: reviewerProvider,
         reviewer_model: reviewerModel || null,
         instructions: instructions || null,
-        // Phase 3: reuse an existing reviewer thread when chosen (remote currently
-        // never has reviewer_threads in its snapshot, so this stays null there).
+        // Phase 3: reuse an existing reviewer thread when chosen.
         reviewer_thread_id: reviewerThreadId || null,
+        // Phase 5: round budget for the iterative reviewer↔author loop.
+        max_rounds: maxRounds || 1,
       },
     });
     await syncRemoteSnapshot("post-review-request", true);

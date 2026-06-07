@@ -210,6 +210,85 @@ mod path_scope_tests {
         )
     }
 
+    #[tokio::test]
+    async fn file_change_detail_uses_authoritative_runtime_entry() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_string_lossy().into_owned();
+        let (app, _, _) = build_app(&cwd).await;
+        let thread_id = "runtime-only-thread";
+        let item_id = "turn-diff:turn-1";
+
+        {
+            let mut relay = app.relay.write().await;
+            relay.activate_thread(
+                crate::protocol::ThreadSummaryView {
+                    id: thread_id.to_string(),
+                    name: None,
+                    preview: String::new(),
+                    cwd: cwd.clone(),
+                    updated_at: unix_now(),
+                    source: "fake".to_string(),
+                    status: "idle".to_string(),
+                    model_provider: "fake".to_string(),
+                    provider: "fake".to_string(),
+                },
+                &cwd,
+                DEFAULT_MODEL,
+                DEFAULT_APPROVAL_POLICY,
+                DEFAULT_SANDBOX,
+                DEFAULT_EFFORT,
+                "device-a",
+            );
+            relay.upsert_transcript_item(
+                item_id.to_string(),
+                crate::protocol::TranscriptEntryKind::ToolCall,
+                Some("Edited files".to_string()),
+                "completed".to_string(),
+                Some("turn-1".to_string()),
+                Some(crate::protocol::ToolCallView {
+                    item_type: "turnDiff".to_string(),
+                    name: "turn_diff".to_string(),
+                    title: "Changed files".to_string(),
+                    detail: None,
+                    query: None,
+                    path: None,
+                    url: None,
+                    command: None,
+                    input_preview: None,
+                    result_preview: None,
+                    diff: Some("@@ -1 +1 @@\n-old\n+new".to_string()),
+                    file_changes: vec![crate::protocol::FileChangeDiffView {
+                        path: "src/main.rs".to_string(),
+                        change_type: "modify".to_string(),
+                        diff: "-old\n+new".to_string(),
+                    }],
+                    apply_state: None,
+                    file_changes_omitted: false,
+                }),
+            );
+        }
+
+        let detail = app
+            .read_thread_entry_detail(crate::protocol::ReadThreadEntryDetailInput {
+                thread_id: thread_id.to_string(),
+                item_id: item_id.to_string(),
+                field: None,
+                cursor: None,
+                device_id: None,
+            })
+            .await
+            .expect("runtime file-change detail should not require a provider read");
+
+        let tool = detail
+            .entry
+            .expect("detail entry")
+            .tool
+            .expect("tool detail");
+        assert_eq!(tool.diff.as_deref(), Some("@@ -1 +1 @@\n-old\n+new"));
+        assert_eq!(tool.file_changes[0].diff, "-old\n+new");
+        assert!(!tool.file_changes_omitted);
+    }
+
     async fn pair_device(app: &AppState, device_id: &str, path_scope: Vec<String>) {
         // Normalize the scope the same way start_pairing does in production, so symlinked
         // tmpdirs on macOS (/var/folders → /private/var/folders) don't produce false misses.
@@ -2205,6 +2284,12 @@ mod review_tests {
         // guard that must refuse to reuse a thread's PRIOR review as this turn's
         // result. Recap/other turns still reply normally.
         suppress_reviewer_reply: Arc<AtomicBool>,
+        // Verdicts the reviewer should emit, one popped per reviewer turn (FIFO).
+        // Empty → default NEEDS_CHANGES. Drives the iterative loop in tests.
+        reviewer_verdicts: Arc<Mutex<std::collections::VecDeque<String>>>,
+        // When true, a parent FIX turn (driven between rounds) parks on an approval —
+        // exercising the "author's fix needs the user → escalate" path.
+        raise_approval_on_fix_turn: Arc<AtomicBool>,
         // Threads "evicted" by a simulated provider/app-server restart: a turn can't
         // start on one until it is re-loaded via `resume_thread`. Models Codex, where
         // approvalPolicy/sandbox attach on thread/resume, not turn/start.
@@ -2243,6 +2328,8 @@ mod review_tests {
                 fail_delete_thread_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
                 turn_models: Arc::new(Mutex::new(Vec::new())),
                 suppress_reviewer_reply: Arc::new(AtomicBool::new(false)),
+                reviewer_verdicts: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+                raise_approval_on_fix_turn: Arc::new(AtomicBool::new(false)),
                 unloaded_threads: Arc::new(Mutex::new(std::collections::HashSet::new())),
                 resumes: Arc::new(Mutex::new(Vec::new())),
                 complete_delay_ms: Arc::new(AtomicU64::new(15)),
@@ -2459,8 +2546,23 @@ mod review_tests {
             let emit_assistant = self.emit_assistant.load(Ordering::Relaxed)
                 && !(is_reviewer_diff_turn && self.suppress_reviewer_reply.load(Ordering::Relaxed));
             let is_reviewer_turn = text.contains("You are reviewing another agent's work");
+            // The parent fix turn (driven between rounds) carries this marker.
+            let is_fix_turn = text.contains("Address the findings below");
+            // A reviewer turn ends with the verdict the test queued (default needs-changes).
+            let reply_text = if is_reviewer_diff_turn {
+                let verdict = self
+                    .reviewer_verdicts
+                    .lock()
+                    .await
+                    .pop_front()
+                    .unwrap_or_else(|| "NEEDS_CHANGES".to_string());
+                format!("{REVIEW_REPLY}\n\nVERDICT: {verdict}")
+            } else {
+                REVIEW_REPLY.to_string()
+            };
             let raise_approval = self.raise_approval.load(Ordering::Relaxed)
-                || (is_reviewer_turn && self.approval_on_reviewer_turn.load(Ordering::Relaxed));
+                || (is_reviewer_turn && self.approval_on_reviewer_turn.load(Ordering::Relaxed))
+                || (is_fix_turn && self.raise_approval_on_fix_turn.load(Ordering::Relaxed));
             let inject_unrelated = self
                 .inject_unrelated_approval
                 .swap(false, Ordering::Relaxed);
@@ -2552,7 +2654,7 @@ mod review_tests {
                             relay.start_agent_message(assistant_item.clone(), turn.clone());
                             relay.complete_agent_message(
                                 assistant_item.clone(),
-                                REVIEW_REPLY.to_string(),
+                                reply_text.clone(),
                                 turn.clone(),
                             );
                         }
@@ -2578,7 +2680,7 @@ mod review_tests {
                             relay.bg_complete_agent_message(
                                 &thread_id,
                                 assistant_item.clone(),
-                                REVIEW_REPLY.to_string(),
+                                reply_text.clone(),
                                 turn.clone(),
                                 now,
                             );
@@ -2602,7 +2704,7 @@ mod review_tests {
                     entries.push(TranscriptEntryView {
                         item_id: Some(assistant_item),
                         kind: TranscriptEntryKind::AgentText,
-                        text: Some(REVIEW_REPLY.to_string()),
+                        text: Some(reply_text.clone()),
                         status: "completed".to_string(),
                         turn_id: Some(turn),
                         tool: None,
@@ -2711,7 +2813,7 @@ mod review_tests {
     }
 
     async fn wait_for_review(app: &AppState, job_id: &str) -> crate::protocol::ReviewJobView {
-        wait_for_review_status(app, job_id, &["complete", "failed", "blocked"]).await
+        wait_for_review_status(app, job_id, &["complete", "failed", "blocked", "escalated"]).await
     }
 
     /// Wait until no turn is in flight on the active thread (e.g. the review's
@@ -2774,6 +2876,7 @@ mod review_tests {
             reviewer_model: None,
             reviewer_thread_id: None,
             instructions: Some("focus on the tests".to_string()),
+            max_rounds: None,
             device_id: Some("device-1".to_string()),
         }
     }
@@ -3380,6 +3483,220 @@ mod review_tests {
         }
     }
 
+    // --- Phase 5: iterative review loop ----------------------------------------
+
+    async fn queue_verdicts(provider: &ReviewTestProvider, verdicts: &[&str]) {
+        let mut queue = provider.reviewer_verdicts.lock().await;
+        for verdict in verdicts {
+            queue.push_back(verdict.to_string());
+        }
+    }
+
+    fn count_turns_with(turns: &[(String, String)], marker: &str) -> usize {
+        turns
+            .iter()
+            .filter(|(_, text)| text.contains(marker))
+            .count()
+    }
+
+    #[tokio::test]
+    async fn review_loop_completes_when_reviewer_approves_first_round() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+        queue_verdicts(providers.get("codex").unwrap(), &["APPROVE"]).await;
+
+        let mut input = review_input("codex");
+        input.max_rounds = Some(3);
+        let receipt = app
+            .request_review(input)
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+
+        assert_eq!(job.status, "complete");
+        assert_eq!(job.round, 1, "approved on the first round");
+        assert_eq!(job.verdict.as_deref(), Some("approve"));
+        let turns = providers.get("codex").unwrap().turns.lock().await.clone();
+        assert_eq!(
+            count_turns_with(&turns, "Workspace diff collected by the relay"),
+            1,
+            "one review, no re-review"
+        );
+        assert_eq!(
+            count_turns_with(&turns, "Address the findings below"),
+            0,
+            "no author fix turn when approved immediately"
+        );
+        assert!(turns
+            .iter()
+            .any(|(tid, text)| tid == &parent.id && text.contains("APPROVED")));
+    }
+
+    #[tokio::test]
+    async fn review_clamps_max_rounds_to_cap() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        start_parent(&app, cwd, "codex").await;
+        queue_verdicts(providers.get("codex").unwrap(), &["APPROVE"]).await;
+
+        let mut input = review_input("codex");
+        input.max_rounds = Some(99); // absurd → clamp to the cap (10).
+        let receipt = app
+            .request_review(input)
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+
+        assert_eq!(job.status, "complete");
+        assert_eq!(job.max_rounds, 10, "max_rounds is clamped to the hard cap");
+    }
+
+    #[tokio::test]
+    async fn review_loop_escalates_after_budget_without_approval() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+        queue_verdicts(
+            providers.get("codex").unwrap(),
+            &["NEEDS_CHANGES", "NEEDS_CHANGES"],
+        )
+        .await;
+
+        let mut input = review_input("codex");
+        input.max_rounds = Some(2);
+        let receipt = app
+            .request_review(input)
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+
+        assert_eq!(job.status, "escalated");
+        assert_eq!(job.round, 2, "ran the full 2-round budget");
+        assert_eq!(job.verdict.as_deref(), Some("needs_changes"));
+        let reviewer = job.reviewer_thread_id.clone().expect("reviewer thread id");
+        let turns = providers.get("codex").unwrap().turns.lock().await.clone();
+        assert_eq!(
+            turns.iter().filter(|(tid, _)| tid == &reviewer).count(),
+            2,
+            "both rounds re-used the SAME reviewer thread"
+        );
+        assert_eq!(
+            count_turns_with(&turns, "Address the findings below"),
+            1,
+            "one author fix turn between the two rounds"
+        );
+        assert!(turns
+            .iter()
+            .any(|(tid, text)| tid == &parent.id && text.contains("still has concerns")));
+        // Escalated is terminal → both threads unlock so the user can continue.
+        let relay = app.relay.read().await;
+        assert!(!relay.is_thread_review_locked(&parent.id));
+        assert!(!relay.is_thread_review_locked(&reviewer));
+    }
+
+    #[tokio::test]
+    async fn review_loop_completes_when_reviewer_approves_second_round() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        start_parent(&app, cwd, "codex").await;
+        queue_verdicts(
+            providers.get("codex").unwrap(),
+            &["NEEDS_CHANGES", "APPROVE"],
+        )
+        .await;
+
+        let mut input = review_input("codex");
+        input.max_rounds = Some(3);
+        let receipt = app
+            .request_review(input)
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+
+        assert_eq!(job.status, "complete");
+        assert_eq!(job.round, 2, "approved on the second round");
+        assert_eq!(job.verdict.as_deref(), Some("approve"));
+        let turns = providers.get("codex").unwrap().turns.lock().await.clone();
+        assert_eq!(
+            count_turns_with(&turns, "Workspace diff collected by the relay"),
+            2
+        );
+        assert_eq!(count_turns_with(&turns, "Address the findings below"), 1);
+    }
+
+    #[tokio::test]
+    async fn review_single_round_completes_even_when_not_approved() {
+        // max_rounds = 1 keeps today's behavior: post the review and complete,
+        // regardless of verdict — no escalation, no author fix turn.
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+        queue_verdicts(providers.get("codex").unwrap(), &["NEEDS_CHANGES"]).await;
+
+        let mut input = review_input("codex");
+        input.max_rounds = Some(1);
+        let receipt = app
+            .request_review(input)
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+
+        assert_eq!(
+            job.status, "complete",
+            "single-shot completes, never escalates"
+        );
+        assert_eq!(job.round, 1);
+        let turns = providers.get("codex").unwrap().turns.lock().await.clone();
+        assert_eq!(count_turns_with(&turns, "Address the findings below"), 0);
+        assert!(turns
+            .iter()
+            .any(|(tid, text)| tid == &parent.id
+                && text.contains("review result from reviewer thread")));
+    }
+
+    #[tokio::test]
+    async fn review_loop_escalates_when_author_fix_needs_approval() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+        let codex = providers.get("codex").unwrap();
+        queue_verdicts(codex, &["NEEDS_CHANGES"]).await;
+        // The author's fix turn parks on an approval the review flow can't grant.
+        codex
+            .raise_approval_on_fix_turn
+            .store(true, Ordering::Relaxed);
+
+        let mut input = review_input("codex");
+        input.max_rounds = Some(3);
+        let receipt = app
+            .request_review(input)
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+
+        assert_eq!(
+            job.status, "escalated",
+            "the author's fix needing approval escalates to the user"
+        );
+        let reviewer = job.reviewer_thread_id.clone().expect("reviewer thread id");
+        let turns = providers.get("codex").unwrap().turns.lock().await.clone();
+        assert_eq!(
+            turns.iter().filter(|(tid, _)| tid == &reviewer).count(),
+            1,
+            "only the first review ran before escalation"
+        );
+        assert!(count_turns_with(&turns, "Address the findings below") >= 1);
+        let relay = app.relay.read().await;
+        assert!(!relay.is_thread_review_locked(&parent.id));
+    }
+
     #[tokio::test]
     async fn review_rejects_when_no_active_parent() {
         let dir = TempDir::new().expect("tmpdir");
@@ -3732,6 +4049,7 @@ mod review_tests {
                 cwd.to_string(),
                 "device-1".to_string(),
                 None,
+                1,
             );
             relay.insert_review_job(job);
             // Atomic: register the row AND assign reviewer_thread_id together.
@@ -4777,6 +5095,7 @@ mod review_tests {
                     cwd.to_string(),
                     "device-1".to_string(),
                     None,
+                    1,
                 );
                 synthetic.set_status(crate::state::ReviewJobStatus::Complete);
                 relay.insert_review_job(synthetic);
@@ -4801,6 +5120,7 @@ mod review_tests {
                 cwd.to_string(),
                 "device-1".to_string(),
                 None,
+                1,
             );
             extra.set_status(crate::state::ReviewJobStatus::Complete);
             relay.insert_review_job(extra);
@@ -4986,6 +5306,7 @@ mod review_tests {
                 cwd.to_string(),
                 "device-1".to_string(),
                 None,
+                1,
             );
             relay.insert_review_job(job);
             relay.update_review_job("review-promote", |job| {

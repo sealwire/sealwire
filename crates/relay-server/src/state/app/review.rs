@@ -19,14 +19,19 @@ use crate::protocol::{
     TranscriptEntryKind, TranscriptEntryView,
 };
 use crate::state::{
-    parent_recap_prompt, post_back_message, re_review_prompt, reviewer_prompt, ReviewJob,
-    ReviewJobStatus, ReviewMode, MAX_REVIEWERS_PER_PARENT,
+    parent_fix_prompt, parent_recap_prompt, parse_verdict, post_back_message, re_review_prompt,
+    review_approved_message, review_escalated_message, reviewer_prompt, ReviewJob, ReviewJobStatus,
+    ReviewMode, MAX_REVIEWERS_PER_PARENT,
 };
 
 use super::*;
 
 /// How often to re-issue an interrupt while draining a turn that wouldn't stop.
 const INTERRUPT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Hard cap on the iterative review loop's per-request round budget, so a single
+/// review can't loop unbounded (each round costs a parent + reviewer turn).
+const MAX_REVIEW_ROUNDS: u32 = 10;
 
 /// A review whose cleanup failed: the job stays in the non-terminal `Blocked`
 /// status, which keeps its parent + reviewer threads review-locked (frozen for
@@ -76,6 +81,7 @@ struct ReviewJobFields {
     cwd: String,
     device_id: String,
     instructions: Option<String>,
+    max_rounds: u32,
 }
 
 impl AppState {
@@ -251,6 +257,8 @@ reviewer thread"
             cwd,
             device_id.clone(),
             non_empty(input.instructions.clone()),
+            // Round budget for the iterative loop: default 1 (single-shot), clamp 1..=10.
+            input.max_rounds.unwrap_or(1).clamp(1, MAX_REVIEW_ROUNDS),
         );
         // For reuse, the reviewer thread id is known up front (it already exists and
         // is registered in the durable map); record it so the orchestrator and the
@@ -385,6 +393,7 @@ to this thread."
             cwd,
             device_id: _device_id,
             instructions,
+            max_rounds,
         } = fields;
 
         // --- Step 1: ask the parent to recap its changes ---------------------
@@ -476,227 +485,326 @@ to this thread."
                 .await;
         }
 
-        // --- Step 2: collect the workspace diff ------------------------------
-        let diff = match collect_workspace_diff(&cwd).await {
-            Ok(diff) => diff,
-            Err(error) => {
-                self.fail_job(
-                    &job_id,
-                    format!("failed to collect the workspace diff: {error}"),
-                )
-                .await;
-                return;
-            }
-        };
-        {
-            let generated_at = diff.generated_at;
-            let truncated = diff.truncated;
-            self.update_job(&job_id, |job| {
-                job.workspace_diff_generated_at = Some(generated_at);
-                job.workspace_diff_truncated = truncated;
-            })
-            .await;
-        }
+        // --- Review rounds ----------------------------------------------------
+        // Each round: collect a fresh diff → review → parse the verdict. `max_rounds
+        // == 1` is the single-shot path (today's behavior). For `> 1`, a non-approve
+        // verdict drives the PARENT to address the findings, then re-reviews — until
+        // the reviewer approves (Complete) or the budget runs out (Escalated).
+        // One reviewer thread is established in round 1 and reused for later rounds.
+        let mut reviewer_thread_id: Option<String> = None;
+        let mut round: u32 = 0;
+        loop {
+            round += 1;
 
-        // --- Step 3: obtain the reviewer thread -------------------------------
-        // CleanThread: create it as a BACKGROUND thread — it never becomes the
-        // active thread, so the user's conversation is never disturbed. The thread
-        // is review-locked via job state and hidden from nav. Registration and job
-        // assignment happen under one relay write lock so there is never a window
-        // where the thread row exists but reviewer_thread_ids() does not yet include
-        // it. ExistingThread (reuse): the thread already exists, is already in the
-        // durable map, and `job.reviewer_thread_id` was set at request time — so we
-        // skip creation entirely and route to it via its provider.
-        self.set_job_status(&job_id, ReviewJobStatus::StartingReviewer)
-            .await;
-        let is_reuse = matches!(reviewer_mode, ReviewMode::ExistingThread { .. });
-        // (reviewer_turn_model, reviewer_turn_effort): a CLEAN reviewer turn uses the
-        // requested model (resolved when the thread was created). A REUSED thread
-        // keeps its OWN persisted model/effort — passing `None` would resolve to the
-        // *parent's* session model and silently override the reviewer (Codex puts the
-        // value in `turn/start.model`).
-        let (reviewer_thread_id, reviewer_turn_model, reviewer_turn_effort) = match &reviewer_mode {
-            ReviewMode::ExistingThread { thread_id } => {
-                let reviewer_thread_id = thread_id.clone();
-                // Re-attach the reviewer thread if it lost its runtime (e.g. after a
-                // restart) so the wait loop can observe this turn, and recover its own
-                // model/effort for the turn.
-                match self
-                    .prepare_reused_reviewer_thread(&reviewer_thread_id)
-                    .await
-                {
-                    Ok((model, effort)) => (reviewer_thread_id, model, effort),
-                    Err(error) => {
-                        self.fail_job(
-                            &job_id,
-                            format!("failed to prepare the reviewer thread: {error}"),
-                        )
-                        .await;
-                        return;
-                    }
-                }
-            }
-            ReviewMode::CleanThread => {
-                match self
-                    .start_background_reviewer_thread(
+            // --- collect a fresh workspace diff for this round ---
+            let diff = match collect_workspace_diff(&cwd).await {
+                Ok(diff) => diff,
+                Err(error) => {
+                    self.fail_job(
                         &job_id,
-                        &cwd,
-                        &reviewer_provider,
-                        reviewer_model.as_deref(),
+                        format!("failed to collect the workspace diff: {error}"),
                     )
-                    .await
-                {
-                    // reviewer_thread_id is already recorded on the job by
-                    // start_background_reviewer_thread (atomically, under one write
-                    // lock).
-                    Ok(thread_id) => (thread_id, reviewer_model.clone(), None),
-                    Err(error) => {
-                        self.fail_job(
+                    .await;
+                    return;
+                }
+            };
+            {
+                let generated_at = diff.generated_at;
+                let truncated = diff.truncated;
+                self.update_job(&job_id, |job| {
+                    job.workspace_diff_generated_at = Some(generated_at);
+                    job.workspace_diff_truncated = truncated;
+                })
+                .await;
+            }
+
+            // --- obtain the reviewer thread + its per-turn model/effort ---
+            // Round 1 uses the request's mode (clean, or Phase-3 reuse); later rounds
+            // always reuse the reviewer established in round 1. A reused thread keeps
+            // its OWN model/effort (passing `None` would resolve to the parent's).
+            self.set_job_status(&job_id, ReviewJobStatus::StartingReviewer)
+                .await;
+            let existing_reviewer = reviewer_thread_id.clone().or_else(|| match &reviewer_mode {
+                ReviewMode::ExistingThread { thread_id } => Some(thread_id.clone()),
+                ReviewMode::CleanThread => None,
+            });
+            let reuse_existing = existing_reviewer.is_some();
+            let (this_reviewer_id, reviewer_turn_model, reviewer_turn_effort) =
+                match existing_reviewer {
+                    Some(existing) => match self.prepare_reused_reviewer_thread(&existing).await {
+                        Ok((model, effort)) => (existing, model, effort),
+                        Err(error) => {
+                            self.fail_job(
+                                &job_id,
+                                format!("failed to prepare the reviewer thread: {error}"),
+                            )
+                            .await;
+                            return;
+                        }
+                    },
+                    None => match self
+                        .start_background_reviewer_thread(
                             &job_id,
-                            format!("failed to start the reviewer thread: {error}"),
+                            &cwd,
+                            &reviewer_provider,
+                            reviewer_model.as_deref(),
+                        )
+                        .await
+                    {
+                        Ok(thread_id) => (thread_id, reviewer_model.clone(), None),
+                        Err(error) => {
+                            self.fail_job(
+                                &job_id,
+                                format!("failed to start the reviewer thread: {error}"),
+                            )
+                            .await;
+                            return;
+                        }
+                    },
+                };
+
+            // --- send the review prompt + wait + read-back (fresh-message bound) ---
+            self.set_job_status(&job_id, ReviewJobStatus::WaitingForReviewer)
+                .await;
+            let prompt = if reuse_existing {
+                re_review_prompt(&recap, &diff, instructions.as_deref())
+            } else {
+                reviewer_prompt(&recap, &diff, instructions.as_deref())
+            };
+            let reviewer_baseline = self
+                .latest_assistant_entry(&this_reviewer_id)
+                .await
+                .map(|(item_id, _)| item_id);
+            match self
+                .send_message_to_thread(
+                    &this_reviewer_id,
+                    &prompt,
+                    reviewer_turn_model.as_deref(),
+                    reviewer_turn_effort.as_deref(),
+                )
+                .await
+            {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    self.fail_after_uncertain_turn_start(
+                        &job_id,
+                        &this_reviewer_id,
+                        "reviewer did not return a turn id",
+                    )
+                    .await;
+                    return;
+                }
+                Err(error) => {
+                    self.fail_after_uncertain_turn_start(
+                        &job_id,
+                        &this_reviewer_id,
+                        format!("failed to send the reviewer prompt: {error}"),
+                    )
+                    .await;
+                    return;
+                }
+            }
+            // A background Claude reviewer's synthetic `claude-pending-…` id is
+            // promoted to its real session id once its turn starts; re-read it.
+            let current_id = self
+                .current_reviewer_thread_id(&job_id)
+                .await
+                .unwrap_or(this_reviewer_id);
+            reviewer_thread_id = Some(current_id.clone());
+            match self.wait_for_thread_idle_outcome(&current_id).await {
+                WaitOutcome::Completed => {}
+                outcome @ (WaitOutcome::FailedApproval
+                | WaitOutcome::FailedAskUser
+                | WaitOutcome::TimedOut) => {
+                    // Stop the reviewer turn; if it can't be stopped, the job enters
+                    // the persistent Blocked state (threads stay review-locked).
+                    if self.stop_thread_or_block(&job_id, &current_id).await {
+                        self.fail_job(&job_id, reviewer_failure_message(&outcome))
+                            .await;
+                    }
+                    return;
+                }
+            }
+            self.set_job_status(&job_id, ReviewJobStatus::WaitingToPostBack)
+                .await;
+            let current_id = self
+                .current_reviewer_thread_id(&job_id)
+                .await
+                .unwrap_or(current_id);
+            reviewer_thread_id = Some(current_id.clone());
+            let review = match self.latest_assistant_entry(&current_id).await {
+                Some((item_id, text)) if reviewer_baseline.as_deref() != Some(item_id.as_str()) => {
+                    text
+                }
+                _ => {
+                    self.fail_job(&job_id, "the reviewer produced no review for this turn")
+                        .await;
+                    return;
+                }
+            };
+            let verdict = parse_verdict(&review);
+            {
+                let review = review.clone();
+                let verdict_str = verdict.as_str().to_string();
+                self.update_job(&job_id, |job| {
+                    job.review_text = Some(review);
+                    job.round = round;
+                    job.verdict = Some(verdict_str);
+                })
+                .await;
+            }
+
+            // --- decide: single-shot / approve / exhaust / drive the parent fix ---
+            self.set_job_status(&job_id, ReviewJobStatus::PostingBack)
+                .await;
+            if max_rounds == 1 {
+                // Single-shot: today's behavior — post the review and complete,
+                // regardless of verdict.
+                let message = post_back_message(&reviewer_provider, &current_id, &review);
+                self.finish_review_to_parent(
+                    &job_id,
+                    &parent_thread_id,
+                    message,
+                    ReviewJobStatus::Complete,
+                )
+                .await;
+                return;
+            }
+            if verdict.is_approved() {
+                let message = review_approved_message(&reviewer_provider, round, &review);
+                self.finish_review_to_parent(
+                    &job_id,
+                    &parent_thread_id,
+                    message,
+                    ReviewJobStatus::Complete,
+                )
+                .await;
+                return;
+            }
+            if round >= max_rounds {
+                let message = review_escalated_message(&reviewer_provider, max_rounds, &review);
+                self.finish_review_to_parent(
+                    &job_id,
+                    &parent_thread_id,
+                    message,
+                    ReviewJobStatus::Escalated,
+                )
+                .await;
+                return;
+            }
+
+            // --- not approved, rounds remain: drive the parent to address findings ---
+            self.set_job_status(&job_id, ReviewJobStatus::AddressingFindings)
+                .await;
+            let fix_prompt = parent_fix_prompt(&reviewer_provider, &review, round, max_rounds);
+            let parent_baseline = self
+                .latest_assistant_entry(&parent_thread_id)
+                .await
+                .map(|(item_id, _)| item_id);
+            match self
+                .send_message_to_thread(&parent_thread_id, &fix_prompt, None, None)
+                .await
+            {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    self.fail_after_uncertain_turn_start(
+                        &job_id,
+                        &parent_thread_id,
+                        "the author did not return a turn id for the fix",
+                    )
+                    .await;
+                    return;
+                }
+                Err(error) => {
+                    self.fail_after_uncertain_turn_start(
+                        &job_id,
+                        &parent_thread_id,
+                        format!("failed to ask the author to address findings: {error}"),
+                    )
+                    .await;
+                    return;
+                }
+            }
+            match self.wait_for_thread_idle_outcome(&parent_thread_id).await {
+                WaitOutcome::Completed => {}
+                WaitOutcome::FailedApproval
+                | WaitOutcome::FailedAskUser
+                | WaitOutcome::TimedOut => {
+                    // The author's fix needs a human (its sandbox prompts on a write,
+                    // or it asked a question). Stop the turn and escalate to the user.
+                    if self.stop_thread_or_block(&job_id, &parent_thread_id).await {
+                        let message =
+                            review_escalated_message(&reviewer_provider, max_rounds, &review);
+                        self.finish_review_to_parent(
+                            &job_id,
+                            &parent_thread_id,
+                            message,
+                            ReviewJobStatus::Escalated,
                         )
                         .await;
-                        return;
                     }
+                    return;
                 }
             }
-        };
-
-        // --- Step 4: send the reviewer prompt and wait (background turn) -----
-        self.set_job_status(&job_id, ReviewJobStatus::WaitingForReviewer)
-            .await;
-        // A reused thread already holds its prior review; frame a delta re-review.
-        let prompt = if is_reuse {
-            re_review_prompt(&recap, &diff, instructions.as_deref())
-        } else {
-            reviewer_prompt(&recap, &diff, instructions.as_deref())
-        };
-        // Bind the read-back to a FRESH reviewer message: remember the reviewer's
-        // current last reply so a reused thread can't replay its PRIOR review as this
-        // turn's result. A clean thread has no prior reply, so this is `None`.
-        let reviewer_baseline = self
-            .latest_assistant_entry(&reviewer_thread_id)
-            .await
-            .map(|(item_id, _)| item_id);
-        match self
-            .send_message_to_thread(
-                &reviewer_thread_id,
-                &prompt,
-                reviewer_turn_model.as_deref(),
-                reviewer_turn_effort.as_deref(),
-            )
-            .await
-        {
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                self.fail_after_uncertain_turn_start(
+            // Require a FRESH author reply; if the fix turn produced none, escalate
+            // rather than re-review an unchanged tree forever.
+            let author_responded = match self.latest_assistant_entry(&parent_thread_id).await {
+                Some((item_id, _)) => parent_baseline.as_deref() != Some(item_id.as_str()),
+                None => false,
+            };
+            if !author_responded {
+                let message = review_escalated_message(&reviewer_provider, max_rounds, &review);
+                self.finish_review_to_parent(
                     &job_id,
-                    &reviewer_thread_id,
-                    "reviewer did not return a turn id",
+                    &parent_thread_id,
+                    message,
+                    ReviewJobStatus::Escalated,
                 )
                 .await;
                 return;
             }
-            Err(error) => {
-                self.fail_after_uncertain_turn_start(
-                    &job_id,
-                    &reviewer_thread_id,
-                    format!("failed to send the reviewer prompt: {error}"),
-                )
-                .await;
-                return;
-            }
+            // Loop to the next round: fresh diff + re-review of the author's changes.
         }
-        // A background Claude reviewer's synthetic `claude-pending-…` id is promoted
-        // to the real session id once its turn starts; the job's reviewer_thread_id
-        // is rewritten in place, so read it back before waiting / reading the review.
-        let reviewer_thread_id = self
-            .current_reviewer_thread_id(&job_id)
-            .await
-            .unwrap_or(reviewer_thread_id);
-        match self.wait_for_thread_idle_outcome(&reviewer_thread_id).await {
-            WaitOutcome::Completed => {}
-            outcome @ (WaitOutcome::FailedApproval
-            | WaitOutcome::FailedAskUser
-            | WaitOutcome::TimedOut) => {
-                // Stop the reviewer turn; if it can't be stopped, the job enters the
-                // persistent Blocked state (its threads stay review-locked) instead
-                // of unwinding. No active-thread handoff — the parent was never
-                // displaced.
-                if self
-                    .stop_thread_or_block(&job_id, &reviewer_thread_id)
-                    .await
-                {
-                    self.fail_job(&job_id, reviewer_failure_message(&outcome))
-                        .await;
-                }
-                return;
-            }
-        }
-        self.set_job_status(&job_id, ReviewJobStatus::WaitingToPostBack)
-            .await;
-        // Read the review back from the reviewer thread (re-read the id in case of a
-        // late promotion). Never read `active_thread_id` — the active thread is the
-        // user's, not the reviewer's.
-        let reviewer_thread_id = self
-            .current_reviewer_thread_id(&job_id)
-            .await
-            .unwrap_or(reviewer_thread_id);
-        let review = match self.latest_assistant_entry(&reviewer_thread_id).await {
-            Some((item_id, text)) if reviewer_baseline.as_deref() != Some(item_id.as_str()) => text,
-            _ => {
-                // The reviewer turn settled without a fresh reply (no output, an
-                // abnormal end, or — for a reused thread — only its prior review is
-                // present). Never post a stale review back as this turn's result.
-                self.fail_job(&job_id, "the reviewer produced no review for this turn")
-                    .await;
-                return;
-            }
-        };
-        {
-            let review = review.clone();
-            self.update_job(&job_id, |job| {
-                job.review_text = Some(review);
-            })
-            .await;
-        }
+    }
 
-        // --- Step 5: post the review back into the parent thread -------------
-        // Runs as a (background) turn on the parent; no active-thread handoff.
-        self.set_job_status(&job_id, ReviewJobStatus::PostingBack)
-            .await;
-        let message = post_back_message(&reviewer_provider, &reviewer_thread_id, &review);
+    /// Post a final message into the parent thread and set the job's terminal
+    /// status. On a send error the job is failed instead.
+    async fn finish_review_to_parent(
+        &self,
+        job_id: &str,
+        parent_thread_id: &str,
+        message: String,
+        status: ReviewJobStatus,
+    ) {
         let post_turn = match self
-            .send_message_to_thread(&parent_thread_id, &message, None, None)
+            .send_message_to_thread(parent_thread_id, &message, None, None)
             .await
         {
             Ok(turn_id) => turn_id,
             Err(error) => {
                 self.fail_after_uncertain_turn_start(
-                    &job_id,
-                    &parent_thread_id,
+                    job_id,
+                    parent_thread_id,
                     format!("failed to post the review back to the parent: {error}"),
                 )
                 .await;
                 return;
             }
         };
-        self.update_job(&job_id, |job| {
+        self.update_job(job_id, |job| {
             job.posted_back_turn_id = post_turn;
-            job.set_status(ReviewJobStatus::Complete);
+            job.set_status(status);
         })
         .await;
-        {
-            let mut relay = self.relay.write().await;
-            relay.push_log(
-                "info",
-                format!(
-                    "Review {job_id} complete; posted the {reviewer_provider} review back to \
-thread {parent_thread_id}."
-                ),
-            );
-            relay.notify();
-        }
+        let mut relay = self.relay.write().await;
+        relay.push_log(
+            "info",
+            format!(
+                "Review {job_id} {}; result posted to thread {parent_thread_id}.",
+                status.as_str()
+            ),
+        );
+        relay.notify();
     }
 
     async fn review_job_fields(&self, job_id: &str) -> Option<ReviewJobFields> {
@@ -709,6 +817,7 @@ thread {parent_thread_id}."
             cwd: job.cwd.clone(),
             device_id: job.requested_by_device_id.clone(),
             instructions: job.instructions.clone(),
+            max_rounds: job.max_rounds,
         })
     }
 
