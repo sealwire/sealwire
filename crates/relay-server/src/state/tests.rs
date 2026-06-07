@@ -1216,23 +1216,22 @@ fn reviewer_thread_views_enrich_provider_and_label_from_summary() {
 #[test]
 fn reviewers_to_evict_returns_oldest_beyond_cap() {
     let mut relay = test_state();
-    // Six reviewers of parent-1 with increasing created_at (oldest = rev-1).
+    // Six reviewers of parent-1, registered in order → strictly increasing seq, so
+    // FIFO order is registration order even though they share a wall-clock second.
     for index in 1..=6u64 {
-        let id = format!("rev-{index}");
-        relay.register_reviewer_thread(id.clone(), "parent-1".to_string());
-        relay.reviewer_threads.get_mut(&id).unwrap().created_at = index;
+        relay.register_reviewer_thread(format!("rev-{index}"), "parent-1".to_string());
     }
     // A reviewer of a different parent is never considered.
     relay.register_reviewer_thread("rev-other".to_string(), "parent-2".to_string());
 
-    // Keep 5 → evict the single oldest.
+    // Keep 5 → evict the single oldest (the first registered).
     assert_eq!(
         relay.reviewers_to_evict("parent-1", 5),
         vec!["rev-1".to_string()]
     );
     // A parent under the cap evicts nothing.
     assert!(relay.reviewers_to_evict("parent-2", 5).is_empty());
-    // A lower cap evicts the oldest first.
+    // A lower cap evicts the oldest first, in registration order.
     assert_eq!(
         relay.reviewers_to_evict("parent-1", 3),
         vec![
@@ -1245,33 +1244,59 @@ fn reviewers_to_evict_returns_oldest_beyond_cap() {
 }
 
 #[test]
-fn reviewer_thread_created_at_round_trips_and_tolerates_legacy_string() {
+fn reviewers_to_evict_protects_active_review_reviewer() {
+    let mut relay = test_state();
+    for index in 1..=6u64 {
+        relay.register_reviewer_thread(format!("rev-{index}"), "parent-1".to_string());
+    }
+    // The OLDEST reviewer (rev-1) is bound to a non-terminal review job.
+    let mut job = ReviewJob::new(
+        "job-1".to_string(),
+        "parent-1".to_string(),
+        "codex".to_string(),
+        "codex".to_string(),
+        None,
+        ReviewMode::CleanThread,
+        "/tmp/project".to_string(),
+        "device-1".to_string(),
+        None,
+    );
+    job.reviewer_thread_id = Some("rev-1".to_string());
+    relay.insert_review_job(job);
+
+    // rev-1 is the oldest but protected → the next-oldest (rev-2) is evicted instead.
+    assert_eq!(
+        relay.reviewers_to_evict("parent-1", 5),
+        vec!["rev-2".to_string()]
+    );
+}
+
+#[test]
+fn reviewer_thread_seq_resumes_past_restored_max() {
     let mut relay = test_state();
     relay.register_reviewer_thread("rev-1".to_string(), "parent-1".to_string());
-    relay.reviewer_threads.get_mut("rev-1").unwrap().created_at = 1234;
+    relay.register_reviewer_thread("rev-2".to_string(), "parent-1".to_string());
 
-    // Round-trip the new {parent, created_at} form through the persisted snapshot.
+    // Round-trip the {parent, seq} form through the persisted snapshot.
     let persisted = PersistedRelayState::from_relay(&relay);
     let json = serde_json::to_string(&persisted).expect("serialize");
     let decoded: PersistedRelayState = serde_json::from_str(&json).expect("decode");
-    let record = decoded.reviewer_threads.get("rev-1").expect("record");
-    assert_eq!(record.parent_thread_id, "parent-1");
-    assert_eq!(record.created_at, 1234);
+    let seq_1 = decoded.reviewer_threads.get("rev-1").expect("rev-1").seq;
+    let seq_2 = decoded.reviewer_threads.get("rev-2").expect("rev-2").seq;
+    assert!(seq_2 > seq_1, "registration seq is strictly increasing");
 
-    // The legacy persisted form (value was a bare parent-id string) still decodes,
-    // with created_at defaulting to 0 (so it sorts oldest / evicts first).
-    let legacy = json.replace(
-        "\"rev-1\":{\"parent_thread_id\":\"parent-1\",\"created_at\":1234}",
-        "\"rev-1\":\"parent-1\"",
+    // After restoring, a newly registered reviewer must sort AFTER the restored ones
+    // (the counter resumes past the largest restored seq) — so FIFO order survives a
+    // restart and an old reviewer is still evicted before a post-restart one.
+    let (change_tx, _) = watch::channel(0_u64);
+    let mut restored = RelayState::new("/tmp/x".to_string(), change_tx, SecurityProfile::private());
+    restored.apply_persisted(&persisted);
+    restored.register_reviewer_thread("rev-3".to_string(), "parent-1".to_string());
+    assert_eq!(
+        restored.reviewers_to_evict("parent-1", 2),
+        vec!["rev-1".to_string()],
+        "the pre-restart oldest is evicted before the post-restart reviewer"
     );
-    assert_ne!(legacy, json, "legacy replacement should have applied");
-    let decoded_legacy: PersistedRelayState = serde_json::from_str(&legacy).expect("decode legacy");
-    let record = decoded_legacy
-        .reviewer_threads
-        .get("rev-1")
-        .expect("legacy record");
-    assert_eq!(record.parent_thread_id, "parent-1");
-    assert_eq!(record.created_at, 0);
 }
 
 #[test]

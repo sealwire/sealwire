@@ -3358,18 +3358,19 @@ mod review_tests {
             "parent should keep exactly the cap of reviewers"
         );
 
-        // Exactly one created reviewer was evicted from the durable map AND
-        // permanently deleted from the provider.
+        // The evicted reviewer is exactly the OLDEST (first created) one — true FIFO,
+        // deterministic via the registration seq — and it's gone from the durable map
+        // AND permanently deleted from the provider.
         let evicted: Vec<&String> = created.iter().filter(|id| !kept.contains(id)).collect();
         assert_eq!(
-            evicted.len(),
-            1,
-            "exactly one oldest reviewer evicted: created={created:?} kept={kept:?}"
+            evicted,
+            vec![&created[0]],
+            "the single oldest reviewer is evicted (FIFO): created={created:?} kept={kept:?}"
         );
         let provider_threads = providers.get("codex").unwrap().threads.lock().await;
         assert!(
-            !provider_threads.contains_key(evicted[0]),
-            "the evicted reviewer thread must be deleted from the provider"
+            !provider_threads.contains_key(&created[0]),
+            "the evicted (oldest) reviewer thread must be deleted from the provider"
         );
         for id in &kept {
             assert!(

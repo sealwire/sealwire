@@ -80,56 +80,16 @@ impl ThreadSessionSettings {
     }
 }
 
-/// Durable identity of one reviewer thread: which parent it reviews and when it
-/// was registered. `created_at` gives a stable FIFO order so the oldest reviewer of
-/// a parent can be evicted once the per-parent cap is exceeded.
-#[derive(Debug, Clone, Serialize)]
+/// Durable identity of one reviewer thread: which parent it reviews and a strictly
+/// increasing registration sequence. `seq` (not a wall-clock time) gives a reliable
+/// FIFO order — even for reviewers registered in the same second — so the genuinely
+/// oldest reviewer of a parent is the one evicted once the per-parent cap is hit.
+/// The counter is restored as `max(seq) + 1` after a restart, so order survives.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ReviewerThread {
     pub(crate) parent_thread_id: String,
-    pub(crate) created_at: u64,
-}
-
-impl ReviewerThread {
-    fn new(parent_thread_id: String) -> Self {
-        Self {
-            parent_thread_id,
-            created_at: unix_now(),
-        }
-    }
-}
-
-// Tolerant of the legacy persisted form where the value was a bare parent-thread-id
-// string (before `created_at` existed): such entries decode with `created_at: 0`,
-// so they sort oldest and are evicted first.
-impl<'de> Deserialize<'de> for ReviewerThread {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Repr {
-            Legacy(String),
-            Full {
-                parent_thread_id: String,
-                #[serde(default)]
-                created_at: u64,
-            },
-        }
-        Ok(match Repr::deserialize(deserializer)? {
-            Repr::Legacy(parent_thread_id) => ReviewerThread {
-                parent_thread_id,
-                created_at: 0,
-            },
-            Repr::Full {
-                parent_thread_id,
-                created_at,
-            } => ReviewerThread {
-                parent_thread_id,
-                created_at,
-            },
-        })
-    }
+    #[serde(default)]
+    pub(crate) seq: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -236,6 +196,9 @@ pub struct RelayState {
     /// (e.g. the user kept it when deleting its parent). Distinct from
     /// `is_thread_review_locked` (live freeze), which remains in-memory.
     pub(super) reviewer_threads: HashMap<String, ReviewerThread>,
+    /// Next reviewer-thread registration sequence (monotonic FIFO order). Restored as
+    /// `max(seq) + 1` after a restart so eviction order survives. In-memory only.
+    reviewer_thread_seq: u64,
 }
 
 impl RelayState {
@@ -292,6 +255,7 @@ impl RelayState {
             recent_remote_actions: HashMap::new(),
             review_jobs: HashMap::new(),
             reviewer_threads: HashMap::new(),
+            reviewer_thread_seq: 0,
         };
         state.push_log("info", "Relay booted. Waiting for Codex app-server.");
         state
@@ -378,11 +342,18 @@ impl RelayState {
     }
 
     /// Persistently record a reviewer thread's identity (reviewer id -> parent id),
-    /// so it stays hidden from navigation across restarts and job eviction. Stamps
-    /// the current time for FIFO eviction ordering.
+    /// so it stays hidden from navigation across restarts and job eviction. Assigns a
+    /// strictly increasing `seq` for FIFO eviction ordering.
     pub(crate) fn register_reviewer_thread(&mut self, reviewer_id: String, parent_id: String) {
-        self.reviewer_threads
-            .insert(reviewer_id, ReviewerThread::new(parent_id));
+        let seq = self.reviewer_thread_seq;
+        self.reviewer_thread_seq += 1;
+        self.reviewer_threads.insert(
+            reviewer_id,
+            ReviewerThread {
+                parent_thread_id: parent_id,
+                seq,
+            },
+        );
     }
 
     /// Stop hiding a reviewer thread — either because it was actually deleted, or
@@ -392,6 +363,18 @@ impl RelayState {
         self.reviewer_threads
             .remove(reviewer_id)
             .map(|record| record.parent_thread_id)
+    }
+
+    /// After restoring `reviewer_threads` from a snapshot, resume the registration
+    /// counter past the largest restored `seq`, so newly registered reviewers always
+    /// sort after the restored ones (FIFO order survives a restart).
+    fn recompute_reviewer_thread_seq(&mut self) {
+        self.reviewer_thread_seq = self
+            .reviewer_threads
+            .values()
+            .map(|record| record.seq)
+            .max()
+            .map_or(0, |max| max + 1);
     }
 
     /// Reviewer thread ids owned by `parent_id` (for the parent-delete prompt).
@@ -404,20 +387,20 @@ impl RelayState {
     }
 
     /// Reviewer threads of `parent_id` to evict so it keeps at most `keep`: the
-    /// oldest by `created_at` beyond the cap, FIFO. Reviewers currently bound to a
-    /// non-terminal review job are protected (never evicted mid-review). Returns ids
-    /// only; the caller performs the actual provider delete.
+    /// oldest by registration `seq` beyond the cap, FIFO. Reviewers currently bound
+    /// to a non-terminal review job are protected (never evicted mid-review). Returns
+    /// ids only; the caller performs the actual provider delete.
     pub(crate) fn reviewers_to_evict(&self, parent_id: &str, keep: usize) -> Vec<String> {
         let mut owned: Vec<(&String, u64)> = self
             .reviewer_threads
             .iter()
             .filter(|(_, record)| record.parent_thread_id == parent_id)
-            .map(|(reviewer, record)| (reviewer, record.created_at))
+            .map(|(reviewer, record)| (reviewer, record.seq))
             .collect();
         if owned.len() <= keep {
             return Vec::new();
         }
-        // Oldest first (id as a stable tiebreak for equal timestamps).
+        // Oldest first (seq is unique; id is a defensive tiebreak only).
         owned.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(b.0)));
         let protected: HashSet<&str> = self
             .review_jobs
@@ -1146,6 +1129,7 @@ impl RelayState {
         self.paired_devices = persisted.paired_devices.clone();
         // Durable reviewer-thread identity survives restart (review jobs do not).
         self.reviewer_threads = persisted.reviewer_threads.clone();
+        self.recompute_reviewer_thread_seq();
         self.online_surface_peer_ids.clear();
         self.online_surface_peer_devices.clear();
         self.backfill_device_records_from_paired_devices();
@@ -1539,6 +1523,7 @@ impl RelayState {
         self.paired_devices = persisted.paired_devices.clone();
         // Durable reviewer-thread identity survives restart (review jobs do not).
         self.reviewer_threads = persisted.reviewer_threads.clone();
+        self.recompute_reviewer_thread_seq();
         self.online_surface_peer_ids.clear();
         self.online_surface_peer_devices.clear();
         self.backfill_device_records_from_paired_devices();
