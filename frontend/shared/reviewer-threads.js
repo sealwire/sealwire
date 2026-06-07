@@ -45,3 +45,37 @@ export function reviewerChoiceRequestInit(deleteReviewers) {
     body: JSON.stringify({ delete_reviewers: deleteReviewers }),
   };
 }
+
+/**
+ * Reviewer threads (from the session snapshot's `reviewer_threads` map) that can be
+ * REUSED for a new review of `parentThreadId` (Phase 3 reuse picker). Filters to the
+ * parent; if `provider` is given, keeps entries whose provider matches OR is unknown
+ * (`null` after a restart — still offered, the backend re-derives the provider on
+ * submit). Sorted newest-first by `updated_at`. Defensive about null/malformed input.
+ *
+ * @param {Array<{reviewer_thread_id?: string, parent_thread_id?: string, reviewer_provider?: string|null, name?: string|null, updated_at?: number|null}>|null|undefined} reviewerThreads
+ * @param {string|null|undefined} parentThreadId
+ * @param {string|null|undefined} provider
+ * @returns {Array<{reviewerThreadId: string, provider: string|null, label: string}>}
+ */
+export function selectReusableReviewers(reviewerThreads, parentThreadId, provider) {
+  if (!parentThreadId) {
+    return [];
+  }
+  return (reviewerThreads || [])
+    .filter(
+      (entry) =>
+        entry?.reviewer_thread_id &&
+        entry.parent_thread_id === parentThreadId &&
+        (!provider ||
+          entry.reviewer_provider == null ||
+          entry.reviewer_provider === provider)
+    )
+    .slice()
+    .sort((a, b) => (b?.updated_at || 0) - (a?.updated_at || 0))
+    .map((entry) => ({
+      reviewerThreadId: entry.reviewer_thread_id,
+      provider: entry.reviewer_provider ?? null,
+      label: entry.name || entry.reviewer_thread_id,
+    }));
+}

@@ -342,15 +342,46 @@ impl RelayState {
             .collect()
     }
 
-    /// Compact views of the reviewer→parent map for the snapshot (the local delete
-    /// UI uses it to decide whether to prompt). Sorted for a stable snapshot.
+    /// The in-process summary for a reviewer thread, preferring its live runtime
+    /// and falling back to the cached thread row. `None` after a restart (runtimes
+    /// and the thread cache are not persisted — only the reviewer→parent map is).
+    fn reviewer_thread_summary(&self, reviewer_id: &str) -> Option<&ThreadSummaryView> {
+        self.runtimes
+            .get(reviewer_id)
+            .and_then(|runtime| runtime.summary.as_ref())
+            .or_else(|| self.threads.iter().find(|thread| thread.id == reviewer_id))
+    }
+
+    /// The provider key for a reviewer thread, derived from its summary
+    /// (`provider`, then `source`). `None` if the thread is unknown in-process
+    /// (e.g. after a restart) — callers re-derive via `find_thread_provider`.
+    pub(crate) fn reviewer_thread_provider(&self, reviewer_id: &str) -> Option<String> {
+        let summary = self.reviewer_thread_summary(reviewer_id)?;
+        [summary.provider.as_str(), summary.source.as_str()]
+            .into_iter()
+            .find(|value| !value.is_empty())
+            .map(str::to_string)
+    }
+
+    /// Compact views of the reviewer→parent map for the snapshot. The local UI uses
+    /// it both for the delete/archive prompt and the Phase 3 reuse picker, so each
+    /// view is enriched (best-effort) with the reviewer thread's provider, name, and
+    /// last-updated time from its in-process summary. After a restart those joins
+    /// return `None` (the summary isn't persisted); the backend re-derives the
+    /// provider on submit. Sorted for a stable snapshot.
     pub(crate) fn reviewer_thread_views(&self) -> Vec<crate::protocol::ReviewerThreadView> {
         let mut views: Vec<_> = self
             .reviewer_threads
             .iter()
-            .map(|(reviewer, parent)| crate::protocol::ReviewerThreadView {
-                reviewer_thread_id: reviewer.clone(),
-                parent_thread_id: parent.clone(),
+            .map(|(reviewer, parent)| {
+                let summary = self.reviewer_thread_summary(reviewer);
+                crate::protocol::ReviewerThreadView {
+                    reviewer_thread_id: reviewer.clone(),
+                    parent_thread_id: parent.clone(),
+                    reviewer_provider: self.reviewer_thread_provider(reviewer),
+                    name: summary.and_then(|s| s.name.clone()),
+                    updated_at: summary.map(|s| s.updated_at),
+                }
             })
             .collect();
         views.sort_by(|a, b| a.reviewer_thread_id.cmp(&b.reviewer_thread_id));

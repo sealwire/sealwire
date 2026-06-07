@@ -2816,6 +2816,150 @@ mod review_tests {
     }
 
     #[tokio::test]
+    async fn review_reuses_existing_reviewer_thread() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+
+        // First review spawns a clean reviewer thread.
+        let first = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("first review should start");
+        let first_job = wait_for_review(&app, &first.review_job_id).await;
+        assert_eq!(
+            first_job.status, "complete",
+            "job failed: {:?}",
+            first_job.error
+        );
+        let reviewer = first_job
+            .reviewer_thread_id
+            .clone()
+            .expect("reviewer thread id");
+        assert!(app
+            .relay
+            .read()
+            .await
+            .reviewer_threads_of_parent(&parent.id)
+            .contains(&reviewer));
+        wait_for_active_turn_idle(&app).await;
+
+        let provider = providers.get("codex").unwrap();
+        let threads_before = provider.start_thread_cwds.lock().await.len();
+
+        // Second review REUSES the existing reviewer thread.
+        let mut reuse = review_input("codex");
+        reuse.reviewer_thread_id = Some(reviewer.clone());
+        let second = app
+            .request_review(reuse)
+            .await
+            .expect("reuse review should start");
+        // The receipt immediately names the reused thread.
+        assert_eq!(
+            second.reviewer_thread_id.as_deref(),
+            Some(reviewer.as_str())
+        );
+        let second_job = wait_for_review(&app, &second.review_job_id).await;
+        assert_eq!(
+            second_job.status, "complete",
+            "reuse job failed: {:?}",
+            second_job.error
+        );
+        assert_eq!(
+            second_job.reviewer_thread_id.as_deref(),
+            Some(reviewer.as_str()),
+            "the reuse job runs on the same reviewer thread"
+        );
+
+        // No NEW reviewer thread was created (an idle reused reviewer in the same
+        // cwd also does not trip the has_working_thread_in_cwd guard).
+        assert_eq!(
+            provider.start_thread_cwds.lock().await.len(),
+            threads_before,
+            "reuse must not create a new reviewer thread"
+        );
+
+        // The second review's reviewer turn went to the reused thread with the
+        // re-review framing; recap → reviewer(reuse) → post-back are the last 3 turns.
+        let turns = provider.turns.lock().await.clone();
+        assert_eq!(turns.len(), 6, "expected 3 turns per review: {turns:?}");
+        assert_eq!(turns[3].0, parent.id, "second recap goes to the parent");
+        assert_eq!(
+            turns[4].0, reviewer,
+            "second review runs on the reused thread"
+        );
+        assert!(
+            turns[4]
+                .1
+                .contains("You previously reviewed this repository"),
+            "reuse should send the re-review prompt: {}",
+            turns[4].1
+        );
+        assert_eq!(
+            turns[5].0, parent.id,
+            "second review posts back to the parent"
+        );
+    }
+
+    #[tokio::test]
+    async fn review_reuse_rejects_foreign_reviewer() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, _providers) = build_review_app(cwd, &["codex"]).await;
+        start_parent(&app, cwd, "codex").await;
+
+        // A reviewer thread that belongs to a DIFFERENT parent is not reusable here.
+        app.relay
+            .write()
+            .await
+            .register_reviewer_thread("foreign-reviewer".to_string(), "other-parent".to_string());
+
+        let mut input = review_input("codex");
+        input.reviewer_thread_id = Some("foreign-reviewer".to_string());
+        let error = app
+            .request_review(input)
+            .await
+            .expect_err("a reviewer owned by another parent should be rejected");
+        assert!(error.contains("does not belong"), "got: {error}");
+    }
+
+    #[tokio::test]
+    async fn review_reuse_rejects_provider_mismatch() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, _providers) = build_review_app(cwd, &["codex", "claude_code"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+
+        // Create a codex reviewer via a first review.
+        let first = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("first review should start");
+        let first_job = wait_for_review(&app, &first.review_job_id).await;
+        let reviewer = first_job
+            .reviewer_thread_id
+            .clone()
+            .expect("reviewer thread id");
+        assert!(app
+            .relay
+            .read()
+            .await
+            .reviewer_threads_of_parent(&parent.id)
+            .contains(&reviewer));
+        wait_for_active_turn_idle(&app).await;
+
+        // Reusing it but claiming a different provider is rejected.
+        let mut input = review_input("claude_code");
+        input.reviewer_thread_id = Some(reviewer.clone());
+        let error = app
+            .request_review(input)
+            .await
+            .expect_err("a provider mismatch should be rejected");
+        assert!(error.contains("does not match"), "got: {error}");
+    }
+
+    #[tokio::test]
     async fn review_rejects_when_no_active_parent() {
         let dir = TempDir::new().expect("tmpdir");
         let (app, _providers) = build_review_app(dir.path().to_str().unwrap(), &["codex"]).await;
@@ -2889,19 +3033,20 @@ mod review_tests {
     }
 
     #[tokio::test]
-    async fn review_rejects_existing_reviewer_thread() {
+    async fn review_reuse_rejects_unknown_reviewer() {
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();
         let (app, _providers) = build_review_app(cwd, &["codex"]).await;
         start_parent(&app, cwd, "codex").await;
 
+        // An id that is not a reviewer thread of the active parent is rejected.
         let mut input = review_input("codex");
-        input.reviewer_thread_id = Some("some-existing-thread".to_string());
+        input.reviewer_thread_id = Some("some-unknown-thread".to_string());
         let error = app
             .request_review(input)
             .await
-            .expect_err("existing reviewer thread should be rejected in v1");
-        assert!(error.contains("clean reviewer"), "got: {error}");
+            .expect_err("an unknown reviewer thread should be rejected");
+        assert!(error.contains("does not belong"), "got: {error}");
     }
 
     #[tokio::test]

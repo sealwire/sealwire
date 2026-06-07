@@ -109,6 +109,7 @@ import {
   selectReviewLaunchModel,
 } from "../shared/review-state.js";
 import { ReviewLauncher } from "../shared/review-panel.js";
+import { selectReusableReviewers } from "../shared/reviewer-threads.js";
 import { createPanelControl } from "../local/panel-controls.js";
 import { setupHeaderBandSync } from "../local/header-band-sync.js";
 import {
@@ -782,6 +783,14 @@ function RemoteApp() {
         providerModels: remoteUi.providerModels,
         session,
       }),
+      // Remote snapshots strip `reviewer_threads` (broker frame budget), so this is
+      // empty on remote → the picker shows only "New clean reviewer session".
+      // Reuse is a local-only affordance for this phase.
+      reusableReviewers: selectReusableReviewers(
+        session?.reviewer_threads,
+        session?.active_thread_id,
+        null
+      ),
       canRequest: canRequestReview(session, remoteDeviceId),
       blocked: isReviewBlocked(session),
     });

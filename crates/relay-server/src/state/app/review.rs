@@ -19,7 +19,8 @@ use crate::protocol::{
     TranscriptEntryKind, TranscriptEntryView,
 };
 use crate::state::{
-    parent_recap_prompt, post_back_message, reviewer_prompt, ReviewJob, ReviewJobStatus, ReviewMode,
+    parent_recap_prompt, post_back_message, re_review_prompt, reviewer_prompt, ReviewJob,
+    ReviewJobStatus, ReviewMode,
 };
 
 use super::*;
@@ -71,6 +72,7 @@ struct ReviewJobFields {
     parent_thread_id: String,
     reviewer_provider: String,
     reviewer_model: Option<String>,
+    reviewer_mode: ReviewMode,
     cwd: String,
     device_id: String,
     instructions: Option<String>,
@@ -87,16 +89,21 @@ impl AppState {
         let device_id = require_device_id(input.device_id.clone())?;
         self.expire_stale_controller_if_needed().await;
 
-        if input.reviewer_thread_id.is_some() {
-            return Err("reusing an existing reviewer thread is not supported yet; \
-request a clean reviewer session"
-                .to_string());
-        }
-        let reviewer_provider = non_empty(Some(input.reviewer_provider.clone()))
-            .ok_or_else(|| "reviewer_provider is required".to_string())?;
+        // Phase 3: an optional `reviewer_thread_id` reuses an existing reviewer
+        // thread (it keeps its prior review context) instead of spawning a clean
+        // one. The provider for a reused thread is derived/locked from the thread
+        // itself (below, under the relay read lock); the request's
+        // `reviewer_provider` is only a hint that must match if present.
+        let reuse_thread_id = non_empty(input.reviewer_thread_id.clone());
+        let requested_provider = non_empty(Some(input.reviewer_provider.clone()));
 
-        // Fail fast if the reviewer provider is not available.
-        self.resolve_provider(Some(&reviewer_provider))?;
+        if reuse_thread_id.is_none() {
+            // Clean reviewer: the provider is required and must be available now.
+            let reviewer_provider = requested_provider
+                .clone()
+                .ok_or_else(|| "reviewer_provider is required".to_string())?;
+            self.resolve_provider(Some(&reviewer_provider))?;
+        }
 
         // Briefly take the shared session slot ONLY to atomically validate and
         // record the job. Unlike before, we do NOT hold it for the review's
@@ -105,7 +112,7 @@ request a clean reviewer session"
         // `is_thread_review_locked`). The slot drops at the end of this function.
         let _slot = self.acquire_session_slot()?;
 
-        let (parent_thread_id, parent_provider, cwd) = {
+        let (parent_thread_id, parent_provider, cwd, locked_provider) = {
             let relay = self.relay.read().await;
             // One active review at a time (the slot no longer enforces this).
             if relay.has_active_review() {
@@ -140,7 +147,9 @@ request a clean reviewer session"
             // The active parent being idle does not mean the workspace is quiet: a
             // backgrounded thread sharing this cwd could mutate files while we
             // collect the diff or the reviewer reads it. Refuse rather than race
-            // (a worktree/snapshot mode is the future stronger fix).
+            // (a worktree/snapshot mode is the future stronger fix). A reused
+            // reviewer thread is idle at this point (its prior review is terminal),
+            // so it does not trip this guard.
             if relay.has_working_thread_in_cwd(&relay.current_cwd) {
                 return Err(
                     "another thread is running in this workspace; wait for it to finish before \
@@ -155,25 +164,90 @@ requesting a review"
                 &relay.allowed_roots,
             )?;
 
+            // Validate a reuse target and lock its provider.
+            let locked_provider = match &reuse_thread_id {
+                Some(reviewer_id) => {
+                    // The reviewer thread must be a reviewer of THIS parent. Rejects
+                    // unknown ids, foreign-parent reviewers, and un-hidden (forgotten)
+                    // ones. Works post-restart/eviction (the map is durable).
+                    if !relay
+                        .reviewer_threads_of_parent(&parent_thread_id)
+                        .contains(reviewer_id)
+                    {
+                        return Err("that reviewer thread does not belong to the thread \
+being reviewed"
+                            .to_string());
+                    }
+                    // Lock the provider to the reviewer thread's own provider. If the
+                    // caller sent a hint, it must match. `None` (post-restart, no
+                    // in-process summary) is re-derived after the lock via
+                    // `find_thread_provider`.
+                    match (
+                        relay.reviewer_thread_provider(reviewer_id),
+                        &requested_provider,
+                    ) {
+                        (Some(actual), Some(requested)) if &actual != requested => {
+                            return Err("the reviewer provider does not match the selected \
+reviewer thread"
+                                .to_string());
+                        }
+                        (resolved, _) => resolved,
+                    }
+                }
+                None => requested_provider.clone(),
+            };
+
             (
                 parent_thread_id,
                 relay.provider_name.clone(),
                 relay.current_cwd.clone(),
+                locked_provider,
             )
         };
 
+        // Finalize the reviewer provider. Clean reviews always have it (validated
+        // above). A reused thread without an in-process summary (post-restart) is
+        // re-derived by probing the provider registry.
+        let reviewer_provider = match locked_provider {
+            Some(provider) => provider,
+            None => {
+                let reviewer_id = reuse_thread_id
+                    .as_deref()
+                    .ok_or_else(|| "reviewer_provider is required".to_string())?;
+                let (provider_name, _bridge) = self.find_thread_provider(reviewer_id).await?;
+                provider_name.to_string()
+            }
+        };
+
         let job_id = format!("review-{}-{}", unix_now(), random_suffix());
-        let job = ReviewJob::new(
+        let reviewer_mode = match &reuse_thread_id {
+            Some(thread_id) => ReviewMode::ExistingThread {
+                thread_id: thread_id.clone(),
+            },
+            None => ReviewMode::CleanThread,
+        };
+        let mut job = ReviewJob::new(
             job_id.clone(),
             parent_thread_id.clone(),
             parent_provider,
             reviewer_provider,
-            non_empty(input.reviewer_model.clone()),
-            ReviewMode::CleanThread,
+            // A reused thread keeps its own session model; never override it.
+            if reuse_thread_id.is_some() {
+                None
+            } else {
+                non_empty(input.reviewer_model.clone())
+            },
+            reviewer_mode,
             cwd,
             device_id.clone(),
             non_empty(input.instructions.clone()),
         );
+        // For reuse, the reviewer thread id is known up front (it already exists and
+        // is registered in the durable map); record it so the orchestrator and the
+        // receipt point at it immediately.
+        if let Some(reviewer_id) = &reuse_thread_id {
+            job.reviewer_thread_id = Some(reviewer_id.clone());
+        }
         let status_view = job.status_view();
 
         {
@@ -202,7 +276,7 @@ requesting a review"
         Ok(RequestReviewReceipt {
             review_job_id: job_id,
             parent_thread_id,
-            reviewer_thread_id: None,
+            reviewer_thread_id: reuse_thread_id,
             status: status_view,
             message: "Review started. The reviewer will run and post its findings back \
 to this thread."
@@ -297,6 +371,7 @@ to this thread."
             parent_thread_id,
             reviewer_provider,
             reviewer_model,
+            reviewer_mode,
             cwd,
             device_id: _device_id,
             instructions,
@@ -413,41 +488,56 @@ to this thread."
             .await;
         }
 
-        // --- Step 3: create the reviewer thread as a BACKGROUND thread -------
-        // It never becomes the active thread, so the user's conversation is never
-        // disturbed. The thread is review-locked via job state and hidden from nav.
-        // Registration and job assignment happen under one relay write lock so there
-        // is never a window where the thread row exists but reviewer_thread_ids()
-        // does not yet include it — which would let list_threads drop the row or
-        // expose it in navigation.
+        // --- Step 3: obtain the reviewer thread -------------------------------
+        // CleanThread: create it as a BACKGROUND thread — it never becomes the
+        // active thread, so the user's conversation is never disturbed. The thread
+        // is review-locked via job state and hidden from nav. Registration and job
+        // assignment happen under one relay write lock so there is never a window
+        // where the thread row exists but reviewer_thread_ids() does not yet include
+        // it. ExistingThread (reuse): the thread already exists, is already in the
+        // durable map, and `job.reviewer_thread_id` was set at request time — so we
+        // skip creation entirely and route to it via its provider.
         self.set_job_status(&job_id, ReviewJobStatus::StartingReviewer)
             .await;
-        let reviewer_thread_id = match self
-            .start_background_reviewer_thread(
-                &job_id,
-                &cwd,
-                &reviewer_provider,
-                reviewer_model.as_deref(),
-            )
-            .await
-        {
-            Ok(thread_id) => thread_id,
-            Err(error) => {
-                self.fail_job(
-                    &job_id,
-                    format!("failed to start the reviewer thread: {error}"),
-                )
-                .await;
-                return;
+        let is_reuse = matches!(reviewer_mode, ReviewMode::ExistingThread { .. });
+        let reviewer_thread_id = match &reviewer_mode {
+            ReviewMode::ExistingThread { thread_id } => thread_id.clone(),
+            ReviewMode::CleanThread => {
+                match self
+                    .start_background_reviewer_thread(
+                        &job_id,
+                        &cwd,
+                        &reviewer_provider,
+                        reviewer_model.as_deref(),
+                    )
+                    .await
+                {
+                    // reviewer_thread_id is already recorded on the job by
+                    // start_background_reviewer_thread (atomically, under one write
+                    // lock).
+                    Ok(thread_id) => thread_id,
+                    Err(error) => {
+                        self.fail_job(
+                            &job_id,
+                            format!("failed to start the reviewer thread: {error}"),
+                        )
+                        .await;
+                        return;
+                    }
+                }
             }
         };
-        // reviewer_thread_id is already recorded on the job by
-        // start_background_reviewer_thread (atomically, under one write lock).
 
         // --- Step 4: send the reviewer prompt and wait (background turn) -----
         self.set_job_status(&job_id, ReviewJobStatus::WaitingForReviewer)
             .await;
-        let prompt = reviewer_prompt(&recap, &diff, instructions.as_deref());
+        // A reused thread already holds its prior review; frame a delta re-review.
+        // It also keeps its own session model, so never pass a model override.
+        let prompt = if is_reuse {
+            re_review_prompt(&recap, &diff, instructions.as_deref())
+        } else {
+            reviewer_prompt(&recap, &diff, instructions.as_deref())
+        };
         match self
             .send_message_to_thread(
                 &reviewer_thread_id,
@@ -572,6 +662,7 @@ thread {parent_thread_id}."
             parent_thread_id: job.parent_thread_id.clone(),
             reviewer_provider: job.reviewer_provider.clone(),
             reviewer_model: job.reviewer_model.clone(),
+            reviewer_mode: job.reviewer_mode.clone(),
             cwd: job.cwd.clone(),
             device_id: job.requested_by_device_id.clone(),
             instructions: job.instructions.clone(),

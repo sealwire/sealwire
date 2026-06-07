@@ -68,6 +68,7 @@ import { SessionSettingsButton } from "../shared/session-settings-panel.js";
 import {
   ReviewLauncher,
 } from "../shared/review-panel.js";
+import { selectReusableReviewers } from "../shared/reviewer-threads.js";
 import {
   canRequestReview,
   isReviewBlocked,
@@ -741,6 +742,13 @@ export function createSessionRenderer({
     setReviewSlice({
       reviewJobs: session?.active_review_jobs || [],
       reviewModel: reviewLaunchModel(session),
+      // Existing reviewer threads of the active parent, offered for reuse. Provider
+      // filtering happens in the panel (it reacts to the chosen provider).
+      reusableReviewers: selectReusableReviewers(
+        session?.reviewer_threads,
+        session?.active_thread_id,
+        null
+      ),
       canRequest:
         typeof requestReview === "function" &&
         canRequestReview(session, state.deviceId),
@@ -777,6 +785,11 @@ export function createSessionRenderer({
           providerOptions: reviewModel.providerOptions,
           models: reviewModel.models,
           defaultProvider: reviewModel.defaultProvider,
+          reusableReviewers: selectReusableReviewers(
+            session?.reviewer_threads,
+            session?.active_thread_id,
+            null
+          ),
           disabled: false,
           onSubmit: (values) => requestReview(values),
         })

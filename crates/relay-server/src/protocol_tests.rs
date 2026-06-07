@@ -139,6 +139,9 @@ fn compact_for_broker_strips_reviewer_threads() {
         .map(|index| ReviewerThreadView {
             reviewer_thread_id: format!("reviewer-{index}"),
             parent_thread_id: format!("parent-{index}"),
+            reviewer_provider: Some("codex".to_string()),
+            name: Some(format!("Reviewer {index}")),
+            updated_at: Some(index),
         })
         .collect();
 
@@ -159,6 +162,9 @@ fn compact_for_local_web_keeps_reviewer_threads() {
     snapshot.reviewer_threads = vec![ReviewerThreadView {
         reviewer_thread_id: "reviewer-1".to_string(),
         parent_thread_id: "parent-1".to_string(),
+        reviewer_provider: Some("codex".to_string()),
+        name: Some("Reviewer one".to_string()),
+        updated_at: Some(42),
     }];
 
     let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::LocalWeb);
@@ -170,6 +176,13 @@ fn compact_for_local_web_keeps_reviewer_threads() {
     assert_eq!(
         compacted.reviewer_threads[0].parent_thread_id, "parent-1",
         "the parent linkage is preserved for the prompt's reviewer count"
+    );
+    // Enrichment fields (provider/name/updated_at) ride along on the kept path so
+    // the reuse picker can filter + label.
+    assert_eq!(
+        compacted.reviewer_threads[0].reviewer_provider.as_deref(),
+        Some("codex"),
+        "LocalWeb keeps the enriched reviewer_provider for the reuse picker"
     );
 }
 

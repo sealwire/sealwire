@@ -11,13 +11,14 @@ use crate::protocol::{ReviewJobStatusView, ReviewJobView, WorkspaceDiffResponse}
 
 use super::unix_now;
 
-/// How the reviewer thread is sourced. v1 only ever constructs `CleanThread`;
-/// `ExistingThread` is reserved for Phase 3 (reviewer-thread reuse).
+/// How the reviewer thread is sourced. `CleanThread` spawns a fresh background
+/// reviewer; `ExistingThread` reuses a prior reviewer thread (Phase 3) so it keeps
+/// its earlier review context and the user doesn't accumulate orphan reviewers.
 #[derive(Debug, Clone)]
 pub(crate) enum ReviewMode {
     CleanThread,
-    #[allow(dead_code)]
     ExistingThread {
+        #[allow(dead_code)]
         thread_id: String,
     },
 }
@@ -83,8 +84,9 @@ pub(crate) struct ReviewJob {
     pub(crate) reviewer_thread_id: Option<String>,
     pub(crate) reviewer_provider: String,
     pub(crate) reviewer_model: Option<String>,
-    // Always `CleanThread` in v1; `ExistingThread` lands with Phase 3 reuse.
-    #[allow(dead_code)]
+    /// `CleanThread` for a fresh reviewer; `ExistingThread` when reusing a prior
+    /// reviewer thread (the orchestrator skips reviewer creation and sends a
+    /// re-review prompt to the existing thread).
     pub(crate) reviewer_mode: ReviewMode,
     pub(crate) cwd: String,
     pub(crate) status: ReviewJobStatus,
@@ -200,9 +202,44 @@ Return only:\n\
 Do not make new code changes in this turn."
 }
 
-/// Prompt handed to the reviewer (doc §Reviewer Prompt). The review is read-only;
-/// the diff is authoritative over the recap.
+/// Prompt handed to a fresh reviewer (doc §Reviewer Prompt). The review is
+/// read-only; the diff is authoritative over the recap.
 pub(crate) fn reviewer_prompt(
+    recap: &str,
+    diff: &WorkspaceDiffResponse,
+    instructions: Option<&str>,
+) -> String {
+    build_review_prompt(
+        "You are reviewing another agent's work in this repository.",
+        recap,
+        diff,
+        instructions,
+    )
+}
+
+/// Prompt handed to a REUSED reviewer thread (Phase 3). The thread already holds
+/// its prior review in its transcript, so this frames a delta review of the
+/// current state. The relay is still authoritative on the fresh recap + diff, so
+/// they are handed over again.
+pub(crate) fn re_review_prompt(
+    recap: &str,
+    diff: &WorkspaceDiffResponse,
+    instructions: Option<&str>,
+) -> String {
+    build_review_prompt(
+        "You previously reviewed this repository. Here is an updated recap and a fresh \
+workspace diff — re-review the CURRENT state, focusing on what changed since your last \
+review and whether earlier findings were addressed.",
+        recap,
+        diff,
+        instructions,
+    )
+}
+
+/// Shared body for the reviewer / re-review prompts. Only the opening `intro`
+/// line differs between a fresh review and a reuse.
+fn build_review_prompt(
+    intro: &str,
     recap: &str,
     diff: &WorkspaceDiffResponse,
     instructions: Option<&str>,
@@ -229,7 +266,7 @@ working tree)"
     };
 
     let mut prompt = format!(
-        "You are reviewing another agent's work in this repository.\n\n\
+        "{intro}\n\n\
 Do not modify files. Inspect the working tree and report findings only.\n\
 Prioritize bugs, regressions, security risks, race conditions, data loss,\n\
 incorrect assumptions, and missing tests. Keep style nits out unless they hide a\n\

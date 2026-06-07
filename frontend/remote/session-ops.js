@@ -1066,18 +1066,30 @@ export async function fetchRemoteWorkspaceDiff() {
 
 // Cross-agent review actions over the broker. Each ack carries no snapshot, so
 // we follow up with syncRemoteSnapshot to refresh active_review_jobs.
-export async function requestRemoteReview({ reviewerProvider, reviewerModel, instructions } = {}) {
+export async function requestRemoteReview({
+  reviewerProvider,
+  reviewerModel,
+  instructions,
+  reviewerThreadId,
+} = {}) {
   if (!reviewerProvider) {
     renderLog("Pick a reviewer provider before starting a review.");
     return false;
   }
-  renderLog(`Requesting ${reviewerProvider} review.`);
+  renderLog(
+    reviewerThreadId
+      ? `Requesting ${reviewerProvider} re-review.`
+      : `Requesting ${reviewerProvider} review.`
+  );
   try {
     await dispatchOrRecover("request_review", {
       input: {
         reviewer_provider: reviewerProvider,
         reviewer_model: reviewerModel || null,
         instructions: instructions || null,
+        // Phase 3: reuse an existing reviewer thread when chosen (remote currently
+        // never has reviewer_threads in its snapshot, so this stays null there).
+        reviewer_thread_id: reviewerThreadId || null,
       },
     });
     await syncRemoteSnapshot("post-review-request", true);

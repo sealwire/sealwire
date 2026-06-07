@@ -6,6 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import {
   ReviewLauncher,
   ReviewPanel,
+  reviewSubmitPayload,
 } from "../shared/review-panel.js";
 import {
   canRequestReview,
@@ -37,6 +38,75 @@ test("ReviewPanel renders the reviewer provider options and the clean-reviewer f
   assert.match(html, /New clean reviewer session/);
   assert.match(html, /Start review/);
   assert.match(html, /focus on the storage refactor/);
+});
+
+test("ReviewPanel lists reusable reviewer threads as 'Reuse:' options", () => {
+  const html = renderToStaticMarkup(
+    h(ReviewPanel, {
+      providerOptions: [{ label: "Codex", value: "codex" }],
+      models: [],
+      defaultProvider: "codex",
+      reusableReviewers: [
+        { reviewerThreadId: "rev-1", provider: "codex", label: "Codex reviewer" },
+      ],
+    })
+  );
+  // The clean option plus the reusable reviewer are both offered.
+  assert.match(html, /New clean reviewer session/);
+  assert.match(html, /Reuse: Codex reviewer/);
+  assert.match(html, /value="rev-1"/);
+});
+
+test("ReviewPanel shows only the clean option when there are no reusable reviewers", () => {
+  const html = renderToStaticMarkup(
+    h(ReviewPanel, {
+      providerOptions: [{ label: "Codex", value: "codex" }],
+      models: [],
+      defaultProvider: "codex",
+      reusableReviewers: [],
+    })
+  );
+  assert.match(html, /New clean reviewer session/);
+  assert.doesNotMatch(html, /Reuse:/);
+});
+
+test("reviewSubmitPayload carries the reuse thread id and nulls the model on reuse", () => {
+  // Reuse: the chosen thread id is sent and the model is NEVER overridden (the
+  // existing thread keeps its own session model).
+  assert.deepEqual(
+    reviewSubmitPayload({
+      reviewerProvider: "codex",
+      reviewerModel: "gpt-5.5",
+      instructions: "  look again  ",
+      reviewerThreadId: "rev-1",
+    }),
+    {
+      reviewerProvider: "codex",
+      reviewerModel: null,
+      instructions: "look again",
+      reviewerThreadId: "rev-1",
+    }
+  );
+});
+
+test("reviewSubmitPayload sends a clean reviewer (null thread id) otherwise", () => {
+  // "clean" sentinel and undefined both mean a fresh reviewer; the model passes through.
+  for (const reviewerThreadId of ["clean", undefined]) {
+    assert.deepEqual(
+      reviewSubmitPayload({
+        reviewerProvider: "codex",
+        reviewerModel: "gpt-5.5",
+        instructions: "",
+        reviewerThreadId,
+      }),
+      {
+        reviewerProvider: "codex",
+        reviewerModel: "gpt-5.5",
+        instructions: null,
+        reviewerThreadId: null,
+      }
+    );
+  }
 });
 
 test("ReviewLauncher renders a Review button alongside the panel", () => {

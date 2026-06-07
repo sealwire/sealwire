@@ -134,12 +134,25 @@ pub struct SessionSnapshot {
     pub reviewer_threads: Vec<ReviewerThreadView>,
 }
 
-/// One reviewer thread and the parent it reviews. Surfaced so the UI can prompt
-/// about associated reviewer threads when a parent is permanently deleted.
+/// One reviewer thread and the parent it reviews. Surfaced so the local UI can
+/// prompt about associated reviewer threads on parent delete/archive AND offer
+/// them in the Phase 3 reuse picker. The enrichment fields are best-effort: they
+/// are `None` after a relay restart (the reviewer thread's summary isn't
+/// persisted — only the reviewer→parent identity is); the backend re-derives the
+/// provider on submit.
 #[derive(Debug, Clone, Serialize)]
 pub struct ReviewerThreadView {
     pub reviewer_thread_id: String,
     pub parent_thread_id: String,
+    /// Provider key (for filtering the reuse picker + locking the provider).
+    #[serde(default)]
+    pub reviewer_provider: Option<String>,
+    /// Human label for the reuse picker (the reviewer thread's name).
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Last-updated time, for newest-first ordering in the reuse picker.
+    #[serde(default)]
+    pub updated_at: Option<u64>,
 }
 
 /// One working thread, as surfaced to clients for per-thread activity badges.

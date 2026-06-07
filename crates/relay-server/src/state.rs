@@ -22,7 +22,8 @@ pub(crate) use self::relay::{
     RelayState, RemoteActionReplayDecision, ThreadSessionSettings, TranscriptDeltaKind,
 };
 pub(crate) use self::review::{
-    parent_recap_prompt, post_back_message, reviewer_prompt, ReviewJob, ReviewJobStatus, ReviewMode,
+    parent_recap_prompt, post_back_message, re_review_prompt, reviewer_prompt, ReviewJob,
+    ReviewJobStatus, ReviewMode,
 };
 pub(crate) use self::security::SecurityProfile;
 

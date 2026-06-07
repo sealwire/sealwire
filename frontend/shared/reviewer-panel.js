@@ -45,6 +45,7 @@ function latestAgentText(entries) {
 export function ReviewerPanel({
   reviewJobs = [],
   reviewModel = {},
+  reusableReviewers = [],
   canRequest = false,
   requesting = false,
   onRequestReview,
@@ -67,6 +68,7 @@ export function ReviewerPanel({
       providerOptions: reviewModel.providerOptions || [],
       models: reviewModel.models || [],
       defaultProvider: reviewModel.defaultProvider || "",
+      reusableReviewers,
       disabled: requesting || !canRequest,
       onSubmit: onRequestReview,
     });

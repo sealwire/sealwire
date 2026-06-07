@@ -357,13 +357,22 @@ export function createLifecycleController(ctx) {
     }
   }
 
-  async function requestReview({ reviewerProvider, reviewerModel, instructions } = {}) {
+  async function requestReview({
+    reviewerProvider,
+    reviewerModel,
+    instructions,
+    reviewerThreadId,
+  } = {}) {
     if (!reviewerProvider) {
       logLine("Pick a reviewer provider before starting a review.");
       return null;
     }
 
-    logLine(`Requesting ${reviewerProvider} review`);
+    logLine(
+      reviewerThreadId
+        ? `Requesting ${reviewerProvider} re-review`
+        : `Requesting ${reviewerProvider} review`
+    );
 
     try {
       const receipt = await requestReviewApi(
@@ -372,6 +381,8 @@ export function createLifecycleController(ctx) {
           reviewer_provider: reviewerProvider,
           reviewer_model: reviewerModel || null,
           instructions: instructions || null,
+          // Phase 3: reuse an existing reviewer thread when chosen.
+          reviewer_thread_id: reviewerThreadId || null,
         },
         state.deviceId
       );
