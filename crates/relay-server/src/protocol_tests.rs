@@ -1,10 +1,11 @@
 use crate::protocol::strip_file_change_diffs_for_snapshot;
 use crate::protocol::{
     truncate_with_ellipsis, ApprovalRequestView, AskUserOptionView, AskUserQuestionRequestView,
-    AskUserQuestionView, FileChangeDiffView, LogEntryView, SecurityMode, SessionSnapshot,
-    SessionSnapshotCompactProfile, ThreadEntriesResponse, ThreadEntryDetailResponse,
-    ThreadSummaryView, ThreadTranscriptResponse, ThreadsResponse, ThreadsResponseCompactProfile,
-    ToolCallView, TranscriptEntryKind, TranscriptEntryView, EMERGENCY_TRANSCRIPT_SHELL_CHARS,
+    AskUserQuestionView, DeleteThreadInput, FileChangeDiffView, LogEntryView, ReviewerThreadView,
+    SecurityMode, SessionSnapshot, SessionSnapshotCompactProfile, ThreadEntriesResponse,
+    ThreadEntryDetailResponse, ThreadSummaryView, ThreadTranscriptResponse, ThreadsResponse,
+    ThreadsResponseCompactProfile, ToolCallView, TranscriptEntryKind, TranscriptEntryView,
+    EMERGENCY_TRANSCRIPT_SHELL_CHARS,
 };
 
 const MAX_BROKER_LOGS: usize = 8;
@@ -85,6 +86,7 @@ fn make_snapshot() -> SessionSnapshot {
             })
             .collect(),
         active_review_jobs: vec![],
+        reviewer_threads: vec![],
     }
 }
 
@@ -125,6 +127,76 @@ fn compact_for_broker_limits_logs_and_transcript() {
         .map(|value| value.chars().count() <= 800)
         .unwrap_or(true));
     assert!(serde_json::to_vec(&compacted).unwrap().len() <= SESSION_SNAPSHOT_TARGET_BYTES);
+}
+
+#[test]
+fn compact_for_broker_strips_reviewer_threads() {
+    // The reviewer→parent map only drives the LOCAL delete/archive prompt; remote
+    // surfaces never delete threads. It must be dropped from broker-bound snapshots
+    // so it can't grow unbounded across many reviews and blow the frame budget.
+    let mut snapshot = make_snapshot();
+    snapshot.reviewer_threads = (0..50)
+        .map(|index| ReviewerThreadView {
+            reviewer_thread_id: format!("reviewer-{index}"),
+            parent_thread_id: format!("parent-{index}"),
+        })
+        .collect();
+
+    let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::RemoteSurface);
+    assert!(
+        compacted.reviewer_threads.is_empty(),
+        "reviewer_threads must be stripped from the broker-compacted snapshot"
+    );
+}
+
+#[test]
+fn compact_for_local_web_keeps_reviewer_threads() {
+    // The LOCAL snapshot path (/api/session + SSE) is the ONLY surface whose
+    // delete/archive prompt reads `reviewer_threads`. Stripping it here would make
+    // the frontend think there are no reviewers and silently skip the confirmation,
+    // so LocalWeb must preserve the map.
+    let mut snapshot = make_snapshot();
+    snapshot.reviewer_threads = vec![ReviewerThreadView {
+        reviewer_thread_id: "reviewer-1".to_string(),
+        parent_thread_id: "parent-1".to_string(),
+    }];
+
+    let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::LocalWeb);
+    assert_eq!(
+        compacted.reviewer_threads.len(),
+        1,
+        "LocalWeb must keep reviewer_threads so the local prompt can see reviewers"
+    );
+    assert_eq!(
+        compacted.reviewer_threads[0].parent_thread_id, "parent-1",
+        "the parent linkage is preserved for the prompt's reviewer count"
+    );
+}
+
+#[test]
+fn delete_thread_input_body_resolves_reviewer_choice() {
+    // The delete/archive HTTP handlers resolve their optional body with
+    // `body.and_then(|Json(input)| input.delete_reviewers)`. Pin every case so a
+    // bodyless or empty request can never be misread as an explicit choice — that's
+    // what makes archive's "no body → keep" default non-destructive.
+
+    // A bodyless request: Axum's `Option<Json<_>>` extractor yields `None`, so the
+    // resolved choice is `None` ("no explicit choice").
+    let bodyless: Option<DeleteThreadInput> = None;
+    assert_eq!(bodyless.and_then(|input| input.delete_reviewers), None);
+
+    // An empty JSON object: `#[serde(default)]` leaves the field absent → `None`, so
+    // a client that posts `{}` is also treated as "no explicit choice".
+    let empty: DeleteThreadInput = serde_json::from_str("{}").expect("empty object decodes");
+    assert_eq!(empty.delete_reviewers, None);
+
+    // Explicit choices round-trip unchanged.
+    let yes: DeleteThreadInput =
+        serde_json::from_str(r#"{"delete_reviewers": true}"#).expect("true decodes");
+    assert_eq!(yes.delete_reviewers, Some(true));
+    let no: DeleteThreadInput =
+        serde_json::from_str(r#"{"delete_reviewers": false}"#).expect("false decodes");
+    assert_eq!(no.delete_reviewers, Some(false));
 }
 
 #[test]

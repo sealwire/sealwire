@@ -2192,6 +2192,10 @@ mod review_tests {
         // When true, `delete_thread_permanently` also errors — forces the tombstone
         // path when both archive and delete fail.
         fail_delete: Arc<AtomicBool>,
+        // Thread ids whose `delete_thread_permanently` should error, while every
+        // other thread deletes fine. Lets a test fail ONLY a reviewer delete while
+        // the parent delete still succeeds (the F1 un-hide-on-failure path).
+        fail_delete_thread_ids: Arc<Mutex<std::collections::HashSet<String>>>,
         // Delay before a turn completes (ms). Lets tests complete a turn *after* a
         // short step timeout, exercising the drain path.
         complete_delay_ms: Arc<AtomicU64>,
@@ -2220,6 +2224,7 @@ mod review_tests {
                 fail_reviewer_start: Arc::new(AtomicBool::new(false)),
                 fail_archive: Arc::new(AtomicBool::new(false)),
                 fail_delete: Arc::new(AtomicBool::new(false)),
+                fail_delete_thread_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
                 complete_delay_ms: Arc::new(AtomicU64::new(15)),
                 next_id: Arc::new(AtomicU64::new(1)),
             }
@@ -2362,7 +2367,9 @@ mod review_tests {
             &self,
             thread_id: &str,
         ) -> Result<crate::codex_local::LocalThreadDeleteSummary, String> {
-            if self.fail_delete.load(Ordering::Relaxed) {
+            if self.fail_delete.load(Ordering::Relaxed)
+                || self.fail_delete_thread_ids.lock().await.contains(thread_id)
+            {
                 return Err("delete failed (simulated)".to_string());
             }
             self.threads.lock().await.remove(thread_id);
@@ -2661,6 +2668,19 @@ mod review_tests {
 
     async fn wait_for_review(app: &AppState, job_id: &str) -> crate::protocol::ReviewJobView {
         wait_for_review_status(app, job_id, &["complete", "failed", "blocked"]).await
+    }
+
+    /// Wait until no turn is in flight on the active thread (e.g. the review's
+    /// post-back turn on the parent has finished settling), so the parent can be
+    /// deleted (`can_delete_thread` rejects a thread with a running turn).
+    async fn wait_for_active_turn_idle(app: &AppState) {
+        for _ in 0..400 {
+            if app.relay.read().await.active_turn_id.is_none() {
+                return;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        panic!("active turn never settled");
     }
 
     /// Wait until the review job has a reviewer_thread_id set (atomically with
@@ -3690,6 +3710,357 @@ mod review_tests {
     }
 
     #[tokio::test]
+    async fn deleting_a_parent_deletes_its_reviewer_thread_by_default() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
+        let reviewer = job.reviewer_thread_id.clone().expect("reviewer thread id");
+        // The reviewer is hidden and tracked in the durable map.
+        assert!(app
+            .relay
+            .read()
+            .await
+            .reviewer_thread_ids()
+            .contains(&reviewer));
+        wait_for_active_turn_idle(&app).await;
+
+        // Delete the parent with the default (None) → delete the reviewer too.
+        app.delete_thread_permanently(&parent.id, None)
+            .await
+            .expect("deleting the parent should succeed");
+
+        assert!(
+            !providers
+                .get("codex")
+                .unwrap()
+                .threads
+                .lock()
+                .await
+                .contains_key(&reviewer),
+            "the reviewer thread is deleted along with its parent by default"
+        );
+        assert!(
+            !app.relay
+                .read()
+                .await
+                .reviewer_thread_ids()
+                .contains(&reviewer),
+            "the reviewer is no longer tracked"
+        );
+        assert!(
+            app.list_review_jobs()
+                .await
+                .iter()
+                .all(|job| job.id != receipt.review_job_id),
+            "the review job is dropped so no stale panel card remains"
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_a_parent_can_keep_the_reviewer_as_a_normal_thread() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "complete");
+        let reviewer = job.reviewer_thread_id.clone().expect("reviewer thread id");
+
+        // Before deletion the reviewer is hidden from the thread list.
+        let before = app.list_threads(50, None).await.expect("list_threads");
+        assert!(before.threads.iter().all(|t| t.id != reviewer));
+        wait_for_active_turn_idle(&app).await;
+
+        // Delete the parent but KEEP the reviewer thread.
+        app.delete_thread_permanently(&parent.id, Some(false))
+            .await
+            .expect("deleting the parent should succeed");
+
+        // The reviewer thread still exists on the provider...
+        assert!(
+            providers
+                .get("codex")
+                .unwrap()
+                .threads
+                .lock()
+                .await
+                .contains_key(&reviewer),
+            "the reviewer thread is kept on disk"
+        );
+        // ...and is now un-hidden — a normal, navigable thread.
+        assert!(!app
+            .relay
+            .read()
+            .await
+            .reviewer_thread_ids()
+            .contains(&reviewer));
+        let after = app.list_threads(50, None).await.expect("list_threads");
+        assert!(
+            after.threads.iter().any(|t| t.id == reviewer),
+            "the kept reviewer thread now appears as a normal thread"
+        );
+        assert!(
+            app.list_review_jobs()
+                .await
+                .iter()
+                .all(|job| job.id != receipt.review_job_id),
+            "the review job is dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_a_parent_unhides_reviewer_when_its_delete_fails() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
+        let reviewer = job.reviewer_thread_id.clone().expect("reviewer thread id");
+        wait_for_active_turn_idle(&app).await;
+
+        // The reviewer thread can't be deleted (only it — the parent deletes fine).
+        providers
+            .get("codex")
+            .unwrap()
+            .fail_delete_thread_ids
+            .lock()
+            .await
+            .insert(reviewer.clone());
+
+        // Delete the parent with default (delete reviewers too). The parent deletes,
+        // but the reviewer delete fails → it must be un-hidden, not stranded.
+        let delete_receipt = app
+            .delete_thread_permanently(&parent.id, None)
+            .await
+            .expect("deleting the parent should still succeed");
+
+        // The reviewer thread is still on disk (its delete failed)...
+        assert!(
+            providers
+                .get("codex")
+                .unwrap()
+                .threads
+                .lock()
+                .await
+                .contains_key(&reviewer),
+            "the reviewer thread survived its failed delete"
+        );
+        // ...and is now un-hidden so it can never be a stranded, entryless thread.
+        assert!(
+            !app.relay
+                .read()
+                .await
+                .reviewer_thread_ids()
+                .contains(&reviewer),
+            "a reviewer that can't be deleted is converted to a normal thread"
+        );
+        let after = app.list_threads(50, None).await.expect("list_threads");
+        assert!(
+            after.threads.iter().any(|t| t.id == reviewer),
+            "the un-deletable reviewer now appears as a normal thread"
+        );
+        // The partial failure is surfaced in the receipt message.
+        assert!(
+            delete_receipt.message.contains("could not be deleted"),
+            "receipt should report the partial failure, got: {}",
+            delete_receipt.message
+        );
+        // The in-memory review job is still dropped.
+        assert!(
+            app.list_review_jobs()
+                .await
+                .iter()
+                .all(|job| job.id != receipt.review_job_id),
+            "the review job is dropped even when the reviewer delete fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn archiving_a_parent_deletes_its_reviewer_thread_when_requested() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
+        let reviewer = job.reviewer_thread_id.clone().expect("reviewer thread id");
+        assert!(app
+            .relay
+            .read()
+            .await
+            .reviewer_thread_ids()
+            .contains(&reviewer));
+        wait_for_active_turn_idle(&app).await;
+
+        // Archive the parent with an explicit `true` → delete the reviewer (a
+        // reviewer thread has no archived state of its own).
+        app.archive_thread(&parent.id, Some(true))
+            .await
+            .expect("archiving the parent should succeed");
+
+        assert!(
+            !providers
+                .get("codex")
+                .unwrap()
+                .threads
+                .lock()
+                .await
+                .contains_key(&reviewer),
+            "the reviewer thread is deleted when archive explicitly requests it"
+        );
+        assert!(
+            !app.relay
+                .read()
+                .await
+                .reviewer_thread_ids()
+                .contains(&reviewer),
+            "the reviewer is no longer tracked"
+        );
+        assert!(
+            app.list_review_jobs()
+                .await
+                .iter()
+                .all(|job| job.id != receipt.review_job_id),
+            "the review job is dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn archiving_a_parent_keeps_its_reviewer_thread_by_default() {
+        // Archive is a soft, non-destructive operation: a bodyless request (no
+        // explicit choice) must KEEP the reviewer as a normal thread, never silently
+        // delete its transcript.
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
+        let reviewer = job.reviewer_thread_id.clone().expect("reviewer thread id");
+        wait_for_active_turn_idle(&app).await;
+
+        // Archive the parent with the default (None) → keep the reviewer.
+        app.archive_thread(&parent.id, None)
+            .await
+            .expect("archiving the parent should succeed");
+
+        // The reviewer thread is NOT deleted...
+        assert!(
+            providers
+                .get("codex")
+                .unwrap()
+                .threads
+                .lock()
+                .await
+                .contains_key(&reviewer),
+            "a bodyless archive must not delete the reviewer transcript"
+        );
+        // ...and is now un-hidden — a normal, navigable thread.
+        assert!(
+            !app.relay
+                .read()
+                .await
+                .reviewer_thread_ids()
+                .contains(&reviewer),
+            "the kept reviewer is un-hidden, not stranded"
+        );
+        let after = app.list_threads(50, None).await.expect("list_threads");
+        assert!(
+            after.threads.iter().any(|t| t.id == reviewer),
+            "the kept reviewer now appears as a normal thread"
+        );
+        assert!(
+            app.list_review_jobs()
+                .await
+                .iter()
+                .all(|job| job.id != receipt.review_job_id),
+            "the review job is dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn archiving_a_parent_can_keep_the_reviewer_as_a_normal_thread() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "complete");
+        let reviewer = job.reviewer_thread_id.clone().expect("reviewer thread id");
+        wait_for_active_turn_idle(&app).await;
+
+        // Archive the parent but KEEP the reviewer thread.
+        app.archive_thread(&parent.id, Some(false))
+            .await
+            .expect("archiving the parent should succeed");
+
+        // The reviewer thread still exists on the provider...
+        assert!(
+            providers
+                .get("codex")
+                .unwrap()
+                .threads
+                .lock()
+                .await
+                .contains_key(&reviewer),
+            "the reviewer thread is kept on disk"
+        );
+        // ...and is now un-hidden — a normal, navigable thread.
+        assert!(!app
+            .relay
+            .read()
+            .await
+            .reviewer_thread_ids()
+            .contains(&reviewer));
+        let after = app.list_threads(50, None).await.expect("list_threads");
+        assert!(
+            after.threads.iter().any(|t| t.id == reviewer),
+            "the kept reviewer thread now appears as a normal thread"
+        );
+        assert!(
+            app.list_review_jobs()
+                .await
+                .iter()
+                .all(|job| job.id != receipt.review_job_id),
+            "the review job is dropped"
+        );
+    }
+
+    #[tokio::test]
     async fn dismiss_review_falls_back_to_delete_when_archive_fails() {
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();
@@ -4072,6 +4443,7 @@ mod review_tests {
                 "workspace-write",
                 "medium",
             );
+            relay.register_reviewer_thread(pending.to_string(), parent.id.clone());
             // The active thread (parent) must NOT change across promotion.
             assert_eq!(relay.active_thread_id.as_deref(), Some(parent.id.as_str()));
             relay.promote_background_thread(pending, real);
@@ -4104,6 +4476,12 @@ mod review_tests {
         assert!(
             relay.reviewer_thread_ids().contains(real),
             "nav-hiding follows the real id"
+        );
+        // The durable reviewer→parent map entry also moves pending -> real.
+        assert_eq!(
+            relay.reviewer_threads_of_parent(&parent.id),
+            vec![real.to_string()],
+            "the persisted reviewer map entry moves pending -> real"
         );
         assert!(
             relay.is_thread_review_locked(real),

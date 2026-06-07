@@ -57,6 +57,7 @@ fn make_snapshot() -> SessionSnapshot {
             .collect(),
         logs: vec![],
         active_review_jobs: vec![],
+        reviewer_threads: vec![],
     }
 }
 

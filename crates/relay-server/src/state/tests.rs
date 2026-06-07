@@ -77,6 +77,7 @@ fn test_persisted_state() -> PersistedRelayState {
         allowed_roots: vec!["/tmp/project".to_string()],
         device_records,
         paired_devices,
+        reviewer_threads: std::collections::HashMap::new(),
     }
 }
 
@@ -280,6 +281,7 @@ fn test_cached_remote_action_result(action_kind: &str, ok: bool) -> CachedRemote
             transcript: Vec::new(),
             logs: Vec::new(),
             active_review_jobs: Vec::new(),
+            reviewer_threads: Vec::new(),
         }),
         receipt: Some(ApprovalReceipt {
             request_id: "req-1".to_string(),
@@ -1107,6 +1109,73 @@ fn persisted_state_round_trip_drops_ephemeral_fields() {
             DEFAULT_MODEL
         )
     );
+}
+
+#[test]
+fn reviewer_thread_hiding_persists_across_restart() {
+    let mut relay = test_state();
+    // A reviewer thread is registered for a parent, but there is NO live review
+    // job (e.g. it was evicted, or this is a fresh process restoring from disk).
+    relay.register_reviewer_thread("reviewer-1".to_string(), "parent-1".to_string());
+    assert!(relay.reviewer_thread_ids().contains("reviewer-1"));
+
+    // Round-trip through the persisted snapshot into a fresh RelayState.
+    let persisted = PersistedRelayState::from_relay(&relay);
+    let (change_tx, _) = watch::channel(0_u64);
+    let mut restored = RelayState::new(
+        "/tmp/other".to_string(),
+        change_tx,
+        SecurityProfile::private(),
+    );
+    restored.apply_persisted(&persisted);
+
+    // Hiding survives the restart even with no review jobs in memory.
+    assert!(
+        restored.reviewer_thread_ids().contains("reviewer-1"),
+        "reviewer-thread hiding must persist across a restart"
+    );
+    assert_eq!(
+        restored.reviewer_threads_of_parent("parent-1"),
+        vec!["reviewer-1".to_string()]
+    );
+    // But it is NOT review-locked (no live job) — hiding is durable, freezing isn't.
+    assert!(!restored.is_thread_review_locked("reviewer-1"));
+    assert!(!restored.is_thread_review_locked("parent-1"));
+}
+
+#[test]
+fn persist_skips_pending_claude_reviewer_ids() {
+    let mut relay = test_state();
+    // A real (promoted) reviewer id alongside a synthetic Claude pending id. The
+    // pending id only exists in memory — it has no real SDK session — so persisting
+    // it would leave a ghost hiding entry that never resolves after a restart.
+    relay.register_reviewer_thread("reviewer-real".to_string(), "parent-1".to_string());
+    relay.register_reviewer_thread("claude-pending-abc".to_string(), "parent-2".to_string());
+
+    let persisted = PersistedRelayState::from_relay(&relay);
+    assert!(
+        persisted.reviewer_threads.contains_key("reviewer-real"),
+        "the real reviewer id is persisted"
+    );
+    assert!(
+        !persisted
+            .reviewer_threads
+            .contains_key("claude-pending-abc"),
+        "synthetic claude-pending reviewer ids must be dropped from the snapshot"
+    );
+
+    // Restoring keeps the real one hidden and never resurrects the pending ghost.
+    let (change_tx, _) = watch::channel(0_u64);
+    let mut restored = RelayState::new(
+        "/tmp/other".to_string(),
+        change_tx,
+        SecurityProfile::private(),
+    );
+    restored.apply_persisted(&persisted);
+    assert!(restored.reviewer_thread_ids().contains("reviewer-real"));
+    assert!(!restored
+        .reviewer_thread_ids()
+        .contains("claude-pending-abc"));
 }
 
 #[test]

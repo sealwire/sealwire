@@ -168,12 +168,17 @@ pub struct RelayState {
     pub(super) apply_states: HashMap<String, FileChangeApplyState>,
     recent_remote_actions: HashMap<String, CachedRemoteActionState>,
     /// Relay-owned cross-agent review jobs, keyed by job id. In-memory only for
-    /// v1 (lost on restart).
+    /// v1 (lost on restart) — recap/review text and review status are NOT
+    /// restored; the review TEXT already lives in the reviewer thread's own
+    /// provider transcript.
     review_jobs: HashMap<String, ReviewJob>,
-    /// Thread ids whose reviewer hiding must persist even after their job has been
-    /// removed (e.g. dismissed while archival and deletion both failed). Cleared
-    /// when the thread is later successfully removed by another code path.
-    dismissed_reviewer_thread_ids: HashSet<String>,
+    /// Durable identity of reviewer threads: reviewer_thread_id -> parent_thread_id.
+    /// This is the *persisted* source of truth for nav-hiding (so reviewer threads
+    /// stay hidden across a relay restart and across review-job eviction). An entry
+    /// stays until the reviewer thread is actually deleted or explicitly un-hidden
+    /// (e.g. the user kept it when deleting its parent). Distinct from
+    /// `is_thread_review_locked` (live freeze), which remains in-memory.
+    pub(super) reviewer_threads: HashMap<String, String>,
 }
 
 impl RelayState {
@@ -229,7 +234,7 @@ impl RelayState {
             apply_states: HashMap::new(),
             recent_remote_actions: HashMap::new(),
             review_jobs: HashMap::new(),
-            dismissed_reviewer_thread_ids: HashSet::new(),
+            reviewer_threads: HashMap::new(),
         };
         state.push_log("info", "Relay booted. Waiting for Codex app-server.");
         state
@@ -289,27 +294,67 @@ impl RelayState {
         self.review_jobs.remove(id)
     }
 
-    /// Thread ids that are reviewer threads of some review job. The thread list
-    /// filters these out so a reviewer never shows up as a peer session — it is
-    /// owned by its review (surfaced through the Reviewer panel).
-    ///
-    /// NOTE: this is derived purely from the in-memory `review_jobs`, which are
-    /// not persisted. After a relay restart (or once a job is evicted by the
-    /// `MAX_REVIEW_JOBS` backstop) its reviewer thread is no longer hidden and
-    /// can reappear in navigation. Durable hiding would need the reviewer ids in
-    /// the persistence layer (see state/persistence.rs) — deferred for now.
-    pub(crate) fn reviewer_thread_ids(&self) -> HashSet<String> {
+    /// Drop any review jobs whose reviewer thread is `reviewer_id` — called when
+    /// that reviewer thread is deleted or promoted to a normal thread, so the
+    /// Reviewer panel can't show a stale card pointing at it.
+    pub(crate) fn drop_review_jobs_for_reviewer(&mut self, reviewer_id: &str) {
         self.review_jobs
-            .values()
-            .filter_map(|job| job.reviewer_thread_id.clone())
-            .chain(self.dismissed_reviewer_thread_ids.iter().cloned())
+            .retain(|_, job| job.reviewer_thread_id.as_deref() != Some(reviewer_id));
+    }
+
+    /// Thread ids that are reviewer threads. The thread list filters these out so a
+    /// reviewer never shows up as a peer session — it is owned by its review
+    /// (surfaced through the Reviewer panel). Backed by the DURABLE `reviewer_threads`
+    /// map (persisted), so hiding survives a relay restart and review-job eviction.
+    /// Unioned with live `review_jobs` reviewer ids for safety (the map is populated
+    /// atomically with thread registration, so this union is belt-and-suspenders).
+    pub(crate) fn reviewer_thread_ids(&self) -> HashSet<String> {
+        self.reviewer_threads
+            .keys()
+            .cloned()
+            .chain(
+                self.review_jobs
+                    .values()
+                    .filter_map(|job| job.reviewer_thread_id.clone()),
+            )
             .collect()
     }
 
-    /// Record a reviewer thread id whose hiding must survive job removal.
-    /// Called when dismiss cannot remove the thread (archive + delete both fail).
-    pub(crate) fn tombstone_reviewer_thread(&mut self, thread_id: String) {
-        self.dismissed_reviewer_thread_ids.insert(thread_id);
+    /// Persistently record a reviewer thread's identity (reviewer id -> parent id),
+    /// so it stays hidden from navigation across restarts and job eviction.
+    pub(crate) fn register_reviewer_thread(&mut self, reviewer_id: String, parent_id: String) {
+        self.reviewer_threads.insert(reviewer_id, parent_id);
+    }
+
+    /// Stop hiding a reviewer thread — either because it was actually deleted, or
+    /// because the user chose to keep it as a normal (visible) thread when deleting
+    /// its parent. Returns the parent id it was associated with, if any.
+    pub(crate) fn forget_reviewer_thread(&mut self, reviewer_id: &str) -> Option<String> {
+        self.reviewer_threads.remove(reviewer_id)
+    }
+
+    /// Reviewer thread ids owned by `parent_id` (for the parent-delete prompt).
+    pub(crate) fn reviewer_threads_of_parent(&self, parent_id: &str) -> Vec<String> {
+        self.reviewer_threads
+            .iter()
+            .filter(|(_, parent)| parent.as_str() == parent_id)
+            .map(|(reviewer, _)| reviewer.clone())
+            .collect()
+    }
+
+    /// Compact views of the reviewer→parent map for the snapshot (the local delete
+    /// UI uses it to decide whether to prompt). Sorted for a stable snapshot.
+    pub(crate) fn reviewer_thread_views(&self) -> Vec<crate::protocol::ReviewerThreadView> {
+        let mut views: Vec<_> = self
+            .reviewer_threads
+            .iter()
+            .map(|(reviewer, parent)| crate::protocol::ReviewerThreadView {
+                reviewer_thread_id: reviewer.clone(),
+                parent_thread_id: parent.clone(),
+            })
+            .collect();
+        views.sort_by(|a, b| a.reviewer_thread_id.cmp(&b.reviewer_thread_id));
+        views
     }
 
     /// Promote a background reviewer thread from its synthetic `claude-pending-…`
@@ -367,6 +412,10 @@ impl RelayState {
                 job.reviewer_thread_id = Some(real_id.to_string());
             }
         }
+        // Move the durable nav-hiding entry from the pending id to the real id.
+        if let Some(parent_id) = self.reviewer_threads.remove(pending_id) {
+            self.reviewer_threads.insert(real_id.to_string(), parent_id);
+        }
         // The reviewer's turn is in flight; mark the real runtime working until the
         // provider's `done`/`session_stopped` event flips it idle. This keeps the
         // orchestrator's per-thread idle wait correct regardless of turn-id timing.
@@ -391,12 +440,6 @@ impl RelayState {
                 && (job.parent_thread_id == thread_id
                     || job.reviewer_thread_id.as_deref() == Some(thread_id))
         })
-    }
-
-    /// Remove a thread id from the tombstone set (called when the thread is
-    /// later successfully archived or deleted by some other code path).
-    pub(crate) fn clear_reviewer_tombstone(&mut self, thread_id: &str) {
-        self.dismissed_reviewer_thread_ids.remove(thread_id);
     }
 
     /// Hard-cap the total retained review jobs (evicting the oldest terminal jobs
@@ -753,6 +796,7 @@ impl RelayState {
             transcript,
             logs: self.logs.clone(),
             active_review_jobs: self.active_review_jobs_view(),
+            reviewer_threads: self.reviewer_thread_views(),
         }
     }
 
@@ -938,6 +982,8 @@ impl RelayState {
         self.allowed_roots = persisted.allowed_roots.clone();
         self.device_records = persisted.device_records.clone();
         self.paired_devices = persisted.paired_devices.clone();
+        // Durable reviewer-thread identity survives restart (review jobs do not).
+        self.reviewer_threads = persisted.reviewer_threads.clone();
         self.online_surface_peer_ids.clear();
         self.online_surface_peer_devices.clear();
         self.backfill_device_records_from_paired_devices();
@@ -1329,6 +1375,8 @@ impl RelayState {
         self.allowed_roots = persisted.allowed_roots.clone();
         self.device_records = persisted.device_records.clone();
         self.paired_devices = persisted.paired_devices.clone();
+        // Durable reviewer-thread identity survives restart (review jobs do not).
+        self.reviewer_threads = persisted.reviewer_threads.clone();
         self.online_surface_peer_ids.clear();
         self.online_surface_peer_devices.clear();
         self.backfill_device_records_from_paired_devices();

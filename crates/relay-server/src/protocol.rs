@@ -127,6 +127,19 @@ pub struct SessionSnapshot {
     /// review jobs are serialized one at a time and terminal jobs age out.
     #[serde(default)]
     pub active_review_jobs: Vec<ReviewJobView>,
+    /// Durable reviewer→parent thread identity (persisted; survives restart). Lets
+    /// the UI hide reviewer threads and, when deleting a parent, prompt about its
+    /// reviewer thread(s). Independent of `active_review_jobs` (which is in-memory).
+    #[serde(default)]
+    pub reviewer_threads: Vec<ReviewerThreadView>,
+}
+
+/// One reviewer thread and the parent it reviews. Surfaced so the UI can prompt
+/// about associated reviewer threads when a parent is permanently deleted.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReviewerThreadView {
+    pub reviewer_thread_id: String,
+    pub parent_thread_id: String,
 }
 
 /// One working thread, as surfaced to clients for per-thread activity badges.
@@ -177,6 +190,7 @@ const SESSION_SNAPSHOT_REMOTE_SURFACE_BUDGET: SessionSnapshotCompactBudget =
         max_file_changes: 12,
         fallback_file_changes: 4,
         max_pending_ask_user_question_inline_bytes: Some(4_000),
+        strip_reviewer_threads: true,
     };
 
 const SESSION_SNAPSHOT_LOCAL_WEB_BUDGET: SessionSnapshotCompactBudget =
@@ -197,6 +211,7 @@ const SESSION_SNAPSHOT_LOCAL_WEB_BUDGET: SessionSnapshotCompactBudget =
         max_file_changes: 16,
         fallback_file_changes: 6,
         max_pending_ask_user_question_inline_bytes: None,
+        strip_reviewer_threads: false,
     };
 
 const SESSION_SNAPSHOT_IOS_SURFACE_BUDGET: SessionSnapshotCompactBudget =
@@ -292,6 +307,11 @@ struct SessionSnapshotCompactBudget {
     max_file_changes: usize,
     fallback_file_changes: usize,
     max_pending_ask_user_question_inline_bytes: Option<usize>,
+    /// Drop the reviewer→parent map from the snapshot. True only for broker-bound
+    /// (remote/iOS) profiles, where it would grow unbounded across reviews and blow
+    /// the frame budget AND is unused (remote surfaces never delete/archive
+    /// threads). False for LocalWeb, whose delete/archive prompt depends on it.
+    strip_reviewer_threads: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -328,6 +348,16 @@ impl SessionSnapshot {
 
     fn compact_for_budget(mut self, budget: SessionSnapshotCompactBudget) -> Self {
         let mut transcript_truncated = self.transcript_truncated;
+
+        // `reviewer_threads` only drives the LOCAL delete/archive prompt; remote
+        // surfaces never delete threads. Drop it from broker-bound snapshots so it
+        // can't grow unbounded across many reviews and blow the frame budget — but
+        // KEEP it for LocalWeb, whose prompt depends on it (stripping it there would
+        // make the frontend think there are no reviewers and silently skip the
+        // "delete the reviewer thread(s) too?" confirmation).
+        if budget.strip_reviewer_threads {
+            self.reviewer_threads = Vec::new();
+        }
 
         if let Some(max_inline_bytes) = budget.max_pending_ask_user_question_inline_bytes {
             for pending in &mut self.pending_ask_user_questions {
@@ -1088,6 +1118,18 @@ pub struct ThreadArchiveReceipt {
 pub struct ThreadDeleteReceipt {
     pub thread_id: String,
     pub message: String,
+}
+
+/// Optional body shared by the thread `delete` and `archive` endpoints. When the
+/// target thread is the parent of reviewer thread(s), `delete_reviewers` decides
+/// their fate: `Some(true)` → delete them too; `Some(false)` → keep them as normal
+/// (un-hidden) threads. An ABSENT field (or absent body) deserializes to `None`,
+/// meaning "no explicit choice" — each endpoint then applies its own default:
+/// permanent delete cascades (deletes), while archive is non-destructive (keeps).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct DeleteThreadInput {
+    pub delete_reviewers: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

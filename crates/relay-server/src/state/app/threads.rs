@@ -149,7 +149,21 @@ impl AppState {
         })
     }
 
-    pub async fn archive_thread(&self, thread_id: &str) -> Result<ThreadArchiveReceipt, String> {
+    /// Archive a thread (soft remove from local history). If the thread is the
+    /// PARENT of reviewer thread(s), `delete_reviewers` decides their fate:
+    /// `Some(true)` → permanently delete them (reviewer threads have no "archived"
+    /// state of their own); `Some(false)`/`None` → keep them as normal, un-hidden
+    /// threads. Archive is a soft, non-destructive operation, so a bodyless request
+    /// (no explicit choice) DEFAULTS TO KEEP — only an explicit `true` permanently
+    /// deletes. Either way the reviewer is never left stranded (hidden, no UI entry).
+    /// The frontend always sends an explicit choice when reviewers are present, so
+    /// this default only governs non-UI/bodyless callers. (Permanent delete, by
+    /// contrast, defaults to cascade-delete — see `delete_thread_permanently`.)
+    pub async fn archive_thread(
+        &self,
+        thread_id: &str,
+        delete_reviewers: Option<bool>,
+    ) -> Result<ThreadArchiveReceipt, String> {
         let _slot = self.acquire_session_slot()?;
         {
             // Don't let a user archive a thread that a running review owns (its
@@ -160,6 +174,10 @@ impl AppState {
                 return Err(REVIEW_LOCKED_THREAD_MSG.to_string());
             }
         }
+        let reviewer_threads = {
+            let relay = self.relay.read().await;
+            relay.reviewer_threads_of_parent(thread_id)
+        };
         let archived_active_thread = {
             let relay = self.relay.read().await;
             relay.can_archive_thread(thread_id)?
@@ -174,7 +192,9 @@ impl AppState {
         {
             let mut relay = self.relay.write().await;
             let removed = relay.remove_thread(thread_id);
-            relay.clear_reviewer_tombstone(thread_id);
+            // The thread is gone — stop hiding it as a reviewer thread (no-op if it
+            // wasn't one).
+            relay.forget_reviewer_thread(thread_id);
             if archived_active_thread {
                 relay.clear_active_session();
             }
@@ -191,17 +211,42 @@ impl AppState {
             }
         }
 
+        let mut message = "Session archived and removed from local history.".to_string();
+        if !reviewer_threads.is_empty() {
+            // Non-destructive default: keep (un-hide) reviewers unless told to delete.
+            let delete = delete_reviewers.unwrap_or(false);
+            let kept = self
+                .handle_parent_reviewer_threads(reviewer_threads, delete)
+                .await;
+            if kept > 0 {
+                message.push_str(&format!(
+                    " ({kept} reviewer thread{} could not be deleted and {} kept as normal threads)",
+                    if kept == 1 { "" } else { "s" },
+                    if kept == 1 { "was" } else { "were" },
+                ));
+            }
+        }
+
         let _ = self.list_threads(20, None).await;
 
         Ok(ThreadArchiveReceipt {
             thread_id: thread_id.to_string(),
-            message: "Session archived and removed from local history.".to_string(),
+            message,
         })
     }
 
+    /// Permanently delete a thread. If the thread is the PARENT of one or more
+    /// (hidden) reviewer threads, `delete_reviewers` controls what happens to them:
+    ///   - `Some(true)` / `None` (default): also delete each reviewer thread.
+    ///   - `Some(false)`: keep them on disk but un-hide them — they become normal,
+    ///     navigable threads.
+    /// Either way, any in-memory review job that referenced a handled reviewer
+    /// thread is dropped so the Reviewer panel can't show a card pointing at a
+    /// deleted/promoted thread.
     pub async fn delete_thread_permanently(
         &self,
         thread_id: &str,
+        delete_reviewers: Option<bool>,
     ) -> Result<ThreadDeleteReceipt, String> {
         let _slot = self.acquire_session_slot()?;
         {
@@ -212,6 +257,81 @@ impl AppState {
                 return Err(REVIEW_LOCKED_THREAD_MSG.to_string());
             }
         }
+        let reviewer_threads = {
+            let relay = self.relay.read().await;
+            relay.reviewer_threads_of_parent(thread_id)
+        };
+
+        // Delete the parent thread itself (no slot re-acquisition — we hold it).
+        let mut receipt = self.delete_thread_inner(thread_id).await?;
+
+        // Handle the parent's reviewer threads (delete or keep-as-normal).
+        if !reviewer_threads.is_empty() {
+            let delete = delete_reviewers.unwrap_or(true);
+            let kept = self
+                .handle_parent_reviewer_threads(reviewer_threads, delete)
+                .await;
+            let _ = self.list_threads(20, None).await;
+            if kept > 0 {
+                receipt.message.push_str(&format!(
+                    " ({kept} reviewer thread{} could not be deleted and {} kept as normal threads)",
+                    if kept == 1 { "" } else { "s" },
+                    if kept == 1 { "was" } else { "were" },
+                ));
+            }
+        }
+
+        Ok(receipt)
+    }
+
+    /// Handle the reviewer threads owned by a parent that is being deleted or
+    /// archived. `delete = true` permanently deletes each; `false` keeps them as
+    /// normal (un-hidden) threads. A reviewer that CAN'T be deleted is un-hidden
+    /// anyway, so it can never become a stranded, hidden, entryless thread — it
+    /// becomes a normal thread the user can retry. Drops each handled reviewer's
+    /// in-memory review job. Returns the number that could not be deleted (partial
+    /// failure, only when `delete` is true).
+    async fn handle_parent_reviewer_threads(
+        &self,
+        reviewer_ids: Vec<String>,
+        delete: bool,
+    ) -> usize {
+        let mut failed = 0usize;
+        for reviewer_id in reviewer_ids {
+            if delete {
+                if let Err(error) = self.delete_thread_inner(&reviewer_id).await {
+                    // Could not delete it — un-hide it rather than strand it.
+                    self.push_runtime_log(
+                        "warn",
+                        format!(
+                            "Could not delete reviewer thread {reviewer_id}: {error}; kept it as a \
+normal thread instead."
+                        ),
+                    )
+                    .await;
+                    let mut relay = self.relay.write().await;
+                    relay.forget_reviewer_thread(&reviewer_id);
+                    relay.notify();
+                    failed += 1;
+                }
+            } else {
+                // Keep it, but stop hiding it: it becomes a normal, navigable thread.
+                let mut relay = self.relay.write().await;
+                relay.forget_reviewer_thread(&reviewer_id);
+                relay.notify();
+            }
+            // Drop any stale in-memory review job referencing this reviewer.
+            let mut relay = self.relay.write().await;
+            relay.drop_review_jobs_for_reviewer(&reviewer_id);
+            relay.notify();
+        }
+        failed
+    }
+
+    /// Core single-thread permanent delete (no session slot, no review-lock check,
+    /// no reviewer-thread fan-out). Shared by `delete_thread_permanently` so it can
+    /// delete the parent and each reviewer thread under one held slot.
+    async fn delete_thread_inner(&self, thread_id: &str) -> Result<ThreadDeleteReceipt, String> {
         let deleted_active_thread = {
             let relay = self.relay.read().await;
             relay.can_delete_thread(thread_id)?
@@ -230,7 +350,8 @@ impl AppState {
                 relay.clear_active_session();
             }
             relay.mark_thread_deleted(thread_id);
-            relay.clear_reviewer_tombstone(thread_id);
+            // The thread is gone — stop hiding it as a reviewer thread.
+            relay.forget_reviewer_thread(thread_id);
             relay.push_log(
                 "info",
                 format!(

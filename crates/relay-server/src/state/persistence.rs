@@ -36,6 +36,12 @@ pub(super) struct PersistedRelayState {
     pub(super) device_records: std::collections::HashMap<String, DeviceRecord>,
     #[serde(default)]
     pub(super) paired_devices: std::collections::HashMap<String, PairedDevice>,
+    /// Durable reviewer-thread identity: reviewer_thread_id -> parent_thread_id.
+    /// Keeps reviewer threads hidden from navigation across relay restarts. The
+    /// review jobs themselves (recap/review text, status) are deliberately NOT
+    /// persisted. `#[serde(default)]` keeps old state files loadable (empty map).
+    #[serde(default)]
+    pub(super) reviewer_threads: std::collections::HashMap<String, String>,
 }
 
 impl PersistedRelayState {
@@ -64,6 +70,16 @@ impl PersistedRelayState {
             allowed_roots: relay.allowed_roots.clone(),
             device_records: relay.device_records.clone(),
             paired_devices: relay.paired_devices.clone(),
+            // Drop synthetic Claude pending reviewer ids (same as active_thread_id
+            // above): a reviewer that hasn't promoted to a real session id is
+            // ephemeral — its review is gone on restart anyway — so persisting the
+            // placeholder would only leave a ghost hiding entry.
+            reviewer_threads: relay
+                .reviewer_threads
+                .iter()
+                .filter(|(reviewer_id, _)| !reviewer_id.starts_with("claude-pending-"))
+                .map(|(reviewer_id, parent_id)| (reviewer_id.clone(), parent_id.clone()))
+                .collect(),
         }
     }
 

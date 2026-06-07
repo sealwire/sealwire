@@ -241,29 +241,28 @@ to this thread."
                 "the review is still active; stop the reviewer before dismissing it".to_string(),
             );
         }
-        // Remove the reviewer thread from the history list. We try the least
-        // destructive option first (archive), fall back to permanent deletion (the
-        // only option for Claude, which does not support archive), and if both
-        // fail we add a tombstone so the thread stays hidden from `list_threads`
-        // even though its job is gone. Tombstones are cleared when the thread is
-        // later archived/deleted successfully through another code path.
+        // Remove the reviewer thread from history. Try the least destructive option
+        // first (archive), fall back to permanent deletion (the only option for
+        // Claude, which does not support archive). A successful archive/delete also
+        // forgets the durable nav-hiding entry (see threads.rs). If BOTH fail, the
+        // entry stays in the persisted `reviewer_threads` map, so the thread remains
+        // hidden from navigation even though its job is gone — no extra tombstone
+        // bookkeeping needed.
         if let Some(ref thread_id) = reviewer_thread_id {
-            let archive_result = self.archive_thread(thread_id).await;
-            if archive_result.is_err() {
-                let delete_result = self.delete_thread_permanently(thread_id).await;
-                if delete_result.is_err() {
-                    // Neither worked — install a tombstone so the filtering
-                    // outlives the job record and the thread stays out of nav.
-                    let mut relay = self.relay.write().await;
-                    relay.tombstone_reviewer_thread(thread_id.clone());
-                    relay.push_log(
-                        "warn",
-                        format!(
-                            "Dismiss {job_id}: could not archive or delete reviewer thread \
-{thread_id}; it is tombstoned and will remain hidden from navigation."
-                        ),
-                    );
-                }
+            if self.archive_thread(thread_id, Some(true)).await.is_err()
+                && self
+                    .delete_thread_permanently(thread_id, Some(true))
+                    .await
+                    .is_err()
+            {
+                self.push_runtime_log(
+                    "warn",
+                    format!(
+                        "Dismiss {job_id}: could not archive or delete reviewer thread \
+{thread_id}; it stays hidden from navigation via the persisted reviewer map."
+                    ),
+                )
+                .await;
             }
         }
         {
@@ -714,14 +713,21 @@ thread {parent_thread_id}."
                 &sandbox,
                 &effort,
             );
-            // Assign reviewer_thread_id on the job in the SAME write lock as
-            // register_background_thread. This means reviewer_thread_ids() will
-            // include this thread id from the first moment the row is visible in
-            // relay.threads — there is no window where list_threads can drop the
-            // row (not yet recognised as a reviewer) or expose it in navigation.
+            // Assign reviewer_thread_id on the job AND register the durable
+            // reviewer→parent map entry in the SAME write lock as
+            // register_background_thread. This means reviewer_thread_ids() includes
+            // this id from the first moment the row is visible in relay.threads —
+            // there is no window where list_threads can drop the row (not yet
+            // recognised as a reviewer) or expose it in navigation — and the hiding
+            // is persisted so it survives a restart / job eviction.
+            let parent_thread_id = relay
+                .review_job(job_id)
+                .map(|job| job.parent_thread_id.clone())
+                .unwrap_or_default();
             relay.update_review_job(job_id, |job| {
-                job.reviewer_thread_id = Some(reviewer_thread_id);
+                job.reviewer_thread_id = Some(reviewer_thread_id.clone());
             });
+            relay.register_reviewer_thread(reviewer_thread_id, parent_thread_id);
             let (level, note) = if read_only_enforced {
                 ("info", "read-only sandbox enforced")
             } else {

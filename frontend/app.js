@@ -158,6 +158,10 @@ import {
 import { localQueryClient } from "./local/query-client.js";
 import { attachTranscriptHistoryLoader } from "./shared/transcript-history-loader.js";
 import { copyTextToClipboard } from "./shared/clipboard.js";
+import {
+  countReviewerThreadsForParent,
+  reviewerChoiceRequestInit,
+} from "./shared/reviewer-threads.js";
 
 const DEVICE_STORAGE_KEY = "agent-relay.device-id";
 const API_TOKEN_STORAGE_KEY = "agent-relay.api-token";
@@ -1489,9 +1493,27 @@ async function archiveThreadFromContextMenu() {
     return;
   }
 
+  // If this thread is the parent of hidden reviewer thread(s), ask what to do with
+  // them. Reviewer threads have no archived state of their own, so the choice is
+  // delete vs keep-as-normal — same prompt as permanent delete. Default (OK) deletes
+  // them; Cancel keeps them as normal threads.
+  const reviewerCount = countReviewerThreadsForParent(
+    state.session?.reviewer_threads,
+    threadId
+  );
+  let deleteReviewers;
+  if (reviewerCount > 0) {
+    deleteReviewers = window.confirm(
+      `This conversation has ${reviewerCount} reviewer thread${reviewerCount === 1 ? "" : "s"}.\n\n` +
+        "OK: delete the reviewer thread(s) too.\n" +
+        "Cancel: keep them as normal threads (they'll appear in your thread list)."
+    );
+  }
+
   try {
     const response = await apiFetch(`/api/threads/${encodeURIComponent(threadId)}/archive`, {
       method: "POST",
+      ...reviewerChoiceRequestInit(deleteReviewers),
     });
     const payload = await response.json();
     if (!response.ok || !payload.ok) {
@@ -1529,9 +1551,25 @@ async function deleteThreadFromContextMenu() {
     return;
   }
 
+  // If this thread is the parent of hidden reviewer thread(s), ask what to do with
+  // them. Default (OK) deletes them too; Cancel keeps them as normal threads.
+  const reviewerCount = countReviewerThreadsForParent(
+    state.session?.reviewer_threads,
+    threadId
+  );
+  let deleteReviewers;
+  if (reviewerCount > 0) {
+    deleteReviewers = window.confirm(
+      `This conversation has ${reviewerCount} reviewer thread${reviewerCount === 1 ? "" : "s"}.\n\n` +
+        "OK: delete the reviewer thread(s) too.\n" +
+        "Cancel: keep them as normal threads (they'll appear in your thread list)."
+    );
+  }
+
   try {
     const response = await apiFetch(`/api/threads/${encodeURIComponent(threadId)}/delete`, {
       method: "POST",
+      ...reviewerChoiceRequestInit(deleteReviewers),
     });
     const payload = await response.json();
     if (!response.ok || !payload.ok) {

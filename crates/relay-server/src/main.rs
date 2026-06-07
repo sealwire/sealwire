@@ -35,14 +35,15 @@ use futures_util::stream::{self, StreamExt};
 use protocol::{
     AllowedRootsInput, AllowedRootsReceipt, ApiEnvelope, ApiError, ApplyFileChangeInput,
     ApplyFileChangeReceipt, ApprovalDecisionInput, ApprovalReceipt, AskUserAnswerReceipt,
-    AuthSessionInput, AuthSessionView, BulkRevokeDevicesReceipt, HealthResponse, HeartbeatInput,
-    ModelOptionView, PairingDecisionInput, PairingDecisionReceipt, PairingStartInput,
-    PairingTicketView, ReadThreadEntryDetailInput, ReadThreadTranscriptInput, RequestReviewInput,
-    RequestReviewReceipt, ResumeSessionInput, ReviewDismissReceipt, ReviewJobView,
-    RevokeDeviceReceipt, SendMessageInput, SessionSnapshot, SessionSnapshotCompactProfile,
-    StartSessionInput, StopTurnInput, SubmitAskUserAnswerInput, TakeOverInput,
-    ThreadArchiveReceipt, ThreadDeleteReceipt, ThreadEntryDetailResponse, ThreadTranscriptResponse,
-    ThreadsQuery, ThreadsResponse, UpdateSessionSettingsInput, WorkspaceDiffResponse,
+    AuthSessionInput, AuthSessionView, BulkRevokeDevicesReceipt, DeleteThreadInput, HealthResponse,
+    HeartbeatInput, ModelOptionView, PairingDecisionInput, PairingDecisionReceipt,
+    PairingStartInput, PairingTicketView, ReadThreadEntryDetailInput, ReadThreadTranscriptInput,
+    RequestReviewInput, RequestReviewReceipt, ResumeSessionInput, ReviewDismissReceipt,
+    ReviewJobView, RevokeDeviceReceipt, SendMessageInput, SessionSnapshot,
+    SessionSnapshotCompactProfile, StartSessionInput, StopTurnInput, SubmitAskUserAnswerInput,
+    TakeOverInput, ThreadArchiveReceipt, ThreadDeleteReceipt, ThreadEntryDetailResponse,
+    ThreadTranscriptResponse, ThreadsQuery, ThreadsResponse, UpdateSessionSettingsInput,
+    WorkspaceDiffResponse,
 };
 use relay_http::{
     apply_standard_security_headers, header_origin, parse_optional_string_env, request_origin,
@@ -542,11 +543,17 @@ async fn archive_thread(
     headers: HeaderMap,
     uri: Uri,
     Path(thread_id): Path<String>,
+    // Optional body: absent → non-destructive default (keep reviewer threads as
+    // normal, un-hidden threads); present → honour the user's explicit choice
+    // (delete vs keep-as-normal). Archive must never silently delete a reviewer
+    // transcript when no choice was transmitted.
+    body: Option<Json<DeleteThreadInput>>,
 ) -> Result<Json<ApiEnvelope<ThreadArchiveReceipt>>, (StatusCode, Json<ApiError>)> {
     authorize_api(&context, &headers, &uri)?;
+    let delete_reviewers = body.and_then(|Json(input)| input.delete_reviewers);
     context
         .app
-        .archive_thread(&thread_id)
+        .archive_thread(&thread_id, delete_reviewers)
         .await
         .map(|receipt| Json(ApiEnvelope::ok(receipt)))
         .map_err(|error| {
@@ -563,11 +570,15 @@ async fn delete_thread_permanently(
     headers: HeaderMap,
     uri: Uri,
     Path(thread_id): Path<String>,
+    // Optional body: absent (the pre-feature client) → default delete of reviewer
+    // threads; present → honour the user's choice.
+    body: Option<Json<DeleteThreadInput>>,
 ) -> Result<Json<ApiEnvelope<ThreadDeleteReceipt>>, (StatusCode, Json<ApiError>)> {
     authorize_api(&context, &headers, &uri)?;
+    let delete_reviewers = body.and_then(|Json(input)| input.delete_reviewers);
     context
         .app
-        .delete_thread_permanently(&thread_id)
+        .delete_thread_permanently(&thread_id, delete_reviewers)
         .await
         .map(|receipt| Json(ApiEnvelope::ok(receipt)))
         .map_err(|error| {
