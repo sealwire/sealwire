@@ -621,6 +621,132 @@ test("view-only thread stays pinned while its review runs, then releases when it
   );
 });
 
+test("stale view-only fetch cannot override a newer resume", async () => {
+  activeBrowser = installBrowserStubs();
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { handleRemoteBrokerPayload } = await import("./actions.js");
+  const {
+    applySessionSnapshot,
+    resumeRemoteSession,
+    viewRemoteThread,
+  } = await import("./session-ops.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-view-race",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: null,
+    sessionClaimExpiresAt: null,
+  });
+  seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
+  state.pendingActions.clear();
+  seedTranscriptHydrationState(state);
+
+  let resolveViewFetch;
+  state.socket = {
+    readyState: 1,
+    send(frameText) {
+      const frame = JSON.parse(frameText);
+      if (frame.payload.request?.type === "fetch_thread_transcript") {
+        resolveViewFetch = () => {
+          void handleRemoteBrokerPayload({
+            kind: "remote_action_result",
+            action_id: frame.payload.action_id,
+            action: "fetch_thread_transcript",
+            ok: true,
+            snapshot: {},
+            thread_transcript: {
+              thread_id: "parent-view-race",
+              entries: [
+                {
+                  item_id: "parent-entry",
+                  kind: "agent_text",
+                  text: "stale parent body",
+                  status: "completed",
+                  turn_id: "parent-turn",
+                  tool: null,
+                },
+              ],
+              prev_cursor: null,
+            },
+          });
+        };
+        return;
+      }
+      if (frame.payload.request?.type === "resume_session") {
+        setImmediate(() => {
+          void handleRemoteBrokerPayload({
+            kind: "remote_action_result",
+            action_id: frame.payload.action_id,
+            action: "resume_session",
+            ok: true,
+            snapshot: {},
+          });
+        });
+      }
+    },
+  };
+
+  const reviewing = [
+    {
+      id: "review-race",
+      status: "waiting_for_reviewer",
+      parent_thread_id: "parent-view-race",
+    },
+  ];
+  applySessionSnapshot({
+    active_controller_device_id: "device-1",
+    active_review_jobs: reviewing,
+    active_thread_id: "thread-live",
+    active_turn_id: null,
+    current_cwd: "/tmp/project",
+    current_status: "idle",
+    pending_approvals: [],
+    transcript: [],
+    transcript_truncated: false,
+  });
+  state.threads = [
+    { id: "parent-view-race", cwd: "/tmp/project" },
+    { id: "thread-new-live", cwd: "/tmp/project" },
+  ];
+
+  const pendingView = viewRemoteThread("parent-view-race");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(typeof resolveViewFetch, "function", "view transcript fetch is pending");
+
+  const resumed = await resumeRemoteSession("thread-new-live");
+  assert.equal(resumed, true);
+  applySessionSnapshot({
+    active_controller_device_id: "device-1",
+    active_review_jobs: reviewing,
+    active_thread_id: "thread-new-live",
+    active_turn_id: null,
+    current_cwd: "/tmp/project",
+    current_status: "idle",
+    pending_approvals: [],
+    transcript: [{ item_id: "live-entry", text: "new live body" }],
+    transcript_truncated: false,
+  });
+
+  resolveViewFetch();
+  assert.equal(await pendingView, false, "the stale view response is discarded");
+  assert.equal(
+    state.session.active_thread_id,
+    "thread-new-live",
+    "the stale view does not replace the newer live navigation"
+  );
+});
+
 test("transcript hydration retries after an incomplete entry fetch", async () => {
   const browser = activeBrowser || installBrowserStubs();
   const sentPayloads = [];

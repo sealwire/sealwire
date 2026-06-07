@@ -49,6 +49,12 @@ const fetchTranscriptEntryDetailRequest =
 // auto-releases and the view returns to the live session. Explicit user actions
 // (resume/start/leaving the relay) clear it immediately.
 let viewOnlyThreadId = null;
+let viewOnlyNavigationGeneration = 0;
+
+function invalidateViewOnlyNavigation() {
+  viewOnlyNavigationGeneration += 1;
+  viewOnlyThreadId = null;
+}
 
 function remoteQueryScope() {
   return state.remoteAuth?.relayId || "unpaired";
@@ -727,8 +733,8 @@ export async function syncRemoteSnapshot(reason, silent = false) {
 }
 
 export async function startRemoteSession(sessionDraftOverride = null) {
-  // Explicit live action — drop any view-only pin so live snapshots flow again.
-  viewOnlyThreadId = null;
+  // Explicit live action: invalidate pending view fetches and let live snapshots flow.
+  invalidateViewOnlyNavigation();
   const sessionDraft = sessionDraftOverride;
   if (!sessionDraft) {
     throw new Error("startRemoteSession requires a session draft");
@@ -819,8 +825,8 @@ export async function resumeRemoteSession(threadId, _sessionDraftOverride = null
   if (!threadId) {
     return;
   }
-  // Explicit live action — drop any view-only pin so live snapshots flow again.
-  viewOnlyThreadId = null;
+  // Explicit live action: invalidate pending view fetches and let live snapshots flow.
+  invalidateViewOnlyNavigation();
 
   renderLog(`Resuming remote thread ${threadId}.`);
 
@@ -883,6 +889,7 @@ export async function viewRemoteThread(threadId) {
     return false;
   }
 
+  const navigationGeneration = ++viewOnlyNavigationGeneration;
   renderLog(`Viewing remote thread ${threadId}.`);
 
   try {
@@ -890,6 +897,11 @@ export async function viewRemoteThread(threadId) {
       before: null,
       threadId,
     });
+    // A newer view, resume, start, or relay reset won while this fetch was in
+    // flight. Do not let this stale response restore an old read-only projection.
+    if (navigationGeneration !== viewOnlyNavigationGeneration) {
+      return false;
+    }
     if (!page || page.thread_id !== threadId) {
       throw new Error("remote transcript page response is incomplete");
     }
@@ -1115,7 +1127,7 @@ export async function fetchRemoteThreadTranscript(threadId) {
 }
 
 export function clearSessionRuntime() {
-  viewOnlyThreadId = null;
+  invalidateViewOnlyNavigation();
   clearTranscriptHydration(state);
 }
 
