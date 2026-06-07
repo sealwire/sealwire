@@ -83,7 +83,23 @@ impl AppState {
         sort_threads_by_recency(&mut threads);
         threads.truncate(limit);
         let response_threads = threads.clone();
-        relay.threads = threads;
+
+        // The routing cache (relay.threads) must retain reviewer-thread rows even
+        // though they are filtered from the nav-visible response. `find_thread_provider`
+        // looks up threads by id in this cache, and a synthetic `claude-pending-…`
+        // reviewer is only there (not yet in the provider's own thread list), so
+        // losing its row would make it unroutable for `send_message_to_thread`.
+        // We preserve any reviewer rows that were already cached here.
+        let retained_reviewer_rows: Vec<_> = relay
+            .threads
+            .iter()
+            .filter(|cached| reviewer_ids.contains(&cached.id))
+            .cloned()
+            .collect();
+        let mut cached_threads = response_threads.clone();
+        cached_threads.extend(retained_reviewer_rows);
+        relay.threads = cached_threads;
+
         relay.notify();
         Ok(ThreadsResponse {
             threads: response_threads,
@@ -134,9 +150,16 @@ impl AppState {
     }
 
     pub async fn archive_thread(&self, thread_id: &str) -> Result<ThreadArchiveReceipt, String> {
-        // A review holds the active thread; don't let archive remove the parent
-        // out from under an in-flight review.
         let _slot = self.acquire_session_slot()?;
+        {
+            // Don't let a user archive a thread that a running review owns (its
+            // parent or reviewer). Terminal-review cleanup (dismiss) is unaffected
+            // because the job is terminal by then, so the thread is not locked.
+            let relay = self.relay.read().await;
+            if relay.is_thread_review_locked(thread_id) {
+                return Err(REVIEW_LOCKED_THREAD_MSG.to_string());
+            }
+        }
         let archived_active_thread = {
             let relay = self.relay.read().await;
             relay.can_archive_thread(thread_id)?
@@ -181,6 +204,14 @@ impl AppState {
         thread_id: &str,
     ) -> Result<ThreadDeleteReceipt, String> {
         let _slot = self.acquire_session_slot()?;
+        {
+            // Don't let a user delete a thread a running review owns. Terminal-
+            // review cleanup (dismiss) is unaffected (job is terminal → not locked).
+            let relay = self.relay.read().await;
+            if relay.is_thread_review_locked(thread_id) {
+                return Err(REVIEW_LOCKED_THREAD_MSG.to_string());
+            }
+        }
         let deleted_active_thread = {
             let relay = self.relay.read().await;
             relay.can_delete_thread(thread_id)?

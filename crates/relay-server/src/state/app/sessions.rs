@@ -113,6 +113,25 @@ impl AppState {
         input: ResumeSessionInput,
     ) -> Result<SessionSnapshot, String> {
         let _slot = self.acquire_session_slot()?;
+        {
+            // resume_session is NOT view-only: it calls bridge.resume_thread,
+            // overwrites runtime data via load_thread_data, and can change the
+            // active thread and its settings. Block it for any thread that a
+            // running review owns (its parent OR its reviewer thread):
+            //   • Parent: resuming it mid-recap/post-back could rebuild its
+            //     runtime, change approval_policy, or interrupt the turn.
+            //   • Reviewer: resuming its (hidden) thread_id would make it the
+            //     active thread, violating "the active conversation is never
+            //     displaced by the reviewer" — the fundamental guarantee of the
+            //     background-review model.
+            // Users who want to NAVIGATE to the parent during a review should do
+            // so via the frontend's URL/view-thread route (setThreadRoute), which
+            // does not call resume_session.
+            let relay = self.relay.read().await;
+            if relay.is_thread_review_locked(&input.thread_id) {
+                return Err(REVIEW_LOCKED_THREAD_MSG.to_string());
+            }
+        }
         self.resume_session_inner(input).await
     }
 
@@ -246,6 +265,9 @@ impl AppState {
                 .active_thread_id
                 .clone()
                 .ok_or_else(|| "there is no active thread to update".to_string())?;
+            if relay.is_thread_review_locked(&thread_id) {
+                return Err(REVIEW_LOCKED_THREAD_MSG.to_string());
+            }
             let next_approval_policy =
                 non_empty(input.approval_policy).unwrap_or_else(|| relay.approval_policy.clone());
             let next_sandbox = non_empty(input.sandbox).unwrap_or_else(|| relay.sandbox.clone());
@@ -346,10 +368,14 @@ impl AppState {
                 &device_scope,
                 &relay.allowed_roots,
             )?;
-            relay
+            let thread_id = relay
                 .active_thread_id
                 .clone()
-                .ok_or_else(|| "there is no active Codex thread to send to".to_string())?
+                .ok_or_else(|| "there is no active Codex thread to send to".to_string())?;
+            if relay.is_thread_review_locked(&thread_id) {
+                return Err(REVIEW_LOCKED_THREAD_MSG.to_string());
+            }
+            thread_id
         };
         let (provider_name, bridge) = self.find_thread_provider(&thread_id).await?;
         let provider_models = self
@@ -406,6 +432,9 @@ impl AppState {
                 .active_thread_id
                 .clone()
                 .ok_or_else(|| "there is no active Codex thread to stop".to_string())?;
+            if relay.is_thread_review_locked(&thread_id) {
+                return Err(REVIEW_LOCKED_THREAD_MSG.to_string());
+            }
             let turn_id = relay
                 .active_turn_id
                 .clone()
@@ -508,14 +537,17 @@ marking idle locally."
 
     pub async fn take_over_control(&self, input: TakeOverInput) -> Result<SessionSnapshot, String> {
         let device_id = require_device_id(input.device_id)?;
-        // A review owns the active thread and hands control back itself; don't let
-        // a take-over reassign the controller mid-review (it could strand the
-        // resolve action or clobber the post-review handoff).
         let _slot = self.acquire_session_slot()?;
         let mut relay = self.relay.write().await;
         expire_controller_if_needed(&mut relay);
-        if relay.active_thread_id.is_none() {
+        let Some(active_thread_id) = relay.active_thread_id.clone() else {
             return Err("there is no active session to take over".to_string());
+        };
+        // A review owns the reviewed thread's turn sequence; don't let a take-over
+        // reassign control of THAT thread mid-review. Taking over any other active
+        // thread is fine — the review runs in the background and is unaffected.
+        if relay.is_thread_review_locked(&active_thread_id) {
+            return Err(REVIEW_LOCKED_THREAD_MSG.to_string());
         }
 
         let changed = relay.set_active_controller(&device_id);

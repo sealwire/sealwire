@@ -487,6 +487,19 @@ const renderer = createSessionRenderer({
   setReviewSlice(slice) {
     workspaceDiffStore.setReview(slice);
   },
+  // View-only navigation: just update the URL/viewThreadId without calling the
+  // backend resume_session, which is mutating. Used during a review when the
+  // user clicks a thread in the sidebar — the backend would reject resume for
+  // review-locked threads, so we navigate without it.
+  viewThread(threadId) {
+    void runViewTransition(() => {
+      setThreadRoute(threadId);
+      if (state.session) {
+        renderer.renderSession(state.session);
+      }
+      renderer.syncThreadSelection();
+    });
+  },
 });
 
 // Wrap renderer.renderSession so every full render also reconciles the

@@ -28,20 +28,24 @@ impl AppState {
     ) -> Result<ApprovalReceipt, ApprovalError> {
         let device_id =
             require_device_id(input.device_id.clone()).map_err(ApprovalError::Bridge)?;
-        // During a review the only pending approvals belong to the reviewer, which
-        // the orchestrator auto-denies — block user decisions so a write can't be
-        // approved out from under it.
         let _slot = self.acquire_session_slot().map_err(ApprovalError::Bridge)?;
         let pending = {
             let relay = self.relay.read().await;
             relay
                 .ensure_device_can_approve(&device_id)
                 .map_err(ApprovalError::Bridge)?;
-            relay
+            let pending = relay
                 .pending_approvals
                 .get(request_id)
                 .cloned()
-                .ok_or(ApprovalError::NoPendingRequest)?
+                .ok_or(ApprovalError::NoPendingRequest)?;
+            // A reviewer thread's approvals belong to the review (the orchestrator
+            // auto-denies them) — block user decisions so a write can't be approved
+            // out from under it. Approvals on any OTHER thread stay decidable.
+            if relay.is_thread_review_locked(&pending.thread_id) {
+                return Err(ApprovalError::Bridge(REVIEW_LOCKED_THREAD_MSG.to_string()));
+            }
+            pending
         };
 
         let bridge = if pending.thread_id.is_empty() {
@@ -107,6 +111,16 @@ impl AppState {
             relay.pending_ask_user_questions.get(request_id).cloned()
         };
         let pending = pending.ok_or(AskUserAnswerError::NoPendingRequest)?;
+        // A reviewer thread's questions belong to the review — block answering them.
+        // Questions on any other thread stay answerable.
+        if !pending.thread_id.is_empty() {
+            let relay = self.relay.read().await;
+            if relay.is_thread_review_locked(&pending.thread_id) {
+                return Err(AskUserAnswerError::Bridge(
+                    REVIEW_LOCKED_THREAD_MSG.to_string(),
+                ));
+            }
+        }
 
         let bridge = if pending.thread_id.is_empty() {
             self.require_active_provider()
@@ -187,6 +201,11 @@ impl AppState {
         let (cwd, diff) = {
             let relay = self.relay.read().await;
             relay.ensure_device_can_send_message(&device_id)?;
+            if let Some(active) = relay.active_thread_id.as_deref() {
+                if relay.is_thread_review_locked(active) {
+                    return Err(REVIEW_LOCKED_THREAD_MSG.to_string());
+                }
+            }
             let device_scope = relay.device_path_scope(&device_id);
             ensure_path_within_device_scope(
                 &relay.current_cwd,

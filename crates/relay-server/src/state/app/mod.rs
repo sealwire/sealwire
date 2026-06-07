@@ -35,17 +35,24 @@ use super::{
     SecurityProfile, DEFAULT_MODEL,
 };
 
+/// Error returned when a user op targets a thread that a non-terminal review
+/// currently owns (its parent or reviewer thread). Such a thread is frozen for
+/// send/stop while the review runs in the background; every OTHER thread stays
+/// fully usable.
+pub(super) const REVIEW_LOCKED_THREAD_MSG: &str =
+    "this thread is being reviewed; switch to another thread or wait for the review to finish";
+
 #[derive(Clone)]
 pub struct AppState {
     relay: Arc<RwLock<RelayState>>,
     providers: HashMap<String, Arc<dyn ProviderBridge>>,
     change_tx: watch::Sender<u64>,
-    /// Serializes review orchestration against user session operations. A review
-    /// job holds this guard for its entire lifetime; session-mutating ops
-    /// (send/start/resume/settings/stop/approve/archive/delete) acquire it for
-    /// their full duration. Because both sides hold the *same* guard, a review and
-    /// a session op can never interleave — closing the check-then-act race — and
-    /// it auto-releases when the holder drops (including on panic).
+    /// Serializes individual session-mutating ops against each other (op-vs-op
+    /// atomicity for their brief check-then-act windows). Unlike before, a review
+    /// does NOT hold this for its lifetime — the review runs fully in the
+    /// background and freezes only its own parent + reviewer threads, derived from
+    /// job state via `RelayState::is_thread_review_locked`. `request_review` takes
+    /// it only briefly to atomically validate + record the job.
     session_guard: Arc<tokio::sync::Mutex<()>>,
     /// Per-turn timeout (ms) for review steps. Overridable in tests so the
     /// timeout-interrupt path can be exercised without a 10-minute wait.
@@ -57,9 +64,10 @@ pub struct AppState {
     /// before falling back to marking the turn idle locally (so a provider that
     /// never confirms can't wedge the session). Overridable in tests.
     stop_fallback_ms: Arc<std::sync::atomic::AtomicU64>,
-    /// Holds the session guard of a review that became `Blocked` (cleanup failed).
-    /// While `Some`, the session lock stays held — every session op and new review
-    /// is rejected — until `resolve_blocked_review` stops the reviewer and drops it.
+    /// Tracks a review that became `Blocked` (cleanup failed). The job stays in the
+    /// non-terminal `Blocked` status — which keeps its threads review-locked — until
+    /// `resolve_blocked_review` stops the stuck turn and marks the job terminal. The
+    /// mutex provides cancellation-safety for the resolve attempt; no lock is held.
     blocked_review: Arc<tokio::sync::Mutex<Option<review::BlockedReview>>>,
 }
 

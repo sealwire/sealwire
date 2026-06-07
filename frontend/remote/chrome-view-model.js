@@ -1,6 +1,6 @@
 import { formatTimestamp, shortId, workspaceBasename } from "./utils.js";
 import { providerLabel } from "../shared/provider-labels.js";
-import { isReviewInProgress } from "../shared/review-state.js";
+import { isReviewInProgressForThread } from "../shared/review-state.js";
 import {
   isProgressStalled,
   progressPhaseLabel,
@@ -305,14 +305,15 @@ function selectControlBannerRenderModel(currentState, session) {
     };
   }
 
-  const reviewRunning = isReviewInProgress(session);
+  // Only the thread actually under review is off-limits for take-over.
+  const activeUnderReview = isReviewInProgressForThread(session, session.active_thread_id);
   return {
     hidden: false,
-    hint: reviewRunning
-      ? "A review is in progress; control returns automatically when it finishes."
+    hint: activeUnderReview
+      ? "This thread is being reviewed; it unlocks when the review finishes."
       : "Read-only for sending until you take over. Approvals can still be handled here.",
     summary: `Controlled by ${controllerLabel(currentState, session.active_controller_device_id)}`,
-    takeOverHidden: reviewRunning,
+    takeOverHidden: activeUnderReview,
   };
 }
 

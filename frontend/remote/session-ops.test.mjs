@@ -487,6 +487,140 @@ test("resumeRemoteSession sends only thread id so relay restores per-thread sett
   });
 });
 
+test("view-only thread stays pinned while its review runs, then releases when it ends", async () => {
+  activeBrowser = installBrowserStubs();
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { handleRemoteBrokerPayload } = await import("./actions.js");
+  const { applySessionSnapshot, viewRemoteThread } = await import("./session-ops.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-view",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: null,
+    sessionClaimExpiresAt: null,
+  });
+  seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
+  state.pendingActions.clear();
+  seedTranscriptHydrationState(state);
+  state.socket = {
+    readyState: 1,
+    send(frameText) {
+      const frame = JSON.parse(frameText);
+      setImmediate(async () => {
+        await handleRemoteBrokerPayload({
+          kind: "remote_action_result",
+          action_id: frame.payload.action_id,
+          action: "fetch_thread_transcript",
+          ok: true,
+          snapshot: {},
+          thread_transcript: {
+            thread_id: "parent-view-1",
+            entries: [
+              {
+                item_id: "p1",
+                kind: "agent_text",
+                text: "parent body",
+                status: "completed",
+                turn_id: "t1",
+                tool: null,
+              },
+            ],
+            prev_cursor: null,
+          },
+        });
+      });
+    },
+  };
+
+  const snapshot = (overrides) => ({
+    active_controller_device_id: "device-2",
+    active_controller_last_seen_at: 1,
+    active_flags: [],
+    active_turn_id: null,
+    allowed_roots: [],
+    approval_policy: "untrusted",
+    audit_enabled: false,
+    available_models: [],
+    broker_can_read_content: true,
+    broker_channel_id: "room-a",
+    broker_connected: true,
+    broker_peer_id: "relay-1",
+    codex_connected: true,
+    controller_lease_expires_at: null,
+    controller_lease_seconds: 15,
+    current_cwd: "/tmp/project",
+    current_status: "idle",
+    device_records: [],
+    e2ee_enabled: false,
+    logs: [],
+    model: "gpt-5.4",
+    paired_devices: [],
+    pending_approvals: [],
+    pending_pairing_requests: [],
+    provider: "codex",
+    reasoning_effort: "medium",
+    sandbox: "workspace-write",
+    security_mode: "managed",
+    service_ready: true,
+    transcript_truncated: false,
+    transcript: [],
+    ...overrides,
+  });
+
+  const reviewing = [
+    { id: "rev-1", status: "waiting_for_reviewer", parent_thread_id: "parent-view-1" },
+  ];
+
+  // 1. Live session is on another thread; a review is running on parent-view-1.
+  applySessionSnapshot(
+    snapshot({ active_thread_id: "thread-other", active_review_jobs: reviewing })
+  );
+  assert.equal(state.session.active_thread_id, "thread-other");
+  state.threads = [{ id: "parent-view-1", cwd: "/tmp/project" }];
+
+  // 2. View the reviewed parent read-only (resume would be backend-rejected).
+  const ok = await viewRemoteThread("parent-view-1");
+  assert.equal(ok, true);
+  assert.equal(state.session.active_thread_id, "parent-view-1", "view-only shows the parent");
+
+  // 3. A live snapshot for the OTHER active thread (review still running) must NOT
+  //    overwrite the pinned view-only projection.
+  applySessionSnapshot(
+    snapshot({ active_thread_id: "thread-other", active_review_jobs: reviewing })
+  );
+  assert.equal(
+    state.session.active_thread_id,
+    "parent-view-1",
+    "the pinned parent stays displayed while the review runs"
+  );
+
+  // 4. Once the review completes, the pin auto-releases and live snapshots flow.
+  applySessionSnapshot(
+    snapshot({
+      active_thread_id: "thread-other",
+      active_review_jobs: [
+        { id: "rev-1", status: "complete", parent_thread_id: "parent-view-1" },
+      ],
+    })
+  );
+  assert.equal(
+    state.session.active_thread_id,
+    "thread-other",
+    "the view returns to the live session once the review finishes"
+  );
+});
+
 test("transcript hydration retries after an incomplete entry fetch", async () => {
   const browser = activeBrowser || installBrowserStubs();
   const sentPayloads = [];

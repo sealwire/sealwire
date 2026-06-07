@@ -36,10 +36,19 @@ import {
   applyRemoteSurfacePatch,
   createRemoteThreadsPatch,
 } from "./surface-state.js";
+import { isReviewInProgressForThread } from "../shared/review-state.js";
 
 const fetchRawTranscriptPage = createTranscriptPageFetcher(dispatchOrRecover);
 const fetchTranscriptEntryDetailRequest =
   createTranscriptEntryDetailFetcher(dispatchOrRecover);
+
+// While the user is viewing a review-locked thread (resume is blocked, so we show
+// a read-only transcript projection), this pins that thread id. Live broker
+// snapshots that would swap the view back to the relay's actual active thread are
+// suppressed until the review on the pinned thread finishes — then the pin
+// auto-releases and the view returns to the live session. Explicit user actions
+// (resume/start/leaving the relay) clear it immediately.
+let viewOnlyThreadId = null;
 
 function remoteQueryScope() {
   return state.remoteAuth?.relayId || "unpaired";
@@ -534,6 +543,20 @@ function shouldAcceptSessionSnapshot(snapshot) {
   if (!snapshot) {
     return false;
   }
+  // View-only pin (see `viewOnlyThreadId`): while a thread is pinned for read-only
+  // viewing because it is under review, suppress live snapshots that would swap
+  // the view back to the relay's real active thread. Auto-release the pin once the
+  // review on the pinned thread is no longer in progress, letting live flow again.
+  if (viewOnlyThreadId) {
+    if (isReviewInProgressForThread(snapshot, viewOnlyThreadId)) {
+      const incoming = snapshot.active_thread_id || null;
+      if (incoming && incoming !== viewOnlyThreadId) {
+        return false;
+      }
+    } else {
+      viewOnlyThreadId = null;
+    }
+  }
   const incomingThreadId = snapshot.active_thread_id || null;
   const currentThreadId = state.session?.active_thread_id || null;
   if (!incomingThreadId || incomingThreadId !== currentThreadId) {
@@ -704,6 +727,8 @@ export async function syncRemoteSnapshot(reason, silent = false) {
 }
 
 export async function startRemoteSession(sessionDraftOverride = null) {
+  // Explicit live action — drop any view-only pin so live snapshots flow again.
+  viewOnlyThreadId = null;
   const sessionDraft = sessionDraftOverride;
   if (!sessionDraft) {
     throw new Error("startRemoteSession requires a session draft");
@@ -794,6 +819,8 @@ export async function resumeRemoteSession(threadId, _sessionDraftOverride = null
   if (!threadId) {
     return;
   }
+  // Explicit live action — drop any view-only pin so live snapshots flow again.
+  viewOnlyThreadId = null;
 
   renderLog(`Resuming remote thread ${threadId}.`);
 
@@ -869,6 +896,9 @@ export async function viewRemoteThread(threadId) {
 
     const thread = (state.threads || []).find((candidate) => candidate?.id === threadId);
     clearTranscriptHydration(state);
+    // Pin this thread so incoming live snapshots don't immediately overwrite the
+    // view-only projection (released automatically when the review finishes).
+    viewOnlyThreadId = threadId;
     applyRenderedSession(
       {
         ...(state.session || {}),
@@ -1085,6 +1115,7 @@ export async function fetchRemoteThreadTranscript(threadId) {
 }
 
 export function clearSessionRuntime() {
+  viewOnlyThreadId = null;
   clearTranscriptHydration(state);
 }
 

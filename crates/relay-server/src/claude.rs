@@ -834,6 +834,14 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                 }
                 if let Some(pending_id) = stale_pending_id {
                     relay.threads.retain(|thread| thread.id != pending_id);
+                } else if let Some(pending_id) = pending_thread_id.as_deref() {
+                    // Background reviewer: the pending thread is NOT the active
+                    // thread (a clean reviewer runs off to the side), so the active-
+                    // thread promotion above didn't fire. Promote it in place so the
+                    // review job / runtime / transcript line up under the real id.
+                    if pending_id != sid {
+                        relay.promote_background_thread(pending_id, sid);
+                    }
                 }
             }
             let is_active_session = provider_session_id

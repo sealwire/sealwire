@@ -2663,6 +2663,25 @@ mod review_tests {
         wait_for_review_status(app, job_id, &["complete", "failed", "blocked"]).await
     }
 
+    /// Wait until the review job has a reviewer_thread_id set (atomically with
+    /// thread registration in production, so this is reachable even when the recap
+    /// completes and the review transitions to StartingReviewer).
+    async fn wait_for_reviewer_thread_id(app: &AppState, job_id: &str) -> String {
+        for _ in 0..400 {
+            if let Some(id) = app
+                .relay
+                .read()
+                .await
+                .review_job(job_id)
+                .and_then(|j| j.reviewer_thread_id.clone())
+            {
+                return id;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        panic!("review job {job_id} never got a reviewer_thread_id");
+    }
+
     async fn wait_for_review_status(
         app: &AppState,
         job_id: &str,
@@ -2712,6 +2731,14 @@ mod review_tests {
 
         let job = wait_for_review(&app, &receipt.review_job_id).await;
         assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
+
+        // The reviewer ran entirely in the BACKGROUND: the active thread stayed the
+        // parent the whole time — there was no handoff to displace the user.
+        assert_eq!(
+            app.snapshot().await.active_thread_id.as_deref(),
+            Some(parent.id.as_str()),
+            "the active thread must remain the parent throughout a background review"
+        );
 
         let provider = providers.get("codex").unwrap();
         let turns = provider.turns.lock().await.clone();
@@ -2957,11 +2984,12 @@ mod review_tests {
     }
 
     #[tokio::test]
-    async fn review_in_progress_blocks_user_session_ops() {
+    async fn review_freezes_only_the_reviewed_thread() {
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();
         let (app, providers) = build_review_app(cwd, &["codex"]).await;
-        // Hold the review guard open: the recap turn never completes.
+        // The recap turn never completes, so the review stays in progress with the
+        // parent (reviewed) thread locked for the whole test.
         providers
             .get("codex")
             .unwrap()
@@ -2971,8 +2999,9 @@ mod review_tests {
 
         app.request_review(review_input("codex"))
             .await
-            .expect("review should start and hold the guard");
+            .expect("review should start");
 
+        // Sending to the reviewed (active) thread is blocked.
         let send_err = app
             .send_message(crate::protocol::SendMessageInput {
                 text: "hi".to_string(),
@@ -2981,13 +3010,12 @@ mod review_tests {
                 device_id: Some("device-1".to_string()),
             })
             .await
-            .expect_err("send should be blocked during a review");
-        assert!(
-            send_err.contains("review is in progress"),
-            "got: {send_err}"
-        );
+            .expect_err("send to the reviewed thread should be blocked");
+        assert!(send_err.contains("being reviewed"), "got: {send_err}");
 
-        let start_err = app
+        // Starting another session is NOT blocked — other threads stay usable —
+        // and it becomes the active thread.
+        let started = app
             .start_session(StartSessionInput {
                 device_id: Some("device-1".to_string()),
                 cwd: Some(cwd.to_string()),
@@ -2999,12 +3027,25 @@ mod review_tests {
                 initial_prompt: None,
             })
             .await
-            .expect_err("start should be blocked during a review");
-        assert!(
-            start_err.contains("review is in progress"),
-            "got: {start_err}"
-        );
+            .expect("starting another session must be allowed during a review");
+        let other_thread = started.active_thread_id.expect("new active thread");
+        assert_ne!(other_thread, parent.id, "a new thread became active");
 
+        // The new (non-reviewed) thread can receive messages while the review runs.
+        app.send_message(crate::protocol::SendMessageInput {
+            text: "work on the other thread".to_string(),
+            model: None,
+            effort: None,
+            device_id: Some("device-1".to_string()),
+        })
+        .await
+        .expect("sending on a non-reviewed thread must be allowed during a review");
+
+        // resume_session is NOT view-only — it calls bridge.resume_thread,
+        // overwrites the runtime, and can change settings. Both the reviewed parent
+        // and the reviewer thread are blocked for resume while a review runs. The
+        // frontend navigates to other threads via setThreadRoute (view-only URL
+        // change), not by calling resume_session.
         let resume_err = app
             .resume_session(crate::protocol::ResumeSessionInput {
                 thread_id: parent.id.clone(),
@@ -3015,10 +3056,140 @@ mod review_tests {
                 provider: Some("codex".to_string()),
             })
             .await
-            .expect_err("resume should be blocked during a review");
+            .expect_err("resuming the reviewed parent must be blocked (resume is mutating)");
+        assert!(resume_err.contains("being reviewed"), "got: {resume_err}");
+    }
+
+    #[tokio::test]
+    async fn resume_session_is_blocked_for_reviewed_parent_and_reviewer_thread() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        // Recap completes so the orchestrator advances to StartingReviewer and the
+        // reviewer_thread_id is set. Then the reviewer turn never completes, keeping
+        // the review in-progress for the rest of the test.
+        let codex = providers.get("codex").unwrap();
+        codex.complete_turns.store(true, Ordering::Relaxed); // recap completes
+        let parent = start_parent(&app, cwd, "codex").await;
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+
+        // Wait until the reviewer thread is registered (recap done, Step 3 complete).
+        let reviewer_id = wait_for_reviewer_thread_id(&app, &receipt.review_job_id).await;
+
+        // Pause further turns so the review stays in-progress.
+        codex.complete_turns.store(false, Ordering::Relaxed);
+
+        // Resuming the reviewed parent must be blocked (resume is mutating, not view-only).
+        let resume_parent_err = app
+            .resume_session(crate::protocol::ResumeSessionInput {
+                thread_id: parent.id.clone(),
+                approval_policy: None,
+                sandbox: None,
+                effort: None,
+                device_id: Some("device-1".to_string()),
+                provider: None,
+            })
+            .await
+            .expect_err("resuming the reviewed parent must be blocked");
         assert!(
-            resume_err.contains("review is in progress"),
-            "got: {resume_err}"
+            resume_parent_err.contains("being reviewed"),
+            "got: {resume_parent_err}"
+        );
+
+        // Resuming the reviewer thread must ALWAYS be blocked — it would make the
+        // hidden reviewer the active thread, violating the background-review invariant.
+        let resume_reviewer_err = app
+            .resume_session(crate::protocol::ResumeSessionInput {
+                thread_id: reviewer_id.clone(),
+                approval_policy: None,
+                sandbox: None,
+                effort: None,
+                device_id: Some("device-1".to_string()),
+                provider: None,
+            })
+            .await
+            .expect_err("resuming the reviewer thread must always be blocked");
+        assert!(
+            resume_reviewer_err.contains("being reviewed"),
+            "got: {resume_reviewer_err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_threads_retains_reviewer_rows_in_routing_cache() {
+        // A background Claude reviewer is registered under a synthetic pending id
+        // and must remain routable even if list_threads is called before its first
+        // turn (when the provider cannot return it yet).
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, _providers) = build_review_app(cwd, &["codex"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+
+        let pending = "claude-pending-review-test";
+        {
+            // Mirror production ordering: insert the job WITHOUT reviewer_thread_id,
+            // then register the background thread and assign reviewer_thread_id
+            // atomically in the same write lock. This is the race the test covers:
+            // list_threads called between insert_review_job and the atomic
+            // (register + assign) step must not lose the row.
+            let mut relay = app.relay.write().await;
+            let job = crate::state::ReviewJob::new(
+                "review-cache".to_string(),
+                parent.id.clone(),
+                "codex".to_string(),
+                "claude_code".to_string(),
+                None,
+                crate::state::ReviewMode::CleanThread,
+                cwd.to_string(),
+                "device-1".to_string(),
+                None,
+            );
+            relay.insert_review_job(job);
+            // Atomic: register the row AND assign reviewer_thread_id together.
+            relay.register_background_thread(
+                crate::protocol::ThreadSummaryView {
+                    id: pending.to_string(),
+                    name: None,
+                    preview: String::new(),
+                    cwd: cwd.to_string(),
+                    updated_at: 1,
+                    source: "claude_code".to_string(),
+                    status: "active".to_string(),
+                    model_provider: "anthropic".to_string(),
+                    provider: "claude_code".to_string(),
+                },
+                cwd,
+                "claude-model",
+                "on-request",
+                "workspace-write",
+                "medium",
+            );
+            relay.update_review_job("review-cache", |job| {
+                job.reviewer_thread_id = Some(pending.to_string());
+            });
+        }
+
+        // Trigger a list_threads refresh (simulates the periodic poll or a
+        // browser-triggered refresh) and verify the reviewer row is preserved.
+        let listed = app.list_threads(50, None).await.expect("list_threads");
+        assert!(
+            listed.threads.iter().all(|t| t.id != pending),
+            "reviewer thread must not appear in the nav-visible response"
+        );
+        // But it must still be in the relay.threads routing cache.
+        let in_cache = app
+            .relay
+            .read()
+            .await
+            .threads
+            .iter()
+            .any(|t| t.id == pending);
+        assert!(
+            in_cache,
+            "reviewer thread must be retained in relay.threads for routing after list_threads"
         );
     }
 
@@ -3050,26 +3221,45 @@ mod review_tests {
     }
 
     #[tokio::test]
-    async fn decide_approval_is_blocked_during_review() {
+    async fn decide_approval_on_a_reviewed_thread_is_blocked() {
         use crate::protocol::{ApprovalDecision, ApprovalDecisionInput};
+        use crate::state::{ApprovalKind, PendingApproval};
 
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();
         let (app, providers) = build_review_app(cwd, &["codex"]).await;
-        // Hold the session guard open for the whole test.
         providers
             .get("codex")
             .unwrap()
             .complete_turns
             .store(false, Ordering::Relaxed);
-        start_parent(&app, cwd, "codex").await;
+        let parent = start_parent(&app, cwd, "codex").await;
         app.request_review(review_input("codex"))
             .await
-            .expect("review should start and hold the guard");
+            .expect("review should start");
+
+        // Simulate an approval surfacing on the reviewed thread.
+        app.relay.write().await.pending_approvals.insert(
+            "req-1".to_string(),
+            PendingApproval {
+                request_id: "req-1".to_string(),
+                raw_request_id: serde_json::json!("req-1"),
+                kind: ApprovalKind::Command,
+                thread_id: parent.id.clone(),
+                summary: "run".to_string(),
+                detail: None,
+                command: Some("true".to_string()),
+                cwd: Some(cwd.to_string()),
+                context_preview: None,
+                requested_permissions: None,
+                available_decisions: vec!["approve".to_string()],
+                supports_session_scope: false,
+            },
+        );
 
         let error = app
             .decide_approval(
-                "any-request",
+                "req-1",
                 ApprovalDecisionInput {
                     decision: ApprovalDecision::Approve,
                     scope: None,
@@ -3077,12 +3267,12 @@ mod review_tests {
                 },
             )
             .await
-            .expect_err("approving during a review must be blocked");
+            .expect_err("approving the reviewed thread's approval must be blocked");
         let message = match error {
             crate::state::ApprovalError::Bridge(message) => message,
             other => panic!("unexpected approval error: {other:?}"),
         };
-        assert!(message.contains("review is in progress"), "got: {message}");
+        assert!(message.contains("being reviewed"), "got: {message}");
     }
 
     #[tokio::test]
@@ -3147,7 +3337,7 @@ mod review_tests {
             )
             .await
             .expect_err("apply_file_change must be blocked during a review");
-        assert!(error.contains("review is in progress"), "got: {error}");
+        assert!(error.contains("being reviewed"), "got: {error}");
     }
 
     #[tokio::test]
@@ -3209,11 +3399,8 @@ mod review_tests {
                 device_id: Some("device-1".to_string()),
             })
             .await
-            .expect_err("the lock must stay held while blocked");
-        assert!(
-            send_err.contains("review is in progress"),
-            "got: {send_err}"
-        );
+            .expect_err("the reviewed thread must stay frozen while blocked");
+        assert!(send_err.contains("being reviewed"), "got: {send_err}");
 
         // A passive (non-controller) device must not be able to resolve.
         let scope_err = app
@@ -3273,7 +3460,7 @@ mod review_tests {
             .await;
         if let Err(error) = after {
             assert!(
-                !error.contains("review is in progress"),
+                !error.contains("being reviewed"),
                 "lock should be released after resolve: {error}"
             );
         }
@@ -3338,8 +3525,8 @@ mod review_tests {
                 device_id: Some("other-device".to_string()),
             })
             .await
-            .expect_err("take-over must be blocked during a review");
-        assert!(error.contains("review is in progress"), "got: {error}");
+            .expect_err("take-over of the reviewed thread must be blocked during a review");
+        assert!(error.contains("being reviewed"), "got: {error}");
     }
 
     #[tokio::test]
@@ -3354,14 +3541,14 @@ mod review_tests {
     }
 
     #[tokio::test]
-    async fn reviewer_handoff_block_keeps_reviewer_active_until_resolved() {
+    async fn reviewer_block_keeps_the_reviewed_thread_frozen_until_resolved() {
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();
         let (app, providers) = build_review_app(cwd, &["codex"]).await;
         app.set_review_drain_max_ms(200);
         let codex = providers.get("codex").unwrap();
-        // Recap completes; the REVIEWER turn parks on an approval that can't be
-        // denied or interrupted — so the block happens during the handoff.
+        // Recap completes; the REVIEWER (background) turn parks on an approval that
+        // can't be denied or interrupted — so the block happens on the reviewer.
         codex
             .approval_on_reviewer_turn
             .store(true, Ordering::Relaxed);
@@ -3376,20 +3563,52 @@ mod review_tests {
         let job = wait_for_review_status(&app, &receipt.review_job_id, &["blocked"]).await;
         assert_eq!(job.status, "blocked");
 
-        // Control was NOT handed back to the parent — the reviewer is still active
-        // and gated, never running unobserved against the parent thread.
+        // No handoff: the parent was never displaced, so it is STILL the active
+        // thread — the reviewer ran in the background.
         let reviewer_thread = job.reviewer_thread_id.clone().expect("reviewer thread id");
         let active = app.snapshot().await.active_thread_id;
-        assert_eq!(active.as_deref(), Some(reviewer_thread.as_str()));
-        assert_ne!(active.as_deref(), Some(parent.id.as_str()));
+        assert_eq!(
+            active.as_deref(),
+            Some(parent.id.as_str()),
+            "the parent is never displaced by the reviewer"
+        );
+        assert_ne!(active.as_deref(), Some(reviewer_thread.as_str()));
 
-        // Resolve (now stoppable) → reviewer stopped, lock released, job failed.
+        // While blocked, the reviewed parent stays frozen for sending.
+        let send_err = app
+            .send_message(crate::protocol::SendMessageInput {
+                text: "hi".to_string(),
+                model: None,
+                effort: None,
+                device_id: Some("device-1".to_string()),
+            })
+            .await
+            .expect_err("the reviewed thread must stay frozen while blocked");
+        assert!(send_err.contains("being reviewed"), "got: {send_err}");
+
+        // Resolve (now stoppable) → reviewer stopped, job failed, parent unfreezes.
         codex.interrupt_fails.store(false, Ordering::Relaxed);
         app.resolve_blocked_review(Some("device-1".to_string()))
             .await
             .expect("resolve should unblock");
         let job = wait_for_review_status(&app, &receipt.review_job_id, &["failed"]).await;
         assert_eq!(job.status, "failed");
+
+        // The parent is unlocked again.
+        if let Err(error) = app
+            .send_message(crate::protocol::SendMessageInput {
+                text: "hi again".to_string(),
+                model: None,
+                effort: None,
+                device_id: Some("device-1".to_string()),
+            })
+            .await
+        {
+            assert!(
+                !error.contains("being reviewed"),
+                "the parent should be unlocked after resolve: {error}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -3765,6 +3984,134 @@ mod review_tests {
     }
 
     #[tokio::test]
+    async fn failed_review_unfreezes_the_reviewed_thread() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        // The recap completes but produces no assistant text → the review fails
+        // cleanly (no Blocked state). The parent must auto-unfreeze.
+        providers
+            .get("codex")
+            .unwrap()
+            .emit_assistant
+            .store(false, Ordering::Relaxed);
+        let parent = start_parent(&app, cwd, "codex").await;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "failed");
+
+        // The job is terminal, so the parent is no longer review-locked.
+        assert!(
+            !app.relay.read().await.is_thread_review_locked(&parent.id),
+            "a failed review must release the reviewed thread's lock"
+        );
+        if let Err(error) = app
+            .send_message(crate::protocol::SendMessageInput {
+                text: "back to work".to_string(),
+                model: None,
+                effort: None,
+                device_id: Some("device-1".to_string()),
+            })
+            .await
+        {
+            assert!(
+                !error.contains("being reviewed"),
+                "the parent must be sendable after a failed review: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn promote_background_thread_rewrites_job_and_moves_runtime() {
+        // Directly exercises the Claude background-promotion logic: a clean reviewer
+        // runs off to the side under a synthetic `claude-pending-…` id and is
+        // promoted to the real session id without ever becoming the active thread.
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, _providers) = build_review_app(cwd, &["codex"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+
+        let pending = "claude-pending-xyz";
+        let real = "real-session-9";
+        {
+            let mut relay = app.relay.write().await;
+            let job = crate::state::ReviewJob::new(
+                "review-promote".to_string(),
+                parent.id.clone(),
+                "codex".to_string(),
+                "claude_code".to_string(),
+                None,
+                crate::state::ReviewMode::CleanThread,
+                cwd.to_string(),
+                "device-1".to_string(),
+                None,
+            );
+            relay.insert_review_job(job);
+            relay.update_review_job("review-promote", |job| {
+                job.reviewer_thread_id = Some(pending.to_string())
+            });
+            relay.register_background_thread(
+                crate::protocol::ThreadSummaryView {
+                    id: pending.to_string(),
+                    name: None,
+                    preview: String::new(),
+                    cwd: cwd.to_string(),
+                    updated_at: 1,
+                    source: "claude_code".to_string(),
+                    status: "active".to_string(),
+                    model_provider: "anthropic".to_string(),
+                    provider: "claude_code".to_string(),
+                },
+                cwd,
+                "claude-model",
+                "on-request",
+                "workspace-write",
+                "medium",
+            );
+            // The active thread (parent) must NOT change across promotion.
+            assert_eq!(relay.active_thread_id.as_deref(), Some(parent.id.as_str()));
+            relay.promote_background_thread(pending, real);
+            assert_eq!(
+                relay.active_thread_id.as_deref(),
+                Some(parent.id.as_str()),
+                "promotion must not touch the active thread"
+            );
+        }
+
+        let relay = app.relay.read().await;
+        let job = relay.review_job("review-promote").expect("job present");
+        assert_eq!(
+            job.reviewer_thread_id.as_deref(),
+            Some(real),
+            "the job's reviewer id is rewritten pending -> real"
+        );
+        assert!(
+            relay.runtime_for_thread(pending).is_none(),
+            "the pending runtime is moved away"
+        );
+        assert!(
+            relay.runtime_for_thread(real).is_some(),
+            "the real-id runtime exists"
+        );
+        assert!(
+            !relay.threads.iter().any(|thread| thread.id == pending),
+            "the stale pending thread row is dropped"
+        );
+        assert!(
+            relay.reviewer_thread_ids().contains(real),
+            "nav-hiding follows the real id"
+        );
+        assert!(
+            relay.is_thread_review_locked(real),
+            "the real reviewer thread is review-locked"
+        );
+    }
+
+    #[tokio::test]
     async fn dismiss_review_rejects_an_active_review() {
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();
@@ -3957,8 +4304,9 @@ mod review_tests {
     }
 
     #[tokio::test]
-    async fn submit_ask_user_answer_is_blocked_during_review() {
+    async fn submit_ask_user_answer_on_a_reviewed_thread_is_blocked() {
         use crate::protocol::SubmitAskUserAnswerInput;
+        use crate::state::PendingAskUserQuestion;
 
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();
@@ -3968,27 +4316,39 @@ mod review_tests {
             .unwrap()
             .complete_turns
             .store(false, Ordering::Relaxed);
-        start_parent(&app, cwd, "codex").await;
+        let parent = start_parent(&app, cwd, "codex").await;
         app.request_review(review_input("codex"))
             .await
-            .expect("review should start and hold the guard");
+            .expect("review should start");
+
+        // Simulate a question surfacing on the reviewed thread.
+        app.relay.write().await.pending_ask_user_questions.insert(
+            "ask:1".to_string(),
+            PendingAskUserQuestion {
+                request_id: "ask:1".to_string(),
+                tool_use_id: "tool-1".to_string(),
+                thread_id: parent.id.clone(),
+                requested_at: crate::state::unix_now(),
+                questions: Vec::new(),
+            },
+        );
 
         let mut answers = serde_json::Map::new();
         answers.insert("Q?".to_string(), serde_json::Value::String("A".to_string()));
         let error = app
             .submit_ask_user_answer(
-                "ask:any",
+                "ask:1",
                 SubmitAskUserAnswerInput {
                     answers,
                     device_id: Some("device-1".to_string()),
                 },
             )
             .await
-            .expect_err("answering during a review must be blocked");
+            .expect_err("answering the reviewed thread's question must be blocked");
         let message = match error {
             crate::state::AskUserAnswerError::Bridge(message) => message,
             other => panic!("unexpected error: {other:?}"),
         };
-        assert!(message.contains("review is in progress"), "got: {message}");
+        assert!(message.contains("being reviewed"), "got: {message}");
     }
 }

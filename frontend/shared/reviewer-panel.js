@@ -188,10 +188,12 @@ function ReviewerJobCard({ job, onResolveReview, onDismissReview, fetchReviewerT
           type: "button",
           className: "header-button reviewer-dismiss-button",
           disabled: !terminal,
-          title: terminal ? "Dismiss this review" : "Stop the reviewer before dismissing it",
+          title: terminal
+            ? "Delete this review and its reviewer thread (the findings stay in the conversation)"
+            : "Stop the reviewer before deleting it",
           onClick: () => terminal && onDismissReview?.(job.id),
         },
-        "Dismiss"
+        "Delete"
       )
     )
   );

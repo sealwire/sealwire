@@ -42,6 +42,7 @@ const MAX_REMOTE_ACTION_REPLAY_ENTRIES: usize = 512;
 /// a timer — is what eventually evicts old completed reviews.
 const MAX_REVIEW_JOBS: usize = 64;
 /// Public alias for tests.
+#[cfg(test)]
 pub const MAX_REVIEW_JOBS_PUB: usize = MAX_REVIEW_JOBS;
 
 fn thread_status_is_working(status: &str) -> bool {
@@ -309,6 +310,87 @@ impl RelayState {
     /// Called when dismiss cannot remove the thread (archive + delete both fail).
     pub(crate) fn tombstone_reviewer_thread(&mut self, thread_id: String) {
         self.dismissed_reviewer_thread_ids.insert(thread_id);
+    }
+
+    /// Promote a background reviewer thread from its synthetic `claude-pending-…`
+    /// id to the real session id WITHOUT touching the active thread. A clean Claude
+    /// thread only learns its real id once its first turn runs; because the
+    /// reviewer runs in the background (the user's thread stays active), the normal
+    /// active-thread promotion path (in claude.rs) is skipped, so we do it here:
+    /// move the runtime (transcript/turn/status/settings), retarget pending
+    /// approvals/questions, drop the stale pending thread row, and rewrite the
+    /// review job's `reviewer_thread_id` so the orchestrator waits on / reads from
+    /// the real id and nav-hiding follows it. The real runtime is marked working
+    /// (its turn is in flight) until the provider's `done` event sets it idle.
+    pub(crate) fn promote_background_thread(&mut self, pending_id: &str, real_id: &str) {
+        if pending_id == real_id || pending_id.is_empty() || real_id.is_empty() {
+            return;
+        }
+        if let Some(mut runtime) = self.runtimes.remove(pending_id) {
+            if let Some(summary) = runtime.summary.as_mut() {
+                summary.id = real_id.to_string();
+            }
+            match self.runtimes.remove(real_id) {
+                // The event stream already created a real-id runtime with more
+                // transcript — keep it, but carry over the pending turn id if it
+                // has none.
+                Some(mut existing) if existing.transcript.len() >= runtime.transcript.len() => {
+                    if existing.active_turn_id.is_none() {
+                        existing.active_turn_id = runtime.active_turn_id.take();
+                    }
+                    self.runtimes.insert(real_id.to_string(), existing);
+                }
+                _ => {
+                    self.runtimes.insert(real_id.to_string(), runtime);
+                }
+            }
+        }
+        if let Some(settings) = self.thread_settings.remove(pending_id) {
+            self.thread_settings
+                .entry(real_id.to_string())
+                .or_insert(settings);
+        }
+        // Drop the stale pending row; the real row is upserted by the caller.
+        self.threads.retain(|thread| thread.id != pending_id);
+        for approval in self.pending_approvals.values_mut() {
+            if approval.thread_id == pending_id {
+                approval.thread_id = real_id.to_string();
+            }
+        }
+        for question in self.pending_ask_user_questions.values_mut() {
+            if question.thread_id == pending_id {
+                question.thread_id = real_id.to_string();
+            }
+        }
+        for job in self.review_jobs.values_mut() {
+            if job.reviewer_thread_id.as_deref() == Some(pending_id) {
+                job.reviewer_thread_id = Some(real_id.to_string());
+            }
+        }
+        // The reviewer's turn is in flight; mark the real runtime working until the
+        // provider's `done`/`session_stopped` event flips it idle. This keeps the
+        // orchestrator's per-thread idle wait correct regardless of turn-id timing.
+        self.set_thread_status(real_id, "active".to_string(), Vec::new());
+    }
+
+    /// Whether any non-terminal review job exists. Used to enforce one active
+    /// review at a time (the review no longer holds the global session guard).
+    pub(crate) fn has_active_review(&self) -> bool {
+        self.review_jobs
+            .values()
+            .any(|job| !job.status.is_terminal())
+    }
+
+    /// Whether `thread_id` is owned by a non-terminal review (its parent OR its
+    /// reviewer thread). Such a thread is frozen for send/stop while the review
+    /// runs; all other threads stay fully usable. A Blocked job is non-terminal,
+    /// so this keeps its threads locked with no held guard.
+    pub(crate) fn is_thread_review_locked(&self, thread_id: &str) -> bool {
+        self.review_jobs.values().any(|job| {
+            !job.status.is_terminal()
+                && (job.parent_thread_id == thread_id
+                    || job.reviewer_thread_id.as_deref() == Some(thread_id))
+        })
     }
 
     /// Remove a thread id from the tombstone set (called when the thread is
@@ -703,6 +785,39 @@ impl RelayState {
         );
         self.remember_thread_settings(&thread_id, approval_policy, sandbox, effort, model);
         self.sync_selected_runtime_to_fields();
+        self.upsert_thread(thread);
+    }
+
+    /// Register a thread as a BACKGROUND runtime without touching the active
+    /// thread, controller, provider, or model. Used to spin up a reviewer thread
+    /// that runs concurrently with (and never disturbs) the user's active
+    /// conversation. The thread summary is added to `relay.threads` so
+    /// `find_thread_provider` can route to it; it is hidden from navigation by
+    /// `reviewer_thread_ids()` filtering.
+    pub fn register_background_thread(
+        &mut self,
+        thread: ThreadSummaryView,
+        cwd: &str,
+        model: &str,
+        approval_policy: &str,
+        sandbox: &str,
+        effort: &str,
+    ) {
+        let now = unix_now();
+        let thread_id = thread.id.clone();
+        self.runtimes.insert(
+            thread_id.clone(),
+            ThreadRuntime::new(
+                thread.clone(),
+                cwd,
+                model,
+                approval_policy,
+                sandbox,
+                effort,
+                now,
+            ),
+        );
+        self.remember_thread_settings(&thread_id, approval_policy, sandbox, effort, model);
         self.upsert_thread(thread);
     }
 

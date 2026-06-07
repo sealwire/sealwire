@@ -182,6 +182,7 @@ export function createSessionRenderer({
   updateSessionSettings,
   requestReview,
   setReviewSlice,
+  viewThread,
 }) {
   function reviewChips(session) {
     return (session?.active_review_jobs || []).map((job) =>
@@ -210,8 +211,11 @@ export function createSessionRenderer({
     const viewingConversation = isViewingConversation(session);
     const canWrite = canCurrentDeviceWrite(session);
     const turnRunning = Boolean(session.active_turn_id);
-    const reviewInProgress = isReviewInProgress(session);
     const reviewBlocked = isReviewBlocked(session);
+    // The composer is frozen ONLY when the thread you're looking at is itself
+    // being reviewed. A review running in the background on another thread leaves
+    // the active conversation fully usable.
+    const activeThreadFrozen = isReviewInProgressForThread(session, session.active_thread_id);
     const workspace = session.current_cwd || state.selectedCwd || "";
     const workspaceName = workspace ? workspaceBasename(workspace) : "";
     const viewingSessionDetails = Boolean(sessionMeta?.closest("dialog")?.open);
@@ -268,7 +272,9 @@ export function createSessionRenderer({
     } else if (isProgressStalled(session)) {
       statusBadge.textContent = "Stalled?";
       statusBadge.className = "status-badge status-badge-alert";
-    } else if (reviewInProgress) {
+    } else if (activeThreadFrozen) {
+      // Only badge the thread you're viewing as under review; a background review
+      // on another thread leaves this conversation live.
       statusBadge.textContent = "Review in progress";
       statusBadge.className = "status-badge status-badge-alert";
     } else {
@@ -323,17 +329,17 @@ export function createSessionRenderer({
     }
     messageForm.hidden = !viewingConversation;
     const composerReady = hasActiveSession && canWrite && viewingConversation;
-    sendButton.disabled = !composerReady || turnRunning || reviewInProgress;
+    sendButton.disabled = !composerReady || turnRunning || activeThreadFrozen;
     sendButton.hidden = composerReady && turnRunning;
     if (stopButton) {
-      // Don't let the user stop the reviewer's turn mid-review.
-      stopButton.hidden = !composerReady || !turnRunning || reviewInProgress;
+      // Don't let the user stop the review's turn on the thread being reviewed.
+      stopButton.hidden = !composerReady || !turnRunning || activeThreadFrozen;
       stopButton.disabled = stopButton.hidden;
     }
     messageInput.disabled =
-      !hasActiveSession || !canWrite || !viewingConversation || reviewInProgress;
-    messageInput.placeholder = reviewInProgress
-      ? "Review in progress…"
+      !hasActiveSession || !canWrite || !viewingConversation || activeThreadFrozen;
+    messageInput.placeholder = activeThreadFrozen
+      ? "This thread is being reviewed…"
       : !hasActiveSession
       ? "Start or resume a session first."
       : !viewingConversation
@@ -790,16 +796,18 @@ export function createSessionRenderer({
     }
 
     controlBanner.hidden = false;
-    const reviewRunning = isReviewInProgress(session);
+    // Only the thread actually being reviewed is off-limits for take-over; a
+    // background review elsewhere doesn't lock this thread's controls.
+    const activeUnderReview = isReviewInProgressForThread(session, session.active_thread_id);
     renderReactContent(
       controlBanner,
       h(ControlBannerContent, {
-        hint: reviewRunning
-          ? "A review is in progress; control returns automatically when it finishes."
+        hint: activeUnderReview
+          ? "This thread is being reviewed; it unlocks when the review finishes."
           : "You can still approve from this device. Take over when you want to type or continue the session.",
-        // A review owns the active thread and hands control back itself — don't
-        // let a take-over reassign the controller mid-review.
-        showTakeOver: !reviewRunning,
+        // The review owns the reviewed thread's turn sequence — don't let a
+        // take-over reassign its controller mid-review.
+        showTakeOver: !activeUnderReview,
         summary: `Another device has control (${controllerLabel(session.active_controller_device_id)})`,
       })
     );
@@ -1015,16 +1023,22 @@ export function createSessionRenderer({
         transcriptOptions: {
           currentCwd: session?.current_cwd || state.selectedCwd || "",
           detailEntries: transcriptDetailEntries,
-          // Hide rollback/reapply while a review reads the working tree.
-          enableFileChangeActions: !isReviewInProgress(session),
+          // Hide rollback/reapply while the active thread is itself under review.
+          enableFileChangeActions: !isReviewInProgressForThread(
+            session,
+            session.active_thread_id
+          ),
           expandedKeys: localUi.transcriptExpandedItemIds,
           loadingItemIds: localUi.transcriptLoadingItemIds,
           onEnsureFileChangeDetail: (itemId) => {
             void state.controller?.ensureFileChangeDetail?.(itemId);
           },
-          // Suppress the answer entry during a review (the orchestrator dismisses
-          // the reviewer's own questions; v1 reviews are non-interactive).
-          pendingAskUserQuestions: isReviewInProgress(session)
+          // Suppress the answer entry while the active thread is under review (the
+          // orchestrator dismisses the reviewer's own questions; v1 is non-interactive).
+          pendingAskUserQuestions: isReviewInProgressForThread(
+            session,
+            session.active_thread_id
+          )
             ? []
             : session?.pending_ask_user_questions || [],
           onSubmitAskUserAnswers: (requestId, answers) => {
@@ -1074,7 +1088,8 @@ export function createSessionRenderer({
     renderWorkspaceSuggestions(state.session);
     threadsCount.textContent = summarizeThreadGroups(groups);
     threadsCount.title = groups.map((group) => group.cwd).join("\n");
-    resumeLatestButton.disabled = totalThreads === 0 || isReviewInProgress(state.session);
+    // Resuming another thread is allowed during a background review.
+    resumeLatestButton.disabled = totalThreads === 0;
 
     renderReactContent(
       threadsList,
@@ -1090,7 +1105,18 @@ export function createSessionRenderer({
           openThreadContextMenu(threadId, clientX, clientY);
         },
         onResumeThread(threadId) {
-          void resumeSession(threadId);
+          // During a review, resume_session is blocked by the backend for
+          // review-locked threads (the reviewed parent and the reviewer) because
+          // it is mutating: it calls bridge.resume_thread and overwrites the
+          // runtime. To let the user still navigate to another thread, we call
+          // the view-only path (setThreadRoute / viewThread) which only updates
+          // the URL without touching the backend session. For non-reviewed threads
+          // the normal resume runs as usual.
+          if (typeof viewThread === "function" && isReviewInProgress(state.session)) {
+            viewThread(threadId);
+          } else {
+            void resumeSession(threadId);
+          }
         },
         onSelectWorkspace(cwd) {
           setSelectedCwd(cwd || "");

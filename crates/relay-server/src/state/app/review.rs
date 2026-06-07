@@ -27,22 +27,43 @@ use super::*;
 /// How often to re-issue an interrupt while draining a turn that wouldn't stop.
 const INTERRUPT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
-/// A review whose cleanup failed: the held session guard keeps the workspace
-/// locked until `resolve_blocked_review` stops the reviewer and drops it.
+/// A review whose cleanup failed: the job stays in the non-terminal `Blocked`
+/// status, which keeps its parent + reviewer threads review-locked (frozen for
+/// send/stop) until `resolve_blocked_review` stops the stuck turn and marks the
+/// job terminal. No session guard is held — the lock is derived from job state.
 pub(super) struct BlockedReview {
     pub(super) job_id: String,
     /// The stuck (reviewer/parent) thread whose turn must be stopped to unblock.
     pub(super) thread_id: String,
-    /// Holding this keeps the session lock held; dropping it releases the lock.
-    pub(super) guard: tokio::sync::OwnedMutexGuard<()>,
 }
 
-/// Result of waiting for the active thread's in-flight turn to settle.
+/// Result of waiting for a thread's in-flight turn to settle.
 enum WaitOutcome {
     Completed,
     FailedApproval,
     FailedAskUser,
     TimedOut,
+}
+
+/// Crash-safety net for `run_review_job`. If the orchestrator task exits (return
+/// OR panic-unwind, both of which drop locals) while the job is still
+/// non-terminal and not intentionally `Blocked`, the job is failed so its
+/// per-thread review lock is released and the reviewed thread can never stay
+/// frozen forever. A normal completion / fail / block already reached a state the
+/// drop check treats as "settled", so the lifeguard is a no-op in those cases.
+struct ReviewJobLifeguard {
+    app: AppState,
+    job_id: String,
+}
+
+impl Drop for ReviewJobLifeguard {
+    fn drop(&mut self) {
+        let app = self.app.clone();
+        let job_id = self.job_id.clone();
+        tokio::spawn(async move {
+            app.fail_job_if_stranded(&job_id).await;
+        });
+    }
 }
 
 /// Immutable fields captured once at the top of the orchestrator.
@@ -77,16 +98,22 @@ request a clean reviewer session"
         // Fail fast if the reviewer provider is not available.
         self.resolve_provider(Some(&reviewer_provider))?;
 
-        // Take the shared session guard for the entire job. The owned guard moves
-        // into the background task and releases when the job ends (including on
-        // panic). While it is held, all user session ops (send/start/resume/...)
-        // are rejected, so the active thread can't move out from under us.
-        let guard = self.session_guard.clone().try_lock_owned().map_err(|_| {
-            "a review or session operation is already running; wait for it to finish".to_string()
-        })?;
+        // Briefly take the shared session slot ONLY to atomically validate and
+        // record the job. Unlike before, we do NOT hold it for the review's
+        // lifetime — the review runs entirely in the background and freezes only
+        // its own parent + reviewer threads (derived from job state via
+        // `is_thread_review_locked`). The slot drops at the end of this function.
+        let _slot = self.acquire_session_slot()?;
 
         let (parent_thread_id, parent_provider, cwd) = {
             let relay = self.relay.read().await;
+            // One active review at a time (the slot no longer enforces this).
+            if relay.has_active_review() {
+                return Err(
+                    "a review is already running; wait for it to finish before starting another"
+                        .to_string(),
+                );
+            }
             relay.ensure_device_can_send_message(&device_id)?;
 
             let active_thread_id = relay
@@ -162,9 +189,14 @@ requesting a review"
         let app = self.clone();
         let task_job_id = job_id.clone();
         tokio::spawn(async move {
-            // The guard is owned by the job. It drops (releasing the lock) when the
-            // job ends normally, or is moved into the blocked slot if cleanup fails.
-            app.run_review_job(task_job_id, guard).await;
+            // Crash safety: a lifeguard fails the job if the task ever exits while
+            // the job is still non-terminal (and not intentionally Blocked), so a
+            // panic or early return can never leave the parent frozen forever.
+            let _lifeguard = ReviewJobLifeguard {
+                app: app.clone(),
+                job_id: task_job_id.clone(),
+            };
+            app.run_review_job(task_job_id).await;
         });
 
         Ok(RequestReviewReceipt {
@@ -258,9 +290,7 @@ to this thread."
             .store(ms, std::sync::atomic::Ordering::Relaxed);
     }
 
-    async fn run_review_job(&self, job_id: String, guard: tokio::sync::OwnedMutexGuard<()>) {
-        // Held by the job; moved into the blocked slot only if cleanup fails.
-        let mut guard = Some(guard);
+    async fn run_review_job(&self, job_id: String) {
         let Some(fields) = self.review_job_fields(&job_id).await else {
             return;
         };
@@ -269,11 +299,15 @@ to this thread."
             reviewer_provider,
             reviewer_model,
             cwd,
-            device_id,
+            device_id: _device_id,
             instructions,
         } = fields;
 
         // --- Step 1: ask the parent to recap its changes ---------------------
+        // The recap runs as a turn on the PARENT thread. The parent is review-
+        // locked (frozen for the user) but the orchestrator drives it directly via
+        // `send_message_to_thread`, which routes as a background turn if the user
+        // has switched the active thread away. We never change the active thread.
         self.set_job_status(&job_id, ReviewJobStatus::WaitingForParentRecap)
             .await;
         // Remember the parent's current last assistant message so we can require a
@@ -290,7 +324,7 @@ to this thread."
             Ok(None) => {
                 self.fail_after_uncertain_turn_start(
                     &job_id,
-                    &mut guard,
+                    &parent_thread_id,
                     "parent did not return a recap turn id",
                 )
                 .await;
@@ -299,7 +333,7 @@ to this thread."
             Err(error) => {
                 self.fail_after_uncertain_turn_start(
                     &job_id,
-                    &mut guard,
+                    &parent_thread_id,
                     format!("failed to ask the parent for a recap: {error}"),
                 )
                 .await;
@@ -308,10 +342,10 @@ to this thread."
         };
         self.update_job(&job_id, |job| job.parent_recap_turn_id = recap_turn)
             .await;
-        match self.wait_for_active_thread_idle().await {
+        match self.wait_for_thread_idle_outcome(&parent_thread_id).await {
             WaitOutcome::Completed => {}
             WaitOutcome::FailedApproval => {
-                if self.stop_active_thread_or_block(&job_id, &mut guard).await {
+                if self.stop_thread_or_block(&job_id, &parent_thread_id).await {
                     self.fail_job(
                         &job_id,
                         "the parent recap raised an approval; v1 cannot continue",
@@ -321,7 +355,7 @@ to this thread."
                 return;
             }
             WaitOutcome::FailedAskUser => {
-                if self.stop_active_thread_or_block(&job_id, &mut guard).await {
+                if self.stop_thread_or_block(&job_id, &parent_thread_id).await {
                     self.fail_job(
                         &job_id,
                         "the parent recap asked a question; v1 cannot continue",
@@ -331,7 +365,7 @@ to this thread."
                 return;
             }
             WaitOutcome::TimedOut => {
-                if self.stop_active_thread_or_block(&job_id, &mut guard).await {
+                if self.stop_thread_or_block(&job_id, &parent_thread_id).await {
                     self.fail_job(
                         &job_id,
                         "timed out waiting for the parent recap; the turn was stopped",
@@ -380,15 +414,21 @@ to this thread."
             .await;
         }
 
-        // --- Step 3: create + activate the reviewer thread -------------------
+        // --- Step 3: create the reviewer thread as a BACKGROUND thread -------
+        // It never becomes the active thread, so the user's conversation is never
+        // disturbed. The thread is review-locked via job state and hidden from nav.
+        // Registration and job assignment happen under one relay write lock so there
+        // is never a window where the thread row exists but reviewer_thread_ids()
+        // does not yet include it — which would let list_threads drop the row or
+        // expose it in navigation.
         self.set_job_status(&job_id, ReviewJobStatus::StartingReviewer)
             .await;
         let reviewer_thread_id = match self
-            .activate_reviewer_thread(
+            .start_background_reviewer_thread(
+                &job_id,
                 &cwd,
                 &reviewer_provider,
                 reviewer_model.as_deref(),
-                &device_id,
             )
             .await
         {
@@ -399,19 +439,13 @@ to this thread."
                     format!("failed to start the reviewer thread: {error}"),
                 )
                 .await;
-                // The parent is still active here; nothing to restore.
                 return;
             }
         };
-        {
-            let reviewer_thread_id = reviewer_thread_id.clone();
-            self.update_job(&job_id, |job| {
-                job.reviewer_thread_id = Some(reviewer_thread_id)
-            })
-            .await;
-        }
+        // reviewer_thread_id is already recorded on the job by
+        // start_background_reviewer_thread (atomically, under one write lock).
 
-        // --- Step 4: send the reviewer prompt and wait -----------------------
+        // --- Step 4: send the reviewer prompt and wait (background turn) -----
         self.set_job_status(&job_id, ReviewJobStatus::WaitingForReviewer)
             .await;
         let prompt = reviewer_prompt(&recap, &diff, instructions.as_deref());
@@ -426,93 +460,80 @@ to this thread."
         {
             Ok(Some(_)) => {}
             Ok(None) => {
-                if self
-                    .fail_after_uncertain_turn_start(
-                        &job_id,
-                        &mut guard,
-                        "reviewer did not return a turn id",
-                    )
-                    .await
-                {
-                    let _ = self.re_activate_parent(&parent_thread_id, &device_id).await;
-                }
+                self.fail_after_uncertain_turn_start(
+                    &job_id,
+                    &reviewer_thread_id,
+                    "reviewer did not return a turn id",
+                )
+                .await;
                 return;
             }
             Err(error) => {
-                if self
-                    .fail_after_uncertain_turn_start(
-                        &job_id,
-                        &mut guard,
-                        format!("failed to send the reviewer prompt: {error}"),
-                    )
-                    .await
-                {
-                    let _ = self.re_activate_parent(&parent_thread_id, &device_id).await;
-                }
+                self.fail_after_uncertain_turn_start(
+                    &job_id,
+                    &reviewer_thread_id,
+                    format!("failed to send the reviewer prompt: {error}"),
+                )
+                .await;
                 return;
             }
         }
-        match self.wait_for_active_thread_idle().await {
+        // A background Claude reviewer's synthetic `claude-pending-…` id is promoted
+        // to the real session id once its turn starts; the job's reviewer_thread_id
+        // is rewritten in place, so read it back before waiting / reading the review.
+        let reviewer_thread_id = self
+            .current_reviewer_thread_id(&job_id)
+            .await
+            .unwrap_or(reviewer_thread_id);
+        match self.wait_for_thread_idle_outcome(&reviewer_thread_id).await {
             WaitOutcome::Completed => {}
             outcome @ (WaitOutcome::FailedApproval
             | WaitOutcome::FailedAskUser
             | WaitOutcome::TimedOut) => {
                 // Stop the reviewer turn; if it can't be stopped, the job enters the
-                // persistent Blocked state (lock stays held) instead of unwinding.
-                if self.stop_active_thread_or_block(&job_id, &mut guard).await {
+                // persistent Blocked state (its threads stay review-locked) instead
+                // of unwinding. No active-thread handoff — the parent was never
+                // displaced.
+                if self
+                    .stop_thread_or_block(&job_id, &reviewer_thread_id)
+                    .await
+                {
                     self.fail_job(&job_id, reviewer_failure_message(&outcome))
                         .await;
-                    // Only hand control back once the reviewer turn is confirmed
-                    // stopped — never while it might still run in this workspace.
-                    let _ = self.re_activate_parent(&parent_thread_id, &device_id).await;
                 }
                 return;
             }
         }
-        // The reviewer thread id may have been finalized while active (e.g. a
-        // Claude synthetic id swapped for the real session id), so read it back.
-        let real_reviewer_id = {
-            let relay = self.relay.read().await;
-            relay
-                .active_thread_id
-                .clone()
-                .unwrap_or_else(|| reviewer_thread_id.clone())
-        };
-        let review = match self.latest_assistant_entry(&real_reviewer_id).await {
+        self.set_job_status(&job_id, ReviewJobStatus::WaitingToPostBack)
+            .await;
+        // Read the review back from the reviewer thread (re-read the id in case of a
+        // late promotion). Never read `active_thread_id` — the active thread is the
+        // user's, not the reviewer's.
+        let reviewer_thread_id = self
+            .current_reviewer_thread_id(&job_id)
+            .await
+            .unwrap_or(reviewer_thread_id);
+        let review = match self.latest_assistant_entry(&reviewer_thread_id).await {
             Some((_, text)) => text,
             None => {
                 self.fail_job(&job_id, "the reviewer produced no review text")
                     .await;
-                let _ = self.re_activate_parent(&parent_thread_id, &device_id).await;
                 return;
             }
         };
         {
-            let real_reviewer_id = real_reviewer_id.clone();
             let review = review.clone();
             self.update_job(&job_id, |job| {
-                job.reviewer_thread_id = Some(real_reviewer_id);
                 job.review_text = Some(review);
             })
             .await;
         }
 
-        // --- Step 5: hand control back to the parent -------------------------
-        self.set_job_status(&job_id, ReviewJobStatus::WaitingToPostBack)
-            .await;
-        if let Err(error) = self.re_activate_parent(&parent_thread_id, &device_id).await {
-            self.fail_job(
-                &job_id,
-                format!("failed to hand control back to the parent thread: {error}"),
-            )
-            .await;
-            return;
-        }
-
-        // --- Step 6: post the review back into the parent thread -------------
+        // --- Step 5: post the review back into the parent thread -------------
+        // Runs as a (background) turn on the parent; no active-thread handoff.
         self.set_job_status(&job_id, ReviewJobStatus::PostingBack)
             .await;
-        let message = post_back_message(&reviewer_provider, &real_reviewer_id, &review);
+        let message = post_back_message(&reviewer_provider, &reviewer_thread_id, &review);
         let post_turn = match self
             .send_message_to_thread(&parent_thread_id, &message, None, None)
             .await
@@ -521,7 +542,7 @@ to this thread."
             Err(error) => {
                 self.fail_after_uncertain_turn_start(
                     &job_id,
-                    &mut guard,
+                    &parent_thread_id,
                     format!("failed to post the review back to the parent: {error}"),
                 )
                 .await;
@@ -620,7 +641,13 @@ thread {parent_thread_id}."
                 relay.model = model.clone();
                 relay.reasoning_effort = effort.clone();
                 relay.remember_active_thread_settings();
-            } else {
+            } else if relay.runtime_for_thread(thread_id).is_some() {
+                // Background turn. Only set the turn if this thread still has a
+                // runtime: a Claude reviewer's synthetic pending id may have already
+                // been promoted to its real id during `start_turn` (which returns
+                // after `session_started`), in which case the pending runtime is
+                // gone and the real runtime is already marked working by promotion.
+                // Touching the pending id here would spawn a phantom working thread.
                 relay.bg_set_active_turn(thread_id, turn_id.clone(), unix_now());
             }
             relay.notify();
@@ -629,15 +656,19 @@ thread {parent_thread_id}."
         Ok(turn_id)
     }
 
-    /// Create a clean reviewer thread and make it the active thread. Returns the
-    /// reviewer thread id (a synthetic placeholder for a clean Claude thread,
-    /// finalized once it runs its first turn while active).
-    async fn activate_reviewer_thread(
+    /// Create a clean reviewer thread as a BACKGROUND thread — it never becomes
+    /// the active thread, so the user's conversation is never displaced. Returns
+    /// the reviewer thread id (a synthetic placeholder for a clean Claude thread,
+    /// promoted to the real session id once its first turn runs; see
+    /// `RelayState::promote_background_thread`). Crucially this does NOT mutate the
+    /// active thread, `provider_name`, or `available_models`, which belong to the
+    /// user's active session.
+    async fn start_background_reviewer_thread(
         &self,
+        job_id: &str,
         cwd: &str,
         reviewer_provider: &str,
         reviewer_model: Option<&str>,
-        device_id: &str,
     ) -> Result<String, String> {
         let (provider_name, bridge) = {
             let (name, bridge) = self.resolve_provider(Some(reviewer_provider))?;
@@ -664,23 +695,33 @@ thread {parent_thread_id}."
         let start = bridge
             .start_thread(cwd, &model, &approval_policy, &sandbox, None)
             .await?;
-        let reviewer_thread_id = start.thread.id.clone();
+        let mut thread = start.thread;
+        // The thread must be routable by `find_thread_provider`, which matches the
+        // summary's provider/source against the provider registry — set both to the
+        // reviewer provider key (it's hidden from nav by `reviewer_thread_ids()`).
+        thread.provider = provider_name.clone();
+        thread.source = provider_name.clone();
+        let reviewer_thread_id = thread.id.clone();
 
         {
+            let reviewer_thread_id = reviewer_thread_id.clone();
             let mut relay = self.relay.write().await;
-            relay.set_provider_name(provider_name.clone());
-            if let Some(models) = provider_models {
-                relay.set_available_models(models);
-            }
-            relay.activate_thread(
-                start.thread,
+            relay.register_background_thread(
+                thread,
                 cwd,
                 &model,
                 &approval_policy,
                 &sandbox,
                 &effort,
-                device_id,
             );
+            // Assign reviewer_thread_id on the job in the SAME write lock as
+            // register_background_thread. This means reviewer_thread_ids() will
+            // include this thread id from the first moment the row is visible in
+            // relay.threads — there is no window where list_threads can drop the
+            // row (not yet recognised as a reviewer) or expose it in navigation.
+            relay.update_review_job(job_id, |job| {
+                job.reviewer_thread_id = Some(reviewer_thread_id);
+            });
             let (level, note) = if read_only_enforced {
                 ("info", "read-only sandbox enforced")
             } else {
@@ -691,7 +732,9 @@ thread {parent_thread_id}."
             };
             relay.push_log(
                 level,
-                format!("Started a clean {provider_name} reviewer thread in {cwd}: {note}."),
+                format!(
+                    "Started a clean {provider_name} background reviewer thread in {cwd}: {note}."
+                ),
             );
             relay.notify();
         }
@@ -699,37 +742,39 @@ thread {parent_thread_id}."
         Ok(reviewer_thread_id)
     }
 
-    /// Restore the parent as the active thread and return control to the
-    /// requesting device. No-op if the parent is already active.
-    async fn re_activate_parent(
-        &self,
-        parent_thread_id: &str,
-        device_id: &str,
-    ) -> Result<(), String> {
-        {
-            let relay = self.relay.read().await;
-            if relay.active_thread_id.as_deref() == Some(parent_thread_id) {
-                return Ok(());
-            }
-        }
-        // Use the ungated inner resume: the review gate would otherwise reject the
-        // orchestrator's own handoff while it holds the review guard.
-        self.resume_session_inner(ResumeSessionInput {
-            thread_id: parent_thread_id.to_string(),
-            approval_policy: None,
-            sandbox: None,
-            effort: None,
-            device_id: Some(device_id.to_string()),
-            provider: None,
-        })
-        .await
-        .map(|_| ())
+    /// The current reviewer thread id recorded on the job (re-read because a
+    /// background Claude reviewer's pending id is promoted to the real session id
+    /// in place once its turn starts).
+    async fn current_reviewer_thread_id(&self, job_id: &str) -> Option<String> {
+        self.relay
+            .read()
+            .await
+            .review_job(job_id)
+            .and_then(|job| job.reviewer_thread_id.clone())
     }
 
-    /// Wait until the active thread's in-flight turn settles. Returns
+    /// Fail the job iff it is still non-terminal and not intentionally `Blocked`.
+    /// Called by the crash-safety lifeguard when the orchestrator task exits.
+    async fn fail_job_if_stranded(&self, job_id: &str) {
+        let stranded = {
+            let relay = self.relay.read().await;
+            match relay.review_job(job_id) {
+                Some(job) => {
+                    !job.status.is_terminal() && !matches!(job.status, ReviewJobStatus::Blocked)
+                }
+                None => false,
+            }
+        };
+        if stranded {
+            self.fail_job(job_id, "the review task ended unexpectedly")
+                .await;
+        }
+    }
+
+    /// Wait until the given thread's in-flight turn settles. Returns
     /// `FailedApproval` if an approval appears mid-turn (v1 cannot continue), or
     /// `TimedOut` after `REVIEW_STEP_TIMEOUT`.
-    async fn wait_for_active_thread_idle(&self) -> WaitOutcome {
+    async fn wait_for_thread_idle_outcome(&self, thread_id: &str) -> WaitOutcome {
         let timeout_ms = self
             .review_step_timeout_ms
             .load(std::sync::atomic::Ordering::Relaxed);
@@ -738,32 +783,28 @@ thread {parent_thread_id}."
         loop {
             {
                 let relay = self.relay.read().await;
-                // Only the *active* (target) thread's approvals matter. An
-                // unrelated background thread parking on its own approval must not
+                // Only THIS thread's approvals matter — the orchestrator keys off
+                // the explicit thread id, never the active thread (which is the
+                // user's). An unrelated thread parking on its own approval must not
                 // fail the review or get auto-denied.
-                let active = relay.active_thread_id.as_deref();
-                let blocked = active.is_some_and(|thread_id| {
-                    relay
-                        .pending_approvals
-                        .values()
-                        .any(|approval| approval.thread_id == thread_id)
-                });
+                let blocked = relay
+                    .pending_approvals
+                    .values()
+                    .any(|approval| approval.thread_id == thread_id);
                 if blocked {
                     return WaitOutcome::FailedApproval;
                 }
                 // Same for AskUserQuestion: a non-interactive review can't answer
                 // the reviewer's question, so treat it as a blocking interaction.
-                let asked = active.is_some_and(|thread_id| {
-                    relay
-                        .pending_ask_user_questions
-                        .values()
-                        .any(|question| question.thread_id == thread_id)
-                });
+                let asked = relay
+                    .pending_ask_user_questions
+                    .values()
+                    .any(|question| question.thread_id == thread_id);
                 if asked {
                     return WaitOutcome::FailedAskUser;
                 }
                 let working = relay
-                    .selected_runtime()
+                    .runtime_for_thread(thread_id)
                     .map(|runtime| runtime.is_working())
                     .unwrap_or(false);
                 if !working {
@@ -828,69 +869,59 @@ thread {parent_thread_id}."
         }
     }
 
-    /// Request cancellation for the active thread. Providers decide whether the
-    /// optional turn id is required.
-    async fn request_active_thread_stop(&self) -> bool {
-        let (thread_id, turn_id) = {
+    /// Request cancellation for a specific thread's in-flight turn. Reads that
+    /// thread's runtime turn id; providers decide whether the id is required.
+    async fn request_thread_stop(&self, thread_id: &str) -> bool {
+        let turn_id = {
             let relay = self.relay.read().await;
-            match relay.active_thread_id.clone() {
-                Some(thread_id) => (thread_id, relay.active_turn_id.clone()),
+            match relay.runtime_for_thread(thread_id) {
+                Some(runtime) => runtime.active_turn_id.clone(),
                 None => return false,
             }
         };
-        self.request_provider_stop(&thread_id, turn_id.as_deref())
+        self.request_provider_stop(thread_id, turn_id.as_deref())
             .await
     }
 
-    /// Whether the active thread's runtime still reports an in-flight turn.
-    async fn active_thread_working(&self) -> bool {
+    /// Whether the given thread's runtime still reports an in-flight turn.
+    async fn thread_working(&self, thread_id: &str) -> bool {
         self.relay
             .read()
             .await
-            .selected_runtime()
+            .runtime_for_thread(thread_id)
             .map(|runtime| runtime.is_working())
             .unwrap_or(false)
     }
 
-    /// Stop the active (reviewer/parent) thread's turn, or block the review if it
+    /// Stop a specific (reviewer/parent) thread's turn, or block the review if it
     /// can't be confirmed stopped. Best-effort denies the thread's approvals, then
     /// interrupts + drains the turn. On success (turn stopped) clears the thread's
-    /// residual approvals/questions and returns true. On failure, moves the session
-    /// guard into the persistent blocked slot (lock stays held, status `Blocked`)
-    /// and returns false — the caller must NOT fail or unwind the job.
-    async fn stop_active_thread_or_block(
-        &self,
-        job_id: &str,
-        guard: &mut Option<tokio::sync::OwnedMutexGuard<()>>,
-    ) -> bool {
-        let active = { self.relay.read().await.active_thread_id.clone() };
-        let Some(active) = active else {
-            return true;
-        };
-        self.deny_thread_approvals_best_effort(&active).await;
-        if self.interrupt_then_drain_active_turn(job_id).await {
-            self.clear_thread_interactions(&active).await;
+    /// residual approvals/questions and returns true. On failure, records the
+    /// persistent `Blocked` state (the job stays non-terminal, so its threads stay
+    /// review-locked) and returns false — the caller must NOT fail or unwind.
+    async fn stop_thread_or_block(&self, job_id: &str, thread_id: &str) -> bool {
+        self.deny_thread_approvals_best_effort(thread_id).await;
+        if self.interrupt_then_drain_thread(job_id, thread_id).await {
+            self.clear_thread_interactions(thread_id).await;
             return true;
         }
-        if let Some(guard) = guard.take() {
-            self.enter_blocked(job_id, &active, guard).await;
-        }
+        self.enter_blocked(job_id, thread_id).await;
         false
     }
 
     /// A failed/empty turn-start response is not proof that the provider did not
-    /// begin work. If runtime state indicates possible in-flight work, stop it
-    /// through the same confirmed-stop path before making the job terminal.
-    /// Returns false when cleanup entered persistent Blocked state.
+    /// begin work. If the target thread's runtime indicates possible in-flight
+    /// work, stop it through the same confirmed-stop path before making the job
+    /// terminal. Returns false when cleanup entered persistent Blocked state.
     async fn fail_after_uncertain_turn_start(
         &self,
         job_id: &str,
-        guard: &mut Option<tokio::sync::OwnedMutexGuard<()>>,
+        thread_id: &str,
         message: impl Into<String>,
     ) -> bool {
         let message = message.into();
-        if self.active_thread_working().await
-            && !self.stop_active_thread_or_block(job_id, guard).await
+        if self.thread_working(thread_id).await
+            && !self.stop_thread_or_block(job_id, thread_id).await
         {
             return false;
         }
@@ -898,14 +929,14 @@ thread {parent_thread_id}."
         true
     }
 
-    /// Fire a cancel for the active turn, then wait for the provider's *real*
+    /// Fire a cancel for the thread's turn, then wait for the provider's *real*
     /// completion (never trust the cancel ack). Returns true only once the runtime
     /// reports the turn actually stopped; false if it doesn't stop within the
     /// drain window. While waiting, the job shows the non-terminal `Interrupting`
     /// status so the UI stays disabled.
-    async fn interrupt_then_drain_active_turn(&self, job_id: &str) -> bool {
-        let _ = self.request_active_thread_stop().await;
-        if !self.active_thread_working().await {
+    async fn interrupt_then_drain_thread(&self, job_id: &str, thread_id: &str) -> bool {
+        let _ = self.request_thread_stop(thread_id).await;
+        if !self.thread_working(thread_id).await {
             return true;
         }
         self.set_job_status(job_id, ReviewJobStatus::Interrupting)
@@ -913,29 +944,24 @@ thread {parent_thread_id}."
         self.push_runtime_log(
             "warn",
             format!(
-                "Review {job_id}: interrupt sent; waiting for the turn to actually stop before \
-releasing the lock."
+                "Review {job_id}: interrupt sent to {thread_id}; waiting for the turn to actually \
+stop before unlocking the reviewed thread."
             ),
         )
         .await;
-        self.drain_active_turn().await
+        self.drain_thread_turn(thread_id).await
     }
 
-    /// Move the held session guard into the persistent blocked slot. The lock
-    /// stays held (every session op / new review is rejected) until
-    /// `resolve_blocked_review` stops the reviewer and drops it.
-    async fn enter_blocked(
-        &self,
-        job_id: &str,
-        thread_id: &str,
-        guard: tokio::sync::OwnedMutexGuard<()>,
-    ) {
+    /// Record the persistent blocked state. The job stays in the non-terminal
+    /// `Blocked` status, which keeps its threads review-locked (frozen for
+    /// send/stop) until `resolve_blocked_review` stops the stuck turn and marks the
+    /// job terminal. No session guard is held.
+    async fn enter_blocked(&self, job_id: &str, thread_id: &str) {
         {
             let mut slot = self.blocked_review.lock().await;
             *slot = Some(BlockedReview {
                 job_id: job_id.to_string(),
                 thread_id: thread_id.to_string(),
-                guard,
             });
         }
         self.update_job(job_id, |job| job.set_status(ReviewJobStatus::Blocked))
@@ -944,16 +970,15 @@ releasing the lock."
             "error",
             format!(
                 "Review {job_id} is BLOCKED: the reviewer turn could not be stopped, so the \
-workspace stays locked. Resolve the review (stop the reviewer) to unlock."
+reviewed thread stays locked. Resolve the review (stop the reviewer) to unlock."
             ),
         )
         .await;
     }
 
-    /// Wait for the active thread's turn to actually end (real provider
-    /// completion), re-issuing interrupts, while holding the session lock. Returns
-    /// true once it ends, false at the drain max.
-    async fn drain_active_turn(&self) -> bool {
+    /// Wait for a thread's turn to actually end (real provider completion),
+    /// re-issuing interrupts. Returns true once it ends, false at the drain max.
+    async fn drain_thread_turn(&self, thread_id: &str) -> bool {
         let drain_max = Duration::from_millis(
             self.review_drain_max_ms
                 .load(std::sync::atomic::Ordering::Relaxed),
@@ -962,14 +987,14 @@ workspace stays locked. Resolve the review (stop the reviewer) to unlock."
         let hard_deadline = Instant::now() + drain_max;
         let mut next_retry = Instant::now() + INTERRUPT_RETRY_INTERVAL;
         loop {
-            if !self.active_thread_working().await {
+            if !self.thread_working(thread_id).await {
                 return true;
             }
             if Instant::now() >= hard_deadline {
                 return false;
             }
             if Instant::now() >= next_retry {
-                let _ = self.request_active_thread_stop().await;
+                let _ = self.request_thread_stop(thread_id).await;
                 next_retry = Instant::now() + INTERRUPT_RETRY_INTERVAL;
             }
             tokio::select! {
@@ -1097,13 +1122,13 @@ workspace stays locked. Resolve the review (stop the reviewer) to unlock."
 
     /// User-triggered recovery for a `Blocked` review: stop the stuck reviewer
     /// (deny its approvals + cancel its turn and wait for the real completion),
-    /// hand control back to the parent, then release the session lock and mark the
-    /// job `Failed`. On any failure it stays blocked.
+    /// then mark the job `Failed`, which drops the per-thread review lock and
+    /// unfreezes the reviewed parent. On any failure it stays blocked. No active-
+    /// thread handoff — the parent was never displaced.
     ///
-    /// Cancellation-safe: the held guard stays inside the blocked slot for the
-    /// whole attempt (so the session lock is never released if the handler is
-    /// cancelled mid-await) and is only taken out + dropped after a confirmed stop
-    /// AND a successful parent handoff.
+    /// Cancellation-safe: the blocked slot is held for the whole attempt and is
+    /// only cleared after a confirmed stop, so a cancelled handler leaves the
+    /// review blocked (still locked) rather than half-resolved.
     pub async fn resolve_blocked_review(
         &self,
         device_id: Option<String>,
@@ -1111,13 +1136,13 @@ workspace stays locked. Resolve the review (stop the reviewer) to unlock."
         let device_id = require_device_id(device_id)?;
 
         // Hold the blocked-slot lock for the whole attempt. If we're cancelled, the
-        // guard remains in the Option and the session lock stays held.
+        // entry stays in the slot and the job stays Blocked (still locked).
         let mut slot = self.blocked_review.lock().await;
         let (job_id, thread_id) = match slot.as_ref() {
             Some(blocked) => (blocked.job_id.clone(), blocked.thread_id.clone()),
             None => return Err("there is no blocked review to resolve".to_string()),
         };
-        // Only the active controller may stop the reviewer / unlock the workspace.
+        // Only a device that can drive this session may stop the reviewer.
         {
             let relay = self.relay.read().await;
             relay.ensure_device_can_send_message(&device_id)?;
@@ -1132,35 +1157,29 @@ workspace stays locked. Resolve the review (stop the reviewer) to unlock."
 
         self.deny_thread_approvals_best_effort(&thread_id).await;
         if !self.try_stop_thread(&thread_id).await {
-            // Still running — stays blocked, guard still in the slot.
+            // Still running — stays blocked.
             return Err(
                 "the reviewer turn is still running and could not be stopped; try again"
                     .to_string(),
             );
         }
-        // Hand control back to the parent before releasing the lock; if that fails,
-        // stay blocked so the UI never unlocks onto the reviewer thread.
-        if !parent_thread_id.is_empty() {
-            if let Err(error) = self.re_activate_parent(&parent_thread_id, &device_id).await {
-                return Err(format!(
-                    "stopped the reviewer but could not hand control back to the parent thread \
-({error}); still blocked"
-                ));
-            }
-        }
         self.clear_thread_interactions(&thread_id).await;
+        // Confirmed stopped: mark the job terminal. That drops the per-thread
+        // review lock (the parent unfreezes) since the job is no longer
+        // non-terminal — no guard to release, no handoff to perform.
         self.update_job(&job_id, |job| {
             job.fail("review was blocked and has been resolved by stopping the reviewer")
         })
         .await;
-        // Confirmed stopped + handed off: atomically take the guard out of the slot
-        // and drop it, releasing the session lock. No `.await` between take + drop.
-        let blocked = slot.take().expect("blocked review present");
+        // Clear the blocked slot atomically after the job is terminal.
+        let _ = slot.take();
         drop(slot);
-        drop(blocked.guard);
         self.push_runtime_log(
             "info",
-            format!("Review {job_id} unblocked; the reviewer was stopped and the workspace is unlocked."),
+            format!(
+                "Review {job_id} unblocked; the reviewer was stopped and the reviewed thread is \
+unlocked."
+            ),
         )
         .await;
 
@@ -1171,7 +1190,7 @@ workspace stays locked. Resolve the review (stop the reviewer) to unlock."
             status: crate::protocol::ReviewJobStatusView {
                 status: "failed".to_string(),
             },
-            message: "Reviewer stopped; the workspace is unlocked.".to_string(),
+            message: "Reviewer stopped; the reviewed thread is unlocked.".to_string(),
         })
     }
 }

@@ -7,6 +7,7 @@ import {
   selectSessionRenderModel,
   selectThreadsRenderModel,
 } from "../view-model.js";
+import { isReviewInProgressForThread } from "../../shared/review-state.js";
 
 test("selectSessionRenderModel derives composer state from controller/session flags", () => {
   const model = selectSessionRenderModel({
@@ -37,6 +38,79 @@ test("selectSessionRenderModel derives composer state from controller/session fl
     truncated: "1",
     status: "idle",
   });
+});
+
+test("selectSessionRenderModel freezes the composer only when the active thread is reviewed", () => {
+  const base = {
+    active_thread_id: "thread-1",
+    current_cwd: "/tmp",
+    current_status: "idle",
+    pending_approvals: [],
+    transcript: [],
+  };
+
+  // A background review on ANOTHER thread leaves this composer usable.
+  const usable = selectSessionRenderModel({
+    session: {
+      ...base,
+      active_review_jobs: [
+        { id: "r1", status: "waiting_for_reviewer", parent_thread_id: "other-thread" },
+      ],
+    },
+    previousSession: null,
+    hasControllerLease: true,
+  });
+  assert.equal(usable.composerDisabled, false);
+  assert.equal(usable.canWrite, true);
+
+  // A review on the ACTIVE thread freezes the composer.
+  const frozen = selectSessionRenderModel({
+    session: {
+      ...base,
+      active_review_jobs: [
+        { id: "r1", status: "waiting_for_reviewer", parent_thread_id: "thread-1" },
+      ],
+    },
+    previousSession: null,
+    hasControllerLease: true,
+  });
+  assert.equal(frozen.composerDisabled, true);
+  assert.equal(frozen.canWrite, false);
+  assert.match(frozen.messagePlaceholder, /being reviewed/i);
+});
+
+// The routing decision (onViewThread vs onResumeThread) in react-app.js uses
+// isReviewInProgressForThread directly. Verify the predicate correctly
+// identifies which thread clicks should be view-only vs resumable.
+test("isReviewInProgressForThread identifies review-locked threads for remote navigation", () => {
+  const session = {
+    active_review_jobs: [
+      { id: "r1", status: "waiting_for_reviewer", parent_thread_id: "parent-1" },
+    ],
+  };
+  // The reviewed parent: remote sidebar click must use view-only path.
+  assert.equal(
+    isReviewInProgressForThread(session, "parent-1"),
+    true,
+    "parent thread is locked — use view-only navigation"
+  );
+  // Another thread during the review: resume is fine.
+  assert.equal(
+    isReviewInProgressForThread(session, "other-thread"),
+    false,
+    "unrelated thread is NOT locked — normal resume is allowed"
+  );
+  // A completed review no longer locks the thread.
+  const done = {
+    active_review_jobs: [
+      { id: "r2", status: "complete", parent_thread_id: "parent-1" },
+    ],
+  };
+  assert.equal(
+    isReviewInProgressForThread(done, "parent-1"),
+    false,
+    "terminal review does not lock the thread"
+  );
 });
 
 test("selectThreadsRenderModel returns empty copy for unauthenticated state", () => {

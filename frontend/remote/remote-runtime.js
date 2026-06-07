@@ -4,7 +4,7 @@ import { initializeRemoteNavigation, openRemoteNavigation } from "./navigation.j
 import { applyPairingQuery, beginPairing, forgetCurrentDevice, handleEncryptedPairingResult, sendPairingRequest } from "./pairing.js";
 import { registerRemotePwa } from "./pwa.js";
 import { renderLog } from "./session-surface.js";
-import { applyFileChange, applySessionSnapshot, applyTranscriptDelta, applyTranscriptEvent, clearSessionRuntime, dismissRemoteReview, fetchAskUserQuestionDetail, fetchRemoteProviderModels, fetchRemoteProviders, fetchRemoteThreadTranscript, fetchTranscriptEntryDetail, refreshRemoteThreads, requestRemoteReview, resolveRemoteReview, resumeRemoteSession, sendMessage, startRemoteSession, stopActiveTurn, submitAskUserAnswer, submitDecision, syncRemoteSnapshot, takeOverControl, updateRemoteSessionSettings } from "./session-ops.js";
+import { applyFileChange, applySessionSnapshot, applyTranscriptDelta, applyTranscriptEvent, clearSessionRuntime, dismissRemoteReview, fetchAskUserQuestionDetail, fetchRemoteProviderModels, fetchRemoteProviders, fetchRemoteThreadTranscript, fetchTranscriptEntryDetail, refreshRemoteThreads, requestRemoteReview, resolveRemoteReview, resumeRemoteSession, sendMessage, startRemoteSession, stopActiveTurn, submitAskUserAnswer, submitDecision, syncRemoteSnapshot, takeOverControl, updateRemoteSessionSettings, viewRemoteThread } from "./session-ops.js";
 import { clearActiveRelaySelection, ensureDeviceIdentity, hydrateStoredRemoteSecrets, selectRelayProfile, state } from "./state.js";
 import { applyRemoteSurfacePatch, createResetRemoteSurfaceStatePatch } from "./surface-state.js";
 
@@ -170,6 +170,12 @@ export function createRemoteAppHandlers() {
     },
     onResumeThread(threadId, sessionDraft) {
       return resumeRemoteSession(threadId, sessionDraft);
+    },
+    // View-only navigation: fetch the thread's transcript and show it without
+    // calling the backend resume, which is mutating. Used when the target thread
+    // is review-locked (the remote UI already rejects resume in that case).
+    onViewThread(threadId) {
+      return viewRemoteThread(threadId);
     },
     onReturnHome() {
       return returnToRelayHome();

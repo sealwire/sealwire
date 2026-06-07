@@ -93,7 +93,7 @@ test("selectSessionChromeRenderModel derives header, status, and control banner"
   assert.equal(model.sessionMeta.chips.find((chip) => chip.label === "Effort").value, "medium");
 });
 
-test("remote control banner hides take over while a review owns the session", () => {
+test("remote control banner hides take over while the active thread is being reviewed", () => {
   const state = {
     remoteAuth: { deviceId: "device-1" },
     socketConnected: true,
@@ -101,7 +101,10 @@ test("remote control banner hides take over while a review owns the session", ()
   const session = {
     active_thread_id: "thread-1",
     active_controller_device_id: "device-2",
-    active_review_jobs: [{ id: "review-1", status: "waiting_for_reviewer" }],
+    // The review's parent IS the active thread, so it's locked.
+    active_review_jobs: [
+      { id: "review-1", status: "waiting_for_reviewer", parent_thread_id: "thread-1" },
+    ],
     pending_approvals: [],
     provider_connected: true,
   };
@@ -110,7 +113,29 @@ test("remote control banner hides take over while a review owns the session", ()
 
   assert.equal(model.controlBanner.hidden, false);
   assert.equal(model.controlBanner.takeOverHidden, true);
-  assert.match(model.controlBanner.hint, /control returns automatically/i);
+  assert.match(model.controlBanner.hint, /being reviewed/i);
+});
+
+test("remote control banner allows take over when the review is on another thread", () => {
+  const state = {
+    remoteAuth: { deviceId: "device-1" },
+    socketConnected: true,
+  };
+  const session = {
+    active_thread_id: "thread-2",
+    active_controller_device_id: "device-2",
+    // A background review owns a DIFFERENT thread — take-over stays allowed.
+    active_review_jobs: [
+      { id: "review-1", status: "waiting_for_reviewer", parent_thread_id: "thread-1" },
+    ],
+    pending_approvals: [],
+    provider_connected: true,
+  };
+
+  const model = selectSessionChromeRenderModel(state, session);
+
+  assert.equal(model.controlBanner.hidden, false);
+  assert.equal(model.controlBanner.takeOverHidden, false);
 });
 
 test("selectStatusBadgeRenderModel falls back to home and pairing states without a session", () => {

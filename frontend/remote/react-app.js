@@ -105,6 +105,7 @@ import {
 import {
   canRequestReview,
   isReviewBlocked,
+  isReviewInProgressForThread,
   selectReviewLaunchModel,
 } from "../shared/review-state.js";
 import { ReviewLauncher } from "../shared/review-panel.js";
@@ -927,6 +928,14 @@ function RemoteApp() {
   async function handleResumeThread(threadId) {
     closeRemoteNavigation();
     if (threadId === session?.active_thread_id) {
+      return;
+    }
+    // resume_session is mutating (calls bridge.resume_thread, overwrites runtime).
+    // If the target thread is review-locked the backend would reject it. Use the
+    // view-only path instead so the user can still navigate to the parent thread
+    // (or any other locked thread) while a background review is running.
+    if (isReviewInProgressForThread(session, threadId)) {
+      await handlers.onViewThread?.(threadId);
       return;
     }
     const resumed = await handlers.onResumeThread(threadId, remoteUi.sessionDraft);

@@ -2,6 +2,7 @@ import {
   buildThreadGroups,
   summarizeThreadGroups,
 } from "../shared/thread-groups.js";
+import { isReviewInProgressForThread } from "../shared/review-state.js";
 import { workspaceBasename } from "./utils.js";
 
 function createActiveSessionThread(session) {
@@ -24,15 +25,20 @@ function createActiveSessionThread(session) {
 export function selectSessionRenderModel({ session, previousSession, hasControllerLease }) {
   const approval = session.pending_approvals?.[0] || null;
   const hasActiveSession = Boolean(session.active_thread_id);
+  // The active thread is frozen only when it is itself being reviewed; a
+  // background review on another thread leaves this conversation usable.
+  const activeThreadFrozen = isReviewInProgressForThread(session, session.active_thread_id);
 
   return {
     approval,
-    canWrite: hasControllerLease,
-    composerDisabled: !hasActiveSession || !hasControllerLease,
+    canWrite: hasControllerLease && !activeThreadFrozen,
+    composerDisabled: !hasActiveSession || !hasControllerLease || activeThreadFrozen,
     currentApprovalId: approval?.request_id || null,
     hasActiveSession,
     hasControllerLease,
-    messagePlaceholder: !hasActiveSession
+    messagePlaceholder: activeThreadFrozen
+      ? "This thread is being reviewed…"
+      : !hasActiveSession
       ? "Start a remote session first."
       : hasControllerLease
         ? "Message Codex remotely..."
