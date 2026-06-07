@@ -440,9 +440,12 @@ export function ReviewerChip({ store, onTap }) {
   const blocked = Boolean(review.blocked);
   const active = reviewJobs.some((job) => !TERMINAL_REVIEW.has(job.status));
   const hasReviews = reviewJobs.length > 0;
-  const canRequest = Boolean(review.canRequest);
-  // Don't clutter the composer when there's nothing to see and nothing to start.
-  if (!hasReviews && !canRequest) return null;
+  // Only surface once there's an actual review to track (in progress / blocked /
+  // done) — that's when the status badge carries signal. In the pure-idle "you
+  // could start one" state the chip says nothing and just competes for composer
+  // space with the diff chip and the "Want a second opinion?" idle nudge already
+  // shown there, so stay hidden and let those handle discovery + launch.
+  if (!hasReviews) return null;
   const badge = blocked ? "⚠" : active ? "•" : hasReviews ? "✓" : null;
   const modifier = blocked
     ? "is-blocked"

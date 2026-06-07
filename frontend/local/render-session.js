@@ -88,6 +88,11 @@ import {
 } from "./react-session-panels.js";
 import { ThreadGroupList } from "../shared/thread-list-react.js";
 import { buildThreadActivityMap } from "../shared/thread-activity.js";
+import { threadAttention } from "../shared/thread-attention.js";
+import {
+  configureThreadNotifications,
+  ensureNotificationPermission,
+} from "../shared/thread-notify.js";
 import { TranscriptPane } from "../shared/transcript-pane.js";
 import {
   captureTranscriptScrollSnapshot,
@@ -185,6 +190,22 @@ export function createSessionRenderer({
   setReviewSlice,
   viewThread,
 }) {
+  // Wire thread notifications to this surface: resolve names from the loaded
+  // thread summaries, and open the thread (respecting review locks) on click.
+  configureThreadNotifications({
+    resolveThreadName: (threadId) => {
+      const thread = (state.threads || []).find((entry) => entry?.id === threadId);
+      return thread ? thread.name || thread.preview || shortId(threadId) : null;
+    },
+    onActivateThread: (threadId) => {
+      if (typeof viewThread === "function" && isReviewInProgress(state.session)) {
+        viewThread(threadId);
+      } else {
+        void resumeSession(threadId);
+      }
+    },
+  });
+
   function reviewChips(session) {
     return (session?.active_review_jobs || []).map((job) =>
       metaChip("Review", reviewStatusLabel(job.status))
@@ -782,6 +803,7 @@ export function createSessionRenderer({
         h("span", { className: "review-idle-nudge-copy" }, "Want a second opinion on these changes?"),
         h(ReviewLauncher, {
           panelId: "review-panel-nudge",
+          label: "Request reviewer",
           providerOptions: reviewModel.providerOptions,
           models: reviewModel.models,
           defaultProvider: reviewModel.defaultProvider,
@@ -1118,6 +1140,11 @@ export function createSessionRenderer({
           openThreadContextMenu(threadId, clientX, clientY);
         },
         onResumeThread(threadId) {
+          // Opening a thread clears its attention dot immediately; the click also
+          // doubles as the user gesture that unlocks notification permission.
+          threadAttention.clear(threadId);
+          void ensureNotificationPermission();
+          renderThreads();
           // During a review, resume_session is blocked by the backend for
           // review-locked threads (the reviewed parent and the reviewer) because
           // it is mutating: it calls bridge.resume_thread and overwrites the
@@ -1142,6 +1169,7 @@ export function createSessionRenderer({
         },
         selectedCwd,
         threadActivity: buildThreadActivityMap(state.session),
+        threadAttention: threadAttention.snapshotMap(),
       })
     );
 

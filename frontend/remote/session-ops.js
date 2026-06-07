@@ -37,6 +37,8 @@ import {
   createRemoteThreadsPatch,
 } from "./surface-state.js";
 import { isReviewInProgressForThread } from "../shared/review-state.js";
+import { threadAttention } from "../shared/thread-attention.js";
+import { isDocumentForeground, notifyThreadEvents } from "../shared/thread-notify.js";
 
 const fetchRawTranscriptPage = createTranscriptPageFetcher(dispatchOrRecover);
 const fetchTranscriptEntryDetailRequest =
@@ -475,6 +477,19 @@ export function applySessionSnapshot(snapshot) {
   applyRenderedSession(effectiveSnapshot, {
     hydrationSnapshot: displaySnapshot,
   });
+  // Derive per-thread attention flags from the snapshot stream and fire browser
+  // notifications for threads the user isn't actively watching. Best-effort:
+  // never let a notification hiccup break snapshot rendering.
+  try {
+    const viewedThreadId = viewOnlyThreadId || snapshot?.active_thread_id || null;
+    const events = threadAttention.ingest(snapshot, {
+      viewedThreadId,
+      isForeground: isDocumentForeground(),
+    });
+    notifyThreadEvents(events);
+  } catch (error) {
+    renderLog(`[thread-attention] ingest failed: ${error?.message || error}`);
+  }
   const scrollTop = remoteUiRefs.remoteTranscript?.scrollTop || 0;
   const scrollHeight = remoteUiRefs.remoteTranscript?.scrollHeight || 0;
   const clientHeight = remoteUiRefs.remoteTranscript?.clientHeight || 0;

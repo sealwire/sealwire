@@ -131,6 +131,11 @@ import { SessionSettingsButton } from "../shared/session-settings-panel.js";
 import { attachTranscriptHistoryLoader } from "../shared/transcript-history-loader.js";
 import { ThreadGroupList } from "../shared/thread-list-react.js";
 import { buildThreadActivityMap } from "../shared/thread-activity.js";
+import { threadAttention } from "../shared/thread-attention.js";
+import {
+  configureThreadNotifications,
+  ensureNotificationPermission,
+} from "../shared/thread-notify.js";
 import {
   createThreadListStore,
 } from "../shared/thread-list-store.js";
@@ -935,6 +940,10 @@ function RemoteApp() {
 
   async function handleResumeThread(threadId) {
     closeRemoteNavigation();
+    // Opening a thread clears its attention dot; treat the click as the user
+    // gesture that unlocks notification permission for later events.
+    threadAttention.clear(threadId);
+    void ensureNotificationPermission();
     if (threadId === session?.active_thread_id) {
       return;
     }
@@ -1309,6 +1318,19 @@ function RemoteApp() {
   );
 }
 
+function findThreadNameInGroups(groups, threadId) {
+  if (!threadId || !Array.isArray(groups)) {
+    return null;
+  }
+  for (const group of groups) {
+    const thread = group?.threads?.find?.((entry) => entry?.id === threadId);
+    if (thread) {
+      return thread.name || thread.preview || shortId(threadId);
+    }
+  }
+  return null;
+}
+
 function RemoteSidebar({
   currentState,
   hasRelay,
@@ -1335,6 +1357,15 @@ function RemoteSidebar({
 }) {
   const usesDrawer = currentState.remoteNavMode === "drawer";
   const navOpen = currentState.remoteNavMode !== "drawer" || currentState.remoteNavOpen;
+
+  // Keep the thread-notification hooks pointed at the current thread list and
+  // resume handler (cheap + idempotent; re-binds fresh closures each render).
+  configureThreadNotifications({
+    resolveThreadName: (threadId) => findThreadNameInGroups(threadsModel?.groups, threadId),
+    onActivateThread: (threadId) => {
+      void onResumeThread?.(threadId);
+    },
+  });
 
   return h(
     "aside",
@@ -1479,6 +1510,7 @@ function RemoteSidebar({
           onToggleExpandedGroup,
           onToggleGroup,
           threadActivity: buildThreadActivityMap(session),
+          threadAttention: threadAttention.snapshotMap(),
         })
       )
     ),
@@ -1767,14 +1799,12 @@ function RemoteThreadPanel({
           h(
             "div",
             { className: "review-idle-nudge-inner" },
-            h(
-              "span",
-              { className: "review-idle-nudge-copy" },
-              "Want a second opinion on these changes?"
-            ),
+            // Mobile: the button label carries the whole meaning, so we drop the
+            // longer "Want a second opinion?" copy that wraps to two lines on a
+            // narrow composer (the desktop nudge keeps it — it has the room).
             h(ReviewLauncher, {
               panelId: "review-panel-remote-nudge",
-              label: "Request review",
+              label: "Request reviewer",
               providerOptions: reviewNudgeModel.reviewModel?.providerOptions || [],
               models: reviewNudgeModel.reviewModel?.models || [],
               defaultProvider: reviewNudgeModel.reviewModel?.defaultProvider || "",

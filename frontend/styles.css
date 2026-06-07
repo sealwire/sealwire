@@ -938,6 +938,16 @@ input:focus, textarea:focus, select:focus {
   box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent-primary, #4c8bf5) 60%, transparent);
   animation: agent-working-indicator-pulse 1.4s ease-in-out infinite;
 }
+/* Attention states: the thread is no longer working but wants the user. Steady
+   (no pulse) so it reads as "resolved, waiting for you" rather than "busy". */
+.conversation-activity-dot.is-attention-done,
+.conversation-activity-dot.is-attention-input {
+  animation: none;
+  box-shadow: none;
+}
+.conversation-activity-dot.is-attention-input {
+  background: var(--accent-warning, #e6a23c);
+}
 @media (prefers-reduced-motion: reduce) {
   .conversation-activity-dot { animation: none; }
 }

@@ -42,6 +42,7 @@ export function ThreadGroupList({
   previewFallback = "No preview yet.",
   selectedCwd = "",
   threadActivity = null,
+  threadAttention = null,
 }) {
   if (!groups.length) {
     return h("p", { className: "sidebar-empty" }, emptyMessage);
@@ -104,6 +105,7 @@ export function ThreadGroupList({
             previewFallback,
             row,
             threadActivity,
+            threadAttention,
           })
         );
       })
@@ -124,6 +126,7 @@ function ThreadListRow({
   previewFallback,
   row,
   threadActivity,
+  threadAttention,
 }) {
   if (row.type === "group") {
     const isSelected = normalizedSelectedCwd && row.normalizedCwd === normalizedSelectedCwd;
@@ -148,6 +151,7 @@ function ThreadListRow({
     return h(ThreadGroupItem, {
       active: activeThreadId === row.thread.id,
       activity: threadActivity?.get?.(row.thread.id) || null,
+      attentionKind: threadAttention?.get?.(row.thread.id) || null,
       formatThreadMeta,
       group: row.group,
       includePreview,
@@ -326,6 +330,7 @@ function ThreadGroupHeader({
 function ThreadGroupItem({
   active,
   activity = null,
+  attentionKind = null,
   formatThreadMeta,
   group,
   includePreview,
@@ -337,7 +342,20 @@ function ThreadGroupItem({
   const title = thread.name || thread.preview || shortId(thread.id);
   const provider = providerLabel(thread.provider);
   const providerToneClass = `is-${providerTone(thread.provider)}`;
-  const activityLabel = activity ? (activity.tool ? `Working · ${activity.tool}` : "Working") : "";
+  // The dot has three states. A live turn always wins (the pulsing "working"
+  // look); otherwise a client-side attention flag shows a steady dot until the
+  // user opens the thread: amber when it needs input, blue when it just finished.
+  const working = Boolean(activity);
+  const dot = working
+    ? {
+        className: "conversation-activity-dot",
+        label: activity.tool ? `Working · ${activity.tool}` : "Working",
+      }
+    : attentionKind === "needs_input"
+      ? { className: "conversation-activity-dot is-attention-input", label: "Needs your input" }
+      : attentionKind === "completed"
+        ? { className: "conversation-activity-dot is-attention-done", label: "Completed" }
+        : null;
 
   return h(
     "button",
@@ -365,12 +383,12 @@ function ThreadGroupItem({
     h(
       "span",
       { className: "conversation-title-row" },
-      activity
+      dot
         ? h("span", {
-            className: "conversation-activity-dot",
+            className: dot.className,
             role: "img",
-            "aria-label": activityLabel,
-            title: activityLabel,
+            "aria-label": dot.label,
+            title: dot.label,
           })
         : null,
       h("span", { className: "conversation-title" }, title)

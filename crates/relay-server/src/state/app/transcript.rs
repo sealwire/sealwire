@@ -149,7 +149,18 @@ impl AppState {
                     .transcript
                     .iter()
                     .find(|entry| entry.item_id == input.item_id)
-                    .filter(|entry| entry.kind != crate::protocol::TranscriptEntryKind::ToolCall)
+                    .filter(|entry| {
+                        if entry.kind != crate::protocol::TranscriptEntryKind::ToolCall {
+                            return true;
+                        }
+                        entry.tool.as_ref().is_some_and(|tool| {
+                            tool.diff.is_some()
+                                || tool
+                                    .file_changes
+                                    .iter()
+                                    .any(|change| !change.diff.is_empty())
+                        })
+                    })
                     .map(|entry| entry.to_view())
             } else {
                 None
