@@ -3147,6 +3147,81 @@ mod review_tests {
         );
     }
 
+    // R2b: a reviewer thread whose persisted settings were flipped to a WRITABLE
+    // sandbox (after its review went terminal and unlocked) must be re-forced to the
+    // read-only reviewer policy on reuse — both at the provider (resume) and in the
+    // relay's settings. The read-only policy is never trusted from persisted settings.
+    #[tokio::test]
+    async fn review_reuse_re_enforces_read_only_over_writable_settings() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        start_parent(&app, cwd, "codex").await;
+
+        let first = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("first review should start");
+        let first_job = wait_for_review(&app, &first.review_job_id).await;
+        let reviewer = first_job
+            .reviewer_thread_id
+            .clone()
+            .expect("reviewer thread id");
+        wait_for_active_turn_idle(&app).await;
+
+        // The (now terminal, unlocked) reviewer is resumed by a user and flipped to a
+        // writable sandbox, which persists in thread_settings.
+        {
+            let mut relay = app.relay.write().await;
+            relay.remember_thread_settings(
+                &reviewer,
+                "bypass",
+                "danger-full-access",
+                "medium",
+                "codex-model",
+            );
+        }
+
+        let mut reuse = review_input("codex");
+        reuse.reviewer_thread_id = Some(reviewer.clone());
+        let second = app
+            .request_review(reuse)
+            .await
+            .expect("reuse review should start");
+        let second_job = wait_for_review(&app, &second.review_job_id).await;
+        assert_eq!(
+            second_job.status, "complete",
+            "reuse job failed: {:?}",
+            second_job.error
+        );
+
+        // The reviewer was re-resumed with the read-only policy, NOT the writable
+        // settings a user had left on it.
+        let resumes = providers.get("codex").unwrap().resumes.lock().await.clone();
+        let resumed = resumes
+            .iter()
+            .rev()
+            .find(|(tid, _, _)| tid == &reviewer)
+            .expect("the reused reviewer must be resumed");
+        assert_eq!(
+            resumed.1, "never",
+            "reviewer must be forced to `never` approval"
+        );
+        assert_eq!(
+            resumed.2, "read-only",
+            "reviewer must be forced to the read-only sandbox"
+        );
+        // The relay's persisted settings were corrected away from the writable values.
+        let settings = app
+            .relay
+            .read()
+            .await
+            .thread_settings(&reviewer)
+            .expect("reviewer settings");
+        assert_eq!(settings.approval_policy, "never");
+        assert_eq!(settings.sandbox, "read-only");
+    }
+
     // R3: a reused reviewer keeps its OWN model/effort, not the parent's session model.
     #[tokio::test]
     async fn review_reuse_keeps_reviewer_model() {

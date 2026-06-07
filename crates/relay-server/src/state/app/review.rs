@@ -882,84 +882,93 @@ thread {parent_thread_id}."
         Ok(reviewer_thread_id)
     }
 
-    /// Prepare a REUSED reviewer thread for its re-review turn. Returns the
-    /// reviewer's own `(model, effort)` so the turn keeps the reviewer's settings
-    /// rather than inheriting the parent's session model. If the thread lost its
-    /// runtime (e.g. after a relay restart), re-attaches a background runtime from
-    /// freshly-read provider data so `wait_for_thread_idle_outcome` actually waits
-    /// for this turn (a missing runtime reads as "idle") and the read-back can bind
-    /// to a fresh message instead of replaying the prior review.
+    /// Prepare a REUSED reviewer thread for its re-review turn. Re-establishes the
+    /// reviewer's READ-ONLY safety and returns its `(model, effort)` so the turn keeps
+    /// the reviewer's own settings rather than the parent's.
+    ///
+    /// The read-only policy (`never`/`read-only` for Codex) is RECOMPUTED from the
+    /// provider's reviewer policy on every reuse — never trusted from the persisted
+    /// per-thread settings, because once a review is terminal the reviewer thread is
+    /// unlocked and a user could resume it with a writable sandbox
+    /// (`bypass`/`danger-full-access`), which would persist. We then ALWAYS
+    /// `resume_thread` with the read-only policy before the turn (Codex attaches the
+    /// sandbox on thread/resume, not turn/start, and the provider's current sandbox
+    /// for the thread may have drifted writable or — after a restart — be unloaded
+    /// entirely), and correct the relay's runtime + persisted settings to match. Only
+    /// model/effort (not a safety concern) are carried over from the reviewer's own
+    /// recorded settings.
     async fn prepare_reused_reviewer_thread(
         &self,
         reviewer_thread_id: &str,
     ) -> Result<(Option<String>, Option<String>), String> {
-        // The reviewer thread's own settings (persisted, so they survive a restart;
-        // falls back to the runtime when only that is present).
+        let (provider_name, bridge) = self.find_thread_provider(reviewer_thread_id).await?;
+        let defaults = self.defaults().await;
+        // Authoritative read-only policy for a reviewer on this provider. Recomputed,
+        // never read from (user-mutable) persisted settings.
+        let (approval_policy, sandbox, _read_only) =
+            reviewer_thread_settings(provider_name, &defaults.approval_policy, &defaults.sandbox);
+
+        // Model/effort are not a safety concern: keep the reviewer's own where
+        // recorded, falling back to the session default — never None (which
+        // `send_message_to_thread` would resolve to the parent's model).
         let settings = {
             let relay = self.relay.read().await;
             relay.thread_settings(reviewer_thread_id)
         };
-        let has_runtime = {
-            let relay = self.relay.read().await;
-            relay.runtime_for_thread(reviewer_thread_id).is_some()
-        };
-        if !has_runtime {
-            let (provider_name, bridge) = self.find_thread_provider(reviewer_thread_id).await?;
-            let defaults = self.defaults().await;
-            // The reviewer's read-only policy. Prefer the persisted per-thread
-            // settings; otherwise recompute the provider's reviewer policy — NEVER
-            // fall back to the parent's (writable) sandbox.
-            let (approval_policy, sandbox) = match &settings {
-                Some(s) if !s.approval_policy.is_empty() => {
-                    (s.approval_policy.clone(), s.sandbox.clone())
-                }
-                _ => {
-                    let (approval, sandbox, _) = reviewer_thread_settings(
-                        provider_name,
-                        &defaults.approval_policy,
-                        &defaults.sandbox,
-                    );
-                    (approval, sandbox)
-                }
-            };
-            // After a restart the provider's app-server is fresh: the reviewer thread
-            // is not loaded and its sandbox is not attached. Codex (and Claude) only
-            // (re)apply approvalPolicy + sandbox via thread/resume — turn/start carries
-            // only model/effort — so RESUME before reading/hydrating, both to load the
-            // thread (so its turn can start at all) and to re-attach the reviewer's
-            // read-only safety. Without this a reused reviewer could run with the
-            // parent's writable sandbox, or fail to start.
-            bridge
-                .resume_thread(reviewer_thread_id, &approval_policy, &sandbox)
-                .await?;
-            let mut data = bridge.read_thread(reviewer_thread_id).await?;
-            // Keep the row routable + nav-hidden (reviewer_thread_ids still filters it).
-            data.thread.provider = provider_name.to_string();
-            data.thread.source = provider_name.to_string();
-            let effort = settings
-                .as_ref()
-                .map(|s| s.reasoning_effort.clone())
-                .filter(|value| !value.is_empty())
-                .unwrap_or_else(|| defaults.reasoning_effort.clone());
-            let model = settings
-                .as_ref()
-                .map(|s| s.model.clone())
-                .filter(|value| !value.is_empty())
-                .unwrap_or_else(|| defaults.model.clone());
-            let mut relay = self.relay.write().await;
-            relay.hydrate_background_runtime(data, &approval_policy, &sandbox, &effort, &model);
-            relay.notify();
-        }
-        // Non-empty settings only; an empty model/effort falls back to the provider
-        // default in `send_message_to_thread` (never to the parent's model).
-        let model = settings
-            .as_ref()
-            .map(|s| s.model.clone())
-            .filter(|value| !value.is_empty());
         let effort = settings
             .as_ref()
             .map(|s| s.reasoning_effort.clone())
             .filter(|value| !value.is_empty());
+        let model = settings
+            .as_ref()
+            .map(|s| s.model.clone())
+            .filter(|value| !value.is_empty());
+        let effort_value = effort
+            .clone()
+            .unwrap_or_else(|| defaults.reasoning_effort.clone());
+        let model_value = model.clone().unwrap_or_else(|| defaults.model.clone());
+
+        // Always (re)apply the read-only policy to the provider before the turn.
+        bridge
+            .resume_thread(reviewer_thread_id, &approval_policy, &sandbox)
+            .await?;
+
+        let has_runtime = {
+            let relay = self.relay.read().await;
+            relay.runtime_for_thread(reviewer_thread_id).is_some()
+        };
+        if has_runtime {
+            // Correct the live runtime + persisted settings to the read-only policy
+            // (preserving model/effort), so the snapshot and turn can't run writable.
+            let mut relay = self.relay.write().await;
+            relay.remember_thread_settings(
+                reviewer_thread_id,
+                &approval_policy,
+                &sandbox,
+                &effort_value,
+                &model_value,
+            );
+            relay.notify();
+        } else {
+            // Re-attach a background runtime from freshly-read provider data with the
+            // read-only policy, so `wait_for_thread_idle_outcome` observes this turn
+            // (a missing runtime reads as "idle") and the read-back binds to a fresh
+            // message instead of replaying the prior review.
+            let mut data = bridge.read_thread(reviewer_thread_id).await?;
+            // Keep the row routable + nav-hidden (reviewer_thread_ids still filters it).
+            data.thread.provider = provider_name.to_string();
+            data.thread.source = provider_name.to_string();
+            let mut relay = self.relay.write().await;
+            relay.hydrate_background_runtime(
+                data,
+                &approval_policy,
+                &sandbox,
+                &effort_value,
+                &model_value,
+            );
+            relay.notify();
+        }
+
         Ok((model, effort))
     }
 
