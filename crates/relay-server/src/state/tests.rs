@@ -1214,6 +1214,67 @@ fn reviewer_thread_views_enrich_provider_and_label_from_summary() {
 }
 
 #[test]
+fn reviewers_to_evict_returns_oldest_beyond_cap() {
+    let mut relay = test_state();
+    // Six reviewers of parent-1 with increasing created_at (oldest = rev-1).
+    for index in 1..=6u64 {
+        let id = format!("rev-{index}");
+        relay.register_reviewer_thread(id.clone(), "parent-1".to_string());
+        relay.reviewer_threads.get_mut(&id).unwrap().created_at = index;
+    }
+    // A reviewer of a different parent is never considered.
+    relay.register_reviewer_thread("rev-other".to_string(), "parent-2".to_string());
+
+    // Keep 5 → evict the single oldest.
+    assert_eq!(
+        relay.reviewers_to_evict("parent-1", 5),
+        vec!["rev-1".to_string()]
+    );
+    // A parent under the cap evicts nothing.
+    assert!(relay.reviewers_to_evict("parent-2", 5).is_empty());
+    // A lower cap evicts the oldest first.
+    assert_eq!(
+        relay.reviewers_to_evict("parent-1", 3),
+        vec![
+            "rev-1".to_string(),
+            "rev-2".to_string(),
+            "rev-3".to_string()
+        ]
+    );
+    assert!(relay.reviewers_to_evict("parent-1", 6).is_empty());
+}
+
+#[test]
+fn reviewer_thread_created_at_round_trips_and_tolerates_legacy_string() {
+    let mut relay = test_state();
+    relay.register_reviewer_thread("rev-1".to_string(), "parent-1".to_string());
+    relay.reviewer_threads.get_mut("rev-1").unwrap().created_at = 1234;
+
+    // Round-trip the new {parent, created_at} form through the persisted snapshot.
+    let persisted = PersistedRelayState::from_relay(&relay);
+    let json = serde_json::to_string(&persisted).expect("serialize");
+    let decoded: PersistedRelayState = serde_json::from_str(&json).expect("decode");
+    let record = decoded.reviewer_threads.get("rev-1").expect("record");
+    assert_eq!(record.parent_thread_id, "parent-1");
+    assert_eq!(record.created_at, 1234);
+
+    // The legacy persisted form (value was a bare parent-id string) still decodes,
+    // with created_at defaulting to 0 (so it sorts oldest / evicts first).
+    let legacy = json.replace(
+        "\"rev-1\":{\"parent_thread_id\":\"parent-1\",\"created_at\":1234}",
+        "\"rev-1\":\"parent-1\"",
+    );
+    assert_ne!(legacy, json, "legacy replacement should have applied");
+    let decoded_legacy: PersistedRelayState = serde_json::from_str(&legacy).expect("decode legacy");
+    let record = decoded_legacy
+        .reviewer_threads
+        .get("rev-1")
+        .expect("legacy record");
+    assert_eq!(record.parent_thread_id, "parent-1");
+    assert_eq!(record.created_at, 0);
+}
+
+#[test]
 fn restore_thread_data_keeps_persisted_controller_and_settings() {
     let mut relay = test_state();
     relay

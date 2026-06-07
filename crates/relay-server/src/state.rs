@@ -19,7 +19,8 @@ pub(crate) use self::relay::{
     parse_ask_user_questions, ApprovalKind, BrokerPendingMessage, CachedRemoteActionResult,
     ClaimChallenge, CompletedRemoteClaim, DeviceRecord, IssuedClaimChallenge, PairedDevice,
     PendingApproval, PendingAskUserQuestion, PendingPairingResult, PendingTranscriptDelta,
-    RelayState, RemoteActionReplayDecision, ThreadSessionSettings, TranscriptDeltaKind,
+    RelayState, RemoteActionReplayDecision, ReviewerThread, ThreadSessionSettings,
+    TranscriptDeltaKind, MAX_REVIEWERS_PER_PARENT,
 };
 pub(crate) use self::review::{
     parent_recap_prompt, post_back_message, re_review_prompt, reviewer_prompt, ReviewJob,

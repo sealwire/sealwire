@@ -41,6 +41,11 @@ const MAX_REMOTE_ACTION_REPLAY_ENTRIES: usize = 512;
 /// dismisses them (the Reviewer panel is a persistent surface), so this cap — not
 /// a timer — is what eventually evicts old completed reviews.
 const MAX_REVIEW_JOBS: usize = 64;
+/// Per-parent cap on retained reviewer threads. Re-reviewing a parent with a clean
+/// reviewer spawns a new hidden reviewer thread; once a parent has more than this,
+/// the oldest is evicted (FIFO) and permanently deleted so reviewer threads can't
+/// accumulate without bound.
+pub(crate) const MAX_REVIEWERS_PER_PARENT: usize = 5;
 /// Public alias for tests.
 #[cfg(test)]
 pub const MAX_REVIEW_JOBS_PUB: usize = MAX_REVIEW_JOBS;
@@ -72,6 +77,58 @@ impl ThreadSessionSettings {
             reasoning_effort: reasoning_effort.to_string(),
             model: model.to_string(),
         }
+    }
+}
+
+/// Durable identity of one reviewer thread: which parent it reviews and when it
+/// was registered. `created_at` gives a stable FIFO order so the oldest reviewer of
+/// a parent can be evicted once the per-parent cap is exceeded.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ReviewerThread {
+    pub(crate) parent_thread_id: String,
+    pub(crate) created_at: u64,
+}
+
+impl ReviewerThread {
+    fn new(parent_thread_id: String) -> Self {
+        Self {
+            parent_thread_id,
+            created_at: unix_now(),
+        }
+    }
+}
+
+// Tolerant of the legacy persisted form where the value was a bare parent-thread-id
+// string (before `created_at` existed): such entries decode with `created_at: 0`,
+// so they sort oldest and are evicted first.
+impl<'de> Deserialize<'de> for ReviewerThread {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Legacy(String),
+            Full {
+                parent_thread_id: String,
+                #[serde(default)]
+                created_at: u64,
+            },
+        }
+        Ok(match Repr::deserialize(deserializer)? {
+            Repr::Legacy(parent_thread_id) => ReviewerThread {
+                parent_thread_id,
+                created_at: 0,
+            },
+            Repr::Full {
+                parent_thread_id,
+                created_at,
+            } => ReviewerThread {
+                parent_thread_id,
+                created_at,
+            },
+        })
     }
 }
 
@@ -178,7 +235,7 @@ pub struct RelayState {
     /// stays until the reviewer thread is actually deleted or explicitly un-hidden
     /// (e.g. the user kept it when deleting its parent). Distinct from
     /// `is_thread_review_locked` (live freeze), which remains in-memory.
-    pub(super) reviewer_threads: HashMap<String, String>,
+    pub(super) reviewer_threads: HashMap<String, ReviewerThread>,
 }
 
 impl RelayState {
@@ -321,25 +378,65 @@ impl RelayState {
     }
 
     /// Persistently record a reviewer thread's identity (reviewer id -> parent id),
-    /// so it stays hidden from navigation across restarts and job eviction.
+    /// so it stays hidden from navigation across restarts and job eviction. Stamps
+    /// the current time for FIFO eviction ordering.
     pub(crate) fn register_reviewer_thread(&mut self, reviewer_id: String, parent_id: String) {
-        self.reviewer_threads.insert(reviewer_id, parent_id);
+        self.reviewer_threads
+            .insert(reviewer_id, ReviewerThread::new(parent_id));
     }
 
     /// Stop hiding a reviewer thread — either because it was actually deleted, or
     /// because the user chose to keep it as a normal (visible) thread when deleting
     /// its parent. Returns the parent id it was associated with, if any.
     pub(crate) fn forget_reviewer_thread(&mut self, reviewer_id: &str) -> Option<String> {
-        self.reviewer_threads.remove(reviewer_id)
+        self.reviewer_threads
+            .remove(reviewer_id)
+            .map(|record| record.parent_thread_id)
     }
 
     /// Reviewer thread ids owned by `parent_id` (for the parent-delete prompt).
     pub(crate) fn reviewer_threads_of_parent(&self, parent_id: &str) -> Vec<String> {
         self.reviewer_threads
             .iter()
-            .filter(|(_, parent)| parent.as_str() == parent_id)
+            .filter(|(_, record)| record.parent_thread_id == parent_id)
             .map(|(reviewer, _)| reviewer.clone())
             .collect()
+    }
+
+    /// Reviewer threads of `parent_id` to evict so it keeps at most `keep`: the
+    /// oldest by `created_at` beyond the cap, FIFO. Reviewers currently bound to a
+    /// non-terminal review job are protected (never evicted mid-review). Returns ids
+    /// only; the caller performs the actual provider delete.
+    pub(crate) fn reviewers_to_evict(&self, parent_id: &str, keep: usize) -> Vec<String> {
+        let mut owned: Vec<(&String, u64)> = self
+            .reviewer_threads
+            .iter()
+            .filter(|(_, record)| record.parent_thread_id == parent_id)
+            .map(|(reviewer, record)| (reviewer, record.created_at))
+            .collect();
+        if owned.len() <= keep {
+            return Vec::new();
+        }
+        // Oldest first (id as a stable tiebreak for equal timestamps).
+        owned.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(b.0)));
+        let protected: HashSet<&str> = self
+            .review_jobs
+            .values()
+            .filter(|job| !job.status.is_terminal())
+            .filter_map(|job| job.reviewer_thread_id.as_deref())
+            .collect();
+        let excess = owned.len() - keep;
+        let mut evict = Vec::new();
+        for (reviewer, _) in owned {
+            if evict.len() >= excess {
+                break;
+            }
+            if protected.contains(reviewer.as_str()) {
+                continue;
+            }
+            evict.push(reviewer.clone());
+        }
+        evict
     }
 
     /// The in-process summary for a reviewer thread, preferring its live runtime
@@ -373,11 +470,11 @@ impl RelayState {
         let mut views: Vec<_> = self
             .reviewer_threads
             .iter()
-            .map(|(reviewer, parent)| {
+            .map(|(reviewer, record)| {
                 let summary = self.reviewer_thread_summary(reviewer);
                 crate::protocol::ReviewerThreadView {
                     reviewer_thread_id: reviewer.clone(),
-                    parent_thread_id: parent.clone(),
+                    parent_thread_id: record.parent_thread_id.clone(),
                     reviewer_provider: self.reviewer_thread_provider(reviewer),
                     name: summary.and_then(|s| s.name.clone()),
                     updated_at: summary.map(|s| s.updated_at),
@@ -443,9 +540,10 @@ impl RelayState {
                 job.reviewer_thread_id = Some(real_id.to_string());
             }
         }
-        // Move the durable nav-hiding entry from the pending id to the real id.
-        if let Some(parent_id) = self.reviewer_threads.remove(pending_id) {
-            self.reviewer_threads.insert(real_id.to_string(), parent_id);
+        // Move the durable nav-hiding entry from the pending id to the real id
+        // (carrying its parent + created_at, so FIFO order is preserved).
+        if let Some(record) = self.reviewer_threads.remove(pending_id) {
+            self.reviewer_threads.insert(real_id.to_string(), record);
         }
         // The reviewer's turn is in flight; mark the real runtime working until the
         // provider's `done`/`session_stopped` event flips it idle. This keeps the

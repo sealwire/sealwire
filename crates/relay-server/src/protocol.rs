@@ -203,7 +203,7 @@ const SESSION_SNAPSHOT_REMOTE_SURFACE_BUDGET: SessionSnapshotCompactBudget =
         max_file_changes: 12,
         fallback_file_changes: 4,
         max_pending_ask_user_question_inline_bytes: Some(4_000),
-        strip_reviewer_threads: true,
+        reviewer_threads_active_parent_only: true,
     };
 
 const SESSION_SNAPSHOT_LOCAL_WEB_BUDGET: SessionSnapshotCompactBudget =
@@ -224,7 +224,7 @@ const SESSION_SNAPSHOT_LOCAL_WEB_BUDGET: SessionSnapshotCompactBudget =
         max_file_changes: 16,
         fallback_file_changes: 6,
         max_pending_ask_user_question_inline_bytes: None,
-        strip_reviewer_threads: false,
+        reviewer_threads_active_parent_only: false,
     };
 
 const SESSION_SNAPSHOT_IOS_SURFACE_BUDGET: SessionSnapshotCompactBudget =
@@ -320,11 +320,12 @@ struct SessionSnapshotCompactBudget {
     max_file_changes: usize,
     fallback_file_changes: usize,
     max_pending_ask_user_question_inline_bytes: Option<usize>,
-    /// Drop the reviewer→parent map from the snapshot. True only for broker-bound
-    /// (remote/iOS) profiles, where it would grow unbounded across reviews and blow
-    /// the frame budget AND is unused (remote surfaces never delete/archive
-    /// threads). False for LocalWeb, whose delete/archive prompt depends on it.
-    strip_reviewer_threads: bool,
+    /// Scope the reviewer→parent map to the ACTIVE parent only. True for broker-bound
+    /// (remote/iOS) profiles: the full map could grow unbounded across reviews and
+    /// blow the frame budget, and the only remote consumer is the reuse picker, which
+    /// just needs the active thread's reviewers (bounded by the per-parent cap).
+    /// False for LocalWeb, whose delete/archive prompt needs every thread's reviewers.
+    reviewer_threads_active_parent_only: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -362,14 +363,14 @@ impl SessionSnapshot {
     fn compact_for_budget(mut self, budget: SessionSnapshotCompactBudget) -> Self {
         let mut transcript_truncated = self.transcript_truncated;
 
-        // `reviewer_threads` only drives the LOCAL delete/archive prompt; remote
-        // surfaces never delete threads. Drop it from broker-bound snapshots so it
-        // can't grow unbounded across many reviews and blow the frame budget — but
-        // KEEP it for LocalWeb, whose prompt depends on it (stripping it there would
-        // make the frontend think there are no reviewers and silently skip the
-        // "delete the reviewer thread(s) too?" confirmation).
-        if budget.strip_reviewer_threads {
-            self.reviewer_threads = Vec::new();
+        // LocalWeb keeps every thread's reviewer entries (its delete/archive prompt
+        // works on any thread). Broker-bound (remote/iOS) snapshots keep ONLY the
+        // active parent's reviewers: that's all the remote reuse picker needs, and it
+        // bounds the map (per-parent cap) so it can't blow the frame budget.
+        if budget.reviewer_threads_active_parent_only {
+            let active = self.active_thread_id.clone();
+            self.reviewer_threads
+                .retain(|view| Some(&view.parent_thread_id) == active.as_ref());
         }
 
         if let Some(max_inline_bytes) = budget.max_pending_ask_user_question_inline_bytes {

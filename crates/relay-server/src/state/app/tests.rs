@@ -3322,6 +3322,63 @@ mod review_tests {
         assert!(error.contains("does not match"), "got: {error}");
     }
 
+    // F-E: a parent keeps at most MAX_REVIEWERS_PER_PARENT reviewer threads; the
+    // oldest is evicted (FIFO) and permanently deleted once the cap is exceeded.
+    #[tokio::test]
+    async fn review_caps_reviewers_per_parent_and_evicts_oldest() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+
+        let cap = crate::state::MAX_REVIEWERS_PER_PARENT;
+        // Run one more clean review than the cap; each spawns a new reviewer thread.
+        let mut created = Vec::new();
+        for _ in 0..(cap + 1) {
+            let receipt = app
+                .request_review(review_input("codex"))
+                .await
+                .expect("review should start");
+            let job = wait_for_review(&app, &receipt.review_job_id).await;
+            assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
+            created.push(job.reviewer_thread_id.clone().expect("reviewer thread id"));
+            wait_for_active_turn_idle(&app).await;
+        }
+        assert_eq!(created.len(), cap + 1);
+
+        // The parent keeps exactly the cap; the extra (oldest) reviewer was evicted.
+        let kept = app
+            .relay
+            .read()
+            .await
+            .reviewer_threads_of_parent(&parent.id);
+        assert_eq!(
+            kept.len(),
+            cap,
+            "parent should keep exactly the cap of reviewers"
+        );
+
+        // Exactly one created reviewer was evicted from the durable map AND
+        // permanently deleted from the provider.
+        let evicted: Vec<&String> = created.iter().filter(|id| !kept.contains(id)).collect();
+        assert_eq!(
+            evicted.len(),
+            1,
+            "exactly one oldest reviewer evicted: created={created:?} kept={kept:?}"
+        );
+        let provider_threads = providers.get("codex").unwrap().threads.lock().await;
+        assert!(
+            !provider_threads.contains_key(evicted[0]),
+            "the evicted reviewer thread must be deleted from the provider"
+        );
+        for id in &kept {
+            assert!(
+                provider_threads.contains_key(id),
+                "kept reviewer {id} should still exist on the provider"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn review_rejects_when_no_active_parent() {
         let dir = TempDir::new().expect("tmpdir");

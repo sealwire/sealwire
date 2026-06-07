@@ -291,7 +291,7 @@ impl AppState {
     /// becomes a normal thread the user can retry. Drops each handled reviewer's
     /// in-memory review job. Returns the number that could not be deleted (partial
     /// failure, only when `delete` is true).
-    async fn handle_parent_reviewer_threads(
+    pub(super) async fn handle_parent_reviewer_threads(
         &self,
         reviewer_ids: Vec<String>,
         delete: bool,

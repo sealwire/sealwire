@@ -20,7 +20,7 @@ use crate::protocol::{
 };
 use crate::state::{
     parent_recap_prompt, post_back_message, re_review_prompt, reviewer_prompt, ReviewJob,
-    ReviewJobStatus, ReviewMode,
+    ReviewJobStatus, ReviewMode, MAX_REVIEWERS_PER_PARENT,
 };
 
 use super::*;
@@ -877,6 +877,31 @@ thread {parent_thread_id}."
                 ),
             );
             relay.notify();
+        }
+
+        // FIFO cap: a parent keeps at most MAX_REVIEWERS_PER_PARENT reviewer threads.
+        // The reviewer just registered is the newest (and is protected as the active
+        // job's reviewer), so this evicts only OLDER, terminal reviewers of the same
+        // parent and permanently deletes them.
+        let evict_ids = {
+            let relay = self.relay.read().await;
+            let parent_thread_id = relay
+                .review_job(job_id)
+                .map(|job| job.parent_thread_id.clone())
+                .unwrap_or_default();
+            relay.reviewers_to_evict(&parent_thread_id, MAX_REVIEWERS_PER_PARENT)
+        };
+        if !evict_ids.is_empty() {
+            self.push_runtime_log(
+                "info",
+                format!(
+                    "Reviewer cap reached: evicting {} oldest reviewer thread(s) (keep {}).",
+                    evict_ids.len(),
+                    MAX_REVIEWERS_PER_PARENT
+                ),
+            )
+            .await;
+            self.handle_parent_reviewer_threads(evict_ids, true).await;
         }
 
         Ok(reviewer_thread_id)

@@ -130,25 +130,35 @@ fn compact_for_broker_limits_logs_and_transcript() {
 }
 
 #[test]
-fn compact_for_broker_strips_reviewer_threads() {
-    // The reviewer→parent map only drives the LOCAL delete/archive prompt; remote
-    // surfaces never delete threads. It must be dropped from broker-bound snapshots
-    // so it can't grow unbounded across many reviews and blow the frame budget.
+fn compact_for_broker_keeps_only_active_parent_reviewers() {
+    // Broker-bound (remote/iOS) snapshots keep ONLY the active parent's reviewers —
+    // all the remote reuse picker needs — so the full cross-parent map (which could
+    // grow unbounded) never blows the frame budget. make_snapshot's active thread is
+    // "thread-1".
     let mut snapshot = make_snapshot();
-    snapshot.reviewer_threads = (0..50)
-        .map(|index| ReviewerThreadView {
-            reviewer_thread_id: format!("reviewer-{index}"),
-            parent_thread_id: format!("parent-{index}"),
-            reviewer_provider: Some("codex".to_string()),
-            name: Some(format!("Reviewer {index}")),
-            updated_at: Some(index),
-        })
-        .collect();
+    let reviewer = |id: &str, parent: &str| ReviewerThreadView {
+        reviewer_thread_id: id.to_string(),
+        parent_thread_id: parent.to_string(),
+        reviewer_provider: Some("codex".to_string()),
+        name: Some(id.to_string()),
+        updated_at: Some(1),
+    };
+    snapshot.reviewer_threads = vec![
+        reviewer("active-rev-1", "thread-1"),
+        reviewer("active-rev-2", "thread-1"),
+        reviewer("other-rev", "thread-99"),
+    ];
 
     let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::RemoteSurface);
-    assert!(
-        compacted.reviewer_threads.is_empty(),
-        "reviewer_threads must be stripped from the broker-compacted snapshot"
+    let ids: Vec<&str> = compacted
+        .reviewer_threads
+        .iter()
+        .map(|view| view.reviewer_thread_id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["active-rev-1", "active-rev-2"],
+        "remote keeps only the active parent's reviewers; other parents are dropped"
     );
 }
 
@@ -159,23 +169,30 @@ fn compact_for_local_web_keeps_reviewer_threads() {
     // the frontend think there are no reviewers and silently skip the confirmation,
     // so LocalWeb must preserve the map.
     let mut snapshot = make_snapshot();
-    snapshot.reviewer_threads = vec![ReviewerThreadView {
-        reviewer_thread_id: "reviewer-1".to_string(),
-        parent_thread_id: "parent-1".to_string(),
-        reviewer_provider: Some("codex".to_string()),
-        name: Some("Reviewer one".to_string()),
-        updated_at: Some(42),
-    }];
+    snapshot.reviewer_threads = vec![
+        ReviewerThreadView {
+            reviewer_thread_id: "reviewer-1".to_string(),
+            parent_thread_id: "parent-1".to_string(),
+            reviewer_provider: Some("codex".to_string()),
+            name: Some("Reviewer one".to_string()),
+            updated_at: Some(42),
+        },
+        // A reviewer of a NON-active parent — local must still keep it (the
+        // delete/archive prompt works on any thread, not just the active one).
+        ReviewerThreadView {
+            reviewer_thread_id: "reviewer-2".to_string(),
+            parent_thread_id: "parent-2".to_string(),
+            reviewer_provider: Some("codex".to_string()),
+            name: Some("Reviewer two".to_string()),
+            updated_at: Some(7),
+        },
+    ];
 
     let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::LocalWeb);
     assert_eq!(
         compacted.reviewer_threads.len(),
-        1,
-        "LocalWeb must keep reviewer_threads so the local prompt can see reviewers"
-    );
-    assert_eq!(
-        compacted.reviewer_threads[0].parent_thread_id, "parent-1",
-        "the parent linkage is preserved for the prompt's reviewer count"
+        2,
+        "LocalWeb keeps every thread's reviewers (not just the active parent's)"
     );
     // Enrichment fields (provider/name/updated_at) ride along on the kept path so
     // the reuse picker can filter + label.

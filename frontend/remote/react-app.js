@@ -783,9 +783,8 @@ function RemoteApp() {
         providerModels: remoteUi.providerModels,
         session,
       }),
-      // Remote snapshots strip `reviewer_threads` (broker frame budget), so this is
-      // empty on remote → the picker shows only "New clean reviewer session".
-      // Reuse is a local-only affordance for this phase.
+      // Remote snapshots carry only the ACTIVE parent's reviewer_threads (scoped for
+      // the broker frame budget), which is exactly what the reuse picker needs.
       reusableReviewers: selectReusableReviewers(
         session?.reviewer_threads,
         session?.active_thread_id,

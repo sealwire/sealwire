@@ -9,8 +9,8 @@ use tokio::sync::{watch, RwLock};
 use tracing::warn;
 
 use super::{
-    DeviceRecord, PairedDevice, RelayState, ThreadSessionSettings, DEFAULT_STATE_FILE,
-    PERSISTED_STATE_VERSION,
+    DeviceRecord, PairedDevice, RelayState, ReviewerThread, ThreadSessionSettings,
+    DEFAULT_STATE_FILE, PERSISTED_STATE_VERSION,
 };
 
 const PERSISTENCE_DEBOUNCE: Duration = Duration::from_millis(150);
@@ -36,12 +36,14 @@ pub(super) struct PersistedRelayState {
     pub(super) device_records: std::collections::HashMap<String, DeviceRecord>,
     #[serde(default)]
     pub(super) paired_devices: std::collections::HashMap<String, PairedDevice>,
-    /// Durable reviewer-thread identity: reviewer_thread_id -> parent_thread_id.
-    /// Keeps reviewer threads hidden from navigation across relay restarts. The
-    /// review jobs themselves (recap/review text, status) are deliberately NOT
-    /// persisted. `#[serde(default)]` keeps old state files loadable (empty map).
+    /// Durable reviewer-thread identity: reviewer_thread_id -> {parent, created_at}.
+    /// Keeps reviewer threads hidden from navigation across relay restarts and gives
+    /// a stable FIFO order for per-parent eviction. The review jobs themselves
+    /// (recap/review text, status) are deliberately NOT persisted. `#[serde(default)]`
+    /// keeps old state files loadable (empty map); `ReviewerThread` also decodes the
+    /// legacy bare-string form.
     #[serde(default)]
-    pub(super) reviewer_threads: std::collections::HashMap<String, String>,
+    pub(super) reviewer_threads: std::collections::HashMap<String, ReviewerThread>,
 }
 
 impl PersistedRelayState {
@@ -78,7 +80,7 @@ impl PersistedRelayState {
                 .reviewer_threads
                 .iter()
                 .filter(|(reviewer_id, _)| !reviewer_id.starts_with("claude-pending-"))
-                .map(|(reviewer_id, parent_id)| (reviewer_id.clone(), parent_id.clone()))
+                .map(|(reviewer_id, record)| (reviewer_id.clone(), record.clone()))
                 .collect(),
         }
     }
