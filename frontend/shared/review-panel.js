@@ -51,7 +51,7 @@ export function ReviewPanel({
   models = [],
   defaultProvider = "",
   reusableReviewers = [],
-  submitting = false,
+  submitting: submittingProp = false,
   onSubmit,
   onRequestClose,
 }) {
@@ -62,6 +62,14 @@ export function ReviewPanel({
   const [reviewerThreadId, setReviewerThreadId] = React.useState("clean");
   // Round budget for the iterative review loop (1 = single review).
   const [maxRounds, setMaxRounds] = React.useState(1);
+  // In-flight + error state for the submit itself. Previously the modal closed
+  // optimistically and any backend rejection (e.g. "another thread is running in
+  // this workspace", provider unavailable, "a review is already running") only
+  // surfaced in the buried activity log — so clicking "Start review" looked like
+  // it did nothing. Now a rejected request keeps the modal open and shows why.
+  const [submitting, setSubmitting] = React.useState(false);
+  const [error, setError] = React.useState(null);
+  const busy = submitting || submittingProp;
 
   React.useEffect(() => {
     if (!reviewerProvider && defaultProvider) {
@@ -81,6 +89,7 @@ export function ReviewPanel({
   );
 
   const close = () => {
+    setError(null);
     onRequestClose?.();
     document.getElementById(id)?.close?.();
   };
@@ -107,20 +116,36 @@ export function ReviewPanel({
     setReviewerModel("");
   };
 
-  const submit = () => {
-    if (!reviewerProvider || submitting) {
+  const submit = async () => {
+    if (!reviewerProvider || busy) {
       return;
     }
-    onSubmit?.(
-      reviewSubmitPayload({
-        reviewerProvider,
-        reviewerModel,
-        instructions,
-        reviewerThreadId,
-        maxRounds,
-      })
-    );
-    close();
+    setError(null);
+    setSubmitting(true);
+    try {
+      // The request helpers signal failure either by throwing (local lifecycle +
+      // remote ops re-raise the relay's reason) or by resolving `false` (a guard
+      // tripped before dispatch). Both keep the modal open with an explanation;
+      // only a real success closes it.
+      const result = await onSubmit?.(
+        reviewSubmitPayload({
+          reviewerProvider,
+          reviewerModel,
+          instructions,
+          reviewerThreadId,
+          maxRounds,
+        })
+      );
+      if (result === false) {
+        setError("Couldn't start the review — check the activity log for details.");
+        return;
+      }
+      close();
+    } catch (err) {
+      setError(err?.message || "Couldn't start the review.");
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const providerSelectOptions = (providerOptions || []).map((option) => {
@@ -265,6 +290,11 @@ export function ReviewPanel({
             { className: "panel-modal-copy" },
             "The reviewer and the author iterate until the reviewer approves or the rounds run out (then it's handed back to you). The author thread must be able to edit without approval prompts."
           )
+        : null,
+      // A rejected request stays here (the modal no longer closes optimistically),
+      // so the user sees the relay's reason instead of a silent no-op.
+      error
+        ? h("p", { className: "panel-modal-error", role: "alert" }, error)
         : null
     ),
     h(
@@ -274,11 +304,11 @@ export function ReviewPanel({
         "button",
         {
           className: "start-session-button",
-          disabled: submitting || !reviewerProvider,
+          disabled: busy || !reviewerProvider,
           onClick: submit,
           type: "button",
         },
-        submitting ? "Starting…" : "Start review"
+        busy ? "Starting…" : "Start review"
       )
     )
   );

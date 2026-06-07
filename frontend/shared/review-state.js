@@ -23,6 +23,13 @@ const TERMINAL_REVIEW_STATUSES = new Set([
   "cancelled",
 ]);
 
+// Single source of truth for "this review is finished" — used by the panel, the
+// tab label, and the chip so they can never drift (e.g. `escalated` being terminal
+// in one place but not another).
+export function isTerminalReviewStatus(status) {
+  return TERMINAL_REVIEW_STATUSES.has(status);
+}
+
 export function reviewStatusLabel(status) {
   return REVIEW_STATUS_LABELS[status] || status || "Reviewing";
 }

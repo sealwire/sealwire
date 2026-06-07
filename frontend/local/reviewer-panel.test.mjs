@@ -203,6 +203,51 @@ test("RightPanelTabs flags the Reviewer tab when a review is blocked, and render
   assert.doesNotMatch(reviewerBody, /CHANGES-BODY/);
 });
 
+test("RightPanelTabs shows the in-progress dot for a running review", () => {
+  const html = renderToStaticMarkup(
+    h(RightPanelTabs, {
+      store: makeStore({
+        activeTab: "changes",
+        review: {
+          reviewJobs: [{ id: "r", status: "waiting_for_reviewer" }],
+          reviewModel: {},
+          canRequest: false,
+          blocked: false,
+        },
+      }),
+      panelId: "review-panel-test",
+      reviewer: {},
+      changes: h("div", null, "CHANGES-BODY"),
+    })
+  );
+  assert.match(html, /Reviewer •/);
+});
+
+test("RightPanelTabs treats an escalated review as terminal (no in-progress dot)", () => {
+  // `escalated` is terminal: the tab label must read a plain "Reviewer" — not the
+  // in-progress "Reviewer •" — so the tab agrees with review-state.js + the backend
+  // (regression guard for the duplicated terminal-status set that omitted escalated).
+  const html = renderToStaticMarkup(
+    h(RightPanelTabs, {
+      store: makeStore({
+        activeTab: "changes",
+        review: {
+          reviewJobs: [{ id: "r", status: "escalated" }],
+          reviewModel: {},
+          canRequest: false,
+          blocked: false,
+        },
+      }),
+      panelId: "review-panel-test",
+      reviewer: {},
+      changes: h("div", null, "CHANGES-BODY"),
+    })
+  );
+  assert.doesNotMatch(html, /Reviewer •/);
+  assert.doesNotMatch(html, /Reviewer ⚠/);
+  assert.match(html, />Reviewer</);
+});
+
 test("ReviewerPanel shows round progress + verdict for an iterative review", () => {
   const html = renderToStaticMarkup(
     h(ReviewerPanel, {

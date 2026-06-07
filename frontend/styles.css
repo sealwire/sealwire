@@ -2551,6 +2551,19 @@ input:focus, textarea:focus, select:focus {
   line-height: 1.6;
 }
 
+/* Inline reason shown when a review request is rejected (the modal stays open
+ * instead of closing on a silent failure). */
+.panel-modal-error {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--err-fg);
+  background: var(--err-bg);
+  border: 1px solid var(--err-fg);
+}
+
 .modal-actions {
   display: flex;
   gap: 10px;

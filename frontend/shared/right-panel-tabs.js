@@ -2,10 +2,9 @@ import React from "react";
 
 import { SegmentedControl } from "./session-settings-panel.js";
 import { ReviewerPanel } from "./reviewer-panel.js";
+import { isTerminalReviewStatus } from "./review-state.js";
 
 const h = React.createElement;
-
-const TERMINAL = new Set(["complete", "failed", "cancelled"]);
 
 function useStoreState(store) {
   return React.useSyncExternalStore(
@@ -29,16 +28,20 @@ export function RightPanelTabs({ store, changes, reviewer = {}, panelId = "revie
   const activeTab = state.activeTab === "reviewer" ? "reviewer" : "changes";
   const blocked = Boolean(review.blocked);
 
-  // A blocked review needs attention now — pull the user onto the Reviewer tab.
+  const inProgress = (review.reviewJobs || []).filter(
+    (job) => !isTerminalReviewStatus(job.status)
+  ).length;
+
+  // A starting/running review (or a blocked one) is what the user just asked for —
+  // pull them onto the Reviewer tab so the reviewer activity is visible instead of
+  // running unseen behind the Changes tab. Fires only on the transition into the
+  // attention state (dep is the derived flag), so it never fights manual tab use.
+  const pullToReviewer = blocked || inProgress > 0;
   React.useEffect(() => {
-    if (blocked && activeTab !== "reviewer") {
+    if (pullToReviewer && activeTab !== "reviewer") {
       store.setActiveTab?.("reviewer");
     }
-  }, [blocked]);
-
-  const inProgress = (review.reviewJobs || []).filter(
-    (job) => !TERMINAL.has(job.status)
-  ).length;
+  }, [pullToReviewer]);
   const reviewerLabel = blocked
     ? "Reviewer ⚠"
     : inProgress > 0

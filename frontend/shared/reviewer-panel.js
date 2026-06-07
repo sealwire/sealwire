@@ -1,11 +1,13 @@
 import React from "react";
 
 import { ReviewLauncher } from "./review-panel.js";
-import { reviewChipTone, reviewStatusLabel } from "./review-state.js";
+import {
+  isTerminalReviewStatus,
+  reviewChipTone,
+  reviewStatusLabel,
+} from "./review-state.js";
 
 const h = React.createElement;
-
-const TERMINAL = new Set(["complete", "failed", "escalated", "cancelled"]);
 
 function entryText(entry) {
   if (entry?.text && entry.text.trim()) return entry.text.trim();
@@ -120,7 +122,7 @@ export function ReviewerPanel({
 
 function ReviewerJobCard({ job, onResolveReview, onDismissReview, fetchReviewerTranscript }) {
   const [review, setReview] = React.useState({ status: "idle", text: null, error: null });
-  const terminal = TERMINAL.has(job.status);
+  const terminal = isTerminalReviewStatus(job.status);
   const blocked = job.status === "blocked";
   const reviewerThreadId = job.reviewer_thread_id || null;
 

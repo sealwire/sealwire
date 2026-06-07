@@ -1112,8 +1112,11 @@ export async function requestRemoteReview({
     await syncRemoteSnapshot("post-review-request", true);
     return true;
   } catch (error) {
+    // Log AND re-raise so the request modal can show the relay's reason inline
+    // (mirrors the local lifecycle path); a rejected review is no longer a silent
+    // no-op the user only finds in the activity log.
     renderLog(`Remote review request failed: ${error.message}`);
-    return false;
+    throw error;
   }
 }
 

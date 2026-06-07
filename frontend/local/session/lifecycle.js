@@ -394,8 +394,11 @@ export function createLifecycleController(ctx) {
       await loadSession("post-review-request");
       return receipt;
     } catch (error) {
+      // Log AND re-raise: the request modal surfaces the relay's reason inline so a
+      // rejected review (e.g. "another thread is running in this workspace") no longer
+      // looks like a silent no-op buried in the activity log.
       logLine(`Review request failed: ${error.message}`);
-      return null;
+      throw error;
     }
   }
 
