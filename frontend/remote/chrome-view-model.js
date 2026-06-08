@@ -1,6 +1,9 @@
 import { formatTimestamp, shortId, workspaceBasename } from "./utils.js";
 import { providerLabel } from "../shared/provider-labels.js";
-import { isReviewInProgressForThread } from "../shared/review-state.js";
+import {
+  isReviewInProgressForThread,
+  reviewStatusBadge,
+} from "../shared/review-state.js";
 import {
   isProgressStalled,
   progressPhaseLabel,
@@ -64,6 +67,13 @@ function deriveStatusBadge(currentState, session, approval) {
   }
   if (isSessionOffline(currentState, session)) {
     return { label: "Offline", tone: "offline" };
+  }
+  // Surface the under-review state in the header (parity with local) — the remote
+  // surface previously only froze the composer, so a remote user had no "Review in
+  // progress / blocked" indicator. Shared helper → identical wording/tone to local.
+  const review = reviewStatusBadge(session, session.active_thread_id);
+  if (review) {
+    return review;
   }
   if (!session.active_thread_id) {
     return { label: "Standby", tone: "ready" };

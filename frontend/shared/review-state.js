@@ -62,6 +62,22 @@ export function reviewChipTone(status) {
   return "active";
 }
 
+// Header status-badge summary for the active thread's review state, or null when there's
+// nothing review-related to surface. Single source of truth so the LOCAL and REMOTE
+// surfaces render the SAME wording/tone — the "under review" state must look identical on
+// both (the remote surface used to only freeze the composer and showed no status).
+export const REVIEW_BLOCKED_BADGE = { label: "Review blocked — action needed", tone: "alert" };
+export const REVIEW_IN_PROGRESS_BADGE = { label: "Review in progress", tone: "alert" };
+
+export function reviewStatusBadge(session, activeThreadId) {
+  // A blocked review locks the workspace until the user stops the reviewer — surface it
+  // regardless of which thread is active. An in-progress review only badges the thread the
+  // user is actually viewing (a background review on another thread leaves this one live).
+  if (isReviewBlocked(session)) return REVIEW_BLOCKED_BADGE;
+  if (isReviewInProgressForThread(session, activeThreadId)) return REVIEW_IN_PROGRESS_BADGE;
+  return null;
+}
+
 // Read-only "view projection" for the local app. While a review runs on a thread
 // that is NOT the active one, the user can click back to it — but resume is rejected
 // (it's review-locked and mutating). This projects the real session so the viewed

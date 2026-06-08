@@ -74,6 +74,8 @@ import {
   isReviewBlocked,
   isReviewInProgressForThread,
   projectReviewReadOnlySession,
+  REVIEW_BLOCKED_BADGE,
+  REVIEW_IN_PROGRESS_BADGE,
   reviewStatusLabel,
   selectReviewLaunchModel,
 } from "../shared/review-state.js";
@@ -325,16 +327,17 @@ export function createSessionRenderer({
     } else if (reviewBlocked) {
       // A blocked review locks the workspace until the user stops the reviewer —
       // surface it globally (not just inside the Reviewer tab) so it can't be missed.
-      statusBadge.textContent = "Review blocked — action needed";
-      statusBadge.className = "status-badge status-badge-alert";
+      // Shared constant → identical wording/tone to the remote surface.
+      statusBadge.textContent = REVIEW_BLOCKED_BADGE.label;
+      statusBadge.className = `status-badge status-badge-${REVIEW_BLOCKED_BADGE.tone}`;
     } else if (isProgressStalled(session)) {
       statusBadge.textContent = "Stalled?";
       statusBadge.className = "status-badge status-badge-alert";
     } else if (activeThreadFrozen) {
       // Only badge the thread you're viewing as under review; a background review
       // on another thread leaves this conversation live.
-      statusBadge.textContent = "Review in progress";
-      statusBadge.className = "status-badge status-badge-alert";
+      statusBadge.textContent = REVIEW_IN_PROGRESS_BADGE.label;
+      statusBadge.className = `status-badge status-badge-${REVIEW_IN_PROGRESS_BADGE.tone}`;
     } else {
       statusBadge.textContent = sessionStatusLabel(session, approval);
       statusBadge.className = "status-badge status-badge-ready";

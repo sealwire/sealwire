@@ -116,6 +116,55 @@ test("remote control banner hides take over while the active thread is being rev
   assert.match(model.controlBanner.hint, /being reviewed/i);
 });
 
+test("remote status badge surfaces 'Review in progress' when the active thread is under review", () => {
+  const state = { remoteAuth: { deviceId: "device-1" }, socketConnected: true };
+  const session = {
+    active_thread_id: "thread-1",
+    active_review_jobs: [
+      { id: "review-1", status: "waiting_for_reviewer", parent_thread_id: "thread-1" },
+    ],
+    pending_approvals: [],
+    provider_connected: true,
+  };
+
+  const model = selectSessionChromeRenderModel(state, session);
+  assert.equal(model.statusBadge.label, "Review in progress");
+  assert.equal(model.statusBadge.tone, "alert");
+});
+
+test("remote status badge surfaces 'Review blocked' regardless of which thread is active", () => {
+  const state = { remoteAuth: { deviceId: "device-1" }, socketConnected: true };
+  const session = {
+    active_thread_id: "thread-2",
+    // A blocked review on ANOTHER thread still needs attention → badge it.
+    active_review_jobs: [
+      { id: "review-1", status: "blocked", parent_thread_id: "thread-1" },
+    ],
+    pending_approvals: [],
+    provider_connected: true,
+  };
+
+  const model = selectSessionChromeRenderModel(state, session);
+  assert.equal(model.statusBadge.label, "Review blocked — action needed");
+  assert.equal(model.statusBadge.tone, "alert");
+});
+
+test("remote status badge stays 'Live' when a review runs on a non-active thread", () => {
+  const state = { remoteAuth: { deviceId: "device-1" }, socketConnected: true };
+  const session = {
+    active_thread_id: "thread-2",
+    active_review_jobs: [
+      { id: "review-1", status: "waiting_for_reviewer", parent_thread_id: "thread-1" },
+    ],
+    pending_approvals: [],
+    provider_connected: true,
+  };
+
+  const model = selectSessionChromeRenderModel(state, session);
+  assert.equal(model.statusBadge.label, "Live");
+  assert.equal(model.statusBadge.tone, "ready");
+});
+
 test("remote control banner allows take over when the review is on another thread", () => {
   const state = {
     remoteAuth: { deviceId: "device-1" },
