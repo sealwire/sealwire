@@ -1282,6 +1282,51 @@ fn restore_drops_a_non_terminal_review_job_from_a_corrupt_or_future_snapshot() {
 }
 
 #[test]
+fn review_jobs_view_shows_one_card_per_reviewer_thread_keeping_the_latest() {
+    // Design: one reviewer thread → one card (the latest run). Reusing a reviewer across
+    // several reviews must collapse to a single card in the snapshot, not accumulate one
+    // per run.
+    let mut relay = test_state();
+    let mk = |id: &str, reviewer: &str, updated: u64| {
+        let mut job = ReviewJob::new(
+            id.to_string(),
+            "parent-1".to_string(),
+            "codex".to_string(),
+            "codex".to_string(),
+            None,
+            ReviewMode::CleanThread,
+            "/tmp/project".to_string(),
+            "device-1".to_string(),
+            None,
+            1,
+        );
+        job.reviewer_thread_id = Some(reviewer.to_string());
+        job.set_status(ReviewJobStatus::Complete);
+        job.updated_at = updated;
+        job
+    };
+    relay.insert_review_job(mk("job-old", "rev-shared", 100));
+    relay.insert_review_job(mk("job-new", "rev-shared", 200));
+    relay.insert_review_job(mk("job-other", "rev-other", 150));
+
+    let view = relay.active_review_jobs_view();
+    let ids: Vec<&str> = view.iter().map(|v| v.id.as_str()).collect();
+    assert_eq!(view.len(), 2, "one card per reviewer thread, got {ids:?}");
+    assert!(
+        ids.contains(&"job-new"),
+        "the latest run for the shared reviewer is shown"
+    );
+    assert!(
+        !ids.contains(&"job-old"),
+        "the older run for the shared reviewer is hidden"
+    );
+    assert!(
+        ids.contains(&"job-other"),
+        "a different reviewer thread keeps its own card"
+    );
+}
+
+#[test]
 fn persist_skips_pending_claude_reviewer_ids() {
     let mut relay = test_state();
     // A real (promoted) reviewer id alongside a synthetic Claude pending id. The

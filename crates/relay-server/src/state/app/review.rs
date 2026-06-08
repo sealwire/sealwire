@@ -379,7 +379,15 @@ to this thread."
         }
         {
             let mut relay = self.relay.write().await;
-            relay.remove_review_job(&job_id);
+            // One card per reviewer thread: dismissing it drops every review run bound to
+            // that (now-archived) reviewer thread, not just the latest — otherwise an
+            // older run's card would reappear pointing at a thread that no longer exists.
+            match reviewer_thread_id.as_deref() {
+                Some(reviewer) => relay.drop_review_jobs_for_reviewer(reviewer),
+                None => {
+                    relay.remove_review_job(&job_id);
+                }
+            }
             relay.push_log("info", format!("Dismissed review {job_id}."));
             relay.notify();
         }

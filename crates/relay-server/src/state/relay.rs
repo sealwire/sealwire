@@ -615,11 +615,39 @@ impl RelayState {
         self.review_jobs.get(id)
     }
 
-    /// Compact views of every retained review job for the snapshot. Terminal jobs
-    /// persist here (the Reviewer panel keeps them until dismissed), so this no
-    /// longer filters by age. Ordered oldest-updated first for a stable UI.
+    /// Compact views of retained review jobs for the snapshot. ONE card per reviewer
+    /// thread: when a reviewer thread is reused across several reviews, only the
+    /// most-recently-updated job for it is shown (older runs collapse into the latest);
+    /// jobs not yet bound to a reviewer thread are each kept. Terminal jobs persist here
+    /// (the Reviewer panel keeps them until dismissed). Ordered oldest-updated first for
+    /// a stable UI.
     pub(crate) fn active_review_jobs_view(&self) -> Vec<crate::protocol::ReviewJobView> {
-        let mut views: Vec<_> = self.review_jobs.values().map(|job| job.view()).collect();
+        let mut latest_by_reviewer: std::collections::HashMap<&str, &ReviewJob> =
+            std::collections::HashMap::new();
+        let mut unbound: Vec<&ReviewJob> = Vec::new();
+        for job in self.review_jobs.values() {
+            match job.reviewer_thread_id.as_deref() {
+                Some(reviewer) => {
+                    let newer = match latest_by_reviewer.get(reviewer) {
+                        Some(existing) => {
+                            (job.updated_at, job.id.as_str())
+                                > (existing.updated_at, existing.id.as_str())
+                        }
+                        None => true,
+                    };
+                    if newer {
+                        latest_by_reviewer.insert(reviewer, job);
+                    }
+                }
+                None => unbound.push(job),
+            }
+        }
+        let mut views: Vec<_> = latest_by_reviewer
+            .values()
+            .copied()
+            .chain(unbound)
+            .map(|job| job.view())
+            .collect();
         views.sort_by(|left, right| {
             left.updated_at
                 .cmp(&right.updated_at)

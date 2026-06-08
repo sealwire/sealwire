@@ -2853,12 +2853,16 @@ mod review_tests {
         job_id: &str,
         statuses: &[&str],
     ) -> crate::protocol::ReviewJobView {
+        // Read the job by id directly, not via the snapshot view: the view shows one
+        // card per reviewer thread (older reuse runs collapse into the latest), so a
+        // specific job we're waiting on may be deduped out of the display list.
         for _ in 0..400 {
             if let Some(job) = app
-                .list_review_jobs()
+                .relay
+                .read()
                 .await
-                .into_iter()
-                .find(|job| job.id == job_id)
+                .review_job(job_id)
+                .map(|job| job.view())
             {
                 if statuses.contains(&job.status.as_str()) {
                     return job;
