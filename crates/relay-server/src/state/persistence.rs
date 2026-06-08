@@ -9,7 +9,7 @@ use tokio::sync::{watch, RwLock};
 use tracing::warn;
 
 use super::{
-    DeviceRecord, PairedDevice, RelayState, ReviewerThread, ThreadSessionSettings,
+    DeviceRecord, PairedDevice, RelayState, ReviewJob, ReviewerThread, ThreadSessionSettings,
     DEFAULT_STATE_FILE, PERSISTED_STATE_VERSION,
 };
 
@@ -38,12 +38,18 @@ pub(super) struct PersistedRelayState {
     pub(super) paired_devices: std::collections::HashMap<String, PairedDevice>,
     /// Durable reviewer-thread identity: reviewer_thread_id -> {parent, created_at}.
     /// Keeps reviewer threads hidden from navigation across relay restarts and gives
-    /// a stable FIFO order for per-parent eviction. The review jobs themselves
-    /// (recap/review text, status) are deliberately NOT persisted. `#[serde(default)]`
-    /// keeps old state files loadable (empty map); `ReviewerThread` also decodes the
-    /// legacy bare-string form.
+    /// a stable FIFO order for per-parent eviction. `#[serde(default)]` keeps old state
+    /// files loadable (empty map); `ReviewerThread` also decodes the legacy bare-string
+    /// form.
     #[serde(default)]
     pub(super) reviewer_threads: std::collections::HashMap<String, ReviewerThread>,
+    /// Completed (TERMINAL) review-job cards so the Reviewer panel survives a restart.
+    /// Only terminal jobs are persisted: an in-progress job's orchestrator task dies
+    /// with the process, so restoring it would strand a non-terminal job (locking its
+    /// parent forever with nothing to release it). `#[serde(default)]` keeps old state
+    /// files loadable (empty map).
+    #[serde(default)]
+    pub(super) review_jobs: std::collections::HashMap<String, ReviewJob>,
 }
 
 impl PersistedRelayState {
@@ -81,6 +87,15 @@ impl PersistedRelayState {
                 .iter()
                 .filter(|(reviewer_id, _)| !reviewer_id.starts_with("claude-pending-"))
                 .map(|(reviewer_id, record)| (reviewer_id.clone(), record.clone()))
+                .collect(),
+            // Only terminal review cards survive a restart (see the field doc): an
+            // in-progress job has no orchestrator after restart, so persisting it would
+            // leave the parent review-locked with nothing to release it.
+            review_jobs: relay
+                .review_jobs
+                .iter()
+                .filter(|(_, job)| job.status.is_terminal())
+                .map(|(id, job)| (id.clone(), job.clone()))
                 .collect(),
         }
     }

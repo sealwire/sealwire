@@ -184,11 +184,12 @@ pub struct RelayState {
     /// restart, which resets entries to the default "applied" state.
     pub(super) apply_states: HashMap<String, FileChangeApplyState>,
     recent_remote_actions: HashMap<String, CachedRemoteActionState>,
-    /// Relay-owned cross-agent review jobs, keyed by job id. In-memory only for
-    /// v1 (lost on restart) — recap/review text and review status are NOT
-    /// restored; the review TEXT already lives in the reviewer thread's own
-    /// provider transcript.
-    review_jobs: HashMap<String, ReviewJob>,
+    /// Relay-owned cross-agent review jobs, keyed by job id. TERMINAL jobs are
+    /// persisted (so the Reviewer panel's completed cards survive a restart — see
+    /// `PersistedRelayState`); in-progress jobs are not (their orchestrator dies with
+    /// the process). The review TEXT also lives in the reviewer thread's own provider
+    /// transcript. `pub(super)` so the persistence writer can read it.
+    pub(super) review_jobs: HashMap<String, ReviewJob>,
     /// Durable identity of reviewer threads: reviewer_thread_id -> parent_thread_id.
     /// This is the *persisted* source of truth for nav-hiding (so reviewer threads
     /// stay hidden across a relay restart and across review-job eviction). An entry
@@ -1142,8 +1143,11 @@ impl RelayState {
         self.allowed_roots = persisted.allowed_roots.clone();
         self.device_records = persisted.device_records.clone();
         self.paired_devices = persisted.paired_devices.clone();
-        // Durable reviewer-thread identity survives restart (review jobs do not).
+        // Durable reviewer-thread identity + completed (terminal) review-job cards
+        // survive restart. Only terminal jobs are persisted (the writer filters), so
+        // the restored set never locks a parent or expects a live orchestrator.
         self.reviewer_threads = persisted.reviewer_threads.clone();
+        self.review_jobs = persisted.review_jobs.clone();
         self.recompute_reviewer_thread_seq();
         self.online_surface_peer_ids.clear();
         self.online_surface_peer_devices.clear();
@@ -1564,8 +1568,11 @@ impl RelayState {
         self.allowed_roots = persisted.allowed_roots.clone();
         self.device_records = persisted.device_records.clone();
         self.paired_devices = persisted.paired_devices.clone();
-        // Durable reviewer-thread identity survives restart (review jobs do not).
+        // Durable reviewer-thread identity + completed (terminal) review-job cards
+        // survive restart. Only terminal jobs are persisted (the writer filters), so
+        // the restored set never locks a parent or expects a live orchestrator.
         self.reviewer_threads = persisted.reviewer_threads.clone();
+        self.review_jobs = persisted.review_jobs.clone();
         self.recompute_reviewer_thread_seq();
         self.online_surface_peer_ids.clear();
         self.online_surface_peer_devices.clear();

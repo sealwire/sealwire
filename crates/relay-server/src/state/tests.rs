@@ -78,6 +78,7 @@ fn test_persisted_state() -> PersistedRelayState {
         device_records,
         paired_devices,
         reviewer_threads: std::collections::HashMap::new(),
+        review_jobs: std::collections::HashMap::new(),
     }
 }
 
@@ -1141,6 +1142,80 @@ fn reviewer_thread_hiding_persists_across_restart() {
     // But it is NOT review-locked (no live job) — hiding is durable, freezing isn't.
     assert!(!restored.is_thread_review_locked("reviewer-1"));
     assert!(!restored.is_thread_review_locked("parent-1"));
+}
+
+#[test]
+fn terminal_review_cards_persist_across_restart_but_in_progress_ones_do_not() {
+    let mut relay = test_state();
+
+    // A finished (terminal) review card the user wants to keep.
+    let mut done = ReviewJob::new(
+        "job-done".to_string(),
+        "parent-1".to_string(),
+        "codex".to_string(),
+        "codex".to_string(),
+        None,
+        ReviewMode::CleanThread,
+        "/tmp/project".to_string(),
+        "device-1".to_string(),
+        None,
+        1,
+    );
+    done.reviewer_thread_id = Some("rev-done".to_string());
+    done.review_text = Some("looks good".to_string());
+    done.set_status(ReviewJobStatus::Complete);
+    relay.insert_review_job(done);
+
+    // An in-flight review whose orchestrator would die with the process.
+    let mut live = ReviewJob::new(
+        "job-live".to_string(),
+        "parent-2".to_string(),
+        "codex".to_string(),
+        "codex".to_string(),
+        None,
+        ReviewMode::CleanThread,
+        "/tmp/project".to_string(),
+        "device-1".to_string(),
+        None,
+        1,
+    );
+    live.reviewer_thread_id = Some("rev-live".to_string());
+    live.set_status(ReviewJobStatus::WaitingForReviewer);
+    relay.insert_review_job(live);
+
+    // The snapshot keeps ONLY the terminal card.
+    let persisted = PersistedRelayState::from_relay(&relay);
+    assert!(
+        persisted.review_jobs.contains_key("job-done"),
+        "a completed review card must be persisted"
+    );
+    assert!(
+        !persisted.review_jobs.contains_key("job-live"),
+        "an in-progress review must NOT be persisted (its orchestrator dies on restart)"
+    );
+
+    // Restore into a fresh process.
+    let (change_tx, _) = watch::channel(0_u64);
+    let mut restored = RelayState::new(
+        "/tmp/other".to_string(),
+        change_tx,
+        SecurityProfile::private(),
+    );
+    restored.apply_persisted(&persisted);
+
+    let card = restored
+        .review_job("job-done")
+        .expect("terminal card restored");
+    assert_eq!(card.status, ReviewJobStatus::Complete);
+    assert_eq!(card.review_text.as_deref(), Some("looks good"));
+    assert_eq!(card.reviewer_thread_id.as_deref(), Some("rev-done"));
+    assert!(
+        restored.review_job("job-live").is_none(),
+        "the in-progress job must not come back after a restart"
+    );
+    // A restored terminal card never re-locks its parent/reviewer (terminal = unlocked).
+    assert!(!restored.is_thread_review_locked("parent-1"));
+    assert!(!restored.is_thread_review_locked("rev-done"));
 }
 
 #[test]

@@ -7,6 +7,8 @@
 //! `markdown/agent-review-orchestration.md` so it can later move into an event
 //! log without renaming the protocol.
 
+use serde::{Deserialize, Serialize};
+
 use crate::protocol::{ReviewJobStatusView, ReviewJobView, WorkspaceDiffResponse};
 
 use super::unix_now;
@@ -14,8 +16,9 @@ use super::unix_now;
 /// How the reviewer thread is sourced. `CleanThread` spawns a fresh background
 /// reviewer; `ExistingThread` reuses a prior reviewer thread (Phase 3) so it keeps
 /// its earlier review context and the user doesn't accumulate orphan reviewers.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) enum ReviewMode {
+    #[default]
     CleanThread,
     ExistingThread {
         #[allow(dead_code)]
@@ -25,7 +28,7 @@ pub(crate) enum ReviewMode {
 
 /// Lifecycle of a single review job. Terminal states are `Complete`, `Failed`,
 /// `Escalated`, and `Cancelled`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub(crate) enum ReviewJobStatus {
     PendingParentRecap,
     WaitingForParentRecap,
@@ -45,6 +48,9 @@ pub(crate) enum ReviewJobStatus {
     /// user must run `resolve` to stop the reviewer. Non-terminal on purpose.
     Blocked,
     Complete,
+    /// Default only for serde forward-compat (a persisted job missing its status decodes
+    /// to a safe TERMINAL state that can never leak a review lock).
+    #[default]
     Failed,
     /// A multi-round review used up its round budget without the reviewer approving
     /// (or the author's fix needs the user). The latest review is posted to the
@@ -86,7 +92,12 @@ impl ReviewJobStatus {
     }
 }
 
-#[derive(Debug, Clone)]
+// `Default` + `#[serde(default)]` give persistence forward-compat: a snapshot written by
+// a future build that adds a `ReviewJob` field still decodes here (the missing field
+// falls back to its default), and unknown fields are ignored. Only TERMINAL jobs are ever
+// persisted (see `PersistedRelayState::from_relay`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub(crate) struct ReviewJob {
     pub(crate) id: String,
     pub(crate) parent_thread_id: String,
