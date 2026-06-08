@@ -1284,6 +1284,15 @@ function RemoteApp() {
           reviewNudgeModel: {
             canRequest: canRequestRemoteReview,
             reviewModel: reviewLaunchModel,
+            // The composer nudge launcher needs the reusable-reviewer list too, or it
+            // shows no "reuse an existing reviewer" option (the rail/modal launcher
+            // already gets it via the workspace-diff store). Remote snapshots carry the
+            // active parent's reviewer_threads, which is exactly what the picker needs.
+            reusableReviewers: selectReusableReviewers(
+              session?.reviewer_threads,
+              session?.active_thread_id,
+              null
+            ),
             onRequestReview: reviewerActions.onRequestReview,
           },
           session,
@@ -1839,6 +1848,7 @@ function RemoteThreadPanel({
               providerOptions: reviewNudgeModel.reviewModel?.providerOptions || [],
               models: reviewNudgeModel.reviewModel?.models || [],
               defaultProvider: reviewNudgeModel.reviewModel?.defaultProvider || "",
+              reusableReviewers: reviewNudgeModel.reusableReviewers || [],
               disabled: false,
               onSubmit: (values) => reviewNudgeModel.onRequestReview?.(values),
             })

@@ -280,12 +280,20 @@ reviewer thread"
         job.reviewer_effort = non_empty(input.reviewer_effort.clone());
         let status_view = job.status_view();
 
+        // Diagnostic: record whether this request asked to REUSE an existing reviewer
+        // thread or spawn a clean one (RB2 — "reuse selected but a new agent appears").
+        // Pairs with the orchestrator's reuse-vs-clean log below to bisect where a lost
+        // reuse selection drops (frontend payload vs backend mode vs orchestrator branch).
+        let reuse_note = match &reuse_thread_id {
+            Some(id) => format!("reuse reviewer thread {id}"),
+            None => "clean reviewer".to_string(),
+        };
         {
             let mut relay = self.relay.write().await;
             relay.insert_review_job(job);
             relay.push_log(
                 "info",
-                format!("Review {job_id} requested for thread {parent_thread_id}."),
+                format!("Review {job_id} requested for thread {parent_thread_id} ({reuse_note})."),
             );
             relay.notify();
         }
@@ -562,6 +570,21 @@ max_rounds={max_rounds}). Step 1: asking the author to recap its changes."
                 ReviewMode::CleanThread => None,
             });
             let reuse_existing = existing_reviewer.is_some();
+            // Diagnostic (RB2): which reviewer-thread path this round takes. If a reuse was
+            // requested but this logs "creating a clean reviewer", the selection was lost
+            // before the orchestrator (frontend payload / request_review mode); if it logs
+            // "reusing …" yet a new agent still appears, the resume path is the culprit.
+            self.push_runtime_log(
+                "info",
+                format!(
+                    "Review {job_id}: round {round} reviewer thread — {}.",
+                    match &existing_reviewer {
+                        Some(id) => format!("reusing {id}"),
+                        None => "creating a clean reviewer".to_string(),
+                    }
+                ),
+            )
+            .await;
             let (this_reviewer_id, reviewer_turn_model, reviewer_turn_effort) =
                 match existing_reviewer {
                     Some(existing) => match self.prepare_reused_reviewer_thread(&existing).await {
