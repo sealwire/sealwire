@@ -976,6 +976,11 @@ impl RelayState {
             transcript_truncated: false,
             transcript,
             logs: self.logs.clone(),
+            // Keep this the FULL (global) review-job list — do NOT scope it to the active
+            // thread for the remote/broker frame. The remote header's "Review blocked —
+            // action needed" badge derives from `isReviewBlocked`, which must see a blocked
+            // review on a BACKGROUND thread; scoping this per active thread would silently
+            // drop that badge on remote.
             active_review_jobs: self.active_review_jobs_view(),
             reviewer_threads: self.reviewer_thread_views(),
         }
