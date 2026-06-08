@@ -15,6 +15,7 @@ import {
 import { canonicalizeWorkspace } from "./thread-groups.js";
 import { createThreadListRows } from "./thread-list-state.js";
 import { providerLabel, providerTone } from "./provider-labels.js";
+import { selectThreadDot } from "./thread-dot.js";
 
 const h = React.createElement;
 const VISIBLE_THREAD_LIMIT = 10;
@@ -342,20 +343,9 @@ function ThreadGroupItem({
   const title = thread.name || thread.preview || shortId(thread.id);
   const provider = providerLabel(thread.provider);
   const providerToneClass = `is-${providerTone(thread.provider)}`;
-  // The dot has three states. A live turn always wins (the pulsing "working"
-  // look); otherwise a client-side attention flag shows a steady dot until the
-  // user opens the thread: amber when it needs input, blue when it just finished.
-  const working = Boolean(activity);
-  const dot = working
-    ? {
-        className: "conversation-activity-dot",
-        label: activity.tool ? `Working · ${activity.tool}` : "Working",
-      }
-    : attentionKind === "needs_input"
-      ? { className: "conversation-activity-dot is-attention-input", label: "Needs your input" }
-      : attentionKind === "completed"
-        ? { className: "conversation-activity-dot is-attention-done", label: "Completed" }
-        : null;
+  // Three-state dot: needs_input (amber) > working (pulse) > completed (blue).
+  // See selectThreadDot for why needs_input outranks the live-turn pulse.
+  const dot = selectThreadDot({ activity, attentionKind });
 
   return h(
     "button",

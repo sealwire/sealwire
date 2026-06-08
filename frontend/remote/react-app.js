@@ -135,7 +135,14 @@ import { threadAttention } from "../shared/thread-attention.js";
 import {
   configureThreadNotifications,
   ensureNotificationPermission,
+  isDocumentForeground,
 } from "../shared/thread-notify.js";
+
+// Stable refs for useSyncExternalStore so the thread list re-renders on
+// out-of-band attention changes (clear-on-open, tab refocus) — not just on
+// session snapshots.
+const subscribeThreadAttention = (listener) => threadAttention.subscribe(listener);
+const getThreadAttentionVersion = () => threadAttention.getVersion();
 import {
   createThreadListStore,
 } from "../shared/thread-list-store.js";
@@ -780,9 +787,17 @@ function RemoteApp() {
   // Push the review slice onto the remote workspace-diff store so the Reviewer
   // tab (rail + modal) and the mobile chip badge stay in sync with the session.
   const remoteDeviceId = currentState.remoteAuth?.deviceId;
+  // A review (and its lingering terminal error) belongs to its parent thread, so the
+  // Reviewer panel must only surface jobs for the thread in view — never bleed onto
+  // every other thread. The session's global active_review_jobs stays authoritative
+  // for navigation/locking; only the DISPLAY is scoped here.
+  const remoteViewedThreadId = session?.active_thread_id || null;
+  const remoteThreadReviewJobs = (session?.active_review_jobs || []).filter(
+    (job) => job.parent_thread_id === remoteViewedThreadId
+  );
   useEffect(() => {
     getRemoteWorkspaceDiffStore().setReview({
-      reviewJobs: session?.active_review_jobs || [],
+      reviewJobs: remoteThreadReviewJobs,
       reviewModel: selectReviewLaunchModel({
         providers: remoteUi.providers,
         providerModels: remoteUi.providerModels,
@@ -796,7 +811,7 @@ function RemoteApp() {
         null
       ),
       canRequest: canRequestReview(session, remoteDeviceId),
-      blocked: isReviewBlocked(session),
+      blocked: isReviewBlocked({ active_review_jobs: remoteThreadReviewJobs }),
     });
   }, [session, remoteUi.providers, remoteUi.providerModels, remoteDeviceId]);
 
@@ -1357,6 +1372,22 @@ function RemoteSidebar({
 }) {
   const usesDrawer = currentState.remoteNavMode === "drawer";
   const navOpen = currentState.remoteNavMode !== "drawer" || currentState.remoteNavOpen;
+
+  // Re-render when the attention map changes out-of-band (clear-on-open, tab
+  // refocus). Snapshot-driven changes already re-render via the session prop.
+  useSyncExternalStore(subscribeThreadAttention, getThreadAttentionVersion, getThreadAttentionVersion);
+
+  // Clear the viewed thread's dot when the tab regains focus, even with no new
+  // snapshot for an idle thread.
+  useEffect(() => {
+    const clearViewedDot = () => threadAttention.clearViewedOnFocus(isDocumentForeground());
+    window.addEventListener("focus", clearViewedDot);
+    document.addEventListener("visibilitychange", clearViewedDot);
+    return () => {
+      window.removeEventListener("focus", clearViewedDot);
+      document.removeEventListener("visibilitychange", clearViewedDot);
+    };
+  }, []);
 
   // Keep the thread-notification hooks pointed at the current thread list and
   // resume handler (cheap + idempotent; re-binds fresh closures each render).

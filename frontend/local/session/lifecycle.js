@@ -24,6 +24,8 @@ import { readThreadListUi } from "../../shared/thread-list-store.js";
 import { shouldRenderThreadListLoadingPlaceholder } from "../../shared/thread-list-state.js";
 import { syncLiveTranscriptEntryDetailsFromSnapshot } from "../transcript/details.js";
 import { clearTranscriptHydration, restoreHydratedTranscript } from "../transcript/store.js";
+import { threadAttention } from "../../shared/thread-attention.js";
+import { isDocumentForeground, notifyThreadEvents } from "../../shared/thread-notify.js";
 
 export function createLifecycleController(ctx) {
   const {
@@ -360,6 +362,7 @@ export function createLifecycleController(ctx) {
   async function requestReview({
     reviewerProvider,
     reviewerModel,
+    reviewerEffort,
     instructions,
     reviewerThreadId,
     maxRounds,
@@ -381,6 +384,8 @@ export function createLifecycleController(ctx) {
         {
           reviewer_provider: reviewerProvider,
           reviewer_model: reviewerModel || null,
+          // Optional reasoning-effort override (clean or reuse).
+          reviewer_effort: reviewerEffort || null,
           instructions: instructions || null,
           // Phase 3: reuse an existing reviewer thread when chosen.
           reviewer_thread_id: reviewerThreadId || null,
@@ -493,6 +498,20 @@ export function createLifecycleController(ctx) {
       && state.viewThreadId === previousThreadId
     ) {
       setThreadRoute(snapshot.active_thread_id, { replace: true });
+    }
+
+    // Update per-thread attention + fire notifications here — the single
+    // chokepoint every snapshot path flows through (SSE, polling fallback,
+    // pairing, initial load) — so the feature keeps working when streaming is
+    // unavailable. Runs before renderSession so the dot paints the same frame.
+    try {
+      const events = threadAttention.ingest(snapshot, {
+        viewedThreadId: state.viewThreadId || snapshot?.active_thread_id || null,
+        isForeground: isDocumentForeground(),
+      });
+      notifyThreadEvents(events);
+    } catch (error) {
+      logLine(`Thread attention update failed: ${error.message}`);
     }
 
     syncLiveTranscriptEntryDetailsFromSnapshot(state, snapshot);

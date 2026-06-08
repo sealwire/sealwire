@@ -1,22 +1,26 @@
 /**
  * Client-side "needs attention" tracker for threads.
  *
- * The relay's SessionSnapshot describes only the ACTIVE thread in its top-level
- * fields (`active_turn_id` / `current_status` / `pending_*`), plus a
- * `thread_activity` array for any backgrounded thread that still has an
- * in-flight turn. From a stream of snapshots we derive, per thread, whether it
- * is (a) currently working and (b) waiting on user input — then flag the
- * transitions that deserve the user's attention:
+ * The relay's SessionSnapshot describes the ACTIVE thread in its top-level
+ * fields, plus a `thread_activity` array for any backgrounded thread that still
+ * has an in-flight turn, plus global `pending_approvals` /
+ * `pending_ask_user_questions` arrays (each carrying its own `thread_id`). From
+ * a stream of snapshots we derive, per thread, whether it is (a) currently
+ * working and (b) waiting on user input, then maintain two kinds of badge:
  *
- *   - "needs_input": a thread started waiting for an approval / ask-user answer.
- *   - "completed":   a thread stopped working (turn ended) without needing input.
+ *   - "needs_input": LIVE — shown while a thread is waiting for an approval /
+ *                    ask-user answer, cleared as soon as the wait resolves.
+ *   - "completed":   STICKY — set when a thread finishes its turn (stops working
+ *                    without needing input) and kept until the user opens it.
  *
- * Attention (and the matching browser notification) is suppressed for the
- * thread the user is actively looking at in a focused tab — they don't need a
- * nudge to notice what's on screen.
+ * Browser notifications fire on the *transitions* into those states; the badge
+ * map reflects current state. Both are suppressed for the thread the user is
+ * actively looking at in a focused tab.
  *
- * This module is intentionally pure (no DOM, no globals beyond the exported
- * singleton) so the diffing logic can be unit-tested in isolation.
+ * The module is framework-agnostic: it exposes a tiny observable (subscribe /
+ * getVersion) so React (useSyncExternalStore) and the imperative local renderer
+ * can both react to out-of-band changes (clear-on-open, tab refocus). The pure
+ * diff logic stays unit-testable.
  */
 
 // Mirrors `thread_status_is_working` on the Rust side: any status other than
@@ -78,7 +82,18 @@ export function computeThreadStates(snapshot) {
     }
   }
 
-  // Ask-user questions carry their own thread_id (a backgrounded thread can ask).
+  // Approvals and ask-user questions each carry their own thread_id, so a
+  // backgrounded thread's request is attributed to *that* thread rather than the
+  // active one. (Older snapshots without thread_id fall back to the active
+  // thread, matching the relay's "force the awaited thread active" behavior.)
+  if (Array.isArray(snapshot.pending_approvals)) {
+    for (const approval of snapshot.pending_approvals) {
+      const entry = ensure(approval?.thread_id || activeThreadId);
+      if (entry) {
+        entry.needsInput = true;
+      }
+    }
+  }
   if (Array.isArray(snapshot.pending_ask_user_questions)) {
     for (const question of snapshot.pending_ask_user_questions) {
       const entry = ensure(question?.thread_id || activeThreadId);
@@ -88,16 +103,12 @@ export function computeThreadStates(snapshot) {
     }
   }
 
-  // Approvals don't carry a thread_id; the relay forces the awaited thread
-  // active, so attribute them (and the waiting flags) to the active thread.
+  // Fallback: the active thread's waiting flags catch cases where the request
+  // arrays were compacted out of a budget-limited snapshot.
   const flags = Array.isArray(snapshot.active_flags) ? snapshot.active_flags : [];
-  const hasApprovals =
-    Array.isArray(snapshot.pending_approvals) && snapshot.pending_approvals.length > 0;
   if (
     activeThreadId &&
-    (hasApprovals ||
-      flags.includes("waitingOnApproval") ||
-      flags.includes("waitingOnAskUser"))
+    (flags.includes("waitingOnApproval") || flags.includes("waitingOnAskUser"))
   ) {
     const entry = ensure(activeThreadId);
     if (entry) {
@@ -123,12 +134,18 @@ export class ThreadAttentionTracker {
     this.prev = null;
     /** @type {Map<string, AttentionKind>} */
     this.attention = new Map();
+    /** Thread the user was last viewing (for focus-driven clearing). */
+    this.lastViewed = null;
+    /** Bumped on every attention-map change; the observable "snapshot". */
+    this.version = 0;
+    /** @type {Set<() => void>} */
+    this.listeners = new Set();
   }
 
   /**
-   * Feed the next snapshot. Updates the attention map and returns the
-   * attention-worthy transition events (for browser notifications). The first
-   * snapshot only establishes a baseline and returns no events.
+   * Feed the next snapshot. Returns the *transition* events worth a browser
+   * notification, and updates the badge map to reflect current state. The first
+   * snapshot only establishes a baseline (no events).
    *
    * @param {object} snapshot
    * @param {{ viewedThreadId?: string | null, isForeground?: boolean }} [ctx]
@@ -139,61 +156,98 @@ export class ThreadAttentionTracker {
     const prev = this.prev;
     /** @type {AttentionEvent[]} */
     const events = [];
+    let changed = false;
 
+    const setKind = (id, kind) => {
+      if (this.attention.get(id) !== kind) {
+        this.attention.set(id, kind);
+        changed = true;
+      }
+    };
+    const dropKind = (id) => {
+      if (this.attention.delete(id)) {
+        changed = true;
+      }
+    };
+    // "Away" = the user is NOT staring at this exact thread in a focused tab.
+    const away = (id) => !(isForeground && id === viewedThreadId);
+
+    // 1. Notification events come from state *transitions* (skip the baseline).
     if (prev) {
       const threadIds = new Set([...prev.keys(), ...next.keys()]);
       for (const threadId of threadIds) {
         const before = stateFor(prev, threadId);
         const after = stateFor(next, threadId);
-
         let kind = null;
         if (after.needsInput && !before.needsInput) {
           kind = "needs_input";
         } else if (before.working && !after.working && !after.needsInput) {
           kind = "completed";
         }
-
-        if (!kind) {
-          continue;
-        }
-
-        // The user is staring at this exact thread in a focused tab — no nudge.
-        const away = !(isForeground && threadId === viewedThreadId);
-        if (away) {
-          // needs_input outranks a prior "completed" flag on the same thread.
-          if (kind === "needs_input" || this.attention.get(threadId) !== "needs_input") {
-            this.attention.set(threadId, kind);
-          }
-          events.push({ threadId, kind, notify: true });
-        } else {
-          this.attention.delete(threadId);
-          events.push({ threadId, kind, notify: false });
+        if (kind) {
+          events.push({ threadId, kind, notify: away(threadId) });
         }
       }
     }
 
-    // A thread that resumed working is no longer "waiting" on the user, so drop a
-    // stale "completed" flag. Keep "needs_input" (it stays active during approval).
+    // 2. needs_input badge is LIVE: present iff the thread is currently waiting
+    //    (and the user isn't looking at it). Reconcile every snapshot.
+    for (const [threadId, st] of next) {
+      if (st.needsInput && away(threadId)) {
+        setKind(threadId, "needs_input");
+      } else if (this.attention.get(threadId) === "needs_input") {
+        dropKind(threadId);
+      }
+    }
+    // Threads that dropped out of the snapshot entirely no longer need input.
+    for (const [threadId, kind] of [...this.attention]) {
+      if (kind === "needs_input" && !next.get(threadId)?.needsInput) {
+        dropKind(threadId);
+      }
+    }
+
+    // 3. completed badge is STICKY: set on the work→idle transition, never over
+    //    a live needs_input flag.
+    for (const event of events) {
+      if (event.kind === "completed" && event.notify && this.attention.get(event.threadId) !== "needs_input") {
+        setKind(event.threadId, "completed");
+      }
+    }
+
+    // 4. A thread that resumed working drops its stale "completed" flag.
     for (const [threadId, st] of next) {
       if (st.working && !st.needsInput && this.attention.get(threadId) === "completed") {
-        this.attention.delete(threadId);
+        dropKind(threadId);
       }
     }
 
-    // Returning to a thread in the foreground clears its dot, even with no
-    // transition this tick (covers tab-refocus and plain navigation).
+    // 5. Whatever the user is viewing in the foreground needs no dot.
     if (isForeground && viewedThreadId) {
-      this.attention.delete(viewedThreadId);
+      dropKind(viewedThreadId);
     }
 
+    this.lastViewed = viewedThreadId || this.lastViewed;
     this.prev = next;
+    if (changed) {
+      this._bump();
+    }
     return events;
   }
 
-  /** Remove a thread's attention flag (e.g. the user opened it). */
+  /** Remove a thread's badge (e.g. the user opened it). */
   clear(threadId) {
-    if (threadId) {
-      this.attention.delete(threadId);
+    if (threadId && this.attention.delete(threadId)) {
+      this._bump();
+    }
+  }
+
+  /**
+   * Clear the last-viewed thread's badge when the tab regains focus — backs the
+   * "refocus clears the dot" behavior even when no snapshot arrives.
+   */
+  clearViewedOnFocus(isForeground) {
+    if (isForeground && this.lastViewed && this.attention.delete(this.lastViewed)) {
+      this._bump();
     }
   }
 
@@ -207,10 +261,36 @@ export class ThreadAttentionTracker {
     return new Map(this.attention);
   }
 
+  /** Subscribe to attention-map changes. Returns an unsubscribe fn. */
+  subscribe(listener) {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  /** Monotonic version, usable as a useSyncExternalStore snapshot. */
+  getVersion() {
+    return this.version;
+  }
+
   /** Drop all state (tests / hard resets). */
   reset() {
     this.prev = null;
     this.attention.clear();
+    this.lastViewed = null;
+    this._bump();
+  }
+
+  _bump() {
+    this.version += 1;
+    for (const listener of this.listeners) {
+      try {
+        listener();
+      } catch {
+        // A bad subscriber must not break the tracker.
+      }
+    }
   }
 }
 

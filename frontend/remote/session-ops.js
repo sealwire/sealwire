@@ -1084,6 +1084,7 @@ export async function fetchRemoteWorkspaceDiff() {
 export async function requestRemoteReview({
   reviewerProvider,
   reviewerModel,
+  reviewerEffort,
   instructions,
   reviewerThreadId,
   maxRounds,
@@ -1102,6 +1103,8 @@ export async function requestRemoteReview({
       input: {
         reviewer_provider: reviewerProvider,
         reviewer_model: reviewerModel || null,
+        // Optional reasoning-effort override (clean or reuse).
+        reviewer_effort: reviewerEffort || null,
         instructions: instructions || null,
         // Phase 3: reuse an existing reviewer thread when chosen.
         reviewer_thread_id: reviewerThreadId || null,

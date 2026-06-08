@@ -24,6 +24,7 @@ impl PendingApproval {
     pub fn to_view(&self) -> ApprovalRequestView {
         ApprovalRequestView {
             request_id: self.request_id.clone(),
+            thread_id: self.thread_id.clone(),
             kind: self.kind.as_str().to_string(),
             summary: self.summary.clone(),
             detail: self.detail.clone(),

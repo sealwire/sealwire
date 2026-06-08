@@ -72,7 +72,6 @@ import { selectReusableReviewers } from "../shared/reviewer-threads.js";
 import {
   canRequestReview,
   isReviewBlocked,
-  isReviewInProgress,
   isReviewInProgressForThread,
   reviewStatusLabel,
   selectReviewLaunchModel,
@@ -92,6 +91,7 @@ import { threadAttention } from "../shared/thread-attention.js";
 import {
   configureThreadNotifications,
   ensureNotificationPermission,
+  isDocumentForeground,
 } from "../shared/thread-notify.js";
 import { TranscriptPane } from "../shared/transcript-pane.js";
 import {
@@ -103,6 +103,7 @@ const h = React.createElement;
 const reactRoots = new WeakMap();
 let transcriptRoot = null;
 let transcriptRootElement = null;
+let attentionFocusListenerAttached = false;
 
 function renderReactContent(element, content) {
   if (!element) {
@@ -198,7 +199,13 @@ export function createSessionRenderer({
       return thread ? thread.name || thread.preview || shortId(threadId) : null;
     },
     onActivateThread: (threadId) => {
-      if (typeof viewThread === "function" && isReviewInProgress(state.session)) {
+      // Only the thread actually under review is review-locked (resume is rejected
+      // for it). Every OTHER thread must resume normally — gating on the global
+      // "a review is running" made all threads view-only and unreachable.
+      if (
+        typeof viewThread === "function" &&
+        isReviewInProgressForThread(state.session, threadId)
+      ) {
         viewThread(threadId);
       } else {
         void resumeSession(threadId);
@@ -206,10 +213,26 @@ export function createSessionRenderer({
     },
   });
 
+  // When the tab regains focus, clear the dot on the thread the user is looking
+  // at (the tracker only does this on the next snapshot, which may not arrive
+  // for an idle thread). Attached once per page.
+  if (!attentionFocusListenerAttached && typeof window !== "undefined") {
+    attentionFocusListenerAttached = true;
+    const clearViewedDot = () => {
+      threadAttention.clearViewedOnFocus(isDocumentForeground());
+      renderThreads();
+    };
+    window.addEventListener("focus", clearViewedDot);
+    document.addEventListener("visibilitychange", clearViewedDot);
+  }
+
   function reviewChips(session) {
-    return (session?.active_review_jobs || []).map((job) =>
-      metaChip("Review", reviewStatusLabel(job.status))
-    );
+    // The session-details panel describes the active thread, so only surface its
+    // OWN review(s) — not reviews running on (or lingering for) other threads.
+    const activeThreadId = session?.active_thread_id || null;
+    return (session?.active_review_jobs || [])
+      .filter((job) => job.parent_thread_id === activeThreadId)
+      .map((job) => metaChip("Review", reviewStatusLabel(job.status)));
   }
 
   function reviewLaunchModel(session) {
@@ -760,8 +783,16 @@ export function createSessionRenderer({
     if (typeof setReviewSlice !== "function") {
       return;
     }
+    // The Reviewer panel belongs to the thread you're looking at: a review (and its
+    // lingering terminal error) must only show on its own parent thread, never bleed
+    // into every other thread's panel. Scope the DISPLAY to the viewed thread; the
+    // session's global active_review_jobs stays authoritative for navigation/locking.
+    const viewedThreadId = state.viewThreadId || session?.active_thread_id || null;
+    const threadReviewJobs = (session?.active_review_jobs || []).filter(
+      (job) => job.parent_thread_id === viewedThreadId
+    );
     setReviewSlice({
-      reviewJobs: session?.active_review_jobs || [],
+      reviewJobs: threadReviewJobs,
       reviewModel: reviewLaunchModel(session),
       // Existing reviewer threads of the active parent, offered for reuse. Provider
       // filtering happens in the panel (it reacts to the chosen provider).
@@ -773,7 +804,7 @@ export function createSessionRenderer({
       canRequest:
         typeof requestReview === "function" &&
         canRequestReview(session, state.deviceId),
-      blocked: isReviewBlocked(session),
+      blocked: isReviewBlocked({ active_review_jobs: threadReviewJobs }),
     });
   }
 
@@ -1145,14 +1176,17 @@ export function createSessionRenderer({
           threadAttention.clear(threadId);
           void ensureNotificationPermission();
           renderThreads();
-          // During a review, resume_session is blocked by the backend for
-          // review-locked threads (the reviewed parent and the reviewer) because
-          // it is mutating: it calls bridge.resume_thread and overwrites the
-          // runtime. To let the user still navigate to another thread, we call
-          // the view-only path (setThreadRoute / viewThread) which only updates
-          // the URL without touching the backend session. For non-reviewed threads
-          // the normal resume runs as usual.
-          if (typeof viewThread === "function" && isReviewInProgress(state.session)) {
+          // During a review, resume_session is blocked by the backend ONLY for the
+          // review-locked threads (the reviewed parent and its hidden reviewer)
+          // because resume is mutating: it calls bridge.resume_thread and overwrites
+          // the runtime. For the reviewed parent we use the view-only path
+          // (setThreadRoute / viewThread) which just updates the URL. EVERY OTHER
+          // thread must resume normally — gating on the global "a review is running"
+          // froze the whole sidebar, so clicking any thread fell back to the overview.
+          if (
+            typeof viewThread === "function" &&
+            isReviewInProgressForThread(state.session, threadId)
+          ) {
             viewThread(threadId);
           } else {
             void resumeSession(threadId);

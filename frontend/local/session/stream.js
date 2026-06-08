@@ -1,6 +1,4 @@
 import { openSessionStream, sessionStreamUrl } from "../../session-stream.js";
-import { threadAttention } from "../../shared/thread-attention.js";
-import { isDocumentForeground, notifyThreadEvents } from "../../shared/thread-notify.js";
 
 export function createStreamController(ctx) {
   const {
@@ -41,17 +39,8 @@ export function createStreamController(ctx) {
           state.streamConnected = true;
           cancelSessionPoll();
           seedDefaults(snapshot);
-          // Derive attention flags + fire notifications before re-rendering, so
-          // the thread list paints the new dot in the same frame. Best-effort.
-          try {
-            const events = threadAttention.ingest(snapshot, {
-              viewedThreadId: state.viewThreadId || snapshot.active_thread_id || null,
-              isForeground: isDocumentForeground(),
-            });
-            notifyThreadEvents(events);
-          } catch (error) {
-            logLine(`Thread attention update failed: ${error.message}`);
-          }
+          // Attention + notifications are handled inside applySessionSnapshot
+          // (the chokepoint shared with the polling fallback).
           applySessionSnapshot(snapshot);
         } catch (error) {
           logLine(`Stream payload failed: ${error.message}`);

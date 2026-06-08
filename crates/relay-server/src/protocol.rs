@@ -881,6 +881,11 @@ pub struct AskUserAnswerReceipt {
 #[derive(Debug, Clone, Serialize)]
 pub struct ApprovalRequestView {
     pub request_id: String,
+    /// Thread that requested the approval. Surfaced (like
+    /// `AskUserQuestionRequestView.thread_id`) so clients can attribute a
+    /// pending approval to its originating thread — including a backgrounded
+    /// thread that is not the active one — rather than assuming the active thread.
+    pub thread_id: String,
     pub kind: String,
     pub summary: String,
     pub detail: Option<String>,
