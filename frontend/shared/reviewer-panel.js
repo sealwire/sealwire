@@ -9,6 +9,11 @@ import {
 
 const h = React.createElement;
 
+// While a review is still running, re-fetch the reviewer's latest message on this
+// cadence so the user can watch an in-progress (or stuck) reviewer. Terminal reviews
+// are fetched once. Kept modest because the remote surface fetches via the broker.
+const REVIEWER_PREVIEW_POLL_MS = 6000;
+
 function entryText(entry) {
   if (entry?.text && entry.text.trim()) return entry.text.trim();
   // Chunked transcript pages carry text as ordered `parts` instead of a flat
@@ -126,24 +131,37 @@ function ReviewerJobCard({ job, onResolveReview, onDismissReview, fetchReviewerT
   const blocked = job.status === "blocked";
   const reviewerThreadId = job.reviewer_thread_id || null;
 
-  // Lazily load the reviewer's latest message once the review has produced one.
+  // Surface the reviewer's latest message for ANY review with a reviewer thread —
+  // not just terminal ones — so the user can see what an in-progress or stuck
+  // reviewer is doing (the whole point of "let me see inside the review"). While the
+  // review is still running we poll, so the preview keeps up with the reviewer.
   React.useEffect(() => {
-    if (!terminal || !reviewerThreadId || typeof fetchReviewerTranscript !== "function") {
-      return;
+    if (!reviewerThreadId || typeof fetchReviewerTranscript !== "function") {
+      return undefined;
     }
     let cancelled = false;
-    setReview({ status: "loading", text: null, error: null });
-    Promise.resolve(fetchReviewerTranscript(reviewerThreadId))
-      .then((entries) => {
-        if (cancelled) return;
-        setReview({ status: "loaded", text: latestAgentText(entries), error: null });
-      })
-      .catch((error) => {
-        if (cancelled) return;
-        setReview({ status: "error", text: null, error: error?.message || String(error) });
-      });
+    const load = () => {
+      Promise.resolve(fetchReviewerTranscript(reviewerThreadId))
+        .then((entries) => {
+          if (cancelled) return;
+          setReview({ status: "loaded", text: latestAgentText(entries), error: null });
+        })
+        .catch((error) => {
+          if (cancelled) return;
+          // Keep any message we already showed; only surface an error if we have none.
+          setReview((prev) =>
+            prev.text
+              ? prev
+              : { status: "error", text: null, error: error?.message || String(error) }
+          );
+        });
+    };
+    setReview((prev) => (prev.text ? prev : { status: "loading", text: null, error: null }));
+    load();
+    const timer = terminal ? null : setInterval(load, REVIEWER_PREVIEW_POLL_MS);
     return () => {
       cancelled = true;
+      if (timer) clearInterval(timer);
     };
   }, [terminal, reviewerThreadId, fetchReviewerTranscript]);
 
@@ -172,14 +190,35 @@ function ReviewerJobCard({ job, onResolveReview, onDismissReview, fetchReviewerT
       ? h("p", { className: "reviewer-job-verdict" }, `Verdict: ${job.verdict}`)
       : null,
     job.error ? h("p", { className: "reviewer-job-error" }, job.error) : null,
-    terminal && review.status === "loading"
-      ? h("p", { className: "reviewer-job-loading" }, "Loading review…")
+    review.status === "loading" && !review.text
+      ? h(
+          "p",
+          { className: "reviewer-job-loading" },
+          terminal ? "Loading review…" : "Loading the reviewer's latest message…"
+        )
       : null,
-    terminal && review.status === "error"
-      ? h("p", { className: "reviewer-job-error" }, `Couldn't load the review: ${review.error}`)
+    review.status === "error" && !review.text
+      ? h(
+          "p",
+          { className: "reviewer-job-error" },
+          `Couldn't load the reviewer's messages: ${review.error}`
+        )
       : null,
     review.text
-      ? h("div", { className: "reviewer-job-review" }, review.text)
+      ? h(
+          React.Fragment,
+          null,
+          // For a running review, label the preview so it's clear this is the
+          // reviewer's latest message in flight, not the final posted-back review.
+          !terminal
+            ? h(
+                "p",
+                { className: "reviewer-job-review-label" },
+                "Reviewer's latest message (review not final):"
+              )
+            : null,
+          h("div", { className: "reviewer-job-review" }, review.text)
+        )
       : null,
     h(
       "div",
