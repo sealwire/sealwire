@@ -69,6 +69,11 @@ pub struct AppState {
     /// `resolve_blocked_review` stops the stuck turn and marks the job terminal. The
     /// mutex provides cancellation-safety for the resolve attempt; no lock is held.
     blocked_review: Arc<tokio::sync::Mutex<Option<review::BlockedReview>>>,
+    /// Set to a review job id when the user asks to stop/cancel that (non-terminal)
+    /// review. The orchestrator polls it at each wait checkpoint and bails (so it
+    /// won't start the next turn); `cancel_active_review` stops the in-flight turn and
+    /// marks the job `Cancelled`. There is at most one active review at a time.
+    cancel_requested_job: Arc<tokio::sync::Mutex<Option<String>>>,
 }
 
 mod approvals;
@@ -98,6 +103,7 @@ impl AppState {
             review_drain_max_ms: Arc::new(std::sync::atomic::AtomicU64::new(300_000)),
             stop_fallback_ms: Arc::new(std::sync::atomic::AtomicU64::new(10_000)),
             blocked_review: Arc::new(tokio::sync::Mutex::new(None)),
+            cancel_requested_job: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
@@ -172,6 +178,7 @@ impl AppState {
             review_drain_max_ms: Arc::new(std::sync::atomic::AtomicU64::new(300_000)),
             stop_fallback_ms: Arc::new(std::sync::atomic::AtomicU64::new(10_000)),
             blocked_review: Arc::new(tokio::sync::Mutex::new(None)),
+            cancel_requested_job: Arc::new(tokio::sync::Mutex::new(None)),
         };
 
         state.spawn_initial_model_catalog_refresh();

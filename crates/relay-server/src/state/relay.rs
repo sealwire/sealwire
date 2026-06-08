@@ -542,6 +542,21 @@ impl RelayState {
             .any(|job| !job.status.is_terminal())
     }
 
+    /// `(job_id, parent_thread_id, reviewer_thread_id)` of the single active
+    /// (non-terminal) review, if any — used by the user-triggered cancel.
+    pub(crate) fn active_review_job_ids(&self) -> Option<(String, String, Option<String>)> {
+        self.review_jobs
+            .values()
+            .find(|job| !job.status.is_terminal())
+            .map(|job| {
+                (
+                    job.id.clone(),
+                    job.parent_thread_id.clone(),
+                    job.reviewer_thread_id.clone(),
+                )
+            })
+    }
+
     /// Whether `thread_id` is owned by a non-terminal review (its parent OR its
     /// reviewer thread). Such a thread is frozen for send/stop while the review
     /// runs; all other threads stay fully usable. A Blocked job is non-terminal,

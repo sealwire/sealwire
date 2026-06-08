@@ -184,17 +184,21 @@ function ReviewerJobCard({ job, onResolveReview, onDismissReview, fetchReviewerT
     h(
       "div",
       { className: "reviewer-job-actions" },
-      blocked
+      // A Stop button is available for ANY in-progress review (not just the
+      // cleanup-failed `blocked` state) so a stuck/hung review can always be
+      // cancelled and its threads unlocked.
+      !terminal
         ? h(
             "button",
             {
               type: "button",
               className: "header-button review-resolve-button",
-              title:
-                "The reviewer turn couldn't be stopped and the workspace is locked. Stop it to unlock.",
+              title: blocked
+                ? "The reviewer turn couldn't be stopped and the workspace is locked. Stop it to unlock."
+                : "Stop this review now and unlock the reviewed thread.",
               onClick: () => onResolveReview?.(),
             },
-            "Stop reviewer & unlock"
+            blocked ? "Stop reviewer & unlock" : "Stop review"
           )
         : null,
       h(

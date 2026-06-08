@@ -926,7 +926,7 @@ async fn execute_remote_action(
             .await
             .map(|_| RemoteActionOutcome::default()),
         RemoteActionRequest::ResolveReview { device_id } => state
-            .resolve_blocked_review(device_id)
+            .cancel_active_review(device_id)
             .await
             .map(|_| RemoteActionOutcome::default()),
         RemoteActionRequest::DismissReview {

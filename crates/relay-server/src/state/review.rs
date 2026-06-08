@@ -24,7 +24,7 @@ pub(crate) enum ReviewMode {
 }
 
 /// Lifecycle of a single review job. Terminal states are `Complete`, `Failed`,
-/// and `Cancelled`.
+/// `Escalated`, and `Cancelled`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReviewJobStatus {
     PendingParentRecap,
@@ -51,8 +51,8 @@ pub(crate) enum ReviewJobStatus {
     /// parent and control returns to the user. TERMINAL — threads unlock so the user
     /// can continue manually.
     Escalated,
-    // No cancel path in v1; retained as a documented terminal state for later.
-    #[allow(dead_code)]
+    /// The user stopped the review before it finished (`cancel_active_review`): the
+    /// in-flight turn is interrupted and the threads unlock. TERMINAL.
     Cancelled,
 }
 
@@ -173,11 +173,26 @@ impl ReviewJob {
     }
 
     pub(crate) fn set_status(&mut self, status: ReviewJobStatus) {
+        // Terminal is final: once a job is Complete/Failed/Escalated/Cancelled it must
+        // never move back to a non-terminal state. The orchestrator (`run_review_job`)
+        // writes status between wait checkpoints and only polls the cancel flag *inside*
+        // a wait, so a user cancel that marks the job `Cancelled` can be raced by the
+        // orchestrator's next between-turns write. Without this guard that write would
+        // resurrect the job non-terminal forever, leaving its threads review-locked even
+        // though `cancel_active_review` reported success — defeating the cancel feature.
+        if self.status.is_terminal() {
+            return;
+        }
         self.status = status;
         self.updated_at = unix_now();
     }
 
     pub(crate) fn fail(&mut self, error: impl Into<String>) {
+        // Respect terminality too: a user cancel (`Cancelled` + its reason) must not be
+        // turned into a spurious `Failed` by a late lifeguard/orchestrator write.
+        if self.status.is_terminal() {
+            return;
+        }
         self.error = Some(error.into());
         self.set_status(ReviewJobStatus::Failed);
     }
@@ -449,4 +464,78 @@ to you. Latest review:\n\n{review}",
         provider = provider_label(reviewer_provider),
         review = review.trim(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_job() -> ReviewJob {
+        ReviewJob::new(
+            "job-1".to_string(),
+            "parent-1".to_string(),
+            "codex".to_string(),
+            "codex".to_string(),
+            None,
+            ReviewMode::CleanThread,
+            "/tmp".to_string(),
+            "device-1".to_string(),
+            None,
+            1,
+        )
+    }
+
+    #[test]
+    fn terminal_status_is_never_resurrected() {
+        // Regression for the cancel lost-update race: once a job is terminal (a user
+        // cancel), the orchestrator's next between-turns status write must be ignored —
+        // otherwise the job is left non-terminal forever and its threads stay locked.
+        for terminal in [
+            ReviewJobStatus::Cancelled,
+            ReviewJobStatus::Complete,
+            ReviewJobStatus::Failed,
+            ReviewJobStatus::Escalated,
+        ] {
+            let mut job = sample_job();
+            job.set_status(terminal);
+            assert_eq!(job.status, terminal);
+
+            // The orchestrator's racing writes (StartingReviewer / WaitingForReviewer /
+            // AddressingFindings …) must not move it back out of terminal.
+            job.set_status(ReviewJobStatus::WaitingForReviewer);
+            job.set_status(ReviewJobStatus::AddressingFindings);
+            assert_eq!(
+                job.status, terminal,
+                "a terminal job ({terminal:?}) was resurrected by a later status write",
+            );
+        }
+    }
+
+    #[test]
+    fn fail_does_not_override_a_terminal_cancel() {
+        // A late lifeguard/orchestrator `fail()` must not clobber a user cancel's
+        // status or reason.
+        let mut job = sample_job();
+        job.error = Some("review cancelled by the user".to_string());
+        job.set_status(ReviewJobStatus::Cancelled);
+
+        job.fail("the review task ended unexpectedly");
+
+        assert_eq!(job.status, ReviewJobStatus::Cancelled);
+        assert_eq!(job.error.as_deref(), Some("review cancelled by the user"));
+    }
+
+    #[test]
+    fn non_terminal_status_transitions_freely() {
+        // The guard only freezes terminal states; the normal lifecycle still advances.
+        let mut job = sample_job();
+        assert_eq!(job.status, ReviewJobStatus::PendingParentRecap);
+        job.set_status(ReviewJobStatus::StartingReviewer);
+        assert_eq!(job.status, ReviewJobStatus::StartingReviewer);
+        job.set_status(ReviewJobStatus::WaitingForReviewer);
+        assert_eq!(job.status, ReviewJobStatus::WaitingForReviewer);
+        // Reaching terminal still works (and then sticks).
+        job.set_status(ReviewJobStatus::Complete);
+        assert_eq!(job.status, ReviewJobStatus::Complete);
+    }
 }

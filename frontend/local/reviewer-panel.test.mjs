@@ -100,6 +100,33 @@ test("ReviewerPanel surfaces the unlock action when a review is blocked", () => 
   assert.match(html, /Stop reviewer &amp; unlock/);
 });
 
+test("ReviewerPanel shows a Stop button for any in-progress (non-terminal) review", () => {
+  // A stuck-but-not-blocked review (e.g. the reviewer turn hangs) must still be
+  // stoppable, so the user can recover the locked workspace.
+  const running = renderToStaticMarkup(
+    h(ReviewerPanel, {
+      reviewJobs: [{ id: "r", reviewer_provider: "codex", status: "waiting_for_reviewer" }],
+      canRequest: false,
+      onResolveReview() {},
+    })
+  );
+  assert.match(running, /review-resolve-button/);
+  assert.match(running, />Stop review</);
+  assert.doesNotMatch(running, /Stop reviewer &amp; unlock/);
+
+  // A terminal review has no Stop button (only Delete).
+  const done = renderToStaticMarkup(
+    h(ReviewerPanel, {
+      reviewJobs: [
+        { id: "r2", reviewer_provider: "codex", status: "complete", reviewer_thread_id: "t" },
+      ],
+      canRequest: false,
+      onResolveReview() {},
+    })
+  );
+  assert.doesNotMatch(done, /review-resolve-button/);
+});
+
 test("ReviewerChip stays hidden when there is no review (idle), regardless of canRequest", () => {
   // No reviews + can't request → hidden.
   const cannot = renderToStaticMarkup(

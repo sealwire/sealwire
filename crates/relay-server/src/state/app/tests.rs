@@ -5654,6 +5654,119 @@ mod review_tests {
         );
     }
 
+    // The user can stop a review that's stuck mid-turn (NOT just the cleanup-failed
+    // `Blocked` state): cancel_active_review interrupts the running turn, marks the
+    // job `Cancelled`, and unlocks the reviewed parent.
+    #[tokio::test]
+    async fn cancel_stops_an_in_progress_review_and_unlocks_the_parent() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        // Long step timeout so the review stays stuck (not auto-timed-out), and turns
+        // never complete so the recap turn hangs — i.e. a review in flight.
+        app.set_review_step_timeout_ms(60_000);
+        let codex = providers.get("codex").unwrap();
+        codex.complete_turns.store(false, Ordering::Relaxed);
+        let parent = start_parent(&app, cwd, "codex").await;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        // Wait until the recap turn is actually in flight (non-terminal, in progress).
+        wait_for_review_status(&app, &receipt.review_job_id, &["waiting_for_parent_recap"]).await;
+        for _ in 0..200 {
+            let working = app
+                .relay
+                .read()
+                .await
+                .runtime_for_thread(&parent.id)
+                .map(|runtime| runtime.is_working())
+                .unwrap_or(false);
+            if working {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            app.relay.read().await.is_thread_review_locked(&parent.id),
+            "parent should be review-locked while the review is in flight"
+        );
+
+        // User cancels the stuck review.
+        let cancel = app
+            .cancel_active_review(Some("device-1".to_string()))
+            .await
+            .expect("cancel should succeed");
+        assert_eq!(cancel.status.status, "cancelled");
+
+        let job = wait_for_review_status(&app, &receipt.review_job_id, &["cancelled"]).await;
+        assert_eq!(job.status, "cancelled", "job error: {:?}", job.error);
+        assert!(
+            !app.relay.read().await.is_thread_review_locked(&parent.id),
+            "the reviewed parent must be unlocked after cancel"
+        );
+        assert!(
+            !codex.interrupts.lock().await.is_empty(),
+            "cancel must interrupt the running turn"
+        );
+    }
+
+    // Regression for the between-turns lost-update race: the orchestrator writes job
+    // status between wait checkpoints, while a user cancel marks the job terminal. A
+    // status write that lands AFTER the cancel must NOT resurrect the job — otherwise it
+    // is left non-terminal and its threads stay review-locked forever, even though
+    // `cancel_active_review` reported success.
+    #[tokio::test]
+    async fn a_cancelled_review_cannot_be_resurrected_by_a_racing_status_write() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        app.set_review_step_timeout_ms(60_000);
+        let codex = providers.get("codex").unwrap();
+        codex.complete_turns.store(false, Ordering::Relaxed);
+        let parent = start_parent(&app, cwd, "codex").await;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        wait_for_review_status(&app, &receipt.review_job_id, &["waiting_for_parent_recap"]).await;
+
+        let cancel = app
+            .cancel_active_review(Some("device-1".to_string()))
+            .await
+            .expect("cancel should succeed");
+        assert_eq!(cancel.status.status, "cancelled");
+        wait_for_review_status(&app, &receipt.review_job_id, &["cancelled"]).await;
+
+        // Simulate the orchestrator's next between-turns status write landing AFTER the
+        // cancel (the exact lost-update the terminal-status guard must reject). This is
+        // the same path `set_job_status` takes: update_review_job → ReviewJob::set_status.
+        app.relay
+            .write()
+            .await
+            .update_review_job(&receipt.review_job_id, |job| {
+                job.set_status(crate::state::ReviewJobStatus::WaitingForReviewer)
+            });
+
+        let status = app
+            .relay
+            .read()
+            .await
+            .review_job(&receipt.review_job_id)
+            .map(|job| job.status);
+        assert_eq!(
+            status,
+            Some(crate::state::ReviewJobStatus::Cancelled),
+            "a cancelled review must not be resurrected by a later status write",
+        );
+        assert!(
+            !app.relay.read().await.is_thread_review_locked(&parent.id),
+            "the reviewed parent must stay unlocked after a racing status write",
+        );
+    }
+
     #[tokio::test]
     async fn unrelated_background_approval_does_not_fail_the_review() {
         let dir = TempDir::new().expect("tmpdir");

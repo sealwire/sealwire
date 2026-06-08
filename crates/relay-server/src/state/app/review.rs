@@ -29,6 +29,12 @@ use super::*;
 /// How often to re-issue an interrupt while draining a turn that wouldn't stop.
 const INTERRUPT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
+/// How often to emit a "still waiting" diagnostic while a review turn runs long, so
+/// a stuck review is visible in the logs (which step + thread, how long) instead of
+/// silently hanging. Only fires when a single turn exceeds this — fast reviews stay
+/// quiet.
+const REVIEW_WAIT_HEARTBEAT: Duration = Duration::from_secs(8);
+
 /// Hard cap on the iterative review loop's per-request round budget, so a single
 /// review can't loop unbounded (each round costs a parent + reviewer turn).
 const MAX_REVIEW_ROUNDS: u32 = 10;
@@ -49,6 +55,10 @@ enum WaitOutcome {
     FailedApproval,
     FailedAskUser,
     TimedOut,
+    /// The user asked to stop/cancel the review while this turn was in flight. The
+    /// orchestrator bails immediately; `cancel_active_review` owns stopping the turn
+    /// and marking the job terminal.
+    Cancelled,
 }
 
 /// Crash-safety net for `run_review_job`. If the orchestrator task exits (return
@@ -399,6 +409,15 @@ to this thread."
             max_rounds,
         } = fields;
 
+        self.push_runtime_log(
+            "info",
+            format!(
+                "Review {job_id}: started (parent={parent_thread_id}, reviewer={reviewer_provider}, \
+max_rounds={max_rounds}). Step 1: asking the author to recap its changes."
+            ),
+        )
+        .await;
+
         // --- Step 1: ask the parent to recap its changes ---------------------
         // The recap runs as a turn on the PARENT thread. The parent is review-
         // locked (frozen for the user) but the orchestrator drives it directly via
@@ -438,8 +457,12 @@ to this thread."
         };
         self.update_job(&job_id, |job| job.parent_recap_turn_id = recap_turn)
             .await;
-        match self.wait_for_thread_idle_outcome(&parent_thread_id).await {
+        match self
+            .wait_for_thread_idle_outcome(&job_id, &parent_thread_id)
+            .await
+        {
             WaitOutcome::Completed => {}
+            WaitOutcome::Cancelled => return,
             WaitOutcome::FailedApproval => {
                 if self.stop_thread_or_block(&job_id, &parent_thread_id).await {
                     self.fail_job(
@@ -498,6 +521,13 @@ to this thread."
         let mut round: u32 = 0;
         loop {
             round += 1;
+
+            // A cancel may have landed since the previous wait returned — bail before
+            // collecting the diff or starting another turn. `cancel_active_review` owns
+            // unlocking; the orchestrator just stops.
+            if self.review_aborted(&job_id).await {
+                return;
+            }
 
             // --- collect a fresh workspace diff for this round ---
             let diff = match collect_workspace_diff(&cwd).await {
@@ -587,6 +617,11 @@ to this thread."
                 .latest_assistant_entry(&this_reviewer_id)
                 .await
                 .map(|(item_id, _)| item_id);
+            // `collect_workspace_diff` + reviewer prep ran outside any wait checkpoint;
+            // re-check for a cancel so we never dispatch an orphaned reviewer turn.
+            if self.review_aborted(&job_id).await {
+                return;
+            }
             match self
                 .send_message_to_thread(
                     &this_reviewer_id,
@@ -622,9 +657,14 @@ to this thread."
                 .current_reviewer_thread_id(&job_id)
                 .await
                 .unwrap_or(this_reviewer_id);
-            reviewer_thread_id = Some(current_id.clone());
-            match self.wait_for_thread_idle_outcome(&current_id).await {
+            // (The loop-reuse `reviewer_thread_id` is re-set from the post-wait,
+            // post-promotion id at the read-back below; no need to stash the pre-wait id.)
+            match self
+                .wait_for_thread_idle_outcome(&job_id, &current_id)
+                .await
+            {
                 WaitOutcome::Completed => {}
+                WaitOutcome::Cancelled => return,
                 outcome @ (WaitOutcome::FailedApproval
                 | WaitOutcome::FailedAskUser
                 | WaitOutcome::TimedOut) => {
@@ -665,6 +705,14 @@ to this thread."
                 })
                 .await;
             }
+            self.push_runtime_log(
+                "info",
+                format!(
+                    "Review {job_id}: round {round}/{max_rounds} — reviewer finished, verdict = {}.",
+                    verdict.as_str()
+                ),
+            )
+            .await;
 
             // --- decide: single-shot / approve / exhaust / drive the parent fix ---
             self.set_job_status(&job_id, ReviewJobStatus::PostingBack)
@@ -713,6 +761,11 @@ to this thread."
                 .latest_assistant_entry(&parent_thread_id)
                 .await
                 .map(|(item_id, _)| item_id);
+            // The verdict/post-back decision ran outside a wait checkpoint; re-check so a
+            // cancel can't trigger an orphaned author fix turn (which would edit code).
+            if self.review_aborted(&job_id).await {
+                return;
+            }
             match self
                 .send_message_to_thread(&parent_thread_id, &fix_prompt, None, None)
                 .await
@@ -737,8 +790,12 @@ to this thread."
                     return;
                 }
             }
-            match self.wait_for_thread_idle_outcome(&parent_thread_id).await {
+            match self
+                .wait_for_thread_idle_outcome(&job_id, &parent_thread_id)
+                .await
+            {
                 WaitOutcome::Completed => {}
+                WaitOutcome::Cancelled => return,
                 WaitOutcome::FailedApproval
                 | WaitOutcome::FailedAskUser
                 | WaitOutcome::TimedOut => {
@@ -847,8 +904,18 @@ to this thread."
         let error = error.into();
         let mut relay = self.relay.write().await;
         let logged = error.clone();
-        relay.update_review_job(job_id, move |job| job.fail(error));
-        relay.push_log("warn", format!("Review {job_id} failed: {logged}"));
+        // `ReviewJob::fail` no-ops once terminal (e.g. a user cancel already won the
+        // race), so only log the failure when it actually applied — otherwise a stray
+        // late `fail_job` would emit a misleading "Review X failed" line for a job that
+        // is really `Cancelled`/`Complete`.
+        let mut applied = false;
+        relay.update_review_job(job_id, |job| {
+            applied = !job.status.is_terminal();
+            job.fail(error);
+        });
+        if applied {
+            relay.push_log("warn", format!("Review {job_id} failed: {logged}"));
+        }
         relay.notify();
     }
 
@@ -1158,9 +1225,46 @@ to this thread."
             .and_then(|job| job.reviewer_thread_id.clone())
     }
 
-    /// Fail the job iff it is still non-terminal and not intentionally `Blocked`.
-    /// Called by the crash-safety lifeguard when the orchestrator task exits.
+    /// Whether the user has asked to cancel this review (set by
+    /// `cancel_active_review`, polled by the orchestrator's wait checkpoints).
+    async fn review_cancel_requested(&self, job_id: &str) -> bool {
+        self.cancel_requested_job.lock().await.as_deref() == Some(job_id)
+    }
+
+    /// Whether the orchestrator should stop without starting another turn: the user
+    /// asked to cancel (the cancel handler owns interrupting the in-flight turn,
+    /// marking the job terminal, and unlocking the threads), or the job already reached
+    /// a terminal state — e.g. a cancel that landed in the gap between two turns, which
+    /// the terminal-status guard (`ReviewJob::set_status`) kept terminal. Checked before
+    /// each turn so a between-turns cancel can't leave an orphaned reviewer/author turn
+    /// running against an already-stopped review.
+    async fn review_aborted(&self, job_id: &str) -> bool {
+        if self.review_cancel_requested(job_id).await {
+            return true;
+        }
+        let relay = self.relay.read().await;
+        match relay.review_job(job_id) {
+            Some(job) => job.status.is_terminal(),
+            None => true,
+        }
+    }
+
+    /// Fail the job iff it is still non-terminal and not intentionally `Blocked` or
+    /// being cancelled. Called by the crash-safety lifeguard when the orchestrator
+    /// task exits.
+    ///
+    /// A user cancel is exempt (`!cancelling`): `cancel_active_review` owns the terminal
+    /// transition — it either marks the job `Cancelled` (success) or leaves it `Blocked`
+    /// (a turn wouldn't stop, so the threads stay locked and the user retries). The
+    /// lifeguard must NOT race a `Failed` in ahead of that decision: doing so could
+    /// unlock a job whose turn is still running while cancel is mid-`enter_blocked`.
+    /// This exemption can't strand the job non-terminal, because the only way the
+    /// orchestrator exits while a cancel is pending is via `WaitOutcome::Cancelled`,
+    /// after which `cancel_active_review` always drives the job to `Cancelled`/`Blocked`;
+    /// and the terminal-status guard in `ReviewJob::set_status` prevents the orchestrator
+    /// from resurrecting an already-`Cancelled` job. Also clears the now-moot cancel flag.
     async fn fail_job_if_stranded(&self, job_id: &str) {
+        let cancelling = self.review_cancel_requested(job_id).await;
         let stranded = {
             let relay = self.relay.read().await;
             match relay.review_job(job_id) {
@@ -1170,22 +1274,37 @@ to this thread."
                 None => false,
             }
         };
-        if stranded {
+        if stranded && !cancelling {
             self.fail_job(job_id, "the review task ended unexpectedly")
                 .await;
+        }
+        // The orchestrator has exited; the cancel flag (if any) is moot.
+        {
+            let mut slot = self.cancel_requested_job.lock().await;
+            if slot.as_deref() == Some(job_id) {
+                *slot = None;
+            }
         }
     }
 
     /// Wait until the given thread's in-flight turn settles. Returns
     /// `FailedApproval` if an approval appears mid-turn (v1 cannot continue), or
     /// `TimedOut` after `REVIEW_STEP_TIMEOUT`.
-    async fn wait_for_thread_idle_outcome(&self, thread_id: &str) -> WaitOutcome {
+    async fn wait_for_thread_idle_outcome(&self, job_id: &str, thread_id: &str) -> WaitOutcome {
         let timeout_ms = self
             .review_step_timeout_ms
             .load(std::sync::atomic::Ordering::Relaxed);
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        let started = Instant::now();
+        let mut next_heartbeat = started + REVIEW_WAIT_HEARTBEAT;
         let mut rx = self.subscribe();
         loop {
+            // A user cancel takes precedence over any other outcome: bail at once so
+            // the orchestrator won't start the next turn (cancel_active_review stops
+            // the in-flight turn and marks the job terminal).
+            if self.review_cancel_requested(job_id).await {
+                return WaitOutcome::Cancelled;
+            }
             {
                 let relay = self.relay.read().await;
                 // Only THIS thread's approvals matter — the orchestrator keys off
@@ -1221,6 +1340,27 @@ to this thread."
                     if changed.is_err() {
                         return WaitOutcome::Completed;
                     }
+                }
+                _ = tokio::time::sleep_until(next_heartbeat) => {
+                    // The turn is taking a while — surface what we're waiting on so a
+                    // stuck review is diagnosable (and tells the user they can Stop it).
+                    let status = {
+                        let relay = self.relay.read().await;
+                        relay
+                            .review_job(job_id)
+                            .map(|job| job.status.as_str().to_string())
+                            .unwrap_or_default()
+                    };
+                    self.push_runtime_log(
+                        "info",
+                        format!(
+                            "Review {job_id}: still waiting on thread {thread_id}'s turn — \
+            {}s elapsed (status: {status}). Use \"Stop review\" to cancel.",
+                            started.elapsed().as_secs()
+                        ),
+                    )
+                    .await;
+                    next_heartbeat = Instant::now() + REVIEW_WAIT_HEARTBEAT;
                 }
                 _ = tokio::time::sleep_until(deadline) => {
                     return WaitOutcome::TimedOut;
@@ -1525,6 +1665,85 @@ reviewed thread stays locked. Resolve the review (stop the reviewer) to unlock."
         self.wait_for_thread_idle(thread_id, deadline).await
     }
 
+    /// User-triggered stop for ANY non-terminal review (not just `Blocked`): signal
+    /// the orchestrator to bail at its next wait checkpoint, stop whatever turn is in
+    /// flight (the reviewer's review turn, or the parent's recap/fix/post-back turn),
+    /// then mark the job `Cancelled` — terminal, so the per-thread review lock drops
+    /// and the parent unfreezes. If a turn can't be confirmed stopped the review is
+    /// left `Blocked` (still locked) so the user can retry; the cancel flag stays set
+    /// so the orchestrator still bails when the turn eventually ends.
+    pub async fn cancel_active_review(
+        &self,
+        device_id: Option<String>,
+    ) -> Result<RequestReviewReceipt, String> {
+        let device_id = require_device_id(device_id)?;
+        // A cleanup-failed (`Blocked`) review has a dedicated recovery that targets
+        // the exact stuck thread recorded in the blocked slot — reuse it.
+        if self.blocked_review.lock().await.is_some() {
+            return self.resolve_blocked_review(Some(device_id)).await;
+        }
+        let (job_id, parent_thread_id, reviewer_thread_id) = {
+            let relay = self.relay.read().await;
+            relay.ensure_device_can_send_message(&device_id)?;
+            match relay.active_review_job_ids() {
+                Some(ids) => ids,
+                None => return Err("there is no active review to stop".to_string()),
+            }
+        };
+
+        // Tell the orchestrator to bail (so it won't start the next turn).
+        *self.cancel_requested_job.lock().await = Some(job_id.clone());
+
+        // Stop whichever thread is running the review's turn — confirmed stop.
+        let mut targets = vec![parent_thread_id.clone()];
+        if let Some(reviewer) = reviewer_thread_id.clone() {
+            targets.push(reviewer);
+        }
+        for thread_id in &targets {
+            self.deny_thread_approvals_best_effort(thread_id).await;
+            if !self.try_stop_thread(thread_id).await {
+                // Couldn't confirm the turn stopped → leave it Blocked (still locked)
+                // so the user can retry. The cancel flag stays set.
+                self.enter_blocked(&job_id, thread_id).await;
+                return Err(
+                    "a review turn is still running and could not be stopped; try again"
+                        .to_string(),
+                );
+            }
+            self.clear_thread_interactions(thread_id).await;
+        }
+
+        // Confirmed stopped → make the job terminal (drops the review lock) and clear
+        // any blocked slot for it. The orchestrator (if still alive) bails on the
+        // cancel flag at its next checkpoint without starting another turn.
+        self.update_job(&job_id, |job| {
+            job.error = Some("review cancelled by the user".to_string());
+            job.set_status(ReviewJobStatus::Cancelled);
+        })
+        .await;
+        {
+            let mut slot = self.blocked_review.lock().await;
+            if slot.as_ref().map(|b| b.job_id == job_id).unwrap_or(false) {
+                *slot = None;
+            }
+        }
+        self.push_runtime_log(
+            "info",
+            format!("Review {job_id} cancelled by the user; the reviewed thread is unlocked."),
+        )
+        .await;
+
+        Ok(RequestReviewReceipt {
+            review_job_id: job_id,
+            parent_thread_id,
+            reviewer_thread_id: None,
+            status: crate::protocol::ReviewJobStatusView {
+                status: "cancelled".to_string(),
+            },
+            message: "Review cancelled; the reviewed thread is unlocked.".to_string(),
+        })
+    }
+
     /// User-triggered recovery for a `Blocked` review: stop the stuck reviewer
     /// (deny its approvals + cancel its turn and wait for the real completion),
     /// then mark the job `Failed`, which drops the per-thread review lock and
@@ -1630,6 +1849,7 @@ fn reviewer_failure_message(outcome: &WaitOutcome) -> &'static str {
         WaitOutcome::FailedAskUser => "the reviewer asked a question; v1 cannot continue",
         WaitOutcome::TimedOut => "timed out waiting for the reviewer; the turn was stopped",
         WaitOutcome::Completed => "the reviewer finished",
+        WaitOutcome::Cancelled => "the review was cancelled by the user",
     }
 }
 

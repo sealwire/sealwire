@@ -739,9 +739,11 @@ async fn resolve_review(
     Json(input): Json<StopTurnInput>,
 ) -> Result<Json<ApiEnvelope<RequestReviewReceipt>>, (StatusCode, Json<ApiError>)> {
     authorize_api(&context, &headers, &uri)?;
+    // Stop/cancel the active review — works for ANY non-terminal review (blocked OR
+    // just stuck mid-turn), not only the cleanup-failed `Blocked` case.
     context
         .app
-        .resolve_blocked_review(input.device_id)
+        .cancel_active_review(input.device_id)
         .await
         .map(|receipt| Json(ApiEnvelope::ok(receipt)))
         .map_err(bad_request)
