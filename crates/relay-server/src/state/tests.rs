@@ -1219,6 +1219,69 @@ fn terminal_review_cards_persist_across_restart_but_in_progress_ones_do_not() {
 }
 
 #[test]
+fn restore_drops_a_non_terminal_review_job_from_a_corrupt_or_future_snapshot() {
+    // Defense-in-depth: the writer only persists terminal jobs, but the restore side
+    // re-applies the same filter so a non-terminal job that somehow reaches the snapshot
+    // (a hand-edited/corrupt file, or a future build that persists in-progress jobs) is
+    // dropped — never restored as a parent-locking job with no orchestrator to release it.
+    let mut relay = test_state();
+    let mut done = ReviewJob::new(
+        "job-done".to_string(),
+        "parent-done".to_string(),
+        "codex".to_string(),
+        "codex".to_string(),
+        None,
+        ReviewMode::CleanThread,
+        "/tmp/project".to_string(),
+        "device-1".to_string(),
+        None,
+        1,
+    );
+    done.set_status(ReviewJobStatus::Complete);
+    relay.insert_review_job(done);
+
+    // Start from a valid snapshot, then inject an in-progress job the writer would never
+    // produce, simulating a corrupt/future-build state file on the read path.
+    let mut persisted = PersistedRelayState::from_relay(&relay);
+    let mut live = ReviewJob::new(
+        "job-live".to_string(),
+        "parent-live".to_string(),
+        "codex".to_string(),
+        "codex".to_string(),
+        None,
+        ReviewMode::CleanThread,
+        "/tmp/project".to_string(),
+        "device-1".to_string(),
+        None,
+        1,
+    );
+    live.reviewer_thread_id = Some("rev-live".to_string());
+    live.set_status(ReviewJobStatus::WaitingForReviewer);
+    persisted.review_jobs.insert("job-live".to_string(), live);
+
+    let (change_tx, _) = watch::channel(0_u64);
+    let mut restored = RelayState::new(
+        "/tmp/other".to_string(),
+        change_tx,
+        SecurityProfile::private(),
+    );
+    restored.apply_persisted(&persisted);
+
+    assert!(
+        restored.review_job("job-done").is_some(),
+        "the terminal card is still restored"
+    );
+    assert!(
+        restored.review_job("job-live").is_none(),
+        "a non-terminal job in the snapshot must be dropped on restore"
+    );
+    assert!(
+        !restored.is_thread_review_locked("parent-live"),
+        "a dropped in-progress job must not re-lock its parent"
+    );
+}
+
+#[test]
 fn persist_skips_pending_claude_reviewer_ids() {
     let mut relay = test_state();
     // A real (promoted) reviewer id alongside a synthetic Claude pending id. The

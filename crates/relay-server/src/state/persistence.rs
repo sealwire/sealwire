@@ -43,11 +43,13 @@ pub(super) struct PersistedRelayState {
     /// form.
     #[serde(default)]
     pub(super) reviewer_threads: std::collections::HashMap<String, ReviewerThread>,
-    /// Completed (TERMINAL) review-job cards so the Reviewer panel survives a restart.
-    /// Only terminal jobs are persisted: an in-progress job's orchestrator task dies
-    /// with the process, so restoring it would strand a non-terminal job (locking its
-    /// parent forever with nothing to release it). `#[serde(default)]` keeps old state
-    /// files loadable (empty map).
+    /// Completed (TERMINAL) review-job cards — stored whole (incl. recap/review text)
+    /// so the Reviewer panel survives a restart with its content. Only terminal jobs
+    /// are persisted: an in-progress job's orchestrator dies with the process, so
+    /// restoring it would strand a non-terminal job (locking its parent with nothing to
+    /// release it) — the restore side (`RelayState`) re-applies this same terminal
+    /// filter as a safeguard. `#[serde(default)]` keeps old state files loadable (empty
+    /// map).
     #[serde(default)]
     pub(super) review_jobs: std::collections::HashMap<String, ReviewJob>,
 }
