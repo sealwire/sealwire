@@ -140,14 +140,21 @@ function ReviewerJobCard({ job, onResolveReview, onDismissReview, fetchReviewerT
       return undefined;
     }
     let cancelled = false;
+    // Monotonic request ids so an out-of-order poll (a slow fetch resolving after a
+    // newer one) can't overwrite the newer message with stale text.
+    let applied = 0;
+    let nextRequest = 0;
     const load = () => {
+      const requestId = (nextRequest += 1);
       Promise.resolve(fetchReviewerTranscript(reviewerThreadId))
         .then((entries) => {
-          if (cancelled) return;
+          if (cancelled || requestId <= applied) return;
+          applied = requestId;
           setReview({ status: "loaded", text: latestAgentText(entries), error: null });
         })
         .catch((error) => {
-          if (cancelled) return;
+          if (cancelled || requestId <= applied) return;
+          applied = requestId;
           // Keep any message we already showed; only surface an error if we have none.
           setReview((prev) =>
             prev.text
@@ -158,7 +165,14 @@ function ReviewerJobCard({ job, onResolveReview, onDismissReview, fetchReviewerT
     };
     setReview((prev) => (prev.text ? prev : { status: "loading", text: null, error: null }));
     load();
-    const timer = terminal ? null : setInterval(load, REVIEWER_PREVIEW_POLL_MS);
+    // Poll while the review runs so the preview tracks the reviewer, but pause when the
+    // tab is hidden — nobody's watching, so there's no point spending a broker round-trip.
+    const timer = terminal
+      ? null
+      : setInterval(() => {
+          if (typeof document !== "undefined" && document.hidden) return;
+          load();
+        }, REVIEWER_PREVIEW_POLL_MS);
     return () => {
       cancelled = true;
       if (timer) clearInterval(timer);
