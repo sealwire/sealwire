@@ -1327,6 +1327,84 @@ fn review_jobs_view_shows_one_card_per_reviewer_thread_keeping_the_latest() {
 }
 
 #[test]
+fn review_jobs_view_keeps_an_in_progress_run_visible_over_a_same_second_terminal_run() {
+    // The deduped view backs the Stop / in-progress affordances, so a live (non-terminal)
+    // run must never be hidden behind a just-completed one for the same reviewer — even
+    // when both share the same whole-second updated_at (unix_now is seconds).
+    let mut relay = test_state();
+    let mk = |id: &str, status: ReviewJobStatus, updated: u64| {
+        let mut job = ReviewJob::new(
+            id.to_string(),
+            "parent-1".to_string(),
+            "codex".to_string(),
+            "codex".to_string(),
+            None,
+            ReviewMode::CleanThread,
+            "/tmp/project".to_string(),
+            "device-1".to_string(),
+            None,
+            1,
+        );
+        job.reviewer_thread_id = Some("rev-shared".to_string());
+        job.set_status(status);
+        job.updated_at = updated;
+        job
+    };
+    relay.insert_review_job(mk("job-done", ReviewJobStatus::Complete, 500));
+    relay.insert_review_job(mk("job-live", ReviewJobStatus::WaitingForReviewer, 500));
+
+    let view = relay.active_review_jobs_view();
+    assert_eq!(view.len(), 1, "still one card per reviewer thread");
+    assert_eq!(
+        view[0].id, "job-live",
+        "the in-progress run must be the visible card on a same-second tie"
+    );
+}
+
+#[test]
+fn drop_terminal_review_jobs_for_reviewer_keeps_an_in_progress_run() {
+    // dismiss_review uses this: it clears a reviewer's finished run-cards but must never
+    // delete a concurrently-started in-progress job (which would orphan its orchestrator
+    // and unlock its threads mid-turn).
+    let mut relay = test_state();
+    let mk = |id: &str, reviewer: &str, status: ReviewJobStatus| {
+        let mut job = ReviewJob::new(
+            id.to_string(),
+            "parent-1".to_string(),
+            "codex".to_string(),
+            "codex".to_string(),
+            None,
+            ReviewMode::CleanThread,
+            "/tmp/project".to_string(),
+            "device-1".to_string(),
+            None,
+            1,
+        );
+        job.reviewer_thread_id = Some(reviewer.to_string());
+        job.set_status(status);
+        job
+    };
+    relay.insert_review_job(mk("done-1", "rev-x", ReviewJobStatus::Complete));
+    relay.insert_review_job(mk("live-1", "rev-x", ReviewJobStatus::WaitingForReviewer));
+    relay.insert_review_job(mk("done-other", "rev-y", ReviewJobStatus::Complete));
+
+    relay.drop_terminal_review_jobs_for_reviewer("rev-x");
+
+    assert!(
+        relay.review_job("done-1").is_none(),
+        "the finished run for rev-x is dropped"
+    );
+    assert!(
+        relay.review_job("live-1").is_some(),
+        "a concurrent in-progress run for rev-x is kept"
+    );
+    assert!(
+        relay.review_job("done-other").is_some(),
+        "a different reviewer's job is untouched"
+    );
+}
+
+#[test]
 fn persist_skips_pending_claude_reviewer_ids() {
     let mut relay = test_state();
     // A real (promoted) reviewer id alongside a synthetic Claude pending id. The

@@ -379,11 +379,13 @@ to this thread."
         }
         {
             let mut relay = self.relay.write().await;
-            // One card per reviewer thread: dismissing it drops every review run bound to
-            // that (now-archived) reviewer thread, not just the latest — otherwise an
+            // One card per reviewer thread: dismissing it drops every TERMINAL run bound
+            // to that (now-archived) reviewer thread, not just the latest — otherwise an
             // older run's card would reappear pointing at a thread that no longer exists.
+            // Only terminal runs are dropped: a reuse that raced into this window stays
+            // intact (dropping its in-progress job would orphan its orchestrator).
             match reviewer_thread_id.as_deref() {
-                Some(reviewer) => relay.drop_review_jobs_for_reviewer(reviewer),
+                Some(reviewer) => relay.drop_terminal_review_jobs_for_reviewer(reviewer),
                 None => {
                     relay.remove_review_job(&job_id);
                 }

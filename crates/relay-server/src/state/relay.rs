@@ -327,6 +327,17 @@ impl RelayState {
             .retain(|_, job| job.reviewer_thread_id.as_deref() != Some(reviewer_id));
     }
 
+    /// Drop only the TERMINAL review jobs for `reviewer_id`. Used by `dismiss_review`,
+    /// which collapses a reviewer's finished run-cards but must NOT delete a
+    /// concurrently-started in-progress job for the same reviewer (created in the window
+    /// between the dismiss's terminality check and this write) — doing so would orphan
+    /// that run's orchestrator and unlock its threads mid-turn.
+    pub(crate) fn drop_terminal_review_jobs_for_reviewer(&mut self, reviewer_id: &str) {
+        self.review_jobs.retain(|_, job| {
+            !(job.reviewer_thread_id.as_deref() == Some(reviewer_id) && job.status.is_terminal())
+        });
+    }
+
     /// Thread ids that are reviewer threads. The thread list filters these out so a
     /// reviewer never shows up as a peer session — it is owned by its review
     /// (surfaced through the Reviewer panel). Backed by the DURABLE `reviewer_threads`
@@ -630,8 +641,19 @@ impl RelayState {
                 Some(reviewer) => {
                     let newer = match latest_by_reviewer.get(reviewer) {
                         Some(existing) => {
-                            (job.updated_at, job.id.as_str())
-                                > (existing.updated_at, existing.id.as_str())
+                            // Prefer the most-recently-updated run; on a same-second tie,
+                            // prefer a NON-terminal (in-progress) job so a live run is
+                            // never hidden behind a just-completed one — the Stop /
+                            // in-progress affordances read this deduped view.
+                            (
+                                job.updated_at,
+                                u8::from(!job.status.is_terminal()),
+                                job.id.as_str(),
+                            ) > (
+                                existing.updated_at,
+                                u8::from(!existing.status.is_terminal()),
+                                existing.id.as_str(),
+                            )
                         }
                         None => true,
                     };
