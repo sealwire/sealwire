@@ -1,6 +1,6 @@
 use super::*;
 use crate::auth::AuthConfig;
-use axum::http::{header, header::HeaderName, Method};
+use axum::http::{header, header::HeaderName, Method, StatusCode};
 use relay_http::{
     apply_standard_security_headers, build_content_security_policy, DEFAULT_CONNECT_SRC,
     PERMISSIONS_POLICY, REFERRER_POLICY, X_CONTENT_TYPE_OPTIONS,
@@ -115,6 +115,32 @@ fn strict_transport_security_only_applies_when_enabled_for_https_requests() {
         false,
     );
     assert!(!insecure_headers.contains_key("strict-transport-security"));
+}
+
+#[test]
+fn cache_control_policy_for_static_surface() {
+    // Hashed bundles are immutable — but ONLY on success.
+    assert_eq!(
+        cache_control_for("/static/assets/app-deadbeef.js", StatusCode::OK),
+        Some("public, max-age=31536000, immutable")
+    );
+    // The bug being guarded: a missing hashed asset must NOT be cached as
+    // immutable (a year-long negative cache).
+    assert_eq!(
+        cache_control_for("/static/assets/app-deadbeef.js", StatusCode::NOT_FOUND),
+        None
+    );
+    // The HTML shell and other non-hashed static files revalidate.
+    assert_eq!(cache_control_for("/", StatusCode::OK), Some("no-cache"));
+    assert_eq!(
+        cache_control_for("/index.html", StatusCode::OK),
+        Some("no-cache")
+    );
+    // Non-2xx for those revalidating paths is also left untouched.
+    assert_eq!(cache_control_for("/missing", StatusCode::NOT_FOUND), None);
+    // API responses (JSON + the SSE stream) manage their own freshness.
+    assert_eq!(cache_control_for("/api/session", StatusCode::OK), None);
+    assert_eq!(cache_control_for("/api/stream", StatusCode::OK), None);
 }
 
 #[test]

@@ -14,6 +14,7 @@ import {
   isReviewBlocked,
   isReviewInProgress,
   isReviewInProgressForThread,
+  projectReviewReadOnlySession,
   reviewChipTone,
   reviewStatusLabel,
   selectReviewLaunchModel,
@@ -71,19 +72,21 @@ test("ReviewPanel shows only the clean option when there are no reusable reviewe
   assert.doesNotMatch(html, /Reuse:/);
 });
 
-test("reviewSubmitPayload carries the reuse thread id and nulls the model on reuse", () => {
-  // Reuse: the chosen thread id is sent and the model is NEVER overridden (the
-  // existing thread keeps its own session model).
+test("reviewSubmitPayload carries the reuse thread id AND an explicit model/effort override", () => {
+  // Reuse now honors a model/effort override (the existing thread no longer silently
+  // keeps its own when the user picks one); the chosen thread id is still sent.
   assert.deepEqual(
     reviewSubmitPayload({
       reviewerProvider: "codex",
       reviewerModel: "gpt-5.5",
+      reviewerEffort: "high",
       instructions: "  look again  ",
       reviewerThreadId: "rev-1",
     }),
     {
       reviewerProvider: "codex",
-      reviewerModel: null,
+      reviewerModel: "gpt-5.5",
+      reviewerEffort: "high",
       instructions: "look again",
       reviewerThreadId: "rev-1",
       maxRounds: 1,
@@ -91,19 +94,41 @@ test("reviewSubmitPayload carries the reuse thread id and nulls the model on reu
   );
 });
 
+test("reviewSubmitPayload leaves model/effort null when not overridden on reuse", () => {
+  // Empty values mean "keep the reviewer thread's own model/effort".
+  assert.deepEqual(
+    reviewSubmitPayload({
+      reviewerProvider: "codex",
+      reviewerModel: "",
+      reviewerEffort: "",
+      reviewerThreadId: "rev-1",
+    }),
+    {
+      reviewerProvider: "codex",
+      reviewerModel: null,
+      reviewerEffort: null,
+      instructions: null,
+      reviewerThreadId: "rev-1",
+      maxRounds: 1,
+    }
+  );
+});
+
 test("reviewSubmitPayload sends a clean reviewer (null thread id) otherwise", () => {
-  // "clean" sentinel and undefined both mean a fresh reviewer; the model passes through.
+  // "clean" sentinel and undefined both mean a fresh reviewer; model/effort pass through.
   for (const reviewerThreadId of ["clean", undefined]) {
     assert.deepEqual(
       reviewSubmitPayload({
         reviewerProvider: "codex",
         reviewerModel: "gpt-5.5",
+        reviewerEffort: "medium",
         instructions: "",
         reviewerThreadId,
       }),
       {
         reviewerProvider: "codex",
         reviewerModel: "gpt-5.5",
+        reviewerEffort: "medium",
         instructions: null,
         reviewerThreadId: null,
         maxRounds: 1,
@@ -155,6 +180,25 @@ test("ReviewPanel renders a maximum-rounds input", () => {
   assert.match(html, /Maximum rounds/);
   assert.match(html, /id="review-panel-max-rounds"/);
   assert.match(html, /type="number"/);
+});
+
+test("ReviewPanel renders a reasoning-effort selector with the model's supported efforts", () => {
+  const html = renderToStaticMarkup(
+    h(ReviewPanel, {
+      providerOptions: [{ label: "Codex", value: "codex" }],
+      models: [
+        {
+          model: "gpt-5.5",
+          display_name: "GPT-5.5",
+          provider: "codex",
+          supported_reasoning_efforts: ["low", "high"],
+        },
+      ],
+      defaultProvider: "codex",
+    })
+  );
+  assert.match(html, /Reasoning effort/);
+  assert.match(html, /id="review-panel-effort"/);
 });
 
 test("ReviewLauncher renders a Review button alongside the panel", () => {
@@ -221,6 +265,35 @@ test("selectReviewLaunchModel offers a different default provider and flattens t
   assert.equal(model.models.length, 2);
 });
 
+test("selectReviewLaunchModel stamps each model with its provider so the dialog filters by reviewer", () => {
+  const { models } = selectReviewLaunchModel({
+    providers: ["codex", "claude_code"],
+    providerModels: {
+      // Codex returns models with an EMPTY provider field — the source of the bug
+      // where GPT models showed up under a Claude reviewer.
+      codex: [{ model: "gpt-5.5", display_name: "GPT-5.5", provider: "" }],
+      claude_code: [{ model: "sonnet", display_name: "Sonnet", provider: "claude_code" }],
+    },
+    session: { provider: "codex", available_models: [] },
+  });
+  // Every model carries its owning provider key (no empty providers left to leak).
+  assert.deepEqual(
+    models.map((model) => [model.model, model.provider]).sort(),
+    [
+      ["gpt-5.5", "codex"],
+      ["sonnet", "claude_code"],
+    ]
+  );
+  // The dialog's per-provider filter now shows ONLY the chosen reviewer's models.
+  const forClaude = models.filter(
+    (model) => !model.provider || model.provider === "claude_code"
+  );
+  assert.deepEqual(
+    forClaude.map((model) => model.model),
+    ["sonnet"]
+  );
+});
+
 test("selectReviewLaunchModel falls back to the session provider when it is the only one", () => {
   const model = selectReviewLaunchModel({
     providers: ["codex"],
@@ -253,6 +326,57 @@ test("canRequestReview requires controller + idle + no active review", () => {
   );
   // No active thread.
   assert.equal(canRequestReview({ ...base, active_thread_id: null }, "device-a"), false);
+});
+
+test("projectReviewReadOnlySession projects a non-active review parent into a read-only session", () => {
+  const real = {
+    active_thread_id: "B",
+    transcript: [{ kind: "agent_text", text: "thread B live" }],
+    active_turn_id: "turn-b",
+    active_controller_device_id: "device-a",
+    pending_approvals: [{ request_id: "x" }],
+    active_review_jobs: [{ parent_thread_id: "A", status: "waiting_for_reviewer" }],
+  };
+  const viewOnlyThread = {
+    threadId: "A",
+    entries: [{ kind: "agent_text", text: "thread A recap" }],
+  };
+
+  // Viewing the review parent A while B is active → read-only projection onto A.
+  const projected = projectReviewReadOnlySession(real, { viewThreadId: "A", viewOnlyThread });
+  assert.notEqual(projected, real, "should return a new projected session");
+  assert.equal(projected.active_thread_id, "A", "projected active thread is the viewed parent");
+  assert.equal(projected.transcript[0].text, "thread A recap", "renders the parent's transcript");
+  assert.equal(projected.view_only, true);
+  assert.equal(projected.active_controller_device_id, "__view_only__", "read-only (not controller)");
+  assert.equal(projected.active_turn_id, null);
+  assert.deepEqual(projected.pending_approvals, []);
+});
+
+test("projectReviewReadOnlySession is a no-op unless viewing a non-active review parent", () => {
+  const real = {
+    active_thread_id: "B",
+    transcript: [],
+    active_review_jobs: [{ parent_thread_id: "A", status: "waiting_for_reviewer" }],
+  };
+  const pin = { threadId: "A", entries: [{ kind: "agent_text", text: "a" }] };
+
+  // No pin → unchanged.
+  assert.equal(projectReviewReadOnlySession(real, { viewThreadId: "A", viewOnlyThread: null }), real);
+  // Viewing the ACTIVE thread → unchanged (it renders live normally).
+  const activeReal = { ...real, active_thread_id: "A" };
+  assert.equal(
+    projectReviewReadOnlySession(activeReal, { viewThreadId: "A", viewOnlyThread: pin }),
+    activeReal
+  );
+  // Pin/viewThreadId mismatch → unchanged.
+  assert.equal(projectReviewReadOnlySession(real, { viewThreadId: "C", viewOnlyThread: pin }), real);
+  // Thread not under review → unchanged (no review to be read-only for).
+  const noReview = { active_thread_id: "B", transcript: [], active_review_jobs: [] };
+  assert.equal(
+    projectReviewReadOnlySession(noReview, { viewThreadId: "A", viewOnlyThread: pin }),
+    noReview
+  );
 });
 
 test("isReviewInProgressForThread only matches the reviewed parent while non-terminal", () => {

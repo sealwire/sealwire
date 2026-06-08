@@ -97,6 +97,10 @@ pub(crate) struct ReviewJob {
     pub(crate) reviewer_thread_id: Option<String>,
     pub(crate) reviewer_provider: String,
     pub(crate) reviewer_model: Option<String>,
+    /// Optional reasoning-effort override for the reviewer's turn(s). `None` falls
+    /// back to the reviewer thread's own recorded effort (reuse) or the model default
+    /// (clean). Set by `request_review` from the request.
+    pub(crate) reviewer_effort: Option<String>,
     /// `CleanThread` for a fresh reviewer; `ExistingThread` when reusing a prior
     /// reviewer thread (the orchestrator skips reviewer creation and sends a
     /// re-review prompt to the existing thread).
@@ -148,6 +152,7 @@ impl ReviewJob {
             reviewer_thread_id: None,
             reviewer_provider,
             reviewer_model,
+            reviewer_effort: None,
             reviewer_mode,
             cwd,
             status: ReviewJobStatus::PendingParentRecap,

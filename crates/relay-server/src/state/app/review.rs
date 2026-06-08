@@ -77,6 +77,7 @@ struct ReviewJobFields {
     parent_thread_id: String,
     reviewer_provider: String,
     reviewer_model: Option<String>,
+    reviewer_effort: Option<String>,
     reviewer_mode: ReviewMode,
     cwd: String,
     device_id: String,
@@ -247,12 +248,10 @@ reviewer thread"
             parent_thread_id.clone(),
             parent_provider,
             reviewer_provider,
-            // A reused thread keeps its own session model; never override it.
-            if reuse_thread_id.is_some() {
-                None
-            } else {
-                non_empty(input.reviewer_model.clone())
-            },
+            // The reviewer model: an explicit choice is honored for clean AND reused
+            // reviewers (the caller can re-review with a different model). When omitted
+            // a reused thread falls back to its own recorded model in the orchestrator.
+            non_empty(input.reviewer_model.clone()),
             reviewer_mode,
             cwd,
             device_id.clone(),
@@ -266,6 +265,9 @@ reviewer thread"
         if let Some(reviewer_id) = &reuse_thread_id {
             job.reviewer_thread_id = Some(reviewer_id.clone());
         }
+        // Optional reasoning-effort override (clean or reuse). Falls back in the
+        // orchestrator to the reviewer thread's own effort / the model default.
+        job.reviewer_effort = non_empty(input.reviewer_effort.clone());
         let status_view = job.status_view();
 
         {
@@ -389,6 +391,7 @@ to this thread."
             parent_thread_id,
             reviewer_provider,
             reviewer_model,
+            reviewer_effort,
             reviewer_mode,
             cwd,
             device_id: _device_id,
@@ -532,7 +535,13 @@ to this thread."
             let (this_reviewer_id, reviewer_turn_model, reviewer_turn_effort) =
                 match existing_reviewer {
                     Some(existing) => match self.prepare_reused_reviewer_thread(&existing).await {
-                        Ok((model, effort)) => (existing, model, effort),
+                        // Reuse: an explicit request model/effort overrides the reviewer
+                        // thread's own recorded settings; otherwise keep its own.
+                        Ok((model, effort)) => (
+                            existing,
+                            reviewer_model.clone().or(model),
+                            reviewer_effort.clone().or(effort),
+                        ),
                         Err(error) => {
                             self.fail_job(
                                 &job_id,
@@ -548,10 +557,13 @@ to this thread."
                             &cwd,
                             &reviewer_provider,
                             reviewer_model.as_deref(),
+                            reviewer_effort.as_deref(),
                         )
                         .await
                     {
-                        Ok(thread_id) => (thread_id, reviewer_model.clone(), None),
+                        Ok(thread_id) => {
+                            (thread_id, reviewer_model.clone(), reviewer_effort.clone())
+                        }
                         Err(error) => {
                             self.fail_job(
                                 &job_id,
@@ -812,6 +824,7 @@ to this thread."
             parent_thread_id: job.parent_thread_id.clone(),
             reviewer_provider: job.reviewer_provider.clone(),
             reviewer_model: job.reviewer_model.clone(),
+            reviewer_effort: job.reviewer_effort.clone(),
             reviewer_mode: job.reviewer_mode.clone(),
             cwd: job.cwd.clone(),
             device_id: job.requested_by_device_id.clone(),
@@ -933,6 +946,7 @@ to this thread."
         cwd: &str,
         reviewer_provider: &str,
         reviewer_model: Option<&str>,
+        reviewer_effort: Option<&str>,
     ) -> Result<String, String> {
         let (provider_name, bridge) = {
             let (name, bridge) = self.resolve_provider(Some(reviewer_provider))?;
@@ -948,8 +962,13 @@ to this thread."
             reviewer_model.map(str::to_string),
             defaults.model.clone(),
         );
-        let effort =
-            default_effort_for_model(&provider_models, &model).unwrap_or(defaults.reasoning_effort);
+        // An explicit effort override wins; otherwise use the model's default effort,
+        // falling back to the session default.
+        let effort = reviewer_effort
+            .map(str::to_string)
+            .filter(|value| !value.is_empty())
+            .or_else(|| default_effort_for_model(&provider_models, &model))
+            .unwrap_or(defaults.reasoning_effort);
         // Keep the reviewer read-only where the provider supports it (Codex honors
         // a read-only sandbox); otherwise fall back to a permission-prompting mode
         // and warn, since the review must not mutate the work under review.

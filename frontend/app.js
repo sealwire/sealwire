@@ -135,6 +135,7 @@ import {
 } from "./shared/thread-list-store.js";
 import { installThreadListWheelProxy } from "./shared/thread-list-scroll.js";
 import { fetchBuildInfo } from "./shared/build-badge.js";
+import { isReviewInProgressForThread } from "./shared/review-state.js";
 import { ClientLog } from "./shared/client-log.js";
 import {
   loadLastApprovalPolicy,
@@ -181,6 +182,11 @@ const state = {
   selectedCwd: "",
   session: null,
   viewThreadId: readThreadIdFromUrl(),
+  // Read-only "view projection" of a non-active, review-locked parent thread (see
+  // render-session.js projectReadOnlyView). `{ threadId, entries, generation,
+  // reviewSig, loading }` or null. Loaded by loadViewOnlyTranscript() below.
+  viewOnlyThread: null,
+  viewOnlyGeneration: 0,
   sessionStream: null,
   streamConnected: false,
   transcriptEntryDetailCache: new Map(),
@@ -503,6 +509,10 @@ const renderer = createSessionRenderer({
       }
       renderer.syncThreadSelection();
     });
+    // Fetch the viewed thread's transcript so a non-active review parent renders
+    // read-only (instead of falling back to the console home). No-op / clears the
+    // projection for threads that aren't a non-active review parent.
+    void loadViewOnlyTranscript(threadId);
   },
 });
 
@@ -512,9 +522,99 @@ const renderer = createSessionRenderer({
 // through the wrapper.
 const _baseRenderSession = renderer.renderSession;
 renderer.renderSession = function wrappedRenderSession(session) {
+  maybeRefreshViewOnly(session);
   _baseRenderSession(session);
   syncVerbTimer(session);
 };
+
+// A stable signature of the review running on `threadId`, so the read-only view
+// re-fetches when the review advances (a new round, a posted-back result) and is
+// released when it ends.
+function viewOnlyReviewSignature(session, threadId) {
+  const job = (session?.active_review_jobs || []).find(
+    (entry) => entry.parent_thread_id === threadId
+  );
+  return job ? `${job.status}:${job.round ?? 0}:${job.updated_at ?? 0}` : "none";
+}
+
+// Fetch a non-active, review-locked parent thread's transcript into
+// state.viewOnlyThread so render-session.js can project it read-only. For any other
+// thread (active, or not under review) it clears the projection. A generation guard
+// drops stale responses when the user navigates again mid-fetch.
+async function loadViewOnlyTranscript(threadId) {
+  const session = state.session;
+  const eligible =
+    Boolean(threadId) &&
+    Boolean(session) &&
+    threadId !== session.active_thread_id &&
+    isReviewInProgressForThread(session, threadId);
+  if (!eligible) {
+    if (state.viewOnlyThread) {
+      state.viewOnlyThread = null;
+      if (state.session) renderer.renderSession(state.session);
+    }
+    return;
+  }
+
+  const generation = (state.viewOnlyGeneration = (state.viewOnlyGeneration || 0) + 1);
+  const reviewSig = viewOnlyReviewSignature(session, threadId);
+  const priorEntries =
+    state.viewOnlyThread?.threadId === threadId ? state.viewOnlyThread.entries : [];
+  state.viewOnlyThread = {
+    threadId,
+    entries: priorEntries,
+    generation,
+    reviewSig,
+    loading: true,
+  };
+  if (state.session) renderer.renderSession(state.session);
+
+  try {
+    const page = await controller?.fetchTranscriptPage(threadId, {});
+    if (generation !== state.viewOnlyGeneration) return;
+    const entries = page?.entries || (Array.isArray(page) ? page : []);
+    state.viewOnlyThread = { threadId, entries, generation, reviewSig, loading: false };
+  } catch (error) {
+    if (generation !== state.viewOnlyGeneration) return;
+    state.viewOnlyThread = {
+      threadId,
+      entries: priorEntries,
+      generation,
+      reviewSig,
+      loading: false,
+    };
+    logLine(`Couldn't load the read-only thread view: ${error.message}`);
+  }
+  if (state.session) renderer.renderSession(state.session);
+}
+
+// Called on every render: release the read-only pin once the viewed thread becomes
+// active or its review ends, and re-fetch when the review advances. The reviewSig
+// guard keeps this from re-fetching on unrelated renders.
+function maybeRefreshViewOnly(session) {
+  const pin = state.viewOnlyThread;
+  if (!pin || !session) return;
+  if (pin.threadId === session.active_thread_id) {
+    // The viewed thread is already the active session → drop the read-only pin.
+    state.viewOnlyThread = null;
+    return;
+  }
+  if (!isReviewInProgressForThread(session, pin.threadId)) {
+    // The review ended. Per the chosen UX: if the user is STILL looking at this
+    // thread, seamlessly resume it so the read-only view turns into the live session
+    // IN PLACE — never flip them to the console home. If they've already navigated
+    // away, just drop the pin and leave their view exactly where it is.
+    const threadId = pin.threadId;
+    state.viewOnlyThread = null;
+    if (state.viewThreadId === threadId) {
+      void controller?.resumeSession(threadId);
+    }
+    return;
+  }
+  if (!pin.loading && pin.reviewSig !== viewOnlyReviewSignature(session, pin.threadId)) {
+    void loadViewOnlyTranscript(pin.threadId);
+  }
+}
 
 controller = createSessionController({
   state,

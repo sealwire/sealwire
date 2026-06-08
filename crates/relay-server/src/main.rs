@@ -230,7 +230,47 @@ fn build_router(context: AppContext, web_assets: WebAssets) -> Router {
             context,
             with_security_headers,
         ))
+        .layer(middleware::from_fn(with_cache_headers))
         .layer(TraceLayer::new_for_http())
+}
+
+/// Cache policy for the static web surface. Without this the HTML shell is served
+/// with no `Cache-Control`, so browsers (notably iOS Safari / installed PWAs)
+/// heuristically cache `index.html` — which pins them to the OLD content-hashed
+/// asset filenames it references, so a rebuilt bundle never loads even though the
+/// runtime-fetched `build-meta.json` reports the new build. The fix: the HTML shell
+/// and other non-hashed files always revalidate (`no-cache`), while Vite's
+/// content-hashed bundles under `/static/assets/` are immutable and cache forever.
+/// Decide the `Cache-Control` value for a static-surface response, or `None` to
+/// leave the header untouched. Pure so the policy is unit-testable without
+/// driving the router.
+///
+/// - `/api/*` (JSON + the SSE stream) manage their own freshness — untouched.
+/// - Only SUCCESSFUL responses are stamped: a 404 for a missing hashed asset
+///   under `/static/assets/` must never be cached as `immutable` for a year (it
+///   would pin a negative response).
+/// - Content-hashed bundles are immutable; everything else revalidates.
+fn cache_control_for(path: &str, status: StatusCode) -> Option<&'static str> {
+    if path.starts_with("/api/") || !status.is_success() {
+        return None;
+    }
+    if path.starts_with("/static/assets/") {
+        Some("public, max-age=31536000, immutable")
+    } else {
+        Some("no-cache")
+    }
+}
+
+async fn with_cache_headers(request: Request, next: Next) -> Response {
+    let path = request.uri().path().to_string();
+    let mut response = next.run(request).await;
+    if let Some(value) = cache_control_for(&path, response.status()) {
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static(value),
+        );
+    }
+    response
 }
 
 async fn serve_embedded_index() -> Response {

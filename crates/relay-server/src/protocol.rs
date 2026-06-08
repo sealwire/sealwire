@@ -1287,6 +1287,12 @@ pub struct RequestReviewInput {
     pub parent_thread_id: Option<String>,
     pub reviewer_provider: String,
     pub reviewer_model: Option<String>,
+    /// Optional reasoning-effort override for the reviewer's turn(s). Honored for
+    /// clean AND reused reviewers (a reused thread no longer silently keeps its own
+    /// effort when the caller picks one). `None` falls back to the reviewer thread's
+    /// recorded effort (reuse) or the model default (clean).
+    #[serde(default)]
+    pub reviewer_effort: Option<String>,
     /// Reserved for Phase 3 (reviewer-thread reuse). v1 rejects when set.
     pub reviewer_thread_id: Option<String>,
     pub instructions: Option<String>,

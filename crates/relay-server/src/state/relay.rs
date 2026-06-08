@@ -609,30 +609,6 @@ impl RelayState {
         views
     }
 
-    /// Review jobs for the SESSION SNAPSHOT, scoped to the active thread (the parent
-    /// under review in v1, which stays active/frozen for the review's lifetime). A
-    /// review belongs to its parent thread, so a terminal job — which now persists
-    /// until dismissed — must NOT bleed into the Reviewer panel of an unrelated thread
-    /// the user later switches to. The management endpoint (`list_review_jobs`) and the
-    /// per-thread lock logic stay global; only what the panel renders is scoped here.
-    pub(crate) fn snapshot_review_jobs_view(&self) -> Vec<crate::protocol::ReviewJobView> {
-        let Some(active) = self.active_thread_id.as_deref() else {
-            return Vec::new();
-        };
-        let mut views: Vec<_> = self
-            .review_jobs
-            .values()
-            .filter(|job| job.parent_thread_id == active)
-            .map(|job| job.view())
-            .collect();
-        views.sort_by(|left, right| {
-            left.updated_at
-                .cmp(&right.updated_at)
-                .then_with(|| left.id.cmp(&right.id))
-        });
-        views
-    }
-
     pub(crate) fn ensure_runtime_for_thread(&mut self, thread_id: &str) -> &mut ThreadRuntime {
         if self.active_thread_id.as_deref() == Some(thread_id)
             && !self.runtimes.contains_key(thread_id)
@@ -931,7 +907,7 @@ impl RelayState {
             transcript_truncated: false,
             transcript,
             logs: self.logs.clone(),
-            active_review_jobs: self.snapshot_review_jobs_view(),
+            active_review_jobs: self.active_review_jobs_view(),
             reviewer_threads: self.reviewer_thread_views(),
         }
     }

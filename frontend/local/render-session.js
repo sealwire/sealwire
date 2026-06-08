@@ -73,6 +73,7 @@ import {
   canRequestReview,
   isReviewBlocked,
   isReviewInProgressForThread,
+  projectReviewReadOnlySession,
   reviewStatusLabel,
   selectReviewLaunchModel,
 } from "../shared/review-state.js";
@@ -248,6 +249,14 @@ export function createSessionRenderer({
     if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
       window.dispatchEvent(new CustomEvent("agent-relay:session-updated"));
     }
+    // From here down, render the (possibly read-only) projection — never `state.session`
+    // directly — so a non-active review parent the user clicked back to shows its own
+    // conversation read-only instead of the console home. `state.session` stays the
+    // REAL session so heartbeat / lease / controller / nav keep using it.
+    session = projectReviewReadOnlySession(session, {
+      viewThreadId: state.viewThreadId,
+      viewOnlyThread: state.viewOnlyThread,
+    });
 
     const approval = session.pending_approvals[0] || null;
     const pendingPairings = filterActivePairings(session.pending_pairing_requests || []);
@@ -271,7 +280,11 @@ export function createSessionRenderer({
     state.currentApprovalId = approval?.request_id || null;
 
     workspaceTitle.textContent = workspaceName || "Relay console";
-    if (viewingConversation && session.active_thread_id) {
+    if (session.view_only && session.active_thread_id) {
+      const threadLabel =
+        activeThread?.name || activeThread?.preview || shortId(session.active_thread_id);
+      workspaceSubtitle.textContent = `read-only · review in progress · ${threadLabel}`;
+    } else if (viewingConversation && session.active_thread_id) {
       const threadLabel =
         activeThread?.name || activeThread?.preview || shortId(session.active_thread_id);
       workspaceSubtitle.textContent = `live · ${threadLabel}`;
@@ -853,6 +866,7 @@ export function createSessionRenderer({
   function renderControlBanner(session) {
     if (
       !session.active_thread_id
+      || session.view_only
       || !isViewingConversation(session)
       || !session.active_controller_device_id
       || isCurrentDeviceActiveController(session)
@@ -1026,6 +1040,20 @@ export function createSessionRenderer({
         );
         return;
       }
+    }
+
+    // Read-only review view whose transcript hasn't loaded yet — show a calm
+    // placeholder instead of the live "send the first prompt" ready-state.
+    if (!entries.length && session.view_only) {
+      renderConversationContent(
+        h(ConversationEmptyState, {
+          badge: "Review",
+          className: "thread-empty-ready",
+          copy: "Loading this thread's conversation. Another agent is reviewing it — its progress shows in the Reviewer panel.",
+          title: "Review in progress",
+        })
+      );
+      return;
     }
 
     if (!entries.length && !approval) {

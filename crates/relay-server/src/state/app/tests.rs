@@ -2874,6 +2874,7 @@ mod review_tests {
             parent_thread_id: None,
             reviewer_provider: reviewer_provider.to_string(),
             reviewer_model: None,
+            reviewer_effort: None,
             reviewer_thread_id: None,
             instructions: Some("focus on the tests".to_string()),
             max_rounds: None,
@@ -2988,52 +2989,6 @@ mod review_tests {
             .await
             .expect("a clobbering refresh must not make the reviewer unroutable");
         assert_eq!(name, "codex");
-    }
-
-    #[tokio::test]
-    async fn snapshot_review_jobs_are_scoped_to_the_active_thread() {
-        // A review belongs to its parent thread. Terminal jobs persist until dismissed,
-        // so without scoping a finished/failed review would keep showing in the Reviewer
-        // panel of whatever thread the user later switches to.
-        let dir = TempDir::new().expect("tmpdir");
-        let cwd = dir.path().to_str().unwrap();
-        let (app, _providers) = build_review_app(cwd, &["codex"]).await;
-        start_parent(&app, cwd, "codex").await;
-
-        let receipt = app
-            .request_review(review_input("codex"))
-            .await
-            .expect("review should start");
-        let job = wait_for_review(&app, &receipt.review_job_id).await;
-        assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
-
-        // The parent is the active thread: its review surfaces in the snapshot.
-        assert!(
-            app.snapshot()
-                .await
-                .active_review_jobs
-                .iter()
-                .any(|job| job.id == receipt.review_job_id),
-            "the parent thread's own review must be visible"
-        );
-
-        // Navigate to an unrelated thread: the review must NOT bleed into its panel.
-        {
-            let mut relay = app.relay.write().await;
-            relay.active_thread_id = Some("some-unrelated-thread".to_string());
-        }
-        assert!(
-            app.snapshot().await.active_review_jobs.is_empty(),
-            "a review must not surface on a thread that is not its parent"
-        );
-        // ...but it stays globally retrievable, so it can still be dismissed.
-        assert!(
-            app.list_review_jobs()
-                .await
-                .iter()
-                .any(|job| job.id == receipt.review_job_id),
-            "the management list stays global"
-        );
     }
 
     #[tokio::test]
@@ -3534,6 +3489,68 @@ mod review_tests {
         assert_eq!(
             reviewer_turn_model, "codex-special",
             "the reuse turn must keep the reviewer's own model: {turn_models:?}"
+        );
+    }
+
+    // A reused reviewer now honors an EXPLICIT model + effort override from the
+    // request (the user can re-review with a different model/effort), instead of
+    // silently keeping the thread's own.
+    #[tokio::test]
+    async fn review_reuse_honors_model_and_effort_override() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        start_parent(&app, cwd, "codex").await;
+
+        let mut first_input = review_input("codex");
+        first_input.reviewer_model = Some("codex-special".to_string());
+        let first = app
+            .request_review(first_input)
+            .await
+            .expect("first review should start");
+        let first_job = wait_for_review(&app, &first.review_job_id).await;
+        let reviewer = first_job
+            .reviewer_thread_id
+            .clone()
+            .expect("reviewer thread id");
+        wait_for_active_turn_idle(&app).await;
+
+        // Reuse WITH an explicit model + effort override.
+        let mut reuse = review_input("codex");
+        reuse.reviewer_thread_id = Some(reviewer.clone());
+        reuse.reviewer_model = Some("codex-override".to_string());
+        reuse.reviewer_effort = Some("high".to_string());
+        let second = app
+            .request_review(reuse)
+            .await
+            .expect("reuse review should start");
+        let second_job = wait_for_review(&app, &second.review_job_id).await;
+        assert_eq!(
+            second_job.status, "complete",
+            "reuse job failed: {:?}",
+            second_job.error
+        );
+
+        let turn_models = providers
+            .get("codex")
+            .unwrap()
+            .turn_models
+            .lock()
+            .await
+            .clone();
+        let (model, effort) = turn_models
+            .iter()
+            .filter(|(tid, _, _)| tid == &reviewer)
+            .last()
+            .map(|(_, model, effort)| (model.clone(), effort.clone()))
+            .expect("a reviewer turn should have run");
+        assert_eq!(
+            model, "codex-override",
+            "the reuse turn must use the override model: {turn_models:?}"
+        );
+        assert_eq!(
+            effort, "high",
+            "the reuse turn must use the override effort: {turn_models:?}"
         );
     }
 

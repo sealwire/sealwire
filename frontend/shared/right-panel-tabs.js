@@ -32,16 +32,9 @@ export function RightPanelTabs({ store, changes, reviewer = {}, panelId = "revie
     (job) => !isTerminalReviewStatus(job.status)
   ).length;
 
-  // A starting/running review (or a blocked one) is what the user just asked for —
-  // pull them onto the Reviewer tab so the reviewer activity is visible instead of
-  // running unseen behind the Changes tab. Fires only on the transition into the
-  // attention state (dep is the derived flag), so it never fights manual tab use.
-  const pullToReviewer = blocked || inProgress > 0;
-  React.useEffect(() => {
-    if (pullToReviewer && activeTab !== "reviewer") {
-      store.setActiveTab?.("reviewer");
-    }
-  }, [pullToReviewer]);
+  // NEVER auto-switch the tab — the review must not yank the user's view around.
+  // A running/blocked review only surfaces PASSIVELY here: the tab label gets a dot
+  // ("Reviewer •") or a warning ("Reviewer ⚠"), and the user switches when they want.
   const reviewerLabel = blocked
     ? "Reviewer ⚠"
     : inProgress > 0

@@ -16,6 +16,7 @@ const h = React.createElement;
 export function reviewSubmitPayload({
   reviewerProvider,
   reviewerModel,
+  reviewerEffort,
   instructions,
   reviewerThreadId,
   maxRounds,
@@ -23,7 +24,11 @@ export function reviewSubmitPayload({
   const isReuse = Boolean(reviewerThreadId) && reviewerThreadId !== "clean";
   return {
     reviewerProvider,
-    reviewerModel: isReuse ? null : reviewerModel || null,
+    // Model + effort are honored for clean AND reused reviewers: an empty value
+    // (null) means "use the reviewer's own / the provider default", a non-empty one
+    // overrides it for this run. (A reused thread no longer silently ignores them.)
+    reviewerModel: reviewerModel || null,
+    reviewerEffort: reviewerEffort || null,
     instructions: (instructions || "").trim() || null,
     reviewerThreadId: isReuse ? reviewerThreadId : null,
     // 1 = single review (default); >1 enables the iterative reviewer↔author loop.
@@ -57,6 +62,8 @@ export function ReviewPanel({
 }) {
   const [reviewerProvider, setReviewerProvider] = React.useState(defaultProvider || "");
   const [reviewerModel, setReviewerModel] = React.useState("");
+  // Optional reasoning-effort override for the reviewer's turn(s). "" = default.
+  const [reviewerEffort, setReviewerEffort] = React.useState("");
   const [instructions, setInstructions] = React.useState("");
   // "clean" for a new reviewer, or an existing reviewer thread id to reuse.
   const [reviewerThreadId, setReviewerThreadId] = React.useState("clean");
@@ -99,11 +106,12 @@ export function ReviewPanel({
   const selectProvider = (value) => {
     setReviewerProvider(value);
     setReviewerModel("");
+    setReviewerEffort("");
     setReviewerThreadId("clean");
   };
 
-  // Choosing an existing reviewer locks the provider to that thread's provider
-  // (the reused thread keeps its own session + model).
+  // Choosing an existing reviewer locks the provider to that thread's provider.
+  // Model/effort default to "keep current" but can still be overridden below.
   const selectReviewerSession = (value) => {
     setReviewerThreadId(value);
     if (value === "clean") {
@@ -114,7 +122,16 @@ export function ReviewPanel({
       setReviewerProvider(entry.provider);
     }
     setReviewerModel("");
+    setReviewerEffort("");
   };
+
+  // Reasoning-effort options for the currently-selected model (fall back to the
+  // common low/medium/high triple when the catalog doesn't enumerate them).
+  const selectedModel = providerModels.find((model) => model.model === reviewerModel);
+  const effortOptions =
+    selectedModel?.supported_reasoning_efforts?.length
+      ? selectedModel.supported_reasoning_efforts
+      : ["low", "medium", "high"];
 
   const submit = async () => {
     if (!reviewerProvider || busy) {
@@ -131,6 +148,7 @@ export function ReviewPanel({
         reviewSubmitPayload({
           reviewerProvider,
           reviewerModel,
+          reviewerEffort,
           instructions,
           reviewerThreadId,
           maxRounds,
@@ -198,9 +216,10 @@ export function ReviewPanel({
         h("option", { value: "" }, "Select a provider…"),
         ...providerSelectOptions
       ),
-      // Model selection is hidden while reusing: the existing thread keeps its own
-      // session model.
-      !isReuse && providerModels.length
+      // Model + effort are selectable for clean AND reused reviewers. On reuse the
+      // empty option keeps the reviewer thread's own model/effort; picking a value
+      // overrides it for this run (the backend honors both).
+      providerModels.length
         ? h(
             React.Fragment,
             null,
@@ -215,9 +234,13 @@ export function ReviewPanel({
                 id: `${id}-model`,
                 className: "control-input",
                 value: reviewerModel,
-                onChange: (event) => setReviewerModel(event.target.value),
+                onChange: (event) => {
+                  setReviewerModel(event.target.value);
+                  // A new model may not support the previously-picked effort.
+                  setReviewerEffort("");
+                },
               },
-              h("option", { value: "" }, "Provider default"),
+              h("option", { value: "" }, isReuse ? "Keep current model" : "Provider default"),
               ...providerModels.map((model) =>
                 h(
                   "option",
@@ -228,6 +251,24 @@ export function ReviewPanel({
             )
           )
         : null,
+      h(
+        "label",
+        { className: "sidebar-label", htmlFor: `${id}-effort` },
+        "Reasoning effort (optional)"
+      ),
+      h(
+        "select",
+        {
+          id: `${id}-effort`,
+          className: "control-input",
+          value: reviewerEffort,
+          onChange: (event) => setReviewerEffort(event.target.value),
+        },
+        h("option", { value: "" }, isReuse ? "Keep current effort" : "Model default"),
+        ...effortOptions.map((effort) =>
+          h("option", { key: effort, value: effort }, effort)
+        )
+      ),
       h(
         "label",
         { className: "sidebar-label", htmlFor: `${id}-reviewer-session` },
