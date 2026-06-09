@@ -1273,34 +1273,30 @@ function isGroupableDiff(entry) {
 export function groupToolEntries(entries) {
   const list = entries || [];
 
-  // A turn that has a *completed* turnDiff gets consolidated: all of that turn's
-  // diff entries (every per-edit fileChange card plus the turnDiff) collapse
-  // into ONE end-of-turn diff-group, even across intervening assistant text or
-  // tool calls. This is what guarantees a single diff chip per turn instead of
-  // one chip for the inline edit and another for the summary.
-  const consolidatedTurns = new Set();
-  for (const entry of list) {
-    if (
-      isGroupableDiff(entry)
-      && entry?.tool?.item_type === "turnDiff"
-      && entry?.turn_id
-    ) {
-      consolidatedTurns.add(entry.turn_id);
+  // Every turn that has any groupable diff entry gets consolidated: all of that
+  // turn's diff entries (every per-edit fileChange card plus the turnDiff, if
+  // one exists) collapse into ONE diff-group, even across intervening assistant
+  // text or tool calls, and even before a turnDiff arrives (a still-streaming
+  // turn). The group is emitted at the turn's LAST diff entry. We record that
+  // index up front.
+  const lastDiffIndexByTurn = new Map();
+  list.forEach((entry, index) => {
+    if (isGroupableDiff(entry) && entry?.turn_id) {
+      lastDiffIndexByTurn.set(entry.turn_id, index);
     }
-  }
+  });
 
   const result = [];
   let currentGroup = null;
   let currentType = null;
   const pendingByTurn = new Map();
 
-  for (const entry of list) {
+  list.forEach((entry, index) => {
     const diffEntry = isGroupableDiff(entry);
     const turnId = entry?.turn_id;
 
-    // Consolidated diff entry: accumulate by turn, emit at the turnDiff anchor
-    // (end of turn). The earlier fileChange cards fold into this single group.
-    if (diffEntry && turnId && consolidatedTurns.has(turnId)) {
+    // Consolidated diff entry: accumulate by turn, emit at the turn's last diff.
+    if (diffEntry && turnId && lastDiffIndexByTurn.has(turnId)) {
       currentGroup = null;
       currentType = null;
       let group = pendingByTurn.get(turnId);
@@ -1309,16 +1305,15 @@ export function groupToolEntries(entries) {
         pendingByTurn.set(turnId, group);
       }
       group.entries.push(entry);
-      if (entry?.tool?.item_type === "turnDiff") {
+      if (index === lastDiffIndexByTurn.get(turnId)) {
         result.push(group);
         pendingByTurn.delete(turnId);
       }
-      continue;
+      return;
     }
 
     // Everything else groups by adjacency: tools into a tool-group, and any
-    // diff entry whose turn has no completed turnDiff (e.g. a still-streaming
-    // turn) into an inline diff-group so live edits stay visible.
+    // diff entry without a turn_id into an inline diff-group.
     let nextType = null;
     if (isGroupableCompletedTool(entry)) {
       nextType = "tool-group";
@@ -1333,20 +1328,31 @@ export function groupToolEntries(entries) {
         result.push(currentGroup);
       }
       currentGroup.entries.push(entry);
-      continue;
+      return;
     }
 
     currentGroup = null;
     currentType = null;
     result.push(entry);
-  }
+  });
 
-  // Defensive: flush any consolidated turn whose turnDiff never arrived.
+  // Defensive: flush any turn whose last diff index was somehow never reached.
   for (const group of pendingByTurn.values()) {
     result.push(group);
   }
 
-  return result;
+  // Finally, merge adjacent diff-groups into one — so several file diffs in a
+  // row collapse into a single group, exactly like consecutive tool calls do.
+  const merged = [];
+  for (const item of result) {
+    const prev = merged[merged.length - 1];
+    if (item?.type === "diff-group" && prev?.type === "diff-group") {
+      prev.entries = prev.entries.concat(item.entries);
+    } else {
+      merged.push(item);
+    }
+  }
+  return merged;
 }
 
 function groupExpandKey(group) {

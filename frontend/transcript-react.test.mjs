@@ -1016,6 +1016,29 @@ test("groupToolEntries consolidates per turn even when a tool call sits between 
   assert.deepEqual(result[1].entries.map((e) => e.item_id), ["fc", "td"]);
 });
 
+test("groupToolEntries consolidates a turn's edits even without a turnDiff (still streaming)", () => {
+  const fc1 = makeTool("fc1", { tool: { item_type: "fileChange", name: "Edit" }, turn_id: "t1" });
+  const text = { item_id: "txt", kind: "agent_text", status: "completed", text: "working", turn_id: "t1" };
+  const fc2 = makeTool("fc2", { tool: { item_type: "fileChange", name: "Edit" }, turn_id: "t1" });
+  const result = groupToolEntries([fc1, text, fc2]);
+  // No turnDiff yet, but both edits collapse into one group (emitted at fc2).
+  assert.equal(result.length, 2);
+  assert.equal(result[0].kind, "agent_text");
+  assert.equal(result[1].type, "diff-group");
+  assert.deepEqual(result[1].entries.map((e) => e.item_id), ["fc1", "fc2"]);
+});
+
+test("groupToolEntries merges back-to-back diff-groups from different turns, like tools", () => {
+  const a = makeTool("a", { tool: { item_type: "fileChange", name: "Edit" }, turn_id: "t1" });
+  const b = makeTool("b", { tool: { item_type: "fileChange", name: "Edit" }, turn_id: "t2" });
+  const c = makeTool("c", { tool: { item_type: "turnDiff", name: "TurnDiff" }, turn_id: "t2" });
+  const result = groupToolEntries([a, b, c]);
+  // Adjacent diff-groups (t1's and t2's) coalesce into a single group.
+  assert.equal(result.length, 1);
+  assert.equal(result[0].type, "diff-group");
+  assert.deepEqual(result[0].entries.map((e) => e.item_id), ["a", "b", "c"]);
+});
+
 test("groupToolEntries groups Edit/Write tools alongside read tools", () => {
   const edit = makeTool("e", {
     tool: {
@@ -1125,6 +1148,30 @@ test("TranscriptContent renders a collapsed diff-group chip with once-per-turn s
   assert.match(markup, /diff-group-chip-del">−1</);
   // Members (diff panels) do not render while the group is collapsed.
   assert.doesNotMatch(markup, /file-diff-panel/);
+});
+
+test("a turn editing several files collapses to ONE chip even with text between edits", () => {
+  const fcA = makeTool("fca", {
+    tool: {
+      item_type: "fileChange",
+      name: "Edit",
+      file_changes: [{ path: "a.js", change_type: "update", diff: "@@ -1,1 +1,1 @@\n-x\n+y\n" }],
+    },
+    turn_id: "t1",
+  });
+  const text = { item_id: "txt", kind: "agent_text", status: "completed", text: "next file", turn_id: "t1" };
+  const fcB = makeTool("fcb", {
+    tool: {
+      item_type: "fileChange",
+      name: "Edit",
+      file_changes: [{ path: "b.js", change_type: "update", diff: "@@ -1,1 +1,1 @@\n-x\n+y\n" }],
+    },
+    turn_id: "t1",
+  });
+  const markup = renderTranscriptContentMarkup([fcA, text, fcB]);
+  // A single chip aggregating both files — not two separate collapsed groups.
+  assert.equal((markup.match(/chat-message-diff-group/g) || []).length, 1);
+  assert.match(markup, /··· 2 file changes</);
 });
 
 test("diff-group chip falls back to fileChange stats when the turnDiff bodies are omitted", () => {
