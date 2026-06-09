@@ -2215,6 +2215,38 @@ fn has_working_thread_in_cwd_ignores_reviewer_and_deleted_threads() {
 }
 
 #[test]
+fn completed_background_turn_clears_phase_so_the_thread_is_not_stuck_working() {
+    // Repro: a review's recap runs on the parent in the BACKGROUND (the user switched
+    // their active thread away after requesting). When the recap turn completes, the
+    // provider event loops (codex/rpc.rs, claude.rs, fake_provider.rs) all run the same
+    // background "done" sequence — bg_set_active_turn(None) + bg_set_thread_status(idle) —
+    // but neither clears current_phase (the ACTIVE path clears it via clear_progress()).
+    // So current_phase lingers, is_working() stays true forever, and the orchestrator's
+    // recap-wait never sees the parent idle → the reviewer thread NEVER starts (the review
+    // is stuck at waiting_for_parent_recap).
+    let mut relay = test_state();
+    relay.active_thread_id = Some("active-thread".to_string());
+
+    // Background thread runs a turn: provider seeds the active turn + a "thinking" phase.
+    relay.bg_set_active_turn("bg-thread", Some("turn-1".to_string()), 0);
+    relay.touch_thread_progress("bg-thread", Some("thinking"), None);
+    assert!(
+        relay.runtime_for_thread("bg-thread").unwrap().is_working(),
+        "the background thread is working mid-turn"
+    );
+
+    // The turn completes — exactly what the codex/claude/fake background `done` arms do.
+    relay.bg_set_active_turn("bg-thread", None, 0);
+    relay.bg_set_thread_status("bg-thread", "idle".to_string(), Vec::new(), 0);
+
+    assert!(
+        !relay.runtime_for_thread("bg-thread").unwrap().is_working(),
+        "a completed background turn must clear its phase; otherwise is_working() stays \
+         true and a review's recap-wait on this parent never starts the reviewer"
+    );
+}
+
+#[test]
 fn active_idle_thread_can_be_archived() {
     let mut relay = test_state();
     relay.threads = vec![test_thread("thread-1", "/tmp/project")];

@@ -132,8 +132,18 @@ impl RelayState {
     }
 
     pub fn bg_set_active_turn(&mut self, thread_id: &str, turn_id: Option<String>, _now: u64) {
+        // `turn_id == None` means the background turn ENDED. Clear its progress phase/tool
+        // too — mirroring the active thread's clear_progress() on `done`. Without this,
+        // current_phase lingers ("thinking"/"tool"), is_working() stays true forever, and a
+        // review's recap-wait on this (background) parent never completes, so the reviewer
+        // thread never starts. (All provider `done` arms route here for background threads.)
+        let turn_ended = turn_id.is_none();
         let runtime = self.ensure_runtime_for_thread(thread_id);
         runtime.active_turn_id = turn_id;
+        if turn_ended {
+            runtime.current_phase = None;
+            runtime.current_tool = None;
+        }
         if self.active_thread_id.as_deref() == Some(thread_id) {
             self.sync_selected_runtime_to_fields();
         }
