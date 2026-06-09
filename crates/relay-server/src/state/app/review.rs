@@ -1841,10 +1841,18 @@ fn reviewer_thread_settings(
         // Codex honors a read-only sandbox: the reviewer can read files and run
         // read-only commands but cannot write. `never` keeps it non-interactive.
         "codex" => ("never".to_string(), "read-only".to_string(), true),
-        // Claude has no hard read-only mode; `default` (anything but bypass/never)
-        // makes edits require a permission prompt, which the review flow never
-        // grants — so no silent writes, but it is not a sandbox guarantee.
-        "claude" | "claude_code" => ("on-request".to_string(), parent_sandbox.to_string(), false),
+        // Claude has no filesystem sandbox. A permission-prompt policy made the reviewer
+        // prompt before reading/inspecting, which the non-interactive review loop can't
+        // answer — so the review failed the moment the reviewer tried to look at anything.
+        // Run it read-only instead: `review_read_only` maps (in the worker) to
+        // bypassPermissions — auto-allow reads + Bash, no prompts — plus a disallowedTools
+        // denylist for the file-mutation tools and AskUserQuestion. Not a hard sandbox
+        // (Bash can still write), but the dedicated write tools are blocked.
+        "claude" | "claude_code" => (
+            "review_read_only".to_string(),
+            parent_sandbox.to_string(),
+            false,
+        ),
         _ => (
             parent_approval.to_string(),
             parent_sandbox.to_string(),

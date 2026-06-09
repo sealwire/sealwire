@@ -91,6 +91,11 @@ pub(super) fn claude_permission_mode(approval_policy: &str, _sandbox: &str) -> &
     match approval_policy {
         "bypass" => "bypassPermissions",
         "never" => "acceptEdits",
+        // Read-only reviewer thread. The worker translates this sentinel to
+        // bypassPermissions (auto-allow reads + Bash with no approval prompts — the
+        // review loop is non-interactive and would fail on any prompt) plus a
+        // disallowedTools denylist for the file-mutation tools and AskUserQuestion.
+        "review_read_only" => "reviewer-read-only",
         _ => "default",
     }
 }

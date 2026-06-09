@@ -2294,6 +2294,17 @@ mod tests {
     }
 
     #[test]
+    fn review_read_only_policy_maps_to_the_reviewer_sentinel() {
+        // The reviewer thread runs read-only; the worker translates this sentinel to
+        // bypassPermissions + a write-tool denylist so the non-interactive review can
+        // inspect freely without prompting and still can't edit.
+        assert_eq!(
+            claude_permission_mode("review_read_only", "workspace-write"),
+            "reviewer-read-only"
+        );
+    }
+
+    #[test]
     fn bypass_policy_maps_to_bypass_permissions() {
         // The unified "Full access" UI option must reach the SDK as
         // `bypassPermissions` so Bash and every other tool runs without a
