@@ -3,6 +3,18 @@ use crate::protocol::{ToolCallView, TranscriptEntryKind};
 use super::RelayState;
 
 impl RelayState {
+    /// A locally-deleted thread must stay dead: late provider events (a turn still
+    /// draining on the provider, queued events processed after the delete) route here for
+    /// background threads, and every `bg_*` handler below ultimately calls
+    /// `ensure_runtime_for_thread`, whose `or_insert_with` would RE-CREATE the runtime —
+    /// resurrecting a ghost "working" thread that blocks reviews / shows in the activity
+    /// view until restart. The delete tombstone is otherwise only enforced on the thread
+    /// list, not the runtime/event path, so each background handler drops events for a
+    /// tombstoned thread up front.
+    fn drop_bg_event_for_deleted_thread(&self, thread_id: &str) -> bool {
+        self.locally_deleted_thread_ids.contains(thread_id)
+    }
+
     pub fn bg_append_agent_delta(
         &mut self,
         thread_id: &str,
@@ -11,6 +23,9 @@ impl RelayState {
         turn_id: &str,
         _now: u64,
     ) {
+        if self.drop_bg_event_for_deleted_thread(thread_id) {
+            return;
+        }
         self.append_agent_delta_for_thread(thread_id, item_id, delta, turn_id);
     }
 
@@ -21,6 +36,9 @@ impl RelayState {
         turn_id: String,
         _now: u64,
     ) {
+        if self.drop_bg_event_for_deleted_thread(thread_id) {
+            return;
+        }
         self.start_agent_message_for_thread(thread_id, item_id, turn_id);
     }
 
@@ -32,6 +50,9 @@ impl RelayState {
         turn_id: String,
         _now: u64,
     ) {
+        if self.drop_bg_event_for_deleted_thread(thread_id) {
+            return;
+        }
         self.complete_agent_message_for_thread(thread_id, item_id, text, turn_id);
     }
 
@@ -43,6 +64,9 @@ impl RelayState {
         turn_id: String,
         _now: u64,
     ) {
+        if self.drop_bg_event_for_deleted_thread(thread_id) {
+            return;
+        }
         self.upsert_user_message_for_thread(thread_id, item_id, text, turn_id);
     }
 
@@ -53,6 +77,9 @@ impl RelayState {
         delta: &str,
         _now: u64,
     ) {
+        if self.drop_bg_event_for_deleted_thread(thread_id) {
+            return;
+        }
         self.append_command_delta_for_thread(thread_id, item_id, delta);
     }
 
@@ -65,6 +92,9 @@ impl RelayState {
         turn_id: String,
         _now: u64,
     ) {
+        if self.drop_bg_event_for_deleted_thread(thread_id) {
+            return;
+        }
         self.start_command_execution_for_thread(thread_id, item_id, command, status, turn_id);
     }
 
@@ -78,6 +108,9 @@ impl RelayState {
         turn_id: String,
         _now: u64,
     ) {
+        if self.drop_bg_event_for_deleted_thread(thread_id) {
+            return;
+        }
         let mut text = command;
         if let Some(output) = super::super::non_empty(Some(output.unwrap_or_default())) {
             text.push('\n');
@@ -104,6 +137,9 @@ impl RelayState {
         tool: Option<ToolCallView>,
         _now: u64,
     ) {
+        if self.drop_bg_event_for_deleted_thread(thread_id) {
+            return;
+        }
         self.upsert_transcript_item_for_thread(
             thread_id,
             item_id,
@@ -126,12 +162,18 @@ impl RelayState {
         tool: Option<ToolCallView>,
         _now: u64,
     ) {
+        if self.drop_bg_event_for_deleted_thread(thread_id) {
+            return;
+        }
         self.upsert_transcript_item_for_thread(
             thread_id, item_id, kind, text, status, turn_id, tool,
         );
     }
 
     pub fn bg_set_active_turn(&mut self, thread_id: &str, turn_id: Option<String>, _now: u64) {
+        if self.drop_bg_event_for_deleted_thread(thread_id) {
+            return;
+        }
         // `turn_id == None` means the background turn ENDED. Clear its progress phase/tool
         // too — mirroring the active thread's clear_progress() on `done`. Without this,
         // current_phase lingers ("thinking"/"tool"), is_working() stays true forever, and a
@@ -157,6 +199,9 @@ impl RelayState {
         active_flags: Vec<String>,
         _now: u64,
     ) {
+        if self.drop_bg_event_for_deleted_thread(thread_id) {
+            return;
+        }
         self.set_thread_status(thread_id, status, active_flags);
     }
 
@@ -167,6 +212,9 @@ impl RelayState {
         status: &str,
         _now: u64,
     ) {
+        if self.drop_bg_event_for_deleted_thread(thread_id) {
+            return;
+        }
         self.set_transcript_item_status_for_thread(thread_id, item_id, status);
     }
 }

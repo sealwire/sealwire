@@ -2247,6 +2247,36 @@ fn completed_background_turn_clears_phase_so_the_thread_is_not_stuck_working() {
 }
 
 #[test]
+fn deleted_thread_is_not_resurrected_by_late_background_events() {
+    // SR3 repro: deleting a thread tombstones it + drops its runtime, but a stray late
+    // provider event (dispatch routes background events to the bg_* handlers) used to flow
+    // into ensure_runtime_for_thread's or_insert_with and RE-CREATE the runtime — a ghost
+    // "working" thread that blocks reviews / shows in the activity view until restart.
+    let mut relay = test_state();
+    relay.active_thread_id = Some("active".to_string());
+
+    // The thread is live (has a runtime), then the user deletes it.
+    relay.bg_set_thread_status("ghost", "active".to_string(), Vec::new(), 0);
+    assert!(relay.runtime_for_thread("ghost").is_some());
+    relay.mark_thread_deleted("ghost");
+    assert!(
+        relay.runtime_for_thread("ghost").is_none(),
+        "delete removes the runtime + tombstones the id"
+    );
+
+    // Late events for the deleted thread arrive (turn-in-flight on the provider, queued
+    // events, etc.) — they must be dropped, not resurrect the thread.
+    relay.bg_set_active_turn("ghost", Some("turn-9".to_string()), 0);
+    relay.bg_set_thread_status("ghost", "active".to_string(), Vec::new(), 0);
+    relay.bg_append_agent_delta("ghost", "item-1", "hi", "turn-9", 0);
+
+    assert!(
+        relay.runtime_for_thread("ghost").is_none(),
+        "a late background event must not resurrect a deleted thread's runtime"
+    );
+}
+
+#[test]
 fn active_idle_thread_can_be_archived() {
     let mut relay = test_state();
     relay.threads = vec![test_thread("thread-1", "/tmp/project")];
