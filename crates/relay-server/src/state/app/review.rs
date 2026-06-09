@@ -1560,41 +1560,6 @@ reviewed thread stays locked. Resolve the review (stop the reviewer) to unlock."
         }
     }
 
-    /// Wait for a specific thread's turn to actually end (real provider
-    /// completion), re-issuing interrupts. Returns true once it ends, false at the
-    /// deadline. Used by the resolve action.
-    async fn wait_for_thread_idle(&self, thread_id: &str, deadline: Instant) -> bool {
-        let mut rx = self.subscribe();
-        let mut next_retry = Instant::now() + INTERRUPT_RETRY_INTERVAL;
-        loop {
-            let (working, turn_id) = {
-                let relay = self.relay.read().await;
-                let runtime = relay.runtime_for_thread(thread_id);
-                (
-                    runtime.map(|runtime| runtime.is_working()).unwrap_or(false),
-                    runtime.and_then(|runtime| runtime.active_turn_id.clone()),
-                )
-            };
-            if !working {
-                return true;
-            }
-            if Instant::now() >= deadline {
-                return false;
-            }
-            if Instant::now() >= next_retry {
-                let _ = self
-                    .request_provider_stop(thread_id, turn_id.as_deref())
-                    .await;
-                next_retry = Instant::now() + INTERRUPT_RETRY_INTERVAL;
-            }
-            tokio::select! {
-                _ = rx.changed() => {}
-                _ = tokio::time::sleep_until(next_retry) => {}
-                _ = tokio::time::sleep_until(deadline) => {}
-            }
-        }
-    }
-
     /// Best-effort deny every pending approval on a thread via its provider. Does
     /// not remove them from relay state (the caller clears them only once the turn
     /// is confirmed stopped, so a failed deny stays visible).
@@ -1649,39 +1614,15 @@ reviewed thread stays locked. Resolve the review (stop the reviewer) to unlock."
         relay.notify();
     }
 
-    /// Try to stop a specific thread for the resolve action: fire a cancel, then
-    /// wait for the provider's real completion. Returns true only once the thread
-    /// is confirmed no longer running.
-    async fn try_stop_thread(&self, thread_id: &str) -> bool {
-        let (working, turn_id) = {
-            let relay = self.relay.read().await;
-            let runtime = relay.runtime_for_thread(thread_id);
-            (
-                runtime.map(|runtime| runtime.is_working()).unwrap_or(false),
-                runtime.and_then(|runtime| runtime.active_turn_id.clone()),
-            )
-        };
-        if !working {
-            return true;
-        }
-        let _ = self
-            .request_provider_stop(thread_id, turn_id.as_deref())
-            .await;
-        let deadline = Instant::now()
-            + Duration::from_millis(
-                self.review_drain_max_ms
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            );
-        self.wait_for_thread_idle(thread_id, deadline).await
-    }
-
     /// User-triggered stop for ANY non-terminal review (not just `Blocked`): signal
-    /// the orchestrator to bail at its next wait checkpoint, stop whatever turn is in
-    /// flight (the reviewer's review turn, or the parent's recap/fix/post-back turn),
-    /// then mark the job `Cancelled` — terminal, so the per-thread review lock drops
-    /// and the parent unfreezes. If a turn can't be confirmed stopped the review is
-    /// left `Blocked` (still locked) so the user can retry; the cancel flag stays set
-    /// so the orchestrator still bails when the turn eventually ends.
+    /// the orchestrator to bail at its next wait checkpoint, best-effort interrupt
+    /// whatever turn is in flight (the reviewer's review turn, or the parent's
+    /// recap/fix/post-back turn), then ALWAYS mark the job `Cancelled` — terminal, so the
+    /// per-thread review lock drops and the parent unfreezes. This is the user's escape
+    /// hatch, so it unlocks even when a turn can't be confirmed stopped (a stale/stuck
+    /// "working" thread, or one ignoring interrupts): it does NOT wait for a drain and
+    /// never leaves the review `Blocked`. The cooperative cancel flag stops the
+    /// orchestrator from starting another turn.
     pub async fn cancel_active_review(
         &self,
         device_id: Option<String>,
@@ -1709,17 +1650,17 @@ reviewed thread stays locked. Resolve the review (stop the reviewer) to unlock."
         if let Some(reviewer) = reviewer_thread_id.clone() {
             targets.push(reviewer);
         }
+        // Best-effort interrupt, then ALWAYS unlock. "Stop review" is the user's escape
+        // hatch: it must make the review terminal and unlock its threads even when a turn
+        // can't be confirmed stopped (a stale/stuck "working" thread, or one that ignores
+        // interrupts). We fire the interrupt but DON'T wait for a drain — the drain can take
+        // up to review_drain_max_ms (5 min) and never confirms for a truly stuck turn, which
+        // is exactly why Stop appeared to "not work". The cooperative cancel flag stops the
+        // orchestrator from starting more turns, and a still-running turn can't race a future
+        // review (has_working_thread_in_cwd still gates that).
         for thread_id in &targets {
             self.deny_thread_approvals_best_effort(thread_id).await;
-            if !self.try_stop_thread(thread_id).await {
-                // Couldn't confirm the turn stopped → leave it Blocked (still locked)
-                // so the user can retry. The cancel flag stays set.
-                self.enter_blocked(&job_id, thread_id).await;
-                return Err(
-                    "a review turn is still running and could not be stopped; try again"
-                        .to_string(),
-                );
-            }
+            let _ = self.request_thread_stop(thread_id).await;
             self.clear_thread_interactions(thread_id).await;
         }
 
@@ -1754,15 +1695,13 @@ reviewed thread stays locked. Resolve the review (stop the reviewer) to unlock."
         })
     }
 
-    /// User-triggered recovery for a `Blocked` review: stop the stuck reviewer
-    /// (deny its approvals + cancel its turn and wait for the real completion),
-    /// then mark the job `Failed`, which drops the per-thread review lock and
-    /// unfreezes the reviewed parent. On any failure it stays blocked. No active-
-    /// thread handoff — the parent was never displaced.
-    ///
-    /// Cancellation-safe: the blocked slot is held for the whole attempt and is
-    /// only cleared after a confirmed stop, so a cancelled handler leaves the
-    /// review blocked (still locked) rather than half-resolved.
+    /// User-triggered recovery for a `Blocked` review ("Stop reviewer & unlock"):
+    /// best-effort deny the reviewer's approvals + interrupt its turn, then ALWAYS mark
+    /// the job `Failed`, dropping the per-thread review lock and unfreezing the parent.
+    /// Like `cancel_active_review`, this is an escape hatch — it unlocks even when the
+    /// turn can't be confirmed stopped (it does not wait for a drain), so the user is
+    /// never left with a permanently-blocked review. No active-thread handoff (the parent
+    /// was never displaced).
     pub async fn resolve_blocked_review(
         &self,
         device_id: Option<String>,
@@ -1789,14 +1728,12 @@ reviewed thread stays locked. Resolve the review (stop the reviewer) to unlock."
                 .unwrap_or_default()
         };
 
+        // Best-effort interrupt, then ALWAYS unlock — same escape-hatch contract as
+        // cancel_active_review. Don't gate the unlock on a confirmed drain (it can hang up
+        // to review_drain_max_ms and never confirms for a stuck turn), which is why
+        // "Stop reviewer & unlock" appeared to do nothing.
         self.deny_thread_approvals_best_effort(&thread_id).await;
-        if !self.try_stop_thread(&thread_id).await {
-            // Still running — stays blocked.
-            return Err(
-                "the reviewer turn is still running and could not be stopped; try again"
-                    .to_string(),
-            );
-        }
+        let _ = self.request_thread_stop(&thread_id).await;
         self.clear_thread_interactions(&thread_id).await;
         // Confirmed stopped: mark the job terminal. That drops the per-thread
         // review lock (the parent unfreezes) since the job is no longer

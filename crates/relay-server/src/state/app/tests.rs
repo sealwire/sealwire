@@ -4542,37 +4542,14 @@ mod review_tests {
             .expect_err("a non-controller device must not resolve");
         assert!(scope_err.contains("control"), "got: {scope_err}");
 
-        // A resolve that can't stop the turn stays blocked (guard never leaves the
-        // slot), and the lock is still held.
-        let resolve_err = app
-            .resolve_blocked_review(Some("device-1".to_string()))
-            .await
-            .expect_err("resolve must fail while the turn can't be stopped");
-        assert!(resolve_err.contains("still running"), "got: {resolve_err}");
-        assert_eq!(
-            app.list_review_jobs()
-                .await
-                .into_iter()
-                .find(|job| job.id == receipt.review_job_id)
-                .map(|job| job.status),
-            Some("blocked".to_string()),
-            "a failed resolve must stay blocked"
-        );
-        app.send_message(crate::protocol::SendMessageInput {
-            text: "hi".to_string(),
-            model: None,
-            effort: None,
-            device_id: Some("device-1".to_string()),
-        })
-        .await
-        .expect_err("the lock must still be held after a failed resolve");
-
-        // Now the provider can stop the turn; resolving unlocks the workspace.
-        codex.interrupt_fails.store(false, Ordering::Relaxed);
+        // "Stop reviewer & unlock" is the escape hatch: it unlocks even though the turn
+        // still can't be stopped (interrupt_fails stays true) — a best-effort interrupt,
+        // then the review is forced terminal and the workspace unlocked. (It used to stay
+        // blocked here and return an error, leaving the user no way out.)
         let resolved = app
             .resolve_blocked_review(Some("device-1".to_string()))
             .await
-            .expect("resolve should unblock");
+            .expect("resolve must unlock even when the turn can't be stopped");
         assert_eq!(resolved.status.status, "failed");
 
         let job = wait_for_review_status(&app, &receipt.review_job_id, &["failed"]).await;
@@ -5768,6 +5745,79 @@ mod review_tests {
         assert!(
             !app.relay.read().await.is_thread_review_locked(&parent.id),
             "the reviewed parent must stay unlocked after a racing status write",
+        );
+    }
+
+    // "Stop review" MUST unlock the reviewed thread even when the in-flight turn can't be
+    // confirmed stopped (a stale "working" thread, or a turn that ignores interrupts).
+    // Before the fix cancel left the review Blocked + returned an error, so the workspace
+    // stayed locked — the escape hatch didn't escape.
+    #[tokio::test]
+    async fn cancel_unlocks_even_when_the_turn_cannot_be_stopped() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        app.set_review_step_timeout_ms(60_000); // don't auto-timeout the review
+        let codex = providers.get("codex").unwrap();
+        codex.complete_turns.store(false, Ordering::Relaxed); // recap turn hangs
+        codex.interrupt_fails.store(true, Ordering::Relaxed); // ...and ignores interrupts
+        let parent = start_parent(&app, cwd, "codex").await;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        wait_for_review_status(&app, &receipt.review_job_id, &["waiting_for_parent_recap"]).await;
+        assert!(app.relay.read().await.is_thread_review_locked(&parent.id));
+
+        let cancel = app.cancel_active_review(Some("device-1".to_string())).await;
+        assert!(
+            cancel.is_ok(),
+            "Stop review must not error when the turn can't be stopped: {cancel:?}"
+        );
+        assert_eq!(cancel.unwrap().status.status, "cancelled");
+        let job = wait_for_review_status(&app, &receipt.review_job_id, &["cancelled"]).await;
+        assert_eq!(job.status, "cancelled", "error: {:?}", job.error);
+        assert!(
+            !app.relay.read().await.is_thread_review_locked(&parent.id),
+            "Stop review must unlock the reviewed thread even for an un-stoppable turn"
+        );
+    }
+
+    // "Stop reviewer & unlock" on a BLOCKED review must also force the unlock through, even
+    // if the stuck turn still won't stop. (A review reaches Blocked when the orchestrator's
+    // own stop attempt fails.)
+    #[tokio::test]
+    async fn resolve_unlocks_a_blocked_review_even_when_the_turn_cannot_be_stopped() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        app.set_review_step_timeout_ms(120); // recap times out fast
+        app.set_review_drain_max_ms(100); // the orchestrator's stop-drain gives up fast → Blocked
+        let codex = providers.get("codex").unwrap();
+        codex.complete_turns.store(false, Ordering::Relaxed); // recap hangs
+        codex.interrupt_fails.store(true, Ordering::Relaxed); // can't be stopped → orchestrator blocks
+        let parent = start_parent(&app, cwd, "codex").await;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        // The recap times out and the orchestrator can't stop the turn → review goes Blocked.
+        let job = wait_for_review_status(&app, &receipt.review_job_id, &["blocked"]).await;
+        assert_eq!(job.status, "blocked");
+        assert!(app.relay.read().await.is_thread_review_locked(&parent.id));
+
+        // "Stop reviewer & unlock" → cancel delegates to resolve_blocked_review.
+        let resolved = app.cancel_active_review(Some("device-1".to_string())).await;
+        assert!(
+            resolved.is_ok(),
+            "unblock must not error when the turn can't be stopped: {resolved:?}"
+        );
+        wait_for_review_status(&app, &receipt.review_job_id, &["failed", "cancelled"]).await;
+        assert!(
+            !app.relay.read().await.is_thread_review_locked(&parent.id),
+            "unblock must unlock the reviewed thread even for an un-stoppable turn"
         );
     }
 
