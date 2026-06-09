@@ -5865,6 +5865,57 @@ mod review_tests {
         );
     }
 
+    // The motivating scenario specifically: the reviewer resets the stall window by
+    // running TOOL calls (read-only commands / file reads), not just by streaming text.
+    // Tool/command transcript items bump the same per-thread revision, so they must reset
+    // the deadline too.
+    #[tokio::test]
+    async fn review_wait_does_not_time_out_while_the_reviewer_runs_tool_calls() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, _providers) = build_review_app(cwd, &["codex"]).await;
+        app.set_review_step_timeout_ms(400);
+        {
+            let mut relay = app.relay.write().await;
+            relay.bg_set_active_turn("rev", Some("t1".to_string()), 0);
+            relay.bg_set_thread_status("rev", "active".to_string(), Vec::new(), 0);
+        }
+        let app2 = app.clone();
+        let waiter = tokio::spawn(async move {
+            app2.wait_for_thread_idle_outcome_label("job-x", "rev")
+                .await
+        });
+
+        // The reviewer runs read-only commands for ~600ms (past the 400ms window); each
+        // command result is a transcript mutation that must reset the stall deadline.
+        for i in 0..12 {
+            sleep(Duration::from_millis(50)).await;
+            let mut relay = app.relay.write().await;
+            relay.bg_add_command_result(
+                "rev",
+                format!("cmd-{i}"),
+                "grep diff-group".to_string(),
+                Some("match".to_string()),
+                "completed".to_string(),
+                "t1".to_string(),
+                0,
+            );
+            relay.notify();
+        }
+        {
+            let mut relay = app.relay.write().await;
+            relay.bg_set_active_turn("rev", None, 0);
+            relay.bg_set_thread_status("rev", "idle".to_string(), Vec::new(), 0);
+            relay.notify();
+        }
+
+        let outcome = waiter.await.expect("waiter joins");
+        assert_eq!(
+            outcome, "completed",
+            "a reviewer actively running tool calls past the fixed cap must not time out"
+        );
+    }
+
     // The flip side: a reviewer that produces NOTHING for the whole stall window still
     // times out (the stall timeout must still fire on a genuine hang).
     #[tokio::test]
