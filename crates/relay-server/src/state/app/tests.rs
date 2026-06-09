@@ -5821,6 +5821,70 @@ mod review_tests {
         );
     }
 
+    // A reviewer that keeps producing output must NOT be timed out, no matter how long the
+    // whole turn runs — the step timeout is a STALL window (reset on progress), not a fixed
+    // cap. (Before the fix a thorough review that ran past the fixed 10-min cap got killed
+    // mid-write with "timed out waiting for the reviewer".)
+    #[tokio::test]
+    async fn review_wait_does_not_time_out_while_the_reviewer_keeps_producing_output() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, _providers) = build_review_app(cwd, &["codex"]).await;
+        app.set_review_step_timeout_ms(400); // short STALL window for the test
+        {
+            let mut relay = app.relay.write().await;
+            relay.bg_set_active_turn("rev", Some("t1".to_string()), 0);
+            relay.bg_set_thread_status("rev", "active".to_string(), Vec::new(), 0);
+        }
+        let app2 = app.clone();
+        let waiter = tokio::spawn(async move {
+            app2.wait_for_thread_idle_outcome_label("job-x", "rev")
+                .await
+        });
+
+        // Stream output for ~600ms (well past the 400ms window); each delta bumps the
+        // thread's transcript revision and must reset the stall deadline.
+        for i in 0..12 {
+            sleep(Duration::from_millis(50)).await;
+            let mut relay = app.relay.write().await;
+            relay.bg_append_agent_delta("rev", "item-1", &format!("chunk{i} "), "t1", 0);
+            relay.notify();
+        }
+        // The reviewer finishes.
+        {
+            let mut relay = app.relay.write().await;
+            relay.bg_set_active_turn("rev", None, 0);
+            relay.bg_set_thread_status("rev", "idle".to_string(), Vec::new(), 0);
+            relay.notify();
+        }
+
+        let outcome = waiter.await.expect("waiter joins");
+        assert_eq!(
+            outcome, "completed",
+            "a reviewer that kept producing output past the fixed cap must complete, not time out"
+        );
+    }
+
+    // The flip side: a reviewer that produces NOTHING for the whole stall window still
+    // times out (the stall timeout must still fire on a genuine hang).
+    #[tokio::test]
+    async fn review_wait_times_out_when_the_reviewer_makes_no_progress() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, _providers) = build_review_app(cwd, &["codex"]).await;
+        app.set_review_step_timeout_ms(120);
+        {
+            let mut relay = app.relay.write().await;
+            relay.bg_set_active_turn("rev", Some("t1".to_string()), 0);
+            relay.bg_set_thread_status("rev", "active".to_string(), Vec::new(), 0);
+        }
+        let outcome = app.wait_for_thread_idle_outcome_label("job-x", "rev").await;
+        assert_eq!(
+            outcome, "timed_out",
+            "a reviewer with no progress for the whole stall window must time out"
+        );
+    }
+
     #[tokio::test]
     async fn unrelated_background_approval_does_not_fail_the_review() {
         let dir = TempDir::new().expect("tmpdir");

@@ -403,6 +403,24 @@ to this thread."
             .store(ms, std::sync::atomic::Ordering::Relaxed);
     }
 
+    // Test-only label wrapper for the private wait outcome, so tests can exercise the
+    // stall-timeout behavior of `wait_for_thread_idle_outcome` without exposing the
+    // internal `WaitOutcome` enum.
+    #[cfg(test)]
+    pub(crate) async fn wait_for_thread_idle_outcome_label(
+        &self,
+        job_id: &str,
+        thread_id: &str,
+    ) -> &'static str {
+        match self.wait_for_thread_idle_outcome(job_id, thread_id).await {
+            WaitOutcome::Completed => "completed",
+            WaitOutcome::FailedApproval => "failed_approval",
+            WaitOutcome::FailedAskUser => "failed_ask_user",
+            WaitOutcome::TimedOut => "timed_out",
+            WaitOutcome::Cancelled => "cancelled",
+        }
+    }
+
     async fn run_review_job(&self, job_id: String) {
         let Some(fields) = self.review_job_fields(&job_id).await else {
             return;
@@ -1304,7 +1322,19 @@ max_rounds={max_rounds}). Step 1: asking the author to recap its changes."
         let timeout_ms = self
             .review_step_timeout_ms
             .load(std::sync::atomic::Ordering::Relaxed);
-        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        let timeout = Duration::from_millis(timeout_ms);
+        // The step timeout is a STALL window, not a fixed cap: it RESETS whenever the
+        // reviewer makes progress (its per-thread transcript revision advances — streamed
+        // output or a tool call). So an actively-working reviewer is never killed no matter
+        // how long the whole review runs; only `timeout` of NO progress at all trips it.
+        let mut deadline = Instant::now() + timeout;
+        let mut last_revision = self
+            .relay
+            .read()
+            .await
+            .runtime_for_thread(thread_id)
+            .map(|runtime| runtime.transcript_revision)
+            .unwrap_or(0);
         let started = Instant::now();
         let mut next_heartbeat = started + REVIEW_WAIT_HEARTBEAT;
         let mut rx = self.subscribe();
@@ -1337,12 +1367,18 @@ max_rounds={max_rounds}). Step 1: asking the author to recap its changes."
                 if asked {
                     return WaitOutcome::FailedAskUser;
                 }
-                let working = relay
-                    .runtime_for_thread(thread_id)
-                    .map(|runtime| runtime.is_working())
-                    .unwrap_or(false);
+                let (working, revision) = match relay.runtime_for_thread(thread_id) {
+                    Some(runtime) => (runtime.is_working(), runtime.transcript_revision),
+                    None => (false, last_revision),
+                };
                 if !working {
                     return WaitOutcome::Completed;
+                }
+                // Progress resets the stall deadline (see the loop preamble): each new
+                // streamed delta / tool call bumps the thread's transcript revision.
+                if revision != last_revision {
+                    last_revision = revision;
+                    deadline = Instant::now() + timeout;
                 }
             }
             tokio::select! {
