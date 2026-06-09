@@ -1476,7 +1476,13 @@ function DiffGroupEntry({ group, options = null }) {
   const expandKey = groupExpandKey(group);
   const expanded = Boolean(expandKey && options?.expandedKeys?.has(expandKey));
   const { added, removed, fileCount } = aggregateDiffGroupStats(group);
-  const count = fileCount || (group?.entries?.length || 0);
+  // Prefer the distinct changed-file count. When no paths resolve (degenerate),
+  // fall back to the number of edit cards — NOT entries.length, which would also
+  // count the turnDiff summary (edits + 1) in a consolidated group.
+  const editCount = (group?.entries || []).filter(
+    (entry) => entry?.tool?.item_type !== "turnDiff"
+  ).length;
+  const count = fileCount || editCount || (group?.entries?.length || 0);
   const label = `··· ${count} file ${count === 1 ? "change" : "changes"}`;
 
   // The turnDiff is folded into the chip rather than rendered as its own card

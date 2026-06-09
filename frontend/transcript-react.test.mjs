@@ -1153,6 +1153,23 @@ test("diff-group chip falls back to fileChange stats when the turnDiff bodies ar
   assert.match(markup, /diff-group-chip-del">−1</);
 });
 
+test("diff-group label counts edits, not entries, when no file paths resolve", () => {
+  // Degenerate: neither entry exposes a path, so the distinct-file count is 0.
+  // The label must fall back to the edit count (1), not entries.length (2, which
+  // would wrongly include the turnDiff summary in this consolidated group).
+  const fileChange = makeTool("fc", {
+    tool: { item_type: "fileChange", name: "Edit" },
+    turn_id: "t1",
+  });
+  const turnDiff = makeTool("td", {
+    tool: { item_type: "turnDiff", name: "TurnDiff" },
+    turn_id: "t1",
+  });
+  const markup = renderTranscriptContentMarkup([fileChange, turnDiff]);
+  assert.match(markup, /··· 1 file change</);
+  assert.doesNotMatch(markup, /··· 2 file changes/);
+});
+
 test("expanded diff-group shows only the fileChange member, not the redundant turnDiff card", () => {
   const fileChange = makeTool("fc", {
     tool: {
