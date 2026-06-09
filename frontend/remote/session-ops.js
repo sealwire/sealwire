@@ -23,6 +23,8 @@ import {
   createTranscriptEntryDetailFetcher,
   createTranscriptPageFetcher,
 } from "./transcript/api.js";
+import { transcriptPageCache } from "./transcript/page-cache-instance.js";
+import { createCachingTranscriptPageFetcher } from "../shared/caching-transcript-fetcher.js";
 import {
   createThreadListQueryOptions,
   createThreadTranscriptPageQueryOptions,
@@ -43,6 +45,17 @@ import { isDocumentForeground, notifyThreadEvents } from "../shared/thread-notif
 const fetchRawTranscriptPage = createTranscriptPageFetcher(dispatchOrRecover);
 const fetchTranscriptEntryDetailRequest =
   createTranscriptEntryDetailFetcher(dispatchOrRecover);
+
+// Persistent, encrypted-at-rest cache for OLDER transcript history pages. Only
+// append-stable older pages (before != null) are cached; the live tail always
+// hits the network. This makes scroll-up history loads and post-reload backfill
+// resolve from disk instead of a per-page network round trip. See
+// shared/caching-transcript-fetcher.js for the policy and the streaming red line.
+const fetchCachedTranscriptPage = createCachingTranscriptPageFetcher({
+  cache: transcriptPageCache,
+  fetchPage: fetchRawTranscriptPage,
+  getScope: remoteQueryScope,
+});
 
 // While the user is viewing a review-locked thread (resume is blocked, so we show
 // a read-only transcript projection), this pins that thread id. Live broker
@@ -66,7 +79,7 @@ function fetchTranscriptPage({ threadId, before }) {
   return remoteQueryClient.fetchQuery(
     createThreadTranscriptPageQueryOptions({
       before,
-      fetchPage: fetchRawTranscriptPage,
+      fetchPage: fetchCachedTranscriptPage,
       scope: remoteQueryScope(),
       surface: "remote",
       threadId,

@@ -4,6 +4,7 @@ import {
   loadStoredPayloadSecret,
   storePayloadSecret,
 } from "./secret-store.js";
+import { clearTranscriptPageCacheForScope } from "./transcript/page-cache-instance.js";
 
 const REMOTE_STATE_STORAGE_KEY = "agent-relay.remote-state";
 const REMOTE_STATE_SCHEMA_VERSION = 1;
@@ -445,6 +446,9 @@ export function forgetCurrentRemoteProfile() {
   const relayId = state.activeRelayId;
   patchRemoteState(createForgottenRemoteProfilePatch(state), { persist: true });
   void deleteStoredPayloadSecret(relayId);
+  // The cache is keyed by relayId (remoteQueryScope), so wipe this relay's
+  // on-disk history when the user forgets it.
+  clearTranscriptPageCacheForScope(relayId);
 }
 
 export function saveClientAuth(value) {

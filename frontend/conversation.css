@@ -3,6 +3,14 @@
   flex: 1 1 auto;
   height: 100%;
   overflow-y: auto;
+  /* Keep the transcript's overscroll inside the scroller. Without this, pulling
+   * down at the very top (the exact gesture used to load older history) chains
+   * to the document and fires Chrome's pull-to-refresh / iOS rubber-band — which
+   * reloaded the whole app and wiped the in-memory transcript. `contain` matches
+   * the thread-list and sidebar scrollers; `-webkit-overflow-scrolling: touch`
+   * restores momentum scrolling on iOS (the sidebars already opt in). */
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
   /* `overflow-anchor: auto` is the browser-native equivalent of our manual
    * "preserve scroll position on prepend" logic in transcript-scroll.js. With
    * it on, prepending older messages stays visually stable without needing the
