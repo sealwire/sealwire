@@ -938,7 +938,7 @@ test("groupToolEntries leaves running tools ungrouped and breaks the run", () =>
   assert.deepEqual(result[2].entries.map((e) => e.item_id), ["c"]);
 });
 
-test("groupToolEntries excludes fileChange and turnDiff item_types from groups", () => {
+test("groupToolEntries puts fileChange/turnDiff in their own diff-group, separate from tool-group", () => {
   const fileChange = makeTool("fc", {
     tool: { item_type: "fileChange", name: "Edit" },
   });
@@ -954,10 +954,39 @@ test("groupToolEntries excludes fileChange and turnDiff item_types from groups",
   ]);
   assert.equal(result.length, 5);
   assert.equal(result[0].type, "tool-group");
-  assert.equal(result[1].tool.item_type, "fileChange");
+  assert.deepEqual(result[0].entries.map((e) => e.item_id), ["a"]);
+  assert.equal(result[1].type, "diff-group");
+  assert.deepEqual(result[1].entries.map((e) => e.item_id), ["fc"]);
   assert.equal(result[2].type, "tool-group");
-  assert.equal(result[3].tool.item_type, "turnDiff");
+  assert.deepEqual(result[2].entries.map((e) => e.item_id), ["b"]);
+  assert.equal(result[3].type, "diff-group");
+  assert.deepEqual(result[3].entries.map((e) => e.item_id), ["td"]);
   assert.equal(result[4].type, "tool-group");
+  assert.deepEqual(result[4].entries.map((e) => e.item_id), ["c"]);
+});
+
+test("groupToolEntries fuses a turn's fileChange and turnDiff into one diff-group", () => {
+  const fc1 = makeTool("fc1", { tool: { item_type: "fileChange", name: "Edit" }, turn_id: "t1" });
+  const fc2 = makeTool("fc2", { tool: { item_type: "fileChange", name: "Edit" }, turn_id: "t1" });
+  const td = makeTool("td1", { tool: { item_type: "turnDiff", name: "TurnDiff" }, turn_id: "t1" });
+  const result = groupToolEntries([fc1, fc2, td]);
+  assert.equal(result.length, 1);
+  assert.equal(result[0].type, "diff-group");
+  assert.deepEqual(result[0].entries.map((e) => e.item_id), ["fc1", "fc2", "td1"]);
+});
+
+test("groupToolEntries leaves a running turnDiff ungrouped", () => {
+  const fc = makeTool("fc", { tool: { item_type: "fileChange", name: "Edit" }, turn_id: "t1" });
+  const runningTd = {
+    ...makeTool("td", { tool: { item_type: "turnDiff", name: "TurnDiff" }, turn_id: "t1" }),
+    status: "running",
+  };
+  const result = groupToolEntries([fc, runningTd]);
+  assert.equal(result.length, 2);
+  assert.equal(result[0].type, "diff-group");
+  assert.deepEqual(result[0].entries.map((e) => e.item_id), ["fc"]);
+  assert.equal(result[1].kind, "tool_call");
+  assert.equal(result[1].status, "running");
 });
 
 test("groupToolEntries groups Edit/Write tools alongside read tools", () => {
@@ -1039,6 +1068,123 @@ test("TranscriptContent surfaces aggregate diff stats on the group chip for Edit
   const markup = renderTranscriptContentMarkup([makeTool("r"), edit]);
   assert.match(markup, /tool-group-chip-add">\+2</);
   assert.match(markup, /tool-group-chip-del">−1</);
+});
+
+test("TranscriptContent renders a collapsed diff-group chip with once-per-turn stats", () => {
+  const diff = "@@ -1,2 +1,4 @@\n-foo\n+bar\n+baz\n+qux\n";
+  const fileChange = makeTool("fc", {
+    tool: {
+      item_type: "fileChange",
+      name: "Edit",
+      file_changes: [{ path: "a.js", change_type: "update", diff }],
+    },
+    turn_id: "t1",
+  });
+  const turnDiff = makeTool("td", {
+    tool: {
+      item_type: "turnDiff",
+      name: "TurnDiff",
+      file_changes: [{ path: "a.js", change_type: "update", diff }],
+    },
+    turn_id: "t1",
+  });
+  const markup = renderTranscriptContentMarkup([fileChange, turnDiff]);
+  assert.match(markup, /chat-message-diff-group/);
+  assert.match(markup, /data-expand-key="group:fc"/);
+  assert.match(markup, /data-transcript-toggle="group"/);
+  assert.match(markup, /··· 1 file change</);
+  // Counted once per turn — NOT doubled across the fileChange + turnDiff.
+  assert.match(markup, /diff-group-chip-add">\+3</);
+  assert.match(markup, /diff-group-chip-del">−1</);
+  // Members (diff panels) do not render while the group is collapsed.
+  assert.doesNotMatch(markup, /file-diff-panel/);
+});
+
+test("TranscriptContent renders both diff-group members when expanded", () => {
+  const diff = "@@ -1,1 +1,1 @@\n-foo\n+bar\n";
+  const fileChange = makeTool("fc", {
+    tool: {
+      item_type: "fileChange",
+      name: "Edit",
+      file_changes: [{ path: "a.js", change_type: "update", diff }],
+    },
+    turn_id: "t1",
+  });
+  const turnDiff = makeTool("td", {
+    tool: {
+      item_type: "turnDiff",
+      name: "TurnDiff",
+      file_changes: [{ path: "a.js", change_type: "update", diff }],
+    },
+    turn_id: "t1",
+  });
+  const markup = renderTranscriptContentMarkup(
+    [fileChange, turnDiff],
+    null,
+    { expandedKeys: new Set(["group:fc"]) }
+  );
+  assert.match(markup, /diff-group-chip-open/);
+  // Both the inline fileChange and the turnDiff summary render their panels.
+  assert.equal((markup.match(/file-diff-panel/g) || []).length, 2);
+});
+
+test("collapsed diff-group surfaces the Undo action on the chip", () => {
+  const diff = "@@ -1,1 +1,1 @@\n-foo\n+bar\n";
+  const fileChange = makeTool("fc", {
+    tool: {
+      item_type: "fileChange",
+      name: "Edit",
+      file_changes: [{ path: "a.js", change_type: "update", diff }],
+    },
+    turn_id: "t1",
+  });
+  const turnDiff = makeTool("td", {
+    tool: {
+      item_type: "turnDiff",
+      name: "TurnDiff",
+      apply_state: "applied",
+      file_changes: [{ path: "a.js", change_type: "update", diff }],
+    },
+    turn_id: "t1",
+  });
+  const markup = renderTranscriptContentMarkup(
+    [fileChange, turnDiff],
+    null,
+    { enableFileChangeActions: true }
+  );
+  assert.match(markup, /chat-message-diff-group/);
+  assert.match(markup, /data-file-change-action="rollback"/);
+  assert.match(markup, /data-item-id="td"/);
+  // Exactly one Undo (on the chip) — collapsed members render nothing.
+  assert.equal((markup.match(/data-file-change-action/g) || []).length, 1);
+});
+
+test("expanded diff-group shows Undo on the member, not duplicated on the chip", () => {
+  const diff = "@@ -1,1 +1,1 @@\n-foo\n+bar\n";
+  const fileChange = makeTool("fc", {
+    tool: {
+      item_type: "fileChange",
+      name: "Edit",
+      file_changes: [{ path: "a.js", change_type: "update", diff }],
+    },
+    turn_id: "t1",
+  });
+  const turnDiff = makeTool("td", {
+    tool: {
+      item_type: "turnDiff",
+      name: "TurnDiff",
+      file_changes: [{ path: "a.js", change_type: "update", diff }],
+    },
+    turn_id: "t1",
+  });
+  const markup = renderTranscriptContentMarkup(
+    [fileChange, turnDiff],
+    null,
+    { enableFileChangeActions: true, expandedKeys: new Set(["group:fc"]) }
+  );
+  assert.match(markup, /data-file-change-action="rollback"/);
+  // Exactly one Undo overall (the member's) — the chip adds none when expanded.
+  assert.equal((markup.match(/data-file-change-action/g) || []).length, 1);
 });
 
 test("renderTranscriptContentMarkup combines typed entries and pending approval into one thread content block", () => {

@@ -1152,23 +1152,7 @@ function GenericToolEntry({ entry, isJustPrepended = false, options = null }) {
               if (!options?.enableFileChangeActions || !isLastTurnDiff) {
                 return null;
               }
-              const rolledBack = tool.apply_state === "rolled_back";
-              const action = rolledBack ? "reapply" : "rollback";
-              const label = rolledBack ? "Reapply" : "Undo";
-              return h(
-                "div",
-                { className: "tool-file-actions" },
-                h(
-                  "button",
-                  {
-                    className: "tool-toggle-button tool-action-button",
-                    "data-item-id": itemId,
-                    "data-file-change-action": action,
-                    type: "button",
-                  },
-                  label
-                )
-              );
+              return turnDiffUndoAction(itemId, tool.apply_state);
             })()
           )
         : !expanded
@@ -1272,20 +1256,47 @@ function isGroupableCompletedTool(entry) {
   return true;
 }
 
+// File-change / per-turn-diff cards form their OWN group, kept separate from the
+// regular tool group. Only completed entries group, so a still-streaming
+// turnDiff (status "running") stays inline until the turn settles.
+function isGroupableDiff(entry) {
+  if (!entry || entry.kind !== "tool_call") {
+    return false;
+  }
+  if ((entry.status || "completed") !== "completed") {
+    return false;
+  }
+  const itemType = entry?.tool?.item_type || "";
+  return itemType === "fileChange" || itemType === "turnDiff";
+}
+
 export function groupToolEntries(entries) {
   const result = [];
   let currentGroup = null;
+  let currentType = null;
 
   for (const entry of entries || []) {
+    let nextType = null;
     if (isGroupableCompletedTool(entry)) {
-      if (!currentGroup) {
-        currentGroup = { entries: [], type: "tool-group" };
+      nextType = "tool-group";
+    } else if (isGroupableDiff(entry)) {
+      nextType = "diff-group";
+    }
+
+    if (nextType) {
+      // A run only continues while the group type stays the same, so tool and
+      // diff groups never absorb each other's members.
+      if (!currentGroup || currentType !== nextType) {
+        currentGroup = { entries: [], type: nextType };
+        currentType = nextType;
         result.push(currentGroup);
       }
       currentGroup.entries.push(entry);
       continue;
     }
+
     currentGroup = null;
+    currentType = null;
     result.push(entry);
   }
 
@@ -1310,6 +1321,42 @@ function aggregateGroupDiffStats(group) {
     }
   }
   return { added, removed };
+}
+
+// A diff group holds BOTH the inline fileChange cards and the turnDiff summary
+// for the same turn(s), so summing every member double-counts. Count each turn
+// once via its turnDiff (the merged summary) and only fall back to a turn's
+// fileChange cards when it has no turnDiff. Entries without a turn_id are
+// counted directly. Also returns the number of distinct changed files for the
+// chip label.
+function aggregateDiffGroupStats(group) {
+  const entries = group?.entries || [];
+  const turnsWithSummary = new Set();
+  for (const entry of entries) {
+    if (entry?.tool?.item_type === "turnDiff" && entry?.turn_id) {
+      turnsWithSummary.add(entry.turn_id);
+    }
+  }
+
+  let added = 0;
+  let removed = 0;
+  const files = new Set();
+  for (const entry of entries) {
+    const tool = entry?.tool || {};
+    const isTurnDiff = tool.item_type === "turnDiff";
+    if (!isTurnDiff && entry?.turn_id && turnsWithSummary.has(entry.turn_id)) {
+      continue;
+    }
+    for (const change of getFileChanges(tool)) {
+      const stats = diffStats(change.diff);
+      added += stats.added;
+      removed += stats.removed;
+      if (change.path) {
+        files.add(change.path);
+      }
+    }
+  }
+  return { added, removed, fileCount: files.size };
 }
 
 function ToolGroupEntry({ group, options = null }) {
@@ -1346,6 +1393,78 @@ function ToolGroupEntry({ group, options = null }) {
         ? h("span", { className: "tool-group-chip-del" }, `−${removed}`)
         : null
     )
+  );
+}
+
+// The Undo/Reapply control attached to the last turnDiff. Reused by both the
+// expanded turnDiff entry and the collapsed diff-group chip (so the entry point
+// survives when the turnDiff is folded into a group).
+function turnDiffUndoAction(itemId, applyState) {
+  const rolledBack = applyState === "rolled_back";
+  const action = rolledBack ? "reapply" : "rollback";
+  const label = rolledBack ? "Reapply" : "Undo";
+  return h(
+    "div",
+    { className: "tool-file-actions" },
+    h(
+      "button",
+      {
+        className: "tool-toggle-button tool-action-button",
+        "data-item-id": itemId,
+        "data-file-change-action": action,
+        type: "button",
+      },
+      label
+    )
+  );
+}
+
+function DiffGroupEntry({ group, options = null }) {
+  const expandKey = groupExpandKey(group);
+  const expanded = Boolean(expandKey && options?.expandedKeys?.has(expandKey));
+  const { added, removed, fileCount } = aggregateDiffGroupStats(group);
+  const count = fileCount || (group?.entries?.length || 0);
+  const label = `··· ${count} file ${count === 1 ? "change" : "changes"}`;
+
+  // The last turnDiff owns the Undo/Reapply entry point. While the group is
+  // collapsed its member is unmounted, so surface the action on the chip; when
+  // expanded, the member renders its own action (so we never show two).
+  const lastTurnDiffItemId = options?.lastTurnDiffItemId;
+  const undoEntry =
+    !expanded && options?.enableFileChangeActions && lastTurnDiffItemId
+      ? (group?.entries || []).find((entry) => entry?.item_id === lastTurnDiffItemId)
+      : null;
+
+  return h(
+    "article",
+    {
+      className: "chat-message chat-message-system chat-message-diff-group",
+      ...(expandKey ? { "data-diff-group-key": expandKey } : {}),
+    },
+    h(
+      "button",
+      {
+        className: `diff-group-chip${expanded ? " diff-group-chip-open" : ""}`,
+        ...(expandKey ? { "data-expand-key": expandKey } : {}),
+        "data-transcript-toggle": "group",
+        type: "button",
+      },
+      h(
+        "span",
+        { "aria-hidden": "true", className: "diff-group-chevron" },
+        expanded ? "▾" : "▸"
+      ),
+      h("span", { className: "diff-group-count" }, label),
+      added > 0
+        ? h("span", { className: "diff-group-chip-add" }, `+${added}`)
+        : null,
+      removed > 0
+        ? h("span", { className: "diff-group-chip-del" }, `−${removed}`)
+        : null
+    ),
+    // Sibling of the toggle button (NOT a descendant) so clicking Undo never
+    // bubbles into the group-toggle handler.
+    undoEntry ? turnDiffUndoAction(undoEntry.item_id, undoEntry?.tool?.apply_state) : null
   );
 }
 
@@ -1620,6 +1739,33 @@ export function TranscriptContent({
       const groupKey = expandKey || `tool-group:${index}`;
       nodes.push(
         h(ToolGroupEntry, { group: item, key: groupKey, options: effectiveOptions })
+      );
+      if (expanded) {
+        item.entries.forEach((memberEntry, memberIndex) => {
+          const memberId = memberEntry.item_id || "";
+          nodes.push(
+            h(TranscriptEntry, {
+              entry: memberEntry,
+              isJustPrepended: Boolean(memberId && justPrependedItemIds.has(memberId)),
+              isLatestUser: false,
+              key:
+                memberId
+                || memberEntry.id
+                || `${groupKey}:member:${memberIndex}`,
+              options: effectiveOptions,
+            })
+          );
+        });
+      }
+      return;
+    }
+
+    if (item?.type === "diff-group") {
+      const expandKey = groupExpandKey(item);
+      const expanded = Boolean(expandKey && effectiveOptions?.expandedKeys?.has(expandKey));
+      const groupKey = expandKey || `diff-group:${index}`;
+      nodes.push(
+        h(DiffGroupEntry, { group: item, key: groupKey, options: effectiveOptions })
       );
       if (expanded) {
         item.entries.forEach((memberEntry, memberIndex) => {

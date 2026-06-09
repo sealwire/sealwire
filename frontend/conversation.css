@@ -1252,6 +1252,61 @@
   font-size: 11px;
 }
 
+/* Diff group chip — mirrors the tool-group chip, used to collapse consecutive
+   per-turn diff cards. Stacks the optional Undo action beneath the chip. */
+.chat-message-diff-group {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.diff-group-chip {
+  display: inline-flex;
+  align-self: flex-start;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  margin: 0;
+  border: 1px solid var(--border-faint);
+  border-radius: 999px;
+  background: var(--surface-1);
+  color: var(--text-tertiary);
+  font-size: 12px;
+  line-height: 1.4;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.diff-group-chip:hover,
+.diff-group-chip-open {
+  color: var(--text-secondary);
+  background: var(--bg-elevated);
+  border-color: var(--border-subtle);
+}
+
+.diff-group-chevron {
+  display: inline-block;
+  width: 10px;
+  flex-shrink: 0;
+  text-align: center;
+}
+
+.diff-group-count {
+  white-space: nowrap;
+}
+
+.diff-group-chip-add {
+  color: var(--status-ready-text);
+  font-size: 11px;
+}
+
+.diff-group-chip-del {
+  color: var(--status-offline-text);
+  font-size: 11px;
+}
+
 .file-change-summary {
   display: flex;
   flex-wrap: wrap;
