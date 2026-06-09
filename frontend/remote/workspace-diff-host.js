@@ -4,6 +4,7 @@ import {
   ReviewerChip,
   WorkspaceChangesPanel,
   WorkspaceDiffChip,
+  WorkspaceDiffModalTitle,
   WorkspaceDiffSheetBody,
 } from "../local/workspace-diff.js";
 import { RightPanelTabs } from "../shared/right-panel-tabs.js";
@@ -138,19 +139,12 @@ export function RemoteWorkspaceDiffModal({ reviewer = {} } = {}) {
     h(
       "div",
       { className: "modal-header" },
-      h("h2", null, "Workspace diff"),
+      h(WorkspaceDiffModalTitle, { store }),
       h(
         "div",
         { className: "modal-header-actions" },
-        h(
-          "button",
-          {
-            className: "load-button",
-            onClick: () => store.refresh(),
-            type: "button",
-          },
-          "Refresh"
-        ),
+        // Diff refresh now lives inside the Changes body (WorkspaceDiffSheetBody),
+        // scoped to the diff. Header keeps only the close affordance.
         h(
           "button",
           {

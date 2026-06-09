@@ -1800,6 +1800,9 @@ function RemoteThreadPanel({
         { className: "workspace-diff-chip-slot" },
         h(RemoteWorkspaceDiffChip, {
           onTap: () => {
+            // Open the panel straight on the Changes tab — otherwise tapping
+            // Changes after Reviewer would land on whatever tab was last open.
+            getRemoteWorkspaceDiffStore().setActiveTab("changes");
             triggerRemoteWorkspaceDiffRefresh();
             const dialog = document.getElementById("remote-workspace-diff-modal");
             dialog?.showModal?.();

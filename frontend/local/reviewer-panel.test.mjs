@@ -5,7 +5,11 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { ReviewerPanel } from "../shared/reviewer-panel.js";
 import { RightPanelTabs } from "../shared/right-panel-tabs.js";
-import { ReviewerChip } from "./workspace-diff.js";
+import {
+  ReviewerChip,
+  WorkspaceDiffModalTitle,
+  WorkspaceDiffSheetBody,
+} from "./workspace-diff.js";
 
 const h = React.createElement;
 
@@ -273,6 +277,32 @@ test("RightPanelTabs treats an escalated review as terminal (no in-progress dot)
   assert.doesNotMatch(html, /Reviewer •/);
   assert.doesNotMatch(html, /Reviewer ⚠/);
   assert.match(html, />Reviewer</);
+});
+
+test("WorkspaceDiffModalTitle follows the active tab (so opening Reviewer isn't titled 'Workspace diff')", () => {
+  const changes = renderToStaticMarkup(
+    h(WorkspaceDiffModalTitle, { store: makeStore({ activeTab: "changes" }) })
+  );
+  assert.match(changes, /Workspace diff/);
+  assert.doesNotMatch(changes, /Reviewer/);
+
+  const reviewer = renderToStaticMarkup(
+    h(WorkspaceDiffModalTitle, { store: makeStore({ activeTab: "reviewer" }) })
+  );
+  assert.match(reviewer, /Reviewer/);
+  assert.doesNotMatch(reviewer, /Workspace diff/);
+});
+
+test("WorkspaceDiffSheetBody carries its own diff-scoped refresh (not the modal header)", () => {
+  // The refresh lives WITH the diff and is labelled so it can't read as a
+  // global/session refresh. It only renders here (the Changes body), so it never
+  // appears on the Reviewer tab.
+  const html = renderToStaticMarkup(
+    h(WorkspaceDiffSheetBody, { store: makeStore({ status: "loaded", data: { cwd: "/repo" } }) })
+  );
+  assert.match(html, /workspace-diff-sheet-refresh/);
+  assert.match(html, /Refresh diff/);
+  assert.match(html, /aria-label="Refresh workspace diff"/);
 });
 
 test("ReviewerPanel shows round progress + verdict for an iterative review", () => {

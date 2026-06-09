@@ -2775,6 +2775,43 @@ input:focus, textarea:focus, select:focus {
   font-size: 12px;
   color: var(--text-secondary);
 }
+/* In-body diff refresh (mobile sheet / remote modal). Lives with the diff —
+   not in the modal header — so it's unambiguously scoped to the diff. */
+.workspace-diff-sheet-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 8px;
+}
+.workspace-diff-sheet-refresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.3));
+  border-radius: 6px;
+  cursor: pointer;
+  box-shadow: none;
+  transition: color 120ms ease, background-color 120ms ease, border-color 120ms ease;
+}
+.workspace-diff-sheet-refresh:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+}
+.workspace-diff-sheet-refresh:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.workspace-diff-sheet-refresh.is-loading svg {
+  animation: workspace-diff-spin 900ms linear infinite;
+}
+/* Mounted-title wrapper: render no box so the <h2> inside behaves as the modal
+   header's direct flex child, exactly like a static <h2> would. */
+.modal-title-slot {
+  display: contents;
+}
 .workspace-diff-cwd {
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
   overflow: hidden;

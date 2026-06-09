@@ -13,6 +13,16 @@ function useStoreState(store) {
   );
 }
 
+// The mobile sheet / remote modal share one panel for both the diff and the
+// reviewer, so the header title must follow the active tab — otherwise opening
+// the Reviewer chip lands you on a panel still titled "Workspace diff", which
+// reads as "it didn't switch". Used by both surfaces' modal wrappers.
+export function WorkspaceDiffModalTitle({ store }) {
+  const state = useStoreState(store);
+  const onReviewer = state.activeTab === "reviewer";
+  return h("h2", null, onReviewer ? "Reviewer" : "Workspace diff");
+}
+
 export function createWorkspaceDiffStore({ apiFetch, fetchDiff = null, surface = "local" }) {
   const tabStorageKey = `agent-relay:right-panel-tab:${surface}`;
   let state = {
@@ -166,7 +176,7 @@ export function createWorkspaceDiffSheet({
   mount,
   modal,
   closeButton,
-  refreshButton,
+  titleMount,
   reviewer = {},
   panelId = "review-panel-sheet",
 }) {
@@ -180,6 +190,10 @@ export function createWorkspaceDiffSheet({
       changes: h(WorkspaceDiffSheetBody, { store }),
     })
   );
+  // Title follows the active tab (Workspace diff / Reviewer); mounted as its own
+  // root so the static modal shell never fights it on re-render.
+  const titleRoot = titleMount ? createRoot(titleMount) : null;
+  titleRoot?.render(h(WorkspaceDiffModalTitle, { store }));
 
   function open() {
     if (typeof modal.showModal === "function") {
@@ -199,9 +213,6 @@ export function createWorkspaceDiffSheet({
   }
 
   closeButton?.addEventListener("click", close);
-  refreshButton?.addEventListener("click", () => {
-    void store.refresh();
-  });
   modal.addEventListener("click", (event) => {
     if (event.target === modal) {
       close();
@@ -213,6 +224,7 @@ export function createWorkspaceDiffSheet({
     close,
     destroy() {
       root.unmount();
+      titleRoot?.unmount();
     },
   };
 }
@@ -494,9 +506,35 @@ export function mountReviewerChip({ store, mount, onTap }) {
 
 export function WorkspaceDiffSheetBody({ store }) {
   const state = useStoreState(store);
+  const isLoading = state.status === "loading";
   return h(
     "div",
     { className: "workspace-diff-sheet-body" },
+    // Refresh lives WITH the diff (not in the modal header) so it's obviously
+    // scoped to the diff — the header "Refresh" used to read as a global/session
+    // refresh and showed even on the Reviewer tab where it does nothing. This body
+    // only renders on the Changes tab, so the button is inherently diff-scoped.
+    h(
+      "div",
+      { className: "workspace-diff-sheet-toolbar" },
+      h(
+        "button",
+        {
+          type: "button",
+          className: `workspace-diff-sheet-refresh${isLoading ? " is-loading" : ""}`,
+          onClick: () => void store.refresh(),
+          disabled: isLoading,
+          title: isLoading ? "Refreshing…" : "Refresh diff",
+          "aria-label": isLoading ? "Refreshing workspace diff" : "Refresh workspace diff",
+        },
+        h(RefreshIcon),
+        h(
+          "span",
+          { className: "workspace-diff-sheet-refresh-label" },
+          isLoading ? "Refreshing…" : "Refresh diff"
+        )
+      )
+    ),
     state.data?.cwd
       ? h(
           "div",

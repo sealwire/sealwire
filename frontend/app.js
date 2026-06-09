@@ -73,7 +73,7 @@ import {
   workspaceSubtitle,
   workspaceDiffModal,
   closeWorkspaceDiffModalButton,
-  workspaceDiffRefreshButton,
+  workspaceDiffTitleMount,
   workspaceDiffMount,
   workspaceChangesMount,
   workspaceDiffChipMount,
@@ -248,7 +248,7 @@ const workspaceDiffSheet = createWorkspaceDiffSheet({
   mount: workspaceDiffMount,
   modal: workspaceDiffModal,
   closeButton: closeWorkspaceDiffModalButton,
-  refreshButton: workspaceDiffRefreshButton,
+  titleMount: workspaceDiffTitleMount,
   reviewer: reviewerActions,
   panelId: "review-panel-sheet",
 });
@@ -264,7 +264,13 @@ setupHeaderBandSync({
 mountChip({
   store: workspaceDiffStore,
   mount: workspaceDiffChipMount,
-  onTap: () => workspaceDiffSheet?.open(),
+  onTap: () => {
+    // Mirror the Reviewer chip below: force the Changes tab rather than opening
+    // on whatever tab was last persisted, so tapping the diff chip always shows
+    // the diff (not the Reviewer panel under a now-"Reviewer" title).
+    workspaceDiffStore.setActiveTab("changes");
+    workspaceDiffSheet?.open();
+  },
 });
 mountReviewerChip({
   store: workspaceDiffStore,

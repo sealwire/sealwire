@@ -608,19 +608,12 @@ function WorkspaceDiffModal() {
     h(
       "div",
       { className: "modal-header" },
-      h("h2", null, "Workspace diff"),
+      // Title is mounted (createWorkspaceDiffSheet) so it follows the active tab.
+      // Diff refresh now lives inside the Changes body, not this header.
+      h("div", { className: "modal-title-slot", id: "workspace-diff-title" }),
       h(
         "div",
         { className: "modal-header-actions" },
-        h(
-          "button",
-          {
-            className: "load-button",
-            id: "workspace-diff-refresh",
-            type: "button",
-          },
-          "Refresh"
-        ),
         h(
           "button",
           {
