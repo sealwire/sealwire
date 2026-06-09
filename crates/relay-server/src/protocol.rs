@@ -1363,6 +1363,15 @@ pub struct ApplyFileChangeReceipt {
 
 const THREAD_TRANSCRIPT_RESPONSE_TARGET_BYTES: usize = 20_000;
 
+// Upper bound on the serialized bytes of a ThreadTranscriptResponse *envelope*
+// (every field except the entries-array content), used for incremental page
+// sizing in `build_reverse_thread_transcript_page`. It must be >= the real
+// envelope for any cursor/seq values so the running estimate never under-counts
+// and a page can never exceed the byte budget. The real worst case is ~242 bytes
+// (all u64/usize fields at 20 digits, both cursors present); 320 leaves margin.
+// `thread_id` length is added on top at the call site.
+const THREAD_TRANSCRIPT_ENVELOPE_UPPER_BOUND_BYTES: usize = 320;
+
 impl ThreadTranscriptResponse {
     #[cfg(test)]
     pub fn from_transcript(
@@ -1558,36 +1567,44 @@ fn build_reverse_thread_transcript_page(
     upper_bound: usize,
     revision: u64,
 ) -> ThreadTranscriptResponse {
-    let mut selected = Vec::new();
+    // Pack entries from `upper_bound` backwards until the serialized response
+    // would exceed the byte budget. We size the page incrementally instead of
+    // re-serializing the whole growing candidate on every step — the old code was
+    // O(entries-per-page^2) in both JSON serialization and clones. Each entry is
+    // serialized exactly once; the envelope (everything outside the entries array)
+    // is charged a fixed UPPER BOUND, so the running estimate is always >= the
+    // real serialized length and a page can never exceed the budget — at worst we
+    // pack a single fewer entry near the boundary.
+    let envelope_upper_bound = THREAD_TRANSCRIPT_ENVELOPE_UPPER_BOUND_BYTES + thread_id.len();
+    let mut entry_bytes_sum = 0usize;
+    let mut count = 0usize;
     let mut index = upper_bound;
 
     while index > 0 {
-        selected.push(transcript[index - 1].clone());
-        let candidate = build_thread_transcript_page(
-            thread_id,
-            &selected.iter().rev().cloned().collect::<Vec<_>>(),
-            None,
-            None,
-            revision,
-            index - 1,
-        );
-        if serialized_len(&candidate) > THREAD_TRANSCRIPT_RESPONSE_TARGET_BYTES
-            && selected.len() > 1
-        {
-            selected.pop();
+        let entry_len = serialized_len(&transcript[index - 1]);
+        // Estimated serialized length if this entry joins the page:
+        //   envelope + sum(entry JSON lengths) + (entry_count - 1) array commas.
+        // For the tentative (count + 1) entries that is `+ count` commas.
+        let estimated = envelope_upper_bound + entry_bytes_sum + entry_len + count;
+        if estimated > THREAD_TRANSCRIPT_RESPONSE_TARGET_BYTES && count >= 1 {
             break;
         }
+        entry_bytes_sum += entry_len;
+        count += 1;
         index -= 1;
     }
 
-    if selected.is_empty() && upper_bound > 0 {
-        selected.push(transcript[upper_bound - 1].clone());
+    // Always emit at least one entry: an oversized single entry is allowed to
+    // exceed the budget because splitting it would corrupt the transcript.
+    // (Defensive — the loop above already includes the first entry unconditionally
+    // whenever `upper_bound > 0`.)
+    if count == 0 && upper_bound > 0 {
         index = upper_bound - 1;
     }
 
     build_thread_transcript_page(
         thread_id,
-        &selected.into_iter().rev().collect::<Vec<_>>(),
+        &transcript[index..upper_bound],
         (upper_bound < transcript.len()).then_some(upper_bound),
         (index > 0).then_some(index),
         revision,

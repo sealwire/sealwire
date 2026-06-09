@@ -1013,6 +1013,64 @@ fn thread_transcript_response_can_page_backwards_from_tail() {
 }
 
 #[test]
+fn thread_transcript_response_packs_many_small_entries_within_budget() {
+    // Many small entries is the case the incremental page sizer most affects:
+    // the old code re-serialized the whole growing candidate per entry. Verify
+    // pages stay within budget, pack more than one entry, and lose nothing.
+    let transcript = (0..400)
+        .map(|index| TranscriptEntryView {
+            item_id: Some(format!("item-{index}")),
+            kind: TranscriptEntryKind::AgentText,
+            text: Some(format!("small entry {index}")),
+            status: "completed".to_string(),
+            turn_id: Some(format!("turn-{index}")),
+            tool: None,
+        })
+        .collect::<Vec<_>>();
+
+    let mut before = None;
+    let mut pages = Vec::new();
+    let mut max_page_entries = 0usize;
+    loop {
+        let page = ThreadTranscriptResponse::from_transcript_before(
+            "thread-1".to_string(),
+            transcript.clone(),
+            before,
+            7,
+        );
+        assert!(!page.entries.is_empty());
+        let page_bytes = serde_json::to_vec(&page).unwrap().len();
+        assert!(
+            page_bytes <= THREADS_RESPONSE_TARGET_BYTES,
+            "page exceeded budget: {page_bytes} bytes"
+        );
+        max_page_entries = max_page_entries.max(page.entries.len());
+        before = page.prev_cursor;
+        pages.push(page);
+        if before.is_none() {
+            break;
+        }
+    }
+
+    // Packing works (not one-entry-per-page).
+    assert!(
+        max_page_entries > 1,
+        "expected multi-entry pages, got {max_page_entries}"
+    );
+
+    // Nothing lost, order preserved across the reverse walk.
+    let rebuilt = pages
+        .into_iter()
+        .rev()
+        .flat_map(|page| page.entries.into_iter())
+        .map(|entry| entry.item_id.unwrap_or_default())
+        .collect::<Vec<_>>();
+    assert_eq!(rebuilt.len(), transcript.len());
+    assert_eq!(rebuilt.first().map(String::as_str), Some("item-0"));
+    assert_eq!(rebuilt.last().map(String::as_str), Some("item-399"));
+}
+
+#[test]
 fn thread_transcript_response_tail_returns_latest_page_first() {
     let transcript = (0..12)
         .map(|index| TranscriptEntryView {
