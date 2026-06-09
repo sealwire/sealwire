@@ -989,6 +989,33 @@ test("groupToolEntries leaves a running turnDiff ungrouped", () => {
   assert.equal(result[1].status, "running");
 });
 
+test("groupToolEntries consolidates a turn's fileChange and turnDiff across intervening text", () => {
+  // Real relay ordering: the synthetic turnDiff is injected at end-of-turn,
+  // AFTER the agent's closing text — so the edit card and the summary are not
+  // adjacent. They must still collapse into ONE end-of-turn diff-group.
+  const fc = makeTool("fc", { tool: { item_type: "fileChange", name: "Edit" }, turn_id: "t1" });
+  const text = { item_id: "txt", kind: "agent_text", status: "completed", text: "Done", turn_id: "t1" };
+  const td = makeTool("td", { tool: { item_type: "turnDiff", name: "TurnDiff" }, turn_id: "t1" });
+  const result = groupToolEntries([fc, text, td]);
+  assert.equal(result.length, 2);
+  assert.equal(result[0].kind, "agent_text");
+  assert.equal(result[1].type, "diff-group");
+  assert.deepEqual(result[1].entries.map((e) => e.item_id), ["fc", "td"]);
+});
+
+test("groupToolEntries consolidates per turn even when a tool call sits between edit and summary", () => {
+  const fc = makeTool("fc", { tool: { item_type: "fileChange", name: "Edit" }, turn_id: "t1" });
+  const bash = makeTool("bash", { turn_id: "t1" });
+  const td = makeTool("td", { tool: { item_type: "turnDiff", name: "TurnDiff" }, turn_id: "t1" });
+  const result = groupToolEntries([fc, bash, td]);
+  // The Bash stays in its own tool-group; fc + td collapse into one diff-group.
+  assert.equal(result.length, 2);
+  assert.equal(result[0].type, "tool-group");
+  assert.deepEqual(result[0].entries.map((e) => e.item_id), ["bash"]);
+  assert.equal(result[1].type, "diff-group");
+  assert.deepEqual(result[1].entries.map((e) => e.item_id), ["fc", "td"]);
+});
+
 test("groupToolEntries groups Edit/Write tools alongside read tools", () => {
   const edit = makeTool("e", {
     tool: {
@@ -1100,13 +1127,14 @@ test("TranscriptContent renders a collapsed diff-group chip with once-per-turn s
   assert.doesNotMatch(markup, /file-diff-panel/);
 });
 
-test("TranscriptContent renders both diff-group members when expanded", () => {
-  const diff = "@@ -1,1 +1,1 @@\n-foo\n+bar\n";
+test("diff-group chip falls back to fileChange stats when the turnDiff bodies are omitted", () => {
   const fileChange = makeTool("fc", {
     tool: {
       item_type: "fileChange",
       name: "Edit",
-      file_changes: [{ path: "a.js", change_type: "update", diff }],
+      file_changes: [
+        { path: "a.js", change_type: "update", diff: "@@ -1,1 +1,2 @@\n-foo\n+bar\n+baz\n" },
+      ],
     },
     turn_id: "t1",
   });
@@ -1114,7 +1142,35 @@ test("TranscriptContent renders both diff-group members when expanded", () => {
     tool: {
       item_type: "turnDiff",
       name: "TurnDiff",
-      file_changes: [{ path: "a.js", change_type: "update", diff }],
+      file_changes_omitted: true,
+      file_changes: [{ path: "a.js", change_type: "update", diff: "" }],
+    },
+    turn_id: "t1",
+  });
+  const markup = renderTranscriptContentMarkup([fileChange, turnDiff]);
+  // turnDiff carries no usable diff → count the inline fileChange, not 0.
+  assert.match(markup, /diff-group-chip-add">\+2</);
+  assert.match(markup, /diff-group-chip-del">−1</);
+});
+
+test("expanded diff-group shows only the fileChange member, not the redundant turnDiff card", () => {
+  const fileChange = makeTool("fc", {
+    tool: {
+      item_type: "fileChange",
+      name: "Edit",
+      file_changes: [
+        { path: "a.js", change_type: "update", diff: "@@ -1,1 +1,1 @@\n-foo\n+INLINE_EDIT\n" },
+      ],
+    },
+    turn_id: "t1",
+  });
+  const turnDiff = makeTool("td", {
+    tool: {
+      item_type: "turnDiff",
+      name: "TurnDiff",
+      file_changes: [
+        { path: "a.js", change_type: "update", diff: "@@ -1,1 +1,1 @@\n-foo\n+SUMMARY_AGG\n" },
+      ],
     },
     turn_id: "t1",
   });
@@ -1124,8 +1180,10 @@ test("TranscriptContent renders both diff-group members when expanded", () => {
     { expandedKeys: new Set(["group:fc"]) }
   );
   assert.match(markup, /diff-group-chip-open/);
-  // Both the inline fileChange and the turnDiff summary render their panels.
-  assert.equal((markup.match(/file-diff-panel/g) || []).length, 2);
+  // Exactly one diff panel: the inline edit. The turnDiff summary is suppressed.
+  assert.equal((markup.match(/file-diff-panel/g) || []).length, 1);
+  assert.match(markup, /INLINE_EDIT/);
+  assert.doesNotMatch(markup, /SUMMARY_AGG/);
 });
 
 test("collapsed diff-group surfaces the Undo action on the chip", () => {
@@ -1159,7 +1217,7 @@ test("collapsed diff-group surfaces the Undo action on the chip", () => {
   assert.equal((markup.match(/data-file-change-action/g) || []).length, 1);
 });
 
-test("expanded diff-group shows Undo on the member, not duplicated on the chip", () => {
+test("expanded diff-group keeps Undo on the chip (turnDiff card is suppressed)", () => {
   const diff = "@@ -1,1 +1,1 @@\n-foo\n+bar\n";
   const fileChange = makeTool("fc", {
     tool: {
@@ -1183,7 +1241,9 @@ test("expanded diff-group shows Undo on the member, not duplicated on the chip",
     { enableFileChangeActions: true, expandedKeys: new Set(["group:fc"]) }
   );
   assert.match(markup, /data-file-change-action="rollback"/);
-  // Exactly one Undo overall (the member's) — the chip adds none when expanded.
+  assert.match(markup, /data-item-id="td"/);
+  // Still exactly one Undo: the turnDiff card isn't rendered (only the inline
+  // fileChange member is), so the chip remains the single Undo entry point.
   assert.equal((markup.match(/data-file-change-action/g) || []).length, 1);
 });
 

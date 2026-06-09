@@ -1271,21 +1271,62 @@ function isGroupableDiff(entry) {
 }
 
 export function groupToolEntries(entries) {
+  const list = entries || [];
+
+  // A turn that has a *completed* turnDiff gets consolidated: all of that turn's
+  // diff entries (every per-edit fileChange card plus the turnDiff) collapse
+  // into ONE end-of-turn diff-group, even across intervening assistant text or
+  // tool calls. This is what guarantees a single diff chip per turn instead of
+  // one chip for the inline edit and another for the summary.
+  const consolidatedTurns = new Set();
+  for (const entry of list) {
+    if (
+      isGroupableDiff(entry)
+      && entry?.tool?.item_type === "turnDiff"
+      && entry?.turn_id
+    ) {
+      consolidatedTurns.add(entry.turn_id);
+    }
+  }
+
   const result = [];
   let currentGroup = null;
   let currentType = null;
+  const pendingByTurn = new Map();
 
-  for (const entry of entries || []) {
+  for (const entry of list) {
+    const diffEntry = isGroupableDiff(entry);
+    const turnId = entry?.turn_id;
+
+    // Consolidated diff entry: accumulate by turn, emit at the turnDiff anchor
+    // (end of turn). The earlier fileChange cards fold into this single group.
+    if (diffEntry && turnId && consolidatedTurns.has(turnId)) {
+      currentGroup = null;
+      currentType = null;
+      let group = pendingByTurn.get(turnId);
+      if (!group) {
+        group = { entries: [], type: "diff-group" };
+        pendingByTurn.set(turnId, group);
+      }
+      group.entries.push(entry);
+      if (entry?.tool?.item_type === "turnDiff") {
+        result.push(group);
+        pendingByTurn.delete(turnId);
+      }
+      continue;
+    }
+
+    // Everything else groups by adjacency: tools into a tool-group, and any
+    // diff entry whose turn has no completed turnDiff (e.g. a still-streaming
+    // turn) into an inline diff-group so live edits stay visible.
     let nextType = null;
     if (isGroupableCompletedTool(entry)) {
       nextType = "tool-group";
-    } else if (isGroupableDiff(entry)) {
+    } else if (diffEntry) {
       nextType = "diff-group";
     }
 
     if (nextType) {
-      // A run only continues while the group type stays the same, so tool and
-      // diff groups never absorb each other's members.
       if (!currentGroup || currentType !== nextType) {
         currentGroup = { entries: [], type: nextType };
         currentType = nextType;
@@ -1298,6 +1339,11 @@ export function groupToolEntries(entries) {
     currentGroup = null;
     currentType = null;
     result.push(entry);
+  }
+
+  // Defensive: flush any consolidated turn whose turnDiff never arrived.
+  for (const group of pendingByTurn.values()) {
+    result.push(group);
   }
 
   return result;
@@ -1325,15 +1371,17 @@ function aggregateGroupDiffStats(group) {
 
 // A diff group holds BOTH the inline fileChange cards and the turnDiff summary
 // for the same turn(s), so summing every member double-counts. Count each turn
-// once via its turnDiff (the merged summary) and only fall back to a turn's
-// fileChange cards when it has no turnDiff. Entries without a turn_id are
-// counted directly. Also returns the number of distinct changed files for the
-// chip label.
+// once via its turnDiff (the merged summary) and fall back to the turn's
+// fileChange cards when it has no turnDiff — or when the turnDiff's diff bodies
+// were omitted in a snapshot (in which case the fileChanges may still carry the
+// real diffs). Entries without a turn_id are counted directly. Also returns the
+// number of distinct changed files for the chip label.
 function aggregateDiffGroupStats(group) {
   const entries = group?.entries || [];
   const turnsWithSummary = new Set();
   for (const entry of entries) {
-    if (entry?.tool?.item_type === "turnDiff" && entry?.turn_id) {
+    const tool = entry?.tool;
+    if (tool?.item_type === "turnDiff" && entry?.turn_id && !tool?.file_changes_omitted) {
       turnsWithSummary.add(entry.turn_id);
     }
   }
@@ -1344,6 +1392,11 @@ function aggregateDiffGroupStats(group) {
   for (const entry of entries) {
     const tool = entry?.tool || {};
     const isTurnDiff = tool.item_type === "turnDiff";
+    // Skip a turnDiff whose bodies were omitted; its turn is counted via the
+    // fileChange cards instead.
+    if (isTurnDiff && tool.file_changes_omitted) {
+      continue;
+    }
     if (!isTurnDiff && entry?.turn_id && turnsWithSummary.has(entry.turn_id)) {
       continue;
     }
@@ -1426,12 +1479,18 @@ function DiffGroupEntry({ group, options = null }) {
   const count = fileCount || (group?.entries?.length || 0);
   const label = `··· ${count} file ${count === 1 ? "change" : "changes"}`;
 
-  // The last turnDiff owns the Undo/Reapply entry point. While the group is
-  // collapsed its member is unmounted, so surface the action on the chip; when
-  // expanded, the member renders its own action (so we never show two).
+  // The turnDiff is folded into the chip rather than rendered as its own card
+  // (its per-file diffs are already shown by the inline fileChange members on
+  // expand), so the chip owns the Undo/Reapply action. The only exception is a
+  // degenerate group with no fileChange members: there the turnDiff renders as
+  // a fallback member and shows its own Undo, so the chip skips it.
   const lastTurnDiffItemId = options?.lastTurnDiffItemId;
+  const hasFileChangeMembers = (group?.entries || []).some(
+    (entry) => entry?.tool?.item_type !== "turnDiff"
+  );
+  const turnDiffRendersAsMember = expanded && !hasFileChangeMembers;
   const undoEntry =
-    !expanded && options?.enableFileChangeActions && lastTurnDiffItemId
+    !turnDiffRendersAsMember && options?.enableFileChangeActions && lastTurnDiffItemId
       ? (group?.entries || []).find((entry) => entry?.item_id === lastTurnDiffItemId)
       : null;
 
@@ -1768,7 +1827,15 @@ export function TranscriptContent({
         h(DiffGroupEntry, { group: item, key: groupKey, options: effectiveOptions })
       );
       if (expanded) {
-        item.entries.forEach((memberEntry, memberIndex) => {
+        // On expand show the per-edit fileChange cards (the reassuring "what
+        // changed" detail) but NOT the turnDiff summary card — it just repeats
+        // the same diff the chip already aggregates. Fall back to rendering the
+        // turnDiff only when the group has no fileChange members at all.
+        const fileChangeMembers = item.entries.filter(
+          (memberEntry) => memberEntry?.tool?.item_type !== "turnDiff"
+        );
+        const members = fileChangeMembers.length ? fileChangeMembers : item.entries;
+        members.forEach((memberEntry, memberIndex) => {
           const memberId = memberEntry.item_id || "";
           nodes.push(
             h(TranscriptEntry, {
