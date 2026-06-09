@@ -1585,11 +1585,17 @@ fn build_reverse_thread_transcript_page(
         // Estimated serialized length if this entry joins the page:
         //   envelope + sum(entry JSON lengths) + (entry_count - 1) array commas.
         // For the tentative (count + 1) entries that is `+ count` commas.
-        let estimated = envelope_upper_bound + entry_bytes_sum + entry_len + count;
+        // Saturating: `serialized_len` returns usize::MAX on a (here impossible)
+        // serialize failure; saturating keeps such an entry "oversized" instead
+        // of overflow-panicking, matching the old code's graceful handling.
+        let estimated = envelope_upper_bound
+            .saturating_add(entry_bytes_sum)
+            .saturating_add(entry_len)
+            .saturating_add(count);
         if estimated > THREAD_TRANSCRIPT_RESPONSE_TARGET_BYTES && count >= 1 {
             break;
         }
-        entry_bytes_sum += entry_len;
+        entry_bytes_sum = entry_bytes_sum.saturating_add(entry_len);
         count += 1;
         index -= 1;
     }
@@ -1602,14 +1608,26 @@ fn build_reverse_thread_transcript_page(
         index = upper_bound - 1;
     }
 
-    build_thread_transcript_page(
+    let page = build_thread_transcript_page(
         thread_id,
         &transcript[index..upper_bound],
         (upper_bound < transcript.len()).then_some(upper_bound),
         (index > 0).then_some(index),
         revision,
         index,
-    )
+    );
+    // Pin the hand-derived envelope upper bound: a page with more than one entry
+    // must never exceed the budget. If a future field added to
+    // ThreadTranscriptResponse pushes the real envelope past the constant, this
+    // fires in tests (debug builds) rather than silently shipping over-budget
+    // pages. Compiled out of release builds.
+    debug_assert!(
+        page.entries.len() <= 1 || serialized_len(&page) <= THREAD_TRANSCRIPT_RESPONSE_TARGET_BYTES,
+        "multi-entry transcript page exceeded budget ({} bytes); \
+         THREAD_TRANSCRIPT_ENVELOPE_UPPER_BOUND_BYTES may be too small",
+        serialized_len(&page),
+    );
+    page
 }
 
 fn unix_now_secs() -> u64 {
