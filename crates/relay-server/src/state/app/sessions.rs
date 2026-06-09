@@ -199,6 +199,12 @@ impl AppState {
             if let Some(models) = provider_models {
                 relay.set_available_models(models);
             }
+            // Seed the honest sort key from the PRE-resume `updated_at` (read
+            // before `resume_thread` spun up a live SDK session and rewrote the
+            // session file). `or_insert` keeps any existing/persisted value, so
+            // only the first-ever resume of a never-messaged thread sets the
+            // baseline — and the resume itself never advances the ordering.
+            relay.seed_thread_last_activity(&input.thread_id, preview.thread.updated_at);
             relay.load_thread_data(
                 thread_data,
                 &approval_policy,

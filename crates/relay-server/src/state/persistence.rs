@@ -30,6 +30,11 @@ pub(super) struct PersistedRelayState {
     pub(super) reasoning_effort: String,
     #[serde(default)]
     pub(super) thread_settings: std::collections::HashMap<String, ThreadSessionSettings>,
+    /// Honest per-thread last-activity timestamps (unix secs) used as the
+    /// thread-list sort key instead of the resume-polluted provider mtime.
+    /// `#[serde(default)]` keeps old state files loadable (empty map).
+    #[serde(default)]
+    pub(super) thread_last_activity_at: std::collections::HashMap<String, u64>,
     #[serde(default)]
     pub(super) allowed_roots: Vec<String>,
     #[serde(default)]
@@ -77,6 +82,7 @@ impl PersistedRelayState {
             sandbox: relay.sandbox.clone(),
             reasoning_effort: relay.reasoning_effort.clone(),
             thread_settings: relay.thread_settings.clone(),
+            thread_last_activity_at: relay.thread_last_activity_at.clone(),
             allowed_roots: relay.allowed_roots.clone(),
             device_records: relay.device_records.clone(),
             paired_devices: relay.paired_devices.clone(),

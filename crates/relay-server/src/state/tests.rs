@@ -74,6 +74,7 @@ fn test_persisted_state() -> PersistedRelayState {
         sandbox: DEFAULT_SANDBOX.to_string(),
         reasoning_effort: DEFAULT_EFFORT.to_string(),
         thread_settings,
+        thread_last_activity_at: std::collections::HashMap::new(),
         allowed_roots: vec!["/tmp/project".to_string()],
         device_records,
         paired_devices,
@@ -526,6 +527,107 @@ fn snapshot_strips_file_change_diffs_but_keeps_stored_diffs() {
     assert!(!stored_tool.file_changes_omitted);
     assert_eq!(stored_tool.diff.as_deref(), Some("@@ big joined diff @@"));
     assert_eq!(stored_tool.file_changes[0].diff, "-old\n+new");
+}
+
+#[test]
+fn thread_last_activity_or_prefers_tracked_value_over_provider_mtime() {
+    let mut relay = test_state();
+    // Untracked thread (never resumed by us): the provider mtime is honest, so
+    // we fall back to it.
+    assert_eq!(relay.thread_last_activity_or("ghost", 4242), 4242);
+
+    // The pre-resume honest value wins over a resume-polluted provider mtime,
+    // and a *second* resume — whose pre-read now sees the polluted mtime — must
+    // NOT clobber the seeded baseline (`seed` is or-insert).
+    relay.seed_thread_last_activity("thread-1", 1_000);
+    relay.seed_thread_last_activity("thread-1", 9_999_999);
+    assert_eq!(relay.thread_last_activity_or("thread-1", 9_999_999), 1_000);
+}
+
+#[test]
+fn transcript_write_advances_thread_last_activity() {
+    let mut relay = test_state();
+    relay.activate_thread(
+        test_thread("thread-1", "/tmp/project"),
+        "/tmp/project",
+        DEFAULT_MODEL,
+        DEFAULT_APPROVAL_POLICY,
+        DEFAULT_SANDBOX,
+        DEFAULT_EFFORT,
+        "device-a",
+    );
+    // Force an ancient baseline, then prove a genuine transcript write (agent
+    // output) advances the honest sort key to ~now. Resume's bulk history load
+    // does NOT go through this path, so it can't move the thread.
+    relay
+        .thread_last_activity_at
+        .insert("thread-1".to_string(), 1_000);
+    relay.upsert_transcript_item(
+        "item-1".to_string(),
+        TranscriptEntryKind::AgentText,
+        Some("hi".to_string()),
+        "complete".to_string(),
+        Some("turn-1".to_string()),
+        None,
+    );
+    assert!(relay.thread_last_activity_or("thread-1", 0) > 1_000);
+}
+
+#[test]
+fn thread_last_activity_survives_persistence_round_trip() {
+    let mut relay = test_state();
+    relay
+        .thread_last_activity_at
+        .insert("thread-1".to_string(), 1_234);
+
+    let persisted = PersistedRelayState::from_relay(&relay);
+    assert_eq!(
+        persisted.thread_last_activity_at.get("thread-1"),
+        Some(&1_234)
+    );
+
+    let mut restored = test_state();
+    restored.apply_persisted(&persisted);
+    assert_eq!(restored.thread_last_activity_or("thread-1", 0), 1_234);
+}
+
+#[test]
+fn promote_background_thread_migrates_last_activity_keeping_most_recent() {
+    // A background reviewer logs activity under its synthetic `claude-pending-…`
+    // id; promotion to the real session id must carry that honest timestamp over
+    // and drop the pending entry (which is otherwise orphaned in a persisted
+    // map). When both ids have a value, the most-recent wins — either could have
+    // logged a transcript write during the handoff.
+    let mut relay = test_state();
+    relay
+        .thread_last_activity_at
+        .insert("claude-pending-1".to_string(), 8_000);
+    relay
+        .thread_last_activity_at
+        .insert("real-1".to_string(), 5_000);
+    relay.promote_background_thread("claude-pending-1", "real-1");
+    assert_eq!(
+        relay.thread_last_activity_at.get("real-1"),
+        Some(&8_000),
+        "the more recent pending timestamp must win"
+    );
+    assert!(
+        !relay
+            .thread_last_activity_at
+            .contains_key("claude-pending-1"),
+        "the pending entry must not orphan after promotion"
+    );
+
+    // When only the pending id has a value, it carries over wholesale.
+    let mut relay = test_state();
+    relay
+        .thread_last_activity_at
+        .insert("claude-pending-2".to_string(), 9_000);
+    relay.promote_background_thread("claude-pending-2", "real-2");
+    assert_eq!(relay.thread_last_activity_at.get("real-2"), Some(&9_000));
+    assert!(!relay
+        .thread_last_activity_at
+        .contains_key("claude-pending-2"));
 }
 
 #[test]
@@ -2147,6 +2249,9 @@ fn mark_thread_deleted_clears_settings_and_runtime() {
     );
     assert!(relay.thread_settings("thread-2").is_some());
     assert!(relay.runtime_for_thread("thread-2").is_some());
+    // The bg transcript write above went through the bump chokepoint, so the
+    // honest sort key is now tracked for this thread.
+    assert!(relay.thread_last_activity_at.contains_key("thread-2"));
     relay
         .pending_approvals
         .insert("req-1".to_string(), test_pending_approval("thread-2"));
@@ -2159,6 +2264,9 @@ fn mark_thread_deleted_clears_settings_and_runtime() {
 
     assert!(relay.thread_settings("thread-2").is_none());
     assert!(relay.runtime_for_thread("thread-2").is_none());
+    // Persisted per-thread state must not leak past a delete (the map is
+    // serialized on every save).
+    assert!(!relay.thread_last_activity_at.contains_key("thread-2"));
     assert!(relay.pending_approvals.is_empty());
     assert!(relay.pending_ask_user_questions.is_empty());
     let filtered = relay.filter_deleted_threads(vec![test_thread("thread-2", "/tmp/project")]);

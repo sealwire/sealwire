@@ -4327,6 +4327,65 @@ mod review_tests {
     }
 
     #[tokio::test]
+    async fn list_threads_orders_by_honest_activity_not_resume_polluted_mtime() {
+        // End-to-end guard for the click-reorder fix: the provider reports both
+        // threads with a ~now mtime (the mock's summary() uses unix_now(), which
+        // is exactly what a resume/selection pollutes the real session file to),
+        // but list_threads must order and surface by our tracked last-activity
+        // timestamp instead.
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, _providers) = build_review_app(cwd, &["codex"]).await;
+
+        let stale = start_parent(&app, cwd, "codex").await;
+        let active = start_parent(&app, cwd, "codex").await;
+
+        {
+            // `stale` was genuinely last used long ago (the user merely selected
+            // it just now); `active` had real recent activity. Overwrite whatever
+            // start_session recorded with these explicit honest values.
+            let mut relay = app.relay.write().await;
+            relay
+                .thread_last_activity_at
+                .insert(stale.id.clone(), 1_000);
+            relay
+                .thread_last_activity_at
+                .insert(active.id.clone(), 2_000_000_000);
+        }
+
+        let listed = app.list_threads(50, None).await.expect("list_threads");
+
+        // The surfaced timestamp is the tracked value, not the provider mtime.
+        let stale_view = listed
+            .threads
+            .iter()
+            .find(|t| t.id == stale.id)
+            .expect("stale thread present");
+        assert_eq!(
+            stale_view.updated_at, 1_000,
+            "provider session-file mtime must be replaced by the tracked activity time"
+        );
+
+        // ...and ordering follows it: the merely-selected (stale) thread sorts
+        // BELOW the one with recent real activity, despite both having a ~now
+        // provider mtime.
+        let pos_stale = listed
+            .threads
+            .iter()
+            .position(|t| t.id == stale.id)
+            .expect("stale position");
+        let pos_active = listed
+            .threads
+            .iter()
+            .position(|t| t.id == active.id)
+            .expect("active position");
+        assert!(
+            pos_active < pos_stale,
+            "recent-activity thread must outrank the merely-selected one (active={pos_active}, stale={pos_stale})"
+        );
+    }
+
+    #[tokio::test]
     async fn review_fails_when_recap_has_no_assistant_text() {
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();

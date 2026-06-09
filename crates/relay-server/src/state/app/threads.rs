@@ -80,6 +80,15 @@ impl AppState {
             }
         }
 
+        // Replace the provider's session-file mtime — which any resume/selection
+        // bumps to ~now (a no-prompt click spins up a live SDK session that
+        // rewrites the session file) — with our honest last-activity timestamp,
+        // for both ordering AND the displayed "last message" time. Threads we've
+        // never resumed aren't tracked and keep their (never-polluted) provider
+        // value.
+        for thread in &mut threads {
+            thread.updated_at = relay.thread_last_activity_or(&thread.id, thread.updated_at);
+        }
         sort_threads_by_recency(&mut threads);
         threads.truncate(limit);
         let response_threads = threads.clone();

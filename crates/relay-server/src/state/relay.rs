@@ -161,6 +161,17 @@ pub struct RelayState {
     pub sandbox: String,
     pub reasoning_effort: String,
     pub(super) thread_settings: HashMap<String, ThreadSessionSettings>,
+    /// Honest "last real activity" timestamp per thread (unix secs), used as
+    /// the thread-list sort/display key INSTEAD of the provider's session-file
+    /// mtime. The provider's `updated_at` (Claude `lastModified` / Codex
+    /// `updatedAt`) is bumped to ~now whenever we *resume* a session — even a
+    /// no-prompt selection spins up a live SDK session that rewrites the
+    /// session file — which would shove a thread to the top of the list on a
+    /// mere click. This map only advances on genuine activity (transcript
+    /// writes: user sends, agent output, tool/file-change entries) and is
+    /// seeded from the pre-resume `updated_at`. Persisted so the ordering
+    /// survives a relay restart.
+    pub(super) thread_last_activity_at: HashMap<String, u64>,
     pub allowed_roots: Vec<String>,
     pub available_models: Vec<ModelOptionView>,
     pub device_records: HashMap<String, DeviceRecord>,
@@ -237,6 +248,7 @@ impl RelayState {
             sandbox: DEFAULT_SANDBOX.to_string(),
             reasoning_effort: DEFAULT_EFFORT.to_string(),
             thread_settings: HashMap::new(),
+            thread_last_activity_at: HashMap::new(),
             allowed_roots: Vec::new(),
             available_models: Vec::new(),
             device_records: HashMap::new(),
@@ -281,6 +293,13 @@ impl RelayState {
     }
 
     pub(super) fn bump_thread_transcript_revision(&mut self, thread_id: &str) -> (u64, u64) {
+        // Every per-thread transcript mutation (agent message start/deltas,
+        // tool calls, user messages, turn-completion status, file-change apply)
+        // funnels through here, so this is the one place to record genuine
+        // activity for the honest sort key. Resume's bulk history load rebuilds
+        // the runtime via `ThreadRuntime::from_sync_data`/`merge_fresh_history`
+        // and never calls this, so a mere session selection won't reorder.
+        self.touch_thread_last_activity(thread_id);
         let runtime = self.ensure_runtime_for_thread(thread_id);
         let base_revision = runtime.transcript_revision;
         runtime.transcript_revision = runtime.transcript_revision.wrapping_add(1);
@@ -529,6 +548,18 @@ impl RelayState {
             self.thread_settings
                 .entry(real_id.to_string())
                 .or_insert(settings);
+        }
+        // Carry the honest last-activity timestamp from the synthetic pending id
+        // to the real session id, keeping the most recent of the two (either
+        // could have logged a transcript write during the promotion handoff).
+        // Without this the pending-id entry orphans (and leaks, since the map is
+        // persisted) and a later un-hidden reviewer would fall back to mtime.
+        if let Some(pending_activity) = self.thread_last_activity_at.remove(pending_id) {
+            let entry = self
+                .thread_last_activity_at
+                .entry(real_id.to_string())
+                .or_insert(pending_activity);
+            *entry = (*entry).max(pending_activity);
         }
         // Drop the stale pending row; the real row is upserted by the caller.
         self.threads.retain(|thread| thread.id != pending_id);
@@ -1290,6 +1321,36 @@ impl RelayState {
         }
     }
 
+    /// Record genuine activity for a thread (user send, agent output, tool /
+    /// file-change entry). Always advances to now — real activity is, by
+    /// definition, the most recent thing to happen to the thread.
+    pub(super) fn touch_thread_last_activity(&mut self, thread_id: &str) {
+        self.thread_last_activity_at
+            .insert(thread_id.to_string(), unix_now());
+    }
+
+    /// Seed a thread's activity baseline from a known-honest timestamp (the
+    /// pre-resume provider `updated_at`), WITHOUT clobbering an existing — and
+    /// therefore more authoritative — value. Lets a thread we've only ever
+    /// resumed (never messaged) still sort by its real last-activity time
+    /// instead of the resume-polluted session-file mtime.
+    pub(super) fn seed_thread_last_activity(&mut self, thread_id: &str, updated_at: u64) {
+        self.thread_last_activity_at
+            .entry(thread_id.to_string())
+            .or_insert(updated_at);
+    }
+
+    /// Honest sort/display timestamp for a thread: the tracked activity time if
+    /// we have one, else the provider-reported `updated_at` (which is only ever
+    /// polluted for threads we've resumed, and those are exactly the ones we
+    /// have a tracked value for).
+    pub(super) fn thread_last_activity_or(&self, thread_id: &str, provider_updated_at: u64) -> u64 {
+        self.thread_last_activity_at
+            .get(thread_id)
+            .copied()
+            .unwrap_or(provider_updated_at)
+    }
+
     pub fn thread_settings(&self, thread_id: &str) -> Option<ThreadSessionSettings> {
         self.thread_settings
             .get(thread_id)
@@ -1373,6 +1434,7 @@ impl RelayState {
         let before_len = self.threads.len();
         self.threads.retain(|thread| thread.id != thread_id);
         self.thread_settings.remove(thread_id);
+        self.thread_last_activity_at.remove(thread_id);
         self.runtimes.remove(thread_id);
         self.drop_pending_requests_for_thread(thread_id);
         self.threads.len() != before_len
@@ -1622,6 +1684,7 @@ impl RelayState {
         self.sandbox = persisted.sandbox.clone();
         self.reasoning_effort = persisted.reasoning_effort.clone();
         self.thread_settings = persisted.thread_settings.clone();
+        self.thread_last_activity_at = persisted.thread_last_activity_at.clone();
         if let Some(thread_id) = self.active_thread_id.clone() {
             let mut settings = self
                 .thread_settings
