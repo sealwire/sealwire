@@ -305,9 +305,18 @@ impl RelayState {
     /// `cwd`. A review reads the live working tree, so a concurrent turn in the
     /// same workspace could mutate files mid-review; v1 refuses rather than racing.
     pub(crate) fn has_working_thread_in_cwd(&self, cwd: &str) -> bool {
-        self.runtimes
-            .values()
-            .any(|runtime| runtime.current_cwd == cwd && runtime.is_working())
+        let reviewers = self.reviewer_thread_ids();
+        self.runtimes.iter().any(|(thread_id, runtime)| {
+            runtime.current_cwd == cwd
+                && runtime.is_working()
+                // Reviewer threads are read-only background threads — they can't mutate the
+                // workspace, so a running review must never gate a NEW review request.
+                && !reviewers.contains(thread_id)
+                // A locally-deleted thread is gone. A stray late event can resurrect its
+                // runtime (the delete tombstone is enforced on the thread list, not the
+                // runtime map), so a deleted thread must not keep blocking reviews.
+                && !self.locally_deleted_thread_ids.contains(thread_id)
+        })
     }
 
     pub(crate) fn insert_review_job(&mut self, job: ReviewJob) {
@@ -796,6 +805,11 @@ impl RelayState {
         let mut activity = Vec::new();
         for (thread_id, runtime) in &self.runtimes {
             if !runtime.is_working() {
+                continue;
+            }
+            // A locally-deleted thread whose runtime was resurrected by a stray late
+            // event must not show up as a working/ghost thread.
+            if self.locally_deleted_thread_ids.contains(thread_id) {
                 continue;
             }
             activity.push(ThreadActivityView {

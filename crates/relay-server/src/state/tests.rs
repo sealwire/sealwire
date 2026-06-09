@@ -2168,6 +2168,53 @@ fn mark_thread_deleted_clears_settings_and_runtime() {
 }
 
 #[test]
+fn has_working_thread_in_cwd_ignores_reviewer_and_deleted_threads() {
+    let mut relay = test_state();
+    let cwd = "/tmp/project";
+
+    // A working REVIEWER thread is a read-only background thread — it can't mutate the
+    // workspace, so it must NOT block a new review request.
+    relay.register_reviewer_thread("reviewer-1".to_string(), "parent-1".to_string());
+    {
+        let rt = relay.ensure_runtime_for_thread("reviewer-1");
+        rt.current_cwd = cwd.to_string();
+        rt.current_phase = Some("tool".to_string());
+    }
+    assert!(
+        !relay.has_working_thread_in_cwd(cwd),
+        "a working reviewer thread must not gate a review request"
+    );
+
+    // A normal user thread working in the cwd DOES gate it (it could mutate files).
+    {
+        let rt = relay.ensure_runtime_for_thread("user-1");
+        rt.current_cwd = cwd.to_string();
+        rt.current_phase = Some("tool".to_string());
+    }
+    assert!(
+        relay.has_working_thread_in_cwd(cwd),
+        "a working user thread blocks a review (it could mutate the workspace)"
+    );
+
+    // Deleting the user thread tombstones it + drops its runtime. A stray late event can
+    // resurrect the runtime — but a deleted thread must never block a review again.
+    relay.mark_thread_deleted("user-1");
+    assert!(
+        !relay.has_working_thread_in_cwd(cwd),
+        "deleting the working thread unblocks reviews"
+    );
+    {
+        let rt = relay.ensure_runtime_for_thread("user-1");
+        rt.current_cwd = cwd.to_string();
+        rt.current_phase = Some("tool".to_string());
+    }
+    assert!(
+        !relay.has_working_thread_in_cwd(cwd),
+        "a deleted thread's resurrected runtime must not gate a review"
+    );
+}
+
+#[test]
 fn active_idle_thread_can_be_archived() {
     let mut relay = test_state();
     relay.threads = vec![test_thread("thread-1", "/tmp/project")];
