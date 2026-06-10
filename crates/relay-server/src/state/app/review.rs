@@ -619,8 +619,8 @@ max_rounds={max_rounds}). Step 1: asking the author to recap its changes."
                         )
                         .await
                     {
-                        Ok(thread_id) => {
-                            (thread_id, reviewer_model.clone(), reviewer_effort.clone())
+                        Ok((thread_id, resolved_model)) => {
+                            (thread_id, Some(resolved_model), reviewer_effort.clone())
                         }
                         Err(error) => {
                             self.fail_job(
@@ -632,6 +632,19 @@ max_rounds={max_rounds}). Step 1: asking the author to recap its changes."
                         }
                     },
                 };
+
+            // Record the model that ACTUALLY runs this round so the reviewer card shows
+            // the effective model. A clean reviewer started on the provider default carries
+            // no explicit request model, so without this the job would store `None` and the
+            // card would show no model at all (the reported gap). Reuse keeps the thread's
+            // own/overridden model. Only a reused thread with no recorded model anywhere
+            // stays `None`.
+            if let Some(effective_model) = reviewer_turn_model.clone() {
+                self.update_job(&job_id, |job| {
+                    job.reviewer_model = Some(effective_model);
+                })
+                .await;
+            }
 
             // --- send the review prompt + wait + read-back (fresh-message bound) ---
             self.set_job_status(&job_id, ReviewJobStatus::WaitingForReviewer)
@@ -1030,11 +1043,14 @@ max_rounds={max_rounds}). Step 1: asking the author to recap its changes."
 
     /// Create a clean reviewer thread as a BACKGROUND thread — it never becomes
     /// the active thread, so the user's conversation is never displaced. Returns
-    /// the reviewer thread id (a synthetic placeholder for a clean Claude thread,
-    /// promoted to the real session id once its first turn runs; see
-    /// `RelayState::promote_background_thread`). Crucially this does NOT mutate the
-    /// active thread, `provider_name`, or `available_models`, which belong to the
-    /// user's active session.
+    /// `(reviewer thread id, the resolved model the reviewer turn runs on)`. The id
+    /// is a synthetic placeholder for a clean Claude thread, promoted to the real
+    /// session id once its first turn runs (see `RelayState::promote_background_thread`).
+    /// The resolved model is surfaced so the caller can record the EFFECTIVE model on
+    /// the job — a clean reviewer on the provider default carries no explicit request
+    /// model, but the card should still show what actually ran. Crucially this does
+    /// NOT mutate the active thread, `provider_name`, or `available_models`, which
+    /// belong to the user's active session.
     async fn start_background_reviewer_thread(
         &self,
         job_id: &str,
@@ -1042,7 +1058,7 @@ max_rounds={max_rounds}). Step 1: asking the author to recap its changes."
         reviewer_provider: &str,
         reviewer_model: Option<&str>,
         reviewer_effort: Option<&str>,
-    ) -> Result<String, String> {
+    ) -> Result<(String, String), String> {
         let (provider_name, bridge) = {
             let (name, bridge) = self.resolve_provider(Some(reviewer_provider))?;
             (name.to_string(), bridge.clone())
@@ -1149,7 +1165,7 @@ max_rounds={max_rounds}). Step 1: asking the author to recap its changes."
             self.handle_parent_reviewer_threads(evict_ids, true).await;
         }
 
-        Ok(reviewer_thread_id)
+        Ok((reviewer_thread_id, model))
     }
 
     /// Prepare a REUSED reviewer thread for its re-review turn. Re-establishes the

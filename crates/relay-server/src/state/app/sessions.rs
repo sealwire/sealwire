@@ -199,12 +199,19 @@ impl AppState {
             if let Some(models) = provider_models {
                 relay.set_available_models(models);
             }
-            // Seed the honest sort key from the PRE-resume `updated_at` (read
-            // before `resume_thread` spun up a live SDK session and rewrote the
-            // session file). `or_insert` keeps any existing/persisted value, so
-            // only the first-ever resume of a never-messaged thread sets the
-            // baseline — and the resume itself never advances the ordering.
-            relay.seed_thread_last_activity(&input.thread_id, preview.thread.updated_at);
+            // Fold the provider's reported last-activity time into the honest
+            // sort key. Only Claude's `read_thread` reports a resume-safe value
+            // (the worker derives `updated_at` from the transcript's last
+            // message, not the session-file mtime that resume's init-write
+            // bumps); for it we max-fold so unwitnessed CLI use can heal on
+            // open. Other providers may report a bumpable mtime, so we
+            // freeze-first to keep repeated selection from creeping the thread
+            // up the list.
+            if bridge.read_thread_reports_activity_time() {
+                relay.observe_thread_last_activity(&input.thread_id, preview.thread.updated_at);
+            } else {
+                relay.seed_thread_last_activity(&input.thread_id, preview.thread.updated_at);
+            }
             relay.load_thread_data(
                 thread_data,
                 &approval_policy,

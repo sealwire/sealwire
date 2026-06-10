@@ -1330,6 +1330,11 @@ pub struct ReviewJobView {
     pub id: String,
     pub parent_thread_id: String,
     pub reviewer_provider: String,
+    /// The reviewer's EFFECTIVE model — the one the reviewer turn actually runs on
+    /// (resolved provider default included), recorded once the reviewer thread starts.
+    /// `None` only briefly before the first reviewer turn, or for a reused thread with
+    /// no recorded model anywhere.
+    pub reviewer_model: Option<String>,
     pub reviewer_thread_id: Option<String>,
     pub status: String,
     pub error: Option<String>,

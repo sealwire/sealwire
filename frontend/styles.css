@@ -3259,10 +3259,40 @@ body.is-resizing-panel {
   justify-content: space-between;
   gap: 8px;
 }
+.reviewer-job-identity {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0; /* let the model truncate instead of pushing the status off */
+}
+.reviewer-job-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
 .reviewer-job-provider {
   font-size: 13px;
   font-weight: 600;
   color: var(--text-primary);
+}
+.reviewer-job-model {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The reviewer thread name is long: keep it to one line, truncate with an
+   ellipsis, and rely on the title/aria-label for the full value on hover. */
+.reviewer-job-thread {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .reviewer-job-status {
   font-size: 11px;

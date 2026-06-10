@@ -536,12 +536,20 @@ fn thread_last_activity_or_prefers_tracked_value_over_provider_mtime() {
     // we fall back to it.
     assert_eq!(relay.thread_last_activity_or("ghost", 4242), 4242);
 
-    // The pre-resume honest value wins over a resume-polluted provider mtime,
-    // and a *second* resume — whose pre-read now sees the polluted mtime — must
-    // NOT clobber the seeded baseline (`seed` is or-insert).
-    relay.seed_thread_last_activity("thread-1", 1_000);
-    relay.seed_thread_last_activity("thread-1", 9_999_999);
-    assert_eq!(relay.thread_last_activity_or("thread-1", 9_999_999), 1_000);
+    // `observe` (honest-provider resume path) folds in last-activity times,
+    // keeping the most recent: a newer real-activity time advances the key
+    // (heals unwitnessed CLI use), but an older observation can't drag it back.
+    relay.observe_thread_last_activity("honest", 1_000);
+    relay.observe_thread_last_activity("honest", 9_000);
+    assert_eq!(relay.thread_last_activity_or("honest", 0), 9_000);
+    relay.observe_thread_last_activity("honest", 5_000);
+    assert_eq!(relay.thread_last_activity_or("honest", 0), 9_000);
+
+    // `seed` (non-honest provider resume path) freezes the first observation,
+    // so a later resume-bumped mtime can't creep the key up the list.
+    relay.seed_thread_last_activity("frozen", 1_000);
+    relay.seed_thread_last_activity("frozen", 9_999_999);
+    assert_eq!(relay.thread_last_activity_or("frozen", 0), 1_000);
 }
 
 #[test]

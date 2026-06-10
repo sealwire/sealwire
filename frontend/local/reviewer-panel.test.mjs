@@ -368,3 +368,51 @@ test("ReviewerPanel treats an escalated review as terminal (Delete enabled)", ()
   assert.match(html, /Delete this review and its reviewer thread/);
   assert.doesNotMatch(html, /Stop the reviewer before deleting/);
 });
+
+test("ReviewerPanel shows the reviewer model + the (long) thread name with a full-value tooltip", () => {
+  const longName = "Review: refactor the workspace-diff host into shared chrome (round 1)";
+  const html = renderToStaticMarkup(
+    h(ReviewerPanel, {
+      reviewJobs: [
+        {
+          id: "r1",
+          reviewer_provider: "codex",
+          reviewer_model: "gpt-5-codex",
+          status: "waiting_for_reviewer",
+          reviewer_thread_id: "rev-thread-1",
+        },
+      ],
+      reviewerThreads: [{ reviewer_thread_id: "rev-thread-1", name: longName }],
+      canRequest: false,
+    })
+  );
+  // Model is shown.
+  assert.match(html, /reviewer-job-model[^>]*>gpt-5-codex</);
+  // The long name renders, truncation is CSS, and the FULL value is in title + aria-label
+  // so hovering reveals all of it.
+  assert.match(html, /reviewer-job-thread/);
+  assert.match(html, new RegExp(`title="${longName.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&")}"`));
+  assert.match(html, /aria-label="Reviewer thread: Review: refactor/);
+});
+
+test("ReviewerPanel falls back to the reviewer thread id when the thread has no name; hides model when unknown", () => {
+  const html = renderToStaticMarkup(
+    h(ReviewerPanel, {
+      reviewJobs: [
+        {
+          id: "r2",
+          reviewer_provider: "codex",
+          status: "waiting_for_reviewer",
+          reviewer_thread_id: "rev-thread-2",
+          // no reviewer_model (e.g. a reused thread that inherits its model)
+        },
+      ],
+      reviewerThreads: [], // no name match
+      canRequest: false,
+    })
+  );
+  // No model span when the job carries no model.
+  assert.doesNotMatch(html, /reviewer-job-model/);
+  // Falls back to the raw thread id as the displayed/tooltipped name.
+  assert.match(html, /reviewer-job-thread[^>]*title="rev-thread-2"/);
+});

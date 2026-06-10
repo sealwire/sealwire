@@ -2,10 +2,36 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  lastMessageActivitySeconds,
   mapModelInfo,
   mapModelInfos,
   mapSessionMessages,
 } from "./sdk-mapping.mjs";
+
+test("lastMessageActivitySeconds returns the newest message time in unix seconds", () => {
+  assert.equal(
+    lastMessageActivitySeconds([
+      { type: "user", timestamp: "2026-06-10T08:10:00.000Z" },
+      { type: "assistant", timestamp: "2026-06-10T08:12:52.625Z" },
+      { type: "assistant", timestamp: "2026-06-10T08:11:00.000Z" },
+    ]),
+    Math.floor(Date.parse("2026-06-10T08:12:52.625Z") / 1000),
+  );
+});
+
+test("lastMessageActivitySeconds ignores entries without a timestamp and returns null when none have one", () => {
+  // A resume appends a session-init line with no timestamp; it must not count.
+  assert.equal(
+    lastMessageActivitySeconds([
+      { type: "user", timestamp: "2026-06-10T08:10:00.000Z" },
+      { type: "system", permissionMode: "default" },
+    ]),
+    Math.floor(Date.parse("2026-06-10T08:10:00.000Z") / 1000),
+  );
+  assert.equal(lastMessageActivitySeconds([{ type: "system" }]), null);
+  assert.equal(lastMessageActivitySeconds([]), null);
+  assert.equal(lastMessageActivitySeconds(undefined), null);
+});
 
 test("mapModelInfo flattens Claude SDK model metadata for the relay", () => {
   assert.deepEqual(

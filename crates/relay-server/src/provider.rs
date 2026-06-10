@@ -89,6 +89,19 @@ pub trait ProviderBridge: Send + Sync {
         answers: &serde_json::Map<String, serde_json::Value>,
     ) -> Result<(), String>;
     fn provider_name(&self) -> &'static str;
+
+    /// Whether this provider's `read_thread` reports an `updated_at` that is the
+    /// thread's genuine last-activity time (resume-safe) rather than a session
+    /// file mtime that a no-prompt resume bumps to ~now. Claude derives it from
+    /// the transcript (see the worker's `read_session`), so the relay can
+    /// max-fold it into the activity sort key — which also heals activity the
+    /// relay never witnessed (e.g. the session used via the CLI between views).
+    /// Providers that report a bumpable mtime return `false`; the relay then
+    /// freezes their first observation (or-insert) so repeated selection can't
+    /// creep the thread up the list.
+    fn read_thread_reports_activity_time(&self) -> bool {
+        false
+    }
 }
 
 struct ProviderEntry {

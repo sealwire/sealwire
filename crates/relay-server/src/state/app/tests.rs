@@ -2300,6 +2300,11 @@ mod review_tests {
         // Delay before a turn completes (ms). Lets tests complete a turn *after* a
         // short step timeout, exercising the drain path.
         complete_delay_ms: Arc<AtomicU64>,
+        // When true, models a provider (like Claude) whose read_thread reports a
+        // resume-safe last-activity time → resume max-folds it. Default false
+        // models a provider whose updated_at is a bumpable mtime (like Codex) →
+        // resume freezes (or-insert) to avoid click-to-top creep.
+        report_activity_time: Arc<AtomicBool>,
         next_id: Arc<AtomicU64>,
     }
 
@@ -2333,6 +2338,7 @@ mod review_tests {
                 unloaded_threads: Arc::new(Mutex::new(std::collections::HashSet::new())),
                 resumes: Arc::new(Mutex::new(Vec::new())),
                 complete_delay_ms: Arc::new(AtomicU64::new(15)),
+                report_activity_time: Arc::new(AtomicBool::new(false)),
                 next_id: Arc::new(AtomicU64::new(1)),
             }
         }
@@ -2762,6 +2768,10 @@ mod review_tests {
         fn provider_name(&self) -> &'static str {
             self.name
         }
+
+        fn read_thread_reports_activity_time(&self) -> bool {
+            self.report_activity_time.load(Ordering::Relaxed)
+        }
     }
 
     async fn build_review_app(
@@ -3012,6 +3022,20 @@ mod review_tests {
 
         let job = wait_for_review(&app, &receipt.review_job_id).await;
         assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
+
+        // The review was requested WITHOUT an explicit model (review_input sets
+        // reviewer_model: None), but the card must still show the model it actually ran
+        // on: the orchestrator records the resolved EFFECTIVE model on the job once the
+        // reviewer thread starts. Without that, a default-model clean reviewer would
+        // store None and the UI would show no model at all.
+        assert!(
+            job.reviewer_model
+                .as_ref()
+                .map(|m| !m.is_empty())
+                .unwrap_or(false),
+            "the effective reviewer model must be recorded on the job (got {:?})",
+            job.reviewer_model
+        );
 
         // The reviewer ran entirely in the BACKGROUND: the active thread stayed the
         // parent the whole time — there was no handoff to displace the user.
@@ -4382,6 +4406,97 @@ mod review_tests {
         assert!(
             pos_active < pos_stale,
             "recent-activity thread must outrank the merely-selected one (active={pos_active}, stale={pos_stale})"
+        );
+    }
+
+    // Regression guard for the Codex creep the reviewer flagged: a provider whose
+    // read_thread.updated_at may be a resume-bumped mtime must NOT advance the
+    // tracked activity key on a no-prompt selection — repeated selection would
+    // otherwise creep it up the list (the original click-to-top bug).
+    #[tokio::test]
+    async fn resume_does_not_creep_last_activity_for_non_honest_provider() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, _providers) = build_review_app(cwd, &["codex"]).await;
+        // Default ReviewTestProvider reports report_activity_time=false (Codex-like)
+        // and its read_thread returns updated_at = unix_now() (a "bumped" mtime).
+        let thread = start_parent(&app, cwd, "codex").await;
+
+        // Stand in for an honest older baseline, then select the thread.
+        app.relay
+            .write()
+            .await
+            .thread_last_activity_at
+            .insert(thread.id.clone(), 1_000);
+        app.resume_session(crate::protocol::ResumeSessionInput {
+            thread_id: thread.id.clone(),
+            approval_policy: None,
+            sandbox: None,
+            effort: None,
+            device_id: Some("device-1".to_string()),
+            provider: None,
+        })
+        .await
+        .expect("resume");
+
+        let tracked = app
+            .relay
+            .read()
+            .await
+            .thread_last_activity_at
+            .get(&thread.id)
+            .copied();
+        assert_eq!(
+            tracked,
+            Some(1_000),
+            "a non-honest provider's selection must freeze (or-insert), not adopt its bumpable mtime"
+        );
+    }
+
+    // The honest-source path the reviewer noted was untested end-to-end: a
+    // provider that reports a resume-safe last-activity time (like Claude) must
+    // max-fold on resume, healing a stale tracked value from unwitnessed use.
+    #[tokio::test]
+    async fn resume_heals_last_activity_for_honest_provider() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        providers
+            .get("codex")
+            .unwrap()
+            .report_activity_time
+            .store(true, Ordering::Relaxed);
+        let thread = start_parent(&app, cwd, "codex").await;
+
+        // Stale tracked value (e.g. the session was used via the CLI since we
+        // last saw it); the provider's honest read reports a much newer time.
+        app.relay
+            .write()
+            .await
+            .thread_last_activity_at
+            .insert(thread.id.clone(), 1_000);
+        app.resume_session(crate::protocol::ResumeSessionInput {
+            thread_id: thread.id.clone(),
+            approval_policy: None,
+            sandbox: None,
+            effort: None,
+            device_id: Some("device-1".to_string()),
+            provider: None,
+        })
+        .await
+        .expect("resume");
+
+        let tracked = app
+            .relay
+            .read()
+            .await
+            .thread_last_activity_at
+            .get(&thread.id)
+            .copied()
+            .expect("tracked");
+        assert!(
+            tracked > 1_000,
+            "an honest provider's selection must max-fold and heal the stale value (got {tracked})"
         );
     }
 

@@ -680,6 +680,12 @@ impl ProviderBridge for ClaudeCodeBridge {
     fn provider_name(&self) -> &'static str {
         "claude_code"
     }
+
+    fn read_thread_reports_activity_time(&self) -> bool {
+        // `read_session` overrides `updated_at` with the transcript's last real
+        // message time (worker.mjs), so it is resume-safe and can be max-folded.
+        true
+    }
 }
 
 // --- stdout / stderr readers -----------------------------------------------

@@ -162,15 +162,19 @@ pub struct RelayState {
     pub reasoning_effort: String,
     pub(super) thread_settings: HashMap<String, ThreadSessionSettings>,
     /// Honest "last real activity" timestamp per thread (unix secs), used as
-    /// the thread-list sort/display key INSTEAD of the provider's session-file
-    /// mtime. The provider's `updated_at` (Claude `lastModified` / Codex
-    /// `updatedAt`) is bumped to ~now whenever we *resume* a session — even a
-    /// no-prompt selection spins up a live SDK session that rewrites the
-    /// session file — which would shove a thread to the top of the list on a
-    /// mere click. This map only advances on genuine activity (transcript
-    /// writes: user sends, agent output, tool/file-change entries) and is
-    /// seeded from the pre-resume `updated_at`. Persisted so the ordering
-    /// survives a relay restart.
+    /// the thread-list sort/display key INSTEAD of the provider's raw
+    /// `updated_at`. A no-prompt resume/selection spins up a live SDK session
+    /// that rewrites the session file, bumping the provider's mtime-based
+    /// `updated_at` to ~now — which would shove a thread to the top of the list
+    /// on a mere click. This map advances only on signals that survive that:
+    ///   • live in-relay activity — every per-thread transcript write
+    ///     (`touch_thread_last_activity` via `bump_thread_transcript_revision`);
+    ///   • on resume, the provider's reported last-activity time, folded in two
+    ///     ways depending on `ProviderBridge::read_thread_reports_activity_time`:
+    ///     Claude reports a transcript-derived (resume-safe) time → max-fold
+    ///     (`observe_*`, which also heals unwitnessed CLI use); other providers
+    ///     may report a bumpable mtime → freeze-first (`seed_*`) to avoid creep.
+    /// Persisted so the ordering survives a relay restart.
     pub(super) thread_last_activity_at: HashMap<String, u64>,
     pub allowed_roots: Vec<String>,
     pub available_models: Vec<ModelOptionView>,
@@ -1329,11 +1333,27 @@ impl RelayState {
             .insert(thread_id.to_string(), unix_now());
     }
 
-    /// Seed a thread's activity baseline from a known-honest timestamp (the
-    /// pre-resume provider `updated_at`), WITHOUT clobbering an existing — and
-    /// therefore more authoritative — value. Lets a thread we've only ever
-    /// resumed (never messaged) still sort by its real last-activity time
-    /// instead of the resume-polluted session-file mtime.
+    /// Fold a resume-HONEST activity timestamp into the tracked value, keeping
+    /// the most recent. Only call this with a value that a no-prompt resume
+    /// can't inflate — i.e. a provider whose `read_thread.updated_at` is the
+    /// transcript's last real message time (`read_thread_reports_activity_time`
+    /// == true, currently Claude). Because the input is never resume-polluted,
+    /// the max is safe (can't reintroduce click-to-top reordering) AND heals
+    /// activity the relay never witnessed (e.g. CLI use between views) on open.
+    pub(super) fn observe_thread_last_activity(&mut self, thread_id: &str, activity_at: u64) {
+        let entry = self
+            .thread_last_activity_at
+            .entry(thread_id.to_string())
+            .or_insert(activity_at);
+        *entry = (*entry).max(activity_at);
+    }
+
+    /// Seed a thread's activity baseline WITHOUT clobbering an existing value.
+    /// Used on resume for providers whose `read_thread.updated_at` may be a
+    /// session-file mtime that resume bumps (anything other than Claude). The
+    /// or-insert freeze means a polluted mtime is recorded at most once, so
+    /// repeated selection can't creep the thread up the list — the same
+    /// provider-agnostic safety the non-Claude path had before honest sourcing.
     pub(super) fn seed_thread_last_activity(&mut self, thread_id: &str, updated_at: u64) {
         self.thread_last_activity_at
             .entry(thread_id.to_string())

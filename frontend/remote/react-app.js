@@ -810,6 +810,9 @@ function RemoteApp() {
         session?.active_thread_id,
         null
       ),
+      // Full reviewer-thread list so each card can show its reviewer thread's
+      // (long, truncated-with-tooltip) name by joining on reviewer_thread_id.
+      reviewerThreads: session?.reviewer_threads || [],
       canRequest: canRequestReview(session, remoteDeviceId),
       blocked: isReviewBlocked({ active_review_jobs: remoteThreadReviewJobs }),
     });

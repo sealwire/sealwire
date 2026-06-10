@@ -49,10 +49,21 @@ function latestAgentText(entries) {
 //   onResolveReview:   () => void                (stop a blocked reviewer)
 //   onDismissReview:   (jobId) => void           (drop a terminal review)
 //   fetchReviewerTranscript: (threadId) => Promise<entries[]>
+// Join a job to its reviewer thread's display name (falling back to the raw
+// thread id) so the card can show — and tooltip — the long reviewer-thread name.
+function reviewerThreadName(job, reviewerThreads) {
+  const id = job?.reviewer_thread_id;
+  if (!id) return null;
+  const match = (reviewerThreads || []).find((rt) => rt?.reviewer_thread_id === id);
+  const name = match?.name && match.name.trim() ? match.name.trim() : null;
+  return name || id;
+}
+
 export function ReviewerPanel({
   reviewJobs = [],
   reviewModel = {},
   reusableReviewers = [],
+  reviewerThreads = [],
   canRequest = false,
   requesting = false,
   onRequestReview,
@@ -99,6 +110,7 @@ export function ReviewerPanel({
             h(ReviewerJobCard, {
               key: job.id,
               job,
+              threadName: reviewerThreadName(job, reviewerThreads),
               onResolveReview,
               onDismissReview,
               fetchReviewerTranscript,
@@ -125,7 +137,7 @@ export function ReviewerPanel({
   );
 }
 
-function ReviewerJobCard({ job, onResolveReview, onDismissReview, fetchReviewerTranscript }) {
+function ReviewerJobCard({ job, threadName, onResolveReview, onDismissReview, fetchReviewerTranscript }) {
   const [review, setReview] = React.useState({ status: "idle", text: null, error: null });
   const terminal = isTerminalReviewStatus(job.status);
   const blocked = job.status === "blocked";
@@ -185,21 +197,51 @@ function ReviewerJobCard({ job, onResolveReview, onDismissReview, fetchReviewerT
     h(
       "div",
       { className: "reviewer-job-head" },
-      h("span", { className: "reviewer-job-provider" }, job.reviewer_provider || "reviewer"),
+      // Left cluster: who's reviewing — provider + (when known) its own model.
       h(
-        "span",
-        { className: `reviewer-job-status reviewer-job-status-${reviewChipTone(job.status)}` },
-        reviewStatusLabel(job.status)
+        "div",
+        { className: "reviewer-job-identity" },
+        h("span", { className: "reviewer-job-provider" }, job.reviewer_provider || "reviewer"),
+        // A reused thread may inherit its model and not carry one on the job.
+        job.reviewer_model
+          ? h(
+              "span",
+              { className: "reviewer-job-model", title: job.reviewer_model },
+              job.reviewer_model
+            )
+          : null
       ),
-      // Iterative review loop progress (only meaningful when a budget was set).
-      job.max_rounds > 1
-        ? h(
-            "span",
-            { className: "reviewer-job-round" },
-            `Round ${job.round || 0}/${job.max_rounds}`
-          )
-        : null
+      // Right cluster: status + iterative-loop progress (when a budget was set).
+      h(
+        "div",
+        { className: "reviewer-job-meta" },
+        h(
+          "span",
+          { className: `reviewer-job-status reviewer-job-status-${reviewChipTone(job.status)}` },
+          reviewStatusLabel(job.status)
+        ),
+        job.max_rounds > 1
+          ? h(
+              "span",
+              { className: "reviewer-job-round" },
+              `Round ${job.round || 0}/${job.max_rounds}`
+            )
+          : null
+      )
     ),
+    // The reviewer thread's name is long, so truncate it (CSS) but keep the full
+    // value in the tooltip + aria-label so hovering reveals the whole thing.
+    threadName
+      ? h(
+          "p",
+          {
+            className: "reviewer-job-thread",
+            title: threadName,
+            "aria-label": `Reviewer thread: ${threadName}`,
+          },
+          threadName
+        )
+      : null,
     job.verdict && job.verdict !== "unknown"
       ? h("p", { className: "reviewer-job-verdict" }, `Verdict: ${job.verdict}`)
       : null,

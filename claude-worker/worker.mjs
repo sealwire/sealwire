@@ -46,6 +46,7 @@ import {
   log,
 } from "./protocol.mjs";
 import {
+  lastMessageActivitySeconds,
   mapModelInfos,
   mapSdkMessage,
   mapSessionInfo,
@@ -966,13 +967,19 @@ async function main() {
               includeSystemMessages: false,
             }),
           ]);
+          const thread = mapSessionInfo(info ?? {
+            sessionId,
+            summary: "",
+            lastModified: Date.now(),
+            cwd: cmd.cwd || "",
+          });
+          // Prefer the last real message time over the session-file mtime: a
+          // resume appends a session-init line that bumps mtime without being
+          // genuine activity. Falls back to the mtime for empty sessions.
+          const lastActivity = lastMessageActivitySeconds(messages);
+          if (lastActivity) thread.updated_at = lastActivity;
           emitResponse(cmd.id, {
-            thread: mapSessionInfo(info ?? {
-              sessionId,
-              summary: "",
-              lastModified: Date.now(),
-              cwd: cmd.cwd || "",
-            }),
+            thread,
             transcript: mapSessionMessages(messages),
           });
         } catch (err) {

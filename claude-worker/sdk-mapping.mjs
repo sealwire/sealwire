@@ -278,6 +278,22 @@ export function mapSessionInfo(session) {
   };
 }
 
+// The real "last activity" for a session is the timestamp of its newest actual
+// message — NOT the session-file mtime that `mapSessionInfo` reads, which a
+// resume bumps to ~now by appending a session-init line. Derive it from the
+// transcript so the relay can order/display by genuine activity. Returns unix
+// SECONDS (matching `updated_at`) or null when no message carries a timestamp.
+export function lastMessageActivitySeconds(messages) {
+  let maxMs = 0;
+  for (const message of messages || []) {
+    const raw = message && message.timestamp;
+    if (raw == null) continue;
+    const ms = typeof raw === "number" ? raw : Date.parse(raw);
+    if (Number.isFinite(ms) && ms > maxMs) maxMs = ms;
+  }
+  return maxMs > 0 ? Math.floor(maxMs / 1000) : null;
+}
+
 export function mapSessionMessages(messages) {
   const entries = [];
   const toolEntryById = new Map();
