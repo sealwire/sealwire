@@ -1694,6 +1694,23 @@ impl RelayState {
             runtime.touch(unix_now());
         }
 
+        // The same "turn is over" signal also means any approval / ask-user
+        // request the agent paused on is now orphaned: there is no live turn to
+        // consume an answer. Drop them so a cancelled or abnormally-ended turn
+        // doesn't leave an unanswerable prompt pinned — which clients surface
+        // forever as a "needs input" badge with nothing to resolve it.
+        //
+        // SAFETY CONTRACT: this only drops genuinely-orphaned requests because
+        // every provider sets a *working* status BEFORE adding a pending request
+        // (claude.rs `approval_requested`/`ask_user_question_requested`, codex
+        // `requestApproval`) and keeps the turn suspended while it is pending. So
+        // a non-working status here always means the request can no longer be
+        // answered. A future handler that adds a pending request without first
+        // marking the thread active would break this and must not.
+        if !thread_status_is_working(&status) {
+            self.drop_pending_requests_for_thread(thread_id);
+        }
+
         if let Some(thread) = self.threads.iter_mut().find(|item| item.id == thread_id) {
             thread.status = status;
         }

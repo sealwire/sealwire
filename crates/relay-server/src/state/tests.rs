@@ -855,6 +855,105 @@ fn load_thread_data_preserves_pending_requests_from_other_threads() {
 }
 
 #[test]
+fn turn_going_idle_drops_that_threads_pending_user_requests() {
+    let mut relay = test_state();
+    relay.activate_thread(
+        test_thread("thread-1", "/tmp/project"),
+        "/tmp/project",
+        DEFAULT_MODEL,
+        DEFAULT_APPROVAL_POLICY,
+        DEFAULT_SANDBOX,
+        DEFAULT_EFFORT,
+        "device-a",
+    );
+    // The agent paused mid-turn to ask the user a question (and to request an
+    // approval) — the thread is active and waiting on input.
+    relay.add_pending_ask_user_question(test_pending_ask_user_question("thread-1"));
+    relay.add_pending_approval(test_pending_approval("thread-1"));
+    relay.set_thread_status(
+        "thread-1",
+        "active".to_string(),
+        vec!["waitingOnAskUser".to_string()],
+    );
+    assert!(relay.pending_ask_user_questions.contains_key("ask:1"));
+    assert!(relay.pending_approvals.contains_key("req-1"));
+
+    // The turn ends without an answer (completed / cancelled / stopped / the
+    // reviewer was cancelled) — the thread goes idle.
+    relay.set_thread_status("thread-1", "idle".to_string(), Vec::new());
+
+    // An idle thread has no live turn, so a lingering ask-user question or
+    // approval is ORPHANED: there is nothing to consume an answer. It must be
+    // dropped, otherwise the snapshot keeps surfacing it and the UI pins a
+    // permanent "needs input" badge that can never resolve.
+    assert!(
+        !relay.pending_ask_user_questions.contains_key("ask:1"),
+        "going idle must drop the thread's orphaned pending ask-user question"
+    );
+    assert!(
+        relay.pending_approvals.is_empty(),
+        "going idle must drop the thread's orphaned pending approval"
+    );
+}
+
+#[test]
+fn turn_going_idle_keeps_other_threads_pending_requests() {
+    let mut relay = test_state();
+    relay.activate_thread(
+        test_thread("thread-1", "/tmp/project"),
+        "/tmp/project",
+        DEFAULT_MODEL,
+        DEFAULT_APPROVAL_POLICY,
+        DEFAULT_SANDBOX,
+        DEFAULT_EFFORT,
+        "device-a",
+    );
+    // A DIFFERENT thread (thread-2) is mid-turn, genuinely waiting on the user.
+    relay.add_pending_ask_user_question(test_pending_ask_user_question("thread-2"));
+    relay.add_pending_approval(test_pending_approval("thread-2"));
+    relay.set_thread_status(
+        "thread-2",
+        "active".to_string(),
+        vec!["waitingOnAskUser".to_string()],
+    );
+
+    // thread-1 finishing its own turn must NOT disturb thread-2's live requests
+    // (guards the per-thread `thread_id` filter in drop_pending_requests_for_thread).
+    relay.set_thread_status("thread-1", "idle".to_string(), Vec::new());
+
+    assert!(
+        relay.pending_ask_user_questions.contains_key("ask:1"),
+        "another thread going idle must not drop thread-2's pending ask-user question"
+    );
+    assert!(
+        relay.pending_approvals.contains_key("req-1"),
+        "another thread going idle must not drop thread-2's pending approval"
+    );
+}
+
+#[test]
+fn background_turn_going_idle_drops_its_orphaned_request() {
+    let mut relay = test_state();
+    // A backgrounded thread paused on an ask-user question, then its turn ends
+    // via the background status path (bg_set_thread_status -> set_thread_status).
+    relay.add_pending_ask_user_question(test_pending_ask_user_question("bg-thread"));
+    relay.bg_set_thread_status(
+        "bg-thread",
+        "active".to_string(),
+        vec!["waitingOnAskUser".to_string()],
+        0,
+    );
+    assert!(relay.pending_ask_user_questions.contains_key("ask:1"));
+
+    relay.bg_set_thread_status("bg-thread", "idle".to_string(), Vec::new(), 0);
+
+    assert!(
+        !relay.pending_ask_user_questions.contains_key("ask:1"),
+        "a background thread going idle must drop its orphaned ask-user question"
+    );
+}
+
+#[test]
 fn clear_active_session_clears_selected_runtime_mirror() {
     let mut relay = test_state();
     relay.activate_thread(
