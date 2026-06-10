@@ -1683,6 +1683,14 @@ impl RelayState {
             let runtime = self.ensure_runtime_for_thread(thread_id);
             runtime.current_status = status.clone();
             runtime.active_flags = active_flags.clone();
+            // An idle / not-working status means the turn is over: drop any lingering
+            // phase/tool so it can't go stale. Phase is only refreshed for the ACTIVE
+            // thread, so a background thread that finished a turn would otherwise keep a
+            // ghost "thinking"/"tool" phase forever. Keeps phase consistent with status.
+            if !thread_status_is_working(&status) {
+                runtime.current_phase = None;
+                runtime.current_tool = None;
+            }
             runtime.touch(unix_now());
         }
 

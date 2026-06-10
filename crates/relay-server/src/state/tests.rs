@@ -2289,12 +2289,13 @@ fn has_working_thread_in_cwd_ignores_reviewer_and_deleted_threads() {
     let cwd = "/tmp/project";
 
     // A working REVIEWER thread is a read-only background thread — it can't mutate the
-    // workspace, so it must NOT block a new review request.
+    // workspace, so it must NOT block a new review request. ("working" = a genuine
+    // in-flight turn; a bare phase is not liveness, see is_working().)
     relay.register_reviewer_thread("reviewer-1".to_string(), "parent-1".to_string());
     {
         let rt = relay.ensure_runtime_for_thread("reviewer-1");
         rt.current_cwd = cwd.to_string();
-        rt.current_phase = Some("tool".to_string());
+        rt.active_turn_id = Some("rev-turn".to_string());
     }
     assert!(
         !relay.has_working_thread_in_cwd(cwd),
@@ -2305,7 +2306,7 @@ fn has_working_thread_in_cwd_ignores_reviewer_and_deleted_threads() {
     {
         let rt = relay.ensure_runtime_for_thread("user-1");
         rt.current_cwd = cwd.to_string();
-        rt.current_phase = Some("tool".to_string());
+        rt.active_turn_id = Some("user-turn".to_string());
     }
     assert!(
         relay.has_working_thread_in_cwd(cwd),
@@ -2322,7 +2323,7 @@ fn has_working_thread_in_cwd_ignores_reviewer_and_deleted_threads() {
     {
         let rt = relay.ensure_runtime_for_thread("user-1");
         rt.current_cwd = cwd.to_string();
-        rt.current_phase = Some("tool".to_string());
+        rt.active_turn_id = Some("user-turn-2".to_string());
     }
     assert!(
         !relay.has_working_thread_in_cwd(cwd),
@@ -2359,6 +2360,76 @@ fn completed_background_turn_clears_phase_so_the_thread_is_not_stuck_working() {
         !relay.runtime_for_thread("bg-thread").unwrap().is_working(),
         "a completed background turn must clear its phase; otherwise is_working() stays \
          true and a review's recap-wait on this parent never starts the reviewer"
+    );
+}
+
+#[test]
+fn a_stale_phase_without_a_turn_is_not_working_and_does_not_block_reviews() {
+    // Repro (live-confirmed): a thread runs a tool while ACTIVE (current_phase set via the
+    // active-relative touch_progress), then the user switches the active thread away. Its
+    // turn ends — status goes idle and active_turn_id clears — but the stale current_phase
+    // is never cleared (phase is only refreshed for the active thread). is_working() used
+    // to count current_phase, so the thread stayed "working" forever, and
+    // has_working_thread_in_cwd falsely rejected every new review in that workspace with
+    // "another thread is running" until the relay was restarted.
+    let mut relay = test_state();
+    let cwd = "/tmp/project";
+    relay.active_thread_id = Some("other-active".to_string());
+    {
+        let rt = relay.ensure_runtime_for_thread("bg-1");
+        rt.current_cwd = cwd.to_string();
+        rt.active_turn_id = None; // the turn is over
+        rt.current_status = "idle".to_string(); // the provider says idle
+        rt.current_phase = Some("thinking".to_string()); // ...but a stale phase lingered
+        rt.current_tool = None;
+    }
+    assert!(
+        !relay.runtime_for_thread("bg-1").unwrap().is_working(),
+        "phase is a descriptive label, not liveness: an idle thread with no in-flight turn \
+         must not be 'working' just because a phase lingered"
+    );
+    assert!(
+        !relay.has_working_thread_in_cwd(cwd),
+        "a stale phase must not falsely block reviews in the workspace"
+    );
+}
+
+#[test]
+fn going_idle_clears_a_threads_stale_phase() {
+    // Defense in depth for the bug above: when a thread's status transitions to a
+    // not-working value, drop its phase/tool so phase stays consistent with status (and
+    // the activity badge can't show a ghost "thinking"/"tool"). A still-working status
+    // must keep the phase.
+    let mut relay = test_state();
+    relay.active_thread_id = Some("other".to_string());
+    {
+        let rt = relay.ensure_runtime_for_thread("bg-1");
+        rt.current_phase = Some("tool".to_string());
+        rt.current_tool = Some("Bash".to_string());
+    }
+    relay.set_thread_status("bg-1", "idle".to_string(), Vec::new());
+    {
+        let rt = relay.runtime_for_thread("bg-1").unwrap();
+        assert_eq!(
+            rt.current_phase, None,
+            "idle status must clear the stale phase"
+        );
+        assert_eq!(
+            rt.current_tool, None,
+            "idle status must clear the stale tool"
+        );
+    }
+    // A working status must NOT clear the phase (it's a live turn's label).
+    relay.touch_thread_progress("bg-1", Some("thinking"), None);
+    relay.set_thread_status("bg-1", "active".to_string(), Vec::new());
+    assert_eq!(
+        relay
+            .runtime_for_thread("bg-1")
+            .unwrap()
+            .current_phase
+            .as_deref(),
+        Some("thinking"),
+        "a working status must keep the live phase"
     );
 }
 

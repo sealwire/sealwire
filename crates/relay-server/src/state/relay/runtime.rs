@@ -151,9 +151,14 @@ impl ThreadRuntime {
     }
 
     pub(crate) fn is_working(&self) -> bool {
-        self.active_turn_id.is_some()
-            || self.current_phase.is_some()
-            || thread_status_is_working(&self.current_status)
+        // `current_phase` ("thinking"/"tool"/…) is a DESCRIPTIVE label of an in-flight
+        // turn, NOT a liveness signal: it is only refreshed for the ACTIVE thread, so a
+        // thread that goes background mid-turn can be left with a stale phase that never
+        // clears. Liveness is an in-flight turn (`active_turn_id`) or a working provider
+        // status — both maintained per-thread on turn start/end. A leftover phase must
+        // not keep a thread "working", or it falsely blocks reviews
+        // (has_working_thread_in_cwd) and shows a ghost activity badge until restart.
+        self.active_turn_id.is_some() || thread_status_is_working(&self.current_status)
     }
 
     pub(crate) fn transcript_views(&self) -> Vec<TranscriptEntryView> {
