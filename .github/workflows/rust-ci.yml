@@ -83,6 +83,41 @@ jobs:
       - name: cargo test
         run: cargo test --workspace
 
+  review-recap-modes-e2e:
+    name: review-recap-modes-e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: npm ci
+        run: npm ci
+
+      - name: Build relay-server
+        run: cargo build -p relay-server
+
+      # Full-stack HTTP e2e (no browser / Playwright): spins up the real relay
+      # binary with the fake provider and drives BOTH review briefing modes
+      # through /api/session/review — `recap` (drives a recap turn) and
+      # `last_message` (skips it, briefs with the author's last message) — asserting
+      # the recap turn's presence/absence and the reviewer's briefing source.
+      - name: Review recap-modes e2e
+        run: npm run test:review-recap-modes
+
   browser-smoke:
     name: browser-page-smoke
     runs-on: ubuntu-latest
