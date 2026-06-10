@@ -504,6 +504,105 @@ test("renderEntryMarkup shows Reapply on a rolled-back turn-diff entry", () => {
   assert.doesNotMatch(markup, /data-file-change-action="rollback"/);
 });
 
+test("renderEntryMarkup reads apply_state from the live entry, not a stale detail", () => {
+  // The expanded turnDiff renders from its cached detail entry (fetched once for
+  // the full diff). A later rollback flips apply_state on the LIVE snapshot entry
+  // only, so the detail goes stale. The Undo/Reapply control must follow the live
+  // entry — otherwise an expanded diff keeps showing "Undo" after a rollback.
+  const liveEntry = {
+    item_id: "turn-diff:44",
+    kind: "tool_call",
+    status: "completed",
+    tool: {
+      name: "File summary",
+      title: "Codex changed frontend/app.js in this turn.",
+      item_type: "turnDiff",
+      apply_state: "rolled_back",
+      file_changes: [{ path: "frontend/app.js", change_type: "update", diff: "" }],
+    },
+  };
+  const staleDetail = {
+    item_id: "turn-diff:44",
+    kind: "tool_call",
+    status: "completed",
+    tool: {
+      name: "File summary",
+      title: "Codex changed frontend/app.js in this turn.",
+      item_type: "turnDiff",
+      apply_state: null,
+      file_changes: [{
+        path: "frontend/app.js",
+        change_type: "update",
+        diff: "diff --git a/frontend/app.js b/frontend/app.js\n@@ -1 +1 @@\n-old\n+new",
+      }],
+    },
+  };
+  const markup = renderEntryMarkup(liveEntry, {
+    enableFileChangeActions: true,
+    expandedKeys: new Set(),
+    lastTurnDiffItemId: "turn-diff:44",
+    detailEntries: new Map([["turn-diff:44", staleDetail]]),
+  });
+
+  assert.match(markup, /data-file-change-action="reapply"/);
+  assert.match(markup, />Reapply</);
+  assert.doesNotMatch(markup, /data-file-change-action="rollback"/);
+});
+
+test("expanded diff-group member follows live apply_state, not a stale detail", () => {
+  // Closest unit-level mirror of the e2e regression: a turn with a single
+  // turnDiff folds into a degenerate diff-group (no fileChange members). When
+  // expanded it renders the turnDiff as a group member via GenericToolEntry, so
+  // the member-owned Undo/Reapply control must follow the live snapshot entry
+  // even though the cached detail (full diff) still carries the pre-rollback
+  // apply_state.
+  const liveEntry = {
+    item_id: "turn-diff:55",
+    kind: "tool_call",
+    status: "completed",
+    turn_id: "turn-55",
+    tool: {
+      name: "File summary",
+      title: "Codex changed frontend/app.js in this turn.",
+      item_type: "turnDiff",
+      apply_state: "rolled_back",
+      file_changes: [{ path: "frontend/app.js", change_type: "update", diff: "" }],
+    },
+  };
+  const staleDetail = {
+    item_id: "turn-diff:55",
+    kind: "tool_call",
+    status: "completed",
+    turn_id: "turn-55",
+    tool: {
+      name: "File summary",
+      title: "Codex changed frontend/app.js in this turn.",
+      item_type: "turnDiff",
+      apply_state: null,
+      file_changes: [{
+        path: "frontend/app.js",
+        change_type: "update",
+        diff: "diff --git a/frontend/app.js b/frontend/app.js\n@@ -1 +1 @@\n-old\n+new",
+      }],
+    },
+  };
+  // groupExpandKey is `group:${firstEntryItemId}`; the group's only entry is the
+  // turnDiff, so the expanded key is `group:turn-diff:55`.
+  const markup = renderTranscriptContentMarkup([liveEntry], null, {
+    enableFileChangeActions: true,
+    expandedKeys: new Set(["group:turn-diff:55"]),
+    detailEntries: new Map([["turn-diff:55", staleDetail]]),
+  });
+
+  // Sanity: the group expanded and rendered the turnDiff member's diff body.
+  assert.match(markup, /chat-message-diff-group/);
+  assert.match(markup, /data-transcript-entry-id="turn-diff:55"/);
+  // The live rolled-back state must win over the stale detail.
+  assert.match(markup, /data-file-change-action="reapply"/);
+  assert.match(markup, />Reapply</);
+  assert.doesNotMatch(markup, /data-file-change-action="rollback"/);
+});
+
 test("renderEntryMarkup omits undo controls on non-last turn-diff entries", () => {
   const markup = renderEntryMarkup({
     item_id: "turn-diff:older",

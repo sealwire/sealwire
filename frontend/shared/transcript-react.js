@@ -1064,7 +1064,15 @@ function GenericToolEntry({ entry, isJustPrepended = false, options = null }) {
   const loading = Boolean(itemId && options?.loadingItemIds?.has(itemId));
   const detailEntry = resolveTranscriptDetailEntry(entry, options);
   const toolEntry = detailEntry || entry;
-  const tool = toolEntry.tool || entry.tool || {};
+  const baseTool = toolEntry.tool || entry.tool || {};
+  // `apply_state` is a live overlay the relay flips in place on rollback/reapply.
+  // The cached detail entry (fetched once for the full diff, before the rollback)
+  // can hold a stale value, so always source apply_state from the live snapshot
+  // entry. Otherwise an expanded turnDiff keeps showing "Undo" after a rollback.
+  const tool =
+    detailEntry && entry.tool
+      ? { ...baseTool, apply_state: entry.tool.apply_state ?? null }
+      : baseTool;
   const isFileChange = tool.item_type === "fileChange" || tool.item_type === "turnDiff";
   const displayTool = isFileChange
     ? { ...tool, display_options: options || null }

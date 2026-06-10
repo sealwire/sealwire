@@ -98,6 +98,25 @@ async function main() {
       null,
       { timeout: TIMEOUT_MS }
     );
+    // A turn's file diffs are consolidated into a collapsed diff-group chip
+    // (see groupToolEntries). Expand it so the turnDiff renders as a group
+    // member with its inline diff body and the Undo/Reapply control. (When the
+    // entry happens to render standalone there is no chip, so this is a no-op.)
+    await page.waitForFunction(
+      (itemId) =>
+        Boolean(
+          document.querySelector(".diff-group-chip") ||
+            document.querySelector(`[data-transcript-entry-id="${itemId}"]`)
+        ),
+      TURN_DIFF_ITEM_ID,
+      { timeout: TIMEOUT_MS }
+    );
+    await page.evaluate(() => {
+      const chip = document.querySelector(".diff-group-chip:not(.diff-group-chip-open)");
+      if (chip instanceof HTMLButtonElement) {
+        chip.click();
+      }
+    });
     await page.waitForFunction(
       (itemId) => Boolean(document.querySelector(`[data-transcript-entry-id="${itemId}"]`)),
       TURN_DIFF_ITEM_ID,
