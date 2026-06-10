@@ -141,7 +141,8 @@ impl FindingSet {
         Self { keys }
     }
 
-    /// Whether `other` contains a finding identity not present in `self`.
+    /// Whether `self` (this round) contains a finding identity not present in
+    /// `prior` — i.e. the re-review surfaced something new.
     pub(crate) fn has_new_relative_to(&self, prior: &FindingSet) -> bool {
         self.keys.iter().any(|k| !prior.keys.contains(k))
     }
@@ -409,5 +410,41 @@ mod tests {
             "race in baz".to_string(),
         ]);
         assert!(round3.has_new_relative_to(&round1));
+    }
+
+    #[test]
+    fn missing_status_decodes_to_failed_terminal() {
+        // `#[serde(default)]` forward-compat (load-bearing for the persistence
+        // chunk): a persisted run written without `status` — an older build, or a
+        // truncated record — must decode to a SAFE terminal state, never a
+        // non-terminal one that would strand a tree lock with no orchestrator.
+        let json =
+            r#"{"id":"run-1","workflow_id":"code-flow","parent_thread_id":"p","cwd":"/tmp"}"#;
+        let run: WorkflowRun = serde_json::from_str(json).expect("decode run missing status");
+        assert_eq!(run.status, RunStatus::Failed);
+        assert!(run.status.is_terminal());
+    }
+
+    #[test]
+    fn run_status_as_str_matches_serde_wire_format() {
+        // `as_str()` and `#[serde(rename_all = "snake_case")]` are hand-maintained
+        // in two places; assert they agree so logs/UI can't silently drift from the
+        // persisted/snapshot wire format.
+        for status in [
+            RunStatus::Queued,
+            RunStatus::Running,
+            RunStatus::Done,
+            RunStatus::Escalated,
+            RunStatus::Failed,
+            RunStatus::Interrupted,
+            RunStatus::Cancelled,
+        ] {
+            let serialized = serde_json::to_value(status).expect("serialize status");
+            assert_eq!(
+                serde_json::Value::String(status.as_str().to_string()),
+                serialized,
+                "as_str() disagrees with the serde wire format for {status:?}",
+            );
+        }
     }
 }
