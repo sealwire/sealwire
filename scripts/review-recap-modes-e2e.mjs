@@ -26,7 +26,8 @@ import { setTimeout as delay } from "node:timers/promises";
 const ROOT = process.cwd();
 const TIMEOUT_MS = Number(process.env.REVIEW_MODES_E2E_TIMEOUT_MS || 60000);
 const DEVICE = "review-modes-e2e";
-const RECAP_PROMPT_MARKER = "recap the changes"; // from parent_recap_prompt()
+const RECAP_PROMPT_MARKER = "recap the changes"; // from parent_recap_prompt(): the recap turn ran
+const RECAP_CONTENT_MARKER = "Goal you were implementing"; // distinctive recap-body line
 const managedProcesses = [];
 
 process.on("exit", () => {
@@ -41,7 +42,13 @@ async function main() {
   const relayPort = await getFreePort();
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-review-modes-e2e-"));
   const statePath = path.join(stateDir, "session.json");
-  const relay = spawnManagedProcess("relay", "cargo", ["run", "-p", "relay-server"], {
+  // Build once, then spawn the relay BINARY directly. `cargo run` wraps the server in
+  // a cargo process that doesn't forward SIGTERM, so teardown would orphan the relay
+  // (and hold the port) on local runs; spawning the prebuilt binary lets
+  // stopManagedProcess actually reach the server.
+  await buildRelay();
+  const relayBin = path.join(ROOT, "target", "debug", "relay-server");
+  const relay = spawnManagedProcess("relay", relayBin, [], {
     AGENT_PROVIDERS: "fake",
     PORT: String(relayPort),
     RELAY_STATE_PATH: statePath,
@@ -61,6 +68,15 @@ async function main() {
     assert.ok(
       recap.parentEntries.some((entry) => (entry.text || "").includes(RECAP_PROMPT_MARKER)),
       "recap mode must drive a recap turn on the parent (the recap prompt should appear in the parent transcript)"
+    );
+    // ...and the reviewer was briefed with the recap CONTENT, not merely that a turn
+    // ran. The fake echoes the recap prompt, so a distinctive recap-body line lands in
+    // the reviewer's prompt — symmetric with the mode-B briefing-source assertion.
+    assert.ok(recap.job.reviewer_thread_id, "recap-mode review should have a reviewer thread");
+    const recapReviewerEntries = await transcriptEntries(relayPort, recap.job.reviewer_thread_id);
+    assert.ok(
+      recapReviewerEntries.some((entry) => (entry.text || "").includes(RECAP_CONTENT_MARKER)),
+      "recap mode must brief the reviewer with the recap content"
     );
 
     // --- Mode B: last_message (skips recap; briefs with the parent's last msg) --
@@ -87,9 +103,27 @@ async function main() {
       "last_message mode must brief the reviewer with the parent's last message (the seed text should appear in the reviewer's prompt)"
     );
 
+    // --- Mode C: last_message with NO last message -> falls back to a recap turn ---
+    const fallbackCwd = await makeProjectDir(stateDir, "fallback");
+    const fallback = await runReview(relayPort, { cwd: fallbackCwd, recapSource: "last_message" });
+    assert.equal(
+      fallback.job.status,
+      "complete",
+      `last_message fallback review should complete (status=${fallback.job.status}, error=${fallback.job.error})`
+    );
+    assert.ok(
+      fallback.parentEntries.some((entry) => (entry.text || "").includes(RECAP_PROMPT_MARKER)),
+      "last_message with no parent message must fall back to a recap turn"
+    );
+
     console.log(
       JSON.stringify(
-        { ok: true, recap: recap.job.status, last_message: last.job.status },
+        {
+          ok: true,
+          recap: recap.job.status,
+          last_message: last.job.status,
+          last_message_fallback: fallback.job.status,
+        },
         null,
         2
       )
@@ -196,6 +230,22 @@ async function postEnvelope(relayPort, pathName, body = undefined) {
     body: body ? JSON.stringify(body) : undefined,
   });
   return response.json();
+}
+
+function buildRelay() {
+  return new Promise((resolve, reject) => {
+    const build = spawn("cargo", ["build", "-p", "relay-server"], {
+      cwd: ROOT,
+      env: process.env,
+      stdio: ["ignore", "inherit", "inherit"],
+    });
+    build.on("error", reject);
+    build.on("exit", (code) =>
+      code === 0
+        ? resolve()
+        : reject(new Error(`cargo build -p relay-server failed (exit ${code})`))
+    );
+  });
 }
 
 function spawnManagedProcess(name, command, args, extraEnv) {
