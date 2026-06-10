@@ -5,6 +5,7 @@ mod review;
 mod security;
 #[cfg(test)]
 mod tests;
+mod workflow;
 
 use std::{
     env,
@@ -28,6 +29,11 @@ pub(crate) use self::review::{
     ReviewMode, ReviewRecapSource, Verdict,
 };
 pub(crate) use self::security::SecurityProfile;
+#[allow(unused_imports)]
+pub(crate) use self::workflow::{
+    ArtifactKind, FindingSet, LoopSpec, RunStatus, StepRole, StopCondition, Workflow, WorkflowRun,
+    WorkflowStep, WorkflowVerdict,
+};
 
 use crate::protocol::ThreadSummaryView;
 
