@@ -21,7 +21,7 @@ use crate::protocol::{
 use crate::state::{
     parent_fix_prompt, parent_recap_prompt, parse_verdict, post_back_message, re_review_prompt,
     review_approved_message, review_escalated_message, reviewer_prompt, ReviewJob, ReviewJobStatus,
-    ReviewMode, MAX_REVIEWERS_PER_PARENT,
+    ReviewMode, ReviewRecapSource, MAX_REVIEWERS_PER_PARENT,
 };
 
 use super::*;
@@ -89,6 +89,7 @@ struct ReviewJobFields {
     reviewer_model: Option<String>,
     reviewer_effort: Option<String>,
     reviewer_mode: ReviewMode,
+    recap_source: ReviewRecapSource,
     cwd: String,
     device_id: String,
     instructions: Option<String>,
@@ -278,6 +279,8 @@ reviewer thread"
         // Optional reasoning-effort override (clean or reuse). Falls back in the
         // orchestrator to the reviewer thread's own effort / the model default.
         job.reviewer_effort = non_empty(input.reviewer_effort.clone());
+        // How to brief the reviewer (default: the parent's last message, no recap turn).
+        job.recap_source = ReviewRecapSource::from_request(input.recap_source.as_deref());
         let status_view = job.status_view();
 
         {
@@ -431,6 +434,7 @@ to this thread."
             reviewer_model,
             reviewer_effort,
             reviewer_mode,
+            recap_source,
             cwd,
             device_id: _device_id,
             instructions,
@@ -446,91 +450,38 @@ max_rounds={max_rounds}). Step 1: asking the author to recap its changes."
         )
         .await;
 
-        // --- Step 1: ask the parent to recap its changes ---------------------
-        // The recap runs as a turn on the PARENT thread. The parent is review-
-        // locked (frozen for the user) but the orchestrator drives it directly via
-        // `send_message_to_thread`, which routes as a background turn if the user
-        // has switched the active thread away. We never change the active thread.
-        self.set_job_status(&job_id, ReviewJobStatus::WaitingForParentRecap)
-            .await;
-        // Remember the parent's current last assistant message so we can require a
-        // *new* one for the recap rather than reusing a prior reply.
-        let recap_baseline = self
-            .latest_assistant_entry(&parent_thread_id)
-            .await
-            .map(|(item_id, _)| item_id);
-        let recap_turn = match self
-            .send_message_to_thread(&parent_thread_id, parent_recap_prompt(), None, None)
-            .await
-        {
-            Ok(Some(turn_id)) => Some(turn_id),
-            Ok(None) => {
-                self.fail_after_uncertain_turn_start(
-                    &job_id,
-                    &parent_thread_id,
-                    "parent did not return a recap turn id",
-                )
-                .await;
-                return;
-            }
-            Err(error) => {
-                self.fail_after_uncertain_turn_start(
-                    &job_id,
-                    &parent_thread_id,
-                    format!("failed to ask the parent for a recap: {error}"),
-                )
-                .await;
-                return;
-            }
-        };
-        self.update_job(&job_id, |job| job.parent_recap_turn_id = recap_turn)
-            .await;
-        match self
-            .wait_for_thread_idle_outcome(&job_id, &parent_thread_id)
-            .await
-        {
-            WaitOutcome::Completed => {}
-            WaitOutcome::Cancelled => return,
-            WaitOutcome::FailedApproval => {
-                if self.stop_thread_or_block(&job_id, &parent_thread_id).await {
-                    self.fail_job(
-                        &job_id,
-                        "the parent recap raised an approval; v1 cannot continue",
-                    )
-                    .await;
+        // --- Step 1: brief the reviewer -------------------------------------
+        // `LastMessage` (the default): hand the parent's latest assistant message to
+        // the reviewer with NO extra turn — saving a whole parent turn and its tokens.
+        // `Recap`: drive the parent to write a fresh recap (the original behavior).
+        // Either way the parent stays review-locked and we never change the active
+        // thread. When `LastMessage` finds no usable message we fall back to a recap
+        // turn so the reviewer is still briefed.
+        let recap = match recap_source {
+            ReviewRecapSource::LastMessage => {
+                match self.latest_assistant_entry(&parent_thread_id).await {
+                    Some((_, text)) if !text.trim().is_empty() => {
+                        self.push_runtime_log(
+                            "info",
+                            format!(
+                                "Review {job_id}: Step 1 — briefing the reviewer with the author's \
+last message (no recap turn)."
+                            ),
+                        )
+                        .await;
+                        text
+                    }
+                    _ => match self.drive_parent_recap(&job_id, &parent_thread_id).await {
+                        Some(text) => text,
+                        None => return,
+                    },
                 }
-                return;
             }
-            WaitOutcome::FailedAskUser => {
-                if self.stop_thread_or_block(&job_id, &parent_thread_id).await {
-                    self.fail_job(
-                        &job_id,
-                        "the parent recap asked a question; v1 cannot continue",
-                    )
-                    .await;
+            ReviewRecapSource::Recap => {
+                match self.drive_parent_recap(&job_id, &parent_thread_id).await {
+                    Some(text) => text,
+                    None => return,
                 }
-                return;
-            }
-            WaitOutcome::TimedOut => {
-                if self.stop_thread_or_block(&job_id, &parent_thread_id).await {
-                    self.fail_job(
-                        &job_id,
-                        "timed out waiting for the parent recap; the turn was stopped",
-                    )
-                    .await;
-                }
-                return;
-            }
-        }
-        let recap = match self.latest_assistant_entry(&parent_thread_id).await {
-            Some((item_id, text)) if recap_baseline.as_deref() != Some(item_id.as_str()) => text,
-            _ => {
-                // The recap turn settled without a fresh assistant reply (e.g. it
-                // ended on a question or produced no text). Don't reuse a stale
-                // message as the recap.
-                self.fail_job(&job_id, "the parent produced no recap for this turn")
-                    .await;
-                return;
             }
         };
         {
@@ -916,6 +867,99 @@ max_rounds={max_rounds}). Step 1: asking the author to recap its changes."
         relay.notify();
     }
 
+    /// Drive a fresh recap turn on the PARENT thread and return its recap text. On any
+    /// failure (the turn didn't start, parked on an approval/question, timed out, or
+    /// produced no fresh reply) it fails — or, where recoverable, blocks — the job and
+    /// returns `None`, so the caller should `return`.
+    async fn drive_parent_recap(&self, job_id: &str, parent_thread_id: &str) -> Option<String> {
+        // The recap runs as a turn on the PARENT thread (review-locked, but the
+        // orchestrator drives it directly; it routes as a background turn if the user
+        // switched the active thread away). We never change the active thread.
+        self.set_job_status(job_id, ReviewJobStatus::WaitingForParentRecap)
+            .await;
+        // Remember the parent's current last assistant message so we can require a
+        // *new* one for the recap rather than reusing a prior reply.
+        let recap_baseline = self
+            .latest_assistant_entry(parent_thread_id)
+            .await
+            .map(|(item_id, _)| item_id);
+        let recap_turn = match self
+            .send_message_to_thread(parent_thread_id, parent_recap_prompt(), None, None)
+            .await
+        {
+            Ok(Some(turn_id)) => Some(turn_id),
+            Ok(None) => {
+                self.fail_after_uncertain_turn_start(
+                    job_id,
+                    parent_thread_id,
+                    "parent did not return a recap turn id",
+                )
+                .await;
+                return None;
+            }
+            Err(error) => {
+                self.fail_after_uncertain_turn_start(
+                    job_id,
+                    parent_thread_id,
+                    format!("failed to ask the parent for a recap: {error}"),
+                )
+                .await;
+                return None;
+            }
+        };
+        self.update_job(job_id, |job| job.parent_recap_turn_id = recap_turn)
+            .await;
+        match self
+            .wait_for_thread_idle_outcome(job_id, parent_thread_id)
+            .await
+        {
+            WaitOutcome::Completed => {}
+            WaitOutcome::Cancelled => return None,
+            WaitOutcome::FailedApproval => {
+                if self.stop_thread_or_block(job_id, parent_thread_id).await {
+                    self.fail_job(
+                        job_id,
+                        "the parent recap raised an approval; v1 cannot continue",
+                    )
+                    .await;
+                }
+                return None;
+            }
+            WaitOutcome::FailedAskUser => {
+                if self.stop_thread_or_block(job_id, parent_thread_id).await {
+                    self.fail_job(
+                        job_id,
+                        "the parent recap asked a question; v1 cannot continue",
+                    )
+                    .await;
+                }
+                return None;
+            }
+            WaitOutcome::TimedOut => {
+                if self.stop_thread_or_block(job_id, parent_thread_id).await {
+                    self.fail_job(
+                        job_id,
+                        "timed out waiting for the parent recap; the turn was stopped",
+                    )
+                    .await;
+                }
+                return None;
+            }
+        }
+        match self.latest_assistant_entry(parent_thread_id).await {
+            Some((item_id, text)) if recap_baseline.as_deref() != Some(item_id.as_str()) => {
+                Some(text)
+            }
+            _ => {
+                // The recap turn settled without a fresh assistant reply (e.g. it ended
+                // on a question or produced no text). Don't reuse a stale message.
+                self.fail_job(job_id, "the parent produced no recap for this turn")
+                    .await;
+                None
+            }
+        }
+    }
+
     async fn review_job_fields(&self, job_id: &str) -> Option<ReviewJobFields> {
         let relay = self.relay.read().await;
         relay.review_job(job_id).map(|job| ReviewJobFields {
@@ -924,6 +968,7 @@ max_rounds={max_rounds}). Step 1: asking the author to recap its changes."
             reviewer_model: job.reviewer_model.clone(),
             reviewer_effort: job.reviewer_effort.clone(),
             reviewer_mode: job.reviewer_mode.clone(),
+            recap_source: job.recap_source,
             cwd: job.cwd.clone(),
             device_id: job.requested_by_device_id.clone(),
             instructions: job.instructions.clone(),

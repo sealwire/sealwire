@@ -26,6 +26,32 @@ pub(crate) enum ReviewMode {
     },
 }
 
+/// How the reviewer is briefed in step 1. `LastMessage` (the default) skips the
+/// parent recap turn entirely and hands the parent thread's latest assistant
+/// message to the reviewer — saving a whole parent turn (and its tokens). `Recap`
+/// drives the parent to write a fresh recap (the original behavior). When
+/// `LastMessage` is chosen but the parent has no usable last message, the
+/// orchestrator falls back to driving a recap turn.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ReviewRecapSource {
+    #[default]
+    LastMessage,
+    Recap,
+}
+
+impl ReviewRecapSource {
+    /// Parse the request's optional `recap_source` string; anything unrecognized
+    /// (including `None`) falls back to the default (`LastMessage`).
+    pub(crate) fn from_request(value: Option<&str>) -> Self {
+        match value {
+            Some("recap") => ReviewRecapSource::Recap,
+            Some("last_message") => ReviewRecapSource::LastMessage,
+            _ => ReviewRecapSource::default(),
+        }
+    }
+}
+
 /// Lifecycle of a single review job. Terminal states are `Complete`, `Failed`,
 /// `Escalated`, and `Cancelled`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -116,6 +142,9 @@ pub(crate) struct ReviewJob {
     /// reviewer thread (the orchestrator skips reviewer creation and sends a
     /// re-review prompt to the existing thread).
     pub(crate) reviewer_mode: ReviewMode,
+    /// How the reviewer is briefed in step 1 (recap turn vs. the parent's last
+    /// message). Defaults to `LastMessage`.
+    pub(crate) recap_source: ReviewRecapSource,
     pub(crate) cwd: String,
     pub(crate) status: ReviewJobStatus,
     /// Round budget for the iterative review loop. `1` = single-shot (today's
@@ -165,6 +194,7 @@ impl ReviewJob {
             reviewer_model,
             reviewer_effort: None,
             reviewer_mode,
+            recap_source: ReviewRecapSource::default(),
             cwd,
             status: ReviewJobStatus::PendingParentRecap,
             max_rounds: max_rounds.max(1),

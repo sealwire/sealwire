@@ -2891,6 +2891,9 @@ mod review_tests {
             reviewer_effort: None,
             reviewer_thread_id: None,
             instructions: Some("focus on the tests".to_string()),
+            // These tests exercise the recap-turn flow explicitly (the user-facing
+            // default is now "last_message"; that path has its own dedicated tests).
+            recap_source: Some("recap".to_string()),
             max_rounds: None,
             device_id: Some("device-1".to_string()),
         }
@@ -3097,6 +3100,85 @@ mod review_tests {
             cwds.iter()
                 .any(|(tid, c)| tid == &reviewer_thread && c == &parent_cwd),
             "reviewer thread cwd mismatch: {cwds:?} (parent cwd {parent_cwd})"
+        );
+    }
+
+    #[tokio::test]
+    async fn review_last_message_mode_skips_the_recap_turn() {
+        // The default briefing mode hands the parent's LAST assistant message to the
+        // reviewer instead of driving a fresh recap turn — saving a whole parent turn.
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let _parent = start_parent(&app, cwd, "codex").await;
+
+        // Seed a last assistant message on the parent (the fake replies REVIEW_REPLY).
+        app.send_message(crate::protocol::SendMessageInput {
+            text: "implement the storage refactor".to_string(),
+            model: None,
+            effort: None,
+            device_id: Some("device-1".to_string()),
+        })
+        .await
+        .expect("seed turn should start");
+        wait_for_active_turn_idle(&app).await;
+
+        // Default briefing = last_message (no explicit recap_source).
+        let mut input = review_input("codex");
+        input.recap_source = None;
+        let receipt = app
+            .request_review(input)
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
+
+        let turns = providers.get("codex").unwrap().turns.lock().await.clone();
+        // No recap turn was driven on the parent — the whole point of last_message mode.
+        assert!(
+            turns
+                .iter()
+                .all(|(_, prompt)| !prompt.contains("recap the changes")),
+            "last_message mode must NOT drive a recap turn: {turns:?}"
+        );
+        // The reviewer was briefed with the parent's last message (REVIEW_REPLY).
+        let reviewer_thread = job.reviewer_thread_id.clone().expect("reviewer thread id");
+        let reviewer_turn = turns
+            .iter()
+            .find(|(tid, _)| tid == &reviewer_thread)
+            .expect("a reviewer turn");
+        assert!(
+            reviewer_turn.1.contains(REVIEW_REPLY),
+            "reviewer prompt should carry the parent's last message as the recap: {}",
+            reviewer_turn.1
+        );
+    }
+
+    #[tokio::test]
+    async fn review_last_message_mode_falls_back_to_recap_when_no_message() {
+        // last_message mode with nothing to brief from (the parent never replied) must
+        // fall back to driving a real recap turn rather than briefing the reviewer empty.
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+        // No turn has run on the parent → no assistant message to brief from.
+
+        let mut input = review_input("codex");
+        input.recap_source = Some("last_message".to_string());
+        let receipt = app
+            .request_review(input)
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
+
+        let turns = providers.get("codex").unwrap().turns.lock().await.clone();
+        assert!(
+            turns
+                .iter()
+                .any(|(tid, prompt)| tid == &parent.id && prompt.contains("recap the changes")),
+            "last_message with no parent message must fall back to a recap turn: {turns:?}"
         );
     }
 

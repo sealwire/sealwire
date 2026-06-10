@@ -111,6 +111,10 @@ export function ReviewerPanel({
               key: job.id,
               job,
               threadName: reviewerThreadName(job, reviewerThreads),
+              reviewModel,
+              reusableReviewers,
+              canRequest,
+              onRequestReview,
               onResolveReview,
               onDismissReview,
               fetchReviewerTranscript,
@@ -137,7 +141,17 @@ export function ReviewerPanel({
   );
 }
 
-function ReviewerJobCard({ job, threadName, onResolveReview, onDismissReview, fetchReviewerTranscript }) {
+function ReviewerJobCard({
+  job,
+  threadName,
+  reviewModel = {},
+  reusableReviewers = [],
+  canRequest = false,
+  onRequestReview,
+  onResolveReview,
+  onDismissReview,
+  fetchReviewerTranscript,
+}) {
   const [review, setReview] = React.useState({ status: "idle", text: null, error: null });
   const terminal = isTerminalReviewStatus(job.status);
   const blocked = job.status === "blocked";
@@ -295,6 +309,27 @@ function ReviewerJobCard({ job, threadName, onResolveReview, onDismissReview, fe
             },
             blocked ? "Stop reviewer & unlock" : "Stop review"
           )
+        : null,
+      // Per-card "Re-review": opens the request form PREFILLED to reuse this card's
+      // reviewer thread (provider locked, reuse preselected) — so you can re-review
+      // with this reviewer without hunting for it in the reuse dropdown. Only on a
+      // terminal card with a reviewer thread, and only when this device can request.
+      terminal && job.reviewer_thread_id && typeof onRequestReview === "function"
+        ? h(ReviewLauncher, {
+            panelId: `review-card-${job.id}`,
+            label: "Re-review",
+            title: canRequest
+              ? "Re-review the current changes with this reviewer (reuse preselected)"
+              : "Available when the agent is idle and no other device has control",
+            providerOptions: reviewModel.providerOptions || [],
+            models: reviewModel.models || [],
+            defaultProvider: reviewModel.defaultProvider || "",
+            reusableReviewers,
+            initialReviewerThreadId: job.reviewer_thread_id,
+            initialProvider: job.reviewer_provider || "",
+            disabled: !canRequest,
+            onSubmit: onRequestReview,
+          })
         : null,
       h(
         "button",

@@ -1101,6 +1101,7 @@ export async function requestRemoteReview({
   instructions,
   reviewerThreadId,
   maxRounds,
+  recapSource,
 } = {}) {
   if (!reviewerProvider) {
     renderLog("Pick a reviewer provider before starting a review.");
@@ -1121,6 +1122,8 @@ export async function requestRemoteReview({
         instructions: instructions || null,
         // Phase 3: reuse an existing reviewer thread when chosen.
         reviewer_thread_id: reviewerThreadId || null,
+        // How to brief the reviewer ("last_message" default vs "recap").
+        recap_source: recapSource || "last_message",
         // Phase 5: round budget for the iterative reviewer↔author loop.
         max_rounds: maxRounds || 1,
       },

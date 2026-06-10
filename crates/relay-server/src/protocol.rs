@@ -1296,6 +1296,12 @@ pub struct RequestReviewInput {
     /// Reserved for Phase 3 (reviewer-thread reuse). v1 rejects when set.
     pub reviewer_thread_id: Option<String>,
     pub instructions: Option<String>,
+    /// How to brief the reviewer in step 1: `"last_message"` (default — hand the
+    /// parent's latest assistant message to the reviewer, skipping the recap turn and
+    /// its tokens) or `"recap"` (drive the parent to write a fresh recap). Unrecognized
+    /// / `None` falls back to the default.
+    #[serde(default)]
+    pub recap_source: Option<String>,
     /// Round budget for the iterative review loop (Phase 5). `None`/`1` = single
     /// review (today's behavior); `>1` enables reviewer↔author negotiation. Clamped
     /// to 1..=10 server-side.

@@ -416,3 +416,51 @@ test("ReviewerPanel falls back to the reviewer thread id when the thread has no 
   // Falls back to the raw thread id as the displayed/tooltipped name.
   assert.match(html, /reviewer-job-thread[^>]*title="rev-thread-2"/);
 });
+
+test("a terminal card carries a per-card Re-review launcher (prefilled, own modal id)", () => {
+  const html = renderToStaticMarkup(
+    h(ReviewerPanel, {
+      reviewJobs: [
+        {
+          id: "r1",
+          reviewer_provider: "codex",
+          status: "complete",
+          reviewer_thread_id: "rev-1",
+        },
+      ],
+      reviewModel: {
+        providerOptions: [{ label: "Codex", value: "codex" }],
+        models: [],
+        defaultProvider: "codex",
+      },
+      reusableReviewers: [{ reviewerThreadId: "rev-1", provider: "codex", label: "Reviewer one" }],
+      canRequest: true,
+      onRequestReview() {},
+    })
+  );
+  // Each card gets its own "Re-review" button + a namespaced request modal.
+  assert.match(html, /Re-review/);
+  assert.match(html, /id="review-card-r1"/);
+  // The form is prefilled to reuse this card's reviewer thread.
+  assert.match(html, /value="rev-1"/);
+});
+
+test("an in-progress card has no Re-review launcher (only terminal cards can re-review)", () => {
+  const html = renderToStaticMarkup(
+    h(ReviewerPanel, {
+      reviewJobs: [
+        {
+          id: "r2",
+          reviewer_provider: "codex",
+          status: "waiting_for_reviewer",
+          reviewer_thread_id: "rev-2",
+        },
+      ],
+      reviewModel: { providerOptions: [], models: [], defaultProvider: "codex" },
+      canRequest: true,
+      onRequestReview() {},
+    })
+  );
+  assert.doesNotMatch(html, /Re-review/);
+  assert.doesNotMatch(html, /id="review-card-r2"/);
+});

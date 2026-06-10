@@ -25,7 +25,7 @@ pub(crate) use self::relay::{
 pub(crate) use self::review::{
     parent_fix_prompt, parent_recap_prompt, parse_verdict, post_back_message, re_review_prompt,
     review_approved_message, review_escalated_message, reviewer_prompt, ReviewJob, ReviewJobStatus,
-    ReviewMode, Verdict,
+    ReviewMode, ReviewRecapSource, Verdict,
 };
 pub(crate) use self::security::SecurityProfile;
 

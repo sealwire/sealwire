@@ -90,6 +90,7 @@ test("reviewSubmitPayload carries the reuse thread id AND an explicit model/effo
       instructions: "look again",
       reviewerThreadId: "rev-1",
       maxRounds: 1,
+      recapSource: "last_message",
     }
   );
 });
@@ -110,6 +111,7 @@ test("reviewSubmitPayload leaves model/effort null when not overridden on reuse"
       instructions: null,
       reviewerThreadId: "rev-1",
       maxRounds: 1,
+      recapSource: "last_message",
     }
   );
 });
@@ -132,6 +134,7 @@ test("reviewSubmitPayload sends a clean reviewer (null thread id) otherwise", ()
         instructions: null,
         reviewerThreadId: null,
         maxRounds: 1,
+        recapSource: "last_message",
       }
     );
   }
@@ -156,6 +159,23 @@ test("reviewSubmitPayload carries and clamps the round budget", () => {
   assert.equal(
     reviewSubmitPayload({ reviewerProvider: "codex", maxRounds: "abc" }).maxRounds,
     1
+  );
+});
+
+test("reviewSubmitPayload defaults the briefing to last_message; 'recap' is honored", () => {
+  // The token-saving default: brief the reviewer with the author's last message.
+  assert.equal(
+    reviewSubmitPayload({ reviewerProvider: "codex" }).recapSource,
+    "last_message"
+  );
+  assert.equal(
+    reviewSubmitPayload({ reviewerProvider: "codex", recapSource: "recap" }).recapSource,
+    "recap"
+  );
+  // Anything unrecognized falls back to the safe default.
+  assert.equal(
+    reviewSubmitPayload({ reviewerProvider: "codex", recapSource: "bogus" }).recapSource,
+    "last_message"
   );
 });
 

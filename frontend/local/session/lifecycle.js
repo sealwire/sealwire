@@ -366,6 +366,7 @@ export function createLifecycleController(ctx) {
     instructions,
     reviewerThreadId,
     maxRounds,
+    recapSource,
   } = {}) {
     if (!reviewerProvider) {
       logLine("Pick a reviewer provider before starting a review.");
@@ -389,6 +390,8 @@ export function createLifecycleController(ctx) {
           instructions: instructions || null,
           // Phase 3: reuse an existing reviewer thread when chosen.
           reviewer_thread_id: reviewerThreadId || null,
+          // How to brief the reviewer ("last_message" default vs "recap").
+          recap_source: recapSource || "last_message",
           // Phase 5: round budget for the iterative reviewer↔author loop.
           max_rounds: maxRounds || 1,
         },
