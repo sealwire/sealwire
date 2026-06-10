@@ -2,6 +2,8 @@ import { transcript } from "../dom.js";
 import { fetchTranscriptEntryDetailViaRequester } from "../../shared/transcript-entry-detail.js";
 import { normalizeThreadTranscriptPage } from "../../shared/transcript-page.js";
 import { createThreadTranscriptPageQueryOptions } from "../../shared/thread-queries.js";
+import { createCachingTranscriptPageFetcher } from "../../shared/caching-transcript-fetcher.js";
+import { localTranscriptPageCache } from "../transcript/page-cache-instance.js";
 import { readLocalUiState } from "../ui-store.js";
 import {
   cacheTranscriptEntryDetail,
@@ -55,34 +57,46 @@ export function createTranscriptController(ctx) {
     });
   }
 
+  const fetchRawTranscriptPage = async ({ threadId, before }) => {
+    const url = new URL(
+      `/api/threads/${encodeURIComponent(threadId)}/transcript`,
+      window.location.origin
+    );
+    if (before != null) {
+      url.searchParams.set("before", String(before));
+    }
+
+    const response = await apiFetch(url);
+    const payload = await response.json();
+
+    if (!response.ok || !payload.ok) {
+      throw new Error(payload?.error?.message || "Failed to load transcript history");
+    }
+
+    return normalizeThreadTranscriptPage(payload.data);
+  };
+
+  // Same older-page disk cache the remote surface uses: older pages
+  // (before != null) are served from IndexedDB before hitting the relay, so
+  // scroll-up / thread-switch / reload don't pay a fresh relay round trip (and,
+  // for non-active threads, a full provider read_thread re-parse) on every page.
+  // The live tail (before == null) always goes to the network — see
+  // shared/caching-transcript-fetcher.js for the policy and the streaming red line.
+  const fetchCachedTranscriptPage = createCachingTranscriptPageFetcher({
+    cache: localTranscriptPageCache,
+    fetchPage: fetchRawTranscriptPage,
+    getScope: () => "local",
+  });
+
   async function fetchTranscriptPage(threadId, { before = null } = {}) {
-    const fetchPage = async () => {
-      const url = new URL(
-        `/api/threads/${encodeURIComponent(threadId)}/transcript`,
-        window.location.origin
-      );
-      if (before != null) {
-        url.searchParams.set("before", String(before));
-      }
-
-      const response = await apiFetch(url);
-      const payload = await response.json();
-
-      if (!response.ok || !payload.ok) {
-        throw new Error(payload?.error?.message || "Failed to load transcript history");
-      }
-
-      return normalizeThreadTranscriptPage(payload.data);
-    };
-
     if (!queryClient) {
-      return fetchPage();
+      return fetchCachedTranscriptPage({ threadId, before });
     }
 
     return queryClient.fetchQuery(
       createThreadTranscriptPageQueryOptions({
         before,
-        fetchPage,
+        fetchPage: fetchCachedTranscriptPage,
         scope: "local",
         surface: "local",
         threadId,

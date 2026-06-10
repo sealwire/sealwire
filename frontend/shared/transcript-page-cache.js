@@ -1,10 +1,13 @@
 // Persistent, encrypted-at-rest cache for OLDER transcript history pages.
 //
+// Shared between the local and remote surfaces: each builds its own instance
+// (see local/transcript/page-cache-instance.js and
+// remote/transcript/page-cache-instance.js) and isolates entries by `scope`.
+//
 // Only append-stable older pages (before != null) are stored here — the live
-// tail is never cached (see ../../shared/caching-transcript-fetcher.js). Pages
-// are keyed by (scope, threadId, before); `before` is a from-oldest index
-// cursor, so under the common tail-append case an older page's content is stable
-// for a given cursor.
+// tail is never cached (see ./caching-transcript-fetcher.js). Pages are keyed by
+// (scope, threadId, before); `before` is a from-oldest index cursor, so under the
+// common tail-append case an older page's content is stable for a given cursor.
 //
 // At rest the page JSON is encrypted with AES-GCM under a per-browser,
 // NON-EXTRACTABLE key (same hardening as remote/secret-store.js): copying the
@@ -19,7 +22,21 @@
 // All operations are best-effort: any IndexedDB/WebCrypto failure rejects, and
 // the caller (caching-transcript-fetcher) swallows it into a cache miss / no-op.
 
-import { base64ToBytes, bytesToBase64 } from "../encoding.js";
+// Base64 <-> bytes, inlined so this module is surface-agnostic (no dependency on
+// remote/encoding.js). Format is unchanged, so existing cached records stay
+// readable. Used only for the encrypted iv/ciphertext fields.
+function bytesToBase64(bytes) {
+  let binary = "";
+  bytes.forEach((byte) => {
+    binary += String.fromCharCode(byte);
+  });
+  return window.btoa(binary);
+}
+
+function base64ToBytes(value) {
+  const binary = window.atob(value);
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+}
 
 const DB_NAME = "agent-relay-transcript-cache";
 const DB_VERSION = 1;

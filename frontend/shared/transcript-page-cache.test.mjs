@@ -2,13 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { webcrypto as webCrypto } from "node:crypto";
 
-// encoding.js (imported transitively by page-cache.js) uses window.atob/btoa.
+// The cache's inlined base64 helpers use window.atob/btoa.
 globalThis.window = globalThis.window || {
   atob: (value) => Buffer.from(value, "base64").toString("binary"),
   btoa: (value) => Buffer.from(value, "binary").toString("base64"),
 };
 
-const { createTranscriptPageCache } = await import("./page-cache.js");
+const { createTranscriptPageCache } = await import("./transcript-page-cache.js");
 
 // ---------------------------------------------------------------------------
 // Minimal but faithful in-memory IndexedDB supporting exactly what page-cache.js
