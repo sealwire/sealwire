@@ -11,6 +11,7 @@ import { createRoot } from "react-dom/client";
 import { flushSync } from "react-dom";
 import { fetchBuildInfo } from "../shared/build-badge.js";
 import { ClientLog } from "../shared/client-log.js";
+import { createAskUserQuestionDetailLoader } from "../shared/ask-user-question-detail-loader.js";
 import {
   loadLastApprovalPolicy,
   loadLastEffort,
@@ -220,32 +221,6 @@ function mergeAskUserQuestionDetails(pendingRequests, detailByRequestId) {
   });
 }
 
-function filterAskUserDetailMap(map, activeRequestIds) {
-  let changed = false;
-  const next = new Map();
-  for (const [requestId, value] of map || []) {
-    if (activeRequestIds.has(requestId)) {
-      next.set(requestId, value);
-    } else {
-      changed = true;
-    }
-  }
-  return changed ? next : map;
-}
-
-function filterAskUserDetailSet(set, activeRequestIds) {
-  let changed = false;
-  const next = new Set();
-  for (const requestId of set || []) {
-    if (activeRequestIds.has(requestId)) {
-      next.add(requestId);
-    } else {
-      changed = true;
-    }
-  }
-  return changed ? next : set;
-}
-
 function RemoteApp() {
   const currentState = useSyncExternalStore(
     subscribeRemoteState,
@@ -282,6 +257,38 @@ function RemoteApp() {
     return () => clearInterval(timer);
   }, [sessionPhase]);
   const handlers = createRemoteAppHandlers();
+
+  // On-demand loader for truncated ("long") AskUserQuestion detail. Imperative and
+  // re-sync-safe: re-rendering never cancels an in-flight fetch (the previous inline
+  // effect listed the state it mutated in its deps, so it re-triggered itself and its
+  // cleanup discarded the in-flight fetch, leaving the UI stuck on "Loading question
+  // detail" until a manual refresh — see ../shared/ask-user-question-detail-loader.js).
+  // It owns details/loading/errors and mirrors them into React state via onChange.
+  const askUserDetailFetchRef = useRef(null);
+  askUserDetailFetchRef.current = handlers?.onFetchAskUserQuestionDetail;
+  // NOTE: lazy-init in render + dispose() on unmount is NOT StrictMode-safe. The
+  // remote root renders without StrictMode (see the createRoot call below), so a
+  // real unmount destroys this ref and a remount recreates the loader. If
+  // StrictMode is ever adopted, its mount→unmount→remount double-invoke runs the
+  // dispose cleanup but does NOT re-run this render body, leaving a permanently
+  // disposed loader (sync/reset become no-ops). The fix then is to create the
+  // loader inside a mount useEffect and dispose in its cleanup (not a guard here —
+  // the render body doesn't re-run between the two effect setups).
+  const askUserDetailLoaderRef = useRef(null);
+  if (!askUserDetailLoaderRef.current) {
+    askUserDetailLoaderRef.current = createAskUserQuestionDetailLoader({
+      fetchDetail: (requestId) => {
+        const fetchDetail = askUserDetailFetchRef.current;
+        return fetchDetail ? fetchDetail(requestId) : Promise.resolve(null);
+      },
+      onChange: (next) => {
+        setAskUserQuestionDetails(next.details);
+        setAskUserQuestionDetailLoading(next.loading);
+        setAskUserQuestionDetailErrors(next.errors);
+      },
+    });
+  }
+
   const selectedProvider = remoteUi.sessionDraft.provider || defaultProvider(remoteUi.providers);
   const selectedProviderModels = remoteUi.providerModels[selectedProvider] || [];
   const selectedProviderSettings = providerSettings(selectedProvider);
@@ -569,81 +576,24 @@ function RemoteApp() {
     dispatchTranscriptUi({
       type: "transcript/reset",
     });
-    setAskUserQuestionDetails(new Map());
-    setAskUserQuestionDetailLoading(new Set());
-    setAskUserQuestionDetailErrors(new Map());
+    askUserDetailLoaderRef.current?.reset();
   }, [session?.active_thread_id]);
 
+  // Drive detail loading from the pending set. Re-sync only when the pending
+  // signature actually changes; the loader is idempotent and prunes by request id,
+  // and (unlike the old effect) never cancels an in-flight fetch on re-render.
   useEffect(() => {
-    const activeRequestIds = new Set(
-      pendingAskUserQuestions
-        .map((request) => request?.request_id)
-        .filter(Boolean)
-    );
-    setAskUserQuestionDetails((prev) => filterAskUserDetailMap(prev, activeRequestIds));
-    setAskUserQuestionDetailErrors((prev) => filterAskUserDetailMap(prev, activeRequestIds));
-    setAskUserQuestionDetailLoading((prev) => filterAskUserDetailSet(prev, activeRequestIds));
+    const requestIds = pendingAskUserQuestions
+      .filter((request) => (
+        request?.request_id
+        && request.questions_inline_complete === false
+        && request.detail_available !== false
+      ))
+      .map((request) => request.request_id);
+    askUserDetailLoaderRef.current?.sync(requestIds);
+  }, [pendingAskUserSignature]);
 
-    const requestsToLoad = pendingAskUserQuestions.filter((request) => (
-      request?.request_id
-      && request.questions_inline_complete === false
-      && request.detail_available !== false
-      && !askUserQuestionDetails.has(request.request_id)
-      && !askUserQuestionDetailLoading.has(request.request_id)
-    ));
-    if (!requestsToLoad.length) {
-      return undefined;
-    }
-
-    let cancelled = false;
-    for (const request of requestsToLoad) {
-      const requestId = request.request_id;
-      setAskUserQuestionDetailLoading((prev) => {
-        const next = new Set(prev);
-        next.add(requestId);
-        return next;
-      });
-      handlers.onFetchAskUserQuestionDetail?.(requestId)
-        .then((detail) => {
-          if (cancelled || !detail?.request_id) return;
-          setAskUserQuestionDetails((prev) => {
-            const next = new Map(prev);
-            next.set(requestId, detail);
-            return next;
-          });
-          setAskUserQuestionDetailErrors((prev) => {
-            if (!prev.has(requestId)) return prev;
-            const next = new Map(prev);
-            next.delete(requestId);
-            return next;
-          });
-        })
-        .catch((error) => {
-          if (cancelled) return;
-          setAskUserQuestionDetailErrors((prev) => {
-            const next = new Map(prev);
-            next.set(requestId, error?.message || "Failed to load question details.");
-            return next;
-          });
-        })
-        .finally(() => {
-          if (cancelled) return;
-          setAskUserQuestionDetailLoading((prev) => {
-            const next = new Set(prev);
-            next.delete(requestId);
-            return next;
-          });
-        });
-    }
-
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    pendingAskUserSignature,
-    askUserQuestionDetails,
-    askUserQuestionDetailLoading,
-  ]);
+  useEffect(() => () => askUserDetailLoaderRef.current?.dispose(), []);
 
   useEffect(() => {
     if (!session?.active_thread_id) {
