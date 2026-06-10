@@ -111,6 +111,12 @@ export function ReviewerPanel({
               key: job.id,
               job,
               threadName: reviewerThreadName(job, reviewerThreads),
+              // Namespace per-card modal ids by THIS panel mount: the reviewer panel
+              // renders in BOTH the remote rail and the remote sheet, so a bare
+              // `review-card-<id>` would collide and getElementById would open the
+              // wrong (hidden) copy — the per-card Re-review button then did nothing
+              // on mobile (sheet) while working on desktop (rail).
+              panelId,
               reviewModel,
               reusableReviewers,
               canRequest,
@@ -144,6 +150,7 @@ export function ReviewerPanel({
 function ReviewerJobCard({
   job,
   threadName,
+  panelId = "review-panel",
   reviewModel = {},
   reusableReviewers = [],
   canRequest = false,
@@ -316,7 +323,10 @@ function ReviewerJobCard({
       // terminal card with a reviewer thread, and only when this device can request.
       terminal && job.reviewer_thread_id && typeof onRequestReview === "function"
         ? h(ReviewLauncher, {
-            panelId: `review-card-${job.id}`,
+            // Namespaced by the panel mount (rail vs sheet) so the rail's and the
+            // sheet's copies of this card don't share a dialog id — otherwise the
+            // sheet's button opens the hidden rail's dialog and looks dead on mobile.
+            panelId: `${panelId}-recard-${job.id}`,
             label: "Re-review",
             title: canRequest
               ? "Re-review the current changes with this reviewer (reuse preselected)"

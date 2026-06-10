@@ -435,14 +435,42 @@ test("a terminal card carries a per-card Re-review launcher (prefilled, own moda
       },
       reusableReviewers: [{ reviewerThreadId: "rev-1", provider: "codex", label: "Reviewer one" }],
       canRequest: true,
+      panelId: "review-panel-test",
       onRequestReview() {},
     })
   );
-  // Each card gets its own "Re-review" button + a namespaced request modal.
+  // Each card gets its own "Re-review" button + a request modal namespaced by the
+  // panel mount (rail vs sheet) so the two copies don't collide on a shared dialog id.
   assert.match(html, /Re-review/);
-  assert.match(html, /id="review-card-r1"/);
+  assert.match(html, /id="review-panel-test-recard-r1"/);
   // The form is prefilled to reuse this card's reviewer thread.
   assert.match(html, /value="rev-1"/);
+});
+
+test("the per-card Re-review modal id is namespaced by the panel mount (rail vs sheet)", () => {
+  // Regression guard: the reviewer panel renders in BOTH the remote rail and the
+  // remote sheet, so the same job must NOT produce a shared dialog id — otherwise the
+  // sheet's button opens the (hidden) rail's dialog via getElementById and looks dead
+  // on mobile while working on desktop.
+  const job = {
+    id: "rX",
+    reviewer_provider: "codex",
+    status: "complete",
+    reviewer_thread_id: "rev-x",
+  };
+  const props = {
+    reviewJobs: [job],
+    reviewModel: { providerOptions: [], models: [], defaultProvider: "codex" },
+    reusableReviewers: [{ reviewerThreadId: "rev-x", provider: "codex", label: "X" }],
+    canRequest: true,
+    onRequestReview() {},
+  };
+  const rail = renderToStaticMarkup(h(ReviewerPanel, { ...props, panelId: "review-panel-remote-rail" }));
+  const sheet = renderToStaticMarkup(h(ReviewerPanel, { ...props, panelId: "review-panel-remote-modal" }));
+  assert.match(rail, /id="review-panel-remote-rail-recard-rX"/);
+  assert.match(sheet, /id="review-panel-remote-modal-recard-rX"/);
+  // The two mounts must not share an id.
+  assert.doesNotMatch(rail, /id="review-panel-remote-modal-recard-rX"/);
 });
 
 test("an in-progress card has no Re-review launcher (only terminal cards can re-review)", () => {
@@ -458,9 +486,10 @@ test("an in-progress card has no Re-review launcher (only terminal cards can re-
       ],
       reviewModel: { providerOptions: [], models: [], defaultProvider: "codex" },
       canRequest: true,
+      panelId: "review-panel-test",
       onRequestReview() {},
     })
   );
   assert.doesNotMatch(html, /Re-review/);
-  assert.doesNotMatch(html, /id="review-card-r2"/);
+  assert.doesNotMatch(html, /-recard-r2"/);
 });
