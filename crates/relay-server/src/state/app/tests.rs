@@ -3781,6 +3781,175 @@ mod review_tests {
             .count()
     }
 
+    // --- Workflow runner (chunk 6) ---------------------------------------------
+    // Reuses the review harness: ReviewTestProvider already replies to the runner's
+    // reviewer_prompt (the "Workspace diff collected by the relay" marker) with the
+    // queued verdict, and to author turns (execute/revise) with a generic reply.
+
+    /// A canonical Code-Flow workflow with all steps on `provider`.
+    fn workflow_code_flow(provider: &str, max_rounds: u32) -> crate::state::Workflow {
+        use crate::state::{ArtifactKind, LoopSpec, StepRole, Workflow, WorkflowStep};
+        let mk = |id: &str, role: StepRole| WorkflowStep {
+            id: id.to_string(),
+            agent: provider.to_string(),
+            role,
+            model: None,
+            prompt: String::new(),
+        };
+        Workflow {
+            id: "code".to_string(),
+            name: "Code Flow".to_string(),
+            artifact: ArtifactKind::Diff,
+            steps: vec![
+                mk("execute", StepRole::Execute),
+                mk("review", StepRole::Review),
+                mk("revise", StepRole::Revise),
+            ],
+            loop_: Some(LoopSpec {
+                from_step: "review".to_string(),
+                to_step: "revise".to_string(),
+                max_rounds,
+                stop_when: crate::state::StopCondition::ReviewerApproved,
+            }),
+        }
+    }
+
+    async fn wait_for_workflow_status(app: &AppState, run_id: &str, statuses: &[&str]) -> String {
+        for _ in 0..400 {
+            if let Some(status) = app
+                .relay
+                .read()
+                .await
+                .workflow_run(run_id)
+                .map(|run| run.status.as_str().to_string())
+            {
+                if statuses.contains(&status.as_str()) {
+                    return status;
+                }
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        panic!("workflow run {run_id} never reached {statuses:?}");
+    }
+
+    const WORKFLOW_TERMINAL: &[&str] = &["done", "escalated", "failed", "interrupted", "cancelled"];
+
+    #[tokio::test]
+    async fn workflow_completes_after_revise_then_approve() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let _parent = start_parent(&app, cwd, "codex").await;
+        // Round 1 reviewer rejects -> revise; round 2 approves -> Done.
+        queue_verdicts(
+            providers.get("codex").unwrap(),
+            &["NEEDS_CHANGES", "APPROVE"],
+        )
+        .await;
+
+        let run_id = app
+            .start_workflow(
+                Some("device-1".to_string()),
+                workflow_code_flow("codex", 3),
+                "anchor-item".to_string(),
+            )
+            .await
+            .expect("workflow should start");
+
+        let status = wait_for_workflow_status(&app, &run_id, WORKFLOW_TERMINAL).await;
+        assert_eq!(status, "done", "approved on round 2 -> Done");
+
+        let (round, approved) = {
+            let relay = app.relay.read().await;
+            let run = relay.workflow_run(&run_id).expect("run exists");
+            (run.round, run.last_verdict.as_ref().map(|v| v.approved))
+        };
+        assert_eq!(round, 2, "one rejected round, then approved");
+        assert_eq!(approved, Some(true));
+
+        let turns = providers.get("codex").unwrap().turns.lock().await.clone();
+        assert_eq!(
+            count_turns_with(&turns, "Workspace diff collected by the relay"),
+            2,
+            "two reviews (round 1 + round 2)"
+        );
+        assert_eq!(
+            count_turns_with(&turns, "Address the findings below"),
+            1,
+            "one revise, after the round-1 rejection"
+        );
+    }
+
+    #[tokio::test]
+    async fn workflow_escalates_when_budget_runs_out() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let _parent = start_parent(&app, cwd, "codex").await;
+        // Never approves within the 2-round budget.
+        queue_verdicts(
+            providers.get("codex").unwrap(),
+            &["NEEDS_CHANGES", "NEEDS_CHANGES"],
+        )
+        .await;
+
+        let run_id = app
+            .start_workflow(
+                Some("device-1".to_string()),
+                workflow_code_flow("codex", 2),
+                "anchor-item".to_string(),
+            )
+            .await
+            .expect("workflow should start");
+
+        let status = wait_for_workflow_status(&app, &run_id, WORKFLOW_TERMINAL).await;
+        assert_eq!(status, "escalated", "budget exhausted without approval");
+
+        let round = app.relay.read().await.workflow_run(&run_id).unwrap().round;
+        assert_eq!(round, 2, "ran both rounds");
+    }
+
+    #[tokio::test]
+    async fn workflow_and_review_are_mutually_exclusive() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let _parent = start_parent(&app, cwd, "codex").await;
+        // Turns never complete, so the first workflow stays non-terminal.
+        providers
+            .get("codex")
+            .unwrap()
+            .complete_turns
+            .store(false, Ordering::Relaxed);
+
+        let _run = app
+            .start_workflow(
+                Some("device-1".to_string()),
+                workflow_code_flow("codex", 3),
+                "anchor-item".to_string(),
+            )
+            .await
+            .expect("first workflow should start");
+
+        // A second workflow is refused...
+        let err = app
+            .start_workflow(
+                Some("device-1".to_string()),
+                workflow_code_flow("codex", 3),
+                "anchor-item".to_string(),
+            )
+            .await
+            .expect_err("a second workflow must be refused");
+        assert!(err.contains("already running"), "{err}");
+
+        // ...and so is a review while the workflow is active.
+        let err2 = app
+            .request_review(review_input("codex"))
+            .await
+            .expect_err("a review must be refused while a workflow runs");
+        assert!(err2.contains("workflow is running"), "{err2}");
+    }
+
     #[tokio::test]
     async fn review_loop_completes_when_reviewer_approves_first_round() {
         let dir = TempDir::new().expect("tmpdir");
