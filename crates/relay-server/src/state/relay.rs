@@ -2098,9 +2098,28 @@ fn remote_action_cache_key(device_id: &str, action_id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{RelayState, WorkflowRun};
+    use super::{PersistedRelayState, RelayState, SecurityProfile, WorkflowRun, MAX_WORKFLOW_RUNS};
     use crate::state::RunStatus;
     use std::collections::HashMap;
+    use tokio::sync::watch;
+
+    fn test_relay() -> RelayState {
+        let (tx, _rx) = watch::channel(0_u64);
+        RelayState::new("/tmp/project".to_string(), tx, SecurityProfile::private())
+    }
+
+    fn run_with_status(id: &str, status: RunStatus) -> WorkflowRun {
+        let mut run = WorkflowRun::new(
+            id.to_string(),
+            "wf".to_string(),
+            "parent".to_string(),
+            "anchor".to_string(),
+            "/tmp/project".to_string(),
+            "device".to_string(),
+        );
+        run.set_status(status);
+        run
+    }
 
     #[test]
     fn restore_reconciles_non_terminal_workflow_runs() {
@@ -2140,5 +2159,58 @@ mod tests {
         assert!(restored["r1"].error.is_some());
         assert_eq!(restored["r2"].status, RunStatus::Done);
         assert!(restored["r2"].error.is_none());
+    }
+
+    #[test]
+    fn workflow_runs_persist_and_reconcile_end_to_end() {
+        // The fuller round-trip the reviewers asked for: through
+        // PersistedRelayState::from_relay (writer) and apply_persisted (restore),
+        // not just the inner map. A non-terminal run survives persistence and comes
+        // back Interrupted; a terminal run round-trips unchanged.
+        let mut relay = test_relay();
+        relay.insert_workflow_run(run_with_status("r1", RunStatus::Running));
+        relay.insert_workflow_run(run_with_status("r2", RunStatus::Done));
+
+        let persisted = PersistedRelayState::from_relay(&relay);
+        assert_eq!(
+            persisted.workflow_jobs.len(),
+            2,
+            "the writer persists non-terminal runs too (unlike review jobs)",
+        );
+
+        let mut restored = test_relay();
+        restored.apply_persisted(&persisted);
+        assert_eq!(
+            restored.workflow_run("r1").unwrap().status,
+            RunStatus::Interrupted,
+        );
+        assert!(restored.workflow_run("r1").unwrap().error.is_some());
+        assert_eq!(restored.workflow_run("r2").unwrap().status, RunStatus::Done);
+    }
+
+    #[test]
+    fn prune_caps_terminal_runs_but_never_evicts_non_terminal() {
+        // Terminal runs are capped at MAX_WORKFLOW_RUNS (oldest evicted first).
+        let mut relay = test_relay();
+        for i in 0..=MAX_WORKFLOW_RUNS {
+            relay.insert_workflow_run(run_with_status(&format!("t{i}"), RunStatus::Done));
+        }
+        assert_eq!(
+            relay.workflow_jobs.len(),
+            MAX_WORKFLOW_RUNS,
+            "terminal runs are capped",
+        );
+
+        // When every retained run is non-terminal there is nothing evictable, so the
+        // map exceeds the cap rather than dropping a still-recoverable run.
+        let mut relay = test_relay();
+        for i in 0..=MAX_WORKFLOW_RUNS {
+            relay.insert_workflow_run(run_with_status(&format!("n{i}"), RunStatus::Running));
+        }
+        assert_eq!(
+            relay.workflow_jobs.len(),
+            MAX_WORKFLOW_RUNS + 1,
+            "non-terminal runs are never auto-evicted",
+        );
     }
 }
