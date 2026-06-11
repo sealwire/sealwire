@@ -37,12 +37,6 @@ const MAX_WORKFLOW_ROUNDS: u32 = 20;
 /// for the whole window (a wedged provider), never on a normally-running step.
 const WORKFLOW_STEP_STALL_SECS: u64 = 600;
 
-/// How long to wait for a stopped turn to actually settle before the run gives up
-/// and goes terminal. A stop request is not proof the turn ended, so we drain
-/// rather than race it; bounded so a provider that never confirms can't wedge the
-/// run forever (workflow threads aren't locked).
-const WORKFLOW_DRAIN_MAX_SECS: u64 = 30;
-
 /// Outcome of waiting for a step's in-flight turn to settle.
 enum StepOutcome {
     Completed,
@@ -172,6 +166,12 @@ finish before starting a workflow"
         Ok(run_id)
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_workflow_drain_max_ms(&self, ms: u64) {
+        self.workflow_drain_max_ms
+            .store(ms, std::sync::atomic::Ordering::Relaxed);
+    }
+
     async fn run_workflow_job(&self, run_id: String, workflow: Workflow) {
         let Some(WorkflowRunFields {
             parent_thread_id,
@@ -242,7 +242,12 @@ finish before starting a workflow"
         // 2. Spawn the read-only reviewer thread once; reused across rounds.
         self.set_run_step(&run_id, &review.id).await;
         let (mut reviewer_thread_id, reviewer_model) = match self
-            .start_workflow_step_thread(&cwd, &review.agent, review.model.as_deref())
+            .start_workflow_step_thread(
+                &cwd,
+                &review.agent,
+                review.model.as_deref(),
+                &parent_thread_id,
+            )
             .await
         {
             Ok(result) => result,
@@ -382,13 +387,14 @@ finish before starting a workflow"
             .await
         {
             Ok(Some(_)) => {}
-            // Uncertain whether a turn actually started — drain to be safe before
-            // failing, so a started-but-unacknowledged turn can't keep mutating.
-            Ok(None) => {
+            // Both are uncertain starts: Ok(None) returned no turn id, and a
+            // provider can begin work before returning Err (response-loss). Drain
+            // either way so a started turn can't keep mutating after the run goes
+            // terminal.
+            Ok(None) | Err(_) => {
                 self.stop_and_drain(thread_id).await;
                 return None;
             }
-            Err(_) => return None,
         }
         match self.wait_for_step_idle(thread_id).await {
             StepOutcome::Completed => {}
@@ -425,11 +431,12 @@ finish before starting a workflow"
             .await
         {
             Ok(Some(_)) => {}
-            Ok(None) => {
+            // Uncertain start (no turn id, or a started turn lost to an error) —
+            // drain before failing so it can't keep running after the run ends.
+            Ok(None) | Err(_) => {
                 self.stop_and_drain(reviewer_thread_id).await;
                 return None;
             }
-            Err(_) => return None,
         }
         let current = self
             .current_step_thread(run_id, review_step_id)
@@ -513,7 +520,10 @@ finish before starting a workflow"
     /// while waiting; bounded by `WORKFLOW_DRAIN_MAX_SECS` so a provider that never
     /// confirms can't wedge the run forever.
     async fn stop_and_drain(&self, thread_id: &str) {
-        let deadline = Instant::now() + Duration::from_secs(WORKFLOW_DRAIN_MAX_SECS);
+        let drain_ms = self
+            .workflow_drain_max_ms
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let deadline = Instant::now() + Duration::from_millis(drain_ms);
         let mut rx = self.subscribe();
         loop {
             self.request_thread_stop(thread_id).await;
@@ -543,6 +553,7 @@ finish before starting a workflow"
         cwd: &str,
         provider: &str,
         model_override: Option<&str>,
+        parent_thread_id: &str,
     ) -> Result<(String, String), String> {
         let (provider_name, bridge) = {
             let (name, bridge) = self.resolve_provider(Some(provider))?;
@@ -583,6 +594,12 @@ finish before starting a workflow"
                 &sandbox,
                 &effort,
             );
+            // Hide the reviewer thread from navigation durably (the same map review
+            // uses, so it survives a restart) instead of leaking as an ordinary
+            // session. NOTE (deferred to the drill-down UI chunk): a per-parent cap
+            // and cleanup-on-prune for these threads — their retention policy is that
+            // feature's call (see the chunk-3 review open question).
+            relay.register_reviewer_thread(thread_id.clone(), parent_thread_id.to_string());
             let note = if read_only_enforced {
                 "read-only sandbox enforced"
             } else {

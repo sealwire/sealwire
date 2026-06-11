@@ -3910,6 +3910,83 @@ mod review_tests {
     }
 
     #[tokio::test]
+    async fn workflow_drains_and_fails_on_lost_reviewer_start() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        // The double won't settle the thread on stop, so cap the drain wait.
+        app.set_workflow_drain_max_ms(50);
+        let _parent = start_parent(&app, cwd, "codex").await;
+        let provider = providers.get("codex").unwrap();
+        // The reviewer turn starts work, then its start response is lost (Err).
+        provider.fail_reviewer_start.store(true, Ordering::Relaxed);
+
+        let run_id = app
+            .start_workflow(
+                Some("device-1".to_string()),
+                workflow_code_flow("codex", 3),
+                "anchor-item".to_string(),
+            )
+            .await
+            .expect("workflow should start");
+
+        let status = wait_for_workflow_status(&app, &run_id, WORKFLOW_TERMINAL).await;
+        assert_eq!(status, "failed", "a lost reviewer start fails the run");
+
+        // The runner requested a stop on the reviewer thread before going terminal,
+        // so a started-but-lost turn can't keep running afterward.
+        let reviewer = app
+            .relay
+            .read()
+            .await
+            .workflow_run(&run_id)
+            .unwrap()
+            .step_threads
+            .get("review")
+            .cloned()
+            .expect("reviewer thread recorded");
+        let interrupted = provider.interrupts.lock().await.clone();
+        assert!(
+            interrupted.contains(&reviewer),
+            "the lost reviewer turn must be stopped before the run goes terminal"
+        );
+    }
+
+    #[tokio::test]
+    async fn workflow_reviewer_thread_is_hidden_from_navigation() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let _parent = start_parent(&app, cwd, "codex").await;
+        queue_verdicts(providers.get("codex").unwrap(), &["APPROVE"]).await;
+
+        let run_id = app
+            .start_workflow(
+                Some("device-1".to_string()),
+                workflow_code_flow("codex", 1),
+                "anchor-item".to_string(),
+            )
+            .await
+            .expect("workflow should start");
+        wait_for_workflow_status(&app, &run_id, WORKFLOW_TERMINAL).await;
+
+        // The reviewer thread must be hidden from navigation, not leak as an
+        // ordinary session.
+        let relay = app.relay.read().await;
+        let reviewer = relay
+            .workflow_run(&run_id)
+            .unwrap()
+            .step_threads
+            .get("review")
+            .cloned()
+            .expect("reviewer thread recorded");
+        assert!(
+            relay.reviewer_thread_ids().contains(&reviewer),
+            "workflow reviewer thread should be registered as hidden from nav"
+        );
+    }
+
+    #[tokio::test]
     async fn workflow_and_review_are_mutually_exclusive() {
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();

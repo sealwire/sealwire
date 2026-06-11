@@ -60,6 +60,9 @@ pub struct AppState {
     /// Max time (ms) to drain a turn that won't stop before declaring the review
     /// `Blocked`. Overridable in tests.
     review_drain_max_ms: Arc<std::sync::atomic::AtomicU64>,
+    /// Max time (ms) the workflow runner waits for a stopped turn to actually
+    /// settle before giving up and going terminal. Overridable in tests.
+    workflow_drain_max_ms: Arc<std::sync::atomic::AtomicU64>,
     /// How long a user-initiated Stop waits for the provider's completion event
     /// before falling back to marking the turn idle locally (so a provider that
     /// never confirms can't wedge the session). Overridable in tests.
@@ -102,6 +105,7 @@ impl AppState {
             session_guard: Arc::new(tokio::sync::Mutex::new(())),
             review_step_timeout_ms: Arc::new(std::sync::atomic::AtomicU64::new(600_000)),
             review_drain_max_ms: Arc::new(std::sync::atomic::AtomicU64::new(300_000)),
+            workflow_drain_max_ms: Arc::new(std::sync::atomic::AtomicU64::new(30_000)),
             stop_fallback_ms: Arc::new(std::sync::atomic::AtomicU64::new(10_000)),
             blocked_review: Arc::new(tokio::sync::Mutex::new(None)),
             cancel_requested_job: Arc::new(tokio::sync::Mutex::new(None)),
@@ -177,6 +181,7 @@ impl AppState {
             session_guard: Arc::new(tokio::sync::Mutex::new(())),
             review_step_timeout_ms: Arc::new(std::sync::atomic::AtomicU64::new(600_000)),
             review_drain_max_ms: Arc::new(std::sync::atomic::AtomicU64::new(300_000)),
+            workflow_drain_max_ms: Arc::new(std::sync::atomic::AtomicU64::new(30_000)),
             stop_fallback_ms: Arc::new(std::sync::atomic::AtomicU64::new(10_000)),
             blocked_review: Arc::new(tokio::sync::Mutex::new(None)),
             cancel_requested_job: Arc::new(tokio::sync::Mutex::new(None)),
