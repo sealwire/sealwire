@@ -243,10 +243,11 @@ finish before starting a workflow"
         self.set_run_step(&run_id, &review.id).await;
         let (mut reviewer_thread_id, reviewer_model) = match self
             .start_workflow_step_thread(
+                &run_id,
+                &review.id,
                 &cwd,
                 &review.agent,
                 review.model.as_deref(),
-                &parent_thread_id,
             )
             .await
         {
@@ -260,14 +261,6 @@ finish before starting a workflow"
                 return;
             }
         };
-        {
-            let reviewer_thread_id = reviewer_thread_id.clone();
-            let step_id = review.id.clone();
-            self.update_run(&run_id, move |r| {
-                r.step_threads.insert(step_id, reviewer_thread_id);
-            })
-            .await;
-        }
 
         // 3. Review / revise loop.
         let mut round: u32 = 0;
@@ -534,12 +527,29 @@ finish before starting a workflow"
                     .map(|runtime| runtime.is_working())
                     .unwrap_or(false)
             };
-            if !working || Instant::now() >= deadline {
+            if !working {
+                return;
+            }
+            if Instant::now() >= deadline {
+                // Couldn't confirm the turn stopped within the window. For Codex an
+                // ID-less cancel is rejected, so a turn begun after a lost start
+                // response can still be running. The complete fix is review's
+                // non-terminal `Blocked` state, which needs the lifeguard + a thread
+                // lock (chunks 4-5); until then, surface a warning and let the run go
+                // terminal.
+                self.push_runtime_log(
+                    "warn",
+                    format!(
+                        "Workflow: thread {thread_id}'s turn did not confirm stopping within \
+the drain window; it may still be running."
+                    ),
+                )
+                .await;
                 return;
             }
             tokio::select! {
                 _ = rx.changed() => {}
-                _ = tokio::time::sleep_until(deadline) => return,
+                _ = tokio::time::sleep_until(deadline) => {}
             }
         }
     }
@@ -550,10 +560,11 @@ finish before starting a workflow"
     /// `(thread_id, resolved_model)`; the model is reused for the reviewer's turns.
     async fn start_workflow_step_thread(
         &self,
+        run_id: &str,
+        step_id: &str,
         cwd: &str,
         provider: &str,
         model_override: Option<&str>,
-        parent_thread_id: &str,
     ) -> Result<(String, String), String> {
         let (provider_name, bridge) = {
             let (name, bridge) = self.resolve_provider(Some(provider))?;
@@ -594,12 +605,15 @@ finish before starting a workflow"
                 &sandbox,
                 &effort,
             );
-            // Hide the reviewer thread from navigation durably (the same map review
-            // uses, so it survives a restart) instead of leaking as an ordinary
-            // session. NOTE (deferred to the drill-down UI chunk): a per-parent cap
-            // and cleanup-on-prune for these threads — their retention policy is that
-            // feature's call (see the chunk-3 review open question).
-            relay.register_reviewer_thread(thread_id.clone(), parent_thread_id.to_string());
+            // Record the reviewer thread ON THE RUN so it is hidden from navigation
+            // (reviewer_thread_ids derives from step_threads). It is owned by the run,
+            // NOT the review reviewer_threads map, so review's per-parent FIFO cap can
+            // never delete a workflow reviewer's transcript. Per-run cap/cleanup of
+            // these threads is deferred to the drill-down UI chunk (retention policy).
+            relay.update_workflow_run(run_id, |run| {
+                run.step_threads
+                    .insert(step_id.to_string(), thread_id.clone());
+            });
             let note = if read_only_enforced {
                 "read-only sandbox enforced"
             } else {

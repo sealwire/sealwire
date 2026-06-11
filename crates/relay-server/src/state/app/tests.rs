@@ -3957,7 +3957,7 @@ mod review_tests {
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();
         let (app, providers) = build_review_app(cwd, &["codex"]).await;
-        let _parent = start_parent(&app, cwd, "codex").await;
+        let parent = start_parent(&app, cwd, "codex").await;
         queue_verdicts(providers.get("codex").unwrap(), &["APPROVE"]).await;
 
         let run_id = app
@@ -3970,8 +3970,6 @@ mod review_tests {
             .expect("workflow should start");
         wait_for_workflow_status(&app, &run_id, WORKFLOW_TERMINAL).await;
 
-        // The reviewer thread must be hidden from navigation, not leak as an
-        // ordinary session.
         let relay = app.relay.read().await;
         let reviewer = relay
             .workflow_run(&run_id)
@@ -3980,9 +3978,18 @@ mod review_tests {
             .get("review")
             .cloned()
             .expect("reviewer thread recorded");
+        // Hidden from navigation...
         assert!(
             relay.reviewer_thread_ids().contains(&reviewer),
-            "workflow reviewer thread should be registered as hidden from nav"
+            "workflow reviewer thread should be hidden from nav"
+        );
+        // ...but NOT in the review-owned map, so review's per-parent FIFO eviction
+        // can never delete a workflow reviewer's transcript.
+        assert!(
+            !relay
+                .reviewer_threads_of_parent(&parent.id)
+                .contains(&reviewer),
+            "workflow reviewer must not be in the review-owned reviewer_threads map"
         );
     }
 

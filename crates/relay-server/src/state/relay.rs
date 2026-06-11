@@ -396,6 +396,14 @@ impl RelayState {
                     .values()
                     .filter_map(|job| job.reviewer_thread_id.clone()),
             )
+            .chain(
+                // Workflow reviewer threads are OWNED by their run (not the review
+                // map), so review's per-parent FIFO eviction can never delete them.
+                // Hide them by deriving from each run's step_threads.
+                self.workflow_jobs
+                    .values()
+                    .flat_map(|run| run.step_threads.values().cloned()),
+            )
             .collect()
     }
 
