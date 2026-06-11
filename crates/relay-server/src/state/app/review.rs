@@ -1523,7 +1523,7 @@ last message (no recap turn)."
 
     /// Request cancellation for a specific thread's in-flight turn. Reads that
     /// thread's runtime turn id; providers decide whether the id is required.
-    async fn request_thread_stop(&self, thread_id: &str) -> bool {
+    pub(super) async fn request_thread_stop(&self, thread_id: &str) -> bool {
         let turn_id = {
             let relay = self.relay.read().await;
             match relay.runtime_for_thread(thread_id) {
@@ -1866,7 +1866,7 @@ unlocked."
 /// Resolve the reviewer thread's approval policy + sandbox, preferring a
 /// provider-enforced read-only mode. Returns `(approval_policy, sandbox,
 /// read_only_enforced)`.
-fn reviewer_thread_settings(
+pub(super) fn reviewer_thread_settings(
     provider: &str,
     parent_approval: &str,
     parent_sandbox: &str,
@@ -1920,7 +1920,7 @@ fn latest_agent_entry(views: &[TranscriptEntryView]) -> Option<(String, String)>
     })
 }
 
-fn random_suffix() -> String {
+pub(super) fn random_suffix() -> String {
     use rand::{distributions::Alphanumeric, Rng};
     rand::thread_rng()
         .sample_iter(&Alphanumeric)

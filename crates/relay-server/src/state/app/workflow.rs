@@ -2,29 +2,31 @@
 //!
 //! Generalizes the review orchestrator into a configurable pipeline: an optional
 //! `Execute` step runs once on the parent (author) thread, then a `Review` step
-//! (on a spawned background reviewer thread) and a `Revise` step (back on the
-//! parent) loop up to `max_rounds` until the reviewer's structured verdict is
+//! (on a spawned read-only background reviewer thread) and a `Revise` step (back
+//! on the parent) loop up to `max_rounds` until the reviewer's verdict is
 //! `approved` (Done) or the budget runs out (Escalated). Execute/Revise run on
-//! the parent; Review runs on a dedicated background thread — exactly the
-//! parent/reviewer split the review orchestrator uses.
+//! the parent; Review runs on a dedicated background thread — the parent/reviewer
+//! split the review orchestrator uses.
 //!
-//! Phase 1 is intentionally lean: serial steps, the `ReviewerApproved` stop, no
-//! cancel, no per-step worktree isolation. The verdict is derived from the
-//! reviewer's `VERDICT:` line (reusing the review parser) — real-provider
-//! structured-output extraction is a later chunk. Crash-safety (a lifeguard) and
-//! the working-tree lock are separate chunks; every error path here still drives
-//! the run to a terminal state on its own.
+//! Phase 1 is intentionally constrained, and `start_workflow` REJECTS shapes it
+//! does not honor (more than one step per role; a loop that isn't review→revise;
+//! a non-`ReviewerApproved` stop; an author step whose provider differs from the
+//! active thread). The reviewer thread is spawned read-only with provider-correct
+//! model resolution (honoring `step.model`); a parked/timed-out turn is stopped
+//! before the run goes terminal. Crash-safety (a lifeguard) and a full
+//! working-tree lock are later chunks; every error path here still drives the run
+//! to a terminal state.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tokio::time::Instant;
 
 use crate::state::{
-    parse_verdict, re_review_prompt, reviewer_prompt, RunStatus, StepRole, Workflow, WorkflowRun,
-    WorkflowStep, WorkflowVerdict,
+    parse_verdict, re_review_prompt, reviewer_prompt, RunStatus, StepRole, StopCondition, Workflow,
+    WorkflowRun, WorkflowVerdict,
 };
 
+use super::review::{random_suffix, reviewer_thread_settings};
 use super::*;
 
 /// Hard cap on the review/revise loop so a single run can't loop unbounded.
@@ -35,15 +37,11 @@ const MAX_WORKFLOW_ROUNDS: u32 = 20;
 /// for the whole window (a wedged provider), never on a normally-running step.
 const WORKFLOW_STEP_STALL_SECS: u64 = 600;
 
-/// Process-unique suffix source for run ids (avoids pulling in the review
-/// module's RNG helper; uniqueness within a process is all a run id needs).
-static WORKFLOW_RUN_SEQ: AtomicU64 = AtomicU64::new(0);
-
 /// Outcome of waiting for a step's in-flight turn to settle.
 enum StepOutcome {
     Completed,
     /// The turn parked on an approval / question — a non-interactive workflow
-    /// can't answer, so the step is treated as failed.
+    /// can't answer, so the step is treated as failed (and its turn is stopped).
     NeedsHuman,
     TimedOut,
 }
@@ -70,11 +68,20 @@ impl AppState {
             self.resolve_provider(Some(&step.agent))?;
         }
 
-        // Briefly hold the session slot to validate + record atomically; the run
-        // itself executes in the background.
+        // Briefly hold the session slot so validate + record is atomic against a
+        // concurrent start (the run itself executes in the background).
         let _slot = self.acquire_session_slot()?;
-        let (parent_thread_id, cwd) = {
+        let (parent_thread_id, cwd, parent_provider) = {
             let relay = self.relay.read().await;
+            // One workflow at a time (checked under the slot, so check + insert is
+            // atomic against another start).
+            if relay.has_active_workflow() {
+                return Err(
+                    "a workflow is already running; wait for it to finish before \
+starting another"
+                        .to_string(),
+                );
+            }
             relay.ensure_device_can_send_message(&device_id)?;
             let parent = relay
                 .active_thread_id
@@ -92,9 +99,6 @@ impl AppState {
                     relay.current_status
                 ));
             }
-            // A backgrounded thread sharing this cwd could mutate files mid-run; a
-            // proper working-tree lock lands in a later chunk, but refuse the
-            // obvious race now.
             if relay.has_working_thread_in_cwd(&relay.current_cwd) {
                 return Err(
                     "another thread is running in this workspace; wait for it to \
@@ -102,11 +106,26 @@ finish before starting a workflow"
                         .to_string(),
                 );
             }
-            (parent, relay.current_cwd.clone())
+            // The controlling device must be allowed to act in this workspace —
+            // the run launches file-mutating turns on the active thread.
+            let device_scope = relay.device_path_scope(&device_id);
+            ensure_path_within_device_scope(
+                &relay.current_cwd,
+                &device_scope,
+                &relay.allowed_roots,
+            )?;
+            (
+                parent,
+                relay.current_cwd.clone(),
+                relay.provider_name.clone(),
+            )
         };
 
-        let seq = WORKFLOW_RUN_SEQ.fetch_add(1, Ordering::Relaxed);
-        let run_id = format!("workflow-{}-{}", unix_now(), seq);
+        // Reject any workflow shape the phase-1 runner does not actually honor,
+        // rather than silently mishandling it.
+        validate_workflow_shape(&workflow, &parent_provider)?;
+
+        let run_id = format!("workflow-{}-{}", unix_now(), random_suffix());
         let run = WorkflowRun::new(
             run_id.clone(),
             workflow.id.clone(),
@@ -180,8 +199,18 @@ finish before starting a workflow"
         // 1. Execute once on the parent (author) thread.
         if let Some(step) = &execute {
             self.set_run_step(&run_id, &step.id).await;
-            let prompt = step_prompt(step, "Implement the requested change for review.");
-            if self.run_turn(&parent_thread_id, &prompt).await.is_none() {
+            let artifact = self.workspace_diff_text(&cwd).await;
+            let prompt = expand_prompt(
+                &step.prompt,
+                "Implement the requested change for review.",
+                "",
+                &artifact,
+            );
+            if self
+                .run_turn(&parent_thread_id, &prompt, step.model.as_deref())
+                .await
+                .is_none()
+            {
                 self.fail_run(&run_id, "the execute step produced no output")
                     .await;
                 return;
@@ -194,9 +223,13 @@ finish before starting a workflow"
             return;
         };
 
-        // 2. Spawn the reviewer thread once; reused across rounds.
-        let reviewer_thread_id = match self.start_workflow_step_thread(&cwd, &review.agent).await {
-            Ok(id) => id,
+        // 2. Spawn the read-only reviewer thread once; reused across rounds.
+        self.set_run_step(&run_id, &review.id).await;
+        let (mut reviewer_thread_id, reviewer_model) = match self
+            .start_workflow_step_thread(&cwd, &review.agent, review.model.as_deref())
+            .await
+        {
+            Ok(result) => result,
             Err(error) => {
                 self.fail_run(
                     &run_id,
@@ -243,7 +276,16 @@ finish before starting a workflow"
             };
 
             self.set_run_step(&run_id, &review.id).await;
-            let review_text = match self.run_turn(&reviewer_thread_id, &prompt).await {
+            let review_text = match self
+                .run_reviewer_turn(
+                    &run_id,
+                    &review.id,
+                    &mut reviewer_thread_id,
+                    &prompt,
+                    Some(reviewer_model.as_str()),
+                )
+                .await
+            {
                 Some(text) => text,
                 None => {
                     self.fail_run(&run_id, "the reviewer produced no review for this round")
@@ -288,15 +330,14 @@ finish before starting a workflow"
                 return;
             };
             self.set_run_step(&run_id, &revise.id).await;
-            let revise_prompt = step_prompt(
-                revise,
-                &format!(
-                    "A reviewer did not approve your changes. Address the findings below; the \
-reviewer will look again afterward.\n\n{review_text}"
-                ),
+            let revise_prompt = expand_prompt(
+                &revise.prompt,
+                &default_revise_prompt(&review_text),
+                &review_text,
+                &diff.diff,
             );
             if self
-                .run_turn(&parent_thread_id, &revise_prompt)
+                .run_turn(&parent_thread_id, &revise_prompt, revise.model.as_deref())
                 .await
                 .is_none()
             {
@@ -311,16 +352,17 @@ reviewer will look again afterward.\n\n{review_text}"
         }
     }
 
-    /// Send `prompt` to `thread_id`, wait for the turn to settle, and return the
-    /// fresh assistant reply text (i.e. an entry whose id differs from the
-    /// pre-turn baseline). `None` on any failure or if no new reply landed.
-    async fn run_turn(&self, thread_id: &str, prompt: &str) -> Option<String> {
+    /// Send `prompt` to `thread_id` (an already-real thread: the parent/author),
+    /// wait for the turn to settle, and return the fresh assistant reply text.
+    /// `None` on any failure or if no new reply landed; a parked/timed-out turn is
+    /// stopped before returning so it can't keep mutating files after the run ends.
+    async fn run_turn(&self, thread_id: &str, prompt: &str, model: Option<&str>) -> Option<String> {
         let baseline = self
             .latest_assistant_entry(thread_id)
             .await
             .map(|(id, _)| id);
         match self
-            .send_message_to_thread(thread_id, prompt, None, None)
+            .send_message_to_thread(thread_id, prompt, model, None)
             .await
         {
             Ok(Some(_)) => {}
@@ -328,9 +370,58 @@ reviewer will look again afterward.\n\n{review_text}"
         }
         match self.wait_for_step_idle(thread_id).await {
             StepOutcome::Completed => {}
-            StepOutcome::NeedsHuman | StepOutcome::TimedOut => return None,
+            StepOutcome::NeedsHuman | StepOutcome::TimedOut => {
+                self.request_thread_stop(thread_id).await;
+                return None;
+            }
         }
         match self.latest_assistant_entry(thread_id).await {
+            Some((id, text)) if baseline.as_deref() != Some(id.as_str()) => Some(text),
+            _ => None,
+        }
+    }
+
+    /// Run one reviewer turn, tolerant of a clean Claude reviewer's synthetic
+    /// `claude-pending-*` id being promoted to its real session id once the turn
+    /// starts: the id is re-read from the run's `step_threads` (which
+    /// `promote_background_thread` rewrites) after sending and after the wait, and
+    /// `*reviewer_thread_id` is updated so later rounds use the live id.
+    async fn run_reviewer_turn(
+        &self,
+        run_id: &str,
+        review_step_id: &str,
+        reviewer_thread_id: &mut String,
+        prompt: &str,
+        model: Option<&str>,
+    ) -> Option<String> {
+        let baseline = self
+            .latest_assistant_entry(reviewer_thread_id)
+            .await
+            .map(|(id, _)| id);
+        match self
+            .send_message_to_thread(reviewer_thread_id, prompt, model, None)
+            .await
+        {
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => return None,
+        }
+        let current = self
+            .current_step_thread(run_id, review_step_id)
+            .await
+            .unwrap_or_else(|| reviewer_thread_id.clone());
+        match self.wait_for_step_idle(&current).await {
+            StepOutcome::Completed => {}
+            StepOutcome::NeedsHuman | StepOutcome::TimedOut => {
+                self.request_thread_stop(&current).await;
+                return None;
+            }
+        }
+        let current = self
+            .current_step_thread(run_id, review_step_id)
+            .await
+            .unwrap_or(current);
+        *reviewer_thread_id = current.clone();
+        match self.latest_assistant_entry(&current).await {
             Some((id, text)) if baseline.as_deref() != Some(id.as_str()) => Some(text),
             _ => None,
         }
@@ -389,23 +480,37 @@ reviewer will look again afterward.\n\n{review_text}"
         }
     }
 
-    /// Spawn a background thread on `provider` for a step (the reviewer). Does not
-    /// become the active thread. Phase 1 uses session defaults; read-only
-    /// enforcement for a real reviewer lands with provider wiring.
+    /// Spawn a read-only background reviewer thread on `provider`, resolving the
+    /// turn model from the provider's own catalog (honoring `model_override`) so a
+    /// codex reviewer never inherits a claude model id and vice versa. Returns
+    /// `(thread_id, resolved_model)`; the model is reused for the reviewer's turns.
     async fn start_workflow_step_thread(
         &self,
         cwd: &str,
         provider: &str,
-    ) -> Result<String, String> {
+        model_override: Option<&str>,
+    ) -> Result<(String, String), String> {
         let (provider_name, bridge) = {
             let (name, bridge) = self.resolve_provider(Some(provider))?;
             (name.to_string(), bridge.clone())
         };
         let defaults = self.defaults().await;
-        let model = defaults.model.clone();
-        let approval_policy = defaults.approval_policy.clone();
-        let sandbox = defaults.sandbox.clone();
-        let effort = defaults.reasoning_effort.clone();
+        let provider_models = self
+            .load_provider_model_catalog(&provider_name, &bridge)
+            .await;
+        let model = resolve_provider_model(
+            &provider_name,
+            &provider_models,
+            model_override.map(str::to_string),
+            defaults.model.clone(),
+        );
+        let effort = default_effort_for_model(&provider_models, &model)
+            .unwrap_or_else(|| defaults.reasoning_effort.clone());
+        // Keep the reviewer read-only where the provider supports it (Codex
+        // read-only sandbox; Claude review_read_only) so it can't mutate the
+        // artifact under review.
+        let (approval_policy, sandbox, read_only_enforced) =
+            reviewer_thread_settings(&provider_name, &defaults.approval_policy, &defaults.sandbox);
 
         let start = bridge
             .start_thread(cwd, &model, &approval_policy, &sandbox, None)
@@ -424,13 +529,34 @@ reviewer will look again afterward.\n\n{review_text}"
                 &sandbox,
                 &effort,
             );
+            let note = if read_only_enforced {
+                "read-only sandbox enforced"
+            } else {
+                "no hard read-only mode for this provider; edits require approval, which the \
+workflow denies"
+            };
             relay.push_log(
                 "info",
-                format!("Workflow: started a {provider_name} background step thread in {cwd}."),
+                format!("Workflow: started a {provider_name} background reviewer thread in {cwd}: {note}."),
             );
             relay.notify();
         }
-        Ok(thread_id)
+        Ok((thread_id, model))
+    }
+
+    async fn current_step_thread(&self, run_id: &str, step_id: &str) -> Option<String> {
+        let relay = self.relay.read().await;
+        relay
+            .workflow_run(run_id)
+            .and_then(|run| run.step_threads.get(step_id).cloned())
+    }
+
+    /// Best-effort current workspace diff text for `{artifact}` substitution.
+    async fn workspace_diff_text(&self, cwd: &str) -> String {
+        collect_workspace_diff(cwd)
+            .await
+            .map(|diff| diff.diff)
+            .unwrap_or_default()
     }
 
     async fn workflow_run_fields(&self, run_id: &str) -> Option<WorkflowRunFields> {
@@ -477,12 +603,183 @@ reviewer will look again afterward.\n\n{review_text}"
     }
 }
 
-/// The step's own prompt, or a role default when it carries none.
-fn step_prompt(step: &WorkflowStep, default: &str) -> String {
-    let trimmed = step.prompt.trim();
-    if trimmed.is_empty() {
+fn role_label(role: StepRole) -> &'static str {
+    match role {
+        StepRole::Execute => "execute",
+        StepRole::Review => "review",
+        StepRole::Revise => "revise",
+    }
+}
+
+/// Reject any workflow the phase-1 runner does not honor end-to-end, so an
+/// accepted run always matches what actually executes.
+fn validate_workflow_shape(workflow: &Workflow, parent_provider: &str) -> Result<(), String> {
+    let count = |role: StepRole| workflow.steps.iter().filter(|s| s.role == role).count();
+    for role in [StepRole::Execute, StepRole::Review, StepRole::Revise] {
+        if count(role) > 1 {
+            return Err(format!(
+                "phase 1 supports at most one {} step per workflow",
+                role_label(role)
+            ));
+        }
+    }
+    // Author steps (execute/revise) run on the active thread, so their provider
+    // must match it — the runner does not spawn separate author threads.
+    for step in workflow
+        .steps
+        .iter()
+        .filter(|s| matches!(s.role, StepRole::Execute | StepRole::Revise))
+    {
+        if step.agent != parent_provider {
+            return Err(format!(
+                "phase 1 runs the {} step on the active thread, so its provider must be \
+`{parent_provider}` (got `{}`)",
+                role_label(step.role),
+                step.agent
+            ));
+        }
+    }
+    if let Some(loop_spec) = &workflow.loop_ {
+        let review = workflow
+            .steps
+            .iter()
+            .find(|s| s.role == StepRole::Review)
+            .ok_or_else(|| "a looping workflow needs a review step".to_string())?;
+        if loop_spec.from_step != review.id {
+            return Err(
+                "phase 1 loops from the review step (loop.from_step must be the review step id)"
+                    .to_string(),
+            );
+        }
+        match workflow.steps.iter().find(|s| s.role == StepRole::Revise) {
+            Some(revise) if loop_spec.to_step == revise.id => {}
+            _ => {
+                return Err(
+                    "phase 1 loops to the revise step (loop.to_step must be the revise step id)"
+                        .to_string(),
+                )
+            }
+        }
+        if loop_spec.stop_when != StopCondition::ReviewerApproved {
+            return Err("phase 1 only supports the ReviewerApproved stop condition".to_string());
+        }
+    }
+    Ok(())
+}
+
+/// A step's prompt with `{review}` / `{artifact}` expanded, or a role default
+/// when it carries none. If a custom prompt omits `{review}`, the reviewer's
+/// findings are APPENDED rather than lost.
+fn expand_prompt(template: &str, default: &str, review: &str, artifact: &str) -> String {
+    let template = template.trim();
+    let base = if template.is_empty() {
         default.to_string()
     } else {
-        trimmed.to_string()
+        template.to_string()
+    };
+    let referenced_review = base.contains("{review}");
+    let mut out = base
+        .replace("{review}", review)
+        .replace("{artifact}", artifact);
+    if !template.is_empty() && !referenced_review && !review.trim().is_empty() {
+        out.push_str(&format!("\n\nReviewer findings:\n{review}"));
+    }
+    out
+}
+
+fn default_revise_prompt(review: &str) -> String {
+    format!(
+        "A reviewer did not approve your changes. Address the findings below; the reviewer will \
+look again afterward.\n\n{review}"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{expand_prompt, validate_workflow_shape};
+    use crate::state::{LoopSpec, StepRole, StopCondition, Workflow, WorkflowStep};
+
+    fn step(id: &str, agent: &str, role: StepRole) -> WorkflowStep {
+        WorkflowStep {
+            id: id.to_string(),
+            agent: agent.to_string(),
+            role,
+            model: None,
+            prompt: String::new(),
+        }
+    }
+
+    /// A canonical Code-Flow-shaped workflow whose author steps use `parent`.
+    fn code_flow(parent: &str) -> Workflow {
+        Workflow {
+            id: "code".to_string(),
+            name: "Code Flow".to_string(),
+            artifact: Default::default(),
+            steps: vec![
+                step("e", parent, StepRole::Execute),
+                step("rv", "codex", StepRole::Review),
+                step("rs", parent, StepRole::Revise),
+            ],
+            loop_: Some(LoopSpec {
+                from_step: "rv".to_string(),
+                to_step: "rs".to_string(),
+                max_rounds: 3,
+                stop_when: StopCondition::ReviewerApproved,
+            }),
+        }
+    }
+
+    #[test]
+    fn accepts_canonical_code_flow() {
+        assert!(validate_workflow_shape(&code_flow("claude_code"), "claude_code").is_ok());
+    }
+
+    #[test]
+    fn rejects_author_provider_mismatch() {
+        // Execute/Revise run on the active thread, so their provider must match it.
+        let err = validate_workflow_shape(&code_flow("codex"), "claude_code").unwrap_err();
+        assert!(err.contains("active thread"), "{err}");
+    }
+
+    #[test]
+    fn rejects_more_than_one_step_per_role() {
+        let mut wf = code_flow("claude_code");
+        wf.steps.push(step("rv2", "codex", StepRole::Review));
+        assert!(validate_workflow_shape(&wf, "claude_code").is_err());
+    }
+
+    #[test]
+    fn rejects_non_reviewer_approved_stop() {
+        let mut wf = code_flow("claude_code");
+        wf.loop_.as_mut().unwrap().stop_when = StopCondition::NoNewFindings;
+        let err = validate_workflow_shape(&wf, "claude_code").unwrap_err();
+        assert!(err.contains("ReviewerApproved"), "{err}");
+    }
+
+    #[test]
+    fn rejects_loop_that_is_not_review_to_revise() {
+        let mut wf = code_flow("claude_code");
+        wf.loop_.as_mut().unwrap().from_step = "e".to_string();
+        assert!(validate_workflow_shape(&wf, "claude_code").is_err());
+    }
+
+    #[test]
+    fn expand_prompt_substitutes_review_and_artifact() {
+        let out = expand_prompt("fix {review} in {artifact}", "default", "BUG", "DIFF");
+        assert_eq!(out, "fix BUG in DIFF");
+    }
+
+    #[test]
+    fn expand_prompt_appends_findings_when_custom_prompt_omits_them() {
+        // A custom revise prompt must not silently drop the reviewer's findings.
+        let out = expand_prompt("just revise it", "default", "BUG", "DIFF");
+        assert!(out.starts_with("just revise it"));
+        assert!(out.contains("Reviewer findings:\nBUG"), "{out}");
+    }
+
+    #[test]
+    fn expand_prompt_uses_default_when_template_empty() {
+        let out = expand_prompt("", "the default {review}", "BUG", "DIFF");
+        assert_eq!(out, "the default BUG");
     }
 }

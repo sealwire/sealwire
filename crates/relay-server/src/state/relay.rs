@@ -593,6 +593,17 @@ impl RelayState {
                 job.reviewer_thread_id = Some(real_id.to_string());
             }
         }
+        // A workflow step thread (a clean Claude reviewer) is promoted from its
+        // synthetic pending id to the real session id once its first turn starts;
+        // rewrite any workflow `step_threads` entry so the runner keeps tracking the
+        // live thread instead of waiting on the removed pending runtime.
+        for run in self.workflow_jobs.values_mut() {
+            for thread_id in run.step_threads.values_mut() {
+                if thread_id == pending_id {
+                    *thread_id = real_id.to_string();
+                }
+            }
+        }
         // Move the durable nav-hiding entry from the pending id to the real id
         // (carrying its parent + created_at, so FIFO order is preserved).
         if let Some(record) = self.reviewer_threads.remove(pending_id) {
@@ -706,6 +717,15 @@ impl RelayState {
 
     pub(crate) fn workflow_run(&self, id: &str) -> Option<&WorkflowRun> {
         self.workflow_jobs.get(id)
+    }
+
+    /// Whether any workflow run is still non-terminal. One workflow at a time
+    /// (mirrors `has_active_review`); checked while holding the session slot so the
+    /// check + insert is atomic against a concurrent start.
+    pub(crate) fn has_active_workflow(&self) -> bool {
+        self.workflow_jobs
+            .values()
+            .any(|run| !run.status.is_terminal())
     }
 
     /// Hard-cap retained workflow runs, evicting the oldest TERMINAL runs first
