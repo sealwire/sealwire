@@ -80,6 +80,7 @@ fn test_persisted_state() -> PersistedRelayState {
         paired_devices,
         reviewer_threads: std::collections::HashMap::new(),
         review_jobs: std::collections::HashMap::new(),
+        workflow_jobs: std::collections::HashMap::new(),
     }
 }
 

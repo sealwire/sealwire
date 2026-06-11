@@ -10,7 +10,7 @@ use tracing::warn;
 
 use super::{
     DeviceRecord, PairedDevice, RelayState, ReviewJob, ReviewerThread, ThreadSessionSettings,
-    DEFAULT_STATE_FILE, PERSISTED_STATE_VERSION,
+    WorkflowRun, DEFAULT_STATE_FILE, PERSISTED_STATE_VERSION,
 };
 
 const PERSISTENCE_DEBOUNCE: Duration = Duration::from_millis(150);
@@ -57,6 +57,14 @@ pub(super) struct PersistedRelayState {
     /// map).
     #[serde(default)]
     pub(super) review_jobs: std::collections::HashMap<String, ReviewJob>,
+    /// Workflow runs (orchestration metadata only — step transcripts are rebuilt
+    /// from the provider). Unlike `review_jobs` (terminal-only), NON-terminal runs
+    /// ARE persisted so a run survives a restart; the restore side
+    /// (`RelayState::restored_workflow_jobs`) reconciles any non-terminal run to the
+    /// terminal `Interrupted` state, so a run is never restored `Running` with no
+    /// orchestrator. `#[serde(default)]` keeps old state files loadable (empty map).
+    #[serde(default)]
+    pub(super) workflow_jobs: std::collections::HashMap<String, WorkflowRun>,
 }
 
 impl PersistedRelayState {
@@ -105,6 +113,10 @@ impl PersistedRelayState {
                 .filter(|(_, job)| job.status.is_terminal())
                 .map(|(id, job)| (id.clone(), job.clone()))
                 .collect(),
+            // Persist ALL workflow runs (terminal cards AND non-terminal): a
+            // non-terminal run must survive so the restore side can reconcile it to
+            // `Interrupted` and offer a re-run, rather than vanishing on restart.
+            workflow_jobs: relay.workflow_jobs.clone(),
         }
     }
 

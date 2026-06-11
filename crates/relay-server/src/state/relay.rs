@@ -20,8 +20,8 @@ use crate::{
 };
 
 use super::{
-    persistence::PersistedRelayState, unix_now, ReviewJob, SecurityProfile, CONTROLLER_LEASE_SECS,
-    DEFAULT_APPROVAL_POLICY, DEFAULT_EFFORT, DEFAULT_MODEL, DEFAULT_SANDBOX,
+    persistence::PersistedRelayState, unix_now, ReviewJob, SecurityProfile, WorkflowRun,
+    CONTROLLER_LEASE_SECS, DEFAULT_APPROVAL_POLICY, DEFAULT_EFFORT, DEFAULT_MODEL, DEFAULT_SANDBOX,
 };
 
 pub use self::approval::{ApprovalKind, PendingApproval};
@@ -41,6 +41,10 @@ const MAX_REMOTE_ACTION_REPLAY_ENTRIES: usize = 512;
 /// dismisses them (the Reviewer panel is a persistent surface), so this cap — not
 /// a timer — is what eventually evicts old completed reviews.
 const MAX_REVIEW_JOBS: usize = 64;
+/// Backstop on retained workflow runs, mirroring `MAX_REVIEW_JOBS`: evict the
+/// oldest TERMINAL runs first; non-terminal runs are never auto-evicted (they
+/// have a live or restart-recoverable orchestrator).
+const MAX_WORKFLOW_RUNS: usize = 64;
 /// Per-parent cap on retained reviewer threads. Re-reviewing a parent with a clean
 /// reviewer spawns a new hidden reviewer thread; once a parent has more than this,
 /// the oldest is evicted (FIFO) and permanently deleted so reviewer threads can't
@@ -218,6 +222,12 @@ pub struct RelayState {
     /// Next reviewer-thread registration sequence (monotonic FIFO order). Restored as
     /// `max(seq) + 1` after a restart so eviction order survives. In-memory only.
     reviewer_thread_seq: u64,
+    /// Relay-owned workflow runs, keyed by run id. Unlike `review_jobs`
+    /// (terminal-only), NON-terminal runs persist too: a run must survive a restart
+    /// so its card can offer "re-run from the last completed step". The restore side
+    /// reconciles any non-terminal run to the terminal `Interrupted` state (no
+    /// orchestrator survives a restart). `pub(super)` so the persistence writer reads it.
+    pub(super) workflow_jobs: HashMap<String, WorkflowRun>,
 }
 
 impl RelayState {
@@ -276,6 +286,7 @@ impl RelayState {
             review_jobs: HashMap::new(),
             reviewer_threads: HashMap::new(),
             reviewer_thread_seq: 0,
+            workflow_jobs: HashMap::new(),
         };
         state.push_log("info", "Relay booted. Waiting for Codex app-server.");
         state
@@ -668,6 +679,72 @@ impl RelayState {
 
     pub(crate) fn review_job(&self, id: &str) -> Option<&ReviewJob> {
         self.review_jobs.get(id)
+    }
+
+    pub(crate) fn insert_workflow_run(&mut self, run: WorkflowRun) {
+        self.prune_workflow_runs();
+        self.workflow_jobs.insert(run.id.clone(), run);
+    }
+
+    pub(crate) fn remove_workflow_run(&mut self, id: &str) -> Option<WorkflowRun> {
+        self.workflow_jobs.remove(id)
+    }
+
+    pub(crate) fn update_workflow_run<F: FnOnce(&mut WorkflowRun)>(
+        &mut self,
+        id: &str,
+        update: F,
+    ) -> bool {
+        match self.workflow_jobs.get_mut(id) {
+            Some(run) => {
+                update(run);
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub(crate) fn workflow_run(&self, id: &str) -> Option<&WorkflowRun> {
+        self.workflow_jobs.get(id)
+    }
+
+    /// Hard-cap retained workflow runs, evicting the oldest TERMINAL runs first
+    /// (mirrors `prune_review_jobs`). Non-terminal runs are never auto-evicted —
+    /// they have a live or restart-recoverable orchestrator.
+    fn prune_workflow_runs(&mut self) {
+        if self.workflow_jobs.len() < MAX_WORKFLOW_RUNS {
+            return;
+        }
+        let mut terminal: Vec<(String, u64)> = self
+            .workflow_jobs
+            .iter()
+            .filter(|(_, run)| run.status.is_terminal())
+            .map(|(id, run)| (id.clone(), run.updated_at))
+            .collect();
+        terminal.sort_by_key(|(_, updated_at)| *updated_at);
+        for (id, _) in terminal {
+            if self.workflow_jobs.len() < MAX_WORKFLOW_RUNS {
+                break;
+            }
+            self.workflow_jobs.remove(&id);
+        }
+    }
+
+    /// Clone persisted workflow runs for restore, reconciling any NON-terminal run
+    /// to the terminal `Interrupted` state: after a restart there is no orchestrator
+    /// to drive it, so it must never come back `Running` (the failure
+    /// `persistence.rs` warns about for review jobs). Terminal runs restore as-is.
+    fn restored_workflow_jobs(
+        persisted: &HashMap<String, WorkflowRun>,
+    ) -> HashMap<String, WorkflowRun> {
+        persisted
+            .iter()
+            .map(|(id, run)| {
+                let mut run = run.clone();
+                run.mark_interrupted_if_stranded();
+                (id.clone(), run)
+            })
+            .collect()
     }
 
     /// Compact views of retained review jobs for the snapshot. ONE card per reviewer
@@ -1262,6 +1339,10 @@ impl RelayState {
             .filter(|(_, job)| job.status.is_terminal())
             .map(|(id, job)| (id.clone(), job.clone()))
             .collect();
+        // Workflow runs persist NON-terminal too; reconcile any stranded run to the
+        // terminal `Interrupted` here — no orchestrator survives a restart (see
+        // workflow.rs / `restored_workflow_jobs`).
+        self.workflow_jobs = Self::restored_workflow_jobs(&persisted.workflow_jobs);
         self.recompute_reviewer_thread_seq();
         self.online_surface_peer_ids.clear();
         self.online_surface_peer_devices.clear();
@@ -1767,6 +1848,10 @@ impl RelayState {
             .filter(|(_, job)| job.status.is_terminal())
             .map(|(id, job)| (id.clone(), job.clone()))
             .collect();
+        // Workflow runs persist NON-terminal too; reconcile any stranded run to the
+        // terminal `Interrupted` here — no orchestrator survives a restart (see
+        // workflow.rs / `restored_workflow_jobs`).
+        self.workflow_jobs = Self::restored_workflow_jobs(&persisted.workflow_jobs);
         self.recompute_reviewer_thread_seq();
         self.online_surface_peer_ids.clear();
         self.online_surface_peer_devices.clear();
@@ -2009,4 +2094,51 @@ fn device_state_sort_key(state: crate::protocol::DeviceLifecycleState) -> u8 {
 
 fn remote_action_cache_key(device_id: &str, action_id: &str) -> String {
     format!("{device_id}:{action_id}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RelayState, WorkflowRun};
+    use crate::state::RunStatus;
+    use std::collections::HashMap;
+
+    #[test]
+    fn restore_reconciles_non_terminal_workflow_runs() {
+        // A run persisted while non-terminal must come back terminal `Interrupted`
+        // (no orchestrator survives a restart); a terminal run restores unchanged.
+        // This is the persistence-boundary half of the restart-recovery design.
+        let mut running = WorkflowRun::new(
+            "r1".to_string(),
+            "wf".to_string(),
+            "parent".to_string(),
+            "anchor".to_string(),
+            "/tmp".to_string(),
+            "device".to_string(),
+        );
+        running.set_status(RunStatus::Running);
+        let mut done = WorkflowRun::new(
+            "r2".to_string(),
+            "wf".to_string(),
+            "parent".to_string(),
+            "anchor".to_string(),
+            "/tmp".to_string(),
+            "device".to_string(),
+        );
+        done.set_status(RunStatus::Done);
+
+        let mut persisted = HashMap::new();
+        persisted.insert("r1".to_string(), running);
+        persisted.insert("r2".to_string(), done);
+
+        // Round-trip through JSON to mirror the persistence layer, then restore.
+        let json = serde_json::to_string(&persisted).expect("serialize runs");
+        let decoded: HashMap<String, WorkflowRun> =
+            serde_json::from_str(&json).expect("deserialize runs");
+        let restored = RelayState::restored_workflow_jobs(&decoded);
+
+        assert_eq!(restored["r1"].status, RunStatus::Interrupted);
+        assert!(restored["r1"].error.is_some());
+        assert_eq!(restored["r2"].status, RunStatus::Done);
+        assert!(restored["r2"].error.is_none());
+    }
 }
