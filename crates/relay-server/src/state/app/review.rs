@@ -139,6 +139,16 @@ impl AppState {
                         .to_string(),
                 );
             }
+            // Reviews and workflows both drive turns on the same parent/cwd; a
+            // workflow's background reviewer is excluded from the workspace-working
+            // check, so guard the pair explicitly to prevent concurrent writers.
+            if relay.has_active_workflow() {
+                return Err(
+                    "a workflow is running on this workspace; wait for it to finish before \
+starting a review"
+                        .to_string(),
+                );
+            }
             relay.ensure_device_can_send_message(&device_id)?;
 
             let active_thread_id = relay

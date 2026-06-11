@@ -22,8 +22,8 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use crate::state::{
-    parse_verdict, re_review_prompt, reviewer_prompt, RunStatus, StepRole, StopCondition, Workflow,
-    WorkflowRun, WorkflowVerdict,
+    parse_verdict, re_review_prompt, reviewer_prompt, ArtifactKind, RunStatus, StepRole,
+    StopCondition, Workflow, WorkflowRun, WorkflowVerdict,
 };
 
 use super::review::{random_suffix, reviewer_thread_settings};
@@ -36,6 +36,12 @@ const MAX_WORKFLOW_ROUNDS: u32 = 20;
 /// the turn completes; this only trips on a step that makes no progress at all
 /// for the whole window (a wedged provider), never on a normally-running step.
 const WORKFLOW_STEP_STALL_SECS: u64 = 600;
+
+/// How long to wait for a stopped turn to actually settle before the run gives up
+/// and goes terminal. A stop request is not proof the turn ended, so we drain
+/// rather than race it; bounded so a provider that never confirms can't wedge the
+/// run forever (workflow threads aren't locked).
+const WORKFLOW_DRAIN_MAX_SECS: u64 = 30;
 
 /// Outcome of waiting for a step's in-flight turn to settle.
 enum StepOutcome {
@@ -79,6 +85,16 @@ impl AppState {
                 return Err(
                     "a workflow is already running; wait for it to finish before \
 starting another"
+                        .to_string(),
+                );
+            }
+            // A review and a workflow would both drive turns on this parent/cwd; the
+            // review's background reviewer is excluded from the workspace-working
+            // check, so guard the pair explicitly.
+            if relay.has_active_review() {
+                return Err(
+                    "a review is running on this workspace; wait for it to finish before \
+starting a workflow"
                         .to_string(),
                 );
             }
@@ -366,12 +382,18 @@ finish before starting a workflow"
             .await
         {
             Ok(Some(_)) => {}
-            Ok(None) | Err(_) => return None,
+            // Uncertain whether a turn actually started — drain to be safe before
+            // failing, so a started-but-unacknowledged turn can't keep mutating.
+            Ok(None) => {
+                self.stop_and_drain(thread_id).await;
+                return None;
+            }
+            Err(_) => return None,
         }
         match self.wait_for_step_idle(thread_id).await {
             StepOutcome::Completed => {}
             StepOutcome::NeedsHuman | StepOutcome::TimedOut => {
-                self.request_thread_stop(thread_id).await;
+                self.stop_and_drain(thread_id).await;
                 return None;
             }
         }
@@ -403,7 +425,11 @@ finish before starting a workflow"
             .await
         {
             Ok(Some(_)) => {}
-            Ok(None) | Err(_) => return None,
+            Ok(None) => {
+                self.stop_and_drain(reviewer_thread_id).await;
+                return None;
+            }
+            Err(_) => return None,
         }
         let current = self
             .current_step_thread(run_id, review_step_id)
@@ -412,7 +438,7 @@ finish before starting a workflow"
         match self.wait_for_step_idle(&current).await {
             StepOutcome::Completed => {}
             StepOutcome::NeedsHuman | StepOutcome::TimedOut => {
-                self.request_thread_stop(&current).await;
+                self.stop_and_drain(&current).await;
                 return None;
             }
         }
@@ -476,6 +502,34 @@ finish before starting a workflow"
                 _ = tokio::time::sleep_until(deadline) => {
                     return StepOutcome::TimedOut;
                 }
+            }
+        }
+    }
+
+    /// Stop a thread's in-flight turn and WAIT for it to actually settle before the
+    /// run goes terminal. A stop request is acknowledgement, not proof the turn
+    /// ended (see `ProviderBridge::request_turn_stop`), and a file-mutating author
+    /// turn must not keep running after the run reports failure. Re-issues the stop
+    /// while waiting; bounded by `WORKFLOW_DRAIN_MAX_SECS` so a provider that never
+    /// confirms can't wedge the run forever.
+    async fn stop_and_drain(&self, thread_id: &str) {
+        let deadline = Instant::now() + Duration::from_secs(WORKFLOW_DRAIN_MAX_SECS);
+        let mut rx = self.subscribe();
+        loop {
+            self.request_thread_stop(thread_id).await;
+            let working = {
+                let relay = self.relay.read().await;
+                relay
+                    .runtime_for_thread(thread_id)
+                    .map(|runtime| runtime.is_working())
+                    .unwrap_or(false)
+            };
+            if !working || Instant::now() >= deadline {
+                return;
+            }
+            tokio::select! {
+                _ = rx.changed() => {}
+                _ = tokio::time::sleep_until(deadline) => return,
             }
         }
     }
@@ -614,6 +668,13 @@ fn role_label(role: StepRole) -> &'static str {
 /// Reject any workflow the phase-1 runner does not honor end-to-end, so an
 /// accepted run always matches what actually executes.
 fn validate_workflow_shape(workflow: &Workflow, parent_provider: &str) -> Result<(), String> {
+    // Phase 1 reviews the git workspace diff; DesignDoc review is not implemented.
+    if workflow.artifact != ArtifactKind::Diff {
+        return Err(
+            "phase 1 supports the Diff artifact only; DesignDoc review is not implemented yet"
+                .to_string(),
+        );
+    }
     let count = |role: StepRole| workflow.steps.iter().filter(|s| s.role == role).count();
     for role in [StepRole::Execute, StepRole::Review, StepRole::Revise] {
         if count(role) > 1 {
@@ -638,6 +699,44 @@ fn validate_workflow_shape(workflow: &Workflow, parent_provider: &str) -> Result
                 step.agent
             ));
         }
+    }
+    // The reviewer must run with a HARD read-only sandbox so it can't mutate the
+    // artifact under review. Codex enforces this; a Claude reviewer's read-only mode
+    // still leaves Bash writable (see the worker), so reject it for now.
+    if let Some(review) = workflow.steps.iter().find(|s| s.role == StepRole::Review) {
+        if matches!(review.agent.as_str(), "claude" | "claude_code") {
+            return Err(
+                "phase 1 needs a reviewer with a hard read-only sandbox (e.g. codex); a Claude \
+reviewer can still write via Bash, so it isn't accepted yet"
+                    .to_string(),
+            );
+        }
+    }
+    // The runner executes steps in execute -> review -> revise order; reject a
+    // reordering it would silently run differently.
+    let position = |role: StepRole| workflow.steps.iter().position(|s| s.role == role);
+    let (execute_at, review_at, revise_at) = (
+        position(StepRole::Execute),
+        position(StepRole::Review),
+        position(StepRole::Revise),
+    );
+    let out_of_order = |before: Option<usize>, after: Option<usize>| matches!((before, after), (Some(b), Some(a)) if b > a);
+    if out_of_order(execute_at, review_at)
+        || out_of_order(review_at, revise_at)
+        || out_of_order(execute_at, revise_at)
+    {
+        return Err(
+            "phase 1 runs steps in execute -> review -> revise order; reorder the steps"
+                .to_string(),
+        );
+    }
+    // A revise step only runs inside the review loop; without a review step and a
+    // loop it would never execute.
+    if revise_at.is_some() && (review_at.is_none() || workflow.loop_.is_none()) {
+        return Err(
+            "a revise step only runs inside a review loop; add a review step and a loop"
+                .to_string(),
+        );
     }
     if let Some(loop_spec) = &workflow.loop_ {
         let review = workflow
@@ -697,7 +796,7 @@ look again afterward.\n\n{review}"
 #[cfg(test)]
 mod tests {
     use super::{expand_prompt, validate_workflow_shape};
-    use crate::state::{LoopSpec, StepRole, StopCondition, Workflow, WorkflowStep};
+    use crate::state::{ArtifactKind, LoopSpec, StepRole, StopCondition, Workflow, WorkflowStep};
 
     fn step(id: &str, agent: &str, role: StepRole) -> WorkflowStep {
         WorkflowStep {
@@ -761,6 +860,54 @@ mod tests {
         let mut wf = code_flow("claude_code");
         wf.loop_.as_mut().unwrap().from_step = "e".to_string();
         assert!(validate_workflow_shape(&wf, "claude_code").is_err());
+    }
+
+    #[test]
+    fn rejects_claude_reviewer() {
+        // A Claude reviewer can still write via Bash, so it isn't accepted yet.
+        let mut wf = code_flow("claude_code");
+        wf.steps[1].agent = "claude_code".to_string();
+        let err = validate_workflow_shape(&wf, "claude_code").unwrap_err();
+        assert!(err.contains("read-only"), "{err}");
+    }
+
+    #[test]
+    fn rejects_design_doc_artifact() {
+        let mut wf = code_flow("claude_code");
+        wf.artifact = ArtifactKind::DesignDoc;
+        let err = validate_workflow_shape(&wf, "claude_code").unwrap_err();
+        assert!(err.contains("Diff artifact only"), "{err}");
+    }
+
+    #[test]
+    fn rejects_revise_without_review_loop() {
+        // A revise step with no review step / loop would never execute.
+        let wf = Workflow {
+            id: "x".to_string(),
+            name: "Revise only".to_string(),
+            artifact: ArtifactKind::Diff,
+            steps: vec![step("rs", "claude_code", StepRole::Revise)],
+            loop_: None,
+        };
+        let err = validate_workflow_shape(&wf, "claude_code").unwrap_err();
+        assert!(err.contains("review loop"), "{err}");
+    }
+
+    #[test]
+    fn rejects_steps_out_of_order() {
+        // review before execute is run differently than authored -> reject.
+        let wf = Workflow {
+            id: "x".to_string(),
+            name: "Reordered".to_string(),
+            artifact: ArtifactKind::Diff,
+            steps: vec![
+                step("rv", "codex", StepRole::Review),
+                step("e", "claude_code", StepRole::Execute),
+            ],
+            loop_: None,
+        };
+        let err = validate_workflow_shape(&wf, "claude_code").unwrap_err();
+        assert!(err.contains("order"), "{err}");
     }
 
     #[test]
