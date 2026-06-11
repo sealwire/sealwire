@@ -86,6 +86,7 @@ mod sessions;
 mod tests;
 mod threads;
 mod transcript;
+mod workflow;
 
 impl AppState {
     #[cfg(test)]

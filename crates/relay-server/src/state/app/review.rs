@@ -1480,7 +1480,7 @@ last message (no recap turn)."
     /// the live runtime transcript; falls back to reading from the provider. The
     /// `item_id` lets callers bind a result to a turn (require a *new* message
     /// rather than reusing a pre-existing assistant reply).
-    async fn latest_assistant_entry(&self, thread_id: &str) -> Option<(String, String)> {
+    pub(super) async fn latest_assistant_entry(&self, thread_id: &str) -> Option<(String, String)> {
         {
             let relay = self.relay.read().await;
             if let Some(runtime) = relay.runtime_for_thread(thread_id) {
