@@ -136,6 +136,12 @@ import {
 import { installThreadListWheelProxy } from "./shared/thread-list-scroll.js";
 import { fetchBuildInfo } from "./shared/build-badge.js";
 import { isReviewInProgressForThread } from "./shared/review-state.js";
+import {
+  buildViewOnlyPin,
+  mergeOlderViewOnlyPage,
+  viewOnlyEligible,
+  viewOnlyPinNextAction,
+} from "./local/view-only-thread.js";
 import { ClientLog } from "./shared/client-log.js";
 import {
   loadLastApprovalPolicy,
@@ -182,11 +188,16 @@ const state = {
   selectedCwd: "",
   session: null,
   viewThreadId: readThreadIdFromUrl(),
-  // Read-only "view projection" of a non-active, review-locked parent thread (see
-  // render-session.js projectReadOnlyView). `{ threadId, entries, generation,
-  // reviewSig, loading }` or null. Loaded by loadViewOnlyTranscript() below.
+  // Read-only "view projection" pin for ANY non-active thread the user is looking
+  // at (see local/view-only-thread.js). `{ threadId, entries, olderCursor,
+  // generation, review, reviewSig, loading }` or null. Loaded by
+  // loadViewOnlyTranscript() below; paginated by loadOlderViewOnlyTranscript().
   viewOnlyThread: null,
   viewOnlyGeneration: 0,
+  // Last thread id we self-triggered a view-only load for (deep links / back
+  // button reach a non-active thread without going through viewThread()). One
+  // attempt per navigation so a failing fetch can't loop.
+  viewOnlyLoadAttemptThreadId: null,
   sessionStream: null,
   streamConnected: false,
   transcriptEntryDetailCache: new Map(),
@@ -504,9 +515,9 @@ const renderer = createSessionRenderer({
     workspaceDiffStore.setReview(slice);
   },
   // View-only navigation: just update the URL/viewThreadId without calling the
-  // backend resume_session, which is mutating. Used during a review when the
-  // user clicks a thread in the sidebar — the backend would reject resume for
-  // review-locked threads, so we navigate without it.
+  // backend resume_session, which is mutating (it moves the relay's single
+  // active thread for EVERY connected client). Any non-active thread renders
+  // read-only from the pin; resume stays an explicit user action.
   viewThread(threadId) {
     void runViewTransition(() => {
       setThreadRoute(threadId);
@@ -515,9 +526,9 @@ const renderer = createSessionRenderer({
       }
       renderer.syncThreadSelection();
     });
-    // Fetch the viewed thread's transcript so a non-active review parent renders
-    // read-only (instead of falling back to the console home). No-op / clears the
-    // projection for threads that aren't a non-active review parent.
+    // Fetch the viewed thread's transcript so it renders read-only (instead of
+    // falling back to the console home). No-op / clears the projection when the
+    // thread is the active one.
     void loadViewOnlyTranscript(threadId);
   },
 });
@@ -543,18 +554,15 @@ function viewOnlyReviewSignature(session, threadId) {
   return job ? `${job.status}:${job.round ?? 0}:${job.updated_at ?? 0}` : "none";
 }
 
-// Fetch a non-active, review-locked parent thread's transcript into
-// state.viewOnlyThread so render-session.js can project it read-only. For any other
-// thread (active, or not under review) it clears the projection. A generation guard
-// drops stale responses when the user navigates again mid-fetch.
+// Fetch a non-active thread's transcript tail into state.viewOnlyThread so
+// render-session.js can project it read-only (with scroll-up pagination via the
+// pin's olderCursor). Works for ANY non-active thread — the review-locked parent
+// case is just one flavor (pin.review). For the active thread it clears the
+// projection. A generation guard drops stale responses when the user navigates
+// again mid-fetch.
 async function loadViewOnlyTranscript(threadId) {
   const session = state.session;
-  const eligible =
-    Boolean(threadId) &&
-    Boolean(session) &&
-    threadId !== session.active_thread_id &&
-    isReviewInProgressForThread(session, threadId);
-  if (!eligible) {
+  if (!viewOnlyEligible(session, threadId)) {
     if (state.viewOnlyThread) {
       state.viewOnlyThread = null;
       if (state.session) renderer.renderSession(state.session);
@@ -562,63 +570,120 @@ async function loadViewOnlyTranscript(threadId) {
     return;
   }
 
+  const review = isReviewInProgressForThread(session, threadId);
   const generation = (state.viewOnlyGeneration = (state.viewOnlyGeneration || 0) + 1);
-  const reviewSig = viewOnlyReviewSignature(session, threadId);
-  const priorEntries =
-    state.viewOnlyThread?.threadId === threadId ? state.viewOnlyThread.entries : [];
-  state.viewOnlyThread = {
+  const reviewSig = review ? viewOnlyReviewSignature(session, threadId) : null;
+  const prior = state.viewOnlyThread?.threadId === threadId ? state.viewOnlyThread : null;
+  state.viewOnlyThread = buildViewOnlyPin({
     threadId,
-    entries: priorEntries,
     generation,
+    review,
     reviewSig,
+    priorEntries: prior?.entries || [],
+    priorOlderCursor: prior?.olderCursor ?? null,
     loading: true,
-  };
+  });
   if (state.session) renderer.renderSession(state.session);
 
   try {
     const page = await controller?.fetchTranscriptPage(threadId, {});
     if (generation !== state.viewOnlyGeneration) return;
-    const entries = page?.entries || (Array.isArray(page) ? page : []);
-    state.viewOnlyThread = { threadId, entries, generation, reviewSig, loading: false };
+    const normalized =
+      page && Array.isArray(page.entries)
+        ? page
+        : { thread_id: threadId, entries: Array.isArray(page) ? page : [], prev_cursor: null };
+    state.viewOnlyThread = buildViewOnlyPin({
+      threadId,
+      page: normalized,
+      generation,
+      review,
+      reviewSig,
+    });
   } catch (error) {
     if (generation !== state.viewOnlyGeneration) return;
-    state.viewOnlyThread = {
+    state.viewOnlyThread = buildViewOnlyPin({
       threadId,
-      entries: priorEntries,
       generation,
+      review,
       reviewSig,
-      loading: false,
-    };
+      priorEntries: prior?.entries || [],
+      priorOlderCursor: prior?.olderCursor ?? null,
+    });
     logLine(`Couldn't load the read-only thread view: ${error.message}`);
   }
   if (state.session) renderer.renderSession(state.session);
 }
 
-// Called on every render: release the read-only pin once the viewed thread becomes
-// active or its review ends, and re-fetch when the review advances. The reviewSig
-// guard keeps this from re-fetching on unrelated renders.
+// Scroll-up pagination for the read-only pin: fetch the page before the pin's
+// olderCursor (cache-aware via the transcript page cache) and prepend it.
+// Deliberately separate from the active-thread hydration pipeline — that store
+// is keyed to the live thread and must not be re-keyed by a view-only visit.
+let viewOnlyOlderLoading = false;
+async function loadOlderViewOnlyTranscript() {
+  const pin = state.viewOnlyThread;
+  if (
+    !pin ||
+    pin.loading ||
+    viewOnlyOlderLoading ||
+    pin.olderCursor == null ||
+    state.viewThreadId !== pin.threadId
+  ) {
+    return;
+  }
+  const generation = pin.generation;
+  viewOnlyOlderLoading = true;
+  try {
+    const page = await controller?.fetchTranscriptPage(pin.threadId, {
+      before: pin.olderCursor,
+    });
+    const current = state.viewOnlyThread;
+    if (!current || current.generation !== generation || current.threadId !== pin.threadId) {
+      return; // user navigated / pin replaced while the fetch was in flight
+    }
+    state.viewOnlyThread = mergeOlderViewOnlyPage(current, page);
+    if (state.session) renderer.renderSession(state.session);
+  } catch (error) {
+    logLine(`Couldn't load older messages for the read-only view: ${error.message}`);
+  } finally {
+    viewOnlyOlderLoading = false;
+  }
+}
+
+// Called on every render: keep the pin honest against the latest REAL session.
+// General pins stay pinned while viewed (NEVER auto-resume — that would mutate
+// the relay's global active thread as a side effect of looking); review pins keep
+// the pre-existing UX (seamless resume-in-place when their review ends, re-fetch
+// when it advances). Also self-heals: deep links / back-button land on a
+// non-active thread without going through viewThread(), so load the pin here —
+// once per navigated thread, so a failing fetch can't loop.
 function maybeRefreshViewOnly(session) {
   const pin = state.viewOnlyThread;
-  if (!pin || !session) return;
-  if (pin.threadId === session.active_thread_id) {
-    // The viewed thread is already the active session → drop the read-only pin.
-    state.viewOnlyThread = null;
-    return;
-  }
-  if (!isReviewInProgressForThread(session, pin.threadId)) {
-    // The review ended. Per the chosen UX: if the user is STILL looking at this
-    // thread, seamlessly resume it so the read-only view turns into the live session
-    // IN PLACE — never flip them to the console home. If they've already navigated
-    // away, just drop the pin and leave their view exactly where it is.
-    const threadId = pin.threadId;
-    state.viewOnlyThread = null;
-    if (state.viewThreadId === threadId) {
+  if (pin && session) {
+    const action = viewOnlyPinNextAction(session, pin, {
+      viewThreadId: state.viewThreadId,
+      reviewSignature: viewOnlyReviewSignature,
+    });
+    if (action.kind === "release") {
+      state.viewOnlyThread = null;
+    } else if (action.kind === "resume") {
+      const threadId = pin.threadId;
+      state.viewOnlyThread = null;
       void controller?.resumeSession(threadId);
+    } else if (action.kind === "refresh") {
+      void loadViewOnlyTranscript(pin.threadId);
     }
-    return;
   }
-  if (!pin.loading && pin.reviewSig !== viewOnlyReviewSignature(session, pin.threadId)) {
-    void loadViewOnlyTranscript(pin.threadId);
+
+  const viewId = state.viewThreadId;
+  if (
+    viewId &&
+    session &&
+    viewOnlyEligible(session, viewId) &&
+    state.viewOnlyThread?.threadId !== viewId &&
+    state.viewOnlyLoadAttemptThreadId !== viewId
+  ) {
+    state.viewOnlyLoadAttemptThreadId = viewId;
+    void loadViewOnlyTranscript(viewId);
   }
 }
 
@@ -1028,7 +1093,16 @@ transcript.addEventListener("click", (event) => {
 // renderSession because the sentinel is part of the React tree and may be
 // replaced when the active branch swaps.
 const transcriptHistoryLoader = attachTranscriptHistoryLoader({
-  onLoad: () => controller?.maybeLoadOlderTranscript(),
+  onLoad: () => {
+    // A pinned read-only view paginates through its own pin (the hydration
+    // pipeline is keyed to the live thread); everything else takes the normal
+    // active-thread path, which no-ops while a pin is showing.
+    const pin = state.viewOnlyThread;
+    if (pin && state.viewThreadId === pin.threadId) {
+      return loadOlderViewOnlyTranscript();
+    }
+    return controller?.maybeLoadOlderTranscript();
+  },
   scrollElement: transcript,
 });
 renderer.setTranscriptHistorySync(() => transcriptHistoryLoader.sync());

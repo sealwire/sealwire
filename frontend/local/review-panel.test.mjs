@@ -14,7 +14,6 @@ import {
   isReviewBlocked,
   isReviewInProgress,
   isReviewInProgressForThread,
-  projectReviewReadOnlySession,
   reviewChipTone,
   reviewStatusLabel,
   selectReviewLaunchModel,
@@ -348,56 +347,9 @@ test("canRequestReview requires controller + idle + no active review", () => {
   assert.equal(canRequestReview({ ...base, active_thread_id: null }, "device-a"), false);
 });
 
-test("projectReviewReadOnlySession projects a non-active review parent into a read-only session", () => {
-  const real = {
-    active_thread_id: "B",
-    transcript: [{ kind: "agent_text", text: "thread B live" }],
-    active_turn_id: "turn-b",
-    active_controller_device_id: "device-a",
-    pending_approvals: [{ request_id: "x" }],
-    active_review_jobs: [{ parent_thread_id: "A", status: "waiting_for_reviewer" }],
-  };
-  const viewOnlyThread = {
-    threadId: "A",
-    entries: [{ kind: "agent_text", text: "thread A recap" }],
-  };
-
-  // Viewing the review parent A while B is active → read-only projection onto A.
-  const projected = projectReviewReadOnlySession(real, { viewThreadId: "A", viewOnlyThread });
-  assert.notEqual(projected, real, "should return a new projected session");
-  assert.equal(projected.active_thread_id, "A", "projected active thread is the viewed parent");
-  assert.equal(projected.transcript[0].text, "thread A recap", "renders the parent's transcript");
-  assert.equal(projected.view_only, true);
-  assert.equal(projected.active_controller_device_id, "__view_only__", "read-only (not controller)");
-  assert.equal(projected.active_turn_id, null);
-  assert.deepEqual(projected.pending_approvals, []);
-});
-
-test("projectReviewReadOnlySession is a no-op unless viewing a non-active review parent", () => {
-  const real = {
-    active_thread_id: "B",
-    transcript: [],
-    active_review_jobs: [{ parent_thread_id: "A", status: "waiting_for_reviewer" }],
-  };
-  const pin = { threadId: "A", entries: [{ kind: "agent_text", text: "a" }] };
-
-  // No pin → unchanged.
-  assert.equal(projectReviewReadOnlySession(real, { viewThreadId: "A", viewOnlyThread: null }), real);
-  // Viewing the ACTIVE thread → unchanged (it renders live normally).
-  const activeReal = { ...real, active_thread_id: "A" };
-  assert.equal(
-    projectReviewReadOnlySession(activeReal, { viewThreadId: "A", viewOnlyThread: pin }),
-    activeReal
-  );
-  // Pin/viewThreadId mismatch → unchanged.
-  assert.equal(projectReviewReadOnlySession(real, { viewThreadId: "C", viewOnlyThread: pin }), real);
-  // Thread not under review → unchanged (no review to be read-only for).
-  const noReview = { active_thread_id: "B", transcript: [], active_review_jobs: [] };
-  assert.equal(
-    projectReviewReadOnlySession(noReview, { viewThreadId: "A", viewOnlyThread: pin }),
-    noReview
-  );
-});
+// The read-only view projection moved to frontend/local/view-only-thread.js and is
+// no longer review-specific — any non-active thread projects read-only. Projection
+// behavior (including the review flavor) is covered by view-only-thread.test.mjs.
 
 test("isReviewInProgressForThread only matches the reviewed parent while non-terminal", () => {
   const session = {

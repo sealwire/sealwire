@@ -78,42 +78,10 @@ export function reviewStatusBadge(session, activeThreadId) {
   return null;
 }
 
-// Read-only "view projection" for the local app. While a review runs on a thread
-// that is NOT the active one, the user can click back to it — but resume is rejected
-// (it's review-locked and mutating). This projects the real session so the viewed
-// parent renders read-only: its own transcript, a frozen composer, the conversation
-// layout (not the console home). The REAL session is untouched by the caller — only
-// the projection is rendered — so heartbeat / lease / controller keep working.
-// Returns `realSession` unchanged unless the viewed thread is a non-active,
-// review-locked parent that has a loaded transcript (`viewOnlyThread`).
-export function projectReviewReadOnlySession(
-  realSession,
-  { viewThreadId, viewOnlyThread } = {}
-) {
-  if (
-    !viewOnlyThread ||
-    !realSession ||
-    !viewThreadId ||
-    viewOnlyThread.threadId !== viewThreadId ||
-    viewThreadId === realSession.active_thread_id ||
-    !isReviewInProgressForThread(realSession, viewThreadId)
-  ) {
-    return realSession;
-  }
-  return {
-    ...realSession,
-    active_thread_id: viewThreadId,
-    active_turn_id: null,
-    pending_approvals: [],
-    pending_ask_user_questions: [],
-    // A sentinel controller id makes canCurrentDeviceWrite() false → read-only.
-    active_controller_device_id: "__view_only__",
-    transcript: viewOnlyThread.entries || [],
-    transcript_truncated: false,
-    current_status: "viewing",
-    view_only: true,
-  };
-}
+// NOTE: the local app's read-only "view projection" used to live here as
+// projectReviewReadOnlySession, gated to review-locked threads. It generalized to
+// ANY non-active thread and moved to frontend/local/view-only-thread.js
+// (projectViewOnlySession) when local navigation became view-only.
 
 // Build the model picker payload for the review-request dialog. Shared by the
 // local renderer and the remote app so both offer the same reviewer choices.

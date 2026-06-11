@@ -73,12 +73,12 @@ import {
   canRequestReview,
   isReviewBlocked,
   isReviewInProgressForThread,
-  projectReviewReadOnlySession,
   REVIEW_BLOCKED_BADGE,
   REVIEW_IN_PROGRESS_BADGE,
   reviewStatusLabel,
   selectReviewLaunchModel,
 } from "../shared/review-state.js";
+import { projectViewOnlySession } from "./view-only-thread.js";
 import { saveLastEffort } from "../shared/last-used-settings.js";
 import {
   AuditList,
@@ -252,10 +252,10 @@ export function createSessionRenderer({
       window.dispatchEvent(new CustomEvent("agent-relay:session-updated"));
     }
     // From here down, render the (possibly read-only) projection — never `state.session`
-    // directly — so a non-active review parent the user clicked back to shows its own
+    // directly — so ANY non-active thread the user is viewing shows its own
     // conversation read-only instead of the console home. `state.session` stays the
     // REAL session so heartbeat / lease / controller / nav keep using it.
-    session = projectReviewReadOnlySession(session, {
+    session = projectViewOnlySession(session, {
       viewThreadId: state.viewThreadId,
       viewOnlyThread: state.viewOnlyThread,
     });
@@ -285,7 +285,9 @@ export function createSessionRenderer({
     if (session.view_only && session.active_thread_id) {
       const threadLabel =
         activeThread?.name || activeThread?.preview || shortId(session.active_thread_id);
-      workspaceSubtitle.textContent = `read-only · review in progress · ${threadLabel}`;
+      workspaceSubtitle.textContent = state.viewOnlyThread?.review
+        ? `read-only · review in progress · ${threadLabel}`
+        : `read-only · saved thread · ${threadLabel}`;
     } else if (viewingConversation && session.active_thread_id) {
       const threadLabel =
         activeThread?.name || activeThread?.preview || shortId(session.active_thread_id);
@@ -368,14 +370,23 @@ export function createSessionRenderer({
     renderSessionSettingsPanel(session);
     renderReviewSlice(session);
     renderReviewIdleNudge(session);
-    renderPendingActionBanner(approval, pendingPairings);
+    renderPendingActionBanner(approval, pendingPairings, session);
     renderWorkspaceSuggestions(session);
     renderTranscript(session, approval);
     renderLogs(session.logs);
     syncThreadSelection();
     syncThreadHistoryScroll();
     restoreThreadHistoryScroll();
-    if (viewingConversation && session.active_thread_id && session.transcript_truncated) {
+    if (
+      viewingConversation &&
+      session.active_thread_id &&
+      session.transcript_truncated &&
+      // A read-only projection paginates through its own pin (app.js
+      // loadOlderViewOnlyTranscript). Feeding the projection into the shared
+      // hydration pipeline would re-key the hydration store — which belongs to
+      // the LIVE thread — to the viewed thread and clobber it.
+      !session.view_only
+    ) {
       ensureConversationTranscript?.(session);
     }
     scheduleControllerHeartbeat(session);
@@ -899,8 +910,37 @@ export function createSessionRenderer({
     );
   }
 
-  function renderPendingActionBanner(approval, pendingPairings) {
+  function renderPendingActionBanner(approval, pendingPairings, session = null) {
     if (!pendingActionBanner) {
+      return;
+    }
+
+    // General read-only view of a saved thread: offer the explicit way back to
+    // live. (Review view-only keeps its existing calm UI — resume is blocked
+    // while the review runs, so no button is offered there.)
+    if (session?.view_only && session.active_thread_id && !state.viewOnlyThread?.review) {
+      pendingActionBanner.hidden = false;
+      renderReactContent(
+        pendingActionBanner,
+        h(
+          "div",
+          { className: "pending-action-banner-inner pending-action-banner-view-only" },
+          h(
+            "span",
+            { className: "pending-action-banner-text" },
+            "Read-only view of a saved thread."
+          ),
+          h(
+            "button",
+            {
+              className: "pending-action-btn pending-action-btn-primary",
+              "data-resume-thread-id": session.active_thread_id,
+              type: "button",
+            },
+            "Resume this thread"
+          )
+        )
+      );
       return;
     }
 
