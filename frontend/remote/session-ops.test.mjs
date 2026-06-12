@@ -687,6 +687,102 @@ test("viewing the live thread stays pinned when another client moves live focus"
   assert.equal(state.session.transcript[0].text, "thread A");
 });
 
+test("successful first send follows a promoted Claude pending thread id", async () => {
+  activeBrowser = installBrowserStubs();
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { handleRemoteBrokerPayload } = await import("./actions.js");
+  const { ensureRemoteRuntimeConfigured } = await import("./remote-runtime.js");
+  const {
+    applySessionSnapshot,
+    clearSessionRuntime,
+    sendMessage,
+    viewRemoteThread,
+  } = await import("./session-ops.js");
+
+  ensureRemoteRuntimeConfigured();
+  clearSessionRuntime();
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-pending-promotion",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: "claim-token-1",
+    sessionClaimExpiresAt: Math.floor(Date.now() / 1000) + 300,
+  });
+  seedSocketState(state, {
+    socketConnected: true,
+    socketPeerId: "surface-peer-1",
+  });
+  state.pendingActions.clear();
+  seedTranscriptHydrationState(state);
+
+  const pendingId = "claude-pending-abc";
+  const realId = "claude-real-123";
+  applySessionSnapshot({
+    active_thread_id: pendingId,
+    active_turn_id: null,
+    current_cwd: "/tmp/project",
+    current_status: "idle",
+    pending_approvals: [],
+    pending_ask_user_questions: [],
+    transcript: [],
+    transcript_truncated: false,
+  });
+  assert.equal(await viewRemoteThread(pendingId), true);
+
+  state.socket = {
+    readyState: 1,
+    send(frameText) {
+      const frame = JSON.parse(frameText);
+      setImmediate(async () => {
+        await handleRemoteBrokerPayload({
+          kind: "remote_session_result",
+          action_id: frame.payload.action_id,
+          action: "send_message",
+          ok: true,
+          snapshot: {
+            active_thread_id: realId,
+            active_turn_id: "claude-turn-1",
+            current_cwd: "/tmp/project",
+            current_status: "active",
+            pending_approvals: [],
+            pending_ask_user_questions: [],
+            transcript: [
+              {
+                item_id: "user-1",
+                kind: "user_text",
+                status: "completed",
+                text: "hello",
+                turn_id: "claude-turn-1",
+                tool: null,
+              },
+            ],
+            transcript_truncated: false,
+          },
+        });
+      });
+    },
+  };
+
+  assert.equal(await sendMessage("hello", "medium"), true);
+  assert.equal(state.realSession.active_thread_id, realId);
+  assert.equal(state.session.active_thread_id, realId);
+  assert.equal(state.session.view_only, undefined);
+  assert.equal(state.session.transcript[0].text, "hello");
+  clearSessionRuntime();
+  state.socket = null;
+  state.pendingActions.clear();
+});
+
 test("stale view-only fetch cannot override a newer resume", async () => {
   activeBrowser = installBrowserStubs();
 
@@ -2393,6 +2489,134 @@ test("applyTranscriptDelta gap repair fetches the authoritative tail and converg
   remoteQueryClient.clear();
 });
 
+test("gap repair updates the live session while preserving a view-only thread", async () => {
+  activeBrowser = installBrowserStubs();
+  const sentPayloads = [];
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { handleRemoteBrokerPayload } = await import("./actions.js");
+  const {
+    applySessionSnapshot,
+    applyTranscriptDelta,
+    clearSessionRuntime,
+    viewRemoteThread,
+  } = await import("./session-ops.js");
+  const { remoteQueryClient } = await import("./query-client.js");
+
+  clearSessionRuntime();
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-view-gap",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: null,
+    sessionClaimExpiresAt: null,
+  });
+  seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
+  state.pendingActions.clear();
+  remoteQueryClient.clear();
+  seedTranscriptHydrationState(state);
+  state.threads = [
+    { id: "thread-a", cwd: "/tmp/a", status: "idle" },
+    { id: "thread-b", cwd: "/tmp/b", status: "active" },
+  ];
+
+  applySessionSnapshot({
+    active_thread_id: "thread-a",
+    active_turn_id: null,
+    current_cwd: "/tmp/a",
+    current_status: "idle",
+    pending_approvals: [],
+    pending_ask_user_questions: [],
+    transcript: [{ item_id: "a-1", text: "thread A" }],
+    transcript_revision: 1,
+    transcript_truncated: false,
+  });
+  assert.equal(await viewRemoteThread("thread-a"), true);
+  applySessionSnapshot({
+    active_thread_id: "thread-b",
+    active_turn_id: "turn-b",
+    current_cwd: "/tmp/b",
+    current_status: "active",
+    pending_approvals: [],
+    pending_ask_user_questions: [],
+    transcript: [
+      {
+        item_id: "b-1",
+        kind: "agent_text",
+        status: "running",
+        text: "Hello",
+        turn_id: "turn-b",
+        tool: null,
+      },
+    ],
+    transcript_revision: 5,
+    transcript_truncated: false,
+  });
+
+  state.socket = {
+    readyState: 1,
+    send(frameText) {
+      const frame = JSON.parse(frameText);
+      sentPayloads.push(frame.payload);
+      setImmediate(async () => {
+        await handleRemoteBrokerPayload({
+          kind: "remote_action_result",
+          action_id: frame.payload.action_id,
+          action: "fetch_thread_transcript",
+          ok: true,
+          snapshot: {},
+          thread_transcript: {
+            thread_id: "thread-b",
+            revision: 12,
+            entries: [
+              {
+                item_id: "b-1",
+                kind: "agent_text",
+                text: "Hello world again",
+                status: "completed",
+                turn_id: "turn-b",
+                tool: null,
+              },
+            ],
+            prev_cursor: null,
+          },
+        });
+      });
+    },
+  };
+
+  applyTranscriptDelta({
+    thread_id: "thread-b",
+    base_revision: 10,
+    revision: 11,
+    item_id: "b-1",
+    turn_id: "turn-b",
+    delta: " again",
+    delta_kind: "agent_text",
+    text_offset: 11,
+  });
+
+  await waitFor(() => state.realSession?.transcript?.[0]?.text === "Hello world again");
+  assert.equal(sentPayloads.length, 1);
+  assert.equal(state.realSession.active_thread_id, "thread-b");
+  assert.equal(state.realSession.transcript_revision, 12);
+  assert.equal(state.session.active_thread_id, "thread-a");
+  assert.equal(state.session.transcript[0].text, "thread A");
+  clearSessionRuntime();
+  state.socket = null;
+  state.pendingActions.clear();
+  remoteQueryClient.clear();
+});
+
 test("applyTranscriptDelta gap repair retries after a transient fetch failure and still converges", async () => {
   activeBrowser || installBrowserStubs();
   const sentPayloads = [];
@@ -2942,6 +3166,85 @@ test("applyTranscriptEvent updates approvals as metadata only", async () => {
 
   assert.deepEqual(state.session.pending_approvals, []);
   assert.equal(state.session.transcript[0].text, "visible history");
+});
+
+test("approval events merge against the live session while another thread is viewed", async () => {
+  activeBrowser = installBrowserStubs();
+
+  const { state } = await import("./state.js");
+  const {
+    applySessionSnapshot,
+    applyTranscriptEvent,
+    clearSessionRuntime,
+    viewRemoteThread,
+  } = await import("./session-ops.js");
+
+  clearSessionRuntime();
+  state.threads = [
+    { id: "thread-a", cwd: "/tmp/a", status: "idle" },
+    { id: "thread-b", cwd: "/tmp/b", status: "active" },
+  ];
+  applySessionSnapshot({
+    active_thread_id: "thread-a",
+    active_turn_id: null,
+    current_cwd: "/tmp/a",
+    current_status: "idle",
+    pending_approvals: [
+      { request_id: "approval-a", thread_id: "thread-a", summary: "A" },
+    ],
+    pending_ask_user_questions: [],
+    transcript: [{ item_id: "a-1", text: "thread A" }],
+    transcript_truncated: false,
+  });
+  assert.equal(await viewRemoteThread("thread-a"), true);
+  applySessionSnapshot({
+    active_thread_id: "thread-b",
+    active_turn_id: "turn-b",
+    current_cwd: "/tmp/b",
+    current_status: "active",
+    pending_approvals: [
+      { request_id: "approval-a", thread_id: "thread-a", summary: "A" },
+      { request_id: "approval-b1", thread_id: "thread-b", summary: "B1" },
+    ],
+    pending_ask_user_questions: [],
+    transcript: [{ item_id: "b-1", text: "thread B" }],
+    transcript_truncated: false,
+  });
+
+  applyTranscriptEvent({
+    kind: "approval_added",
+    approval: {
+      request_id: "approval-b2",
+      thread_id: "thread-b",
+      summary: "B2",
+    },
+  });
+
+  assert.deepEqual(
+    state.realSession.pending_approvals.map((approval) => approval.request_id),
+    ["approval-a", "approval-b1", "approval-b2"]
+  );
+  assert.deepEqual(
+    state.session.pending_approvals.map((approval) => approval.request_id),
+    ["approval-a"],
+    "the projected thread still shows only its own approval"
+  );
+
+  applyTranscriptEvent({
+    kind: "approval_resolved",
+    request_id: "approval-b1",
+  });
+
+  assert.deepEqual(
+    state.realSession.pending_approvals.map((approval) => approval.request_id),
+    ["approval-a", "approval-b2"],
+    "resolving one live approval must not drop unrelated approvals"
+  );
+  assert.deepEqual(
+    state.session.pending_approvals.map((approval) => approval.request_id),
+    ["approval-a"]
+  );
+  clearSessionRuntime();
 });
 
 test("sendHeartbeat dispatches a heartbeat when the current device holds control", async () => {

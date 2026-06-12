@@ -326,7 +326,7 @@ async function runTranscriptRepairLoop(threadId) {
   let repairedToRevision = -1;
   let consecutiveFailures = 0;
   try {
-    while (state.session?.active_thread_id === threadId) {
+    while (currentLiveSession()?.active_thread_id === threadId) {
       const target = pendingGapRepairThreads.get(threadId) ?? 0;
       if (target <= repairedToRevision) {
         break;
@@ -364,7 +364,8 @@ async function repairActiveTranscriptTail(threadId, targetRevision) {
   const page = await fetchRawTranscriptPage({ threadId, before: null });
   // The active thread may have changed while the fetch was in flight — a
   // legitimate no-op (the user moved on), not a failure to retry.
-  if (!state.session || state.session.active_thread_id !== threadId) {
+  const liveSession = currentLiveSession();
+  if (!liveSession || liveSession.active_thread_id !== threadId) {
     return;
   }
   // A missing or wrong-thread page is an incomplete/garbled response: throw so
@@ -376,7 +377,7 @@ async function repairActiveTranscriptTail(threadId, targetRevision) {
 
   const pageEntries = Array.isArray(page.entries) ? page.entries : [];
   const pageItemIds = new Set(pageEntries.map((entry) => entry?.item_id).filter(Boolean));
-  const current = Array.isArray(state.session.transcript) ? state.session.transcript : [];
+  const current = Array.isArray(liveSession.transcript) ? liveSession.transcript : [];
   const currentByItemId = new Map(
     current.filter((entry) => entry?.item_id).map((entry) => [entry.item_id, entry])
   );
@@ -399,7 +400,7 @@ async function repairActiveTranscriptTail(threadId, targetRevision) {
     };
   });
 
-  const currentRevision = numericRevision(state.session.transcript_revision) ?? 0;
+  const currentRevision = numericRevision(liveSession.transcript_revision) ?? 0;
   const pageRevision = numericRevision(page.revision) ?? 0;
   const nextRevision = Math.max(
     currentRevision,
@@ -408,14 +409,14 @@ async function repairActiveTranscriptTail(threadId, targetRevision) {
   );
 
   const nextSession = {
-    ...state.session,
+    ...liveSession,
     transcript: [...olderKept, ...repairedTail],
     transcript_truncated: page.prev_cursor != null,
   };
   if (nextRevision > 0) {
     nextSession.transcript_revision = nextRevision;
   }
-  renderSession(nextSession);
+  commitLiveSession(nextSession);
 }
 
 export function applyTranscriptEvent(event) {
@@ -454,8 +455,9 @@ export function applyTranscriptEvent(event) {
     if (!approval?.request_id) {
       return;
     }
+    const liveSession = currentLiveSession();
     applySessionMetadataPatch({
-      pending_approvals: upsertApproval(state.session.pending_approvals || [], approval),
+      pending_approvals: upsertApproval(liveSession?.pending_approvals || [], approval),
     });
     return;
   }
@@ -465,8 +467,9 @@ export function applyTranscriptEvent(event) {
     if (!requestId) {
       return;
     }
+    const liveSession = currentLiveSession();
     applySessionMetadataPatch({
-      pending_approvals: (state.session.pending_approvals || [])
+      pending_approvals: (liveSession?.pending_approvals || [])
         .filter((approval) => approval?.request_id !== requestId),
     });
     return;
@@ -1115,6 +1118,24 @@ export async function sendMessage(messageDraft, effort, model = "") {
         thread_id: threadId,
       },
     });
+    // Claude's first send promotes a synthetic pending id to the real SDK
+    // session id. The action snapshot arrives while the old id is still pinned,
+    // so it is initially projected back onto that stale id. Rebind the client-
+    // local view after the successful targeted send and hydrate the real thread.
+    const promotedThreadId = state.realSession?.active_thread_id || null;
+    if (
+      threadId.startsWith("claude-pending-")
+      && viewOnlyThreadId === threadId
+      && promotedThreadId
+      && promotedThreadId !== threadId
+    ) {
+      viewOnlyNavigationGeneration += 1;
+      viewOnlyThreadId = promotedThreadId;
+      viewOnlyLastRefreshAt = Date.now();
+      viewOnlyWasWorking = Boolean(state.realSession?.active_turn_id);
+      clearTranscriptHydration(state);
+      applyRenderedSession(state.realSession);
+    }
     return true;
   } catch (error) {
     renderLog(`Remote send failed: ${error.message}`);
