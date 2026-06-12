@@ -142,6 +142,7 @@ import {
   viewOnlyEligible,
   viewOnlyPinNextAction,
 } from "./local/view-only-thread.js";
+import { shouldRefreshViewedThread } from "./shared/viewed-thread-refresh.js";
 import { ClientLog } from "./shared/client-log.js";
 import {
   loadLastApprovalPolicy,
@@ -727,11 +728,12 @@ function maybeRefreshViewOnly(session) {
       const working = Boolean(
         (session.thread_activity || []).find((entry) => entry?.thread_id === pin.threadId)
       );
-      if (
-        !pin.loading &&
-        (working || pin.wasWorking) &&
-        Date.now() - (pin.lastRefreshAt || 0) >= 300
-      ) {
+      if (shouldRefreshViewedThread({
+        elapsedMs: Date.now() - (pin.lastRefreshAt || 0),
+        loading: pin.loading,
+        wasWorking: pin.wasWorking,
+        working,
+      })) {
         void loadViewOnlyTranscript(pin.threadId);
       }
     }

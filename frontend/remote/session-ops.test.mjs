@@ -584,7 +584,13 @@ test("view-only thread stays pinned across live snapshots and review completion"
 
   // 1. Live session is on another thread; a review is running on parent-view-1.
   applySessionSnapshot(
-    snapshot({ active_thread_id: "thread-other", active_review_jobs: reviewing })
+    snapshot({
+      active_thread_id: "thread-other",
+      active_review_jobs: reviewing,
+      thread_activity: [
+        { thread_id: "parent-view-1", phase: "thinking", tool: null },
+      ],
+    })
   );
   assert.equal(state.session.active_thread_id, "thread-other");
   state.threads = [{ id: "parent-view-1", cwd: "/tmp/project" }];
@@ -593,6 +599,13 @@ test("view-only thread stays pinned across live snapshots and review completion"
   const ok = await viewRemoteThread("parent-view-1");
   assert.equal(ok, true);
   assert.equal(state.session.active_thread_id, "parent-view-1", "view-only shows the parent");
+  assert.equal(
+    state.session.current_status,
+    "active",
+    "transcript hydration must not settle a working viewed thread to idle"
+  );
+  assert.equal(state.session.current_phase, "thinking");
+  assert.equal(state.session.active_turn_id, "view:parent-view-1");
 
   // 3. A live snapshot for the OTHER active thread (review still running) must NOT
   //    overwrite the pinned view-only projection.

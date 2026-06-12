@@ -41,6 +41,7 @@ import {
 import { isReviewInProgressForThread } from "../shared/review-state.js";
 import { threadAttention } from "../shared/thread-attention.js";
 import { isDocumentForeground, notifyThreadEvents } from "../shared/thread-notify.js";
+import { shouldRefreshViewedThread } from "../shared/viewed-thread-refresh.js";
 
 const fetchRawTranscriptPage = createTranscriptPageFetcher(dispatchOrRecover);
 const fetchTranscriptEntryDetailRequest =
@@ -1027,40 +1028,29 @@ export async function viewRemoteThread(threadId) {
       throw new Error("remote transcript page response is incomplete");
     }
 
-    const thread = (state.threads || []).find((candidate) => candidate?.id === threadId);
     clearTranscriptHydration(state);
     // Pin this thread so incoming live snapshots update state.realSession while
     // leaving the user's local view in place.
     viewOnlyThreadId = threadId;
     viewOnlyLastRefreshAt = Date.now();
-    viewOnlyWasWorking = Boolean(
-      (state.realSession?.thread_activity || []).find(
-        (entry) => entry?.thread_id === threadId
-      )
-    );
+    if (!viewOnlyRefreshInFlight) {
+      viewOnlyWasWorking = Boolean(
+        (state.realSession?.thread_activity || []).find(
+          (entry) => entry?.thread_id === threadId
+        )
+      );
+    }
     applyRenderedSession(
-      {
-        ...(state.realSession || state.session || {}),
-        active_controller_device_id: "__view_only__",
-        active_controller_last_seen_at: null,
-        active_flags: [],
-        active_thread_id: threadId,
-        active_turn_id: null,
-        controller_lease_expires_at: null,
-        current_cwd: thread?.cwd || "",
-        current_status: settledThreadStatus(thread?.status),
-        current_phase: null,
-        current_tool: null,
-        model: "",
-        reasoning_effort: "",
-        approval_policy: "",
-        sandbox: "",
-        pending_approvals: [],
-        pending_ask_user_questions: [],
-        transcript: page.entries || [],
-        transcript_truncated: page.prev_cursor != null,
-        view_only: true,
-      },
+      projectRemoteViewedSession(
+        state.realSession || state.session,
+        threadId,
+        {
+          active_thread_id: threadId,
+          transcript: page.entries || [],
+          transcript_revision: page.revision || 0,
+          transcript_truncated: page.prev_cursor != null,
+        }
+      ),
       {
         hydrateTranscript: true,
       }
@@ -1081,9 +1071,13 @@ function maybeRefreshRemoteViewedThread(realSession) {
       (entry) => entry?.thread_id === viewOnlyThreadId
     )
   );
-  const needsRefresh = working || viewOnlyWasWorking;
+  const shouldRefresh = shouldRefreshViewedThread({
+    elapsedMs: Date.now() - viewOnlyLastRefreshAt,
+    wasWorking: viewOnlyWasWorking,
+    working,
+  });
   viewOnlyWasWorking = working;
-  if (!needsRefresh || Date.now() - viewOnlyLastRefreshAt < 300) {
+  if (!shouldRefresh) {
     return;
   }
   const threadId = viewOnlyThreadId;
@@ -1091,6 +1085,7 @@ function maybeRefreshRemoteViewedThread(realSession) {
   viewOnlyLastRefreshAt = Date.now();
   void viewRemoteThread(threadId).finally(() => {
     viewOnlyRefreshInFlight = false;
+    maybeRefreshRemoteViewedThread(state.realSession);
   });
 }
 
