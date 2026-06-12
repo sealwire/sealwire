@@ -268,6 +268,8 @@ function selectSessionMetaRenderModel(currentState, session) {
         label: "Control",
         value: session.view_only
           ? "View only"
+          : !session.active_turn_id
+          ? "Available"
           : session.active_controller_device_id
           ? controllerLabel(currentState, session.active_controller_device_id)
           : "Unclaimed",
@@ -299,10 +301,12 @@ function sessionModelTitle(session) {
 }
 
 function selectControlBannerRenderModel(currentState, session) {
+  const activeUnderReview = isReviewInProgressForThread(session, session.active_thread_id);
   if (
     session.view_only
     || !session.active_thread_id
     || !session.active_controller_device_id
+    || (!session.active_turn_id && !activeUnderReview)
   ) {
     return {
       hidden: true,
@@ -322,7 +326,6 @@ function selectControlBannerRenderModel(currentState, session) {
   }
 
   // Only the thread actually under review is off-limits for take-over.
-  const activeUnderReview = isReviewInProgressForThread(session, session.active_thread_id);
   return {
     hidden: false,
     hint: activeUnderReview

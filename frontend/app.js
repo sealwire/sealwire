@@ -199,9 +199,9 @@ const state = {
   // button reach a non-active thread without going through viewThread()). One
   // attempt per navigation so a failing fetch can't loop.
   viewOnlyLoadAttemptThreadId: null,
-  // True while a composer submit (including a view-only take-over) is in flight.
+  // True while a composer submit is in flight.
   // Freezes the composer and rejects re-entry so a draft edit / navigation /
-  // double-submit during the async resume can't change or duplicate the send.
+  // double-submit during the async request can't change or duplicate the send.
   composerSubmitInFlight: false,
   sessionStream: null,
   streamConnected: false,
@@ -522,7 +522,7 @@ const renderer = createSessionRenderer({
   // View-only navigation: just update the URL/viewThreadId without calling the
   // backend resume_session, which is mutating (it moves the relay's single
   // active thread for EVERY connected client). Any non-active thread renders
-  // read-only from the pin; sending is the only take-over action.
+  // from the client-local pin; an idle viewed thread can be sent to directly.
   viewThread(threadId) {
     void runViewTransition(() => {
       setThreadRoute(threadId);
@@ -2105,6 +2105,12 @@ function controllerLabel(deviceId) {
 }
 
 function controllerStateLabel(session) {
+  if (session?.view_only) {
+    return "View only";
+  }
+  if (session?.active_thread_id && !session.active_turn_id) {
+    return "Available";
+  }
   switch (sessionControllerState(session)) {
     case "this_device":
       return "This device";

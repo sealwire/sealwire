@@ -9,7 +9,7 @@ import {
 } from "../view-model.js";
 import { isReviewInProgressForThread } from "../../shared/review-state.js";
 
-test("selectSessionRenderModel derives composer state from controller/session flags", () => {
+test("selectSessionRenderModel allows direct send to an idle thread held by another device", () => {
   const model = selectSessionRenderModel({
     session: {
       active_thread_id: "thread-1",
@@ -28,10 +28,10 @@ test("selectSessionRenderModel derives composer state from controller/session fl
   assert.equal(model.approval?.request_id, "approval-1");
   assert.equal(model.currentApprovalId, "approval-1");
   assert.equal(model.hasActiveSession, true);
-  assert.equal(model.canCompose, false);
+  assert.equal(model.canCompose, true);
   assert.equal(model.canWrite, false);
-  assert.equal(model.composerDisabled, true);
-  assert.match(model.messagePlaceholder, /Another device has control/);
+  assert.equal(model.composerDisabled, false);
+  assert.equal(model.messagePlaceholder, "Message Codex remotely...");
   assert.deepEqual(model.scrollDebug, {
     thread: "thread-1",
     prevThread: "thread-0",
@@ -39,6 +39,26 @@ test("selectSessionRenderModel derives composer state from controller/session fl
     truncated: "1",
     status: "idle",
   });
+});
+
+test("selectSessionRenderModel keeps a running thread read-only for another device", () => {
+  const model = selectSessionRenderModel({
+    session: {
+      active_thread_id: "thread-1",
+      active_turn_id: "turn-1",
+      current_cwd: "/tmp",
+      current_status: "active",
+      pending_approvals: [],
+      transcript: [],
+    },
+    previousSession: null,
+    hasControllerLease: false,
+  });
+
+  assert.equal(model.canCompose, false);
+  assert.equal(model.canWrite, false);
+  assert.equal(model.composerDisabled, true);
+  assert.match(model.messagePlaceholder, /running on another device/i);
 });
 
 test("selectSessionRenderModel freezes the composer only when the active thread is reviewed", () => {
@@ -101,7 +121,7 @@ test("selectSessionRenderModel keeps a general view-only thread writable by targ
   assert.equal(model.canCompose, true);
   assert.equal(model.canWrite, false);
   assert.equal(model.composerDisabled, false);
-  assert.match(model.messagePlaceholder, /take control/i);
+  assert.equal(model.messagePlaceholder, "Message Codex remotely...");
 });
 
 test("selectSessionRenderModel keeps a reviewed view-only thread frozen", () => {

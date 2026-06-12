@@ -3,6 +3,7 @@ import {
   summarizeThreadGroups,
 } from "../shared/thread-groups.js";
 import { isReviewInProgressForThread } from "../shared/review-state.js";
+import { canComposeThread } from "../shared/thread-compose.js";
 import { workspaceBasename } from "./utils.js";
 
 function createActiveSessionThread(session) {
@@ -28,13 +29,15 @@ export function selectSessionRenderModel({ session, previousSession, hasControll
   // The active thread is frozen only when it is itself being reviewed; a
   // background review on another thread leaves this conversation usable.
   const activeThreadFrozen = isReviewInProgressForThread(session, session.active_thread_id);
-  // A client-local saved-thread projection deliberately has no controller
-  // lease. Only the composer gets a targeted-send exception: sending is the
-  // take-over, while other writes (for example file rollback/reapply) stay
-  // disabled until this device actually controls the live session.
-  const viewOnlyComposable = Boolean(session.view_only && !activeThreadFrozen);
   const canWrite = hasControllerLease && !activeThreadFrozen;
-  const canCompose = (canWrite || viewOnlyComposable) && hasActiveSession;
+  // Sending to an idle thread is itself the atomic claim. The relay serializes
+  // concurrent sends, so no separate take-over step is needed.
+  const canCompose = canComposeThread({
+    activeTurnId: session.active_turn_id,
+    hasActiveSession,
+    hasControllerLease,
+    reviewLocked: activeThreadFrozen,
+  });
 
   return {
     approval,
@@ -48,11 +51,9 @@ export function selectSessionRenderModel({ session, previousSession, hasControll
       ? "This thread is being reviewed…"
       : !hasActiveSession
       ? "Start a remote session first."
-      : viewOnlyComposable
-        ? "Message this thread to take control..."
-      : hasControllerLease
+      : canCompose
         ? "Message Codex remotely..."
-        : "Another device has control. Take over to reply.",
+        : "This thread is currently running on another device.",
     scrollDebug: {
       thread: session.active_thread_id || "-",
       prevThread: previousSession?.active_thread_id || "-",

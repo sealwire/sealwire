@@ -79,6 +79,7 @@ import {
   selectReviewLaunchModel,
 } from "../shared/review-state.js";
 import { projectViewOnlySession } from "./view-only-thread.js";
+import { canComposeThread } from "../shared/thread-compose.js";
 import { saveLastEffort } from "../shared/last-used-settings.js";
 import {
   AuditList,
@@ -401,11 +402,15 @@ export function createSessionRenderer({
       goConsoleHomeSidebarButton.hidden = !viewingConversation;
     }
     messageForm.hidden = !viewingConversation;
-    // In a general (non-review) read-only view, the composer is usable: sending
-    // directly targets the viewed thread. Review view-only stays locked.
-    const viewOnlyWritable = Boolean(session.view_only && !state.viewOnlyThread?.review);
-    const canCompose = canWrite || viewOnlyWritable;
-    // Frozen while a submit/take-over is in flight (app.js runComposerSubmit) so a
+    // An idle thread is open to either local or remote. The targeted send is the
+    // atomic claim; only an already-running turn remains controller-gated.
+    const canCompose = canComposeThread({
+      activeTurnId: session.active_turn_id,
+      hasActiveSession,
+      hasControllerLease: canWrite,
+      reviewLocked: activeThreadFrozen || Boolean(state.viewOnlyThread?.review),
+    });
+    // Frozen while a submit is in flight (app.js runComposerSubmit) so a
     // draft edit or second submit can't change or duplicate the in-flight send.
     const submitInFlight = Boolean(state.composerSubmitInFlight);
     const composerReady = hasActiveSession && canCompose && viewingConversation;
@@ -428,11 +433,9 @@ export function createSessionRenderer({
       ? "Start or open a session first."
       : !viewingConversation
         ? "Open the thread page to send a message."
-        : canWrite
+        : canCompose
           ? "Message Codex..."
-          : viewOnlyWritable
-            ? "Type a reply to take control…"
-            : "Another device has control. Take over to reply.";
+          : "This thread is currently running on another device.";
   }
 
   function renderSessionUnavailable(message) {
@@ -895,12 +898,14 @@ export function createSessionRenderer({
   }
 
   function renderControlBanner(session) {
+    const activeUnderReview = isReviewInProgressForThread(session, session.active_thread_id);
     if (
       !session.active_thread_id
       || session.view_only
       || !isViewingConversation(session)
       || !session.active_controller_device_id
       || isCurrentDeviceActiveController(session)
+      || (!session.active_turn_id && !activeUnderReview)
     ) {
       controlBanner.hidden = true;
       return;
@@ -909,7 +914,6 @@ export function createSessionRenderer({
     controlBanner.hidden = false;
     // Only the thread actually being reviewed is off-limits for take-over; a
     // background review elsewhere doesn't lock this thread's controls.
-    const activeUnderReview = isReviewInProgressForThread(session, session.active_thread_id);
     renderReactContent(
       controlBanner,
       h(ControlBannerContent, {
@@ -926,25 +930,6 @@ export function createSessionRenderer({
 
   function renderPendingActionBanner(approval, pendingPairings, session = null) {
     if (!pendingActionBanner) {
-      return;
-    }
-
-    // A saved-thread projection is writable through the composer: sending is
-    // the take-over. No separate resume action is exposed.
-    if (session?.view_only && session.active_thread_id && !state.viewOnlyThread?.review) {
-      pendingActionBanner.hidden = false;
-      renderReactContent(
-        pendingActionBanner,
-        h(
-          "div",
-          { className: "pending-action-banner-inner pending-action-banner-view-only" },
-          h(
-            "span",
-            { className: "pending-action-banner-text" },
-            "Viewing saved thread. Sending a message will take control."
-          )
-        )
-      );
       return;
     }
 
@@ -1162,7 +1147,12 @@ export function createSessionRenderer({
     renderConversationContent(
       h(TranscriptPane, {
         approval,
-        canWrite: canCurrentDeviceWrite(session),
+        canWrite: canComposeThread({
+          activeTurnId: session.active_turn_id,
+          hasActiveSession: Boolean(session.active_thread_id),
+          hasControllerLease: canCurrentDeviceWrite(session),
+          reviewLocked: isReviewInProgressForThread(session, session.active_thread_id),
+        }),
         entries,
         hydrationLoading: shouldShowTranscriptLoading(session, state),
         transcriptOptions: {

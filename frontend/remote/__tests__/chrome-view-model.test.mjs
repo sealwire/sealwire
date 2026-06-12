@@ -83,14 +83,34 @@ test("selectSessionChromeRenderModel derives header, status, and control banner"
   assert.equal(model.header.modelTitle, "Codex · gpt-5.4 · effort medium");
   assert.equal(model.statusBadge.label, "Live");
   assert.equal(model.agentWorkingIndicator.hidden, true);
-  assert.equal(model.controlBanner.hidden, false);
-  assert.match(model.controlBanner.hint, /Approvals can still be handled here/i);
-  assert.equal(model.controlBanner.takeOverHidden, false);
-  assert.equal(model.controlBanner.summary, "Controlled by device-2");
+  assert.equal(model.controlBanner.hidden, true);
+  assert.equal(model.controlBanner.takeOverHidden, true);
   assert.equal(model.sessionMeta.chips.find((chip) => chip.label === "Thread").value, "thread-1");
   assert.equal(model.sessionMeta.chips.find((chip) => chip.label === "Provider").value, "Codex");
   assert.equal(model.sessionMeta.chips.find((chip) => chip.label === "Model").value, "gpt-5.4");
   assert.equal(model.sessionMeta.chips.find((chip) => chip.label === "Effort").value, "medium");
+  assert.equal(model.sessionMeta.chips.find((chip) => chip.label === "Control").value, "Available");
+});
+
+test("remote control banner remains visible while another device is running the thread", () => {
+  const state = {
+    remoteAuth: { deviceId: "device-1" },
+    socketConnected: true,
+  };
+  const session = {
+    active_thread_id: "thread-1",
+    active_turn_id: "turn-1",
+    active_controller_device_id: "device-2",
+    current_status: "active",
+    pending_approvals: [],
+    provider_connected: true,
+  };
+
+  const model = selectSessionChromeRenderModel(state, session);
+
+  assert.equal(model.controlBanner.hidden, false);
+  assert.equal(model.controlBanner.takeOverHidden, false);
+  assert.match(model.controlBanner.hint, /read-only/i);
 });
 
 test("remote control banner hides take over while the active thread is being reviewed", () => {
@@ -197,6 +217,7 @@ test("remote control banner allows take over when the review is on another threa
   };
   const session = {
     active_thread_id: "thread-2",
+    active_turn_id: "turn-2",
     active_controller_device_id: "device-2",
     // A background review owns a DIFFERENT thread — take-over stays allowed.
     active_review_jobs: [
