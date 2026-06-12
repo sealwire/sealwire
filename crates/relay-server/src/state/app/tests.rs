@@ -736,14 +736,15 @@ mod path_scope_tests {
         );
     }
 
-    // P0a regression repro: resuming a thread that is genuinely mid-turn must NOT
-    // drop its "running" state. Claude's read_thread hardcodes status="idle" (it
-    // cannot report a working status — see claude.rs), so merge_fresh_history
-    // clearing active_turn_id on a non-working fresh status wrongly settles a LIVE
-    // turn to idle. The thread is still producing output but shows as not-running:
-    // is_working() == false, so it drops out of thread_activity (no activity dot).
-    // Automatic resumes (cross-agent review / workflow runner re-driving a thread)
-    // trigger this with no user action — "什么都没做自己就这样".
+    // C5 repro: resuming a thread that is genuinely mid-turn must NOT drop its
+    // "running" state. This exercises the WORST case — the post-turn-start,
+    // pre-status-event window: active_turn_id is set but current_status hasn't been
+    // bumped to a working value yet (the RecordingProvider, like a real provider
+    // before its status event lands, leaves it idle). Combined with Claude's
+    // always-idle read_thread, a status-based guard would clear the live turn here.
+    // active_turn_id is the authority, so the turn must survive. Automatic resumes
+    // (review / workflow runner re-driving a thread) trigger this with no user
+    // action — "什么都没做自己就这样".
     #[tokio::test]
     async fn resuming_a_running_thread_keeps_its_live_turn() {
         let project = TempDir::new().expect("project tempdir");
@@ -765,7 +766,9 @@ mod path_scope_tests {
             relay.assign_active_controller("device-1", unix_now());
         }
 
-        // Drive a turn so the thread is genuinely running (active_turn_id set).
+        // Drive a turn so the thread is genuinely running (active_turn_id set). We do
+        // NOT set a working status — modelling the window before the provider's
+        // status event arrives, which is exactly where the old guard misfired.
         let running = app
             .send_message(SendMessageInput {
                 text: "do the thing".to_string(),
@@ -780,15 +783,6 @@ mod path_scope_tests {
             running.active_turn_id.is_some(),
             "precondition: the thread is running (has a live turn)"
         );
-        // Real Claude sets a working status on the active thread while a turn
-        // streams (claude.rs: set_thread_status "active"); the RecordingProvider
-        // emits no such event, so set it explicitly to model a genuinely-running
-        // thread (status "active" + a live turn).
-        {
-            let mut relay = app.relay.write().await;
-            relay.set_thread_status(&thread.id, "active".to_string(), Vec::new());
-        }
-        assert!(app.snapshot().await.active_turn_id.is_some());
 
         // An automatic resume of the still-running thread (the turn is still live
         // on the provider; a review/workflow runner re-drives it). Claude's

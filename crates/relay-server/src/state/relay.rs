@@ -1671,6 +1671,39 @@ impl RelayState {
         self.sync_selected_runtime_to_fields();
     }
 
+    /// A provider worker died mid-turn (its stream closed). Any turn it was running
+    /// can never emit a terminal event, so settle every thread that belongs to this
+    /// provider and still carries a live `active_turn_id` to idle. The worker's death
+    /// IS the authoritative terminal signal here — this is where the "idle + stale
+    /// turn" ghost is killed, NOT in `merge_fresh_history` (C5: a history re-read is
+    /// never authoritative about turn liveness). Without this a ghost `active_turn_id`
+    /// keeps is_working() true forever, blocking reviews in that cwd until restart.
+    pub fn fail_in_flight_turns_for_provider(&mut self, provider: &str) {
+        let now = unix_now();
+        let stuck_threads: Vec<String> = self
+            .runtimes
+            .iter()
+            .filter(|(_, runtime)| {
+                runtime.active_turn_id.is_some()
+                    && runtime
+                        .summary
+                        .as_ref()
+                        .is_some_and(|summary| summary.provider == provider)
+            })
+            .map(|(thread_id, _)| thread_id.clone())
+            .collect();
+        for thread_id in stuck_threads {
+            if self.active_thread_id.as_deref() == Some(thread_id.as_str()) {
+                self.set_active_turn(None);
+                self.set_thread_status(&thread_id, "idle".to_string(), Vec::new());
+                self.clear_progress();
+            } else {
+                self.bg_set_active_turn(&thread_id, None, now);
+                self.bg_set_thread_status(&thread_id, "idle".to_string(), Vec::new(), now);
+            }
+        }
+    }
+
     pub fn mark_surface_peer_online(&mut self, peer_id: &str) -> bool {
         self.online_surface_peer_ids.insert(peer_id.to_string())
     }

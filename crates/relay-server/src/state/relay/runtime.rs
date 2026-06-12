@@ -189,44 +189,27 @@ impl ThreadRuntime {
         if !fresh.model.is_empty() {
             self.model = fresh.model;
         }
-        // A history re-read (resume / switch-back) must NOT end a turn the relay
-        // believes is live. Turn liveness is owned by turn start/stop/completion
-        // events, not by a transcript read — and crucially, some providers cannot
-        // report a working status from read_thread: Claude's hardcodes "idle". So
-        // trusting a non-working FRESH status to clear active_turn_id would settle a
-        // still-running thread to idle (no activity dot, is_working() == false,
-        // dropped from thread_activity) on every resume — including the automatic
-        // resumes a review/workflow runner performs with no user action.
+        // C5 — turn liveness is event-owned. A history re-read (resume / switch-back)
+        // must NEVER touch active_turn_id (nor the descriptive phase/tool): the turn
+        // is started/ended only by turn start/stop/completion events. `active_turn_id`
+        // is THE live-turn authority (see is_working()); status is not, and it is not
+        // even updated atomically with the turn — turn/started sets the turn before
+        // thread/status/changed arrives, so "idle status + a turn" can be a LIVE turn
+        // whose status hasn't landed yet, not a ghost. Claude's read_thread hardcodes
+        // "idle", so keying liveness off the fresh (or stale) status would settle a
+        // still-running thread to idle on every resume.
         //
-        // Only drop the turn when the thread was ALREADY non-working before this
-        // merge AND stays non-working: that is the genuine ghost ("idle status + a
-        // leftover turn id" from a completion that idled the status without clearing
-        // the turn), where the turn id is inconsistent with the thread's own idle
-        // status. A thread that was working keeps its turn — a re-read is not
-        // authoritative enough to end it. (A running thread carries a working
-        // current_status; see claude.rs / the codex status path.)
-        let was_working = thread_status_is_working(&self.current_status);
-        let fresh_working = thread_status_is_working(&fresh.current_status);
+        // We DO adopt the fresh status/flags (cheap, self-correcting): with no turn it
+        // makes a stale "working" status idle (a pending thread that never started a
+        // turn won't linger as a ghost is_working); with a live turn, is_working()
+        // stays true via the turn regardless of the status string.
+        //
+        // The one genuine "idle + stale turn" ghost — a worker that died mid-turn
+        // without a terminal event — is cleared at its source: the worker-disconnect
+        // handler calls fail_in_flight_turns_for_provider (see claude.rs). active_turn_id
+        // is not persisted, so a restart already resets it.
+        self.current_status = fresh.current_status;
         self.active_flags = fresh.active_flags;
-        if was_working && !fresh_working {
-            // Non-authoritative idle read (Claude's read_thread hardcodes "idle")
-            // over a thread we believe is working: KEEP the working status and the
-            // live turn. Overwriting current_status to idle here would erase the very
-            // signal this guard reads, so the NEXT merge would mistake the still-live
-            // turn for a ghost and clear it — a running thread that survives one
-            // resume but not two. Only a terminal turn event may move a working
-            // thread to idle.
-        } else {
-            self.current_status = fresh.current_status;
-            if !fresh_working {
-                // Was already idle and stays idle → drop the stale leftover turn/
-                // phase (the genuine "idle status + leftover turn id" ghost).
-                self.active_turn_id = None;
-                self.current_phase = None;
-                self.current_tool = None;
-                self.last_progress_at = None;
-            }
-        }
         self.merge_transcript_records(fresh.transcript);
     }
 
@@ -374,31 +357,51 @@ mod tests {
         )
     }
 
-    // P0a regression (original ghost): a thread whose own status is ALREADY idle
-    // but still carries a leftover active_turn_id (a completion that idled the
-    // status without clearing the turn) reported is_working() == true forever
-    // ("resume 后状态莫名其妙"). A history re-read that also reports idle confirms
-    // there is no live turn, so the stale turn id is dropped.
+    // C5 — active_turn_id is the live-turn authority; a history re-read must NEVER
+    // clear it. `set_active_turn` and the working-status event are not atomic
+    // (turn/started sets the turn before thread/status/changed arrives), so "idle
+    // status + a turn" can be a LIVE turn whose status hasn't landed yet — not a
+    // ghost. Clearing it (esp. with Claude's always-idle read_thread) would drop a
+    // real turn. Repeated idle merges must keep it. The genuine worker-crash ghost
+    // is cleared at the disconnect handler, not here.
     #[test]
-    fn merge_fresh_history_clears_leftover_turn_when_thread_already_idle() {
+    fn merge_fresh_history_never_clears_a_turn_even_with_idle_status() {
         let mut rt = runtime("t1", "idle");
         rt.active_turn_id = Some("turn-1".to_string());
-        rt.current_phase = Some("thinking".to_string());
-        rt.current_tool = Some("shell".to_string());
-        assert!(
-            rt.is_working(),
-            "a leftover turn id keeps is_working() true"
+        assert!(rt.is_working(), "a turn id keeps is_working() true");
+
+        rt.merge_fresh_history(runtime("t1", "idle"));
+        assert_eq!(
+            rt.active_turn_id.as_deref(),
+            Some("turn-1"),
+            "first idle re-read keeps the turn (could be the pre-status-event window)"
         );
+        rt.merge_fresh_history(runtime("t1", "idle"));
+        assert_eq!(
+            rt.active_turn_id.as_deref(),
+            Some("turn-1"),
+            "and the second idle re-read keeps it too"
+        );
+        assert!(rt.is_working());
+    }
+
+    // C5 reverse: a pending/blank thread reports a working *status* ("active")
+    // before any turn starts. Merging a fresh idle read must ADOPT idle — with no
+    // active_turn_id there is no live turn, so the thread must not linger as a ghost
+    // "working" that blocks reviews (has_working_thread_in_cwd).
+    #[test]
+    fn merge_fresh_history_drops_working_status_when_no_turn_and_fresh_is_idle() {
+        let mut rt = runtime("t1", "active");
+        assert!(rt.active_turn_id.is_none());
+        assert!(rt.is_working(), "a working status alone makes it working");
 
         rt.merge_fresh_history(runtime("t1", "idle"));
 
-        assert_eq!(rt.active_turn_id, None);
-        assert_eq!(rt.current_phase, None);
-        assert_eq!(rt.current_tool, None);
         assert_eq!(rt.current_status, "idle");
+        assert!(rt.active_turn_id.is_none());
         assert!(
             !rt.is_working(),
-            "an idle thread with no in-flight turn must not be working"
+            "no turn + idle status → not working (no ghost is_working)"
         );
     }
 

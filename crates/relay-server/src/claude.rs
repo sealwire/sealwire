@@ -706,6 +706,10 @@ fn spawn_stdout_reader(
                 Ok(None) => {
                     let mut relay = state.write().await;
                     relay.set_provider_connection("claude_code", false);
+                    // The worker is gone; any turn it was running can never complete.
+                    // Settle its threads so a ghost active_turn_id doesn't keep them
+                    // is_working() forever (blocking reviews) until restart.
+                    relay.fail_in_flight_turns_for_provider("claude_code");
                     relay.push_log("error", "Claude worker stdout closed.");
                     relay.notify();
                     break;
@@ -713,6 +717,7 @@ fn spawn_stdout_reader(
                 Err(error) => {
                     let mut relay = state.write().await;
                     relay.set_provider_connection("claude_code", false);
+                    relay.fail_in_flight_turns_for_provider("claude_code");
                     relay.push_log(
                         "error",
                         format!("Failed to read claude worker stdout: {error}"),

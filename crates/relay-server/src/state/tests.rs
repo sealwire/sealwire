@@ -2431,6 +2431,49 @@ fn has_working_thread_in_cwd_ignores_reviewer_and_deleted_threads() {
     );
 }
 
+// C5 ghost cleanup: a worker that dies mid-turn never emits a terminal event, so
+// its threads would keep a ghost active_turn_id forever (is_working() == true,
+// blocking reviews in that cwd). fail_in_flight_turns_for_provider settles them on
+// disconnect — and must touch ONLY that provider's threads, not another provider's
+// genuinely-running turn. (This is where the "idle + stale turn" ghost is killed,
+// NOT in merge_fresh_history, which is no longer authoritative about turn liveness.)
+#[test]
+fn worker_disconnect_fails_in_flight_turns_for_that_provider_only() {
+    let mut relay = test_state();
+
+    let mut claude_summary = test_thread("claude-1", "/tmp/project");
+    claude_summary.provider = "claude_code".to_string();
+    relay.upsert_thread(claude_summary.clone());
+    let mut codex_summary = test_thread("codex-1", "/tmp/project");
+    codex_summary.provider = "codex".to_string();
+    relay.upsert_thread(codex_summary.clone());
+
+    // Both threads are running a turn in the background; give each runtime its
+    // provider summary so the per-provider filter can tell them apart.
+    relay.bg_set_active_turn("claude-1", Some("turn-claude".to_string()), 0);
+    relay.bg_set_active_turn("codex-1", Some("turn-codex".to_string()), 0);
+    relay.ensure_runtime_for_thread("claude-1").summary = Some(claude_summary);
+    relay.ensure_runtime_for_thread("codex-1").summary = Some(codex_summary);
+    assert!(relay.runtime_for_thread("claude-1").unwrap().is_working());
+    assert!(relay.runtime_for_thread("codex-1").unwrap().is_working());
+
+    // The Claude worker dies.
+    relay.fail_in_flight_turns_for_provider("claude_code");
+
+    assert!(
+        !relay.runtime_for_thread("claude-1").unwrap().is_working(),
+        "the dead worker's in-flight turn is settled to idle (no ghost is_working)"
+    );
+    assert_eq!(
+        relay.runtime_for_thread("claude-1").unwrap().active_turn_id,
+        None
+    );
+    assert!(
+        relay.runtime_for_thread("codex-1").unwrap().is_working(),
+        "another provider's running turn must be untouched by a Claude disconnect"
+    );
+}
+
 #[test]
 fn completed_background_turn_clears_phase_so_the_thread_is_not_stuck_working() {
     // Repro: a review's recap runs on the parent in the BACKGROUND (the user switched
