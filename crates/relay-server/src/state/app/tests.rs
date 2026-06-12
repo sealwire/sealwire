@@ -3040,6 +3040,20 @@ mod review_tests {
             job.reviewer_model
         );
 
+        // Same for reasoning effort: the review was requested WITHOUT an explicit
+        // effort (review_input sets reviewer_effort: None), but ReviewJobView must
+        // still carry the EFFECTIVE effort the clean reviewer ran on — the orchestrator
+        // resolves and records it when the reviewer thread starts. Without that the card
+        // would show a model but no effort (the reported gap).
+        assert!(
+            job.reviewer_effort
+                .as_ref()
+                .map(|e| !e.is_empty())
+                .unwrap_or(false),
+            "the effective reviewer effort must be recorded on the job (got {:?})",
+            job.reviewer_effort
+        );
+
         // The reviewer ran entirely in the BACKGROUND: the active thread stayed the
         // parent the whole time — there was no handoff to displace the user.
         assert_eq!(

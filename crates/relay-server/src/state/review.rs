@@ -250,6 +250,7 @@ impl ReviewJob {
             parent_thread_id: self.parent_thread_id.clone(),
             reviewer_provider: self.reviewer_provider.clone(),
             reviewer_model: self.reviewer_model.clone(),
+            reviewer_effort: self.reviewer_effort.clone(),
             reviewer_thread_id: self.reviewer_thread_id.clone(),
             status: self.status.as_str().to_string(),
             error: self.error.clone(),

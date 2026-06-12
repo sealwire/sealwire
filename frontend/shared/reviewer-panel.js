@@ -230,6 +230,19 @@ function ReviewerJobCard({
               { className: "reviewer-job-model", title: job.reviewer_model },
               job.reviewer_model
             )
+          : null,
+        // Effective reasoning effort for the reviewer's turn(s), when known. Shown
+        // next to the model so the card reflects HOW the reviewer was run, not just
+        // which model. `null` for a reused thread with no recorded effort anywhere.
+        job.reviewer_effort
+          ? h(
+              "span",
+              {
+                className: "reviewer-job-effort",
+                title: `Reasoning effort: ${job.reviewer_effort}`,
+              },
+              job.reviewer_effort
+            )
           : null
       ),
       // Right cluster: status + iterative-loop progress (when a budget was set).

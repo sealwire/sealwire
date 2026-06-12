@@ -580,8 +580,8 @@ last message (no recap turn)."
                         )
                         .await
                     {
-                        Ok((thread_id, resolved_model)) => {
-                            (thread_id, Some(resolved_model), reviewer_effort.clone())
+                        Ok((thread_id, resolved_model, resolved_effort)) => {
+                            (thread_id, Some(resolved_model), Some(resolved_effort))
                         }
                         Err(error) => {
                             self.fail_job(
@@ -603,6 +603,17 @@ last message (no recap turn)."
             if let Some(effective_model) = reviewer_turn_model.clone() {
                 self.update_job(&job_id, |job| {
                     job.reviewer_model = Some(effective_model);
+                })
+                .await;
+            }
+            // Likewise record the effective reasoning effort for this round so the
+            // reviewer card can show it (the reported gap: only the model showed). A
+            // clean reviewer now carries its resolved effort; reuse keeps the thread's
+            // own/overridden effort. Only a reused thread with no recorded effort
+            // anywhere stays `None`.
+            if let Some(effective_effort) = reviewer_turn_effort.clone() {
+                self.update_job(&job_id, |job| {
+                    job.reviewer_effort = Some(effective_effort);
                 })
                 .await;
             }
@@ -1113,7 +1124,7 @@ last message (no recap turn)."
         reviewer_provider: &str,
         reviewer_model: Option<&str>,
         reviewer_effort: Option<&str>,
-    ) -> Result<(String, String), String> {
+    ) -> Result<(String, String, String), String> {
         let (provider_name, bridge) = {
             let (name, bridge) = self.resolve_provider(Some(reviewer_provider))?;
             (name.to_string(), bridge.clone())
@@ -1220,7 +1231,7 @@ last message (no recap turn)."
             self.handle_parent_reviewer_threads(evict_ids, true).await;
         }
 
-        Ok((reviewer_thread_id, model))
+        Ok((reviewer_thread_id, model, effort))
     }
 
     /// Prepare a REUSED reviewer thread for its re-review turn. Re-establishes the

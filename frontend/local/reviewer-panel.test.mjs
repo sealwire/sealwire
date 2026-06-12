@@ -395,6 +395,48 @@ test("ReviewerPanel shows the reviewer model + the (long) thread name with a ful
   assert.match(html, /aria-label="Reviewer thread: Review: refactor/);
 });
 
+test("ReviewerPanel shows the reviewer effort chip beside the model, with a reasoning-effort tooltip", () => {
+  const html = renderToStaticMarkup(
+    h(ReviewerPanel, {
+      reviewJobs: [
+        {
+          id: "r1",
+          reviewer_provider: "codex",
+          reviewer_model: "gpt-5-codex",
+          reviewer_effort: "high",
+          status: "waiting_for_reviewer",
+          reviewer_thread_id: "rev-thread-1",
+        },
+      ],
+      canRequest: false,
+    })
+  );
+  // The effort renders in its own chip, with the full value in the title tooltip.
+  assert.match(html, /reviewer-job-effort[^>]*>high</);
+  assert.match(html, /reviewer-job-effort[^>]*title="Reasoning effort: high"/);
+  // Both facets show together: model AND effort.
+  assert.match(html, /reviewer-job-model[^>]*>gpt-5-codex</);
+});
+
+test("ReviewerPanel omits the effort chip when the job carries no effort", () => {
+  const html = renderToStaticMarkup(
+    h(ReviewerPanel, {
+      reviewJobs: [
+        {
+          id: "r2",
+          reviewer_provider: "codex",
+          reviewer_model: "gpt-5-codex",
+          // no reviewer_effort (e.g. a reused thread with no recorded effort)
+          status: "waiting_for_reviewer",
+          reviewer_thread_id: "rev-thread-2",
+        },
+      ],
+      canRequest: false,
+    })
+  );
+  assert.doesNotMatch(html, /reviewer-job-effort/);
+});
+
 test("ReviewerPanel falls back to the reviewer thread id when the thread has no name; hides model when unknown", () => {
   const html = renderToStaticMarkup(
     h(ReviewerPanel, {

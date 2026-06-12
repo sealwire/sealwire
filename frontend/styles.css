@@ -3284,6 +3284,19 @@ body.is-resizing-panel {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Effort chip sits beside the model: short, fixed (no truncation), and visually
+   set off as a small pill so it reads as a separate facet from the model name. */
+.reviewer-job-effort {
+  flex-shrink: 0;
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 0 6px;
+  border-radius: 999px;
+  color: var(--text-secondary);
+  background: var(--surface-muted, rgba(127, 127, 127, 0.14));
+  white-space: nowrap;
+  text-transform: capitalize;
+}
 /* The reviewer thread name is long: keep it to one line, truncate with an
    ellipsis, and rely on the title/aria-label for the full value on hover. */
 .reviewer-job-thread {

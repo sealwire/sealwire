@@ -1341,6 +1341,12 @@ pub struct ReviewJobView {
     /// `None` only briefly before the first reviewer turn, or for a reused thread with
     /// no recorded model anywhere.
     pub reviewer_model: Option<String>,
+    /// The reviewer's EFFECTIVE reasoning effort for its turn(s) — the explicit
+    /// override, else the reused thread's recorded effort, else the resolved
+    /// model/session default — recorded once the reviewer thread starts. `None` only
+    /// briefly before the first reviewer turn, or for a reused thread with no recorded
+    /// effort anywhere.
+    pub reviewer_effort: Option<String>,
     pub reviewer_thread_id: Option<String>,
     pub status: String,
     pub error: Option<String>,
