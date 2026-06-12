@@ -813,6 +813,62 @@ mod path_scope_tests {
         );
     }
 
+    // Review finding 2: "send = take over" must NOT start a second turn on a thread
+    // that is already running one. Sending to a background thread with a live
+    // active_turn_id would resume it and call start_turn again — double-starting.
+    // The server rejects up front, before any take-over side effect, and leaves the
+    // current active thread untouched.
+    #[tokio::test]
+    async fn send_to_a_busy_background_thread_is_rejected_without_double_starting() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, codex, _claude) = build_recording_provider_app(cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let thread_a = codex.thread_summary("codex-thread-a", cwd);
+        let thread_b = codex.thread_summary("codex-thread-b", cwd);
+        {
+            let mut threads = codex.threads.lock().await;
+            threads.insert(thread_a.id.clone(), thread_a.clone());
+            threads.insert(thread_b.id.clone(), thread_b.clone());
+        }
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("codex".to_string());
+            relay.active_thread_id = Some(thread_a.id.clone());
+            relay.threads = vec![thread_a.clone(), thread_b.clone()];
+            relay.assign_active_controller("device-1", unix_now());
+            // B is running a turn in the background.
+            let now = unix_now();
+            relay.bg_set_active_turn(&thread_b.id, Some("turn-b".to_string()), now);
+            relay.bg_set_thread_status(&thread_b.id, "active".to_string(), Vec::new(), now);
+        }
+
+        let result = app
+            .send_message(SendMessageInput {
+                text: "interrupt B".to_string(),
+                model: None,
+                effort: None,
+                device_id: Some("device-1".to_string()),
+                thread_id: Some(thread_b.id.clone()),
+            })
+            .await;
+
+        assert!(
+            result.is_err(),
+            "sending to a thread already running a turn must be rejected"
+        );
+        assert!(
+            codex.turn_thread_ids.lock().await.is_empty(),
+            "no turn may be started on a thread that is already running one"
+        );
+        assert_eq!(
+            app.snapshot().await.active_thread_id.as_deref(),
+            Some(thread_a.id.as_str()),
+            "a rejected take-over must not displace the current active thread"
+        );
+    }
+
     #[tokio::test]
     async fn send_message_without_thread_id_targets_the_active_thread() {
         let project = TempDir::new().expect("project tempdir");

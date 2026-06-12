@@ -390,6 +390,25 @@ impl AppState {
             if relay.is_thread_review_locked(&target) {
                 return Err(REVIEW_LOCKED_THREAD_MSG.to_string());
             }
+            // A thread with a turn ALREADY IN FLIGHT must not receive a second
+            // prompt: taking it over and calling start_turn again would double-start
+            // (the provider rejects/queues it, and the relay loses track of the
+            // original turn). Reject up front — BEFORE any take-over side effect — so
+            // "send = take over" never silently interleaves two turns on one thread.
+            // The session slot held by send_message() keeps this stable for the rest
+            // of the method. (Queue/interrupt semantics are a separate, explicit
+            // contract; the conservative default is to reject.)
+            //
+            // The signal is a live `active_turn_id`, NOT is_working(): a blank/pending
+            // thread reports a working *status* ("active") before its first turn has
+            // started, and sending that first message must be allowed.
+            let target_has_live_turn = relay
+                .runtime_for_thread(&target)
+                .map(|runtime| runtime.active_turn_id.is_some())
+                .unwrap_or(false);
+            if target_has_live_turn {
+                return Err("that thread is busy with a turn; wait for it to finish".to_string());
+            }
             target
         };
 

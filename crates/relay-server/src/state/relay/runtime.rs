@@ -206,13 +206,26 @@ impl ThreadRuntime {
         // authoritative enough to end it. (A running thread carries a working
         // current_status; see claude.rs / the codex status path.)
         let was_working = thread_status_is_working(&self.current_status);
-        self.current_status = fresh.current_status;
+        let fresh_working = thread_status_is_working(&fresh.current_status);
         self.active_flags = fresh.active_flags;
-        if !was_working && !thread_status_is_working(&self.current_status) {
-            self.active_turn_id = None;
-            self.current_phase = None;
-            self.current_tool = None;
-            self.last_progress_at = None;
+        if was_working && !fresh_working {
+            // Non-authoritative idle read (Claude's read_thread hardcodes "idle")
+            // over a thread we believe is working: KEEP the working status and the
+            // live turn. Overwriting current_status to idle here would erase the very
+            // signal this guard reads, so the NEXT merge would mistake the still-live
+            // turn for a ghost and clear it — a running thread that survives one
+            // resume but not two. Only a terminal turn event may move a working
+            // thread to idle.
+        } else {
+            self.current_status = fresh.current_status;
+            if !fresh_working {
+                // Was already idle and stays idle → drop the stale leftover turn/
+                // phase (the genuine "idle status + leftover turn id" ghost).
+                self.active_turn_id = None;
+                self.current_phase = None;
+                self.current_tool = None;
+                self.last_progress_at = None;
+            }
         }
         self.merge_transcript_records(fresh.transcript);
     }
@@ -410,6 +423,37 @@ mod tests {
         assert!(
             rt.is_working(),
             "a running thread must stay working across a resume that re-reads idle"
+        );
+    }
+
+    // Review finding 1: the live-turn must survive REPEATED idle re-reads, not just
+    // one. The first fix preserved the turn but still overwrote current_status to
+    // idle, so a second resume saw "idle status + a turn" and cleared it as a ghost.
+    // A running thread that a review/workflow runner re-drives resumes many times.
+    #[test]
+    fn merge_fresh_history_keeps_live_turn_across_repeated_idle_reads() {
+        let mut rt = runtime("t1", "active");
+        rt.active_turn_id = Some("turn-1".to_string());
+        assert!(rt.is_working());
+
+        // Claude reports idle on every read_thread; resume happens twice.
+        rt.merge_fresh_history(runtime("t1", "idle"));
+        assert_eq!(
+            rt.active_turn_id.as_deref(),
+            Some("turn-1"),
+            "turn survives the first idle re-read"
+        );
+        assert!(rt.is_working());
+
+        rt.merge_fresh_history(runtime("t1", "idle"));
+        assert_eq!(
+            rt.active_turn_id.as_deref(),
+            Some("turn-1"),
+            "turn must ALSO survive the second idle re-read (no ghost-clear)"
+        );
+        assert!(
+            rt.is_working(),
+            "a running thread must stay working across repeated resumes"
         );
     }
 
