@@ -2753,7 +2753,7 @@ mod review_tests {
     use super::super::*;
     use crate::protocol::{
         ModelOptionView, RequestReviewInput, StartSessionInput, ThreadSummaryView,
-        TranscriptEntryKind, TranscriptEntryView,
+        TranscriptEntryKind, TranscriptEntryView, UpdateSessionSettingsInput,
     };
     use crate::state::security::SecurityProfile;
     use std::collections::HashMap;
@@ -4430,6 +4430,88 @@ mod review_tests {
             1,
             "one revise, after the round-1 rejection"
         );
+    }
+
+    // Sibling of the review-gate bug, SAME root cause: start_workflow's status gate is
+    // the literal `current_status != "idle"` (workflow.rs), while its cwd-quiet check went
+    // semantic — so a saved Codex thread ("unknown"/"completed", no live turn) hits the
+    // exact mixed literal/semantic gate-pair the original report complained about and
+    // can't launch a workflow. CAPTURED REPRO: FAILS today on the literal gate, must pass
+    // once workflow.rs uses the semantic helper. Loops the full Codex terminal vocabulary.
+    #[ignore = "captured repro for the workflow-gate sibling bug; un-ignore when the gate goes semantic"]
+    #[tokio::test]
+    async fn workflow_starts_when_codex_reports_a_non_idle_saved_status() {
+        for saved_status in ["unknown", "completed"] {
+            let dir = TempDir::new().expect("tmpdir");
+            let cwd = dir.path().to_str().unwrap();
+            let (app, providers) = build_review_app(cwd, &["codex"]).await;
+            let parent = start_parent(&app, cwd, "codex").await;
+            queue_verdicts(providers.get("codex").unwrap(), &["APPROVE"]).await;
+
+            // Saved Codex thread, not running: no live turn, non-idle status string.
+            {
+                let mut relay = app.relay.write().await;
+                relay.set_active_turn(None);
+                relay.set_thread_status(&parent.id, saved_status.to_string(), Vec::new());
+            }
+
+            let run_id = app
+                .start_workflow(
+                    Some("device-1".to_string()),
+                    workflow_code_flow("codex", 2),
+                    "anchor-item".to_string(),
+                )
+                .await
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "status `{saved_status}`: a not-running Codex thread must allow a \
+workflow: {error}"
+                    )
+                });
+            let status = wait_for_workflow_status(&app, &run_id, WORKFLOW_TERMINAL).await;
+            assert_eq!(
+                status, "done",
+                "status `{saved_status}` workflow should complete"
+            );
+        }
+    }
+
+    // Sibling of the review-gate bug, SAME root cause: update_session_settings' status gate
+    // is the literal `runtime.current_status != "idle"` (sessions.rs), so a saved Codex
+    // thread ("unknown"/"completed") has its model/effort/approval/sandbox permanently
+    // locked. CAPTURED REPRO: FAILS today on the literal gate, must pass once sessions.rs
+    // uses the semantic per-runtime check.
+    #[ignore = "captured repro for the session-settings-gate sibling bug; un-ignore when the gate goes semantic"]
+    #[tokio::test]
+    async fn session_settings_update_when_codex_reports_a_non_idle_saved_status() {
+        for saved_status in ["unknown", "completed"] {
+            let dir = TempDir::new().expect("tmpdir");
+            let cwd = dir.path().to_str().unwrap();
+            let (app, _providers) = build_review_app(cwd, &["codex"]).await;
+            let parent = start_parent(&app, cwd, "codex").await;
+
+            {
+                let mut relay = app.relay.write().await;
+                relay.set_active_turn(None);
+                relay.set_thread_status(&parent.id, saved_status.to_string(), Vec::new());
+            }
+
+            app.update_session_settings(UpdateSessionSettingsInput {
+                approval_policy: Some("bypass".to_string()),
+                sandbox: Some("danger-full-access".to_string()),
+                effort: Some("low".to_string()),
+                model: None,
+                device_id: Some("device-1".to_string()),
+                thread_id: parent.id.clone(),
+            })
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "status `{saved_status}`: a not-running Codex thread must allow a \
+settings update: {error}"
+                )
+            });
+        }
     }
 
     #[tokio::test]
