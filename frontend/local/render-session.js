@@ -202,13 +202,11 @@ export function createSessionRenderer({
       return thread ? thread.name || thread.preview || shortId(threadId) : null;
     },
     onActivateThread: (threadId) => {
-      // Only the thread actually under review is review-locked (resume is rejected
-      // for it). Every OTHER thread must resume normally — gating on the global
-      // "a review is running" made all threads view-only and unreachable.
-      if (
-        typeof viewThread === "function" &&
-        isReviewInProgressForThread(state.session, threadId)
-      ) {
+      // Notification activation is navigation → VIEW-ONLY, the same policy as a
+      // sidebar click (S2). It must never resume: resume moves the relay's single
+      // active thread for every connected client. Take-control stays the explicit
+      // "Resume this thread" action.
+      if (typeof viewThread === "function") {
         viewThread(threadId);
       } else {
         void resumeSession(threadId);
@@ -272,7 +270,12 @@ export function createSessionRenderer({
     // being reviewed. A review running in the background on another thread leaves
     // the active conversation fully usable.
     const activeThreadFrozen = isReviewInProgressForThread(session, session.active_thread_id);
-    const workspace = session.current_cwd || state.selectedCwd || "";
+    // In a read-only view, the workspace is the saved thread's own cwd (or blank
+    // when unknown) — never the user's currently-selected cwd, which would
+    // misrepresent the saved thread.
+    const workspace = session.view_only
+      ? session.current_cwd || ""
+      : session.current_cwd || state.selectedCwd || "";
     const workspaceName = workspace ? workspaceBasename(workspace) : "";
     const viewingSessionDetails = Boolean(sessionMeta?.closest("dialog")?.open);
     const viewingSecurityDetails = Boolean(
@@ -389,8 +392,13 @@ export function createSessionRenderer({
     ) {
       ensureConversationTranscript?.(session);
     }
-    scheduleControllerHeartbeat(session);
-    scheduleControllerLeaseRefresh(session);
+    // Heartbeat/lease must track the REAL session, not the read-only projection.
+    // The projection's controller is the "__view_only__" sentinel, so passing it
+    // here would cancel the controller heartbeat and let the real lease expire
+    // (15s) while you merely browse a saved thread — handing control to another
+    // device. state.session is the real session (set at the top of renderSession).
+    scheduleControllerHeartbeat(state.session);
+    scheduleControllerLeaseRefresh(state.session);
 
     openSessionDetailsButton.disabled = false;
     if (goConsoleHomeButton) {
@@ -400,7 +408,12 @@ export function createSessionRenderer({
       goConsoleHomeSidebarButton.hidden = !viewingConversation;
     }
     messageForm.hidden = !viewingConversation;
-    const composerReady = hasActiveSession && canWrite && viewingConversation;
+    // In a general (non-review) read-only view, the composer is usable: typing and
+    // sending takes over the thread (resume) and then sends — see app.js
+    // resumeThenSend. Review view-only stays locked (resume is rejected mid-review).
+    const viewOnlyWritable = Boolean(session.view_only && !state.viewOnlyThread?.review);
+    const canCompose = canWrite || viewOnlyWritable;
+    const composerReady = hasActiveSession && canCompose && viewingConversation;
     sendButton.disabled = !composerReady || turnRunning || activeThreadFrozen;
     sendButton.hidden = composerReady && turnRunning;
     if (stopButton) {
@@ -409,7 +422,7 @@ export function createSessionRenderer({
       stopButton.disabled = stopButton.hidden;
     }
     messageInput.disabled =
-      !hasActiveSession || !canWrite || !viewingConversation || activeThreadFrozen;
+      !hasActiveSession || !canCompose || !viewingConversation || activeThreadFrozen;
     messageInput.placeholder = activeThreadFrozen
       ? "This thread is being reviewed…"
       : !hasActiveSession
@@ -418,7 +431,9 @@ export function createSessionRenderer({
         ? "Open the thread page to send a message."
         : canWrite
           ? "Message Codex..."
-          : "Another device has control. Take over to reply.";
+          : viewOnlyWritable
+            ? "Type to resume this thread and reply…"
+            : "Another device has control. Take over to reply.";
   }
 
   function renderSessionUnavailable(message) {
@@ -1088,15 +1103,20 @@ export function createSessionRenderer({
       }
     }
 
-    // Read-only review view whose transcript hasn't loaded yet — show a calm
-    // placeholder instead of the live "send the first prompt" ready-state.
+    // A view-only thread whose transcript hasn't loaded yet — calm placeholder
+    // instead of the live "send the first prompt" ready-state. The review flavor
+    // keeps its reviewer-panel wording; a plain saved thread must not be mislabeled
+    // "Review in progress".
     if (!entries.length && session.view_only) {
+      const reviewView = Boolean(state.viewOnlyThread?.review);
       renderConversationContent(
         h(ConversationEmptyState, {
-          badge: "Review",
+          badge: reviewView ? "Review" : "Read-only",
           className: "thread-empty-ready",
-          copy: "Loading this thread's conversation. Another agent is reviewing it — its progress shows in the Reviewer panel.",
-          title: "Review in progress",
+          copy: reviewView
+            ? "Loading this thread's conversation. Another agent is reviewing it — its progress shows in the Reviewer panel."
+            : "Loading this saved thread's conversation…",
+          title: reviewView ? "Review in progress" : "Read-only view",
         })
       );
       return;
@@ -1163,11 +1183,13 @@ export function createSessionRenderer({
         transcriptOptions: {
           currentCwd: session?.current_cwd || state.selectedCwd || "",
           detailEntries: transcriptDetailEntries,
-          // Hide rollback/reapply while the active thread is itself under review.
-          enableFileChangeActions: !isReviewInProgressForThread(
-            session,
-            session.active_thread_id
-          ),
+          // Hide rollback/reapply on a read-only view-only thread (the apply
+          // endpoint resolves the item against the relay's REAL active thread, so
+          // acting from a saved-thread view would mutate the wrong/live thread),
+          // and while the active thread is itself under review.
+          enableFileChangeActions:
+            !session.view_only &&
+            !isReviewInProgressForThread(session, session.active_thread_id),
           expandedKeys: localUi.transcriptExpandedItemIds,
           loadingItemIds: localUi.transcriptLoadingItemIds,
           onEnsureFileChangeDetail: (itemId) => {
@@ -1250,17 +1272,14 @@ export function createSessionRenderer({
           threadAttention.clear(threadId);
           void ensureNotificationPermission();
           renderThreads();
-          // During a review, resume_session is blocked by the backend ONLY for the
-          // review-locked threads (the reviewed parent and its hidden reviewer)
-          // because resume is mutating: it calls bridge.resume_thread and overwrites
-          // the runtime. For the reviewed parent we use the view-only path
-          // (setThreadRoute / viewThread) which just updates the URL. EVERY OTHER
-          // thread must resume normally — gating on the global "a review is running"
-          // froze the whole sidebar, so clicking any thread fell back to the overview.
-          if (
-            typeof viewThread === "function" &&
-            isReviewInProgressForThread(state.session, threadId)
-          ) {
+          // Navigation is VIEW-ONLY. Opening a thread shows it — live when it is
+          // the relay's active thread, read-only otherwise — without resuming.
+          // Resume moves the relay's single active thread for EVERY connected
+          // client, so it stays an explicit take-control action (the "Resume this
+          // thread" banner button on a read-only view, or the review flow) and is
+          // never a side effect of clicking the sidebar. This is what stops local
+          // and remote from yanking each other's active thread.
+          if (typeof viewThread === "function") {
             viewThread(threadId);
           } else {
             void resumeSession(threadId);

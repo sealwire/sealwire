@@ -171,6 +171,22 @@ export function createTranscriptController(ctx) {
     }
   }
 
+  // In a read-only view-only projection the displayed transcript is the PINNED
+  // thread (state.viewOnlyThread), not the relay's live active thread. Detail
+  // expansion / file-diff loading must resolve and fetch against THAT thread —
+  // otherwise they query the active thread, the viewed thread's details never
+  // load, and an item-id collision could surface another thread's detail.
+  function displayedThreadId() {
+    return state.viewOnlyThread?.threadId || state.session?.active_thread_id || null;
+  }
+  function displayedEntries() {
+    const pin = state.viewOnlyThread;
+    if (pin) {
+      return pin.entries || [];
+    }
+    return restoreHydratedTranscript(state, state.session)?.transcript || [];
+  }
+
   async function toggleTranscriptEntry(itemId) {
     if (!itemId) {
       return;
@@ -182,18 +198,18 @@ export function createTranscriptController(ctx) {
     }
 
     const localUi = readLocalUiState(state.localUiStore);
+    const threadId = displayedThreadId();
     if (
       !localUi.transcriptExpandedItemIds.has(expandKey)
-      || !state.session?.active_thread_id
-      || getCachedTranscriptEntryDetail(state, state.session.active_thread_id, itemId)
-      || getLiveTranscriptEntryDetail(state, state.session.active_thread_id, itemId)
+      || !threadId
+      || getCachedTranscriptEntryDetail(state, threadId, itemId)
+      || getLiveTranscriptEntryDetail(state, threadId, itemId)
       || localUi.transcriptLoadingItemIds.has(itemId)
     ) {
       return;
     }
 
-    const snapshot = restoreHydratedTranscript(state, state.session);
-    const entry = (snapshot?.transcript || []).find((candidate) => candidate?.item_id === itemId);
+    const entry = displayedEntries().find((candidate) => candidate?.item_id === itemId);
     if (!entry || (entry.kind !== "tool_call" && entry.kind !== "command")) {
       return;
     }
@@ -202,14 +218,13 @@ export function createTranscriptController(ctx) {
     renderSession(state.session);
 
     try {
-      const detailThreadId = state.session.active_thread_id;
-      const detail = await fetchTranscriptEntryDetail(detailThreadId, itemId);
-      if (!detail || state.session?.active_thread_id !== detailThreadId) {
+      const detail = await fetchTranscriptEntryDetail(threadId, itemId);
+      if (!detail || displayedThreadId() !== threadId) {
         return;
       }
-      const { cached } = cacheTranscriptEntryDetail(state, detailThreadId, detail);
+      const { cached } = cacheTranscriptEntryDetail(state, threadId, detail);
       if (!cached) {
-        setLiveTranscriptEntryDetail(state, detailThreadId, detail);
+        setLiveTranscriptEntryDetail(state, threadId, detail);
       }
     } catch (error) {
       logLine(`Transcript detail load failed: ${error.message}`);
@@ -225,10 +240,10 @@ export function createTranscriptController(ctx) {
   // the snapshot only carries the file-change summary (file_changes_omitted) the
   // shared renderer calls this to pull the full diffs on demand. Idempotent.
   async function ensureFileChangeDetail(itemId) {
-    if (!itemId || !state.session?.active_thread_id) {
+    const threadId = displayedThreadId();
+    if (!itemId || !threadId) {
       return;
     }
-    const threadId = state.session.active_thread_id;
     const localUi = readLocalUiState(state.localUiStore);
     // Skip only when we already hold the FULL detail — a stripped summary parked
     // in the live store (running turnDiff) must not block the fetch.
@@ -247,7 +262,7 @@ export function createTranscriptController(ctx) {
     }
     try {
       const detail = await fetchTranscriptEntryDetail(threadId, itemId);
-      if (!detail || state.session?.active_thread_id !== threadId) {
+      if (!detail || displayedThreadId() !== threadId) {
         return;
       }
       const { cached } = cacheTranscriptEntryDetail(state, threadId, detail);

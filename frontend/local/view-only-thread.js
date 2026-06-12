@@ -34,6 +34,8 @@ export function buildViewOnlyPin({
   generation = 0,
   review = false,
   reviewSig = null,
+  cwd = null,
+  provider = null,
   priorEntries = [],
   priorOlderCursor = null,
   loading = false,
@@ -45,6 +47,12 @@ export function buildViewOnlyPin({
     generation,
     review,
     reviewSig,
+    // The viewed thread's own metadata, from its thread summary. The projection
+    // uses these so a cross-workspace saved thread shows ITS workspace/provider
+    // rather than the live thread's. The summary carries no model/effort/policy,
+    // so the projection blanks those (blank/unknown beats impersonating live).
+    cwd,
+    provider,
     loading,
   };
 }
@@ -96,6 +104,17 @@ export function projectViewOnlySession(realSession, { viewThreadId, viewOnlyThre
     transcript_truncated: viewOnlyThread.olderCursor != null,
     current_status: "viewing",
     view_only: true,
+    // A read-only saved-thread view must never present the LIVE session's
+    // metadata as the saved thread's. Use the viewed thread's summary fields
+    // (cwd/provider) and BLANK what the summary doesn't carry (model, effort,
+    // approval policy, sandbox). Blank/unknown over impersonation — and never
+    // fall back to the live cwd.
+    current_cwd: viewOnlyThread.cwd ?? "",
+    provider: viewOnlyThread.provider ?? "",
+    model: "",
+    reasoning_effort: "",
+    approval_policy: "",
+    sandbox: "",
   };
 }
 
@@ -132,4 +151,22 @@ export function viewOnlyPinNextAction(session, pin, { viewThreadId, reviewSignat
     return { kind: "release" };
   }
   return { kind: "none" };
+}
+
+// How a composer submit should behave, given the REAL session and the view-only
+// pin. Sending from a general (non-review) read-only view is an explicit
+// take-control: resume the viewed thread, then send. A review pin is locked (the
+// thread is mid-review and resume is rejected). Otherwise — no pin, or the pin's
+// thread is already the active one — send normally.
+export function viewOnlySubmitAction(realSession, pin) {
+  if (!pin) {
+    return { kind: "send" };
+  }
+  if (pin.review) {
+    return { kind: "blocked" };
+  }
+  if (realSession && pin.threadId === realSession.active_thread_id) {
+    return { kind: "send" };
+  }
+  return { kind: "resume-then-send", threadId: pin.threadId };
 }

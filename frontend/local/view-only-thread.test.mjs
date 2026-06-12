@@ -7,6 +7,7 @@ import {
   projectViewOnlySession,
   viewOnlyEligible,
   viewOnlyPinNextAction,
+  viewOnlySubmitAction,
 } from "./view-only-thread.js";
 
 const REVIEW_RUNNING = [{ parent_thread_id: "A", status: "waiting_for_reviewer" }];
@@ -22,6 +23,12 @@ function realSession(overrides = {}) {
     transcript: [{ item_id: "live-entry" }],
     transcript_truncated: false,
     current_status: "active",
+    current_cwd: "/live/workspace",
+    model: "live-model",
+    provider: "live-provider",
+    reasoning_effort: "high",
+    approval_policy: "on-request",
+    sandbox: "workspace-write",
     active_review_jobs: [],
     ...overrides,
   };
@@ -35,6 +42,8 @@ function pinFor(threadId, overrides = {}) {
     generation: 1,
     review: false,
     reviewSig: null,
+    cwd: "/saved/workspace",
+    provider: "saved-provider",
     loading: false,
     ...overrides,
   };
@@ -67,6 +76,32 @@ test("REGRESSION #2: a non-active, NON-review thread projects read-only with pag
     true,
     "older cursor present → truncated → scroll-up pagination must arm"
   );
+});
+
+test("projection uses the VIEWED thread's metadata and never impersonates the live session", () => {
+  const real = realSession();
+  const projected = projectViewOnlySession(real, {
+    viewThreadId: "A",
+    viewOnlyThread: pinFor("A", { cwd: "/saved/workspace", provider: "saved-provider" }),
+  });
+  // Summary-backed fields use the saved thread's own values.
+  assert.equal(projected.current_cwd, "/saved/workspace");
+  assert.equal(projected.provider, "saved-provider");
+  // Fields the summary can't supply are blanked — never the live values.
+  assert.equal(projected.model, "");
+  assert.equal(projected.reasoning_effort, "");
+  assert.equal(projected.approval_policy, "");
+  assert.equal(projected.sandbox, "");
+});
+
+test("projection blanks cwd/provider when unknown — never falls back to live metadata", () => {
+  const projected = projectViewOnlySession(realSession(), {
+    viewThreadId: "A",
+    viewOnlyThread: pinFor("A", { cwd: null, provider: null }),
+  });
+  assert.equal(projected.current_cwd, "", "blank, not the live cwd");
+  assert.equal(projected.provider, "", "blank, not the live provider");
+  assert.equal(projected.model, "");
 });
 
 test("projection reports complete history when the older cursor is exhausted", () => {
@@ -228,6 +263,38 @@ test("no pin or no session → nothing to do", () => {
 });
 
 // ---------------------------------------------------------------------------
+// viewOnlySubmitAction — S3: type-and-send from a read-only view auto-resumes
+// ---------------------------------------------------------------------------
+
+test("viewOnlySubmitAction: no pin → plain send (live thread)", () => {
+  assert.deepEqual(viewOnlySubmitAction(realSession(), null), { kind: "send" });
+});
+
+test("viewOnlySubmitAction: general pin → resume the viewed thread, then send", () => {
+  assert.deepEqual(viewOnlySubmitAction(realSession(), pinFor("A")), {
+    kind: "resume-then-send",
+    threadId: "A",
+  });
+});
+
+test("viewOnlySubmitAction: review pin → blocked (can't send to a thread under review)", () => {
+  assert.deepEqual(
+    viewOnlySubmitAction(
+      realSession({ active_review_jobs: REVIEW_RUNNING }),
+      pinFor("A", { review: true })
+    ),
+    { kind: "blocked" }
+  );
+});
+
+test("viewOnlySubmitAction: pin whose thread is already active → plain send", () => {
+  assert.deepEqual(
+    viewOnlySubmitAction(realSession({ active_thread_id: "A" }), pinFor("A")),
+    { kind: "send" }
+  );
+});
+
+// ---------------------------------------------------------------------------
 // viewOnlyEligible + buildViewOnlyPin
 // ---------------------------------------------------------------------------
 
@@ -239,7 +306,7 @@ test("any non-active thread is eligible for view-only — review no longer requi
   assert.equal(viewOnlyEligible(null, "A"), false);
 });
 
-test("buildViewOnlyPin captures entries and the older cursor from the tail page", () => {
+test("buildViewOnlyPin captures entries, older cursor, and the viewed thread cwd", () => {
   const pin = buildViewOnlyPin({
     threadId: "A",
     page: {
@@ -249,10 +316,14 @@ test("buildViewOnlyPin captures entries and the older cursor from the tail page"
     },
     generation: 3,
     review: false,
+    cwd: "/saved/workspace",
+    provider: "saved-provider",
   });
   assert.equal(pin.threadId, "A");
   assert.deepEqual(pin.entries.map((entry) => entry.item_id), ["e9"]);
   assert.equal(pin.olderCursor, 4);
   assert.equal(pin.generation, 3);
+  assert.equal(pin.cwd, "/saved/workspace");
+  assert.equal(pin.provider, "saved-provider");
   assert.equal(pin.loading, false);
 });

@@ -141,6 +141,7 @@ import {
   mergeOlderViewOnlyPage,
   viewOnlyEligible,
   viewOnlyPinNextAction,
+  viewOnlySubmitAction,
 } from "./local/view-only-thread.js";
 import { ClientLog } from "./shared/client-log.js";
 import {
@@ -539,6 +540,13 @@ const renderer = createSessionRenderer({
 // through the wrapper.
 const _baseRenderSession = renderer.renderSession;
 renderer.renderSession = function wrappedRenderSession(session) {
+  // Make the real session current BEFORE reconciling the view-only pin.
+  // maybeRefreshViewOnly() (and the loadViewOnlyTranscript it may trigger) read
+  // state.session; without this, the very first render after a deep link to a
+  // non-active thread runs while state.session is still null, the self-heal load
+  // bails, and the one-attempt guard suppresses every retry. _baseRenderSession
+  // sets it again (idempotent).
+  state.session = session;
   maybeRefreshViewOnly(session);
   _baseRenderSession(session);
   syncVerbTimer(session);
@@ -573,12 +581,19 @@ async function loadViewOnlyTranscript(threadId) {
   const review = isReviewInProgressForThread(session, threadId);
   const generation = (state.viewOnlyGeneration = (state.viewOnlyGeneration || 0) + 1);
   const reviewSig = review ? viewOnlyReviewSignature(session, threadId) : null;
+  // The viewed thread's own metadata (workspace + provider), so the projection
+  // shows them instead of the live thread's for a cross-workspace saved thread.
+  const summary = (state.threads || []).find((thread) => thread?.id === threadId) || null;
+  const cwd = summary?.cwd ?? null;
+  const provider = summary?.provider ?? null;
   const prior = state.viewOnlyThread?.threadId === threadId ? state.viewOnlyThread : null;
   state.viewOnlyThread = buildViewOnlyPin({
     threadId,
     generation,
     review,
     reviewSig,
+    cwd,
+    provider,
     priorEntries: prior?.entries || [],
     priorOlderCursor: prior?.olderCursor ?? null,
     loading: true,
@@ -598,6 +613,8 @@ async function loadViewOnlyTranscript(threadId) {
       generation,
       review,
       reviewSig,
+      cwd,
+      provider,
     });
   } catch (error) {
     if (generation !== state.viewOnlyGeneration) return;
@@ -606,6 +623,8 @@ async function loadViewOnlyTranscript(threadId) {
       generation,
       review,
       reviewSig,
+      cwd,
+      provider,
       priorEntries: prior?.entries || [],
       priorOlderCursor: prior?.olderCursor ?? null,
     });
@@ -671,6 +690,22 @@ function maybeRefreshViewOnly(session) {
       void controller?.resumeSession(threadId);
     } else if (action.kind === "refresh") {
       void loadViewOnlyTranscript(pin.threadId);
+    }
+  }
+
+  // The viewed thread's cwd/provider come from its thread summary, which on a
+  // deep link loads AFTER the session — so a deep-linked pin can be built with
+  // them null. Backfill once the summary appears (otherwise the projection shows
+  // blank metadata until then).
+  const metaPin = state.viewOnlyThread;
+  if (metaPin && (metaPin.cwd == null || metaPin.provider == null)) {
+    const summary = (state.threads || []).find((thread) => thread?.id === metaPin.threadId) || null;
+    if (summary && (summary.cwd != null || summary.provider != null)) {
+      state.viewOnlyThread = {
+        ...metaPin,
+        cwd: metaPin.cwd ?? summary.cwd ?? null,
+        provider: metaPin.provider ?? summary.provider ?? null,
+      };
     }
   }
 
@@ -970,8 +1005,31 @@ controlBanner?.addEventListener("click", (event) => {
   void takeOverControl();
 });
 
+// In a read-only view, sending is the explicit take-control action: resume the
+// viewed thread, then send the typed message. The textarea value survives the
+// resume re-render, so sendMessage() picks it up. If resume doesn't yield write
+// control (it failed, or another device holds control), don't send — leave the
+// user's text in place.
+async function resumeThenSend(threadId) {
+  await resumeSession(threadId);
+  if (state.session?.active_thread_id === threadId && canCurrentDeviceWrite(state.session)) {
+    await sendMessage();
+  } else {
+    logLine('Couldn’t take over this thread to send — try "Resume this thread".');
+  }
+}
+
 messageForm.addEventListener("submit", (event) => {
   event.preventDefault();
+  const action = viewOnlySubmitAction(state.session, state.viewOnlyThread);
+  if (action.kind === "blocked") {
+    logLine("This thread is being reviewed — you can’t send to it right now.");
+    return;
+  }
+  if (action.kind === "resume-then-send") {
+    void resumeThenSend(action.threadId);
+    return;
+  }
   void sendMessage();
 });
 

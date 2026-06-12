@@ -118,6 +118,12 @@ export function createLifecycleController(ctx) {
       state.threadListStore.getState().finishRefresh();
       renderThreads();
       renderOverviewState(state.session);
+      // A read-only view-only pin sources its cwd/provider from the thread
+      // summary, which may have just loaded — re-render the session so the
+      // projection picks them up now instead of waiting for the next snapshot.
+      if (state.viewOnlyThread && state.session) {
+        renderSession(state.session);
+      }
     } catch (error) {
       state.threadListStore.getState().failRefresh(error.message);
       if (state.authRequired && !state.authenticated) {
