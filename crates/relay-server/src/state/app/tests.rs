@@ -4493,7 +4493,74 @@ workflow: {error}"
                 relay.set_thread_status(&parent.id, saved_status.to_string(), Vec::new());
             }
 
-            app.update_session_settings(UpdateSessionSettingsInput {
+            let snap = app
+                .update_session_settings(UpdateSessionSettingsInput {
+                    approval_policy: Some("bypass".to_string()),
+                    sandbox: Some("danger-full-access".to_string()),
+                    effort: Some("low".to_string()),
+                    model: None,
+                    device_id: Some("device-1".to_string()),
+                    thread_id: parent.id.clone(),
+                })
+                .await
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "status `{saved_status}`: a not-running Codex thread must allow a \
+settings update: {error}"
+                    )
+                });
+
+            // Read back: the update must actually TAKE EFFECT, not merely return Ok.
+            assert_eq!(
+                snap.approval_policy, "bypass",
+                "status `{saved_status}`: approval_policy must persist"
+            );
+            assert_eq!(
+                snap.sandbox, "danger-full-access",
+                "status `{saved_status}`: sandbox must persist"
+            );
+            assert_eq!(
+                snap.reasoning_effort, "low",
+                "status `{saved_status}`: effort must persist"
+            );
+        }
+    }
+
+    // Negative gate-wiring guard: closing the loop on the two semantic migrations above,
+    // a genuinely-WORKING status (no live turn id yet — the pre-turn-id window) must STILL
+    // block both gates. Without this, deleting the gate line entirely would slip past the
+    // positive repros (which only exercise not-working statuses). Mirrors the C5-reverse
+    // semantics: `active` + no turn = working.
+    #[tokio::test]
+    async fn workflow_and_settings_blocked_when_agent_status_is_working() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, _providers) = build_review_app(cwd, &["codex"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+
+        // A working status with NO live turn id (provider reported "active" before the
+        // turn id surfaced) — the gates must read this as busy.
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_active_turn(None);
+            relay.set_thread_status(&parent.id, "active".to_string(), Vec::new());
+        }
+
+        let workflow_err = app
+            .start_workflow(
+                Some("device-1".to_string()),
+                workflow_code_flow("codex", 2),
+                "anchor-item".to_string(),
+            )
+            .await
+            .expect_err("a working status must still block start_workflow");
+        assert!(
+            workflow_err.contains("while the agent is `active`"),
+            "got: {workflow_err}"
+        );
+
+        let settings_err = app
+            .update_session_settings(UpdateSessionSettingsInput {
                 approval_policy: Some("bypass".to_string()),
                 sandbox: Some("danger-full-access".to_string()),
                 effort: Some("low".to_string()),
@@ -4502,13 +4569,11 @@ workflow: {error}"
                 thread_id: parent.id.clone(),
             })
             .await
-            .unwrap_or_else(|error| {
-                panic!(
-                    "status `{saved_status}`: a not-running Codex thread must allow a \
-settings update: {error}"
-                )
-            });
-        }
+            .expect_err("a working status must still block update_session_settings");
+        assert!(
+            settings_err.contains("while agent is `active`"),
+            "got: {settings_err}"
+        );
     }
 
     #[tokio::test]
