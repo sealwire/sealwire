@@ -336,8 +336,12 @@ test("canRequestReview requires controller + idle + no active review", () => {
   assert.equal(canRequestReview(base, "device-b"), false);
   // A turn is running.
   assert.equal(canRequestReview({ ...base, active_turn_id: "turn-1" }, "device-a"), false);
-  // Status not idle.
+  // A genuinely-working status blocks.
   assert.equal(canRequestReview({ ...base, current_status: "working" }, "device-a"), false);
+  // A saved Codex thread reports `unknown` (not the literal "idle") but isn't running —
+  // it must still allow a review, mirroring the backend `thread_status_is_working`.
+  assert.equal(canRequestReview({ ...base, current_status: "unknown" }, "device-a"), true);
+  assert.equal(canRequestReview({ ...base, current_status: "completed" }, "device-a"), true);
   // A review already in progress.
   assert.equal(
     canRequestReview({ ...base, active_review_jobs: [{ status: "waiting_for_reviewer" }] }, "device-a"),

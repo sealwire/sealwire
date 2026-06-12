@@ -5691,13 +5691,9 @@ mod review_tests {
     //   2. has_working_thread_in_cwd: `is_working()` → thread_status_is_working() treats
     //      ANY status except idle/viewing/empty as "working", so the parent self-blocks.
     // Liveness is authoritatively `active_turn_id` (see runtime.rs is_working() docs), so
-    // a not-running thread must allow a review regardless of the status string.
-    //
-    // CAPTURED REPRO — currently FAILS on gate 1 ("cannot start a review while the agent
-    // is `unknown`"), and would then fail on gate 2 (has_working_thread_in_cwd, the parent
-    // self-blocks). Marked #[ignore] so it lives in the tree without reddening CI; drop the
-    // attribute when the review gates go semantic and this becomes the regression guard.
-    #[ignore = "captured repro for the Codex review-gate bug; un-ignore when the gates go semantic"]
+    // a not-running thread must allow a review regardless of the status string. Both gates
+    // now go semantic via `thread_status_is_working` (which classifies `unknown`/`completed`
+    // as not-working), so this passes for the full Codex terminal vocabulary.
     #[tokio::test]
     async fn review_starts_when_codex_reports_a_non_idle_saved_status() {
         // Cover the FULL Codex terminal vocabulary, not just one string: a fix via an

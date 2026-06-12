@@ -954,6 +954,71 @@ fn background_turn_going_idle_drops_its_orphaned_request() {
     );
 }
 
+// SAFETY-CONTRACT guard for the Codex review-gate fix: classifying `unknown` as
+// not-working (so it no longer freezes the review CTA) must NOT also make it drop a
+// live pending approval. `unknown` is indeterminate, not settled — only the strict
+// settled set (idle/viewing/empty) drops orphaned requests. This pins the decoupling
+// between `thread_status_is_working` (liveness) and `thread_status_is_settled` (drop).
+#[test]
+fn unknown_status_keeps_pending_approval_yet_reads_as_not_working() {
+    let mut relay = test_state();
+    relay.activate_thread(
+        test_thread("thread-1", "/tmp/project"),
+        "/tmp/project",
+        DEFAULT_MODEL,
+        DEFAULT_APPROVAL_POLICY,
+        DEFAULT_SANDBOX,
+        DEFAULT_EFFORT,
+        "device-a",
+    );
+    relay.add_pending_approval(test_pending_approval("thread-1"));
+    relay.set_thread_status("thread-1", "active".to_string(), Vec::new());
+    assert!(relay.pending_approvals.contains_key("req-1"));
+
+    // A stray refresh / malformed event reports an indeterminate status mid-turn.
+    relay.set_thread_status("thread-1", "unknown".to_string(), Vec::new());
+    assert!(
+        relay.pending_approvals.contains_key("req-1"),
+        "an indeterminate `unknown` status must NOT orphan-drop a live approval"
+    );
+    assert!(
+        !relay.active_agent_is_working(),
+        "`unknown` must read as not-working so the review CTA isn't frozen"
+    );
+}
+
+// The review-gate liveness predicate (active_agent_is_working) must read Codex's
+// settled/terminal vocabulary as idle, but a genuinely-working status with no turn
+// id yet (the pre-turn-id window) must still read as working — preserving the
+// C5-reverse semantics in runtime.rs so a review can't start on a live turn.
+#[test]
+fn active_agent_is_working_classifies_status_for_the_review_gate() {
+    let mut relay = test_state();
+    relay.activate_thread(
+        test_thread("thread-1", "/tmp/project"),
+        "/tmp/project",
+        DEFAULT_MODEL,
+        DEFAULT_APPROVAL_POLICY,
+        DEFAULT_SANDBOX,
+        DEFAULT_EFFORT,
+        "device-a",
+    );
+    for status in ["idle", "viewing", "completed", "unknown", ""] {
+        relay.set_thread_status("thread-1", status.to_string(), Vec::new());
+        assert!(
+            !relay.active_agent_is_working(),
+            "`{status}` must read as not-working (review allowed)"
+        );
+    }
+    for status in ["active", "working", "running", "requires_action"] {
+        relay.set_thread_status("thread-1", status.to_string(), Vec::new());
+        assert!(
+            relay.active_agent_is_working(),
+            "`{status}` must read as working (review blocked)"
+        );
+    }
+}
+
 #[test]
 fn clear_active_session_clears_selected_runtime_mirror() {
     let mut relay = test_state();

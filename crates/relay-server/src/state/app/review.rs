@@ -166,7 +166,12 @@ starting a review"
             if !relay.pending_approvals.is_empty() {
                 return Err("cannot start a review while approvals are pending".to_string());
             }
-            if relay.current_status != "idle" {
+            // Semantic liveness, NOT a literal `== "idle"`: a saved Codex thread reports
+            // its own status vocabulary (`unknown` / `completed`), so a literal check
+            // wrongly refused on an idle-but-not-running thread. `active_turn_id` (above)
+            // is the authoritative in-flight signal; this only adds a clearer error for the
+            // pre-turn-id window where a provider reports a working status with no turn yet.
+            if relay.active_agent_is_working() {
                 return Err(format!(
                     "cannot start a review while the agent is `{}`",
                     relay.current_status

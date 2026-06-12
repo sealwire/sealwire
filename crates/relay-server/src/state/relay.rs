@@ -54,9 +54,44 @@ pub(crate) const MAX_REVIEWERS_PER_PARENT: usize = 5;
 #[cfg(test)]
 pub const MAX_REVIEW_JOBS_PUB: usize = MAX_REVIEW_JOBS;
 
-fn thread_status_is_working(status: &str) -> bool {
-    let status = status.trim();
-    !status.is_empty() && status != "idle" && status != "viewing"
+/// Whether a thread's provider-reported status string means a turn is actively
+/// in flight. This is a SECONDARY signal — `active_turn_id` is the authoritative
+/// live-turn record (see `ThreadRuntime::is_working`); status only catches the
+/// brief window before a turn id is surfaced.
+///
+/// NOT-working set: empty, `idle`, `viewing`, and the terminal/settled vocabulary
+/// `completed` / `unknown`. The last two matter because providers don't agree on
+/// an idle word: Claude's bridge hardcodes `idle`, but Codex passes through its
+/// own `status.type` and a `thread/list` summary with no live status field parses
+/// to `unknown` (see codex `parse_status`). Classifying those as "working" made a
+/// saved-but-not-running Codex thread look busy forever — wrongly freezing the
+/// "Request review" CTA and self-blocking the cwd-quiet check.
+///
+/// Deliberate trade-off: a Codex session driven by an EXTERNAL client (e.g. the
+/// codex CLI) in the same cwd can also surface as `unknown` here, and we no longer
+/// treat that as working — `active_turn_id` only covers relay-driven turns, so the
+/// cwd mutation-race guard is best-effort for externally-driven sessions (v1
+/// already cannot observe foreign turns; a worktree/snapshot mode is the real fix).
+pub(crate) fn thread_status_is_working(status: &str) -> bool {
+    !matches!(
+        status.trim(),
+        "" | "idle" | "viewing" | "completed" | "unknown"
+    )
+}
+
+/// Whether a status means the turn is DEFINITIVELY over — strictly stronger than
+/// `!thread_status_is_working`. Used only by the two destructive turn-end sites
+/// (clearing the progress phase, dropping orphaned approval / ask-user requests),
+/// which must fire ONLY on a settled status, never on an indeterminate one.
+///
+/// `unknown` and `completed` are not-working (so they don't freeze the review CTA)
+/// but they are NOT settled: `unknown` is "we can't tell" (a `thread/list` summary
+/// or a malformed event), and dropping a genuinely-pending approval on an
+/// indeterminate status would strand the turn. So those destructive sites keep the
+/// original strict set — idle / viewing / empty — and leave pending requests intact
+/// on `unknown` / `completed`, preserving the `set_thread_status` SAFETY CONTRACT.
+fn thread_status_is_settled(status: &str) -> bool {
+    matches!(status.trim(), "" | "idle" | "viewing")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -357,6 +392,15 @@ impl RelayState {
                 // runtime map), so a deleted thread must not keep blocking reviews.
                 && !self.locally_deleted_thread_ids.contains(thread_id)
         })
+    }
+
+    /// Whether the ACTIVE thread's agent is mid-turn per its provider-reported
+    /// status. Semantic mirror of the frontend `canRequestReview` gate: callers
+    /// that need a "is the agent busy right now" check must use this, NOT a literal
+    /// `current_status == "idle"` test, so providers that report a non-`idle` settled
+    /// status (Codex's `unknown` / `completed`) aren't treated as busy.
+    pub(crate) fn active_agent_is_working(&self) -> bool {
+        thread_status_is_working(&self.current_status)
     }
 
     pub(crate) fn insert_review_job(&mut self, job: ReviewJob) {
@@ -1841,11 +1885,12 @@ impl RelayState {
             let runtime = self.ensure_runtime_for_thread(thread_id);
             runtime.current_status = status.clone();
             runtime.active_flags = active_flags.clone();
-            // An idle / not-working status means the turn is over: drop any lingering
-            // phase/tool so it can't go stale. Phase is only refreshed for the ACTIVE
-            // thread, so a background thread that finished a turn would otherwise keep a
-            // ghost "thinking"/"tool" phase forever. Keeps phase consistent with status.
-            if !thread_status_is_working(&status) {
+            // A SETTLED status means the turn is over: drop any lingering phase/tool so it
+            // can't go stale. Phase is only refreshed for the ACTIVE thread, so a background
+            // thread that finished a turn would otherwise keep a ghost "thinking"/"tool"
+            // phase forever. Use the strict settled set (not merely `!working`) so an
+            // indeterminate `unknown`/`completed` doesn't wipe a still-relevant phase.
+            if thread_status_is_settled(&status) {
                 runtime.current_phase = None;
                 runtime.current_tool = None;
             }
@@ -1865,7 +1910,11 @@ impl RelayState {
         // a non-working status here always means the request can no longer be
         // answered. A future handler that adds a pending request without first
         // marking the thread active would break this and must not.
-        if !thread_status_is_working(&status) {
+        //
+        // Gated on the strict SETTLED set, not merely `!working`: an indeterminate
+        // `unknown` (a stray refresh / malformed event) must NEVER orphan-drop a live
+        // approval. Only a definitively-over status (idle / viewing / empty) drops.
+        if thread_status_is_settled(&status) {
             self.drop_pending_requests_for_thread(thread_id);
         }
 

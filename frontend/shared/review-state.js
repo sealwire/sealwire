@@ -126,11 +126,23 @@ export function selectReviewLaunchModel({ providers = [], providerModels = {}, s
   };
 }
 
+// Provider-reported statuses that mean a turn is actively in flight. Mirror of the
+// backend `thread_status_is_working` (state/relay.rs): the NOT-working set is empty /
+// `idle` / `viewing` / `completed` / `unknown`. The last two matter because providers
+// disagree on an idle word — Claude hardcodes `idle`, but a saved Codex thread reports
+// `unknown` (a `thread/list` summary with no live status) — so a literal `=== "idle"`
+// test wrongly disabled the CTA for not-running Codex threads.
+const NOT_WORKING_STATUSES = new Set(["", "idle", "viewing", "completed", "unknown"]);
+
+export function isAgentStatusWorking(status) {
+  return !NOT_WORKING_STATUSES.has((status || "").trim());
+}
+
 // Whether THIS device may start a new review right now. Mirrors the backend
 // request_review gate: the device must be able to drive the session (control is
 // unclaimed OR held by this device — same as can_device_send_message), the agent
-// must be idle with no pending approvals, and no review may already be running.
-// Used for the Reviewer-tab CTA + idle nudge.
+// must not be mid-turn, no approvals may be pending, and no review may already be
+// running. Used for the Reviewer-tab CTA + idle nudge.
 export function canRequestReview(session, deviceId) {
   if (!session?.active_thread_id) return false;
   const controller = session.active_controller_device_id;
@@ -140,5 +152,5 @@ export function canRequestReview(session, deviceId) {
     return false;
   }
   if (isReviewInProgress(session)) return false;
-  return session.current_status === "idle";
+  return !isAgentStatusWorking(session.current_status);
 }
