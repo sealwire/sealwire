@@ -182,6 +182,7 @@ impl RelayState {
         let turn_ended = turn_id.is_none();
         let runtime = self.ensure_runtime_for_thread(thread_id);
         runtime.active_turn_id = turn_id;
+        runtime.note_turn_event();
         if turn_ended {
             runtime.current_phase = None;
             runtime.current_tool = None;

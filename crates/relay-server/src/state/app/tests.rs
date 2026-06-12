@@ -162,7 +162,7 @@ mod path_scope_tests {
         DEFAULT_EFFORT, DEFAULT_MODEL, DEFAULT_SANDBOX,
     };
     use std::sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     };
     use tempfile::TempDir;
@@ -323,10 +323,13 @@ mod path_scope_tests {
         turn_thread_ids: Arc<Mutex<Vec<String>>>,
         interrupt_thread_ids: Arc<Mutex<Vec<String>>>,
         resume_thread_ids: Arc<Mutex<Vec<String>>>,
+        state: Arc<RwLock<RelayState>>,
+        mark_active_status_before_return: Arc<AtomicBool>,
+        complete_before_return: Arc<AtomicBool>,
     }
 
     impl RecordingProvider {
-        fn new(name: &'static str) -> Self {
+        fn new(name: &'static str, state: Arc<RwLock<RelayState>>) -> Self {
             Self {
                 name,
                 threads: Arc::new(Mutex::new(HashMap::new())),
@@ -335,6 +338,9 @@ mod path_scope_tests {
                 turn_thread_ids: Arc::new(Mutex::new(Vec::new())),
                 interrupt_thread_ids: Arc::new(Mutex::new(Vec::new())),
                 resume_thread_ids: Arc::new(Mutex::new(Vec::new())),
+                state,
+                mark_active_status_before_return: Arc::new(AtomicBool::new(false)),
+                complete_before_return: Arc::new(AtomicBool::new(false)),
             }
         }
 
@@ -474,7 +480,32 @@ mod path_scope_tests {
                 .lock()
                 .await
                 .push(thread_id.to_string());
-            Ok(Some(format!("turn:{thread_id}")))
+            let turn_id = format!("turn:{thread_id}");
+            if self
+                .mark_active_status_before_return
+                .load(Ordering::Relaxed)
+            {
+                let mut relay = self.state.write().await;
+                relay.set_thread_status(thread_id, "active".to_string(), Vec::new());
+                relay.notify();
+            }
+            if self.complete_before_return.load(Ordering::Relaxed) {
+                let mut relay = self.state.write().await;
+                if relay.active_thread_id.as_deref() == Some(thread_id) {
+                    relay.set_active_turn(Some(turn_id.clone()));
+                    relay.set_thread_status(thread_id, "active".to_string(), Vec::new());
+                    relay.set_active_turn(None);
+                    relay.set_thread_status(thread_id, "idle".to_string(), Vec::new());
+                } else {
+                    let now = unix_now();
+                    relay.bg_set_active_turn(thread_id, Some(turn_id.clone()), now);
+                    relay.bg_set_thread_status(thread_id, "active".to_string(), Vec::new(), now);
+                    relay.bg_set_active_turn(thread_id, None, now);
+                    relay.bg_set_thread_status(thread_id, "idle".to_string(), Vec::new(), now);
+                }
+                relay.notify();
+            }
+            Ok(Some(turn_id))
         }
 
         async fn request_turn_stop(
@@ -527,8 +558,8 @@ mod path_scope_tests {
             change_tx.clone(),
             SecurityProfile::private(),
         )));
-        let codex = RecordingProvider::new("codex");
-        let claude = RecordingProvider::new("claude_code");
+        let codex = RecordingProvider::new("codex", relay.clone());
+        let claude = RecordingProvider::new("claude_code", relay.clone());
         let mut providers: HashMap<String, Arc<dyn ProviderBridge>> = HashMap::new();
         providers.insert("codex".to_string(), Arc::new(codex.clone()));
         providers.insert("claude_code".to_string(), Arc::new(claude.clone()));
@@ -785,6 +816,104 @@ mod path_scope_tests {
             *codex.turn_thread_ids.lock().await,
             vec![thread_a.id.clone()]
         );
+    }
+
+    #[tokio::test]
+    async fn send_does_not_resurrect_a_turn_completed_before_start_returns() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, codex, _claude) = build_recording_provider_app(cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let thread_a = codex.thread_summary("codex-thread-a", cwd);
+        let thread_b = codex.thread_summary("codex-thread-b", cwd);
+        {
+            let mut threads = codex.threads.lock().await;
+            threads.insert(thread_a.id.clone(), thread_a.clone());
+            threads.insert(thread_b.id.clone(), thread_b.clone());
+        }
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("codex".to_string());
+            relay.active_thread_id = Some(thread_a.id.clone());
+            relay.threads = vec![thread_a, thread_b.clone()];
+        }
+        codex.complete_before_return.store(true, Ordering::Relaxed);
+
+        let snapshot = app
+            .send_message(SendMessageInput {
+                text: "finish immediately".to_string(),
+                model: None,
+                effort: None,
+                device_id: Some("device-1".to_string()),
+                thread_id: thread_b.id.clone(),
+            })
+            .await
+            .expect("the completed turn should still count as an accepted send");
+
+        assert_eq!(
+            snapshot.active_thread_id.as_deref(),
+            Some(thread_b.id.as_str()),
+            "an accepted send still moves control focus"
+        );
+        assert_eq!(
+            snapshot.active_controller_device_id.as_deref(),
+            Some("device-1")
+        );
+        assert_eq!(
+            snapshot.active_turn_id, None,
+            "the app fallback must not resurrect a provider-completed turn"
+        );
+        assert_eq!(snapshot.current_status, "idle");
+        assert!(
+            snapshot
+                .thread_activity
+                .iter()
+                .all(|activity| activity.thread_id != thread_b.id),
+            "the completed thread must not retain a ghost activity badge"
+        );
+    }
+
+    #[tokio::test]
+    async fn status_event_before_start_response_still_seeds_returned_turn_id() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, codex, _claude) = build_recording_provider_app(cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let thread = codex.thread_summary("codex-thread", cwd);
+        codex
+            .threads
+            .lock()
+            .await
+            .insert(thread.id.clone(), thread.clone());
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("codex".to_string());
+            relay.active_thread_id = Some(thread.id.clone());
+            relay.threads = vec![thread.clone()];
+        }
+        codex
+            .mark_active_status_before_return
+            .store(true, Ordering::Relaxed);
+
+        let snapshot = app
+            .send_message(SendMessageInput {
+                text: "status arrives first".to_string(),
+                model: None,
+                effort: None,
+                device_id: Some("device-1".to_string()),
+                thread_id: thread.id.clone(),
+            })
+            .await
+            .expect("the status-before-turn window should remain writable");
+
+        assert_eq!(
+            snapshot.active_turn_id.as_deref(),
+            Some("turn:codex-thread"),
+            "a status notification alone must not suppress the response fallback"
+        );
+        assert_eq!(snapshot.current_status, "active");
     }
 
     // C5 repro: resuming a thread that is genuinely mid-turn must NOT drop its

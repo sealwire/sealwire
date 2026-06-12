@@ -14,6 +14,7 @@ use super::{
 pub(crate) struct ThreadRuntime {
     pub(crate) summary: Option<ThreadSummaryView>,
     pub(crate) active_turn_id: Option<String>,
+    pub(crate) turn_revision: u64,
     pub(crate) current_status: String,
     pub(crate) current_phase: Option<String>,
     pub(crate) current_tool: Option<String>,
@@ -47,6 +48,7 @@ impl ThreadRuntime {
                 provider: String::new(),
             }),
             active_turn_id: None,
+            turn_revision: 0,
             current_status: "active".to_string(),
             current_phase: None,
             current_tool: None,
@@ -84,6 +86,7 @@ impl ThreadRuntime {
             reasoning_effort: effort.to_string(),
             summary: Some(thread),
             active_turn_id: None,
+            turn_revision: 0,
             current_phase: None,
             current_tool: None,
             last_progress_at: None,
@@ -128,6 +131,7 @@ impl ThreadRuntime {
             reasoning_effort: effort.to_string(),
             summary: Some(data.thread),
             active_turn_id: None,
+            turn_revision: 0,
             current_phase: None,
             current_tool: None,
             last_progress_at: None,
@@ -159,6 +163,10 @@ impl ThreadRuntime {
         // not keep a thread "working", or it falsely blocks reviews
         // (has_working_thread_in_cwd) and shows a ghost activity badge until restart.
         self.active_turn_id.is_some() || thread_status_is_working(&self.current_status)
+    }
+
+    pub(crate) fn note_turn_event(&mut self) {
+        self.turn_revision = self.turn_revision.wrapping_add(1);
     }
 
     pub(crate) fn transcript_views(&self) -> Vec<TranscriptEntryView> {

@@ -335,6 +335,12 @@ impl RelayState {
         self.runtimes.get(thread_id)
     }
 
+    pub(crate) fn thread_turn_revision(&self, thread_id: &str) -> u64 {
+        self.runtime_for_thread(thread_id)
+            .map(|runtime| runtime.turn_revision)
+            .unwrap_or(0)
+    }
+
     /// True if any thread runtime (e.g. a backgrounded thread) is still working in
     /// `cwd`. A review reads the live working tree, so a concurrent turn in the
     /// same workspace could mutate files mid-review; v1 refuses rather than racing.
@@ -553,9 +559,14 @@ impl RelayState {
                     if existing.active_turn_id.is_none() {
                         existing.active_turn_id = runtime.active_turn_id.take();
                     }
+                    existing.turn_revision = existing.turn_revision.max(runtime.turn_revision);
                     self.runtimes.insert(real_id.to_string(), existing);
                 }
-                _ => {
+                Some(existing) => {
+                    runtime.turn_revision = runtime.turn_revision.max(existing.turn_revision);
+                    self.runtimes.insert(real_id.to_string(), runtime);
+                }
+                None => {
                     self.runtimes.insert(real_id.to_string(), runtime);
                 }
             }
@@ -1670,6 +1681,7 @@ impl RelayState {
         if let Some(thread_id) = self.active_thread_id.clone() {
             let runtime = self.ensure_runtime_for_thread(&thread_id);
             runtime.active_turn_id = turn_id;
+            runtime.note_turn_event();
             runtime.touch(unix_now());
         }
         self.sync_selected_runtime_to_fields();

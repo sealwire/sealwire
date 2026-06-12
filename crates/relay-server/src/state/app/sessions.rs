@@ -485,6 +485,18 @@ impl AppState {
             ensure_path_within_device_scope(&target_cwd, &device_scope, &relay.allowed_roots)?;
         }
 
+        let turn_revision = {
+            let relay = self.relay.read().await;
+            let target_has_live_turn = relay
+                .runtime_for_thread(&target_thread)
+                .is_some_and(|runtime| runtime.active_turn_id.is_some())
+                || (relay.active_thread_id.as_deref() == Some(target_thread.as_str())
+                    && relay.active_turn_id.is_some());
+            if target_has_live_turn {
+                return Err("that thread is busy with a turn; wait for it to finish".to_string());
+            }
+            relay.thread_turn_revision(&target_thread)
+        };
         let turn_id = bridge
             .start_turn(&target_thread, &text, &model, &effort)
             .await?;
@@ -496,8 +508,13 @@ impl AppState {
             if let Some(models) = provider_models {
                 relay.set_available_models(models);
             }
-            relay.set_active_turn(turn_id);
-            relay.set_thread_status(&effective_thread_id, "active".to_string(), Vec::new());
+            // A provider may publish turn start + completion before start_turn
+            // returns. Preserve those turn events instead of resurrecting the
+            // completed turn; seed active state only when no turn event landed.
+            if relay.thread_turn_revision(&effective_thread_id) == turn_revision {
+                relay.set_active_turn(turn_id);
+                relay.set_thread_status(&effective_thread_id, "active".to_string(), Vec::new());
+            }
             relay.model = model.clone();
             relay.reasoning_effort = effort.clone();
             relay.remember_active_thread_settings();
