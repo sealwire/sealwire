@@ -28,6 +28,7 @@ test("selectSessionRenderModel derives composer state from controller/session fl
   assert.equal(model.approval?.request_id, "approval-1");
   assert.equal(model.currentApprovalId, "approval-1");
   assert.equal(model.hasActiveSession, true);
+  assert.equal(model.canCompose, false);
   assert.equal(model.canWrite, false);
   assert.equal(model.composerDisabled, true);
   assert.match(model.messagePlaceholder, /Another device has control/);
@@ -61,6 +62,7 @@ test("selectSessionRenderModel freezes the composer only when the active thread 
     hasControllerLease: true,
   });
   assert.equal(usable.composerDisabled, false);
+  assert.equal(usable.canCompose, true);
   assert.equal(usable.canWrite, true);
 
   // A review on the ACTIVE thread freezes the composer.
@@ -75,6 +77,7 @@ test("selectSessionRenderModel freezes the composer only when the active thread 
     hasControllerLease: true,
   });
   assert.equal(frozen.composerDisabled, true);
+  assert.equal(frozen.canCompose, false);
   assert.equal(frozen.canWrite, false);
   assert.match(frozen.messagePlaceholder, /being reviewed/i);
 });
@@ -95,7 +98,8 @@ test("selectSessionRenderModel keeps a general view-only thread writable by targ
   });
 
   assert.equal(model.hasControllerLease, false);
-  assert.equal(model.canWrite, true);
+  assert.equal(model.canCompose, true);
+  assert.equal(model.canWrite, false);
   assert.equal(model.composerDisabled, false);
   assert.match(model.messagePlaceholder, /take control/i);
 });
@@ -122,6 +126,7 @@ test("selectSessionRenderModel keeps a reviewed view-only thread frozen", () => 
     hasControllerLease: false,
   });
 
+  assert.equal(model.canCompose, false);
   assert.equal(model.canWrite, false);
   assert.equal(model.composerDisabled, true);
   assert.match(model.messagePlaceholder, /being reviewed/i);

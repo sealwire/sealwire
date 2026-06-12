@@ -29,15 +29,18 @@ export function selectSessionRenderModel({ session, previousSession, hasControll
   // background review on another thread leaves this conversation usable.
   const activeThreadFrozen = isReviewInProgressForThread(session, session.active_thread_id);
   // A client-local saved-thread projection deliberately has no controller
-  // lease. It is still writable through the targeted send API: sending is the
-  // take-over, so view-only must not reintroduce an explicit Take over step.
-  const viewOnlyWritable = Boolean(session.view_only && !activeThreadFrozen);
-  const canWrite = (hasControllerLease || viewOnlyWritable) && !activeThreadFrozen;
+  // lease. Only the composer gets a targeted-send exception: sending is the
+  // take-over, while other writes (for example file rollback/reapply) stay
+  // disabled until this device actually controls the live session.
+  const viewOnlyComposable = Boolean(session.view_only && !activeThreadFrozen);
+  const canWrite = hasControllerLease && !activeThreadFrozen;
+  const canCompose = (canWrite || viewOnlyComposable) && hasActiveSession;
 
   return {
     approval,
+    canCompose,
     canWrite,
-    composerDisabled: !hasActiveSession || !canWrite,
+    composerDisabled: !canCompose,
     currentApprovalId: approval?.request_id || null,
     hasActiveSession,
     hasControllerLease,
@@ -45,7 +48,7 @@ export function selectSessionRenderModel({ session, previousSession, hasControll
       ? "This thread is being reviewed…"
       : !hasActiveSession
       ? "Start a remote session first."
-      : viewOnlyWritable
+      : viewOnlyComposable
         ? "Message this thread to take control..."
       : hasControllerLease
         ? "Message Codex remotely..."

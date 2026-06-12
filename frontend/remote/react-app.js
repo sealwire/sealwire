@@ -1948,7 +1948,7 @@ function RemoteTranscriptPanel({
   } else {
     body = h(TranscriptPane, {
       approval,
-      canWrite: sessionView.canWrite,
+      canWrite: sessionView.canCompose,
       emptyContent: null,
       entries,
       hydrationLoading,
@@ -1961,7 +1961,7 @@ function RemoteTranscriptPanel({
       transcriptOptions: {
         currentCwd: session?.current_cwd || "",
         detailEntries: transcriptDetailEntries,
-        enableFileChangeActions: true,
+        enableFileChangeActions: sessionView.canWrite,
         expandedItemIds: uiState.transcriptExpandedItemIds,
         expandedKeys: uiState.transcriptExpandedItemIds,
         loadingItemIds: uiState.transcriptLoadingItemIds,
