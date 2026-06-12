@@ -134,6 +134,11 @@ export function selectReviewLaunchModel({ providers = [], providerModels = {}, s
 // test wrongly disabled the CTA for not-running Codex threads.
 const NOT_WORKING_STATUSES = new Set(["", "idle", "viewing", "completed", "unknown"]);
 
+// `.toLowerCase()` is defensive: today every provider status is already lowercase
+// (Codex `status.type`, Claude hardcodes "idle"), so this never diverges from the
+// backend `thread_status_is_working` (which only trims). The BACKEND is authoritative —
+// this gate only governs UI affordances; a mismatch would at worst enable a control the
+// server then rejects, never the reverse.
 export function isAgentStatusWorking(status) {
   return !NOT_WORKING_STATUSES.has((status || "").trim().toLowerCase());
 }

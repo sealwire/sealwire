@@ -1,3 +1,87 @@
+// Lint-style guard against the recurring bug class: an action gate that blocks on a
+// literal `current_status != "idle"` instead of the semantic predicate
+// (`active_agent_is_working()` / `runtime.is_working()`). That literal misclassifies
+// Codex's non-idle settled statuses (`unknown`/`completed`) and has shipped THREE times
+// (request_review, start_workflow, update_session_settings).
+//
+// Scope: the whole action-gate LAYER (`src/state/app/`), scanned by directory rather than
+// a hardcoded file list — so a refactor that renames a gate file or moves a gate into a new
+// file in this layer stays covered automatically, and if the layer dir is moved wholesale
+// the test fails loudly (forcing this guard to be updated) instead of silently passing.
+// Test files are skipped (they hold this guard's own pattern strings and idle assertions).
+// This layer has zero legitimate literal idle comparisons, so no allowlist is needed; a
+// broad whole-crate scan would instead false-positive on benign idle waits (the
+// `#[cfg(test)]` `wait_for_threads_idle` helper in claude.rs) and poll-cadence code.
+#[cfg(test)]
+mod idle_gate_lint {
+    use std::path::{Path, PathBuf};
+
+    fn gate_layer_files(dir: &Path, out: &mut Vec<PathBuf>) {
+        let entries = std::fs::read_dir(dir).unwrap_or_else(|e| {
+            panic!(
+                "read_dir {} ({e}) — did the action layer move?",
+                dir.display()
+            )
+        });
+        for entry in entries {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                gate_layer_files(&path, out);
+                continue;
+            }
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+            // Skip test sources: tests.rs carries this guard's own literal pattern strings
+            // and many `current_status == "idle"` assertions.
+            if path.extension().and_then(|e| e.to_str()) == Some("rs")
+                && name != "tests.rs"
+                && !name.contains("test")
+            {
+                out.push(path);
+            }
+        }
+    }
+
+    #[test]
+    fn action_gates_use_the_semantic_idle_predicate_not_a_literal() {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let layer = Path::new(manifest).join("src/state/app");
+        let mut files = Vec::new();
+        gate_layer_files(&layer, &mut files);
+        assert!(
+            !files.is_empty(),
+            "no non-test .rs files under {} — update this guard to the action layer's new home",
+            layer.display()
+        );
+
+        for path in files {
+            let rel = path
+                .strip_prefix(manifest)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+            let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
+            for (i, line) in src.lines().enumerate() {
+                // Skip comments — the fixes left explanatory `// ... == "idle"` notes.
+                if line.trim_start().starts_with("//") {
+                    continue;
+                }
+                let normalized = line.replace(' ', "");
+                assert!(
+                    !(normalized.contains("current_status!=\"idle\"")
+                        || normalized.contains("current_status==\"idle\"")),
+                    "{rel}:{} gates on a literal current_status idle comparison; use the semantic \
+predicate (active_agent_is_working / runtime.is_working) so Codex's `unknown`/`completed` \
+statuses aren't misread as busy:\n  {line}",
+                    i + 1
+                );
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod workspace_diff_tests {
     use super::super::{
