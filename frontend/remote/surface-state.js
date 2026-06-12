@@ -13,6 +13,7 @@ export function applyRemoteSurfacePatch(patch) {
 export function createClearedRemoteSurfaceSessionStatePatch() {
   return {
     currentApprovalId: null,
+    realSession: null,
     session: null,
     threads: [],
     ...createClearedTranscriptEntryDetailsPatch(),

@@ -534,16 +534,9 @@ impl RelayState {
         views
     }
 
-    /// Promote a background reviewer thread from its synthetic `claude-pending-…`
-    /// id to the real session id WITHOUT touching the active thread. A clean Claude
-    /// thread only learns its real id once its first turn runs; because the
-    /// reviewer runs in the background (the user's thread stays active), the normal
-    /// active-thread promotion path (in claude.rs) is skipped, so we do it here:
-    /// move the runtime (transcript/turn/status/settings), retarget pending
-    /// approvals/questions, drop the stale pending thread row, and rewrite the
-    /// review job's `reviewer_thread_id` so the orchestrator waits on / reads from
-    /// the real id and nav-hiding follows it. The real runtime is marked working
-    /// (its turn is in flight) until the provider's `done` event sets it idle.
+    /// Promote a Claude thread from its synthetic `claude-pending-…` id to the
+    /// real SDK session id. This moves the runtime, pending prompts, and any review
+    /// job reference without assuming the thread is the current live projection.
     pub(crate) fn promote_background_thread(&mut self, pending_id: &str, real_id: &str) {
         if pending_id == real_id || pending_id.is_empty() || real_id.is_empty() {
             return;
@@ -935,6 +928,17 @@ impl RelayState {
             .map(|(key, pending)| (key.clone(), pending.clone()))
             .collect();
         self.runtimes.insert(thread_id, runtime);
+    }
+
+    /// Move the legacy control focus to an already-known runtime without
+    /// resuming or re-reading the provider session. Viewing is client-local;
+    /// this is used only after a targeted write has successfully started.
+    pub(crate) fn focus_thread_runtime(&mut self, thread_id: &str, device_id: &str) {
+        self.materialize_selected_runtime_from_fields();
+        self.ensure_runtime_for_thread(thread_id);
+        self.active_thread_id = Some(thread_id.to_string());
+        self.assign_active_controller(device_id, unix_now());
+        self.sync_selected_runtime_to_fields();
     }
 
     /// Live per-thread activity for the activity badges: the active thread (if

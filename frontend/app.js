@@ -521,7 +521,7 @@ const renderer = createSessionRenderer({
   // View-only navigation: just update the URL/viewThreadId without calling the
   // backend resume_session, which is mutating (it moves the relay's single
   // active thread for EVERY connected client). Any non-active thread renders
-  // read-only from the pin; resume stays an explicit user action.
+  // read-only from the pin; sending is the only take-over action.
   viewThread(threadId) {
     void runViewTransition(() => {
       setThreadRoute(threadId);
@@ -543,6 +543,26 @@ const renderer = createSessionRenderer({
 // through the wrapper.
 const _baseRenderSession = renderer.renderSession;
 renderer.renderSession = function wrappedRenderSession(session) {
+  const previousLiveSession = state.session;
+  const viewedThreadWasLive = Boolean(
+    state.viewThreadId
+    && previousLiveSession?.active_thread_id === state.viewThreadId
+    && session?.active_thread_id !== state.viewThreadId
+    && !state.viewOnlyThread
+  );
+  if (viewedThreadWasLive) {
+    const summary =
+      (state.threads || []).find((thread) => thread?.id === state.viewThreadId) || null;
+    state.viewOnlyThread = buildViewOnlyPin({
+      threadId: state.viewThreadId,
+      priorEntries: previousLiveSession.transcript || [],
+      cwd: summary?.cwd ?? previousLiveSession.current_cwd ?? null,
+      provider: summary?.provider ?? previousLiveSession.provider ?? null,
+      status: previousLiveSession.current_status || "idle",
+      lastRefreshAt: Date.now(),
+      wasWorking: Boolean(previousLiveSession.active_turn_id),
+    });
+  }
   // Make the real session current BEFORE reconciling the view-only pin.
   // maybeRefreshViewOnly() (and the loadViewOnlyTranscript it may trigger) read
   // state.session; without this, the very first render after a deep link to a
@@ -553,6 +573,9 @@ renderer.renderSession = function wrappedRenderSession(session) {
   maybeRefreshViewOnly(session);
   _baseRenderSession(session);
   syncVerbTimer(session);
+  if (viewedThreadWasLive) {
+    void loadViewOnlyTranscript(state.viewThreadId);
+  }
 };
 
 // A stable signature of the review running on `threadId`, so the read-only view
@@ -590,6 +613,10 @@ async function loadViewOnlyTranscript(threadId) {
   const cwd = summary?.cwd ?? null;
   const provider = summary?.provider ?? null;
   const prior = state.viewOnlyThread?.threadId === threadId ? state.viewOnlyThread : null;
+  const isWorking = Boolean(
+    (session.thread_activity || []).find((entry) => entry?.thread_id === threadId)
+  );
+  const status = !isWorking && prior?.wasWorking ? "idle" : summary?.status ?? null;
   state.viewOnlyThread = buildViewOnlyPin({
     threadId,
     generation,
@@ -597,6 +624,9 @@ async function loadViewOnlyTranscript(threadId) {
     reviewSig,
     cwd,
     provider,
+    status,
+    lastRefreshAt: Date.now(),
+    wasWorking: isWorking,
     priorEntries: prior?.entries || [],
     priorOlderCursor: prior?.olderCursor ?? null,
     loading: true,
@@ -618,6 +648,9 @@ async function loadViewOnlyTranscript(threadId) {
       reviewSig,
       cwd,
       provider,
+      status,
+      lastRefreshAt: Date.now(),
+      wasWorking: isWorking,
     });
   } catch (error) {
     if (generation !== state.viewOnlyGeneration) return;
@@ -628,6 +661,9 @@ async function loadViewOnlyTranscript(threadId) {
       reviewSig,
       cwd,
       provider,
+      status,
+      lastRefreshAt: Date.now(),
+      wasWorking: isWorking,
       priorEntries: prior?.entries || [],
       priorOlderCursor: prior?.olderCursor ?? null,
     });
@@ -672,10 +708,8 @@ async function loadOlderViewOnlyTranscript() {
 }
 
 // Called on every render: keep the pin honest against the latest REAL session.
-// General pins stay pinned while viewed (NEVER auto-resume — that would mutate
-// the relay's global active thread as a side effect of looking); review pins keep
-// the pre-existing UX (seamless resume-in-place when their review ends, re-fetch
-// when it advances). Also self-heals: deep links / back-button land on a
+// Pins stay pinned while viewed and never auto-resume. Review pins refresh when
+// their review advances or ends. Also self-heals: deep links / back-button land on a
 // non-active thread without going through viewThread(), so load the pin here —
 // once per navigated thread, so a failing fetch can't loop.
 function maybeRefreshViewOnly(session) {
@@ -687,12 +721,19 @@ function maybeRefreshViewOnly(session) {
     });
     if (action.kind === "release") {
       state.viewOnlyThread = null;
-    } else if (action.kind === "resume") {
-      const threadId = pin.threadId;
-      state.viewOnlyThread = null;
-      void controller?.resumeSession(threadId);
     } else if (action.kind === "refresh") {
       void loadViewOnlyTranscript(pin.threadId);
+    } else {
+      const working = Boolean(
+        (session.thread_activity || []).find((entry) => entry?.thread_id === pin.threadId)
+      );
+      if (
+        !pin.loading &&
+        (working || pin.wasWorking) &&
+        Date.now() - (pin.lastRefreshAt || 0) >= 300
+      ) {
+        void loadViewOnlyTranscript(pin.threadId);
+      }
     }
   }
 
@@ -1011,9 +1052,8 @@ controlBanner?.addEventListener("click", (event) => {
 // Drive a composer submit. The draft text and the target thread are captured
 // synchronously at submit time and the composer is frozen, so a draft edit /
 // navigation / second submit during the async send can't change or duplicate it.
-// The send carries the target thread id; the relay atomically takes that thread
-// over (resume) if it isn't the active one, then sends — so "sending IS taking
-// over" with no separate resume request and no wrong-thread window.
+// The send carries the target thread id; the relay starts the turn directly on
+// that thread and moves control after success.
 async function runComposerSubmit() {
   const text = messageInput.value;
   const pin = state.viewOnlyThread;
@@ -1132,6 +1172,7 @@ transcript.addEventListener("click", (event) => {
         }
         syncThreadSelection();
       });
+      void loadViewOnlyTranscript(threadId);
     }
     return;
   }
@@ -1148,13 +1189,6 @@ transcript.addEventListener("click", (event) => {
     return;
   }
 
-  const resumeThreadButton = event.target.closest("[data-resume-thread-id]");
-  if (resumeThreadButton) {
-    const threadId = resumeThreadButton.dataset.resumeThreadId;
-    if (threadId) {
-      void resumeSession(threadId);
-    }
-  }
 });
 
 // IntersectionObserver-driven prefetch: when the zero-height history sentinel
@@ -1837,7 +1871,8 @@ async function deleteThreadFromContextMenu() {
       const canResumeFallback =
         fallbackThreadId && state.threads.some((entry) => entry.id === fallbackThreadId);
       if (canResumeFallback) {
-        await resumeSession(fallbackThreadId);
+        setThreadRoute(fallbackThreadId, { replace: true });
+        await loadViewOnlyTranscript(fallbackThreadId);
       } else {
         clearThreadRoute({ replace: true });
         await loadSession("post-delete refresh");

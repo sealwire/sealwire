@@ -41,6 +41,7 @@ impl AppState {
             )
             .await?;
         let consumed_initial_prompt = start_result.consumed_initial_prompt;
+        let started_thread_id = start_result.thread.id.clone();
         let initial_user_message = start_result.initial_user_message.clone();
         let started_turn_id = start_result.started_turn_id.clone();
 
@@ -100,7 +101,7 @@ impl AppState {
                     model: Some(model),
                     effort: Some(effort),
                     device_id: Some(device_id),
-                    thread_id: None,
+                    thread_id: started_thread_id,
                 })
                 .await;
         }
@@ -241,8 +242,12 @@ impl AppState {
         input: UpdateSessionSettingsInput,
     ) -> Result<SessionSnapshot, String> {
         let device_id = require_device_id(input.device_id)?;
+        let thread_id =
+            non_empty(Some(input.thread_id)).ok_or_else(|| "thread_id is required".to_string())?;
         let _slot = self.acquire_session_slot()?;
         self.expire_stale_controller_if_needed().await;
+        self.ensure_thread_runtime_loaded(&thread_id, &device_id)
+            .await?;
         let requested_model = non_empty(input.model);
         let requested_effort = non_empty(input.effort);
 
@@ -256,42 +261,39 @@ impl AppState {
             next_sandbox,
         ) = {
             let relay = self.relay.read().await;
-            relay.ensure_device_can_send_message(&device_id)?;
-
-            if relay.active_turn_id.is_some() {
+            let runtime = relay
+                .runtime_for_thread(&thread_id)
+                .ok_or_else(|| format!("thread `{thread_id}` is not loaded"))?;
+            if runtime.active_turn_id.is_some() {
                 return Err(
                     "cannot change session settings while a turn is in progress".to_string()
                 );
             }
-            if !relay.pending_approvals.is_empty() {
+            if !runtime.pending_approvals.is_empty() {
                 return Err(
                     "cannot change session settings while approvals are pending".to_string()
                 );
             }
-            if relay.current_status != "idle" {
+            if runtime.current_status != "idle" {
                 return Err(format!(
                     "cannot change session settings while agent is `{}`",
-                    relay.current_status
+                    runtime.current_status
                 ));
             }
 
-            let thread_id = relay
-                .active_thread_id
-                .clone()
-                .ok_or_else(|| "there is no active thread to update".to_string())?;
             if relay.is_thread_review_locked(&thread_id) {
                 return Err(REVIEW_LOCKED_THREAD_MSG.to_string());
             }
             let next_approval_policy =
-                non_empty(input.approval_policy).unwrap_or_else(|| relay.approval_policy.clone());
-            let next_sandbox = non_empty(input.sandbox).unwrap_or_else(|| relay.sandbox.clone());
+                non_empty(input.approval_policy).unwrap_or_else(|| runtime.approval_policy.clone());
+            let next_sandbox = non_empty(input.sandbox).unwrap_or_else(|| runtime.sandbox.clone());
 
             (
-                thread_id,
-                relay.approval_policy.clone(),
-                relay.sandbox.clone(),
-                relay.reasoning_effort.clone(),
-                relay.model.clone(),
+                thread_id.clone(),
+                runtime.approval_policy.clone(),
+                runtime.sandbox.clone(),
+                runtime.reasoning_effort.clone(),
+                runtime.model.clone(),
                 next_approval_policy,
                 next_sandbox,
             )
@@ -334,16 +336,23 @@ impl AppState {
 
         {
             let mut relay = self.relay.write().await;
-            relay.set_provider_name(provider_name.to_string());
-            if let Some(models) = provider_models {
-                relay.set_available_models(models);
+            let is_focused = relay.active_thread_id.as_deref() == Some(thread_id.as_str());
+            if is_focused {
+                relay.set_provider_name(provider_name.to_string());
+                if let Some(models) = provider_models {
+                    relay.set_available_models(models);
+                }
             }
-            relay.approval_policy = next_approval_policy.clone();
-            relay.sandbox = next_sandbox.clone();
-            relay.reasoning_effort = next_effort.clone();
-            relay.model = next_model.clone();
-            relay.remember_active_thread_settings();
-            relay.assign_active_controller(&device_id, unix_now());
+            relay.remember_thread_settings(
+                &thread_id,
+                &next_approval_policy,
+                &next_sandbox,
+                &next_effort,
+                &next_model,
+            );
+            if is_focused {
+                relay.sync_selected_runtime_to_fields();
+            }
             relay.push_log(
                 "info",
                 format!(
@@ -373,21 +382,12 @@ impl AppState {
             .ok_or_else(|| "message text cannot be empty".to_string())?;
         let requested_model = non_empty(input.model);
         let requested_effort = non_empty(input.effort);
-        let requested_thread = non_empty(input.thread_id);
+        let target_thread =
+            non_empty(Some(input.thread_id)).ok_or_else(|| "thread_id is required".to_string())?;
 
-        // Resolve the target thread. An explicit thread_id ("sending IS taking
-        // over this thread") wins over the current active thread. The write-control
-        // check is intentionally NOT here: requiring control of the CURRENT active
-        // thread would reject a legitimate send to a non-active thread that another
-        // device happens to control. It is enforced after take-over below, against
-        // the target — where resume has reassigned control to this device.
-        let target_thread = {
+        {
             let relay = self.relay.read().await;
-            let target = requested_thread
-                .clone()
-                .or_else(|| relay.active_thread_id.clone())
-                .ok_or_else(|| "there is no thread to send to".to_string())?;
-            if relay.is_thread_review_locked(&target) {
+            if relay.is_thread_review_locked(&target_thread) {
                 return Err(REVIEW_LOCKED_THREAD_MSG.to_string());
             }
             // A thread with a turn ALREADY IN FLIGHT must not receive a second
@@ -403,90 +403,110 @@ impl AppState {
             // thread reports a working *status* ("active") before its first turn has
             // started, and sending that first message must be allowed.
             let target_has_live_turn = relay
-                .runtime_for_thread(&target)
+                .runtime_for_thread(&target_thread)
                 .map(|runtime| runtime.active_turn_id.is_some())
-                .unwrap_or(false);
+                .unwrap_or(false)
+                || (relay.active_thread_id.as_deref() == Some(target_thread.as_str())
+                    && relay.active_turn_id.is_some());
             if target_has_live_turn {
                 return Err("that thread is busy with a turn; wait for it to finish".to_string());
             }
-            target
-        };
-
-        // If the target isn't already active, take it over (resume) BEFORE sending.
-        // This whole method runs under the session slot acquired by send_message(),
-        // so no concurrent resume/send from another client can interleave between
-        // the take-over and start_turn — the message can never land on a thread that
-        // changed out from under us (closes the wrong-thread send race). resume_inner
-        // also validates the device's path scope for the target thread.
-        let needs_takeover = {
-            let relay = self.relay.read().await;
-            relay.active_thread_id.as_deref() != Some(target_thread.as_str())
-        };
-        if needs_takeover {
-            self.resume_session_inner(ResumeSessionInput {
-                thread_id: target_thread.clone(),
-                approval_policy: None,
-                sandbox: None,
-                effort: None,
-                device_id: Some(device_id.clone()),
-                provider: None,
-            })
-            .await?;
         }
-
-        let thread_id = {
+        self.ensure_thread_runtime_loaded(&target_thread, &device_id)
+            .await?;
+        let (target_thread, remembered_settings, runtime_cwd) = {
             let relay = self.relay.read().await;
-            // Write-control check against the (post-take-over) ACTIVE thread = the
-            // target. For a take-over send, resume has just made this device the
-            // controller, so it passes; for a same-thread send it still requires the
-            // device to already hold control (no implicit takeover of the active
-            // thread by a passive device).
-            relay.ensure_device_can_send_message(&device_id)?;
-            let device_scope = relay.device_path_scope(&device_id);
-            ensure_path_within_device_scope(
-                &relay.current_cwd,
-                &device_scope,
-                &relay.allowed_roots,
-            )?;
-            let thread_id = relay
-                .active_thread_id
-                .clone()
-                .ok_or_else(|| "there is no active Codex thread to send to".to_string())?;
-            // After any take-over, the active thread is the target we resolved.
-            debug_assert_eq!(thread_id, target_thread);
-            thread_id
+            (
+                target_thread.clone(),
+                relay.thread_settings(&target_thread),
+                relay
+                    .runtime_for_thread(&target_thread)
+                    .map(|runtime| runtime.current_cwd.clone())
+                    .filter(|cwd| !cwd.is_empty()),
+            )
         };
-        let (provider_name, bridge) = self.find_thread_provider(&thread_id).await?;
+
+        let (provider_name, bridge) = self.find_thread_provider(&target_thread).await?;
         let provider_models = self
             .load_provider_model_catalog(provider_name, bridge)
             .await;
+        let fallback_model = remembered_settings
+            .as_ref()
+            .map(|settings| settings.model.clone())
+            .filter(|model| !model.is_empty())
+            .unwrap_or(defaults.model.clone());
         let model = resolve_provider_model(
             provider_name,
             &provider_models,
             requested_model,
-            defaults.model.clone(),
+            fallback_model.clone(),
         );
         let effort = requested_effort
+            .or_else(|| {
+                (model != fallback_model)
+                    .then(|| default_effort_for_model(&provider_models, &model))
+                    .flatten()
+            })
+            .or_else(|| {
+                remembered_settings
+                    .as_ref()
+                    .map(|settings| settings.reasoning_effort.clone())
+                    .filter(|effort| !effort.is_empty())
+            })
             .or_else(|| default_effort_for_model(&provider_models, &model))
             .unwrap_or(defaults.reasoning_effort);
+        let approval_policy = remembered_settings
+            .as_ref()
+            .map(|settings| settings.approval_policy.clone())
+            .filter(|value| !value.is_empty())
+            .unwrap_or(defaults.approval_policy);
+        let sandbox = remembered_settings
+            .as_ref()
+            .map(|settings| settings.sandbox.clone())
+            .filter(|value| !value.is_empty())
+            .unwrap_or(defaults.sandbox);
+
+        // A target that has not been materialized in this relay process still
+        // needs a runtime for event routing and path-scope validation. Reading
+        // history is non-authoritative for turn liveness and does not resume the
+        // provider session.
+        let target_cwd = if let Some(cwd) = runtime_cwd {
+            cwd
+        } else {
+            let data = bridge.read_thread(&target_thread).await?;
+            let cwd = data.thread.cwd.clone();
+            let mut relay = self.relay.write().await;
+            relay.hydrate_background_runtime(data, &approval_policy, &sandbox, &effort, &model);
+            cwd
+        };
+        {
+            let relay = self.relay.read().await;
+            let device_scope = relay.device_path_scope(&device_id);
+            ensure_path_within_device_scope(&target_cwd, &device_scope, &relay.allowed_roots)?;
+        }
 
         let turn_id = bridge
-            .start_turn(&thread_id, &text, &model, &effort)
+            .start_turn(&target_thread, &text, &model, &effort)
             .await?;
+        let effective_thread_id = bridge.resolve_started_thread_id(&target_thread).await;
         {
             let mut relay = self.relay.write().await;
+            relay.focus_thread_runtime(&effective_thread_id, &device_id);
             relay.set_provider_name(provider_name.to_string());
             if let Some(models) = provider_models {
                 relay.set_available_models(models);
             }
-            relay.assign_active_controller(&device_id, unix_now());
             relay.set_active_turn(turn_id);
+            relay.set_thread_status(&effective_thread_id, "active".to_string(), Vec::new());
             relay.model = model.clone();
             relay.reasoning_effort = effort.clone();
             relay.remember_active_thread_settings();
             relay.push_log(
                 "info",
-                format!("Sent a prompt to thread {thread_id} with {model} / {effort}."),
+                format!(
+                    "Sent a prompt to thread {effective_thread_id} with {model} / {effort}; control moved to {}.",
+                    short_device_id(&device_id)
+                ),
             );
             relay.notify();
         }
@@ -496,28 +516,31 @@ impl AppState {
 
     pub async fn stop_active_turn(&self, input: StopTurnInput) -> Result<SessionSnapshot, String> {
         let device_id = require_device_id(input.device_id)?;
+        let requested_thread =
+            non_empty(Some(input.thread_id)).ok_or_else(|| "thread_id is required".to_string())?;
         let _slot = self.acquire_session_slot()?;
         self.expire_stale_controller_if_needed().await;
+        self.ensure_thread_runtime_loaded(&requested_thread, &device_id)
+            .await?;
         let (thread_id, turn_id) = {
             let relay = self.relay.read().await;
-            relay.ensure_device_can_send_message(&device_id)?;
+            let thread_id = requested_thread;
+            let runtime = relay
+                .runtime_for_thread(&thread_id)
+                .ok_or_else(|| format!("thread `{thread_id}` is not loaded"))?;
             let device_scope = relay.device_path_scope(&device_id);
             ensure_path_within_device_scope(
-                &relay.current_cwd,
+                &runtime.current_cwd,
                 &device_scope,
                 &relay.allowed_roots,
             )?;
-            let thread_id = relay
-                .active_thread_id
-                .clone()
-                .ok_or_else(|| "there is no active Codex thread to stop".to_string())?;
             if relay.is_thread_review_locked(&thread_id) {
                 return Err(REVIEW_LOCKED_THREAD_MSG.to_string());
             }
-            let turn_id = relay
+            let turn_id = runtime
                 .active_turn_id
                 .clone()
-                .ok_or_else(|| "there is no running Codex turn to stop".to_string())?;
+                .ok_or_else(|| format!("there is no running turn on thread `{thread_id}`"))?;
             (thread_id, turn_id)
         };
 
@@ -529,7 +552,6 @@ impl AppState {
 
         {
             let mut relay = self.relay.write().await;
-            relay.assign_active_controller(&device_id, unix_now());
             relay.push_log(
                 "info",
                 format!(
@@ -572,8 +594,10 @@ provider completion.",
             {
                 let relay = self.relay.read().await;
                 // The provider confirmed (or the active turn changed) — done.
-                if relay.active_thread_id.as_deref() != Some(thread_id.as_str())
-                    || relay.active_turn_id.as_deref() != Some(turn_id.as_str())
+                if relay
+                    .runtime_for_thread(&thread_id)
+                    .and_then(|runtime| runtime.active_turn_id.as_deref())
+                    != Some(turn_id.as_str())
                 {
                     return;
                 }
@@ -587,10 +611,12 @@ provider completion.",
         let mut relay = self.relay.write().await;
         // Still the same in-flight turn after the window: the provider never
         // confirmed the stop. Reflect idle locally rather than wedging the session.
-        if relay.active_thread_id.as_deref() == Some(thread_id.as_str())
-            && relay.active_turn_id.as_deref() == Some(turn_id.as_str())
+        if relay
+            .runtime_for_thread(&thread_id)
+            .and_then(|runtime| runtime.active_turn_id.as_deref())
+            == Some(turn_id.as_str())
         {
-            relay.set_active_turn(None);
+            relay.bg_set_active_turn(&thread_id, None, unix_now());
             relay.set_thread_status(&thread_id, "idle".to_string(), Vec::new());
             relay.push_log(
                 "warn",

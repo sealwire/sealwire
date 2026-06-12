@@ -194,23 +194,15 @@ export function createSessionRenderer({
   setReviewSlice,
   viewThread,
 }) {
-  // Wire thread notifications to this surface: resolve names from the loaded
-  // thread summaries, and open the thread (respecting review locks) on click.
+  // Notifications navigate locally; looking at a thread never resumes it.
   configureThreadNotifications({
     resolveThreadName: (threadId) => {
       const thread = (state.threads || []).find((entry) => entry?.id === threadId);
       return thread ? thread.name || thread.preview || shortId(threadId) : null;
     },
     onActivateThread: (threadId) => {
-      // Review-locked threads can't be resumed (the backend rejects it while a
-      // review is running). All other threads resume normally on notification click.
-      if (
-        typeof viewThread === "function" &&
-        isReviewInProgressForThread(state.session, threadId)
-      ) {
+      if (typeof viewThread === "function") {
         viewThread(threadId);
-      } else {
-        void resumeSession(threadId);
       }
     },
   });
@@ -409,9 +401,8 @@ export function createSessionRenderer({
       goConsoleHomeSidebarButton.hidden = !viewingConversation;
     }
     messageForm.hidden = !viewingConversation;
-    // In a general (non-review) read-only view, the composer is usable: typing and
-    // sending takes over the thread (resume) and then sends — see app.js
-    // runComposerSubmit. Review view-only stays locked (resume is rejected mid-review).
+    // In a general (non-review) read-only view, the composer is usable: sending
+    // directly targets the viewed thread. Review view-only stays locked.
     const viewOnlyWritable = Boolean(session.view_only && !state.viewOnlyThread?.review);
     const canCompose = canWrite || viewOnlyWritable;
     // Frozen while a submit/take-over is in flight (app.js runComposerSubmit) so a
@@ -434,13 +425,13 @@ export function createSessionRenderer({
     messageInput.placeholder = activeThreadFrozen
       ? "This thread is being reviewed…"
       : !hasActiveSession
-      ? "Start or resume a session first."
+      ? "Start or open a session first."
       : !viewingConversation
         ? "Open the thread page to send a message."
         : canWrite
           ? "Message Codex..."
           : viewOnlyWritable
-            ? "Type to resume this thread and reply…"
+            ? "Type a reply to take control…"
             : "Another device has control. Take over to reply.";
   }
 
@@ -938,9 +929,8 @@ export function createSessionRenderer({
       return;
     }
 
-    // General read-only view of a saved thread: offer the explicit way back to
-    // live. (Review view-only keeps its existing calm UI — resume is blocked
-    // while the review runs, so no button is offered there.)
+    // A saved-thread projection is writable through the composer: sending is
+    // the take-over. No separate resume action is exposed.
     if (session?.view_only && session.active_thread_id && !state.viewOnlyThread?.review) {
       pendingActionBanner.hidden = false;
       renderReactContent(
@@ -951,16 +941,7 @@ export function createSessionRenderer({
           h(
             "span",
             { className: "pending-action-banner-text" },
-            "Read-only view of a saved thread."
-          ),
-          h(
-            "button",
-            {
-              className: "pending-action-btn pending-action-btn-primary",
-              "data-resume-thread-id": session.active_thread_id,
-              type: "button",
-            },
-            "Resume this thread"
+            "Viewing saved thread. Sending a message will take control."
           )
         )
       );
@@ -1067,15 +1048,11 @@ export function createSessionRenderer({
           h(ConversationEmptyState, {
             actions: [
               {
-                attrs: { "data-resume-thread-id": state.viewThreadId },
-                label: "Resume this thread",
-              },
-              {
                 attrs: { "data-go-console-home": "true" },
                 label: "Back to console",
               },
             ],
-            copy: "This URL points at a saved thread, but the relay is currently attached to a different session.",
+            copy: "This saved thread is loading.",
             details: [
               `Requested thread: ${
                 requestedThread
@@ -1083,7 +1060,7 @@ export function createSessionRenderer({
                   : shortId(state.viewThreadId)
               }`,
             ],
-            title: "Thread page not active yet",
+            title: "Loading thread",
           })
         );
         return;
@@ -1157,7 +1134,7 @@ export function createSessionRenderer({
                   label: "Suggest a cleanup",
                 },
               ],
-              copy: "Pick a workspace, then use this console to launch or resume a session while keeping an eye on control, trust, and audit state.",
+              copy: "Pick a workspace, then use this console to launch or open a session while keeping an eye on control, trust, and audit state.",
               details: state.selectedCwd ? [`Selected workspace: ${state.selectedCwd}`] : [],
               title: "Relay standing by",
             }),
@@ -1258,14 +1235,13 @@ export function createSessionRenderer({
     renderWorkspaceSuggestions(state.session);
     threadsCount.textContent = summarizeThreadGroups(groups);
     threadsCount.title = groups.map((group) => group.cwd).join("\n");
-    // Resuming another thread is allowed during a background review.
     resumeLatestButton.disabled = totalThreads === 0;
 
     renderReactContent(
       threadsList,
       h(ThreadGroupList, {
         activeThreadId: viewedThreadId,
-        emptyMessage: "Start or resume a session to build workspace groups.",
+        emptyMessage: "Start or open a session to build workspace groups.",
         expandedGroupCwds: threadListUi.expandedGroupCwds || new Set(),
         formatThreadMeta(thread) {
           return formatRelativeTime(thread.updated_at);
@@ -1280,16 +1256,8 @@ export function createSessionRenderer({
           threadAttention.clear(threadId);
           void ensureNotificationPermission();
           renderThreads();
-          // Review-locked threads can't be resumed while a review is running —
-          // use the view-only path so the user can see the conversation.
-          // Every other thread resumes normally on click.
-          if (
-            typeof viewThread === "function" &&
-            isReviewInProgressForThread(state.session, threadId)
-          ) {
+          if (typeof viewThread === "function") {
             viewThread(threadId);
-          } else {
-            void resumeSession(threadId);
           }
         },
         onSelectWorkspace(cwd) {

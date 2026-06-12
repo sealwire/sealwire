@@ -239,6 +239,67 @@ impl AppState {
         expire_controller_if_needed(&mut relay);
     }
 
+    async fn ensure_thread_runtime_loaded(
+        &self,
+        thread_id: &str,
+        device_id: &str,
+    ) -> Result<(), String> {
+        {
+            let mut relay = self.relay.write().await;
+            if relay.active_thread_id.as_deref() == Some(thread_id)
+                && relay.runtime_for_thread(thread_id).is_none()
+            {
+                relay.materialize_selected_runtime_from_fields();
+            }
+            if let Some(runtime) = relay.runtime_for_thread(thread_id) {
+                let device_scope = relay.device_path_scope(device_id);
+                ensure_path_within_device_scope(
+                    &runtime.current_cwd,
+                    &device_scope,
+                    &relay.allowed_roots,
+                )?;
+                return Ok(());
+            }
+        }
+
+        let defaults = self.defaults().await;
+        let settings = {
+            let relay = self.relay.read().await;
+            relay.thread_settings(thread_id)
+        };
+        let approval_policy = settings
+            .as_ref()
+            .map(|value| value.approval_policy.clone())
+            .unwrap_or(defaults.approval_policy);
+        let sandbox = settings
+            .as_ref()
+            .map(|value| value.sandbox.clone())
+            .unwrap_or(defaults.sandbox);
+        let effort = settings
+            .as_ref()
+            .map(|value| value.reasoning_effort.clone())
+            .unwrap_or(defaults.reasoning_effort);
+        let model = settings
+            .as_ref()
+            .map(|value| value.model.clone())
+            .filter(|value| !value.is_empty())
+            .unwrap_or(defaults.model);
+        let data = self
+            .find_thread_provider(thread_id)
+            .await?
+            .1
+            .read_thread(thread_id)
+            .await?;
+        {
+            let relay = self.relay.read().await;
+            let device_scope = relay.device_path_scope(device_id);
+            ensure_path_within_device_scope(&data.thread.cwd, &device_scope, &relay.allowed_roots)?;
+        }
+        let mut relay = self.relay.write().await;
+        relay.hydrate_background_runtime(data, &approval_policy, &sandbox, &effort, &model);
+        Ok(())
+    }
+
     async fn restore_persisted_session(&self, persisted: PersistedRelayState) {
         let Some(thread_id) = persisted.active_thread_id.clone() else {
             return;

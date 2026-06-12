@@ -48,6 +48,7 @@ export const state = {
   serverConnectionState: "idle",
   remoteProfiles: loadedStore.remoteProfiles,
   requestedDeviceId: null,
+  realSession: null,
   session: null,
   socket: null,
   socketPeerId: null,

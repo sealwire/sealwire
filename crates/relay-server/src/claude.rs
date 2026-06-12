@@ -66,6 +66,8 @@ pub struct ClaudeCodeBridge {
     /// has never seen). On the first send we promote the thread by swapping
     /// the public id to the real SDK session id, then drop the entry here.
     pending_threads: Arc<Mutex<HashMap<String, PendingClaudeConfig>>>,
+    /// One-shot handoff from a deferred-start placeholder to the real SDK id.
+    promoted_thread_ids: Arc<Mutex<HashMap<String, String>>>,
     /// In-memory cache of the SDK model catalog. `list_models` is a live worker
     /// round-trip (`supportedModels()`) that is cold/slow right after startup,
     /// which is exactly when the client pulls it after a handshake. We prewarm
@@ -138,6 +140,7 @@ impl ClaudeCodeBridge {
             next_request_id: AtomicU64::new(1),
             state,
             pending_threads: Arc::new(Mutex::new(HashMap::new())),
+            promoted_thread_ids: Arc::new(Mutex::new(HashMap::new())),
             cached_models: Arc::new(RwLock::new(None)),
         };
 
@@ -564,6 +567,12 @@ impl ProviderBridge for ClaudeCodeBridge {
             // the remote surface had no repair path for).
             let real_session_id =
                 string_at(&result, &["thread", "id"]).unwrap_or_else(|| thread_id.to_string());
+            if real_session_id != thread_id {
+                self.promoted_thread_ids
+                    .lock()
+                    .await
+                    .insert(thread_id.to_string(), real_session_id.clone());
+            }
             self.record_local_user_message(
                 &real_session_id,
                 user_item_id,
@@ -620,6 +629,14 @@ impl ProviderBridge for ClaudeCodeBridge {
         self.record_local_user_message(thread_id, user_item_id, text.to_string(), turn_id.clone())
             .await;
         Ok(Some(turn_id))
+    }
+
+    async fn resolve_started_thread_id(&self, requested_thread_id: &str) -> String {
+        self.promoted_thread_ids
+            .lock()
+            .await
+            .remove(requested_thread_id)
+            .unwrap_or_else(|| requested_thread_id.to_string())
     }
 
     async fn request_turn_stop(
@@ -844,12 +861,10 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                     relay.active_thread_id = Some(sid.to_string());
                 }
                 if let Some(pending_id) = stale_pending_id {
-                    relay.threads.retain(|thread| thread.id != pending_id);
+                    relay.promote_background_thread(&pending_id, sid);
                 } else if let Some(pending_id) = pending_thread_id.as_deref() {
-                    // Background reviewer: the pending thread is NOT the active
-                    // thread (a clean reviewer runs off to the side), so the active-
-                    // thread promotion above didn't fire. Promote it in place so the
-                    // review job / runtime / transcript line up under the real id.
+                    // Promote a non-live pending thread in place so its runtime,
+                    // transcript, and any review job reference use the real id.
                     if pending_id != sid {
                         relay.promote_background_thread(pending_id, sid);
                     }
@@ -1853,7 +1868,7 @@ mod tests {
         )));
         let bridge = match ClaudeCodeBridge::spawn_with_worker_path(
             relay.clone(),
-            &fake_worker_path(),
+            &pending_repro_worker_path(),
         )
         .await
         {
@@ -1910,21 +1925,49 @@ mod tests {
                 .collect::<Vec<_>>(),
         );
 
-        // 2. Type the first message into the blank composer and send it.
+        // Open another blank thread first so the original pending thread is no
+        // longer the relay's live projection. Its first send must still promote
+        // and focus the correct real Claude session.
+        let second = app
+            .start_session(crate::protocol::StartSessionInput {
+                cwd: Some("/tmp".to_string()),
+                initial_prompt: None,
+                model: None,
+                approval_policy: None,
+                sandbox: None,
+                effort: None,
+                device_id: Some("device-1".to_string()),
+                provider: Some("claude_code".to_string()),
+            })
+            .await
+            .expect("second deferred start should succeed");
+        let second_pending_id = second
+            .active_thread_id
+            .expect("second blank session must become live");
+
+        // 2. Type the first message into the original blank composer and send it.
         let result = app
             .send_message(crate::protocol::SendMessageInput {
                 text: "first message".to_string(),
                 model: None,
                 effort: None,
                 device_id: Some("device-1".to_string()),
-                thread_id: None,
+                thread_id: pending_id.clone(),
             })
-            .await;
+            .await
+            .expect("sending the first message to a background blank session should succeed");
 
+        let promoted_id = result
+            .active_thread_id
+            .expect("targeted send should focus the promoted real session");
+        assert_ne!(promoted_id, second_pending_id);
+        assert_ne!(promoted_id, pending_id);
         assert!(
-            result.is_ok(),
-            "sending the first message to a blank claude session failed: {:?}",
-            result.err(),
+            result
+                .transcript
+                .iter()
+                .any(|entry| entry.text.as_deref() == Some("first message")),
+            "the focused promoted session must contain the targeted first message"
         );
     }
 
@@ -1999,7 +2042,7 @@ mod tests {
             model: None,
             effort: None,
             device_id: Some("device-1".to_string()),
-            thread_id: None,
+            thread_id: pending_id.clone(),
         })
         .await
         .expect("sending the first message should succeed");

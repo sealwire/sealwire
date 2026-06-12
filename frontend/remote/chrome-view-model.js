@@ -373,7 +373,7 @@ function remoteAccessLabel(currentState) {
   }
 
   if (!currentState.session?.active_thread_id) {
-    return "Standby until you start or resume a session";
+    return "Standby until you start or open a session";
   }
 
   if (!currentState.session.active_controller_device_id) {
@@ -457,7 +457,7 @@ function workspaceSubtitle(currentState) {
     if (selectedRelayNeedsRepair(currentState)) {
       return "Local encrypted credentials are unavailable in this browser. Pair this relay again on this device to restore remote access.";
     }
-    return "Remote device paired. Start a session, resume one from history, or wait for a live thread.";
+    return "Remote device paired. Start a session, open one from history, or wait for a live thread.";
   }
   if (currentState.pairingTicket) {
     return pairingCopy(currentState);

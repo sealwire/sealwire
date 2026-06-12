@@ -322,6 +322,7 @@ mod path_scope_tests {
         ask_request_ids: Arc<Mutex<Vec<String>>>,
         turn_thread_ids: Arc<Mutex<Vec<String>>>,
         interrupt_thread_ids: Arc<Mutex<Vec<String>>>,
+        resume_thread_ids: Arc<Mutex<Vec<String>>>,
     }
 
     impl RecordingProvider {
@@ -333,6 +334,7 @@ mod path_scope_tests {
                 ask_request_ids: Arc::new(Mutex::new(Vec::new())),
                 turn_thread_ids: Arc::new(Mutex::new(Vec::new())),
                 interrupt_thread_ids: Arc::new(Mutex::new(Vec::new())),
+                resume_thread_ids: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
@@ -408,6 +410,10 @@ mod path_scope_tests {
             _sandbox: &str,
         ) -> Result<(), String> {
             if self.threads.lock().await.contains_key(thread_id) {
+                self.resume_thread_ids
+                    .lock()
+                    .await
+                    .push(thread_id.to_string());
                 Ok(())
             } else {
                 Err(format!("{} thread '{thread_id}' was not found", self.name))
@@ -626,7 +632,7 @@ mod path_scope_tests {
                 model: None,
                 effort: None,
                 device_id: Some("device-1".to_string()),
-                thread_id: Some(thread_b.id.clone()),
+                thread_id: thread_b.id.clone(),
             })
             .await
             .expect("send with explicit thread_id should succeed");
@@ -641,6 +647,51 @@ mod path_scope_tests {
             vec![thread_b.id.clone()],
             "the turn must go to the requested thread, never the previously-active one"
         );
+        assert!(
+            codex.resume_thread_ids.lock().await.is_empty(),
+            "targeted send must not resume the provider session first"
+        );
+    }
+
+    #[tokio::test]
+    async fn targeted_send_takes_over_the_focused_thread_from_another_device() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, codex, _claude) = build_recording_provider_app(cwd).await;
+        pair_device(&app, "device-a", Vec::new()).await;
+        pair_device(&app, "device-b", Vec::new()).await;
+
+        let thread = codex.thread_summary("codex-thread-a", cwd);
+        codex
+            .threads
+            .lock()
+            .await
+            .insert(thread.id.clone(), thread.clone());
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("codex".to_string());
+            relay.active_thread_id = Some(thread.id.clone());
+            relay.threads = vec![thread.clone()];
+            relay.assign_active_controller("device-a", unix_now());
+        }
+
+        let snapshot = app
+            .send_message(SendMessageInput {
+                text: "device B sends directly".to_string(),
+                model: None,
+                effort: None,
+                device_id: Some("device-b".to_string()),
+                thread_id: thread.id.clone(),
+            })
+            .await
+            .expect("an explicit send should take control even when the target is focused");
+
+        assert_eq!(
+            snapshot.active_controller_device_id.as_deref(),
+            Some("device-b")
+        );
+        assert_eq!(*codex.turn_thread_ids.lock().await, vec![thread.id]);
+        assert!(codex.resume_thread_ids.lock().await.is_empty());
     }
 
     // Review #2: a device must be able to take over a NON-active thread by sending
@@ -679,7 +730,7 @@ mod path_scope_tests {
                 model: None,
                 effort: None,
                 device_id: Some("device-b".to_string()),
-                thread_id: Some(thread_b.id.clone()),
+                thread_id: thread_b.id.clone(),
             })
             .await
             .expect("device B should take over a non-active thread by sending to it");
@@ -721,7 +772,7 @@ mod path_scope_tests {
                 model: None,
                 effort: None,
                 device_id: Some("device-1".to_string()),
-                thread_id: Some(thread_a.id.clone()),
+                thread_id: thread_a.id.clone(),
             })
             .await
             .expect("send with thread_id should take over even with no active thread");
@@ -775,7 +826,7 @@ mod path_scope_tests {
                 model: None,
                 effort: None,
                 device_id: Some("device-1".to_string()),
-                thread_id: None,
+                thread_id: thread.id.clone(),
             })
             .await
             .expect("send should start a turn");
@@ -844,7 +895,7 @@ mod path_scope_tests {
                 model: None,
                 effort: None,
                 device_id: Some("device-1".to_string()),
-                thread_id: Some(thread_b.id.clone()),
+                thread_id: thread_b.id.clone(),
             })
             .await;
 
@@ -864,7 +915,7 @@ mod path_scope_tests {
     }
 
     #[tokio::test]
-    async fn send_message_without_thread_id_targets_the_active_thread() {
+    async fn send_message_targets_the_explicit_thread() {
         let project = TempDir::new().expect("project tempdir");
         let cwd = project.path().to_str().unwrap();
         let (app, codex, _claude) = build_recording_provider_app(cwd).await;
@@ -888,10 +939,10 @@ mod path_scope_tests {
             model: None,
             effort: None,
             device_id: Some("device-1".to_string()),
-            thread_id: None,
+            thread_id: thread_a.id.clone(),
         })
         .await
-        .expect("legacy send (no thread_id) should target the active thread");
+        .expect("targeted send should start on the explicit thread");
 
         assert_eq!(
             *codex.turn_thread_ids.lock().await,
@@ -992,7 +1043,7 @@ mod path_scope_tests {
             model: Some("claude_code-model".to_string()),
             effort: Some("medium".to_string()),
             device_id: Some("device-1".to_string()),
-            thread_id: None,
+            thread_id: "claude-thread".to_string(),
         })
         .await
         .expect("message should route to claude provider");
@@ -1030,6 +1081,7 @@ mod path_scope_tests {
         let snapshot = app
             .stop_active_turn(StopTurnInput {
                 device_id: Some("device-1".to_string()),
+                thread_id: "claude-thread".to_string(),
             })
             .await
             .expect("provider should accept the stop request");
@@ -1045,6 +1097,51 @@ mod path_scope_tests {
             "the relay must wait for a provider completion event"
         );
         assert_eq!(snapshot.current_status, "active");
+    }
+
+    #[tokio::test]
+    async fn targeted_stop_does_not_move_live_focus_or_controller() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, codex, _claude) = build_recording_provider_app(cwd).await;
+        pair_device(&app, "device-a", Vec::new()).await;
+        pair_device(&app, "device-b", Vec::new()).await;
+
+        let thread_a = codex.thread_summary("codex-thread-a", cwd);
+        let thread_b = codex.thread_summary("codex-thread-b", cwd);
+        {
+            let mut threads = codex.threads.lock().await;
+            threads.insert(thread_a.id.clone(), thread_a.clone());
+            threads.insert(thread_b.id.clone(), thread_b.clone());
+        }
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("codex".to_string());
+            relay.active_thread_id = Some(thread_a.id.clone());
+            relay.current_cwd = cwd.to_string();
+            relay.threads = vec![thread_a.clone(), thread_b.clone()];
+            relay.assign_active_controller("device-a", unix_now());
+            relay.bg_set_active_turn(&thread_b.id, Some("turn-b".to_string()), unix_now());
+            relay.bg_set_thread_status(&thread_b.id, "active".to_string(), Vec::new(), unix_now());
+        }
+
+        let snapshot = app
+            .stop_active_turn(StopTurnInput {
+                device_id: Some("device-b".to_string()),
+                thread_id: thread_b.id.clone(),
+            })
+            .await
+            .expect("targeted stop should reach the background thread");
+
+        assert_eq!(
+            snapshot.active_thread_id.as_deref(),
+            Some(thread_a.id.as_str())
+        );
+        assert_eq!(
+            snapshot.active_controller_device_id.as_deref(),
+            Some("device-a")
+        );
+        assert_eq!(*codex.interrupt_thread_ids.lock().await, vec![thread_b.id]);
     }
 
     #[tokio::test]
@@ -1075,6 +1172,7 @@ mod path_scope_tests {
         let snapshot = app
             .stop_active_turn(StopTurnInput {
                 device_id: Some("device-1".to_string()),
+                thread_id: "claude-thread".to_string(),
             })
             .await
             .expect("provider should accept the stop request");
@@ -1117,7 +1215,7 @@ mod path_scope_tests {
             model: Some("claude_code-model".to_string()),
             effort: Some("medium".to_string()),
             device_id: Some("device-1".to_string()),
-            thread_id: None,
+            thread_id: "claude-thread-new".to_string(),
         })
         .await
         .expect("new active thread should route through the current provider before list sync");
@@ -1568,7 +1666,7 @@ mod path_scope_tests {
             model: Some("fake-echo".to_string()),
             effort: None,
             device_id: Some("device-1".to_string()),
-            thread_id: None,
+            thread_id: thread_a.clone(),
         })
         .await
         .expect("send streaming message to A");
@@ -1750,6 +1848,7 @@ mod path_scope_tests {
                 effort: Some("medium".to_string()),
                 model: Some("fake-pinned-a".to_string()),
                 device_id: Some("device-1".to_string()),
+                thread_id: thread_a.clone(),
             })
             .await
             .expect("update A settings");
@@ -1892,6 +1991,7 @@ mod path_scope_tests {
                 effort: Some("low".to_string()),
                 model: Some("fake-echo".to_string()),
                 device_id: dev(),
+                thread_id: thread_a.clone(),
             })
             .await
             .expect("update A");
@@ -2117,30 +2217,25 @@ mod path_scope_tests {
         // Manually plant an active thread at `other` so send_message has something to target.
         // Use an unscoped device to start the session first (so we don't trip the scope at start).
         pair_device(&app, "wide-device", Vec::new()).await;
-        app.start_session(StartSessionInput {
-            device_id: Some("wide-device".to_string()),
-            cwd: Some(other.display().to_string()),
-            model: None,
-            effort: None,
-            approval_policy: None,
-            sandbox: None,
-            provider: Some("fake".to_string()),
-            initial_prompt: None,
-        })
-        .await
-        .expect("wide device should start session");
-
-        // Hand controller to scoped device — required so ensure_device_can_send_message passes,
-        // then the scope check fires.
-        {
-            let mut relay = app.relay.write().await;
-            relay.assign_active_controller("scoped-device", unix_now());
-        }
+        let started = app
+            .start_session(StartSessionInput {
+                device_id: Some("wide-device".to_string()),
+                cwd: Some(other.display().to_string()),
+                model: None,
+                effort: None,
+                approval_policy: None,
+                sandbox: None,
+                provider: Some("fake".to_string()),
+                initial_prompt: None,
+            })
+            .await
+            .expect("wide device should start session");
+        let target_thread = started.active_thread_id.expect("started thread id");
 
         let error = app
             .send_message(SendMessageInput {
                 device_id: Some("scoped-device".to_string()),
-                thread_id: None,
+                thread_id: target_thread,
                 text: "hello".to_string(),
                 model: None,
                 effort: None,
@@ -2468,6 +2563,7 @@ mod path_scope_tests {
             })
             .await
             .expect("codex inherited default alias should normalize to a concrete model");
+        let codex_thread_id = snap.active_thread_id.clone().expect("codex thread id");
         assert_eq!(snap.model, DEFAULT_MODEL);
         assert_eq!(codex_provider.models_seen().await, vec![DEFAULT_MODEL]);
 
@@ -2481,6 +2577,7 @@ mod path_scope_tests {
                 effort: None,
                 model: None,
                 device_id: Some("device-1".to_string()),
+                thread_id: codex_thread_id.clone(),
             })
             .await
             .expect("codex settings update should normalize the inherited default alias");
@@ -2495,7 +2592,7 @@ mod path_scope_tests {
             model: None,
             effort: None,
             device_id: Some("device-1".to_string()),
-            thread_id: None,
+            thread_id: codex_thread_id,
         })
         .await
         .expect("codex send_message should normalize the inherited default alias");
@@ -3435,7 +3532,7 @@ mod review_tests {
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();
         let (app, providers) = build_review_app(cwd, &["codex"]).await;
-        let _parent = start_parent(&app, cwd, "codex").await;
+        let parent = start_parent(&app, cwd, "codex").await;
 
         // Seed a last assistant message on the parent (the fake replies REVIEW_REPLY).
         app.send_message(crate::protocol::SendMessageInput {
@@ -3443,7 +3540,7 @@ mod review_tests {
             model: None,
             effort: None,
             device_id: Some("device-1".to_string()),
-            thread_id: None,
+            thread_id: parent.id.clone(),
         })
         .await
         .expect("seed turn should start");
@@ -3600,7 +3697,7 @@ mod review_tests {
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();
         let (app, _providers) = build_review_app(cwd, &["codex"]).await;
-        start_parent(&app, cwd, "codex").await;
+        let _parent = start_parent(&app, cwd, "codex").await;
 
         // A reviewer thread that belongs to a DIFFERENT parent is not reusable here.
         app.relay
@@ -3805,7 +3902,7 @@ mod review_tests {
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();
         let (app, providers) = build_review_app(cwd, &["codex"]).await;
-        start_parent(&app, cwd, "codex").await;
+        let _parent = start_parent(&app, cwd, "codex").await;
 
         let first = app
             .request_review(review_input("codex"))
@@ -3877,7 +3974,7 @@ mod review_tests {
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();
         let (app, providers) = build_review_app(cwd, &["codex"]).await;
-        start_parent(&app, cwd, "codex").await;
+        let _parent = start_parent(&app, cwd, "codex").await;
 
         // The reviewer thread is created with a distinct, explicit model.
         let mut first_input = review_input("codex");
@@ -3936,7 +4033,7 @@ mod review_tests {
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();
         let (app, providers) = build_review_app(cwd, &["codex"]).await;
-        start_parent(&app, cwd, "codex").await;
+        let _parent = start_parent(&app, cwd, "codex").await;
 
         let mut first_input = review_input("codex");
         first_input.reviewer_model = Some("codex-special".to_string());
@@ -4825,7 +4922,7 @@ mod review_tests {
                 model: None,
                 effort: None,
                 device_id: Some("device-1".to_string()),
-                thread_id: None,
+                thread_id: parent.id.clone(),
             })
             .await
             .expect_err("send to the reviewed thread should be blocked");
@@ -4855,7 +4952,7 @@ mod review_tests {
             model: None,
             effort: None,
             device_id: Some("device-1".to_string()),
-            thread_id: None,
+            thread_id: other_thread.clone(),
         })
         .await
         .expect("sending on a non-reviewed thread must be allowed during a review");
@@ -5292,7 +5389,7 @@ mod review_tests {
             .unwrap()
             .complete_turns
             .store(false, Ordering::Relaxed);
-        start_parent(&app, cwd, "codex").await;
+        let parent = start_parent(&app, cwd, "codex").await;
         app.request_review(review_input("codex"))
             .await
             .expect("review should start and hold the guard");
@@ -5303,6 +5400,7 @@ mod review_tests {
                 ApplyFileChangeInput {
                     device_id: Some("device-1".to_string()),
                     direction: FileChangeApplyDirection::Rollback,
+                    thread_id: parent.id,
                 },
             )
             .await
@@ -5348,7 +5446,7 @@ mod review_tests {
         codex.raise_approval.store(true, Ordering::Relaxed);
         codex.deny_fails.store(true, Ordering::Relaxed);
         codex.interrupt_fails.store(true, Ordering::Relaxed);
-        start_parent(&app, cwd, "codex").await;
+        let parent = start_parent(&app, cwd, "codex").await;
 
         let receipt = app
             .request_review(review_input("codex"))
@@ -5367,7 +5465,7 @@ mod review_tests {
                 model: None,
                 effort: None,
                 device_id: Some("device-1".to_string()),
-                thread_id: None,
+                thread_id: parent.id.clone(),
             })
             .await
             .expect_err("the reviewed thread must stay frozen while blocked");
@@ -5404,7 +5502,7 @@ mod review_tests {
                 model: None,
                 effort: None,
                 device_id: Some("device-1".to_string()),
-                thread_id: None,
+                thread_id: parent.id.clone(),
             })
             .await;
         if let Err(error) = after {
@@ -5530,7 +5628,7 @@ mod review_tests {
                 model: None,
                 effort: None,
                 device_id: Some("device-1".to_string()),
-                thread_id: None,
+                thread_id: parent.id.clone(),
             })
             .await
             .expect_err("the reviewed thread must stay frozen while blocked");
@@ -5551,7 +5649,7 @@ mod review_tests {
                 model: None,
                 effort: None,
                 device_id: Some("device-1".to_string()),
-                thread_id: None,
+                thread_id: parent.id.clone(),
             })
             .await
         {
@@ -6319,7 +6417,7 @@ mod review_tests {
                 model: None,
                 effort: None,
                 device_id: Some("device-1".to_string()),
-                thread_id: None,
+                thread_id: parent.id.clone(),
             })
             .await
         {

@@ -195,24 +195,29 @@ impl AppState {
         input: ApplyFileChangeInput,
     ) -> Result<ApplyFileChangeReceipt, String> {
         let device_id = require_device_id(input.device_id)?;
+        let requested_thread =
+            non_empty(Some(input.thread_id)).ok_or_else(|| "thread_id is required".to_string())?;
         // Rollback/reapply mutates the working tree; block it while a review reads
         // that same tree.
         let _slot = self.acquire_session_slot()?;
-        let (cwd, diff) = {
+        self.ensure_thread_runtime_loaded(&requested_thread, &device_id)
+            .await?;
+        let (thread_id, cwd, diff) = {
             let relay = self.relay.read().await;
-            relay.ensure_device_can_send_message(&device_id)?;
-            if let Some(active) = relay.active_thread_id.as_deref() {
-                if relay.is_thread_review_locked(active) {
-                    return Err(REVIEW_LOCKED_THREAD_MSG.to_string());
-                }
+            let thread_id = requested_thread;
+            if relay.is_thread_review_locked(&thread_id) {
+                return Err(REVIEW_LOCKED_THREAD_MSG.to_string());
             }
+            let runtime = relay
+                .runtime_for_thread(&thread_id)
+                .ok_or_else(|| format!("thread `{thread_id}` is not loaded"))?;
             let device_scope = relay.device_path_scope(&device_id);
             ensure_path_within_device_scope(
-                &relay.current_cwd,
+                &runtime.current_cwd,
                 &device_scope,
                 &relay.allowed_roots,
             )?;
-            let entry = relay
+            let entry = runtime
                 .transcript
                 .iter()
                 .find(|entry| entry.item_id == item_id)
@@ -235,13 +240,14 @@ impl AppState {
                     (!parts.is_empty()).then(|| parts.join("\n"))
                 })
                 .ok_or_else(|| format!("file change `{item_id}` has no diff to apply"))?;
-            (relay.current_cwd.clone(), diff)
+            (thread_id, runtime.current_cwd.clone(), diff)
         };
 
         apply_unified_diff(&cwd, &diff, input.direction).await?;
 
         let mut relay = self.relay.write().await;
-        relay.set_file_change_apply_state(
+        relay.set_file_change_apply_state_for_thread(
+            &thread_id,
             item_id,
             match input.direction {
                 FileChangeApplyDirection::Rollback => {

@@ -65,7 +65,7 @@ test("REGRESSION #2: a non-active, NON-review thread projects read-only with pag
   assert.equal(projected.active_thread_id, "A");
   assert.deepEqual(projected.transcript, pin.entries);
   assert.equal(projected.view_only, true);
-  assert.equal(projected.current_status, "viewing");
+  assert.equal(projected.current_status, "idle");
   assert.equal(projected.active_controller_device_id, "__view_only__");
   assert.equal(projected.active_turn_id, null);
   assert.deepEqual(projected.pending_approvals, []);
@@ -109,6 +109,51 @@ test("projection reports complete history when the older cursor is exhausted", (
     viewOnlyThread: pinFor("A", { olderCursor: null }),
   });
   assert.equal(projected.transcript_truncated, false);
+});
+
+test("projection treats a stale working summary as idle when activity is absent", () => {
+  const projected = projectViewOnlySession(realSession({ thread_activity: [] }), {
+    viewThreadId: "A",
+    viewOnlyThread: pinFor("A", { status: "active" }),
+  });
+  assert.equal(projected.current_status, "idle");
+  assert.equal(projected.active_turn_id, null);
+});
+
+test("projection derives working state and pending prompts from the viewed thread", () => {
+  const projected = projectViewOnlySession(
+    realSession({
+      thread_activity: [
+        { thread_id: "A", phase: "tool", tool: "shell" },
+        { thread_id: "B", phase: "thinking", tool: null },
+      ],
+      pending_approvals: [
+        { request_id: "approval-a", thread_id: "A" },
+        { request_id: "approval-b", thread_id: "B" },
+      ],
+      pending_ask_user_questions: [
+        { request_id: "question-a", thread_id: "A" },
+        { request_id: "question-b", thread_id: "B" },
+      ],
+    }),
+    {
+      viewThreadId: "A",
+      viewOnlyThread: pinFor("A", { status: "idle" }),
+    }
+  );
+
+  assert.equal(projected.current_status, "active");
+  assert.equal(projected.current_phase, "tool");
+  assert.equal(projected.current_tool, "shell");
+  assert.equal(projected.active_turn_id, "view:A");
+  assert.deepEqual(
+    projected.pending_approvals.map((entry) => entry.request_id),
+    ["approval-a"]
+  );
+  assert.deepEqual(
+    projected.pending_ask_user_questions.map((entry) => entry.request_id),
+    ["question-a"]
+  );
 });
 
 test("projection is a no-op without a matching pin or when viewing the active thread", () => {
@@ -212,11 +257,11 @@ test("a general pin releases when its thread becomes active or the user navigate
   );
 });
 
-test("a review pin auto-resumes in place when the review ends and the user is still there", () => {
+test("a review pin refreshes in place when the review ends and never resumes", () => {
   const session = realSession({ active_review_jobs: REVIEW_DONE });
   assert.deepEqual(
     viewOnlyPinNextAction(session, pinFor("A", { review: true }), { viewThreadId: "A" }),
-    { kind: "resume" }
+    { kind: "refresh" }
   );
   assert.deepEqual(
     viewOnlyPinNextAction(session, pinFor("A", { review: true }), { viewThreadId: "B" }),

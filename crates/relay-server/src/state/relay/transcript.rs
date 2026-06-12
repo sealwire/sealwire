@@ -599,20 +599,13 @@ impl RelayState {
         )
     }
 
-    pub fn set_file_change_apply_state(
+    pub fn set_file_change_apply_state_for_thread(
         &mut self,
+        thread_id: &str,
         item_id: &str,
         state: FileChangeApplyState,
     ) -> bool {
-        let Some(thread_id) = self.active_thread_id.clone() else {
-            if !self.transcript.iter().any(|entry| entry.item_id == item_id) {
-                return false;
-            }
-            self.apply_states.insert(item_id.to_string(), state);
-            self.bump_transcript_revision();
-            return true;
-        };
-        let runtime = self.ensure_runtime_for_thread(&thread_id);
+        let runtime = self.ensure_runtime_for_thread(thread_id);
         if !runtime
             .transcript
             .iter()
@@ -621,8 +614,10 @@ impl RelayState {
             return false;
         }
         runtime.apply_states.insert(item_id.to_string(), state);
-        self.bump_thread_transcript_revision(&thread_id);
-        self.sync_selected_runtime_to_fields();
+        self.bump_thread_transcript_revision(thread_id);
+        if self.active_thread_id.as_deref() == Some(thread_id) {
+            self.sync_selected_runtime_to_fields();
+        }
         true
     }
 

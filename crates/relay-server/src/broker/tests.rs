@@ -665,7 +665,8 @@ fn parse_inbound_payload_parses_remote_action_requests() {
         "request": {
             "type": "send_message",
             "input": {
-                "text": "hello"
+                "text": "hello",
+                "thread_id": "thread-1"
             }
         }
     });
@@ -780,7 +781,7 @@ fn parse_inbound_payload_parses_encrypted_remote_actions() {
                 model: None,
                 effort: None,
                 device_id: None,
-                thread_id: None,
+                thread_id: "thread-1".to_string(),
             },
         },
     )

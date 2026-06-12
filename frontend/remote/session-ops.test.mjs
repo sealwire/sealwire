@@ -487,7 +487,7 @@ test("resumeRemoteSession sends only thread id so relay restores per-thread sett
   });
 });
 
-test("view-only thread stays pinned while its review runs, then releases when it ends", async () => {
+test("view-only thread stays pinned across live snapshots and review completion", async () => {
   activeBrowser = installBrowserStubs();
 
   const { state, saveRemoteAuth } = await import("./state.js");
@@ -605,7 +605,8 @@ test("view-only thread stays pinned while its review runs, then releases when it
     "the pinned parent stays displayed while the review runs"
   );
 
-  // 4. Once the review completes, the pin auto-releases and live snapshots flow.
+  // 4. Review completion is still just another background snapshot; viewing
+  //    remains client-local until the user sends or navigates elsewhere.
   applySessionSnapshot(
     snapshot({
       active_thread_id: "thread-other",
@@ -616,9 +617,74 @@ test("view-only thread stays pinned while its review runs, then releases when it
   );
   assert.equal(
     state.session.active_thread_id,
-    "thread-other",
-    "the view returns to the live session once the review finishes"
+    "parent-view-1",
+    "review completion must not move the user's view"
   );
+});
+
+test("viewing the live thread stays pinned when another client moves live focus", async () => {
+  activeBrowser = installBrowserStubs();
+
+  const { state } = await import("./state.js");
+  const {
+    applySessionSnapshot,
+    applyTranscriptDelta,
+    clearSessionRuntime,
+    viewRemoteThread,
+  } = await import("./session-ops.js");
+
+  clearSessionRuntime();
+  state.session = null;
+  state.threads = [
+    { id: "thread-a", cwd: "/tmp/a", status: "active" },
+    { id: "thread-b", cwd: "/tmp/b", status: "active" },
+  ];
+  seedTranscriptHydrationState(state);
+
+  applySessionSnapshot({
+    active_thread_id: "thread-a",
+    active_turn_id: null,
+    current_cwd: "/tmp/a",
+    current_status: "idle",
+    pending_approvals: [],
+    pending_ask_user_questions: [],
+    transcript: [{ item_id: "a-1", text: "thread A" }],
+    transcript_truncated: false,
+  });
+  assert.equal(await viewRemoteThread("thread-a"), true);
+
+  applySessionSnapshot({
+    active_thread_id: "thread-b",
+    active_turn_id: "turn-b",
+    current_cwd: "/tmp/b",
+    current_status: "active",
+    pending_approvals: [],
+    pending_ask_user_questions: [],
+    thread_activity: [{ thread_id: "thread-b", phase: "thinking", tool: null }],
+    transcript: [{ item_id: "b-1", text: "thread B" }],
+    transcript_truncated: false,
+  });
+
+  assert.equal(state.realSession.active_thread_id, "thread-b");
+  assert.equal(state.session.active_thread_id, "thread-a");
+  assert.equal(state.session.view_only, true);
+  assert.equal(state.session.current_status, "idle");
+  assert.deepEqual(
+    state.session.transcript.map((entry) => entry.item_id),
+    ["a-1"]
+  );
+
+  applyTranscriptDelta({
+    thread_id: "thread-b",
+    item_id: "b-1",
+    turn_id: "turn-b",
+    delta: " live",
+    delta_kind: "agent_text",
+    revision: 1,
+  });
+  assert.equal(state.realSession.transcript[0].text, "thread B live");
+  assert.equal(state.session.active_thread_id, "thread-a");
+  assert.equal(state.session.transcript[0].text, "thread A");
 });
 
 test("stale view-only fetch cannot override a newer resume", async () => {

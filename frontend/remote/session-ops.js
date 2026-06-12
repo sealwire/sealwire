@@ -57,18 +57,20 @@ const fetchCachedTranscriptPage = createCachingTranscriptPageFetcher({
   getScope: remoteQueryScope,
 });
 
-// While the user is viewing a review-locked thread (resume is blocked, so we show
-// a read-only transcript projection), this pins that thread id. Live broker
-// snapshots that would swap the view back to the relay's actual active thread are
-// suppressed until the review on the pinned thread finishes — then the pin
-// auto-releases and the view returns to the live session. Explicit user actions
-// (resume/start/leaving the relay) clear it immediately.
+// Client-local viewed thread. The relay's live/control snapshot is retained in
+// state.realSession while state.session is the rendered projection.
 let viewOnlyThreadId = null;
 let viewOnlyNavigationGeneration = 0;
+let viewOnlyRefreshInFlight = false;
+let viewOnlyLastRefreshAt = 0;
+let viewOnlyWasWorking = false;
 
 function invalidateViewOnlyNavigation() {
   viewOnlyNavigationGeneration += 1;
   viewOnlyThreadId = null;
+  viewOnlyRefreshInFlight = false;
+  viewOnlyLastRefreshAt = 0;
+  viewOnlyWasWorking = false;
 }
 
 function remoteQueryScope() {
@@ -113,8 +115,9 @@ export function applyTranscriptDelta({
   if (typeof window !== "undefined" && typeof window.__transcriptDeltaCount === "number") {
     window.__transcriptDeltaCount++;
   }
-  if (!state.session) return;
-  const currentThreadId = state.session.active_thread_id || null;
+  const currentSession = currentLiveSession();
+  if (!currentSession) return;
+  const currentThreadId = currentSession.active_thread_id || null;
   if (thread_id && currentThreadId && thread_id !== currentThreadId) {
     const message = `[transcript-delta] ignored thread=${thread_id} current=${currentThreadId} item=${item_id || "-"} kind=${delta_kind || kind || "-"}`;
     renderLog(message);
@@ -122,7 +125,7 @@ export function applyTranscriptDelta({
     console.log(message);
     return;
   }
-  const currentRevision = numericRevision(state.session.transcript_revision);
+  const currentRevision = numericRevision(currentSession.transcript_revision);
   const deltaBaseRevision = numericRevision(base_revision);
   const deltaRevision = numericRevision(revision);
   if (
@@ -136,7 +139,7 @@ export function applyTranscriptDelta({
     return;
   }
 
-  const transcript = state.session.transcript;
+  const transcript = currentSession.transcript;
   if (!Array.isArray(transcript)) return;
   const resolvedKind = transcriptDeltaKindToEntryKind(delta_kind || kind);
   const entryIndex = transcript.findIndex((e) => e.item_id === item_id);
@@ -185,6 +188,7 @@ export function applyTranscriptDelta({
     // Contiguous, or partially-overlapping re-delivery: append only the tail we
     // are missing so re-delivery stays idempotent.
     commitTranscriptDeltaAppend({
+      currentSession,
       transcript,
       entryIndex,
       item_id,
@@ -214,6 +218,7 @@ export function applyTranscriptDelta({
     return;
   }
   commitTranscriptDeltaAppend({
+    currentSession,
     transcript,
     entryIndex,
     item_id,
@@ -227,6 +232,7 @@ export function applyTranscriptDelta({
 }
 
 function commitTranscriptDeltaAppend({
+  currentSession,
   transcript,
   entryIndex,
   item_id,
@@ -266,7 +272,7 @@ function commitTranscriptDeltaAppend({
         },
       ];
   const nextSession = {
-    ...state.session,
+    ...currentSession,
     transcript: nextTranscript,
   };
   // Always advance the revision cursor when we apply a delta, even though the
@@ -279,7 +285,7 @@ function commitTranscriptDeltaAppend({
   if (Number.isSafeInteger(server_time)) {
     nextSession.server_time = server_time;
   }
-  renderSession(nextSession);
+  commitLiveSession(nextSession);
 }
 
 // Highest target revision we still owe a repair for, per thread. A Map (not a
@@ -475,21 +481,46 @@ export function applySessionSnapshot(snapshot) {
   if (typeof window !== "undefined" && typeof window.__snapshotCount === "number") {
     window.__snapshotCount++;
   }
+  // Keep the authoritative live snapshot aligned with the rendered session
+  // whenever no client-local projection is active. This also preserves live
+  // transcript deltas that arrived after the previous full snapshot.
+  if (!state.session) {
+    state.realSession = null;
+    viewOnlyThreadId = null;
+  } else if (!state.session.view_only) {
+    state.realSession = state.session;
+    if (
+      viewOnlyThreadId
+      && viewOnlyThreadId !== state.session.active_thread_id
+    ) {
+      viewOnlyThreadId = null;
+    }
+  }
   if (!shouldAcceptSessionSnapshot(snapshot)) {
-    const currentRevision = numericRevision(state.session?.transcript_revision);
+    const currentRevision = numericRevision(state.realSession?.transcript_revision);
     const incomingRevision = numericRevision(snapshot?.transcript_revision);
     const message = `[session-snapshot] ignored stale revision=${incomingRevision ?? "-"} current=${currentRevision ?? "-"} thread=${snapshot?.active_thread_id || "-"}`;
     renderLog(message);
     console.log(message);
     return;
   }
-  const displaySnapshot = preserveVisibleTranscriptText(state.session, snapshot);
+  const displaySnapshot = preserveVisibleTranscriptText(state.realSession, snapshot);
+  state.realSession = displaySnapshot;
   const previousThreadId = state.session?.active_thread_id || "-";
-  syncLiveTranscriptEntryDetailsFromSnapshot(state, displaySnapshot);
-  const effectiveSnapshot = restoreHydratedTranscript(state, displaySnapshot);
+  const viewingLiveThread =
+    viewOnlyThreadId && displaySnapshot.active_thread_id === viewOnlyThreadId;
+  const projectedSnapshot = viewOnlyThreadId && !viewingLiveThread
+    ? projectRemoteViewedSession(displaySnapshot, viewOnlyThreadId, state.session)
+    : displaySnapshot;
+  syncLiveTranscriptEntryDetailsFromSnapshot(state, projectedSnapshot);
+  const effectiveSnapshot = viewOnlyThreadId && !viewingLiveThread
+    ? projectedSnapshot
+    : restoreHydratedTranscript(state, projectedSnapshot);
   applyRenderedSession(effectiveSnapshot, {
     hydrationSnapshot: displaySnapshot,
+    hydrateTranscript: !viewOnlyThreadId || viewingLiveThread,
   });
+  maybeRefreshRemoteViewedThread(displaySnapshot);
   // Derive per-thread attention flags from the snapshot stream and fire browser
   // notifications for threads the user isn't actively watching. Best-effort:
   // never let a notification hiccup break snapshot rendering.
@@ -577,33 +608,67 @@ function shouldAcceptSessionSnapshot(snapshot) {
   if (!snapshot) {
     return false;
   }
-  // View-only pin (see `viewOnlyThreadId`): while a thread is pinned for read-only
-  // viewing because it is under review, suppress live snapshots that would swap
-  // the view back to the relay's real active thread. Auto-release the pin once the
-  // review on the pinned thread is no longer in progress, letting live flow again.
-  if (viewOnlyThreadId) {
-    if (isReviewInProgressForThread(snapshot, viewOnlyThreadId)) {
-      const incoming = snapshot.active_thread_id || null;
-      if (incoming && incoming !== viewOnlyThreadId) {
-        return false;
-      }
-    } else {
-      viewOnlyThreadId = null;
-    }
-  }
   const incomingThreadId = snapshot.active_thread_id || null;
-  const currentThreadId = state.session?.active_thread_id || null;
+  const currentThreadId = state.realSession?.active_thread_id || null;
   if (!incomingThreadId || incomingThreadId !== currentThreadId) {
     return true;
   }
 
   const incomingRevision = numericRevision(snapshot.transcript_revision);
-  const currentRevision = numericRevision(state.session?.transcript_revision);
+  const currentRevision = numericRevision(state.realSession?.transcript_revision);
   return incomingRevision == null || currentRevision == null || incomingRevision >= currentRevision;
 }
 
+function projectRemoteViewedSession(realSession, threadId, currentView) {
+  const thread = (state.threads || []).find((candidate) => candidate?.id === threadId);
+  const activity = (realSession?.thread_activity || []).find(
+    (entry) => entry?.thread_id === threadId
+  );
+  const pendingApprovals = (realSession?.pending_approvals || []).filter(
+    (entry) => entry?.thread_id === threadId
+  );
+  const pendingQuestions = (realSession?.pending_ask_user_questions || []).filter(
+    (entry) => entry?.thread_id === threadId
+  );
+  return {
+    ...(realSession || {}),
+    active_controller_device_id: "__view_only__",
+    active_controller_last_seen_at: null,
+    active_flags: [],
+    active_thread_id: threadId,
+    active_turn_id: activity ? `view:${threadId}` : null,
+    controller_lease_expires_at: null,
+    current_cwd: thread?.cwd || "",
+    current_phase: activity?.phase || null,
+    current_status: activity ? "active" : settledThreadStatus(thread?.status),
+    current_tool: activity?.tool || null,
+    model: "",
+    reasoning_effort: "",
+    approval_policy: "",
+    sandbox: "",
+    pending_approvals: pendingApprovals,
+    pending_ask_user_questions: pendingQuestions,
+    transcript:
+      currentView?.active_thread_id === threadId ? currentView.transcript || [] : [],
+    transcript_revision:
+      currentView?.active_thread_id === threadId ? currentView.transcript_revision || 0 : 0,
+    transcript_truncated:
+      currentView?.active_thread_id === threadId
+        ? Boolean(currentView.transcript_truncated)
+        : false,
+    view_only: true,
+  };
+}
+
+function settledThreadStatus(status) {
+  const normalized = typeof status === "string" ? status.toLowerCase() : "";
+  return normalized === "active" || normalized === "running" || normalized === "working"
+    ? "idle"
+    : status || "idle";
+}
+
 function applyTranscriptEntryPatch(event, { defaultStatus = null } = {}) {
-  const currentSession = state.session;
+  const currentSession = currentLiveSession();
   if (!currentSession) {
     return;
   }
@@ -675,11 +740,12 @@ function applyTranscriptEntryPatch(event, { defaultStatus = null } = {}) {
   if (Number.isSafeInteger(event.server_time)) {
     nextSession.server_time = event.server_time;
   }
-  renderSession(nextSession);
+  commitLiveSession(nextSession);
 }
 
 function applySessionMetadataPatch(patch) {
-  if (!state.session || !patch) {
+  const currentSession = currentLiveSession();
+  if (!currentSession || !patch) {
     return;
   }
   const {
@@ -689,22 +755,39 @@ function applySessionMetadataPatch(patch) {
     transcript_truncated: _transcriptTruncated,
     ...metadata
   } = patch;
-  renderSession({
-    ...state.session,
+  commitLiveSession({
+    ...currentSession,
     ...metadata,
-    transcript: state.session.transcript,
-    transcript_truncated: state.session.transcript_truncated,
+    transcript: currentSession.transcript,
+    transcript_truncated: currentSession.transcript_truncated,
   });
 }
 
 function shouldAcceptTranscriptRevision(event) {
-  const currentRevision = numericRevision(state.session?.transcript_revision);
+  const currentRevision = numericRevision(
+    currentLiveSession()?.transcript_revision
+  );
   const eventBaseRevision = numericRevision(event.base_revision);
   const eventRevision = numericRevision(event.revision ?? event.transcript_revision);
   if (eventRevision != null && currentRevision != null && eventRevision < currentRevision) {
     return false;
   }
   return !(eventBaseRevision != null && currentRevision != null && eventBaseRevision !== currentRevision);
+}
+
+function currentLiveSession() {
+  return state.session?.view_only ? state.realSession : state.session;
+}
+
+function commitLiveSession(nextLiveSession) {
+  state.realSession = nextLiveSession;
+  if (viewOnlyThreadId && viewOnlyThreadId !== nextLiveSession.active_thread_id) {
+    renderSession(
+      projectRemoteViewedSession(nextLiveSession, viewOnlyThreadId, state.session)
+    );
+    return;
+  }
+  renderSession(nextLiveSession);
 }
 
 function normalizeTranscriptEventEntryKind(kind) {
@@ -875,7 +958,7 @@ export async function updateRemoteSessionSettings({ approval_policy, sandbox, ef
   if (!state.session?.active_thread_id) {
     return false;
   }
-  const input = {};
+  const input = { thread_id: state.session.active_thread_id };
   if (typeof approval_policy === "string" && approval_policy) {
     input.approval_policy = approval_policy;
   }
@@ -919,6 +1002,13 @@ export async function viewRemoteThread(threadId) {
 
   const navigationGeneration = ++viewOnlyNavigationGeneration;
   renderLog(`Viewing remote thread ${threadId}.`);
+  if (state.realSession?.active_thread_id === threadId) {
+    viewOnlyThreadId = threadId;
+    viewOnlyLastRefreshAt = Date.now();
+    viewOnlyWasWorking = Boolean(state.realSession.active_turn_id);
+    applyRenderedSession(state.realSession);
+    return true;
+  }
 
   try {
     const page = await fetchTranscriptPage({
@@ -936,21 +1026,34 @@ export async function viewRemoteThread(threadId) {
 
     const thread = (state.threads || []).find((candidate) => candidate?.id === threadId);
     clearTranscriptHydration(state);
-    // Pin this thread so incoming live snapshots don't immediately overwrite the
-    // view-only projection (released automatically when the review finishes).
+    // Pin this thread so incoming live snapshots update state.realSession while
+    // leaving the user's local view in place.
     viewOnlyThreadId = threadId;
+    viewOnlyLastRefreshAt = Date.now();
+    viewOnlyWasWorking = Boolean(
+      (state.realSession?.thread_activity || []).find(
+        (entry) => entry?.thread_id === threadId
+      )
+    );
     applyRenderedSession(
       {
-        ...(state.session || {}),
+        ...(state.realSession || state.session || {}),
         active_controller_device_id: "__view_only__",
         active_controller_last_seen_at: null,
         active_flags: [],
         active_thread_id: threadId,
         active_turn_id: null,
         controller_lease_expires_at: null,
-        current_cwd: thread?.cwd || state.session?.current_cwd || "",
-        current_status: "viewing",
+        current_cwd: thread?.cwd || "",
+        current_status: settledThreadStatus(thread?.status),
+        current_phase: null,
+        current_tool: null,
+        model: "",
+        reasoning_effort: "",
+        approval_policy: "",
+        sandbox: "",
         pending_approvals: [],
+        pending_ask_user_questions: [],
         transcript: page.entries || [],
         transcript_truncated: page.prev_cursor != null,
         view_only: true,
@@ -966,6 +1069,28 @@ export async function viewRemoteThread(threadId) {
   }
 }
 
+function maybeRefreshRemoteViewedThread(realSession) {
+  if (!viewOnlyThreadId || viewOnlyRefreshInFlight) {
+    return;
+  }
+  const working = Boolean(
+    (realSession?.thread_activity || []).find(
+      (entry) => entry?.thread_id === viewOnlyThreadId
+    )
+  );
+  const needsRefresh = working || viewOnlyWasWorking;
+  viewOnlyWasWorking = working;
+  if (!needsRefresh || Date.now() - viewOnlyLastRefreshAt < 300) {
+    return;
+  }
+  const threadId = viewOnlyThreadId;
+  viewOnlyRefreshInFlight = true;
+  viewOnlyLastRefreshAt = Date.now();
+  void viewRemoteThread(threadId).finally(() => {
+    viewOnlyRefreshInFlight = false;
+  });
+}
+
 export async function sendMessage(messageDraft, effort, model = "") {
   if (typeof messageDraft !== "string" || typeof effort !== "string") {
     throw new Error("sendMessage requires a draft and effort");
@@ -975,6 +1100,11 @@ export async function sendMessage(messageDraft, effort, model = "") {
     renderLog("Message is empty.");
     return false;
   }
+  const threadId = state.session?.active_thread_id;
+  if (!threadId) {
+    renderLog("No thread is selected.");
+    return false;
+  }
 
   try {
     await dispatchOrRecover("send_message", {
@@ -982,13 +1112,7 @@ export async function sendMessage(messageDraft, effort, model = "") {
         text,
         model,
         effort,
-        // Target the thread the user is currently looking at. On the remote
-        // surface a view-only projection sets the rendered session's
-        // active_thread_id to the viewed thread, so this is the thread the user
-        // means — the relay atomically takes it over (resume) and sends in one
-        // op, closing the wrong-thread race when another client moves the global
-        // active thread between navigation and send.
-        thread_id: state.session?.active_thread_id || null,
+        thread_id: threadId,
       },
     });
     return true;
@@ -1006,7 +1130,9 @@ export async function stopActiveTurn() {
 
   try {
     await dispatchOrRecover("stop_turn", {
-      input: {},
+      input: {
+        thread_id: state.session.active_thread_id,
+      },
     });
     renderLog("Remote stop request sent to Codex.");
     return true;
@@ -1079,6 +1205,11 @@ export async function applyFileChange(itemId, direction) {
     renderLog("No file change selected.");
     return;
   }
+  const threadId = state.session?.active_thread_id;
+  if (!threadId) {
+    renderLog("No thread is selected.");
+    return;
+  }
 
   renderLog(`${direction === "rollback" ? "Rolling back" : "Reapplying"} file change ${itemId}`);
 
@@ -1087,6 +1218,7 @@ export async function applyFileChange(itemId, direction) {
       item_id: itemId,
       input: {
         direction,
+        thread_id: threadId,
       },
     });
   } catch (error) {
@@ -1186,11 +1318,16 @@ export async function fetchRemoteThreadTranscript(threadId) {
 
 export function clearSessionRuntime() {
   invalidateViewOnlyNavigation();
+  state.realSession = null;
   clearTranscriptHydration(state);
 }
 
 async function sendHeartbeat() {
-  if (!state.session?.active_thread_id || !isCurrentDeviceActiveController(state.session)) {
+  const liveSession = state.session?.view_only ? state.realSession : state.session;
+  if (
+    !liveSession?.active_thread_id
+    || !isCurrentDeviceActiveController(liveSession)
+  ) {
     return;
   }
 

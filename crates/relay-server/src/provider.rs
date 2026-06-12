@@ -66,6 +66,11 @@ pub trait ProviderBridge: Send + Sync {
         model: &str,
         effort: &str,
     ) -> Result<Option<String>, String>;
+    /// Resolve the public thread id after `start_turn`. Providers whose first
+    /// turn promotes a placeholder id (Claude deferred start) override this.
+    async fn resolve_started_thread_id(&self, requested_thread_id: &str) -> String {
+        requested_thread_id.to_string()
+    }
     /// Request that the provider stop the in-flight work for `thread_id`.
     ///
     /// Providers with turn-scoped cancellation (Codex) require `turn_id`.

@@ -1255,6 +1255,8 @@ pub struct UpdateSessionSettingsInput {
     pub effort: Option<String>,
     pub model: Option<String>,
     pub device_id: Option<String>,
+    /// Explicit operation target.
+    pub thread_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1263,16 +1265,16 @@ pub struct SendMessageInput {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub device_id: Option<String>,
-    /// Target thread for the message. When set and not already the active thread,
-    /// the relay takes it over (resume) and sends to it atomically — "sending IS
-    /// taking over". Omitted → send to the current active thread (legacy behavior).
-    #[serde(default)]
-    pub thread_id: Option<String>,
+    /// Target thread for the message. Sending directly starts a turn on this
+    /// thread and then moves the control/live projection to it.
+    pub thread_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StopTurnInput {
     pub device_id: Option<String>,
+    /// Explicit operation target.
+    pub thread_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1373,6 +1375,8 @@ pub enum FileChangeApplyDirection {
 pub struct ApplyFileChangeInput {
     pub device_id: Option<String>,
     pub direction: FileChangeApplyDirection,
+    /// Thread whose transcript owns the file-change item.
+    pub thread_id: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -296,6 +296,7 @@ export function createTranscriptController(ctx) {
         body: JSON.stringify({
           direction,
           device_id: state.deviceId,
+          thread_id: state.viewOnlyThread?.threadId || state.session?.active_thread_id,
         }),
       });
       const payload = await response.json();

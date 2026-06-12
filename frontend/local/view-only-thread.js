@@ -9,10 +9,7 @@
 //     "pin" { threadId, entries, olderCursor, ... } loaded over the normal
 //     transcript-page API (cache-aware);
 //   - scroll-up pagination merges older pages into the pin;
-//   - resume happens ONLY on an explicit user action (button / send), never as
-//     a side effect of looking at a thread. The single exception is the
-//     pre-existing review UX: when a review on the pinned thread ends while the
-//     user is still on it, the view seamlessly resumes in place.
+//   - sending is the only action that takes control; viewing never resumes.
 //
 // The app glue (frontend/app.js) owns fetching/generations; render-session.js
 // applies projectViewOnlySession() to the rendered session only — state.session
@@ -36,6 +33,9 @@ export function buildViewOnlyPin({
   reviewSig = null,
   cwd = null,
   provider = null,
+  status = null,
+  lastRefreshAt = 0,
+  wasWorking = false,
   priorEntries = [],
   priorOlderCursor = null,
   loading = false,
@@ -53,8 +53,18 @@ export function buildViewOnlyPin({
     // so the projection blanks those (blank/unknown beats impersonating live).
     cwd,
     provider,
+    status,
+    lastRefreshAt,
+    wasWorking,
     loading,
   };
+}
+
+function settledThreadStatus(status) {
+  const normalized = typeof status === "string" ? status.toLowerCase() : "";
+  return normalized === "active" || normalized === "running" || normalized === "working"
+    ? "idle"
+    : status || "idle";
 }
 
 // Prepend an older history page into the pin. Entries already present (by
@@ -92,17 +102,29 @@ export function projectViewOnlySession(realSession, { viewThreadId, viewOnlyThre
   ) {
     return realSession;
   }
+  const activity = (realSession.thread_activity || []).find(
+    (entry) => entry?.thread_id === viewThreadId
+  );
+  const isWorking = Boolean(activity);
+  const pendingApprovals = (realSession.pending_approvals || []).filter(
+    (entry) => entry?.thread_id === viewThreadId
+  );
+  const pendingQuestions = (realSession.pending_ask_user_questions || []).filter(
+    (entry) => entry?.thread_id === viewThreadId
+  );
   return {
     ...realSession,
     active_thread_id: viewThreadId,
-    active_turn_id: null,
-    pending_approvals: [],
-    pending_ask_user_questions: [],
+    active_turn_id: isWorking ? `view:${viewThreadId}` : null,
+    pending_approvals: pendingApprovals,
+    pending_ask_user_questions: pendingQuestions,
     // A sentinel controller id makes canCurrentDeviceWrite() false → read-only.
     active_controller_device_id: "__view_only__",
     transcript: viewOnlyThread.entries || [],
     transcript_truncated: viewOnlyThread.olderCursor != null,
-    current_status: "viewing",
+    current_status: isWorking ? "active" : settledThreadStatus(viewOnlyThread.status),
+    current_phase: activity?.phase || null,
+    current_tool: activity?.tool || null,
     view_only: true,
     // A read-only saved-thread view must never present the LIVE session's
     // metadata as the saved thread's. Use the viewed thread's summary fields
@@ -121,7 +143,6 @@ export function projectViewOnlySession(realSession, { viewThreadId, viewOnlyThre
 // Decide what to do with the pin on each render. Returns { kind }:
 //   "none"    — keep the pin as is
 //   "release" — drop the pin (thread became active, or user navigated away)
-//   "resume"  — drop the pin AND resume the thread in place (review-end UX only)
 //   "refresh" — re-fetch the pinned transcript (review advanced)
 //
 // CRITICAL: a general (non-review) pin never resolves to "resume". Auto-resuming
@@ -136,7 +157,7 @@ export function viewOnlyPinNextAction(session, pin, { viewThreadId, reviewSignat
   }
   if (pin.review) {
     if (!isReviewInProgressForThread(session, pin.threadId)) {
-      return viewThreadId === pin.threadId ? { kind: "resume" } : { kind: "release" };
+      return viewThreadId === pin.threadId ? { kind: "refresh" } : { kind: "release" };
     }
     if (
       !pin.loading &&
@@ -155,6 +176,6 @@ export function viewOnlyPinNextAction(session, pin, { viewThreadId, reviewSignat
 
 // NOTE: the composer's send path is now a single atomic, thread-targeted request
 // (see app.js runComposerSubmit → lifecycle.js sendMessage(text, threadId)). The
-// relay takes the target thread over (resume) and sends in one operation, so the
-// old front-end "resume → verify → send" coordinator (viewOnlySubmitAction /
+// relay sends directly to the target thread and moves control after success, so
+// the old front-end "resume → verify → send" coordinator (viewOnlySubmitAction /
 // runViewOnlyComposerSubmit) is no longer needed and was removed.

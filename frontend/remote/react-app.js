@@ -519,7 +519,7 @@ function RemoteApp() {
         ? "Open a relay before sending messages."
         : "Pair this browser before sending messages."
       : hasUsableRelay
-        ? "Start or resume a remote session first."
+        ? "Start or open a remote session first."
         : "Local credentials are unavailable. Pair this relay again in this browser.",
     sendPending: remoteUi.sendPending,
   };
@@ -912,21 +912,7 @@ function RemoteApp() {
     // gesture that unlocks notification permission for later events.
     threadAttention.clear(threadId);
     void ensureNotificationPermission();
-    if (threadId === session?.active_thread_id) {
-      return;
-    }
-    // resume_session is mutating (calls bridge.resume_thread, overwrites runtime).
-    // If the target thread is review-locked the backend would reject it. Use the
-    // view-only path instead so the user can still navigate to the parent thread
-    // (or any other locked thread) while a background review is running.
-    if (isReviewInProgressForThread(session, threadId)) {
-      await handlers.onViewThread?.(threadId);
-      return;
-    }
-    const resumed = await handlers.onResumeThread(threadId, remoteUi.sessionDraft);
-    if (resumed) {
-      await runThreadRefresh("post-resume refresh", { silent: true });
-    }
+    await handlers.onViewThread?.(threadId);
   }
 
   async function handleSendMessage() {
@@ -1351,8 +1337,7 @@ function RemoteSidebar({
     };
   }, []);
 
-  // Keep the thread-notification hooks pointed at the current thread list and
-  // resume handler (cheap + idempotent; re-binds fresh closures each render).
+  // Keep notifications pointed at the client-local thread navigation handler.
   configureThreadNotifications({
     resolveThreadName: (threadId) => findThreadNameInGroups(threadsModel?.groups, threadId),
     onActivateThread: (threadId) => {

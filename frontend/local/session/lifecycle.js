@@ -254,7 +254,10 @@ export function createLifecycleController(ctx) {
     if (!state.session?.active_thread_id) {
       return;
     }
-    const body = { device_id: state.deviceId };
+    const body = {
+      device_id: state.deviceId,
+      thread_id: state.viewOnlyThread?.threadId || state.session.active_thread_id,
+    };
     if (typeof approval_policy === "string" && approval_policy) {
       body.approval_policy = approval_policy;
     }
@@ -321,7 +324,13 @@ export function createLifecycleController(ctx) {
       return;
     }
 
-    await resumeSession(latestThread.id);
+    await runViewTransition(() => {
+      setThreadRoute(latestThread.id);
+      if (state.session) {
+        renderSession(state.session);
+      }
+      renderThreads();
+    });
   }
 
   async function sendMessage(textOverride, threadId) {
@@ -332,6 +341,10 @@ export function createLifecycleController(ctx) {
 
     if (!text) {
       logLine("Message is empty.");
+      return;
+    }
+    if (!threadId) {
+      logLine("No thread is selected.");
       return;
     }
 
@@ -352,10 +365,9 @@ export function createLifecycleController(ctx) {
             || state.session?.reasoning_effort
             || "",
           device_id: state.deviceId,
-          // Target the thread the user is looking at. The relay atomically takes it
-          // over (resume) if it isn't the active thread, then sends — so the message
-          // can't land on a thread that changed out from under us.
-          thread_id: threadId || null,
+          // Target the thread captured at submit time. The relay starts the turn
+          // directly there, so a concurrent navigation cannot redirect the message.
+          thread_id: threadId,
         }),
       });
       const payload = await response.json();
@@ -471,6 +483,7 @@ export function createLifecycleController(ctx) {
         },
         body: JSON.stringify({
           device_id: state.deviceId,
+          thread_id: state.viewOnlyThread?.threadId || state.session.active_thread_id,
         }),
       });
       const payload = await response.json();
