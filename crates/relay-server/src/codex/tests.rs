@@ -429,6 +429,90 @@ async fn handle_notification_tracks_live_command_output_in_transcript() {
     assert_eq!(entry.text.as_deref(), Some("npm test\nline 1"));
 }
 
+// P0a regression: a codex turn/completed on the ACTIVE thread used to clear the
+// turn but leave current_status = "active" (relying on a separate
+// thread/status/changed). If that follow-up was missing, the thread stayed
+// "working" forever. Completion alone must now settle the status to idle.
+#[tokio::test]
+async fn handle_notification_turn_completed_settles_active_thread_to_idle() {
+    let (change_tx, _) = watch::channel(0_u64);
+    let state = std::sync::Arc::new(RwLock::new(RelayState::new(
+        "/tmp/project".to_string(),
+        change_tx,
+        SecurityProfile::private(),
+    )));
+
+    {
+        let mut relay = state.write().await;
+        relay.active_thread_id = Some("thread-1".to_string());
+        relay.set_thread_status("thread-1", "active".to_string(), Vec::new());
+        relay.set_active_turn(Some("turn-1".to_string()));
+        let snapshot = relay.snapshot();
+        assert_eq!(snapshot.current_status, "active");
+        assert_eq!(snapshot.active_turn_id.as_deref(), Some("turn-1"));
+    }
+
+    handle_notification(
+        json!({
+            "method": "turn/completed",
+            "params": { "threadId": "thread-1", "turn": { "id": "turn-1" } }
+        }),
+        &state,
+    )
+    .await;
+
+    let relay = state.read().await;
+    let snapshot = relay.snapshot();
+    assert_eq!(snapshot.active_turn_id, None, "turn must be cleared");
+    assert_eq!(
+        snapshot.current_status, "idle",
+        "a completed turn must idle the thread, not leave it 'active'"
+    );
+}
+
+// P0a / review #3 regression: a delayed turn/completed for an OLD turn must not
+// clear the newer active turn or idle a working thread (which would also let the
+// server permit an overlapping turn).
+#[tokio::test]
+async fn handle_notification_stale_turn_completed_does_not_clear_newer_turn() {
+    let (change_tx, _) = watch::channel(0_u64);
+    let state = std::sync::Arc::new(RwLock::new(RelayState::new(
+        "/tmp/project".to_string(),
+        change_tx,
+        SecurityProfile::private(),
+    )));
+
+    {
+        let mut relay = state.write().await;
+        relay.active_thread_id = Some("thread-1".to_string());
+        relay.set_thread_status("thread-1", "active".to_string(), Vec::new());
+        // turn B is the current, in-flight turn.
+        relay.set_active_turn(Some("turn-B".to_string()));
+    }
+
+    // turn A's completion arrives late (A was superseded by B).
+    handle_notification(
+        json!({
+            "method": "turn/completed",
+            "params": { "threadId": "thread-1", "turn": { "id": "turn-A" } }
+        }),
+        &state,
+    )
+    .await;
+
+    let relay = state.read().await;
+    let snapshot = relay.snapshot();
+    assert_eq!(
+        snapshot.active_turn_id.as_deref(),
+        Some("turn-B"),
+        "a stale completion of turn A must not clear the newer active turn B"
+    );
+    assert_eq!(
+        snapshot.current_status, "active",
+        "the thread must stay working while turn B is in flight"
+    );
+}
+
 #[tokio::test]
 async fn handle_notification_updates_generic_tool_items() {
     let (change_tx, _) = watch::channel(0_u64);

@@ -8,6 +8,7 @@ import {
   viewOnlyEligible,
   viewOnlyPinNextAction,
   viewOnlySubmitAction,
+  runViewOnlyComposerSubmit,
 } from "./view-only-thread.js";
 
 const REVIEW_RUNNING = [{ parent_thread_id: "A", status: "waiting_for_reviewer" }];
@@ -292,6 +293,79 @@ test("viewOnlySubmitAction: pin whose thread is already active → plain send", 
     viewOnlySubmitAction(realSession({ active_thread_id: "A" }), pinFor("A")),
     { kind: "send" }
   );
+});
+
+// ---------------------------------------------------------------------------
+// runViewOnlyComposerSubmit — the resume/send coordination (race-safe)
+// ---------------------------------------------------------------------------
+
+function makeSubmitHarness({ resumeResult = true, writable = true } = {}) {
+  const calls = [];
+  return {
+    calls,
+    run: (overrides = {}) =>
+      runViewOnlyComposerSubmit({
+        resume: async (threadId) => {
+          calls.push(["resume", threadId]);
+          return resumeResult;
+        },
+        send: async (value) => {
+          calls.push(["send", value]);
+        },
+        isActiveWritable: (threadId) => {
+          calls.push(["check", threadId]);
+          return typeof writable === "function" ? writable(threadId) : writable;
+        },
+        onBlocked: () => calls.push(["blocked"]),
+        onTakeoverFailed: () => calls.push(["takeover-failed"]),
+        ...overrides,
+      }),
+  };
+}
+
+test("composer submit (live thread): sends the captured text, no resume", async () => {
+  const h = makeSubmitHarness();
+  await h.run({ action: { kind: "send" }, text: "hello" });
+  assert.deepEqual(h.calls, [["send", "hello"]]);
+});
+
+test("composer submit (read-only): resume, verify, then send the captured text", async () => {
+  const h = makeSubmitHarness();
+  await h.run({ action: { kind: "resume-then-send", threadId: "A" }, text: "draft for A" });
+  assert.deepEqual(h.calls, [["resume", "A"], ["check", "A"], ["send", "draft for A"]]);
+});
+
+test("composer submit: a later draft cannot change what is sent (captured at submit)", async () => {
+  let sent = null;
+  await runViewOnlyComposerSubmit({
+    action: { kind: "resume-then-send", threadId: "A" },
+    text: "captured-at-submit", // what the user had typed when they hit send
+    resume: async () => true,
+    send: async (value) => {
+      sent = value;
+    },
+    isActiveWritable: () => true,
+  });
+  assert.equal(sent, "captured-at-submit");
+});
+
+test("composer submit: resume failure does NOT send", async () => {
+  const h = makeSubmitHarness({ resumeResult: false });
+  await h.run({ action: { kind: "resume-then-send", threadId: "A" }, text: "x" });
+  assert.deepEqual(h.calls, [["resume", "A"], ["takeover-failed"]]);
+});
+
+test("composer submit: target not active/writable after resume does NOT send", async () => {
+  // e.g. another device grabbed control, or a later snapshot changed the active thread.
+  const h = makeSubmitHarness({ writable: false });
+  await h.run({ action: { kind: "resume-then-send", threadId: "A" }, text: "x" });
+  assert.deepEqual(h.calls, [["resume", "A"], ["check", "A"], ["takeover-failed"]]);
+});
+
+test("composer submit: blocked (review) neither resumes nor sends", async () => {
+  const h = makeSubmitHarness();
+  await h.run({ action: { kind: "blocked" }, text: "x" });
+  assert.deepEqual(h.calls, [["blocked"]]);
 });
 
 // ---------------------------------------------------------------------------

@@ -348,10 +348,23 @@ async fn handle_notification_for_provider(
                 log_ignored_session_notification(method, notification_thread_id.as_deref(), &relay);
                 return;
             }
+            let completed_turn = string_at(&params, &["turn", "id"]);
             if let ThreadRoute::Background(bg_thread_id) = route {
                 let now = crate::state::unix_now();
-                relay.bg_set_active_turn(&bg_thread_id, None, now);
-                if let Some(turn_id) = string_at(&params, &["turn", "id"]) {
+                // Only settle if this completion is for the background thread's
+                // CURRENT turn. A delayed completion for an already-superseded turn
+                // must not clear a newer turn (see the active branch below).
+                let current_turn = relay
+                    .runtime_for_thread(&bg_thread_id)
+                    .and_then(|runtime| runtime.active_turn_id.clone());
+                let superseded = matches!(
+                    (completed_turn.as_deref(), current_turn.as_deref()),
+                    (Some(completed), Some(active)) if completed != active
+                );
+                if !superseded {
+                    relay.bg_set_active_turn(&bg_thread_id, None, now);
+                }
+                if let Some(turn_id) = completed_turn.as_deref() {
                     relay.bg_set_transcript_item_status(
                         &bg_thread_id,
                         &format!("turn-diff:{turn_id}"),
@@ -361,10 +374,30 @@ async fn handle_notification_for_provider(
                 }
                 changed = true;
             } else {
-                relay.set_active_turn(None);
-                relay.clear_progress();
-                changed = true;
-                if let Some(turn_id) = string_at(&params, &["turn", "id"]) {
+                // Only settle the thread's active state if this completion is for
+                // the currently-active turn. A delayed/stale completion for an old
+                // turn (e.g. a stop fallback idled turn A, turn B then started, and
+                // A's completion arrives late) must NOT clear the newer turn or idle
+                // a working thread — that would also let the server permit an
+                // overlapping turn.
+                let superseded = matches!(
+                    (completed_turn.as_deref(), relay.active_turn_id.as_deref()),
+                    (Some(completed), Some(active)) if completed != active
+                );
+                if !superseded {
+                    relay.set_active_turn(None);
+                    // Match the Claude completion path: a completed turn idles the
+                    // active thread. Codex otherwise relies on a follow-up
+                    // thread/status/changed to set idle; if that is missing/delayed,
+                    // the stale "active" status keeps is_working() true (a ghost
+                    // "working" badge / wrongly-frozen composer after the turn ends).
+                    if let Some(thread_id) = relay.active_thread_id.clone() {
+                        relay.set_thread_status(&thread_id, "idle".to_string(), Vec::new());
+                    }
+                    relay.clear_progress();
+                    changed = true;
+                }
+                if let Some(turn_id) = completed_turn.as_deref() {
                     changed |= relay
                         .set_transcript_item_status(&format!("turn-diff:{turn_id}"), "completed");
                 }

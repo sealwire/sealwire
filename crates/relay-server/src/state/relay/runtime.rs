@@ -191,6 +191,19 @@ impl ThreadRuntime {
         }
         self.current_status = fresh.current_status;
         self.active_flags = fresh.active_flags;
+        // A fresh provider read reporting a non-working status is authoritative:
+        // there is no in-flight turn, so drop any active_turn_id/phase/tool the
+        // previous (possibly interrupted) session left behind. Without this, a
+        // resume can leave `idle status + stale turn id`, which keeps is_working()
+        // true forever — a ghost "working" badge, a wrongly-frozen composer, and
+        // blocked reviews until restart. (When the fresh status IS working, the
+        // running turn is restored separately via the background buffer.)
+        if !thread_status_is_working(&self.current_status) {
+            self.active_turn_id = None;
+            self.current_phase = None;
+            self.current_tool = None;
+            self.last_progress_at = None;
+        }
         self.merge_transcript_records(fresh.transcript);
     }
 
@@ -305,5 +318,72 @@ fn tool_calls_equal(left: Option<&ToolCallView>, right: Option<&ToolCallView>) -
                 && left.apply_state == right.apply_state
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn summary(id: &str, status: &str) -> ThreadSummaryView {
+        ThreadSummaryView {
+            id: id.to_string(),
+            name: None,
+            preview: String::new(),
+            cwd: "/cwd".to_string(),
+            updated_at: 0,
+            source: "test".to_string(),
+            status: status.to_string(),
+            model_provider: "fake".to_string(),
+            provider: "fake".to_string(),
+        }
+    }
+
+    fn runtime(id: &str, status: &str) -> ThreadRuntime {
+        ThreadRuntime::new(
+            summary(id, status),
+            "/cwd",
+            "model",
+            "untrusted",
+            "ro",
+            "high",
+            0,
+        )
+    }
+
+    // P0a regression: a resume (merge_fresh_history) used to overwrite the status
+    // but leave a stale active_turn_id behind, so an idle thread reported
+    // is_working() == true forever ("resume 后状态莫名其妙").
+    #[test]
+    fn merge_fresh_history_clears_stale_turn_when_fresh_status_is_idle() {
+        let mut rt = runtime("t1", "active");
+        rt.active_turn_id = Some("turn-1".to_string());
+        rt.current_phase = Some("thinking".to_string());
+        rt.current_tool = Some("shell".to_string());
+        assert!(rt.is_working());
+
+        rt.merge_fresh_history(runtime("t1", "idle"));
+
+        assert_eq!(rt.active_turn_id, None);
+        assert_eq!(rt.current_phase, None);
+        assert_eq!(rt.current_tool, None);
+        assert_eq!(rt.current_status, "idle");
+        assert!(
+            !rt.is_working(),
+            "an idle thread with no in-flight turn must not be working"
+        );
+    }
+
+    #[test]
+    fn merge_fresh_history_keeps_turn_when_fresh_status_still_working() {
+        let mut rt = runtime("t1", "active");
+        rt.active_turn_id = Some("turn-1".to_string());
+
+        // A still-working fresh read carries no turn id (provider reads don't), but
+        // we must not drop the running turn — it's restored via the bg buffer path.
+        rt.merge_fresh_history(runtime("t1", "active"));
+
+        assert_eq!(rt.active_turn_id.as_deref(), Some("turn-1"));
+        assert!(rt.is_working());
     }
 }

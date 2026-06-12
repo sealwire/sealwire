@@ -202,11 +202,12 @@ export function createSessionRenderer({
       return thread ? thread.name || thread.preview || shortId(threadId) : null;
     },
     onActivateThread: (threadId) => {
-      // Notification activation is navigation → VIEW-ONLY, the same policy as a
-      // sidebar click (S2). It must never resume: resume moves the relay's single
-      // active thread for every connected client. Take-control stays the explicit
-      // "Resume this thread" action.
-      if (typeof viewThread === "function") {
+      // Review-locked threads can't be resumed (the backend rejects it while a
+      // review is running). All other threads resume normally on notification click.
+      if (
+        typeof viewThread === "function" &&
+        isReviewInProgressForThread(state.session, threadId)
+      ) {
         viewThread(threadId);
       } else {
         void resumeSession(threadId);
@@ -410,11 +411,14 @@ export function createSessionRenderer({
     messageForm.hidden = !viewingConversation;
     // In a general (non-review) read-only view, the composer is usable: typing and
     // sending takes over the thread (resume) and then sends — see app.js
-    // resumeThenSend. Review view-only stays locked (resume is rejected mid-review).
+    // runComposerSubmit. Review view-only stays locked (resume is rejected mid-review).
     const viewOnlyWritable = Boolean(session.view_only && !state.viewOnlyThread?.review);
     const canCompose = canWrite || viewOnlyWritable;
+    // Frozen while a submit/take-over is in flight (app.js runComposerSubmit) so a
+    // draft edit or second submit can't change or duplicate the in-flight send.
+    const submitInFlight = Boolean(state.composerSubmitInFlight);
     const composerReady = hasActiveSession && canCompose && viewingConversation;
-    sendButton.disabled = !composerReady || turnRunning || activeThreadFrozen;
+    sendButton.disabled = !composerReady || turnRunning || activeThreadFrozen || submitInFlight;
     sendButton.hidden = composerReady && turnRunning;
     if (stopButton) {
       // Don't let the user stop the review's turn on the thread being reviewed.
@@ -422,7 +426,11 @@ export function createSessionRenderer({
       stopButton.disabled = stopButton.hidden;
     }
     messageInput.disabled =
-      !hasActiveSession || !canCompose || !viewingConversation || activeThreadFrozen;
+      !hasActiveSession ||
+      !canCompose ||
+      !viewingConversation ||
+      activeThreadFrozen ||
+      submitInFlight;
     messageInput.placeholder = activeThreadFrozen
       ? "This thread is being reviewed…"
       : !hasActiveSession
@@ -1272,14 +1280,13 @@ export function createSessionRenderer({
           threadAttention.clear(threadId);
           void ensureNotificationPermission();
           renderThreads();
-          // Navigation is VIEW-ONLY. Opening a thread shows it — live when it is
-          // the relay's active thread, read-only otherwise — without resuming.
-          // Resume moves the relay's single active thread for EVERY connected
-          // client, so it stays an explicit take-control action (the "Resume this
-          // thread" banner button on a read-only view, or the review flow) and is
-          // never a side effect of clicking the sidebar. This is what stops local
-          // and remote from yanking each other's active thread.
-          if (typeof viewThread === "function") {
+          // Review-locked threads can't be resumed while a review is running —
+          // use the view-only path so the user can see the conversation.
+          // Every other thread resumes normally on click.
+          if (
+            typeof viewThread === "function" &&
+            isReviewInProgressForThread(state.session, threadId)
+          ) {
             viewThread(threadId);
           } else {
             void resumeSession(threadId);

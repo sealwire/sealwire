@@ -241,8 +241,10 @@ export function createLifecycleController(ctx) {
         messageInput.focus();
       }
       logLine(`Resumed thread ${threadId}`);
+      return true;
     } catch (error) {
       logLine(`Resume failed: ${error.message}`);
+      return false;
     } finally {
       state.pendingThreadHistoryScrollTop = null;
     }
@@ -322,8 +324,11 @@ export function createLifecycleController(ctx) {
     await resumeSession(latestThread.id);
   }
 
-  async function sendMessage() {
-    const text = messageInput.value.trim();
+  async function sendMessage(textOverride) {
+    // Accept an explicit, already-captured message (the view-only take-over path
+    // captures the draft at submit time so a later edit can't change what is
+    // sent). Fall back to the live input value for the normal path.
+    const text = (typeof textOverride === "string" ? textOverride : messageInput.value).trim();
 
     if (!text) {
       logLine("Message is empty.");
