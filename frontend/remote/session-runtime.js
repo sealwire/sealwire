@@ -3,6 +3,13 @@ import {
   resolveReasoningEffortValue,
 } from "../shared/reasoning-efforts.js";
 
+export function selectRemoteControlSession({ session, realSession }) {
+  if (session?.view_only) {
+    return realSession || null;
+  }
+  return session || null;
+}
+
 export function deriveSessionRuntime({
   composerDraft = "",
   composerEffort = "medium",

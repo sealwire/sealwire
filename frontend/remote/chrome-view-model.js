@@ -266,7 +266,9 @@ function selectSessionMetaRenderModel(currentState, session) {
       ...(session.reasoning_effort ? [{ label: "Effort", value: session.reasoning_effort }] : []),
       {
         label: "Control",
-        value: session.active_controller_device_id
+        value: session.view_only
+          ? "View only"
+          : session.active_controller_device_id
           ? controllerLabel(currentState, session.active_controller_device_id)
           : "Unclaimed",
       },
@@ -297,7 +299,11 @@ function sessionModelTitle(session) {
 }
 
 function selectControlBannerRenderModel(currentState, session) {
-  if (!session.active_thread_id || !session.active_controller_device_id) {
+  if (
+    session.view_only
+    || !session.active_thread_id
+    || !session.active_controller_device_id
+  ) {
     return {
       hidden: true,
       hint: "",

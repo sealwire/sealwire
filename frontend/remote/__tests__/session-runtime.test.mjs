@@ -1,7 +1,32 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { deriveSessionRuntime } from "../session-runtime.js";
+import {
+  deriveSessionRuntime,
+  selectRemoteControlSession,
+} from "../session-runtime.js";
+
+test("selectRemoteControlSession uses the rendered session outside view-only mode", () => {
+  const session = { active_thread_id: "thread-live" };
+  const realSession = { active_thread_id: "thread-stale" };
+
+  assert.equal(selectRemoteControlSession({ session, realSession }), session);
+});
+
+test("selectRemoteControlSession keeps heartbeat and lease logic on the real session while viewing", () => {
+  const session = {
+    active_controller_device_id: "__view_only__",
+    active_thread_id: "thread-viewed",
+    view_only: true,
+  };
+  const realSession = {
+    active_controller_device_id: "device-1",
+    active_thread_id: "thread-live",
+  };
+
+  assert.equal(selectRemoteControlSession({ session, realSession }), realSession);
+  assert.equal(selectRemoteControlSession({ session, realSession: null }), null);
+});
 
 test("deriveSessionRuntime returns runtime state from the session view", () => {
   const session = {

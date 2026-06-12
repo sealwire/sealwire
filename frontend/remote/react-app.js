@@ -705,6 +705,7 @@ function RemoteApp() {
   }, [session?.active_thread_id]);
 
   useRemoteSessionRuntime({
+    realSession: currentState.realSession,
     remoteAuth: currentState.remoteAuth,
     sendHeartbeat,
     session,
@@ -1808,7 +1809,7 @@ function RemoteThreadPanel({
       },
       h(Composer, {
         ...composerModel,
-        actionsBeforeSend: session?.active_thread_id
+        actionsBeforeSend: session?.active_thread_id && !session?.view_only
           ? h(SessionSettingsButton, {
               session,
               buttonId: "remote-session-settings-button",

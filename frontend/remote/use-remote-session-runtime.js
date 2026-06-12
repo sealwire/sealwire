@@ -2,19 +2,23 @@ import { useEffect } from "react";
 import { renderLog } from "./session-surface.js";
 import { applySessionSnapshot } from "./session-ops.js";
 import { isCurrentDeviceActiveController } from "./chrome-view-model.js";
+import { selectRemoteControlSession } from "./session-runtime.js";
 import { CONTROL_HEARTBEAT_MS, LEASE_EXPIRY_REFRESH_SKEW_MS } from "./state.js";
 
 export function useRemoteSessionRuntime({
+  realSession,
   remoteAuth,
   session,
   sendHeartbeat,
 }) {
+  const controlSession = selectRemoteControlSession({ realSession, session });
+
   useEffect(() => {
-    if (!session?.active_thread_id) {
+    if (!controlSession?.active_thread_id) {
       return undefined;
     }
 
-    if (!isCurrentDeviceActiveController({ remoteAuth, session })) {
+    if (!isCurrentDeviceActiveController({ remoteAuth, session: controlSession })) {
       return undefined;
     }
 
@@ -44,31 +48,33 @@ export function useRemoteSessionRuntime({
   }, [
     remoteAuth?.deviceId,
     sendHeartbeat,
-    session?.active_controller_device_id,
-    session?.active_thread_id,
+    controlSession?.active_controller_device_id,
+    controlSession?.active_thread_id,
   ]);
 
   useEffect(() => {
-    if (!session?.active_thread_id) {
+    if (!controlSession?.active_thread_id) {
       return undefined;
     }
 
     if (
-      !session.active_controller_device_id
-      || !session.controller_lease_expires_at
-      || isCurrentDeviceActiveController({ remoteAuth, session })
+      !controlSession.active_controller_device_id
+      || !controlSession.controller_lease_expires_at
+      || isCurrentDeviceActiveController({ remoteAuth, session: controlSession })
     ) {
       return undefined;
     }
 
     const delayMs = Math.max(
       LEASE_EXPIRY_REFRESH_SKEW_MS,
-      session.controller_lease_expires_at * 1000 - Date.now() + LEASE_EXPIRY_REFRESH_SKEW_MS
+      controlSession.controller_lease_expires_at * 1000
+        - Date.now()
+        + LEASE_EXPIRY_REFRESH_SKEW_MS
     );
 
     const timerId = window.setTimeout(() => {
       const next = {
-        ...session,
+        ...controlSession,
         active_controller_device_id: null,
         active_controller_last_seen_at: null,
         controller_lease_expires_at: null,
@@ -82,8 +88,8 @@ export function useRemoteSessionRuntime({
     };
   }, [
     remoteAuth?.deviceId,
-    session?.active_controller_device_id,
-    session?.active_thread_id,
-    session?.controller_lease_expires_at,
+    controlSession?.active_controller_device_id,
+    controlSession?.active_thread_id,
+    controlSession?.controller_lease_expires_at,
   ]);
 }

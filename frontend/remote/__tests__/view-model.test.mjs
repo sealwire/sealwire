@@ -79,6 +79,54 @@ test("selectSessionRenderModel freezes the composer only when the active thread 
   assert.match(frozen.messagePlaceholder, /being reviewed/i);
 });
 
+test("selectSessionRenderModel keeps a general view-only thread writable by targeted send", () => {
+  const model = selectSessionRenderModel({
+    session: {
+      active_thread_id: "thread-viewed",
+      active_controller_device_id: "__view_only__",
+      current_cwd: "/tmp",
+      current_status: "idle",
+      pending_approvals: [],
+      transcript: [],
+      view_only: true,
+    },
+    previousSession: null,
+    hasControllerLease: false,
+  });
+
+  assert.equal(model.hasControllerLease, false);
+  assert.equal(model.canWrite, true);
+  assert.equal(model.composerDisabled, false);
+  assert.match(model.messagePlaceholder, /take control/i);
+});
+
+test("selectSessionRenderModel keeps a reviewed view-only thread frozen", () => {
+  const model = selectSessionRenderModel({
+    session: {
+      active_thread_id: "thread-viewed",
+      active_controller_device_id: "__view_only__",
+      active_review_jobs: [
+        {
+          id: "review-1",
+          status: "waiting_for_reviewer",
+          parent_thread_id: "thread-viewed",
+        },
+      ],
+      current_cwd: "/tmp",
+      current_status: "idle",
+      pending_approvals: [],
+      transcript: [],
+      view_only: true,
+    },
+    previousSession: null,
+    hasControllerLease: false,
+  });
+
+  assert.equal(model.canWrite, false);
+  assert.equal(model.composerDisabled, true);
+  assert.match(model.messagePlaceholder, /being reviewed/i);
+});
+
 // The routing decision (onViewThread vs onResumeThread) in react-app.js uses
 // isReviewInProgressForThread directly. Verify the predicate correctly
 // identifies which thread clicks should be view-only vs resumable.

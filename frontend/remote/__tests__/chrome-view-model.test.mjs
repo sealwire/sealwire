@@ -116,6 +116,31 @@ test("remote control banner hides take over while the active thread is being rev
   assert.match(model.controlBanner.hint, /being reviewed/i);
 });
 
+test("remote view-only projection hides the control banner and labels synthetic control honestly", () => {
+  const state = {
+    remoteAuth: { deviceId: "device-1" },
+    socketConnected: true,
+  };
+  const session = {
+    active_thread_id: "thread-viewed",
+    active_controller_device_id: "__view_only__",
+    current_cwd: "/tmp/viewed",
+    current_status: "idle",
+    pending_approvals: [],
+    provider_connected: true,
+    view_only: true,
+  };
+
+  const model = selectSessionChromeRenderModel(state, session);
+
+  assert.equal(model.controlBanner.hidden, true);
+  assert.equal(model.controlBanner.takeOverHidden, true);
+  assert.equal(
+    model.sessionMeta.chips.find((chip) => chip.label === "Control").value,
+    "View only"
+  );
+});
+
 test("remote status badge surfaces 'Review in progress' when the active thread is under review", () => {
   const state = { remoteAuth: { deviceId: "device-1" }, socketConnected: true };
   const session = {
