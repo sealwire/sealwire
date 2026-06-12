@@ -5681,6 +5681,63 @@ mod review_tests {
         assert!(!codex.interrupts.lock().await.is_empty());
     }
 
+    // Repro (capture): a SAVED Codex thread that isn't running carries Codex's own
+    // status vocabulary — "unknown" (a `thread/list` summary with no live status field,
+    // see parse_status) or "completed" — NOT the literal "idle" that Claude's bridge
+    // hardcodes (claude.rs read_thread). Two review gates keyed off "idle"-ness then
+    // wrongly refuse on an idle-but-not-running Codex thread even though no turn is in
+    // flight:
+    //   1. request_review: `current_status != "idle"` (strict literal).
+    //   2. has_working_thread_in_cwd: `is_working()` → thread_status_is_working() treats
+    //      ANY status except idle/viewing/empty as "working", so the parent self-blocks.
+    // Liveness is authoritatively `active_turn_id` (see runtime.rs is_working() docs), so
+    // a not-running thread must allow a review regardless of the status string.
+    //
+    // CAPTURED REPRO — currently FAILS on gate 1 ("cannot start a review while the agent
+    // is `unknown`"), and would then fail on gate 2 (has_working_thread_in_cwd, the parent
+    // self-blocks). Marked #[ignore] so it lives in the tree without reddening CI; drop the
+    // attribute when the review gates go semantic and this becomes the regression guard.
+    #[ignore = "captured repro for the Codex review-gate bug; un-ignore when the gates go semantic"]
+    #[tokio::test]
+    async fn review_starts_when_codex_reports_a_non_idle_saved_status() {
+        // Cover the FULL Codex terminal vocabulary, not just one string: a fix via an
+        // allow/deny-list could get one right and miss the other, so the guard loops over
+        // both statuses `thread/list` can surface for a persisted, not-running thread.
+        for saved_status in ["unknown", "completed"] {
+            let dir = TempDir::new().expect("tmpdir");
+            let cwd = dir.path().to_str().unwrap();
+            let (app, _providers) = build_review_app(cwd, &["codex"]).await;
+            let parent = start_parent(&app, cwd, "codex").await;
+
+            // Reshape the active thread into "saved Codex thread, not running": no live
+            // turn, but a non-idle status string (what `thread/list` yields for a
+            // persisted thread).
+            {
+                let mut relay = app.relay.write().await;
+                relay.set_active_turn(None);
+                relay.set_thread_status(&parent.id, saved_status.to_string(), Vec::new());
+                assert_eq!(relay.current_status, saved_status);
+                assert!(relay.active_turn_id.is_none());
+            }
+
+            let receipt = app
+                .request_review(review_input("codex"))
+                .await
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "a not-running Codex thread (status `{saved_status}`, no live \
+turn) must allow a review: {error:?}"
+                    )
+                });
+            let job = wait_for_review(&app, &receipt.review_job_id).await;
+            assert_eq!(
+                job.status, "complete",
+                "status `{saved_status}` job failed: {:?}",
+                job.error
+            );
+        }
+    }
+
     #[tokio::test]
     async fn take_over_control_is_blocked_during_review() {
         let dir = TempDir::new().expect("tmpdir");
