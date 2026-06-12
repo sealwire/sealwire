@@ -103,7 +103,10 @@ starting a workflow"
             if !relay.pending_approvals.is_empty() {
                 return Err("cannot start a workflow while approvals are pending".to_string());
             }
-            if relay.current_status != "idle" {
+            // Semantic liveness, NOT a literal `== "idle"`: mirrors the review gate so a
+            // saved Codex thread (status `unknown`/`completed`, no live turn) isn't treated
+            // as busy. `active_turn_id` (above) remains the authoritative in-flight signal.
+            if relay.active_agent_is_working() {
                 return Err(format!(
                     "cannot start a workflow while the agent is `{}`",
                     relay.current_status

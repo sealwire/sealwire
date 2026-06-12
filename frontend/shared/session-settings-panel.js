@@ -1,6 +1,7 @@
 import React from "react";
 import { providerSettings, sandboxOptions } from "./provider-settings.js";
 import { buildReasoningEffortOptionsWithSelection } from "./reasoning-efforts.js";
+import { isAgentStatusWorking } from "./review-state.js";
 
 const h = React.createElement;
 
@@ -13,8 +14,9 @@ export function isSessionIdle(session) {
   ) {
     return false;
   }
-  const status = String(session.current_status || "").toLowerCase();
-  return !status || status === "idle";
+  // Semantic mirror of the backend gate (sessions.rs): NOT a literal `=== "idle"`,
+  // so a saved Codex thread reporting `unknown`/`completed` doesn't lock its settings.
+  return !isAgentStatusWorking(session.current_status);
 }
 
 export function sessionBusyReason(session) {
@@ -28,9 +30,8 @@ export function sessionBusyReason(session) {
   ) {
     return "Settings locked while an approval is pending.";
   }
-  const status = String(session.current_status || "").toLowerCase();
-  if (status && status !== "idle") {
-    return `Settings locked while status is ${status}.`;
+  if (isAgentStatusWorking(session.current_status)) {
+    return `Settings locked while status is ${String(session.current_status).toLowerCase()}.`;
   }
   return null;
 }

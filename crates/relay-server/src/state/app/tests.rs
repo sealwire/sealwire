@@ -4436,9 +4436,8 @@ mod review_tests {
     // the literal `current_status != "idle"` (workflow.rs), while its cwd-quiet check went
     // semantic — so a saved Codex thread ("unknown"/"completed", no live turn) hits the
     // exact mixed literal/semantic gate-pair the original report complained about and
-    // can't launch a workflow. CAPTURED REPRO: FAILS today on the literal gate, must pass
-    // once workflow.rs uses the semantic helper. Loops the full Codex terminal vocabulary.
-    #[ignore = "captured repro for the workflow-gate sibling bug; un-ignore when the gate goes semantic"]
+    // can't launch a workflow. Now green: workflow.rs uses the semantic
+    // `active_agent_is_working`. Loops the full Codex terminal vocabulary.
     #[tokio::test]
     async fn workflow_starts_when_codex_reports_a_non_idle_saved_status() {
         for saved_status in ["unknown", "completed"] {
@@ -4479,9 +4478,7 @@ workflow: {error}"
     // Sibling of the review-gate bug, SAME root cause: update_session_settings' status gate
     // is the literal `runtime.current_status != "idle"` (sessions.rs), so a saved Codex
     // thread ("unknown"/"completed") has its model/effort/approval/sandbox permanently
-    // locked. CAPTURED REPRO: FAILS today on the literal gate, must pass once sessions.rs
-    // uses the semantic per-runtime check.
-    #[ignore = "captured repro for the session-settings-gate sibling bug; un-ignore when the gate goes semantic"]
+    // locked. Now green: sessions.rs uses the semantic per-runtime `is_working()` check.
     #[tokio::test]
     async fn session_settings_update_when_codex_reports_a_non_idle_saved_status() {
         for saved_status in ["unknown", "completed"] {

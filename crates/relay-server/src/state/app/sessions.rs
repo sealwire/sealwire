@@ -274,7 +274,11 @@ impl AppState {
                     "cannot change session settings while approvals are pending".to_string()
                 );
             }
-            if runtime.current_status != "idle" {
+            // Semantic per-runtime liveness, NOT a literal `== "idle"`: a saved Codex
+            // thread reports `unknown`/`completed`, which must not lock its settings.
+            // `is_working()` folds in `active_turn_id` (already checked just above, so this
+            // is effectively the status check) — the authoritative in-flight signal.
+            if runtime.is_working() {
                 return Err(format!(
                     "cannot change session settings while agent is `{}`",
                     runtime.current_status

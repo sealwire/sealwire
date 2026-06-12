@@ -135,7 +135,7 @@ export function selectReviewLaunchModel({ providers = [], providerModels = {}, s
 const NOT_WORKING_STATUSES = new Set(["", "idle", "viewing", "completed", "unknown"]);
 
 export function isAgentStatusWorking(status) {
-  return !NOT_WORKING_STATUSES.has((status || "").trim());
+  return !NOT_WORKING_STATUSES.has((status || "").trim().toLowerCase());
 }
 
 // Whether THIS device may start a new review right now. Mirrors the backend
