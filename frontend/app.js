@@ -141,8 +141,6 @@ import {
   mergeOlderViewOnlyPage,
   viewOnlyEligible,
   viewOnlyPinNextAction,
-  viewOnlySubmitAction,
-  runViewOnlyComposerSubmit,
 } from "./local/view-only-thread.js";
 import { ClientLog } from "./shared/client-log.js";
 import {
@@ -1010,34 +1008,32 @@ controlBanner?.addEventListener("click", (event) => {
   void takeOverControl();
 });
 
-// Drive a composer submit safely. The WHAT (draft text) and WHERE (action /
-// target thread) are captured synchronously at submit time and frozen, so during
-// the async take-over a draft edit, navigation, or second submit can't change or
-// duplicate what we send. For a read-only view the take-over (resume) runs first
-// and we only send once the target thread is confirmed active + writable.
+// Drive a composer submit. The draft text and the target thread are captured
+// synchronously at submit time and the composer is frozen, so a draft edit /
+// navigation / second submit during the async send can't change or duplicate it.
+// The send carries the target thread id; the relay atomically takes that thread
+// over (resume) if it isn't the active one, then sends — so "sending IS taking
+// over" with no separate resume request and no wrong-thread window.
 async function runComposerSubmit() {
   const text = messageInput.value;
-  if (!text.trim()) {
-    // Empty: let sendMessage log the parity message; never resume for nothing.
-    void sendMessage(text);
+  const pin = state.viewOnlyThread;
+  if (pin?.review) {
+    // A thread mid-review can't be sent to (the relay rejects resume/send for it).
+    if (text.trim()) {
+      logLine("This thread is being reviewed — you can’t send to it right now.");
+    }
     return;
   }
-  const action = viewOnlySubmitAction(state.session, state.viewOnlyThread);
+  if (!text.trim()) {
+    void sendMessage(text); // empty → sendMessage logs the parity message
+    return;
+  }
+  // The thread the user is looking at (the read-only pin's thread, else active).
+  const targetThreadId = pin?.threadId || state.session?.active_thread_id || null;
   state.composerSubmitInFlight = true;
   if (state.session) renderer.renderSession(state.session); // freeze the composer
   try {
-    await runViewOnlyComposerSubmit({
-      action,
-      text,
-      resume: (threadId) => resumeSession(threadId),
-      send: (value) => sendMessage(value),
-      isActiveWritable: (threadId) =>
-        state.session?.active_thread_id === threadId && canCurrentDeviceWrite(state.session),
-      onBlocked: () =>
-        logLine("This thread is being reviewed — you can’t send to it right now."),
-      onTakeoverFailed: () =>
-        logLine('Couldn’t take over this thread to send — try "Resume this thread".'),
-    });
+    await sendMessage(text, targetThreadId);
   } finally {
     state.composerSubmitInFlight = false;
     if (state.session) renderer.renderSession(state.session); // unfreeze

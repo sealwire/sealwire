@@ -153,53 +153,8 @@ export function viewOnlyPinNextAction(session, pin, { viewThreadId, reviewSignat
   return { kind: "none" };
 }
 
-// How a composer submit should behave, given the REAL session and the view-only
-// pin. Sending from a general (non-review) read-only view is an explicit
-// take-control: resume the viewed thread, then send. A review pin is locked (the
-// thread is mid-review and resume is rejected). Otherwise — no pin, or the pin's
-// thread is already the active one — send normally.
-export function viewOnlySubmitAction(realSession, pin) {
-  if (!pin) {
-    return { kind: "send" };
-  }
-  if (pin.review) {
-    return { kind: "blocked" };
-  }
-  if (realSession && pin.threadId === realSession.active_thread_id) {
-    return { kind: "send" };
-  }
-  return { kind: "resume-then-send", threadId: pin.threadId };
-}
-
-// Coordinate a composer submit safely against draft edits / navigation /
-// double-submit during the async take-over. The caller captures the draft `text`
-// at submit time and passes it in, so a later input change cannot alter WHAT is
-// sent; the caller also guards re-entry and freezes the composer. For a general
-// read-only view this resumes (takes control of) the target thread first and only
-// sends once that thread is confirmed active and writable (`isActiveWritable`) —
-// so a concurrent active-thread change can't send to the wrong thread. All
-// effects are injected, so this is unit-testable without the DOM.
-export async function runViewOnlyComposerSubmit({
-  action,
-  text,
-  resume,
-  send,
-  isActiveWritable,
-  onBlocked = () => {},
-  onTakeoverFailed = () => {},
-}) {
-  if (action && action.kind === "blocked") {
-    onBlocked();
-    return;
-  }
-  if (action && action.kind === "resume-then-send") {
-    const ok = await resume(action.threadId);
-    if (!ok || !isActiveWritable(action.threadId)) {
-      onTakeoverFailed();
-      return;
-    }
-    await send(text);
-    return;
-  }
-  await send(text);
-}
+// NOTE: the composer's send path is now a single atomic, thread-targeted request
+// (see app.js runComposerSubmit → lifecycle.js sendMessage(text, threadId)). The
+// relay takes the target thread over (resume) and sends in one operation, so the
+// old front-end "resume → verify → send" coordinator (viewOnlySubmitAction /
+// runViewOnlyComposerSubmit) is no longer needed and was removed.

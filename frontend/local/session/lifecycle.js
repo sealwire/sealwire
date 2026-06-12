@@ -324,10 +324,10 @@ export function createLifecycleController(ctx) {
     await resumeSession(latestThread.id);
   }
 
-  async function sendMessage(textOverride) {
-    // Accept an explicit, already-captured message (the view-only take-over path
-    // captures the draft at submit time so a later edit can't change what is
-    // sent). Fall back to the live input value for the normal path.
+  async function sendMessage(textOverride, threadId) {
+    // Accept an explicit, already-captured message (the composer captures the draft
+    // at submit time so a later edit can't change what is sent). Fall back to the
+    // live input value for the normal path.
     const text = (typeof textOverride === "string" ? textOverride : messageInput.value).trim();
 
     if (!text) {
@@ -352,6 +352,10 @@ export function createLifecycleController(ctx) {
             || state.session?.reasoning_effort
             || "",
           device_id: state.deviceId,
+          // Target the thread the user is looking at. The relay atomically takes it
+          // over (resume) if it isn't the active thread, then sends — so the message
+          // can't land on a thread that changed out from under us.
+          thread_id: threadId || null,
         }),
       });
       const payload = await response.json();

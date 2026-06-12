@@ -513,6 +513,87 @@ async fn handle_notification_stale_turn_completed_does_not_clear_newer_turn() {
     );
 }
 
+// Review #1: a BACKGROUND codex turn/completed must also settle that thread to
+// idle (not just the active thread). Otherwise a backgrounded thread whose status
+// was "active" stays is_working() forever and can block reviews / show a ghost
+// badge. The earlier switch-back tests masked this by feeding a fresh "idle" read.
+#[tokio::test]
+async fn handle_notification_background_turn_completed_settles_to_idle() {
+    let (change_tx, _) = watch::channel(0_u64);
+    let state = std::sync::Arc::new(RwLock::new(RelayState::new(
+        "/tmp/project".to_string(),
+        change_tx,
+        SecurityProfile::private(),
+    )));
+
+    {
+        let mut relay = state.write().await;
+        relay.active_thread_id = Some("thread-active".to_string());
+        let now = crate::state::unix_now();
+        relay.bg_set_thread_status("thread-bg", "active".to_string(), Vec::new(), now);
+        relay.bg_set_active_turn("thread-bg", Some("turn-1".to_string()), now);
+        assert!(relay
+            .runtime_for_thread("thread-bg")
+            .expect("bg runtime")
+            .is_working());
+    }
+
+    handle_notification(
+        json!({
+            "method": "turn/completed",
+            "params": { "threadId": "thread-bg", "turn": { "id": "turn-1" } }
+        }),
+        &state,
+    )
+    .await;
+
+    let relay = state.read().await;
+    let runtime = relay.runtime_for_thread("thread-bg").expect("bg runtime");
+    assert_eq!(runtime.active_turn_id, None);
+    assert_eq!(runtime.current_status, "idle");
+    assert!(
+        !runtime.is_working(),
+        "a completed background turn must idle the background thread"
+    );
+}
+
+#[tokio::test]
+async fn handle_notification_background_stale_turn_completed_does_not_clear_newer_turn() {
+    let (change_tx, _) = watch::channel(0_u64);
+    let state = std::sync::Arc::new(RwLock::new(RelayState::new(
+        "/tmp/project".to_string(),
+        change_tx,
+        SecurityProfile::private(),
+    )));
+
+    {
+        let mut relay = state.write().await;
+        relay.active_thread_id = Some("thread-active".to_string());
+        let now = crate::state::unix_now();
+        relay.bg_set_thread_status("thread-bg", "active".to_string(), Vec::new(), now);
+        relay.bg_set_active_turn("thread-bg", Some("turn-B".to_string()), now);
+    }
+
+    // Stale completion of the OLD background turn A.
+    handle_notification(
+        json!({
+            "method": "turn/completed",
+            "params": { "threadId": "thread-bg", "turn": { "id": "turn-A" } }
+        }),
+        &state,
+    )
+    .await;
+
+    let relay = state.read().await;
+    let runtime = relay.runtime_for_thread("thread-bg").expect("bg runtime");
+    assert_eq!(
+        runtime.active_turn_id.as_deref(),
+        Some("turn-B"),
+        "a stale background completion must not clear the newer background turn"
+    );
+    assert_eq!(runtime.current_status, "active");
+}
+
 #[tokio::test]
 async fn handle_notification_updates_generic_tool_items() {
     let (change_tx, _) = watch::channel(0_u64);

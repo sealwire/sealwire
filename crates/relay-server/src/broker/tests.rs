@@ -780,6 +780,7 @@ fn parse_inbound_payload_parses_encrypted_remote_actions() {
                 model: None,
                 effort: None,
                 device_id: None,
+                thread_id: None,
             },
         },
     )

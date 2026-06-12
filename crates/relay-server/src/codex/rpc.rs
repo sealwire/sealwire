@@ -363,6 +363,12 @@ async fn handle_notification_for_provider(
                 );
                 if !superseded {
                     relay.bg_set_active_turn(&bg_thread_id, None, now);
+                    // Settle the background thread to idle on completion, mirroring
+                    // the active/Claude paths. Otherwise a background thread whose
+                    // status was "active" stays is_working() == true forever if the
+                    // follow-up thread/status/changed is missing — a ghost "working"
+                    // badge that also blocks reviews on that thread.
+                    relay.bg_set_thread_status(&bg_thread_id, "idle".to_string(), Vec::new(), now);
                 }
                 if let Some(turn_id) = completed_turn.as_deref() {
                     relay.bg_set_transcript_item_status(

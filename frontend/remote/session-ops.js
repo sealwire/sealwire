@@ -982,6 +982,13 @@ export async function sendMessage(messageDraft, effort, model = "") {
         text,
         model,
         effort,
+        // Target the thread the user is currently looking at. On the remote
+        // surface a view-only projection sets the rendered session's
+        // active_thread_id to the viewed thread, so this is the thread the user
+        // means — the relay atomically takes it over (resume) and sends in one
+        // op, closing the wrong-thread race when another client moves the global
+        // active thread between navigation and send.
+        thread_id: state.session?.active_thread_id || null,
       },
     });
     return true;

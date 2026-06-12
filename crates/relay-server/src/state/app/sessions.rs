@@ -100,6 +100,7 @@ impl AppState {
                     model: Some(model),
                     effort: Some(effort),
                     device_id: Some(device_id),
+                    thread_id: None,
                 })
                 .await;
         }
@@ -372,8 +373,55 @@ impl AppState {
             .ok_or_else(|| "message text cannot be empty".to_string())?;
         let requested_model = non_empty(input.model);
         let requested_effort = non_empty(input.effort);
+        let requested_thread = non_empty(input.thread_id);
+
+        // Resolve the target thread. An explicit thread_id ("sending IS taking
+        // over this thread") wins over the current active thread. The write-control
+        // check is intentionally NOT here: requiring control of the CURRENT active
+        // thread would reject a legitimate send to a non-active thread that another
+        // device happens to control. It is enforced after take-over below, against
+        // the target — where resume has reassigned control to this device.
+        let target_thread = {
+            let relay = self.relay.read().await;
+            let target = requested_thread
+                .clone()
+                .or_else(|| relay.active_thread_id.clone())
+                .ok_or_else(|| "there is no thread to send to".to_string())?;
+            if relay.is_thread_review_locked(&target) {
+                return Err(REVIEW_LOCKED_THREAD_MSG.to_string());
+            }
+            target
+        };
+
+        // If the target isn't already active, take it over (resume) BEFORE sending.
+        // This whole method runs under the session slot acquired by send_message(),
+        // so no concurrent resume/send from another client can interleave between
+        // the take-over and start_turn — the message can never land on a thread that
+        // changed out from under us (closes the wrong-thread send race). resume_inner
+        // also validates the device's path scope for the target thread.
+        let needs_takeover = {
+            let relay = self.relay.read().await;
+            relay.active_thread_id.as_deref() != Some(target_thread.as_str())
+        };
+        if needs_takeover {
+            self.resume_session_inner(ResumeSessionInput {
+                thread_id: target_thread.clone(),
+                approval_policy: None,
+                sandbox: None,
+                effort: None,
+                device_id: Some(device_id.clone()),
+                provider: None,
+            })
+            .await?;
+        }
+
         let thread_id = {
             let relay = self.relay.read().await;
+            // Write-control check against the (post-take-over) ACTIVE thread = the
+            // target. For a take-over send, resume has just made this device the
+            // controller, so it passes; for a same-thread send it still requires the
+            // device to already hold control (no implicit takeover of the active
+            // thread by a passive device).
             relay.ensure_device_can_send_message(&device_id)?;
             let device_scope = relay.device_path_scope(&device_id);
             ensure_path_within_device_scope(
@@ -385,9 +433,8 @@ impl AppState {
                 .active_thread_id
                 .clone()
                 .ok_or_else(|| "there is no active Codex thread to send to".to_string())?;
-            if relay.is_thread_review_locked(&thread_id) {
-                return Err(REVIEW_LOCKED_THREAD_MSG.to_string());
-            }
+            // After any take-over, the active thread is the target we resolved.
+            debug_assert_eq!(thread_id, target_thread);
             thread_id
         };
         let (provider_name, bridge) = self.find_thread_provider(&thread_id).await?;

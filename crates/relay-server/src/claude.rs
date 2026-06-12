@@ -1912,6 +1912,7 @@ mod tests {
                 model: None,
                 effort: None,
                 device_id: Some("device-1".to_string()),
+                thread_id: None,
             })
             .await;
 
@@ -1993,6 +1994,7 @@ mod tests {
             model: None,
             effort: None,
             device_id: Some("device-1".to_string()),
+            thread_id: None,
         })
         .await
         .expect("sending the first message should succeed");

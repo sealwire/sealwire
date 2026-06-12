@@ -1263,6 +1263,11 @@ pub struct SendMessageInput {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub device_id: Option<String>,
+    /// Target thread for the message. When set and not already the active thread,
+    /// the relay takes it over (resume) and sends to it atomically — "sending IS
+    /// taking over". Omitted → send to the current active thread (legacy behavior).
+    #[serde(default)]
+    pub thread_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
