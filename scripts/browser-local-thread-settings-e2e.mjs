@@ -89,25 +89,40 @@ async function main() {
     });
     logStep("thread B ready", { threadB });
 
+    // Clicking a thread is VIEW-ONLY navigation: it surfaces that thread's persisted
+    // per-thread settings WITHOUT resuming it on the relay (only sending a message
+    // takes control). So assert the UI navigated to the viewed thread, that the
+    // thread's remembered settings persisted (read from its own thread_state), and
+    // that the relay's controlled thread stays put — viewing never resumes. See
+    // frontend/local/view-only-thread.js + "Decouple thread viewing from targeted
+    // control".
     await clickThread(page, threadA);
-    await waitForSession(relayPort, {
+    await waitForLocalThreadActive(page, threadA);
+    await waitForThreadState(relayPort, threadA, {
       approvalPolicy: "bypass",
-      cwd: workspaceDir,
       effort: "high",
-      threadId: threadA,
       timeoutMs: TIMEOUT_MS,
     });
-    logStep("thread A settings restored");
+    assert.equal(
+      (await fetchSession(relayPort)).active_thread_id,
+      threadB,
+      "view-only navigation must NOT resume the viewed thread on the relay"
+    );
+    logStep("thread A settings surfaced via view-only navigation");
 
     await clickThread(page, threadB);
-    await waitForSession(relayPort, {
+    await waitForLocalThreadActive(page, threadB);
+    await waitForThreadState(relayPort, threadB, {
       approvalPolicy: "untrusted",
-      cwd: workspaceDir,
       effort: "low",
-      threadId: threadB,
       timeoutMs: TIMEOUT_MS,
     });
-    logStep("thread B settings restored");
+    assert.equal(
+      (await fetchSession(relayPort)).active_thread_id,
+      threadB,
+      "the relay's controlled thread stays put across view-only navigation"
+    );
+    logStep("thread B settings surfaced via view-only navigation");
 
     console.log(
       JSON.stringify(
@@ -155,6 +170,52 @@ async function clickThread(page, threadId) {
   const selector = `#threads-list [data-thread-id="${threadId}"]`;
   await page.waitForSelector(selector, { timeout: TIMEOUT_MS });
   await page.click(selector);
+}
+
+// Wait for the thread list to mark `threadId` as the actively-viewed item. In the
+// view-only model the rendered session's active_thread_id IS the viewed thread, so
+// the list highlights it even though the relay's controlled thread is unchanged.
+async function waitForLocalThreadActive(page, threadId) {
+  await page.waitForFunction(
+    (expectedThreadId) =>
+      Boolean(
+        document.querySelector(
+          `#threads-list [data-thread-id="${expectedThreadId}"].is-active`
+        )
+      ),
+    threadId,
+    { timeout: TIMEOUT_MS }
+  );
+}
+
+// Poll a thread's own persisted settings via its transcript-tail `thread_state`
+// (the per-thread source of truth the view-only projection renders from), rather
+// than the relay's GLOBAL session — which only ever reflects the controlled thread.
+async function waitForThreadState(relayPort, threadId, { approvalPolicy, effort, timeoutMs }) {
+  const deadline = Date.now() + timeoutMs;
+  let lastState = null;
+  while (Date.now() < deadline) {
+    const response = await fetch(
+      `http://127.0.0.1:${relayPort}/api/threads/${encodeURIComponent(threadId)}/transcript`
+    );
+    const payload = await response.json().catch(() => null);
+    lastState = payload?.data?.thread_state || null;
+    if (
+      lastState &&
+      lastState.approval_policy === approvalPolicy &&
+      lastState.reasoning_effort === effort
+    ) {
+      return lastState;
+    }
+    await delay(250);
+  }
+  assert.fail(
+    `timed out waiting for thread ${threadId} state ${JSON.stringify({
+      approvalPolicy,
+      effort,
+      lastState,
+    })}`
+  );
 }
 
 async function waitForSession(

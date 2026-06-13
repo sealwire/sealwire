@@ -106,8 +106,14 @@ async function main() {
     const longPad = "lorem ipsum dolor sit amet ".repeat(80);
     let expectedEntries = await countStoredEntries(relayPort, threadId);
     for (let turn = 0; turn < 10; turn += 1) {
+      // The stored-entry count can hit target a beat before the turn tears down,
+      // and the relay rejects a send to a thread with a live turn ("that thread is
+      // busy with a turn"). Wait for the prior turn to settle first — the initial
+      // seed turn on turn 0, the previous prompt's turn afterward.
+      await waitForThreadIdle(relayPort, threadId);
       await sendMessage(relayPort, {
         deviceId,
+        threadId,
         text: `transcript-load turn ${turn} ${longPad}`,
       });
       expectedEntries += 2;
@@ -331,11 +337,11 @@ async function startThread(relayPort, { cwd, deviceId, initialPrompt }) {
   return payload.data.active_thread_id;
 }
 
-async function sendMessage(relayPort, { deviceId, text }) {
+async function sendMessage(relayPort, { deviceId, threadId, text }) {
   const response = await fetch(`http://127.0.0.1:${relayPort}/api/session/message`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text, device_id: deviceId }),
+    body: JSON.stringify({ text, thread_id: threadId, device_id: deviceId }),
   });
   const payload = await response.json().catch(() => null);
   if (!response.ok || !payload?.ok) {
@@ -383,6 +389,25 @@ async function waitForStoredEntries(relayPort, threadId, target, timeoutMs = LOC
   throw new Error(
     `timed out waiting for thread ${threadId} to reach ${target} stored entries`
   );
+}
+
+// Wait for the thread's live turn to clear. The transcript tail carries the
+// thread's `thread_state.active_turn_id`, which mirrors the same runtime field the
+// relay checks before accepting a send.
+async function waitForThreadIdle(relayPort, threadId, timeoutMs = LOCAL_TIMEOUT_MS) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const response = await fetch(
+      `http://127.0.0.1:${relayPort}/api/threads/${encodeURIComponent(threadId)}/transcript`
+    );
+    const payload = await response.json().catch(() => null);
+    const threadState = payload?.data?.thread_state;
+    if (threadState && !threadState.active_turn_id) {
+      return;
+    }
+    await delay(100);
+  }
+  throw new Error(`timed out waiting for thread ${threadId} to go idle`);
 }
 
 main().catch((error) => {

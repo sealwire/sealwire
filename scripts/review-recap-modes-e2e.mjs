@@ -153,6 +153,7 @@ async function runReview(relayPort, { cwd, recapSource, seedMessage }) {
   if (seedMessage) {
     const sent = await postEnvelope(relayPort, "/api/session/message", {
       text: seedMessage,
+      thread_id: parentId,
       device_id: DEVICE,
     });
     assert.ok(sent.ok, `send_message failed: ${JSON.stringify(sent.error)}`);
