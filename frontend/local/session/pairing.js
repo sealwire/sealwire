@@ -169,7 +169,8 @@ export function createPairingController(ctx) {
   }
 
   async function takeOverControl() {
-    if (!state.session?.active_thread_id) {
+    const threadId = state.viewOnlyThread?.threadId || state.session?.active_thread_id;
+    if (!threadId) {
       logLine("There is no active session to take over.");
       return;
     }
@@ -185,6 +186,7 @@ export function createPairingController(ctx) {
         },
         body: JSON.stringify({
           device_id: state.deviceId,
+          thread_id: threadId,
         }),
       });
       const payload = await response.json();

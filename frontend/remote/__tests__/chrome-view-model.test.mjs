@@ -136,16 +136,17 @@ test("remote control banner hides take over while the active thread is being rev
   assert.match(model.controlBanner.hint, /being reviewed/i);
 });
 
-test("remote view-only projection hides the control banner and labels synthetic control honestly", () => {
+test("remote view-only busy projection exposes targeted take over", () => {
   const state = {
     remoteAuth: { deviceId: "device-1" },
     socketConnected: true,
   };
   const session = {
     active_thread_id: "thread-viewed",
+    active_turn_id: "view:thread-viewed",
     active_controller_device_id: "__view_only__",
     current_cwd: "/tmp/viewed",
-    current_status: "idle",
+    current_status: "active",
     pending_approvals: [],
     provider_connected: true,
     view_only: true,
@@ -153,8 +154,8 @@ test("remote view-only projection hides the control banner and labels synthetic 
 
   const model = selectSessionChromeRenderModel(state, session);
 
-  assert.equal(model.controlBanner.hidden, true);
-  assert.equal(model.controlBanner.takeOverHidden, true);
+  assert.equal(model.controlBanner.hidden, false);
+  assert.equal(model.controlBanner.takeOverHidden, false);
   assert.equal(
     model.sessionMeta.chips.find((chip) => chip.label === "Control").value,
     "View only"

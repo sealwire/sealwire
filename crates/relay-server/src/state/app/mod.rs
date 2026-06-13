@@ -19,8 +19,9 @@ use crate::{
         ReadThreadEntryDetailInput, ReadThreadTranscriptInput, ResumeSessionInput,
         RevokeDeviceReceipt, SendMessageInput, SessionSnapshot, StartSessionInput, StopTurnInput,
         SubmitAskUserAnswerInput, TakeOverInput, ThreadArchiveReceipt, ThreadDeleteReceipt,
-        ThreadEntriesResponse, ThreadEntryDetailResponse, ThreadTranscriptResponse,
-        ThreadsResponse, UpdateSessionSettingsInput, WorkspaceDiffResponse,
+        ThreadEntriesResponse, ThreadEntryDetailResponse, ThreadStateView,
+        ThreadTranscriptResponse, ThreadsResponse, UpdateSessionSettingsInput,
+        WorkspaceDiffResponse,
     },
     provider::{spawn_providers, ProviderBridge},
 };

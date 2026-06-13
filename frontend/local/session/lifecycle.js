@@ -290,6 +290,23 @@ export function createLifecycleController(ctx) {
         throw new Error(payload?.error?.message || "Failed to update session settings");
       }
       applySessionSnapshot(payload.data);
+      if (state.viewOnlyThread?.threadId === body.thread_id) {
+        state.viewOnlyThread = {
+          ...state.viewOnlyThread,
+          settings: {
+            ...(state.viewOnlyThread.settings || {}),
+            approval_policy:
+              body.approval_policy || state.viewOnlyThread.settings?.approval_policy || "",
+            sandbox: body.sandbox || state.viewOnlyThread.settings?.sandbox || "",
+            reasoning_effort:
+              body.effort || state.viewOnlyThread.settings?.reasoning_effort || "",
+            model: body.model || state.viewOnlyThread.settings?.model || "",
+          },
+        };
+        if (state.session) {
+          renderSession(state.session);
+        }
+      }
       if (body.approval_policy && state.session?.provider) {
         saveLastApprovalPolicy(state.session.provider, body.approval_policy);
       }

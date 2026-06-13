@@ -165,7 +165,7 @@ pub struct ThreadActivityView {
     pub tool: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelOptionView {
     pub model: String,
     pub display_name: String,
@@ -1070,6 +1070,8 @@ pub struct ThreadTranscriptResponse {
     pub entries: Vec<TranscriptEntryView>,
     pub next_cursor: Option<usize>,
     pub prev_cursor: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_state: Option<ThreadStateView>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1100,6 +1102,25 @@ pub struct ThreadEntryDetailResponse {
     pub entry: Option<TranscriptEntryView>,
     pub pending_fields: Vec<ThreadEntryDetailPendingField>,
     pub chunk: Option<ThreadEntryDetailChunk>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreadStateView {
+    pub thread_id: String,
+    pub provider: String,
+    pub current_cwd: String,
+    pub current_status: String,
+    pub active_turn_id: Option<String>,
+    pub current_phase: Option<String>,
+    pub current_tool: Option<String>,
+    pub last_progress_at: Option<u64>,
+    pub model: String,
+    pub reasoning_effort: String,
+    pub approval_policy: String,
+    pub sandbox: String,
+    pub available_models: Vec<ModelOptionView>,
+    pub review_locked: bool,
+    pub settings_writable: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1280,6 +1301,8 @@ pub struct StopTurnInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TakeOverInput {
     pub device_id: Option<String>,
+    /// Explicit operation target.
+    pub thread_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1584,6 +1607,7 @@ fn build_thread_transcript_page(
         entries: entries.to_vec(),
         next_cursor,
         prev_cursor,
+        thread_state: None,
     }
 }
 

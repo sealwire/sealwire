@@ -14,6 +14,7 @@ export function normalizeThreadTranscriptPage(page) {
       prev_cursor: page.prev_cursor ?? page.next_cursor ?? null,
       revision: page.revision ?? null,
       server_time: page.server_time ?? null,
+      thread_state: page.thread_state ?? null,
       thread_id: page.thread_id,
     };
   }
@@ -57,6 +58,7 @@ export function normalizeThreadTranscriptPage(page) {
     prev_cursor: page.prev_cursor ?? page.next_cursor ?? null,
     revision: page.revision ?? null,
     server_time: page.server_time ?? null,
+    thread_state: page.thread_state ?? null,
     thread_id: page.thread_id,
   };
 }

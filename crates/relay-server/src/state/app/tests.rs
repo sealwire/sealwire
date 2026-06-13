@@ -861,6 +861,90 @@ mod path_scope_tests {
     }
 
     #[tokio::test]
+    async fn explicit_take_over_targets_a_non_active_thread_without_starting_a_turn() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, codex, _claude) = build_recording_provider_app(cwd).await;
+        pair_device(&app, "device-a", Vec::new()).await;
+        pair_device(&app, "device-b", Vec::new()).await;
+
+        let thread_a = codex.thread_summary("codex-thread-a", cwd);
+        let thread_b = codex.thread_summary("codex-thread-b", cwd);
+        {
+            let mut threads = codex.threads.lock().await;
+            threads.insert(thread_a.id.clone(), thread_a.clone());
+            threads.insert(thread_b.id.clone(), thread_b.clone());
+        }
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("codex".to_string());
+            relay.active_thread_id = Some(thread_a.id.clone());
+            relay.threads = vec![thread_a, thread_b.clone()];
+            relay.assign_active_controller("device-a", unix_now());
+        }
+
+        let snapshot = app
+            .take_over_control(crate::protocol::TakeOverInput {
+                device_id: Some("device-b".to_string()),
+                thread_id: thread_b.id.clone(),
+            })
+            .await
+            .expect("take-over should target the viewed background thread");
+
+        assert_eq!(
+            snapshot.active_thread_id.as_deref(),
+            Some(thread_b.id.as_str())
+        );
+        assert_eq!(
+            snapshot.active_controller_device_id.as_deref(),
+            Some("device-b")
+        );
+        assert!(
+            codex.turn_thread_ids.lock().await.is_empty(),
+            "take-over changes control focus but must not start a turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn transcript_tail_carries_the_target_threads_settings_and_liveness() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, codex, _claude) = build_recording_provider_app(cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let thread = codex.thread_summary("codex-thread-settings", cwd);
+        codex
+            .threads
+            .lock()
+            .await
+            .insert(thread.id.clone(), thread.clone());
+        {
+            let mut relay = app.relay.write().await;
+            relay.threads = vec![thread.clone()];
+            relay.remember_thread_settings(&thread.id, "never", "read-only", "low", "saved-model");
+        }
+
+        let page = app
+            .read_thread_transcript(crate::protocol::ReadThreadTranscriptInput {
+                thread_id: thread.id.clone(),
+                cursor: None,
+                before: None,
+                device_id: Some("device-1".to_string()),
+            })
+            .await
+            .expect("tail read");
+        let thread_state = page.thread_state.expect("tail must include thread state");
+
+        assert_eq!(thread_state.thread_id, thread.id);
+        assert_eq!(thread_state.model, "saved-model");
+        assert_eq!(thread_state.reasoning_effort, "low");
+        assert_eq!(thread_state.approval_policy, "never");
+        assert_eq!(thread_state.sandbox, "read-only");
+        assert!(thread_state.active_turn_id.is_none());
+        assert!(thread_state.settings_writable);
+    }
+
+    #[tokio::test]
     async fn send_with_thread_id_and_no_active_thread_takes_over() {
         let project = TempDir::new().expect("project tempdir");
         let cwd = project.path().to_str().unwrap();
@@ -5980,6 +6064,13 @@ turn) must allow a review: {error:?}"
         let error = app
             .take_over_control(crate::protocol::TakeOverInput {
                 device_id: Some("other-device".to_string()),
+                thread_id: app
+                    .relay
+                    .read()
+                    .await
+                    .active_thread_id
+                    .clone()
+                    .expect("active thread"),
             })
             .await
             .expect_err("take-over of the reviewed thread must be blocked during a review");

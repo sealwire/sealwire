@@ -33,6 +33,14 @@ export function buildViewOnlyPin({
   reviewSig = null,
   cwd = null,
   provider = null,
+  settings = null,
+  settingsWritable = false,
+  activeTurnId = null,
+  currentStatus = null,
+  currentPhase = null,
+  currentTool = null,
+  lastProgressAt = null,
+  availableModels = [],
   status = null,
   lastRefreshAt = 0,
   wasWorking = false,
@@ -53,6 +61,14 @@ export function buildViewOnlyPin({
     // so the projection blanks those (blank/unknown beats impersonating live).
     cwd,
     provider,
+    settings,
+    settingsWritable,
+    activeTurnId,
+    currentStatus,
+    currentPhase,
+    currentTool,
+    lastProgressAt,
+    availableModels,
     status,
     lastRefreshAt,
     wasWorking,
@@ -106,6 +122,7 @@ export function projectViewOnlySession(realSession, { viewThreadId, viewOnlyThre
     (entry) => entry?.thread_id === viewThreadId
   );
   const isWorking = Boolean(activity);
+  const settings = viewOnlyThread.settings || {};
   const pendingApprovals = (realSession.pending_approvals || []).filter(
     (entry) => entry?.thread_id === viewThreadId
   );
@@ -115,16 +132,18 @@ export function projectViewOnlySession(realSession, { viewThreadId, viewOnlyThre
   return {
     ...realSession,
     active_thread_id: viewThreadId,
-    active_turn_id: isWorking ? `view:${viewThreadId}` : null,
+    active_turn_id: viewOnlyThread.activeTurnId || (isWorking ? `view:${viewThreadId}` : null),
     pending_approvals: pendingApprovals,
     pending_ask_user_questions: pendingQuestions,
     // A sentinel controller id makes canCurrentDeviceWrite() false → read-only.
     active_controller_device_id: "__view_only__",
     transcript: viewOnlyThread.entries || [],
     transcript_truncated: viewOnlyThread.olderCursor != null,
-    current_status: isWorking ? "active" : settledThreadStatus(viewOnlyThread.status),
-    current_phase: activity?.phase || null,
-    current_tool: activity?.tool || null,
+    current_status: viewOnlyThread.currentStatus
+      || (isWorking ? "active" : settledThreadStatus(viewOnlyThread.status)),
+    current_phase: viewOnlyThread.currentPhase ?? activity?.phase ?? null,
+    current_tool: viewOnlyThread.currentTool ?? activity?.tool ?? null,
+    last_progress_at: viewOnlyThread.lastProgressAt ?? null,
     view_only: true,
     // A read-only saved-thread view must never present the LIVE session's
     // metadata as the saved thread's. Use the viewed thread's summary fields
@@ -133,10 +152,13 @@ export function projectViewOnlySession(realSession, { viewThreadId, viewOnlyThre
     // fall back to the live cwd.
     current_cwd: viewOnlyThread.cwd ?? "",
     provider: viewOnlyThread.provider ?? "",
-    model: "",
-    reasoning_effort: "",
-    approval_policy: "",
-    sandbox: "",
+    model: settings.model || "",
+    reasoning_effort: settings.reasoning_effort || "",
+    approval_policy: settings.approval_policy || "",
+    sandbox: settings.sandbox || "",
+    available_models: viewOnlyThread.availableModels || [],
+    review_locked: Boolean(viewOnlyThread.review),
+    settings_writable: Boolean(viewOnlyThread.settingsWritable),
   };
 }
 

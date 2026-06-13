@@ -3140,6 +3140,49 @@ test("applyTranscriptEvent patches entries without replacing visible transcript"
   assert.equal(state.session.transcript_revision, 8);
 });
 
+test("applyTranscriptEvent repairs a rejected completion revision instead of freezing partial text", async () => {
+  activeBrowser || installBrowserStubs();
+
+  const { state } = await import("./state.js");
+  const { applyTranscriptEvent } = await import("./session-ops.js");
+
+  window.__transcriptGapRepairCount = 0;
+  state.session = {
+    active_thread_id: "thread-1",
+    transcript_revision: 10,
+    transcript_truncated: false,
+    transcript: [
+      {
+        item_id: "item-1",
+        kind: "agent_text",
+        status: "running",
+        text: "Hello, world th",
+        turn_id: "turn-1",
+        tool: null,
+      },
+    ],
+  };
+
+  applyTranscriptEvent({
+    kind: "transcript_entry_completed",
+    thread_id: "thread-1",
+    base_revision: 9,
+    revision: 10,
+    item_id: "item-1",
+    entry_kind: "agent_text",
+    status: "completed",
+    text: "Hello, world this is the end.",
+    turn_id: "turn-1",
+  });
+
+  assert.equal(
+    window.__transcriptGapRepairCount,
+    1,
+    "a rejected completion must schedule authoritative tail repair"
+  );
+  delete window.__transcriptGapRepairCount;
+});
+
 test("applyTranscriptEvent updates approvals as metadata only", async () => {
   activeBrowser || installBrowserStubs();
 

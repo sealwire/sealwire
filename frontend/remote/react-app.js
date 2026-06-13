@@ -1809,7 +1809,8 @@ function RemoteThreadPanel({
       },
       h(Composer, {
         ...composerModel,
-        actionsBeforeSend: session?.active_thread_id && !session?.view_only
+        actionsBeforeSend: session?.active_thread_id
+          && (!session?.view_only || session?.settings_writable)
           ? h(SessionSettingsButton, {
               session,
               buttonId: "remote-session-settings-button",

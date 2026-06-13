@@ -628,6 +628,7 @@ function projectRemoteViewedSession(realSession, threadId, currentView) {
   const activity = (realSession?.thread_activity || []).find(
     (entry) => entry?.thread_id === threadId
   );
+  const threadState = currentView?.thread_state || currentView || {};
   const pendingApprovals = (realSession?.pending_approvals || []).filter(
     (entry) => entry?.thread_id === threadId
   );
@@ -640,16 +641,22 @@ function projectRemoteViewedSession(realSession, threadId, currentView) {
     active_controller_last_seen_at: null,
     active_flags: [],
     active_thread_id: threadId,
-    active_turn_id: activity ? `view:${threadId}` : null,
+    active_turn_id: threadState.active_turn_id || (activity ? `view:${threadId}` : null),
     controller_lease_expires_at: null,
-    current_cwd: thread?.cwd || "",
-    current_phase: activity?.phase || null,
-    current_status: activity ? "active" : settledThreadStatus(thread?.status),
-    current_tool: activity?.tool || null,
-    model: "",
-    reasoning_effort: "",
-    approval_policy: "",
-    sandbox: "",
+    current_cwd: threadState.current_cwd || thread?.cwd || "",
+    current_phase: threadState.current_phase ?? activity?.phase ?? null,
+    current_status: threadState.current_status
+      || (activity ? "active" : settledThreadStatus(thread?.status)),
+    current_tool: threadState.current_tool ?? activity?.tool ?? null,
+    last_progress_at: threadState.last_progress_at ?? null,
+    provider: threadState.provider || thread?.provider || "",
+    model: threadState.model || "",
+    reasoning_effort: threadState.reasoning_effort || "",
+    approval_policy: threadState.approval_policy || "",
+    sandbox: threadState.sandbox || "",
+    available_models: threadState.available_models || [],
+    review_locked: Boolean(threadState.review_locked),
+    settings_writable: Boolean(threadState.settings_writable),
     pending_approvals: pendingApprovals,
     pending_ask_user_questions: pendingQuestions,
     transcript:
@@ -682,6 +689,16 @@ function applyTranscriptEntryPatch(event, { defaultStatus = null } = {}) {
     return;
   }
   if (!shouldAcceptTranscriptRevision(event)) {
+    scheduleTranscriptGapRepair(
+      currentThreadId || eventThreadId,
+      "entry_patch_revision_mismatch",
+      event.revision ?? event.transcript_revision,
+      {
+        base_revision: event.base_revision,
+        current: currentSession.transcript_revision,
+        item: event.item_id || event.entry?.item_id,
+      }
+    );
     return;
   }
 
@@ -992,6 +1009,18 @@ export async function updateRemoteSessionSettings({ approval_policy, sandbox, ef
     if (input.effort) parts.push(`effort=${input.effort}`);
     if (input.model) parts.push(`model=${input.model}`);
     renderLog(`Updated remote session settings: ${parts.join(", ")}`);
+    if (state.session?.view_only && state.session.active_thread_id === input.thread_id) {
+      applyRenderedSession(
+        {
+          ...state.session,
+          approval_policy: input.approval_policy || state.session.approval_policy,
+          sandbox: input.sandbox || state.session.sandbox,
+          reasoning_effort: input.effort || state.session.reasoning_effort,
+          model: input.model || state.session.model,
+        },
+        { hydrateTranscript: false }
+      );
+    }
     return true;
   } catch (error) {
     renderLog(`Remote settings update failed: ${error.message}`);
@@ -1049,6 +1078,7 @@ export async function viewRemoteThread(threadId) {
           transcript: page.entries || [],
           transcript_revision: page.revision || 0,
           transcript_truncated: page.prev_cursor != null,
+          thread_state: page.thread_state || null,
         }
       ),
       {
@@ -1159,12 +1189,19 @@ export async function stopActiveTurn() {
 }
 
 export async function takeOverControl() {
+  const threadId = state.session?.active_thread_id || null;
+  if (!threadId) {
+    renderLog("There is no thread to take over.");
+    return false;
+  }
   try {
     await dispatchOrRecover("take_over", {
-      input: {},
+      input: { thread_id: threadId },
     });
+    return true;
   } catch (error) {
     renderLog(`Take over failed: ${error.message}`);
+    return false;
   }
 }
 

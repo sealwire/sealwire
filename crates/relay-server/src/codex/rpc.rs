@@ -103,6 +103,7 @@ pub(super) fn spawn_stdout_reader(
                 Ok(None) => {
                     let mut relay = state.write().await;
                     relay.set_provider_connection(provider_key, false);
+                    relay.fail_in_flight_turns_for_provider(provider_key);
                     relay.push_log("error", format!("{provider_key} app-server stdout closed."));
                     relay.notify();
                     break;
@@ -110,6 +111,7 @@ pub(super) fn spawn_stdout_reader(
                 Err(error) => {
                     let mut relay = state.write().await;
                     relay.set_provider_connection(provider_key, false);
+                    relay.fail_in_flight_turns_for_provider(provider_key);
                     relay.push_log(
                         "error",
                         format!("Failed to read {provider_key} stdout: {error}"),
@@ -915,4 +917,68 @@ fn log_ignored_session_notification(method: &str, thread_id: Option<&str>, relay
         transcript_entries,
         "ignored codex notification for non-active thread"
     );
+}
+
+#[cfg(test)]
+mod disconnect_tests {
+    use super::*;
+    use crate::{protocol::ThreadSummaryView, state::SecurityProfile};
+    use std::{collections::HashMap, process::Stdio};
+    use tokio::{
+        process::Command,
+        sync::{watch, Mutex},
+        time::{sleep, timeout},
+    };
+
+    #[tokio::test]
+    async fn stdout_close_settles_codex_in_flight_turns() {
+        let (change_tx, _) = watch::channel(0_u64);
+        let mut relay = RelayState::new(
+            "/tmp/project".to_string(),
+            change_tx,
+            SecurityProfile::private(),
+        );
+        let summary = ThreadSummaryView {
+            id: "codex-thread".to_string(),
+            name: None,
+            preview: String::new(),
+            cwd: "/tmp/project".to_string(),
+            updated_at: 1,
+            source: "codex".to_string(),
+            status: "active".to_string(),
+            model_provider: "openai".to_string(),
+            provider: "codex".to_string(),
+        };
+        relay.upsert_thread(summary.clone());
+        relay.bg_set_active_turn("codex-thread", Some("turn-1".to_string()), 1);
+        relay.ensure_runtime_for_thread("codex-thread").summary = Some(summary);
+        let state = Arc::new(RwLock::new(relay));
+
+        let mut child = Command::new("sh")
+            .args(["-c", "true"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn short-lived stdout");
+        let stdout = child.stdout.take().expect("child stdout");
+        let pending_responses = Arc::new(Mutex::new(HashMap::new()));
+        spawn_stdout_reader(stdout, pending_responses, state.clone(), "codex");
+        child.wait().await.expect("child exits");
+
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if state
+                    .read()
+                    .await
+                    .runtime_for_thread("codex-thread")
+                    .and_then(|runtime| runtime.active_turn_id.as_deref())
+                    .is_none()
+                {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("stdout close should settle the turn");
+    }
 }

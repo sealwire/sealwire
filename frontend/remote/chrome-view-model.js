@@ -302,9 +302,16 @@ function sessionModelTitle(session) {
 
 function selectControlBannerRenderModel(currentState, session) {
   const activeUnderReview = isReviewInProgressForThread(session, session.active_thread_id);
+  if (session.view_only && session.active_turn_id && !activeUnderReview) {
+    return {
+      hidden: false,
+      hint: "This background thread is still running. Stop it or take over to continue here.",
+      summary: "Background thread is running",
+      takeOverHidden: false,
+    };
+  }
   if (
-    session.view_only
-    || !session.active_thread_id
+    !session.active_thread_id
     || !session.active_controller_device_id
     || (!session.active_turn_id && !activeUnderReview)
   ) {

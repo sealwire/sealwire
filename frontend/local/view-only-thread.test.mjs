@@ -81,16 +81,27 @@ test("projection uses the VIEWED thread's metadata and never impersonates the li
   const real = realSession();
   const projected = projectViewOnlySession(real, {
     viewThreadId: "A",
-    viewOnlyThread: pinFor("A", { cwd: "/saved/workspace", provider: "saved-provider" }),
+    viewOnlyThread: pinFor("A", {
+      cwd: "/saved/workspace",
+      provider: "saved-provider",
+      settings: {
+        approval_policy: "never",
+        sandbox: "read-only",
+        reasoning_effort: "low",
+        model: "saved-model",
+      },
+      settingsWritable: true,
+    }),
   });
   // Summary-backed fields use the saved thread's own values.
   assert.equal(projected.current_cwd, "/saved/workspace");
   assert.equal(projected.provider, "saved-provider");
-  // Fields the summary can't supply are blanked — never the live values.
-  assert.equal(projected.model, "");
-  assert.equal(projected.reasoning_effort, "");
-  assert.equal(projected.approval_policy, "");
-  assert.equal(projected.sandbox, "");
+  // Settings come from the targeted thread-state read, never the live thread.
+  assert.equal(projected.model, "saved-model");
+  assert.equal(projected.reasoning_effort, "low");
+  assert.equal(projected.approval_policy, "never");
+  assert.equal(projected.sandbox, "read-only");
+  assert.equal(projected.settings_writable, true);
 });
 
 test("projection blanks cwd/provider when unknown — never falls back to live metadata", () => {

@@ -251,6 +251,7 @@ fn remote_action_result_size_breakdown_reports_large_thread_transcript_payloads(
         }],
         next_cursor: None,
         prev_cursor: Some(1),
+        thread_state: None,
     };
     let thread_entries = ThreadEntriesResponse {
         thread_id: "thread-1".to_string(),
@@ -320,6 +321,7 @@ fn make_large_thread_transcript_plaintext() -> RemoteActionResultPlaintext {
             }],
             next_cursor: None,
             prev_cursor: Some(1),
+            thread_state: None,
         }),
         workspace_diff: None,
         ask_user_question_detail: None,

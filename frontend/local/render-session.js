@@ -418,7 +418,10 @@ export function createSessionRenderer({
     sendButton.hidden = composerReady && turnRunning;
     if (stopButton) {
       // Don't let the user stop the review's turn on the thread being reviewed.
-      stopButton.hidden = !composerReady || !turnRunning || activeThreadFrozen;
+      const canStopViewedTurn = turnRunning
+        && !activeThreadFrozen
+        && (canWrite || session.view_only);
+      stopButton.hidden = !canStopViewedTurn;
       stopButton.disabled = stopButton.hidden;
     }
     messageInput.disabled =
@@ -899,9 +902,20 @@ export function createSessionRenderer({
 
   function renderControlBanner(session) {
     const activeUnderReview = isReviewInProgressForThread(session, session.active_thread_id);
+    if (session.view_only && session.active_turn_id && !activeUnderReview) {
+      controlBanner.hidden = false;
+      renderReactContent(
+        controlBanner,
+        h(ControlBannerContent, {
+          hint: "This background thread is still running. Stop it or take over to continue here.",
+          showTakeOver: true,
+          summary: "Background thread is running",
+        })
+      );
+      return;
+    }
     if (
       !session.active_thread_id
-      || session.view_only
       || !isViewingConversation(session)
       || !session.active_controller_device_id
       || isCurrentDeviceActiveController(session)

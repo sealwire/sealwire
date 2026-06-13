@@ -663,27 +663,29 @@ marking idle locally."
 
     pub async fn take_over_control(&self, input: TakeOverInput) -> Result<SessionSnapshot, String> {
         let device_id = require_device_id(input.device_id)?;
+        let thread_id =
+            non_empty(Some(input.thread_id)).ok_or_else(|| "thread_id is required".to_string())?;
         let _slot = self.acquire_session_slot()?;
+        self.expire_stale_controller_if_needed().await;
+        self.ensure_thread_runtime_loaded(&thread_id, &device_id)
+            .await?;
         let mut relay = self.relay.write().await;
-        expire_controller_if_needed(&mut relay);
-        let Some(active_thread_id) = relay.active_thread_id.clone() else {
-            return Err("there is no active session to take over".to_string());
-        };
         // A review owns the reviewed thread's turn sequence; don't let a take-over
         // reassign control of THAT thread mid-review. Taking over any other active
         // thread is fine — the review runs in the background and is unaffected.
-        if relay.is_thread_review_locked(&active_thread_id) {
+        if relay.is_thread_review_locked(&thread_id) {
             return Err(REVIEW_LOCKED_THREAD_MSG.to_string());
         }
 
-        let changed = relay.set_active_controller(&device_id);
-        if changed {
-            relay.push_log(
-                "info",
-                format!("Control moved to {}.", short_device_id(&device_id)),
-            );
-            relay.notify();
-        }
+        relay.focus_thread_runtime(&thread_id, &device_id);
+        relay.push_log(
+            "info",
+            format!(
+                "Control of thread {thread_id} moved to {}.",
+                short_device_id(&device_id)
+            ),
+        );
+        relay.notify();
 
         Ok(relay.snapshot())
     }

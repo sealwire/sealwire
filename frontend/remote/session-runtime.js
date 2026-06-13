@@ -44,6 +44,9 @@ export function deriveSessionRuntime({
     sendDisabled: Boolean(session?.active_turn_id),
     sendPending,
     session,
-    stopVisible: Boolean(session?.active_turn_id && !sessionView.composerDisabled),
+    stopVisible: Boolean(
+      session?.active_turn_id
+      && (!sessionView.composerDisabled || session?.view_only)
+    ),
   };
 }

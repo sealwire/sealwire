@@ -1043,6 +1043,7 @@ fn summarize_thread_transcript_response_reports_entry_and_char_counts() {
         ],
         next_cursor: Some(8),
         prev_cursor: Some(3),
+        thread_state: None,
     });
 
     assert!(summary.contains("thread_id=thread-1"));
