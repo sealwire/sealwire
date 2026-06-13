@@ -1,15 +1,30 @@
-export function parseUnifiedDiffRows(value) {
+function *iterateLines(value) {
+  const text = String(value || "");
+  let start = 0;
+  while (start <= text.length) {
+    const end = text.indexOf("\n", start);
+    if (end < 0) {
+      yield text.slice(start);
+      return;
+    }
+    yield text.slice(start, end);
+    start = end + 1;
+  }
+}
+
+export function parseUnifiedDiffRows(value, { maxRows = Number.POSITIVE_INFINITY } = {}) {
   const rows = [];
   let oldLine = 0;
   let newLine = 0;
   let inHunk = false;
 
-  for (const line of String(value || "").split("\n")) {
+  for (const line of iterateLines(value)) {
     if (!line) {
       if (inHunk) {
         rows.push({ line, marker: " ", newLine, oldLine, type: "context" });
         oldLine += 1;
         newLine += 1;
+        if (rows.length > maxRows) break;
       }
       continue;
     }
@@ -28,6 +43,7 @@ export function parseUnifiedDiffRows(value) {
 
     if (line === "\\ No newline at end of file") {
       rows.push({ line, marker: "", oldLine: null, newLine: null, type: "meta" });
+      if (rows.length > maxRows) break;
       continue;
     }
 
@@ -38,12 +54,14 @@ export function parseUnifiedDiffRows(value) {
     if (line.startsWith("+") && !line.startsWith("+++")) {
       rows.push({ line, marker: "+", oldLine: null, newLine, type: "add" });
       newLine += 1;
+      if (rows.length > maxRows) break;
       continue;
     }
 
     if (line.startsWith("-") && !line.startsWith("---")) {
       rows.push({ line, marker: "-", oldLine, newLine: null, type: "delete" });
       oldLine += 1;
+      if (rows.length > maxRows) break;
       continue;
     }
 
@@ -58,6 +76,7 @@ export function parseUnifiedDiffRows(value) {
       oldLine += 1;
       newLine += 1;
     }
+    if (rows.length > maxRows) break;
   }
 
   return rows;

@@ -14,6 +14,7 @@ const h = React.createElement;
 
 const COLLAPSIBLE_CHAR_THRESHOLD = 900;
 const COLLAPSIBLE_LINE_THRESHOLD = 12;
+const INITIAL_DIFF_ROW_LIMIT = 400;
 
 function isCollapsible(value) {
   if (!value) {
@@ -352,84 +353,137 @@ function DiffLine({ row }) {
 }
 
 function UnifiedDiff({ value }) {
+  const [showAll, setShowAll] = React.useState(false);
+  const parsedRows = parseUnifiedDiffRows(value, {
+    maxRows: showAll ? Number.POSITIVE_INFINITY : INITIAL_DIFF_ROW_LIMIT,
+  });
+  const hasMore = !showAll && parsedRows.length > INITIAL_DIFF_ROW_LIMIT;
+  const visibleRows = hasMore
+    ? parsedRows.slice(0, INITIAL_DIFF_ROW_LIMIT)
+    : parsedRows;
   return h(
     "div",
     { "aria-label": "File diff", className: "diff-view", role: "region" },
-    ...parseUnifiedDiffRows(value).map((row, index) =>
+    ...visibleRows.map((row, index) =>
       h(DiffLine, { key: `${index}:${row.line}`, row })
-    )
+    ),
+    hasMore
+      ? h(
+          "button",
+          {
+            className: "diff-show-more",
+            onClick: () => setShowAll(true),
+            type: "button",
+          },
+          "Show remaining diff"
+        )
+      : null
   );
 }
 
 // True when a file-change entry's snapshot carries only the summary
 // (file_changes_omitted) and we don't yet hold the fetched full detail — the
 // surface should pull the diffs on demand.
-export function shouldAutoLoadFileChangeDiffs(tool, hasResolvedDetail) {
+export function shouldAutoLoadFileChangeDiffs(tool, hasResolvedDetail, isExpanded = false) {
   const isFileChange =
     tool?.item_type === "fileChange" || tool?.item_type === "turnDiff";
-  return Boolean(isFileChange && tool?.file_changes_omitted && !hasResolvedDetail);
+  return Boolean(
+    isExpanded
+    && isFileChange
+    && tool?.file_changes_omitted
+    && !hasResolvedDetail
+  );
 }
 
-export function FileChangeDiff({ tool }) {
+function FileDiffSection({
+  change,
+  displayPath,
+  diffsOmitted,
+  itemId,
+  onEnsureDetail,
+}) {
+  const [opened, setOpened] = React.useState(false);
+  const { added, removed } = opened ? diffStats(change.diff) : { added: 0, removed: 0 };
+  const onToggle = (event) => {
+    const isOpen = Boolean(event.currentTarget.open);
+    setOpened(isOpen);
+    if (
+      shouldAutoLoadFileChangeDiffs(
+        { item_type: "fileChange", file_changes_omitted: diffsOmitted },
+        Boolean(change.diff),
+        isOpen
+      )
+      && itemId
+      && typeof onEnsureDetail === "function"
+    ) {
+      onEnsureDetail(itemId);
+    }
+  };
+
+  return h(
+    "details",
+    {
+      className: "diff-file-section",
+      onToggle,
+    },
+    h(
+      "summary",
+      { className: "diff-file-section-header" },
+      h(
+        "div",
+        { className: "diff-file-section-meta", title: change.path || "unknown" },
+        h(
+          "div",
+          { className: "diff-file-section-primary" },
+          h("strong", { className: "diff-file-section-name" }, displayPath),
+          added > 0 ? h("span", { className: "file-change-chip-add" }, `+${added}`) : null,
+          removed > 0 ? h("span", { className: "file-change-chip-del" }, `-${removed}`) : null
+        )
+      ),
+      h("span", { className: "diff-file-section-chevron", "aria-hidden": "true" }, "▾")
+    ),
+    opened
+      ? h(
+          "div",
+          { className: "diff-file-section-body" },
+          change.diff
+            ? h(UnifiedDiff, { value: change.diff })
+            : h(
+                "p",
+                { className: "diff-file-empty" },
+                diffsOmitted ? "Loading diff…" : "Diff unavailable for this file."
+              )
+        )
+      : null
+  );
+}
+
+export function FileChangeDiff({ tool, itemId = "", onEnsureDetail = null }) {
   const fileChanges = getFileChanges(tool);
   const displayPaths = buildFileDisplayPathMap(fileChanges, tool?.display_options || null);
-  const fileChangesWithDiff = fileChanges.filter((change) => change?.diff);
-  const fallbackDiff = tool.diff || fileChangesWithDiff
-    .map((change) => change?.diff)
-    .filter(Boolean)
-    .join("\n");
-  // Snapshots only carry the file-change summary; the diff bodies load on
-  // demand. While that fetch is in flight (or pending), show a loading hint
-  // instead of the "unavailable" copy used for genuinely missing diffs.
   const diffsOmitted = Boolean(tool?.file_changes_omitted);
-  const emptyDiffMessage = diffsOmitted
-    ? "Loading diff…"
-    : "Diff unavailable for this file.";
 
-  if (!fallbackDiff && !fileChanges.length) {
+  if (!fileChanges.length) {
     return null;
   }
 
   return h(
     "div",
     { className: "file-diff-panel" },
-    fileChanges.length
-      ? h(
-        "div",
-          { className: "diff-file-sections" },
-          ...fileChanges.map((change, index) => {
-            const { added, removed } = diffStats(change.diff);
-            const displayPath = displayPaths.get(change.path) || fileBasename(change.path);
-            return h(
-              "details",
-              { className: "diff-file-section", key: `${change.path || "unknown"}:${index}` },
-              h(
-                "summary",
-                { className: "diff-file-section-header" },
-                h(
-                  "div",
-                  { className: "diff-file-section-meta", title: change.path || "unknown" },
-                  h(
-                    "div",
-                    { className: "diff-file-section-primary" },
-                    h("strong", { className: "diff-file-section-name" }, displayPath),
-                    added > 0 ? h("span", { className: "file-change-chip-add" }, `+${added}`) : null,
-                    removed > 0 ? h("span", { className: "file-change-chip-del" }, `-${removed}`) : null
-                  )
-                ),
-                h("span", { className: "diff-file-section-chevron", "aria-hidden": "true" }, "▾")
-              ),
-              h(
-                "div",
-                { className: "diff-file-section-body" },
-                change.diff
-                  ? h(UnifiedDiff, { value: change.diff })
-                  : h("p", { className: "diff-file-empty" }, emptyDiffMessage)
-              )
-            );
-          })
-        )
-      : h(UnifiedDiff, { value: fallbackDiff })
+    h(
+      "div",
+      { className: "diff-file-sections" },
+      ...fileChanges.map((change, index) =>
+        h(FileDiffSection, {
+          change,
+          diffsOmitted,
+          displayPath: displayPaths.get(change.path) || fileBasename(change.path),
+          itemId,
+          key: `${change.path || "unknown"}:${index}`,
+          onEnsureDetail,
+        })
+      )
+    )
   );
 }
 
@@ -1078,27 +1132,6 @@ function GenericToolEntry({ entry, isJustPrepended = false, options = null }) {
     ? { ...tool, display_options: options || null }
     : tool;
 
-  // File-change entries render diffs inline and have no expand control, so when
-  // the snapshot only carries the summary (file_changes_omitted) we auto-load
-  // the full diffs via a surface-injected fetch. resolveTranscriptDetailEntry
-  // returns the fetched full entry once cached, which clears the flag.
-  const needsFileChangeDetail = shouldAutoLoadFileChangeDiffs(tool, Boolean(detailEntry));
-  // Hold the latest fetch handler in a ref so the effect does NOT depend on its
-  // identity. Both surfaces rebuild this callback every render, and a failed
-  // fetch re-renders (via finishLoadingDetail); depending on the handler would
-  // re-fire the fetch on every such render — a self-exciting retry loop. Instead
-  // the effect fires once per (needsFileChangeDetail, itemId) edge.
-  const ensureFileChangeDetailRef = React.useRef(options?.onEnsureFileChangeDetail);
-  ensureFileChangeDetailRef.current = options?.onEnsureFileChangeDetail;
-  React.useEffect(() => {
-    if (!needsFileChangeDetail || !itemId) {
-      return;
-    }
-    const ensure = ensureFileChangeDetailRef.current;
-    if (typeof ensure === "function") {
-      ensure(itemId);
-    }
-  }, [needsFileChangeDetail, itemId]);
   const status = entry.status || "completed";
   const nameLabel = tool.name || "Tool";
   const fallbackTitle = tool.title || toolEntry.text || entry.text || "Tool call";
@@ -1152,7 +1185,11 @@ function GenericToolEntry({ entry, isJustPrepended = false, options = null }) {
         ? h(
             React.Fragment,
             null,
-            h(FileChangeDiff, { tool: displayTool }),
+            h(FileChangeDiff, {
+              itemId,
+              onEnsureDetail: options?.onEnsureFileChangeDetail,
+              tool: displayTool,
+            }),
             (() => {
               const isTurnDiff = tool.item_type === "turnDiff";
               const isLastTurnDiff =

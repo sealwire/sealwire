@@ -87,6 +87,7 @@ test("createTranscriptPageFetcher normalizes legacy chunk transcript pages", asy
     revision: null,
     server_time: null,
     thread_id: "thread-1",
+    thread_state: null,
   });
 });
 
@@ -145,6 +146,7 @@ test("createTranscriptPageFetcher preserves complete-entry transcript pages", as
     revision: null,
     server_time: null,
     thread_id: "thread-1",
+    thread_state: null,
   });
 });
 

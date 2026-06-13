@@ -1110,6 +1110,54 @@ fn thread_transcript_response_tail_returns_latest_page_first() {
 }
 
 #[test]
+fn thread_transcript_history_externalizes_large_file_change_diffs() {
+    let large_diff = format!(
+        "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-{}\n+{}",
+        "old".repeat(12_000),
+        "new".repeat(12_000)
+    );
+    let transcript = vec![TranscriptEntryView {
+        item_id: Some("turn-diff:turn-1".to_string()),
+        kind: TranscriptEntryKind::ToolCall,
+        text: Some("Changed files".to_string()),
+        status: "completed".to_string(),
+        turn_id: Some("turn-1".to_string()),
+        tool: Some(ToolCallView {
+            item_type: "turnDiff".to_string(),
+            name: "turn_diff".to_string(),
+            title: "Changed files".to_string(),
+            detail: None,
+            query: None,
+            path: None,
+            url: None,
+            command: None,
+            input_preview: None,
+            result_preview: None,
+            diff: None,
+            file_changes: vec![FileChangeDiffView {
+                path: "src/a.rs".to_string(),
+                change_type: "modify".to_string(),
+                diff: large_diff,
+            }],
+            apply_state: None,
+            file_changes_omitted: false,
+        }),
+    }];
+
+    let page = ThreadTranscriptResponse::from_transcript_before(
+        "thread-1".to_string(),
+        transcript,
+        None,
+        9,
+    );
+    let tool = page.entries[0].tool.as_ref().expect("tool summary");
+    assert!(tool.file_changes_omitted);
+    assert!(tool.diff.is_none());
+    assert!(tool.file_changes[0].diff.is_empty());
+    assert!(serde_json::to_vec(&page).unwrap().len() <= THREADS_RESPONSE_TARGET_BYTES);
+}
+
+#[test]
 fn thread_entries_response_returns_complete_entries_for_requested_item_ids() {
     let transcript = vec![
         TranscriptEntryView {
@@ -1188,4 +1236,66 @@ fn thread_entry_detail_response_chunks_large_command_text() {
         .as_ref()
         .map(|chunk| chunk.text.is_empty())
         .unwrap_or(true));
+}
+
+#[test]
+fn thread_entry_detail_response_chunks_large_nested_file_change_diff() {
+    let large_diff = format!(
+        "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-{}\n+{}",
+        "old".repeat(12_000),
+        "new".repeat(12_000)
+    );
+    let entry = TranscriptEntryView {
+        item_id: Some("turn-diff:turn-1".to_string()),
+        kind: TranscriptEntryKind::ToolCall,
+        text: Some("Changed files".to_string()),
+        status: "completed".to_string(),
+        turn_id: Some("turn-1".to_string()),
+        tool: Some(ToolCallView {
+            item_type: "turnDiff".to_string(),
+            name: "turn_diff".to_string(),
+            title: "Changed files".to_string(),
+            detail: None,
+            query: None,
+            path: None,
+            url: None,
+            command: None,
+            input_preview: None,
+            result_preview: None,
+            diff: None,
+            file_changes: vec![FileChangeDiffView {
+                path: "src/a.rs".to_string(),
+                change_type: "modify".to_string(),
+                diff: large_diff,
+            }],
+            apply_state: None,
+            file_changes_omitted: false,
+        }),
+    };
+
+    let response =
+        ThreadEntryDetailResponse::from_entry("thread-1".to_string(), entry.clone()).unwrap();
+    let response_entry = response.entry.as_ref().expect("initial detail entry");
+    let tool = response_entry.tool.as_ref().expect("tool detail");
+    assert!(tool.file_changes[0].diff.is_empty());
+    assert!(response
+        .pending_fields
+        .iter()
+        .any(|pending| pending.field == "tool.diff"));
+    assert!(serde_json::to_vec(&response).unwrap().len() <= THREADS_RESPONSE_TARGET_BYTES);
+
+    let next_cursor = response
+        .pending_fields
+        .iter()
+        .find(|pending| pending.field == "tool.diff")
+        .map(|pending| pending.next_cursor)
+        .expect("tool.diff cursor");
+    let chunk = ThreadEntryDetailResponse::from_entry_chunk(
+        "thread-1".to_string(),
+        &entry,
+        "tool.diff",
+        next_cursor,
+    )
+    .expect("synthetic nested diff chunk");
+    assert!(!chunk.chunk.expect("chunk").text.is_empty());
 }

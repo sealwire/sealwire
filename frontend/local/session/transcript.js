@@ -236,9 +236,8 @@ export function createTranscriptController(ctx) {
     }
   }
 
-  // File-change entries render diffs inline and have no expand control, so when
-  // the snapshot only carries the file-change summary (file_changes_omitted) the
-  // shared renderer calls this to pull the full diffs on demand. Idempotent.
+  // Opening an individual file section calls this to pull omitted diff bodies.
+  // The fetch remains idempotent across repeated open/close interactions.
   async function ensureFileChangeDetail(itemId) {
     const threadId = displayedThreadId();
     if (!itemId || !threadId) {

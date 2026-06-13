@@ -288,10 +288,10 @@ export function isOmittedFileChangeDetail(entry) {
   return Boolean(entry?.tool?.file_changes_omitted);
 }
 
-// Visible file-change entries whose snapshot only carries the summary
-// (file_changes_omitted). They have no expand control, so their fetched full
-// detail must be folded into the detail map regardless of expansion — otherwise
-// the renderer keeps showing the summary and the UI stays on "Loading diff…".
+// Visible file-change entries whose transport projection only carries the
+// summary. Once a user expands one and its detail is fetched, these ids let the
+// renderer fold the cached full detail back in without expanding the whole tool
+// entry.
 export function collectFileChangeDetailItemIds(transcript) {
   const itemIds = [];
   for (const entry of transcript || []) {
@@ -354,8 +354,8 @@ export function buildExpandedTranscriptDetailEntries(
     }
     resolveInto(String(expandedKey).slice("entry:".length));
   }
-  // File-change entries that were stripped to a summary auto-load their detail
-  // even without an expand toggle; fold in only the fetched FULL detail.
+  // Fold in only already-fetched full file-change details. Fetching itself is
+  // driven by opening an individual file section.
   for (const itemId of autoDetailItemIds || []) {
     resolveInto(itemId, { requireFull: true });
   }

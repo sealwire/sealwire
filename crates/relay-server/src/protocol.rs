@@ -988,14 +988,10 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
-/// Reduce a snapshot's transcript to a file-change SUMMARY: drop the diff bodies
-/// (`tool.diff` and each `file_changes[].diff`) while keeping path / change_type,
-/// and flag affected entries with `file_changes_omitted`. Snapshots are
-/// size-bounded projections; the full diffs are fetched on demand via the
-/// entry-detail path, so a large diff can never bloat a snapshot. This only runs
-/// on the snapshot's cloned views — the authoritative transcript records (and
-/// the read/detail responses built from them) keep their full diffs.
-pub(crate) fn strip_file_change_diffs_for_snapshot(transcript: &mut [TranscriptEntryView]) {
+/// Reduce a cloned transcript projection to a file-change summary. Authoritative
+/// runtime entries retain their full diffs; snapshots and paged history load the
+/// bodies through the entry-detail path instead.
+fn strip_file_change_diffs_for_transport(transcript: &mut [TranscriptEntryView]) {
     for entry in transcript.iter_mut() {
         let Some(tool) = entry.tool.as_mut() else {
             continue;
@@ -1014,6 +1010,10 @@ pub(crate) fn strip_file_change_diffs_for_snapshot(transcript: &mut [TranscriptE
         }
         tool.file_changes_omitted = true;
     }
+}
+
+pub(crate) fn strip_file_change_diffs_for_snapshot(transcript: &mut [TranscriptEntryView]) {
+    strip_file_change_diffs_for_transport(transcript);
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1425,9 +1425,10 @@ impl ThreadTranscriptResponse {
     #[cfg(test)]
     pub fn from_transcript(
         thread_id: String,
-        transcript: Vec<TranscriptEntryView>,
+        mut transcript: Vec<TranscriptEntryView>,
         cursor: usize,
     ) -> Self {
+        strip_file_change_diffs_for_transport(&mut transcript);
         let mut selected = Vec::new();
         let mut index = cursor.min(transcript.len());
 
@@ -1467,18 +1468,20 @@ impl ThreadTranscriptResponse {
 
     pub fn from_transcript_tail(
         thread_id: String,
-        transcript: Vec<TranscriptEntryView>,
+        mut transcript: Vec<TranscriptEntryView>,
         revision: u64,
     ) -> Self {
+        strip_file_change_diffs_for_transport(&mut transcript);
         build_reverse_thread_transcript_page(&thread_id, &transcript, transcript.len(), revision)
     }
 
     pub fn from_transcript_before(
         thread_id: String,
-        transcript: Vec<TranscriptEntryView>,
+        mut transcript: Vec<TranscriptEntryView>,
         before: Option<usize>,
         revision: u64,
     ) -> Self {
+        strip_file_change_diffs_for_transport(&mut transcript);
         let upper_bound = before.unwrap_or(transcript.len()).min(transcript.len());
         build_reverse_thread_transcript_page(&thread_id, &transcript, upper_bound, revision)
     }
@@ -1521,6 +1524,7 @@ impl ThreadEntryDetailResponse {
             .clone()
             .ok_or_else(|| "thread entry detail is missing item_id".to_string())?;
         let mut entry_for_response = entry.clone();
+        externalize_nested_file_change_diffs(&mut entry_for_response);
         let mut pending_fields = Vec::new();
 
         for field in detail_field_names(&entry) {
@@ -1532,7 +1536,7 @@ impl ThreadEntryDetailResponse {
                 continue;
             }
 
-            let chunk = slice_chars(value, 0, THREAD_ENTRY_DETAIL_INITIAL_CHUNK_CHARS);
+            let chunk = slice_chars(&value, 0, THREAD_ENTRY_DETAIL_INITIAL_CHUNK_CHARS);
             set_detail_field_value(&mut entry_for_response, field, chunk.clone())?;
             pending_fields.push(ThreadEntryDetailPendingField {
                 field: field.to_string(),
@@ -1563,7 +1567,7 @@ impl ThreadEntryDetailResponse {
         let value = detail_field_value(entry, field)
             .ok_or_else(|| format!("thread entry detail field `{field}` is unavailable"))?;
         let total_chars = value.chars().count();
-        let text = slice_chars(value, cursor, THREAD_ENTRY_DETAIL_CHUNK_CHARS);
+        let text = slice_chars(&value, cursor, THREAD_ENTRY_DETAIL_CHUNK_CHARS);
         let advanced_by = text.chars().count();
         let next_cursor = (cursor + advanced_by < total_chars).then_some(cursor + advanced_by);
 
@@ -1699,14 +1703,73 @@ fn detail_field_names(entry: &TranscriptEntryView) -> &'static [&'static str] {
     }
 }
 
-fn detail_field_value<'a>(entry: &'a TranscriptEntryView, field: &str) -> Option<&'a str> {
+fn detail_field_value<'a>(
+    entry: &'a TranscriptEntryView,
+    field: &str,
+) -> Option<std::borrow::Cow<'a, str>> {
     match field {
-        "text" => entry.text.as_deref(),
-        "tool.detail" => entry.tool.as_ref()?.detail.as_deref(),
-        "tool.input_preview" => entry.tool.as_ref()?.input_preview.as_deref(),
-        "tool.result_preview" => entry.tool.as_ref()?.result_preview.as_deref(),
-        "tool.diff" => entry.tool.as_ref()?.diff.as_deref(),
+        "text" => entry.text.as_deref().map(std::borrow::Cow::Borrowed),
+        "tool.detail" => entry
+            .tool
+            .as_ref()?
+            .detail
+            .as_deref()
+            .map(std::borrow::Cow::Borrowed),
+        "tool.input_preview" => entry
+            .tool
+            .as_ref()?
+            .input_preview
+            .as_deref()
+            .map(std::borrow::Cow::Borrowed),
+        "tool.result_preview" => entry
+            .tool
+            .as_ref()?
+            .result_preview
+            .as_deref()
+            .map(std::borrow::Cow::Borrowed),
+        "tool.diff" => {
+            let tool = entry.tool.as_ref()?;
+            if let Some(diff) = tool.diff.as_deref() {
+                return Some(std::borrow::Cow::Borrowed(diff));
+            }
+            let combined = tool
+                .file_changes
+                .iter()
+                .map(|change| change.diff.as_str())
+                .filter(|diff| !diff.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n");
+            (!combined.is_empty()).then_some(std::borrow::Cow::Owned(combined))
+        }
         _ => None,
+    }
+}
+
+fn externalize_nested_file_change_diffs(entry: &mut TranscriptEntryView) {
+    let Some(tool) = entry.tool.as_mut() else {
+        return;
+    };
+    let has_nested_diff = tool
+        .file_changes
+        .iter()
+        .any(|change| !change.diff.is_empty());
+    if !has_nested_diff {
+        return;
+    }
+    if tool.diff.is_none() {
+        let combined = tool
+            .file_changes
+            .iter()
+            .map(|change| change.diff.as_str())
+            .filter(|diff| !diff.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !combined.is_empty() {
+            tool.diff = Some(combined);
+        }
+    }
+    for change in &mut tool.file_changes {
+        change.diff.clear();
     }
 }
 

@@ -68,7 +68,10 @@ async function main() {
     // Transcript history is no longer persisted in relay state (it is restored
     // from the provider on resume). The fake provider has no real session
     // store, so we hand it the seeded turnDiff transcript via this fixture file.
-    extraEnv: { FAKE_PROVIDER_SEED_PATH: seedPath },
+    extraEnv: {
+      AGENT_PROVIDERS: "fake",
+      FAKE_PROVIDER_SEED_PATH: seedPath,
+    },
   });
 
   await waitForHealth(`http://127.0.0.1:${relayPort}/api/health`);
@@ -98,10 +101,8 @@ async function main() {
       null,
       { timeout: TIMEOUT_MS }
     );
-    // A turn's file diffs are consolidated into a collapsed diff-group chip
-    // (see groupToolEntries). Expand it so the turnDiff renders as a group
-    // member with its inline diff body and the Undo/Reapply control. (When the
-    // entry happens to render standalone there is no chip, so this is a no-op.)
+    // A turn's file diffs are consolidated into a collapsed diff-group chip.
+    // Expand the group first; each file body remains independently lazy.
     await page.waitForFunction(
       (itemId) =>
         Boolean(
@@ -123,6 +124,17 @@ async function main() {
       { timeout: TIMEOUT_MS }
     );
 
+    assert.equal(
+      await page.locator(".diff-line").count(),
+      0,
+      "closed file sections must not mount diff rows"
+    );
+    await page.evaluate(() => {
+      const summary = document.querySelector(".diff-file-section > summary");
+      if (summary instanceof HTMLElement) {
+        summary.click();
+      }
+    });
     await page.waitForFunction(
       () => {
         const transcript = document.querySelector("#transcript")?.textContent || "";

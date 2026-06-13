@@ -16,6 +16,7 @@ import {
 } from "./shared/transcript-react.js";
 import { TranscriptPane } from "./shared/transcript-pane.js";
 import { collectFileChangeDetailItemIds } from "./shared/transcript-entry-details-state.js";
+import { parseUnifiedDiffRows } from "./shared/file-change-diff.js";
 
 const h = React.createElement;
 
@@ -79,33 +80,66 @@ test("renderEntryMarkup renders typed session items safely", () => {
   assert.match(toolMarkup, /tool-log-primary">frontend\/remote\/main\.js</);
 });
 
-test("shouldAutoLoadFileChangeDiffs triggers only for omitted file-change tools without detail", () => {
+test("shouldAutoLoadFileChangeDiffs waits for an explicit file expansion", () => {
   assert.equal(
-    shouldAutoLoadFileChangeDiffs({ item_type: "turnDiff", file_changes_omitted: true }, false),
-    true
+    shouldAutoLoadFileChangeDiffs(
+      { item_type: "turnDiff", file_changes_omitted: true },
+      false,
+      false
+    ),
+    false
   );
   assert.equal(
-    shouldAutoLoadFileChangeDiffs({ item_type: "fileChange", file_changes_omitted: true }, false),
+    shouldAutoLoadFileChangeDiffs(
+      { item_type: "fileChange", file_changes_omitted: true },
+      false,
+      true
+    ),
     true
   );
   // The fetched full detail is already resolved -> no auto-load.
   assert.equal(
-    shouldAutoLoadFileChangeDiffs({ item_type: "turnDiff", file_changes_omitted: true }, true),
+    shouldAutoLoadFileChangeDiffs(
+      { item_type: "turnDiff", file_changes_omitted: true },
+      true,
+      true
+    ),
     false
   );
   // Diffs are inline (not omitted) -> no auto-load.
   assert.equal(
-    shouldAutoLoadFileChangeDiffs({ item_type: "turnDiff", file_changes_omitted: false }, false),
+    shouldAutoLoadFileChangeDiffs(
+      { item_type: "turnDiff", file_changes_omitted: false },
+      false,
+      true
+    ),
     false
   );
   // Not a file-change tool -> no auto-load.
   assert.equal(
-    shouldAutoLoadFileChangeDiffs({ item_type: "mcpToolCall", file_changes_omitted: true }, false),
+    shouldAutoLoadFileChangeDiffs(
+      { item_type: "mcpToolCall", file_changes_omitted: true },
+      false,
+      true
+    ),
     false
   );
 });
 
-test("file-change entry with omitted diffs renders the file summary and a loading hint", () => {
+test("parseUnifiedDiffRows caps initial work for very large diffs", () => {
+  const diff = [
+    "diff --git a/src/a.js b/src/a.js",
+    "--- a/src/a.js",
+    "+++ b/src/a.js",
+    "@@ -1,20000 +1,20000 @@",
+    ...Array.from({ length: 20_000 }, (_, index) => `+line ${index}`),
+  ].join("\n");
+
+  const rows = parseUnifiedDiffRows(diff, { maxRows: 400 });
+  assert.ok(rows.length <= 401, `parsed ${rows.length} rows for the initial render`);
+});
+
+test("file-change entry with omitted diffs renders only the closed file summaries", () => {
   const markup = renderEntryMarkup({
     item_id: "turn-diff:turn-1",
     kind: "tool_call",
@@ -126,9 +160,10 @@ test("file-change entry with omitted diffs renders the file summary and a loadin
   // The file list (summary) is shown even though diff bodies were stripped...
   assert.match(markup, /src\/a\.rs/);
   assert.match(markup, /src\/b\.rs/);
-  // ...with a loading hint, not the "unavailable" copy used for missing diffs.
-  assert.match(markup, /Loading diff/);
+  // Closed sections do not mount a body or start presenting a loading state.
+  assert.doesNotMatch(markup, /Loading diff/);
   assert.doesNotMatch(markup, /Diff unavailable for this file/);
+  assert.doesNotMatch(markup, /diff-file-section-body/);
 });
 
 test("file-change entry with inline diffs still renders the diff (no loading hint)", () => {
@@ -187,8 +222,10 @@ test("file-change entry renders the fetched full diff once detail is resolved", 
 
   assert.match(markup, /src\/a\.rs/);
   assert.doesNotMatch(markup, /Loading diff/);
-  // The fetched diff body is what renders now (added "new" line present).
-  assert.match(markup, /new/);
+  // Full detail is retained, but the body is still not mounted until the file
+  // section itself is opened.
+  assert.doesNotMatch(markup, /diff-line/);
+  assert.doesNotMatch(markup, />new</);
 });
 
 test("collectFileChangeDetailItemIds returns only omitted file-change entries", () => {
@@ -354,7 +391,7 @@ test("renderEntryMarkup avoids repeating file change metadata and path previews"
   assert.doesNotMatch(markup, /tool-preview-label">Input</);
 });
 
-test("renderEntryMarkup derives file chips and +/- stats from unified diff when file_changes are absent", () => {
+test("renderEntryMarkup derives closed file sections from unified diff when file_changes are absent", () => {
   const markup = renderEntryMarkup({
     item_id: "fc-legacy",
     kind: "tool_call",
@@ -380,8 +417,7 @@ test("renderEntryMarkup derives file chips and +/- stats from unified diff when 
 
   assert.match(markup, /app\.js/);
   assert.match(markup, /styles\.css/);
-  assert.match(markup, /\+2/);
-  assert.match(markup, /-2/);
+  assert.doesNotMatch(markup, /diff-line/);
   assert.doesNotMatch(markup, /Codex wants to edit 2 files\./);
 });
 
@@ -444,9 +480,8 @@ test("renderEntryMarkup never attaches undo controls to individual file change e
 
   assert.match(markup, /diff-file-section-chevron/);
   assert.doesNotMatch(markup, /data-file-change-action/);
-  assert.match(markup, /diff-line-delete/);
-  assert.match(markup, /diff-line-add/);
-  assert.match(markup, /diff-line-number">1</);
+  assert.doesNotMatch(markup, /diff-line-delete/);
+  assert.doesNotMatch(markup, /diff-line-add/);
   assert.doesNotMatch(markup, /@@ -1 \+1 @@/);
   assert.match(markup, /frontend\/app\.js/);
 });
@@ -627,7 +662,7 @@ test("renderEntryMarkup omits undo controls on non-last turn-diff entries", () =
   assert.doesNotMatch(markup, /data-file-change-action/);
 });
 
-test("renderEntryMarkup expands turn diff entries into per-file sections", () => {
+test("renderEntryMarkup exposes turn diff files as independently closed sections", () => {
   const markup = renderEntryMarkup({
     item_id: "turn-diff:1",
     kind: "tool_call",
@@ -656,18 +691,15 @@ test("renderEntryMarkup expands turn diff entries into per-file sections", () =>
 
   assert.match(markup, /diff-file-section/);
   assert.match(markup, /diff-file-section-chevron/);
-  assert.match(markup, /app\.js<\/strong><span class="file-change-chip-add">\+1/);
-  assert.match(markup, /styles\.css<\/strong><span class="file-change-chip-add">\+1/);
-  assert.match(markup, /file-change-chip-del">-1/);
   assert.match(markup, /frontend\/app\.js/);
   assert.match(markup, /frontend\/styles\.css/);
-  assert.match(markup, /diff-line-number">1</);
+  assert.doesNotMatch(markup, /diff-line-number/);
   assert.doesNotMatch(markup, /diff --git a\/frontend\/app\.js b\/frontend\/app\.js/);
   assert.doesNotMatch(markup, /diff --git a\/frontend\/styles\.css b\/frontend\/styles\.css/);
   assert.doesNotMatch(markup, /@@ -1 \+1 @@/);
 });
 
-test("renderEntryMarkup enriches path-only file changes from a single new-file diff", () => {
+test("renderEntryMarkup enriches a path-only closed section from a new-file diff", () => {
   const diff = [
     "diff --git a/crates/relay-server/src/file_changes.rs b/crates/relay-server/src/file_changes.rs",
     "new file mode 100644",
@@ -709,15 +741,15 @@ test("renderEntryMarkup enriches path-only file changes from a single new-file d
     expandedKeys: new Set(["entry:turn-diff:new-file"]),
   });
 
-  assert.match(markup, /file_changes\.rs<\/strong><span class="file-change-chip-add">\+11/);
+  assert.match(markup, /file_changes\.rs<\/strong>/);
   assert.match(markup, /crates\/relay-server\/src\/file_changes\.rs/);
-  assert.match(markup, /diff-line diff-line-add/);
-  assert.match(markup, /diff-line-number">11</);
+  assert.doesNotMatch(markup, /diff-line diff-line-add/);
+  assert.doesNotMatch(markup, /diff-line-number/);
   assert.doesNotMatch(markup, /file-change-chip-del">-1/);
   assert.doesNotMatch(markup, /Diff unavailable for this file\./);
 });
 
-test("renderEntryMarkup treats raw created-file content as added lines", () => {
+test("renderEntryMarkup keeps raw created-file content out of a closed section", () => {
   const markup = renderEntryMarkup({
     item_id: "file-change:raw-add",
     kind: "tool_call",
@@ -758,9 +790,9 @@ test("renderEntryMarkup treats raw created-file content as added lines", () => {
     expandedKeys: new Set(["entry:file-change:raw-add"]),
   });
 
-  assert.match(markup, /file-diff-ui-smoke-test\.md<\/strong><span class="file-change-chip-add">\+8/);
+  assert.match(markup, /file-diff-ui-smoke-test\.md<\/strong>/);
   assert.doesNotMatch(markup, /file-change-chip-del">-4/);
-  assert.match(markup, /diff-line diff-line-add/);
+  assert.doesNotMatch(markup, /diff-line diff-line-add/);
 });
 
 test("renderEntryMarkup shows workspace-relative file paths for absolute paths", () => {
@@ -1345,7 +1377,7 @@ test("expanded diff-group shows only the fileChange member, not the redundant tu
   assert.match(markup, /diff-group-chip-open/);
   // Exactly one diff panel: the inline edit. The turnDiff summary is suppressed.
   assert.equal((markup.match(/file-diff-panel/g) || []).length, 1);
-  assert.match(markup, /INLINE_EDIT/);
+  assert.doesNotMatch(markup, /INLINE_EDIT/);
   assert.doesNotMatch(markup, /SUMMARY_AGG/);
 });
 

@@ -369,7 +369,7 @@ mod path_scope_tests {
             .tool
             .expect("tool detail");
         assert_eq!(tool.diff.as_deref(), Some("@@ -1 +1 @@\n-old\n+new"));
-        assert_eq!(tool.file_changes[0].diff, "-old\n+new");
+        assert!(tool.file_changes[0].diff.is_empty());
         assert!(!tool.file_changes_omitted);
     }
 
@@ -6061,16 +6061,17 @@ turn) must allow a review: {error:?}"
             .await
             .expect("review should start and hold the guard");
 
+        let reviewed_thread_id = app
+            .relay
+            .read()
+            .await
+            .active_thread_id
+            .clone()
+            .expect("active thread");
         let error = app
             .take_over_control(crate::protocol::TakeOverInput {
                 device_id: Some("other-device".to_string()),
-                thread_id: app
-                    .relay
-                    .read()
-                    .await
-                    .active_thread_id
-                    .clone()
-                    .expect("active thread"),
+                thread_id: reviewed_thread_id,
             })
             .await
             .expect_err("take-over of the reviewed thread must be blocked during a review");
