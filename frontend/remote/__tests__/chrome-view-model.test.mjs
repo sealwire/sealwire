@@ -234,6 +234,25 @@ test("remote control banner allows take over when the review is on another threa
   assert.equal(model.controlBanner.takeOverHidden, false);
 });
 
+test("remote view-only stale working status exposes targeted take over", () => {
+  const model = selectSessionChromeRenderModel({
+    remoteAuth: { deviceId: "device-1" },
+    socketConnected: true,
+  }, {
+    active_thread_id: "thread-2",
+    active_turn_id: null,
+    active_controller_device_id: "__view_only__",
+    active_review_jobs: [],
+    current_status: "active",
+    pending_approvals: [],
+    provider_connected: true,
+    view_only: true,
+  });
+
+  assert.equal(model.controlBanner.hidden, false);
+  assert.equal(model.controlBanner.takeOverHidden, false);
+});
+
 test("selectStatusBadgeRenderModel falls back to home and pairing states without a session", () => {
   assert.deepEqual(
     selectStatusBadgeRenderModel({

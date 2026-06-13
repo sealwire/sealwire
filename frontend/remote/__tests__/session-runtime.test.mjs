@@ -168,3 +168,23 @@ test("deriveSessionRuntime disables send and shows stop for a running turn", () 
   assert.equal(runtime.sendDisabled, true);
   assert.equal(runtime.stopVisible, true);
 });
+
+test("deriveSessionRuntime shows stop for a view-only stale working status", () => {
+  const session = {
+    active_thread_id: "thread-1",
+    active_turn_id: null,
+    current_status: "active",
+    view_only: true,
+  };
+
+  const runtime = deriveSessionRuntime({
+    session,
+    sessionView: {
+      composerDisabled: true,
+      currentApprovalId: null,
+      messagePlaceholder: "",
+    },
+  });
+
+  assert.equal(runtime.stopVisible, true);
+});

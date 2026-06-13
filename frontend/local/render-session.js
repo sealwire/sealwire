@@ -91,7 +91,7 @@ import {
 } from "./react-session-panels.js";
 import { ThreadGroupList } from "../shared/thread-list-react.js";
 import { buildThreadActivityMap } from "../shared/thread-activity.js";
-import { threadAttention } from "../shared/thread-attention.js";
+import { statusIsWorking, threadAttention } from "../shared/thread-attention.js";
 import {
   configureThreadNotifications,
   ensureNotificationPermission,
@@ -259,6 +259,11 @@ export function createSessionRenderer({
     const viewingConversation = isViewingConversation(session);
     const canWrite = canCurrentDeviceWrite(session);
     const turnRunning = Boolean(session.active_turn_id);
+    const threadWorking = Boolean(
+      turnRunning
+      || session.current_phase
+      || statusIsWorking(session.current_status)
+    );
     const reviewBlocked = isReviewBlocked(session);
     // The composer is frozen ONLY when the thread you're looking at is itself
     // being reviewed. A review running in the background on another thread leaves
@@ -418,7 +423,7 @@ export function createSessionRenderer({
     sendButton.hidden = composerReady && turnRunning;
     if (stopButton) {
       // Don't let the user stop the review's turn on the thread being reviewed.
-      const canStopViewedTurn = turnRunning
+      const canStopViewedTurn = threadWorking
         && !activeThreadFrozen
         && (canWrite || session.view_only);
       stopButton.hidden = !canStopViewedTurn;
@@ -902,7 +907,12 @@ export function createSessionRenderer({
 
   function renderControlBanner(session) {
     const activeUnderReview = isReviewInProgressForThread(session, session.active_thread_id);
-    if (session.view_only && session.active_turn_id && !activeUnderReview) {
+    const sessionWorking = Boolean(
+      session.active_turn_id
+      || session.current_phase
+      || statusIsWorking(session.current_status)
+    );
+    if (session.view_only && sessionWorking && !activeUnderReview) {
       controlBanner.hidden = false;
       renderReactContent(
         controlBanner,
@@ -919,7 +929,7 @@ export function createSessionRenderer({
       || !isViewingConversation(session)
       || !session.active_controller_device_id
       || isCurrentDeviceActiveController(session)
-      || (!session.active_turn_id && !activeUnderReview)
+      || (!sessionWorking && !activeUnderReview)
     ) {
       controlBanner.hidden = true;
       return;

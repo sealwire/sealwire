@@ -1442,6 +1442,42 @@ mod path_scope_tests {
     }
 
     #[tokio::test]
+    async fn stop_clears_stale_working_status_without_a_turn() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, codex, _claude) = build_recording_provider_app(cwd).await;
+        pair_device(&app, "device-a", Vec::new()).await;
+
+        let thread = codex.thread_summary("codex-thread", cwd);
+        codex
+            .threads
+            .lock()
+            .await
+            .insert(thread.id.clone(), thread.clone());
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("codex".to_string());
+            relay.active_thread_id = Some(thread.id.clone());
+            relay.threads = vec![thread.clone()];
+            relay.ensure_runtime_for_thread(&thread.id).summary = Some(thread.clone());
+            relay.set_thread_status(&thread.id, "active".to_string(), Vec::new());
+            relay.set_active_controller("device-a");
+        }
+
+        let snapshot = app
+            .stop_active_turn(StopTurnInput {
+                device_id: Some("device-a".to_string()),
+                thread_id: "codex-thread".to_string(),
+            })
+            .await
+            .expect("explicit stop should clear a no-turn working ghost");
+
+        assert_eq!(snapshot.current_status, "idle");
+        assert!(snapshot.active_turn_id.is_none());
+        assert!(codex.interrupt_thread_ids.lock().await.is_empty());
+    }
+
+    #[tokio::test]
     async fn stop_falls_back_to_idle_when_provider_never_confirms() {
         let project = TempDir::new().expect("project tempdir");
         let cwd = project.path().to_str().unwrap();

@@ -8,6 +8,7 @@ import {
   isProgressStalled,
   progressPhaseLabel,
 } from "../progress-verbs.js";
+import { statusIsWorking } from "../shared/thread-attention.js";
 
 function isSessionOffline(currentState, session) {
   return Boolean(
@@ -302,7 +303,12 @@ function sessionModelTitle(session) {
 
 function selectControlBannerRenderModel(currentState, session) {
   const activeUnderReview = isReviewInProgressForThread(session, session.active_thread_id);
-  if (session.view_only && session.active_turn_id && !activeUnderReview) {
+  const sessionWorking = Boolean(
+    session.active_turn_id
+    || session.current_phase
+    || statusIsWorking(session.current_status)
+  );
+  if (session.view_only && sessionWorking && !activeUnderReview) {
     return {
       hidden: false,
       hint: "This background thread is still running. Stop it or take over to continue here.",
@@ -313,7 +319,7 @@ function selectControlBannerRenderModel(currentState, session) {
   if (
     !session.active_thread_id
     || !session.active_controller_device_id
-    || (!session.active_turn_id && !activeUnderReview)
+    || (!sessionWorking && !activeUnderReview)
   ) {
     return {
       hidden: true,

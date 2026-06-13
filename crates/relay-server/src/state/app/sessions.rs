@@ -558,11 +558,33 @@ impl AppState {
             if relay.is_thread_review_locked(&thread_id) {
                 return Err(REVIEW_LOCKED_THREAD_MSG.to_string());
             }
-            let turn_id = runtime
-                .active_turn_id
-                .clone()
-                .ok_or_else(|| format!("there is no running turn on thread `{thread_id}`"))?;
-            (thread_id, turn_id)
+            (thread_id, runtime.active_turn_id.clone())
+        };
+
+        let Some(turn_id) = turn_id else {
+            let mut relay = self.relay.write().await;
+            let runtime = relay
+                .runtime_for_thread(&thread_id)
+                .ok_or_else(|| format!("thread `{thread_id}` is not loaded"))?;
+            if runtime.active_turn_id.is_some() {
+                return Err(format!(
+                    "a turn started on thread `{thread_id}` while the stop was being prepared; retry"
+                ));
+            }
+            if !runtime.is_working() {
+                return Err(format!("there is no running turn on thread `{thread_id}`"));
+            }
+            relay.set_thread_status(&thread_id, "idle".to_string(), Vec::new());
+            relay.push_log(
+                "warn",
+                format!(
+                    "Cleared stale working status on thread {thread_id} after an explicit stop \
+from {}; no provider turn was active.",
+                    short_device_id(&device_id)
+                ),
+            );
+            relay.notify();
+            return Ok(relay.snapshot());
         };
 
         self.find_thread_provider(&thread_id)
