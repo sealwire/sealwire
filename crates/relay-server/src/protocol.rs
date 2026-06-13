@@ -1466,24 +1466,49 @@ impl ThreadTranscriptResponse {
         )
     }
 
+    #[cfg(test)]
     pub fn from_transcript_tail(
         thread_id: String,
-        mut transcript: Vec<TranscriptEntryView>,
+        transcript: Vec<TranscriptEntryView>,
         revision: u64,
     ) -> Self {
-        strip_file_change_diffs_for_transport(&mut transcript);
-        build_reverse_thread_transcript_page(&thread_id, &transcript, transcript.len(), revision)
+        let transcript_len = transcript.len();
+        Self::from_transcript_source(thread_id, transcript_len, None, revision, |index| {
+            transcript[index].clone()
+        })
     }
 
+    #[cfg(test)]
     pub fn from_transcript_before(
         thread_id: String,
-        mut transcript: Vec<TranscriptEntryView>,
+        transcript: Vec<TranscriptEntryView>,
         before: Option<usize>,
         revision: u64,
     ) -> Self {
-        strip_file_change_diffs_for_transport(&mut transcript);
-        let upper_bound = before.unwrap_or(transcript.len()).min(transcript.len());
-        build_reverse_thread_transcript_page(&thread_id, &transcript, upper_bound, revision)
+        let transcript_len = transcript.len();
+        Self::from_transcript_source(thread_id, transcript_len, before, revision, |index| {
+            transcript[index].clone()
+        })
+    }
+
+    pub(crate) fn from_transcript_source<F>(
+        thread_id: String,
+        transcript_len: usize,
+        before: Option<usize>,
+        revision: u64,
+        entry_at: F,
+    ) -> Self
+    where
+        F: FnMut(usize) -> TranscriptEntryView,
+    {
+        let upper_bound = before.unwrap_or(transcript_len).min(transcript_len);
+        build_reverse_thread_transcript_page_from_source(
+            &thread_id,
+            transcript_len,
+            upper_bound,
+            revision,
+            entry_at,
+        )
     }
 }
 
@@ -1615,27 +1640,30 @@ fn build_thread_transcript_page(
     }
 }
 
-fn build_reverse_thread_transcript_page(
+fn build_reverse_thread_transcript_page_from_source<F>(
     thread_id: &str,
-    transcript: &[TranscriptEntryView],
+    transcript_len: usize,
     upper_bound: usize,
     revision: u64,
-) -> ThreadTranscriptResponse {
+    mut entry_at: F,
+) -> ThreadTranscriptResponse
+where
+    F: FnMut(usize) -> TranscriptEntryView,
+{
     // Pack entries from `upper_bound` backwards until the serialized response
     // would exceed the byte budget. We size the page incrementally instead of
-    // re-serializing the whole growing candidate on every step — the old code was
-    // O(entries-per-page^2) in both JSON serialization and clones. Each entry is
-    // serialized exactly once; the envelope (everything outside the entries array)
-    // is charged a fixed UPPER BOUND, so the running estimate is always >= the
-    // real serialized length and a page can never exceed the budget — at worst we
-    // pack a single fewer entry near the boundary.
+    // cloning and cleaning the whole transcript first. Each candidate entry is
+    // materialized and serialized exactly once; a 50k-entry transcript therefore
+    // costs roughly one page, not 50k entry clones, for every scroll-up request.
     let envelope_upper_bound = THREAD_TRANSCRIPT_ENVELOPE_UPPER_BOUND_BYTES + thread_id.len();
     let mut entry_bytes_sum = 0usize;
-    let mut count = 0usize;
+    let mut selected_reversed = Vec::new();
     let mut index = upper_bound;
 
     while index > 0 {
-        let entry_len = serialized_len(&transcript[index - 1]);
+        let mut entry = entry_at(index - 1);
+        strip_file_change_diffs_for_transport(std::slice::from_mut(&mut entry));
+        let entry_len = serialized_len(&entry);
         // Estimated serialized length if this entry joins the page:
         //   envelope + sum(entry JSON lengths) + (entry_count - 1) array commas.
         // For the tentative (count + 1) entries that is `+ count` commas.
@@ -1645,12 +1673,12 @@ fn build_reverse_thread_transcript_page(
         let estimated = envelope_upper_bound
             .saturating_add(entry_bytes_sum)
             .saturating_add(entry_len)
-            .saturating_add(count);
-        if estimated > THREAD_TRANSCRIPT_RESPONSE_TARGET_BYTES && count >= 1 {
+            .saturating_add(selected_reversed.len());
+        if estimated > THREAD_TRANSCRIPT_RESPONSE_TARGET_BYTES && !selected_reversed.is_empty() {
             break;
         }
         entry_bytes_sum = entry_bytes_sum.saturating_add(entry_len);
-        count += 1;
+        selected_reversed.push(entry);
         index -= 1;
     }
 
@@ -1658,14 +1686,18 @@ fn build_reverse_thread_transcript_page(
     // exceed the budget because splitting it would corrupt the transcript.
     // (Defensive — the loop above already includes the first entry unconditionally
     // whenever `upper_bound > 0`.)
-    if count == 0 && upper_bound > 0 {
+    if selected_reversed.is_empty() && upper_bound > 0 {
+        let mut entry = entry_at(upper_bound - 1);
+        strip_file_change_diffs_for_transport(std::slice::from_mut(&mut entry));
+        selected_reversed.push(entry);
         index = upper_bound - 1;
     }
 
+    selected_reversed.reverse();
     let page = build_thread_transcript_page(
         thread_id,
-        &transcript[index..upper_bound],
-        (upper_bound < transcript.len()).then_some(upper_bound),
+        &selected_reversed,
+        (upper_bound < transcript_len).then_some(upper_bound),
         (index > 0).then_some(index),
         revision,
         index,

@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 
 use crate::{
-    protocol::{FileChangeApplyState, ThreadSummaryView, ToolCallView, TranscriptEntryView},
+    protocol::{
+        FileChangeApplyState, ThreadSummaryView, ThreadTranscriptResponse, ToolCallView,
+        TranscriptEntryView,
+    },
     provider::ThreadSyncData,
 };
 
@@ -200,6 +203,28 @@ impl ThreadRuntime {
                 view
             })
             .collect()
+    }
+
+    pub(crate) fn transcript_page(
+        &self,
+        thread_id: &str,
+        before: Option<usize>,
+    ) -> ThreadTranscriptResponse {
+        ThreadTranscriptResponse::from_transcript_source(
+            thread_id.to_string(),
+            self.transcript.len(),
+            before,
+            self.transcript_revision,
+            |index| {
+                let mut view = self.transcript[index].to_view();
+                if let (Some(item_id), Some(tool)) = (view.item_id.as_ref(), view.tool.as_mut()) {
+                    if let Some(state) = self.apply_states.get(item_id) {
+                        tool.apply_state = Some(*state);
+                    }
+                }
+                view
+            },
+        )
     }
 
     pub(crate) fn touch(&mut self, now: u64) {

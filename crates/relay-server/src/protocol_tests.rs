@@ -1071,6 +1071,47 @@ fn thread_transcript_response_packs_many_small_entries_within_budget() {
 }
 
 #[test]
+fn thread_transcript_page_materializes_only_entries_near_the_requested_cursor() {
+    use std::cell::Cell;
+
+    let materialized = Cell::new(0usize);
+    let transcript_len = 50_000usize;
+    let page = ThreadTranscriptResponse::from_transcript_source(
+        "thread-large".to_string(),
+        transcript_len,
+        None,
+        9,
+        |index| {
+            materialized.set(materialized.get() + 1);
+            TranscriptEntryView {
+                item_id: Some(format!("item-{index}")),
+                kind: TranscriptEntryKind::AgentText,
+                text: Some(format!("entry-{index}-{}", "x".repeat(900))),
+                status: "completed".to_string(),
+                turn_id: Some(format!("turn-{index}")),
+                tool: None,
+            }
+        },
+    );
+
+    assert!(!page.entries.is_empty());
+    assert!(page.prev_cursor.is_some());
+    assert_eq!(page.entry_seq_end, Some(transcript_len as u64));
+    assert!(
+        materialized.get() <= page.entries.len() + 1,
+        "page construction touched {} entries to return {}",
+        materialized.get(),
+        page.entries.len()
+    );
+    assert!(
+        materialized.get() < 64,
+        "page construction scaled with transcript length: {} entries materialized",
+        materialized.get()
+    );
+    assert!(serde_json::to_vec(&page).unwrap().len() <= THREADS_RESPONSE_TARGET_BYTES);
+}
+
+#[test]
 fn thread_transcript_response_tail_returns_latest_page_first() {
     let transcript = (0..12)
         .map(|index| TranscriptEntryView {

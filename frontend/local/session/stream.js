@@ -13,6 +13,32 @@ export function createStreamController(ctx) {
   const cancelStreamReconnect = (...args) => ctx.cancelStreamReconnect(...args);
   const scheduleSessionPoll = (...args) => ctx.scheduleSessionPoll(...args);
   const scheduleStreamReconnect = (...args) => ctx.scheduleStreamReconnect(...args);
+  const scheduleRenderFrame =
+    ctx.scheduleRenderFrame
+    || ((callback) => {
+      if (typeof requestAnimationFrame === "function") {
+        return requestAnimationFrame(callback);
+      }
+      return setTimeout(callback, 16);
+    });
+  let transcriptRenderPending = false;
+
+  function queueTranscriptRender(nextSession) {
+    // State advances synchronously so another delta arriving in this same frame
+    // appends to the latest text instead of the last painted snapshot. Only the
+    // expensive flushSync React render is coalesced.
+    state.session = nextSession;
+    if (transcriptRenderPending) {
+      return;
+    }
+    transcriptRenderPending = true;
+    scheduleRenderFrame(() => {
+      transcriptRenderPending = false;
+      if (state.session) {
+        renderSession(state.session);
+      }
+    });
+  }
 
   function connectSessionStream() {
     if (state.authRequired && !state.authenticated) {
@@ -180,7 +206,7 @@ export function createStreamController(ctx) {
             turn_id: event.turn_id || null,
           },
         ];
-    renderSession({
+    queueTranscriptRender({
       ...state.session,
       transcript: nextTranscript,
       transcript_revision: Number.isSafeInteger(event.revision)
@@ -242,7 +268,7 @@ export function createStreamController(ctx) {
             kind: patchedEntry.kind || "agent_text",
           },
         ];
-    renderSession({
+    queueTranscriptRender({
       ...state.session,
       transcript: nextTranscript,
       transcript_revision: Number.isSafeInteger(event.revision)

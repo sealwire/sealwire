@@ -24,18 +24,7 @@ impl AppState {
             .map(|id| relay.device_path_scope(id))
             .unwrap_or_default();
         ensure_path_within_device_scope(&runtime.current_cwd, &device_scope, &relay.allowed_roots)?;
-        let transcript = runtime.transcript_views();
-        let revision = runtime.transcript_revision;
-        let mut response = if input.before.is_some() {
-            ThreadTranscriptResponse::from_transcript_before(
-                input.thread_id,
-                transcript,
-                input.before,
-                revision,
-            )
-        } else {
-            ThreadTranscriptResponse::from_transcript_tail(input.thread_id, transcript, revision)
-        };
+        let mut response = runtime.transcript_page(&input.thread_id, input.before);
         response.thread_state = thread_state;
         Ok(response)
     }
