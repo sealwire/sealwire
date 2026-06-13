@@ -145,6 +145,7 @@ import {
 } from "./local/view-only-thread.js";
 import { shouldRefreshViewedThread } from "./shared/viewed-thread-refresh.js";
 import { ClientLog } from "./shared/client-log.js";
+import { mapRelayLogEntries, mergeLogEntries } from "./shared/client-log-merge.js";
 import {
   loadLastApprovalPolicy,
   loadLastEffort,
@@ -184,7 +185,12 @@ const state = {
   controllerLeaseRefreshTimer: null,
   currentApprovalId: null,
   currentPairing: null,
-  clientLogLines: ["Booting web client..."],
+  // Client-originated status lines (sends, errors, etc.) kept as {at, text} so
+  // they can be merged with the relay's server logs in one #client-log view.
+  // These PERSIST across snapshots — a server-log refresh must not wipe them.
+  clientLogLines: [{ at: Date.now(), text: "Booting web client..." }],
+  // Latest server (relay) log entries, refreshed from each session snapshot.
+  relayLogLines: [],
   deviceId: loadOrCreateDeviceId(),
   defaultsSeeded: false,
   selectedCwd: "",
@@ -491,6 +497,7 @@ const renderer = createSessionRenderer({
   },
   logLine,
   renderClientLogLines,
+  ingestRelayLogs,
   escapeHtml,
   formatTimestamp,
   formatRelativeTime,
@@ -2223,9 +2230,28 @@ function clearStoredApiToken() {
 }
 
 function logLine(message) {
-  const time = new Date().toLocaleTimeString();
-  state.clientLogLines = [`${time}  ${message}`, ...state.clientLogLines].slice(0, 400);
-  renderClientLogLines(state.clientLogLines);
+  state.clientLogLines = [{ at: Date.now(), text: message }, ...state.clientLogLines].slice(0, 400);
+  renderClientLog();
+}
+
+// Refresh the relay's server logs from a session snapshot. Replaces (rather than
+// appends) so repeated snapshots don't duplicate, and re-renders the merged view
+// WITHOUT discarding client-originated lines (e.g. "Prompt failed: ...").
+function ingestRelayLogs(entries) {
+  state.relayLogLines = mapRelayLogEntries(entries);
+  renderClientLog();
+}
+
+// Merge client + server log entries into the single #client-log surface, newest
+// first. Server-log refreshes and client status lines previously clobbered each
+// other (last writer won); merging keeps both visible. The merge/cap logic lives
+// in client-log-merge.js (unit-tested); only the locale-dependent timestamp
+// formatting stays here.
+function renderClientLog() {
+  const combined = mergeLogEntries(state.clientLogLines, state.relayLogLines).map(
+    (entry) => `${new Date(entry.at).toLocaleTimeString()}  ${entry.text}`
+  );
+  renderClientLogLines(combined);
 }
 
 function renderClientLogLines(lines) {

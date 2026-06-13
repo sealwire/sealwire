@@ -139,11 +139,17 @@ async function main() {
       { timeout: LOCAL_TIMEOUT_MS }
     );
 
+    // Viewing is decoupled from control ("Decouple thread viewing from targeted
+    // control"): after the controlled thread is deleted the relay clears its
+    // active session, and the UI navigates VIEW-ONLY to the adjacent thread
+    // (asserted above) WITHOUT resuming it on the relay — only a send takes
+    // control. So the relay reports no controlled thread here even though the
+    // user is now viewing fallbackThreadId.
     const relayAfterDelete = await fetchSession(relayPort);
     assert.equal(
       relayAfterDelete.active_thread_id,
-      fallbackThreadId,
-      "deleting the current viewed session should resume the adjacent local thread"
+      null,
+      "deleting the controlled thread should clear the relay's active session (view-only navigation never resumes it)"
     );
 
     console.log(

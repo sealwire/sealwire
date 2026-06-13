@@ -171,7 +171,7 @@ export function createSessionRenderer({
   cancelControllerHeartbeat,
   cancelControllerLeaseRefresh,
   logLine,
-  renderClientLogLines,
+  ingestRelayLogs,
   escapeHtml,
   formatTimestamp,
   formatRelativeTime,
@@ -1408,12 +1408,11 @@ export function createSessionRenderer({
   }
 
   function renderLogs(entries) {
-    renderClientLogLines?.(
-      entries.map(
-        (entry) =>
-          `${new Date(entry.created_at * 1000).toLocaleTimeString()}  [${entry.kind}] ${entry.message}`
-      )
-    );
+    // Feed the relay's server logs into the merged client-log view. This must
+    // NOT replace the whole surface (the old behavior), or client-originated
+    // status lines like "Prompt failed: ..." would be wiped on the next
+    // snapshot before the user (or a test) can observe them.
+    ingestRelayLogs?.(entries || []);
   }
 
   function metaChip(label, value) {
