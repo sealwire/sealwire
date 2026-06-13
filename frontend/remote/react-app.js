@@ -698,10 +698,14 @@ function RemoteApp() {
     session?.model,
   ]);
 
-  // Switching to a different session drops any per-surface effort override so
-  // the composer/panel/send fall back to the newly-active session's effort.
+  // Switching to a different session drops any per-surface effort/model override
+  // so the composer/panel/send fall back to the newly-active session's values.
+  // Without the model reset, a model picked on a Codex thread (e.g. gpt-5.5)
+  // stays selected after switching to a Claude thread, where it isn't even a
+  // valid option — buildModelOptions then pins it atop the Claude catalog.
   useEffect(() => {
     remoteUiStore.getState().setComposerEffort("");
+    remoteUiStore.getState().setComposerModel("");
   }, [session?.active_thread_id]);
 
   useRemoteSessionRuntime({

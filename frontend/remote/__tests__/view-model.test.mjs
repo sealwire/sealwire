@@ -15,6 +15,7 @@ test("selectSessionRenderModel allows direct send to an idle thread held by anot
       active_thread_id: "thread-1",
       current_cwd: "/Users/luchi/git/agent-relay",
       current_status: "idle",
+      provider: "codex",
       pending_approvals: [{ request_id: "approval-1" }],
       transcript: [{ item_id: "item-1" }],
       transcript_truncated: true,
@@ -109,6 +110,7 @@ test("selectSessionRenderModel keeps a general view-only thread writable by targ
       active_controller_device_id: "__view_only__",
       current_cwd: "/tmp",
       current_status: "idle",
+      provider: "codex",
       pending_approvals: [],
       transcript: [],
       view_only: true,
@@ -122,6 +124,37 @@ test("selectSessionRenderModel keeps a general view-only thread writable by targ
   assert.equal(model.canWrite, false);
   assert.equal(model.composerDisabled, false);
   assert.equal(model.messagePlaceholder, "Message Codex remotely...");
+});
+
+test("selectSessionRenderModel names the active thread's own provider in the composer placeholder", () => {
+  const claudeModel = selectSessionRenderModel({
+    session: {
+      active_thread_id: "thread-claude",
+      current_cwd: "/tmp",
+      current_status: "idle",
+      provider: "claude_code",
+      pending_approvals: [],
+      transcript: [],
+    },
+    previousSession: null,
+    hasControllerLease: true,
+  });
+  // A Claude thread must never read "Message Codex…" — that was the bug.
+  assert.equal(claudeModel.messagePlaceholder, "Message Claude remotely...");
+
+  const unknownProviderModel = selectSessionRenderModel({
+    session: {
+      active_thread_id: "thread-unknown",
+      current_cwd: "/tmp",
+      current_status: "idle",
+      pending_approvals: [],
+      transcript: [],
+    },
+    previousSession: null,
+    hasControllerLease: true,
+  });
+  // No provider yet → a neutral placeholder, still not a hardcoded vendor.
+  assert.equal(unknownProviderModel.messagePlaceholder, "Message remotely...");
 });
 
 test("selectSessionRenderModel keeps a reviewed view-only thread frozen", () => {

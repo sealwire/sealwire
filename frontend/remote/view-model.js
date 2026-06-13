@@ -4,6 +4,7 @@ import {
 } from "../shared/thread-groups.js";
 import { isReviewInProgressForThread } from "../shared/review-state.js";
 import { canComposeThread } from "../shared/thread-compose.js";
+import { providerLabel } from "../shared/provider-labels.js";
 import { workspaceBasename } from "./utils.js";
 
 function createActiveSessionThread(session) {
@@ -52,7 +53,11 @@ export function selectSessionRenderModel({ session, previousSession, hasControll
       : !hasActiveSession
       ? "Start a remote session first."
       : canCompose
-        ? "Message Codex remotely..."
+        // Derive the agent name from the active thread's own provider — a Claude
+        // thread must read "Message Claude...", never a hardcoded "Codex".
+        ? (providerLabel(session.provider)
+          ? `Message ${providerLabel(session.provider)} remotely...`
+          : "Message remotely...")
         : "This thread is currently running on another device.",
     scrollDebug: {
       thread: session.active_thread_id || "-",

@@ -18,6 +18,7 @@ import {
   dismissReview as dismissReviewApi,
 } from "../api.js";
 import { loadLastEffort, saveLastApprovalPolicy } from "../../shared/last-used-settings.js";
+import { providerLabel } from "../../shared/provider-labels.js";
 import { buildThreadGroups, findLatestThread } from "../../shared/thread-groups.js";
 import { createThreadListQueryOptions } from "../../shared/thread-queries.js";
 import { readThreadListUi } from "../../shared/thread-list-store.js";
@@ -485,12 +486,14 @@ export function createLifecycleController(ctx) {
   }
 
   async function stopActiveTurn() {
+    // Name the active thread's own provider — never a hardcoded "Codex".
+    const agentName = providerLabel(state.session?.provider) || "agent";
     if (!state.session?.active_thread_id || !state.session.active_turn_id) {
-      logLine("There is no running Codex turn to stop.");
+      logLine(`There is no running ${agentName} turn to stop.`);
       return;
     }
 
-    logLine("Requesting Codex stop");
+    logLine(`Requesting ${agentName} stop`);
 
     try {
       const response = await apiFetch("/api/session/stop", {
@@ -506,11 +509,11 @@ export function createLifecycleController(ctx) {
       const payload = await response.json();
 
       if (!response.ok || !payload.ok) {
-        throw new Error(payload?.error?.message || "Failed to stop Codex");
+        throw new Error(payload?.error?.message || `Failed to stop ${agentName}`);
       }
 
       applySessionSnapshot(payload.data);
-      logLine("Stop request sent to Codex");
+      logLine(`Stop request sent to ${agentName}`);
     } catch (error) {
       logLine(`Stop failed: ${error.message}`);
     }

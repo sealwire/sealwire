@@ -438,7 +438,10 @@ export function createSessionRenderer({
       : !viewingConversation
         ? "Open the thread page to send a message."
         : canCompose
-          ? "Message Codex..."
+          // Name the active thread's own provider — never a hardcoded "Codex".
+          ? (providerLabel(session?.provider)
+            ? `Message ${providerLabel(session.provider)}...`
+            : "Message...")
           : "This thread is currently running on another device.";
   }
 
