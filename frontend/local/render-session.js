@@ -1144,7 +1144,7 @@ export function createSessionRenderer({
             }),
           readyState: session.active_thread_id
             ? {
-              readyCopy: "Codex is connected. Send the first prompt below when you're ready.",
+              readyCopy: `${providerLabel(session?.provider) || "The agent"} is connected. Send the first prompt below when you're ready.`,
               session,
               shortId,
               waitingCopy: "This thread is open, but another device currently has control. Take over to send the first prompt from here.",

@@ -135,6 +135,7 @@ import {
 } from "./shared/thread-list-store.js";
 import { installThreadListWheelProxy } from "./shared/thread-list-scroll.js";
 import { fetchBuildInfo } from "./shared/build-badge.js";
+import { providerLabel } from "./shared/provider-labels.js";
 import { isReviewInProgressForThread } from "./shared/review-state.js";
 import {
   buildViewOnlyPin,
@@ -1863,9 +1864,11 @@ async function deleteThreadFromContextMenu() {
   const shouldPreserveConversation = state.viewThreadId === threadId;
   const fallbackThreadId = shouldPreserveConversation ? findAdjacentThreadId(threadId) : null;
   const title = thread?.name || thread?.preview || shortId(threadId);
-  const providerLabel = thread?.provider === "claude_code" ? "Claude Code" : "Codex";
+  // Name the thread's own provider — the old ternary mislabeled every
+  // non-Claude provider (incl. future ones) as "Codex".
+  const providerName = providerLabel(thread?.provider) || "agent";
   const confirmed = window.confirm(
-    `Permanently delete "${title}" from local ${providerLabel} storage?\n\nThis removes the local thread file and related local index/state entries. This cannot be undone.`
+    `Permanently delete "${title}" from local ${providerName} storage?\n\nThis removes the local thread file and related local index/state entries. This cannot be undone.`
   );
   if (!confirmed) {
     return;

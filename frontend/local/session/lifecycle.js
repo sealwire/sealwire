@@ -166,7 +166,9 @@ export function createLifecycleController(ctx) {
 
     setSelectedCwd(cwd);
     setStartControlsBusy(true);
-    logLine(`Starting a new Codex thread in ${cwd}`);
+    // Name the provider being started — not a hardcoded "Codex".
+    const agentName = providerLabel(liveProviderInput?.value) || "agent";
+    logLine(`Starting a new ${agentName} thread in ${cwd}`);
 
     try {
       const response = await apiFetch("/api/session/start", {
@@ -202,7 +204,7 @@ export function createLifecycleController(ctx) {
         messageInput.focus();
       }
       await loadThreads("post-start refresh");
-      logLine("Started a new Codex thread");
+      logLine(`Started a new ${agentName} thread`);
     } catch (error) {
       logLine(`Session start failed: ${error.message}`);
     } finally {
@@ -367,7 +369,7 @@ export function createLifecycleController(ctx) {
     }
 
     sendButton.disabled = true;
-    logLine("Sending prompt to Codex");
+    logLine(`Sending prompt to ${providerLabel(state.session?.provider) || "agent"}`);
 
     try {
       const response = await apiFetch("/api/session/message", {

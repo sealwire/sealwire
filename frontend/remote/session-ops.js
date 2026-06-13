@@ -25,6 +25,7 @@ import {
 } from "./transcript/api.js";
 import { transcriptPageCache } from "./transcript/page-cache-instance.js";
 import { createCachingTranscriptPageFetcher } from "../shared/caching-transcript-fetcher.js";
+import { providerLabel } from "../shared/provider-labels.js";
 import {
   createThreadListQueryOptions,
   createThreadTranscriptPageQueryOptions,
@@ -1169,8 +1170,10 @@ export async function sendMessage(messageDraft, effort, model = "") {
 }
 
 export async function stopActiveTurn() {
+  // Name the active thread's own provider — never a hardcoded "Codex".
+  const agentName = providerLabel(state.session?.provider) || "agent";
   if (!state.session?.active_thread_id || !state.session.active_turn_id) {
-    renderLog("There is no running Codex turn to stop.");
+    renderLog(`There is no running ${agentName} turn to stop.`);
     return false;
   }
 
@@ -1180,7 +1183,7 @@ export async function stopActiveTurn() {
         thread_id: state.session.active_thread_id,
       },
     });
-    renderLog("Remote stop request sent to Codex.");
+    renderLog(`Remote stop request sent to ${agentName}.`);
     return true;
   } catch (error) {
     renderLog(`Remote stop failed: ${error.message}`);
