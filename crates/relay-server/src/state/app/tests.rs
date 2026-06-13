@@ -945,6 +945,55 @@ mod path_scope_tests {
     }
 
     #[tokio::test]
+    async fn transcript_tail_serves_models_from_the_relay_cache_not_a_live_bridge_call() {
+        // The transcript tail is polled ~3x/s for a working viewed thread. It
+        // must serve the model catalog from the relay's independently-refreshed
+        // cache rather than re-issuing a (Codex-uncached) `model/list` per read.
+        // Seed the cache with a sentinel the bridge would never return, then
+        // assert the tail surfaces exactly that.
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, codex, _claude) = build_recording_provider_app(cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let thread = codex.thread_summary("codex-thread-models", cwd);
+        codex
+            .threads
+            .lock()
+            .await
+            .insert(thread.id.clone(), thread.clone());
+        {
+            let mut relay = app.relay.write().await;
+            relay.threads = vec![thread.clone()];
+            relay.set_available_models(vec![crate::protocol::ModelOptionView {
+                model: "cached-sentinel".to_string(),
+                display_name: "Cached Sentinel".to_string(),
+                provider: "codex".to_string(),
+                supported_reasoning_efforts: vec!["medium".to_string()],
+                default_reasoning_effort: "medium".to_string(),
+                hidden: false,
+                is_default: true,
+            }]);
+        }
+
+        let page = app
+            .read_thread_transcript(crate::protocol::ReadThreadTranscriptInput {
+                thread_id: thread.id.clone(),
+                cursor: None,
+                before: None,
+                device_id: Some("device-1".to_string()),
+            })
+            .await
+            .expect("tail read");
+        let thread_state = page.thread_state.expect("tail must include thread state");
+
+        // The recording bridge's list_models returns "codex-model"; seeing the
+        // sentinel proves the tail read the cache, not the bridge.
+        assert_eq!(thread_state.available_models.len(), 1);
+        assert_eq!(thread_state.available_models[0].model, "cached-sentinel");
+    }
+
+    #[tokio::test]
     async fn send_with_thread_id_and_no_active_thread_takes_over() {
         let project = TempDir::new().expect("project tempdir");
         let cwd = project.path().to_str().unwrap();

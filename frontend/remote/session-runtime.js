@@ -2,7 +2,7 @@ import {
   buildReasoningEffortOptions,
   resolveReasoningEffortValue,
 } from "../shared/reasoning-efforts.js";
-import { statusIsWorking } from "../shared/thread-attention.js";
+import { sessionIsWorking } from "../shared/thread-attention.js";
 
 export function selectRemoteControlSession({ session, realSession }) {
   if (session?.view_only) {
@@ -46,11 +46,7 @@ export function deriveSessionRuntime({
     sendPending,
     session,
     stopVisible: Boolean(
-      (
-        session?.active_turn_id
-        || session?.current_phase
-        || statusIsWorking(session?.current_status)
-      )
+      sessionIsWorking(session)
       && (!sessionView.composerDisabled || session?.view_only)
     ),
   };

@@ -8,7 +8,7 @@ import {
   isProgressStalled,
   progressPhaseLabel,
 } from "../progress-verbs.js";
-import { statusIsWorking } from "../shared/thread-attention.js";
+import { sessionIsWorking } from "../shared/thread-attention.js";
 
 function isSessionOffline(currentState, session) {
   return Boolean(
@@ -303,11 +303,7 @@ function sessionModelTitle(session) {
 
 function selectControlBannerRenderModel(currentState, session) {
   const activeUnderReview = isReviewInProgressForThread(session, session.active_thread_id);
-  const sessionWorking = Boolean(
-    session.active_turn_id
-    || session.current_phase
-    || statusIsWorking(session.current_status)
-  );
+  const sessionWorking = sessionIsWorking(session);
   if (session.view_only && sessionWorking && !activeUnderReview) {
     return {
       hidden: false,

@@ -24,11 +24,29 @@
  */
 
 // Mirrors `thread_status_is_working` on the Rust side: any status other than
-// these counts as "working".
-const NON_WORKING_STATUSES = new Set(["", "idle", "viewing"]);
+// these counts as "working". `completed`/`unknown` are settled vocabulary (a
+// saved-but-not-running Codex thread parses to `unknown`, Claude reports
+// `completed`); classifying them as working made saved threads look busy
+// forever and showed a Stop/Take-over the backend then rejects with "no running
+// turn". Keep this set in lockstep with `thread_status_is_working` (relay.rs).
+const NON_WORKING_STATUSES = new Set(["", "idle", "viewing", "completed", "unknown"]);
 
 export function statusIsWorking(status) {
   return typeof status === "string" && !NON_WORKING_STATUSES.has(status);
+}
+
+// Single source of truth for "is this thread working?", mirroring
+// `ThreadRuntime::is_working` (relay/runtime.rs): an in-flight turn OR a working
+// provider status. `current_phase` is deliberately EXCLUDED — it is a
+// descriptive label refreshed only for the active thread, so a thread that goes
+// background mid-turn can keep a stale phase forever. The backend never treats a
+// leftover phase as liveness, so neither must the UI: a phase-only "working"
+// shows Stop/Take-over that the backend can't honor (deadlock).
+export function sessionIsWorking(session) {
+  return (
+    Boolean(session && session.active_turn_id != null) ||
+    statusIsWorking(session?.current_status)
+  );
 }
 
 const DEFAULT_STATE = { working: false, needsInput: false };
@@ -60,16 +78,9 @@ export function computeThreadStates(snapshot) {
   const activeThreadId = snapshot.active_thread_id || null;
 
   // Active thread working state — mirrors ThreadRuntime::is_working (an in-flight
-  // turn, a live phase, or a working status all count).
-  if (activeThreadId) {
-    const entry = ensure(activeThreadId);
-    if (
-      snapshot.active_turn_id != null ||
-      snapshot.current_phase != null ||
-      statusIsWorking(snapshot.current_status)
-    ) {
-      entry.working = true;
-    }
+  // turn or a working status; a leftover phase does NOT count, see sessionIsWorking).
+  if (activeThreadId && sessionIsWorking(snapshot)) {
+    ensure(activeThreadId).working = true;
   }
 
   // Backgrounded threads that still have an in-flight turn.

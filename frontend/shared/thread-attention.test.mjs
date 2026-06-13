@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   ThreadAttentionTracker,
   computeThreadStates,
+  sessionIsWorking,
   statusIsWorking,
 } from "./thread-attention.js";
 
@@ -21,13 +22,31 @@ function snapshot(overrides = {}) {
   };
 }
 
-test("statusIsWorking treats idle/viewing/empty as not working", () => {
+test("statusIsWorking treats idle/viewing/empty/completed/unknown as not working", () => {
   assert.equal(statusIsWorking("active"), true);
   assert.equal(statusIsWorking("thinking"), true);
   assert.equal(statusIsWorking("idle"), false);
   assert.equal(statusIsWorking("viewing"), false);
   assert.equal(statusIsWorking(""), false);
   assert.equal(statusIsWorking(null), false);
+  // Settled vocabulary must match the Rust `thread_status_is_working` set:
+  // a saved Codex thread parses to `unknown`, Claude reports `completed`.
+  // Treating either as working showed a Stop the backend rejects.
+  assert.equal(statusIsWorking("completed"), false);
+  assert.equal(statusIsWorking("unknown"), false);
+});
+
+test("sessionIsWorking mirrors Rust is_working: turn or working status, never phase alone", () => {
+  assert.equal(sessionIsWorking({ active_turn_id: "t1", current_status: "idle" }), true);
+  assert.equal(sessionIsWorking({ active_turn_id: null, current_status: "active" }), true);
+  // A leftover phase with no turn and a settled status is NOT working — the
+  // backend can't Stop it, so the UI must not offer to.
+  assert.equal(
+    sessionIsWorking({ active_turn_id: null, current_phase: "thinking", current_status: "idle" }),
+    false,
+  );
+  assert.equal(sessionIsWorking({ active_turn_id: null, current_status: "unknown" }), false);
+  assert.equal(sessionIsWorking(null), false);
 });
 
 test("computeThreadStates derives working from active turn and thread_activity", () => {

@@ -91,7 +91,7 @@ import {
 } from "./react-session-panels.js";
 import { ThreadGroupList } from "../shared/thread-list-react.js";
 import { buildThreadActivityMap } from "../shared/thread-activity.js";
-import { statusIsWorking, threadAttention } from "../shared/thread-attention.js";
+import { sessionIsWorking, threadAttention } from "../shared/thread-attention.js";
 import {
   configureThreadNotifications,
   ensureNotificationPermission,
@@ -259,11 +259,7 @@ export function createSessionRenderer({
     const viewingConversation = isViewingConversation(session);
     const canWrite = canCurrentDeviceWrite(session);
     const turnRunning = Boolean(session.active_turn_id);
-    const threadWorking = Boolean(
-      turnRunning
-      || session.current_phase
-      || statusIsWorking(session.current_status)
-    );
+    const threadWorking = sessionIsWorking(session);
     const reviewBlocked = isReviewBlocked(session);
     // The composer is frozen ONLY when the thread you're looking at is itself
     // being reviewed. A review running in the background on another thread leaves
@@ -907,11 +903,7 @@ export function createSessionRenderer({
 
   function renderControlBanner(session) {
     const activeUnderReview = isReviewInProgressForThread(session, session.active_thread_id);
-    const sessionWorking = Boolean(
-      session.active_turn_id
-      || session.current_phase
-      || statusIsWorking(session.current_status)
-    );
+    const sessionWorking = sessionIsWorking(session);
     if (session.view_only && sessionWorking && !activeUnderReview) {
       controlBanner.hidden = false;
       renderReactContent(

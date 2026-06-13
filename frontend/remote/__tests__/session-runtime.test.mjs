@@ -169,6 +169,44 @@ test("deriveSessionRuntime disables send and shows stop for a running turn", () 
   assert.equal(runtime.stopVisible, true);
 });
 
+test("deriveSessionRuntime hides stop for a phase-only ghost the backend can't stop", () => {
+  // Regression: a leftover `current_phase` with no turn and a settled status is
+  // NOT working on the Rust side, so Stop would return "no running turn". The UI
+  // must mirror is_working (turn or working status only) and hide Stop.
+  const session = {
+    active_thread_id: "thread-1",
+    active_turn_id: null,
+    current_phase: "thinking",
+    current_status: "idle",
+    view_only: true,
+  };
+
+  const runtime = deriveSessionRuntime({
+    session,
+    sessionView: { composerDisabled: true, currentApprovalId: null, messagePlaceholder: "" },
+  });
+
+  assert.equal(runtime.stopVisible, false);
+});
+
+test("deriveSessionRuntime hides stop for a saved Codex thread (unknown status)", () => {
+  // A saved-but-not-running Codex thread parses to status `unknown`, which the
+  // backend treats as not working. Stop must not appear.
+  const session = {
+    active_thread_id: "thread-1",
+    active_turn_id: null,
+    current_status: "unknown",
+    view_only: true,
+  };
+
+  const runtime = deriveSessionRuntime({
+    session,
+    sessionView: { composerDisabled: true, currentApprovalId: null, messagePlaceholder: "" },
+  });
+
+  assert.equal(runtime.stopVisible, false);
+});
+
 test("deriveSessionRuntime shows stop for a view-only stale working status", () => {
   const session = {
     active_thread_id: "thread-1",
