@@ -122,8 +122,26 @@ impl ThreadRuntime {
             })
             .collect();
 
+        // A read/restore is history, not liveness: this constructor always sets
+        // active_turn_id = None (turn ids are never persisted nor surfaced by a read),
+        // so liveness is re-established only by live turn/status events. A provider that
+        // passes its stored status through a read (Codex's thread/read returns the real
+        // `status.type`; the fake provider mirrors it) can therefore hand us a *working*
+        // status with no turn behind it — and with no turn that string becomes the sole
+        // is_working() signal, a ghost "working" thread on a freshly started service that
+        // jams every escape (Stop has no real turn, Send is C2-rejected). Settle it here,
+        // mirroring Claude's read_thread (which hardcodes "idle") and merge_fresh_history
+        // (which drops a working status when a fresh read has no turn). A genuinely
+        // running thread re-asserts "active" via its event stream; a settled non-working
+        // string (idle/viewing/completed/unknown) is preserved verbatim.
+        let current_status = if thread_status_is_working(&data.status) {
+            "idle".to_string()
+        } else {
+            data.status
+        };
+
         Self {
-            current_status: data.status,
+            current_status,
             current_cwd: data.thread.cwd.clone(),
             model: model.to_string(),
             approval_policy: approval_policy.to_string(),
@@ -479,5 +497,41 @@ mod tests {
 
         assert_eq!(rt.active_turn_id.as_deref(), Some("turn-1"));
         assert!(rt.is_working());
+    }
+
+    // The restart-restore / first-load path builds a runtime via `from_sync_data`
+    // DIRECTLY — not `merge_fresh_history` — because there is no prior runtime to
+    // merge into (restore_thread_data / hydrate_background_runtime / load_thread_data's
+    // insert branch). Every ghost-status regression above is on the MERGE path, so
+    // none of them exercise this one: that gap is why "a freshly started service shows
+    // a running Codex thread with nothing running" escaped CI.
+    //
+    // A read is history, not liveness. `from_sync_data` already hardcodes
+    // active_turn_id = None (turn ids are never persisted nor re-read). Codex's
+    // thread/read passes through its stored `status.type`, which can be "active" for a
+    // thread with no live turn (Claude hardcodes "idle", so it never hits this; the
+    // fake provider passes status through, like Codex). With no turn, that read-derived
+    // working status becomes the ONLY liveness signal — a ghost that shows "working" on
+    // startup and jams every escape (Stop finds no real turn, Send is C2-rejected). A
+    // fresh hydrate must not be is_working() without a live turn.
+    #[test]
+    fn from_sync_data_does_not_resurrect_working_status_without_a_turn() {
+        let data = ThreadSyncData {
+            thread: summary("t1", "active"),
+            status: "active".to_string(),
+            active_flags: Vec::new(),
+            transcript: Vec::new(),
+        };
+
+        let rt = ThreadRuntime::from_sync_data(data, "untrusted", "ro", "high", "model", 0);
+
+        assert!(
+            rt.active_turn_id.is_none(),
+            "a read never restores a turn id"
+        );
+        assert!(
+            !rt.is_working(),
+            "a read-derived working status with no live turn is a ghost, not liveness"
+        );
     }
 }

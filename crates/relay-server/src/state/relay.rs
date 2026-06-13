@@ -896,6 +896,16 @@ impl RelayState {
                     runtime.current_cwd = summary.cwd.clone();
                     runtime.summary = Some(summary);
                 }
+                // A lazily-materialized runtime carries no live turn (placeholder sets
+                // active_turn_id = None), and its status is read-derived — from a
+                // `self.threads` summary (which upsert_thread keeps at the raw provider
+                // string) or, with no summary, the placeholder's own "active" default.
+                // Neither is a liveness signal, so a working value here is a ghost
+                // is_working() (mirrors from_sync_data / upsert_thread). Settle it; a
+                // live turn/status event re-asserts working afterwards.
+                if thread_status_is_working(&runtime.current_status) {
+                    runtime.current_status = "idle".to_string();
+                }
                 runtime.model = self.model.clone();
                 runtime.approval_policy = self.approval_policy.clone();
                 runtime.sandbox = self.sandbox.clone();
@@ -1481,7 +1491,22 @@ impl RelayState {
         }
         if let Some(runtime) = self.runtimes.get_mut(&thread.id) {
             runtime.summary = Some(thread.clone());
-            runtime.current_status = thread.status.clone();
+            // A thread summary (a provider list/read row) is NOT a liveness signal —
+            // only live turn/status events are. A summary that reports a working status
+            // for a thread with no live turn must not overwrite the runtime into
+            // "working": that is the read-status ghost (Codex's read/list surfaces a
+            // stale `status.type`; the same status from_sync_data just settled would be
+            // resurrected here, e.g. via restore_thread_data's closing upsert). Keep a
+            // working status only when a turn is actually in flight; otherwise settle to
+            // idle. A settled string (idle/viewing/completed/unknown) applies verbatim.
+            // The display row in `self.threads` below keeps the raw status; list working
+            // badges read `runtime.is_working()`, not the summary string.
+            runtime.current_status =
+                if runtime.active_turn_id.is_some() || !thread_status_is_working(&thread.status) {
+                    thread.status.clone()
+                } else {
+                    "idle".to_string()
+                };
             if runtime.current_cwd.is_empty() {
                 runtime.current_cwd = thread.cwd.clone();
             }

@@ -803,7 +803,12 @@ fn load_thread_data_sets_active_controller_on_resume() {
         relay.active_controller_device_id.as_deref(),
         Some("phone-device")
     );
-    assert_eq!(relay.current_status, "running");
+    // The read reports a working status ("running") but carries no live turn, and
+    // there is no prior runtime to merge into — so this is a read-derived working
+    // status with no liveness behind it. It settles to idle (see
+    // ThreadRuntime::from_sync_data): a resume/switch-in must not resurrect a ghost
+    // "working" thread. Real liveness re-asserts via the provider's turn/status events.
+    assert_eq!(relay.current_status, "idle");
     assert_eq!(
         relay
             .thread_settings("thread-9")
@@ -2668,6 +2673,35 @@ fn deleted_thread_is_not_resurrected_by_late_background_events() {
     assert!(
         relay.runtime_for_thread("ghost").is_none(),
         "a late background event must not resurrect a deleted thread's runtime"
+    );
+}
+
+#[test]
+fn ensure_runtime_for_thread_does_not_create_a_ghost_working_runtime() {
+    let mut relay = test_state();
+
+    // (a) A list/read summary reporting a working status, materialized lazily with no
+    // live turn, must not become a ghost is_working() runtime. upsert_thread keeps the
+    // raw "active" on the self.threads display row; ensure_runtime_for_thread must
+    // settle the runtime it creates from that summary.
+    let mut working = test_thread("listed", "/tmp/project");
+    working.status = "active".to_string();
+    relay.upsert_thread(working);
+    {
+        let rt = relay.ensure_runtime_for_thread("listed");
+        assert!(rt.active_turn_id.is_none());
+        assert!(
+            !rt.is_working(),
+            "a read-derived working summary status with no turn must not be a ghost"
+        );
+    }
+
+    // (b) No summary at all: ThreadRuntime::placeholder defaults current_status to
+    // "active", so the materialized runtime would be working without ever having a turn.
+    let rt = relay.ensure_runtime_for_thread("unlisted");
+    assert!(
+        !rt.is_working(),
+        "the placeholder 'active' default must not surface as a ghost working runtime"
     );
 }
 

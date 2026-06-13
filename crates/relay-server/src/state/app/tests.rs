@@ -294,6 +294,90 @@ mod path_scope_tests {
         )
     }
 
+    // End-to-end guard for "a freshly started service shows a running Codex thread
+    // with nothing running". The unit test in runtime.rs pins the from_sync_data choke
+    // point; this pins the whole restart-restore wiring
+    // (restore_persisted_session → provider resume_thread + read_thread →
+    // restore_thread_data → from_sync_data AND the closing upsert_thread), because the
+    // read status arrives on TWO fields (ThreadSyncData.status AND .thread.status) and
+    // the summary path nearly re-clobbered the constructor fix.
+    //
+    // The fake provider's read_thread passes its stored status through, exactly like
+    // Codex's thread/read returns the real `status.type` (Claude hardcodes "idle"). A
+    // restored thread has no live turn (turn ids are never persisted), so it must come
+    // back idle — not a ghost "working" thread that jams every escape.
+    #[tokio::test]
+    async fn restoring_a_thread_with_a_working_read_status_is_not_a_ghost() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_string_lossy().into_owned();
+        let (change_tx, _) = watch::channel(0_u64);
+        let relay = Arc::new(RwLock::new(RelayState::new(
+            cwd.clone(),
+            change_tx.clone(),
+            SecurityProfile::private(),
+        )));
+
+        // Seed an ACTIVE thread BEFORE spawning the provider: the fake provider seeds
+        // its one thread (and the status its read_thread will report) from the relay
+        // snapshot at spawn time. This stands in for a Codex thread that codex's store
+        // still reports as `active`.
+        {
+            let mut relay = relay.write().await;
+            relay.activate_thread(
+                crate::protocol::ThreadSummaryView {
+                    id: "ghost-thread".to_string(),
+                    name: None,
+                    preview: String::new(),
+                    cwd: cwd.clone(),
+                    updated_at: unix_now(),
+                    source: "fake".to_string(),
+                    status: "active".to_string(),
+                    model_provider: "fake".to_string(),
+                    provider: "fake".to_string(),
+                },
+                &cwd,
+                DEFAULT_MODEL,
+                DEFAULT_APPROVAL_POLICY,
+                DEFAULT_SANDBOX,
+                DEFAULT_EFFORT,
+                "device-a",
+            );
+            assert_eq!(
+                relay.current_status, "active",
+                "precondition: the thread is working before the restart"
+            );
+        }
+
+        let bridge = FakeProviderBridge::spawn(relay.clone())
+            .await
+            .expect("fake provider should spawn");
+        let mut providers: HashMap<String, Arc<dyn ProviderBridge>> = HashMap::new();
+        providers.insert("fake".to_string(), Arc::new(bridge));
+        let app = AppState::from_parts(relay.clone(), providers, change_tx);
+
+        // Capture what shutdown would persist, then model a fresh boot: the in-memory
+        // runtime is gone (active_turn_id is never persisted) while the provider's store
+        // still has the thread and reports it `active` on read.
+        let persisted = {
+            let relay = relay.read().await;
+            crate::state::persistence::PersistedRelayState::from_relay(&relay)
+        };
+        relay.write().await.clear_active_session();
+
+        app.restore_persisted_session(persisted).await;
+
+        let snapshot = app.snapshot().await;
+        assert_eq!(snapshot.active_thread_id.as_deref(), Some("ghost-thread"));
+        assert_eq!(
+            snapshot.active_turn_id, None,
+            "a restore never resurrects a turn id"
+        );
+        assert_eq!(
+            snapshot.current_status, "idle",
+            "a restored thread with no live turn must not come back as a ghost 'working' thread"
+        );
+    }
+
     #[tokio::test]
     async fn file_change_detail_uses_authoritative_runtime_entry() {
         let project = TempDir::new().expect("project tempdir");
