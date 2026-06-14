@@ -338,6 +338,37 @@ test("renderEntryMarkup omits the copy button when the agent text is empty", () 
   assert.doesNotMatch(markup, /message-copy-button/);
 });
 
+test("renderEntryMarkup renders a failed turn as a distinct, escaped error card", () => {
+  // The relay injects kind "error" / status "failed" for a failed turn. It must
+  // render as an unmistakable failure card (not the generic system fallback, and
+  // not an agent message), so a failed turn can never read as a clean success.
+  const markup = renderEntryMarkup({
+    item_id: "turn-error:turn-7",
+    kind: "error",
+    status: "failed",
+    text: "Claude turn failed: error_during_execution",
+  });
+
+  assert.match(markup, /message-card-error/);
+  assert.match(markup, /Turn failed/);
+  assert.match(markup, /failed/);
+  assert.match(markup, /Claude turn failed: error_during_execution/);
+  assert.match(markup, /data-transcript-entry-id="turn-error:turn-7"/);
+  assert.match(markup, /data-transcript-entry-kind="error"/);
+  // Not an agent message: no copy-response affordance.
+  assert.doesNotMatch(markup, /message-copy-button/);
+
+  // The reason text is escaped (server-derived but never trusted as HTML).
+  const escaped = renderEntryMarkup({
+    item_id: "turn-error:turn-x",
+    kind: "error",
+    status: "failed",
+    text: "<script>alert(1)</script>",
+  });
+  assert.match(escaped, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+  assert.doesNotMatch(escaped, /<script>alert/);
+});
+
 test("TranscriptPane renders empty, ready, and transcript states", () => {
   const emptyMarkup = renderTranscriptPaneMarkup({
     emptyContent: h("p", { className: "empty-marker" }, "No session"),
