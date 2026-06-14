@@ -23,6 +23,13 @@ pub struct ThreadSyncData {
 }
 
 #[derive(Clone)]
+pub struct ThreadTranscriptPageData {
+    pub sync: ThreadSyncData,
+    pub prev_cursor: Option<usize>,
+    pub paged: bool,
+}
+
+#[derive(Clone)]
 pub struct StartThreadResult {
     pub thread: ThreadSummaryView,
     pub consumed_initial_prompt: bool,
@@ -49,6 +56,13 @@ pub trait ProviderBridge: Send + Sync {
         sandbox: &str,
     ) -> Result<(), String>;
     async fn read_thread(&self, thread_id: &str) -> Result<ThreadSyncData, String>;
+    async fn read_thread_transcript_page(
+        &self,
+        _thread_id: &str,
+        _before: Option<usize>,
+    ) -> Result<Option<ThreadTranscriptPageData>, String> {
+        Ok(None)
+    }
     async fn read_thread_entry_detail(
         &self,
         thread_id: &str,

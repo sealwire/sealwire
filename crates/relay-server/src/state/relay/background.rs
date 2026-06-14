@@ -15,18 +15,36 @@ impl RelayState {
         self.locally_deleted_thread_ids.contains(thread_id)
     }
 
+    fn touch_bg_progress_at(&mut self, thread_id: &str, now: u64) {
+        let touched = {
+            let runtime = self.ensure_runtime_for_thread(thread_id);
+            if runtime.active_turn_id.is_none() {
+                false
+            } else {
+                runtime.last_progress_at = Some(now);
+                runtime.liveness_timed_out = false;
+                runtime.liveness_stop_requested = false;
+                true
+            }
+        };
+        if touched && self.active_thread_id.as_deref() == Some(thread_id) {
+            self.sync_selected_runtime_to_fields();
+        }
+    }
+
     pub fn bg_append_agent_delta(
         &mut self,
         thread_id: &str,
         item_id: &str,
         delta: &str,
         turn_id: &str,
-        _now: u64,
+        now: u64,
     ) {
         if self.drop_bg_event_for_deleted_thread(thread_id) {
             return;
         }
         self.append_agent_delta_for_thread(thread_id, item_id, delta, turn_id);
+        self.touch_bg_progress_at(thread_id, now);
     }
 
     pub fn bg_start_agent_message(
@@ -34,12 +52,13 @@ impl RelayState {
         thread_id: &str,
         item_id: String,
         turn_id: String,
-        _now: u64,
+        now: u64,
     ) {
         if self.drop_bg_event_for_deleted_thread(thread_id) {
             return;
         }
         self.start_agent_message_for_thread(thread_id, item_id, turn_id);
+        self.touch_bg_progress_at(thread_id, now);
     }
 
     pub fn bg_complete_agent_message(
@@ -48,12 +67,13 @@ impl RelayState {
         item_id: String,
         text: String,
         turn_id: String,
-        _now: u64,
+        now: u64,
     ) {
         if self.drop_bg_event_for_deleted_thread(thread_id) {
             return;
         }
         self.complete_agent_message_for_thread(thread_id, item_id, text, turn_id);
+        self.touch_bg_progress_at(thread_id, now);
     }
 
     pub fn bg_upsert_user_message(
@@ -62,12 +82,13 @@ impl RelayState {
         item_id: String,
         text: String,
         turn_id: String,
-        _now: u64,
+        now: u64,
     ) {
         if self.drop_bg_event_for_deleted_thread(thread_id) {
             return;
         }
         self.upsert_user_message_for_thread(thread_id, item_id, text, turn_id);
+        self.touch_bg_progress_at(thread_id, now);
     }
 
     pub fn bg_append_command_delta(
@@ -75,12 +96,13 @@ impl RelayState {
         thread_id: &str,
         item_id: &str,
         delta: &str,
-        _now: u64,
+        now: u64,
     ) {
         if self.drop_bg_event_for_deleted_thread(thread_id) {
             return;
         }
         self.append_command_delta_for_thread(thread_id, item_id, delta);
+        self.touch_bg_progress_at(thread_id, now);
     }
 
     pub fn bg_start_command_execution(
@@ -90,12 +112,13 @@ impl RelayState {
         command: String,
         status: String,
         turn_id: String,
-        _now: u64,
+        now: u64,
     ) {
         if self.drop_bg_event_for_deleted_thread(thread_id) {
             return;
         }
         self.start_command_execution_for_thread(thread_id, item_id, command, status, turn_id);
+        self.touch_bg_progress_at(thread_id, now);
     }
 
     pub fn bg_add_command_result(
@@ -106,7 +129,7 @@ impl RelayState {
         output: Option<String>,
         status: String,
         turn_id: String,
-        _now: u64,
+        now: u64,
     ) {
         if self.drop_bg_event_for_deleted_thread(thread_id) {
             return;
@@ -125,6 +148,7 @@ impl RelayState {
             Some(turn_id),
             None,
         );
+        self.touch_bg_progress_at(thread_id, now);
     }
 
     pub fn bg_upsert_turn_diff_item(
@@ -135,7 +159,7 @@ impl RelayState {
         status: String,
         turn_id: Option<String>,
         tool: Option<ToolCallView>,
-        _now: u64,
+        now: u64,
     ) {
         if self.drop_bg_event_for_deleted_thread(thread_id) {
             return;
@@ -149,6 +173,7 @@ impl RelayState {
             turn_id,
             tool,
         );
+        self.touch_bg_progress_at(thread_id, now);
     }
 
     pub fn bg_upsert_transcript_item(
@@ -160,7 +185,7 @@ impl RelayState {
         status: String,
         turn_id: Option<String>,
         tool: Option<ToolCallView>,
-        _now: u64,
+        now: u64,
     ) {
         if self.drop_bg_event_for_deleted_thread(thread_id) {
             return;
@@ -168,9 +193,10 @@ impl RelayState {
         self.upsert_transcript_item_for_thread(
             thread_id, item_id, kind, text, status, turn_id, tool,
         );
+        self.touch_bg_progress_at(thread_id, now);
     }
 
-    pub fn bg_set_active_turn(&mut self, thread_id: &str, turn_id: Option<String>, _now: u64) {
+    pub fn bg_set_active_turn(&mut self, thread_id: &str, turn_id: Option<String>, now: u64) {
         if self.drop_bg_event_for_deleted_thread(thread_id) {
             return;
         }
@@ -182,6 +208,9 @@ impl RelayState {
         let turn_ended = turn_id.is_none();
         let runtime = self.ensure_runtime_for_thread(thread_id);
         runtime.active_turn_id = turn_id;
+        runtime.liveness_timed_out = false;
+        runtime.liveness_stop_requested = false;
+        runtime.last_progress_at = runtime.active_turn_id.as_ref().map(|_| now);
         runtime.note_turn_event();
         if turn_ended {
             runtime.current_phase = None;
@@ -198,12 +227,13 @@ impl RelayState {
         thread_id: &str,
         status: String,
         active_flags: Vec<String>,
-        _now: u64,
+        now: u64,
     ) {
         if self.drop_bg_event_for_deleted_thread(thread_id) {
             return;
         }
         self.set_thread_status(thread_id, status, active_flags);
+        self.touch_bg_progress_at(thread_id, now);
     }
 
     pub fn bg_set_transcript_item_status(
@@ -211,11 +241,12 @@ impl RelayState {
         thread_id: &str,
         item_id: &str,
         status: &str,
-        _now: u64,
+        now: u64,
     ) {
         if self.drop_bg_event_for_deleted_thread(thread_id) {
             return;
         }
         self.set_transcript_item_status_for_thread(thread_id, item_id, status);
+        self.touch_bg_progress_at(thread_id, now);
     }
 }

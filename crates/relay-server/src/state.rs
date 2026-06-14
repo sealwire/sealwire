@@ -42,6 +42,7 @@ pub const DEFAULT_APPROVAL_POLICY: &str = "untrusted";
 pub const DEFAULT_SANDBOX: &str = "workspace-write";
 pub const DEFAULT_EFFORT: &str = "medium";
 pub const CONTROLLER_LEASE_SECS: u64 = 15;
+pub const STALE_TURN_PROGRESS_TIMEOUT_SECS: u64 = 600;
 const MAX_LOG_LINES: usize = 200;
 const PERSISTED_STATE_VERSION: u32 = 2;
 const DEFAULT_STATE_FILE: &str = ".agent-relay/session.json";

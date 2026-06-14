@@ -97,7 +97,7 @@ starting a workflow"
                 .active_thread_id
                 .clone()
                 .ok_or_else(|| "there is no active thread to run a workflow on".to_string())?;
-            if relay.active_turn_id.is_some() {
+            if relay.active_thread_has_live_turn() {
                 return Err("cannot start a workflow while a turn is in progress".to_string());
             }
             if !relay.pending_approvals.is_empty() {

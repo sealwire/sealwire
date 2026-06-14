@@ -4,6 +4,7 @@ use tokio::{
     io::AsyncWriteExt,
     process::Command,
     sync::{watch, RwLock},
+    time::Duration,
 };
 use tracing::warn;
 
@@ -33,7 +34,7 @@ use super::{
     path_within_device_scope, require_device_id, short_device_id, sort_threads_by_recency,
     unix_now, BrokerPendingMessage, CachedRemoteActionResult, ClaimChallenge, CompletedRemoteClaim,
     IssuedClaimChallenge, PendingPairingResult, RelayState, RemoteActionReplayDecision,
-    SecurityProfile, DEFAULT_MODEL,
+    SecurityProfile, DEFAULT_MODEL, STALE_TURN_PROGRESS_TIMEOUT_SECS,
 };
 
 /// Error returned when a user op targets a thread that a non-terminal review
@@ -189,6 +190,7 @@ impl AppState {
         };
 
         state.spawn_initial_model_catalog_refresh();
+        state.spawn_stale_turn_liveness_watchdog();
         // Warm worker-backed catalogs (e.g. Claude) in the background so the
         // client's post-handshake model pull hits a populated cache instead of
         // racing a cold `supportedModels()` round-trip.
@@ -206,7 +208,84 @@ impl AppState {
     pub async fn snapshot(&self) -> SessionSnapshot {
         let mut relay = self.relay.write().await;
         expire_controller_if_needed(&mut relay);
+        expire_turn_liveness_if_needed(&mut relay);
         relay.snapshot()
+    }
+
+    fn spawn_stale_turn_liveness_watchdog(&self) {
+        let app = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(15));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                app.stop_stale_turns_at(unix_now()).await;
+            }
+        });
+    }
+
+    async fn stop_stale_turns_at(&self, now: u64) {
+        let candidates = {
+            let mut relay = self.relay.write().await;
+            let expired = relay.expire_stale_turn_liveness(now);
+            if !expired.is_empty() {
+                log_expired_turns(&mut relay, expired);
+                relay.notify();
+            }
+            relay.stale_turn_stop_candidates()
+        };
+
+        for (thread_id, turn_id) in candidates {
+            let still_stale = {
+                let relay = self.relay.read().await;
+                relay.runtime_for_thread(&thread_id).is_some_and(|runtime| {
+                    runtime.liveness_timed_out
+                        && !runtime.liveness_stop_requested
+                        && runtime.active_turn_id.as_deref() == Some(turn_id.as_str())
+                })
+            };
+            if !still_stale {
+                continue;
+            }
+            let stop_result = match self.find_thread_provider(&thread_id).await {
+                Ok((_, bridge)) => bridge.request_turn_stop(&thread_id, Some(&turn_id)).await,
+                Err(error) => Err(error),
+            };
+            let mut relay = self.relay.write().await;
+            match stop_result {
+                Ok(()) => {
+                    relay.mark_stale_turn_stop_requested(&thread_id, &turn_id);
+                    relay.push_log(
+                        "warn",
+                        format!(
+                            "Automatically requested stop for stale turn {turn_id} \
+in thread {thread_id}."
+                        ),
+                    );
+                    relay.notify();
+                    drop(relay);
+                    let app = self.clone();
+                    tokio::spawn(async move {
+                        app.await_stop_or_mark_idle(thread_id, turn_id).await;
+                    });
+                }
+                Err(error) => {
+                    relay.push_log(
+                        "warn",
+                        format!(
+                            "Failed to automatically stop stale turn {turn_id} \
+in thread {thread_id}: {error}"
+                        ),
+                    );
+                    relay.notify();
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn run_stale_turn_watchdog_once(&self, now: u64) {
+        self.stop_stale_turns_at(now).await;
     }
 
     pub fn available_providers(&self) -> Vec<String> {
@@ -348,6 +427,28 @@ impl AppState {
                 relay.notify();
             }
         }
+    }
+}
+
+fn expire_turn_liveness_if_needed(relay: &mut RelayState) -> bool {
+    let expired = relay.expire_stale_turn_liveness(unix_now());
+    if expired.is_empty() {
+        return false;
+    }
+    log_expired_turns(relay, expired);
+    true
+}
+
+fn log_expired_turns(relay: &mut RelayState, expired: Vec<String>) {
+    for thread_id in expired {
+        relay.push_log(
+            "warn",
+            format!(
+                "Turn liveness timed out on thread {thread_id} after \
+{STALE_TURN_PROGRESS_TIMEOUT_SECS} seconds without provider progress; \
+an automatic provider stop will be requested."
+            ),
+        );
     }
 }
 

@@ -1,4 +1,19 @@
-import React from "react";
+import React, {
+  useCallback,
+  useLayoutEffect,
+  useReducer,
+  useRef,
+} from "react";
+import {
+  Virtualizer,
+  elementScroll,
+  measureElement,
+  observeElementOffset,
+  observeElementRect,
+  observeWindowOffset,
+  observeWindowRect,
+  windowScroll,
+} from "@tanstack/virtual-core";
 import { CHECK_SVG, COPY_SVG, SPARKLES_SVG } from "../svg.js";
 import {
   buildFileDisplayPathMap,
@@ -15,6 +30,8 @@ const h = React.createElement;
 const COLLAPSIBLE_CHAR_THRESHOLD = 900;
 const COLLAPSIBLE_LINE_THRESHOLD = 12;
 const INITIAL_DIFF_ROW_LIMIT = 400;
+const TRANSCRIPT_VIRTUALIZATION_THRESHOLD = 20;
+const TRANSCRIPT_VIRTUAL_OVERSCAN = 6;
 
 function isCollapsible(value) {
   if (!value) {
@@ -1706,6 +1723,10 @@ const TRANSCRIPT_HISTORY_SKELETON_COUNT = 3;
 
 export const TRANSCRIPT_HISTORY_SENTINEL_ATTRIBUTE = TRANSCRIPT_HISTORY_SENTINEL_ATTR;
 
+export function shouldVirtualizeTranscript(rowCount, browserAvailable = typeof window !== "undefined") {
+  return browserAvailable && rowCount >= TRANSCRIPT_VIRTUALIZATION_THRESHOLD;
+}
+
 function TranscriptHistorySkeleton() {
   // Rendered above the first transcript entry while older pages are being
   // fetched. They occupy the same vertical real estate as real messages, so
@@ -1943,12 +1964,190 @@ export function TranscriptContent({
     return status !== "" && status !== "completed";
   })();
 
+  const sentinel = nodes.shift();
+  const latestUserNodeIndex = findTranscriptEntryNodeIndex(nodes, latestUserEntryId);
+  const virtualized = shouldVirtualizeTranscript(nodes.length);
+  const virtualizer = useTranscriptVirtualizer(nodes, virtualized);
+  const previousVirtualLatestUserIdRef = useRef("");
+  useLayoutEffect(() => {
+    const previousLatestUserId = previousVirtualLatestUserIdRef.current;
+    previousVirtualLatestUserIdRef.current = latestUserEntryId;
+    if (
+      !virtualized
+      || !previousLatestUserId
+      || !latestUserEntryId
+      || previousLatestUserId === latestUserEntryId
+    ) {
+      return;
+    }
+    if (latestUserNodeIndex >= 0) {
+      virtualizer.scrollToIndex(latestUserNodeIndex, {
+        align: "start",
+      });
+    }
+  }, [
+    latestUserEntryId,
+    latestUserNodeIndex,
+    virtualized,
+    virtualizer,
+  ]);
+  const contentProps = {
+    className: `thread-content${virtualized ? " thread-content-virtualized" : ""}`,
+    ...(needsBottomSpacer ? { "data-bottom-spacer": "true" } : {}),
+    ref: virtualizer.scrollTargetRef,
+  };
+
+  if (!virtualized) {
+    return h("div", contentProps, sentinel, ...nodes);
+  }
+
   return h(
     "div",
-    {
-      className: "thread-content",
-      ...(needsBottomSpacer ? { "data-bottom-spacer": "true" } : {}),
-    },
-    ...nodes
+    contentProps,
+    sentinel,
+    h(
+      "div",
+      {
+        className: "transcript-virtual-spacer",
+        style: { height: `${virtualizer.getTotalSize()}px` },
+      },
+      ...virtualizer.getVirtualItems().map((virtualRow) => {
+        const node = nodes[virtualRow.index];
+        if (!node) {
+          return null;
+        }
+        return h(
+          "div",
+          {
+            className: "transcript-virtual-row",
+            "data-index": virtualRow.index,
+            key: node.key || virtualRow.key,
+            ref: virtualizer.measureElement,
+            style: {
+              transform: `translateY(${virtualRow.start - virtualizer.scrollMargin}px)`,
+            },
+          },
+          node
+        );
+      })
+    )
   );
+}
+
+export function findTranscriptEntryNodeIndex(nodes, entryId) {
+  if (!entryId) return -1;
+  return nodes.findIndex((node) => {
+    const entry = node?.props?.entry;
+    return entry?.item_id === entryId || entry?.id === entryId;
+  });
+}
+
+function useTranscriptVirtualizer(rows, enabled) {
+  const scrollTargetRef = useRef(null);
+  const [, forceUpdate] = useReducer((value) => value + 1, 0);
+  const virtualizerRef = useRef(null);
+  const scrollElement = findTranscriptScrollElement(scrollTargetRef.current);
+  const scrollMargin = measureTranscriptScrollMargin(scrollTargetRef.current, scrollElement);
+
+  if (!virtualizerRef.current) {
+    virtualizerRef.current = new Virtualizer({
+      count: rows.length,
+      enabled,
+      estimateSize: estimateTranscriptRowSize,
+      getScrollElement: () => findTranscriptScrollElement(scrollTargetRef.current),
+      observeElementOffset: observeTranscriptOffset,
+      observeElementRect: observeTranscriptRect,
+      overscan: TRANSCRIPT_VIRTUAL_OVERSCAN,
+      scrollMargin,
+      scrollToFn: transcriptScroll,
+      onChange: () => forceUpdate(),
+    });
+  }
+
+  const getItemKey = useCallback(
+    (index) => rows[index]?.key || index,
+    [rows]
+  );
+  virtualizerRef.current.setOptions({
+    count: rows.length,
+    enabled,
+    estimateSize: estimateTranscriptRowSize,
+    getItemKey,
+    getScrollElement: () => findTranscriptScrollElement(scrollTargetRef.current),
+    measureElement,
+    observeElementOffset: observeTranscriptOffset,
+    observeElementRect: observeTranscriptRect,
+    overscan: TRANSCRIPT_VIRTUAL_OVERSCAN,
+    scrollMargin,
+    scrollToFn: transcriptScroll,
+    onChange: () => forceUpdate(),
+  });
+
+  useLayoutEffect(() => {
+    const virtualizer = virtualizerRef.current;
+    const cleanup = virtualizer._didMount();
+    virtualizer._willUpdate();
+    forceUpdate();
+    return cleanup;
+  }, []);
+
+  useLayoutEffect(() => {
+    virtualizerRef.current._willUpdate();
+  });
+
+  return {
+    getTotalSize: () => virtualizerRef.current.getTotalSize(),
+    getVirtualItems: () => virtualizerRef.current.getVirtualItems(),
+    measureElement: virtualizerRef.current.measureElement,
+    scrollToIndex: (...args) => virtualizerRef.current.scrollToIndex(...args),
+    scrollMargin,
+    scrollTargetRef,
+  };
+}
+
+function estimateTranscriptRowSize(index) {
+  return index % 5 === 0 ? 180 : 140;
+}
+
+export function findTranscriptScrollElement(node) {
+  const container = node?.closest?.(".chat-thread") || node?.parentElement || null;
+  if (!container) return null;
+  if (container.scrollHeight > container.clientHeight + 1) {
+    return container;
+  }
+  return container.ownerDocument?.defaultView || container;
+}
+
+function measureTranscriptScrollMargin(node, scrollElement) {
+  if (!node || !scrollElement || node === scrollElement) {
+    return 0;
+  }
+  const nodeRect = node.getBoundingClientRect();
+  if (isWindowScrollElement(scrollElement)) {
+    return nodeRect.top + scrollElement.scrollY;
+  }
+  const scrollRect = scrollElement.getBoundingClientRect();
+  return nodeRect.top - scrollRect.top + scrollElement.scrollTop;
+}
+
+function observeTranscriptRect(instance, callback) {
+  return isWindowScrollElement(instance.scrollElement)
+    ? observeWindowRect(instance, callback)
+    : observeElementRect(instance, callback);
+}
+
+function observeTranscriptOffset(instance, callback) {
+  return isWindowScrollElement(instance.scrollElement)
+    ? observeWindowOffset(instance, callback)
+    : observeElementOffset(instance, callback);
+}
+
+function transcriptScroll(offset, options, instance) {
+  return isWindowScrollElement(instance.scrollElement)
+    ? windowScroll(offset, options, instance)
+    : elementScroll(offset, options, instance);
+}
+
+function isWindowScrollElement(element) {
+  return Boolean(element && element.window === element);
 }

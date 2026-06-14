@@ -1422,6 +1422,26 @@ const THREAD_TRANSCRIPT_RESPONSE_TARGET_BYTES: usize = 20_000;
 const THREAD_TRANSCRIPT_ENVELOPE_UPPER_BOUND_BYTES: usize = 320;
 
 impl ThreadTranscriptResponse {
+    pub(crate) fn from_provider_page(
+        thread_id: String,
+        mut entries: Vec<TranscriptEntryView>,
+        prev_cursor: Option<usize>,
+        revision: u64,
+    ) -> Self {
+        strip_file_change_diffs_for_transport(&mut entries);
+        ThreadTranscriptResponse {
+            thread_id,
+            revision,
+            server_time: unix_now_secs(),
+            entry_seq_start: None,
+            entry_seq_end: None,
+            entries,
+            next_cursor: None,
+            prev_cursor,
+            thread_state: None,
+        }
+    }
+
     #[cfg(test)]
     pub fn from_transcript(
         thread_id: String,

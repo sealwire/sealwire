@@ -216,6 +216,109 @@ test("send emits user_message with relay-provided transcript ids", async () => {
     );
     assert.equal(userMessage.item_id, "user:relay-turn-1");
     assert.equal(userMessage.turn_id, "relay-turn-1");
+    const done = await worker.waitFor(
+      (event) =>
+        event.type === "done"
+        && event.provider_session_id === "sess-1"
+        && event.turn_id === "relay-turn-1",
+      { label: "second done with relay turn id" },
+    );
+    assert.equal(done.turn_id, "relay-turn-1");
+  } finally {
+    await worker.close();
+  }
+});
+
+test("a prior result cannot complete the next relay turn before authoritative idle", async () => {
+  const worker = spawnWorker({
+    CLAUDE_FAKE_FIRST_TURN_LATE_IDLE_MS: "150",
+    CLAUDE_FAKE_HOLD_AFTER_FIRST: "1",
+  });
+  try {
+    worker.send({ ...START_DEFAULT, turn_id: "relay-turn-a" });
+    await worker.waitFor(isStarted("sess-1"), { label: "session_started" });
+    await worker.waitFor(
+      (event) => event.type === "done" && event.turn_id === "relay-turn-a",
+      { label: "turn A done" },
+    );
+
+    worker.send({
+      type: "send",
+      provider_session_id: "sess-1",
+      model: "claude-sonnet-4-6",
+      permissionMode: "default",
+      prompt: "second",
+      turn_id: "relay-turn-b",
+      user_item_id: "user:relay-turn-b",
+    });
+    await worker.waitFor(
+      (event) => event.type === "user_message" && event.turn_id === "relay-turn-b",
+      { label: "turn B user message" },
+    );
+
+    await assert.rejects(
+      worker.waitFor(
+        (event) => event.type === "done" && event.turn_id === "relay-turn-b",
+        { timeoutMs: 400, label: "unexpected turn B completion" },
+      ),
+      /timed out/,
+    );
+  } finally {
+    await worker.close();
+  }
+});
+
+test("a running turn settles when the SDK stream ends before idle", async () => {
+  const worker = spawnWorker({ CLAUDE_FAKE_END_AFTER_RESULT: "1" });
+  try {
+    worker.send({ ...START_DEFAULT, turn_id: "relay-turn-stream-end" });
+    await worker.waitFor(isStarted("sess-1"), { label: "session_started" });
+    const stopped = await worker.waitFor(
+      (event) =>
+        event.type === "session_stopped"
+        && event.provider_session_id === "sess-1"
+        && event.turn_id === "relay-turn-stream-end",
+      { label: "stream-end session_stopped" },
+    );
+    assert.equal(stopped.turn_id, "relay-turn-stream-end");
+  } finally {
+    await worker.close();
+  }
+});
+
+test("result without idle keeps the turn running while the SDK stream stays open", async () => {
+  const worker = spawnWorker({ CLAUDE_FAKE_KEEP_OPEN_AFTER_RESULT: "1" });
+  try {
+    worker.send({ ...START_DEFAULT, turn_id: "relay-turn-missing-idle" });
+    await worker.waitFor(isStarted("sess-1"), { label: "session_started" });
+    await worker.waitFor(
+      (event) =>
+        event.type === "user_message"
+        && event.turn_id === "relay-turn-missing-idle",
+      { label: "turn user_message" },
+    );
+
+    await assert.rejects(
+      worker.waitFor(
+        (event) =>
+          (event.type === "done" || event.type === "session_stopped")
+          && event.turn_id === "relay-turn-missing-idle",
+        { timeoutMs: 300, label: "unexpected terminal event" },
+      ),
+      /timed out/,
+    );
+
+    worker.send({
+      type: "cancel",
+      id: "cancel-missing-idle",
+      provider_session_id: "sess-1",
+    });
+    await worker.waitFor(
+      (event) =>
+        event.type === "session_stopped"
+        && event.turn_id === "relay-turn-missing-idle",
+      { label: "cancelled missing-idle turn" },
+    );
   } finally {
     await worker.close();
   }
@@ -298,14 +401,14 @@ test("switching the model on a live session rebuilds the query", async () => {
 });
 
 test("cancel tears the live session down and emits session_stopped", async () => {
-  const worker = spawnWorker();
+  const worker = spawnWorker({ CLAUDE_FAKE_HOLD_TURNS: "1" });
   try {
-    worker.send(START_DEFAULT);
+    worker.send({ ...START_DEFAULT, turn_id: "relay-turn-cancel" });
     await worker.waitFor(isStarted("sess-1"), { label: "session_started" });
-    await worker.waitFor(isDone, { label: "turn done" });
 
     worker.send({ type: "cancel", id: "cancel-1", provider_session_id: "sess-1" });
-    await worker.waitFor(isStopped, { label: "session_stopped" });
+    const stopped = await worker.waitFor(isStopped, { label: "session_stopped" });
+    assert.equal(stopped.turn_id, "relay-turn-cancel");
     const response = await worker.waitFor(
       (event) => event.type === "response" && event.id === "cancel-1",
       { label: "cancel response" },

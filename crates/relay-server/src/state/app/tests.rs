@@ -246,7 +246,7 @@ mod path_scope_tests {
         DEFAULT_EFFORT, DEFAULT_MODEL, DEFAULT_SANDBOX,
     };
     use std::sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc,
     };
     use tempfile::TempDir;
@@ -286,6 +286,33 @@ mod path_scope_tests {
         providers.insert(
             "consumed-initial".to_string(),
             Arc::new(ConsumedInitialPromptProvider::default()),
+        );
+        (
+            AppState::from_parts(relay, providers, change_tx),
+            project,
+            outside,
+        )
+    }
+
+    async fn build_completed_consumed_initial_prompt_app(
+        cwd: &str,
+    ) -> (AppState, TempDir, TempDir) {
+        let project = TempDir::new().expect("project tempdir");
+        let outside = TempDir::new().expect("outside tempdir");
+        let (change_tx, _) = watch::channel(0_u64);
+        let relay = Arc::new(RwLock::new(RelayState::new(
+            cwd.to_string(),
+            change_tx.clone(),
+            SecurityProfile::private(),
+        )));
+        let mut providers: HashMap<String, Arc<dyn ProviderBridge>> = HashMap::new();
+        providers.insert(
+            "consumed-initial".to_string(),
+            Arc::new(ConsumedInitialPromptProvider {
+                relay: Some(relay.clone()),
+                complete_initial_before_return: true,
+                ..ConsumedInitialPromptProvider::default()
+            }),
         );
         (
             AppState::from_parts(relay, providers, change_tx),
@@ -494,6 +521,9 @@ mod path_scope_tests {
         state: Arc<RwLock<RelayState>>,
         mark_active_status_before_return: Arc<AtomicBool>,
         complete_before_return: Arc<AtomicBool>,
+        transcript_pages:
+            Arc<Mutex<HashMap<(String, Option<usize>), crate::provider::ThreadTranscriptPageData>>>,
+        read_thread_calls: Arc<AtomicUsize>,
     }
 
     impl RecordingProvider {
@@ -509,6 +539,8 @@ mod path_scope_tests {
                 state,
                 mark_active_status_before_return: Arc::new(AtomicBool::new(false)),
                 complete_before_return: Arc::new(AtomicBool::new(false)),
+                transcript_pages: Arc::new(Mutex::new(HashMap::new())),
+                read_thread_calls: Arc::new(AtomicUsize::new(0)),
             }
         }
 
@@ -598,6 +630,7 @@ mod path_scope_tests {
             &self,
             thread_id: &str,
         ) -> Result<crate::provider::ThreadSyncData, String> {
+            self.read_thread_calls.fetch_add(1, Ordering::Relaxed);
             let thread = self
                 .threads
                 .lock()
@@ -611,6 +644,19 @@ mod path_scope_tests {
                 active_flags: Vec::new(),
                 transcript: Vec::new(),
             })
+        }
+
+        async fn read_thread_transcript_page(
+            &self,
+            thread_id: &str,
+            before: Option<usize>,
+        ) -> Result<Option<crate::provider::ThreadTranscriptPageData>, String> {
+            Ok(self
+                .transcript_pages
+                .lock()
+                .await
+                .get(&(thread_id.to_string(), before))
+                .cloned())
         }
 
         async fn read_thread_entry_detail(
@@ -1026,6 +1072,98 @@ mod path_scope_tests {
         assert_eq!(thread_state.sandbox, "read-only");
         assert!(thread_state.active_turn_id.is_none());
         assert!(thread_state.settings_writable);
+    }
+
+    #[tokio::test]
+    async fn cold_transcript_uses_provider_pages_without_full_session_read() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, _codex, claude) = build_recording_provider_app(cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let thread = claude.thread_summary("claude-paged-thread", cwd);
+        let expected_name = thread.name.clone();
+        claude
+            .threads
+            .lock()
+            .await
+            .insert(thread.id.clone(), thread.clone());
+        let entry = |item_id: &str, text: &str| crate::protocol::TranscriptEntryView {
+            item_id: Some(item_id.to_string()),
+            kind: crate::protocol::TranscriptEntryKind::AgentText,
+            text: Some(text.to_string()),
+            status: "completed".to_string(),
+            turn_id: Some(item_id.to_string()),
+            tool: None,
+        };
+        {
+            let mut pages = claude.transcript_pages.lock().await;
+            pages.insert(
+                (thread.id.clone(), None),
+                crate::provider::ThreadTranscriptPageData {
+                    sync: crate::provider::ThreadSyncData {
+                        thread: thread.clone(),
+                        status: "idle".to_string(),
+                        active_flags: Vec::new(),
+                        transcript: vec![entry("tail", "tail")],
+                    },
+                    prev_cursor: Some(123),
+                    paged: true,
+                },
+            );
+            pages.insert(
+                (thread.id.clone(), Some(123)),
+                crate::provider::ThreadTranscriptPageData {
+                    sync: crate::provider::ThreadSyncData {
+                        thread: thread.clone(),
+                        status: "idle".to_string(),
+                        active_flags: Vec::new(),
+                        transcript: vec![entry("older", "older")],
+                    },
+                    prev_cursor: None,
+                    paged: true,
+                },
+            );
+        }
+        app.relay.write().await.threads = vec![thread.clone()];
+
+        let tail = app
+            .read_thread_transcript(ReadThreadTranscriptInput {
+                thread_id: thread.id.clone(),
+                cursor: None,
+                before: None,
+                device_id: Some("device-1".to_string()),
+            })
+            .await
+            .expect("cold tail page");
+        assert_eq!(tail.prev_cursor, Some(123));
+        assert_eq!(tail.entries[0].item_id.as_deref(), Some("tail"));
+
+        let older = app
+            .read_thread_transcript(ReadThreadTranscriptInput {
+                thread_id: thread.id.clone(),
+                cursor: None,
+                before: Some(123),
+                device_id: Some("device-1".to_string()),
+            })
+            .await
+            .expect("older provider page");
+        assert_eq!(older.prev_cursor, None);
+        assert_eq!(older.entries[0].item_id.as_deref(), Some("older"));
+        assert_eq!(claude.read_thread_calls.load(Ordering::Relaxed), 0);
+
+        let relay = app.relay.read().await;
+        let runtime = relay.runtime_for_thread(&thread.id).expect("paged runtime");
+        assert_eq!(runtime.transcript.len(), 2);
+        assert_eq!(runtime.transcript[0].item_id, "older");
+        assert_eq!(runtime.transcript[1].item_id, "tail");
+        assert_eq!(
+            runtime
+                .summary
+                .as_ref()
+                .and_then(|summary| summary.name.clone()),
+            expected_name
+        );
     }
 
     #[tokio::test]
@@ -1662,6 +1800,81 @@ mod path_scope_tests {
     }
 
     #[tokio::test]
+    async fn stale_turn_watchdog_stops_provider_without_releasing_the_turn_early() {
+        // This also models a persistent Claude SDK stream that emitted `result`
+        // but lost its authoritative `idle`: no terminal event arrives, so only
+        // provider progress expiry can initiate recovery.
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, _codex, claude) = build_recording_provider_app(cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+        app.set_stop_fallback_ms(80);
+
+        let thread = claude.thread_summary("claude-thread", cwd);
+        claude
+            .threads
+            .lock()
+            .await
+            .insert(thread.id.clone(), thread.clone());
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("claude_code".to_string());
+            relay.active_thread_id = Some(thread.id.clone());
+            relay.threads = vec![thread.clone()];
+            relay.ensure_runtime_for_thread(&thread.id).summary = Some(thread.clone());
+            relay.ensure_runtime_for_thread(&thread.id).current_cwd = cwd.to_string();
+            relay.bg_set_active_turn(&thread.id, Some("turn-stale".to_string()), 100);
+            relay.bg_set_thread_status(&thread.id, "active".to_string(), Vec::new(), 100);
+            relay.set_active_controller("device-1");
+        }
+
+        app.run_stale_turn_watchdog_once(100 + crate::state::STALE_TURN_PROGRESS_TIMEOUT_SECS)
+            .await;
+
+        {
+            let relay = app.relay.read().await;
+            let runtime = relay
+                .runtime_for_thread(&thread.id)
+                .expect("stale runtime remains tracked until provider completion");
+            assert!(runtime.liveness_timed_out);
+            assert!(runtime.liveness_stop_requested);
+        }
+        assert_eq!(
+            *claude.interrupt_thread_ids.lock().await,
+            vec![thread.id.clone()]
+        );
+        assert_eq!(
+            app.snapshot().await.active_turn_id.as_deref(),
+            Some("turn-stale"),
+            "accepted stop must not forge provider completion"
+        );
+        let send_error = app
+            .send_message(SendMessageInput {
+                text: "must remain blocked".to_string(),
+                model: Some("claude_code-model".to_string()),
+                effort: Some("medium".to_string()),
+                device_id: Some("device-1".to_string()),
+                thread_id: thread.id.clone(),
+            })
+            .await
+            .expect_err("a stale provider turn remains exclusive until it stops");
+        assert!(send_error.contains("busy with a turn"));
+
+        let mut idled = false;
+        for _ in 0..50 {
+            if app.snapshot().await.active_turn_id.is_none() {
+                idled = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            idled,
+            "the bounded stop fallback must eventually release the turn"
+        );
+    }
+
+    #[tokio::test]
     async fn send_message_routes_new_active_thread_before_provider_list_syncs() {
         let project = TempDir::new().expect("project tempdir");
         let cwd = project.path().to_str().unwrap();
@@ -1767,6 +1980,8 @@ mod path_scope_tests {
     struct ConsumedInitialPromptProvider {
         threads: Arc<Mutex<HashMap<String, ConsumedInitialThread>>>,
         next_id: AtomicU64,
+        relay: Option<Arc<RwLock<RelayState>>>,
+        complete_initial_before_return: bool,
     }
 
     impl ConsumedInitialPromptProvider {
@@ -1874,6 +2089,37 @@ mod path_scope_tests {
                     transcript,
                 },
             );
+
+            if self.complete_initial_before_return {
+                let relay = self
+                    .relay
+                    .as_ref()
+                    .expect("completion harness requires relay access");
+                let turn_id = initial_user_message
+                    .as_ref()
+                    .and_then(|entry| entry.turn_id.clone())
+                    .expect("completion harness requires an initial turn");
+                let now = unix_now();
+                let mut relay = relay.write().await;
+                relay.bg_set_active_turn(&thread.id, Some(turn_id.clone()), now);
+                relay.bg_set_thread_status(&thread.id, "active".to_string(), Vec::new(), now);
+                relay.bg_upsert_user_message(
+                    &thread.id,
+                    "user:provider-initial".to_string(),
+                    initial_prompt.unwrap_or_default().to_string(),
+                    turn_id.clone(),
+                    now,
+                );
+                relay.bg_complete_agent_message(
+                    &thread.id,
+                    "assistant:provider-reply".to_string(),
+                    "provider reply".to_string(),
+                    turn_id,
+                    now,
+                );
+                relay.bg_set_active_turn(&thread.id, None, now);
+                relay.bg_set_thread_status(&thread.id, "idle".to_string(), Vec::new(), now);
+            }
 
             Ok(crate::provider::StartThreadResult {
                 thread,
@@ -2550,6 +2796,45 @@ mod path_scope_tests {
         assert_settings_invariants(&snap, "resume B");
         assert_eq!(snap.reasoning_effort, "high");
         assert_eq!(snap.approval_policy, "untrusted");
+    }
+
+    #[tokio::test]
+    async fn consumed_initial_prompt_completion_before_start_returns_stays_idle() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, _p, _o) = build_completed_consumed_initial_prompt_app(cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let snapshot = app
+            .start_session(StartSessionInput {
+                device_id: Some("device-1".to_string()),
+                cwd: Some(cwd.to_string()),
+                model: None,
+                effort: None,
+                approval_policy: None,
+                sandbox: None,
+                provider: Some("consumed-initial".to_string()),
+                initial_prompt: Some("finish before start returns".to_string()),
+            })
+            .await
+            .expect("start consumed initial prompt");
+
+        assert_eq!(
+            snapshot.active_turn_id, None,
+            "start_session must not resurrect a provider-completed initial turn"
+        );
+        assert_eq!(snapshot.current_status, "idle");
+        assert!(
+            snapshot.thread_activity.is_empty(),
+            "a completed initial turn must not leave a ghost activity badge"
+        );
+        assert!(
+            snapshot.transcript.iter().any(|entry| {
+                entry.item_id.as_deref() == Some("assistant:provider-reply")
+                    && entry.text.as_deref() == Some("provider reply")
+            }),
+            "provider transcript events that beat activation must be preserved"
+        );
     }
 
     #[tokio::test]
@@ -5335,7 +5620,10 @@ settings update: {error}"
         let cwd = dir.path().to_str().unwrap();
         let (app, _providers) = build_review_app(cwd, &["codex"]).await;
         start_parent(&app, cwd, "codex").await;
-        app.relay.write().await.active_turn_id = Some("turn-in-flight".to_string());
+        app.relay
+            .write()
+            .await
+            .set_active_turn(Some("turn-in-flight".to_string()));
 
         let error = app
             .request_review(review_input("codex"))

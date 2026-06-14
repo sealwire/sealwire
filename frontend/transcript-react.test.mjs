@@ -6,14 +6,73 @@ import { renderToStaticMarkup } from "react-dom/server";
 import {
   ApprovalCard,
   TranscriptContent,
+  shouldVirtualizeTranscript,
   TranscriptEntry,
   buildAskUserAnswerValue,
   buildAskUserAnswersPayload,
   diffPrependedItemIds,
+  findTranscriptScrollElement,
+  findTranscriptEntryNodeIndex,
   groupToolEntries,
   parseAskUserAnswers,
   shouldAutoLoadFileChangeDiffs,
 } from "./shared/transcript-react.js";
+
+test("transcript virtualization stays off for short lists and server rendering", () => {
+  assert.equal(shouldVirtualizeTranscript(19, true), false);
+  assert.equal(shouldVirtualizeTranscript(20, true), true);
+  assert.equal(shouldVirtualizeTranscript(10_000, false), false);
+});
+
+test("virtual transcript locates an entry by rendered node index after expanded groups", () => {
+  const nodes = [
+    React.createElement("div", { key: "group-chip" }),
+    React.createElement(TranscriptEntry, {
+      entry: { item_id: "tool-a", kind: "tool_call" },
+      key: "tool-a",
+    }),
+    React.createElement(TranscriptEntry, {
+      entry: { item_id: "tool-b", kind: "tool_call" },
+      key: "tool-b",
+    }),
+    React.createElement(TranscriptEntry, {
+      entry: { item_id: "user-latest", kind: "user_text" },
+      key: "user-latest",
+    }),
+  ];
+
+  assert.equal(findTranscriptEntryNodeIndex(nodes, "user-latest"), 3);
+  assert.equal(findTranscriptEntryNodeIndex(nodes, "missing"), -1);
+});
+
+test("virtual transcript uses window scrolling when the chat container grows with content", () => {
+  const windowStub = { window: null };
+  windowStub.window = windowStub;
+  const documentStub = { defaultView: windowStub };
+  const growingContainer = {
+    clientHeight: 6_000,
+    ownerDocument: documentStub,
+    scrollHeight: 6_000,
+  };
+  const fixedContainer = {
+    clientHeight: 800,
+    ownerDocument: documentStub,
+    scrollHeight: 6_000,
+  };
+
+  assert.equal(
+    findTranscriptScrollElement({
+      closest: () => growingContainer,
+    }),
+    windowStub
+  );
+  assert.equal(
+    findTranscriptScrollElement({
+      closest: () => fixedContainer,
+    }),
+    fixedContainer
+  );
+});
 import { TranscriptPane } from "./shared/transcript-pane.js";
 import { collectFileChangeDetailItemIds } from "./shared/transcript-entry-details-state.js";
 import { parseUnifiedDiffRows } from "./shared/file-change-diff.js";

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::{
     protocol::{
@@ -22,6 +22,8 @@ pub(crate) struct ThreadRuntime {
     pub(crate) current_phase: Option<String>,
     pub(crate) current_tool: Option<String>,
     pub(crate) last_progress_at: Option<u64>,
+    pub(crate) liveness_timed_out: bool,
+    pub(crate) liveness_stop_requested: bool,
     pub(crate) active_flags: Vec<String>,
     pub(crate) current_cwd: String,
     pub(crate) model: String,
@@ -30,6 +32,8 @@ pub(crate) struct ThreadRuntime {
     pub(crate) reasoning_effort: String,
     pub(crate) transcript_revision: u64,
     pub(crate) transcript: Vec<TranscriptRecord>,
+    pub(crate) provider_history_cursor: Option<usize>,
+    pub(crate) provider_history_paged: bool,
     pub(crate) apply_states: HashMap<String, FileChangeApplyState>,
     pub(crate) pending_approvals: HashMap<String, PendingApproval>,
     pub(crate) pending_ask_user_questions: HashMap<String, PendingAskUserQuestion>,
@@ -56,6 +60,8 @@ impl ThreadRuntime {
             current_phase: None,
             current_tool: None,
             last_progress_at: None,
+            liveness_timed_out: false,
+            liveness_stop_requested: false,
             active_flags: Vec::new(),
             current_cwd: String::new(),
             model: String::new(),
@@ -64,6 +70,8 @@ impl ThreadRuntime {
             reasoning_effort: String::new(),
             transcript_revision: 0,
             transcript: Vec::new(),
+            provider_history_cursor: None,
+            provider_history_paged: false,
             apply_states: HashMap::new(),
             pending_approvals: HashMap::new(),
             pending_ask_user_questions: HashMap::new(),
@@ -93,9 +101,13 @@ impl ThreadRuntime {
             current_phase: None,
             current_tool: None,
             last_progress_at: None,
+            liveness_timed_out: false,
+            liveness_stop_requested: false,
             active_flags: Vec::new(),
             transcript_revision: 0,
             transcript: Vec::new(),
+            provider_history_cursor: None,
+            provider_history_paged: false,
             apply_states: HashMap::new(),
             pending_approvals: HashMap::new(),
             pending_ask_user_questions: HashMap::new(),
@@ -156,9 +168,13 @@ impl ThreadRuntime {
             current_phase: None,
             current_tool: None,
             last_progress_at: None,
+            liveness_timed_out: false,
+            liveness_stop_requested: false,
             active_flags: data.active_flags,
             transcript_revision: 0,
             transcript,
+            provider_history_cursor: None,
+            provider_history_paged: false,
             apply_states: HashMap::new(),
             pending_approvals: HashMap::new(),
             pending_ask_user_questions: HashMap::new(),
@@ -183,7 +199,29 @@ impl ThreadRuntime {
         // status — both maintained per-thread on turn start/end. A leftover phase must
         // not keep a thread "working", or it falsely blocks reviews
         // (has_working_thread_in_cwd) and shows a ghost activity badge until restart.
-        self.active_turn_id.is_some() || thread_status_is_working(&self.current_status)
+        self.active_turn_id.is_some()
+            || (!self.liveness_timed_out && thread_status_is_working(&self.current_status))
+    }
+
+    pub(crate) fn has_live_turn(&self) -> bool {
+        self.active_turn_id.is_some()
+    }
+
+    pub(crate) fn expire_stale_liveness(&mut self, now: u64, timeout_secs: u64) -> bool {
+        if self.liveness_timed_out || self.active_turn_id.is_none() {
+            return false;
+        }
+        let Some(last_progress_at) = self.last_progress_at.filter(|value| *value > 0) else {
+            return false;
+        };
+        if now.saturating_sub(last_progress_at) < timeout_secs {
+            return false;
+        }
+        self.liveness_timed_out = true;
+        self.liveness_stop_requested = false;
+        self.current_phase = None;
+        self.current_tool = None;
+        true
     }
 
     pub(crate) fn note_turn_event(&mut self) {
@@ -210,7 +248,7 @@ impl ThreadRuntime {
         thread_id: &str,
         before: Option<usize>,
     ) -> ThreadTranscriptResponse {
-        ThreadTranscriptResponse::from_transcript_source(
+        let mut page = ThreadTranscriptResponse::from_transcript_source(
             thread_id.to_string(),
             self.transcript.len(),
             before,
@@ -224,7 +262,45 @@ impl ThreadRuntime {
                 }
                 view
             },
-        )
+        );
+        if before.is_none() && self.provider_history_paged {
+            page.prev_cursor = self.provider_history_cursor;
+        }
+        page
+    }
+
+    pub(crate) fn prepend_provider_history(
+        &mut self,
+        entries: Vec<TranscriptEntryView>,
+        requested_cursor: Option<usize>,
+        prev_cursor: Option<usize>,
+    ) {
+        let fallback_page = requested_cursor
+            .map(|cursor| cursor.to_string())
+            .unwrap_or_else(|| "tail".to_string());
+        let mut records = entries
+            .into_iter()
+            .enumerate()
+            .map(|(index, entry)| TranscriptRecord {
+                item_id: entry
+                    .item_id
+                    .unwrap_or_else(|| format!("provider-history-{fallback_page}-{index}")),
+                kind: entry.kind,
+                text: entry.text,
+                status: entry.status,
+                turn_id: entry.turn_id,
+                tool: entry.tool,
+            })
+            .collect::<Vec<_>>();
+        let mut seen_item_ids = self
+            .transcript
+            .iter()
+            .map(|record| record.item_id.clone())
+            .collect::<HashSet<_>>();
+        records.retain(|record| seen_item_ids.insert(record.item_id.clone()));
+        records.extend(std::mem::take(&mut self.transcript));
+        self.transcript = records;
+        self.provider_history_cursor = prev_cursor;
     }
 
     pub(crate) fn touch(&mut self, now: u64) {
@@ -261,6 +337,10 @@ impl ThreadRuntime {
         // is not persisted, so a restart already resets it.
         self.current_status = fresh.current_status;
         self.active_flags = fresh.active_flags;
+        if !fresh.provider_history_paged {
+            self.provider_history_cursor = None;
+            self.provider_history_paged = false;
+        }
         self.merge_transcript_records(fresh.transcript);
     }
 
@@ -522,6 +602,51 @@ mod tests {
 
         assert_eq!(rt.active_turn_id.as_deref(), Some("turn-1"));
         assert!(rt.is_working());
+    }
+
+    #[test]
+    fn merge_full_history_clears_provider_page_cursor() {
+        let mut rt = runtime("t1", "idle");
+        rt.provider_history_paged = true;
+        rt.provider_history_cursor = Some(4096);
+
+        rt.merge_fresh_history(runtime("t1", "idle"));
+
+        assert!(!rt.provider_history_paged);
+        assert_eq!(rt.provider_history_cursor, None);
+    }
+
+    #[test]
+    fn prepend_provider_history_is_idempotent_for_retried_pages() {
+        let mut rt = runtime("t1", "idle");
+        rt.transcript.push(TranscriptRecord {
+            item_id: "tail".to_string(),
+            kind: crate::protocol::TranscriptEntryKind::AgentText,
+            text: Some("tail".to_string()),
+            status: "completed".to_string(),
+            turn_id: None,
+            tool: None,
+        });
+        let older = vec![TranscriptEntryView {
+            item_id: Some("older".to_string()),
+            kind: crate::protocol::TranscriptEntryKind::UserText,
+            text: Some("older".to_string()),
+            status: "completed".to_string(),
+            turn_id: None,
+            tool: None,
+        }];
+
+        rt.prepend_provider_history(older.clone(), Some(4096), Some(2048));
+        rt.prepend_provider_history(older, Some(4096), Some(2048));
+
+        assert_eq!(
+            rt.transcript
+                .iter()
+                .map(|record| record.item_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["older", "tail"]
+        );
+        assert_eq!(rt.provider_history_cursor, Some(2048));
     }
 
     // The restart-restore / first-load path builds a runtime via `from_sync_data`

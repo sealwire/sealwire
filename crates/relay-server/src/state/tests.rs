@@ -2608,6 +2608,96 @@ fn a_stale_phase_without_a_turn_is_not_working_and_does_not_block_reviews() {
 }
 
 #[test]
+fn stale_turn_liveness_times_out_without_discarding_the_provider_turn_id() {
+    let mut relay = test_state();
+    let thread_id = "stale-turn";
+    let cwd = "/tmp/project";
+    relay.active_thread_id = Some(thread_id.to_string());
+    {
+        let runtime = relay.ensure_runtime_for_thread(thread_id);
+        runtime.current_cwd = cwd.to_string();
+    }
+    relay.bg_set_active_turn(thread_id, Some("turn-1".to_string()), 100);
+    relay.bg_set_thread_status(thread_id, "active".to_string(), Vec::new(), 100);
+
+    assert!(relay.has_working_thread_in_cwd(cwd));
+    assert!(relay
+        .expire_stale_turn_liveness(100 + STALE_TURN_PROGRESS_TIMEOUT_SECS - 1)
+        .is_empty());
+
+    assert_eq!(
+        relay.expire_stale_turn_liveness(100 + STALE_TURN_PROGRESS_TIMEOUT_SECS),
+        vec![thread_id.to_string()]
+    );
+    let runtime = relay.runtime_for_thread(thread_id).unwrap();
+    assert_eq!(runtime.active_turn_id.as_deref(), Some("turn-1"));
+    assert!(runtime.liveness_timed_out);
+    assert!(runtime.has_live_turn());
+    assert!(runtime.is_working());
+    assert!(relay.has_working_thread_in_cwd(cwd));
+    assert_eq!(
+        relay.stale_turn_stop_candidates(),
+        vec![(thread_id.to_string(), "turn-1".to_string())]
+    );
+
+    let snapshot = relay.snapshot();
+    assert_eq!(snapshot.active_turn_id.as_deref(), Some("turn-1"));
+    assert_eq!(snapshot.current_status, "idle");
+    assert_eq!(snapshot.thread_activity.len(), 1);
+}
+
+#[test]
+fn background_provider_output_refreshes_turn_liveness() {
+    let mut relay = test_state();
+    let thread_id = "background-output";
+    let started_at = 100;
+    let progress_at = started_at + STALE_TURN_PROGRESS_TIMEOUT_SECS - 1;
+
+    relay.active_thread_id = Some("other-thread".to_string());
+    relay.bg_set_active_turn(thread_id, Some("turn-1".to_string()), started_at);
+    relay.bg_start_agent_message(
+        thread_id,
+        "assistant-1".to_string(),
+        "turn-1".to_string(),
+        progress_at,
+    );
+
+    assert!(
+        relay
+            .expire_stale_turn_liveness(started_at + STALE_TURN_PROGRESS_TIMEOUT_SECS)
+            .is_empty(),
+        "recent output from a background provider turn must prevent the watchdog from \
+         treating that turn as stale"
+    );
+    assert_eq!(
+        relay
+            .runtime_for_thread(thread_id)
+            .and_then(|runtime| runtime.last_progress_at),
+        Some(progress_at)
+    );
+}
+
+#[test]
+fn provider_progress_revives_a_turn_after_liveness_timeout() {
+    let mut relay = test_state();
+    let thread_id = "revived-turn";
+    relay.active_thread_id = Some(thread_id.to_string());
+    relay.bg_set_active_turn(thread_id, Some("turn-1".to_string()), 100);
+    assert_eq!(
+        relay.expire_stale_turn_liveness(100 + STALE_TURN_PROGRESS_TIMEOUT_SECS),
+        vec![thread_id.to_string()]
+    );
+
+    relay.touch_thread_progress(thread_id, Some("thinking"), None);
+
+    let runtime = relay.runtime_for_thread(thread_id).unwrap();
+    assert_eq!(runtime.active_turn_id.as_deref(), Some("turn-1"));
+    assert!(runtime.has_live_turn());
+    assert!(runtime.is_working());
+    assert_eq!(runtime.current_phase.as_deref(), Some("thinking"));
+}
+
+#[test]
 fn going_idle_clears_a_threads_stale_phase() {
     // Defense in depth for the bug above: when a thread's status transitions to a
     // not-working value, drop its phase/tool so phase stays consistent with status (and

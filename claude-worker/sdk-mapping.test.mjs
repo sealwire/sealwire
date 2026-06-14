@@ -5,8 +5,21 @@ import {
   lastMessageActivitySeconds,
   mapModelInfo,
   mapModelInfos,
+  mapSdkMessage,
   mapSessionMessages,
 } from "./sdk-mapping.mjs";
+
+test("only SDK idle is authoritative turn completion", () => {
+  assert.equal(mapSdkMessage({ type: "result", usage: {} }), null);
+  assert.deepEqual(
+    mapSdkMessage({
+      type: "system",
+      subtype: "session_state_changed",
+      state: "idle",
+    }),
+    { type: "done" },
+  );
+});
 
 test("lastMessageActivitySeconds returns the newest message time in unix seconds", () => {
   assert.equal(

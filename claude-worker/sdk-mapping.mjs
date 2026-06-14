@@ -257,7 +257,10 @@ export function mapSdkMessage(msg) {
     }
 
     case "result":
-      return { type: "done", usage: msg.usage };
+      // The SDK can emit `result` before its authoritative
+      // `session_state_changed: idle`. Treating both as terminal lets the
+      // first event release turn A, then stamps A's delayed idle onto turn B.
+      return null;
 
     default:
       return null;

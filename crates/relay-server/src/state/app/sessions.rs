@@ -51,7 +51,8 @@ impl AppState {
             if let Some(models) = provider_models {
                 relay.set_available_models(models);
             }
-            relay.activate_thread(
+            let turn_revision = relay.thread_turn_revision(&started_thread_id);
+            relay.activate_started_thread(
                 start_result.thread,
                 &cwd,
                 &model,
@@ -60,11 +61,10 @@ impl AppState {
                 &effort,
                 &device_id,
             );
-            // Claude's `start` path consumes the first prompt before this relay
-            // activates the new thread, so any earlier worker event can be
-            // cleared by `activate_thread`. Reinsert the same SDK-backed entry
-            // after activation so live snapshots and later read_thread results
-            // share the same item_id.
+            // Claude consumes the first prompt before this relay activates the
+            // new thread. Provider events that win that race are preserved by
+            // activate_started_thread; upsert the response-backed user entry as
+            // well so both event orderings use the same stable item_id.
             if consumed_initial_prompt {
                 if let Some(entry) = initial_user_message {
                     if let (Some(item_id), Some(text)) = (entry.item_id, entry.text) {
@@ -76,12 +76,18 @@ impl AppState {
                     }
                 }
             }
-            if let Some(turn_id) = started_turn_id {
-                relay.set_active_turn(Some(turn_id));
-                if let Some(active_thread_id) = relay.active_thread_id.clone() {
-                    relay.set_thread_status(&active_thread_id, "active".to_string(), Vec::new());
+            if turn_revision == 0 {
+                if let Some(turn_id) = started_turn_id {
+                    relay.set_active_turn(Some(turn_id));
+                    if let Some(active_thread_id) = relay.active_thread_id.clone() {
+                        relay.set_thread_status(
+                            &active_thread_id,
+                            "active".to_string(),
+                            Vec::new(),
+                        );
+                    }
+                    relay.touch_progress(Some("thinking"), None);
                 }
-                relay.touch_progress(Some("thinking"), None);
             }
             relay.push_log(
                 "info",
@@ -264,7 +270,7 @@ impl AppState {
             let runtime = relay
                 .runtime_for_thread(&thread_id)
                 .ok_or_else(|| format!("thread `{thread_id}` is not loaded"))?;
-            if runtime.active_turn_id.is_some() {
+            if runtime.has_live_turn() {
                 return Err(
                     "cannot change session settings while a turn is in progress".to_string()
                 );
@@ -408,10 +414,10 @@ impl AppState {
             // started, and sending that first message must be allowed.
             let target_has_live_turn = relay
                 .runtime_for_thread(&target_thread)
-                .map(|runtime| runtime.active_turn_id.is_some())
+                .map(|runtime| runtime.has_live_turn())
                 .unwrap_or(false)
                 || (relay.active_thread_id.as_deref() == Some(target_thread.as_str())
-                    && relay.active_turn_id.is_some());
+                    && relay.active_thread_has_live_turn());
             if target_has_live_turn {
                 return Err("that thread is busy with a turn; wait for it to finish".to_string());
             }
@@ -493,9 +499,9 @@ impl AppState {
             let relay = self.relay.read().await;
             let target_has_live_turn = relay
                 .runtime_for_thread(&target_thread)
-                .is_some_and(|runtime| runtime.active_turn_id.is_some())
+                .is_some_and(|runtime| runtime.has_live_turn())
                 || (relay.active_thread_id.as_deref() == Some(target_thread.as_str())
-                    && relay.active_turn_id.is_some());
+                    && relay.active_thread_has_live_turn());
             if target_has_live_turn {
                 return Err("that thread is busy with a turn; wait for it to finish".to_string());
             }
@@ -626,7 +632,7 @@ provider completion.",
 
     /// Wait for the provider to clear `turn_id` on `thread_id`. If it doesn't
     /// within the fallback window, mark the turn idle locally and warn.
-    async fn await_stop_or_mark_idle(&self, thread_id: String, turn_id: String) {
+    pub(super) async fn await_stop_or_mark_idle(&self, thread_id: String, turn_id: String) {
         let deadline = tokio::time::Instant::now()
             + std::time::Duration::from_millis(
                 self.stop_fallback_ms

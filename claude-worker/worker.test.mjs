@@ -105,6 +105,7 @@ test("flushEvents records liveness against the owning session tracker", async ()
           message: { content: [{ type: "text", text: "A" }] },
         },
         { type: "result", usage: {} },
+        { type: "system", subtype: "session_state_changed", state: "idle" },
       ]),
       { current: false },
       null,

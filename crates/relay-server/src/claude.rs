@@ -24,7 +24,7 @@ use crate::{
         ApprovalDecision, ApprovalDecisionInput, ModelOptionView, ThreadSummaryView, ToolCallView,
         TranscriptEntryKind, TranscriptEntryView,
     },
-    provider::{ProviderBridge, StartThreadResult, ThreadSyncData},
+    provider::{ProviderBridge, StartThreadResult, ThreadSyncData, ThreadTranscriptPageData},
     state::{
         BrokerPendingMessage, PendingApproval, PendingTranscriptDelta, RelayState,
         TranscriptDeltaKind,
@@ -453,6 +453,53 @@ impl ProviderBridge for ClaudeCodeBridge {
             active_flags: Vec::new(),
             transcript,
         })
+    }
+
+    async fn read_thread_transcript_page(
+        &self,
+        thread_id: &str,
+        before: Option<usize>,
+    ) -> Result<Option<ThreadTranscriptPageData>, String> {
+        let Some(real_session_id) = self.resolve_real_session_id(thread_id) else {
+            return Ok(None);
+        };
+        let cwd = self.cwd_for_thread(thread_id).await;
+        let mut cmd = json!({
+            "provider_session_id": real_session_id,
+        });
+        if let Some(before) = before {
+            cmd["before_cursor"] = Value::from(before);
+        }
+        if let Some(cwd) = cwd {
+            cmd["cwd"] = Value::String(cwd);
+        }
+        let result = self.send_request("read_session_page", cmd).await?;
+        let mut thread =
+            parse_thread_summary(value_at(&result, &["thread"]).unwrap_or(&Value::Null))?;
+        thread.id = thread_id.to_string();
+        let transcript = value_at(&result, &["transcript"])
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| serde_json::from_value(item.clone()).ok())
+                    .collect::<Vec<TranscriptEntryView>>()
+            })
+            .unwrap_or_default();
+        Ok(Some(ThreadTranscriptPageData {
+            sync: ThreadSyncData {
+                thread,
+                status: "idle".to_string(),
+                active_flags: Vec::new(),
+                transcript: inject_turn_diff_entries(transcript),
+            },
+            prev_cursor: value_at(&result, &["prev_cursor"])
+                .and_then(Value::as_u64)
+                .map(|v| v as usize),
+            paged: value_at(&result, &["paged"])
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        }))
     }
 
     async fn read_thread_entry_detail(
@@ -1226,22 +1273,40 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
         }
 
         "progress_tick" => {
-            if matches!(
-                claude_thread_route(&relay, event_thread_id.as_deref()),
-                ClaudeThreadRoute::Active
-            ) {
-                let phase = string_at(&payload, &["phase"]);
-                let tool = string_at(&payload, &["tool"]);
-                relay.touch_progress(phase.as_deref(), tool.as_deref());
+            let phase = string_at(&payload, &["phase"]);
+            let tool = string_at(&payload, &["tool"]);
+            match claude_thread_route(&relay, event_thread_id.as_deref()) {
+                ClaudeThreadRoute::Active => {
+                    relay.touch_progress(phase.as_deref(), tool.as_deref());
+                }
+                ClaudeThreadRoute::Background(thread_id) => {
+                    relay.touch_thread_progress(&thread_id, phase.as_deref(), tool.as_deref());
+                }
+                ClaudeThreadRoute::Drop => return,
             }
             relay.notify();
         }
 
         "done" | "session_stopped" => {
             let stopped_explicitly = event_type == "session_stopped";
+            let event_turn_id = string_at(&payload, &["turn_id"]);
             match claude_thread_route(&relay, event_thread_id.as_deref()) {
                 ClaudeThreadRoute::Active => {
                     let tid = relay.active_thread_id.clone().unwrap_or_default();
+                    if !completion_matches_turn(
+                        relay.active_turn_id.as_deref(),
+                        event_turn_id.as_deref(),
+                    ) {
+                        relay.push_log(
+                            "warn",
+                            format!(
+                                "Ignored stale Claude completion for turn {} on thread {tid}.",
+                                event_turn_id.as_deref().unwrap_or("<missing>")
+                            ),
+                        );
+                        relay.notify();
+                        return;
+                    }
                     let completed_turn_id = relay.active_turn_id.clone();
                     relay.set_active_turn(None);
                     relay.set_thread_status(&tid, "idle".to_string(), Vec::new());
@@ -1262,6 +1327,20 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                     }
                 }
                 ClaudeThreadRoute::Background(thread_id) => {
+                    let active_turn_id = relay
+                        .runtime_for_thread(&thread_id)
+                        .and_then(|runtime| runtime.active_turn_id.as_deref());
+                    if !completion_matches_turn(active_turn_id, event_turn_id.as_deref()) {
+                        relay.push_log(
+                            "warn",
+                            format!(
+                                "Ignored stale Claude completion for turn {} on thread {thread_id}.",
+                                event_turn_id.as_deref().unwrap_or("<missing>")
+                            ),
+                        );
+                        relay.notify();
+                        return;
+                    }
                     let now = crate::state::unix_now();
                     relay.bg_set_active_turn(&thread_id, None, now);
                     relay.bg_set_thread_status(&thread_id, "idle".to_string(), Vec::new(), now);
@@ -1304,6 +1383,14 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
         }
 
         _ => {}
+    }
+}
+
+fn completion_matches_turn(active_turn_id: Option<&str>, event_turn_id: Option<&str>) -> bool {
+    match (active_turn_id, event_turn_id) {
+        (Some(active), Some(completed)) => active == completed,
+        (Some(_), None) => false,
+        (None, _) => true,
     }
 }
 
@@ -2254,6 +2341,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn background_claude_progress_tick_refreshes_its_own_turn_liveness() {
+        let state = test_relay_with_active_b().await;
+        {
+            let mut relay = state.write().await;
+            relay.bg_set_active_turn("thread-a", Some("turn-a".to_string()), 100);
+            let runtime = relay
+                .runtime_for_thread("thread-a")
+                .cloned()
+                .expect("background runtime");
+            assert_eq!(runtime.last_progress_at, Some(100));
+            relay.expire_stale_turn_liveness(100 + crate::state::STALE_TURN_PROGRESS_TIMEOUT_SECS);
+            assert!(
+                relay
+                    .runtime_for_thread("thread-a")
+                    .is_some_and(|runtime| runtime.liveness_timed_out),
+                "precondition: background turn is timed out"
+            );
+        }
+
+        handle_worker_event(
+            json!({
+                "type": "progress_tick",
+                "provider_session_id": "thread-a",
+                "phase": "tool",
+                "tool": "Bash"
+            }),
+            &state,
+        )
+        .await;
+
+        let relay = state.read().await;
+        let background = relay
+            .runtime_for_thread("thread-a")
+            .expect("background runtime");
+        assert!(!background.liveness_timed_out);
+        assert_eq!(background.current_phase.as_deref(), Some("tool"));
+        assert_eq!(background.current_tool.as_deref(), Some("Bash"));
+        assert_eq!(
+            relay.active_thread_id.as_deref(),
+            Some("thread-b"),
+            "background heartbeat must not steal focus"
+        );
+        assert_eq!(relay.current_phase, None);
+        assert_eq!(relay.current_tool, None);
+    }
+
+    #[tokio::test]
     async fn background_claude_session_started_does_not_steal_active_provider() {
         let (tx, _) = tokio::sync::watch::channel(0);
         let state = Arc::new(RwLock::new(RelayState::new(
@@ -2430,7 +2564,8 @@ mod tests {
         handle_worker_event(
             json!({
                 "type": "session_stopped",
-                "provider_session_id": "claude-thread"
+                "provider_session_id": "claude-thread",
+                "turn_id": "claude-turn"
             }),
             &state,
         )
@@ -2444,6 +2579,68 @@ mod tests {
             .logs
             .iter()
             .any(|entry| entry.message == "Claude session stopped."));
+    }
+
+    #[tokio::test]
+    async fn stale_completion_cannot_clear_a_newer_claude_turn() {
+        let state = new_test_state();
+        {
+            let mut relay = state.write().await;
+            relay.set_provider_name("claude_code".to_string());
+            relay.active_thread_id = Some("claude-thread".to_string());
+            relay.set_active_turn(Some("turn-new".to_string()));
+            relay.set_thread_status("claude-thread", "active".to_string(), Vec::new());
+        }
+
+        handle_worker_event(
+            json!({
+                "type": "done",
+                "provider_session_id": "claude-thread",
+                "turn_id": "turn-old"
+            }),
+            &state,
+        )
+        .await;
+        assert_eq!(
+            state.read().await.active_turn_id.as_deref(),
+            Some("turn-new")
+        );
+
+        handle_worker_event(
+            json!({
+                "type": "done",
+                "provider_session_id": "claude-thread",
+                "turn_id": "turn-new"
+            }),
+            &state,
+        )
+        .await;
+        assert_eq!(state.read().await.active_turn_id, None);
+    }
+
+    #[tokio::test]
+    async fn completion_without_turn_id_cannot_clear_an_active_claude_turn() {
+        let state = new_test_state();
+        {
+            let mut relay = state.write().await;
+            relay.set_provider_name("claude_code".to_string());
+            relay.active_thread_id = Some("claude-thread".to_string());
+            relay.set_active_turn(Some("turn-active".to_string()));
+            relay.set_thread_status("claude-thread", "active".to_string(), Vec::new());
+        }
+
+        handle_worker_event(
+            json!({
+                "type": "done",
+                "provider_session_id": "claude-thread"
+            }),
+            &state,
+        )
+        .await;
+
+        let relay = state.read().await;
+        assert_eq!(relay.active_turn_id.as_deref(), Some("turn-active"));
+        assert_eq!(relay.current_status, "active");
     }
 
     #[tokio::test]

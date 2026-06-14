@@ -43,6 +43,7 @@ import { isReviewInProgressForThread } from "../shared/review-state.js";
 import { threadAttention } from "../shared/thread-attention.js";
 import { isDocumentForeground, notifyThreadEvents } from "../shared/thread-notify.js";
 import { shouldRefreshViewedThread } from "../shared/viewed-thread-refresh.js";
+import { createFrameRenderQueue } from "./frame-render-queue.js";
 
 const fetchRawTranscriptPage = createTranscriptPageFetcher(dispatchOrRecover);
 const fetchTranscriptEntryDetailRequest =
@@ -66,6 +67,17 @@ let viewOnlyNavigationGeneration = 0;
 let viewOnlyRefreshInFlight = false;
 let viewOnlyLastRefreshAt = 0;
 let viewOnlyWasWorking = false;
+const transcriptFrameRenderQueue = createFrameRenderQueue({
+  render() {
+    if (state.session) {
+      renderSession(state.session);
+    }
+  },
+});
+
+export function flushRemoteTranscriptRenderForTest() {
+  transcriptFrameRenderQueue.flush();
+}
 
 function invalidateViewOnlyNavigation() {
   viewOnlyNavigationGeneration += 1;
@@ -521,6 +533,7 @@ export function applySessionSnapshot(snapshot) {
   const effectiveSnapshot = viewOnlyThreadId && !viewingLiveThread
     ? projectedSnapshot
     : restoreHydratedTranscript(state, projectedSnapshot);
+  transcriptFrameRenderQueue.cancel();
   applyRenderedSession(effectiveSnapshot, {
     hydrationSnapshot: displaySnapshot,
     hydrateTranscript: !viewOnlyThreadId || viewingLiveThread,
@@ -803,13 +816,19 @@ function currentLiveSession() {
 
 function commitLiveSession(nextLiveSession) {
   state.realSession = nextLiveSession;
+  let nextRenderedSession = nextLiveSession;
   if (viewOnlyThreadId && viewOnlyThreadId !== nextLiveSession.active_thread_id) {
-    renderSession(
-      projectRemoteViewedSession(nextLiveSession, viewOnlyThreadId, state.session)
+    nextRenderedSession = projectRemoteViewedSession(
+      nextLiveSession,
+      viewOnlyThreadId,
+      state.session
     );
-    return;
   }
-  renderSession(nextLiveSession);
+  // Advance reducer state synchronously so every delta in this frame appends to
+  // the latest text. Subscriber notification and React reconciliation are the
+  // expensive part, so those are coalesced to one animation-frame render.
+  state.session = nextRenderedSession;
+  transcriptFrameRenderQueue.queue();
 }
 
 function normalizeTranscriptEventEntryKind(kind) {

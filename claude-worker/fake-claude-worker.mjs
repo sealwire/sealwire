@@ -64,6 +64,13 @@ function resultFor(cmd, sessionId) {
       };
     case "read_session":
       return { thread: makeThread(sessionId, cmd.cwd), messages: [] };
+    case "read_session_page":
+      return {
+        thread: makeThread(sessionId, cmd.cwd),
+        messages: [],
+        prev_cursor: null,
+        paged: false,
+      };
     case "delete_session":
       return { provider_session_id: sessionId };
     default:
@@ -118,6 +125,10 @@ for await (const line of rl) {
 
   // Fire-and-forget turns (`send`) complete immediately in the fake.
   if (cmd.type === "send") {
-    send({ type: "done", provider_session_id: sessionId });
+    send({
+      type: "done",
+      provider_session_id: sessionId,
+      turn_id: cmd.turn_id ?? undefined,
+    });
   }
 }

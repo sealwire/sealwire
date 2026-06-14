@@ -44,6 +44,13 @@ export function query({ prompt, options = {} }) {
     process.env.CLAUDE_FAKE_INTERRUPT_DELAY_MS || "0",
     10,
   );
+  const firstTurnLateIdleMs = Number.parseInt(
+    process.env.CLAUDE_FAKE_FIRST_TURN_LATE_IDLE_MS || "0",
+    10,
+  );
+  const holdAfterFirst = process.env.CLAUDE_FAKE_HOLD_AFTER_FIRST === "1";
+  const endAfterResult = process.env.CLAUDE_FAKE_END_AFTER_RESULT === "1";
+  const keepOpenAfterResult = process.env.CLAUDE_FAKE_KEEP_OPEN_AFTER_RESULT === "1";
 
   writeLine({
     type: "__query",
@@ -78,6 +85,7 @@ export function query({ prompt, options = {} }) {
     outQueue.push(message);
     drain();
   };
+  let userTurnCount = 0;
 
   // Ack each user turn with an idle/done so the worker emits a `done` event the
   // test can synchronize on.
@@ -87,7 +95,21 @@ export function query({ prompt, options = {} }) {
         if (message?.type === "user") {
           recordUserMessage(sessionId, message);
           if (!holdTurns) {
-            pushOut({ type: "system", subtype: "session_state_changed", state: "idle" });
+            userTurnCount += 1;
+            if (userTurnCount === 1 && (endAfterResult || keepOpenAfterResult)) {
+              pushOut({ type: "result", usage: {} });
+              if (endAfterResult) {
+                ended = true;
+                drain();
+              }
+            } else if (userTurnCount === 1 && firstTurnLateIdleMs > 0) {
+              pushOut({ type: "result", usage: {} });
+              setTimeout(() => {
+                pushOut({ type: "system", subtype: "session_state_changed", state: "idle" });
+              }, firstTurnLateIdleMs);
+            } else if (!(holdAfterFirst && userTurnCount > 1)) {
+              pushOut({ type: "system", subtype: "session_state_changed", state: "idle" });
+            }
           }
         }
       }

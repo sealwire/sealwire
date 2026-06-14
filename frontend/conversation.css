@@ -31,6 +31,27 @@
   gap: 24px;
 }
 
+.thread-content-virtualized {
+  display: block;
+  position: relative;
+}
+
+.transcript-virtual-spacer {
+  position: relative;
+  width: 100%;
+}
+
+.transcript-virtual-row {
+  display: flex;
+  flex-direction: column;
+  left: 0;
+  min-width: 0;
+  padding-bottom: 24px;
+  position: absolute;
+  top: 0;
+  width: 100%;
+}
+
 /* Bottom spacer: guarantees a freshly sent user message can be scrolled all
  * the way up to the top of the viewport while the assistant streams below
  * it. Only attached while the latest turn is in flight (`data-bottom-spacer`

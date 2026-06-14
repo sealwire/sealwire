@@ -135,6 +135,13 @@ for await (const line of rl) {
       }
     } else if (cmd.type === "read_session") {
       result = { thread: makeThread(sessionId, cmd.cwd), messages: [] };
+    } else if (cmd.type === "read_session_page") {
+      result = {
+        thread: makeThread(sessionId, cmd.cwd),
+        messages: [],
+        prev_cursor: null,
+        paged: false,
+      };
     } else if (cmd.type === "list_sessions") {
       result = { threads: [] };
     } else {
@@ -152,6 +159,10 @@ for await (const line of rl) {
   // Existing-session turns (`send`) complete immediately; the relay already
   // recorded that user message synchronously via record_local_user_message().
   if (cmd.type === "send") {
-    send({ type: "done", provider_session_id: sessionId });
+    send({
+      type: "done",
+      provider_session_id: sessionId,
+      turn_id: cmd.turn_id ?? undefined,
+    });
   }
 }

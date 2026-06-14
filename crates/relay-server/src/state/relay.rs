@@ -22,6 +22,7 @@ use crate::{
 use super::{
     persistence::PersistedRelayState, unix_now, ReviewJob, SecurityProfile, WorkflowRun,
     CONTROLLER_LEASE_SECS, DEFAULT_APPROVAL_POLICY, DEFAULT_EFFORT, DEFAULT_MODEL, DEFAULT_SANDBOX,
+    STALE_TURN_PROGRESS_TIMEOUT_SECS,
 };
 
 pub use self::approval::{ApprovalKind, PendingApproval};
@@ -400,7 +401,53 @@ impl RelayState {
     /// `current_status == "idle"` test, so providers that report a non-`idle` settled
     /// status (Codex's `unknown` / `completed`) aren't treated as busy.
     pub(crate) fn active_agent_is_working(&self) -> bool {
-        thread_status_is_working(&self.current_status)
+        self.selected_runtime()
+            .map(ThreadRuntime::is_working)
+            .unwrap_or_else(|| thread_status_is_working(&self.current_status))
+    }
+
+    pub(crate) fn active_thread_has_live_turn(&self) -> bool {
+        self.selected_runtime()
+            .map(ThreadRuntime::has_live_turn)
+            .unwrap_or_else(|| self.active_turn_id.is_some())
+    }
+
+    pub(crate) fn expire_stale_turn_liveness(&mut self, now: u64) -> Vec<String> {
+        let mut expired = Vec::new();
+        for (thread_id, runtime) in &mut self.runtimes {
+            if runtime.expire_stale_liveness(now, STALE_TURN_PROGRESS_TIMEOUT_SECS) {
+                expired.push(thread_id.clone());
+            }
+        }
+        if !expired.is_empty() {
+            self.sync_selected_runtime_to_fields();
+        }
+        expired
+    }
+
+    pub(crate) fn stale_turn_stop_candidates(&self) -> Vec<(String, String)> {
+        self.runtimes
+            .iter()
+            .filter_map(|(thread_id, runtime)| {
+                (runtime.liveness_timed_out && !runtime.liveness_stop_requested)
+                    .then(|| {
+                        runtime
+                            .active_turn_id
+                            .as_ref()
+                            .map(|turn_id| (thread_id.clone(), turn_id.clone()))
+                    })
+                    .flatten()
+            })
+            .collect()
+    }
+
+    pub(crate) fn mark_stale_turn_stop_requested(&mut self, thread_id: &str, turn_id: &str) {
+        let Some(runtime) = self.runtimes.get_mut(thread_id) else {
+            return;
+        };
+        if runtime.liveness_timed_out && runtime.active_turn_id.as_deref() == Some(turn_id) {
+            runtime.liveness_stop_requested = true;
+        }
     }
 
     pub(crate) fn insert_review_job(&mut self, job: ReviewJob) {
@@ -1083,10 +1130,22 @@ impl RelayState {
             .map(|runtime| runtime.transcript_revision)
             .unwrap_or(self.transcript_revision);
         let active_turn_id = selected
+            .filter(|runtime| runtime.has_live_turn())
             .and_then(|runtime| runtime.active_turn_id.clone())
-            .or_else(|| self.active_turn_id.clone());
+            .or_else(|| {
+                selected
+                    .is_none()
+                    .then(|| self.active_turn_id.clone())
+                    .flatten()
+            });
         let current_status = selected
-            .map(|runtime| runtime.current_status.clone())
+            .map(|runtime| {
+                if runtime.liveness_timed_out {
+                    "idle".to_string()
+                } else {
+                    runtime.current_status.clone()
+                }
+            })
             .unwrap_or_else(|| self.current_status.clone());
         let current_phase = selected
             .and_then(|runtime| runtime.current_phase.clone())
@@ -1236,6 +1295,52 @@ impl RelayState {
                 now,
             ),
         );
+        self.remember_thread_settings(&thread_id, approval_policy, sandbox, effort, model);
+        self.sync_selected_runtime_to_fields();
+        self.upsert_thread(thread);
+    }
+
+    pub(crate) fn activate_started_thread(
+        &mut self,
+        mut thread: ThreadSummaryView,
+        cwd: &str,
+        model: &str,
+        approval_policy: &str,
+        sandbox: &str,
+        effort: &str,
+        device_id: &str,
+    ) {
+        let now = unix_now();
+        let thread_id = thread.id.clone();
+        self.materialize_selected_runtime_from_fields();
+        self.assign_active_controller(device_id, now);
+        self.active_thread_id = Some(thread_id.clone());
+        if let Some(runtime) = self.runtimes.get_mut(&thread_id) {
+            // Provider events can race the start response and create this runtime
+            // before start_session activates it. Keep their transcript and turn
+            // lifecycle instead of replacing a completed turn with fresh active state.
+            thread.status = runtime.current_status.clone();
+            runtime.summary = Some(thread.clone());
+            runtime.current_cwd = cwd.to_string();
+            runtime.model = model.to_string();
+            runtime.approval_policy = approval_policy.to_string();
+            runtime.sandbox = sandbox.to_string();
+            runtime.reasoning_effort = effort.to_string();
+            runtime.touch(now);
+        } else {
+            self.runtimes.insert(
+                thread_id.clone(),
+                ThreadRuntime::new(
+                    thread.clone(),
+                    cwd,
+                    model,
+                    approval_policy,
+                    sandbox,
+                    effort,
+                    now,
+                ),
+            );
+        }
         self.remember_thread_settings(&thread_id, approval_policy, sandbox, effort, model);
         self.sync_selected_runtime_to_fields();
         self.upsert_thread(thread);
@@ -1461,6 +1566,27 @@ impl RelayState {
         if self.locally_deleted_thread_ids.contains(&thread.id) {
             return;
         }
+        if let Some(existing) = self
+            .threads
+            .iter()
+            .find(|existing| existing.id == thread.id)
+        {
+            if thread.name.is_none() {
+                thread.name = existing.name.clone();
+            }
+            if thread.preview.is_empty() {
+                thread.preview = existing.preview.clone();
+            }
+            if thread.cwd.is_empty() {
+                thread.cwd = existing.cwd.clone();
+            }
+            if thread.source.is_empty() {
+                thread.source = existing.source.clone();
+            }
+            if thread.model_provider.is_empty() {
+                thread.model_provider = existing.model_provider.clone();
+            }
+        }
         // Codex thread summaries carry an empty `provider` key (see codex.rs
         // `parse_thread_summary`). Routing a BACKGROUND thread relies on that key —
         // a reviewer thread is never the active thread, so the active-provider
@@ -1613,9 +1739,8 @@ impl RelayState {
         let running = self
             .runtimes
             .get(thread_id)
-            .and_then(|runtime| runtime.active_turn_id.as_ref())
-            .is_some()
-            || (is_active && self.active_turn_id.is_some());
+            .is_some_and(ThreadRuntime::has_live_turn)
+            || (is_active && self.active_thread_has_live_turn());
         if running {
             return Err(
                 "cannot archive the active session while Codex is still running".to_string(),
@@ -1630,9 +1755,8 @@ impl RelayState {
         let running = self
             .runtimes
             .get(thread_id)
-            .and_then(|runtime| runtime.active_turn_id.as_ref())
-            .is_some()
-            || (is_active && self.active_turn_id.is_some());
+            .is_some_and(ThreadRuntime::has_live_turn)
+            || (is_active && self.active_thread_has_live_turn());
         if running {
             return Err(
                 "cannot permanently delete the active session while Codex is still running"
@@ -1747,11 +1871,15 @@ impl RelayState {
     }
 
     pub fn set_active_turn(&mut self, turn_id: Option<String>) {
+        let now = unix_now();
         if let Some(thread_id) = self.active_thread_id.clone() {
             let runtime = self.ensure_runtime_for_thread(&thread_id);
             runtime.active_turn_id = turn_id;
+            runtime.liveness_timed_out = false;
+            runtime.liveness_stop_requested = false;
+            runtime.last_progress_at = runtime.active_turn_id.as_ref().map(|_| now);
             runtime.note_turn_event();
-            runtime.touch(unix_now());
+            runtime.touch(now);
         }
         self.sync_selected_runtime_to_fields();
     }
@@ -2063,6 +2191,8 @@ impl RelayState {
         let now = unix_now();
         let runtime = self.ensure_runtime_for_thread(thread_id);
         runtime.last_progress_at = Some(now);
+        runtime.liveness_timed_out = false;
+        runtime.liveness_stop_requested = false;
         runtime.touch(now);
         if let Some(p) = phase {
             runtime.current_phase = Some(p.to_string());
@@ -2090,6 +2220,8 @@ impl RelayState {
         runtime.current_phase = None;
         runtime.current_tool = None;
         runtime.last_progress_at = None;
+        runtime.liveness_timed_out = false;
+        runtime.liveness_stop_requested = false;
         runtime.touch(unix_now());
         if self.active_thread_id.as_deref() == Some(thread_id) {
             self.sync_selected_runtime_to_fields();

@@ -160,7 +160,7 @@ starting a review"
             if parent_thread_id != active_thread_id {
                 return Err("v1 can only review the active thread".to_string());
             }
-            if relay.active_turn_id.is_some() {
+            if relay.active_thread_has_live_turn() {
                 return Err("cannot start a review while a turn is in progress".to_string());
             }
             if !relay.pending_approvals.is_empty() {

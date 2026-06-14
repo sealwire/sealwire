@@ -9,6 +9,7 @@
  *   {"type":"model/list","id":"...","cwd":"..."}
  *   {"type":"list_sessions","id":"...","cwd":"...","limit":80}
  *   {"type":"read_session","id":"...","provider_session_id":"...","cwd":"..."}
+ *   {"type":"read_session_page","id":"...","provider_session_id":"...","cwd":"...","before_cursor":123}
  *   {"type":"approval_decision","id":"...","approval_id":"...","decision":"approve|deny|cancel","scope":"once|session"}
  *   {"type":"ask_user_question_answer","id":"...","request_id":"...","answers":{"<question text>":"<chosen label>"}}
  *   {"type":"cancel"}
@@ -28,6 +29,7 @@
 
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
+import { stat } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import {
   createPermissionHandler,
@@ -54,6 +56,10 @@ import {
 } from "./sdk-mapping.mjs";
 import { buildSessionOptionsBase } from "./session-options.mjs";
 import { createProgressTracker } from "./progress-tracker.mjs";
+import {
+  findLocalSessionFile,
+  readSessionMessagePage,
+} from "./session-page.mjs";
 
 const DEFAULT_SETTING_SOURCES = ["user", "project", "local"];
 
@@ -340,6 +346,7 @@ function createSessionEntry({ key, providerSessionId = null, cmd, pendingStartRe
     progressTracker: createProgressTracker({ emit: rawEmit }),
     pendingStartResponse,
     initialUserMessage: null,
+    currentTurnId: null,
     running: false,
     stopGeneration: 0,
     stopOperation: null,
@@ -487,9 +494,53 @@ function evictSessionsIfNeeded(sessions, context) {
       emit({
         type: "done",
         provider_session_id: providerSessionId,
+        turn_id: evict.currentTurnId,
       });
     }
   }
+}
+
+function settleUnexpectedStreamEnd(sessions, entry, context) {
+  if (entry.cancelFlag.current || !entry.running) return;
+
+  const providerSessionId = entry.providerSessionId || entry.pendingThreadId;
+  const turnId = entry.currentTurnId;
+  entry.running = false;
+  entry.currentTurnId = null;
+  entry.session = null;
+  entry.progressTracker?.stop();
+  touchSessionEntry(entry);
+
+  if (entry.pendingStartResponse) {
+    emitErrorResponse(
+      entry.pendingStartResponse.id,
+      "Claude session stream ended before the turn became idle",
+    );
+    entry.pendingStartResponse = null;
+  }
+
+  if (providerSessionId) {
+    rejectAllPendingApprovals(
+      context.pendingApprovals,
+      (pending) => pending.providerSessionId === providerSessionId,
+    );
+    rejectAllPendingAskUserQuestions(
+      context.pendingAskUserQuestions,
+      (pending) => pending.providerSessionId === providerSessionId,
+    );
+    emit({
+      type: "error",
+      message: "Claude session stream ended before the turn became idle",
+      provider_session_id: providerSessionId,
+    });
+    emit({
+      type: "session_stopped",
+      provider_session_id: providerSessionId,
+      turn_id: turnId,
+    });
+  }
+
+  evictSessionsIfNeeded(sessions, context);
 }
 
 function startSessionStream(sessions, entry, context) {
@@ -506,9 +557,13 @@ function startSessionStream(sessions, entry, context) {
       if (entry.pendingThreadId && !event.pending_thread_id) {
         event.pending_thread_id = entry.pendingThreadId;
       }
+      if (entry.currentTurnId && !event.turn_id) {
+        event.turn_id = entry.currentTurnId;
+      }
     },
     entry.progressTracker,
   ).finally(() => {
+    settleUnexpectedStreamEnd(sessions, entry, context);
     if (entry.streamTask === streamTask) {
       entry.streamTask = null;
     }
@@ -562,6 +617,7 @@ function handleSessionEvent(sessions, entry, event, context) {
   }
   if (event.type === "done") {
     entry.running = false;
+    entry.currentTurnId = null;
     evictSessionsIfNeeded(sessions, context);
   }
 }
@@ -687,6 +743,7 @@ async function main() {
         for (const entry of targets) {
           const doneSessionId =
             entry.providerSessionId || entry.pendingThreadId || providerSessionId;
+          const stoppedTurnId = entry.currentTurnId;
           const isPending = !entry.providerSessionId && entry.pendingThreadId;
           // Reject any pending interactions immediately so the relay isn't left
           // waiting on them.
@@ -708,6 +765,7 @@ async function main() {
               emit({
                 type: "session_stopped",
                 provider_session_id: doneSessionId,
+                turn_id: stoppedTurnId,
               });
             }
           });
@@ -765,6 +823,7 @@ async function main() {
               messageUuid: cmd.user_message_uuid || null,
             });
             entry.initialUserMessage = userTurn.event;
+            entry.currentTurnId = userTurn.event.turn_id;
             entry.running = true;
             entry.progressTracker.start();
             await entry.session.send(userTurn.sdkMessage);
@@ -828,6 +887,7 @@ async function main() {
               messageUuid: cmd.user_message_uuid || null,
             });
             userTurn.event.provider_session_id = cmd.provider_session_id;
+            entry.currentTurnId = userTurn.event.turn_id;
             entry.running = true;
             entry.progressTracker.start();
             emit(userTurn.event, entry.progressTracker);
@@ -891,6 +951,7 @@ async function main() {
             messageUuid: cmd.user_message_uuid || null,
           });
           userTurn.event.provider_session_id = providerSessionId;
+          entry.currentTurnId = userTurn.event.turn_id;
           entry.running = true;
           touchSessionEntry(entry);
           emit(userTurn.event, entry.progressTracker);
@@ -988,6 +1049,65 @@ async function main() {
         break;
       }
 
+      case "read_session_page": {
+        try {
+          const sessionId = cmd.provider_session_id;
+          if (!sessionId) throw new Error("read_session_page requires provider_session_id");
+          const filePath = await findLocalSessionFile({
+            cwd: cmd.cwd || "",
+            sessionId,
+          });
+          if (!filePath) {
+            const info = await sdk.getSessionInfo(sessionId, { dir: cmd.cwd || undefined });
+            const messages = await sdk.getSessionMessages(sessionId, {
+              dir: cmd.cwd || undefined,
+              includeSystemMessages: false,
+            });
+            const thread = mapSessionInfo(info ?? {
+              sessionId,
+              summary: "",
+              lastModified: Date.now(),
+              cwd: cmd.cwd || "",
+            });
+            const lastActivity = lastMessageActivitySeconds(messages);
+            if (lastActivity) thread.updated_at = lastActivity;
+            emitResponse(cmd.id, {
+              paged: false,
+              prev_cursor: null,
+              thread,
+              transcript: mapSessionMessages(messages),
+            });
+            break;
+          }
+
+          const beforeCursor = Number.isSafeInteger(cmd.before_cursor)
+            ? cmd.before_cursor
+            : null;
+          const page = await readSessionMessagePage({
+            beforeByte: beforeCursor,
+            filePath,
+          });
+          const fileInfo = await stat(filePath);
+          const thread = mapSessionInfo({
+            sessionId,
+            summary: "",
+            lastModified: fileInfo.mtimeMs,
+            cwd: cmd.cwd || "",
+          });
+          const lastActivity = lastMessageActivitySeconds(page.messages);
+          if (lastActivity) thread.updated_at = lastActivity;
+          emitResponse(cmd.id, {
+            paged: true,
+            prev_cursor: page.nextCursor,
+            thread,
+            transcript: mapSessionMessages(page.messages),
+          });
+        } catch (err) {
+          emitErrorResponse(cmd.id, String(err));
+        }
+        break;
+      }
+
       case "delete_session": {
         try {
           const sessionId = cmd.provider_session_id;
@@ -1022,6 +1142,7 @@ export {
   handleSessionEvent,
   promoteSessionEntry,
   sessionOptionsChanged,
+  settleUnexpectedStreamEnd,
 };
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

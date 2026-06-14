@@ -1949,7 +1949,10 @@ test("applyTranscriptDelta updates existing transcript entries using text and st
   activeBrowser || installBrowserStubs();
 
   const { state } = await import("./state.js");
-  const { applyTranscriptDelta } = await import("./session-ops.js");
+  const {
+    applyTranscriptDelta,
+    flushRemoteTranscriptRenderForTest,
+  } = await import("./session-ops.js");
 
   state.session = {
     active_thread_id: "thread-1",
@@ -1976,6 +1979,124 @@ test("applyTranscriptDelta updates existing transcript entries using text and st
   assert.equal(state.session.transcript[0].text, "Hello world");
   assert.equal(state.session.transcript[0].status, "running");
   assert.equal(state.session.transcript[0].kind, "agent_text");
+  flushRemoteTranscriptRenderForTest();
+});
+
+test("remote transcript deltas notify the React store once per frame", async () => {
+  installBrowserStubs();
+  const { state, subscribeRemoteState } = await import("./state.js");
+  const {
+    applyTranscriptDelta,
+    flushRemoteTranscriptRenderForTest,
+  } = await import("./session-ops.js");
+  const notifications = [];
+  const unsubscribe = subscribeRemoteState((_nextState, patch) => {
+    if (patch.session) {
+      notifications.push(patch.session);
+    }
+  });
+
+  state.session = {
+    active_thread_id: "thread-frame",
+    transcript_revision: 0,
+    transcript: [{
+      item_id: "item-frame",
+      kind: "agent_text",
+      status: "running",
+      text: "",
+      turn_id: "turn-frame",
+      tool: null,
+    }],
+  };
+  state.realSession = state.session;
+
+  for (const [revision, delta] of [[1, "one"], [2, " two"], [3, " three"]]) {
+    applyTranscriptDelta({
+      thread_id: "thread-frame",
+      revision,
+      item_id: "item-frame",
+      turn_id: "turn-frame",
+      delta,
+      delta_kind: "agent_text",
+    });
+  }
+
+  assert.equal(state.session.transcript[0].text, "one two three");
+  assert.equal(notifications.length, 0);
+  flushRemoteTranscriptRenderForTest();
+  assert.equal(notifications.length, 1);
+  assert.equal(notifications[0].transcript[0].text, "one two three");
+  unsubscribe();
+});
+
+test("an authoritative snapshot cancels a queued remote delta render", async () => {
+  const browser = installBrowserStubs();
+  const { state, subscribeRemoteState } = await import("./state.js");
+  const {
+    applySessionSnapshot,
+    applyTranscriptDelta,
+    flushRemoteTranscriptRenderForTest,
+  } = await import("./session-ops.js");
+  flushRemoteTranscriptRenderForTest();
+  seedTranscriptHydrationState(state);
+  const notifications = [];
+  const unsubscribe = subscribeRemoteState((_nextState, patch) => {
+    if (patch.session) {
+      notifications.push(patch.session);
+    }
+  });
+
+  state.session = {
+    active_thread_id: "thread-frame-snapshot",
+    transcript_revision: 0,
+    transcript_truncated: false,
+    transcript: [{
+      item_id: "item-frame-snapshot",
+      kind: "agent_text",
+      status: "running",
+      text: "",
+      turn_id: "turn-frame-snapshot",
+      tool: null,
+    }],
+  };
+  state.realSession = state.session;
+
+  applyTranscriptDelta({
+    thread_id: "thread-frame-snapshot",
+    revision: 1,
+    item_id: "item-frame-snapshot",
+    turn_id: "turn-frame-snapshot",
+    delta: "partial",
+    delta_kind: "agent_text",
+  });
+  applySessionSnapshot({
+    active_thread_id: "thread-frame-snapshot",
+    active_turn_id: null,
+    current_cwd: "/tmp/project",
+    current_status: "idle",
+    pending_approvals: [],
+    pending_ask_user_questions: [],
+    transcript_revision: 2,
+    transcript_truncated: false,
+    transcript: [{
+      item_id: "item-frame-snapshot",
+      kind: "agent_text",
+      status: "completed",
+      text: "authoritative",
+      turn_id: "turn-frame-snapshot",
+      tool: null,
+    }],
+  });
+
+  assert.equal(notifications.length, 1);
+  assert.equal(notifications[0].transcript[0].text, "authoritative");
+  browser.runNextTimer();
+  assert.equal(
+    notifications.length,
+    1,
+    "the stale delta frame must not render again after the snapshot"
+  );
+  unsubscribe();
 });
 
 test("applyTranscriptDelta does not mutate the previous session snapshot", async () => {
