@@ -204,6 +204,7 @@ const SESSION_SNAPSHOT_REMOTE_SURFACE_BUDGET: SessionSnapshotCompactBudget =
         fallback_file_changes: 4,
         max_pending_ask_user_question_inline_bytes: Some(4_000),
         reviewer_threads_active_parent_only: true,
+        drop_operator_only_logs: true,
     };
 
 const SESSION_SNAPSHOT_LOCAL_WEB_BUDGET: SessionSnapshotCompactBudget =
@@ -225,6 +226,7 @@ const SESSION_SNAPSHOT_LOCAL_WEB_BUDGET: SessionSnapshotCompactBudget =
         fallback_file_changes: 6,
         max_pending_ask_user_question_inline_bytes: None,
         reviewer_threads_active_parent_only: false,
+        drop_operator_only_logs: false,
     };
 
 const SESSION_SNAPSHOT_IOS_SURFACE_BUDGET: SessionSnapshotCompactBudget =
@@ -326,6 +328,11 @@ struct SessionSnapshotCompactBudget {
     /// just needs the active thread's reviewers (bounded by the per-parent cap).
     /// False for LocalWeb, whose delete/archive prompt needs every thread's reviewers.
     reviewer_threads_active_parent_only: bool,
+    /// Drop operator-only logs (everything not marked `remote_safe`) from the
+    /// projection. True for broker-bound (remote/iOS) profiles, which are
+    /// broadcast to every paired device regardless of `path_scope`; false for
+    /// LocalWeb, which is the operator's own surface and keeps the full buffer.
+    drop_operator_only_logs: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -377,6 +384,16 @@ impl SessionSnapshot {
             for pending in &mut self.pending_ask_user_questions {
                 pending.externalize_questions_if_over(max_inline_bytes);
             }
+        }
+
+        // Confidentiality gate (must run before the size-based truncation):
+        // broker-bound snapshots are broadcast to EVERY paired device with the
+        // same payload, ignoring each device's `path_scope`, and the global log
+        // buffer aggregates lines across ALL threads/cwds. Strip everything not
+        // explicitly `remote_safe` so a non-active, out-of-scope thread's log
+        // line cannot ride to a device scoped to a different project.
+        if budget.drop_operator_only_logs {
+            self.logs.retain(|entry| entry.remote_safe);
         }
 
         if self.logs.len() > budget.max_logs {
@@ -1128,6 +1145,20 @@ pub struct LogEntryView {
     pub kind: String,
     pub message: String,
     pub created_at: u64,
+    /// Whether this line may cross to a broker-bound (remote/iOS) surface.
+    ///
+    /// Defaults to `false` = operator-only. The global `logs` buffer aggregates
+    /// lines across ALL threads/cwds and a broker-bound snapshot is broadcast to
+    /// EVERY paired device regardless of its per-device `path_scope`, so an
+    /// operator-only line (thread/session ids, cwd paths, provider content) must
+    /// not ride to a device scoped to a different project. Broker-bound
+    /// compaction keeps only `remote_safe` lines; the local operator web keeps
+    /// all of them. Marked `#[serde(skip)]`: it is a purely internal projection
+    /// flag (never on the wire or in persisted state) that fails CLOSED —
+    /// anything restored or received without it is treated as operator-only. See
+    /// `markdown/CLAUDE_TURN_COMPLETION_FOLLOWUPS.md` (P1).
+    #[serde(skip)]
+    pub remote_safe: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

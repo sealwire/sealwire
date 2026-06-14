@@ -158,6 +158,12 @@ impl RelayState {
                 kind: kind.to_string(),
                 message: message.into(),
                 created_at: super::super::unix_now(),
+                // Operator-only by default: the global buffer mixes lines from
+                // every thread/cwd and broker-bound snapshots are broadcast to
+                // all paired devices irrespective of `path_scope`. A line reaches
+                // remote/iOS surfaces only by explicitly setting `remote_safe`.
+                // Fail closed.
+                remote_safe: false,
             },
         );
         if self.logs.len() > super::super::MAX_LOG_LINES {

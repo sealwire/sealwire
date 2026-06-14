@@ -84,6 +84,10 @@ fn make_snapshot() -> SessionSnapshot {
                 kind: "info".to_string(),
                 message: format!("log-{index}"),
                 created_at: index,
+                // Mark these helper logs remote_safe so the existing budget/size
+                // assertions exercise the truncation path, not the operator-only
+                // confidentiality strip (covered by a dedicated test below).
+                remote_safe: true,
             })
             .collect(),
         active_review_jobs: vec![],
@@ -308,6 +312,74 @@ fn compact_for_ios_surface_currently_reuses_remote_budget() {
 }
 
 #[test]
+fn compact_for_broker_drops_operator_only_logs_but_keeps_remote_safe() {
+    // P1 confidentiality: the global `logs` buffer aggregates lines across ALL
+    // threads/cwds and a broker-bound snapshot is broadcast to EVERY paired
+    // device regardless of its `path_scope`. An out-of-scope thread's
+    // identifying log line must not ride to a device scoped elsewhere, while a
+    // line explicitly cleared for remote (`remote_safe`) still rides.
+    let mut snapshot = make_snapshot();
+    // Trim heavy fields so the snapshot is comfortably under the broker byte
+    // budget: the ONLY reason a log can disappear here is the operator-only
+    // strip, never size pressure.
+    snapshot.transcript = vec![];
+    snapshot.transcript_truncated = false;
+    snapshot.pending_approvals = vec![];
+    snapshot.current_cwd = "/tmp/p".to_string();
+    snapshot.logs = vec![
+        // Operator-only line that identifies an out-of-scope thread + its cwd
+        // (mirrors the real `Claude session: {sid}` operator log).
+        LogEntryView {
+            kind: "info".to_string(),
+            message: "Claude session: sess-out-of-scope (/srv/other-project)".to_string(),
+            created_at: 2,
+            remote_safe: false,
+        },
+        // A generic operational line explicitly cleared for remote surfaces.
+        LogEntryView {
+            kind: "info".to_string(),
+            message: "remote-safe-operational-line".to_string(),
+            created_at: 1,
+            remote_safe: true,
+        },
+    ];
+
+    for profile in [
+        SessionSnapshotCompactProfile::RemoteSurface,
+        SessionSnapshotCompactProfile::IosSurface,
+    ] {
+        let compacted = snapshot.clone().compact_for(profile);
+        let messages: Vec<&str> = compacted.logs.iter().map(|l| l.message.as_str()).collect();
+        assert!(
+            !messages.iter().any(|m| m.contains("out-of-scope")),
+            "operator-only log leaked to a broker-bound surface: {messages:?}"
+        );
+        assert!(
+            messages.contains(&"remote-safe-operational-line"),
+            "remote_safe log was dropped from a broker-bound surface: {messages:?}"
+        );
+        // The serialized envelope carries no trace of the out-of-scope thread
+        // identifier or its cwd either.
+        let json = String::from_utf8(serde_json::to_vec(&compacted).unwrap()).unwrap();
+        assert!(!json.contains("out-of-scope"), "leaked via serialized json");
+        assert!(
+            !json.contains("/srv/other-project"),
+            "leaked cwd via serialized json"
+        );
+    }
+
+    // The local operator surface is the operator's own view and keeps the full
+    // buffer, including the operator-only line.
+    let local = snapshot.compact_for(SessionSnapshotCompactProfile::LocalWeb);
+    let local_messages: Vec<&str> = local.logs.iter().map(|l| l.message.as_str()).collect();
+    assert!(
+        local_messages.iter().any(|m| m.contains("out-of-scope")),
+        "local operator surface unexpectedly dropped an operator-only log"
+    );
+    assert!(local_messages.contains(&"remote-safe-operational-line"));
+}
+
+#[test]
 fn threads_response_compact_for_broker_limits_serialized_size() {
     let response = ThreadsResponse {
         threads: (0..120)
@@ -418,6 +490,9 @@ fn compact_for_broker_shells_transcript_tail_as_last_resort_without_clearing() {
             kind: "info".to_string(),
             message: format!("{}-{index}", "日志".repeat(600)),
             created_at: index as u64,
+            // remote_safe so they reach the byte-budget reduction this test
+            // asserts drops them (the operator-only strip would drop them first).
+            remote_safe: true,
         })
         .collect();
     snapshot.transcript = (0..3)
