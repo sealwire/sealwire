@@ -229,7 +229,12 @@ test("send emits user_message with relay-provided transcript ids", async () => {
   }
 });
 
-test("a prior result cannot complete the next relay turn before authoritative idle", async () => {
+test("a turn's trailing idle never completes a later relay turn (idle is non-terminal)", async () => {
+  // Turn A settles on its `result`; a `session_state_changed: idle` then arrives
+  // late (150ms). Because idle is non-terminal it must do nothing — in
+  // particular it must never leak across to complete the next turn B. (Turn B is
+  // held with no terminal, so the only thing that could spuriously finish it is
+  // A's trailing idle.)
   const worker = spawnWorker({
     CLAUDE_FAKE_FIRST_TURN_LATE_IDLE_MS: "150",
     CLAUDE_FAKE_HOLD_AFTER_FIRST: "1",
@@ -268,56 +273,139 @@ test("a prior result cannot complete the next relay turn before authoritative id
   }
 });
 
-test("a running turn settles when the SDK stream ends before idle", async () => {
+test("result settles the turn even when the SDK stream then closes", async () => {
+  // CLAUDE_FAKE_END_AFTER_RESULT emits `result` and then closes the stream.
+  // `result` is the authoritative terminal, so the turn completes via `done`
+  // (NOT session_stopped): the stream closing afterwards is not an "unexpected"
+  // end because the turn has already settled.
   const worker = spawnWorker({ CLAUDE_FAKE_END_AFTER_RESULT: "1" });
   try {
     worker.send({ ...START_DEFAULT, turn_id: "relay-turn-stream-end" });
     await worker.waitFor(isStarted("sess-1"), { label: "session_started" });
-    const stopped = await worker.waitFor(
+    const done = await worker.waitFor(
       (event) =>
-        event.type === "session_stopped"
+        event.type === "done"
         && event.provider_session_id === "sess-1"
         && event.turn_id === "relay-turn-stream-end",
-      { label: "stream-end session_stopped" },
+      { label: "result-terminated done" },
     );
-    assert.equal(stopped.turn_id, "relay-turn-stream-end");
+    assert.equal(done.turn_id, "relay-turn-stream-end");
   } finally {
     await worker.close();
   }
 });
 
-test("result without idle keeps the turn running while the SDK stream stays open", async () => {
+test("a stream that ends with no terminal at all still settles via session_stopped", async () => {
+  // The settleUnexpectedStreamEnd safety net: if the SDK stream closes while a
+  // turn is genuinely in flight (no `result`, no `idle`), the worker must still
+  // settle the turn with a matching turn_id so the relay can clear it.
+  const worker = spawnWorker({ CLAUDE_FAKE_END_WITHOUT_TERMINAL: "1" });
+  try {
+    worker.send({ ...START_DEFAULT, turn_id: "relay-turn-abrupt-end" });
+    await worker.waitFor(isStarted("sess-1"), { label: "session_started" });
+    const stopped = await worker.waitFor(
+      (event) =>
+        event.type === "session_stopped"
+        && event.turn_id === "relay-turn-abrupt-end",
+      { label: "abrupt-end session_stopped" },
+    );
+    assert.equal(stopped.turn_id, "relay-turn-abrupt-end");
+  } finally {
+    await worker.close();
+  }
+});
+
+test("result completes the turn even though the SDK never emits idle (real SDK sequence)", async () => {
+  // ⚠️ REGRESSION LOCK for the "turn ended but the UI still shows streaming" bug.
+  // CLAUDE_FAKE_KEEP_OPEN_AFTER_RESULT reproduces the REAL SDK end-of-turn
+  // sequence: emit `result`, then keep the stream OPEN and never send
+  // `session_state_changed: idle` (verified by driving the real SDK through
+  // worker.mjs). `result` must settle the turn with a matching turn_id —
+  // otherwise the relay's active_turn_id is never cleared and the thread is
+  // stuck "streaming" until the 10-minute watchdog. Before changing this, read
+  // the warning in sdk-mapping.test.mjs and actually re-test the real SDK.
   const worker = spawnWorker({ CLAUDE_FAKE_KEEP_OPEN_AFTER_RESULT: "1" });
   try {
-    worker.send({ ...START_DEFAULT, turn_id: "relay-turn-missing-idle" });
+    worker.send({ ...START_DEFAULT, turn_id: "relay-turn-result-terminal" });
+    await worker.waitFor(isStarted("sess-1"), { label: "session_started" });
+    const done = await worker.waitFor(
+      (event) =>
+        event.type === "done" && event.turn_id === "relay-turn-result-terminal",
+      { label: "result-terminated done" },
+    );
+    assert.equal(done.turn_id, "relay-turn-result-terminal");
+  } finally {
+    await worker.close();
+  }
+});
+
+test("a failed result emits error and done with the same session/turn identity (sanitized)", async () => {
+  // A failing turn must terminate AND be visibly a failure, with `error` and the
+  // settling `done` carrying the same turn/session id so the relay routes both
+  // to the right thread. The error message must be sanitized (no raw provider
+  // content) — the fake injects RAW_* sentinels that must not appear.
+  const worker = spawnWorker({ CLAUDE_FAKE_ERROR_RESULT: "1" });
+  try {
+    worker.send({ ...START_DEFAULT, turn_id: "relay-turn-err" });
+    await worker.waitFor(isStarted("sess-1"), { label: "session_started" });
+    const error = await worker.waitFor(
+      (event) => event.type === "error" && event.turn_id === "relay-turn-err",
+      { label: "error event" },
+    );
+    const done = await worker.waitFor(
+      (event) => event.type === "done" && event.turn_id === "relay-turn-err",
+      { label: "settling done" },
+    );
+    // same identity on both
+    assert.equal(error.turn_id, done.turn_id);
+    assert.equal(error.provider_session_id, "sess-1");
+    assert.equal(done.provider_session_id, "sess-1");
+    // sanitized: no raw provider content leaked into the message
+    assert.doesNotMatch(error.message || "", /RAW_PROVIDER_ERROR_BODY/);
+    assert.doesNotMatch(error.message || "", /RAW_PARTIAL_ASSISTANT_OUTPUT/);
+    assert.match(error.message || "", /Claude turn failed/);
+  } finally {
+    await worker.close();
+  }
+});
+
+test("a replayed result uuid does not complete a later turn (dedup)", async () => {
+  // CLAUDE_FAKE_REPLAY_RESULT_UUID emits the SAME result uuid on every turn.
+  // Turn A settles on the first occurrence; when turn B sends, the replayed
+  // (same-uuid) result must be DROPPED, so it cannot prematurely complete B —
+  // which would otherwise let the relay admit another prompt mid-turn.
+  const worker = spawnWorker({ CLAUDE_FAKE_REPLAY_RESULT_UUID: "1" });
+  try {
+    worker.send({ ...START_DEFAULT, turn_id: "relay-turn-dup-a" });
     await worker.waitFor(isStarted("sess-1"), { label: "session_started" });
     await worker.waitFor(
-      (event) =>
-        event.type === "user_message"
-        && event.turn_id === "relay-turn-missing-idle",
-      { label: "turn user_message" },
+      (event) => event.type === "done" && event.turn_id === "relay-turn-dup-a",
+      { label: "turn A done" },
     );
 
+    worker.send({
+      type: "send",
+      provider_session_id: "sess-1",
+      model: "claude-sonnet-4-6",
+      permissionMode: "default",
+      prompt: "second",
+      turn_id: "relay-turn-dup-b",
+      user_item_id: "user:relay-turn-dup-b",
+    });
+    await worker.waitFor(
+      (event) => event.type === "user_message" && event.turn_id === "relay-turn-dup-b",
+      { label: "turn B user message" },
+    );
+
+    // The replayed result must NOT complete turn B.
     await assert.rejects(
       worker.waitFor(
         (event) =>
           (event.type === "done" || event.type === "session_stopped")
-          && event.turn_id === "relay-turn-missing-idle",
-        { timeoutMs: 300, label: "unexpected terminal event" },
+          && event.turn_id === "relay-turn-dup-b",
+        { timeoutMs: 400, label: "unexpected turn B completion from replay" },
       ),
       /timed out/,
-    );
-
-    worker.send({
-      type: "cancel",
-      id: "cancel-missing-idle",
-      provider_session_id: "sess-1",
-    });
-    await worker.waitFor(
-      (event) =>
-        event.type === "session_stopped"
-        && event.turn_id === "relay-turn-missing-idle",
-      { label: "cancelled missing-idle turn" },
     );
   } finally {
     await worker.close();

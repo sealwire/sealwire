@@ -51,6 +51,14 @@ export function query({ prompt, options = {} }) {
   const holdAfterFirst = process.env.CLAUDE_FAKE_HOLD_AFTER_FIRST === "1";
   const endAfterResult = process.env.CLAUDE_FAKE_END_AFTER_RESULT === "1";
   const keepOpenAfterResult = process.env.CLAUDE_FAKE_KEEP_OPEN_AFTER_RESULT === "1";
+  // Close the stream mid-turn with NO terminal (no result, no idle) — the
+  // genuine "unexpected stream end" the worker settles via session_stopped.
+  const endWithoutTerminal = process.env.CLAUDE_FAKE_END_WITHOUT_TERMINAL === "1";
+  // Turn 1 ends with a FAILURE result (an SDKResultError) instead of success.
+  const errorResult = process.env.CLAUDE_FAKE_ERROR_RESULT === "1";
+  // Every turn emits the SAME result uuid — models a literal replay of an older
+  // turn's `result` landing on a later turn; the worker must dedup it by uuid.
+  const replayResultUuid = process.env.CLAUDE_FAKE_REPLAY_RESULT_UUID === "1";
 
   writeLine({
     type: "__query",
@@ -87,8 +95,10 @@ export function query({ prompt, options = {} }) {
   };
   let userTurnCount = 0;
 
-  // Ack each user turn with an idle/done so the worker emits a `done` event the
-  // test can synchronize on.
+  // Ack each user turn with a terminal so the worker emits a `done`/
+  // `session_stopped` the test can synchronize on. NOTE: the real SDK ends a
+  // turn with a `result` message (and does NOT emit `session_state_changed:
+  // idle` in this mode) — these knobs model that and the failure variants.
   (async () => {
     try {
       for await (const message of prompt) {
@@ -96,7 +106,31 @@ export function query({ prompt, options = {} }) {
           recordUserMessage(sessionId, message);
           if (!holdTurns) {
             userTurnCount += 1;
-            if (userTurnCount === 1 && (endAfterResult || keepOpenAfterResult)) {
+            if (replayResultUuid) {
+              // Same uuid on every turn: the 2nd+ occurrence is a literal replay
+              // the worker must drop (otherwise it completes the running turn).
+              pushOut({
+                type: "result",
+                subtype: "success",
+                is_error: false,
+                uuid: "dup-result-uuid",
+                usage: {},
+              });
+            } else if (userTurnCount === 1 && errorResult) {
+              pushOut({
+                type: "result",
+                subtype: "error_during_execution",
+                is_error: true,
+                // Raw provider content the worker must NOT copy into logs.
+                errors: ["RAW_PROVIDER_ERROR_BODY"],
+                result: "RAW_PARTIAL_ASSISTANT_OUTPUT",
+                uuid: "err-result-uuid",
+                usage: {},
+              });
+            } else if (userTurnCount === 1 && endWithoutTerminal) {
+              ended = true;
+              drain();
+            } else if (userTurnCount === 1 && (endAfterResult || keepOpenAfterResult)) {
               pushOut({ type: "result", usage: {} });
               if (endAfterResult) {
                 ended = true;
@@ -108,7 +142,10 @@ export function query({ prompt, options = {} }) {
                 pushOut({ type: "system", subtype: "session_state_changed", state: "idle" });
               }, firstTurnLateIdleMs);
             } else if (!(holdAfterFirst && userTurnCount > 1)) {
-              pushOut({ type: "system", subtype: "session_state_changed", state: "idle" });
+              // The real SDK terminates a turn with `result` (it does NOT emit
+              // `session_state_changed: idle` in this mode). Model that so the
+              // worker maps it to `done`, like production.
+              pushOut({ type: "result", usage: {} });
             }
           }
         }

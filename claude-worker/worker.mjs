@@ -74,7 +74,63 @@ const CANCEL_DRAIN_TIMEOUT_MS =
     ? configuredCancelDrainTimeout
     : DEFAULT_CANCEL_DRAIN_TIMEOUT_MS;
 
+// Diagnostic instrumentation for the "turn ended but UI still shows streaming"
+// investigation. Gated by SEALWIRE_STREAM_DIAG=1 so it is silent by default.
+// All lines go to stderr, which the relay forwards into its log panel via
+// spawn_stderr_reader -> push_log("claude_worker", ...), so worker + relay
+// diagnostics land in one place. Grep for "[STREAMDIAG]".
+const STREAM_DIAG = process.env.SEALWIRE_STREAM_DIAG === "1";
+function diag(tag, fields) {
+  if (!STREAM_DIAG) return;
+  try {
+    log(`[STREAMDIAG] ${tag} ${JSON.stringify(fields)}`);
+  } catch {
+    log(`[STREAMDIAG] ${tag}`);
+  }
+}
+// Build a diagnostic probe of a raw SDK message. CONTENT-SAFE BY CONSTRUCTION:
+// the relay forwards worker stderr into global, client-visible logs
+// (spawn_stderr_reader -> push_log), so this must never include content-bearing
+// fields — assistant output (`result`), error bodies (`errors`), prompts, file
+// paths (`cwd`), tool args, etc. We log only the message SHAPE (`keys` = field
+// names, never values) plus a whitelist of completion-semantic scalars. `keys`
+// alone is enough to spot a terminal/idle that arrives in an unexpected shape.
+const DIAG_SAFE_SCALARS = ["subtype", "state", "is_error", "stop_reason", "num_turns"];
+export function buildSdkMsgProbe(msg) {
+  const probe = {
+    type: msg?.type ?? null,
+    subtype: msg?.subtype ?? null,
+    state: msg?.state ?? null,
+  };
+  if (msg && (msg.type === "system" || msg.type === "result")) {
+    probe.keys = Object.keys(msg);
+    const safe = {};
+    for (const key of DIAG_SAFE_SCALARS) {
+      const value = msg[key];
+      // scalars only — drop objects/arrays which could carry content
+      if (value !== undefined && (value === null || typeof value !== "object")) {
+        safe[key] = value;
+      }
+    }
+    probe.safe = safe;
+  }
+  return probe;
+}
+
 function emit(event, progressTracker = null) {
+  if (
+    STREAM_DIAG
+    && (event.type === "done"
+      || event.type === "session_stopped"
+      || event.type === "status_changed")
+  ) {
+    diag("emit", {
+      type: event.type,
+      turn_id: event.turn_id ?? null,
+      psid: event.provider_session_id ?? null,
+      state: event.state ?? null,
+    });
+  }
   rawEmit(event);
   progressTracker?.record(event);
 }
@@ -111,6 +167,15 @@ async function flushEvents(
       // Suppress late provider events during cancellation. Returning closes the
       // consumer; the stop operation emits `session_stopped` after this task ends.
       if (shouldCancel.current) return;
+
+      // Reveals whether the SDK actually delivers `result` and the authoritative
+      // `session_state_changed: idle` for each turn. If `idle` never arrives on
+      // a still-open persistent stream, the turn never settles (no done /
+      // session_stopped) and the UI stays "streaming" until the relay watchdog.
+      // buildSdkMsgProbe is content-safe (shape + scalars only) — see its docs.
+      if (STREAM_DIAG) {
+        diag("sdk_msg", buildSdkMsgProbe(msg));
+      }
 
       const mapped = mapSdkMessage(msg);
       if (!mapped) continue;
@@ -501,6 +566,12 @@ function evictSessionsIfNeeded(sessions, context) {
 }
 
 function settleUnexpectedStreamEnd(sessions, entry, context) {
+  diag("stream_end", {
+    running: entry.running,
+    cancel: entry.cancelFlag.current,
+    turn_id: entry.currentTurnId ?? null,
+    psid: entry.providerSessionId ?? entry.pendingThreadId ?? null,
+  });
   if (entry.cancelFlag.current || !entry.running) return;
 
   const providerSessionId = entry.providerSessionId || entry.pendingThreadId;
@@ -543,11 +614,41 @@ function settleUnexpectedStreamEnd(sessions, entry, context) {
   evictSessionsIfNeeded(sessions, context);
 }
 
+// Drop a LITERAL replay of a `result` (same `uuid`) within a session. The
+// persistent SDK stream gives each turn's `result` a unique uuid; a repeated
+// uuid is a re-delivery of an already-terminated turn's result. If it passed
+// through, the worker would stamp it with the CURRENT turn id (decorateEvent)
+// and prematurely complete a still-running turn — which would let the relay
+// admit another prompt mid-turn. Bounded per-session memory; non-result and
+// uuid-less messages pass through untouched. (This catches literal replay; two
+// DISTINCT results for one turn is an SDK-contract violation we cannot attribute
+// — see the assumption note on decorateEvent.)
+const RESULT_REPLAY_MEMORY = 64;
+async function* dedupResultReplays(stream, entry) {
+  for await (const msg of stream) {
+    if (msg?.type === "result" && msg?.uuid) {
+      const seen = (entry.seenResultUuids ??= new Set());
+      if (seen.has(msg.uuid)) {
+        diag("result_replay_dropped", {
+          uuid: msg.uuid,
+          turn_id: entry.currentTurnId ?? null,
+        });
+        continue;
+      }
+      seen.add(msg.uuid);
+      if (seen.size > RESULT_REPLAY_MEMORY) {
+        seen.delete(seen.values().next().value);
+      }
+    }
+    yield msg;
+  }
+}
+
 function startSessionStream(sessions, entry, context) {
   if (!entry.session || entry.streamTask) return;
   entry.cancelFlag.current = false;
   const streamTask = flushEvents(
-    entry.session.stream(),
+    dedupResultReplays(entry.session.stream(), entry),
     entry.cancelFlag,
     (event) => handleSessionEvent(sessions, entry, event, context),
     entry.fileDiffTracker,
@@ -557,6 +658,17 @@ function startSessionStream(sessions, entry, context) {
       if (entry.pendingThreadId && !event.pending_thread_id) {
         event.pending_thread_id = entry.pendingThreadId;
       }
+      // Stamp the CURRENT turn id onto SDK-derived events that lack one.
+      // ASSUMPTION (relied on for turn_id-safe completion): the SDK delivers at
+      // most one terminal (`result`) per running turn, in order, and the relay
+      // does not start turn B until turn A's `done` has cleared its active turn.
+      // So when a terminal arrives, `entry.currentTurnId` is that terminal's own
+      // turn. A *duplicate or out-of-order* `result` for turn A arriving after
+      // turn B started would be mis-stamped as B (the SDK gives `result` no turn
+      // identity we could match on) — that is an SDK-contract violation, not a
+      // case we can disambiguate here. The relay's `completion_matches_turn` is
+      // the second line of defense for late/duplicate terminals that retain a
+      // stale id; it cannot catch one re-stamped with the live turn id.
       if (entry.currentTurnId && !event.turn_id) {
         event.turn_id = entry.currentTurnId;
       }

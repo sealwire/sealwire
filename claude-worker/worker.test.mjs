@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  buildSdkMsgProbe,
   closeSessionEntry,
   createSessionEntry,
   createWorkerSession,
@@ -11,6 +12,42 @@ import {
   flushEvents,
   sessionOptionsChanged,
 } from "./worker.mjs";
+
+test("buildSdkMsgProbe keeps diagnostics content-free (no prompts/output/errors/paths)", () => {
+  // The relay forwards worker stderr into global, client-visible logs, so the
+  // SEALWIRE_STREAM_DIAG probe must never carry content-bearing fields.
+  const resultProbe = buildSdkMsgProbe({
+    type: "result",
+    subtype: "success",
+    is_error: false,
+    stop_reason: "end_turn",
+    num_turns: 1,
+    result: "SECRET_ASSISTANT_OUTPUT",
+    errors: ["SECRET_ERROR_BODY"],
+    session_id: "sess-x",
+    usage: { output_tokens: 3 },
+  });
+  const resultJson = JSON.stringify(resultProbe);
+  assert.doesNotMatch(resultJson, /SECRET_ASSISTANT_OUTPUT/);
+  assert.doesNotMatch(resultJson, /SECRET_ERROR_BODY/);
+  // shape + completion-semantic scalars survive (enough to diagnose terminals)
+  assert.equal(resultProbe.type, "result");
+  assert.equal(resultProbe.safe.is_error, false);
+  assert.equal(resultProbe.safe.stop_reason, "end_turn");
+  assert.ok(resultProbe.keys.includes("result")); // a field NAME is fine; its value is not
+
+  // system/init must not leak cwd paths or tool/arg values either.
+  const initProbe = buildSdkMsgProbe({
+    type: "system",
+    subtype: "init",
+    cwd: "/secret/workspace/path",
+    tools: ["Bash", "Edit"],
+    model: "claude-secret",
+  });
+  const initJson = JSON.stringify(initProbe);
+  assert.doesNotMatch(initJson, /secret\/workspace\/path/);
+  assert.doesNotMatch(initJson, /claude-secret/);
+});
 
 async function* streamMessages(messages) {
   for (const message of messages) {

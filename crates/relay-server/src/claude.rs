@@ -1346,7 +1346,25 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                     relay.bg_set_thread_status(&thread_id, "idle".to_string(), Vec::new(), now);
                     relay.set_thread_status(&thread_id, "idle".to_string(), Vec::new());
                 }
-                ClaudeThreadRoute::Drop => return,
+                ClaudeThreadRoute::Drop => {
+                    // A terminal event that routes to Drop clears NOTHING: the
+                    // thread that owns the turn keeps active_turn_id, so the UI
+                    // stays "streaming". This is otherwise silent — log it so the
+                    // "ended but still streaming" investigation can see it.
+                    let active_thread = relay.active_thread_id.clone();
+                    relay.push_log(
+                        "warn",
+                        format!(
+                            "Dropped Claude {event_type} for turn {} (session {}); \
+                             no matching thread (active_thread={:?}).",
+                            event_turn_id.as_deref().unwrap_or("<missing>"),
+                            event_thread_id.as_deref().unwrap_or("<missing>"),
+                            active_thread.as_deref(),
+                        ),
+                    );
+                    relay.notify();
+                    return;
+                }
             }
             relay.notify();
         }

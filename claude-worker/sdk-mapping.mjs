@@ -180,6 +180,29 @@ function mapToolCall(block, msg, status = "running") {
   };
 }
 
+// Bounded, content-free failure reason for a failed `result`. Derived ONLY from
+// the SDK's `subtype` (a closed enum), never from `errors[]`/`result` bodies,
+// because this string rides the relay's global, all-device snapshot logs. See
+// the PRIVACY note in the `case "result"` of mapSdkMessage.
+const FAILED_TURN_REASONS = {
+  error_during_execution: "an error occurred during execution",
+  error_max_turns: "reached the maximum number of turns",
+  error_max_budget_usd: "reached the maximum budget",
+  error_max_structured_output_retries: "exceeded the structured-output retry limit",
+};
+export function failedTurnReason(subtype) {
+  if (typeof subtype === "string" && subtype in FAILED_TURN_REASONS) {
+    return `Claude turn failed: ${FAILED_TURN_REASONS[subtype]}`;
+  }
+  // success-with-is_error, or an unrecognized subtype: keep it generic. A raw
+  // subtype is a short closed-enum identifier (safe), but provider content is
+  // never included.
+  if (typeof subtype === "string" && subtype && subtype !== "success") {
+    return `Claude turn failed (${subtype})`;
+  }
+  return "Claude turn reported an error";
+}
+
 export function mapSdkMessage(msg) {
   switch (msg.type) {
     case "system": {
@@ -194,7 +217,16 @@ export function mapSdkMessage(msg) {
         };
       }
       if (msg.subtype === "session_state_changed") {
-        if (msg.state === "idle") return { type: "done" };
+        // ⚠️ VERIFIED REAL-SDK BEHAVIOR — do NOT treat `idle` as turn completion.
+        // The real @anthropic-ai/claude-agent-sdk does not emit
+        // `session_state_changed: idle` per turn in the worker's session mode:
+        // a turn ends with a `result` message and idle simply never arrives.
+        // (Confirmed by driving the real SDK through worker.mjs — the raw stream
+        // was: init -> assistant -> result, then silence, no idle for 60s+.)
+        // `result` is the authoritative terminal (see `case "result"` below). If
+        // idle were the only terminal, EVERY Claude turn would hang as
+        // "streaming/unfinished" because it never fires. Keep this NON-terminal.
+        if (msg.state === "idle") return null;
         return { type: "status_changed", state: msg.state };
       }
       return null;
@@ -256,11 +288,47 @@ export function mapSdkMessage(msg) {
       return events.length === 0 ? null : events.length === 1 ? events[0] : events;
     }
 
-    case "result":
-      // The SDK can emit `result` before its authoritative
-      // `session_state_changed: idle`. Treating both as terminal lets the
-      // first event release turn A, then stamps A's delayed idle onto turn B.
-      return null;
+    case "result": {
+      // Authoritative per-turn terminal for the REAL SDK. A Claude turn ends
+      // with this `result` message (subtype "success", stop_reason "end_turn");
+      // `session_state_changed: idle` is NOT emitted in this mode (see the
+      // comment on session_state_changed above). This was once mapped to `null`
+      // (relying on idle instead), which made EVERY turn hang "unfinished" — see
+      // the regression tests in sdk-mapping.test.mjs / worker-loop.test.mjs
+      // before changing this.
+      //
+      // Late/duplicate completions: the worker stamps this with the ACTIVE turn
+      // id (decorateEvent), so a duplicate/out-of-order `result` arriving after
+      // the next turn started would be mis-stamped onto that turn — `result`
+      // carries no matchable turn identity. The relay's `completion_matches_turn`
+      // only catches a terminal that still carries a STALE id, not one re-stamped
+      // live; literal replays (same `uuid`) are dropped upstream in
+      // worker.mjs `dedupResultReplays`. See the assumption note on decorateEvent.
+      //
+      // A `result` can also report FAILURE: subtype is one of
+      // error_during_execution | error_max_turns | error_max_budget_usd |
+      // error_max_structured_output_retries, or subtype "success" with
+      // is_error: true. Such turns must STILL terminate (never hang) but must NOT
+      // masquerade as a clean success. We surface an `error` so the failure is
+      // visible, then the terminal `done` that settles the turn.
+      //
+      // PRIVACY: the `error` message must be a BOUNDED, SANITIZED reason derived
+      // only from `subtype` (a closed enum) — never `errors[]`/`result` content.
+      // Worker stderr is forwarded into the relay's GLOBAL logs, which ride every
+      // snapshot to every paired device (broker.rs encrypts one snapshot for all
+      // targets). Copying provider output here would leak a background thread's
+      // content to unrelated devices that have no path scope for it.
+      const isError =
+        msg.is_error === true ||
+        (typeof msg.subtype === "string" && msg.subtype !== "success");
+      if (isError) {
+        return [
+          { type: "error", message: failedTurnReason(msg.subtype) },
+          { type: "done", usage: msg.usage },
+        ];
+      }
+      return { type: "done", usage: msg.usage };
+    }
 
     default:
       return null;

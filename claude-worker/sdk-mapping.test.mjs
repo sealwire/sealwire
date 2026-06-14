@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  failedTurnReason,
   lastMessageActivitySeconds,
   mapModelInfo,
   mapModelInfos,
@@ -9,15 +10,110 @@ import {
   mapSessionMessages,
 } from "./sdk-mapping.mjs";
 
-test("only SDK idle is authoritative turn completion", () => {
-  assert.equal(mapSdkMessage({ type: "result", usage: {} }), null);
+// ─────────────────────────────────────────────────────────────────────────────
+// ⚠️  LOCKS REAL SDK BEHAVIOR — DO NOT FLIP THIS WITHOUT RE-TESTING THE REAL SDK
+// ─────────────────────────────────────────────────────────────────────────────
+// Verified against @anthropic-ai/claude-agent-sdk (0.3.x): a real Claude turn
+// ends with a `result` message (subtype "success", stop_reason "end_turn"), and
+// the SDK does NOT emit `session_state_changed: idle` in the worker's session
+// mode. We confirmed this by driving the REAL SDK through worker.mjs and reading
+// the raw message stream: init -> assistant -> result, then silence (no idle for
+// 60s+). So `result` is the authoritative per-turn terminal and `idle` is not.
+//
+// A previous version mapped `result` -> null and relied on `idle`. Because idle
+// never arrives, that made EVERY Claude turn hang as "streaming/unfinished"
+// (active_turn_id was never cleared). This test is the guard against that
+// regression.
+//
+// The SDK's TYPE DOCS claim idle is the "authoritative turn-over signal" — that
+// is what misled the original change. The runtime in this mode disagrees. So if
+// you want to make idle the terminal again: DO NOT trust the type docs. Actually
+// run a real turn (no fake SDK) and PROVE idle arrives first. Run any worker
+// command path with SEALWIRE_STREAM_DIAG=1 and confirm you see
+//   [STREAMDIAG] sdk_msg ... "subtype":"session_state_changed","state":"idle"
+// BEFORE the turn is expected to end. Only then touch this mapping or this test.
+test("result is the authoritative turn terminal; idle is non-terminal (real SDK behavior)", () => {
+  // `result` ends the turn.
+  assert.deepEqual(
+    mapSdkMessage({ type: "result", subtype: "success", usage: { output_tokens: 4 } }),
+    { type: "done", usage: { output_tokens: 4 } },
+  );
+  // `idle` must never be turn completion.
+  const idle = mapSdkMessage({
+    type: "system",
+    subtype: "session_state_changed",
+    state: "idle",
+  });
+  assert.ok(
+    idle == null || idle.type !== "done",
+    `session_state_changed:idle must be non-terminal, got ${JSON.stringify(idle)}`,
+  );
+  // A non-idle state remains a non-terminal status hint.
   assert.deepEqual(
     mapSdkMessage({
       type: "system",
       subtype: "session_state_changed",
-      state: "idle",
+      state: "requires_action",
     }),
-    { type: "done" },
+    { type: "status_changed", state: "requires_action" },
+  );
+});
+
+test("an error result terminates the turn AND surfaces a SANITIZED failure (no content leak)", () => {
+  // A `result` can report failure: the SDKResultError subtypes, or subtype
+  // "success" with is_error:true. These must STILL settle the turn (a trailing
+  // `done`, so it never hangs) but must NOT look like a clean success.
+  //
+  // PRIVACY LOCK: the `error` message must be a bounded reason derived only from
+  // `subtype` — it must NEVER contain the raw `errors[]`/`result` provider
+  // content, because the worker's stderr rides the relay's global, all-device
+  // snapshot logs. The sentinels below MUST NOT appear in any emitted message.
+  const errorSubtypes = [
+    "error_during_execution",
+    "error_max_turns",
+    "error_max_budget_usd",
+    "error_max_structured_output_retries",
+  ];
+  for (const subtype of errorSubtypes) {
+    const mapped = mapSdkMessage({
+      type: "result",
+      subtype,
+      is_error: true,
+      errors: ["RAW_ERROR_BODY_SENTINEL"],
+      result: "RAW_ASSISTANT_OUTPUT_SENTINEL",
+      usage: { output_tokens: 2 },
+    });
+    assert.ok(Array.isArray(mapped), `${subtype} must map to [error, done]`);
+    assert.equal(mapped.length, 2);
+    assert.equal(mapped[0].type, "error");
+    assert.equal(mapped[0].message, failedTurnReason(subtype));
+    assert.doesNotMatch(mapped[0].message, /RAW_ERROR_BODY_SENTINEL/);
+    assert.doesNotMatch(mapped[0].message, /RAW_ASSISTANT_OUTPUT_SENTINEL/);
+    assert.deepEqual(mapped[1], { type: "done", usage: { output_tokens: 2 } });
+  }
+
+  // subtype "success" but is_error:true is still a failure — and still sanitized.
+  const flagged = mapSdkMessage({
+    type: "result",
+    subtype: "success",
+    is_error: true,
+    result: "RAW_PARTIAL_OUTPUT_SENTINEL",
+    usage: {},
+  });
+  assert.ok(Array.isArray(flagged));
+  assert.equal(flagged[0].type, "error");
+  assert.doesNotMatch(flagged[0].message, /RAW_PARTIAL_OUTPUT_SENTINEL/);
+  assert.equal(flagged[1].type, "done");
+
+  // A clean success stays a single, error-free `done`.
+  assert.deepEqual(
+    mapSdkMessage({
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      usage: { output_tokens: 4 },
+    }),
+    { type: "done", usage: { output_tokens: 4 } },
   );
 });
 
