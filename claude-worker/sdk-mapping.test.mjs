@@ -89,7 +89,17 @@ test("an error result terminates the turn AND surfaces a SANITIZED failure (no c
     assert.equal(mapped[0].message, failedTurnReason(subtype));
     assert.doesNotMatch(mapped[0].message, /RAW_ERROR_BODY_SENTINEL/);
     assert.doesNotMatch(mapped[0].message, /RAW_ASSISTANT_OUTPUT_SENTINEL/);
-    assert.deepEqual(mapped[1], { type: "done", usage: { output_tokens: 2 } });
+    // The terminal `done` carries the failure so the relay can render a durable
+    // transcript failure entry (logs are stripped from broker-bound snapshots).
+    // Its `reason` is the SAME sanitized, subtype-only string — never raw content.
+    assert.deepEqual(mapped[1], {
+      type: "done",
+      usage: { output_tokens: 2 },
+      failed: true,
+      reason: failedTurnReason(subtype),
+    });
+    assert.doesNotMatch(mapped[1].reason, /RAW_ERROR_BODY_SENTINEL/);
+    assert.doesNotMatch(mapped[1].reason, /RAW_ASSISTANT_OUTPUT_SENTINEL/);
   }
 
   // subtype "success" but is_error:true is still a failure — and still sanitized.
@@ -104,6 +114,8 @@ test("an error result terminates the turn AND surfaces a SANITIZED failure (no c
   assert.equal(flagged[0].type, "error");
   assert.doesNotMatch(flagged[0].message, /RAW_PARTIAL_OUTPUT_SENTINEL/);
   assert.equal(flagged[1].type, "done");
+  assert.equal(flagged[1].failed, true);
+  assert.doesNotMatch(flagged[1].reason, /RAW_PARTIAL_OUTPUT_SENTINEL/);
 
   // A clean success stays a single, error-free `done`.
   assert.deepEqual(

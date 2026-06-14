@@ -364,6 +364,13 @@ test("a failed result emits error and done with the same session/turn identity (
     assert.doesNotMatch(error.message || "", /RAW_PROVIDER_ERROR_BODY/);
     assert.doesNotMatch(error.message || "", /RAW_PARTIAL_ASSISTANT_OUTPUT/);
     assert.match(error.message || "", /Claude turn failed/);
+    // The settling `done` itself flags the failure (so the relay can render a
+    // durable transcript failure entry, not just an operator-only log line) and
+    // its reason is the SAME sanitized string — never raw provider content.
+    assert.equal(done.failed, true);
+    assert.match(done.reason || "", /Claude turn failed/);
+    assert.doesNotMatch(done.reason || "", /RAW_PROVIDER_ERROR_BODY/);
+    assert.doesNotMatch(done.reason || "", /RAW_PARTIAL_ASSISTANT_OUTPUT/);
   } finally {
     await worker.close();
   }

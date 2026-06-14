@@ -1319,18 +1319,39 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                             "Claude turn completed."
                         },
                     );
-                    if let Some(turn_id) = completed_turn_id {
+                    if let Some(turn_id) = completed_turn_id.as_deref() {
                         relay.set_transcript_item_status(
                             &format!("turn-diff:{turn_id}"),
                             "completed",
                         );
                     }
+                    // A failed terminal must leave a DURABLE, visible failure in
+                    // the transcript: operator-only logs are stripped from
+                    // broker-bound snapshots, so a log line alone would let a
+                    // remote/mobile client see the failed turn settle as a clean
+                    // success. The reason is the worker's sanitized, subtype-only
+                    // string (no provider content).
+                    if let Some(reason) = claude_failed_turn_reason(&payload) {
+                        let turn_id = completed_turn_id.or_else(|| event_turn_id.clone());
+                        relay.upsert_transcript_item_for_thread(
+                            &tid,
+                            claude_turn_error_item_id(turn_id.as_deref()),
+                            TranscriptEntryKind::Error,
+                            Some(reason),
+                            "failed".to_string(),
+                            turn_id,
+                            None,
+                        );
+                    }
                 }
                 ClaudeThreadRoute::Background(thread_id) => {
-                    let active_turn_id = relay
+                    let completed_turn_id = relay
                         .runtime_for_thread(&thread_id)
-                        .and_then(|runtime| runtime.active_turn_id.as_deref());
-                    if !completion_matches_turn(active_turn_id, event_turn_id.as_deref()) {
+                        .and_then(|runtime| runtime.active_turn_id.clone());
+                    if !completion_matches_turn(
+                        completed_turn_id.as_deref(),
+                        event_turn_id.as_deref(),
+                    ) {
                         relay.push_log(
                             "warn",
                             format!(
@@ -1345,6 +1366,23 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                     relay.bg_set_active_turn(&thread_id, None, now);
                     relay.bg_set_thread_status(&thread_id, "idle".to_string(), Vec::new(), now);
                     relay.set_thread_status(&thread_id, "idle".to_string(), Vec::new());
+                    // Same failure-visibility guarantee for BACKGROUND turns: the
+                    // entry lands on that thread's runtime so it is present when
+                    // the user later switches back to it (and in its broker-bound
+                    // snapshot). See the active-route note above.
+                    if let Some(reason) = claude_failed_turn_reason(&payload) {
+                        let turn_id = completed_turn_id.or_else(|| event_turn_id.clone());
+                        relay.bg_upsert_transcript_item(
+                            &thread_id,
+                            claude_turn_error_item_id(turn_id.as_deref()),
+                            TranscriptEntryKind::Error,
+                            Some(reason),
+                            "failed".to_string(),
+                            turn_id,
+                            None,
+                            now,
+                        );
+                    }
                 }
                 ClaudeThreadRoute::Drop => {
                     // A terminal event that routes to Drop clears NOTHING: the
@@ -1402,6 +1440,32 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
 
         _ => {}
     }
+}
+
+/// The sanitized failure reason if a Claude terminal reported a FAILED turn.
+/// Only the worker's failed `result` sets `failed: true` (mapped onto `done`),
+/// carrying a bounded, subtype-only `reason`; a clean `done` and an explicit
+/// `session_stopped` (user cancel) do not. Returns `None` for non-failures, so
+/// the failure entry is injected exactly for genuine turn failures.
+fn claude_failed_turn_reason(payload: &Value) -> Option<String> {
+    if !payload
+        .get("failed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    Some(
+        string_at(payload, &["reason"])
+            .filter(|reason| !reason.is_empty())
+            .unwrap_or_else(|| "Claude turn failed.".to_string()),
+    )
+}
+
+/// Stable per-turn id for the synthetic failure entry so a re-delivered terminal
+/// upserts (never duplicates) the same entry.
+fn claude_turn_error_item_id(turn_id: Option<&str>) -> String {
+    format!("turn-error:{}", turn_id.unwrap_or("unknown"))
 }
 
 fn completion_matches_turn(active_turn_id: Option<&str>, event_turn_id: Option<&str>) -> bool {
@@ -2659,6 +2723,153 @@ mod tests {
         let relay = state.read().await;
         assert_eq!(relay.active_turn_id.as_deref(), Some("turn-active"));
         assert_eq!(relay.current_status, "active");
+    }
+
+    #[tokio::test]
+    async fn failed_done_records_a_transcript_failure_visible_in_broker_snapshot() {
+        // A failed turn must terminate (never hang) AND remain visibly a failure
+        // on remote/mobile surfaces. Operator-only logs are stripped from
+        // broker-bound snapshots, so the failure has to live in the TRANSCRIPT.
+        let state = new_test_state();
+        {
+            let mut relay = state.write().await;
+            relay.set_provider_name("claude_code".to_string());
+            relay.active_thread_id = Some("claude-thread".to_string());
+            relay.set_active_turn(Some("turn-1".to_string()));
+            relay.set_thread_status("claude-thread", "active".to_string(), Vec::new());
+        }
+
+        handle_worker_event(
+            json!({
+                "type": "done",
+                "provider_session_id": "claude-thread",
+                "turn_id": "turn-1",
+                "failed": true,
+                "reason": "Claude turn failed: error_during_execution"
+            }),
+            &state,
+        )
+        .await;
+
+        let relay = state.read().await;
+        // Terminates.
+        assert_eq!(relay.active_turn_id, None);
+        // Survives broker compaction and is unmistakably a failure.
+        let remote = relay
+            .snapshot()
+            .compact_for(crate::protocol::SessionSnapshotCompactProfile::RemoteSurface);
+        let failure = remote
+            .transcript
+            .iter()
+            .find(|entry| entry.kind == TranscriptEntryKind::Error)
+            .expect("a failed turn must leave an Error entry in the broker snapshot");
+        assert_eq!(failure.status, "failed");
+        assert_eq!(failure.turn_id.as_deref(), Some("turn-1"));
+        assert!(failure
+            .text
+            .as_deref()
+            .unwrap_or_default()
+            .contains("error_during_execution"));
+    }
+
+    #[tokio::test]
+    async fn failed_background_done_surfaces_failure_after_switching_back() {
+        // A turn that fails while its thread is in the BACKGROUND must still
+        // surface the failure when the user later switches back to that thread.
+        let state = new_test_state();
+        let now = crate::state::unix_now();
+        {
+            let mut relay = state.write().await;
+            relay.set_provider_name("claude_code".to_string());
+            // A different thread is active; the failing turn runs in the background.
+            relay.active_thread_id = Some("active-thread".to_string());
+            relay.bg_set_active_turn("bg-thread", Some("turn-bg".to_string()), now);
+        }
+
+        handle_worker_event(
+            json!({
+                "type": "done",
+                "provider_session_id": "bg-thread",
+                "turn_id": "turn-bg",
+                "failed": true,
+                "reason": "Claude turn failed: error_max_turns"
+            }),
+            &state,
+        )
+        .await;
+
+        // While a different thread is active, the failure is not in view.
+        {
+            let relay = state.read().await;
+            let remote = relay
+                .snapshot()
+                .compact_for(crate::protocol::SessionSnapshotCompactProfile::RemoteSurface);
+            assert!(
+                !remote
+                    .transcript
+                    .iter()
+                    .any(|entry| entry.kind == TranscriptEntryKind::Error),
+                "the background failure must not leak onto the active thread"
+            );
+        }
+
+        // Switch back to the failed background thread.
+        {
+            let mut relay = state.write().await;
+            relay.active_thread_id = Some("bg-thread".to_string());
+            relay.sync_selected_runtime_to_fields();
+        }
+
+        let relay = state.read().await;
+        let remote = relay
+            .snapshot()
+            .compact_for(crate::protocol::SessionSnapshotCompactProfile::RemoteSurface);
+        assert!(
+            remote.transcript.iter().any(|entry| {
+                entry.kind == TranscriptEntryKind::Error
+                    && entry.status == "failed"
+                    && entry
+                        .text
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains("error_max_turns")
+            }),
+            "switching back to the failed background thread must show the failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn clean_done_records_no_failure_entry() {
+        // A clean completion must NOT fabricate a failure entry.
+        let state = new_test_state();
+        {
+            let mut relay = state.write().await;
+            relay.set_provider_name("claude_code".to_string());
+            relay.active_thread_id = Some("claude-thread".to_string());
+            relay.set_active_turn(Some("turn-ok".to_string()));
+            relay.set_thread_status("claude-thread", "active".to_string(), Vec::new());
+        }
+
+        handle_worker_event(
+            json!({
+                "type": "done",
+                "provider_session_id": "claude-thread",
+                "turn_id": "turn-ok"
+            }),
+            &state,
+        )
+        .await;
+
+        let relay = state.read().await;
+        assert_eq!(relay.active_turn_id, None);
+        assert!(
+            !relay
+                .snapshot()
+                .transcript
+                .iter()
+                .any(|entry| entry.kind == TranscriptEntryKind::Error),
+            "a clean done must not create an Error entry"
+        );
     }
 
     #[tokio::test]

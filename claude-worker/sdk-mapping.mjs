@@ -322,9 +322,16 @@ export function mapSdkMessage(msg) {
         msg.is_error === true ||
         (typeof msg.subtype === "string" && msg.subtype !== "success");
       if (isError) {
+        // The sanitized, subtype-only reason rides BOTH the `error` event (for
+        // the operator log) AND the terminal `done` (`failed`/`reason`). The
+        // relay turns the failed `done` into a durable transcript failure entry
+        // — logs alone are insufficient, because operator-only logs are stripped
+        // from broker-bound snapshots, so a remote/mobile client would otherwise
+        // see a failed turn settle as a clean success.
+        const reason = failedTurnReason(msg.subtype);
         return [
-          { type: "error", message: failedTurnReason(msg.subtype) },
-          { type: "done", usage: msg.usage },
+          { type: "error", message: reason },
+          { type: "done", usage: msg.usage, failed: true, reason },
         ];
       }
       return { type: "done", usage: msg.usage };

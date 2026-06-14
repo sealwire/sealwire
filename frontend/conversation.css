@@ -402,7 +402,8 @@
 }
 
 .message-card-system,
-.message-card-approval {
+.message-card-approval,
+.message-card-error {
   width: 100%;
   max-width: 100%;
   padding: 10px 12px 10px 14px;
@@ -410,6 +411,17 @@
   background: var(--surface-1);
   border: 1px solid var(--border-faint);
   position: relative;
+}
+
+/* A failed turn: red accent so it can never read as a clean completion. */
+.message-card-error {
+  background: color-mix(in srgb, var(--err-fg, #ef4444) 8%, var(--surface-1));
+  border-color: color-mix(in srgb, var(--err-fg, #ef4444) 30%, var(--border-faint));
+  border-left: 2px solid var(--err-fg, #ef4444);
+}
+
+.message-card-error .message-meta strong {
+  color: var(--err-fg, #ef4444);
 }
 
 .message-card-tool {

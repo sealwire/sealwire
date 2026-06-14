@@ -1280,6 +1280,30 @@ function ToolEntry({ entry, isJustPrepended = false, options = null }) {
   return h(GenericToolEntry, { entry, isJustPrepended, options });
 }
 
+// A turn that ended in failure. The relay injects this (kind "error", status
+// "failed") so a failed turn is unmistakably a FAILURE on every surface —
+// including remote/mobile, where operator-only logs are stripped from the
+// snapshot. `entry.text` is the relay's bounded, subtype-only reason.
+function ErrorEntry({ entry, isJustPrepended = false }) {
+  return h(
+    "article",
+    transcriptEntryDomAttrs(entry, "chat-message chat-message-system", null, {
+      justPrepended: isJustPrepended,
+    }),
+    h(
+      "div",
+      { className: "message-card message-card-error" },
+      h(
+        "div",
+        { className: "message-meta" },
+        h("strong", null, "Turn failed"),
+        h("span", null, entry.status || "failed")
+      ),
+      h("div", { className: "message-body" }, entry.text || "Claude turn failed.")
+    )
+  );
+}
+
 function FallbackEntry({ entry, isJustPrepended = false }) {
   return h(
     "article",
@@ -1623,6 +1647,9 @@ export function TranscriptEntry({
   }
   if (kind === "reasoning") {
     return h(ReasoningEntry, { entry, isJustPrepended });
+  }
+  if (kind === "error") {
+    return h(ErrorEntry, { entry, isJustPrepended });
   }
 
   return h(FallbackEntry, { entry, isJustPrepended });

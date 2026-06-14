@@ -952,6 +952,13 @@ pub enum TranscriptEntryKind {
     ToolCall,
     Command,
     Reasoning,
+    /// A turn that ended in failure. The relay injects a synthetic
+    /// `turn-error:<turn_id>` entry (kind `Error`, status `failed`) carrying a
+    /// bounded, subtype-only reason — never provider content — so a failed turn
+    /// is visible IN THE TRANSCRIPT (and therefore in broker-bound snapshots,
+    /// where operator-only logs are stripped) rather than silently settling as a
+    /// clean success. Serializes as `"error"`.
+    Error,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
