@@ -385,10 +385,32 @@ in thread {thread_id}: {error}"
             return;
         };
 
-        let (provider_name, bridge) = match self.find_thread_provider(&thread_id).await {
-            Ok(found) => found,
-            Err(_) => return,
+        // Resolve the provider for the restored active thread. The relay persists
+        // `active_thread_id` and the active provider, but NOT the thread row — so
+        // prefer the PERSISTED provider. Without it, a restart falls back to
+        // whatever provider spawned last (and `find_thread_provider`'s list-probe
+        // also misses a thread the provider hasn't surfaced yet), mis-routing a
+        // restored Codex session to the Claude worker — it then comes back
+        // labelled Claude with Claude's model catalog.
+        let (provider_name, bridge) = match self
+            .providers
+            .get_key_value(persisted.provider_name.as_str())
+            .map(|(name, bridge)| (name.clone(), bridge.clone()))
+        {
+            Some(found) => found,
+            None => match self.find_thread_provider(&thread_id).await {
+                Ok((name, bridge)) => (name.to_string(), bridge.clone()),
+                Err(_) => return,
+            },
         };
+
+        // Reflect the restored provider immediately, so even a failed resume below
+        // leaves the session attributed to its real provider (and its model picker
+        // correct) instead of the boot-default provider's catalog.
+        {
+            let mut relay = self.relay.write().await;
+            relay.set_provider_name(provider_name.clone());
+        }
 
         let settings = persisted.settings_for_thread(&thread_id);
         let restore_result = match bridge
@@ -402,10 +424,10 @@ in thread {thread_id}: {error}"
         match restore_result {
             Ok(thread_data) => {
                 let provider_models = self
-                    .load_provider_model_catalog(provider_name, bridge)
+                    .load_provider_model_catalog(&provider_name, &bridge)
                     .await;
                 let mut relay = self.relay.write().await;
-                relay.set_provider_name(provider_name.to_string());
+                relay.set_provider_name(provider_name.clone());
                 if let Some(models) = provider_models {
                     relay.set_available_models(models);
                 }

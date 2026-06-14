@@ -138,18 +138,26 @@ impl AppState {
     }
 
     pub(super) async fn refresh_model_catalog(&self) {
-        match self.require_active_provider() {
-            Ok((provider_name, bridge)) => {
-                if let Some(models) = self
-                    .load_provider_model_catalog(provider_name, bridge)
-                    .await
-                {
-                    let mut relay = self.relay.write().await;
-                    relay.set_available_models(models);
-                    relay.notify();
-                }
+        let Ok((provider_name, bridge)) = self
+            .require_active_provider()
+            .map(|(name, bridge)| (name.to_string(), bridge.clone()))
+        else {
+            return;
+        };
+        if let Some(models) = self
+            .load_provider_model_catalog(&provider_name, &bridge)
+            .await
+        {
+            let mut relay = self.relay.write().await;
+            // The active provider may have changed while we awaited the (slow)
+            // catalog load — e.g. a concurrent startup restore switching to codex.
+            // Writing a now-stale provider's catalog here is exactly the
+            // cross-provider model leak (a restored Codex session left showing
+            // Claude's models), so only adopt it if our provider is still active.
+            if relay.provider_name == provider_name {
+                relay.set_available_models(models);
+                relay.notify();
             }
-            Err(_) => {}
         }
     }
 

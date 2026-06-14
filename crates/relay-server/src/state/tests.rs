@@ -73,6 +73,7 @@ fn test_persisted_state() -> PersistedRelayState {
         approval_policy: DEFAULT_APPROVAL_POLICY.to_string(),
         sandbox: DEFAULT_SANDBOX.to_string(),
         reasoning_effort: DEFAULT_EFFORT.to_string(),
+        provider_name: "codex".to_string(),
         thread_settings,
         thread_last_activity_at: std::collections::HashMap::new(),
         allowed_roots: vec!["/tmp/project".to_string()],
@@ -352,6 +353,40 @@ fn available_models_update_default_model_and_effort() {
     assert_eq!(relay.model, "gpt-5.4");
     assert_eq!(relay.reasoning_effort, "medium");
     assert_eq!(relay.available_models.len(), 2);
+}
+
+#[test]
+fn switching_active_provider_drops_the_previous_providers_catalog() {
+    // Repro for: "Codex shows Claude's models." Boot leaves the relay on Claude
+    // with Claude's catalog (the last-spawned provider wins `provider_name`, and
+    // the startup refresh stamps `available_models`).
+    let mut relay = test_state();
+    relay.set_provider_name("claude_code".to_string());
+    relay.set_available_models(vec![ModelOptionView {
+        model: "default".to_string(),
+        display_name: "Default (Opus 4.8)".to_string(),
+        supported_reasoning_efforts: vec!["high".to_string()],
+        default_reasoning_effort: "high".to_string(),
+        provider: "anthropic".to_string(),
+        hidden: false,
+        is_default: true,
+    }]);
+    assert_eq!(relay.available_models.len(), 1);
+
+    // Restoring a persisted Codex session switches the active provider to codex,
+    // but its catalog isn't available yet (load_provider_model_catalog → None, so
+    // restore_persisted_session never calls set_available_models). The stale
+    // Claude catalog must NOT survive the switch — otherwise the snapshot reports
+    // provider="codex" with available_models=Claude, and the model/review pickers
+    // surface Claude's models under Codex.
+    relay.set_provider_name("codex".to_string());
+
+    assert!(
+        relay.available_models.is_empty(),
+        "switching the active provider must drop the prior provider's stale catalog \
+         (got {} stale models)",
+        relay.available_models.len()
+    );
 }
 
 #[test]

@@ -405,6 +405,153 @@ mod path_scope_tests {
         );
     }
 
+    // Repro for: "an existing Codex session shows Claude's models — not a single
+    // GPT." The relay persists `active_thread_id` + the active provider, but NOT
+    // the thread row. On restart the provider for the restored active thread must
+    // be resolved from the PERSISTED provider — not from whatever provider spawned
+    // last (claude_code wins by spawn order) — otherwise a restored Codex session
+    // is mis-routed to the Claude worker and comes back as Claude (provider AND
+    // model catalog).
+    #[tokio::test]
+    async fn restored_session_resumes_on_its_persisted_provider_not_the_last_spawned() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_string_lossy().into_owned();
+        let (app, codex, claude) = build_recording_provider_app(&cwd).await;
+
+        // The Codex session's thread is resumable + readable in codex's store, but
+        // codex's `list_threads` does NOT surface it yet — the live trigger. So
+        // `find_thread_provider`'s probe can't locate it, and resolution must come
+        // from the persisted provider.
+        let codex_thread = codex.thread_summary("codex-thread-1", &cwd);
+        codex
+            .threads
+            .lock()
+            .await
+            .insert(codex_thread.id.clone(), codex_thread.clone());
+        codex
+            .hidden_from_list
+            .lock()
+            .await
+            .insert("codex-thread-1".to_string());
+
+        // Capture what shutdown would persist while the Codex session was active.
+        let persisted = {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("codex".to_string());
+            relay.active_thread_id = Some("codex-thread-1".to_string());
+            crate::state::persistence::PersistedRelayState::from_relay(&relay)
+        };
+        assert_eq!(
+            persisted.provider_name, "codex",
+            "the active provider must be persisted"
+        );
+
+        // Model a fresh boot: claude_code spawned last (so it owns provider_name),
+        // the startup refresh stamped Claude's catalog, and NO thread rows were
+        // persisted.
+        {
+            let mut relay = app.relay.write().await;
+            relay.clear_active_session();
+            relay.set_provider_name("claude_code".to_string());
+            relay.threads.clear();
+            relay.set_available_models(vec![crate::protocol::ModelOptionView {
+                model: "default".to_string(),
+                display_name: "Default (Opus 4.8)".to_string(),
+                provider: "anthropic".to_string(),
+                supported_reasoning_efforts: vec!["high".to_string()],
+                default_reasoning_effort: "high".to_string(),
+                hidden: false,
+                is_default: true,
+            }]);
+        }
+
+        app.restore_persisted_session(persisted).await;
+
+        let snapshot = app.snapshot().await;
+        // The session is restored ON CODEX — resumed there, active thread back,
+        // and the Codex model catalog loaded (no Claude leakage).
+        assert_eq!(
+            snapshot.provider, "codex",
+            "a restored Codex session must come back as codex, not the last-spawned provider"
+        );
+        assert_eq!(
+            snapshot.active_thread_id.as_deref(),
+            Some("codex-thread-1"),
+            "the active Codex thread must be restored"
+        );
+        assert_eq!(
+            codex.resume_thread_ids.lock().await.as_slice(),
+            ["codex-thread-1".to_string()],
+            "restore must resume on the codex provider"
+        );
+        assert!(
+            claude.resume_thread_ids.lock().await.is_empty(),
+            "restore must NOT route the codex thread to the claude worker"
+        );
+        assert!(
+            !snapshot.available_models.is_empty()
+                && snapshot
+                    .available_models
+                    .iter()
+                    .all(|m| m.provider == "codex"),
+            "the restored Codex session must show codex models, got: {:?}",
+            snapshot
+                .available_models
+                .iter()
+                .map(|m| (&m.model, &m.provider))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // A legacy persisted state (saved before `provider_name` existed → empty on
+    // load) must still restore via provider probing: the new persisted field is
+    // an ADDITIVE preference, not a hard requirement, so old state files keep
+    // working.
+    #[tokio::test]
+    async fn restored_session_without_persisted_provider_falls_back_to_probing() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_string_lossy().into_owned();
+        let (app, codex, claude) = build_recording_provider_app(&cwd).await;
+
+        // Here the thread IS surfaced by codex's list_threads, so probing finds it.
+        let codex_thread = codex.thread_summary("codex-thread-2", &cwd);
+        codex
+            .threads
+            .lock()
+            .await
+            .insert(codex_thread.id.clone(), codex_thread.clone());
+
+        // An OLD state file: active_thread_id present, provider_name absent.
+        let mut persisted = {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("codex".to_string());
+            relay.active_thread_id = Some("codex-thread-2".to_string());
+            crate::state::persistence::PersistedRelayState::from_relay(&relay)
+        };
+        persisted.provider_name = String::new();
+
+        {
+            let mut relay = app.relay.write().await;
+            relay.clear_active_session();
+            relay.set_provider_name("claude_code".to_string());
+            relay.threads.clear();
+        }
+
+        app.restore_persisted_session(persisted).await;
+
+        let snapshot = app.snapshot().await;
+        assert_eq!(
+            snapshot.provider, "codex",
+            "probing must still resolve the codex thread when no provider was persisted"
+        );
+        assert_eq!(snapshot.active_thread_id.as_deref(), Some("codex-thread-2"));
+        assert_eq!(
+            codex.resume_thread_ids.lock().await.as_slice(),
+            ["codex-thread-2".to_string()]
+        );
+        assert!(claude.resume_thread_ids.lock().await.is_empty());
+    }
+
     #[tokio::test]
     async fn file_change_detail_uses_authoritative_runtime_entry() {
         let project = TempDir::new().expect("project tempdir");
@@ -518,6 +665,10 @@ mod path_scope_tests {
         turn_thread_ids: Arc<Mutex<Vec<String>>>,
         interrupt_thread_ids: Arc<Mutex<Vec<String>>>,
         resume_thread_ids: Arc<Mutex<Vec<String>>>,
+        // Thread ids that are resumable/readable but deliberately omitted from
+        // `list_threads` — models a provider whose store can resume a session
+        // that its thread listing hasn't surfaced yet (e.g. Codex at restart).
+        hidden_from_list: Arc<Mutex<std::collections::HashSet<String>>>,
         state: Arc<RwLock<RelayState>>,
         mark_active_status_before_return: Arc<AtomicBool>,
         complete_before_return: Arc<AtomicBool>,
@@ -536,6 +687,7 @@ mod path_scope_tests {
                 turn_thread_ids: Arc::new(Mutex::new(Vec::new())),
                 interrupt_thread_ids: Arc::new(Mutex::new(Vec::new())),
                 resume_thread_ids: Arc::new(Mutex::new(Vec::new())),
+                hidden_from_list: Arc::new(Mutex::new(std::collections::HashSet::new())),
                 state,
                 mark_active_status_before_return: Arc::new(AtomicBool::new(false)),
                 complete_before_return: Arc::new(AtomicBool::new(false)),
@@ -565,11 +717,13 @@ mod path_scope_tests {
             &self,
             limit: usize,
         ) -> Result<Vec<crate::protocol::ThreadSummaryView>, String> {
+            let hidden = self.hidden_from_list.lock().await;
             let mut threads = self
                 .threads
                 .lock()
                 .await
                 .values()
+                .filter(|thread| !hidden.contains(&thread.id))
                 .cloned()
                 .collect::<Vec<_>>();
             threads.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));

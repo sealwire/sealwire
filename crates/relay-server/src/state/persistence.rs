@@ -28,6 +28,15 @@ pub(super) struct PersistedRelayState {
     pub(super) approval_policy: String,
     pub(super) sandbox: String,
     pub(super) reasoning_effort: String,
+    /// The active session's provider (relay provider KEY, e.g. "codex" /
+    /// "claude_code"). The relay persists `active_thread_id` but NOT the thread
+    /// row, so without this a restart can't tell which provider the restored
+    /// active thread belongs to — it falls back to whatever provider spawned
+    /// last and mis-routes the session (a restored Codex session shown as Claude,
+    /// with Claude's model catalog). `#[serde(default)]` keeps old state files
+    /// loadable (empty string → fall back to thread detection).
+    #[serde(default)]
+    pub(super) provider_name: String,
     #[serde(default)]
     pub(super) thread_settings: std::collections::HashMap<String, ThreadSessionSettings>,
     /// Honest per-thread last-activity timestamps (unix secs) used as the
@@ -89,6 +98,7 @@ impl PersistedRelayState {
             approval_policy: relay.approval_policy.clone(),
             sandbox: relay.sandbox.clone(),
             reasoning_effort: relay.reasoning_effort.clone(),
+            provider_name: relay.provider_name.clone(),
             thread_settings: relay.thread_settings.clone(),
             thread_last_activity_at: relay.thread_last_activity_at.clone(),
             allowed_roots: relay.allowed_roots.clone(),

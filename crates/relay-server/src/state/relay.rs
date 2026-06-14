@@ -1854,6 +1854,18 @@ impl RelayState {
     }
 
     pub fn set_provider_name(&mut self, name: String) {
+        // A genuine provider switch invalidates the shared model catalog: it was
+        // loaded for the OLD provider, so leaving it in place makes the snapshot
+        // report `provider=<new>` with `available_models=<old provider's catalog>`
+        // — the cross-provider model leak (Codex showing Claude's models when a
+        // persisted Codex session is restored on top of a boot-time Claude
+        // catalog, and the Codex catalog load hasn't landed yet). Drop it; the
+        // next catalog load (start/resume/refresh, or the client's per-provider
+        // fetch) repopulates it for the new provider. The initial assignment (from
+        // an empty provider) keeps any prewarmed catalog.
+        if !self.provider_name.is_empty() && self.provider_name != name {
+            self.available_models.clear();
+        }
         self.provider_name = name;
     }
 
