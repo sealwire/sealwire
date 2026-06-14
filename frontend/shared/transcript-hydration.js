@@ -118,6 +118,9 @@ export async function loadOlderTranscript(
   const threadId = state.session?.active_thread_id;
   const before = store.getTranscriptHydrationCursor(state);
   if (!threadId || before == null) {
+    // No cursor yet (e.g. still hydrating). `null` (not `false`) tells the
+    // history loader this is transient — retry on the next poke — rather than
+    // a genuine "reached the oldest page" stop.
     return null;
   }
   if (state.transcriptHydrationPromise || state.transcriptHydrationStatus === "loading") {
@@ -133,19 +136,29 @@ export async function loadOlderTranscript(
         throw new Error(incompletePageError);
       }
       if (isStaleTranscriptPage(state, page)) {
-        return;
+        return null;
       }
 
       store.mergeTranscriptHydrationPage(state, page, { prepend: true });
-      if (page.prev_cursor == null) {
-        store.markTranscriptHydrationComplete(state);
-      } else {
+      // The history loader uses this tri-state result to decide whether to keep
+      // prefetching the next page within the same burst (see
+      // createTranscriptHistoryLoader), which avoids the "scroll to the top,
+      // nothing loads until you wiggle" stall:
+      //   true  → a page loaded and `prev_cursor` says more remain → keep going
+      //   false → just prepended the oldest page → stop for good (reached top)
+      const hasMore = page.prev_cursor != null;
+      if (hasMore) {
         store.setTranscriptHydrationIdle(state);
+      } else {
+        store.markTranscriptHydrationComplete(state);
       }
       applyTranscriptHydrationProgress(state, store, onProgress);
+      return hasMore;
     } catch (error) {
       store.setTranscriptHydrationIdle(state);
       onError(error);
+      // Transient failure — `null` lets a later poke retry instead of wedging.
+      return null;
     } finally {
       store.clearTranscriptHydrationPromise(state, signature);
     }

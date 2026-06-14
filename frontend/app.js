@@ -717,16 +717,21 @@ async function loadViewOnlyTranscript(threadId) {
 // Deliberately separate from the active-thread hydration pipeline — that store
 // is keyed to the live thread and must not be re-keyed by a view-only visit.
 let viewOnlyOlderLoading = false;
+// Returns the same tri-state the active-thread loader uses so the history
+// loader can keep prefetching read-only pins within one intersection:
+//   true  → a page loaded and more remain
+//   false → reached the pin's oldest page (stop for good)
+//   null  → nothing loaded right now (in-flight / not viewing / error) — retry
 async function loadOlderViewOnlyTranscript() {
   const pin = state.viewOnlyThread;
-  if (
-    !pin ||
-    pin.loading ||
-    viewOnlyOlderLoading ||
-    pin.olderCursor == null ||
-    state.viewThreadId !== pin.threadId
-  ) {
-    return;
+  if (!pin || state.viewThreadId !== pin.threadId) {
+    return null;
+  }
+  if (pin.olderCursor == null) {
+    return false; // no older cursor → this is the oldest page of the pin
+  }
+  if (pin.loading || viewOnlyOlderLoading) {
+    return null; // a load is already in flight; not a definitive stop
   }
   const generation = pin.generation;
   viewOnlyOlderLoading = true;
@@ -736,12 +741,14 @@ async function loadOlderViewOnlyTranscript() {
     });
     const current = state.viewOnlyThread;
     if (!current || current.generation !== generation || current.threadId !== pin.threadId) {
-      return; // user navigated / pin replaced while the fetch was in flight
+      return null; // user navigated / pin replaced while the fetch was in flight
     }
     state.viewOnlyThread = mergeOlderViewOnlyPage(current, page);
     if (state.session) renderer.renderSession(state.session);
+    return state.viewOnlyThread?.olderCursor != null;
   } catch (error) {
     logLine(`Couldn't load older messages for the read-only view: ${error.message}`);
+    return null;
   } finally {
     viewOnlyOlderLoading = false;
   }
