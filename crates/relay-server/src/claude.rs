@@ -1387,20 +1387,19 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                 ClaudeThreadRoute::Drop => {
                     // A terminal event that routes to Drop clears NOTHING: the
                     // thread that owns the turn keeps active_turn_id, so the UI
-                    // stays "streaming". This is otherwise silent — log it so the
-                    // "ended but still streaming" investigation can see it.
-                    let active_thread = relay.active_thread_id.clone();
-                    relay.push_log(
-                        "warn",
-                        format!(
-                            "Dropped Claude {event_type} for turn {} (session {}); \
-                             no matching thread (active_thread={:?}).",
-                            event_turn_id.as_deref().unwrap_or("<missing>"),
-                            event_thread_id.as_deref().unwrap_or("<missing>"),
-                            active_thread.as_deref(),
-                        ),
+                    // stays "streaming". This is otherwise silent — emit it as a
+                    // DEBUG-level diagnostic (off by default; enable with
+                    // `RUST_LOG=relay_server=debug`). It is NOT written to the
+                    // operator log buffer, so it never clutters the log panel nor
+                    // rides a snapshot. State is unchanged here, so no notify.
+                    tracing::debug!(
+                        target: "claude_streamdiag",
+                        event_type,
+                        turn_id = event_turn_id.as_deref().unwrap_or("<missing>"),
+                        session = event_thread_id.as_deref().unwrap_or("<missing>"),
+                        active_thread = relay.active_thread_id.as_deref().unwrap_or("-"),
+                        "dropped unroutable Claude terminal event",
                     );
-                    relay.notify();
                     return;
                 }
             }
@@ -2870,6 +2869,71 @@ mod tests {
                 .any(|entry| entry.kind == TranscriptEntryKind::Error),
             "a clean done must not create an Error entry"
         );
+    }
+
+    #[tokio::test]
+    async fn failed_background_turn_does_not_leak_into_a_remote_devices_snapshot() {
+        // A turn failing in the BACKGROUND must not put its failure (the Error
+        // entry, its reason) or that thread's identifiers into the broadcast
+        // snapshot a remote device sees — which mirrors the operator's ACTIVE
+        // thread, not the background one. (P1 strips operator-only logs; the
+        // failure entry is confined to the background thread's own runtime.)
+        let state = new_test_state();
+        let now = crate::state::unix_now();
+        {
+            let mut relay = state.write().await;
+            relay.set_provider_name("claude_code".to_string());
+            relay.active_thread_id = Some("active-thread".to_string());
+            relay.set_active_turn(Some("turn-active".to_string()));
+            relay.set_thread_status("active-thread", "active".to_string(), Vec::new());
+            relay.bg_set_active_turn("bg-secret-thread", Some("turn-bg".to_string()), now);
+        }
+
+        handle_worker_event(
+            json!({
+                "type": "done",
+                "provider_session_id": "bg-secret-thread",
+                "turn_id": "turn-bg",
+                "failed": true,
+                "reason": "Claude turn failed: error_during_execution"
+            }),
+            &state,
+        )
+        .await;
+
+        let relay = state.read().await;
+        let remote = relay
+            .snapshot()
+            .compact_for(crate::protocol::SessionSnapshotCompactProfile::RemoteSurface);
+
+        // The background failure is not in the broadcast (active-thread) transcript.
+        assert!(
+            !remote
+                .transcript
+                .iter()
+                .any(|entry| entry.kind == TranscriptEntryKind::Error),
+            "background failure leaked into the remote transcript"
+        );
+        // Operator-only logs (incl. any worker error line) are stripped for remote.
+        assert!(
+            remote.logs.is_empty(),
+            "operator-only logs leaked to the remote snapshot: {:?}",
+            remote.logs
+        );
+        // Neither the failed background thread's id nor its reason appears in the
+        // content channels (transcript/logs) of the remote snapshot.
+        let transcript_json = serde_json::to_string(&remote.transcript).unwrap();
+        let logs_json = serde_json::to_string(&remote.logs).unwrap();
+        for channel in [&transcript_json, &logs_json] {
+            assert!(
+                !channel.contains("bg-secret-thread"),
+                "leaked background thread id: {channel}"
+            );
+            assert!(
+                !channel.contains("error_during_execution"),
+                "leaked failure reason into a remote content channel: {channel}"
+            );
+        }
     }
 
     #[tokio::test]

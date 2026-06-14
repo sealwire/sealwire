@@ -79,6 +79,12 @@ const CANCEL_DRAIN_TIMEOUT_MS =
 // All lines go to stderr, which the relay forwards into its log panel via
 // spawn_stderr_reader -> push_log("claude_worker", ...), so worker + relay
 // diagnostics land in one place. Grep for "[STREAMDIAG]".
+//
+// DECISION (2026-06-14): KEEP as a permanent debugging affordance. It is
+// off by default, zero-cost when off, and content-safe by construction
+// (buildSdkMsgProbe emits shape + scalars only — locked by a worker test). The
+// terminal/streaming path it instruments already regressed once (idle-vs-result),
+// so the cheap insurance is worth its lines. Not to be re-litigated.
 const STREAM_DIAG = process.env.SEALWIRE_STREAM_DIAG === "1";
 function diag(tag, fields) {
   if (!STREAM_DIAG) return;
