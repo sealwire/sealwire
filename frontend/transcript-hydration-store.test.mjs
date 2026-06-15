@@ -299,6 +299,59 @@ test("prepareTranscriptHydrationState re-arms hydration when a new oversized ent
   ]);
 });
 
+test("prepareTranscriptHydrationState re-arms the newest entry even when a prior fetch left its promise parked", () => {
+  // Regression: the in-flight guard that fixed the freeze keyed off
+  // `transcriptHydrationPromise != null` as well as status. But a tail fetch's
+  // promise is only cleared when its signature still matches
+  // (createClearedTranscriptHydrationPromisePatch). When a NEW (newest) message
+  // joins while a fetch is in flight, the signature changes, so on settle the
+  // promise is never cleared — it leaks. Status, however, settles to
+  // complete/idle (no fetch is actually running). If a parked promise can veto
+  // re-arming, the newest message never fetches its full text and is stuck on the
+  // `...` preview/omitted shell forever. A settled status (NOT "loading") must
+  // re-arm regardless of a leftover promise.
+  const state = hydratedState({
+    transcriptHydrationPromise: Promise.resolve(),
+    transcriptHydrationStatus: "complete",
+  });
+  const snapshot = {
+    active_thread_id: "thread-1",
+    active_turn_id: "turn-4",
+    transcript_truncated: true,
+    transcript: [
+      {
+        item_id: "item-3",
+        kind: "command",
+        text: "cargo test\npassed ...",
+        status: "completed",
+        turn_id: "turn-3",
+        tool: null,
+        content_state: "preview",
+      },
+      {
+        item_id: "item-omitted",
+        kind: "agent_text",
+        text: "The relay boots with ...",
+        status: "completed",
+        turn_id: "turn-4",
+        tool: null,
+        content_state: "omitted",
+      },
+    ],
+  };
+
+  const prepared = prepareTranscriptHydrationState(state, snapshot);
+
+  assert.equal(
+    prepared.shouldHydrate,
+    true,
+    "a settled (non-loading) status must re-arm the newest entry even with a leftover promise"
+  );
+  assert.equal(prepared.alreadyComplete, false);
+  assert.equal(prepared.existingPromise, null);
+  assert.equal(prepared.patch.transcriptHydrationTailReady, false);
+});
+
 test("prepareTranscriptHydrationState does not re-hydrate when only an existing entry's preview shrinks", () => {
   // Same shape as the signature already on file (single item-3), only the
   // compacted preview text differs. The cached full text already covers it, so

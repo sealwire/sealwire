@@ -276,19 +276,26 @@ export function prepareTranscriptHydrationState(state, snapshot) {
   const sameThread = state.transcriptHydrationThreadId === snapshot.active_thread_id;
   const sameThreadWithVisibleEntries = sameThread && state.transcriptHydrationOrder.length > 0;
 
-  // A re-hydration fetch is already in flight when status is "loading" or a
-  // promise is parked. Re-arming during that window is what froze the tab: the
-  // re-arm patch (below) nulls the in-flight promise and forces shouldHydrate,
-  // so hydrateTranscript's "reuse the existing promise" short-circuit is bypassed
-  // and it starts ANOTHER fetch + synchronously re-fires onProgress. Since the
-  // snapshot stays `transcript_truncated` until the fetch RESOLVES (the cached
-  // tail entry is still preview/omitted), onProgress -> renderSession ->
+  // A re-hydration fetch is actually running iff status is "loading". Re-arming
+  // during that window is what froze the tab: the re-arm patch (below) nulls the
+  // in-flight promise and forces shouldHydrate, so hydrateTranscript's "reuse the
+  // existing promise" short-circuit is bypassed and it starts ANOTHER fetch +
+  // synchronously re-fires onProgress. Since the snapshot stays
+  // `transcript_truncated` until the fetch RESOLVES (the cached tail entry is
+  // still preview/omitted), onProgress -> renderSession ->
   // ensureConversationTranscript re-enters and re-arms again, without bound ->
   // synchronous infinite recursion (see markdown/transcript-perf-freeze-analysis.md).
   // Suppress re-arming while a fetch is pending; the next snapshot after it
   // settles re-evaluates the tail and re-fetches then if it still needs full text.
-  const hydrationInFlight =
-    state.transcriptHydrationStatus === "loading" || state.transcriptHydrationPromise != null;
+  //
+  // Gate on status ONLY, never on `transcriptHydrationPromise != null`: status is
+  // set to "loading" before onProgress fires (so the freeze guard still holds for
+  // the synchronous re-entry) AND is reliably reset to complete/idle on settle.
+  // The promise is NOT a reliable in-flight signal — clearTranscriptHydrationPromise
+  // no-ops when the signature changed mid-flight (a new newest message joined), so
+  // a settled fetch can leave its promise parked. Keying off that parked promise
+  // would veto re-arming forever and freeze the newest message on its `...` shell.
+  const hydrationInFlight = state.transcriptHydrationStatus === "loading";
 
   // Re-arm hydration whenever the visible tail still carries a preview/omitted
   // entry whose authoritative body we don't already hold. `snapshotTailNeedsFullText`
