@@ -53,8 +53,8 @@ export function setTranscriptHydrationPromise(_state, promise) {
   applyRemoteSurfacePatch(createTranscriptHydrationPromisePatch(promise));
 }
 
-export function clearTranscriptHydrationPromise(state, signature) {
-  const patch = createClearedTranscriptHydrationPromisePatch(state, signature);
+export function clearTranscriptHydrationPromise(state, promise) {
+  const patch = createClearedTranscriptHydrationPromisePatch(state, promise);
   if (patch) {
     applyRemoteSurfacePatch(patch);
   }

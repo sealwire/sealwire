@@ -393,6 +393,192 @@ test("hydrateLocalTranscript does not recurse while a re-hydration fetch is alre
   );
 });
 
+test("a stale tail page that lost a concurrently-joined entry must not drop it from the order", async () => {
+  // Codex review finding 1: item-A is hydrated (omitted/running). A tail fetch
+  // starts. While it is in flight, item-B (a newer message) joins via a concurrent
+  // snapshot and is merged into the order. The in-flight fetch then returns a STALE
+  // tail page that predates item-B. A non-prepend merge resets the order to the
+  // page's ids, which would drop item-B from the order while leaving it orphaned in
+  // the entries map — a later same-id merge never re-adds a map-present id, so once
+  // item-B arrives `full` (needsFullText=false) it is permanently missing. The fetch
+  // must detect it went stale (signature changed mid-flight) and discard the page
+  // BEFORE merging, leaving item-B ordered and visible.
+  const itemA = {
+    item_id: "item-A",
+    kind: "agent_text",
+    text: null,
+    status: "running",
+    turn_id: "turn-1",
+    tool: null,
+    content_state: "omitted",
+  };
+  const state = createState({
+    session: { active_thread_id: "thread-1", active_turn_id: "turn-1" },
+    transcriptHydrationThreadId: "thread-1",
+    transcriptHydrationEntries: new Map([["item-A", { ...itemA }]]),
+    transcriptHydrationOrder: ["item-A"],
+    transcriptHydrationOlderCursor: null,
+    transcriptHydrationSignature: "thread-1|turn-1|1|item-A|agent_text|turn-1||||",
+    transcriptHydrationStatus: "idle",
+    transcriptHydrationTailReady: true,
+    transcriptHydrationFetchedRevision: 10,
+  });
+
+  let releasePage;
+  const pageGate = new Promise((resolve) => {
+    releasePage = resolve;
+  });
+  const snapshotA = {
+    active_thread_id: "thread-1",
+    active_turn_id: "turn-1",
+    transcript_revision: 11,
+    transcript_truncated: true,
+    transcript: [{ ...itemA, text: "shell..." }],
+  };
+  const hydrationPromise = hydrateLocalTranscript(state, snapshotA, {
+    async fetchPage() {
+      await pageGate;
+      // Stale: this page was built before item-B joined — it has only item-A.
+      return {
+        thread_id: "thread-1",
+        prev_cursor: null,
+        entries: [
+          {
+            item_id: "item-A",
+            kind: "agent_text",
+            text: "A full body",
+            status: "completed",
+            turn_id: "turn-1",
+            tool: null,
+          },
+        ],
+      };
+    },
+    onProgress(next) {
+      state.session = next;
+    },
+  });
+
+  // While the fetch is in flight, item-B joins via a concurrent snapshot.
+  await new Promise((resolve) => setImmediate(resolve));
+  let concurrentFetchCalled = false;
+  const reentryPromise = hydrateLocalTranscript(
+    state,
+    {
+      active_thread_id: "thread-1",
+      active_turn_id: "turn-2",
+      transcript_revision: 12,
+      transcript_truncated: true,
+      transcript: [
+        { ...itemA, text: "shell..." },
+        {
+          item_id: "item-B",
+          kind: "agent_text",
+          text: "newer...",
+          status: "running",
+          turn_id: "turn-2",
+          tool: null,
+          content_state: "omitted",
+        },
+      ],
+    },
+    {
+      async fetchPage() {
+        concurrentFetchCalled = true;
+        return { thread_id: "thread-1", prev_cursor: null, entries: [] };
+      },
+      onProgress(next) {
+        state.session = next;
+      },
+    }
+  );
+
+  assert.equal(
+    concurrentFetchCalled,
+    false,
+    "the concurrent snapshot reuses the in-flight fetch, it does not start a new one"
+  );
+  assert.ok(
+    state.transcriptHydrationOrder.includes("item-B"),
+    "precondition: item-B joined the order while the fetch was in flight"
+  );
+
+  releasePage();
+  await Promise.all([hydrationPromise, reentryPromise]);
+
+  assert.ok(
+    state.transcriptHydrationOrder.includes("item-B"),
+    "a concurrently-joined entry must survive a stale tail-page merge (not be orphaned out of the order)"
+  );
+});
+
+test("hydrateLocalTranscript clears its in-flight promise on settle even if the signature changed mid-flight", async () => {
+  // A new entry joining the tail during a fetch re-keys the hydration signature
+  // (the merged concurrent snapshot updates it). The settling fetch must still
+  // clear ITS OWN promise. Keying the clear off the now-changed signature leaks
+  // the promise — and a parked promise makes loadOlderTranscript bail
+  // (transcript-hydration.js: `if (state.transcriptHydrationPromise || ...) return`),
+  // so scroll-up to load older history silently stalls.
+  const state = createState();
+  const snapshot = {
+    active_thread_id: "thread-1",
+    active_turn_id: "turn-2",
+    transcript_truncated: true,
+    transcript: [
+      {
+        item_id: "item-2",
+        kind: "agent_text",
+        text: "shell...",
+        status: "running",
+        turn_id: "turn-2",
+        tool: null,
+        content_state: "omitted",
+      },
+    ],
+  };
+  let releasePage;
+  const pageGate = new Promise((resolve) => {
+    releasePage = resolve;
+  });
+
+  const hydrationPromise = hydrateLocalTranscript(state, snapshot, {
+    async fetchPage() {
+      await pageGate;
+      return {
+        thread_id: "thread-1",
+        prev_cursor: null,
+        entries: [
+          {
+            item_id: "item-2",
+            kind: "agent_text",
+            text: "the full streamed body",
+            status: "completed",
+            turn_id: "turn-2",
+            tool: null,
+          },
+        ],
+      };
+    },
+    onProgress(next) {
+      state.session = next;
+    },
+  });
+
+  // While the fetch is in flight, a concurrent snapshot's new entry re-keys the
+  // signature (what createMergedSnapshotTailPatch does on a same-thread merge).
+  await new Promise((resolve) => setImmediate(resolve));
+  state.transcriptHydrationSignature = "thread-1|turn-3|re-keyed-by-a-new-entry";
+
+  releasePage();
+  await hydrationPromise;
+
+  assert.equal(
+    state.transcriptHydrationPromise,
+    null,
+    "the settled fetch must clear its own promise so loadOlderTranscript (scroll-up) is not blocked"
+  );
+});
+
 test("hydrateLocalTranscript does not publish a new emergency shell while its full page is pending", async () => {
   const state = createState();
   const previousSnapshot = {

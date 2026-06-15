@@ -45,8 +45,8 @@ function makeStore() {
     setTranscriptHydrationPromise(state, promise) {
       state.transcriptHydrationPromise = promise;
     },
-    clearTranscriptHydrationPromise(state, signature) {
-      if (state.transcriptHydrationSignature === signature) {
+    clearTranscriptHydrationPromise(state, promise) {
+      if (state.transcriptHydrationPromise === promise) {
         state.transcriptHydrationPromise = null;
       }
     },

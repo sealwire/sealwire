@@ -51,13 +51,25 @@ export async function hydrateTranscript(
         return;
       }
 
+      // Freshness gate BEFORE the (order-resetting) merge. A non-prepend tail merge
+      // RESETS the order to the page's ids (createMergedTranscriptHydrationPagePatch),
+      // so merging a page fetched against a now-stale tail would DROP a
+      // concurrently-joined entry from the order — orphaning it in the entries map,
+      // where a later same-id merge never re-adds it (and once it arrives `full`,
+      // `snapshotTailNeedsFullText` is false so nothing re-fetches → permanently
+      // missing). If the thread or signature changed while this fetch was in flight,
+      // the page is stale: release the loading gate and discard it so a fresh fetch,
+      // re-armed at the new revision, rebuilds the tail. (The older-page loop below
+      // prepends, which never resets the order, so its post-merge checks are safe.)
+      if (
+        store.getTranscriptHydrationThreadId(state) !== snapshot.active_thread_id ||
+        store.getTranscriptHydrationSignature(state) !== signature
+      ) {
+        store.setTranscriptHydrationIdle(state);
+        return;
+      }
+
       store.mergeTranscriptHydrationPage(state, page, { prepend: false });
-      if (store.getTranscriptHydrationThreadId(state) !== snapshot.active_thread_id) {
-        return;
-      }
-      if (store.getTranscriptHydrationSignature(state) !== signature) {
-        return;
-      }
 
       let loadedPages = 1;
       while (
@@ -94,7 +106,10 @@ export async function hydrateTranscript(
       store.setTranscriptHydrationIdle(state);
       onError(error);
     } finally {
-      store.clearTranscriptHydrationPromise(state, signature);
+      // Clear by promise identity, not signature: a new entry joining mid-fetch
+      // re-keys the signature, and a signature gate would leak this promise (which
+      // then blocks loadOlderTranscript / scroll-up).
+      store.clearTranscriptHydrationPromise(state, hydrationPromise);
     }
   })();
 
@@ -127,7 +142,6 @@ export async function loadOlderTranscript(
     return state.transcriptHydrationPromise;
   }
 
-  const signature = store.getTranscriptHydrationSignature(state);
   store.beginTranscriptHydration(state, "loading");
   const loadPromise = (async () => {
     try {
@@ -160,7 +174,7 @@ export async function loadOlderTranscript(
       // Transient failure — `null` lets a later poke retry instead of wedging.
       return null;
     } finally {
-      store.clearTranscriptHydrationPromise(state, signature);
+      store.clearTranscriptHydrationPromise(state, loadPromise);
     }
   })();
 

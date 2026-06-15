@@ -2,6 +2,7 @@ export function createClearedTranscriptHydrationPatch() {
   return {
     transcriptHydrationBaseSnapshot: null,
     transcriptHydrationEntries: new Map(),
+    transcriptHydrationFetchedRevision: null,
     transcriptHydrationLastFetchAt: 0,
     transcriptHydrationOrder: [],
     transcriptHydrationOlderCursor: null,
@@ -297,6 +298,21 @@ export function prepareTranscriptHydrationState(state, snapshot) {
   // would veto re-arming forever and freeze the newest message on its `...` shell.
   const hydrationInFlight = state.transcriptHydrationStatus === "loading";
 
+  // candidate #3 — cap the omitted/preview re-fetch to once per revision. The
+  // settle of one tail fetch re-fires onProgress -> renderSession ->
+  // ensureConversationTranscript at the SAME revision (no new server data, just a
+  // round-trip later), and status-only snapshots re-describe the same omitted tail
+  // — both would re-arm an identical, useless fetch, an RTT-paced storm against the
+  // relay. A genuine transcript change ALWAYS bumps transcript_revision
+  // (bump_thread_transcript_revision fires on every delta/tool/status write), so
+  // only re-fetch when the revision advances past the one we last fetched at — that
+  // still pulls the latest partial body live, just not redundantly within a
+  // revision. Inert when the snapshot carries no revision (older/test fixtures):
+  // the `!= null` guard falls back to the previous always-re-arm behavior.
+  const alreadyFetchedThisRevision =
+    snapshot.transcript_revision != null
+    && snapshot.transcript_revision === state.transcriptHydrationFetchedRevision;
+
   // Re-arm hydration whenever the visible tail still carries a preview/omitted
   // entry whose authoritative body we don't already hold. `snapshotTailNeedsFullText`
   // is the sole gate (NOT a signature/shape change), so:
@@ -311,6 +327,7 @@ export function prepareTranscriptHydrationState(state, snapshot) {
   const reHydrateTail =
     sameThreadWithVisibleEntries
     && !hydrationInFlight
+    && !alreadyFetchedThisRevision
     && snapshotTailNeedsFullText(state, snapshot);
 
   let patch = sameThreadWithVisibleEntries
@@ -329,11 +346,14 @@ export function prepareTranscriptHydrationState(state, snapshot) {
   if (reHydrateTail) {
     // Keep the already-hydrated entries/order for an instant render, but re-arm
     // the fetch path so the new tail (with full text) is pulled exactly once.
+    // Record the revision we're fetching at so same-revision settles/status-only
+    // snapshots don't re-fetch (the candidate #3 gate above reads it back).
     patch = {
       ...patch,
       transcriptHydrationTailReady: false,
       transcriptHydrationStatus: "idle",
       transcriptHydrationPromise: null,
+      transcriptHydrationFetchedRevision: snapshot.transcript_revision ?? null,
     };
   }
 
@@ -361,8 +381,14 @@ export function createTranscriptHydrationPromisePatch(promise) {
   };
 }
 
-export function createClearedTranscriptHydrationPromisePatch(state, signature) {
-  if (state.transcriptHydrationSignature !== signature) {
+export function createClearedTranscriptHydrationPromisePatch(state, promise) {
+  // Clear the in-flight promise by IDENTITY, not by signature. A new entry joining
+  // the tail mid-fetch re-keys the signature (createMergedSnapshotTailPatch), so a
+  // signature gate would leave this settled fetch's promise parked — and a parked
+  // promise makes loadOlderTranscript bail, silently stalling scroll-up of older
+  // history. Identity is correct: clear iff `state` still holds the promise this
+  // fetch set; if a newer fetch overwrote it, that fetch's own settle clears it.
+  if (state.transcriptHydrationPromise !== promise) {
     return null;
   }
 

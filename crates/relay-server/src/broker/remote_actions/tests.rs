@@ -523,3 +523,65 @@ fn large_ask_user_detail_result_chunks_fit_within_broker_limit() {
         .iter()
         .all(|payload| frame_bytes_for_payload(payload) <= MAX_BROKER_TEXT_FRAME_BYTES));
 }
+
+// Repro: the REMOTE (broker / phone) client shows FEWER reviewers than LOCAL for
+// a thread it is VIEWING but that is not the relay's ACTIVE thread. The remote
+// snapshot compaction scopes `reviewer_threads` to the active parent only
+// (`reviewer_threads_active_parent_only`), so a viewed non-active thread's
+// reviewers vanish on remote — while local keeps them. The remote client can
+// view any thread (view-only), so it needs that thread's reviewers too.
+#[test]
+fn remote_snapshot_keeps_reviewers_of_a_non_active_viewed_thread() {
+    let reviewer_threads = vec![
+        crate::protocol::ReviewerThreadView {
+            reviewer_thread_id: "rev-on-active".to_string(),
+            parent_thread_id: "thread-1".to_string(), // the relay's ACTIVE thread
+            reviewer_provider: Some("codex".to_string()),
+            name: Some("Codex reviewer".to_string()),
+            updated_at: Some(10),
+        },
+        crate::protocol::ReviewerThreadView {
+            reviewer_thread_id: "rev-on-viewed".to_string(),
+            parent_thread_id: "thread-2".to_string(), // a NON-active thread viewed on remote
+            reviewer_provider: Some("claude_code".to_string()),
+            name: Some("Claude reviewer".to_string()),
+            updated_at: Some(20),
+        },
+    ];
+
+    let mut base = make_snapshot();
+    base.active_thread_id = Some("thread-1".to_string());
+    base.reviewer_threads = reviewer_threads;
+    // Strip bulky fields so only the active-parent reviewer filter can affect
+    // reviewer_threads (no byte-budget draining muddying the result).
+    base.transcript = vec![];
+    base.logs = vec![];
+
+    let keeps_viewed = |snap: &SessionSnapshot| {
+        snap.reviewer_threads
+            .iter()
+            .any(|view| view.parent_thread_id == "thread-2")
+    };
+
+    // Local web keeps every thread's reviewers — the reference behavior.
+    let local = base
+        .clone()
+        .compact_for(crate::protocol::SessionSnapshotCompactProfile::LocalWeb);
+    assert!(
+        keeps_viewed(&local),
+        "local must keep the viewed (non-active) thread's reviewer"
+    );
+
+    // Remote MUST keep it too, or a remote client viewing thread-2 sees fewer
+    // reviewers than local. (Currently FAILS: active-parent-only compaction.)
+    let remote = base.compact_for(crate::protocol::SessionSnapshotCompactProfile::RemoteSurface);
+    assert!(
+        keeps_viewed(&remote),
+        "remote dropped the non-active viewed thread's reviewer; remote kept parents: {:?}",
+        remote
+            .reviewer_threads
+            .iter()
+            .map(|view| view.parent_thread_id.clone())
+            .collect::<Vec<_>>()
+    );
+}

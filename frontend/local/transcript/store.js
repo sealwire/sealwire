@@ -55,8 +55,8 @@ export function setTranscriptHydrationPromise(state, promise) {
   applyLocalTranscriptPatch(state, createTranscriptHydrationPromisePatch(promise));
 }
 
-export function clearTranscriptHydrationPromise(state, signature) {
-  applyLocalTranscriptPatch(state, createClearedTranscriptHydrationPromisePatch(state, signature));
+export function clearTranscriptHydrationPromise(state, promise) {
+  applyLocalTranscriptPatch(state, createClearedTranscriptHydrationPromisePatch(state, promise));
 }
 
 export function setTranscriptHydrationIdle(state) {

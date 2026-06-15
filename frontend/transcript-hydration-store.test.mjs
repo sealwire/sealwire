@@ -434,6 +434,115 @@ test("prepareTranscriptHydrationState re-arms hydration when an OMITTED entry jo
   assert.equal(omitted.status, "completed");
 });
 
+test("prepareTranscriptHydrationState does not re-fetch a still-omitted tail again at the same revision", () => {
+  // candidate #3: a long entry the relay keeps shipping omitted while it streams
+  // bumps transcript_revision on every delta. Re-fetching is useful once per
+  // revision (it pulls the latest partial full text), but the settle of one fetch
+  // re-fires onProgress -> renderSession -> hydrate at the SAME revision, and
+  // status-only snapshots re-describe the same omitted tail. Those must NOT re-arm
+  // an identical fetch — that is an RTT-paced storm against the relay.
+  const state = hydratedState({
+    transcriptHydrationEntries: new Map([
+      [
+        "item-x",
+        {
+          item_id: "item-x",
+          kind: "agent_text",
+          text: null,
+          status: "running",
+          turn_id: "turn-9",
+          tool: null,
+          content_state: "omitted",
+        },
+      ],
+    ]),
+    transcriptHydrationOrder: ["item-x"],
+    transcriptHydrationSignature: "thread-1|turn-9|1|item-x|agent_text|turn-9||||",
+    transcriptHydrationStatus: "idle",
+    transcriptHydrationTailReady: true,
+    transcriptHydrationFetchedRevision: 30,
+  });
+  const snapshot = {
+    active_thread_id: "thread-1",
+    active_turn_id: "turn-9",
+    transcript_revision: 30,
+    transcript_truncated: true,
+    transcript: [
+      {
+        item_id: "item-x",
+        kind: "agent_text",
+        text: "shell...",
+        status: "running",
+        turn_id: "turn-9",
+        tool: null,
+        content_state: "omitted",
+      },
+    ],
+  };
+
+  const prepared = prepareTranscriptHydrationState(state, snapshot);
+
+  assert.equal(
+    prepared.shouldHydrate,
+    false,
+    "already fetched at this revision — a still-omitted tail must not re-fetch until the revision advances"
+  );
+});
+
+test("prepareTranscriptHydrationState re-fetches the omitted tail once the revision advances, recording it", () => {
+  const state = hydratedState({
+    transcriptHydrationEntries: new Map([
+      [
+        "item-x",
+        {
+          item_id: "item-x",
+          kind: "agent_text",
+          text: null,
+          status: "running",
+          turn_id: "turn-9",
+          tool: null,
+          content_state: "omitted",
+        },
+      ],
+    ]),
+    transcriptHydrationOrder: ["item-x"],
+    transcriptHydrationSignature: "thread-1|turn-9|1|item-x|agent_text|turn-9||||",
+    transcriptHydrationStatus: "idle",
+    transcriptHydrationTailReady: true,
+    transcriptHydrationFetchedRevision: 30,
+  });
+  const snapshot = {
+    active_thread_id: "thread-1",
+    active_turn_id: "turn-9",
+    transcript_revision: 31,
+    transcript_truncated: true,
+    transcript: [
+      {
+        item_id: "item-x",
+        kind: "agent_text",
+        text: "shell...",
+        status: "running",
+        turn_id: "turn-9",
+        tool: null,
+        content_state: "omitted",
+      },
+    ],
+  };
+
+  const prepared = prepareTranscriptHydrationState(state, snapshot);
+
+  assert.equal(
+    prepared.shouldHydrate,
+    true,
+    "a bumped revision means new data — re-fetch the latest partial"
+  );
+  assert.equal(
+    prepared.patch.transcriptHydrationFetchedRevision,
+    31,
+    "the fetched revision is recorded so same-revision settles don't re-fetch"
+  );
+});
+
 test("prepareTranscriptHydrationState does not hydrate when a new FULL entry ending in '...' joins", () => {
   // P1.2: a genuine, complete message whose text legitimately ends in "..." is
   // content_state full. Adding it to a hydrated thread must NOT trigger a wasteful
