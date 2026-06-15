@@ -190,6 +190,7 @@ export function createSessionRenderer({
   brokerStatusLabel,
   pairedDeviceCountLabel,
   ensureConversationTranscript,
+  syncComposerModel,
   updateSessionSettings,
   requestReview,
   setReviewSlice,
@@ -251,6 +252,7 @@ export function createSessionRenderer({
       viewThreadId: state.viewThreadId,
       viewOnlyThread: state.viewOnlyThread,
     });
+    syncComposerModel?.(session);
 
     const approval = session.pending_approvals[0] || null;
     const pendingPairings = filterActivePairings(session.pending_pairing_requests || []);

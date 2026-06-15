@@ -6,7 +6,12 @@ impl AppState {
         provider_name: &str,
     ) -> Result<Vec<ModelOptionView>, String> {
         let (_, bridge) = self.resolve_provider(Some(provider_name))?;
-        bridge.list_models().await
+        let models = bridge.list_models().await?;
+        self.provider_model_catalogs
+            .write()
+            .await
+            .insert(provider_name.to_string(), models.clone());
+        Ok(models)
     }
 
     fn active_provider(&self) -> Option<(&str, &Arc<dyn ProviderBridge>)> {
@@ -123,16 +128,9 @@ impl AppState {
         for (name, bridge) in &self.providers {
             let name = name.clone();
             let bridge = bridge.clone();
-            let relay = self.relay.clone();
+            let state = self.clone();
             tokio::spawn(async move {
-                if let Err(error) = bridge.list_models().await {
-                    let mut relay = relay.write().await;
-                    relay.push_log(
-                        "warn",
-                        format!("Model catalog prewarm for {name} failed: {error}"),
-                    );
-                    relay.notify();
-                }
+                let _ = state.load_provider_model_catalog(&name, &bridge).await;
             });
         }
     }
@@ -174,7 +172,13 @@ impl AppState {
         bridge: &Arc<dyn ProviderBridge>,
     ) -> Option<Vec<ModelOptionView>> {
         match bridge.list_models().await {
-            Ok(models) => Some(models),
+            Ok(models) => {
+                self.provider_model_catalogs
+                    .write()
+                    .await
+                    .insert(provider_name.to_string(), models.clone());
+                Some(models)
+            }
             Err(error) => {
                 self.push_runtime_log(
                     "warn",
@@ -184,5 +188,29 @@ impl AppState {
                 None
             }
         }
+    }
+
+    pub(super) async fn cached_provider_model_catalog(
+        &self,
+        provider_name: &str,
+    ) -> Option<Vec<ModelOptionView>> {
+        let active_catalog = {
+            let relay = self.relay.read().await;
+            (relay.provider_name == provider_name && !relay.available_models.is_empty())
+                .then(|| relay.available_models.clone())
+        };
+        if let Some(models) = active_catalog {
+            self.provider_model_catalogs
+                .write()
+                .await
+                .insert(provider_name.to_string(), models.clone());
+            return Some(models);
+        }
+
+        self.provider_model_catalogs
+            .read()
+            .await
+            .get(provider_name)
+            .cloned()
     }
 }

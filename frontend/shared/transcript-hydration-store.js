@@ -275,7 +275,14 @@ function buildHydratedTranscriptSnapshot(
     if (!itemId) {
       continue;
     }
-    entries.set(itemId, mergeTranscriptEntry(entries.get(itemId), toTranscriptEntry(entry)));
+    const existing = entries.get(itemId);
+    entries.set(
+      itemId,
+      mergeTranscriptEntry(
+        existing,
+        prepareSnapshotOverlayEntry(existing, entry, snapshot.transcript_truncated)
+      )
+    );
     if (!order.includes(itemId)) {
       order.push(itemId);
     }
@@ -290,7 +297,9 @@ function buildHydratedTranscriptSnapshot(
   return {
     ...snapshot,
     transcript,
-    transcript_truncated: state.transcriptHydrationOlderCursor != null,
+    transcript_truncated:
+      state.transcriptHydrationOlderCursor != null
+      || snapshotTailNeedsFullText(state, snapshot),
   };
 }
 
@@ -321,7 +330,14 @@ function createMergedSnapshotTailPatch(state, snapshot, signature) {
     if (!itemId) {
       continue;
     }
-    nextEntries.set(itemId, mergeTranscriptEntry(nextEntries.get(itemId), toTranscriptEntry(entry)));
+    const existing = nextEntries.get(itemId);
+    nextEntries.set(
+      itemId,
+      mergeTranscriptEntry(
+        existing,
+        prepareSnapshotOverlayEntry(existing, entry, snapshot.transcript_truncated)
+      )
+    );
     if (!nextOrder.includes(itemId)) {
       nextOrder.push(itemId);
     }
@@ -351,6 +367,21 @@ function mergeTranscriptEntry(existing, incoming) {
     tool: mergeToolView(existing.tool, incoming.tool),
     turn_id: incoming.turn_id || existing.turn_id || null,
   };
+}
+
+function prepareSnapshotOverlayEntry(existing, entry, snapshotTruncated) {
+  const incoming = toTranscriptEntry(entry);
+  if (
+    snapshotTruncated
+    && !existing
+    && looksTruncated(incoming.text)
+  ) {
+    return {
+      ...incoming,
+      text: null,
+    };
+  }
+  return incoming;
 }
 
 function selectTranscriptText(existingText, incomingText) {

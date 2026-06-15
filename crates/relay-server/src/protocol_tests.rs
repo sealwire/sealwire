@@ -1,8 +1,9 @@
 use crate::protocol::strip_file_change_diffs_for_snapshot;
 use crate::protocol::{
     truncate_with_ellipsis, ApprovalRequestView, AskUserOptionView, AskUserQuestionRequestView,
-    AskUserQuestionView, DeleteThreadInput, FileChangeDiffView, LogEntryView, ReviewerThreadView,
-    SecurityMode, SessionSnapshot, SessionSnapshotCompactProfile, ThreadEntriesResponse,
+    AskUserQuestionView, DeleteThreadInput, DeviceLifecycleState, DeviceRecordView,
+    FileChangeDiffView, LogEntryView, ReviewJobView, ReviewerThreadView, SecurityMode,
+    SessionSnapshot, SessionSnapshotCompactProfile, ThreadEntriesResponse,
     ThreadEntryDetailResponse, ThreadSummaryView, ThreadTranscriptResponse, ThreadsResponse,
     ThreadsResponseCompactProfile, ToolCallView, TranscriptEntryKind, TranscriptEntryView,
     EMERGENCY_TRANSCRIPT_SHELL_CHARS,
@@ -205,6 +206,89 @@ fn compact_for_local_web_keeps_reviewer_threads() {
         compacted.reviewer_threads[0].reviewer_provider.as_deref(),
         Some("codex"),
         "LocalWeb keeps the enriched reviewer_provider for the reuse picker"
+    );
+}
+
+#[test]
+fn local_web_control_plane_metadata_does_not_shell_normal_live_transcript() {
+    // Regression capture for the live UI showing 24-character assistant-message
+    // fragments while the authoritative transcript endpoint still held full text.
+    // The trigger is not a large transcript entry: accumulated review/device
+    // metadata consumes the LocalWeb snapshot budget and the final compaction
+    // fallback shells otherwise-normal live messages.
+    let mut snapshot = make_snapshot();
+    snapshot.pending_approvals.clear();
+    snapshot.logs.clear();
+    snapshot.transcript = (0..4)
+        .map(|index| TranscriptEntryView {
+            item_id: Some(format!("assistant:live-message-{index}")),
+            kind: TranscriptEntryKind::AgentText,
+            text: Some(format!(
+                "Live assistant message {index} must remain readable while transcript hydration is pending."
+            )),
+            status: "completed".to_string(),
+            turn_id: Some("turn-live".to_string()),
+            tool: None,
+        })
+        .collect();
+    snapshot.active_review_jobs = (0..15)
+        .map(|index| ReviewJobView {
+            id: format!("review-job-{index:02}-{}", "a".repeat(28)),
+            parent_thread_id: format!("parent-thread-{index:02}-{}", "b".repeat(24)),
+            reviewer_provider: "claude_code".to_string(),
+            reviewer_model: Some("claude-opus-4-6".to_string()),
+            reviewer_effort: Some("high".to_string()),
+            reviewer_thread_id: Some(format!("reviewer-thread-{index:02}-{}", "c".repeat(22))),
+            status: "completed".to_string(),
+            error: None,
+            updated_at: 1_750_000_000 + index,
+            round: 1,
+            max_rounds: 3,
+            verdict: Some("review completed with no blocking findings".to_string()),
+        })
+        .collect();
+    snapshot.reviewer_threads = (0..17)
+        .map(|index| ReviewerThreadView {
+            reviewer_thread_id: format!("reviewer-thread-{index:02}-{}", "d".repeat(22)),
+            parent_thread_id: format!("parent-thread-{index:02}-{}", "e".repeat(24)),
+            reviewer_provider: Some("claude_code".to_string()),
+            name: Some(format!("Independent Claude review {index:02}")),
+            updated_at: Some(1_750_000_000 + index),
+        })
+        .collect();
+    snapshot.device_records = (0..11)
+        .map(|index| DeviceRecordView {
+            device_id: format!("device-{index:02}-{}", "f".repeat(28)),
+            label: format!("Browser device {index:02} {}", "workstation".repeat(3)),
+            lifecycle_state: DeviceLifecycleState::Approved,
+            created_at: 1_750_000_000 + index,
+            state_changed_at: 1_750_000_100 + index,
+            last_seen_at: Some(1_750_000_200 + index),
+            last_peer_id: Some(format!("peer-{index:02}-{}", "9".repeat(30))),
+            broker_join_ticket_expires_at: Some(1_750_003_600 + index),
+            fingerprint: Some(format!("sha256:{}", "0".repeat(48))),
+            path_scope: vec![format!(
+                "/Users/example/workspaces/review-project-{index:02}/subdirectory"
+            )],
+        })
+        .collect();
+
+    let original_texts = snapshot
+        .transcript
+        .iter()
+        .map(|entry| entry.text.clone())
+        .collect::<Vec<_>>();
+    let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::LocalWeb);
+    let compacted_texts = compacted
+        .transcript
+        .iter()
+        .map(|entry| entry.text.clone())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        compacted_texts, original_texts,
+        "unrelated review/device metadata must not turn normal live messages into \
+         {EMERGENCY_TRANSCRIPT_SHELL_CHARS}-character emergency shells"
     );
 }
 

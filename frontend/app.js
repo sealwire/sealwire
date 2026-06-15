@@ -152,7 +152,10 @@ import {
   saveLastApprovalPolicy,
   saveLastEffort,
 } from "./shared/last-used-settings.js";
-import { renderSelectOptions } from "./shared/select-options.js";
+import {
+  renderSelectOptions,
+  replaceSelectOptions,
+} from "./shared/select-options.js";
 import {
   buildReasoningEffortOptions,
   resolveReasoningEffortValue,
@@ -517,6 +520,9 @@ const renderer = createSessionRenderer({
   pairedDeviceCountLabel,
   ensureConversationTranscript(session) {
     return controller?.ensureConversationTranscript(session);
+  },
+  syncComposerModel(session) {
+    syncComposerModelForRenderedSession(session);
   },
   updateSessionSettings(payload) {
     return controller?.updateSessionSettings(payload);
@@ -1504,7 +1510,13 @@ function seedDefaults(session) {
   const launchProvider = providerInput?.value || activeProvider;
   const launchModels = modelsForProvider(launchProvider, session.available_models || []);
 
-  syncModelSuggestions(messageModel, session.available_models || [], messageModel?.value || session.model, true);
+  syncModelSuggestions(
+    messageModel,
+    session.available_models || [],
+    messageModel?.value || session.model,
+    true,
+    true
+  );
 
   if (!state.defaultsSeeded) {
     if (messageModel) {
@@ -1575,7 +1587,13 @@ async function refreshProviderCatalogs(session) {
   }
 }
 
-function syncModelSuggestions(select, models, selectedModel, allowForeign = false) {
+function syncModelSuggestions(
+  select,
+  models,
+  selectedModel,
+  allowForeign = false,
+  replaceExisting = false
+) {
   if (!select) {
     return;
   }
@@ -1600,13 +1618,38 @@ function syncModelSuggestions(select, models, selectedModel, allowForeign = fals
     }
   }
 
-  renderSelectOptions(
-    select,
-    options.map((model) => ({
-      label: model.display_name,
-      value: model.model,
-    })),
-    currentValue
+  const renderedOptions = options.map((model) => ({
+    label: model.display_name,
+    value: model.model,
+  }));
+  if (replaceExisting) {
+    replaceSelectOptions(select, renderedOptions, currentValue);
+  } else {
+    renderSelectOptions(select, renderedOptions, currentValue);
+  }
+}
+
+function syncComposerModelForRenderedSession(session) {
+  if (!messageModel || !session?.active_thread_id) {
+    return;
+  }
+
+  const models = session.available_models || [];
+  const currentModel = models.some((model) => model.model === messageModel.value)
+    ? messageModel.value
+    : session.model || messageModel.value;
+
+  // The rendered session may be a client-local view-only projection for a
+  // provider different from the relay's live session. Use that projection's
+  // catalog, reject a foreign current value in view-only mode, and reassert the
+  // projection after every live snapshot. Preserve a manual selection whenever
+  // it still belongs to the rendered provider's catalog.
+  syncModelSuggestions(
+    messageModel,
+    models,
+    currentModel,
+    !session.view_only,
+    true
   );
 }
 

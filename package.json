@@ -58,6 +58,7 @@
     "test:browser:local-delete": "npm run build && node scripts/browser-local-delete-e2e.mjs",
     "test:browser:local-session": "npm run build && node scripts/browser-local-session-e2e.mjs",
     "test:browser:local-thread-settings": "npm run build && AGENT_PROVIDERS=fake node scripts/browser-local-thread-settings-e2e.mjs",
+    "test:browser:local-view-only-models": "npm run build && E2E_USE_BUILT_BINARIES=1 node scripts/browser-local-view-only-models-e2e.mjs",
     "test:browser:local-permission-modes": "npm run build && AGENT_PROVIDERS=fake FAKE_PROVIDER_ENFORCE_APPROVALS=1 node scripts/browser-local-permission-modes-e2e.mjs",
     "test:browser:local-thread-groups": "npm run build && node scripts/browser-local-thread-groups-e2e.mjs",
     "test:browser:local-history-scroll": "npm run build && node scripts/browser-local-history-scroll-e2e.mjs",

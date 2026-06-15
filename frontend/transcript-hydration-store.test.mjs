@@ -95,6 +95,45 @@ test("restoreHydratedTranscriptSnapshot keeps older hydrated entries for compact
   assert.equal(restored.transcript_truncated, false);
 });
 
+test("restoreHydratedTranscriptSnapshot hides an uncovered emergency shell until hydration", () => {
+  const state = hydratedState();
+  const snapshot = {
+    active_thread_id: "thread-1",
+    active_turn_id: "turn-4",
+    transcript_revision: 12,
+    transcript_truncated: true,
+    transcript: [
+      {
+        item_id: "item-3",
+        kind: "command",
+        text: "cargo test\npassed ...",
+        status: "completed",
+        turn_id: "turn-3",
+        tool: null,
+      },
+      {
+        item_id: "item-4",
+        kind: "agent_text",
+        text: "The relay boots with ...",
+        status: "completed",
+        turn_id: "turn-4",
+        tool: null,
+      },
+    ],
+  };
+
+  const restored = restoreHydratedTranscriptSnapshot(state, snapshot);
+  const newEntry = restored.transcript.find((entry) => entry.item_id === "item-4");
+
+  assert.ok(newEntry, "the new entry identity must remain visible for ordering and status");
+  assert.equal(newEntry.text, null, "the clipped shell must not be rendered as message content");
+  assert.equal(
+    restored.transcript_truncated,
+    true,
+    "the snapshot must stay truncated so the authoritative page is fetched"
+  );
+});
+
 test("prepareTranscriptHydrationState patches compact tail without clearing same-thread visible history", () => {
   const state = hydratedState();
   const snapshot = {

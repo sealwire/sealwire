@@ -56,3 +56,30 @@ export function renderSelectOptions(select, options = [], selectedValue = "") {
   select.value = selectedValue;
   renderStateBySelect.set(select, nextState);
 }
+
+export function replaceSelectOptions(select, options = [], selectedValue = "") {
+  if (!select) {
+    return;
+  }
+
+  const current = [...select.options];
+  const sameOptions =
+    current.length === options.length
+    && current.every(
+      (option, index) =>
+        option.value === options[index]?.value
+        && option.textContent === options[index]?.label
+    );
+  if (!sameOptions) {
+    const nodes = options.map((option) => {
+      const node = document.createElement("option");
+      node.value = option.value;
+      node.textContent = option.label;
+      return node;
+    });
+    select.replaceChildren(...nodes);
+  }
+  if (select.value !== selectedValue) {
+    select.value = selectedValue;
+  }
+}

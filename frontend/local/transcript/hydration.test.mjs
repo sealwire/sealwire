@@ -273,6 +273,128 @@ test("hydrateLocalTranscript re-entry during progress reuses the in-flight promi
   assert.ok(reenteredPromise instanceof Promise);
 });
 
+test("hydrateLocalTranscript does not publish a new emergency shell while its full page is pending", async () => {
+  const state = createState();
+  const previousSnapshot = {
+    active_thread_id: "thread-1",
+    active_turn_id: "turn-1",
+    transcript_truncated: true,
+    transcript: [
+      {
+        item_id: "item-1",
+        kind: "agent_text",
+        text: "Earlier assistant mess...",
+        status: "completed",
+        turn_id: "turn-1",
+        tool: null,
+      },
+    ],
+  };
+
+  await hydrateLocalTranscript(state, previousSnapshot, {
+    async fetchPage() {
+      return {
+        thread_id: "thread-1",
+        prev_cursor: null,
+        entries: [
+          {
+            item_id: "item-1",
+            kind: "agent_text",
+            text: "Earlier assistant message that is already hydrated.",
+            status: "completed",
+            turn_id: "turn-1",
+            tool: null,
+          },
+        ],
+      };
+    },
+    onProgress(nextSnapshot) {
+      state.session = nextSnapshot;
+    },
+  });
+
+  const emergencyShell = "The relay boots with ...";
+  const nextSnapshot = {
+    active_thread_id: "thread-1",
+    active_turn_id: "turn-2",
+    transcript_truncated: true,
+    transcript: [
+      {
+        item_id: "item-1",
+        kind: "agent_text",
+        text: "Earlier assistant mess...",
+        status: "completed",
+        turn_id: "turn-1",
+        tool: null,
+      },
+      {
+        item_id: "item-2",
+        kind: "agent_text",
+        text: emergencyShell,
+        status: "completed",
+        turn_id: "turn-2",
+        tool: null,
+      },
+    ],
+  };
+  let releasePage;
+  const pageGate = new Promise((resolve) => {
+    releasePage = resolve;
+  });
+  const renderedWhilePending = [];
+
+  const hydrationPromise = hydrateLocalTranscript(state, nextSnapshot, {
+    async fetchPage() {
+      await pageGate;
+      return {
+        thread_id: "thread-1",
+        prev_cursor: null,
+        entries: [
+          {
+            item_id: "item-1",
+            kind: "agent_text",
+            text: "Earlier assistant message that is already hydrated.",
+            status: "completed",
+            turn_id: "turn-1",
+            tool: null,
+          },
+          {
+            item_id: "item-2",
+            kind: "agent_text",
+            text: "The relay boots with the complete provider and transcript state.",
+            status: "completed",
+            turn_id: "turn-2",
+            tool: null,
+          },
+        ],
+      };
+    },
+    onProgress(nextRenderedSnapshot) {
+      renderedWhilePending.push(nextRenderedSnapshot);
+      state.session = nextRenderedSnapshot;
+    },
+  });
+
+  await new Promise((resolve) => setImmediate(resolve));
+  const pendingText = renderedWhilePending
+    .at(-1)
+    ?.transcript?.find((entry) => entry.item_id === "item-2")?.text;
+
+  releasePage();
+  await hydrationPromise;
+
+  assert.equal(
+    pendingText,
+    null,
+    "the renderer must receive an unloaded entry, not a 24-character emergency shell"
+  );
+  assert.equal(
+    state.session.transcript.find((entry) => entry.item_id === "item-2")?.text,
+    "The relay boots with the complete provider and transcript state.",
+    "the authoritative page must replace the unloaded entry with full text"
+  );
+});
+
 test("loadOlderLocalTranscript prepends older hydrated entries", async () => {
   const state = createState({
     session: {

@@ -143,21 +143,18 @@ impl AppState {
 
     async fn read_loaded_thread_state(&self, thread_id: &str) -> Result<ThreadStateView, String> {
         let (provider, bridge) = self.find_thread_provider(thread_id).await?;
-        // The model catalog comes from the relay's independently-refreshed cache
-        // (boot prewarm + provider-connect / session-op refreshes), NOT a live
-        // bridge round-trip: this runs on the transcript tail, which a working
-        // viewed thread polls ~3x/s. Codex's `model/list` is an uncached
-        // app-server RPC, so calling it here amplified app-server traffic and let
-        // a slow (up to 30s timeout) `model/list` stall the transcript read. Fall
-        // back to a one-off bridge load only while the cache is still cold (boot
-        // prewarm not yet landed).
-        let mut available_models = {
-            let relay = self.relay.read().await;
-            relay.available_models.clone()
+        // A transcript tail may describe a non-active provider. The relay's
+        // global available_models belongs only to the active provider, so use the
+        // provider-keyed cache here. This endpoint is polled for working viewed
+        // threads; a cold catalog may load once, but subsequent polls must not
+        // repeat Codex's uncached model/list RPC.
+        let available_models = match self.cached_provider_model_catalog(provider).await {
+            Some(models) => models,
+            None => self
+                .load_provider_model_catalog(provider, bridge)
+                .await
+                .unwrap_or_default(),
         };
-        if available_models.is_empty() {
-            available_models = bridge.list_models().await.unwrap_or_default();
-        }
         let relay = self.relay.read().await;
         let runtime = relay
             .runtime_for_thread(thread_id)

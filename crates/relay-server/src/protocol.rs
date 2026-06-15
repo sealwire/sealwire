@@ -205,6 +205,7 @@ const SESSION_SNAPSHOT_REMOTE_SURFACE_BUDGET: SessionSnapshotCompactBudget =
         max_pending_ask_user_question_inline_bytes: Some(4_000),
         reviewer_threads_active_parent_only: true,
         drop_operator_only_logs: true,
+        emergency_shell_transcript: true,
     };
 
 const SESSION_SNAPSHOT_LOCAL_WEB_BUDGET: SessionSnapshotCompactBudget =
@@ -227,6 +228,7 @@ const SESSION_SNAPSHOT_LOCAL_WEB_BUDGET: SessionSnapshotCompactBudget =
         max_pending_ask_user_question_inline_bytes: None,
         reviewer_threads_active_parent_only: false,
         drop_operator_only_logs: false,
+        emergency_shell_transcript: false,
     };
 
 const SESSION_SNAPSHOT_IOS_SURFACE_BUDGET: SessionSnapshotCompactBudget =
@@ -333,6 +335,11 @@ struct SessionSnapshotCompactBudget {
     /// broadcast to every paired device regardless of `path_scope`; false for
     /// LocalWeb, which is the operator's own surface and keeps the full buffer.
     drop_operator_only_logs: bool,
+    /// Apply the final 24-character transcript-shell fallback when no remaining
+    /// reducible field can bring the snapshot under budget. Broker-bound frames
+    /// need the hard cap; LocalWeb treats its target as soft because unrelated
+    /// review/device metadata must not make live conversation text unreadable.
+    emergency_shell_transcript: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -570,7 +577,7 @@ impl SessionSnapshot {
                 continue;
             }
             self.logs.clear();
-            if !self.transcript.is_empty() {
+            if budget.emergency_shell_transcript && !self.transcript.is_empty() {
                 // Honesty rule: a non-empty thread must never serialize as an
                 // empty transcript — `[]` is indistinguishable from a genuinely
                 // empty thread and makes surfaces drop real visible history.
