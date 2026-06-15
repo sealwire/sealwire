@@ -409,8 +409,10 @@ async function repairActiveTranscriptTail(threadId, targetRevision) {
     return {
       ...existing,
       ...entry,
-      // Never let an unexpectedly-truncated page entry shorten visible text.
-      text: selectVisibleSnapshotText(existing.text, entry.text),
+      // The page is authoritative, but never let an unexpectedly short page
+      // entry shorten already-visible text. Pure length comparison — no
+      // "..."-suffix inference.
+      text: selectLongerVisibleText(existing.text, entry.text),
     };
   });
 
@@ -591,15 +593,12 @@ function preserveVisibleTranscriptText(currentSession, snapshot) {
   let changed = false;
   const transcript = snapshot.transcript.map((entry) => {
     const current = currentByItemId.get(entry?.item_id);
-    const text = selectVisibleSnapshotText(current?.text, entry?.text);
-    if (text === entry?.text) {
+    const resolved = selectVisibleSnapshotEntry(current, entry);
+    if (resolved === entry) {
       return entry;
     }
     changed = true;
-    return {
-      ...entry,
-      text,
-    };
+    return resolved;
   });
 
   return changed
@@ -610,16 +609,56 @@ function preserveVisibleTranscriptText(currentSession, snapshot) {
     : snapshot;
 }
 
-function selectVisibleSnapshotText(currentText, incomingText) {
-  if (
-    typeof currentText === "string"
-    && typeof incomingText === "string"
-    && incomingText.endsWith("...")
-    && currentText.length >= incomingText.length
-  ) {
-    return currentText;
+// Authoritative (`full`) content is anything not explicitly flagged
+// `preview`/`omitted` by snapshot compaction — including a genuine body that
+// ends in "...". String-suffix inference is intentionally gone.
+function isFullSnapshotEntry(entry) {
+  const state = entry?.content_state;
+  return state !== "preview" && state !== "omitted";
+}
+
+function selectLongerVisibleText(existingText, incomingText) {
+  if (incomingText == null) {
+    return existingText ?? null;
   }
-  return incomingText;
+  if (existingText == null) {
+    return incomingText;
+  }
+  return incomingText.length >= existingText.length ? incomingText : existingText;
+}
+
+function selectVisibleSnapshotEntry(current, incoming) {
+  const currentText = current?.text;
+  const incomingText = incoming?.text;
+  // Take the incoming entry as-is when it is authoritative, or when we have no
+  // full text of our own to protect.
+  if (
+    isFullSnapshotEntry(incoming)
+    || typeof currentText !== "string"
+    || !isFullSnapshotEntry(current)
+  ) {
+    return incoming;
+  }
+  // Omitted: the incoming shell text is meaningless, so keep our visible body —
+  // but DO NOT promote content_state to full. The snapshot still says "omitted",
+  // so the hydration store re-fetches the authoritative body (promoting it here
+  // would defeat re-hydration and freeze a stale body).
+  if (incoming?.content_state === "omitted") {
+    return {
+      ...incoming,
+      text: currentText,
+    };
+  }
+  // Preview: keep our visible body only if it is at least as long (more
+  // complete); otherwise the grown preview is fresher. Either way the incoming
+  // content_state (preview) is preserved so hydration still settles the entry.
+  if (currentText.length >= incomingText.length) {
+    return {
+      ...incoming,
+      text: currentText,
+    };
+  }
+  return incoming;
 }
 
 function shouldAcceptSessionSnapshot(snapshot) {

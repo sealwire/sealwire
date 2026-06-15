@@ -634,6 +634,7 @@ mod tests {
             status: "completed".to_string(),
             turn_id: None,
             tool: None,
+            content_state: crate::protocol::TranscriptContentState::Full,
         }];
 
         rt.prepend_provider_history(older.clone(), Some(4096), Some(2048));

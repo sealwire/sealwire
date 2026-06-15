@@ -178,12 +178,26 @@ pub struct ModelOptionView {
 
 const ELLIPSIS_LEN: usize = 3;
 
+/// Terminal review-job statuses, mirroring the frontend's single source of truth
+/// (`TERMINAL_REVIEW_STATUSES` in `frontend/shared/review-state.js`). A
+/// non-terminal job (e.g. `blocked`, a running status) is actionable: the UI
+/// derives the blocked-review alert and send/lock gating from the global
+/// `active_review_jobs` list, so snapshot compaction must never drop one.
+fn review_job_status_is_terminal(status: &str) -> bool {
+    matches!(status, "complete" | "failed" | "escalated" | "cancelled")
+}
+
 /// When even per-field fallback truncation can't get a snapshot under budget
 /// (e.g. an oversized non-transcript field such as a very long cwd), the
 /// surviving transcript tail is reduced to identity shells whose text is clipped
 /// to this many characters — instead of being cleared. A non-empty thread must
 /// never serialize as an empty transcript.
 pub(crate) const EMERGENCY_TRANSCRIPT_SHELL_CHARS: usize = 24;
+
+/// Last-resort clamp for the display-only `current_cwd` string when it dominates
+/// an over-budget frame (see the emergency-shell path). Generous enough to keep a
+/// realistically deep path readable, but bounded so it cannot blow the byte cap.
+const EMERGENCY_TRANSCRIPT_CWD_CHARS: usize = 512;
 
 const SESSION_SNAPSHOT_REMOTE_SURFACE_BUDGET: SessionSnapshotCompactBudget =
     SessionSnapshotCompactBudget {
@@ -206,6 +220,9 @@ const SESSION_SNAPSHOT_REMOTE_SURFACE_BUDGET: SessionSnapshotCompactBudget =
         reviewer_threads_active_parent_only: true,
         drop_operator_only_logs: true,
         emergency_shell_transcript: true,
+        max_active_review_jobs: 8,
+        max_reviewer_threads: 8,
+        max_device_records: 12,
     };
 
 const SESSION_SNAPSHOT_LOCAL_WEB_BUDGET: SessionSnapshotCompactBudget =
@@ -228,7 +245,14 @@ const SESSION_SNAPSHOT_LOCAL_WEB_BUDGET: SessionSnapshotCompactBudget =
         max_pending_ask_user_question_inline_bytes: None,
         reviewer_threads_active_parent_only: false,
         drop_operator_only_logs: false,
-        emergency_shell_transcript: false,
+        // LocalWeb keeps a hard byte cap too: the control-plane collections are
+        // bounded (below) so they can no longer flood the transcript budget, so
+        // the emergency shell is reachable only by a genuinely oversized
+        // transcript/inline field — not by accumulated review/device metadata.
+        emergency_shell_transcript: true,
+        max_active_review_jobs: 24,
+        max_reviewer_threads: 48,
+        max_device_records: 48,
     };
 
 const SESSION_SNAPSHOT_IOS_SURFACE_BUDGET: SessionSnapshotCompactBudget =
@@ -335,11 +359,21 @@ struct SessionSnapshotCompactBudget {
     /// broadcast to every paired device regardless of `path_scope`; false for
     /// LocalWeb, which is the operator's own surface and keeps the full buffer.
     drop_operator_only_logs: bool,
-    /// Apply the final 24-character transcript-shell fallback when no remaining
-    /// reducible field can bring the snapshot under budget. Broker-bound frames
-    /// need the hard cap; LocalWeb treats its target as soft because unrelated
-    /// review/device metadata must not make live conversation text unreadable.
+    /// Apply the final transcript-shell fallback (heavy content dropped, entry
+    /// downgraded to `content_state: omitted`) when no remaining reducible field
+    /// can bring the snapshot under budget. Both surfaces enable it so neither
+    /// exceeds its hard byte cap; the control-plane caps below keep it from
+    /// firing on normal live text just because review/device metadata grew.
     emergency_shell_transcript: bool,
+    /// Hard cap on `active_review_jobs`. These are high-churn, low-value chips;
+    /// without a bound they could displace transcript content from the snapshot.
+    max_active_review_jobs: usize,
+    /// Hard cap on `reviewer_threads` retained in the snapshot (applied after the
+    /// active-parent scoping above). Bounds an otherwise unbounded map.
+    max_reviewer_threads: usize,
+    /// Hard cap on `device_records`. A long-lived relay accrues device records
+    /// indefinitely; bound them so they cannot consume the transcript budget.
+    max_device_records: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -387,6 +421,48 @@ impl SessionSnapshot {
                 .retain(|view| Some(&view.parent_thread_id) == active.as_ref());
         }
 
+        // Hard caps on the low-frequency control-plane collections. These grow
+        // independently of the conversation (a long-lived relay accrues device
+        // records, every review spawns a job + reviewer thread), so without an
+        // explicit bound they could consume the high-frequency transcript
+        // budget and force normal live text into the emergency shell. Cap them
+        // unconditionally here; the byte-budget loop drains them further (ahead
+        // of the transcript) under real pressure.
+        // Each collection is dropped from its LEAST-important end (matching the
+        // producer's sort) so the cap retains what the active view needs:
+        //   * active_review_jobs is sorted updated_at-ascending → keep the newest
+        //     tail (drop the oldest head);
+        //   * device_records is sorted Pending→Approved→Rejected→Revoked → keep
+        //     the actionable head (drop terminal junk from the tail);
+        //   * reviewer_threads has an arbitrary (id-sorted) order → float the
+        //     active parent's reviewers to the front (stable) before truncating,
+        //     so the active thread's reviewers always survive.
+        if self.active_review_jobs.len() > budget.max_active_review_jobs {
+            // Never drop a non-terminal (blocked/running) job — keep all of them
+            // (they are serialized one at a time, so the count is tiny) and fill
+            // the remaining budget with the newest terminal jobs (the list is
+            // updated_at-ascending, so the newest are at the tail).
+            let max = budget.max_active_review_jobs;
+            let (non_terminal, terminal): (Vec<_>, Vec<_>) =
+                std::mem::take(&mut self.active_review_jobs)
+                    .into_iter()
+                    .partition(|job| !review_job_status_is_terminal(&job.status));
+            let terminal_keep = max.saturating_sub(non_terminal.len());
+            let terminal_skip = terminal.len().saturating_sub(terminal_keep);
+            let mut kept = non_terminal;
+            kept.extend(terminal.into_iter().skip(terminal_skip));
+            self.active_review_jobs = kept;
+        }
+        if self.reviewer_threads.len() > budget.max_reviewer_threads {
+            let active = self.active_thread_id.clone();
+            self.reviewer_threads
+                .sort_by_key(|view| u8::from(Some(&view.parent_thread_id) != active.as_ref()));
+            self.reviewer_threads.truncate(budget.max_reviewer_threads);
+        }
+        if self.device_records.len() > budget.max_device_records {
+            self.device_records.truncate(budget.max_device_records);
+        }
+
         if let Some(max_inline_bytes) = budget.max_pending_ask_user_question_inline_bytes {
             for pending in &mut self.pending_ask_user_questions {
                 pending.externalize_questions_if_over(max_inline_bytes);
@@ -426,37 +502,44 @@ impl SessionSnapshot {
             // Ship user text in full here; the byte-budget pass below still
             // bounds a pathologically large snapshot, clipping even user text
             // only as a last resort, so the honesty invariant holds.
+            let mut entry_previewed = false;
             if entry.kind != TranscriptEntryKind::UserText {
                 if let Some(text) = &mut entry.text {
-                    transcript_truncated |=
-                        truncate_with_ellipsis(text, budget.max_transcript_chars);
+                    entry_previewed |= truncate_with_ellipsis(text, budget.max_transcript_chars);
                 }
             }
             if let Some(tool) = &mut entry.tool {
                 if let Some(detail) = &mut tool.detail {
-                    transcript_truncated |=
-                        truncate_with_ellipsis(detail, budget.max_transcript_chars);
+                    entry_previewed |= truncate_with_ellipsis(detail, budget.max_transcript_chars);
                 }
                 if let Some(input_preview) = &mut tool.input_preview {
-                    transcript_truncated |=
+                    entry_previewed |=
                         truncate_with_ellipsis(input_preview, budget.max_transcript_chars);
                 }
                 if let Some(result_preview) = &mut tool.result_preview {
-                    transcript_truncated |=
+                    entry_previewed |=
                         truncate_with_ellipsis(result_preview, budget.max_transcript_chars);
                 }
                 if let Some(diff) = &mut tool.diff {
-                    transcript_truncated |=
-                        truncate_with_ellipsis(diff, budget.max_transcript_chars);
+                    entry_previewed |= truncate_with_ellipsis(diff, budget.max_transcript_chars);
                 }
                 if tool.file_changes.len() > budget.max_file_changes {
                     tool.file_changes.truncate(budget.max_file_changes);
-                    transcript_truncated = true;
+                    entry_previewed = true;
                 }
                 for change in &mut tool.file_changes {
-                    transcript_truncated |=
+                    entry_previewed |=
                         truncate_with_ellipsis(&mut change.diff, budget.max_transcript_chars);
                 }
+            }
+            if entry_previewed {
+                transcript_truncated = true;
+                // The entry's content was ellipsis-truncated but is still
+                // readable; clients fetch the full body via the page/detail
+                // channel. Never inferred from a trailing "..." anymore.
+                entry
+                    .content_state
+                    .downgrade_to(TranscriptContentState::Preview);
             }
         }
 
@@ -520,41 +603,48 @@ impl SessionSnapshot {
                     })
             }) {
                 for entry in &mut self.transcript {
+                    let mut entry_previewed = false;
                     if let Some(text) = &mut entry.text {
-                        transcript_truncated |=
+                        entry_previewed |=
                             truncate_with_ellipsis(text, budget.fallback_transcript_chars);
                     }
                     if let Some(tool) = &mut entry.tool {
                         if let Some(detail) = &mut tool.detail {
-                            transcript_truncated |=
+                            entry_previewed |=
                                 truncate_with_ellipsis(detail, budget.fallback_transcript_chars);
                         }
                         if let Some(input_preview) = &mut tool.input_preview {
-                            transcript_truncated |= truncate_with_ellipsis(
+                            entry_previewed |= truncate_with_ellipsis(
                                 input_preview,
                                 budget.fallback_transcript_chars,
                             );
                         }
                         if let Some(result_preview) = &mut tool.result_preview {
-                            transcript_truncated |= truncate_with_ellipsis(
+                            entry_previewed |= truncate_with_ellipsis(
                                 result_preview,
                                 budget.fallback_transcript_chars,
                             );
                         }
                         if let Some(diff) = &mut tool.diff {
-                            transcript_truncated |=
+                            entry_previewed |=
                                 truncate_with_ellipsis(diff, budget.fallback_transcript_chars);
                         }
                         if tool.file_changes.len() > budget.fallback_file_changes {
                             tool.file_changes.truncate(budget.fallback_file_changes);
-                            transcript_truncated = true;
+                            entry_previewed = true;
                         }
                         for change in &mut tool.file_changes {
-                            transcript_truncated |= truncate_with_ellipsis(
+                            entry_previewed |= truncate_with_ellipsis(
                                 &mut change.diff,
                                 budget.fallback_transcript_chars,
                             );
                         }
+                    }
+                    if entry_previewed {
+                        transcript_truncated = true;
+                        entry
+                            .content_state
+                            .downgrade_to(TranscriptContentState::Preview);
                     }
                 }
                 continue;
@@ -576,17 +666,59 @@ impl SessionSnapshot {
             {
                 continue;
             }
+            // Last resort before shelling real conversation: reclaim the
+            // low-value control-plane collections. This runs AFTER transcript
+            // entry/text reduction so a snapshot whose bulk is the conversation
+            // still keeps these collections (e.g. LocalWeb's reviewer map for
+            // the delete prompt); it only drains them when they are themselves
+            // the over-budget bulk, protecting the transcript from the shell.
+            // Drain from each collection's least-important end (see the cap
+            // comment above): the oldest TERMINAL review job (never a non-terminal
+            // one — the blocked/running alert depends on it), the terminal device
+            // record (tail), and the non-active-parent reviewer (tail — the
+            // up-front cap floats active-parent reviewers to the front).
+            if let Some(pos) = self
+                .active_review_jobs
+                .iter()
+                .position(|job| review_job_status_is_terminal(&job.status))
+            {
+                self.active_review_jobs.remove(pos);
+                continue;
+            }
+            if !self.device_records.is_empty() {
+                self.device_records.pop();
+                continue;
+            }
+            if !self.reviewer_threads.is_empty() {
+                self.reviewer_threads.pop();
+                continue;
+            }
             self.logs.clear();
+            if budget.emergency_shell_transcript {
+                // Bound the one growable string identity field the earlier passes
+                // never touch. `current_cwd` is display-only on the wire (the relay
+                // uses its own path for scope checks), so clamping the snapshot copy
+                // keeps the hard byte cap honest when a pathological path dominates
+                // the frame. The remaining identity fields (available_models,
+                // paired_devices, allowed_roots) are domain-bounded — a handful of
+                // entries each — and are intentionally left intact.
+                truncate_with_ellipsis(&mut self.current_cwd, EMERGENCY_TRANSCRIPT_CWD_CHARS);
+            }
             if budget.emergency_shell_transcript && !self.transcript.is_empty() {
                 // Honesty rule: a non-empty thread must never serialize as an
                 // empty transcript — `[]` is indistinguishable from a genuinely
                 // empty thread and makes surfaces drop real visible history.
                 // Reduce the surviving tail to identity shells (keep
                 // item_id/kind/status/turn_id and a lightweight tool shell, drop
-                // the heavy text/diff/file_changes) and flag the snapshot
-                // truncated so the client fetches full detail instead.
+                // the heavy text/diff/file_changes), mark each entry
+                // `content_state: omitted`, and flag the snapshot truncated so
+                // the client renders a loading placeholder and fetches the full
+                // body instead of rendering the clipped shell.
                 transcript_truncated = true;
                 for entry in &mut self.transcript {
+                    entry
+                        .content_state
+                        .downgrade_to(TranscriptContentState::Omitted);
                     if let Some(text) = &mut entry.text {
                         truncate_with_ellipsis(text, EMERGENCY_TRANSCRIPT_SHELL_CHARS);
                     }
@@ -968,6 +1100,48 @@ pub enum TranscriptEntryKind {
     Error,
 }
 
+/// Explicit per-entry content state on the wire. Replaces the old practice of
+/// inferring omission from a string ending in `...`:
+///
+/// - `Full`: `text`/`tool` carry the complete authoritative content.
+/// - `Preview`: the renderable content was ellipsis-truncated to fit the
+///   snapshot budget; the full body is available via the transcript page/detail
+///   channel. The preview is still readable and may be shown while hydration
+///   completes.
+/// - `Omitted`: the heavy content was dropped entirely by the emergency-shell
+///   fallback. Only identity (`item_id`/`kind`/`status`/`turn_id`) survives.
+///   Clients MUST render a loading placeholder (never the clipped shell text or
+///   an `(empty)` body) and replace it with the hydrated body.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptContentState {
+    #[default]
+    Full,
+    Preview,
+    Omitted,
+}
+
+impl TranscriptContentState {
+    /// Higher precedence = more authoritative. Used so a later compaction pass
+    /// can only ever downgrade an entry's state (Full -> Preview -> Omitted),
+    /// never silently upgrade an already-omitted entry back to a preview.
+    fn rank(self) -> u8 {
+        match self {
+            Self::Full => 2,
+            Self::Preview => 1,
+            Self::Omitted => 0,
+        }
+    }
+
+    /// Record that the entry was reduced to at most `state`. Keeps the
+    /// lower-ranked (more-omitted) of the current and new state.
+    fn downgrade_to(&mut self, state: TranscriptContentState) {
+        if state.rank() < self.rank() {
+            *self = state;
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FileChangeDiffView {
     pub path: String,
@@ -1062,6 +1236,12 @@ pub struct TranscriptEntryView {
     pub status: String,
     pub turn_id: Option<String>,
     pub tool: Option<ToolCallView>,
+    /// Explicit omission state for this entry's content. Defaults to `Full`;
+    /// snapshot compaction downgrades it to `Preview` (ellipsis-truncated) or
+    /// `Omitted` (emergency shell). Authoritative reads (pages/details) always
+    /// serialize `Full`.
+    #[serde(default)]
+    pub content_state: TranscriptContentState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

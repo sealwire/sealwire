@@ -3191,6 +3191,7 @@ test("applySessionSnapshot does not replace longer live text with a compact prev
         text: "Hello partial...",
         turn_id: "turn-1",
         tool: null,
+        content_state: "preview",
       },
     ],
   });
@@ -3581,7 +3582,7 @@ test("applySessionSnapshot re-hydrates a long final message added after the firs
   // Snapshot 1: only the first long reply, truncated -> hydrates to full text.
   applySessionSnapshot(
     snap([
-      { item_id: "item-1", kind: "agent_text", text: `${"A".repeat(1200)}...`, status: "completed", turn_id: "turn-1", tool: null },
+      { item_id: "item-1", kind: "agent_text", text: `${"A".repeat(1200)}...`, status: "completed", turn_id: "turn-1", tool: null, content_state: "preview" },
     ])
   );
   await waitFor(() => state.transcriptHydrationTailReady === true);
@@ -3596,8 +3597,8 @@ test("applySessionSnapshot re-hydrates a long final message added after the firs
   ];
   applySessionSnapshot(
     snap([
-      { item_id: "item-1", kind: "agent_text", text: `${"A".repeat(1200)}...`, status: "completed", turn_id: "turn-1", tool: null },
-      { item_id: "item-2", kind: "agent_text", text: `${"C".repeat(1200)}...`, status: "completed", turn_id: "turn-1", tool: null },
+      { item_id: "item-1", kind: "agent_text", text: `${"A".repeat(1200)}...`, status: "completed", turn_id: "turn-1", tool: null, content_state: "preview" },
+      { item_id: "item-2", kind: "agent_text", text: `${"C".repeat(1200)}...`, status: "completed", turn_id: "turn-1", tool: null, content_state: "preview" },
     ])
   );
   await waitFor(

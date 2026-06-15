@@ -247,6 +247,7 @@ impl ProviderBridge for FakeProviderBridge {
                 status: "completed".to_string(),
                 turn_id: Some(turn_id_for_task.clone()),
                 tool: None,
+                content_state: crate::protocol::TranscriptContentState::Full,
             };
             let assistant_entry = TranscriptEntryView {
                 item_id: Some(assistant_item_id.clone()),
@@ -255,6 +256,7 @@ impl ProviderBridge for FakeProviderBridge {
                 status: "completed".to_string(),
                 turn_id: Some(turn_id_for_task.clone()),
                 tool: None,
+                content_state: crate::protocol::TranscriptContentState::Full,
             };
 
             // 1. Record the user's turn.

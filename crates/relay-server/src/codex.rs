@@ -634,6 +634,7 @@ fn parse_transcript_item(
         status,
         turn_id,
         tool,
+        content_state: crate::protocol::TranscriptContentState::Full,
     })
 }
 
@@ -657,6 +658,7 @@ fn parse_transcript_detail_item(
         status,
         turn_id,
         tool,
+        content_state: crate::protocol::TranscriptContentState::Full,
     })
 }
 
@@ -937,6 +939,7 @@ pub(crate) fn build_turn_diff_entry_with_fallback(
             apply_state: None,
             file_changes_omitted: false,
         }),
+        content_state: crate::protocol::TranscriptContentState::Full,
     }
 }
 

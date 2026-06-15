@@ -287,6 +287,7 @@ test("hydrateLocalTranscript does not publish a new emergency shell while its fu
         status: "completed",
         turn_id: "turn-1",
         tool: null,
+        content_state: "preview",
       },
     ],
   };
@@ -326,6 +327,7 @@ test("hydrateLocalTranscript does not publish a new emergency shell while its fu
         status: "completed",
         turn_id: "turn-1",
         tool: null,
+        content_state: "preview",
       },
       {
         item_id: "item-2",
@@ -334,6 +336,7 @@ test("hydrateLocalTranscript does not publish a new emergency shell while its fu
         status: "completed",
         turn_id: "turn-2",
         tool: null,
+        content_state: "omitted",
       },
     ],
   };

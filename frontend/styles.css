@@ -270,6 +270,32 @@ button, input, textarea, select {
   border: 0;
 }
 
+/* Loading placeholder for a transcript entry whose body the relay omitted to
+   fit the snapshot budget (content_state: "omitted"); replaced in place once
+   the authoritative page hydrates. */
+.message-body-loading {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.2em;
+  opacity: 0.6;
+}
+
+.transcript-entry-loading {
+  letter-spacing: 0.15em;
+  animation: transcript-entry-loading-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes transcript-entry-loading-pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 0.9; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .transcript-entry-loading {
+    animation: none;
+  }
+}
+
 button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, summary:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);

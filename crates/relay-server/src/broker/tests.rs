@@ -1031,6 +1031,7 @@ fn summarize_thread_transcript_response_reports_entry_and_char_counts() {
                 status: "completed".to_string(),
                 turn_id: Some("turn-1".to_string()),
                 tool: None,
+                content_state: crate::protocol::TranscriptContentState::Full,
             },
             TranscriptEntryView {
                 item_id: Some("item-2".to_string()),
@@ -1039,6 +1040,7 @@ fn summarize_thread_transcript_response_reports_entry_and_char_counts() {
                 status: "completed".to_string(),
                 turn_id: Some("turn-1".to_string()),
                 tool: None,
+                content_state: crate::protocol::TranscriptContentState::Full,
             },
         ],
         next_cursor: Some(8),

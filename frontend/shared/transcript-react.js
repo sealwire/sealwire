@@ -1625,12 +1625,62 @@ function DiffGroupEntry({ group, options = null }) {
   );
 }
 
+// Unified loading placeholder for an entry whose body the relay dropped to an
+// identity shell (`content_state: "omitted"`) to fit the snapshot budget. We
+// keep the entry's slot/identity/role styling but render a loading indicator
+// instead of the clipped 24-character shell text or an "(empty)" body; the
+// authoritative body replaces it in place after hydration.
+function OmittedEntryImpl({ entry, isJustPrepended = false }) {
+  const kind = entry?.kind || "agent_text";
+  const className =
+    kind === "user_text"
+      ? "chat-message chat-message-user"
+      : kind === "agent_text"
+        ? "chat-message chat-message-assistant"
+        : "chat-message chat-message-system";
+  return h(
+    "article",
+    transcriptEntryDomAttrs(
+      entry,
+      className,
+      { "data-transcript-pending": "true", "aria-busy": "true" },
+      { justPrepended: isJustPrepended }
+    ),
+    kind === "agent_text"
+      ? h("span", {
+          className: "message-avatar",
+          "aria-hidden": "true",
+          dangerouslySetInnerHTML: { __html: SPARKLES_SVG },
+        })
+      : null,
+    h(
+      "div",
+      { className: "message-card" },
+      h(
+        "div",
+        { className: "message-body message-body-loading", role: "status" },
+        h("span", { className: "transcript-entry-loading", "aria-hidden": "true" }, "•••"),
+        h("span", { className: "sr-only" }, "Loading message…")
+      )
+    )
+  );
+}
+
+const OmittedEntry = React.memo(OmittedEntryImpl);
+
 export function TranscriptEntry({
   entry,
   isJustPrepended = false,
   isLatestUser = false,
   options = null,
 }) {
+  // An omitted-content entry must never render its clipped shell or an
+  // "(empty)" body — show the unified loading placeholder until hydration
+  // delivers the authoritative content, regardless of role.
+  if (entry?.content_state === "omitted") {
+    return h(OmittedEntry, { entry, isJustPrepended });
+  }
+
   const kind = entry.kind || "reasoning";
 
   if (kind === "user_text") {

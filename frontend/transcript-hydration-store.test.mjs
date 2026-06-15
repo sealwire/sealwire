@@ -110,14 +110,18 @@ test("restoreHydratedTranscriptSnapshot hides an uncovered emergency shell until
         status: "completed",
         turn_id: "turn-3",
         tool: null,
+        content_state: "preview",
       },
       {
         item_id: "item-4",
         kind: "agent_text",
+        // The relay clipped this to a 24-char identity shell and marked it
+        // omitted; the trailing "..." is NOT what classifies it.
         text: "The relay boots with ...",
         status: "completed",
         turn_id: "turn-4",
         tool: null,
+        content_state: "omitted",
       },
     ],
   };
@@ -127,6 +131,7 @@ test("restoreHydratedTranscriptSnapshot hides an uncovered emergency shell until
 
   assert.ok(newEntry, "the new entry identity must remain visible for ordering and status");
   assert.equal(newEntry.text, null, "the clipped shell must not be rendered as message content");
+  assert.equal(newEntry.content_state, "omitted", "the omitted state must survive for the renderer");
   assert.equal(
     restored.transcript_truncated,
     true,
@@ -264,6 +269,7 @@ test("prepareTranscriptHydrationState re-arms hydration when a new oversized ent
         status: "completed",
         turn_id: "turn-3",
         tool: null,
+        content_state: "preview",
       },
       {
         item_id: "item-final",
@@ -272,6 +278,7 @@ test("prepareTranscriptHydrationState re-arms hydration when a new oversized ent
         status: "completed",
         turn_id: "turn-3",
         tool: null,
+        content_state: "preview",
       },
     ],
   };
@@ -317,4 +324,202 @@ test("prepareTranscriptHydrationState does not re-hydrate when only an existing 
 
   assert.equal(prepared.shouldHydrate, false);
   assert.equal(prepared.alreadyComplete, true);
+});
+
+test("prepareTranscriptHydrationState re-arms hydration when an OMITTED entry joins a hydrated thread (live path)", () => {
+  // Live path: a fully-hydrated, "complete" thread receives a new entry the relay
+  // dropped to an identity shell (content_state omitted). It must re-arm the
+  // fetch path, keep the already-visible history, and present the omitted entry
+  // with no body so the renderer shows a loading placeholder (not the shell).
+  const state = hydratedState();
+  const snapshot = {
+    active_thread_id: "thread-1",
+    active_turn_id: "turn-4",
+    transcript_truncated: true,
+    transcript: [
+      {
+        item_id: "item-3",
+        kind: "command",
+        text: "cargo test\npassed ...",
+        status: "completed",
+        turn_id: "turn-3",
+        tool: null,
+        content_state: "preview",
+      },
+      {
+        item_id: "item-omitted",
+        kind: "agent_text",
+        // 24-char identity shell text the relay shipped; must never render.
+        text: "The relay boots with ...",
+        status: "completed",
+        turn_id: "turn-4",
+        tool: null,
+        content_state: "omitted",
+      },
+    ],
+  };
+
+  const prepared = prepareTranscriptHydrationState(state, snapshot);
+
+  assert.equal(prepared.shouldHydrate, true);
+  assert.equal(prepared.alreadyComplete, false);
+  assert.equal(prepared.existingPromise, null);
+  assert.equal(prepared.patch.transcriptHydrationTailReady, false);
+  // History preserved + omitted entry appended in order.
+  assert.deepEqual(prepared.patch.transcriptHydrationOrder, [
+    "item-1",
+    "item-2",
+    "item-3",
+    "item-omitted",
+  ]);
+  // The omitted entry's clipped shell text is dropped so the renderer shows a
+  // loading placeholder, while identity/status/state survive for in-place
+  // replacement after hydration.
+  const omitted = prepared.patch.transcriptHydrationEntries.get("item-omitted");
+  assert.equal(omitted.text, null);
+  assert.equal(omitted.content_state, "omitted");
+  assert.equal(omitted.status, "completed");
+});
+
+test("prepareTranscriptHydrationState does not hydrate when a new FULL entry ending in '...' joins", () => {
+  // P1.2: a genuine, complete message whose text legitimately ends in "..." is
+  // content_state full. Adding it to a hydrated thread must NOT trigger a wasteful
+  // re-fetch, and its text must be preserved verbatim (never nulled/treated as a
+  // shell), even though the snapshot is flagged truncated for other reasons.
+  const state = hydratedState();
+  const snapshot = {
+    active_thread_id: "thread-1",
+    active_turn_id: "turn-4",
+    transcript_truncated: true,
+    transcript: [
+      {
+        item_id: "item-3",
+        kind: "command",
+        text: "cargo test\npassed ...",
+        status: "completed",
+        turn_id: "turn-3",
+        tool: null,
+        content_state: "preview",
+      },
+      {
+        item_id: "item-trailing",
+        kind: "agent_text",
+        text: "All set. Let me know if you want more...",
+        status: "completed",
+        turn_id: "turn-4",
+        tool: null,
+        content_state: "full",
+      },
+    ],
+  };
+
+  const prepared = prepareTranscriptHydrationState(state, snapshot);
+
+  assert.equal(prepared.shouldHydrate, false, "a full '...'-ending entry must not re-hydrate");
+  const full = prepared.patch.transcriptHydrationEntries.get("item-trailing");
+  assert.equal(full.text, "All set. Let me know if you want more...");
+  assert.equal(full.content_state, "full");
+});
+
+test("re-hydrates when an already-hydrated full-but-partial entry is later compacted to omitted (streaming settle)", () => {
+  // Review finding F1: content_state `full` means "complete as of this
+  // revision", not "final". An entry hydrated mid-stream as full+partial, then
+  // later shelled to `omitted` by the server (its body grew/over budget), must
+  // re-hydrate — not stay frozen on the stale partial body promoted back to full.
+  const state = hydratedState({
+    transcriptHydrationEntries: new Map([
+      [
+        "item-x",
+        {
+          item_id: "item-x",
+          kind: "agent_text",
+          text: "PARTIAL",
+          status: "running",
+          turn_id: "turn-9",
+          tool: null,
+          content_state: "full",
+        },
+      ],
+    ]),
+    transcriptHydrationOrder: ["item-x"],
+    transcriptHydrationSignature: "thread-1|turn-9|1|item-x|agent_text|turn-9||||",
+  });
+  const snapshot = {
+    active_thread_id: "thread-1",
+    active_turn_id: "turn-9",
+    transcript_revision: 30,
+    transcript_truncated: true,
+    transcript: [
+      {
+        item_id: "item-x",
+        kind: "agent_text",
+        text: "PARTIALplusmuchmore th...",
+        status: "completed",
+        turn_id: "turn-9",
+        tool: null,
+        content_state: "omitted",
+      },
+    ],
+  };
+
+  const prepared = prepareTranscriptHydrationState(state, snapshot);
+  Object.assign(state, prepared.patch);
+
+  assert.equal(prepared.shouldHydrate, true, "an omitted same-id transition must re-hydrate");
+  assert.equal(prepared.alreadyComplete, false);
+  // The clipped shell text must never become the rendered body.
+  const merged = state.transcriptHydrationEntries.get("item-x");
+  assert.notEqual(merged.text, "PARTIALplusmuchmore th...");
+});
+
+test("a longer preview replaces a stale shorter cached body and re-hydrates", () => {
+  // Review finding F1 (preview variant): a stale, shorter cached `full` body must
+  // not win over the server's newer, longer preview, and the entry must still
+  // re-hydrate for the remaining text.
+  const state = hydratedState({
+    transcriptHydrationEntries: new Map([
+      [
+        "item-x",
+        {
+          item_id: "item-x",
+          kind: "agent_text",
+          text: "short",
+          status: "running",
+          turn_id: "turn-9",
+          tool: null,
+          content_state: "full",
+        },
+      ],
+    ]),
+    transcriptHydrationOrder: ["item-x"],
+    transcriptHydrationSignature: "thread-1|turn-9|1|item-x|agent_text|turn-9||||",
+  });
+  const longPreview = `${"Z".repeat(1200)}...`;
+  const snapshot = {
+    active_thread_id: "thread-1",
+    active_turn_id: "turn-9",
+    transcript_revision: 30,
+    transcript_truncated: true,
+    transcript: [
+      {
+        item_id: "item-x",
+        kind: "agent_text",
+        text: longPreview,
+        status: "running",
+        turn_id: "turn-9",
+        tool: null,
+        content_state: "preview",
+      },
+    ],
+  };
+
+  const prepared = prepareTranscriptHydrationState(state, snapshot);
+  Object.assign(state, prepared.patch);
+
+  assert.equal(prepared.shouldHydrate, true, "a longer preview over a stale cache must re-hydrate");
+  assert.equal(
+    state.transcriptHydrationEntries.get("item-x").text,
+    longPreview,
+    "the longer preview must win over the stale shorter cached body"
+  );
 });

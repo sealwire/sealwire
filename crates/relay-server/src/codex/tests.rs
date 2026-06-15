@@ -1478,6 +1478,7 @@ fn agent_entry(item_id: &str, text: &str, status: &str, turn_id: &str) -> Transc
         status: status.to_string(),
         turn_id: Some(turn_id.to_string()),
         tool: None,
+        content_state: crate::protocol::TranscriptContentState::Full,
     }
 }
 
@@ -1797,6 +1798,7 @@ async fn handle_notification_keeps_late_delta_for_prior_thread() {
                     status: "running".to_string(),
                     turn_id: Some("turn-A1".to_string()),
                     tool: None,
+                    content_state: crate::protocol::TranscriptContentState::Full,
                 }],
             },
             "untrusted",
@@ -1922,6 +1924,7 @@ async fn handle_notification_keeps_late_agent_completion_for_prior_thread() {
                     status: "completed".to_string(),
                     turn_id: Some("turn-A1".to_string()),
                     tool: None,
+                    content_state: crate::protocol::TranscriptContentState::Full,
                 }],
             },
             "untrusted",
@@ -2031,6 +2034,7 @@ async fn runtime_merge_does_not_downgrade_fresh_completed_agent_message() {
                     status: "completed".to_string(),
                     turn_id: Some("turn-A1".to_string()),
                     tool: None,
+                    content_state: crate::protocol::TranscriptContentState::Full,
                 }],
             },
             "untrusted",
@@ -2209,6 +2213,7 @@ async fn handle_notification_keeps_late_command_output_for_prior_thread() {
                     status: "running".to_string(),
                     turn_id: Some("turn-A1".to_string()),
                     tool: None,
+                    content_state: crate::protocol::TranscriptContentState::Full,
                 }],
             },
             "untrusted",

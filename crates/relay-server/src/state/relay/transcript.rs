@@ -40,6 +40,9 @@ impl TranscriptRecord {
             status: self.status.clone(),
             turn_id: self.turn_id.clone(),
             tool: self.tool.clone(),
+            // The runtime holds authoritative, complete content. Snapshot
+            // compaction is the only place that downgrades this.
+            content_state: crate::protocol::TranscriptContentState::Full,
         }
     }
 }

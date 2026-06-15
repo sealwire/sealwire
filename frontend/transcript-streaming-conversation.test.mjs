@@ -83,9 +83,16 @@ function createConversation(threadId, { perEntryChars = PER_ENTRY_CHARS } = {}) 
     const transcript = backend.map((entry) => {
       if (typeof entry.text === "string" && entry.text.length > perEntryChars) {
         truncated = true;
-        return { ...entry, text: `${entry.text.slice(0, perEntryChars - 3)}...` };
+        // Mirror the real relay: an ellipsis-truncated entry carries the
+        // explicit `content_state: "preview"` so the client re-hydrates from the
+        // content_state, not from the trailing "...".
+        return {
+          ...entry,
+          text: `${entry.text.slice(0, perEntryChars - 3)}...`,
+          content_state: "preview",
+        };
       }
-      return { ...entry };
+      return { ...entry, content_state: "full" };
     });
     revision += 1;
     return {

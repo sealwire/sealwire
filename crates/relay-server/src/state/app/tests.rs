@@ -1439,6 +1439,7 @@ mod path_scope_tests {
             status: "completed".to_string(),
             turn_id: Some(item_id.to_string()),
             tool: None,
+            content_state: crate::protocol::TranscriptContentState::Full,
         };
         {
             let mut pages = claude.transcript_pages.lock().await;
@@ -2494,6 +2495,7 @@ mod path_scope_tests {
                     status: "completed".to_string(),
                     turn_id: Some("turn:provider-initial".to_string()),
                     tool: None,
+                    content_state: crate::protocol::TranscriptContentState::Full,
                 });
             let mut transcript = Vec::new();
             if let Some(entry) = initial_user_message.clone() {
@@ -2505,6 +2507,7 @@ mod path_scope_tests {
                     status: "completed".to_string(),
                     turn_id: Some("turn:provider-initial".to_string()),
                     tool: None,
+                    content_state: crate::protocol::TranscriptContentState::Full,
                 });
             }
 
@@ -4290,6 +4293,7 @@ mod review_tests {
                     status: "completed".to_string(),
                     turn_id: Some(turn.clone()),
                     tool: None,
+                    content_state: crate::protocol::TranscriptContentState::Full,
                 });
                 if emit_assistant {
                     entries.push(TranscriptEntryView {
@@ -4299,6 +4303,7 @@ mod review_tests {
                         status: "completed".to_string(),
                         turn_id: Some(turn),
                         tool: None,
+                        content_state: crate::protocol::TranscriptContentState::Full,
                     });
                 }
             });

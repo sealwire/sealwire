@@ -5,8 +5,8 @@ use crate::protocol::{
     FileChangeDiffView, LogEntryView, ReviewJobView, ReviewerThreadView, SecurityMode,
     SessionSnapshot, SessionSnapshotCompactProfile, ThreadEntriesResponse,
     ThreadEntryDetailResponse, ThreadSummaryView, ThreadTranscriptResponse, ThreadsResponse,
-    ThreadsResponseCompactProfile, ToolCallView, TranscriptEntryKind, TranscriptEntryView,
-    EMERGENCY_TRANSCRIPT_SHELL_CHARS,
+    ThreadsResponseCompactProfile, ToolCallView, TranscriptContentState, TranscriptEntryKind,
+    TranscriptEntryView, EMERGENCY_TRANSCRIPT_SHELL_CHARS,
 };
 
 const MAX_BROKER_LOGS: usize = 8;
@@ -78,6 +78,7 @@ fn make_snapshot() -> SessionSnapshot {
                 status: "completed".to_string(),
                 turn_id: Some(format!("turn-{index}")),
                 tool: None,
+                content_state: crate::protocol::TranscriptContentState::Full,
             })
             .collect(),
         logs: (0..30)
@@ -229,6 +230,7 @@ fn local_web_control_plane_metadata_does_not_shell_normal_live_transcript() {
             status: "completed".to_string(),
             turn_id: Some("turn-live".to_string()),
             tool: None,
+            content_state: crate::protocol::TranscriptContentState::Full,
         })
         .collect();
     snapshot.active_review_jobs = (0..15)
@@ -289,6 +291,619 @@ fn local_web_control_plane_metadata_does_not_shell_normal_live_transcript() {
         compacted_texts, original_texts,
         "unrelated review/device metadata must not turn normal live messages into \
          {EMERGENCY_TRANSCRIPT_SHELL_CHARS}-character emergency shells"
+    );
+    // The live messages stay authoritative `Full` (never downgraded to Preview
+    // or Omitted) because the control-plane caps protect the transcript budget.
+    assert!(
+        compacted
+            .transcript
+            .iter()
+            .all(|entry| entry.content_state == TranscriptContentState::Full),
+        "normal live messages must keep content_state Full"
+    );
+    // ...and LocalWeb still respects its hard byte cap (no longer a soft target).
+    assert!(serde_json::to_vec(&compacted).unwrap().len() <= LOCAL_SESSION_SNAPSHOT_TARGET_BYTES);
+}
+
+#[test]
+fn emit_cross_layer_compacted_snapshot_fixture() {
+    // P1.8 cross-layer harness: the frontend hydration/renderer regressions must
+    // run against a REAL relay-compacted snapshot, not a separately hand-authored
+    // JS fixture that can silently drift from the Rust contract. This test is the
+    // single source of truth: it builds two realistic compacted snapshots
+    // (RemoteSurface with omitted shells, LocalWeb with a preview + full mix) plus
+    // the authoritative full entries a page fetch would return, and writes them to
+    // a committed fixture the JS cross-layer test consumes verbatim.
+    //
+    // Without UPDATE_FIXTURES it asserts the committed bytes still match freshly
+    // compacted output, so any change to the Rust compaction contract fails here
+    // until the fixture (and the JS expectations) are regenerated.
+    let authoritative_entries: Vec<TranscriptEntryView> = vec![
+        TranscriptEntryView {
+            item_id: Some("u-omitted".to_string()),
+            kind: TranscriptEntryKind::UserText,
+            text: Some("please summarize the whole project in detail".to_string()),
+            status: "completed".to_string(),
+            turn_id: Some("turn-omitted".to_string()),
+            tool: None,
+            content_state: TranscriptContentState::Full,
+        },
+        TranscriptEntryView {
+            item_id: Some("a-omitted".to_string()),
+            kind: TranscriptEntryKind::AgentText,
+            text: Some(format!(
+                "The relay boots with the complete provider and transcript state. {}",
+                "It then streams deltas as the turn progresses. ".repeat(40)
+            )),
+            status: "completed".to_string(),
+            turn_id: Some("turn-omitted".to_string()),
+            tool: None,
+            content_state: TranscriptContentState::Full,
+        },
+    ];
+
+    // RemoteSurface snapshot whose only over-budget bulk is an unfixable
+    // non-transcript field (a giant cwd): the tail survives as omitted identity
+    // shells, never an empty transcript.
+    let mut remote = make_snapshot();
+    remote.logs.clear();
+    remote.pending_approvals.clear();
+    remote.reviewer_threads.clear();
+    remote.active_review_jobs.clear();
+    remote.device_records.clear();
+    remote.active_thread_id = Some("thread-omitted".to_string());
+    remote.current_cwd = "/tmp/".to_string() + &"超长路径".repeat(3_000);
+    remote.transcript = authoritative_entries.clone();
+    remote.transcript_truncated = false;
+    let remote_compacted = remote.compact_for(SessionSnapshotCompactProfile::RemoteSurface);
+    assert!(
+        remote_compacted
+            .transcript
+            .iter()
+            .all(|entry| entry.content_state == TranscriptContentState::Omitted),
+        "fixture scenario must actually omit the tail"
+    );
+
+    // LocalWeb snapshot with a long (preview) message, a short message whose
+    // genuine text ends in "..." (must stay full), and a short full message.
+    let mut local = make_snapshot();
+    local.logs.clear();
+    local.pending_approvals.clear();
+    local.reviewer_threads.clear();
+    local.active_review_jobs.clear();
+    local.device_records.clear();
+    local.active_thread_id = Some("thread-preview".to_string());
+    local.current_cwd = "/tmp/project".to_string();
+    local.transcript = vec![
+        TranscriptEntryView {
+            item_id: Some("u-preview".to_string()),
+            kind: TranscriptEntryKind::UserText,
+            text: Some("walk me through it...".to_string()),
+            status: "completed".to_string(),
+            turn_id: Some("turn-preview".to_string()),
+            tool: None,
+            content_state: TranscriptContentState::Full,
+        },
+        TranscriptEntryView {
+            item_id: Some("a-preview-long".to_string()),
+            kind: TranscriptEntryKind::AgentText,
+            text: Some(format!("Detailed answer. {}", "More detail. ".repeat(400))),
+            status: "completed".to_string(),
+            turn_id: Some("turn-preview".to_string()),
+            tool: None,
+            content_state: TranscriptContentState::Full,
+        },
+        TranscriptEntryView {
+            item_id: Some("a-preview-short".to_string()),
+            kind: TranscriptEntryKind::AgentText,
+            text: Some("done, hope that helps...".to_string()),
+            status: "completed".to_string(),
+            turn_id: Some("turn-preview".to_string()),
+            tool: None,
+            content_state: TranscriptContentState::Full,
+        },
+    ];
+    local.transcript_truncated = false;
+    let local_compacted = local.compact_for(SessionSnapshotCompactProfile::LocalWeb);
+
+    let payload = serde_json::json!({
+        "_comment": "Generated by relay-server protocol_tests::emit_cross_layer_compacted_snapshot_fixture. \
+                     Regenerate with UPDATE_FIXTURES=1 cargo test -p relay-server emit_cross_layer_compacted_snapshot_fixture.",
+        "remote_omitted_snapshot": remote_compacted,
+        "remote_omitted_authoritative_entries": authoritative_entries,
+        "local_preview_snapshot": local_compacted,
+    });
+    let pretty = serde_json::to_string_pretty(&payload).unwrap() + "\n";
+
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../test-fixtures/protocol/cross_layer_compacted_snapshots.json"
+    );
+    if std::env::var("UPDATE_FIXTURES").is_ok() {
+        std::fs::write(path, &pretty).expect("write cross-layer fixture");
+    } else {
+        let existing = std::fs::read_to_string(path).unwrap_or_default();
+        assert_eq!(
+            existing, pretty,
+            "cross-layer compacted-snapshot fixture is stale; regenerate with \
+             UPDATE_FIXTURES=1 cargo test -p relay-server emit_cross_layer_compacted_snapshot_fixture"
+        );
+    }
+}
+
+#[test]
+fn long_session_snapshot_stays_bounded_in_bytes_and_entry_count() {
+    // Perf regression: a long-lived session (1000 transcript entries) plus a
+    // control-plane flood must still compact to a snapshot that is bounded in
+    // BOTH serialized bytes (transport budget) and transcript entry count (what
+    // the client parses and mounts). The omitted-content contract keeps the
+    // snapshot a bounded identity/tail projection; the full bodies ride the
+    // page/detail channel instead.
+    let make_long = || {
+        let mut snapshot = make_snapshot();
+        snapshot.logs.clear();
+        snapshot.pending_approvals.clear();
+        snapshot.transcript = (0..1_000)
+            .map(|index| TranscriptEntryView {
+                item_id: Some(format!("item-{index:04}")),
+                kind: if index % 2 == 0 {
+                    TranscriptEntryKind::UserText
+                } else {
+                    TranscriptEntryKind::AgentText
+                },
+                text: Some(format!("turn {index}: {}", "lorem ipsum dolor ".repeat(60))),
+                status: "completed".to_string(),
+                turn_id: Some(format!("turn-{index}")),
+                tool: None,
+                content_state: TranscriptContentState::Full,
+            })
+            .collect();
+        snapshot.reviewer_threads = (0..200)
+            .map(|index| ReviewerThreadView {
+                reviewer_thread_id: format!("reviewer-{index:03}"),
+                parent_thread_id: "thread-1".to_string(),
+                reviewer_provider: Some("claude_code".to_string()),
+                name: Some(format!("review {index}")),
+                updated_at: Some(1_750_000_000 + index),
+            })
+            .collect();
+        snapshot
+    };
+
+    for (profile, byte_cap, max_entries) in [
+        (
+            SessionSnapshotCompactProfile::RemoteSurface,
+            SESSION_SNAPSHOT_TARGET_BYTES,
+            MAX_BROKER_TRANSCRIPT_ENTRIES,
+        ),
+        (
+            SessionSnapshotCompactProfile::LocalWeb,
+            LOCAL_SESSION_SNAPSHOT_TARGET_BYTES,
+            8usize,
+        ),
+    ] {
+        let compacted = make_long().compact_for(profile);
+        let bytes = serde_json::to_vec(&compacted).unwrap().len();
+        assert!(
+            bytes <= byte_cap,
+            "long-session snapshot blew the byte cap: {bytes} > {byte_cap}"
+        );
+        assert!(
+            compacted.transcript.len() <= max_entries,
+            "long-session snapshot mounted too many rows: {} > {max_entries}",
+            compacted.transcript.len()
+        );
+        assert!(
+            compacted.transcript_truncated,
+            "a 1000-entry session must report truncation"
+        );
+        // The tail is preserved (newest entries), so the client hydrates older
+        // pages rather than losing the live conversation.
+        assert_eq!(
+            compacted
+                .transcript
+                .last()
+                .and_then(|e| e.item_id.as_deref()),
+            Some("item-0999")
+        );
+    }
+}
+
+#[test]
+fn compact_shelled_entries_are_marked_omitted_not_inferred_from_ellipsis() {
+    // P1.1/P1.2: when an unfixable oversized non-transcript field (a giant cwd)
+    // forces the surviving tail into the emergency shell, each entry must carry
+    // an EXPLICIT `content_state: omitted` — the client must never have to infer
+    // omission from a trailing "...". Identity (item_id/kind/status/turn_id) is
+    // preserved so the client can render a loading placeholder in place.
+    let mut snapshot = make_snapshot();
+    snapshot.current_cwd = "/tmp/".to_string() + &"超长路径".repeat(3_000);
+    snapshot.logs.clear();
+    snapshot.pending_approvals.clear();
+    snapshot.transcript = (0..3)
+        .map(|index| TranscriptEntryView {
+            item_id: Some(format!("item-{index}")),
+            kind: TranscriptEntryKind::AgentText,
+            // Note: this content does NOT end in "..." — yet it is omitted. The
+            // omission signal is the explicit state, not a string suffix.
+            text: Some(format!(
+                "normal assistant message {index} without any ellipsis"
+            )),
+            status: "completed".to_string(),
+            turn_id: Some(format!("turn-{index}")),
+            tool: None,
+            content_state: TranscriptContentState::Full,
+        })
+        .collect();
+
+    let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::RemoteSurface);
+
+    assert_eq!(compacted.transcript.len(), 3);
+    assert!(compacted.transcript_truncated);
+    for (index, entry) in compacted.transcript.iter().enumerate() {
+        assert_eq!(
+            entry.content_state,
+            TranscriptContentState::Omitted,
+            "shelled entry {index} must be explicitly omitted"
+        );
+        assert_eq!(
+            entry.item_id.as_deref(),
+            Some(format!("item-{index}").as_str()),
+            "identity must survive omission"
+        );
+        assert_eq!(entry.status, "completed");
+    }
+}
+
+#[test]
+fn compact_marks_ellipsis_truncated_entry_preview_and_leaves_short_full() {
+    // P1.1/P1.2: a long entry clipped to the per-entry budget is `Preview`
+    // (readable, hydrate for the rest). A short entry is untouched and stays
+    // `Full` — INCLUDING one whose genuine text legitimately ends in "...", which
+    // must never be misclassified as truncated.
+    let mut snapshot = make_snapshot();
+    snapshot.logs.clear();
+    snapshot.pending_approvals.clear();
+    snapshot.transcript_truncated = false;
+    snapshot.transcript = vec![
+        TranscriptEntryView {
+            item_id: Some("short-ellipsis".to_string()),
+            kind: TranscriptEntryKind::AgentText,
+            // A real, complete answer that happens to trail off in an ellipsis.
+            text: Some("Sure — let me think about that...".to_string()),
+            status: "completed".to_string(),
+            turn_id: Some("turn-1".to_string()),
+            tool: None,
+            content_state: TranscriptContentState::Full,
+        },
+        TranscriptEntryView {
+            item_id: Some("long".to_string()),
+            kind: TranscriptEntryKind::AgentText,
+            text: Some("L".repeat(MAX_BROKER_TRANSCRIPT_CHARS * 4)),
+            status: "completed".to_string(),
+            turn_id: Some("turn-1".to_string()),
+            tool: None,
+            content_state: TranscriptContentState::Full,
+        },
+    ];
+
+    let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::RemoteSurface);
+
+    let short = &compacted.transcript[0];
+    assert_eq!(
+        short.content_state,
+        TranscriptContentState::Full,
+        "a genuine short body ending in '...' must stay Full"
+    );
+    assert_eq!(
+        short.text.as_deref(),
+        Some("Sure — let me think about that...")
+    );
+
+    let long = &compacted.transcript[1];
+    assert_eq!(
+        long.content_state,
+        TranscriptContentState::Preview,
+        "an ellipsis-truncated long body must be Preview"
+    );
+    assert!(long.text.as_ref().unwrap().chars().count() <= MAX_BROKER_TRANSCRIPT_CHARS);
+}
+
+#[test]
+fn control_plane_flood_keeps_both_surfaces_bounded_without_shelling_live_text() {
+    // P1.5/P1.6: a flood of low-frequency control-plane records (review jobs,
+    // reviewer threads, device records) must NOT push normal live transcript
+    // into the shell, and BOTH surfaces must stay under their hard byte cap.
+    // Three short messages == the broker text-shrink floor (min 3) and below
+    // LocalWeb's (min 4), so no transcript entry is dropped; the control-plane is
+    // bounded/drained instead.
+    let make_flooded = || {
+        let mut snapshot = make_snapshot();
+        snapshot.logs.clear();
+        snapshot.pending_approvals.clear();
+        snapshot.transcript_truncated = false;
+        snapshot.transcript = (0..3)
+            .map(|index| TranscriptEntryView {
+                item_id: Some(format!("live-{index}")),
+                kind: TranscriptEntryKind::AgentText,
+                text: Some(format!("live assistant message {index}")),
+                status: "completed".to_string(),
+                turn_id: Some("turn-live".to_string()),
+                tool: None,
+                content_state: TranscriptContentState::Full,
+            })
+            .collect();
+        snapshot.active_review_jobs = (0..120)
+            .map(|index| ReviewJobView {
+                id: format!("review-job-{index:03}-{}", "a".repeat(40)),
+                parent_thread_id: "thread-1".to_string(),
+                reviewer_provider: "claude_code".to_string(),
+                reviewer_model: Some("claude-opus-4-6".to_string()),
+                reviewer_effort: Some("high".to_string()),
+                reviewer_thread_id: Some(format!("reviewer-thread-{index:03}")),
+                // Terminal (aged-out) jobs — droppable by the cap. Matches the
+                // frontend's terminal-status set ("complete", not "completed").
+                status: "complete".to_string(),
+                error: None,
+                updated_at: 1_750_000_000 + index,
+                round: 1,
+                max_rounds: 3,
+                verdict: Some("no blocking findings in this review round".to_string()),
+            })
+            .collect();
+        snapshot.reviewer_threads = (0..120)
+            .map(|index| ReviewerThreadView {
+                reviewer_thread_id: format!("reviewer-thread-{index:03}-{}", "d".repeat(30)),
+                parent_thread_id: "thread-1".to_string(),
+                reviewer_provider: Some("claude_code".to_string()),
+                name: Some(format!("Independent review {index:03}")),
+                updated_at: Some(1_750_000_000 + index),
+            })
+            .collect();
+        snapshot.device_records = (0..120)
+            .map(|index| DeviceRecordView {
+                device_id: format!("device-{index:03}-{}", "f".repeat(40)),
+                label: format!("Browser device {index:03} {}", "workstation".repeat(3)),
+                lifecycle_state: DeviceLifecycleState::Approved,
+                created_at: 1_750_000_000 + index,
+                state_changed_at: 1_750_000_100 + index,
+                last_seen_at: Some(1_750_000_200 + index),
+                last_peer_id: Some(format!("peer-{index:03}-{}", "9".repeat(36))),
+                broker_join_ticket_expires_at: Some(1_750_003_600 + index),
+                fingerprint: Some(format!("sha256:{}", "0".repeat(48))),
+                path_scope: vec![format!("/Users/example/workspaces/project-{index:03}")],
+            })
+            .collect();
+        snapshot
+    };
+
+    for (profile, cap) in [
+        (
+            SessionSnapshotCompactProfile::RemoteSurface,
+            SESSION_SNAPSHOT_TARGET_BYTES,
+        ),
+        (
+            SessionSnapshotCompactProfile::LocalWeb,
+            LOCAL_SESSION_SNAPSHOT_TARGET_BYTES,
+        ),
+    ] {
+        let compacted = make_flooded().compact_for(profile);
+        let bytes = serde_json::to_vec(&compacted).unwrap().len();
+        assert!(
+            bytes <= cap,
+            "control-plane flood blew the hard byte cap: {bytes} > {cap}"
+        );
+        // Every live message survives in full — the control-plane was bounded,
+        // not the conversation.
+        assert_eq!(compacted.transcript.len(), 3, "no live message was dropped");
+        for (index, entry) in compacted.transcript.iter().enumerate() {
+            assert_eq!(
+                entry.content_state,
+                TranscriptContentState::Full,
+                "live message {index} must stay Full under a control-plane flood"
+            );
+            assert_eq!(
+                entry.text.as_deref(),
+                Some(format!("live assistant message {index}").as_str())
+            );
+        }
+        // The control-plane collections are themselves bounded.
+        assert!(compacted.active_review_jobs.len() <= 24);
+        assert!(compacted.reviewer_threads.len() <= 48);
+        assert!(compacted.device_records.len() <= 48);
+    }
+}
+
+#[test]
+fn control_plane_cap_keeps_actionable_device_records_not_terminal_junk() {
+    // The device_records view arrives sorted Pending(0) → Approved(1) →
+    // Rejected(2) → Revoked(3). When the count exceeds the cap, the cap must keep
+    // the actionable HEAD (pending/approved) rather than the terminal junk tail,
+    // so a pending device card never silently vanishes from the management list.
+    let mut snapshot = make_snapshot();
+    snapshot.logs.clear();
+    snapshot.pending_approvals.clear();
+    snapshot.transcript.clear();
+    snapshot.transcript_truncated = false;
+    let mut device_records = Vec::new();
+    // One actionable pending device at the head (sort key 0)...
+    device_records.push(DeviceRecordView {
+        device_id: "device-pending".to_string(),
+        label: "Pending phone".to_string(),
+        lifecycle_state: DeviceLifecycleState::Pending,
+        created_at: 1,
+        state_changed_at: 1,
+        last_seen_at: Some(1),
+        last_peer_id: None,
+        broker_join_ticket_expires_at: None,
+        fingerprint: None,
+        path_scope: vec![],
+    });
+    // ...followed by 50 approved devices, exceeding the LocalWeb cap of 48.
+    for index in 0..50 {
+        device_records.push(DeviceRecordView {
+            device_id: format!("device-approved-{index:02}"),
+            label: format!("Approved {index:02}"),
+            lifecycle_state: DeviceLifecycleState::Approved,
+            created_at: 10 + index,
+            state_changed_at: 10 + index,
+            last_seen_at: Some(10 + index),
+            last_peer_id: None,
+            broker_join_ticket_expires_at: None,
+            fingerprint: None,
+            path_scope: vec![],
+        });
+    }
+    snapshot.device_records = device_records;
+
+    let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::LocalWeb);
+
+    assert!(compacted.device_records.len() <= 48);
+    assert!(
+        compacted
+            .device_records
+            .iter()
+            .any(|record| record.device_id == "device-pending"),
+        "the cap dropped the actionable pending device while keeping approved junk"
+    );
+}
+
+#[test]
+fn control_plane_cap_keeps_active_parent_reviewer_threads() {
+    // reviewer_threads arrive sorted by reviewer_thread_id (arbitrary relative to
+    // the active thread). When over the cap, the active parent's reviewers — the
+    // ones the active view needs to hide/cascade — must survive even if their ids
+    // sort to the dropped end. make_snapshot's active thread is "thread-1".
+    let mut snapshot = make_snapshot();
+    snapshot.logs.clear();
+    snapshot.pending_approvals.clear();
+    snapshot.transcript.clear();
+    snapshot.transcript_truncated = false;
+    let mut reviewer_threads = Vec::new();
+    // Active-parent reviewers sit at the lexicographic HEAD (ids "00*").
+    for index in 0..2 {
+        reviewer_threads.push(ReviewerThreadView {
+            reviewer_thread_id: format!("reviewer-00{index}"),
+            parent_thread_id: "thread-1".to_string(),
+            reviewer_provider: Some("claude_code".to_string()),
+            name: Some(format!("active review {index}")),
+            updated_at: Some(1),
+        });
+    }
+    // 60 other-parent reviewers push the total over the LocalWeb cap of 48.
+    for index in 0..60 {
+        reviewer_threads.push(ReviewerThreadView {
+            reviewer_thread_id: format!("reviewer-{index:03}-other"),
+            parent_thread_id: format!("other-parent-{index:02}"),
+            reviewer_provider: Some("claude_code".to_string()),
+            name: Some(format!("other review {index}")),
+            updated_at: Some(1),
+        });
+    }
+    snapshot.reviewer_threads = reviewer_threads;
+
+    let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::LocalWeb);
+
+    assert!(compacted.reviewer_threads.len() <= 48);
+    let active_kept = compacted
+        .reviewer_threads
+        .iter()
+        .filter(|view| view.parent_thread_id == "thread-1")
+        .count();
+    assert_eq!(
+        active_kept, 2,
+        "the cap dropped the active parent's reviewer threads"
+    );
+}
+
+#[test]
+fn compact_for_broker_stays_under_budget_even_with_oversized_cwd() {
+    // Review finding F3: the reduction loop shells the transcript and then exits,
+    // so a single oversized non-transcript string field (here current_cwd) could
+    // leave the frame over budget. The hard-cap profiles must clamp it so the
+    // returned snapshot honors the byte target.
+    let mut snapshot = make_snapshot();
+    snapshot.logs.clear();
+    snapshot.pending_approvals.clear();
+    snapshot.reviewer_threads.clear();
+    snapshot.active_review_jobs.clear();
+    snapshot.device_records.clear();
+    snapshot.transcript = vec![TranscriptEntryView {
+        item_id: Some("a1".to_string()),
+        kind: TranscriptEntryKind::AgentText,
+        text: Some("short answer".to_string()),
+        status: "completed".to_string(),
+        turn_id: Some("turn-1".to_string()),
+        tool: None,
+        content_state: TranscriptContentState::Full,
+    }];
+    snapshot.current_cwd = "/tmp/".to_string() + &"超长路径".repeat(4_000);
+
+    let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::RemoteSurface);
+
+    let bytes = serde_json::to_vec(&compacted).unwrap().len();
+    assert!(
+        bytes <= SESSION_SNAPSHOT_TARGET_BYTES,
+        "an oversized cwd left the broker snapshot over budget: {bytes} bytes"
+    );
+    assert!(compacted.current_cwd.starts_with("/tmp/"));
+}
+
+#[test]
+fn control_plane_cap_keeps_non_terminal_review_jobs() {
+    // Review finding F2: the active_review_jobs cap keeps the newest by
+    // updated_at, but a non-terminal (running/blocked) job has an OLD updated_at
+    // and would be dropped while newer terminal jobs survive. The UI derives the
+    // blocked-review alert and send/lock gating from this global list
+    // (review-state.js), so a non-terminal job must never be dropped by the cap.
+    let mut snapshot = make_snapshot();
+    snapshot.logs.clear();
+    snapshot.pending_approvals.clear();
+    snapshot.transcript.clear();
+    snapshot.transcript_truncated = false;
+    let mut jobs = Vec::new();
+    // One old BLOCKED (non-terminal) job at the head (oldest updated_at)...
+    jobs.push(ReviewJobView {
+        id: "review-blocked".to_string(),
+        parent_thread_id: "background-thread".to_string(),
+        reviewer_provider: "claude_code".to_string(),
+        reviewer_model: Some("claude-opus-4-6".to_string()),
+        reviewer_effort: Some("high".to_string()),
+        reviewer_thread_id: Some("reviewer-blocked".to_string()),
+        status: "blocked".to_string(),
+        error: None,
+        updated_at: 1,
+        round: 1,
+        max_rounds: 3,
+        verdict: None,
+    });
+    // ...followed by 30 newer terminal (complete) jobs, exceeding the broker cap.
+    for index in 0..30 {
+        jobs.push(ReviewJobView {
+            id: format!("review-complete-{index:02}"),
+            parent_thread_id: format!("thread-{index:02}"),
+            reviewer_provider: "claude_code".to_string(),
+            reviewer_model: Some("claude-opus-4-6".to_string()),
+            reviewer_effort: Some("high".to_string()),
+            reviewer_thread_id: Some(format!("reviewer-{index:02}")),
+            status: "complete".to_string(),
+            error: None,
+            updated_at: 1_000 + index,
+            round: 1,
+            max_rounds: 3,
+            verdict: Some("no blocking findings".to_string()),
+        });
+    }
+    snapshot.active_review_jobs = jobs;
+
+    let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::RemoteSurface);
+
+    assert!(
+        compacted
+            .active_review_jobs
+            .iter()
+            .any(|job| job.status == "blocked"),
+        "the cap dropped a non-terminal (blocked) review job while keeping terminal ones"
     );
 }
 
@@ -353,6 +968,7 @@ fn compact_for_surfaces_truncates_a_single_oversized_agent_message() {
                 status: "completed".to_string(),
                 turn_id: Some("turn-1".to_string()),
                 tool: None,
+                content_state: crate::protocol::TranscriptContentState::Full,
             },
             TranscriptEntryView {
                 item_id: Some("a1".to_string()),
@@ -361,6 +977,7 @@ fn compact_for_surfaces_truncates_a_single_oversized_agent_message() {
                 status: "completed".to_string(),
                 turn_id: Some("turn-1".to_string()),
                 tool: None,
+                content_state: crate::protocol::TranscriptContentState::Full,
             },
         ];
 
@@ -587,6 +1204,7 @@ fn compact_for_broker_shells_transcript_tail_as_last_resort_without_clearing() {
             status: "completed".to_string(),
             turn_id: Some(format!("turn-{index}")),
             tool: None,
+            content_state: crate::protocol::TranscriptContentState::Full,
         })
         .collect();
 
@@ -656,6 +1274,7 @@ fn compact_for_broker_shells_tool_entries_dropping_heavy_content() {
             apply_state: None,
             file_changes_omitted: false,
         }),
+        content_state: crate::protocol::TranscriptContentState::Full,
     }];
 
     let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::RemoteSurface);
@@ -710,6 +1329,7 @@ fn strip_file_change_diffs_keeps_summary_and_flags_entry() {
                 apply_state: None,
                 file_changes_omitted: false,
             }),
+            content_state: crate::protocol::TranscriptContentState::Full,
         },
         // A plain agent-text entry with no diff body — must be left untouched.
         TranscriptEntryView {
@@ -719,6 +1339,7 @@ fn strip_file_change_diffs_keeps_summary_and_flags_entry() {
             status: "completed".to_string(),
             turn_id: Some("turn-1".to_string()),
             tool: None,
+            content_state: crate::protocol::TranscriptContentState::Full,
         },
     ];
 
@@ -777,6 +1398,7 @@ fn compact_for_broker_shells_bring_oversized_transcript_under_budget() {
                 apply_state: None,
                 file_changes_omitted: false,
             }),
+            content_state: crate::protocol::TranscriptContentState::Full,
         })
         .collect();
 
@@ -842,6 +1464,7 @@ fn compact_for_broker_trims_many_file_changes_without_clearing_transcript() {
             apply_state: None,
             file_changes_omitted: false,
         }),
+        content_state: crate::protocol::TranscriptContentState::Full,
     }];
 
     let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::RemoteSurface);
@@ -1019,6 +1642,7 @@ fn compact_for_broker_preserves_existing_transcript_truncated_flag() {
             status: "completed".to_string(),
             turn_id: Some(format!("turn-{index}")),
             tool: None,
+            content_state: crate::protocol::TranscriptContentState::Full,
         })
         .collect();
 
@@ -1038,6 +1662,7 @@ fn thread_transcript_response_preserves_oversized_single_entries() {
             status: "completed".to_string(),
             turn_id: Some("turn-1".to_string()),
             tool: None,
+            content_state: crate::protocol::TranscriptContentState::Full,
         },
         TranscriptEntryView {
             item_id: Some("item-2".to_string()),
@@ -1046,6 +1671,7 @@ fn thread_transcript_response_preserves_oversized_single_entries() {
             status: "completed".to_string(),
             turn_id: Some("turn-2".to_string()),
             tool: None,
+            content_state: crate::protocol::TranscriptContentState::Full,
         },
     ];
 
@@ -1105,6 +1731,7 @@ fn thread_transcript_response_keeps_complete_entries_together() {
         status: "completed".to_string(),
         turn_id: Some("turn-1".to_string()),
         tool: None,
+        content_state: crate::protocol::TranscriptContentState::Full,
     }];
 
     let page = ThreadTranscriptResponse::from_transcript("thread-1".to_string(), transcript, 0);
@@ -1127,6 +1754,7 @@ fn thread_transcript_response_can_page_backwards_from_tail() {
             status: "completed".to_string(),
             turn_id: Some(format!("turn-{index}")),
             tool: None,
+            content_state: crate::protocol::TranscriptContentState::Full,
         })
         .collect::<Vec<_>>();
 
@@ -1184,6 +1812,7 @@ fn thread_transcript_response_packs_many_small_entries_within_budget() {
             status: "completed".to_string(),
             turn_id: Some(format!("turn-{index}")),
             tool: None,
+            content_state: crate::protocol::TranscriptContentState::Full,
         })
         .collect::<Vec<_>>();
 
@@ -1249,6 +1878,7 @@ fn thread_transcript_page_materializes_only_entries_near_the_requested_cursor() 
                 status: "completed".to_string(),
                 turn_id: Some(format!("turn-{index}")),
                 tool: None,
+                content_state: crate::protocol::TranscriptContentState::Full,
             }
         },
     );
@@ -1280,6 +1910,7 @@ fn thread_transcript_response_tail_returns_latest_page_first() {
             status: "completed".to_string(),
             turn_id: Some(format!("turn-{index}")),
             tool: None,
+            content_state: crate::protocol::TranscriptContentState::Full,
         })
         .collect::<Vec<_>>();
 
@@ -1342,6 +1973,7 @@ fn thread_transcript_history_externalizes_large_file_change_diffs() {
             apply_state: None,
             file_changes_omitted: false,
         }),
+        content_state: crate::protocol::TranscriptContentState::Full,
     }];
 
     let page = ThreadTranscriptResponse::from_transcript_before(
@@ -1367,6 +1999,7 @@ fn thread_entries_response_returns_complete_entries_for_requested_item_ids() {
             status: "completed".to_string(),
             turn_id: Some("turn-1".to_string()),
             tool: None,
+            content_state: crate::protocol::TranscriptContentState::Full,
         },
         TranscriptEntryView {
             item_id: Some("item-2".to_string()),
@@ -1375,6 +2008,7 @@ fn thread_entries_response_returns_complete_entries_for_requested_item_ids() {
             status: "completed".to_string(),
             turn_id: Some("turn-2".to_string()),
             tool: None,
+            content_state: crate::protocol::TranscriptContentState::Full,
         },
     ];
 
@@ -1402,6 +2036,7 @@ fn thread_entry_detail_response_chunks_large_command_text() {
         status: "completed".to_string(),
         turn_id: Some("turn-1".to_string()),
         tool: None,
+        content_state: crate::protocol::TranscriptContentState::Full,
     };
 
     let response =
@@ -1471,6 +2106,7 @@ fn thread_entry_detail_response_chunks_large_nested_file_change_diff() {
             apply_state: None,
             file_changes_omitted: false,
         }),
+        content_state: crate::protocol::TranscriptContentState::Full,
     };
 
     let response =

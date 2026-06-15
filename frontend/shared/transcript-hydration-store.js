@@ -55,22 +55,95 @@ export function restoreHydratedTranscriptSnapshot(state, snapshot) {
   });
 }
 
-// True when the snapshot's tail contains a truncated ("…"-suffixed) entry whose
-// full text is not already held in the hydration cache. Used to decide whether a
-// structural change to a same-thread snapshot warrants re-fetching the tail.
+// Explicit per-entry content state from the wire. The relay marks a compacted
+// entry `preview` (ellipsis-truncated, still readable) or `omitted` (heavy
+// content dropped to an identity shell). Anything else — including a missing
+// field or a genuine body that happens to end in "..." — is authoritative
+// `full`. This is the ONLY omission signal; string-suffix inference is gone.
+const CONTENT_STATE_FULL = "full";
+const CONTENT_STATE_PREVIEW = "preview";
+const CONTENT_STATE_OMITTED = "omitted";
+
+function contentStateOf(entry) {
+  const state = entry?.content_state;
+  if (state === CONTENT_STATE_OMITTED || state === CONTENT_STATE_PREVIEW) {
+    return state;
+  }
+  return CONTENT_STATE_FULL;
+}
+
+function contentStateRank(state) {
+  if (state === CONTENT_STATE_OMITTED) return 0;
+  if (state === CONTENT_STATE_PREVIEW) return 1;
+  return 2;
+}
+
+function rankToContentState(rank) {
+  if (rank <= 0) return CONTENT_STATE_OMITTED;
+  if (rank === 1) return CONTENT_STATE_PREVIEW;
+  return CONTENT_STATE_FULL;
+}
+
+function isFullContent(entry) {
+  return Boolean(entry) && contentStateOf(entry) === CONTENT_STATE_FULL;
+}
+
+// Terminal entry statuses: a `full` body for one of these is FINAL and can be
+// trusted as complete. A non-terminal (e.g. running) entry's `full` body is only
+// "complete as of this revision" and may still grow, so it must not be treated
+// as authoritative when a later snapshot re-describes it as preview/omitted.
+const TERMINAL_ENTRY_STATUSES = new Set(["completed", "complete", "failed", "error", "cancelled"]);
+
+function isTerminalEntryStatus(status) {
+  return TERMINAL_ENTRY_STATUSES.has(status);
+}
+
+// True when the entry's authoritative body has not yet been delivered (it is a
+// preview or an omitted shell), so a hydration fetch is still required.
+function entryNeedsFullText(entry) {
+  return contentStateOf(entry) !== CONTENT_STATE_FULL;
+}
+
+// True when the entry's renderable content was dropped to an identity shell. The
+// renderer must show a loading placeholder for these — never the clipped shell
+// text or an "(empty)" body.
+export function transcriptEntryContentOmitted(entry) {
+  return contentStateOf(entry) === CONTENT_STATE_OMITTED;
+}
+
+// True when the snapshot's tail contains a preview/omitted entry whose
+// authoritative body we do not already hold. This is the sole re-hydration gate
+// (no signature/shape gate), so a same-id `full -> preview/omitted` transition
+// also re-fetches. It is self-terminating:
+//   * no full body cached            -> fetch;
+//   * preview whose body is LONGER than our cached body (a stale partial)
+//                                     -> fetch (the grown server body wins);
+//   * omitted whose cached body is non-terminal (still running, provisional)
+//                                     -> fetch; once terminal+full it is trusted;
+//   * otherwise (cached full+terminal, or a preview no longer than our body)
+//                                     -> trusted, no fetch.
 function snapshotTailNeedsFullText(state, snapshot) {
   const entries = state.transcriptHydrationEntries;
   for (const entry of snapshot.transcript || []) {
-    const text = entry?.text;
-    if (!looksTruncated(text)) {
+    const incomingState = contentStateOf(entry);
+    if (incomingState === CONTENT_STATE_FULL) {
       continue;
     }
-    const existingText = entries?.get?.(entry.item_id)?.text;
-    const haveFullText =
-      typeof existingText === "string"
-      && !looksTruncated(existingText)
-      && existingText.length >= text.length;
-    if (!haveFullText) {
+    const cached = entries?.get?.(entry.item_id);
+    if (!isFullContent(cached)) {
+      return true;
+    }
+    if (incomingState === CONTENT_STATE_PREVIEW) {
+      const cachedLen = typeof cached.text === "string" ? cached.text.length : 0;
+      const previewLen = typeof entry.text === "string" ? entry.text.length : 0;
+      if (cachedLen < previewLen) {
+        return true;
+      }
+      continue;
+    }
+    // Omitted: the shell text carries no usable length, so trust the cache only
+    // when it is a terminal (final) body.
+    if (!isTerminalEntryStatus(cached.status)) {
       return true;
     }
   }
@@ -92,24 +165,19 @@ export function prepareTranscriptHydrationState(state, snapshot) {
   const sameThread = state.transcriptHydrationThreadId === snapshot.active_thread_id;
   const sameThreadWithVisibleEntries = sameThread && state.transcriptHydrationOrder.length > 0;
 
-  // Re-arm hydration when the visible tail changed shape AND that new shape
-  // carries a truncated entry we don't yet hold full text for — e.g. the long
-  // final assistant message that arrives after the tool work. Without this, the
-  // first oversized snapshot in a turn latches transcriptHydrationTailReady=true
-  // and every later truncated snapshot (including the one with the final long
-  // message) is skipped, leaving the UI stuck on the "…" preview until the
-  // thread is switched away and back.
-  //
-  // Both conditions matter:
-  //   * the signature change (it hashes ids/kinds/turn, NOT the entry text)
-  //     gates this to structural changes, so the repeated snapshots of a single
-  //     turn can't loop and a pure preview-text change never re-fetches;
-  //   * the truncated-and-uncovered check means adding a short, complete entry
-  //     (already fully present in the snapshot) does not trigger a needless
-  //     fetch, and an entry whose full text we already cached is left alone.
-  const tailShapeChanged = sameThread && state.transcriptHydrationSignature !== signature;
+  // Re-arm hydration whenever the visible tail still carries a preview/omitted
+  // entry whose authoritative body we don't already hold. `snapshotTailNeedsFullText`
+  // is the sole gate (NOT a signature/shape change), so:
+  //   * a NEW oversized entry joining the tail re-fetches (its body is uncached);
+  //   * a same-id entry transitioning `full -> preview/omitted` (it grew past the
+  //     budget or was shelled) ALSO re-fetches — the previous shape-change gate
+  //     missed this and left the entry frozen on a stale partial body;
+  //   * it stays loop-safe because the gate is self-terminating: once we hold the
+  //     full terminal body (or a preview no longer than our cache), it returns
+  //     false, so repeated snapshots of one turn and pure preview-text shrinks
+  //     never re-fetch.
   const reHydrateTail =
-    sameThreadWithVisibleEntries && tailShapeChanged && snapshotTailNeedsFullText(state, snapshot);
+    sameThreadWithVisibleEntries && snapshotTailNeedsFullText(state, snapshot);
 
   let patch = sameThreadWithVisibleEntries
     ? createMergedSnapshotTailPatch(state, snapshot, signature)
@@ -278,10 +346,7 @@ function buildHydratedTranscriptSnapshot(
     const existing = entries.get(itemId);
     entries.set(
       itemId,
-      mergeTranscriptEntry(
-        existing,
-        prepareSnapshotOverlayEntry(existing, entry, snapshot.transcript_truncated)
-      )
+      mergeTranscriptEntry(existing, prepareSnapshotOverlayEntry(existing, entry))
     );
     if (!order.includes(itemId)) {
       order.push(itemId);
@@ -318,6 +383,7 @@ function toTranscriptEntry(entry) {
     status: entry.status,
     turn_id: entry.turn_id || null,
     tool: entry.tool || null,
+    content_state: contentStateOf(entry),
   };
 }
 
@@ -333,10 +399,7 @@ function createMergedSnapshotTailPatch(state, snapshot, signature) {
     const existing = nextEntries.get(itemId);
     nextEntries.set(
       itemId,
-      mergeTranscriptEntry(
-        existing,
-        prepareSnapshotOverlayEntry(existing, entry, snapshot.transcript_truncated)
-      )
+      mergeTranscriptEntry(existing, prepareSnapshotOverlayEntry(existing, entry))
     );
     if (!nextOrder.includes(itemId)) {
       nextOrder.push(itemId);
@@ -360,22 +423,40 @@ function mergeTranscriptEntry(existing, incoming) {
     return existing;
   }
 
+  const existingFull = isFullContent(existing);
+  const incomingFull = isFullContent(incoming);
+  // The merged content_state is the more-authoritative of the two, because we
+  // keep the more complete body below. This is how an authoritative page (full)
+  // overlaying a cached omitted/preview shell promotes the entry to full.
+  const mergedContentState = rankToContentState(
+    Math.max(
+      contentStateRank(contentStateOf(existing)),
+      contentStateRank(contentStateOf(incoming))
+    )
+  );
+
   return {
     ...existing,
     ...incoming,
-    text: selectTranscriptText(existing.text, incoming.text),
-    tool: mergeToolView(existing.tool, incoming.tool),
+    text: selectTranscriptText(existing.text, incoming.text, existingFull, incomingFull),
+    tool: mergeToolView(existing.tool, incoming.tool, existingFull, incomingFull),
     turn_id: incoming.turn_id || existing.turn_id || null,
+    content_state: mergedContentState,
   };
 }
 
-function prepareSnapshotOverlayEntry(existing, entry, snapshotTruncated) {
+// Project a snapshot tail entry for overlay/merge. An `omitted` entry's text is
+// the relay's clipped identity shell, which must never be rendered as message
+// content. Drop it to `null` (keeping identity + the omitted state) unless we
+// already hold the authoritative body — the renderer then shows a unified
+// loading placeholder, and hydration replaces it in place.
+function prepareSnapshotOverlayEntry(existing, entry) {
   const incoming = toTranscriptEntry(entry);
-  if (
-    snapshotTruncated
-    && !existing
-    && looksTruncated(incoming.text)
-  ) {
+  // An omitted entry's text is the relay's meaningless clipped identity shell —
+  // it must NEVER be merged or rendered. Drop it to null unconditionally; the
+  // merge then keeps any authoritative body we already hold, and the renderer
+  // falls back to a loading placeholder when none exists. Hydration replaces it.
+  if (transcriptEntryContentOmitted(incoming)) {
     return {
       ...incoming,
       text: null,
@@ -384,20 +465,25 @@ function prepareSnapshotOverlayEntry(existing, entry, snapshotTruncated) {
   return incoming;
 }
 
-function selectTranscriptText(existingText, incomingText) {
+function selectTranscriptText(existingText, incomingText, existingFull = true, incomingFull = true) {
   if (incomingText == null) {
     return existingText ?? null;
   }
   if (existingText == null) {
     return incomingText;
   }
-  if (looksTruncated(incomingText) && existingText.length >= incomingText.length) {
+  // Keep a cached full body over a non-authoritative (preview) incoming body ONLY
+  // when our cache is at least as long — i.e. genuinely more complete. A stale
+  // partial cache is SHORTER than the grown preview the server now ships, so the
+  // longer one must win (otherwise the entry freezes on the partial). No
+  // "..."-suffix inference; fullness comes from content_state and length.
+  if (existingFull && !incomingFull && existingText.length >= incomingText.length) {
     return existingText;
   }
   return incomingText.length >= existingText.length ? incomingText : existingText;
 }
 
-function mergeToolView(existingTool, incomingTool) {
+function mergeToolView(existingTool, incomingTool, existingFull = true, incomingFull = true) {
   if (!existingTool) {
     return incomingTool || null;
   }
@@ -408,10 +494,20 @@ function mergeToolView(existingTool, incomingTool) {
   return {
     ...existingTool,
     ...incomingTool,
-    detail: selectTranscriptText(existingTool.detail, incomingTool.detail),
-    input_preview: selectTranscriptText(existingTool.input_preview, incomingTool.input_preview),
-    result_preview: selectTranscriptText(existingTool.result_preview, incomingTool.result_preview),
-    diff: selectTranscriptText(existingTool.diff, incomingTool.diff),
+    detail: selectTranscriptText(existingTool.detail, incomingTool.detail, existingFull, incomingFull),
+    input_preview: selectTranscriptText(
+      existingTool.input_preview,
+      incomingTool.input_preview,
+      existingFull,
+      incomingFull
+    ),
+    result_preview: selectTranscriptText(
+      existingTool.result_preview,
+      incomingTool.result_preview,
+      existingFull,
+      incomingFull
+    ),
+    diff: selectTranscriptText(existingTool.diff, incomingTool.diff, existingFull, incomingFull),
     file_changes: mergeFileChanges(existingTool.file_changes, incomingTool.file_changes),
   };
 }
@@ -440,10 +536,6 @@ function mergeFileChanges(existingChanges, incomingChanges) {
   }
 
   return order.map((key) => changesByPath.get(key)).filter(Boolean);
-}
-
-function looksTruncated(value) {
-  return typeof value === "string" && value.endsWith("...");
 }
 
 function collapseEntryParts(parts) {
