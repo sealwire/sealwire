@@ -697,6 +697,23 @@ marking idle locally."
         self.expire_stale_controller_if_needed().await;
         self.ensure_thread_runtime_loaded(&thread_id, &device_id)
             .await?;
+
+        // Taking over a thread makes it active, so the snapshot's provider and
+        // model catalog must follow the OPENED thread's provider — otherwise
+        // opening a Codex thread while Claude was active leaves the session
+        // showing Claude's provider and model picker. Resolve both BEFORE the
+        // write lock (find_thread_provider / load_provider_model_catalog read the
+        // relay), mirroring resume_session.
+        let provider_models = match self.find_thread_provider(&thread_id).await {
+            Ok((provider_name, bridge)) => {
+                let models = self
+                    .load_provider_model_catalog(provider_name, bridge)
+                    .await;
+                Some((provider_name.to_string(), models))
+            }
+            Err(_) => None,
+        };
+
         let mut relay = self.relay.write().await;
         // A review owns the reviewed thread's turn sequence; don't let a take-over
         // reassign control of THAT thread mid-review. Taking over any other active
@@ -706,6 +723,12 @@ marking idle locally."
         }
 
         relay.focus_thread_runtime(&thread_id, &device_id);
+        if let Some((provider_name, models)) = provider_models {
+            relay.set_provider_name(provider_name);
+            if let Some(models) = models {
+                relay.set_available_models(models);
+            }
+        }
         relay.push_log(
             "info",
             format!(

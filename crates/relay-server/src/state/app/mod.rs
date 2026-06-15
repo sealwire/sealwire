@@ -48,6 +48,7 @@ pub(super) const REVIEW_LOCKED_THREAD_MSG: &str =
 pub struct AppState {
     relay: Arc<RwLock<RelayState>>,
     providers: HashMap<String, Arc<dyn ProviderBridge>>,
+    provider_model_catalogs: Arc<RwLock<HashMap<String, Vec<ModelOptionView>>>>,
     change_tx: watch::Sender<u64>,
     /// Serializes individual session-mutating ops against each other (op-vs-op
     /// atomicity for their brief check-then-act windows). Unlike before, a review
@@ -103,6 +104,7 @@ impl AppState {
         Self {
             relay,
             providers,
+            provider_model_catalogs: Arc::new(RwLock::new(HashMap::new())),
             change_tx,
             session_guard: Arc::new(tokio::sync::Mutex::new(())),
             review_step_timeout_ms: Arc::new(std::sync::atomic::AtomicU64::new(600_000)),
@@ -179,6 +181,7 @@ impl AppState {
         let state = Self {
             relay,
             providers,
+            provider_model_catalogs: Arc::new(RwLock::new(HashMap::new())),
             change_tx,
             session_guard: Arc::new(tokio::sync::Mutex::new(())),
             review_step_timeout_ms: Arc::new(std::sync::atomic::AtomicU64::new(600_000)),
@@ -385,70 +388,122 @@ in thread {thread_id}: {error}"
             return;
         };
 
-        // Resolve the provider for the restored active thread. The relay persists
-        // `active_thread_id` and the active provider, but NOT the thread row — so
-        // prefer the PERSISTED provider. Without it, a restart falls back to
-        // whatever provider spawned last (and `find_thread_provider`'s list-probe
-        // also misses a thread the provider hasn't surfaced yet), mis-routing a
-        // restored Codex session to the Claude worker — it then comes back
-        // labelled Claude with Claude's model catalog.
-        let (provider_name, bridge) = match self
+        let settings = persisted.settings_for_thread(&thread_id);
+
+        // Resolve + resume the restored active thread. Try the PERSISTED provider
+        // FIRST — it's robust against a cold `list_threads` at restart, which would
+        // otherwise mis-route the thread to the boot-default (last-spawned)
+        // provider. Fall back to probing every provider by thread id when the
+        // persisted provider is gone (removed/renamed → not in the map) OR resuming
+        // on it fails (a stale/wrong persisted value) — so a bad persisted provider
+        // self-heals instead of dropping the session.
+        let mut restored: Option<(
+            String,
+            Arc<dyn ProviderBridge>,
+            crate::provider::ThreadSyncData,
+        )> = None;
+
+        if let Some((name, bridge)) = self
             .providers
             .get_key_value(persisted.provider_name.as_str())
             .map(|(name, bridge)| (name.clone(), bridge.clone()))
         {
-            Some(found) => found,
-            None => match self.find_thread_provider(&thread_id).await {
-                Ok((name, bridge)) => (name.to_string(), bridge.clone()),
-                Err(_) => return,
-            },
-        };
-
-        // Reflect the restored provider immediately, so even a failed resume below
-        // leaves the session attributed to its real provider (and its model picker
-        // correct) instead of the boot-default provider's catalog.
-        {
-            let mut relay = self.relay.write().await;
-            relay.set_provider_name(provider_name.clone());
+            if let Some(data) = self
+                .try_resume_thread(
+                    &bridge,
+                    &thread_id,
+                    &settings.approval_policy,
+                    &settings.sandbox,
+                )
+                .await
+            {
+                restored = Some((name, bridge, data));
+            }
         }
 
-        let settings = persisted.settings_for_thread(&thread_id);
-        let restore_result = match bridge
-            .resume_thread(&thread_id, &settings.approval_policy, &settings.sandbox)
-            .await
-        {
-            Ok(()) => bridge.read_thread(&thread_id).await,
-            Err(error) => Err(error),
-        };
-
-        match restore_result {
-            Ok(thread_data) => {
-                let provider_models = self
-                    .load_provider_model_catalog(&provider_name, &bridge)
-                    .await;
-                let mut relay = self.relay.write().await;
-                relay.set_provider_name(provider_name.clone());
-                if let Some(models) = provider_models {
-                    relay.set_available_models(models);
+        // Genuine provider-list probe — NOT `find_thread_provider`, which would
+        // short-circuit to the relay's ACTIVE provider. At boot the persisted
+        // thread is already marked active (apply_persisted) with the untrusted
+        // last-spawned provider, so that shortcut returns the wrong provider and
+        // never actually probes the thread lists.
+        if restored.is_none() {
+            if let Some((name, bridge)) = self.probe_thread_provider(&thread_id).await {
+                if let Some(data) = self
+                    .try_resume_thread(
+                        &bridge,
+                        &thread_id,
+                        &settings.approval_policy,
+                        &settings.sandbox,
+                    )
+                    .await
+                {
+                    restored = Some((name, bridge, data));
                 }
-                relay.restore_thread_data(thread_data, &persisted);
-                expire_controller_if_needed(&mut relay);
-                relay.push_log(
-                    "info",
-                    format!("Restored persisted session for thread {thread_id}."),
-                );
-                relay.notify();
-            }
-            Err(error) => {
-                let mut relay = self.relay.write().await;
-                relay.clear_active_session();
-                relay.push_log(
-                    "warn",
-                    format!("Failed to restore persisted session for thread {thread_id}: {error}"),
-                );
-                relay.notify();
             }
         }
+
+        let Some((provider_name, bridge, thread_data)) = restored else {
+            let mut relay = self.relay.write().await;
+            relay.clear_active_session();
+            relay.push_log(
+                "warn",
+                format!("Failed to restore persisted session for thread {thread_id}."),
+            );
+            relay.notify();
+            return;
+        };
+
+        let provider_models = self
+            .load_provider_model_catalog(&provider_name, &bridge)
+            .await;
+        let mut relay = self.relay.write().await;
+        relay.set_provider_name(provider_name.clone());
+        if let Some(models) = provider_models {
+            relay.set_available_models(models);
+        }
+        relay.restore_thread_data(thread_data, &persisted);
+        expire_controller_if_needed(&mut relay);
+        relay.push_log(
+            "info",
+            format!("Restored persisted session for thread {thread_id}."),
+        );
+        relay.notify();
+    }
+
+    /// Resume a thread on `bridge` and read its current state. Returns `None` when
+    /// the provider can't resume/read the thread (e.g. it isn't the thread's real
+    /// owner), so the caller can fall back to another provider.
+    async fn try_resume_thread(
+        &self,
+        bridge: &Arc<dyn ProviderBridge>,
+        thread_id: &str,
+        approval_policy: &str,
+        sandbox: &str,
+    ) -> Option<crate::provider::ThreadSyncData> {
+        bridge
+            .resume_thread(thread_id, approval_policy, sandbox)
+            .await
+            .ok()?;
+        bridge.read_thread(thread_id).await.ok()
+    }
+
+    /// Probe every provider's thread list for `thread_id`, returning the first
+    /// provider whose listing contains it. Unlike `find_thread_provider`, this
+    /// does NOT short-circuit to the relay's active provider — restore needs a
+    /// genuine probe because at boot the persisted thread is already marked active
+    /// with the untrusted last-spawned provider, which that shortcut would return.
+    async fn probe_thread_provider(
+        &self,
+        thread_id: &str,
+    ) -> Option<(String, Arc<dyn ProviderBridge>)> {
+        for (name, bridge) in &self.providers {
+            if let Ok(threads) = bridge.list_threads(200).await {
+                if threads.iter().any(|thread| thread.id == thread_id) {
+                    return Some((name.clone(), bridge.clone()));
+                }
+            }
+        }
+        None
     }
 }
 

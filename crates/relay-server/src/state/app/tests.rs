@@ -446,12 +446,15 @@ mod path_scope_tests {
             "the active provider must be persisted"
         );
 
-        // Model a fresh boot: claude_code spawned last (so it owns provider_name),
-        // the startup refresh stamped Claude's catalog, and NO thread rows were
-        // persisted.
+        // Model the REAL fresh-boot state: apply_persisted leaves active_thread_id
+        // SET, provider startup leaves the global provider on the last-spawned
+        // provider (claude_code), the startup refresh stamped Claude's catalog, and
+        // the relay thread/runtime caches are empty (not persisted). Critically,
+        // active_thread_id stays set — clearing it would hide the
+        // find_thread_provider active-provider shortcut from the test.
         {
             let mut relay = app.relay.write().await;
-            relay.clear_active_session();
+            relay.active_thread_id = Some("codex-thread-1".to_string());
             relay.set_provider_name("claude_code".to_string());
             relay.threads.clear();
             relay.set_available_models(vec![crate::protocol::ModelOptionView {
@@ -530,9 +533,11 @@ mod path_scope_tests {
         };
         persisted.provider_name = String::new();
 
+        // Real startup state: active_thread_id stays SET (apply_persisted), the
+        // global provider is the last-spawned one, thread/runtime caches empty.
         {
             let mut relay = app.relay.write().await;
-            relay.clear_active_session();
+            relay.active_thread_id = Some("codex-thread-2".to_string());
             relay.set_provider_name("claude_code".to_string());
             relay.threads.clear();
         }
@@ -549,6 +554,113 @@ mod path_scope_tests {
             codex.resume_thread_ids.lock().await.as_slice(),
             ["codex-thread-2".to_string()]
         );
+        assert!(claude.resume_thread_ids.lock().await.is_empty());
+    }
+
+    // A persisted provider that no longer exists (provider removed/renamed) must
+    // fall back to probing the currently-registered providers — not give up.
+    #[tokio::test]
+    async fn restored_session_falls_back_to_probing_when_persisted_provider_is_gone() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_string_lossy().into_owned();
+        let (app, codex, claude) = build_recording_provider_app(&cwd).await;
+
+        let codex_thread = codex.thread_summary("codex-thread-gone", &cwd);
+        codex
+            .threads
+            .lock()
+            .await
+            .insert(codex_thread.id.clone(), codex_thread.clone());
+
+        // Persisted provider key is no longer in the providers map.
+        let mut persisted = {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("codex".to_string());
+            relay.active_thread_id = Some("codex-thread-gone".to_string());
+            crate::state::persistence::PersistedRelayState::from_relay(&relay)
+        };
+        persisted.provider_name = "retired_provider".to_string();
+
+        // Real startup state: active_thread_id stays SET (apply_persisted), the
+        // global provider is the last-spawned one, thread/runtime caches empty.
+        {
+            let mut relay = app.relay.write().await;
+            relay.active_thread_id = Some("codex-thread-gone".to_string());
+            relay.set_provider_name("claude_code".to_string());
+            relay.threads.clear();
+        }
+
+        app.restore_persisted_session(persisted).await;
+
+        let snapshot = app.snapshot().await;
+        assert_eq!(
+            snapshot.provider, "codex",
+            "an unknown persisted provider must fall back to probing, not be trusted blindly"
+        );
+        assert_eq!(
+            snapshot.active_thread_id.as_deref(),
+            Some("codex-thread-gone")
+        );
+        assert_eq!(
+            codex.resume_thread_ids.lock().await.as_slice(),
+            ["codex-thread-gone".to_string()]
+        );
+        assert!(claude.resume_thread_ids.lock().await.is_empty());
+    }
+
+    // A persisted provider that still EXISTS but is WRONG for the thread (stale /
+    // corrupted) must self-heal: resuming on it fails, so restore falls back to
+    // probing and resumes on the thread's real provider instead of dropping the
+    // session.
+    #[tokio::test]
+    async fn restored_session_recovers_when_persisted_provider_is_wrong() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_string_lossy().into_owned();
+        let (app, codex, claude) = build_recording_provider_app(&cwd).await;
+
+        // The thread genuinely lives on codex (resumable + surfaced by list_threads).
+        let codex_thread = codex.thread_summary("codex-thread-wrong", &cwd);
+        codex
+            .threads
+            .lock()
+            .await
+            .insert(codex_thread.id.clone(), codex_thread.clone());
+
+        // ...but the persisted provider WRONGLY names claude_code (a valid,
+        // registered provider that does not own this thread).
+        let mut persisted = {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("codex".to_string());
+            relay.active_thread_id = Some("codex-thread-wrong".to_string());
+            crate::state::persistence::PersistedRelayState::from_relay(&relay)
+        };
+        persisted.provider_name = "claude_code".to_string();
+
+        // Real startup state: active_thread_id stays SET (apply_persisted), the
+        // global provider is the last-spawned one, thread/runtime caches empty.
+        {
+            let mut relay = app.relay.write().await;
+            relay.active_thread_id = Some("codex-thread-wrong".to_string());
+            relay.set_provider_name("claude_code".to_string());
+            relay.threads.clear();
+        }
+
+        app.restore_persisted_session(persisted).await;
+
+        let snapshot = app.snapshot().await;
+        assert_eq!(
+            snapshot.provider, "codex",
+            "a wrong-but-valid persisted provider must self-heal via probing, not lose the session"
+        );
+        assert_eq!(
+            snapshot.active_thread_id.as_deref(),
+            Some("codex-thread-wrong")
+        );
+        assert_eq!(
+            codex.resume_thread_ids.lock().await.as_slice(),
+            ["codex-thread-wrong".to_string()]
+        );
+        // Claude was attempted first and failed, so it recorded no successful resume.
         assert!(claude.resume_thread_ids.lock().await.is_empty());
     }
 
@@ -675,6 +787,7 @@ mod path_scope_tests {
         transcript_pages:
             Arc<Mutex<HashMap<(String, Option<usize>), crate::provider::ThreadTranscriptPageData>>>,
         read_thread_calls: Arc<AtomicUsize>,
+        list_models_calls: Arc<AtomicUsize>,
     }
 
     impl RecordingProvider {
@@ -693,6 +806,7 @@ mod path_scope_tests {
                 complete_before_return: Arc::new(AtomicBool::new(false)),
                 transcript_pages: Arc::new(Mutex::new(HashMap::new())),
                 read_thread_calls: Arc::new(AtomicUsize::new(0)),
+                list_models_calls: Arc::new(AtomicUsize::new(0)),
             }
         }
 
@@ -732,6 +846,7 @@ mod path_scope_tests {
         }
 
         async fn list_models(&self) -> Result<Vec<crate::protocol::ModelOptionView>, String> {
+            self.list_models_calls.fetch_add(1, Ordering::Relaxed);
             Ok(vec![crate::protocol::ModelOptionView {
                 model: format!("{}-model", self.name),
                 display_name: format!("{} Model", self.name),
@@ -1189,6 +1304,81 @@ mod path_scope_tests {
         );
     }
 
+    // Repro for: "opening an existing Codex thread still shows Claude's provider /
+    // models." Taking over a thread makes it active, so the snapshot's provider
+    // and model catalog must follow the OPENED thread's provider — not stay on
+    // whatever provider was active before.
+    #[tokio::test]
+    async fn take_over_a_codex_thread_switches_provider_and_model_catalog() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, codex, claude) = build_recording_provider_app(cwd).await;
+        pair_device(&app, "device-a", Vec::new()).await;
+
+        let claude_thread = claude.thread_summary("claude-thread", cwd);
+        let codex_thread = codex.thread_summary("codex-thread", cwd);
+        claude
+            .threads
+            .lock()
+            .await
+            .insert(claude_thread.id.clone(), claude_thread.clone());
+        codex
+            .threads
+            .lock()
+            .await
+            .insert(codex_thread.id.clone(), codex_thread.clone());
+
+        // Claude is the active session: its provider + catalog are in the snapshot.
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("claude_code".to_string());
+            relay.active_thread_id = Some(claude_thread.id.clone());
+            relay.threads = vec![claude_thread.clone(), codex_thread.clone()];
+            relay.assign_active_controller("device-a", unix_now());
+            relay.set_available_models(vec![crate::protocol::ModelOptionView {
+                model: "default".to_string(),
+                display_name: "Default (Opus 4.8)".to_string(),
+                provider: "anthropic".to_string(),
+                supported_reasoning_efforts: vec!["high".to_string()],
+                default_reasoning_effort: "high".to_string(),
+                hidden: false,
+                is_default: true,
+            }]);
+        }
+
+        // Open (take over) the existing Codex thread.
+        let snapshot = app
+            .take_over_control(crate::protocol::TakeOverInput {
+                device_id: Some("device-a".to_string()),
+                thread_id: codex_thread.id.clone(),
+            })
+            .await
+            .expect("take-over of the codex thread should succeed");
+
+        assert_eq!(
+            snapshot.active_thread_id.as_deref(),
+            Some(codex_thread.id.as_str())
+        );
+        // The session must now reflect the CODEX provider + catalog, not Claude's.
+        assert_eq!(
+            snapshot.provider, "codex",
+            "opening a codex thread must switch the session provider to codex"
+        );
+        assert!(
+            !snapshot.available_models.is_empty()
+                && snapshot
+                    .available_models
+                    .iter()
+                    .all(|m| m.provider == "codex"),
+            "opening a codex thread must show codex models, got: {:?}",
+            snapshot
+                .available_models
+                .iter()
+                .map(|m| (&m.model, &m.provider))
+                .collect::<Vec<_>>()
+        );
+    }
+
     #[tokio::test]
     async fn transcript_tail_carries_the_target_threads_settings_and_liveness() {
         let project = TempDir::new().expect("project tempdir");
@@ -1340,6 +1530,7 @@ mod path_scope_tests {
             .insert(thread.id.clone(), thread.clone());
         {
             let mut relay = app.relay.write().await;
+            relay.set_provider_name("codex".to_string());
             relay.threads = vec![thread.clone()];
             relay.set_available_models(vec![crate::protocol::ModelOptionView {
                 model: "cached-sentinel".to_string(),
@@ -1367,6 +1558,87 @@ mod path_scope_tests {
         // sentinel proves the tail read the cache, not the bridge.
         assert_eq!(thread_state.available_models.len(), 1);
         assert_eq!(thread_state.available_models[0].model, "cached-sentinel");
+        assert_eq!(codex.list_models_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn transcript_tail_uses_the_viewed_threads_provider_model_catalog() {
+        // Opening a non-active saved thread is view-only: the frontend reads this
+        // transcript tail and builds the model picker from thread_state. The
+        // relay's global available_models belongs to the active provider, so it
+        // must never leak into a viewed thread owned by another provider.
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, codex, claude) = build_recording_provider_app(cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let codex_thread = codex.thread_summary("codex-thread-models", cwd);
+        let claude_thread = claude.thread_summary("claude-thread-active", cwd);
+        codex
+            .threads
+            .lock()
+            .await
+            .insert(codex_thread.id.clone(), codex_thread.clone());
+        claude
+            .threads
+            .lock()
+            .await
+            .insert(claude_thread.id.clone(), claude_thread.clone());
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("claude_code".to_string());
+            relay.active_thread_id = Some(claude_thread.id.clone());
+            relay.threads = vec![claude_thread, codex_thread.clone()];
+            relay.set_available_models(vec![crate::protocol::ModelOptionView {
+                model: "claude-only".to_string(),
+                display_name: "Claude Only".to_string(),
+                provider: "claude_code".to_string(),
+                supported_reasoning_efforts: vec!["high".to_string()],
+                default_reasoning_effort: "high".to_string(),
+                hidden: false,
+                is_default: true,
+            }]);
+        }
+
+        let page = app
+            .read_thread_transcript(crate::protocol::ReadThreadTranscriptInput {
+                thread_id: codex_thread.id.clone(),
+                cursor: None,
+                before: None,
+                device_id: Some("device-1".to_string()),
+            })
+            .await
+            .expect("view-only transcript tail read");
+        let thread_state = page.thread_state.expect("tail must include thread state");
+
+        assert_eq!(thread_state.provider, "codex");
+        assert!(
+            !thread_state.available_models.is_empty()
+                && thread_state
+                    .available_models
+                    .iter()
+                    .all(|model| model.provider == "codex"),
+            "viewing a Codex thread must return Codex models, got: {:?}",
+            thread_state
+                .available_models
+                .iter()
+                .map(|model| (&model.model, &model.provider))
+                .collect::<Vec<_>>()
+        );
+
+        app.read_thread_transcript(crate::protocol::ReadThreadTranscriptInput {
+            thread_id: codex_thread.id,
+            cursor: None,
+            before: None,
+            device_id: Some("device-1".to_string()),
+        })
+        .await
+        .expect("second view-only transcript tail read");
+        assert_eq!(
+            codex.list_models_calls.load(Ordering::Relaxed),
+            1,
+            "the non-active provider catalog must be cached across transcript polling"
+        );
     }
 
     #[tokio::test]
