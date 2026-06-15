@@ -277,6 +277,122 @@ test("hydrateLocalTranscript re-entry during progress reuses the in-flight promi
   assert.ok(reenteredPromise instanceof Promise);
 });
 
+test("hydrateLocalTranscript does not recurse while a re-hydration fetch is already in flight", async () => {
+  // Reproduces the hard freeze (markdown/transcript-perf-freeze-analysis.md):
+  // a thread with an already-hydrated window receives a streaming snapshot whose
+  // live tail is an `omitted` shell, so `reHydrateTail` arms a fetch. While that
+  // fetch is pending, hydrateTranscript synchronously fires onProgress, and
+  // render-session.js re-calls ensureConversationTranscript because the snapshot
+  // is still `transcript_truncated`. That re-entry must REUSE the in-flight fetch
+  // (return the existing promise) — never start another one and re-fire onProgress.
+  // Pre-fix, `reHydrateTail` nulls the in-flight promise and re-arms on every
+  // re-entry, so onProgress -> renderSession -> hydrate recurses synchronously
+  // without bound (the snapshot stays truncated until the fetch RESOLVES), which
+  // overflows the stack and freezes the tab.
+  const fullOlder = {
+    item_id: "item-1",
+    kind: "agent_text",
+    text: "older full body",
+    status: "completed",
+    turn_id: "turn-1",
+    tool: null,
+    content_state: "full",
+  };
+  const state = createState({
+    // renderSession sets state.session to the rendered snapshot before calling
+    // ensureConversationTranscript, so it carries the same active_turn_id the base
+    // snapshot does — keep that here so the rebuilt progress snapshot's signature
+    // matches the base (otherwise the in-flight fetch bails on a phantom signature
+    // drift at transcript-hydration.js:58).
+    session: { active_thread_id: "thread-1", active_turn_id: "turn-2" },
+    transcriptHydrationThreadId: "thread-1",
+    transcriptHydrationEntries: new Map([["item-1", fullOlder]]),
+    transcriptHydrationOrder: ["item-1"],
+    transcriptHydrationOlderCursor: null,
+    transcriptHydrationSignature: "thread-1|prior",
+    transcriptHydrationStatus: "idle",
+    transcriptHydrationTailReady: true,
+  });
+
+  const snapshot = {
+    active_thread_id: "thread-1",
+    active_turn_id: "turn-2",
+    transcript_truncated: true,
+    transcript: [
+      fullOlder,
+      {
+        item_id: "item-2",
+        kind: "agent_text",
+        text: "emergency shell...",
+        status: "running",
+        turn_id: "turn-2",
+        tool: null,
+        content_state: "omitted",
+      },
+    ],
+  };
+  const page = {
+    thread_id: "thread-1",
+    prev_cursor: null,
+    entries: [
+      fullOlder,
+      {
+        item_id: "item-2",
+        kind: "agent_text",
+        text: "the full streamed assistant body",
+        status: "completed",
+        turn_id: "turn-2",
+        tool: null,
+      },
+    ],
+  };
+
+  let fetchCalls = 0;
+  let reentryDepth = 0;
+  // Safety cap so the PRE-FIX synchronous recursion can't overflow the stack and
+  // crash the runner — it instead surfaces as a clean fetchCalls assertion failure.
+  const MAX_REENTRY = 50;
+
+  function onProgress(nextSnapshot) {
+    state.session = nextSnapshot;
+    // Mirror render-session.js:380 — a still-truncated snapshot re-runs hydration.
+    if (!nextSnapshot?.transcript_truncated || reentryDepth >= MAX_REENTRY) {
+      return;
+    }
+    reentryDepth += 1;
+    void hydrateLocalTranscript(state, nextSnapshot, {
+      async fetchPage() {
+        fetchCalls += 1;
+        return page;
+      },
+      onProgress,
+    });
+  }
+
+  await hydrateLocalTranscript(state, snapshot, {
+    async fetchPage() {
+      fetchCalls += 1;
+      return page;
+    },
+    onProgress,
+  });
+
+  assert.equal(
+    fetchCalls,
+    1,
+    "a re-hydration fetch already in flight must be reused, not restarted on every synchronous onProgress re-entry"
+  );
+  assert.ok(
+    reentryDepth <= 1,
+    "onProgress must not re-trigger hydration unboundedly while the first fetch is pending"
+  );
+  assert.equal(
+    state.session.transcript.find((entry) => entry.item_id === "item-2")?.text,
+    "the full streamed assistant body",
+    "the in-flight fetch still completes and replaces the omitted shell with full text"
+  );
+});
+
 test("hydrateLocalTranscript does not publish a new emergency shell while its full page is pending", async () => {
   const state = createState();
   const previousSnapshot = {
