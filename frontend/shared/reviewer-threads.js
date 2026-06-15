@@ -79,3 +79,22 @@ export function selectReusableReviewers(reviewerThreads, parentThreadId, provide
       label: entry.name || entry.reviewer_thread_id,
     }));
 }
+
+/**
+ * The reuse picker MUST be scoped to the thread the Reviewer panel is showing —
+ * the VIEWED thread (`viewThreadId`, falling back to the session's active thread) —
+ * the same scope the review job cards (and their per-card "Re-review" launchers)
+ * use. Scoping the reuse list to `active_thread_id` while the cards used the viewed
+ * thread hid the viewed thread's reviewers from the re-review dropdown whenever you
+ * were looking at a non-active thread (e.g. a second session held the active slot),
+ * so the prefilled reviewer had no matching <option> and couldn't be selected.
+ *
+ * @param {{active_thread_id?: string|null, reviewer_threads?: Array}|null|undefined} session
+ * @param {string|null|undefined} viewThreadId
+ * @param {string|null|undefined} provider
+ * @returns {Array<{reviewerThreadId: string, provider: string|null, label: string}>}
+ */
+export function selectReusableReviewersForView(session, viewThreadId, provider = null) {
+  const viewedThreadId = viewThreadId || session?.active_thread_id || null;
+  return selectReusableReviewers(session?.reviewer_threads, viewedThreadId, provider);
+}

@@ -68,7 +68,7 @@ import { SessionSettingsButton } from "../shared/session-settings-panel.js";
 import {
   ReviewLauncher,
 } from "../shared/review-panel.js";
-import { selectReusableReviewers } from "../shared/reviewer-threads.js";
+import { selectReusableReviewersForView } from "../shared/reviewer-threads.js";
 import {
   canRequestReview,
   isReviewBlocked,
@@ -847,11 +847,12 @@ export function createSessionRenderer({
     setReviewSlice({
       reviewJobs: threadReviewJobs,
       reviewModel: reviewLaunchModel(session),
-      // Existing reviewer threads of the active parent, offered for reuse. Provider
-      // filtering happens in the panel (it reacts to the chosen provider).
-      reusableReviewers: selectReusableReviewers(
-        session?.reviewer_threads,
-        session?.active_thread_id,
+      // Existing reviewer threads of the VIEWED thread (same scope as the review job
+      // cards above), offered for reuse. Provider filtering happens in the panel (it
+      // reacts to the chosen provider).
+      reusableReviewers: selectReusableReviewersForView(
+        session,
+        state.viewThreadId,
         null
       ),
       // Full reviewer-thread list so each card can show its reviewer thread's
@@ -894,9 +895,9 @@ export function createSessionRenderer({
           providerOptions: reviewModel.providerOptions,
           models: reviewModel.models,
           defaultProvider: reviewModel.defaultProvider,
-          reusableReviewers: selectReusableReviewers(
-            session?.reviewer_threads,
-            session?.active_thread_id,
+          reusableReviewers: selectReusableReviewersForView(
+            session,
+            state.viewThreadId,
             null
           ),
           disabled: false,

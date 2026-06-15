@@ -416,9 +416,16 @@ impl SessionSnapshot {
         // active parent's reviewers: that's all the remote reuse picker needs, and it
         // bounds the map (per-parent cap) so it can't blow the frame budget.
         if budget.reviewer_threads_active_parent_only {
-            let active = self.active_thread_id.clone();
-            self.reviewer_threads
-                .retain(|view| Some(&view.parent_thread_id) == active.as_ref());
+            // Scope to the active parent — but ONLY when there IS one. With no active
+            // thread, `Some(&parent) == None` is always false, so the retain would
+            // strip EVERY reviewer thread from the remote snapshot the moment the relay
+            // has no active thread (the reuse picker / reviewer panel then goes empty).
+            // With nothing to scope to, leave the map intact; the `max_reviewer_threads`
+            // cap below still bounds it.
+            if let Some(active) = self.active_thread_id.clone() {
+                self.reviewer_threads
+                    .retain(|view| view.parent_thread_id == active);
+            }
         }
 
         // Hard caps on the low-frequency control-plane collections. These grow

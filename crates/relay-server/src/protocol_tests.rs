@@ -170,6 +170,37 @@ fn compact_for_broker_keeps_only_active_parent_reviewers() {
 }
 
 #[test]
+fn compact_for_broker_with_no_active_thread_keeps_reviewers() {
+    // REPRO (remote bug #2): the active-parent scoping uses
+    //     retain(|view| Some(&view.parent_thread_id) == active.as_ref())
+    // which, when there is NO active thread (`active_thread_id == None`, a state the
+    // broker DOES broadcast — broker.rs `active_thread_id.as_deref().unwrap_or("-")`),
+    // compares `Some(parent) == None` and is ALWAYS false. So every reviewer thread is
+    // stripped from the remote snapshot the moment the relay has no active thread, even
+    // though there are real reviewer threads behind real review jobs. With no active
+    // parent to scope by, the scoping should be a no-op (there's nothing to narrow to),
+    // not a total wipe — otherwise the remote reuse picker / reviewer panel goes empty.
+    let mut snapshot = make_snapshot();
+    snapshot.active_thread_id = None;
+    let reviewer = |id: &str, parent: &str| ReviewerThreadView {
+        reviewer_thread_id: id.to_string(),
+        parent_thread_id: parent.to_string(),
+        reviewer_provider: Some("codex".to_string()),
+        name: Some(id.to_string()),
+        updated_at: Some(1),
+    };
+    snapshot.reviewer_threads = vec![reviewer("rev-1", "thread-1"), reviewer("rev-2", "thread-2")];
+
+    let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::RemoteSurface);
+    assert!(
+        !compacted.reviewer_threads.is_empty(),
+        "with no active thread to scope to, the remote snapshot must NOT strip every \
+reviewer thread (got {} reviewers)",
+        compacted.reviewer_threads.len()
+    );
+}
+
+#[test]
 fn compact_for_local_web_keeps_reviewer_threads() {
     // The LOCAL snapshot path (/api/session + SSE) is the ONLY surface whose
     // delete/archive prompt reads `reviewer_threads`. Stripping it here would make
