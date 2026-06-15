@@ -5,7 +5,11 @@ import {
   hydrateLocalTranscript,
   loadOlderLocalTranscript,
 } from "./hydration.js";
-import { clearTranscriptHydration } from "./store.js";
+import {
+  clearTranscriptHydration,
+  restoreHydratedTranscript,
+  switchTranscriptHydrationThread,
+} from "./store.js";
 
 function createState(overrides = {}) {
   return {
@@ -527,4 +531,62 @@ test("clearTranscriptHydration resets local hydration state", () => {
   assert.equal(state.transcriptHydrationStatus, "idle");
   assert.equal(state.transcriptHydrationTailReady, false);
   assert.equal(state.transcriptHydrationThreadId, null);
+});
+
+test("switching local threads retains the loaded window and restores it on switch-back", () => {
+  const olderEntry = (id) => ({
+    item_id: id,
+    kind: "agent_text",
+    text: `body-${id}`,
+    status: "completed",
+    turn_id: `turn-${id}`,
+    tool: null,
+    content_state: "full",
+  });
+  const state = createState({
+    session: { active_thread_id: "thread-A" },
+    transcriptHydrationThreadId: "thread-A",
+    transcriptHydrationEntries: new Map([
+      ["a1", olderEntry("a1")],
+      ["a2", olderEntry("a2")],
+      ["a3", olderEntry("a3")],
+    ]),
+    transcriptHydrationOrder: ["a1", "a2", "a3"],
+    transcriptHydrationOlderCursor: 5,
+    transcriptHydrationSignature: "thread-A|sig",
+    transcriptHydrationStatus: "complete",
+    transcriptHydrationTailReady: true,
+  });
+
+  // Switch to thread B: A's window is stashed, the live slot is cleared for B.
+  switchTranscriptHydrationThread(state, "thread-B");
+  assert.deepEqual(state.transcriptHydrationOrder, []);
+  assert.equal(state.transcriptHydrationThreadId, "thread-B");
+
+  // B loads only its tail.
+  state.transcriptHydrationEntries = new Map([["b1", olderEntry("b1")]]);
+  state.transcriptHydrationOrder = ["b1"];
+  state.transcriptHydrationOlderCursor = null;
+  state.transcriptHydrationTailReady = true;
+
+  // Switch back to A: the older window is restored without a refetch.
+  switchTranscriptHydrationThread(state, "thread-A");
+  assert.deepEqual(state.transcriptHydrationOrder, ["a1", "a2", "a3"]);
+  assert.equal(state.transcriptHydrationOlderCursor, 5);
+  assert.equal(state.transcriptHydrationTailReady, true);
+
+  // A fresh compact snapshot for A merges its live tail onto the restored window
+  // (older history kept, newest entry added) — not a tail-only reset.
+  state.session = { active_thread_id: "thread-A" };
+  const merged = restoreHydratedTranscript(state, {
+    active_thread_id: "thread-A",
+    transcript_revision: 40,
+    transcript_truncated: true,
+    transcript: [olderEntry("a4")],
+  });
+  assert.deepEqual(
+    merged.transcript.map((entry) => entry.item_id),
+    ["a1", "a2", "a3", "a4"],
+    "the restored older window coexists with the freshly-merged tail"
+  );
 });

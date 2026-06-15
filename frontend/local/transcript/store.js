@@ -8,6 +8,9 @@ import {
   createTranscriptHydrationPromisePatch,
   createTranscriptHydrationStatusPatch,
   restoreHydratedTranscriptSnapshot,
+  restoreTranscriptHydrationForThread,
+  stashTranscriptHydrationForThread,
+  clearTranscriptHydrationThreadCache,
 } from "../../shared/transcript-hydration-store.js";
 
 function applyLocalTranscriptPatch(state, patch) {
@@ -19,7 +22,19 @@ function applyLocalTranscriptPatch(state, patch) {
 }
 
 export function clearTranscriptHydration(state) {
+  // Genuine reset (auth loss / session unavailable), not a thread switch — drop
+  // the retained per-thread windows too.
+  clearTranscriptHydrationThreadCache(state);
   applyLocalTranscriptPatch(state, createClearedTranscriptHydrationPatch());
+}
+
+// Thread switch: stash the leaving thread's loaded window and restore the target
+// thread's retained window (or a cleared slot when it has none), so switching
+// away and back keeps the older history the user scrolled into view instead of
+// reloading only the tail.
+export function switchTranscriptHydrationThread(state, nextThreadId) {
+  stashTranscriptHydrationForThread(state);
+  applyLocalTranscriptPatch(state, restoreTranscriptHydrationForThread(state, nextThreadId));
 }
 
 export function restoreHydratedTranscript(state, snapshot) {

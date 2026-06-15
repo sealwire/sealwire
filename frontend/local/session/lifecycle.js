@@ -24,7 +24,11 @@ import { createThreadListQueryOptions } from "../../shared/thread-queries.js";
 import { readThreadListUi } from "../../shared/thread-list-store.js";
 import { shouldRenderThreadListLoadingPlaceholder } from "../../shared/thread-list-state.js";
 import { syncLiveTranscriptEntryDetailsFromSnapshot } from "../transcript/details.js";
-import { clearTranscriptHydration, restoreHydratedTranscript } from "../transcript/store.js";
+import {
+  clearTranscriptHydration,
+  restoreHydratedTranscript,
+  switchTranscriptHydrationThread,
+} from "../transcript/store.js";
 import { threadAttention } from "../../shared/thread-attention.js";
 import { isDocumentForeground, notifyThreadEvents } from "../../shared/thread-notify.js";
 
@@ -524,7 +528,13 @@ export function createLifecycleController(ctx) {
   function applySessionSnapshot(snapshot) {
     const previousThreadId = state.session?.active_thread_id || null;
     if (snapshot?.active_thread_id !== state.transcriptHydrationThreadId) {
-      resetTranscriptHydrationState();
+      // Thread switch: retain the leaving thread's loaded window and restore the
+      // target thread's retained window (if any) instead of clearing — so
+      // switching away and back keeps the older history already scrolled into
+      // view rather than reloading only the tail. The next snapshot/hydration
+      // merges the fresh tail onto the restored window.
+      switchTranscriptHydrationThread(state, snapshot?.active_thread_id || null);
+      state.transcriptPreserveScroll = false;
     }
     if (snapshot?.active_thread_id !== previousThreadId) {
       state.localUiStore.getState().clearTranscriptDetailLoading();

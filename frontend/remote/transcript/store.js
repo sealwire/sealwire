@@ -8,12 +8,29 @@ import {
   createTranscriptHydrationPromisePatch,
   createTranscriptHydrationStatusPatch,
   restoreHydratedTranscriptSnapshot,
+  restoreTranscriptHydrationForThread,
+  stashTranscriptHydrationForThread,
+  clearTranscriptHydrationThreadCache,
 } from "../../shared/transcript-hydration-store.js";
 import { prepareTranscriptEntryForSurface } from "./details.js";
 import { applyRemoteSurfacePatch } from "../surface-state.js";
 
-export function clearTranscriptHydration() {
+export function clearTranscriptHydration(state) {
+  // Genuine reset (disconnect / unpair / relay reset), not a thread switch —
+  // drop the retained per-thread windows too. The per-thread cache lives on the
+  // remote `state` object (the same one patchRemoteState mutates).
+  if (state) {
+    clearTranscriptHydrationThreadCache(state);
+  }
   applyRemoteSurfacePatch(createClearedTranscriptHydrationPatch());
+}
+
+// Thread switch (remote view-only navigation): stash the leaving thread's loaded
+// window and restore the target thread's retained window, so switching between
+// threads and back keeps the older history rather than reloading only the tail.
+export function switchTranscriptHydrationThread(state, nextThreadId) {
+  stashTranscriptHydrationForThread(state);
+  applyRemoteSurfacePatch(restoreTranscriptHydrationForThread(state, nextThreadId));
 }
 
 export function restoreHydratedTranscript(state, snapshot) {

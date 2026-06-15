@@ -13,6 +13,117 @@ export function createClearedTranscriptHydrationPatch() {
   };
 }
 
+// Per-thread retention: switching threads used to clear the single live
+// hydration slot, so returning reloaded only the tail and lost the older window
+// the user had scrolled into view. We instead stash the leaving thread's window
+// and restore it on switch-back. The cache lives directly on `state` (a Map) and
+// is intentionally NOT part of createClearedTranscriptHydrationPatch, so a clear
+// of the live slot does not wipe the retained windows. Bounded by an LRU cap so
+// browsing many threads can't retain transcript memory indefinitely.
+export const MAX_RETAINED_HYDRATION_THREADS = 10;
+
+function ensureHydrationThreadCache(state) {
+  if (!(state.transcriptHydrationThreadCache instanceof Map)) {
+    state.transcriptHydrationThreadCache = new Map();
+  }
+  return state.transcriptHydrationThreadCache;
+}
+
+// Drop every retained per-thread window. Called on a genuine session teardown
+// (disconnect / unpair / auth loss) — NOT on a thread switch — so stale windows
+// from a torn-down session never resurface (and never leak across surfaces that
+// reuse one state object).
+export function clearTranscriptHydrationThreadCache(state) {
+  if (state.transcriptHydrationThreadCache instanceof Map) {
+    state.transcriptHydrationThreadCache.clear();
+  }
+}
+
+// Save the currently-loaded window for the active hydration thread so it can be
+// restored on switch-back. No-op when there is nothing loaded yet. `extra` lets
+// a caller attach surface-specific state (e.g. a scroll offset) to the stash.
+export function stashTranscriptHydrationForThread(state, extra = null) {
+  const threadId = state.transcriptHydrationThreadId;
+  if (!threadId || !(state.transcriptHydrationOrder?.length > 0)) {
+    return;
+  }
+  const cache = ensureHydrationThreadCache(state);
+  // Re-insert to refresh LRU recency (Map preserves insertion order).
+  cache.delete(threadId);
+  cache.set(threadId, {
+    entries: new Map(state.transcriptHydrationEntries),
+    order: [...state.transcriptHydrationOrder],
+    olderCursor: state.transcriptHydrationOlderCursor ?? null,
+    signature: state.transcriptHydrationSignature ?? null,
+    tailReady: Boolean(state.transcriptHydrationTailReady),
+    ...(extra ? { extra } : {}),
+  });
+  while (cache.size > MAX_RETAINED_HYDRATION_THREADS) {
+    const oldest = cache.keys().next().value;
+    cache.delete(oldest);
+  }
+}
+
+// Look up (without consuming) a thread's retained stash, if any.
+export function peekTranscriptHydrationStash(state, threadId) {
+  if (!threadId) {
+    return null;
+  }
+  const cache = ensureHydrationThreadCache(state);
+  return cache.get(threadId) || null;
+}
+
+// Return a patch that repopulates the live hydration slot from a thread's
+// retained window, or a cleared slot when nothing is retained. The next snapshot
+// for that thread merges its fresh tail onto the restored window via the normal
+// prepareTranscriptHydration path, so retained older history + a live tail
+// coexist correctly.
+export function restoreTranscriptHydrationForThread(state, threadId) {
+  const cache = ensureHydrationThreadCache(state);
+  const stash = threadId ? cache.get(threadId) : null;
+  if (!stash) {
+    return {
+      ...createClearedTranscriptHydrationPatch(),
+      transcriptHydrationThreadId: threadId ?? null,
+    };
+  }
+  // Refresh LRU recency on access.
+  cache.delete(threadId);
+  cache.set(threadId, stash);
+  return {
+    ...createClearedTranscriptHydrationPatch(),
+    transcriptHydrationEntries: new Map(stash.entries),
+    transcriptHydrationOrder: [...stash.order],
+    transcriptHydrationOlderCursor: stash.olderCursor ?? null,
+    transcriptHydrationSignature: stash.signature ?? null,
+    transcriptHydrationTailReady: Boolean(stash.tailReady),
+    transcriptHydrationThreadId: threadId,
+    // Leave status idle: the next snapshot's prepareTranscriptHydration recomputes
+    // whether the tail still needs a fetch, merging onto the restored window.
+    transcriptHydrationStatus: "idle",
+  };
+}
+
+// Test/perf instrumentation: counts how many times a per-snapshot code path
+// materializes a copy of the ENTIRE hydrated window (`new Map(allEntries)` /
+// `[...allOrder]`). The freeze investigation
+// (markdown/transcript-perf-freeze-analysis.md) found these O(n) copies ran on
+// every streaming snapshot. The steady-state per-snapshot path must keep this at
+// zero (it should touch only the ~tail); page loads/hydration may still copy.
+let transcriptFullWindowCopyCount = 0;
+
+export function __readTranscriptFullWindowCopyCount() {
+  return transcriptFullWindowCopyCount;
+}
+
+export function __resetTranscriptFullWindowCopyCount() {
+  transcriptFullWindowCopyCount = 0;
+}
+
+function noteFullWindowCopy() {
+  transcriptFullWindowCopyCount += 1;
+}
+
 export function transcriptHydrationSignature(snapshot) {
   const parts = [
     snapshot.active_thread_id || "",
@@ -254,6 +365,10 @@ export function createMergedTranscriptHydrationPagePatch(
 ) {
   let workingState = state;
   let accumulatedPatch = null;
+  // A page load (cold hydration / older-history prepend) legitimately
+  // materializes the full window. This is user-paced (scroll / initial load),
+  // not a per-streaming-snapshot cost, so the O(n) copy here is acceptable.
+  noteFullWindowCopy();
   const nextEntries = new Map(state.transcriptHydrationEntries);
   const nextOrder = prepend ? [...state.transcriptHydrationOrder] : [];
   const pageItemIds = [];
@@ -335,25 +450,36 @@ function buildHydratedTranscriptSnapshot(
     overlayEntries = [],
   } = {}
 ) {
-  const entries = new Map(state.transcriptHydrationEntries);
-  const order = [...state.transcriptHydrationOrder];
+  // Overlay ONLY the (small) snapshot tail — never clone the whole window every
+  // snapshot (that O(n) copy is the long-session freeze; see
+  // markdown/transcript-perf-freeze-analysis.md). Unchanged older entries are
+  // read straight from the live map by reference; genuinely-new item ids are
+  // appended to a shallow order copy.
+  const baseEntries = state.transcriptHydrationEntries;
+  const baseOrder = state.transcriptHydrationOrder;
+  let overlay = null;
+  let appended = null;
 
   for (const entry of overlayEntries || []) {
     const itemId = entry?.item_id;
     if (!itemId) {
       continue;
     }
-    const existing = entries.get(itemId);
-    entries.set(
+    const existing = baseEntries.get(itemId);
+    (overlay ||= new Map()).set(
       itemId,
       mergeTranscriptEntry(existing, prepareSnapshotOverlayEntry(existing, entry))
     );
-    if (!order.includes(itemId)) {
-      order.push(itemId);
+    // includes() runs only for a genuinely-new tail id (rare), not every entry.
+    if (existing === undefined && !baseOrder.includes(itemId)) {
+      (appended ||= []).push(itemId);
     }
   }
 
-  const transcript = order.map((itemId) => entries.get(itemId)).filter(Boolean);
+  const order = appended ? [...baseOrder, ...appended] : baseOrder;
+  const transcript = order
+    .map((itemId) => (overlay && overlay.has(itemId) ? overlay.get(itemId) : baseEntries.get(itemId)))
+    .filter(Boolean);
 
   if (!transcript.length) {
     return snapshot;
@@ -388,28 +514,36 @@ function toTranscriptEntry(entry) {
 }
 
 function createMergedSnapshotTailPatch(state, snapshot, signature) {
-  const nextEntries = new Map(state.transcriptHydrationEntries);
-  const nextOrder = [...state.transcriptHydrationOrder];
+  // Mutate the live window IN PLACE — do not clone the whole map/array every
+  // snapshot (the O(n) copy that froze long sessions; see
+  // markdown/transcript-perf-freeze-analysis.md). Safe because the per-thread
+  // retention cache copies defensively at switch time
+  // (`stashTranscriptHydrationForThread`), so in-place updates here can never
+  // corrupt a retained window, and every consumer reads the live state fresh.
+  const entries = state.transcriptHydrationEntries;
+  const order = state.transcriptHydrationOrder;
 
   for (const entry of snapshot.transcript || []) {
     const itemId = entry?.item_id;
     if (!itemId) {
       continue;
     }
-    const existing = nextEntries.get(itemId);
-    nextEntries.set(
+    const existing = entries.get(itemId);
+    const wasPresent = existing !== undefined;
+    entries.set(
       itemId,
       mergeTranscriptEntry(existing, prepareSnapshotOverlayEntry(existing, entry))
     );
-    if (!nextOrder.includes(itemId)) {
-      nextOrder.push(itemId);
+    // includes() runs only for a genuinely-new tail id (rare), not every entry.
+    if (!wasPresent && !order.includes(itemId)) {
+      order.push(itemId);
     }
   }
 
   return {
     transcriptHydrationBaseSnapshot: snapshot,
-    transcriptHydrationEntries: nextEntries,
-    transcriptHydrationOrder: nextOrder,
+    transcriptHydrationEntries: entries,
+    transcriptHydrationOrder: order,
     transcriptHydrationSignature: signature,
     transcriptHydrationThreadId: snapshot.active_thread_id,
   };

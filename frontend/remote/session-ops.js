@@ -14,6 +14,7 @@ import {
 import {
   clearTranscriptHydration,
   restoreHydratedTranscript,
+  switchTranscriptHydrationThread,
 } from "./transcript/store.js";
 import {
   hydrateRemoteTranscript,
@@ -1116,7 +1117,12 @@ export async function viewRemoteThread(threadId) {
       throw new Error("remote transcript page response is incomplete");
     }
 
-    clearTranscriptHydration(state);
+    // Retain the leaving thread's loaded window and restore the target thread's
+    // retained window (if any) instead of clearing — so switching between remote
+    // threads and back keeps the older history scrolled into view. The page fetch
+    // above still refreshes the tail; hydration merges it onto the restored
+    // window, and scroll-up reuses the retained older pages without a refetch.
+    switchTranscriptHydrationThread(state, threadId);
     // Pin this thread so incoming live snapshots update state.realSession while
     // leaving the user's local view in place.
     viewOnlyThreadId = threadId;
