@@ -17,6 +17,12 @@
 //! working-tree lock are later chunks; every error path here still drives the run
 //! to a terminal state.
 
+// Phase-1 workflow runner: fully implemented and exercised by `state/app/tests.rs`,
+// but not yet wired into the production request handlers, so every item reads as
+// dead in a non-test build. Suppress module-wide until the handlers land (see
+// `markdown/workflow-runner-design.md`).
+#![allow(dead_code)]
+
 use std::time::Duration;
 
 use tokio::time::Instant;

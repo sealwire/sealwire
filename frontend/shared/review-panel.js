@@ -138,7 +138,8 @@ export function ReviewPanel({
   const isReuse = reviewerThreadId !== "clean";
 
   const providerModels = (models || []).filter(
-    (model) => !model.provider || model.provider === reviewerProvider
+    (model) =>
+      (!model.provider || model.provider === reviewerProvider) && !model.hidden
   );
 
   const close = () => {

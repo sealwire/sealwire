@@ -1,5 +1,7 @@
 import React from "react";
 
+import { buildModelOptions } from "./composer.js";
+
 const h = React.createElement;
 
 export function SessionSettingsFields({
@@ -30,7 +32,7 @@ export function SessionSettingsFields({
       id: fieldId(idPrefix, "model-input"),
       label: labels.model || "Model",
       onChange: (value) => onFieldChange?.("model", value),
-      options: models.map((option) => ({
+      options: buildModelOptions(models, fields.model).map((option) => ({
         label: option.display_name || option.model,
         value: option.model,
       })),

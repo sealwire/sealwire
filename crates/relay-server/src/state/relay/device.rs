@@ -175,6 +175,9 @@ pub(crate) struct CompletedPairing {
     pub(crate) device_join_ticket: Option<String>,
     pub(crate) device_join_ticket_expires_at: Option<u64>,
     pub(crate) error: Option<String>,
+    // Set on construction but not read back yet; retained for the path-scoped
+    // pairing flow still being wired up.
+    #[allow(dead_code)]
     pub(crate) path_scope: Vec<String>,
 }
 

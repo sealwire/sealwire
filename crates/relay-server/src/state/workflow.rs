@@ -16,6 +16,11 @@
 //! editor and per-run worktree isolation are phase 2. See
 //! `markdown/workflow-runner-design.md`.
 
+// Phase-1 workflow projection: implemented and unit-tested below, but not yet
+// referenced by a live (non-test) code path, so its types/methods read as dead in a
+// normal build. Suppress module-wide until the runner is wired to the handlers.
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};

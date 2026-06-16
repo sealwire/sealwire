@@ -156,6 +156,7 @@ import {
   renderSelectOptions,
   replaceSelectOptions,
 } from "./shared/select-options.js";
+import { buildModelSelectOptions } from "./shared/composer.js";
 import {
   buildReasoningEffortOptions,
   resolveReasoningEffortValue,
@@ -1598,28 +1599,18 @@ function syncModelSuggestions(
     return;
   }
 
-  const options = [...(models || [])];
-  let currentValue = selectedModel || select.value || "";
-  const known = options.some((model) => model.model === currentValue);
-
-  if (currentValue && !known) {
-    if (allowForeign || options.length === 0) {
-      // Preserve a value the catalog doesn't list — the active session's real
-      // model, or a catalog that hasn't loaded yet — by surfacing it directly.
-      options.unshift({
-        model: currentValue,
-        display_name: currentValue,
-      });
-    } else {
-      // Stale value from a different provider: snap to this provider's default
-      // instead of leaking a foreign model id (e.g. gpt-5.5 under Claude).
-      currentValue =
-        options.find((model) => model.is_default)?.model || options[0].model;
-    }
-  }
+  // Drop hidden models + keep the current selection representable (snapping a
+  // stale foreign value to the provider default when !allowForeign). Shared with
+  // the composer/dialog pickers via buildModelOptions, so the filtering rule has
+  // a single tested definition.
+  const { options, value: currentValue } = buildModelSelectOptions(
+    models,
+    selectedModel || select.value || "",
+    { allowForeign }
+  );
 
   const renderedOptions = options.map((model) => ({
-    label: model.display_name,
+    label: model.display_name || model.model,
     value: model.model,
   }));
   if (replaceExisting) {

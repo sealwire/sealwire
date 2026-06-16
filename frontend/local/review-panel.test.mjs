@@ -42,6 +42,28 @@ test("ReviewPanel renders the reviewer provider options and the clean-reviewer f
   assert.match(html, /focus on the storage refactor/);
 });
 
+test("ReviewPanel does not offer a hidden model in the reviewer-model picker", () => {
+  const html = renderToStaticMarkup(
+    h(ReviewPanel, {
+      providerOptions: [{ label: "Codex", value: "codex" }],
+      models: [
+        { model: "gpt-5.5", display_name: "GPT-5.5", provider: "codex" },
+        {
+          model: "codex-auto-review",
+          display_name: "Codex Auto Review",
+          provider: "codex",
+          hidden: true,
+        },
+      ],
+      defaultProvider: "codex",
+    })
+  );
+
+  assert.match(html, /GPT-5\.5/, "visible reviewer model is offered");
+  assert.doesNotMatch(html, /Codex Auto Review/, "hidden model must not be offered");
+  assert.doesNotMatch(html, /codex-auto-review/, "hidden model value must not appear");
+});
+
 test("ReviewPanel lists reusable reviewer threads as 'Reuse:' options", () => {
   const html = renderToStaticMarkup(
     h(ReviewPanel, {

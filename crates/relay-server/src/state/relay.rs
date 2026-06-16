@@ -45,6 +45,7 @@ const MAX_REVIEW_JOBS: usize = 64;
 /// Backstop on retained workflow runs, mirroring `MAX_REVIEW_JOBS`: evict the
 /// oldest TERMINAL runs first; non-terminal runs are never auto-evicted (they
 /// have a live or restart-recoverable orchestrator).
+#[allow(dead_code)]
 const MAX_WORKFLOW_RUNS: usize = 64;
 /// Per-parent cap on retained reviewer threads. Re-reviewing a parent with a clean
 /// reviewer spawns a new hidden reviewer thread; once a parent has more than this,
@@ -417,6 +418,7 @@ impl RelayState {
     /// that need a "is the agent busy right now" check must use this, NOT a literal
     /// `current_status == "idle"` test, so providers that report a non-`idle` settled
     /// status (Codex's `unknown` / `completed`) aren't treated as busy.
+    #[allow(dead_code)]
     pub(crate) fn active_agent_is_working(&self) -> bool {
         self.selected_runtime()
             .map(ThreadRuntime::is_working)
@@ -834,15 +836,18 @@ impl RelayState {
         self.review_jobs.get(id)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn insert_workflow_run(&mut self, run: WorkflowRun) {
         self.prune_workflow_runs();
         self.workflow_jobs.insert(run.id.clone(), run);
     }
 
+    #[allow(dead_code)]
     pub(crate) fn remove_workflow_run(&mut self, id: &str) -> Option<WorkflowRun> {
         self.workflow_jobs.remove(id)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn update_workflow_run<F: FnOnce(&mut WorkflowRun)>(
         &mut self,
         id: &str,
@@ -857,6 +862,7 @@ impl RelayState {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn workflow_run(&self, id: &str) -> Option<&WorkflowRun> {
         self.workflow_jobs.get(id)
     }
@@ -873,6 +879,7 @@ impl RelayState {
     /// Hard-cap retained workflow runs, evicting the oldest TERMINAL runs first
     /// (mirrors `prune_review_jobs`). Non-terminal runs are never auto-evicted —
     /// they have a live or restart-recoverable orchestrator.
+    #[allow(dead_code)]
     fn prune_workflow_runs(&mut self) {
         if self.workflow_jobs.len() < MAX_WORKFLOW_RUNS {
             return;
@@ -1307,6 +1314,7 @@ impl RelayState {
         }
     }
 
+    #[allow(dead_code)]
     pub fn activate_thread(
         &mut self,
         thread: ThreadSummaryView,
@@ -1995,6 +2003,7 @@ impl RelayState {
         std::mem::take(&mut self.pending_broker_messages)
     }
 
+    #[allow(dead_code)]
     pub fn can_device_send_message(&self, device_id: &str) -> bool {
         if self.active_thread_id.is_none() {
             return false;
@@ -2006,6 +2015,7 @@ impl RelayState {
         }
     }
 
+    #[allow(dead_code)]
     pub fn ensure_device_can_send_message(&self, device_id: &str) -> Result<(), String> {
         if self.active_thread_id.is_none() {
             return Err("there is no active Codex thread to send to".to_string());
@@ -2030,6 +2040,7 @@ impl RelayState {
         }
     }
 
+    #[allow(dead_code)]
     pub fn set_active_controller(&mut self, device_id: &str) -> bool {
         self.assign_active_controller(device_id, unix_now())
     }

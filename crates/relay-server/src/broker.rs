@@ -222,6 +222,9 @@ impl BrokerConfig {
         .await
     }
 
+    // Test-only constructor (exercised from `broker/tests.rs`); not yet wired to a
+    // production caller.
+    #[allow(dead_code)]
     pub(crate) async fn from_parts(
         url: Option<String>,
         public_url: Option<String>,

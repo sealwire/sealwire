@@ -65,6 +65,8 @@ pub struct AppState {
     review_drain_max_ms: Arc<std::sync::atomic::AtomicU64>,
     /// Max time (ms) the workflow runner waits for a stopped turn to actually
     /// settle before giving up and going terminal. Overridable in tests.
+    /// Read only by the workflow runner, which isn't wired to a live path yet.
+    #[allow(dead_code)]
     workflow_drain_max_ms: Arc<std::sync::atomic::AtomicU64>,
     /// How long a user-initiated Stop waits for the provider's completion event
     /// before falling back to marking the turn idle locally (so a provider that

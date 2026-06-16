@@ -327,6 +327,9 @@ const THREAD_ENTRY_DETAIL_CHUNK_CHARS: usize = 12_000;
 pub enum SessionSnapshotCompactProfile {
     LocalWeb,
     RemoteSurface,
+    // Constructed only from tests so far; the iOS surface isn't wired into a live
+    // path yet.
+    #[allow(dead_code)]
     IosSurface,
 }
 
@@ -390,8 +393,11 @@ struct ThreadsResponseReductionStage {
 
 #[derive(Clone, Copy)]
 pub enum ThreadsResponseCompactProfile {
+    // Constructed only from tests so far; not yet wired into a live path.
+    #[allow(dead_code)]
     LocalWeb,
     RemoteSurface,
+    #[allow(dead_code)]
     IosSurface,
 }
 

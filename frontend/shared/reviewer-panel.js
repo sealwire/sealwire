@@ -98,14 +98,21 @@ export function ReviewerPanel({
   return h(
     "section",
     { className: "reviewer-panel" },
-    h(
-      "header",
-      { className: "reviewer-panel-header" },
-      h("h2", { className: "reviewer-panel-title" }, "Reviewer"),
-      // When there are jobs, the launcher lives in the header; the empty state
-      // hosts it otherwise (so only one modal mounts for this panelId).
-      canLaunch && hasJobs ? launcher() : null
-    ),
+    // The eyebrow + inline launcher only earn their place as a toolbar ABOVE a list
+    // of jobs. In the empty state the "Reviewer" eyebrow is redundant with the
+    // already-selected "Reviewer" tab and leaves the label hanging to the left of
+    // the CTA card (its text sits at the panel edge, the card's copy is inset by the
+    // card padding) — so we drop it and let the self-contained card, which carries
+    // its own launcher, stand alone. (Exactly one launcher mounts per panelId either
+    // way: in the header when populated, inside the card when empty.)
+    hasJobs
+      ? h(
+          "header",
+          { className: "reviewer-panel-header" },
+          h("h2", { className: "reviewer-panel-title" }, "Reviewer"),
+          canLaunch ? launcher() : null
+        )
+      : null,
     hasJobs
       ? h(
           "div",

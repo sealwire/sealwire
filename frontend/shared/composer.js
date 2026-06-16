@@ -10,12 +10,33 @@ const h = React.createElement;
 // session reports the concrete "claude-opus-4-8"). The backend is responsible
 // for keeping session.model matchable; this is the UI-side safety net so the
 // selection is never unrepresented.
-export function buildModelOptions(models = [], currentModelValue = "") {
-  const options = [...models];
-  if (currentModelValue && !options.some((model) => model.model === currentModelValue)) {
-    options.unshift({ display_name: currentModelValue, model: currentModelValue });
+// Build the model-picker option list. Hidden models (Codex marks internal /
+// deprecated entries hidden) are always dropped, but the current selection is
+// kept representable: with `allowForeign` (the composer) the real current entry
+// is re-surfaced even if it's hidden/stale; without it (the launch dialog) a
+// value that isn't in THIS provider's catalog is snapped to the provider default
+// instead of leaking a foreign id (e.g. gpt-5.5 under Claude). Returns the
+// filtered `options` plus the possibly-snapped `value`.
+export function buildModelSelectOptions(
+  models = [],
+  currentModelValue = "",
+  { allowForeign = true } = {}
+) {
+  const options = (models || []).filter((model) => !model.hidden);
+  let value = currentModelValue;
+  if (value && !options.some((model) => model.model === value)) {
+    if (allowForeign || options.length === 0) {
+      const current = (models || []).find((model) => model.model === value);
+      options.unshift(current || { display_name: value, model: value });
+    } else {
+      value = options.find((model) => model.is_default)?.model || options[0]?.model || value;
+    }
   }
-  return options;
+  return { options, value };
+}
+
+export function buildModelOptions(models = [], currentModelValue = "") {
+  return buildModelSelectOptions(models, currentModelValue, { allowForeign: true }).options;
 }
 
 export function ConversationComposer({

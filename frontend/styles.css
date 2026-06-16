@@ -3092,17 +3092,13 @@ body.is-resizing-panel {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 16px;
+  /* A slim SECONDARY eyebrow now: it sits BELOW the tabs band (which carries the
+   * chat-header alignment), so making it a second full-height band would stack two
+   * tall headers on the Changes tab. Just enough padding to read as a section label. */
+  padding: 10px 16px;
   border-bottom: 1px solid var(--border-subtle);
   background: var(--bg-base);
   z-index: 2;
-  /* Match the natural height of `.chat-header` so the rail's bottom border
-   * lines up with the chat-header's bottom border. The variable is set by
-   * `header-band-sync.js`, measured from the live chat-header element so
-   * subtitle / path changes don't desync the rule. Fallback covers the
-   * pre-JS render. */
-  min-height: var(--header-band-height, 67px);
-  box-sizing: border-box;
 }
 .workspace-changes-title {
   margin: 0;
@@ -3242,13 +3238,28 @@ body.is-resizing-panel {
   padding: 10px 12px;
   border-bottom: 1px solid var(--border-subtle);
   background: var(--bg-base);
+  /* This is now the TOP band of the right rail, so it — not the inner ENVIRONMENT
+     header — must match the chat-header's height for the bottom borders to line up
+     across the top of the app. The var is measured live from the chat-header by
+     header-band-sync.js; the segmented control stays vertically centered in the band. */
+  min-height: var(--header-band-height, 67px);
+  box-sizing: border-box;
 }
 .right-panel-tabs-header .settings-segmented {
   width: 100%;
+  /* Sit the track on the panel base so the selected chip can lift off it with the
+     SAME material as the reviewer card below (elevated fill on base). Scoped to the
+     right panel — the shared segmented control elsewhere keeps its own surface. */
+  background: var(--bg-base);
+  border-color: var(--border-subtle);
 }
 .right-panel-tabs-header .settings-segmented-option {
   flex: 1 1 0;
   text-align: center;
+}
+.right-panel-tabs-header .settings-segmented-option.is-selected {
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-1);
 }
 
 /* Reviewer tab body ------------------------------------------------------- */
@@ -3277,11 +3288,32 @@ body.is-resizing-panel {
   flex-direction: column;
   gap: 10px;
 }
+/* Empty state reads as one elevated "call to action" card. Its left edge lines
+   up with the REVIEWER eyebrow above it (both are direct children of the panel's
+   12px padding — the old asymmetric `8px 4px` inset pushed the copy 4px past the
+   eyebrow), and the elevated fill + hairline border + soft shadow lift it off the
+   panel base so the empty panel reads as "ready for an action", not unfinished. */
 .reviewer-empty {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 8px 4px;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-1);
+}
+/* The panel's single primary action: promote it from the ghost header-button
+   look to the accent fill and span it across the card so it reads as the CTA. */
+.reviewer-empty .review-launch-button {
+  width: 100%;
+  background: var(--accent);
+  color: var(--accent-on);
+  border-color: transparent;
+}
+.reviewer-empty .review-launch-button:hover:not(:disabled) {
+  background: var(--accent-hover-color);
+  border-color: transparent;
 }
 .reviewer-empty-copy {
   margin: 0;
@@ -3302,6 +3334,7 @@ body.is-resizing-panel {
   border: 1px solid var(--border-subtle);
   border-radius: 10px;
   background: var(--bg-elevated);
+  box-shadow: var(--shadow-1);
 }
 .reviewer-job-alert { border-color: var(--text-warning, #b54708); }
 .reviewer-job-head {

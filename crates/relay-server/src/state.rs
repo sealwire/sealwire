@@ -26,8 +26,13 @@ pub(crate) use self::relay::{
 pub(crate) use self::review::{
     parent_fix_prompt, parent_recap_prompt, parse_verdict, post_back_message, re_review_prompt,
     review_approved_message, review_escalated_message, reviewer_prompt, ReviewJob, ReviewJobStatus,
-    ReviewMode, ReviewRecapSource, Verdict,
+    ReviewMode, ReviewRecapSource,
 };
+// `Verdict` is consumed only by tests today; the workflow runner that will use it in
+// a live path isn't wired up yet, so keep the re-export without an unused-import
+// warning in non-test builds.
+#[allow(unused_imports)]
+pub(crate) use self::review::Verdict;
 pub(crate) use self::security::SecurityProfile;
 #[allow(unused_imports)]
 pub(crate) use self::workflow::{

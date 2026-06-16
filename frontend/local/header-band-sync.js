@@ -1,7 +1,8 @@
-// Keep the right-rail's "ENVIRONMENT" header band the same height as the
-// chat-header so their bottom borders line up. The chat-header's content
-// (title + optional subtitle / path) varies, so we measure it instead of
-// hard-coding a pixel value.
+// Keep the right-rail's top header band (the Changes/Reviewer tabs row —
+// `.right-panel-tabs-header`) the same height as the chat-header so their bottom
+// borders line up across the top of the app. The chat-header's content (title +
+// optional subtitle / path) varies, so we measure it instead of hard-coding a
+// pixel value.
 
 export function setupHeaderBandSync({
   chatHeader,
