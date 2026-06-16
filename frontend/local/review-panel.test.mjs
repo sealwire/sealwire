@@ -8,6 +8,7 @@ import {
   ReviewPanel,
   reviewSubmitPayload,
   clampReviewRounds,
+  providerSwitchClearsReuse,
 } from "../shared/review-panel.js";
 import {
   canRequestReview,
@@ -71,6 +72,61 @@ test("ReviewPanel shows only the clean option when there are no reusable reviewe
   assert.doesNotMatch(html, /Reuse:/);
 });
 
+test("ReviewPanel reuse options are grouped by provider (a codex reviewer is hidden under Claude)", () => {
+  const reusableReviewers = [
+    { reviewerThreadId: "rev-codex", provider: "codex", label: "Codex reviewer" },
+    { reviewerThreadId: "rev-claude", provider: "claude_code", label: "Claude reviewer" },
+  ];
+  const providerOptions = [
+    { label: "Codex", value: "codex" },
+    { label: "Claude", value: "claude_code" },
+  ];
+  // Default reviewer provider is Claude → only the Claude reviewer is offered for reuse.
+  const claudeView = renderToStaticMarkup(
+    h(ReviewPanel, { providerOptions, models: [], defaultProvider: "claude_code", reusableReviewers })
+  );
+  assert.match(claudeView, /value="rev-claude"/);
+  assert.doesNotMatch(claudeView, /value="rev-codex"/);
+
+  // Default reviewer provider is Codex → only the Codex reviewer is offered.
+  const codexView = renderToStaticMarkup(
+    h(ReviewPanel, { providerOptions, models: [], defaultProvider: "codex", reusableReviewers })
+  );
+  assert.match(codexView, /value="rev-codex"/);
+  assert.doesNotMatch(codexView, /value="rev-claude"/);
+});
+
+test("providerSwitchClearsReuse flags switching away from a reused session (drives the flash)", () => {
+  // Switching the provider always falls back to a clean reviewer; it should flash the
+  // reviewer-session field only when a reused session was actually switched away from.
+  assert.equal(providerSwitchClearsReuse("rev-1"), true);
+  assert.equal(providerSwitchClearsReuse("clean"), false);
+  assert.equal(providerSwitchClearsReuse(undefined), false);
+  assert.equal(providerSwitchClearsReuse(null), false);
+});
+
+test("re-review keeps the reviewer provider selectable (not locked) and explains switching", () => {
+  const html = renderToStaticMarkup(
+    h(ReviewPanel, {
+      providerOptions: [
+        { label: "Codex", value: "codex" },
+        { label: "Claude", value: "claude_code" },
+      ],
+      models: [],
+      defaultProvider: "claude_code",
+      reusableReviewers: [{ reviewerThreadId: "rev-1", provider: "codex", label: "Codex reviewer" }],
+      // Prefilled re-review of a codex reviewer thread.
+      initialReviewerThreadId: "rev-1",
+      initialProvider: "codex",
+    })
+  );
+  // The provider <select> must NOT be disabled during reuse — the user can switch it.
+  assert.doesNotMatch(html, /id="review-panel-provider"[^>]*disabled/);
+  // Copy reflects the new behavior (switching starts a new reviewer), not "fixed".
+  assert.match(html, /Switching the provider starts a new reviewer/);
+  assert.doesNotMatch(html, /Provider and model are fixed/);
+});
+
 test("reviewSubmitPayload carries the reuse thread id AND an explicit model/effort override", () => {
   // Reuse now honors a model/effort override (the existing thread no longer silently
   // keeps its own when the user picks one); the chosen thread id is still sent.
@@ -84,6 +140,7 @@ test("reviewSubmitPayload carries the reuse thread id AND an explicit model/effo
     }),
     {
       reviewerProvider: "codex",
+      parentThreadId: null,
       reviewerModel: "gpt-5.5",
       reviewerEffort: "high",
       instructions: "look again",
@@ -105,6 +162,7 @@ test("reviewSubmitPayload leaves model/effort null when not overridden on reuse"
     }),
     {
       reviewerProvider: "codex",
+      parentThreadId: null,
       reviewerModel: null,
       reviewerEffort: null,
       instructions: null,
@@ -128,6 +186,7 @@ test("reviewSubmitPayload sends a clean reviewer (null thread id) otherwise", ()
       }),
       {
         reviewerProvider: "codex",
+        parentThreadId: null,
         reviewerModel: "gpt-5.5",
         reviewerEffort: "medium",
         instructions: null,
@@ -137,6 +196,16 @@ test("reviewSubmitPayload sends a clean reviewer (null thread id) otherwise", ()
       }
     );
   }
+});
+
+test("reviewSubmitPayload carries the parent thread id (the thread to review), defaulting to null", () => {
+  // The panel is scoped to the VIEWED thread, so a review must target that thread.
+  assert.equal(
+    reviewSubmitPayload({ reviewerProvider: "codex", parentThreadId: "thread-B" }).parentThreadId,
+    "thread-B"
+  );
+  // Absent → null, which lets the backend default to the active thread.
+  assert.equal(reviewSubmitPayload({ reviewerProvider: "codex" }).parentThreadId, null);
 });
 
 test("reviewSubmitPayload carries and clamps the round budget", () => {
@@ -323,7 +392,7 @@ test("selectReviewLaunchModel falls back to the session provider when it is the 
   assert.equal(model.models.length, 1);
 });
 
-test("canRequestReview requires controller + idle + no active review", () => {
+test("canRequestReview gates on the reviewed thread being idle + no review running (control NOT checked)", () => {
   const base = {
     active_thread_id: "t1",
     active_controller_device_id: "device-a",
@@ -332,9 +401,10 @@ test("canRequestReview requires controller + idle + no active review", () => {
     active_review_jobs: [],
   };
   assert.equal(canRequestReview(base, "device-a"), true);
-  // Not the controller.
-  assert.equal(canRequestReview(base, "device-b"), false);
-  // A turn is running.
+  // Control is NOT a gate: a review is a background action authorized server-side by
+  // path-scope, so a non-controller device may still request one.
+  assert.equal(canRequestReview(base, "device-b"), true);
+  // A turn is running on the reviewed (active) thread.
   assert.equal(canRequestReview({ ...base, active_turn_id: "turn-1" }, "device-a"), false);
   // A genuinely-working status blocks.
   assert.equal(canRequestReview({ ...base, current_status: "working" }, "device-a"), false);
@@ -342,13 +412,91 @@ test("canRequestReview requires controller + idle + no active review", () => {
   // it must still allow a review, mirroring the backend `thread_status_is_working`.
   assert.equal(canRequestReview({ ...base, current_status: "unknown" }, "device-a"), true);
   assert.equal(canRequestReview({ ...base, current_status: "completed" }, "device-a"), true);
-  // A review already in progress.
+  // A review already in progress (one at a time, global).
   assert.equal(
     canRequestReview({ ...base, active_review_jobs: [{ status: "waiting_for_reviewer" }] }, "device-a"),
     false
   );
-  // No active thread.
+  // No thread to review at all (no active, no viewed) → still false.
   assert.equal(canRequestReview({ ...base, active_thread_id: null }, "device-a"), false);
+});
+
+test("canRequestReview corner cases: no-thread, no-active-but-viewed, and per-thread approvals", () => {
+  // No active thread AND no viewed thread → nothing to review.
+  assert.equal(canRequestReview({ active_review_jobs: [] }, "device-a"), false);
+  assert.equal(canRequestReview({ active_review_jobs: [] }, "device-a", null), false);
+
+  // No active thread, but a named idle viewed thread → allowed (mirrors the backend, which
+  // no longer requires an active thread when a parent_thread_id is named).
+  assert.equal(
+    canRequestReview(
+      { active_thread_id: null, thread_activity: [], active_review_jobs: [] },
+      "device-a",
+      "saved-idle-thread"
+    ),
+    true
+  );
+
+  // Approvals are scoped to the REVIEWED thread: one pending on a different thread does
+  // not block; one on the reviewed thread does.
+  const session = {
+    active_thread_id: "active",
+    thread_activity: [],
+    active_review_jobs: [],
+    pending_approvals: [{ thread_id: "some-other-thread" }],
+  };
+  assert.equal(canRequestReview(session, "device-a", "viewed-idle"), true);
+  assert.equal(
+    canRequestReview(
+      { ...session, pending_approvals: [{ thread_id: "viewed-idle" }] },
+      "device-a",
+      "viewed-idle"
+    ),
+    false
+  );
+});
+
+test("canRequestReview gates on the VIEWED thread, not the active thread (review a non-active idle thread)", () => {
+  // Regression: when another thread holds the active slot and is mid-turn, the
+  // Request-review / Re-review button for the idle thread you're VIEWING must NOT be
+  // disabled. A review is a background action on the viewed thread — the active thread's
+  // turn/status is irrelevant to it.
+  const session = {
+    active_thread_id: "active-busy",
+    active_controller_device_id: null, // unclaimed
+    active_turn_id: "turn-running", // the ACTIVE thread is mid-turn
+    current_status: "active",
+    thread_activity: [], // the viewed thread is NOT working
+    active_review_jobs: [],
+  };
+  // Reviewing the active (busy) thread is still blocked.
+  assert.equal(canRequestReview(session, "device-a", "active-busy"), false);
+  // Reviewing a DIFFERENT, idle thread you're viewing must be allowed.
+  assert.equal(canRequestReview(session, "device-a", "idle-viewed"), true);
+  // A viewed thread that IS working (present in thread_activity) stays blocked.
+  assert.equal(
+    canRequestReview(
+      { ...session, thread_activity: [{ thread_id: "busy-bg" }] },
+      "device-a",
+      "busy-bg"
+    ),
+    false
+  );
+});
+
+test("canRequestReview ignores the __view_only__ render sentinel (review is a background action)", () => {
+  // Browsing a non-active thread projects the session with a "__view_only__" controller
+  // sentinel; that is a render artifact, not a real lock, so it must not disable a review
+  // of the (idle) viewed thread.
+  const projected = {
+    active_thread_id: "viewed-idle",
+    active_controller_device_id: "__view_only__",
+    active_turn_id: null,
+    current_status: "idle",
+    thread_activity: [],
+    active_review_jobs: [],
+  };
+  assert.equal(canRequestReview(projected, "device-a", "viewed-idle"), true);
 });
 
 // The read-only view projection moved to frontend/local/view-only-thread.js and is

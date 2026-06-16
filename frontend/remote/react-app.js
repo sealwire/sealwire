@@ -768,7 +768,10 @@ function RemoteApp() {
       // Full reviewer-thread list so each card can show its reviewer thread's
       // (long, truncated-with-tooltip) name by joining on reviewer_thread_id.
       reviewerThreads: session?.reviewer_threads || [],
-      canRequest: canRequestReview(session, remoteDeviceId),
+      // The thread the panel is showing (on remote this is the active/viewed thread):
+      // sent as the review's parent so the backend reviews this thread explicitly.
+      parentThreadId: remoteViewedThreadId,
+      canRequest: canRequestReview(session, remoteDeviceId, remoteViewedThreadId),
       blocked: isReviewBlocked({ active_review_jobs: remoteThreadReviewJobs }),
     });
   }, [session, remoteUi.providers, remoteUi.providerModels, remoteDeviceId]);
@@ -781,7 +784,7 @@ function RemoteApp() {
     providerModels: remoteUi.providerModels,
     session,
   });
-  const canRequestRemoteReview = canRequestReview(session, remoteDeviceId);
+  const canRequestRemoteReview = canRequestReview(session, remoteDeviceId, remoteViewedThreadId);
 
   useEffect(() => {
     void bootRemoteRuntime();
@@ -1235,6 +1238,7 @@ function RemoteApp() {
               session?.active_thread_id,
               null
             ),
+            parentThreadId: remoteViewedThreadId,
             onRequestReview: reviewerActions.onRequestReview,
           },
           session,
@@ -1793,6 +1797,7 @@ function RemoteThreadPanel({
               models: reviewNudgeModel.reviewModel?.models || [],
               defaultProvider: reviewNudgeModel.reviewModel?.defaultProvider || "",
               reusableReviewers: reviewNudgeModel.reusableReviewers || [],
+              parentThreadId: reviewNudgeModel.parentThreadId || null,
               disabled: false,
               onSubmit: (values) => reviewNudgeModel.onRequestReview?.(values),
             })

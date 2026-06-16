@@ -395,6 +395,23 @@ impl RelayState {
         })
     }
 
+    /// The workspace cwd for an arbitrary thread (not just the active one): its live
+    /// runtime's `current_cwd`, falling back to the cached thread row. Used to scope a
+    /// review at the NAMED parent thread's workspace instead of the active thread's.
+    /// `None` when the thread can't be resolved (so the caller can reject the request).
+    pub(crate) fn thread_cwd(&self, thread_id: &str) -> Option<String> {
+        self.runtime_for_thread(thread_id)
+            .map(|runtime| runtime.current_cwd.clone())
+            .filter(|cwd| !cwd.is_empty())
+            .or_else(|| {
+                self.threads
+                    .iter()
+                    .find(|thread| thread.id == thread_id)
+                    .map(|thread| thread.cwd.clone())
+                    .filter(|cwd| !cwd.is_empty())
+            })
+    }
+
     /// Whether the ACTIVE thread's agent is mid-turn per its provider-reported
     /// status. Semantic mirror of the frontend `canRequestReview` gate: callers
     /// that need a "is the agent busy right now" check must use this, NOT a literal
@@ -595,15 +612,37 @@ impl RelayState {
             .or_else(|| self.threads.iter().find(|thread| thread.id == reviewer_id))
     }
 
-    /// The provider key for a reviewer thread, derived from its summary
-    /// (`provider`, then `source`). `None` if the thread is unknown in-process
-    /// (e.g. after a restart) — callers re-derive via `find_thread_provider`.
+    /// The provider key for a reviewer thread: its summary's `provider`, then the
+    /// routing-cache row's `provider`. NEVER `source` — that is the session ORIGIN
+    /// (e.g. "vscode" for codex running inside an editor), not a provider key. Surfacing
+    /// the source made the re-review reuse picker filter the reviewer out (its "vscode"
+    /// did not match the job's "codex") and the backend reuse-validation reject it. The
+    /// cache row is consulted because codex's empty-provider refreshes can blank the live
+    /// runtime summary's provider while the (stamped) cache row still carries it. `None`
+    /// if no provider is known in-process (e.g. after a restart) — callers re-derive via
+    /// `find_thread_provider`.
     pub(crate) fn reviewer_thread_provider(&self, reviewer_id: &str) -> Option<String> {
-        let summary = self.reviewer_thread_summary(reviewer_id)?;
-        [summary.provider.as_str(), summary.source.as_str()]
-            .into_iter()
-            .find(|value| !value.is_empty())
-            .map(str::to_string)
+        self.reviewer_thread_summary(reviewer_id)
+            .map(|summary| summary.provider.clone())
+            .filter(|provider| !provider.is_empty())
+            .or_else(|| {
+                self.threads
+                    .iter()
+                    .find(|thread| thread.id == reviewer_id)
+                    .map(|thread| thread.provider.clone())
+                    .filter(|provider| !provider.is_empty())
+            })
+            .or_else(|| {
+                // Last resort: the review job recorded the reviewer's provider definitively
+                // at creation. Using it means a reviewer always groups under its REAL
+                // provider in the reuse picker, instead of being left unknown (which would
+                // leak it under every provider — e.g. a codex reviewer showing under Claude).
+                self.review_jobs
+                    .values()
+                    .find(|job| job.reviewer_thread_id.as_deref() == Some(reviewer_id))
+                    .map(|job| job.reviewer_provider.clone())
+                    .filter(|provider| !provider.is_empty())
+            })
     }
 
     /// Compact views of the reviewer→parent map for the snapshot. The local UI uses

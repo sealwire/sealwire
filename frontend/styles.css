@@ -296,6 +296,31 @@ button, input, textarea, select {
   }
 }
 
+/* One-shot highlight on the reviewer-session field when switching the reviewer provider
+   auto-resets a reused session to a clean one — it signals the user was moved off the
+   session they had selected. The class is added briefly then removed (review-panel.js),
+   so it re-fires on each provider switch. */
+@keyframes reviewer-session-autoswitch-flash {
+  0% {
+    background-color: var(--accent-soft-bg);
+    box-shadow: 0 0 0 2px var(--accent);
+  }
+  100% {
+    background-color: transparent;
+    box-shadow: 0 0 0 2px transparent;
+  }
+}
+
+.reviewer-session-autoswitched {
+  animation: reviewer-session-autoswitch-flash 1.1s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reviewer-session-autoswitched {
+    animation: none;
+  }
+}
+
 button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, summary:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);

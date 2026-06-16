@@ -64,6 +64,7 @@ export function RightPanelTabs({ store, changes, reviewer = {}, panelId = "revie
           reviewModel: review.reviewModel || {},
           reusableReviewers: review.reusableReviewers || [],
           reviewerThreads: review.reviewerThreads || [],
+          parentThreadId: review.parentThreadId || null,
           canRequest: Boolean(review.canRequest),
           requesting: Boolean(review.requesting),
           onRequestReview: reviewer.onRequestReview,

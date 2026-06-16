@@ -143,19 +143,36 @@ export function isAgentStatusWorking(status) {
   return !NOT_WORKING_STATUSES.has((status || "").trim().toLowerCase());
 }
 
-// Whether THIS device may start a new review right now. Mirrors the backend
-// request_review gate: the device must be able to drive the session (control is
-// unclaimed OR held by this device — same as can_device_send_message), the agent
-// must not be mid-turn, no approvals may be pending, and no review may already be
-// running. Used for the Reviewer-tab CTA + idle nudge.
-export function canRequestReview(session, deviceId) {
-  if (!session?.active_thread_id) return false;
-  const controller = session.active_controller_device_id;
-  if (controller && controller !== deviceId) return false;
-  if (session.active_turn_id) return false;
-  if (Array.isArray(session.pending_approvals) && session.pending_approvals.length > 0) {
+// Whether a specific thread is busy (mid-turn / working) per the snapshot. The ACTIVE
+// thread's liveness is the top-level turn/status; a background (non-active) thread's is
+// its presence in `thread_activity` — the same signal the view-only projection uses.
+function isThreadBusy(session, threadId) {
+  if (threadId && threadId === session?.active_thread_id) {
+    if (session.active_turn_id) return true;
+    return isAgentStatusWorking(session.current_status);
+  }
+  return (session?.thread_activity || []).some((entry) => entry?.thread_id === threadId);
+}
+
+// Whether a review of `viewedThreadId` (default: the active thread) can be requested now.
+// A review is a BACKGROUND action authorized SERVER-SIDE by workspace path-scope — NOT by
+// who controls the active session — so this gate intentionally does NOT check control or
+// the active-thread lease (`deviceId` is accepted for call-signature stability but unused).
+// It stays OPTIMISTIC: it only suppresses the CTA for states the user can already see are
+// non-actionable — the reviewed thread is mid-turn, an approval is pending on it, or a
+// review is already running — and lets the backend be authoritative for everything else,
+// surfacing any rejection inline in the request modal. Used for the Reviewer-tab CTA +
+// idle nudge.
+export function canRequestReview(session, deviceId, viewedThreadId = null) {
+  const target = viewedThreadId || session?.active_thread_id || null;
+  if (!target) return false;
+  if (isThreadBusy(session, target)) return false;
+  if (
+    Array.isArray(session?.pending_approvals) &&
+    session.pending_approvals.some((approval) => approval?.thread_id === target)
+  ) {
     return false;
   }
   if (isReviewInProgress(session)) return false;
-  return !isAgentStatusWorking(session.current_status);
+  return true;
 }

@@ -416,6 +416,7 @@ export function createLifecycleController(ctx) {
     reviewerEffort,
     instructions,
     reviewerThreadId,
+    parentThreadId,
     maxRounds,
     recapSource,
   } = {}) {
@@ -441,6 +442,9 @@ export function createLifecycleController(ctx) {
           instructions: instructions || null,
           // Phase 3: reuse an existing reviewer thread when chosen.
           reviewer_thread_id: reviewerThreadId || null,
+          // The thread to review (the viewed thread). null lets the backend default
+          // to the active thread.
+          parent_thread_id: parentThreadId || null,
           // How to brief the reviewer ("last_message" default vs "recap").
           recap_source: recapSource || "last_message",
           // Phase 5: round budget for the iterative reviewer↔author loop.

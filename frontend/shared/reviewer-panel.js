@@ -64,6 +64,9 @@ export function ReviewerPanel({
   reviewModel = {},
   reusableReviewers = [],
   reviewerThreads = [],
+  // The thread this panel is showing (the viewed thread). Sent as the review's parent
+  // so "Request review" targets the thread in view, not the relay's active thread.
+  parentThreadId = null,
   canRequest = false,
   requesting = false,
   onRequestReview,
@@ -87,6 +90,7 @@ export function ReviewerPanel({
       models: reviewModel.models || [],
       defaultProvider: reviewModel.defaultProvider || "",
       reusableReviewers,
+      parentThreadId,
       disabled: requesting || !canRequest,
       onSubmit: onRequestReview,
     });
@@ -348,6 +352,8 @@ function ReviewerJobCard({
             models: reviewModel.models || [],
             defaultProvider: reviewModel.defaultProvider || "",
             reusableReviewers,
+            // Re-review targets THIS card's own parent thread.
+            parentThreadId: job.parent_thread_id || null,
             initialReviewerThreadId: job.reviewer_thread_id,
             initialProvider: job.reviewer_provider || "",
             disabled: !canRequest,

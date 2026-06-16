@@ -19,12 +19,17 @@ export function reviewSubmitPayload({
   reviewerEffort,
   instructions,
   reviewerThreadId,
+  parentThreadId,
   maxRounds,
   recapSource,
 } = {}) {
   const isReuse = Boolean(reviewerThreadId) && reviewerThreadId !== "clean";
   return {
     reviewerProvider,
+    // The thread to review. The reviewer panel is scoped to the VIEWED thread, so a
+    // re-review must target that thread — not whatever the relay's active thread is.
+    // null lets the backend default to the active thread (the common, same-thread case).
+    parentThreadId: parentThreadId || null,
     // Model + effort are honored for clean AND reused reviewers: an empty value
     // (null) means "use the reviewer's own / the provider default", a non-empty one
     // overrides it for this run. (A reused thread no longer silently ignores them.)
@@ -48,6 +53,13 @@ export function clampReviewRounds(value) {
   return Math.min(10, Math.max(1, n));
 }
 
+// Pure: switching the reviewer provider always falls back to a clean reviewer (the prior
+// reuse selection belonged to the old provider). Returns whether a reused session was
+// switched away from, so the caller can flash the reviewer-session field to signal it.
+export function providerSwitchClearsReuse(reviewerThreadId) {
+  return Boolean(reviewerThreadId) && reviewerThreadId !== "clean";
+}
+
 // Self-contained modal for requesting a cross-agent review. Manages its own
 // draft state; the caller supplies the reviewer provider/model choices, the list
 // of reusable reviewer threads, and an
@@ -60,6 +72,9 @@ export function ReviewPanel({
   models = [],
   defaultProvider = "",
   reusableReviewers = [],
+  // The thread this review targets (the thread the reviewer panel is showing). Sent as
+  // parent_thread_id so the backend reviews THIS thread, not the relay's active thread.
+  parentThreadId = null,
   // Pre-seed the form to reuse a specific reviewer (the per-card "Re-review" entry
   // point): the reuse dropdown lands on this thread and the provider is locked to it.
   initialReviewerThreadId = "clean",
@@ -94,6 +109,9 @@ export function ReviewPanel({
   // it did nothing. Now a rejected request keeps the modal open and shows why.
   const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState(null);
+  // Brief highlight on the reviewer-session field after changing the provider auto-resets a
+  // reused session to "clean" — so the user notices the system moved them off that session.
+  const [sessionAutoSwitched, setSessionAutoSwitched] = React.useState(false);
   const busy = submitting || submittingProp;
 
   React.useEffect(() => {
@@ -101,6 +119,16 @@ export function ReviewPanel({
       setReviewerProvider(defaultProvider);
     }
   }, [defaultProvider]);
+
+  // Clear the auto-switch highlight after it has flashed once (the CSS animation is one-shot;
+  // dropping the class lets it re-trigger on the next provider switch).
+  React.useEffect(() => {
+    if (!sessionAutoSwitched) {
+      return undefined;
+    }
+    const timer = setTimeout(() => setSessionAutoSwitched(false), 1200);
+    return () => clearTimeout(timer);
+  }, [sessionAutoSwitched]);
 
   // Reusable reviewers offered for the currently-selected provider (an unknown
   // provider — null, after a restart — is always offered).
@@ -119,13 +147,18 @@ export function ReviewPanel({
     document.getElementById(id)?.close?.();
   };
 
-  // Switching provider invalidates a reuse selection (it belonged to the prior
-  // provider), so fall back to a clean reviewer.
+  // Switching provider invalidates a reuse selection (it belonged to the prior provider),
+  // so fall back to a clean reviewer — and, when we were reusing, briefly highlight the
+  // reviewer-session field so the user sees the system moved them off that session.
   const selectProvider = (value) => {
+    const wasReusing = providerSwitchClearsReuse(reviewerThreadId);
     setReviewerProvider(value);
     setReviewerModel("");
     setReviewerEffort("");
     setReviewerThreadId("clean");
+    if (wasReusing) {
+      setSessionAutoSwitched(true);
+    }
   };
 
   // Choosing an existing reviewer locks the provider to that thread's provider.
@@ -169,6 +202,7 @@ export function ReviewPanel({
           reviewerEffort,
           instructions,
           reviewerThreadId,
+          parentThreadId,
           maxRounds,
           recapSource,
         })
@@ -228,8 +262,8 @@ export function ReviewPanel({
           id: `${id}-provider`,
           className: "control-input",
           value: reviewerProvider,
-          // Locked while reusing — the reviewer thread's provider is fixed.
-          disabled: isReuse,
+          // Always changeable: switching the provider off a reused session falls back to a
+          // clean reviewer of the new provider (highlighted on the reviewer-session field).
           onChange: (event) => selectProvider(event.target.value),
         },
         h("option", { value: "" }, "Select a provider…"),
@@ -297,7 +331,9 @@ export function ReviewPanel({
         "select",
         {
           id: `${id}-reviewer-session`,
-          className: "control-input",
+          className: sessionAutoSwitched
+            ? "control-input reviewer-session-autoswitched"
+            : "control-input",
           value: reviewerThreadId,
           onChange: (event) => selectReviewerSession(event.target.value),
         },
@@ -314,7 +350,7 @@ export function ReviewPanel({
         ? h(
             "p",
             { className: "panel-modal-copy" },
-            "Provider and model are fixed by the existing reviewer thread. It keeps its earlier review context."
+            "Reusing this reviewer thread — it keeps its earlier review context. Switching the provider starts a new reviewer instead."
           )
         : null,
       h(
@@ -408,6 +444,7 @@ export function ReviewLauncher({
   models = [],
   defaultProvider = "",
   reusableReviewers = [],
+  parentThreadId = null,
   initialReviewerThreadId = "clean",
   initialProvider = "",
   disabled = false,
@@ -435,6 +472,7 @@ export function ReviewLauncher({
       models,
       defaultProvider,
       reusableReviewers,
+      parentThreadId,
       initialReviewerThreadId,
       initialProvider,
       onSubmit,

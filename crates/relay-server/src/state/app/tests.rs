@@ -4550,6 +4550,253 @@ mod review_tests {
     }
 
     #[tokio::test]
+    async fn review_can_target_a_non_active_parent_thread() {
+        // A review must be allowed to target a thread the request NAMES (parent_thread_id),
+        // not only the relay's active thread. Start B, then start A so A is active and B is a
+        // background (non-active) thread; then review B explicitly. Before lifting the v1
+        // "can only review the active thread" guard this errors; after, it runs against B.
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let parent_b = start_parent(&app, cwd, "codex").await;
+        let parent_a = start_parent(&app, cwd, "codex").await;
+        assert_eq!(
+            app.snapshot().await.active_thread_id.as_deref(),
+            Some(parent_a.id.as_str()),
+            "A should be the active thread; B is now a background thread"
+        );
+
+        let mut input = review_input("codex");
+        input.parent_thread_id = Some(parent_b.id.clone());
+
+        let receipt = app
+            .request_review(input)
+            .await
+            .expect("reviewing a named non-active parent should be allowed");
+        assert_eq!(receipt.parent_thread_id, parent_b.id);
+
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
+        assert_eq!(
+            job.parent_thread_id, parent_b.id,
+            "the review must be recorded against the named parent B"
+        );
+
+        // The active thread A must stay active throughout — the review runs in the
+        // background on B and never displaces the user's active thread.
+        assert_eq!(
+            app.snapshot().await.active_thread_id.as_deref(),
+            Some(parent_a.id.as_str())
+        );
+
+        // The recap turn ran on B (the named parent), never on the active thread A.
+        let provider = providers.get("codex").unwrap();
+        let turns = provider.turns.lock().await.clone();
+        assert!(
+            turns.iter().any(|(tid, _)| tid == &parent_b.id),
+            "expected a recap turn on the named parent B: {turns:?}"
+        );
+        assert!(
+            !turns.iter().any(|(tid, _)| tid == &parent_a.id),
+            "no turn should run on the active thread A: {turns:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn review_allowed_when_another_device_controls_the_session() {
+        // A review is a BACKGROUND action authorized by workspace path-scope, NOT by who
+        // holds the active-thread control lease. Even when another device controls the
+        // active session, this device may start a review of an idle thread. (Before the
+        // control gate was dropped this failed with "another device currently has control".)
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, _providers) = build_review_app(cwd, &["codex"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+        {
+            let mut relay = app.relay.write().await;
+            relay.active_controller_device_id = Some("some-other-device".to_string());
+            relay.active_controller_last_seen_at = Some(unix_now());
+        }
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("a review must not require controlling the active session");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
+        assert_eq!(job.parent_thread_id, parent.id);
+    }
+
+    #[tokio::test]
+    async fn stopping_a_review_is_not_gated_on_active_session_control() {
+        // Symmetry with request_review: a review is authorized by workspace path-scope, NOT
+        // by who controls the active session — so STOPPING must follow the same rule.
+        // Otherwise a path-authorized device that started a background review could be unable
+        // to stop a hung one, stranding the reviewed thread locked until the controller
+        // intervenes. With another device controlling and no active review, the failure must
+        // be "no active review" — never a control-ownership rejection.
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, _providers) = build_review_app(cwd, &["codex"]).await;
+        let _parent = start_parent(&app, cwd, "codex").await;
+        {
+            let mut relay = app.relay.write().await;
+            relay.active_controller_device_id = Some("some-other-device".to_string());
+            relay.active_controller_last_seen_at = Some(unix_now());
+        }
+
+        let err = app
+            .cancel_active_review(Some("device-1".to_string()))
+            .await
+            .expect_err("there is no active review to stop");
+        assert!(
+            !err.to_lowercase().contains("has control"),
+            "stopping a review must not be gated on active-session control: {err}"
+        );
+        assert!(err.contains("no active review"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn review_rejected_when_parent_workspace_is_outside_the_device_scope() {
+        // Authorization now lives in path-scope (not control): a paired device may only
+        // review threads whose workspace is inside its scope. A device scoped to a
+        // different directory is refused before any review work happens.
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let other = TempDir::new().expect("other tmpdir");
+        let other_scope = other.path().to_str().unwrap();
+        let (app, _providers) = build_review_app(cwd, &["codex"]).await;
+        let _parent = start_parent(&app, cwd, "codex").await;
+        {
+            // Pair a device scoped to a DIFFERENT directory than the reviewed thread's cwd.
+            let mut relay = app.relay.write().await;
+            relay.paired_devices.insert(
+                "device-scoped".to_string(),
+                crate::state::relay::PairedDevice {
+                    device_id: "device-scoped".to_string(),
+                    label: "device-scoped".to_string(),
+                    payload_secret: "test-payload-secret".to_string(),
+                    device_verify_key: "test-verify-key".to_string(),
+                    created_at: 1,
+                    last_seen_at: Some(1),
+                    last_peer_id: Some("peer-test".to_string()),
+                    broker_join_ticket_expires_at: None,
+                    path_scope: vec![other_scope.to_string()],
+                },
+            );
+        }
+
+        let mut input = review_input("codex");
+        input.device_id = Some("device-scoped".to_string());
+        let err = app
+            .request_review(input)
+            .await
+            .expect_err("a review of a workspace outside the device's scope must be rejected");
+        assert!(
+            err.to_lowercase().contains("outside") && err.to_lowercase().contains("allowed paths"),
+            "expected a path-scope rejection, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reviewer_thread_provider_never_reports_the_session_source_as_provider() {
+        // Codex running inside an editor reports a session `source` of "vscode" with an
+        // EMPTY provider on its summary. The reviewer thread's provider must NOT become
+        // "vscode": that is the session ORIGIN, not a provider, and surfacing it filtered
+        // the reviewer out of the re-review reuse picker (its provider "vscode" did not
+        // match the job's "codex") and made the backend reuse-validation reject it.
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, _providers) = build_review_app(cwd, &["codex"]).await;
+        let reviewer_id = "reviewer-vscode-sourced";
+        {
+            let mut relay = app.relay.write().await;
+            let thread = crate::protocol::ThreadSummaryView {
+                id: reviewer_id.to_string(),
+                name: None,
+                preview: String::new(),
+                cwd: cwd.to_string(),
+                updated_at: unix_now(),
+                source: "vscode".to_string(),
+                status: "idle".to_string(),
+                model_provider: "vscode".to_string(),
+                provider: String::new(),
+            };
+            relay.register_background_thread(thread, cwd, "model", "never", "read-only", "low");
+            relay.register_reviewer_thread(reviewer_id.to_string(), "parent-1".to_string());
+
+            assert_ne!(
+                relay.reviewer_thread_provider(reviewer_id).as_deref(),
+                Some("vscode"),
+                "the editor session source must never be surfaced as the reviewer provider"
+            );
+            // The snapshot field the reuse picker reads must not carry the source either.
+            let view = relay
+                .reviewer_thread_views()
+                .into_iter()
+                .find(|v| v.reviewer_thread_id == reviewer_id)
+                .expect("reviewer thread view");
+            assert_ne!(view.reviewer_provider.as_deref(), Some("vscode"));
+        }
+    }
+
+    #[tokio::test]
+    async fn reviewer_thread_provider_resolves_from_the_review_job_when_summary_lacks_it() {
+        // When the summary can't tell us the provider (codex's editor-sourced summary has an
+        // empty provider), the REVIEW JOB recorded it definitively at creation. Use it, so a
+        // reviewer groups under its REAL provider in the reuse picker — instead of being left
+        // unknown (null), which leaks it under every provider (e.g. a codex reviewer showing
+        // when Claude is selected).
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, _providers) = build_review_app(cwd, &["codex"]).await;
+        let reviewer_id = "reviewer-grouped-by-job";
+        {
+            let mut relay = app.relay.write().await;
+            let thread = crate::protocol::ThreadSummaryView {
+                id: reviewer_id.to_string(),
+                name: None,
+                preview: String::new(),
+                cwd: cwd.to_string(),
+                updated_at: unix_now(),
+                source: "vscode".to_string(),
+                status: "idle".to_string(),
+                model_provider: "vscode".to_string(),
+                provider: String::new(),
+            };
+            relay.register_background_thread(thread, cwd, "model", "never", "read-only", "low");
+            relay.register_reviewer_thread(reviewer_id.to_string(), "parent-1".to_string());
+
+            let mut job = crate::state::ReviewJob::new(
+                "review-grouping".to_string(),
+                "parent-1".to_string(),
+                "codex".to_string(),
+                "codex".to_string(),
+                None,
+                crate::state::ReviewMode::CleanThread,
+                cwd.to_string(),
+                "device-1".to_string(),
+                None,
+                1,
+            );
+            job.reviewer_thread_id = Some(reviewer_id.to_string());
+            relay.insert_review_job(job);
+
+            assert_eq!(
+                relay.reviewer_thread_provider(reviewer_id).as_deref(),
+                Some("codex"),
+                "the reviewer's provider must resolve from its review job, not stay unknown"
+            );
+            let view = relay
+                .reviewer_thread_views()
+                .into_iter()
+                .find(|v| v.reviewer_thread_id == reviewer_id)
+                .expect("reviewer thread view");
+            assert_eq!(view.reviewer_provider.as_deref(), Some("codex"));
+        }
+    }
+
+    #[tokio::test]
     async fn find_thread_provider_resolves_a_background_thread_missing_from_the_cache() {
         // Regression: a freshly-created background reviewer thread lives in `runtimes`,
         // but a thread-list refresh can transiently drop its row from `relay.threads`
@@ -5349,12 +5596,14 @@ mod review_tests {
             .expect("reviewer thread id");
         wait_for_active_turn_idle(&app).await;
 
-        // Simulate a restart where the in-process summary is gone (runtime + cache
-        // row), so the provider must be re-derived by probing.
+        // Simulate a restart where ALL in-process state is gone — runtime, cache row, AND
+        // review jobs (none are persisted; only the reviewer→parent map is durable) — so the
+        // provider must be re-derived by probing.
         {
             let mut relay = app.relay.write().await;
             relay.runtimes.remove(&reviewer);
             relay.threads.retain(|thread| thread.id != reviewer);
+            relay.review_jobs.clear();
             assert!(relay.reviewer_thread_provider(&reviewer).is_none());
             // Still owned by the parent in the durable map.
             assert!(relay
@@ -6095,14 +6344,18 @@ settings update: {error}"
     }
 
     #[tokio::test]
-    async fn review_rejects_when_no_active_parent() {
+    async fn review_rejects_when_no_thread_to_review() {
+        // With neither a named `parent_thread_id` NOR an active thread, there is nothing to
+        // review. (A named parent no longer requires an active thread — see
+        // `review_can_target_a_non_active_parent_thread` — so the error is now about having
+        // no thread at all, not specifically "no active thread".)
         let dir = TempDir::new().expect("tmpdir");
         let (app, _providers) = build_review_app(dir.path().to_str().unwrap(), &["codex"]).await;
         let error = app
             .request_review(review_input("codex"))
             .await
-            .expect_err("review without an active parent should fail");
-        assert!(error.contains("no active"), "got: {error}");
+            .expect_err("review with no named parent and no active thread should fail");
+        assert!(error.contains("no thread to review"), "got: {error}");
     }
 
     #[tokio::test]
@@ -6860,12 +7113,34 @@ settings update: {error}"
             .expect_err("the reviewed thread must stay frozen while blocked");
         assert!(send_err.contains("being reviewed"), "got: {send_err}");
 
-        // A passive (non-controller) device must not be able to resolve.
+        // Authorization is workspace path-scope (not active-session control): a device
+        // scoped to a DIFFERENT directory than the reviewed thread cannot resolve it.
+        let other = TempDir::new().expect("other tmpdir");
+        {
+            let mut relay = app.relay.write().await;
+            relay.paired_devices.insert(
+                "other-device".to_string(),
+                crate::state::relay::PairedDevice {
+                    device_id: "other-device".to_string(),
+                    label: "other-device".to_string(),
+                    payload_secret: "test-payload-secret".to_string(),
+                    device_verify_key: "test-verify-key".to_string(),
+                    created_at: 1,
+                    last_seen_at: Some(1),
+                    last_peer_id: Some("peer-test".to_string()),
+                    broker_join_ticket_expires_at: None,
+                    path_scope: vec![other.path().to_str().unwrap().to_string()],
+                },
+            );
+        }
         let scope_err = app
             .resolve_blocked_review(Some("other-device".to_string()))
             .await
-            .expect_err("a non-controller device must not resolve");
-        assert!(scope_err.contains("control"), "got: {scope_err}");
+            .expect_err("a device outside the workspace scope must not resolve");
+        assert!(
+            scope_err.to_lowercase().contains("allowed paths"),
+            "got: {scope_err}"
+        );
 
         // "Stop reviewer & unlock" is the escape hatch: it unlocks even though the turn
         // still can't be stopped (interrupt_fails stays true) — a best-effort interrupt,

@@ -392,6 +392,9 @@ fn request_review_action_round_trips_and_binds_device() {
         "input": {
             "reviewer_provider": "codex",
             "instructions": "look at the tests",
+            // The remote surface sends the VIEWED thread as the review parent; it must
+            // survive deserialization + device binding so the relay reviews that thread.
+            "parent_thread_id": "thread-viewed",
         }
     });
     let request: RemoteActionRequest =
@@ -403,13 +406,15 @@ fn request_review_action_round_trips_and_binds_device() {
     let serialized = serde_json::to_value(&request).expect("serialize request_review");
     assert_eq!(serialized["type"], "request_review");
     assert_eq!(serialized["input"]["reviewer_provider"], "codex");
+    assert_eq!(serialized["input"]["parent_thread_id"], "thread-viewed");
 
-    // bind_device stamps the requesting device onto the input.
+    // bind_device stamps the requesting device onto the input WITHOUT dropping parent.
     match request.bind_device("device-9".to_string()) {
         RemoteActionRequest::RequestReview { input } => {
             assert_eq!(input.device_id.as_deref(), Some("device-9"));
             assert_eq!(input.reviewer_provider, "codex");
             assert_eq!(input.instructions.as_deref(), Some("look at the tests"));
+            assert_eq!(input.parent_thread_id.as_deref(), Some("thread-viewed"));
         }
         other => panic!("unexpected bound request: {other:?}"),
     }

@@ -79,7 +79,7 @@ import {
   selectReviewLaunchModel,
 } from "../shared/review-state.js";
 import { projectViewOnlySession } from "./view-only-thread.js";
-import { canComposeThread } from "../shared/thread-compose.js";
+import { canComposeThread, composerButtonState } from "../shared/thread-compose.js";
 import { saveLastEffort } from "../shared/last-used-settings.js";
 import {
   AuditList,
@@ -417,15 +417,23 @@ export function createSessionRenderer({
     // draft edit or second submit can't change or duplicate the in-flight send.
     const submitInFlight = Boolean(state.composerSubmitInFlight);
     const composerReady = hasActiveSession && canCompose && viewingConversation;
-    sendButton.disabled = !composerReady || turnRunning || activeThreadFrozen || submitInFlight;
-    sendButton.hidden = composerReady && turnRunning;
+    // Send and Stop are mutually exclusive: a running turn shows Stop, never Send
+    // (no pending-message queue yet). The view-only observer of a background turn
+    // gets Stop too, so Send must hide for them — not only for the controller.
+    const buttons = composerButtonState({
+      composerReady,
+      turnRunning,
+      threadWorking,
+      activeThreadFrozen,
+      canWrite,
+      viewOnly: session.view_only,
+      submitInFlight,
+    });
+    sendButton.disabled = buttons.sendDisabled;
+    sendButton.hidden = buttons.sendHidden;
     if (stopButton) {
-      // Don't let the user stop the review's turn on the thread being reviewed.
-      const canStopViewedTurn = threadWorking
-        && !activeThreadFrozen
-        && (canWrite || session.view_only);
-      stopButton.hidden = !canStopViewedTurn;
-      stopButton.disabled = stopButton.hidden;
+      stopButton.hidden = buttons.stopHidden;
+      stopButton.disabled = buttons.stopDisabled;
     }
     messageInput.disabled =
       !hasActiveSession ||
@@ -858,9 +866,12 @@ export function createSessionRenderer({
       // Full reviewer-thread list so each card can show its reviewer thread's
       // (long, truncated-with-tooltip) name by joining on reviewer_thread_id.
       reviewerThreads: session?.reviewer_threads || [],
+      // The thread the panel is showing: sent as the review's parent so a review
+      // targets the VIEWED thread, not the relay's active thread.
+      parentThreadId: viewedThreadId,
       canRequest:
         typeof requestReview === "function" &&
-        canRequestReview(session, state.deviceId),
+        canRequestReview(session, state.deviceId, viewedThreadId),
       blocked: isReviewBlocked({ active_review_jobs: threadReviewJobs }),
     });
   }
@@ -876,7 +887,11 @@ export function createSessionRenderer({
     const show =
       typeof requestReview === "function" &&
       isViewingConversation(session) &&
-      canRequestReview(session, state.deviceId);
+      canRequestReview(
+        session,
+        state.deviceId,
+        state.viewThreadId || session?.active_thread_id || null
+      );
     reviewIdleNudge.hidden = !show;
     if (!show) {
       renderReactContent(reviewIdleNudge, null);
@@ -900,6 +915,7 @@ export function createSessionRenderer({
             state.viewThreadId,
             null
           ),
+          parentThreadId: state.viewThreadId || session?.active_thread_id || null,
           disabled: false,
           onSubmit: (values) => requestReview(values),
         })

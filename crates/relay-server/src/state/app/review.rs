@@ -149,41 +149,59 @@ starting a review"
                         .to_string(),
                 );
             }
-            relay.ensure_device_can_send_message(&device_id)?;
-
-            let active_thread_id = relay
-                .active_thread_id
-                .clone()
-                .ok_or_else(|| "there is no active thread to review".to_string())?;
+            // A review is a BACKGROUND action on a specific thread — it does NOT require
+            // controlling the active session (that lease governs who DRIVES the active
+            // thread's input, which is orthogonal to spawning a background reviewer). So we
+            // deliberately do NOT call `ensure_device_can_send_message` here. Authorization
+            // is workspace path-scope (enforced below against the reviewed thread's cwd),
+            // and the reviewed thread must be idle. This lets you review an idle thread
+            // while another session/device holds the active slot.
+            //
+            // Review the thread the request NAMES, falling back to the active thread when
+            // none is given; error only if there is no thread to review at all.
             let parent_thread_id = non_empty(input.parent_thread_id.clone())
-                .unwrap_or_else(|| active_thread_id.clone());
-            if parent_thread_id != active_thread_id {
-                return Err("v1 can only review the active thread".to_string());
-            }
-            if relay.active_thread_has_live_turn() {
+                .or_else(|| relay.active_thread_id.clone())
+                .ok_or_else(|| "there is no thread to review".to_string())?;
+            // The named thread must resolve to a workspace (a live runtime or a cached
+            // thread row); otherwise there is nothing to collect a diff from / review.
+            let parent_cwd = relay
+                .thread_cwd(&parent_thread_id)
+                .ok_or_else(|| "cannot resolve the thread to review".to_string())?;
+            // Liveness is checked on the NAMED parent, not the active thread.
+            if relay
+                .runtime_for_thread(&parent_thread_id)
+                .map(|runtime| runtime.has_live_turn())
+                .unwrap_or(false)
+            {
                 return Err("cannot start a review while a turn is in progress".to_string());
             }
-            if !relay.pending_approvals.is_empty() {
+            // Only approvals pending ON THE REVIEWED THREAD block it; an approval on some
+            // other thread is unrelated to this review.
+            if relay
+                .pending_approvals
+                .values()
+                .any(|approval| approval.thread_id == parent_thread_id)
+            {
                 return Err("cannot start a review while approvals are pending".to_string());
             }
             // Semantic liveness, NOT a literal `== "idle"`: a saved Codex thread reports
             // its own status vocabulary (`unknown` / `completed`), so a literal check
-            // wrongly refused on an idle-but-not-running thread. `active_turn_id` (above)
-            // is the authoritative in-flight signal; this only adds a clearer error for the
-            // pre-turn-id window where a provider reports a working status with no turn yet.
-            if relay.active_agent_is_working() {
-                return Err(format!(
-                    "cannot start a review while the agent is `{}`",
-                    relay.current_status
-                ));
+            // wrongly refused on an idle-but-not-running thread. The live-turn check above
+            // is the authoritative in-flight signal; this is the per-thread mirror of
+            // `active_agent_is_working` for the named parent.
+            if relay
+                .runtime_for_thread(&parent_thread_id)
+                .map(|runtime| runtime.is_working())
+                .unwrap_or(false)
+            {
+                return Err("cannot start a review while the agent is still working".to_string());
             }
-            // The active parent being idle does not mean the workspace is quiet: a
-            // backgrounded thread sharing this cwd could mutate files while we
-            // collect the diff or the reviewer reads it. Refuse rather than race
-            // (a worktree/snapshot mode is the future stronger fix). A reused
-            // reviewer thread is idle at this point (its prior review is terminal),
-            // so it does not trip this guard.
-            if relay.has_working_thread_in_cwd(&relay.current_cwd) {
+            // The parent being idle does not mean its workspace is quiet: a backgrounded
+            // thread sharing the parent's cwd could mutate files while we collect the diff
+            // or the reviewer reads it. Refuse rather than race (a worktree/snapshot mode is
+            // the future stronger fix). A reused reviewer thread is idle at this point (its
+            // prior review is terminal), so it does not trip this guard.
+            if relay.has_working_thread_in_cwd(&parent_cwd) {
                 return Err(
                     "another thread is running in this workspace; wait for it to finish before \
 requesting a review"
@@ -191,11 +209,7 @@ requesting a review"
                 );
             }
             let device_scope = relay.device_path_scope(&device_id);
-            ensure_path_within_device_scope(
-                &relay.current_cwd,
-                &device_scope,
-                &relay.allowed_roots,
-            )?;
+            ensure_path_within_device_scope(&parent_cwd, &device_scope, &relay.allowed_roots)?;
 
             // Validate a reuse target and lock its provider.
             let locked_provider = match &reuse_thread_id {
@@ -233,7 +247,7 @@ reviewer thread"
             (
                 parent_thread_id,
                 relay.provider_name.clone(),
-                relay.current_cwd.clone(),
+                parent_cwd,
                 locked_provider,
             )
         };
@@ -1758,11 +1772,22 @@ reviewed thread stays locked. Resolve the review (stop the reviewer) to unlock."
         }
         let (job_id, parent_thread_id, reviewer_thread_id) = {
             let relay = self.relay.read().await;
-            relay.ensure_device_can_send_message(&device_id)?;
-            match relay.active_review_job_ids() {
+            let ids = match relay.active_review_job_ids() {
                 Some(ids) => ids,
                 None => return Err("there is no active review to stop".to_string()),
+            };
+            // Authorize the stop the SAME way request_review authorizes the start — by the
+            // reviewed thread's workspace path-scope, NOT active-session control. A review
+            // you could start (path-authorized), you must be able to stop; gating stop on
+            // control would strand a hung review whose starter isn't the active controller.
+            if let Some(parent_cwd) = relay.thread_cwd(&ids.1) {
+                ensure_path_within_device_scope(
+                    &parent_cwd,
+                    &relay.device_path_scope(&device_id),
+                    &relay.allowed_roots,
+                )?;
             }
+            ids
         };
 
         // Tell the orchestrator to bail (so it won't start the next turn).
@@ -1838,11 +1863,6 @@ reviewed thread stays locked. Resolve the review (stop the reviewer) to unlock."
             Some(blocked) => (blocked.job_id.clone(), blocked.thread_id.clone()),
             None => return Err("there is no blocked review to resolve".to_string()),
         };
-        // Only a device that can drive this session may stop the reviewer.
-        {
-            let relay = self.relay.read().await;
-            relay.ensure_device_can_send_message(&device_id)?;
-        }
         let parent_thread_id = {
             let relay = self.relay.read().await;
             relay
@@ -1850,6 +1870,20 @@ reviewed thread stays locked. Resolve the review (stop the reviewer) to unlock."
                 .map(|job| job.parent_thread_id.clone())
                 .unwrap_or_default()
         };
+        // Authorize the unlock the SAME way request_review / cancel_active_review do — by the
+        // reviewed thread's workspace path-scope, NOT active-session control. The blocked
+        // recovery is the escape hatch for a stuck review; gating it on who holds the active
+        // lease could leave a path-authorized starter unable to unlock its own review.
+        {
+            let relay = self.relay.read().await;
+            if let Some(parent_cwd) = relay.thread_cwd(&parent_thread_id) {
+                ensure_path_within_device_scope(
+                    &parent_cwd,
+                    &relay.device_path_scope(&device_id),
+                    &relay.allowed_roots,
+                )?;
+            }
+        }
 
         // Best-effort interrupt, then ALWAYS unlock — same escape-hatch contract as
         // cancel_active_review. Don't gate the unlock on a confirmed drain (it can hang up
