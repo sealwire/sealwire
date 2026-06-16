@@ -18,6 +18,7 @@ import {
   deleteReview as deleteReviewApi,
 } from "../api.js";
 import { loadLastEffort, saveLastApprovalPolicy } from "../../shared/last-used-settings.js";
+import { resolveOutgoingEffort } from "../../shared/reasoning-efforts.js";
 import { providerLabel } from "../../shared/provider-labels.js";
 import { buildThreadGroups, findLatestThread } from "../../shared/thread-groups.js";
 import { createThreadListQueryOptions } from "../../shared/thread-queries.js";
@@ -384,10 +385,17 @@ export function createLifecycleController(ctx) {
         body: JSON.stringify({
           text,
           model: messageModel?.value,
-          effort: messageEffort?.value
-            || loadLastEffort(state.session?.provider || "")
-            || state.session?.reasoning_effort
-            || "",
+          // The live session effort wins over the per-provider last-used memory,
+          // and the result is clamped to the target model's supported set — so a
+          // stale/foreign value (e.g. a "max" mis-bucketed under codex) can never
+          // be forwarded and rejected with a 400.
+          effort: resolveOutgoingEffort({
+            override: messageEffort?.value || "",
+            sessionEffort: state.session?.reasoning_effort || "",
+            lastUsedEffort: loadLastEffort(state.session?.provider || ""),
+            models: state.session?.available_models || [],
+            model: messageModel?.value || state.session?.model || "",
+          }),
           device_id: state.deviceId,
           // Target the thread captured at submit time. The relay starts the turn
           // directly there, so a concurrent navigation cannot redirect the message.

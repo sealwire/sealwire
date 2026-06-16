@@ -44,6 +44,39 @@ export function buildReasoningEffortOptionsWithSelection(
   return options;
 }
 
+// Resolve the reasoning effort to SEND for an existing session.
+//
+// Order: an explicit composer override, then the session's LIVE effort (what the
+// UI shows), then the per-provider last-used memory. The last-used memory only
+// seeds new sessions, so it must never override the live session effort — and a
+// stale/foreign value there (e.g. a "max" historically mis-bucketed under codex)
+// must never be forwarded to a provider that would reject it (HTTP 400).
+//
+// The chosen value is dropped to the model default ONLY when the model is known
+// and provably does not support it. An empty/stale catalog (no supported list)
+// leaves it untouched, so a legitimate provider-specific effort like Claude's
+// "max" survives rather than being wrongly downgraded.
+export function resolveOutgoingEffort({
+  override = "",
+  sessionEffort = "",
+  lastUsedEffort = "",
+  models = [],
+  model = "",
+} = {}) {
+  const pick =
+    String(override || "").trim() ||
+    String(sessionEffort || "").trim() ||
+    String(lastUsedEffort || "").trim() ||
+    "";
+  if (!pick) return pick;
+  const option = findModelOption(models, model);
+  const supported = option?.supported_reasoning_efforts;
+  if (Array.isArray(supported) && supported.length && !supported.includes(pick)) {
+    return option?.default_reasoning_effort || supported[0];
+  }
+  return pick;
+}
+
 export function resolveReasoningEffortValue(models = [], modelName = "", selectedEffort = "") {
   const model = findModelOption(models, modelName);
   const supportedEfforts = model?.supported_reasoning_efforts?.length
