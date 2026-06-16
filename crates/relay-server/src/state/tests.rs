@@ -286,6 +286,7 @@ fn test_cached_remote_action_result(action_kind: &str, ok: bool) -> CachedRemote
             logs: Vec::new(),
             active_review_jobs: Vec::new(),
             reviewer_threads: Vec::new(),
+            reviews_revision: 0,
         }),
         receipt: Some(ApprovalReceipt {
             request_id: "req-1".to_string(),
@@ -303,6 +304,7 @@ fn test_cached_remote_action_result(action_kind: &str, ok: bool) -> CachedRemote
         thread_entry_detail: None,
         thread_transcript: None,
         workspace_diff: None,
+        reviews: None,
         ask_user_question_detail: None,
         session_claim: Some("claim-1".to_string()),
         session_claim_expires_at: Some(120),

@@ -132,6 +132,26 @@ pub struct SessionSnapshot {
     /// reviewer thread(s). Independent of `active_review_jobs` (which is in-memory).
     #[serde(default)]
     pub reviewer_threads: Vec<ReviewerThreadView>,
+    /// Content revision of the reviewer-panel data (review jobs + reviewer threads). A
+    /// small scalar that NEVER gets dropped by byte-budget compaction (unlike
+    /// `active_review_jobs`, which is drained under transcript pressure). The reviewer
+    /// panel reads its cards from a dedicated, uncompacted channel (`/api/session/reviews`
+    /// locally, the `fetch_reviews` broker action remotely) and re-fetches ONLY when this
+    /// revision changes — so the panel stays populated during live turns and the client
+    /// doesn't refetch on every frame. `active_review_jobs` above remains for synchronous
+    /// liveness/lock gating only.
+    #[serde(default)]
+    pub reviews_revision: u64,
+}
+
+/// Uncompacted reviewer-panel payload served on demand (decoupled from the byte-budgeted
+/// session snapshot): the full review-job cards + reviewer threads, plus the matching
+/// `reviews_revision` so the client can confirm its cache key. See `SessionSnapshot::reviews_revision`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReviewsResponse {
+    pub reviews_revision: u64,
+    pub review_jobs: Vec<ReviewJobView>,
+    pub reviewer_threads: Vec<ReviewerThreadView>,
 }
 
 /// One reviewer thread and the parent it reviews. Surfaced so the local UI can

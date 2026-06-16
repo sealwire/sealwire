@@ -76,6 +76,7 @@ import {
 } from "./remote-runtime.js";
 import {
   fetchTranscriptEntryDetail as fetchRemoteTranscriptEntryDetail,
+  fetchRemoteReviews,
   maybeLoadOlderTranscriptHistory,
   sendHeartbeat,
 } from "./session-ops.js";
@@ -110,7 +111,11 @@ import {
   selectReviewLaunchModel,
 } from "../shared/review-state.js";
 import { ReviewLauncher } from "../shared/review-panel.js";
-import { selectReusableReviewers } from "../shared/reviewer-threads.js";
+import {
+  createReviewsCache,
+  reviewCardsForViewedThread,
+  reusableReviewersFromReviews,
+} from "../shared/reviews-cache.js";
 import { createPanelControl } from "../local/panel-controls.js";
 import { setupHeaderBandSync } from "../local/header-band-sync.js";
 import {
@@ -750,31 +755,46 @@ function RemoteApp() {
   const remoteThreadReviewJobs = (session?.active_review_jobs || []).filter(
     (job) => job.parent_thread_id === remoteViewedThreadId
   );
+  // Reviewer-panel data over the dedicated (uncompacted) `fetch_reviews` channel, cached and
+  // re-fetched only when the snapshot's `reviews_revision` changes — so the panel survives
+  // live-turn compaction (which drains the snapshot's `active_review_jobs`).
+  const remoteReviewsCacheRef = useRef(null);
+  if (!remoteReviewsCacheRef.current) {
+    remoteReviewsCacheRef.current = createReviewsCache();
+  }
+  const [remoteReviews, setRemoteReviews] = useState(null);
   useEffect(() => {
+    void remoteReviewsCacheRef.current.sync(
+      session?.reviews_revision,
+      () => fetchRemoteReviews(),
+      () => setRemoteReviews(remoteReviewsCacheRef.current.current())
+    );
+  }, [session?.reviews_revision]);
+  useEffect(() => {
+    // Cards + reviewer threads come from the cache once loaded; until then fall back to the
+    // snapshot so the first paint isn't empty. Gating still reads the snapshot.
+    const reviewsData = remoteReviews || {
+      review_jobs: session?.active_review_jobs || [],
+      reviewer_threads: session?.reviewer_threads || [],
+    };
     getRemoteWorkspaceDiffStore().setReview({
-      reviewJobs: remoteThreadReviewJobs,
+      reviewJobs: reviewCardsForViewedThread(reviewsData, remoteViewedThreadId),
       reviewModel: selectReviewLaunchModel({
         providers: remoteUi.providers,
         providerModels: remoteUi.providerModels,
         session,
       }),
-      // Remote snapshots carry only the ACTIVE parent's reviewer_threads (scoped for
-      // the broker frame budget), which is exactly what the reuse picker needs.
-      reusableReviewers: selectReusableReviewers(
-        session?.reviewer_threads,
-        session?.active_thread_id,
-        null
-      ),
+      reusableReviewers: reusableReviewersFromReviews(reviewsData, remoteViewedThreadId, null),
       // Full reviewer-thread list so each card can show its reviewer thread's
       // (long, truncated-with-tooltip) name by joining on reviewer_thread_id.
-      reviewerThreads: session?.reviewer_threads || [],
+      reviewerThreads: reviewsData.reviewer_threads || [],
       // The thread the panel is showing (on remote this is the active/viewed thread):
       // sent as the review's parent so the backend reviews this thread explicitly.
       parentThreadId: remoteViewedThreadId,
       canRequest: canRequestReview(session, remoteDeviceId, remoteViewedThreadId),
       blocked: isReviewBlocked({ active_review_jobs: remoteThreadReviewJobs }),
     });
-  }, [session, remoteUi.providers, remoteUi.providerModels, remoteDeviceId]);
+  }, [session, remoteReviews, remoteUi.providers, remoteUi.providerModels, remoteDeviceId]);
 
   // Inputs for the composer idle nudge ("Want a second opinion on these
   // changes?"), mirroring the local surface. Plain render-time derivations — not
@@ -1229,13 +1249,13 @@ function RemoteApp() {
           reviewNudgeModel: {
             canRequest: canRequestRemoteReview,
             reviewModel: reviewLaunchModel,
-            // The composer nudge launcher needs the reusable-reviewer list too, or it
-            // shows no "reuse an existing reviewer" option (the rail/modal launcher
-            // already gets it via the workspace-diff store). Remote snapshots carry the
-            // active parent's reviewer_threads, which is exactly what the picker needs.
-            reusableReviewers: selectReusableReviewers(
-              session?.reviewer_threads,
-              session?.active_thread_id,
+            // The composer nudge launcher needs the reusable-reviewer list too, or it shows
+            // no "reuse an existing reviewer" option. Source it from the dedicated reviews
+            // cache (same as the panel) so it survives live-turn compaction; fall back to the
+            // snapshot until the cache loads.
+            reusableReviewers: reusableReviewersFromReviews(
+              remoteReviews || { reviewer_threads: session?.reviewer_threads || [] },
+              remoteViewedThreadId,
               null
             ),
             parentThreadId: remoteViewedThreadId,

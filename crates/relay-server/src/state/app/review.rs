@@ -351,6 +351,14 @@ to this thread."
         relay.active_review_jobs_view()
     }
 
+    /// The full, UNCOMPACTED reviewer-panel payload (cards + reviewer threads + revision).
+    /// This is the reviewer panel's source of truth, decoupled from the byte-budgeted
+    /// session snapshot (whose `active_review_jobs` is drained under transcript pressure).
+    pub async fn reviews(&self, device_id: Option<String>) -> crate::protocol::ReviewsResponse {
+        let relay = self.relay.read().await;
+        relay.reviews_response(device_id.as_deref())
+    }
+
     /// Delete a finished review: drop its job record and archive the reviewer
     /// thread (so it leaves history). Only allowed on terminal reviews — an active
     /// or blocked review must be stopped/resolved first.

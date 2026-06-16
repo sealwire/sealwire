@@ -10,10 +10,10 @@ use crate::{
         ApplyFileChangeInput, ApprovalDecisionInput, ApprovalReceipt, AskUserAnswerReceipt,
         AskUserQuestionDetailResponse, HeartbeatInput, ModelOptionView, ReadThreadEntriesInput,
         ReadThreadEntryDetailInput, ReadThreadTranscriptInput, RequestReviewInput,
-        ResumeSessionInput, SendMessageInput, SessionSnapshot, StartSessionInput, StopTurnInput,
-        SubmitAskUserAnswerInput, TakeOverInput, ThreadEntriesResponse, ThreadEntryDetailResponse,
-        ThreadTranscriptResponse, ThreadsQuery, ThreadsResponse, UpdateSessionSettingsInput,
-        WorkspaceDiffResponse,
+        ResumeSessionInput, ReviewsResponse, SendMessageInput, SessionSnapshot, StartSessionInput,
+        StopTurnInput, SubmitAskUserAnswerInput, TakeOverInput, ThreadEntriesResponse,
+        ThreadEntryDetailResponse, ThreadTranscriptResponse, ThreadsQuery, ThreadsResponse,
+        UpdateSessionSettingsInput, WorkspaceDiffResponse,
     },
     state::{
         AppState, ApprovalError, AskUserAnswerError, CachedRemoteActionResult,
@@ -96,6 +96,10 @@ pub(super) enum RemoteActionRequest {
         #[serde(default)]
         device_id: Option<String>,
     },
+    FetchReviews {
+        #[serde(default)]
+        device_id: Option<String>,
+    },
     FetchAskUserQuestionDetail {
         request_id: String,
         #[serde(default)]
@@ -140,6 +144,7 @@ impl RemoteActionRequest {
             Self::DecideApproval { .. } => RemoteActionKind::DecideApproval,
             Self::ApplyFileChange { .. } => RemoteActionKind::ApplyFileChange,
             Self::FetchWorkspaceDiff { .. } => RemoteActionKind::FetchWorkspaceDiff,
+            Self::FetchReviews { .. } => RemoteActionKind::FetchReviews,
             Self::FetchAskUserQuestionDetail { .. } => RemoteActionKind::FetchAskUserQuestionDetail,
             Self::SubmitAskUserAnswer { .. } => RemoteActionKind::SubmitAskUserAnswer,
             Self::RequestReview { .. } => RemoteActionKind::RequestReview,
@@ -218,6 +223,9 @@ impl RemoteActionRequest {
             Self::FetchWorkspaceDiff { .. } => Self::FetchWorkspaceDiff {
                 device_id: Some(device_id),
             },
+            Self::FetchReviews { .. } => Self::FetchReviews {
+                device_id: Some(device_id),
+            },
             Self::FetchAskUserQuestionDetail { request_id, .. } => {
                 Self::FetchAskUserQuestionDetail {
                     request_id,
@@ -267,6 +275,7 @@ pub(super) enum RemoteActionKind {
     DecideApproval,
     ApplyFileChange,
     FetchWorkspaceDiff,
+    FetchReviews,
     FetchAskUserQuestionDetail,
     SubmitAskUserAnswer,
     RequestReview,
@@ -295,6 +304,7 @@ impl RemoteActionKind {
             Self::DecideApproval => "decide_approval",
             Self::ApplyFileChange => "apply_file_change",
             Self::FetchWorkspaceDiff => "fetch_workspace_diff",
+            Self::FetchReviews => "fetch_reviews",
             Self::FetchAskUserQuestionDetail => "fetch_ask_user_question_detail",
             Self::SubmitAskUserAnswer => "submit_ask_user_answer",
             Self::RequestReview => "request_review",
@@ -321,6 +331,8 @@ struct RemoteActionResultPlaintext {
     thread_entry_detail: Option<ThreadEntryDetailResponse>,
     thread_transcript: Option<ThreadTranscriptResponse>,
     workspace_diff: Option<WorkspaceDiffResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reviews: Option<ReviewsResponse>,
     #[serde(skip_serializing_if = "Option::is_none")]
     ask_user_question_detail: Option<AskUserQuestionDetailResponse>,
     session_claim: Option<String>,
@@ -378,6 +390,7 @@ pub(super) struct RemoteActionOutcome {
     pub(super) thread_entry_detail: Option<ThreadEntryDetailResponse>,
     pub(super) thread_transcript: Option<ThreadTranscriptResponse>,
     pub(super) workspace_diff: Option<WorkspaceDiffResponse>,
+    pub(super) reviews: Option<ReviewsResponse>,
     pub(super) ask_user_question_detail: Option<AskUserQuestionDetailResponse>,
     pub(super) session_claim: Option<String>,
     pub(super) session_claim_expires_at: Option<u64>,
@@ -1063,6 +1076,13 @@ async fn execute_remote_action(
                 workspace_diff: Some(workspace_diff),
                 ..RemoteActionOutcome::default()
             }),
+        RemoteActionRequest::FetchReviews { device_id } => Ok(RemoteActionOutcome {
+            // The dedicated, UNCOMPACTED reviewer-panel payload (cards + reviewer threads +
+            // revision). Read-only; not gated on a session claim, but SCOPED to the
+            // requesting device's workspace (like fetch_workspace_diff / transcripts).
+            reviews: Some(state.reviews(device_id).await),
+            ..RemoteActionOutcome::default()
+        }),
         RemoteActionRequest::FetchAskUserQuestionDetail {
             request_id,
             device_id,
@@ -1104,6 +1124,7 @@ fn remote_action_emits_info_log(action: RemoteActionKind) -> bool {
             | RemoteActionKind::FetchThreadEntryDetail
             | RemoteActionKind::FetchThreadTranscript
             | RemoteActionKind::FetchWorkspaceDiff
+            | RemoteActionKind::FetchReviews
             | RemoteActionKind::FetchAskUserQuestionDetail
     )
 }
@@ -1397,6 +1418,7 @@ async fn publish_plain_remote_action_result(
         thread_entry_detail,
         thread_transcript,
         workspace_diff,
+        reviews,
         ask_user_question_detail,
         session_claim,
         session_claim_expires_at,
@@ -1439,6 +1461,7 @@ async fn publish_plain_remote_action_result(
         thread_entry_detail,
         thread_transcript,
         workspace_diff,
+        reviews,
         ask_user_question_detail,
         session_claim,
         session_claim_expires_at,
@@ -1604,6 +1627,7 @@ async fn replay_plain_remote_action_result(
             thread_entry_detail: cached.thread_entry_detail,
             thread_transcript: cached.thread_transcript,
             workspace_diff: cached.workspace_diff,
+            reviews: cached.reviews,
             ask_user_question_detail: cached.ask_user_question_detail,
             session_claim: cached.session_claim,
             session_claim_expires_at: cached.session_claim_expires_at,
@@ -1668,6 +1692,7 @@ async fn publish_remote_action_result_private(
         thread_entry_detail,
         thread_transcript,
         workspace_diff,
+        reviews,
         ask_user_question_detail,
         session_claim,
         session_claim_expires_at,
@@ -1714,6 +1739,7 @@ async fn publish_remote_action_result_private(
         thread_entry_detail,
         thread_transcript,
         workspace_diff,
+        reviews,
         ask_user_question_detail,
         session_claim,
         session_claim_expires_at,
@@ -1793,6 +1819,7 @@ async fn replay_encrypted_remote_action_result(
             thread_entry_detail: cached.thread_entry_detail,
             thread_transcript: cached.thread_transcript,
             workspace_diff: cached.workspace_diff,
+            reviews: cached.reviews,
             ask_user_question_detail: cached.ask_user_question_detail,
             session_claim: cached.session_claim,
             session_claim_expires_at: cached.session_claim_expires_at,
@@ -1984,6 +2011,7 @@ fn cached_remote_action_result(
         thread_entry_detail: outcome.thread_entry_detail,
         thread_transcript: outcome.thread_transcript,
         workspace_diff: outcome.workspace_diff,
+        reviews: outcome.reviews,
         ask_user_question_detail: outcome.ask_user_question_detail,
         session_claim: outcome.session_claim,
         session_claim_expires_at: outcome.session_claim_expires_at,
@@ -2185,6 +2213,7 @@ fn remote_action_result_kind(action: RemoteActionKind) -> RemoteActionResultKind
         | RemoteActionKind::FetchThreadEntryDetail
         | RemoteActionKind::FetchThreadTranscript
         | RemoteActionKind::FetchWorkspaceDiff
+        | RemoteActionKind::FetchReviews
         | RemoteActionKind::FetchAskUserQuestionDetail => {
             RemoteActionResultKind::RemoteTranscriptResult
         }

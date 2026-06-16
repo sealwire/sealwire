@@ -68,7 +68,11 @@ import { SessionSettingsButton } from "../shared/session-settings-panel.js";
 import {
   ReviewLauncher,
 } from "../shared/review-panel.js";
-import { selectReusableReviewersForView } from "../shared/reviewer-threads.js";
+import {
+  createReviewsCache,
+  reviewCardsForViewedThread,
+  reusableReviewersFromReviews,
+} from "../shared/reviews-cache.js";
 import {
   canRequestReview,
   isReviewBlocked,
@@ -194,8 +198,12 @@ export function createSessionRenderer({
   updateSessionSettings,
   requestReview,
   setReviewSlice,
+  fetchReviews,
   viewThread,
 }) {
+  // Cached reviewer-panel data from the dedicated (uncompacted) channel, keyed by the
+  // snapshot's `reviews_revision`. See reviews-cache.js / renderReviewSlice.
+  const reviewsCache = createReviewsCache();
   // Notifications navigate locally; looking at a thread never resumes it.
   configureThreadNotifications({
     resolveThreadName: (threadId) => {
@@ -849,30 +857,49 @@ export function createSessionRenderer({
     // into every other thread's panel. Scope the DISPLAY to the viewed thread; the
     // session's global active_review_jobs stays authoritative for navigation/locking.
     const viewedThreadId = state.viewThreadId || session?.active_thread_id || null;
-    const threadReviewJobs = (session?.active_review_jobs || []).filter(
-      (job) => job.parent_thread_id === viewedThreadId
-    );
+
+    // Refresh the dedicated (uncompacted) reviews channel only when the snapshot's
+    // reviews_revision changes; re-render the slice when fresh data lands. This keeps the
+    // panel populated during live turns, which drain the snapshot's `active_review_jobs`.
+    if (typeof fetchReviews === "function") {
+      void reviewsCache.sync(
+        session?.reviews_revision,
+        () => fetchReviews(),
+        () => renderReviewSlice(state.session || session)
+      );
+    }
+    // Cards + reviewer threads come from the cache (the uncompacted channel) once it's
+    // loaded; until then fall back to the snapshot so the first paint isn't empty.
+    const reviewsData = reviewsCache.hasData()
+      ? reviewsCache.current()
+      : {
+          review_jobs: session?.active_review_jobs || [],
+          reviewer_threads: session?.reviewer_threads || [],
+        };
+    const threadReviewJobs = reviewCardsForViewedThread(reviewsData, viewedThreadId);
     setReviewSlice({
       reviewJobs: threadReviewJobs,
       reviewModel: reviewLaunchModel(session),
       // Existing reviewer threads of the VIEWED thread (same scope as the review job
       // cards above), offered for reuse. Provider filtering happens in the panel (it
       // reacts to the chosen provider).
-      reusableReviewers: selectReusableReviewersForView(
-        session,
-        state.viewThreadId,
-        null
-      ),
+      reusableReviewers: reusableReviewersFromReviews(reviewsData, viewedThreadId, null),
       // Full reviewer-thread list so each card can show its reviewer thread's
       // (long, truncated-with-tooltip) name by joining on reviewer_thread_id.
-      reviewerThreads: session?.reviewer_threads || [],
+      reviewerThreads: reviewsData.reviewer_threads || [],
       // The thread the panel is showing: sent as the review's parent so a review
       // targets the VIEWED thread, not the relay's active thread.
       parentThreadId: viewedThreadId,
+      // Liveness/lock gating still reads the snapshot's `active_review_jobs` (the small
+      // non-terminal set kept for synchronous gating).
       canRequest:
         typeof requestReview === "function" &&
         canRequestReview(session, state.deviceId, viewedThreadId),
-      blocked: isReviewBlocked({ active_review_jobs: threadReviewJobs }),
+      blocked: isReviewBlocked({
+        active_review_jobs: (session?.active_review_jobs || []).filter(
+          (job) => job.parent_thread_id === viewedThreadId
+        ),
+      }),
     });
   }
 
@@ -910,9 +937,13 @@ export function createSessionRenderer({
           providerOptions: reviewModel.providerOptions,
           models: reviewModel.models,
           defaultProvider: reviewModel.defaultProvider,
-          reusableReviewers: selectReusableReviewersForView(
-            session,
-            state.viewThreadId,
+          // Source the reuse list from the dedicated reviews cache (same as the panel) so it
+          // survives live-turn compaction; fall back to the snapshot until the cache loads.
+          reusableReviewers: reusableReviewersFromReviews(
+            reviewsCache.hasData()
+              ? reviewsCache.current()
+              : { reviewer_threads: session?.reviewer_threads || [] },
+            state.viewThreadId || session?.active_thread_id || null,
             null
           ),
           parentThreadId: state.viewThreadId || session?.active_thread_id || null,

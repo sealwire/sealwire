@@ -95,6 +95,7 @@ import {
   createAuthSession,
   deleteAuthSession,
   fetchAuthSession,
+  getReviews,
 } from "./local/api.js";
 import {
   createWorkspaceDiffStore,
@@ -533,6 +534,14 @@ const renderer = createSessionRenderer({
   },
   setReviewSlice(slice) {
     workspaceDiffStore.setReview(slice);
+  },
+  // The reviewer panel's dedicated, UNCOMPACTED data channel (review cards + reviewer
+  // threads + revision). Decoupled from the byte-budgeted snapshot so the panel survives
+  // live-turn compaction (which drains `active_review_jobs`).
+  fetchReviews() {
+    // Local is the operator surface (full access): the endpoint resolves reviews with no
+    // device scope, so don't append a (dead) ?device_id query.
+    return getReviews(apiFetch);
   },
   // View-only navigation: just update the URL/viewThreadId without calling the
   // backend resume_session, which is mutating (it moves the relay's single

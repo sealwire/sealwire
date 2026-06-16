@@ -4797,6 +4797,270 @@ mod review_tests {
     }
 
     #[tokio::test]
+    async fn reviews_channel_returns_full_cards_with_a_revision_matching_the_snapshot() {
+        // The reviewer panel's dedicated channel (`app.reviews()`) returns the FULL review
+        // cards + reviewer threads + a content revision — the panel's source of truth,
+        // decoupled from the snapshot's drainable `active_review_jobs`. The revision it
+        // carries must match the snapshot's `reviews_revision` (the client's cache key, used
+        // to decide when to re-fetch).
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, _providers) = build_review_app(cwd, &["codex"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+
+        let reviews = app.reviews(None).await;
+        assert!(
+            reviews
+                .review_jobs
+                .iter()
+                .any(|j| j.reviewer_thread_id == job.reviewer_thread_id),
+            "the reviews channel must include the completed review card for the parent"
+        );
+        assert_ne!(
+            reviews.reviews_revision, 0,
+            "a real review must yield a non-zero reviews_revision"
+        );
+        assert_eq!(
+            reviews.reviews_revision,
+            app.snapshot().await.reviews_revision,
+            "the snapshot's reviews_revision must match the channel (the client's cache key)"
+        );
+        let _ = parent;
+    }
+
+    #[tokio::test]
+    async fn reviews_revision_changes_when_a_review_is_added() {
+        // The revision is the client's refetch signal: it must change when the reviewer data
+        // changes (a new review), and otherwise stay put so the client doesn't refetch on
+        // every snapshot frame.
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, _providers) = build_review_app(cwd, &["codex"]).await;
+        let _parent = start_parent(&app, cwd, "codex").await;
+        let before = app.reviews(None).await.reviews_revision;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        wait_for_review(&app, &receipt.review_job_id).await;
+        let after = app.reviews(None).await.reviews_revision;
+
+        assert_ne!(
+            before, after,
+            "adding a review must change reviews_revision"
+        );
+        // Stable across an unrelated re-read (no new review).
+        assert_eq!(after, app.reviews(None).await.reviews_revision);
+    }
+
+    #[tokio::test]
+    async fn reviews_channel_is_scoped_to_the_requesting_device_workspace() {
+        // The reviews read channel must not leak review metadata for parents outside the
+        // requesting device's path scope — consistent with workspace_diff / transcripts. A
+        // device scoped to one workspace sees only that workspace's reviews; the local
+        // operator (None) sees all.
+        let in_dir = TempDir::new().expect("in tmpdir");
+        let out_dir = TempDir::new().expect("out tmpdir");
+        let in_cwd = in_dir.path().to_str().unwrap();
+        let out_cwd = out_dir.path().to_str().unwrap();
+        let (app, _providers) = build_review_app(in_cwd, &["codex"]).await;
+        {
+            let mut relay = app.relay.write().await;
+            let mk_thread = |id: &str, cwd: &str| crate::protocol::ThreadSummaryView {
+                id: id.to_string(),
+                name: None,
+                preview: String::new(),
+                cwd: cwd.to_string(),
+                updated_at: unix_now(),
+                source: "codex".to_string(),
+                status: "idle".to_string(),
+                model_provider: "codex".to_string(),
+                provider: "codex".to_string(),
+            };
+            for (parent, reviewer, cwd, job_id) in [
+                ("parent-in", "rev-in", in_cwd, "job-in"),
+                ("parent-out", "rev-out", out_cwd, "job-out"),
+            ] {
+                relay.register_background_thread(
+                    mk_thread(parent, cwd),
+                    cwd,
+                    "model",
+                    "never",
+                    "read-only",
+                    "low",
+                );
+                relay.register_background_thread(
+                    mk_thread(reviewer, cwd),
+                    cwd,
+                    "model",
+                    "never",
+                    "read-only",
+                    "low",
+                );
+                relay.register_reviewer_thread(reviewer.to_string(), parent.to_string());
+                let mut job = crate::state::ReviewJob::new(
+                    job_id.to_string(),
+                    parent.to_string(),
+                    "codex".to_string(),
+                    "codex".to_string(),
+                    None,
+                    crate::state::ReviewMode::CleanThread,
+                    cwd.to_string(),
+                    "device-1".to_string(),
+                    None,
+                    1,
+                );
+                job.reviewer_thread_id = Some(reviewer.to_string());
+                relay.insert_review_job(job);
+            }
+            // A device scoped to ONLY the in-workspace.
+            relay.paired_devices.insert(
+                "device-scoped".to_string(),
+                crate::state::relay::PairedDevice {
+                    device_id: "device-scoped".to_string(),
+                    label: "device-scoped".to_string(),
+                    payload_secret: "test-payload-secret".to_string(),
+                    device_verify_key: "test-verify-key".to_string(),
+                    created_at: 1,
+                    last_seen_at: Some(1),
+                    last_peer_id: Some("peer-test".to_string()),
+                    broker_join_ticket_expires_at: None,
+                    // Normalize like start_pairing does, so symlinked tmpdirs on macOS
+                    // (/var/folders → /private/var/folders) don't produce false misses.
+                    path_scope: crate::state::normalize_allowed_roots(vec![in_cwd.to_string()])
+                        .expect("scope should normalize"),
+                },
+            );
+        }
+
+        // The local operator (None) sees reviews from both workspaces.
+        assert_eq!(
+            app.reviews(None).await.review_jobs.len(),
+            2,
+            "the operator sees all reviews"
+        );
+
+        // The scoped device sees ONLY its own workspace's review + reviewer thread.
+        let scoped = app.reviews(Some("device-scoped".to_string())).await;
+        assert_eq!(
+            scoped
+                .review_jobs
+                .iter()
+                .map(|job| job.parent_thread_id.clone())
+                .collect::<Vec<_>>(),
+            vec!["parent-in".to_string()],
+            "a scoped device must not see reviews outside its workspace"
+        );
+        assert_eq!(
+            scoped
+                .reviewer_threads
+                .iter()
+                .map(|view| view.reviewer_thread_id.clone())
+                .collect::<Vec<_>>(),
+            vec!["rev-in".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn reviews_channel_enforces_relay_allowed_roots_even_with_empty_device_scope() {
+        // Even with an EMPTY device scope — the local operator via reviews(None), or a paired
+        // device with no per-device scope — reviews for parents outside the relay's
+        // allowed_roots must NOT leak. This mirrors workspace_diff, whose
+        // ensure_path_within_device_scope enforces relay roots FIRST regardless of device
+        // scope (guards against stale review jobs left over from older allowed_roots).
+        let in_dir = TempDir::new().expect("in tmpdir");
+        let out_dir = TempDir::new().expect("out tmpdir");
+        let in_cwd = in_dir.path().to_str().unwrap();
+        let out_cwd = out_dir.path().to_str().unwrap();
+        let (app, _providers) = build_review_app(in_cwd, &["codex"]).await;
+        {
+            let mut relay = app.relay.write().await;
+            let mk_thread = |id: &str, cwd: &str| crate::protocol::ThreadSummaryView {
+                id: id.to_string(),
+                name: None,
+                preview: String::new(),
+                cwd: cwd.to_string(),
+                updated_at: unix_now(),
+                source: "codex".to_string(),
+                status: "idle".to_string(),
+                model_provider: "codex".to_string(),
+                provider: "codex".to_string(),
+            };
+            for (parent, reviewer, cwd, job_id) in [
+                ("parent-in", "rev-in", in_cwd, "job-in"),
+                ("parent-out", "rev-out", out_cwd, "job-out"),
+            ] {
+                relay.register_background_thread(
+                    mk_thread(parent, cwd),
+                    cwd,
+                    "model",
+                    "never",
+                    "read-only",
+                    "low",
+                );
+                relay.register_reviewer_thread(reviewer.to_string(), parent.to_string());
+                let mut job = crate::state::ReviewJob::new(
+                    job_id.to_string(),
+                    parent.to_string(),
+                    "codex".to_string(),
+                    "codex".to_string(),
+                    None,
+                    crate::state::ReviewMode::CleanThread,
+                    cwd.to_string(),
+                    "device-1".to_string(),
+                    None,
+                    1,
+                );
+                job.reviewer_thread_id = Some(reviewer.to_string());
+                relay.insert_review_job(job);
+            }
+            // Relay roots restrict to the in-workspace; the device itself has NO scope.
+            relay.allowed_roots = crate::state::normalize_allowed_roots(vec![in_cwd.to_string()])
+                .expect("allowed roots should normalize");
+            relay.paired_devices.insert(
+                "device-unscoped".to_string(),
+                crate::state::relay::PairedDevice {
+                    device_id: "device-unscoped".to_string(),
+                    label: "device-unscoped".to_string(),
+                    payload_secret: "test-payload-secret".to_string(),
+                    device_verify_key: "test-verify-key".to_string(),
+                    created_at: 1,
+                    last_seen_at: Some(1),
+                    last_peer_id: Some("peer-test".to_string()),
+                    broker_join_ticket_expires_at: None,
+                    path_scope: Vec::new(),
+                },
+            );
+        }
+
+        let parents_of = |resp: &crate::protocol::ReviewsResponse| {
+            resp.review_jobs
+                .iter()
+                .map(|job| job.parent_thread_id.clone())
+                .collect::<Vec<_>>()
+        };
+
+        // The local operator (None) must respect relay allowed_roots (mirrors workspace_diff).
+        assert_eq!(
+            parents_of(&app.reviews(None).await),
+            vec!["parent-in".to_string()],
+            "operator reads must enforce relay allowed_roots"
+        );
+        // A paired device with no scope of its own still inherits the relay roots boundary.
+        assert_eq!(
+            parents_of(&app.reviews(Some("device-unscoped".to_string())).await),
+            vec!["parent-in".to_string()],
+            "an unscoped device must still be bounded by relay allowed_roots"
+        );
+    }
+
+    #[tokio::test]
     async fn find_thread_provider_resolves_a_background_thread_missing_from_the_cache() {
         // Regression: a freshly-created background reviewer thread lives in `runtimes`,
         // but a thread-list refresh can transiently drop its row from `relay.threads`

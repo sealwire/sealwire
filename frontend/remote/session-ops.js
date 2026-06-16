@@ -1409,6 +1409,14 @@ export async function requestRemoteReview({
   }
 }
 
+// Fetch the reviewer panel's dedicated, UNCOMPACTED data (review cards + reviewer threads
+// + revision) over the broker `fetch_reviews` action — decoupled from the byte-budgeted
+// snapshot so the panel survives live-turn compaction. Read-only; no session claim.
+export async function fetchRemoteReviews() {
+  const result = await dispatchOrRecover("fetch_reviews", {});
+  return result?.reviews || null;
+}
+
 export async function resolveRemoteReview() {
   renderLog("Stopping the blocked reviewer…");
   try {

@@ -103,7 +103,25 @@ fn make_snapshot() -> SessionSnapshot {
             .collect(),
         active_review_jobs: vec![],
         reviewer_threads: vec![],
+        reviews_revision: 0,
     }
+}
+
+#[test]
+fn compaction_preserves_reviews_revision_so_the_panel_can_refetch() {
+    // The reviewer panel reads its cards from a dedicated (uncompacted) reviews channel and
+    // re-fetches only when `reviews_revision` changes. That scalar MUST survive snapshot
+    // compaction even when the high-churn `active_review_jobs` cards are drained under
+    // transcript pressure (a live turn) — otherwise the client can't tell when to refresh
+    // and the panel goes stale/empty (the live bug: cards vanish during live turns).
+    let mut snapshot = make_snapshot();
+    snapshot.reviews_revision = 4242;
+    // make_snapshot()'s oversized transcript forces the byte-budget drain on RemoteSurface.
+    let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::RemoteSurface);
+    assert_eq!(
+        compacted.reviews_revision, 4242,
+        "the reviews cache-key revision must survive compaction (it's the panel's refetch signal)"
+    );
 }
 
 #[test]

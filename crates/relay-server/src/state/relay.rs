@@ -147,6 +147,7 @@ pub(crate) struct CachedRemoteActionResult {
     pub(crate) thread_entry_detail: Option<ThreadEntryDetailResponse>,
     pub(crate) thread_transcript: Option<ThreadTranscriptResponse>,
     pub(crate) workspace_diff: Option<crate::protocol::WorkspaceDiffResponse>,
+    pub(crate) reviews: Option<crate::protocol::ReviewsResponse>,
     pub(crate) ask_user_question_detail: Option<crate::protocol::AskUserQuestionDetailResponse>,
     pub(crate) session_claim: Option<String>,
     pub(crate) session_claim_expires_at: Option<u64>,
@@ -968,6 +969,88 @@ impl RelayState {
         views
     }
 
+    /// Content revision of the reviewer-panel data (review jobs + reviewer threads). A
+    /// cheap order-independent hash over each card's identity + mutable facets (status,
+    /// updated_at, verdict, round) and each reviewer thread's identity + provider. The
+    /// reviewer panel re-fetches the uncompacted `reviews_response()` only when this
+    /// changes, so it does NOT refetch on every snapshot frame. It's a plain scalar on the
+    /// snapshot, so byte-budget compaction never drops it (unlike `active_review_jobs`).
+    pub(crate) fn reviews_revision(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        // XOR per-entry hashes so the result is independent of map iteration order.
+        let mut acc: u64 = 0;
+        for job in self.active_review_jobs_view() {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            job.id.hash(&mut h);
+            job.status.hash(&mut h);
+            job.updated_at.hash(&mut h);
+            job.round.hash(&mut h);
+            job.max_rounds.hash(&mut h);
+            job.verdict.hash(&mut h);
+            job.reviewer_thread_id.hash(&mut h);
+            job.reviewer_provider.hash(&mut h);
+            acc ^= h.finish();
+        }
+        for view in self.reviewer_thread_views() {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            view.reviewer_thread_id.hash(&mut h);
+            view.parent_thread_id.hash(&mut h);
+            view.reviewer_provider.hash(&mut h);
+            view.name.hash(&mut h);
+            view.updated_at.hash(&mut h);
+            // Rotate so a reviewer-thread change can't cancel an identical job hash.
+            acc ^= h.finish().rotate_left(1);
+        }
+        acc
+    }
+
+    /// The full, UNCOMPACTED reviewer-panel payload (review cards + reviewer threads +
+    /// the matching revision). Served on demand via `/api/session/reviews` (local) and the
+    /// `fetch_reviews` broker action (remote), decoupled from the byte-budgeted snapshot so
+    /// the panel stays populated even while a live turn drains `active_review_jobs`.
+    pub(crate) fn reviews_response(
+        &self,
+        device_id: Option<&str>,
+    ) -> crate::protocol::ReviewsResponse {
+        // Scope the payload to the requesting device's workspace, exactly like the other
+        // on-demand read channels (workspace diff, transcripts): a paired device must not
+        // learn review metadata for parents outside its allowed paths. `None` (the local
+        // operator) sees everything. `reviews_revision` stays global (it matches the
+        // snapshot's — the client's cache key); only the lists are filtered.
+        let scope = device_id
+            .map(|id| self.device_path_scope(id))
+            .unwrap_or_default();
+        let in_scope = |parent_thread_id: &str| -> bool {
+            match self.thread_cwd(parent_thread_id) {
+                // `ensure_path_within_device_scope` enforces relay `allowed_roots` FIRST
+                // (always), then the device scope (skipped when empty) — so even an unscoped
+                // device / the local operator stays bounded by relay roots, matching
+                // workspace_diff / transcripts.
+                Some(cwd) => {
+                    crate::state::ensure_path_within_device_scope(&cwd, &scope, &self.allowed_roots)
+                        .is_ok()
+                }
+                // Unknown workspace: only a fully-unrestricted requester (no device scope AND
+                // no relay roots) has no boundary to enforce, so it may still see the review;
+                // otherwise exclude it (we can't prove it's in-bounds).
+                None => scope.is_empty() && self.allowed_roots.is_empty(),
+            }
+        };
+        crate::protocol::ReviewsResponse {
+            reviews_revision: self.reviews_revision(),
+            review_jobs: self
+                .active_review_jobs_view()
+                .into_iter()
+                .filter(|job| in_scope(&job.parent_thread_id))
+                .collect(),
+            reviewer_threads: self
+                .reviewer_thread_views()
+                .into_iter()
+                .filter(|view| in_scope(&view.parent_thread_id))
+                .collect(),
+        }
+    }
+
     pub(crate) fn ensure_runtime_for_thread(&mut self, thread_id: &str) -> &mut ThreadRuntime {
         if self.active_thread_id.as_deref() == Some(thread_id)
             && !self.runtimes.contains_key(thread_id)
@@ -1311,6 +1394,7 @@ impl RelayState {
             // drop that badge on remote.
             active_review_jobs: self.active_review_jobs_view(),
             reviewer_threads: self.reviewer_thread_views(),
+            reviews_revision: self.reviews_revision(),
         }
     }
 

@@ -39,7 +39,7 @@ use protocol::{
     HeartbeatInput, ModelOptionView, PairingDecisionInput, PairingDecisionReceipt,
     PairingStartInput, PairingTicketView, ReadThreadEntryDetailInput, ReadThreadTranscriptInput,
     RequestReviewInput, RequestReviewReceipt, ResumeSessionInput, ReviewActionInput,
-    ReviewDeleteReceipt, ReviewJobView, RevokeDeviceReceipt, SendMessageInput, SessionSnapshot,
+    ReviewDeleteReceipt, ReviewsResponse, RevokeDeviceReceipt, SendMessageInput, SessionSnapshot,
     SessionSnapshotCompactProfile, StartSessionInput, StopTurnInput, SubmitAskUserAnswerInput,
     TakeOverInput, ThreadArchiveReceipt, ThreadDeleteReceipt, ThreadEntryDetailResponse,
     ThreadTranscriptResponse, ThreadsQuery, ThreadsResponse, UpdateSessionSettingsInput,
@@ -754,9 +754,13 @@ async fn list_reviews(
     State(context): State<AppContext>,
     headers: HeaderMap,
     uri: Uri,
-) -> Result<Json<ApiEnvelope<Vec<ReviewJobView>>>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<ApiEnvelope<ReviewsResponse>>, (StatusCode, Json<ApiError>)> {
     authorize_api(&context, &headers, &uri)?;
-    Ok(Json(ApiEnvelope::ok(context.app.list_review_jobs().await)))
+    // The reviewer panel's dedicated, UNCOMPACTED channel: full review cards + reviewer
+    // threads + a `reviews_revision` cache key. Decoupled from the byte-budgeted snapshot
+    // so the panel survives live-turn compaction (which drains `active_review_jobs`).
+    // `None`: this is the local operator surface (full access), mirroring `workspace_diff`.
+    Ok(Json(ApiEnvelope::ok(context.app.reviews(None).await)))
 }
 
 async fn delete_review(

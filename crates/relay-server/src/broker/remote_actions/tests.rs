@@ -59,6 +59,7 @@ fn make_snapshot() -> SessionSnapshot {
         logs: vec![],
         active_review_jobs: vec![],
         reviewer_threads: vec![],
+        reviews_revision: 0,
     }
 }
 
@@ -152,6 +153,7 @@ fn plain_remote_action_result_payload_splits_control_results_from_session_result
         thread_entry_detail: None,
         thread_transcript: None,
         workspace_diff: None,
+        reviews: None,
         ask_user_question_detail: None,
         session_claim: None,
         session_claim_expires_at: None,
@@ -184,6 +186,7 @@ fn plain_remote_action_result_payload_splits_control_results_from_session_result
         thread_entry_detail: None,
         thread_transcript: None,
         workspace_diff: None,
+        reviews: None,
         ask_user_question_detail: None,
         session_claim: Some("claim-1".to_string()),
         session_claim_expires_at: Some(123),
@@ -328,6 +331,7 @@ fn make_large_thread_transcript_plaintext() -> RemoteActionResultPlaintext {
             thread_state: None,
         }),
         workspace_diff: None,
+        reviews: None,
         ask_user_question_detail: None,
         session_claim: None,
         session_claim_expires_at: None,
@@ -353,6 +357,7 @@ fn make_large_ask_user_detail_plaintext() -> RemoteActionResultPlaintext {
         thread_entry_detail: None,
         thread_transcript: None,
         workspace_diff: None,
+        reviews: None,
         ask_user_question_detail: Some(AskUserQuestionDetailResponse {
             request: AskUserQuestionRequestView::with_inline_questions(
                 "ask:large".to_string(),
@@ -425,6 +430,32 @@ fn request_review_action_round_trips_and_binds_device() {
         RemoteActionResultKind::RemoteActionAck
     ));
     assert!(requires_session_claim(RemoteActionKind::RequestReview));
+}
+
+#[test]
+fn fetch_reviews_action_round_trips_and_is_not_claim_gated() {
+    // The dedicated reviewer-panel channel for remote: a read-only data fetch (mirrors
+    // fetch_workspace_diff / fetch_thread_transcript). It must parse, bind the device, NOT
+    // require a session claim, and route to the data (transcript-result) kind.
+    let request: RemoteActionRequest =
+        serde_json::from_value(serde_json::json!({ "type": "fetch_reviews" }))
+            .expect("fetch_reviews should parse");
+    assert_eq!(request.kind(), RemoteActionKind::FetchReviews);
+    assert_eq!(RemoteActionKind::FetchReviews.as_str(), "fetch_reviews");
+    assert!(
+        !requires_session_claim(RemoteActionKind::FetchReviews),
+        "listing reviews is read-only and must not require session control"
+    );
+    assert!(matches!(
+        remote_action_result_kind(RemoteActionKind::FetchReviews),
+        RemoteActionResultKind::RemoteTranscriptResult
+    ));
+    match request.bind_device("device-7".to_string()) {
+        RemoteActionRequest::FetchReviews { device_id } => {
+            assert_eq!(device_id.as_deref(), Some("device-7"));
+        }
+        other => panic!("unexpected bound request: {other:?}"),
+    }
 }
 
 #[test]
