@@ -1,8 +1,8 @@
-const CACHE_NAME = "agent-relay-remote-v2";
+const CACHE_NAME = "agent-relay-remote-v3";
 const APP_SHELL = [
   "/",
   "/manifest.webmanifest",
-  "/icon.svg"
+  "/static/sealwire_logo.png"
 ];
 
 self.addEventListener("install", (event) => {

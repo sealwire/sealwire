@@ -340,3 +340,23 @@ fn csrf_protection_does_not_apply_to_bearer_authenticated_post() {
     )
     .is_ok());
 }
+
+#[test]
+fn embedded_asset_content_type_serves_png_as_image() {
+    // The brand logo (sealwire_logo.png) is embedded and served by the LOCAL relay
+    // as the favicon / apple-touch-icon. Without an explicit arm it falls through
+    // to application/octet-stream, which some icon contexts reject — so this guards
+    // the mapping the broker's ServeDir gets for free but the embedded server doesn't.
+    assert_eq!(
+        embedded_asset_content_type("sealwire_logo.png"),
+        "image/png"
+    );
+    assert_eq!(
+        embedded_asset_content_type("nested/dir/icon.svg"),
+        "image/svg+xml"
+    );
+    assert_eq!(
+        embedded_asset_content_type("unknown.bin"),
+        "application/octet-stream"
+    );
+}
