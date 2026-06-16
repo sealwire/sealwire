@@ -4,7 +4,7 @@ import { initializeRemoteNavigation, openRemoteNavigation } from "./navigation.j
 import { applyPairingQuery, beginPairing, forgetCurrentDevice, handleEncryptedPairingResult, sendPairingRequest } from "./pairing.js";
 import { registerRemotePwa } from "./pwa.js";
 import { renderLog } from "./session-surface.js";
-import { applyFileChange, applySessionSnapshot, applyTranscriptDelta, applyTranscriptEvent, clearSessionRuntime, dismissRemoteReview, fetchAskUserQuestionDetail, fetchRemoteProviderModels, fetchRemoteProviders, fetchRemoteThreadTranscript, fetchTranscriptEntryDetail, refreshRemoteThreads, requestRemoteReview, resolveRemoteReview, resumeRemoteSession, sendMessage, startRemoteSession, stopActiveTurn, submitAskUserAnswer, submitDecision, syncRemoteSnapshot, takeOverControl, updateRemoteSessionSettings, viewRemoteThread } from "./session-ops.js";
+import { applyFileChange, applySessionSnapshot, applyTranscriptDelta, applyTranscriptEvent, clearSessionRuntime, deleteRemoteReview, fetchAskUserQuestionDetail, fetchRemoteProviderModels, fetchRemoteProviders, fetchRemoteThreadTranscript, fetchTranscriptEntryDetail, refreshRemoteThreads, requestRemoteReview, resolveRemoteReview, resumeRemoteSession, sendMessage, startRemoteSession, stopActiveTurn, submitAskUserAnswer, submitDecision, syncRemoteSnapshot, takeOverControl, updateRemoteSessionSettings, viewRemoteThread } from "./session-ops.js";
 import { clearActiveRelaySelection, ensureDeviceIdentity, hydrateStoredRemoteSecrets, selectRelayProfile, state } from "./state.js";
 import { applyRemoteSurfacePatch, createResetRemoteSurfaceStatePatch } from "./surface-state.js";
 
@@ -213,8 +213,8 @@ export function createRemoteAppHandlers() {
     onResolveReview() {
       return resolveRemoteReview();
     },
-    onDismissReview(reviewId) {
-      return dismissRemoteReview(reviewId);
+    onDeleteReview(reviewId) {
+      return deleteRemoteReview(reviewId);
     },
     onFetchReviewerTranscript(threadId) {
       return fetchRemoteThreadTranscript(threadId);

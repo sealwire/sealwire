@@ -855,7 +855,7 @@ function requiresSessionClaim(actionType) {
     || actionType === "apply_file_change"
     || actionType === "request_review"
     || actionType === "resolve_review"
-    || actionType === "dismiss_review";
+    || actionType === "delete_review";
 }
 
 function shouldAutoReclaimSession() {

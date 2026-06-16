@@ -1679,7 +1679,7 @@ fn review_jobs_view_keeps_an_in_progress_run_visible_over_a_same_second_terminal
 
 #[test]
 fn drop_terminal_review_jobs_for_reviewer_keeps_an_in_progress_run() {
-    // dismiss_review uses this: it clears a reviewer's finished run-cards but must never
+    // delete_review uses this: it clears a reviewer's finished run-cards but must never
     // delete a concurrently-started in-progress job (which would orphan its orchestrator
     // and unlock its threads mid-turn).
     let mut relay = test_state();

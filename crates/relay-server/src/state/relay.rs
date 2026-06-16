@@ -39,7 +39,7 @@ const REMOTE_ACTION_REPLAY_TTL_SECS: u64 = 600;
 const MAX_REMOTE_ACTION_REPLAY_ENTRIES: usize = 512;
 /// Backstop on retained review jobs so a long-lived relay can't accumulate every
 /// recap/review body in memory. Terminal jobs otherwise persist until the user
-/// dismisses them (the Reviewer panel is a persistent surface), so this cap — not
+/// deletes them (the Reviewer panel is a persistent surface), so this cap — not
 /// a timer — is what eventually evicts old completed reviews.
 const MAX_REVIEW_JOBS: usize = 64;
 /// Backstop on retained workflow runs, mirroring `MAX_REVIEW_JOBS`: evict the
@@ -467,10 +467,10 @@ impl RelayState {
             .retain(|_, job| job.reviewer_thread_id.as_deref() != Some(reviewer_id));
     }
 
-    /// Drop only the TERMINAL review jobs for `reviewer_id`. Used by `dismiss_review`,
+    /// Drop only the TERMINAL review jobs for `reviewer_id`. Used by `delete_review`,
     /// which collapses a reviewer's finished run-cards but must NOT delete a
     /// concurrently-started in-progress job for the same reviewer (created in the window
-    /// between the dismiss's terminality check and this write) — doing so would orphan
+    /// between the delete's terminality check and this write) — doing so would orphan
     /// that run's orchestrator and unlock its threads mid-turn.
     pub(crate) fn drop_terminal_review_jobs_for_reviewer(&mut self, reviewer_id: &str) {
         self.review_jobs.retain(|_, job| {
@@ -755,7 +755,7 @@ impl RelayState {
 
     /// Hard-cap the total retained review jobs (evicting the oldest terminal jobs
     /// first) so review bodies can't pile up. Terminal jobs are NOT dropped by age
-    /// — the persistent Reviewer panel keeps them until the user dismisses them.
+    /// — the persistent Reviewer panel keeps them until the user deletes them.
     fn prune_review_jobs(&mut self) {
         // Use strict `<` so there is always room for the caller's insertion:
         // prune when len == MAX_REVIEW_JOBS (not only when it exceeds it).
@@ -874,7 +874,7 @@ impl RelayState {
     /// thread: when a reviewer thread is reused across several reviews, only the
     /// most-recently-updated job for it is shown (older runs collapse into the latest);
     /// jobs not yet bound to a reviewer thread are each kept. Terminal jobs persist here
-    /// (the Reviewer panel keeps them until dismissed). Ordered oldest-updated first for
+    /// (the Reviewer panel keeps them until deleted). Ordered oldest-updated first for
     /// a stable UI.
     pub(crate) fn active_review_jobs_view(&self) -> Vec<crate::protocol::ReviewJobView> {
         let mut latest_by_reviewer: std::collections::HashMap<&str, &ReviewJob> =

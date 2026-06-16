@@ -730,7 +730,7 @@ function RemoteApp() {
     () => ({
       onRequestReview: (values) => handlersRef.current.onRequestReview?.(values),
       onResolveReview: () => handlersRef.current.onResolveReview?.(),
-      onDismissReview: (reviewId) => handlersRef.current.onDismissReview?.(reviewId),
+      onDeleteReview: (reviewId) => handlersRef.current.onDeleteReview?.(reviewId),
       fetchReviewerTranscript: (threadId) =>
         Promise.resolve(handlersRef.current.onFetchReviewerTranscript?.(threadId)).then(
           (entries) => entries || []

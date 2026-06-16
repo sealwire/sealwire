@@ -3609,3 +3609,70 @@ test("applySessionSnapshot re-hydrates a long final message added after the firs
   assert.equal(state.session.transcript_truncated, false);
   assert.equal(fetchCount(), 2, "the new final message triggered exactly one more fetch");
 });
+
+test("projectRemoteViewedSession surfaces the viewed thread's own reviewers, not the global set", async () => {
+  activeBrowser = installBrowserStubs();
+  const { projectRemoteViewedSession } = await import("./session-ops.js");
+
+  // The live (global) session carries only the ACTIVE thread's reviewer — remote
+  // snapshots scope reviewer_threads to the active parent for the broker frame.
+  const realSession = {
+    active_thread_id: "live-thread",
+    reviewer_threads: [
+      { reviewer_thread_id: "rev-of-live", parent_thread_id: "live-thread" },
+    ],
+  };
+  // The per-thread read for the VIEWED (non-active) thread carries its own reviewers.
+  const currentView = {
+    active_thread_id: "viewed-thread",
+    thread_state: {
+      reviewers: [
+        { reviewer_thread_id: "rev-of-viewed", parent_thread_id: "viewed-thread" },
+      ],
+    },
+  };
+
+  const projected = projectRemoteViewedSession(realSession, "viewed-thread", currentView);
+
+  assert.ok(
+    (projected.reviewer_threads || []).some(
+      (reviewer) => reviewer.reviewer_thread_id === "rev-of-viewed"
+    ),
+    "view-only projection must surface the viewed thread's own reviewers from thread_state"
+  );
+});
+
+test("projectRemoteViewedSession keeps the viewed thread's reviewers across re-projection (snapshot/delta)", async () => {
+  activeBrowser = installBrowserStubs();
+  const { projectRemoteViewedSession } = await import("./session-ops.js");
+
+  const realSession = {
+    active_thread_id: "live-thread",
+    reviewer_threads: [
+      { reviewer_thread_id: "rev-of-live", parent_thread_id: "live-thread" },
+    ],
+  };
+
+  // 1. Initial view entry: currentView carries thread_state.reviewers (backend).
+  const entry = projectRemoteViewedSession(realSession, "viewed-thread", {
+    active_thread_id: "viewed-thread",
+    thread_state: {
+      reviewers: [
+        { reviewer_thread_id: "rev-of-viewed", parent_thread_id: "viewed-thread" },
+      ],
+    },
+  });
+  assert.ok(
+    entry.reviewer_threads.some((r) => r.reviewer_thread_id === "rev-of-viewed"),
+    "entry projection populates the viewed thread's reviewers"
+  );
+
+  // 2. Next snapshot/delta re-projects with the PREVIOUSLY PROJECTED session as
+  // currentView — it has reviewer_threads (no thread_state, no `reviewers` key),
+  // exactly like call sites 2/3 (session-ops.js:532, 864).
+  const reprojected = projectRemoteViewedSession(realSession, "viewed-thread", entry);
+  assert.ok(
+    reprojected.reviewer_threads.some((r) => r.reviewer_thread_id === "rev-of-viewed"),
+    "re-projection (snapshot/delta) must KEEP the viewed thread's reviewers, not collapse to []"
+  );
+});

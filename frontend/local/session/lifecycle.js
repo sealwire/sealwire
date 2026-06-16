@@ -15,7 +15,7 @@ import {
 import {
   requestReview as requestReviewApi,
   resolveReview as resolveReviewApi,
-  dismissReview as dismissReviewApi,
+  deleteReview as deleteReviewApi,
 } from "../api.js";
 import { loadLastEffort, saveLastApprovalPolicy } from "../../shared/last-used-settings.js";
 import { providerLabel } from "../../shared/provider-labels.js";
@@ -474,19 +474,19 @@ export function createLifecycleController(ctx) {
     }
   }
 
-  async function dismissReview(reviewId) {
+  async function deleteReview(reviewId) {
     if (!reviewId) {
-      logLine("No review to dismiss.");
+      logLine("No review to delete.");
       return null;
     }
-    logLine("Dismissing review…");
+    logLine("Deleting review…");
     try {
-      const receipt = await dismissReviewApi(apiFetch, reviewId, state.deviceId);
-      logLine(receipt?.message || "Review dismissed.");
-      await loadSession("post-review-dismiss");
+      const receipt = await deleteReviewApi(apiFetch, reviewId, state.deviceId);
+      logLine(receipt?.message || "Review deleted.");
+      await loadSession("post-review-delete");
       return receipt;
     } catch (error) {
-      logLine(`Dismiss failed: ${error.message}`);
+      logLine(`Delete failed: ${error.message}`);
       return null;
     }
   }
@@ -609,7 +609,7 @@ export function createLifecycleController(ctx) {
     sendMessage,
     requestReview,
     resolveReview,
-    dismissReview,
+    deleteReview,
     stopActiveTurn,
     applySessionSnapshot,
     fetchThreadList,

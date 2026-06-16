@@ -119,11 +119,11 @@ export async function resolveReview(apiFetch, deviceId) {
   return payload.data;
 }
 
-// Dismiss a terminal review: archive its reviewer thread and drop the job from
+// Delete a terminal review: archive its reviewer thread and drop the job from
 // the snapshot. The relay rejects this while the review is still active.
-export async function dismissReview(apiFetch, reviewId, deviceId) {
+export async function deleteReview(apiFetch, reviewId, deviceId) {
   const response = await apiFetch(
-    `/api/session/reviews/${encodeURIComponent(reviewId)}/dismiss`,
+    `/api/session/reviews/${encodeURIComponent(reviewId)}/delete`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -132,7 +132,7 @@ export async function dismissReview(apiFetch, reviewId, deviceId) {
   );
   const payload = await response.json();
   if (!response.ok || !payload?.ok) {
-    throw new Error(payload?.error?.message || "Failed to dismiss the review");
+    throw new Error(payload?.error?.message || "Failed to delete the review");
   }
   return payload.data;
 }

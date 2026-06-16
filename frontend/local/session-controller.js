@@ -194,7 +194,7 @@ export function createSessionController({
     sendMessage: controller.sendMessage,
     requestReview: controller.requestReview,
     resolveReview: controller.resolveReview,
-    dismissReview: controller.dismissReview,
+    deleteReview: controller.deleteReview,
     fetchTranscriptPage: controller.fetchTranscriptPage,
     stopActiveTurn: controller.stopActiveTurn,
     startPairing: controller.startPairing,

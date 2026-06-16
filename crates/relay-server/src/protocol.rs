@@ -140,7 +140,7 @@ pub struct SessionSnapshot {
 /// are `None` after a relay restart (the reviewer thread's summary isn't
 /// persisted — only the reviewer→parent identity is); the backend re-derives the
 /// provider on submit.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewerThreadView {
     pub reviewer_thread_id: String,
     pub parent_thread_id: String,
@@ -1337,6 +1337,12 @@ pub struct ThreadStateView {
     pub approval_policy: String,
     pub sandbox: String,
     pub available_models: Vec<ModelOptionView>,
+    /// Reviewer threads whose PARENT is this thread (this thread's own reviewers).
+    /// The global snapshot scopes `reviewer_threads` to the ACTIVE parent for
+    /// broker-bound surfaces, so a remote client viewing a non-active thread would
+    /// otherwise see none. This per-thread read supplies them, mirroring
+    /// `available_models`.
+    pub reviewers: Vec<ReviewerThreadView>,
     pub review_locked: bool,
     pub settings_writable: bool,
 }
@@ -1531,6 +1537,11 @@ pub struct StopTurnInput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewActionInput {
+    pub device_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TakeOverInput {
     pub device_id: Option<String>,
     /// Explicit operation target.
@@ -1587,7 +1598,7 @@ pub struct RequestReviewReceipt {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ReviewDismissReceipt {
+pub struct ReviewDeleteReceipt {
     pub review_job_id: String,
     pub message: String,
 }

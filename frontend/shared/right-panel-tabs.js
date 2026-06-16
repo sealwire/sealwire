@@ -68,7 +68,7 @@ export function RightPanelTabs({ store, changes, reviewer = {}, panelId = "revie
           requesting: Boolean(review.requesting),
           onRequestReview: reviewer.onRequestReview,
           onResolveReview: reviewer.onResolveReview,
-          onDismissReview: reviewer.onDismissReview,
+          onDeleteReview: reviewer.onDeleteReview,
           fetchReviewerTranscript: reviewer.fetchReviewerTranscript,
         })
       : changes

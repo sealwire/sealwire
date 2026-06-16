@@ -2,8 +2,8 @@ use crate::protocol::strip_file_change_diffs_for_snapshot;
 use crate::protocol::{
     truncate_with_ellipsis, ApprovalRequestView, AskUserOptionView, AskUserQuestionRequestView,
     AskUserQuestionView, DeleteThreadInput, DeviceLifecycleState, DeviceRecordView,
-    FileChangeDiffView, LogEntryView, ReviewJobView, ReviewerThreadView, SecurityMode,
-    SessionSnapshot, SessionSnapshotCompactProfile, ThreadEntriesResponse,
+    FileChangeDiffView, LogEntryView, ReviewActionInput, ReviewJobView, ReviewerThreadView,
+    SecurityMode, SessionSnapshot, SessionSnapshotCompactProfile, ThreadEntriesResponse,
     ThreadEntryDetailResponse, ThreadSummaryView, ThreadTranscriptResponse, ThreadsResponse,
     ThreadsResponseCompactProfile, ToolCallView, TranscriptContentState, TranscriptEntryKind,
     TranscriptEntryView, EMERGENCY_TRANSCRIPT_SHELL_CHARS,
@@ -17,6 +17,15 @@ const MAX_BROKER_THREAD_PREVIEW_CHARS: usize = 160;
 const SESSION_SNAPSHOT_TARGET_BYTES: usize = 8_000;
 const LOCAL_SESSION_SNAPSHOT_TARGET_BYTES: usize = 16_000;
 const THREADS_RESPONSE_TARGET_BYTES: usize = 20_000;
+
+#[test]
+fn review_action_input_does_not_require_a_thread_id() {
+    let input: ReviewActionInput =
+        serde_json::from_value(serde_json::json!({ "device_id": "device-a" }))
+            .expect("review resolve/delete requests only target the active review");
+
+    assert_eq!(input.device_id.as_deref(), Some("device-a"));
+}
 
 fn make_snapshot() -> SessionSnapshot {
     SessionSnapshot {

@@ -15,7 +15,7 @@
 use tokio::time::{Duration, Instant};
 
 use crate::protocol::{
-    RequestReviewInput, RequestReviewReceipt, ReviewDismissReceipt, ReviewJobView,
+    RequestReviewInput, RequestReviewReceipt, ReviewDeleteReceipt, ReviewJobView,
     TranscriptEntryKind, TranscriptEntryView,
 };
 use crate::state::{
@@ -337,15 +337,15 @@ to this thread."
         relay.active_review_jobs_view()
     }
 
-    /// Dismiss a finished review: drop its job record and archive the reviewer
+    /// Delete a finished review: drop its job record and archive the reviewer
     /// thread (so it leaves history). Only allowed on terminal reviews — an active
     /// or blocked review must be stopped/resolved first.
-    pub async fn dismiss_review(
+    pub async fn delete_review(
         &self,
         job_id: String,
         device_id: Option<String>,
-    ) -> Result<ReviewDismissReceipt, String> {
-        // Dismiss is cleanup of an already-finished review: the workspace is
+    ) -> Result<ReviewDeleteReceipt, String> {
+        // Delete is cleanup of an already-finished review: the workspace is
         // unlocked and no turn is running, so any authenticated device may do it.
         // We deliberately do NOT call `ensure_device_can_send_message` here
         // (unlike `request_review`/`resolve_blocked_review`, which mutate a live
@@ -355,12 +355,12 @@ to this thread."
             let relay = self.relay.read().await;
             match relay.review_job(&job_id) {
                 Some(job) => (job.status.is_terminal(), job.reviewer_thread_id.clone()),
-                None => return Err("there is no such review to dismiss".to_string()),
+                None => return Err("there is no such review to delete".to_string()),
             }
         };
         if !is_terminal {
             return Err(
-                "the review is still active; stop the reviewer before dismissing it".to_string(),
+                "the review is still active; stop the reviewer before deleting it".to_string(),
             );
         }
         // Remove the reviewer thread from history. Try the least destructive option
@@ -380,7 +380,7 @@ to this thread."
                 self.push_runtime_log(
                     "warn",
                     format!(
-                        "Dismiss {job_id}: could not archive or delete reviewer thread \
+                        "Delete {job_id}: could not archive or delete reviewer thread \
 {thread_id}; it stays hidden from navigation via the persisted reviewer map."
                     ),
                 )
@@ -389,7 +389,7 @@ to this thread."
         }
         {
             let mut relay = self.relay.write().await;
-            // One card per reviewer thread: dismissing it drops every TERMINAL run bound
+            // One card per reviewer thread: deleting it drops every TERMINAL run bound
             // to that (now-archived) reviewer thread, not just the latest — otherwise an
             // older run's card would reappear pointing at a thread that no longer exists.
             // Only terminal runs are dropped: a reuse that raced into this window stays
@@ -400,12 +400,12 @@ to this thread."
                     relay.remove_review_job(&job_id);
                 }
             }
-            relay.push_log("info", format!("Dismissed review {job_id}."));
+            relay.push_log("info", format!("Deleted review {job_id}."));
             relay.notify();
         }
-        Ok(ReviewDismissReceipt {
+        Ok(ReviewDeleteReceipt {
             review_job_id: job_id,
-            message: "Review dismissed.".to_string(),
+            message: "Review deleted.".to_string(),
         })
     }
 

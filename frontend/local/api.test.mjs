@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { dismissReview, getReviews, requestReview, resolveReview, submitAskUserAnswer } from "./api.js";
+import { deleteReview, getReviews, requestReview, resolveReview, submitAskUserAnswer } from "./api.js";
 
 function makeFetchStub(response) {
   const calls = [];
@@ -96,29 +96,29 @@ test("resolveReview POSTs the device id to the resolve endpoint", async () => {
   assert.deepEqual(JSON.parse(calls[0].init.body), { device_id: "device-a" });
 });
 
-test("dismissReview POSTs the device id to the per-review dismiss endpoint", async () => {
-  const receipt = { review_job_id: "review-1", message: "Review dismissed." };
+test("deleteReview POSTs the device id to the per-review delete endpoint", async () => {
+  const receipt = { review_job_id: "review-1", message: "Review deleted." };
   const { apiFetch, calls } = makeFetchStub(jsonResponse({ ok: true, data: receipt }));
 
-  const result = await dismissReview(apiFetch, "review-1", "device-a");
+  const result = await deleteReview(apiFetch, "review-1", "device-a");
   assert.deepEqual(result, receipt);
-  assert.equal(calls[0].input, "/api/session/reviews/review-1/dismiss");
+  assert.equal(calls[0].input, "/api/session/reviews/review-1/delete");
   assert.equal(calls[0].init.method, "POST");
   assert.deepEqual(JSON.parse(calls[0].init.body), { device_id: "device-a" });
 });
 
-test("dismissReview escapes the review id and surfaces server errors", async () => {
+test("deleteReview escapes the review id and surfaces server errors", async () => {
   const { apiFetch, calls } = makeFetchStub(
     jsonResponse(
-      { ok: false, error: { message: "the review is still active; stop the reviewer before dismissing it" } },
+      { ok: false, error: { message: "the review is still active; stop the reviewer before deleting it" } },
       { status: 409 }
     )
   );
   await assert.rejects(
-    () => dismissReview(apiFetch, "review/active", "device-a"),
+    () => deleteReview(apiFetch, "review/active", "device-a"),
     /still active/i
   );
-  assert.equal(calls[0].input, "/api/session/reviews/review%2Factive/dismiss");
+  assert.equal(calls[0].input, "/api/session/reviews/review%2Factive/delete");
 });
 
 test("getReviews GETs the reviews endpoint with the device id and returns the list", async () => {

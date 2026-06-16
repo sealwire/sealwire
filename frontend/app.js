@@ -262,7 +262,7 @@ let clientLogRootElement = null;
 const reviewerActions = {
   onRequestReview: (values) => state.controller?.requestReview(values),
   onResolveReview: () => state.controller?.resolveReview(),
-  onDismissReview: (reviewId) => state.controller?.dismissReview(reviewId),
+  onDeleteReview: (reviewId) => state.controller?.deleteReview(reviewId),
   fetchReviewerTranscript: (threadId) =>
     Promise.resolve(state.controller?.fetchTranscriptPage(threadId, {})).then(
       (page) => page?.entries || (Array.isArray(page) ? page : [])

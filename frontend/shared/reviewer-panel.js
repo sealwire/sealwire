@@ -47,7 +47,7 @@ function latestAgentText(entries) {
 //   canRequest:        whether a new review can be started (idle + controller)
 //   onRequestReview:   ({reviewerProvider, reviewerModel, instructions}) => void
 //   onResolveReview:   () => void                (stop a blocked reviewer)
-//   onDismissReview:   (jobId) => void           (drop a terminal review)
+//   onDeleteReview:    (jobId) => void           (delete a terminal review)
 //   fetchReviewerTranscript: (threadId) => Promise<entries[]>
 // Join a job to its reviewer thread's display name (falling back to the raw
 // thread id) so the card can show — and tooltip — the long reviewer-thread name.
@@ -68,7 +68,7 @@ export function ReviewerPanel({
   requesting = false,
   onRequestReview,
   onResolveReview,
-  onDismissReview,
+  onDeleteReview,
   fetchReviewerTranscript,
   panelId = "review-panel",
 }) {
@@ -122,7 +122,7 @@ export function ReviewerPanel({
               canRequest,
               onRequestReview,
               onResolveReview,
-              onDismissReview,
+              onDeleteReview,
               fetchReviewerTranscript,
             })
           )
@@ -156,7 +156,7 @@ function ReviewerJobCard({
   canRequest = false,
   onRequestReview,
   onResolveReview,
-  onDismissReview,
+  onDeleteReview,
   fetchReviewerTranscript,
 }) {
   const [review, setReview] = React.useState({ status: "idle", text: null, error: null });
@@ -358,12 +358,12 @@ function ReviewerJobCard({
         "button",
         {
           type: "button",
-          className: "header-button reviewer-dismiss-button",
+          className: "header-button reviewer-delete-button",
           disabled: !terminal,
           title: terminal
             ? "Delete this review and its reviewer thread (the findings stay in the conversation)"
             : "Stop the reviewer before deleting it",
-          onClick: () => terminal && onDismissReview?.(job.id),
+          onClick: () => terminal && onDeleteReview?.(job.id),
         },
         "Delete"
       )

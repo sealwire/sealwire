@@ -112,7 +112,7 @@ pub(super) enum RemoteActionRequest {
         #[serde(default)]
         device_id: Option<String>,
     },
-    DismissReview {
+    DeleteReview {
         review_id: String,
         #[serde(default)]
         device_id: Option<String>,
@@ -144,7 +144,7 @@ impl RemoteActionRequest {
             Self::SubmitAskUserAnswer { .. } => RemoteActionKind::SubmitAskUserAnswer,
             Self::RequestReview { .. } => RemoteActionKind::RequestReview,
             Self::ResolveReview { .. } => RemoteActionKind::ResolveReview,
-            Self::DismissReview { .. } => RemoteActionKind::DismissReview,
+            Self::DeleteReview { .. } => RemoteActionKind::DeleteReview,
         }
     }
 
@@ -238,7 +238,7 @@ impl RemoteActionRequest {
             Self::ResolveReview { .. } => Self::ResolveReview {
                 device_id: Some(device_id),
             },
-            Self::DismissReview { review_id, .. } => Self::DismissReview {
+            Self::DeleteReview { review_id, .. } => Self::DeleteReview {
                 review_id,
                 device_id: Some(device_id),
             },
@@ -271,7 +271,7 @@ pub(super) enum RemoteActionKind {
     SubmitAskUserAnswer,
     RequestReview,
     ResolveReview,
-    DismissReview,
+    DeleteReview,
 }
 
 impl RemoteActionKind {
@@ -299,7 +299,7 @@ impl RemoteActionKind {
             Self::SubmitAskUserAnswer => "submit_ask_user_answer",
             Self::RequestReview => "request_review",
             Self::ResolveReview => "resolve_review",
-            Self::DismissReview => "dismiss_review",
+            Self::DeleteReview => "delete_review",
         }
     }
 }
@@ -929,11 +929,11 @@ async fn execute_remote_action(
             .cancel_active_review(device_id)
             .await
             .map(|_| RemoteActionOutcome::default()),
-        RemoteActionRequest::DismissReview {
+        RemoteActionRequest::DeleteReview {
             review_id,
             device_id,
         } => state
-            .dismiss_review(review_id, device_id)
+            .delete_review(review_id, device_id)
             .await
             .map(|_| RemoteActionOutcome::default()),
         RemoteActionRequest::StopTurn { input } => state
@@ -1091,7 +1091,7 @@ fn requires_session_claim(action: RemoteActionKind) -> bool {
             | RemoteActionKind::ApplyFileChange
             | RemoteActionKind::RequestReview
             | RemoteActionKind::ResolveReview
-            | RemoteActionKind::DismissReview
+            | RemoteActionKind::DeleteReview
     )
 }
 
@@ -2195,7 +2195,7 @@ fn remote_action_result_kind(action: RemoteActionKind) -> RemoteActionResultKind
         | RemoteActionKind::ApplyFileChange
         | RemoteActionKind::RequestReview
         | RemoteActionKind::ResolveReview
-        | RemoteActionKind::DismissReview => RemoteActionResultKind::RemoteActionAck,
+        | RemoteActionKind::DeleteReview => RemoteActionResultKind::RemoteActionAck,
     }
 }
 

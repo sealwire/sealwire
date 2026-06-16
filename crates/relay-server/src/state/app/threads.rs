@@ -176,7 +176,7 @@ impl AppState {
         let _slot = self.acquire_session_slot()?;
         {
             // Don't let a user archive a thread that a running review owns (its
-            // parent or reviewer). Terminal-review cleanup (dismiss) is unaffected
+            // parent or reviewer). Terminal-review cleanup (delete) is unaffected
             // because the job is terminal by then, so the thread is not locked.
             let relay = self.relay.read().await;
             if relay.is_thread_review_locked(thread_id) {
@@ -260,7 +260,7 @@ impl AppState {
         let _slot = self.acquire_session_slot()?;
         {
             // Don't let a user delete a thread a running review owns. Terminal-
-            // review cleanup (dismiss) is unaffected (job is terminal → not locked).
+            // review cleanup (delete) is unaffected (job is terminal → not locked).
             let relay = self.relay.read().await;
             if relay.is_thread_review_locked(thread_id) {
                 return Err(REVIEW_LOCKED_THREAD_MSG.to_string());

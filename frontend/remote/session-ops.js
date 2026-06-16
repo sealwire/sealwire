@@ -677,7 +677,7 @@ function shouldAcceptSessionSnapshot(snapshot) {
   return incomingRevision == null || currentRevision == null || incomingRevision >= currentRevision;
 }
 
-function projectRemoteViewedSession(realSession, threadId, currentView) {
+export function projectRemoteViewedSession(realSession, threadId, currentView) {
   const thread = (state.threads || []).find((candidate) => candidate?.id === threadId);
   const activity = (realSession?.thread_activity || []).find(
     (entry) => entry?.thread_id === threadId
@@ -709,6 +709,14 @@ function projectRemoteViewedSession(realSession, threadId, currentView) {
     approval_policy: threadState.approval_policy || "",
     sandbox: threadState.sandbox || "",
     available_models: threadState.available_models || [],
+    // The viewed thread's OWN reviewers. The global remote snapshot scopes
+    // reviewer_threads to the active parent, so without this a viewed non-active
+    // thread shows fewer reviewers than local; the per-thread read supplies them
+    // on view entry (currentView.thread_state.reviewers). On a later snapshot /
+    // live delta, currentView is the previously-projected session (no thread_state,
+    // value already under reviewer_threads), so fall back to that — otherwise the
+    // set collapses to [] on the first re-projection.
+    reviewer_threads: threadState.reviewers ?? currentView?.reviewer_threads ?? [],
     review_locked: Boolean(threadState.review_locked),
     settings_writable: Boolean(threadState.settings_writable),
     pending_approvals: pendingApprovals,
@@ -1410,18 +1418,18 @@ export async function resolveRemoteReview() {
   }
 }
 
-export async function dismissRemoteReview(reviewId) {
+export async function deleteRemoteReview(reviewId) {
   if (!reviewId) {
-    renderLog("No review to dismiss.");
+    renderLog("No review to delete.");
     return false;
   }
-  renderLog("Dismissing review…");
+  renderLog("Deleting review…");
   try {
-    await dispatchOrRecover("dismiss_review", { review_id: reviewId });
-    await syncRemoteSnapshot("post-review-dismiss", true);
+    await dispatchOrRecover("delete_review", { review_id: reviewId });
+    await syncRemoteSnapshot("post-review-delete", true);
     return true;
   } catch (error) {
-    renderLog(`Remote dismiss failed: ${error.message}`);
+    renderLog(`Remote delete failed: ${error.message}`);
     return false;
   }
 }

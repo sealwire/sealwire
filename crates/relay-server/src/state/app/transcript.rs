@@ -165,6 +165,16 @@ impl AppState {
             && !runtime.is_working()
             && !review_locked;
 
+        // This thread's OWN reviewers. The global snapshot scopes reviewer_threads
+        // to the active parent for broker-bound (remote/iOS) surfaces, so a remote
+        // client viewing this (non-active) thread would otherwise see none — supply
+        // them per-thread here, mirroring `available_models`.
+        let reviewers = relay
+            .reviewer_thread_views()
+            .into_iter()
+            .filter(|view| view.parent_thread_id == thread_id)
+            .collect();
+
         Ok(ThreadStateView {
             thread_id: thread_id.to_string(),
             provider: provider.to_string(),
@@ -186,6 +196,7 @@ impl AppState {
             approval_policy: runtime.approval_policy.clone(),
             sandbox: runtime.sandbox.clone(),
             available_models,
+            reviewers,
             review_locked,
             settings_writable,
         })

@@ -69,7 +69,7 @@ test("ReviewerPanel empty state omits the launcher entirely when no request wiri
   assert.match(html, /Available when the agent is idle/);
 });
 
-test("ReviewerPanel renders a job card with a Dismiss action enabled only on terminal status", () => {
+test("ReviewerPanel renders a job card with a Delete action enabled only on terminal status", () => {
   const terminal = renderToStaticMarkup(
     h(ReviewerPanel, {
       reviewJobs: [{ id: "r1", reviewer_provider: "claude_code", status: "complete", reviewer_thread_id: "t-rev" }],
@@ -78,9 +78,9 @@ test("ReviewerPanel renders a job card with a Dismiss action enabled only on ter
   );
   assert.match(terminal, /claude_code/);
   assert.match(terminal, /Review complete/);
-  // Dismiss button present and NOT disabled for a terminal job.
-  assert.match(terminal, /reviewer-dismiss-button/);
-  assert.doesNotMatch(terminal, /reviewer-dismiss-button[^>]*disabled/);
+  // Delete button present and NOT disabled for a terminal job.
+  assert.match(terminal, /reviewer-delete-button/);
+  assert.doesNotMatch(terminal, /reviewer-delete-button[^>]*disabled/);
 
   const active = renderToStaticMarkup(
     h(ReviewerPanel, {
@@ -88,8 +88,8 @@ test("ReviewerPanel renders a job card with a Dismiss action enabled only on ter
       canRequest: false,
     })
   );
-  // Dismiss disabled while the review is still running.
-  assert.match(active, /reviewer-dismiss-button[^>]*disabled/);
+  // Delete disabled while the review is still running.
+  assert.match(active, /reviewer-delete-button[^>]*disabled/);
 });
 
 test("ReviewerPanel surfaces the unlock action when a review is blocked", () => {
@@ -364,7 +364,7 @@ test("ReviewerPanel treats an escalated review as terminal (Delete enabled)", ()
     })
   );
   // The Delete button shows its TERMINAL title only when the job is terminal — so an
-  // escalated job is dismissible (and its transcript is fetched, gated by the same flag).
+  // An escalated job is deletable (and its transcript is fetched, gated by the same flag).
   assert.match(html, /Delete this review and its reviewer thread/);
   assert.doesNotMatch(html, /Stop the reviewer before deleting/);
 });

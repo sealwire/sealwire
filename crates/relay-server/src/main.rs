@@ -38,8 +38,8 @@ use protocol::{
     AuthSessionInput, AuthSessionView, BulkRevokeDevicesReceipt, DeleteThreadInput, HealthResponse,
     HeartbeatInput, ModelOptionView, PairingDecisionInput, PairingDecisionReceipt,
     PairingStartInput, PairingTicketView, ReadThreadEntryDetailInput, ReadThreadTranscriptInput,
-    RequestReviewInput, RequestReviewReceipt, ResumeSessionInput, ReviewDismissReceipt,
-    ReviewJobView, RevokeDeviceReceipt, SendMessageInput, SessionSnapshot,
+    RequestReviewInput, RequestReviewReceipt, ResumeSessionInput, ReviewActionInput,
+    ReviewDeleteReceipt, ReviewJobView, RevokeDeviceReceipt, SendMessageInput, SessionSnapshot,
     SessionSnapshotCompactProfile, StartSessionInput, StopTurnInput, SubmitAskUserAnswerInput,
     TakeOverInput, ThreadArchiveReceipt, ThreadDeleteReceipt, ThreadEntryDetailResponse,
     ThreadTranscriptResponse, ThreadsQuery, ThreadsResponse, UpdateSessionSettingsInput,
@@ -192,8 +192,8 @@ fn build_router(context: AppContext, web_assets: WebAssets) -> Router {
         .route("/api/session/review/resolve", post(resolve_review))
         .route("/api/session/reviews", get(list_reviews))
         .route(
-            "/api/session/reviews/:review_id/dismiss",
-            post(dismiss_review),
+            "/api/session/reviews/:review_id/delete",
+            post(delete_review),
         )
         .route("/api/pairing/start", post(start_pairing))
         .route(
@@ -736,7 +736,7 @@ async fn resolve_review(
     State(context): State<AppContext>,
     headers: HeaderMap,
     uri: Uri,
-    Json(input): Json<StopTurnInput>,
+    Json(input): Json<ReviewActionInput>,
 ) -> Result<Json<ApiEnvelope<RequestReviewReceipt>>, (StatusCode, Json<ApiError>)> {
     authorize_api(&context, &headers, &uri)?;
     // Stop/cancel the active review — works for ANY non-terminal review (blocked OR
@@ -758,17 +758,17 @@ async fn list_reviews(
     Ok(Json(ApiEnvelope::ok(context.app.list_review_jobs().await)))
 }
 
-async fn dismiss_review(
+async fn delete_review(
     State(context): State<AppContext>,
     headers: HeaderMap,
     uri: Uri,
     Path(review_id): Path<String>,
-    Json(input): Json<StopTurnInput>,
-) -> Result<Json<ApiEnvelope<ReviewDismissReceipt>>, (StatusCode, Json<ApiError>)> {
+    Json(input): Json<ReviewActionInput>,
+) -> Result<Json<ApiEnvelope<ReviewDeleteReceipt>>, (StatusCode, Json<ApiError>)> {
     authorize_api(&context, &headers, &uri)?;
     context
         .app
-        .dismiss_review(review_id, input.device_id)
+        .delete_review(review_id, input.device_id)
         .await
         .map(|receipt| Json(ApiEnvelope::ok(receipt)))
         .map_err(bad_request)
