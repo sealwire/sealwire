@@ -1,0 +1,18 @@
+{
+  "name": "Sealwire",
+  "short_name": "Sealwire",
+  "description": "Run and steer your coding agents from this machine.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#171717",
+  "theme_color": "#171717",
+  "icons": [
+    {
+      "src": "/static/sealwire_logo.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

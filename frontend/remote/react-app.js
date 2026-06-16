@@ -1371,6 +1371,18 @@ function RemoteSidebar({
           type: "button",
         },
         h(RemoteToggleLeftPanelIcon)
+      ),
+      h(
+        "div",
+        { className: "sidebar-brand" },
+        h("img", {
+          className: "sidebar-brand-logo",
+          src: "/static/sealwire_logo.png",
+          alt: "",
+          width: 24,
+          height: 24,
+        }),
+        h("span", { className: "sidebar-brand-name" }, "Sealwire")
       )
     ),
     h(

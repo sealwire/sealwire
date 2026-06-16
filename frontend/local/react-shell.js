@@ -33,6 +33,18 @@ function Sidebar({ launchModel = null, onLaunchFieldChange = null, onLaunchStart
           type: "button",
         },
         h(ToggleLeftPanelIcon)
+      ),
+      h(
+        "div",
+        { className: "sidebar-brand" },
+        h("img", {
+          className: "sidebar-brand-logo",
+          src: "/static/sealwire_logo.png",
+          alt: "",
+          width: 24,
+          height: 24,
+        }),
+        h("span", { className: "sidebar-brand-name" }, "Sealwire")
       )
     ),
     h(AuthForm),
