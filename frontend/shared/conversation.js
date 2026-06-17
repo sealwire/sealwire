@@ -1,5 +1,6 @@
 import React from "react";
 import { TranscriptContent } from "./transcript-react.js";
+import { ScrollToBottomButton } from "./scroll-to-bottom.js";
 
 const h = React.createElement;
 
@@ -111,6 +112,7 @@ export function TranscriptState({
       entries,
       hydrationLoading,
       options,
-    })
+    }),
+    h(ScrollToBottomButton, { entries })
   );
 }

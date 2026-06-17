@@ -31,6 +31,124 @@
   gap: 24px;
 }
 
+/* "Scroll to latest" floating button.
+ *
+ * The `.scroll-to-bottom` element is a zero-height sticky strip rendered as the
+ * last child inside the transcript scroller (`.chat-thread`). Being sticky it
+ * pins to the bottom of the scrollport, so the absolutely-positioned button
+ * hovers just above the composer on every surface (local + remote) and viewport
+ * (desktop + phone) — without taking layout space or adding scrollable height.
+ * It is shown only when the reader has scrolled away from the bottom
+ * (`data-visible="true"`, toggled from JS). */
+.scroll-to-bottom {
+  position: sticky;
+  bottom: 0;
+  height: 0;
+  z-index: 4;
+  pointer-events: none;
+}
+
+.scroll-to-bottom-button {
+  position: absolute;
+  bottom: 20px;
+  left: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 1px solid var(--border-prominent);
+  border-radius: 999px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-md);
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(-50%) translateY(8px);
+  transition: opacity 140ms ease, transform 140ms ease, background 120ms ease;
+}
+
+.scroll-to-bottom[data-visible="true"] .scroll-to-bottom-button {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(-50%) translateY(0);
+}
+
+.scroll-to-bottom-button:hover {
+  background: var(--surface-2);
+}
+
+.scroll-to-bottom-button:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+}
+
+.scroll-to-bottom-button .inline-icon {
+  width: 20px;
+  height: 20px;
+}
+
+.scroll-to-bottom-button .inline-icon svg {
+  width: 20px;
+  height: 20px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scroll-to-bottom-button {
+    transition: opacity 140ms ease, background 120ms ease;
+    transform: translateX(-50%);
+  }
+
+  .scroll-to-bottom[data-visible="true"] .scroll-to-bottom-button {
+    transform: translateX(-50%);
+  }
+}
+
+/* Phone / narrow layout (≤960px), LOCAL surface only.
+ *
+ * The local chat shell is height:auto here, so the page (window) scrolls — not
+ * `.chat-thread`. `position: sticky` would then pin to the non-scrolling
+ * `.chat-thread` container and ride off-screen with the content, so switch the
+ * anchor to `position: fixed` against the viewport. The local composer lives
+ * in-flow at the end of the page, so it is off-screen whenever the button is
+ * shown (i.e. when not near the bottom) — no overlap.
+ *
+ * The REMOTE surface keeps its shell pinned to 100dvh with `.chat-thread`
+ * scrolling internally even on phone (see styles.css
+ * `.remote-chat-shell[data-view="conversation"]`), and its composer is always
+ * docked at the viewport bottom. There the default sticky anchor already floats
+ * the button just above the composer, so it must NOT become fixed — hence the
+ * `:not(.remote-chat-shell)` scoping. */
+@media (max-width: 960px) {
+  .chat-shell:not(.remote-chat-shell) .scroll-to-bottom {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 6;
+  }
+
+  .chat-shell:not(.remote-chat-shell) .scroll-to-bottom-button {
+    bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+  }
+}
+
+/* Phone: a comfortable tap target. */
+@media (max-width: 640px) {
+  .scroll-to-bottom-button {
+    width: 44px;
+    height: 44px;
+  }
+
+  .scroll-to-bottom-button .inline-icon,
+  .scroll-to-bottom-button .inline-icon svg {
+    width: 22px;
+    height: 22px;
+  }
+}
+
 .thread-content-virtualized {
   display: block;
   position: relative;
