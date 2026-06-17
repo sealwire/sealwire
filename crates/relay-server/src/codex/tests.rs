@@ -470,6 +470,44 @@ async fn handle_notification_turn_completed_settles_active_thread_to_idle() {
     );
 }
 
+// A codex turn that completes WITH an error must notify remote devices (push),
+// not just log it.
+#[tokio::test]
+async fn turn_completed_with_error_enqueues_error_push() {
+    let (change_tx, _) = watch::channel(0_u64);
+    let state = std::sync::Arc::new(RwLock::new(RelayState::new(
+        "/tmp/project".to_string(),
+        change_tx,
+        SecurityProfile::private(),
+    )));
+    let (push_tx, mut push_rx) = tokio::sync::mpsc::unbounded_channel();
+    {
+        let mut relay = state.write().await;
+        relay.set_push_runtime(push_tx, "test-key".to_string());
+        relay.active_thread_id = Some("thread-1".to_string());
+        relay.set_thread_status("thread-1", "active".to_string(), Vec::new());
+        relay.set_active_turn(Some("turn-1".to_string()));
+    }
+
+    handle_notification(
+        json!({
+            "method": "turn/completed",
+            "params": {
+                "threadId": "thread-1",
+                "turn": { "id": "turn-1", "error": { "message": "model overloaded" } }
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    let job = push_rx
+        .try_recv()
+        .expect("a turn error must enqueue a push");
+    assert_eq!(job.kind, crate::state::PushKind::Error);
+    assert_eq!(job.thread_id, "thread-1");
+}
+
 // P0a / review #3 regression: a delayed turn/completed for an OLD turn must not
 // clear the newer active turn or idle a working thread (which would also let the
 // server permit an overlapping turn).

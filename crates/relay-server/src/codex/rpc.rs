@@ -413,6 +413,9 @@ async fn handle_notification_for_provider(
                     value_at(&params, &["turn", "error", "message"]).and_then(Value::as_str)
                 {
                     relay.push_log("error", turn_error.to_string());
+                    if let Some(thread_id) = relay.active_thread_id.clone() {
+                        relay.enqueue_error_push(&thread_id, turn_error);
+                    }
                     changed = true;
                 }
             }

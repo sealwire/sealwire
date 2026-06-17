@@ -1473,6 +1473,7 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                     // string (no provider content).
                     if let Some(reason) = claude_failed_turn_reason(&payload) {
                         let turn_id = completed_turn_id.or_else(|| event_turn_id.clone());
+                        relay.enqueue_error_push(&tid, reason.clone());
                         relay.upsert_transcript_item_for_thread(
                             &tid,
                             claude_turn_error_item_id(turn_id.as_deref()),
@@ -1512,6 +1513,7 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                     // snapshot). See the active-route note above.
                     if let Some(reason) = claude_failed_turn_reason(&payload) {
                         let turn_id = completed_turn_id.or_else(|| event_turn_id.clone());
+                        relay.enqueue_error_push(&thread_id, reason.clone());
                         relay.bg_upsert_transcript_item(
                             &thread_id,
                             claude_turn_error_item_id(turn_id.as_deref()),
@@ -3600,6 +3602,40 @@ mod tests {
                 "leaked failure reason into a remote content channel: {channel}"
             );
         }
+    }
+
+    // A failed Claude turn must notify remote devices (push), not just record a
+    // transcript error entry.
+    #[tokio::test]
+    async fn failed_turn_enqueues_error_push() {
+        let state = new_test_state();
+        let (push_tx, mut push_rx) = tokio::sync::mpsc::unbounded_channel();
+        {
+            let mut relay = state.write().await;
+            relay.set_push_runtime(push_tx, "test-key".to_string());
+            relay.set_provider_name("claude_code".to_string());
+            relay.active_thread_id = Some("active-thread".to_string());
+            relay.set_active_turn(Some("turn-1".to_string()));
+            relay.set_thread_status("active-thread", "active".to_string(), Vec::new());
+        }
+
+        handle_worker_event(
+            json!({
+                "type": "done",
+                "provider_session_id": "active-thread",
+                "turn_id": "turn-1",
+                "failed": true,
+                "reason": "Claude turn failed: error_during_execution"
+            }),
+            &state,
+        )
+        .await;
+
+        let job = push_rx
+            .try_recv()
+            .expect("a failed turn must enqueue a push");
+        assert_eq!(job.kind, crate::state::PushKind::Error);
+        assert_eq!(job.thread_id, "active-thread");
     }
 
     #[tokio::test]

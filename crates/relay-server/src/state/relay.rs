@@ -619,6 +619,12 @@ impl RelayState {
         }
         if !expired.is_empty() {
             self.sync_selected_runtime_to_fields();
+            for thread_id in &expired {
+                self.enqueue_error_push(
+                    thread_id,
+                    "stalled with no progress; the turn was stopped.",
+                );
+            }
         }
         expired
     }
@@ -2787,6 +2793,25 @@ mod tests {
     fn test_relay() -> RelayState {
         let (tx, _rx) = watch::channel(0_u64);
         RelayState::new("/tmp/project".to_string(), tx, SecurityProfile::private())
+    }
+
+    #[test]
+    fn stale_turn_liveness_enqueues_error_push() {
+        let (push_tx, mut push_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut relay = test_relay();
+        relay.set_push_runtime(push_tx, "test-key".to_string());
+        relay.active_thread_id = Some("t1".to_string());
+        relay.set_thread_status("t1", "active".to_string(), Vec::new());
+        relay.set_active_turn(Some("turn-1".to_string()));
+        // Advance well past the no-progress timeout so the watchdog trips.
+        let now = super::unix_now() + super::STALE_TURN_PROGRESS_TIMEOUT_SECS + 60;
+        let expired = relay.expire_stale_turn_liveness(now);
+        assert_eq!(expired, vec!["t1".to_string()]);
+        let job = push_rx
+            .try_recv()
+            .expect("a stalled turn must enqueue a push");
+        assert_eq!(job.kind, super::PushKind::Error);
+        assert_eq!(job.thread_id, "t1");
     }
 
     fn run_with_status(id: &str, status: RunStatus) -> WorkflowRun {
