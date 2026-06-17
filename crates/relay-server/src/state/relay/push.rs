@@ -545,7 +545,12 @@ impl PushDispatcher {
         let (tx, rx) = mpsc::unbounded_channel();
         let dispatcher = Self {
             relay,
-            http: reqwest::Client::new(),
+            // A per-request timeout so one hung push endpoint can't wedge the
+            // serial dispatch queue.
+            http: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .unwrap_or_default(),
             vapid,
         };
         tokio::spawn(dispatcher.run(rx));
@@ -840,6 +845,16 @@ mod tests {
         assert_eq!(&body[16..20], &PUSH_RECORD_SIZE.to_be_bytes());
         assert_eq!(body[20], 65);
         assert_eq!(&body[21..86], as_public_point.as_bytes());
+
+        // Golden: the full body must equal the RFC 8291 Appendix A.2 published
+        // aes128gcm vector. A wrong info string / derivation would still round-trip
+        // internally (encrypt+decrypt share the helpers) but fail HERE — this is
+        // the only check that pins us to the spec rather than to ourselves.
+        assert_eq!(
+            URL_SAFE_NO_PAD.encode(&body),
+            "DGv6ra1nlYgDCS1FRnbzlwAAEABBBP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A_yl95bQpu6cVPTpK4Mqgkf1CXztLVBSt2Ks3oZwbuwXPXLWyouBWLVWGNWQexSgSxsj_Qulcy4a-fN",
+            "encrypted body must match the RFC 8291 A.2 vector"
+        );
 
         // Round-trip with the receiver private key recovers the plaintext.
         let recovered = decrypt_aes128gcm(&ua_secret, &auth, &body);
