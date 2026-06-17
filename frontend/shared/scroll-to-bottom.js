@@ -4,7 +4,7 @@ import { CHEVRON_DOWN_SVG } from "../svg.js";
 import {
   computeScrollToBottomVisible,
   findScrollContainer,
-  maxScrollTop,
+  nextSettleScrollTop,
   readScrollMetrics,
 } from "./scroll-to-bottom-core.js";
 
@@ -22,7 +22,7 @@ const h = React.createElement;
 export function ScrollToBottomButton({ entries = [], label = "Scroll to latest" }) {
   const anchorRef = React.useRef(null);
   const buttonRef = React.useRef(null);
-  const settleTimerRef = React.useRef(null);
+  const settleRafRef = React.useRef(null);
   const [visible, setVisible] = React.useState(false);
 
   // The active scroller (`.chat-thread` on desktop, the window on phone) is
@@ -75,13 +75,13 @@ export function ScrollToBottomButton({ entries = [], label = "Scroll to latest" 
     update();
   }, [entries, update]);
 
-  // Cancel any in-flight scroll-settling timer when the button unmounts.
+  // Cancel any in-flight scroll-settling frame when the button unmounts.
   React.useEffect(
     () => () => {
-      if (settleTimerRef.current) {
-        clearTimeout(settleTimerRef.current);
-        settleTimerRef.current = null;
+      if (settleRafRef.current != null && typeof cancelAnimationFrame === "function") {
+        cancelAnimationFrame(settleRafRef.current);
       }
+      settleRafRef.current = null;
     },
     []
   );
@@ -101,39 +101,47 @@ export function ScrollToBottomButton({ entries = [], label = "Scroll to latest" 
     // `.transcript-react-root`; keep this (non-transcript) click from reaching it.
     event.stopPropagation();
 
-    if (settleTimerRef.current) {
-      clearTimeout(settleTimerRef.current);
-      settleTimerRef.current = null;
+    if (settleRafRef.current != null && typeof cancelAnimationFrame === "function") {
+      cancelAnimationFrame(settleRafRef.current);
+      settleRafRef.current = null;
     }
 
     // `content-visibility: auto` on `.chat-message` re-measures rows as they
-    // scroll into view, growing scrollHeight while we descend — so a single
-    // scrollTo lands well short of the true bottom. Snap to the (moving) bottom
-    // repeatedly until the height stops changing or we hit a small cap.
-    let tries = 0;
-    let lastHeight = -1;
+    // scroll into view, so a single scrollTo undershoots the true bottom. We
+    // *follow* the bottom for a few frames until it settles — but ONLY ever move
+    // downward. Snapping to a momentarily-smaller scrollHeight (the estimate ↔
+    // real height flip-flop) would yank the viewport back up and read as violent
+    // shaking, so a target above the current position is ignored.
+    const requestFrame =
+      typeof requestAnimationFrame === "function"
+        ? requestAnimationFrame
+        : (cb) => setTimeout(cb, 16);
+    let frames = 0;
     const step = () => {
+      settleRafRef.current = null;
       const scrollEl = findScrollContainer(anchorRef.current);
       const metrics = readScrollMetrics(scrollEl);
       if (!scrollEl || !metrics) {
-        settleTimerRef.current = null;
         return;
       }
-      const top = maxScrollTop(metrics);
-      if (typeof scrollEl.scrollTo === "function") {
-        scrollEl.scrollTo({ top, behavior: "auto" });
-      } else if ("scrollTop" in scrollEl) {
-        scrollEl.scrollTop = top;
+      // Only ever move DOWNWARD toward the bottom (returns null otherwise).
+      const target = nextSettleScrollTop(metrics);
+      const needsScroll = target != null;
+      if (needsScroll) {
+        if (typeof scrollEl.scrollTo === "function") {
+          scrollEl.scrollTo({ top: target, behavior: "auto" });
+        } else if ("scrollTop" in scrollEl) {
+          scrollEl.scrollTop = target;
+        }
       }
-      tries += 1;
-      if (metrics.scrollHeight !== lastHeight && tries < 12) {
-        lastHeight = metrics.scrollHeight;
-        settleTimerRef.current = setTimeout(step, 60);
-      } else {
-        settleTimerRef.current = null;
+      frames += 1;
+      // Watch a couple of frames past "looks settled" to catch late re-measures,
+      // then stop. The cap bounds the follow to ~24 frames (~0.4s) of safety.
+      if ((needsScroll || frames < 3) && frames < 24) {
+        settleRafRef.current = requestFrame(step);
       }
     };
-    step();
+    settleRafRef.current = requestFrame(step);
   }, []);
 
   return h(

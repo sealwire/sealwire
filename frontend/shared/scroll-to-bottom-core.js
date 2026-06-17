@@ -61,6 +61,20 @@ export function maxScrollTop(metrics) {
   return Math.max(0, (metrics.scrollHeight || 0) - (metrics.clientHeight || 0));
 }
 
+// The next scrollTop to apply while "following" the bottom during the click
+// settle. Returns null when no move is needed — crucially, ALSO when the bottom
+// is currently *above* us. `content-visibility: auto` makes scrollHeight flip
+// between each row's 200px estimate and its real height as rows enter/leave the
+// viewport, so the bottom momentarily jumps up; scrolling to it would yank the
+// viewport backward and read as violent shaking. We only ever move downward and
+// let the browser clamp us when the content shrinks.
+export function nextSettleScrollTop(metrics) {
+  if (!metrics) return null;
+  const target = maxScrollTop(metrics);
+  const current = metrics.scrollTop || 0;
+  return target - current > 1 ? target : null;
+}
+
 export function isScrolledToBottom(metrics, threshold = SCROLL_TO_BOTTOM_THRESHOLD_PX) {
   if (!metrics) return true;
   const max = maxScrollTop(metrics);

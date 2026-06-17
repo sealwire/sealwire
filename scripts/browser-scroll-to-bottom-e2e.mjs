@@ -153,6 +153,22 @@ async function exercise(page, surfaceLabel) {
   // (its settle loop defeats the content-visibility undershoot) and hide the
   // button. No manual scrolling here — this verifies the real behaviour.
   const topScrollTop = shownState.scrollTop;
+  // Record the active scroller's scrollTop on every frame so we can assert the
+  // settle only ever moves DOWNWARD — a backward jerk is the "violent shaking"
+  // regression (content-visibility estimate ↔ real height flip-flop).
+  await page.evaluate(() => {
+    window.__scrollSamples = [];
+    const t = document.querySelector(".chat-thread");
+    const overflows = t && t.scrollHeight > t.clientHeight + 1;
+    const read = () => (overflows ? t.scrollTop : window.scrollY);
+    let n = 0;
+    const tick = () => {
+      window.__scrollSamples.push(read());
+      n += 1;
+      if (n < 45) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  });
   await page.click(".scroll-to-bottom-button");
   await page.waitForFunction(
     () => document.querySelector(".scroll-to-bottom")?.getAttribute("data-visible") === "false",
@@ -160,6 +176,16 @@ async function exercise(page, surfaceLabel) {
     { timeout: TIMEOUT_MS }
   );
   await delay(300);
+  const samples = await page.evaluate(() => window.__scrollSamples || []);
+  let maxBackjump = 0;
+  for (let i = 1; i < samples.length; i += 1) {
+    maxBackjump = Math.max(maxBackjump, samples[i - 1] - samples[i]);
+  }
+  console.log(`[${surfaceLabel}] settle samples (${samples.length}), max backward jump:`, maxBackjump);
+  assert.ok(
+    maxBackjump <= 8,
+    `${surfaceLabel}: scroll-to-bottom must not jerk backwards during settle (maxBackjump=${maxBackjump}px, samples=${JSON.stringify(samples)})`
+  );
   const hiddenState = await readButtonState(page);
   await page.screenshot({ path: path.join(SHOT_DIR, `${surfaceLabel}-button-hidden.png`) });
   assert.equal(hiddenState.visible, "false", `${surfaceLabel}: button should hide once at the bottom`);

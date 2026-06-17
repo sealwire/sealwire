@@ -7,6 +7,7 @@ import {
   findScrollContainer,
   isScrolledToBottom,
   maxScrollTop,
+  nextSettleScrollTop,
   readScrollMetrics,
 } from "./shared/scroll-to-bottom-core.js";
 
@@ -62,6 +63,34 @@ test("computeScrollToBottomVisible: hidden when content does not overflow", () =
 
 test("computeScrollToBottomVisible: hidden for missing metrics", () => {
   assert.equal(computeScrollToBottomVisible(null), false);
+});
+
+test("nextSettleScrollTop: returns the bottom when we're above it (scroll down)", () => {
+  assert.equal(
+    nextSettleScrollTop(metrics({ scrollTop: 0, clientHeight: 400, scrollHeight: 2000 })),
+    1600
+  );
+});
+
+test("nextSettleScrollTop: never scrolls UP — returns null when the bottom is above us", () => {
+  // content-visibility shrank scrollHeight so maxScrollTop (900) is now *above*
+  // the current scrollTop (1600). Scrolling there would yank the viewport
+  // backward — the "violent shaking" bug — so it must be a no-op.
+  assert.equal(
+    nextSettleScrollTop({ scrollTop: 1600, clientHeight: 400, scrollHeight: 1300 }),
+    null
+  );
+});
+
+test("nextSettleScrollTop: returns null when already at the bottom", () => {
+  assert.equal(
+    nextSettleScrollTop(metrics({ scrollTop: 1600, clientHeight: 400, scrollHeight: 2000 })),
+    null
+  );
+});
+
+test("nextSettleScrollTop: null metrics is a no-op", () => {
+  assert.equal(nextSettleScrollTop(null), null);
 });
 
 test("readScrollMetrics: reads geometry from a scrollable element", () => {
