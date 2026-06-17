@@ -146,8 +146,19 @@ export function mapModelInfos(modelInfos) {
   return models;
 }
 
-function mapToolCall(block, msg, status = "running") {
-  const fileChange = fileChangeFromToolInput(block.name, block.input);
+function mapToolCall(block, msg, status = "running", { provisionalFileChange = false } = {}) {
+  const baseChange = fileChangeFromToolInput(block.name, block.input);
+  // On the LIVE request path the edit hasn't landed yet, so any diff derived from
+  // the tool input (old_string/new_string, or a Write's full content) is only a
+  // guess that the worker's file-diff tracker replaces with the real on-disk diff
+  // on tool_call_result. Shipping that guess makes the +N/-N badge flip (e.g. a
+  // Write over an existing file shows the whole file as additions, then snaps to
+  // the real small count). Keep the card (path/title) but omit the diff so the
+  // badge only ever reflects the authoritative result. The hydration path
+  // (mapSessionMessages) has no tracker/result recompute, so it keeps the
+  // reconstructed diff as the best — and only — record of a past edit.
+  const fileChange =
+    baseChange && provisionalFileChange ? { ...baseChange, diff: "" } : baseChange;
   const tool =
     fileChangeTool({
       toolName: block.name,
@@ -242,7 +253,7 @@ export function mapSdkMessage(msg) {
             text += block.text || "";
             break;
           case "tool_use":
-            events.push(mapToolCall(block, msg));
+            events.push(mapToolCall(block, msg, "running", { provisionalFileChange: true }));
             break;
           case "tool_result":
             events.push({

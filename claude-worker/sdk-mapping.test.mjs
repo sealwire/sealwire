@@ -304,6 +304,92 @@ test("mapSessionMessages emits transcript kinds using relay JSON names", () => {
   );
 });
 
+// The LIVE request path must not ship an input-derived diff. At tool_call_requested
+// time the edit hasn't landed, so the real on-disk diff is unknown; the worker's
+// file-diff tracker recomputes the authoritative diff on tool_call_result. Shipping
+// the input guess here makes the +N/-N badge flip (e.g. a Write over an existing
+// file shows the whole file as additions, then snaps to the real small count).
+test("live tool_call_requested for a file edit omits the provisional input diff", () => {
+  const writeEvent = mapSdkMessage({
+    type: "assistant",
+    uuid: "assistant-1",
+    message: {
+      content: [
+        {
+          type: "tool_use",
+          id: "tool-1",
+          name: "Write",
+          input: { file_path: "notes.md", content: "line1\nline2\nline3\nline4\n" },
+        },
+      ],
+    },
+  });
+  assert.equal(writeEvent.type, "tool_call_requested");
+  // The card still appears (path/title) so the UI shows "Wrote notes.md"...
+  assert.equal(writeEvent.tool.item_type, "fileChange");
+  assert.equal(writeEvent.tool.path, "notes.md");
+  // ...but carries no diff/badge yet — that arrives with tool_call_result.
+  assert.ok(
+    !writeEvent.tool.diff,
+    `request-time diff must be empty, got ${JSON.stringify(writeEvent.tool.diff)}`,
+  );
+  assert.equal(writeEvent.tool.file_changes.length, 1);
+  assert.equal(writeEvent.tool.file_changes[0].path, "notes.md");
+  assert.equal(writeEvent.tool.file_changes[0].diff, "");
+
+  // Same invariant for Edit (old_string/new_string is still just a guess here).
+  const editEvent = mapSdkMessage({
+    type: "assistant",
+    uuid: "assistant-2",
+    message: {
+      content: [
+        {
+          type: "tool_use",
+          id: "tool-2",
+          name: "Edit",
+          input: { file_path: "a.css", old_string: "x: 26px;", new_string: "x: 0;" },
+        },
+      ],
+    },
+  });
+  assert.equal(editEvent.tool.item_type, "fileChange");
+  assert.ok(
+    !editEvent.tool.diff,
+    `request-time Edit diff must be empty, got ${JSON.stringify(editEvent.tool.diff)}`,
+  );
+  assert.equal(editEvent.tool.file_changes[0].diff, "");
+
+  // MultiEdit takes a different branch in fileChangeFromToolInput (it concatenates
+  // every edit's old/new strings), so lock that branch too — the whole
+  // FILE_EDIT_TOOLS set must be blanked on the live path, not just Edit/Write.
+  const multiEvent = mapSdkMessage({
+    type: "assistant",
+    uuid: "assistant-3",
+    message: {
+      content: [
+        {
+          type: "tool_use",
+          id: "tool-3",
+          name: "MultiEdit",
+          input: {
+            file_path: "b.css",
+            edits: [
+              { old_string: "a: 1;", new_string: "a: 2;" },
+              { old_string: "b: 3;", new_string: "b: 4;" },
+            ],
+          },
+        },
+      ],
+    },
+  });
+  assert.equal(multiEvent.tool.item_type, "fileChange");
+  assert.ok(
+    !multiEvent.tool.diff,
+    `request-time MultiEdit diff must be empty, got ${JSON.stringify(multiEvent.tool.diff)}`,
+  );
+  assert.equal(multiEvent.tool.file_changes[0].diff, "");
+});
+
 test("mapSessionMessages enriches Claude edit tools with file change diffs", () => {
   const entries = mapSessionMessages([
     {
