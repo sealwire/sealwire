@@ -1,5 +1,7 @@
 import React from "react";
 
+import { selectReviewerCatalogState } from "./review-state.js";
+
 export {
   isReviewBlocked,
   isReviewInProgress,
@@ -79,6 +81,13 @@ export function ReviewPanel({
   // point): the reuse dropdown lands on this thread and the provider is locked to it.
   initialReviewerThreadId = "clean",
   initialProvider = "",
+  // Per-provider catalog status (`{ [provider]: "loading"|"ready"|"error" }`) and the
+  // active session's provider, so the dialog can tell "no models" apart from "still
+  // loading"/"failed" — and `onEnsureProviderModels(provider)` lets the dialog ASK the
+  // surface to fetch a cross-agent provider's catalog that the boot pre-fetch missed.
+  providerModelsStatus = {},
+  activeProvider = "",
+  onEnsureProviderModels,
   submitting: submittingProp = false,
   onSubmit,
   onRequestClose,
@@ -137,10 +146,27 @@ export function ReviewPanel({
   );
   const isReuse = reviewerThreadId !== "clean";
 
-  const providerModels = (models || []).filter(
-    (model) =>
-      (!model.provider || model.provider === reviewerProvider) && !model.hidden
-  );
+  // The selectable models for the chosen reviewer provider, plus whether the
+  // catalog still needs fetching and its load status. The cross-agent provider's
+  // catalog does NOT ride the session snapshot, so if the boot pre-fetch missed
+  // it the dialog has to ask the surface to load it (instead of silently showing
+  // an empty picker — the reported bug).
+  const catalog = selectReviewerCatalogState({
+    reviewerProvider,
+    models,
+    providerModelsStatus,
+    session: { provider: activeProvider },
+  });
+  const providerModels = catalog.models;
+
+  React.useEffect(() => {
+    if (catalog.needsLoad && typeof onEnsureProviderModels === "function") {
+      onEnsureProviderModels(reviewerProvider);
+    }
+    // Intentionally keyed on the provider + the derived need: it fires once when a
+    // provider with no catalog is selected, and never loops (a fetch flips status
+    // to "loading"/"error", both of which make needsLoad false).
+  }, [reviewerProvider, catalog.needsLoad]);
 
   const close = () => {
     setError(null);
@@ -304,7 +330,28 @@ export function ReviewPanel({
               )
             )
           )
-        : null,
+        : // Only surface a load status when a loader is wired to resolve it —
+          // otherwise an empty catalog would show a spinner that can never clear.
+          typeof onEnsureProviderModels !== "function"
+          ? null
+          : catalog.modelsStatus === "error"
+            ? h(
+                "p",
+                { className: "panel-modal-copy" },
+                "Couldn't load the reviewer models — the review will use the provider default. ",
+                h(
+                  "button",
+                  {
+                    type: "button",
+                    className: "link-button",
+                    onClick: () => onEnsureProviderModels?.(reviewerProvider),
+                  },
+                  "Retry"
+                )
+              )
+            : catalog.modelsStatus === "loading"
+              ? h("p", { className: "panel-modal-copy" }, "Loading reviewer models…")
+              : null,
       h(
         "label",
         { className: "sidebar-label", htmlFor: `${id}-effort` },
@@ -448,6 +495,9 @@ export function ReviewLauncher({
   parentThreadId = null,
   initialReviewerThreadId = "clean",
   initialProvider = "",
+  providerModelsStatus = {},
+  activeProvider = "",
+  onEnsureProviderModels,
   disabled = false,
   label = "Review",
   title = "Ask another agent to review the current changes",
@@ -476,6 +526,9 @@ export function ReviewLauncher({
       parentThreadId,
       initialReviewerThreadId,
       initialProvider,
+      providerModelsStatus,
+      activeProvider,
+      onEnsureProviderModels,
       onSubmit,
     })
   );

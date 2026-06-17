@@ -35,3 +35,24 @@ export async function fetchModelsWithRetry(
   }
   throw lastError;
 }
+
+// Load one provider's catalog into the remote UI store, with the status
+// transitions + in-flight dedup the review dialog relies on. Returns early when a
+// pull for `provider` is already running ("loading"), so the many ReviewPanel
+// mounts (panel + per-card re-review launchers) collapse to a single fetch — this
+// is safe because the store's set() is synchronous, so the second concurrent
+// caller observes "loading". A pull that ends in "error" is NOT locked out: a
+// later trigger sees "error" (not "loading") and may retry.
+export async function ensureProviderModels(store, provider, fetchFn, options) {
+  if (!provider) return;
+  const ui = store.getState();
+  if (ui.providerModelsStatus[provider] === "loading") return;
+  ui.setProviderModelsStatus(provider, "loading");
+  try {
+    const models = await fetchModelsWithRetry(fetchFn, provider, options);
+    store.getState().setProviderModels(provider, models || []);
+    store.getState().setProviderModelsStatus(provider, "ready");
+  } catch {
+    store.getState().setProviderModelsStatus(provider, "error");
+  }
+}

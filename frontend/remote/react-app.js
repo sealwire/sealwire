@@ -93,7 +93,7 @@ import {
   captureTranscriptScrollSnapshot,
   restoreTranscriptScrollPosition,
 } from "./transcript-scroll.js";
-import { fetchModelsWithRetry } from "./provider-model-fetch.js";
+import { ensureProviderModels, fetchModelsWithRetry } from "./provider-model-fetch.js";
 import { useRemoteSessionRuntime } from "./use-remote-session-runtime.js";
 import {
   RemoteReviewerChip,
@@ -297,6 +297,17 @@ function RemoteApp() {
   const selectedProvider = remoteUi.sessionDraft.provider || defaultProvider(remoteUi.providers);
   const selectedProviderModels = remoteUi.providerModels[selectedProvider] || [];
   const selectedProviderSettings = providerSettings(selectedProvider);
+
+  // Fetch one provider's model catalog on demand (retry + status), reusing the
+  // same path as the boot pre-fetch. The review dialog calls this when its
+  // cross-agent reviewer provider's catalog is missing — that provider's models
+  // never ride the session snapshot, so without an on-demand fetch the picker
+  // would stay empty for the whole session.
+  const ensureRemoteProviderModels = React.useCallback(
+    (provider) =>
+      ensureProviderModels(remoteUiStore, provider, (p) => handlers.onFetchProviderModels?.(p)),
+    [handlers]
+  );
 
   useEffect(() => {
     if (!currentState.remoteAuth?.payloadSecret) return;
@@ -779,11 +790,18 @@ function RemoteApp() {
     };
     getRemoteWorkspaceDiffStore().setReview({
       reviewJobs: reviewCardsForViewedThread(reviewsData, remoteViewedThreadId),
-      reviewModel: selectReviewLaunchModel({
-        providers: remoteUi.providers,
-        providerModels: remoteUi.providerModels,
-        session,
-      }),
+      reviewModel: {
+        ...selectReviewLaunchModel({
+          providers: remoteUi.providers,
+          providerModels: remoteUi.providerModels,
+          session,
+        }),
+        // Let the dialog distinguish "loading"/"failed" from "no models", and
+        // fetch a cross-agent provider's catalog that the boot pre-fetch missed.
+        providerModelsStatus: remoteUi.providerModelsStatus,
+        activeProvider: session?.provider || "",
+        onEnsureProviderModels: ensureRemoteProviderModels,
+      },
       reusableReviewers: reusableReviewersFromReviews(reviewsData, remoteViewedThreadId, null),
       // Full reviewer-thread list so each card can show its reviewer thread's
       // (long, truncated-with-tooltip) name by joining on reviewer_thread_id.
@@ -794,16 +812,28 @@ function RemoteApp() {
       canRequest: canRequestReview(session, remoteDeviceId, remoteViewedThreadId),
       blocked: isReviewBlocked({ active_review_jobs: remoteThreadReviewJobs }),
     });
-  }, [session, remoteReviews, remoteUi.providers, remoteUi.providerModels, remoteDeviceId]);
+  }, [
+    session,
+    remoteReviews,
+    remoteUi.providers,
+    remoteUi.providerModels,
+    remoteUi.providerModelsStatus,
+    remoteDeviceId,
+  ]);
 
   // Inputs for the composer idle nudge ("Want a second opinion on these
   // changes?"), mirroring the local surface. Plain render-time derivations — not
   // effect deps — so recomputing each render is fine.
-  const reviewLaunchModel = selectReviewLaunchModel({
-    providers: remoteUi.providers,
-    providerModels: remoteUi.providerModels,
-    session,
-  });
+  const reviewLaunchModel = {
+    ...selectReviewLaunchModel({
+      providers: remoteUi.providers,
+      providerModels: remoteUi.providerModels,
+      session,
+    }),
+    providerModelsStatus: remoteUi.providerModelsStatus,
+    activeProvider: session?.provider || "",
+    onEnsureProviderModels: ensureRemoteProviderModels,
+  };
   const canRequestRemoteReview = canRequestReview(session, remoteDeviceId, remoteViewedThreadId);
 
   useEffect(() => {
@@ -1828,6 +1858,12 @@ function RemoteThreadPanel({
               providerOptions: reviewNudgeModel.reviewModel?.providerOptions || [],
               models: reviewNudgeModel.reviewModel?.models || [],
               defaultProvider: reviewNudgeModel.reviewModel?.defaultProvider || "",
+              // Same catalog self-heal as the main panel: without these the nudge
+              // dialog would show a stuck empty/loading picker for a cross-agent
+              // provider whose catalog the boot pre-fetch missed.
+              providerModelsStatus: reviewNudgeModel.reviewModel?.providerModelsStatus || {},
+              activeProvider: reviewNudgeModel.reviewModel?.activeProvider || "",
+              onEnsureProviderModels: reviewNudgeModel.reviewModel?.onEnsureProviderModels,
               reusableReviewers: reviewNudgeModel.reusableReviewers || [],
               parentThreadId: reviewNudgeModel.parentThreadId || null,
               disabled: false,

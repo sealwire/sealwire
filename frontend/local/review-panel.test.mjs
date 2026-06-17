@@ -42,6 +42,52 @@ test("ReviewPanel renders the reviewer provider options and the clean-reviewer f
   assert.match(html, /focus on the storage refactor/);
 });
 
+test("ReviewPanel surfaces a loading hint instead of a silent empty model picker", () => {
+  // The reported bug: when the cross-agent reviewer provider's catalog hasn't
+  // loaded, the model <select> simply vanished with no explanation. An empty
+  // catalog with a "loading" status must show a hint, not nothing.
+  const html = renderToStaticMarkup(
+    h(ReviewPanel, {
+      providerOptions: [{ label: "Codex", value: "codex" }],
+      models: [], // codex catalog not loaded yet
+      defaultProvider: "codex",
+      providerModelsStatus: { codex: "loading" },
+      onEnsureProviderModels: () => {}, // a loader is wired, so the hint is meaningful
+    })
+  );
+  assert.match(html, /Loading reviewer models/i);
+});
+
+test("ReviewPanel stays silent (no stuck hint) when no catalog loader is wired", () => {
+  // Without onEnsureProviderModels nothing can resolve a "loading" state, so the
+  // dialog must NOT render a spinner that can never clear (e.g. the local surface).
+  const html = renderToStaticMarkup(
+    h(ReviewPanel, {
+      providerOptions: [{ label: "Codex", value: "codex" }],
+      models: [],
+      defaultProvider: "codex",
+      providerModelsStatus: { codex: "loading" },
+      // no onEnsureProviderModels
+    })
+  );
+  assert.doesNotMatch(html, /Loading reviewer models/i);
+});
+
+test("ReviewPanel surfaces a failed-load hint with a retry, not a silent empty picker", () => {
+  const html = renderToStaticMarkup(
+    h(ReviewPanel, {
+      providerOptions: [{ label: "Codex", value: "codex" }],
+      models: [],
+      defaultProvider: "codex",
+      providerModelsStatus: { codex: "error" },
+      onEnsureProviderModels: () => {},
+    })
+  );
+  // (renderToStaticMarkup escapes the apostrophe in "Couldn't" → &#x27;)
+  assert.match(html, /load the reviewer models/i);
+  assert.match(html, /Retry/);
+});
+
 test("ReviewPanel does not offer a hidden model in the reviewer-model picker", () => {
   const html = renderToStaticMarkup(
     h(ReviewPanel, {

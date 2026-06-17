@@ -126,6 +126,53 @@ export function selectReviewLaunchModel({ providers = [], providerModels = {}, s
   };
 }
 
+// Decide what the review-request dialog should show for the SELECTED reviewer
+// provider, and whether the surface still needs to fetch that provider's model
+// catalog. This is the reviewer-dialog analogue of the new-session dialog's
+// `modelsStatus` + retry: the reviewer defaults to the CROSS-AGENT provider
+// (e.g. Codex when Claude is active), whose models do NOT ride the session
+// snapshot's `available_models` and so must be fetched over the providers
+// channel. Without this, a not-yet-loaded catalog made the model picker vanish
+// silently with no way to recover.
+//   { models, modelsStatus, needsLoad }
+export function selectReviewerCatalogState({
+  reviewerProvider = "",
+  models = [],
+  providerModelsStatus = {},
+  session = null,
+} = {}) {
+  // Mirror review-panel.js's per-provider filter: keep the models that belong to
+  // the selected reviewer provider (Codex stamps an empty provider) and drop
+  // hidden ones (e.g. codex-auto-review).
+  const reviewerModels = (models || []).filter(
+    (model) => (!model.provider || model.provider === reviewerProvider) && !model.hidden
+  );
+  const hasModels = reviewerModels.length > 0;
+  const status = providerModelsStatus[reviewerProvider];
+
+  // The active session's provider always rides the snapshot's available_models,
+  // so its catalog is present without a dedicated fetch. Every OTHER provider's
+  // catalog must be fetched — that's the one the reviewer needs to kick.
+  const ridesSnapshot = !!session?.provider && reviewerProvider === session.provider;
+
+  // Kick a load only when we have nothing AND aren't already loading/errored —
+  // so it fires once on open/provider-change and never auto-loops (an errored
+  // catalog stays errored until the user retries, rather than spinning).
+  const needsLoad =
+    !!reviewerProvider &&
+    !hasModels &&
+    !ridesSnapshot &&
+    status !== "loading" &&
+    status !== "error";
+
+  // `ridesSnapshot` ⇒ the active provider's catalog comes from the snapshot, which
+  // is authoritative: an empty list means "no extra models, submit uses the default",
+  // NOT "still loading". Reporting "ready" avoids a spinner that no fetch can clear.
+  const modelsStatus = hasModels || ridesSnapshot ? "ready" : status || "loading";
+
+  return { models: reviewerModels, modelsStatus, needsLoad };
+}
+
 // Provider-reported statuses that mean a turn is actively in flight. Mirror of the
 // backend `thread_status_is_working` (state/relay.rs): the NOT-working set is empty /
 // `idle` / `viewing` / `completed` / `unknown`. The last two matter because providers
