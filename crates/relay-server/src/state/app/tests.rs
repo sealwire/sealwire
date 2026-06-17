@@ -9013,7 +9013,12 @@ turn) must allow a review: {error:?}"
     }
 
     #[tokio::test]
-    async fn review_rejected_when_background_thread_works_same_cwd() {
+    async fn review_allowed_while_a_background_thread_works_the_same_cwd() {
+        // A review targets a SPECIFIC idle thread; the workspace as a whole no longer
+        // has to be quiet. Another thread running a turn in the same cwd must NOT block
+        // it (the diff is a point-in-time snapshot of the working tree — accepting that
+        // beats forcing the whole workspace idle; worktree isolation is the future
+        // stronger guarantee). The parent's OWN idleness + path-scope are still enforced.
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();
         let (app, _providers) = build_review_app(cwd, &["codex"]).await;
@@ -9037,19 +9042,59 @@ turn) must allow a review: {error:?}"
             relay.bg_set_active_turn("bg-thread", Some("bg-turn".to_string()), unix_now());
         }
 
-        let error = app
+        // The review starts regardless of the busy workspace.
+        let receipt = app
             .request_review(review_input("codex"))
             .await
-            .expect_err("review must be refused while another thread works the cwd");
+            .expect("a review may start even while another thread works the same cwd");
         assert!(
-            error.contains("another thread is running in this workspace"),
-            "got: {error}"
+            !receipt.review_job_id.is_empty(),
+            "the review was accepted and a job recorded"
         );
         // Sanity: the parent itself is the active idle thread.
         assert_eq!(
             app.snapshot().await.active_thread_id.as_deref(),
             Some(parent.id.as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn multi_round_review_also_allowed_while_a_background_thread_works_the_same_cwd() {
+        // Product decision (2026-06-17): the workspace-busy relaxation applies to ALL
+        // reviews, INCLUDING iterative (max_rounds>1) ones that later drive an author-fix
+        // WRITE turn on the parent. We knowingly accept the concurrent-writer risk for now
+        // (worktree/snapshot isolation is the future stronger guarantee). This test pins
+        // that decision so the guard isn't silently re-added for the multi-round case.
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, _providers) = build_review_app(cwd, &["codex"]).await;
+        let _parent = start_parent(&app, cwd, "codex").await;
+        let parent_cwd = app.snapshot().await.current_cwd;
+
+        {
+            let mut relay = app.relay.write().await;
+            relay.threads.push(ThreadSummaryView {
+                id: "bg-thread".to_string(),
+                name: None,
+                preview: String::new(),
+                cwd: parent_cwd.clone(),
+                updated_at: 0,
+                source: "codex".to_string(),
+                status: "active".to_string(),
+                model_provider: "codex".to_string(),
+                provider: "codex".to_string(),
+            });
+            relay.bg_set_active_turn("bg-thread", Some("bg-turn".to_string()), unix_now());
+        }
+
+        let receipt = app
+            .request_review(RequestReviewInput {
+                max_rounds: Some(2),
+                ..review_input("codex")
+            })
+            .await
+            .expect("a multi-round review may also start while another thread works the cwd");
+        assert!(!receipt.review_job_id.is_empty());
     }
 
     #[tokio::test]

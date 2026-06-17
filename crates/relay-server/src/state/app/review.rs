@@ -196,18 +196,16 @@ starting a review"
             {
                 return Err("cannot start a review while the agent is still working".to_string());
             }
-            // The parent being idle does not mean its workspace is quiet: a backgrounded
-            // thread sharing the parent's cwd could mutate files while we collect the diff
-            // or the reviewer reads it. Refuse rather than race (a worktree/snapshot mode is
-            // the future stronger fix). A reused reviewer thread is idle at this point (its
-            // prior review is terminal), so it does not trip this guard.
-            if relay.has_working_thread_in_cwd(&parent_cwd) {
-                return Err(
-                    "another thread is running in this workspace; wait for it to finish before \
-requesting a review"
-                        .to_string(),
-                );
-            }
+            // NOTE: we deliberately do NOT require the parent's whole workspace to be
+            // quiet. A review targets a SPECIFIC idle thread; blocking it whenever any
+            // other thread runs a turn in the same cwd was too coarse (you couldn't
+            // review an idle thread while an unrelated thread — or this very agent —
+            // worked the repo). The diff is a point-in-time snapshot of the working
+            // tree; a concurrent writer can make it a moving target, which we accept
+            // until reviewer worktree/snapshot isolation lands. The parent's OWN
+            // liveness (above) and path-scope (below) are still enforced; a running
+            // workflow on the workspace is still refused earlier (it drives turns on
+            // this same parent/cwd).
             let device_scope = relay.device_path_scope(&device_id);
             ensure_path_within_device_scope(&parent_cwd, &device_scope, &relay.allowed_roots)?;
 

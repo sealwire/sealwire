@@ -1007,7 +1007,60 @@ export async function refreshRemoteThreads(reason, options = {}) {
       renderLog(`Remote thread refresh failed: ${error.message}`);
     }
     throw error;
+  } finally {
+    // Re-arm the recurring poll on every refresh — the same chokepoint pattern
+    // local uses (loadThreads()'s finally schedules the next scheduleThreadsPoll).
+    // Recovery's initial refresh starts the loop; manual refreshes just reset the
+    // 12s clock. Without this, remote's left list would freeze between manual
+    // refreshes while local's keeps its timestamps and ordering live.
+    scheduleRemoteThreadsPoll();
   }
+}
+
+// Cadence matches the local surface's thread poll (frontend/local/session/polling.js)
+// so the remote sidebar refreshes its timestamps and reorders on the same beat.
+const REMOTE_THREADS_POLL_INTERVAL_MS = 12_000;
+
+export function scheduleRemoteThreadsPoll() {
+  if (typeof window === "undefined") {
+    return;
+  }
+  // Unpaired surfaces have nothing to poll; clearing here means teardown paths
+  // that drop remoteAuth (return home / forget device) stop the loop for free.
+  if (!state.remoteAuth) {
+    cancelRemoteThreadsPoll();
+    return;
+  }
+  if (state.remoteThreadsPollTimer) {
+    window.clearTimeout(state.remoteThreadsPollTimer);
+  }
+  state.remoteThreadsPollTimer = window.setTimeout(
+    runRemoteThreadsPoll,
+    REMOTE_THREADS_POLL_INTERVAL_MS
+  );
+}
+
+export function cancelRemoteThreadsPoll() {
+  if (!state.remoteThreadsPollTimer) {
+    return;
+  }
+  window.clearTimeout(state.remoteThreadsPollTimer);
+  state.remoteThreadsPollTimer = null;
+}
+
+function runRemoteThreadsPoll() {
+  state.remoteThreadsPollTimer = null;
+  if (!state.remoteAuth) {
+    return;
+  }
+  if (!state.socketConnected) {
+    // Broker is down: skip the round trip (it would only time out) but keep the
+    // loop alive so polling resumes the moment the socket reconnects.
+    scheduleRemoteThreadsPoll();
+    return;
+  }
+  // refreshRemoteThreads re-arms the next poll from its finally block.
+  void refreshRemoteThreads("poll", { silent: true }).catch(() => {});
 }
 
 export async function fetchRemoteThreads({ limit = 80 } = {}) {

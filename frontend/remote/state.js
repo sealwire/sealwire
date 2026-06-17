@@ -54,6 +54,7 @@ export const state = {
   socketPeerId: null,
   socketConnected: false,
   socketReconnectTimer: null,
+  remoteThreadsPollTimer: null,
   transcriptEntryDetailCache: new Map(),
   transcriptEntryDetailOrder: [],
   transcriptLiveEntryDetails: new Map(),

@@ -1906,6 +1906,213 @@ test("refreshRemoteThreads clears loading state and records an error when the re
   assert.match(result.message, /timed out/i);
 });
 
+test("remote thread list auto-refreshes on a poll without a manual refresh", async () => {
+  // Regression guard: the remote sidebar must auto-update its timestamps and
+  // reorder like the local sidebar (which re-polls /api/threads every 12s).
+  // Before this fix, refreshRemoteThreads only ran on the manual refresh button
+  // or on recovery, so the left list froze until the user pressed refresh.
+  const browser = installBrowserStubs();
+  activeBrowser = browser;
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { handleRemoteBrokerPayload } = await import("./actions.js");
+  const sessionOps = await import("./session-ops.js");
+  const { refreshRemoteThreads } = sessionOps;
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-poll",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-poll",
+    relayPeerId: "relay-poll",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-poll",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: "claim-token-poll",
+    sessionClaimExpiresAt: Math.floor(Date.now() / 1000) + 300,
+  });
+  seedSocketState(state, {
+    socketConnected: true,
+    socketPeerId: "surface-peer-poll",
+  });
+  state.pendingActions.clear();
+  state.threads = [];
+  state.remoteThreadsPollTimer = null;
+
+  // Two successive thread-list snapshots: the second moves thread-2 to the top
+  // with a fresher updated_at — i.e. "I just chatted in thread-2 from another
+  // device" — which the poll must surface without a manual refresh.
+  const threadRevisions = [
+    [
+      { id: "thread-1", cwd: "/tmp/demo", provider: "codex", updated_at: 1000 },
+      { id: "thread-2", cwd: "/tmp/demo", provider: "codex", updated_at: 900 },
+    ],
+    [
+      { id: "thread-2", cwd: "/tmp/demo", provider: "codex", updated_at: 2000 },
+      { id: "thread-1", cwd: "/tmp/demo", provider: "codex", updated_at: 1000 },
+    ],
+  ];
+  const listThreadsSent = [];
+  state.socket = {
+    readyState: 1,
+    send(frameText) {
+      const frame = JSON.parse(frameText);
+      if (frame.payload?.request?.type !== "list_threads") {
+        return;
+      }
+      const threads =
+        threadRevisions[Math.min(listThreadsSent.length, threadRevisions.length - 1)];
+      listThreadsSent.push(frame.payload);
+      setImmediate(async () => {
+        await handleRemoteBrokerPayload({
+          kind: "remote_action_result",
+          action_id: frame.payload.action_id,
+          action: "list_threads",
+          ok: true,
+          snapshot: {},
+          threads: { threads },
+        });
+      });
+    },
+  };
+
+  // The initial refresh (as recovery performs) seeds the list AND must arm the
+  // recurring poll — mirroring local loadThreads() scheduling the next poll.
+  await refreshRemoteThreads("recovery sync");
+  assert.equal(listThreadsSent.length, 1);
+  assert.equal(state.threads[0].id, "thread-1");
+  assert.ok(
+    state.remoteThreadsPollTimer,
+    "refreshRemoteThreads should arm the recurring remote thread poll"
+  );
+
+  // Fire the scheduled poll. No manual refresh button is pressed here.
+  browser.runNextTimer();
+  await waitFor(() => listThreadsSent.length >= 2);
+  await waitFor(() => state.threads[0]?.id === "thread-2");
+
+  assert.equal(state.threads[0].id, "thread-2");
+  assert.equal(state.threads[0].updated_at, 2000);
+
+  sessionOps.cancelRemoteThreadsPoll?.();
+});
+
+test("cancelRemoteThreadsPoll stops the recurring remote thread poll", async () => {
+  // Teardown paths (broker disconnect / relay switch / return home) must be able
+  // to stop the loop so it does not keep firing list_threads after the surface is
+  // torn down.
+  const browser = installBrowserStubs();
+  activeBrowser = browser;
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { scheduleRemoteThreadsPoll, cancelRemoteThreadsPoll } = await import("./session-ops.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-cancel",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-cancel",
+    relayPeerId: "relay-cancel",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-cancel",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: "claim-token-cancel",
+    sessionClaimExpiresAt: Math.floor(Date.now() / 1000) + 300,
+  });
+  seedSocketState(state, {
+    socketConnected: true,
+    socketPeerId: "surface-peer-cancel",
+  });
+  state.pendingActions.clear();
+  state.remoteThreadsPollTimer = null;
+
+  const sentTypes = [];
+  state.socket = {
+    readyState: 1,
+    send(frameText) {
+      sentTypes.push(JSON.parse(frameText).payload?.request?.type || null);
+    },
+  };
+
+  scheduleRemoteThreadsPoll();
+  assert.ok(state.remoteThreadsPollTimer, "poll should be armed");
+
+  cancelRemoteThreadsPoll();
+  assert.equal(state.remoteThreadsPollTimer, null, "cancel should clear the timer");
+
+  // Draining timers must not fire a poll after cancellation.
+  browser.runTimers();
+  assert.equal(
+    sentTypes.filter((type) => type === "list_threads").length,
+    0,
+    "no thread list request should be sent after the poll is cancelled"
+  );
+});
+
+test("the remote thread poll idles without a network round trip while disconnected", async () => {
+  // While the broker socket is down a fired poll must skip the (doomed) request
+  // but keep the loop alive so polling resumes on reconnect.
+  const browser = installBrowserStubs();
+  activeBrowser = browser;
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { scheduleRemoteThreadsPoll, cancelRemoteThreadsPoll } = await import("./session-ops.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-offline",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-offline",
+    relayPeerId: "relay-offline",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-offline",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: "claim-token-offline",
+    sessionClaimExpiresAt: Math.floor(Date.now() / 1000) + 300,
+  });
+  seedSocketState(state, {
+    socketConnected: false,
+    socketPeerId: null,
+  });
+  state.pendingActions.clear();
+  state.remoteThreadsPollTimer = null;
+
+  const sentTypes = [];
+  state.socket = {
+    readyState: 1,
+    send(frameText) {
+      sentTypes.push(JSON.parse(frameText).payload?.request?.type || null);
+    },
+  };
+
+  scheduleRemoteThreadsPoll();
+  browser.runNextTimer();
+
+  assert.equal(
+    sentTypes.filter((type) => type === "list_threads").length,
+    0,
+    "a disconnected poll must not send a list_threads request"
+  );
+  assert.ok(
+    state.remoteThreadsPollTimer,
+    "the poll loop must stay armed so it resumes after reconnect"
+  );
+
+  cancelRemoteThreadsPoll();
+});
+
 test("sendMessage clears pending state when the relay does not reply", async () => {
   activeBrowser || installBrowserStubs();
 

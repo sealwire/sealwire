@@ -4,7 +4,7 @@ import { initializeRemoteNavigation, openRemoteNavigation } from "./navigation.j
 import { applyPairingQuery, beginPairing, forgetCurrentDevice, handleEncryptedPairingResult, sendPairingRequest } from "./pairing.js";
 import { registerRemotePwa } from "./pwa.js";
 import { renderLog } from "./session-surface.js";
-import { applyFileChange, applySessionSnapshot, applyTranscriptDelta, applyTranscriptEvent, clearSessionRuntime, deleteRemoteReview, fetchAskUserQuestionDetail, fetchRemoteProviderModels, fetchRemoteProviders, fetchRemoteThreadTranscript, fetchTranscriptEntryDetail, refreshRemoteThreads, requestRemoteReview, resolveRemoteReview, resumeRemoteSession, sendMessage, startRemoteSession, stopActiveTurn, submitAskUserAnswer, submitDecision, syncRemoteSnapshot, takeOverControl, updateRemoteSessionSettings, viewRemoteThread } from "./session-ops.js";
+import { applyFileChange, applySessionSnapshot, applyTranscriptDelta, applyTranscriptEvent, cancelRemoteThreadsPoll, clearSessionRuntime, deleteRemoteReview, fetchAskUserQuestionDetail, fetchRemoteProviderModels, fetchRemoteProviders, fetchRemoteThreadTranscript, fetchTranscriptEntryDetail, refreshRemoteThreads, requestRemoteReview, resolveRemoteReview, resumeRemoteSession, sendMessage, startRemoteSession, stopActiveTurn, submitAskUserAnswer, submitDecision, syncRemoteSnapshot, takeOverControl, updateRemoteSessionSettings, viewRemoteThread } from "./session-ops.js";
 import { clearActiveRelaySelection, ensureDeviceIdentity, hydrateStoredRemoteSecrets, selectRelayProfile, state } from "./state.js";
 import { applyRemoteSurfacePatch, createResetRemoteSurfaceStatePatch } from "./surface-state.js";
 
@@ -37,6 +37,9 @@ export function ensureRemoteRuntimeConfigured() {
     },
     onBrokerDisconnect() {
       clearClaimLifecycle();
+      // Stop the recurring thread poll while the socket is down; recovery on the
+      // next broker-ready re-arms it via refreshRemoteThreads.
+      cancelRemoteThreadsPoll();
       rejectPendingActions("broker socket disconnected");
     },
     onRelayPresence(kind, peer) {
@@ -115,6 +118,7 @@ export async function switchRemoteRelay(relayId) {
     return;
   }
 
+  cancelRemoteThreadsPoll();
   applyRemoteSurfacePatch(createResetRemoteSurfaceStatePatch({
     clearClaimLifecycle,
     clearSessionRuntime,
@@ -130,6 +134,7 @@ export function returnToRelayHome() {
     return;
   }
 
+  cancelRemoteThreadsPoll();
   applyRemoteSurfacePatch(createResetRemoteSurfaceStatePatch({
     clearClaimLifecycle,
     clearSessionRuntime,
