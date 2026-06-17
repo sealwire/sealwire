@@ -131,6 +131,8 @@ pub(super) enum RemoteActionRequest {
     },
     UnregisterPushSubscription {
         endpoint: String,
+        #[serde(default)]
+        device_id: Option<String>,
     },
 }
 
@@ -273,9 +275,10 @@ impl RemoteActionRequest {
                 input.device_id = Some(device_id);
                 Self::RegisterPushSubscription { input }
             }
-            Self::UnregisterPushSubscription { endpoint } => {
-                Self::UnregisterPushSubscription { endpoint }
-            }
+            Self::UnregisterPushSubscription { endpoint, .. } => Self::UnregisterPushSubscription {
+                endpoint,
+                device_id: Some(device_id),
+            },
         }
     }
 }
@@ -1145,10 +1148,16 @@ async fn execute_remote_action(
             .register_push_subscription(input)
             .await
             .map(|_| RemoteActionOutcome::default()),
-        RemoteActionRequest::UnregisterPushSubscription { endpoint } => state
-            .unregister_push_subscription(endpoint)
-            .await
-            .map(|_| RemoteActionOutcome::default()),
+        RemoteActionRequest::UnregisterPushSubscription {
+            endpoint,
+            device_id,
+        } => {
+            let device_id = device_id.ok_or_else(|| "missing device id".to_string())?;
+            state
+                .unregister_push_subscription(device_id, endpoint)
+                .await
+                .map(|_| RemoteActionOutcome::default())
+        }
     }
 }
 

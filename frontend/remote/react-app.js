@@ -87,6 +87,7 @@ import { getRemoteServiceWorkerRegistration } from "./pwa.js";
 import {
   disablePushSubscription,
   ensurePushSubscription,
+  hasActiveSubscription,
 } from "./push-subscribe.js";
 import {
   fetchTranscriptEntryDetail as fetchRemoteTranscriptEntryDetail,
@@ -1149,12 +1150,30 @@ function RemoteApp() {
     remoteUiStore.getState().setPushBusy(true);
     try {
       const registration = await resolvePushRegistration();
-      await disablePushSubscription({ registration });
-      remoteUiStore.getState().setPushSubscribed(false);
+      const result = await disablePushSubscription({ registration });
+      // Only flip the toggle off if the unsubscribe actually succeeded —
+      // otherwise the device is still subscribed and the UI must reflect that.
+      if (result?.ok) {
+        remoteUiStore.getState().setPushSubscribed(false);
+      }
     } finally {
       remoteUiStore.getState().setPushBusy(false);
     }
   }
+
+  // Reconcile the toggle with the actual browser subscription on load. A push
+  // subscription persists in the SW across reloads, so the stored default
+  // (`pushSubscribed: false`) would otherwise show "Enable" for a subscribed user.
+  useEffect(() => {
+    if (notificationPermission() !== "granted") {
+      return;
+    }
+    void (async () => {
+      const registration = await resolvePushRegistration();
+      const active = await hasActiveSubscription(registration);
+      remoteUiStore.getState().setPushSubscribed(active);
+    })();
+  }, [remoteUiStore]);
 
   // Re-register the subscription when the SW reports the push subscription
   // changed (browser-rotated endpoint). Permission must already be granted.

@@ -179,6 +179,55 @@ fn fork_session_action_round_trips_and_issues_session_claim() {
 }
 
 #[test]
+fn push_subscription_actions_round_trip_and_are_not_claim_gated() {
+    let reg: RemoteActionRequest = serde_json::from_value(serde_json::json!({
+        "type": "register_push_subscription",
+        "input": { "endpoint": "https://push/x", "keys": { "p256dh": "p", "auth": "a" } }
+    }))
+    .unwrap();
+    assert_eq!(reg.kind(), RemoteActionKind::RegisterPushSubscription);
+    // device_id is injected server-side by bind_device, never trusted from the wire.
+    match reg.bind_device("device-1".to_string()) {
+        RemoteActionRequest::RegisterPushSubscription { input } => {
+            assert_eq!(input.device_id.as_deref(), Some("device-1"));
+            assert_eq!(input.endpoint, "https://push/x");
+        }
+        other => panic!("unexpected variant: {other:?}"),
+    }
+
+    let unreg: RemoteActionRequest = serde_json::from_value(serde_json::json!({
+        "type": "unregister_push_subscription",
+        "endpoint": "https://push/x"
+    }))
+    .unwrap();
+    assert_eq!(unreg.kind(), RemoteActionKind::UnregisterPushSubscription);
+    match unreg.bind_device("device-1".to_string()) {
+        RemoteActionRequest::UnregisterPushSubscription {
+            device_id,
+            endpoint,
+        } => {
+            assert_eq!(device_id.as_deref(), Some("device-1"));
+            assert_eq!(endpoint, "https://push/x");
+        }
+        other => panic!("unexpected variant: {other:?}"),
+    }
+
+    for kind in [
+        RemoteActionKind::RegisterPushSubscription,
+        RemoteActionKind::UnregisterPushSubscription,
+    ] {
+        assert!(
+            !requires_session_claim(kind),
+            "{kind:?} must not require a session claim"
+        );
+        assert!(
+            !issues_session_claim(kind),
+            "{kind:?} must not issue a session claim"
+        );
+    }
+}
+
+#[test]
 fn plain_remote_action_result_payload_splits_control_results_from_session_results() {
     let control = RemoteActionResultPlaintext {
         kind: RemoteActionResultKind::RemoteControlResult,

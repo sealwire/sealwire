@@ -252,6 +252,14 @@ impl PushAttentionTracker {
             for id in ids {
                 let before = prev.get(id).copied().unwrap_or_default();
                 let after = next.get(id).copied().unwrap_or_default();
+                // A new turn starting clears any stale error-suppression: suppress
+                // only applies to the work→idle edge of the *errored* turn. Without
+                // this, a suppress that never met its edge (e.g. a sub-debounce
+                // turn the tracker never saw as working) would swallow this new
+                // turn's eventual completion.
+                if !before.working && after.working {
+                    self.suppress_completed.remove(id);
+                }
                 if after.needs_input && !before.needs_input {
                     jobs.push(PushJob::new(PushKind::NeedsInput, id.clone()));
                 } else if before.working && !after.working && !after.needs_input {
@@ -426,6 +434,30 @@ fn b64url_decode(value: &str) -> Result<Vec<u8>, String> {
 fn endpoint_origin(endpoint: &str) -> Result<String, String> {
     let url = url::Url::parse(endpoint).map_err(|e| format!("invalid push endpoint: {e}"))?;
     Ok(url.origin().ascii_serialization())
+}
+
+/// Reject endpoints that aren't public https URLs. A paired device could
+/// otherwise point the relay at an internal address (SSRF); real push services
+/// (FCM / Mozilla autopush / Apple) are always public https, so this is not
+/// restrictive in practice.
+pub(crate) fn is_acceptable_push_endpoint(endpoint: &str) -> bool {
+    let Ok(url) = url::Url::parse(endpoint) else {
+        return false;
+    };
+    if url.scheme() != "https" {
+        return false;
+    }
+    match url.host() {
+        Some(url::Host::Domain(host)) => {
+            let host = host.to_ascii_lowercase();
+            host != "localhost" && !host.ends_with(".localhost") && !host.ends_with(".local")
+        }
+        Some(url::Host::Ipv4(ip)) => {
+            !(ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified())
+        }
+        Some(url::Host::Ipv6(ip)) => !(ip.is_loopback() || ip.is_unspecified()),
+        None => false,
+    }
 }
 
 /// Build the `Authorization: vapid t=<jwt>, k=<public_key>` header value.
@@ -704,6 +736,23 @@ mod tests {
     }
 
     #[test]
+    fn suppress_completed_does_not_swallow_a_later_unrelated_completion() {
+        let mut tracker = PushAttentionTracker::new();
+        tracker.ingest_states(states(&[])); // baseline
+                                            // An error fired while the tracker never observed t1 as working (e.g. a
+                                            // sub-debounce turn): the suppress entry has no matching work->idle edge.
+        tracker.suppress_completed("t1");
+        // A later, unrelated turn on t1 runs and completes normally.
+        tracker.ingest_states(states(&[("t1", true, false)]));
+        let jobs = tracker.ingest_states(states(&[]));
+        assert!(
+            jobs.iter()
+                .any(|j| j.kind == PushKind::Completed && j.thread_id == "t1"),
+            "a stale suppress must not swallow a later real completion: {jobs:?}"
+        );
+    }
+
+    #[test]
     fn tracker_suppresses_completed_after_error() {
         let mut tracker = PushAttentionTracker::new();
         tracker.ingest_states(states(&[("t1", true, false)]));
@@ -739,6 +788,23 @@ mod tests {
         let done = format_push_notification(&PushJob::new(PushKind::Completed, "t1"));
         assert_eq!(done.title, "Agent finished");
         assert_eq!(done.body, "A thread completed its turn.");
+    }
+
+    #[test]
+    fn rejects_non_https_and_internal_push_endpoints() {
+        assert!(is_acceptable_push_endpoint(
+            "https://fcm.googleapis.com/fcm/send/abc"
+        ));
+        assert!(is_acceptable_push_endpoint(
+            "https://updates.push.services.mozilla.com/wpush/v2/xyz"
+        ));
+        assert!(!is_acceptable_push_endpoint("http://fcm.googleapis.com/x"));
+        assert!(!is_acceptable_push_endpoint("https://localhost/x"));
+        assert!(!is_acceptable_push_endpoint("https://127.0.0.1/x"));
+        assert!(!is_acceptable_push_endpoint("https://169.254.169.254/meta"));
+        assert!(!is_acceptable_push_endpoint("https://10.0.0.5/x"));
+        assert!(!is_acceptable_push_endpoint("https://192.168.1.1/x"));
+        assert!(!is_acceptable_push_endpoint("not a url"));
     }
 
     #[test]

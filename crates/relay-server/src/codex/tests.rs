@@ -508,6 +508,48 @@ async fn turn_completed_with_error_enqueues_error_push() {
     assert_eq!(job.thread_id, "thread-1");
 }
 
+// A codex turn that fails on a BACKGROUND thread must also push (symmetric with
+// the active-thread path and with Claude's fg+bg handling).
+#[tokio::test]
+async fn background_turn_completed_with_error_enqueues_error_push() {
+    let (change_tx, _) = watch::channel(0_u64);
+    let state = std::sync::Arc::new(RwLock::new(RelayState::new(
+        "/tmp/project".to_string(),
+        change_tx,
+        SecurityProfile::private(),
+    )));
+    let (push_tx, mut push_rx) = tokio::sync::mpsc::unbounded_channel();
+    {
+        let mut relay = state.write().await;
+        relay.set_push_runtime(push_tx, "test-key".to_string());
+        relay.active_thread_id = Some("active-thread".to_string());
+        relay.set_active_turn(Some("turn-active".to_string()));
+        relay.bg_set_active_turn(
+            "bg-thread",
+            Some("turn-bg".to_string()),
+            crate::state::unix_now(),
+        );
+    }
+
+    handle_notification(
+        json!({
+            "method": "turn/completed",
+            "params": {
+                "threadId": "bg-thread",
+                "turn": { "id": "turn-bg", "error": { "message": "model overloaded" } }
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    let job = push_rx
+        .try_recv()
+        .expect("a background turn error must enqueue a push");
+    assert_eq!(job.kind, crate::state::PushKind::Error);
+    assert_eq!(job.thread_id, "bg-thread");
+}
+
 // P0a / review #3 regression: a delayed turn/completed for an OLD turn must not
 // clear the newer active turn or idle a working thread (which would also let the
 // server permit an overlapping turn).

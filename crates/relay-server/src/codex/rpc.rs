@@ -380,6 +380,12 @@ async fn handle_notification_for_provider(
                         now,
                     );
                 }
+                if let Some(turn_error) =
+                    value_at(&params, &["turn", "error", "message"]).and_then(Value::as_str)
+                {
+                    relay.push_log("error", turn_error.to_string());
+                    relay.enqueue_error_push(&bg_thread_id, turn_error);
+                }
                 changed = true;
             } else {
                 // Only settle the thread's active state if this completion is for

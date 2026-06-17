@@ -380,10 +380,14 @@ in thread {thread_id}: {error}"
         relay.register_push_subscription(input)
     }
 
-    /// Remove a Web Push subscription by endpoint.
-    pub async fn unregister_push_subscription(&self, endpoint: String) -> Result<(), String> {
+    /// Remove a Web Push subscription by endpoint, scoped to the calling device.
+    pub async fn unregister_push_subscription(
+        &self,
+        device_id: String,
+        endpoint: String,
+    ) -> Result<(), String> {
         let mut relay = self.relay.write().await;
-        relay.unregister_push_subscription(&endpoint);
+        relay.unregister_push_subscription(&device_id, &endpoint);
         Ok(())
     }
 

@@ -34,8 +34,8 @@ pub(crate) use self::device::{
     PendingPairingResult, PendingTranscriptDelta, TranscriptDeltaKind,
 };
 pub(crate) use self::push::{
-    load_or_generate_vapid, vapid_key_path, PushAttentionTracker, PushDispatcher, PushJob,
-    PushKind, PushSubscription, PushSubscriptionInput,
+    is_acceptable_push_endpoint, load_or_generate_vapid, vapid_key_path, PushAttentionTracker,
+    PushDispatcher, PushJob, PushKind, PushSubscription, PushSubscriptionInput,
 };
 pub(crate) use self::runtime::ThreadRuntime;
 pub(crate) use self::transcript::TranscriptRecord;
@@ -423,6 +423,9 @@ impl RelayState {
         if input.endpoint.is_empty() || input.keys.p256dh.is_empty() || input.keys.auth.is_empty() {
             return Err("push subscription is incomplete".to_string());
         }
+        if !is_acceptable_push_endpoint(&input.endpoint) {
+            return Err("push endpoint must be a public https URL".to_string());
+        }
         let subscription = PushSubscription {
             endpoint: input.endpoint,
             p256dh: input.keys.p256dh,
@@ -437,15 +440,18 @@ impl RelayState {
         Ok(())
     }
 
-    /// Remove a subscription by endpoint (across all devices).
-    pub(crate) fn unregister_push_subscription(&mut self, endpoint: &str) {
-        let mut changed = false;
-        self.push_subscriptions.retain(|_, subs| {
-            let before = subs.len();
-            subs.retain(|s| s.endpoint != endpoint);
-            changed |= subs.len() != before;
-            !subs.is_empty()
-        });
+    /// Remove a subscription by endpoint, scoped to the owning device so one
+    /// paired device cannot unregister another device's subscription.
+    pub(crate) fn unregister_push_subscription(&mut self, device_id: &str, endpoint: &str) {
+        let Some(subs) = self.push_subscriptions.get_mut(device_id) else {
+            return;
+        };
+        let before = subs.len();
+        subs.retain(|s| s.endpoint != endpoint);
+        let changed = subs.len() != before;
+        if subs.is_empty() {
+            self.push_subscriptions.remove(device_id);
+        }
         if changed {
             self.notify();
         }
@@ -2812,6 +2818,35 @@ mod tests {
             .expect("a stalled turn must enqueue a push");
         assert_eq!(job.kind, super::PushKind::Error);
         assert_eq!(job.thread_id, "t1");
+    }
+
+    #[test]
+    fn unregister_push_subscription_is_scoped_to_the_device() {
+        let mut relay = test_relay();
+        let sub = |endpoint: &str, device: &str| super::PushSubscription {
+            endpoint: endpoint.to_string(),
+            p256dh: "p".to_string(),
+            auth: "a".to_string(),
+            device_id: device.to_string(),
+            created_at: 0,
+        };
+        relay.push_subscriptions.insert(
+            "deviceA".to_string(),
+            vec![sub("https://push/A", "deviceA")],
+        );
+        relay.push_subscriptions.insert(
+            "deviceB".to_string(),
+            vec![sub("https://push/B", "deviceB")],
+        );
+        // deviceB must not be able to unregister deviceA's endpoint.
+        relay.unregister_push_subscription("deviceB", "https://push/A");
+        assert!(
+            relay.push_subscriptions.contains_key("deviceA"),
+            "A's subscription must survive B's cross-device unregister"
+        );
+        // deviceA can unregister its own.
+        relay.unregister_push_subscription("deviceA", "https://push/A");
+        assert!(!relay.push_subscriptions.contains_key("deviceA"));
     }
 
     fn run_with_status(id: &str, status: RunStatus) -> WorkflowRun {

@@ -19,7 +19,8 @@ function installMinimalBrowser({ secureContext = false } = {}) {
 
 installMinimalBrowser();
 
-const { urlBase64ToUint8Array, pushSupported, subscriptionToInput } = await import("./push-subscribe.js");
+const { urlBase64ToUint8Array, pushSupported, subscriptionToInput, hasActiveSubscription } =
+  await import("./push-subscribe.js");
 
 test("urlBase64ToUint8Array decodes a 65-byte uncompressed P-256 key", () => {
   // A real uncompressed P-256 public point (base64url, unpadded): 65 bytes, 0x04 prefix.
@@ -50,4 +51,19 @@ test("subscriptionToInput shapes endpoint + keys from toJSON()", () => {
     endpoint: "https://push.example.test/abc",
     keys: { p256dh: "p256dh-value", auth: "auth-value" },
   });
+});
+
+test("hasActiveSubscription reflects the registration's subscription", async () => {
+  assert.equal(await hasActiveSubscription(null), false);
+  assert.equal(await hasActiveSubscription({}), false);
+  assert.equal(
+    await hasActiveSubscription({ pushManager: { getSubscription: async () => null } }),
+    false,
+  );
+  assert.equal(
+    await hasActiveSubscription({
+      pushManager: { getSubscription: async () => ({ endpoint: "https://push/x" }) },
+    }),
+    true,
+  );
 });

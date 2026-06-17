@@ -130,3 +130,22 @@ export async function disablePushSubscription({ registration } = {}) {
     return { ok: false, reason: error?.message || "unsubscribe-failed" };
   }
 }
+
+/**
+ * Read-only check for an existing push subscription. A subscription persists in
+ * the service worker across reloads, so this reconciles the UI toggle on load
+ * (otherwise an already-subscribed user sees "Enable" after a refresh).
+ *
+ * @param {ServiceWorkerRegistration | null | undefined} registration
+ * @returns {Promise<boolean>}
+ */
+export async function hasActiveSubscription(registration) {
+  if (!registration?.pushManager) {
+    return false;
+  }
+  try {
+    return Boolean(await registration.pushManager.getSubscription());
+  } catch {
+    return false;
+  }
+}
