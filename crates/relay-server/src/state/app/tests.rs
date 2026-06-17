@@ -788,6 +788,10 @@ mod path_scope_tests {
             Arc<Mutex<HashMap<(String, Option<usize>), crate::provider::ThreadTranscriptPageData>>>,
         read_thread_calls: Arc<AtomicUsize>,
         list_models_calls: Arc<AtomicUsize>,
+        // Model-catalog fault injection: a cold/erroring provider (`should_fail`)
+        // or one that answers before it's ready (`returns_empty`).
+        list_models_should_fail: Arc<AtomicBool>,
+        list_models_returns_empty: Arc<AtomicBool>,
     }
 
     impl RecordingProvider {
@@ -807,6 +811,8 @@ mod path_scope_tests {
                 transcript_pages: Arc::new(Mutex::new(HashMap::new())),
                 read_thread_calls: Arc::new(AtomicUsize::new(0)),
                 list_models_calls: Arc::new(AtomicUsize::new(0)),
+                list_models_should_fail: Arc::new(AtomicBool::new(false)),
+                list_models_returns_empty: Arc::new(AtomicBool::new(false)),
             }
         }
 
@@ -847,6 +853,12 @@ mod path_scope_tests {
 
         async fn list_models(&self) -> Result<Vec<crate::protocol::ModelOptionView>, String> {
             self.list_models_calls.fetch_add(1, Ordering::Relaxed);
+            if self.list_models_should_fail.load(Ordering::Relaxed) {
+                return Err(format!("{} model/list failed (cold)", self.name));
+            }
+            if self.list_models_returns_empty.load(Ordering::Relaxed) {
+                return Ok(Vec::new());
+            }
             Ok(vec![crate::protocol::ModelOptionView {
                 model: format!("{}-model", self.name),
                 display_name: format!("{} Model", self.name),
@@ -1560,6 +1572,106 @@ mod path_scope_tests {
         assert_eq!(thread_state.available_models.len(), 1);
         assert_eq!(thread_state.available_models[0].model, "cached-sentinel");
         assert_eq!(codex.list_models_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn provider_models_falls_back_to_cached_catalog_when_live_query_fails() {
+        // The model catalog must survive a cold/erroring provider. Codex's catalog
+        // is fetched live (app-server `model/list`); when that round-trip fails, the
+        // remote dialog used to render an EMPTY model picker (and the new-session
+        // dialog a single hardcoded default). A read must instead serve the
+        // last-known (prewarmed) catalog — stale beats empty.
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, codex, _claude) = build_recording_provider_app(cwd).await;
+
+        // Warm the cache with one good pull (mirrors `spawn_model_catalog_prewarm`).
+        let warm = app.provider_models("codex").await.expect("warm pull");
+        assert_eq!(warm.len(), 1);
+        assert_eq!(warm[0].model, "codex-model");
+
+        // Provider now goes cold/errors on every pull.
+        codex.list_models_should_fail.store(true, Ordering::Relaxed);
+        let served = app
+            .provider_models("codex")
+            .await
+            .expect("a failed live query must fall back to the cached catalog, not error");
+        assert_eq!(
+            served.len(),
+            1,
+            "the warm catalog is served despite the failure"
+        );
+        assert_eq!(served[0].model, "codex-model");
+    }
+
+    #[tokio::test]
+    async fn provider_models_does_not_clobber_a_warm_cache_with_an_empty_result() {
+        // A provider that answers before it's ready returns an EMPTY list. Treat
+        // that as "not ready": serve the warm cache AND leave the cache intact, so
+        // an empty success never poisons a previously-good catalog.
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, codex, _claude) = build_recording_provider_app(cwd).await;
+
+        app.provider_models("codex").await.expect("warm pull");
+
+        // Cold provider returns empty → must fall back, not surface empty.
+        codex
+            .list_models_returns_empty
+            .store(true, Ordering::Relaxed);
+        let served = app
+            .provider_models("codex")
+            .await
+            .expect("empty live result must fall back to the cached catalog");
+        assert_eq!(served.len(), 1, "an empty result is never surfaced");
+        assert_eq!(served[0].model, "codex-model");
+
+        // Prove the empty result did NOT poison the cache: now fail hard, and the
+        // fallback must still yield the warm catalog (which only survives if the
+        // earlier empty call left the cache untouched).
+        codex
+            .list_models_returns_empty
+            .store(false, Ordering::Relaxed);
+        codex.list_models_should_fail.store(true, Ordering::Relaxed);
+        let served_again = app
+            .provider_models("codex")
+            .await
+            .expect("warm cache survives an intervening empty result");
+        assert_eq!(served_again.len(), 1);
+        assert_eq!(served_again[0].model, "codex-model");
+    }
+
+    #[tokio::test]
+    async fn refreshing_a_catalog_with_an_empty_result_keeps_the_warm_cache() {
+        // `load_provider_model_catalog` is the prewarm/periodic-refresh primitive.
+        // A scheduled refresh that races a cold provider (empty list) must NOT
+        // poison the warm cache — otherwise the background refresh we add for
+        // freshness would itself blank the catalog.
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, codex, _claude) = build_recording_provider_app(cwd).await;
+
+        app.provider_models("codex").await.expect("warm pull");
+
+        codex
+            .list_models_returns_empty
+            .store(true, Ordering::Relaxed);
+        let bridge = app.providers.get("codex").expect("codex bridge").clone();
+        let refreshed = app.load_provider_model_catalog("codex", &bridge).await;
+        assert!(refreshed.is_none(), "an empty refresh adopts nothing");
+
+        // The previously-warm catalog must still be servable after the empty
+        // refresh (prove it by failing the live pull and seeing the fallback work).
+        codex
+            .list_models_returns_empty
+            .store(false, Ordering::Relaxed);
+        codex.list_models_should_fail.store(true, Ordering::Relaxed);
+        let served = app
+            .provider_models("codex")
+            .await
+            .expect("warm cache survived the empty refresh");
+        assert_eq!(served.len(), 1);
+        assert_eq!(served[0].model, "codex-model");
     }
 
     #[tokio::test]

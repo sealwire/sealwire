@@ -1,17 +1,43 @@
 use super::*;
 
+/// How often the background task re-pulls every provider's model catalog. The
+/// catalog only changes when a CLI/SDK is upgraded, so a slow cadence is plenty
+/// — this exists so a long-idle relay still picks up new/removed models without
+/// a restart (each pass only adopts non-empty results, never blanking the cache).
+const MODEL_CATALOG_REFRESH_SECS: u64 = 30 * 60;
+
 impl AppState {
     pub async fn provider_models(
         &self,
         provider_name: &str,
     ) -> Result<Vec<ModelOptionView>, String> {
         let (_, bridge) = self.resolve_provider(Some(provider_name))?;
-        let models = bridge.list_models().await?;
-        self.provider_model_catalogs
-            .write()
-            .await
-            .insert(provider_name.to_string(), models.clone());
-        Ok(models)
+        match bridge.list_models().await {
+            // A non-empty live catalog is authoritative: adopt it as the new
+            // last-known so future cold reads can fall back to it.
+            Ok(models) if !models.is_empty() => {
+                self.provider_model_catalogs
+                    .write()
+                    .await
+                    .insert(provider_name.to_string(), models.clone());
+                Ok(models)
+            }
+            // The live query failed (cold/erroring app-server or worker) or
+            // answered before it was ready (empty list). Either way, stale beats
+            // empty: serve the last-known catalog and NEVER overwrite the warm
+            // cache with the empty result. Without this, a single cold pull made
+            // the remote model picker vanish for the whole session.
+            live => {
+                if let Some(cached) = self.cached_provider_model_catalog(provider_name).await {
+                    if !cached.is_empty() {
+                        return Ok(cached);
+                    }
+                }
+                // Nothing cached to fall back to — surface the original outcome
+                // (an honest error, or a genuinely empty catalog).
+                live
+            }
+        }
     }
 
     fn active_provider(&self) -> Option<(&str, &Arc<dyn ProviderBridge>)> {
@@ -135,6 +161,27 @@ impl AppState {
         }
     }
 
+    /// Keep every provider's catalog fresh on a slow cadence, so a relay that
+    /// has been running for a long time still reflects model changes without a
+    /// restart. Best-effort; an empty/failed pull leaves the warm cache intact.
+    pub(super) fn spawn_periodic_model_catalog_refresh(&self) {
+        let state = self.clone();
+        tokio::spawn(async move {
+            let interval = std::time::Duration::from_secs(MODEL_CATALOG_REFRESH_SECS);
+            loop {
+                tokio::time::sleep(interval).await;
+                let providers: Vec<(String, Arc<dyn ProviderBridge>)> = state
+                    .providers
+                    .iter()
+                    .map(|(name, bridge)| (name.clone(), bridge.clone()))
+                    .collect();
+                for (name, bridge) in providers {
+                    let _ = state.load_provider_model_catalog(&name, &bridge).await;
+                }
+            }
+        });
+    }
+
     pub(super) async fn refresh_model_catalog(&self) {
         let Ok((provider_name, bridge)) = self
             .require_active_provider()
@@ -172,12 +219,25 @@ impl AppState {
         bridge: &Arc<dyn ProviderBridge>,
     ) -> Option<Vec<ModelOptionView>> {
         match bridge.list_models().await {
-            Ok(models) => {
+            Ok(models) if !models.is_empty() => {
                 self.provider_model_catalogs
                     .write()
                     .await
                     .insert(provider_name.to_string(), models.clone());
                 Some(models)
+            }
+            // An empty list means the provider answered before it was ready.
+            // Treat it as a soft failure: keep the last-known catalog rather than
+            // blanking it (a background refresh must never poison a warm cache).
+            Ok(_empty) => {
+                self.push_runtime_log(
+                    "debug",
+                    format!(
+                        "{provider_name} model/list returned empty; keeping last-known catalog"
+                    ),
+                )
+                .await;
+                None
             }
             Err(error) => {
                 self.push_runtime_log(

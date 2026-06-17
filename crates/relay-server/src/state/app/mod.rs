@@ -200,6 +200,9 @@ impl AppState {
         // client's post-handshake model pull hits a populated cache instead of
         // racing a cold `supportedModels()` round-trip.
         state.spawn_model_catalog_prewarm();
+        // Re-pull catalogs on a slow cadence so a long-running relay still picks
+        // up model changes (e.g. a CLI upgrade) without a restart.
+        state.spawn_periodic_model_catalog_refresh();
 
         if let Some(persisted) = restored_state {
             state.restore_persisted_session(persisted).await;
