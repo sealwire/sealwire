@@ -47,6 +47,7 @@ export function buildViewOnlyPin({
   priorEntries = [],
   priorOlderCursor = null,
   loading = false,
+  error = false,
 }) {
   return {
     threadId,
@@ -73,7 +74,61 @@ export function buildViewOnlyPin({
     lastRefreshAt,
     wasWorking,
     loading,
+    // True when the last load for this pin FAILED (fetch error). Lets the
+    // self-heal decision retry it after a backoff instead of treating the empty
+    // shell as a settled, complete view forever. See viewOnlySelfHealThreadId.
+    error,
   };
+}
+
+// How long to wait before a render re-arms a view-only load that previously
+// FAILED. Long enough that a tight failure loop can't form (a failed fetch
+// re-renders synchronously), short enough that the next snapshot after the relay
+// comes back recovers the view promptly.
+export const VIEW_ONLY_LOAD_RETRY_BACKOFF_MS = 1000;
+
+// Decide whether a render should (re)arm a view-only transcript load for the
+// thread the user is looking at. app.js's maybeRefreshViewOnly() calls this and
+// fires loadViewOnlyTranscript() for the returned thread id (or does nothing for
+// null). Pure so the navigation/self-heal contract is unit-testable.
+//
+// The viewed thread renders only when a pin projects it (the snapshot carries
+// only the ACTIVE thread's transcript), so a non-active viewed thread MUST keep a
+// good pin. The old code armed the load "once per navigated thread" and never
+// reset that guard, so a single missed/failed load (a rapid-switch race dropped
+// it, or the relay was unreachable) left the thread stuck on "Loading thread"
+// forever. Instead, re-arm whenever there is no good pin and no load is in
+// flight — with a backoff on failures so a failing fetch (which re-renders
+// synchronously) can't form a tight loop.
+export function viewOnlySelfHealThreadId(
+  session,
+  { viewThreadId, viewOnlyThread, now = 0 } = {}
+) {
+  if (!viewThreadId || !session || !viewOnlyEligible(session, viewThreadId)) {
+    return null;
+  }
+  const pin = viewOnlyThread;
+  const pinMatches = pin?.threadId === viewThreadId;
+  // loadViewOnlyTranscript() sets a loading pin synchronously before its fetch,
+  // so a matching loading pin means a load is already in flight — don't double-fire.
+  if (pinMatches && pin.loading) {
+    return null;
+  }
+  // A settled, non-failed pin already projects the thread — nothing to do.
+  if (pinMatches && !pin.error) {
+    return null;
+  }
+  // A failed pin: retry, but only after the backoff elapses.
+  if (
+    pinMatches &&
+    pin.error &&
+    now - (pin.lastRefreshAt || 0) < VIEW_ONLY_LOAD_RETRY_BACKOFF_MS
+  ) {
+    return null;
+  }
+  // No pin, a stale pin for another thread, or a failed pin past its backoff:
+  // (re)arm the load so the viewed thread can finally render.
+  return viewThreadId;
 }
 
 function settledThreadStatus(status) {

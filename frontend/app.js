@@ -143,6 +143,7 @@ import {
   mergeOlderViewOnlyPage,
   viewOnlyEligible,
   viewOnlyPinNextAction,
+  viewOnlySelfHealThreadId,
 } from "./local/view-only-thread.js";
 import { shouldRefreshViewedThread } from "./shared/viewed-thread-refresh.js";
 import { ClientLog } from "./shared/client-log.js";
@@ -207,10 +208,6 @@ const state = {
   // loadViewOnlyTranscript() below; paginated by loadOlderViewOnlyTranscript().
   viewOnlyThread: null,
   viewOnlyGeneration: 0,
-  // Last thread id we self-triggered a view-only load for (deep links / back
-  // button reach a non-active thread without going through viewThread()). One
-  // attempt per navigation so a failing fetch can't loop.
-  viewOnlyLoadAttemptThreadId: null,
   // True while a composer submit is in flight.
   // Freezes the composer and rejects re-entry so a draft edit / navigation /
   // double-submit during the async request can't change or duplicate the send.
@@ -722,6 +719,9 @@ async function loadViewOnlyTranscript(threadId) {
       wasWorking: isWorking,
       priorEntries: prior?.entries || [],
       priorOlderCursor: prior?.olderCursor ?? null,
+      // Mark the failure so the self-heal (viewOnlySelfHealThreadId) retries this
+      // load after a backoff instead of treating the empty shell as settled.
+      error: true,
     });
     logLine(`Couldn't load the read-only thread view: ${error.message}`);
   }
@@ -773,8 +773,9 @@ async function loadOlderViewOnlyTranscript() {
 // Called on every render: keep the pin honest against the latest REAL session.
 // Pins stay pinned while viewed and never auto-resume. Review pins refresh when
 // their review advances or ends. Also self-heals: deep links / back-button land on a
-// non-active thread without going through viewThread(), so load the pin here —
-// once per navigated thread, so a failing fetch can't loop.
+// non-active thread without going through viewThread(), and a rapid-switch race can
+// drop the pin — so re-arm the load here whenever the viewed thread lacks a good pin
+// (viewOnlySelfHealThreadId), with a backoff on failures so a failing fetch can't loop.
 function maybeRefreshViewOnly(session) {
   const pin = state.viewOnlyThread;
   if (pin && session) {
@@ -817,16 +818,13 @@ function maybeRefreshViewOnly(session) {
     }
   }
 
-  const viewId = state.viewThreadId;
-  if (
-    viewId &&
-    session &&
-    viewOnlyEligible(session, viewId) &&
-    state.viewOnlyThread?.threadId !== viewId &&
-    state.viewOnlyLoadAttemptThreadId !== viewId
-  ) {
-    state.viewOnlyLoadAttemptThreadId = viewId;
-    void loadViewOnlyTranscript(viewId);
+  const selfHeal = viewOnlySelfHealThreadId(session, {
+    viewThreadId: state.viewThreadId,
+    viewOnlyThread: state.viewOnlyThread,
+    now: Date.now(),
+  });
+  if (selfHeal) {
+    void loadViewOnlyTranscript(selfHeal);
   }
 }
 
