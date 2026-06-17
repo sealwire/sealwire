@@ -2,6 +2,7 @@ import { clearClaimLifecycle, configureRemoteActions, handleRemoteBrokerPayload,
 import { closeBrokerSocket, configureBrokerClient, connectBroker, refreshRelayDirectory } from "./broker-client.js";
 import { initializeRemoteNavigation, openRemoteNavigation } from "./navigation.js";
 import { applyPairingQuery, beginPairing, forgetCurrentDevice, handleEncryptedPairingResult, sendPairingRequest } from "./pairing.js";
+import { mountIosInstallHint } from "./ios-install.js";
 import { registerRemotePwa } from "./pwa.js";
 import { renderLog } from "./session-surface.js";
 import { applyFileChange, applySessionSnapshot, applyTranscriptDelta, applyTranscriptEvent, cancelRemoteThreadsPoll, clearSessionRuntime, deleteRemoteReview, fetchAskUserQuestionDetail, fetchRemoteProviderModels, fetchRemoteProviders, fetchRemoteThreadTranscript, fetchTranscriptEntryDetail, forkRemoteSession, refreshRemoteThreads, requestRemoteReview, resolveRemoteReview, resumeRemoteSession, sendMessage, startRemoteSession, stopActiveTurn, submitAskUserAnswer, submitDecision, syncRemoteSnapshot, takeOverControl, updateRemoteSessionSettings, viewRemoteThread } from "./session-ops.js";
@@ -79,6 +80,9 @@ export async function bootRemoteRuntime() {
     renderLog(`Stored relay secrets could not be restored: ${error.message}`);
   }
   void registerRemotePwa();
+  // iOS Safari shows no automatic install prompt, so nudge the user toward
+  // Share → Add to Home Screen (no-op on every other platform / when installed).
+  mountIosInstallHint();
 
   const pairingQuery = applyPairingQuery();
 

@@ -2539,6 +2539,42 @@ input:focus, textarea:focus, select:focus {
   font-size: 12px;
   line-height: 1.5;
 }
+/* iOS "Add to Home Screen" hint (iOS Safari has no auto install prompt). */
+.ios-install-hint {
+  position: fixed;
+  left: 12px;
+  right: 12px;
+  bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 14px;
+  border-radius: 12px;
+  background: var(--surface-3, #26262c);
+  color: var(--text-primary, #f3f3f5);
+  border: 1px solid var(--surface-2, #1c1c20);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  font-size: 13px;
+  line-height: 1.4;
+}
+.ios-install-hint__text {
+  flex: 1 1 auto;
+}
+.ios-install-hint__close {
+  flex: 0 0 auto;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  font-size: 15px;
+  line-height: 1;
+  padding: 4px 6px;
+  cursor: pointer;
+  opacity: 0.65;
+}
+.ios-install-hint__close:hover {
+  opacity: 1;
+}
 .meta-chip {
   padding: 4px 12px;
   border-radius: var(--radius-xs);
