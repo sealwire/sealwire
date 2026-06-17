@@ -36,12 +36,40 @@ use crate::{
 use super::persistence::{spawn_persistence_task, PersistedRelayState, PersistenceStore};
 use super::{
     ensure_path_within_allowed_roots, ensure_path_within_device_scope, expire_controller_if_needed,
-    non_empty, normalize_allowed_roots, normalize_cwd, path_within_allowed_roots,
-    path_within_device_scope, require_device_id, short_device_id, sort_threads_by_recency,
-    thread_status_is_working, unix_now, BrokerPendingMessage, CachedRemoteActionResult,
-    ClaimChallenge, CompletedRemoteClaim, IssuedClaimChallenge, PendingPairingResult, RelayState,
+    load_or_generate_vapid, non_empty, normalize_allowed_roots, normalize_cwd,
+    path_within_allowed_roots, path_within_device_scope, require_device_id, short_device_id,
+    sort_threads_by_recency, thread_status_is_working, unix_now, vapid_key_path,
+    BrokerPendingMessage, CachedRemoteActionResult, ClaimChallenge, CompletedRemoteClaim,
+    IssuedClaimChallenge, PendingPairingResult, PushDispatcher, PushSubscriptionInput, RelayState,
     RemoteActionReplayDecision, SecurityProfile, DEFAULT_MODEL, STALE_TURN_PROGRESS_TIMEOUT_SECS,
 };
+
+/// Drive the server-side push attention tracker once per (debounced) state
+/// change: compute the full snapshot and let `RelayState` enqueue any needs-input
+/// / completed transitions as Web Push jobs. Mirrors the persistence task's
+/// coalescing so a burst of changes ingests once. needs-input / completed states
+/// are durable, so the debounce never drops a notification-worthy transition.
+fn spawn_push_attention_task(relay: Arc<RwLock<RelayState>>, mut receiver: watch::Receiver<u64>) {
+    tokio::spawn(async move {
+        while receiver.changed().await.is_ok() {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            loop {
+                match receiver.has_changed() {
+                    Ok(true) => {
+                        if receiver.changed().await.is_err() {
+                            return;
+                        }
+                    }
+                    Ok(false) => break,
+                    Err(_) => return,
+                }
+            }
+            let mut relay = relay.write().await;
+            let snapshot = relay.snapshot();
+            relay.note_snapshot_for_push(&snapshot);
+        }
+    });
+}
 
 /// Error returned when a user op targets a thread that a non-terminal review
 /// currently owns (its parent or reviewer thread). Such a thread is frozen for
@@ -193,6 +221,23 @@ impl AppState {
         let providers = spawn_providers(relay.clone()).await;
         spawn_persistence_task(relay.clone(), change_tx.subscribe(), persistence.clone());
 
+        // Web Push: load/generate the VAPID keypair, install the dispatcher, and
+        // feed the snapshot stream to the attention tracker so a closed remote PWA
+        // still gets needs-input / completed / error notifications. Failure here is
+        // non-fatal — the relay just runs without push.
+        match load_or_generate_vapid(&vapid_key_path(&cwd)) {
+            Ok(vapid) => {
+                let public_key = vapid.public_b64url().to_string();
+                let push_tx = PushDispatcher::spawn(relay.clone(), vapid);
+                {
+                    let mut relay = relay.write().await;
+                    relay.set_push_runtime(push_tx, public_key);
+                }
+                spawn_push_attention_task(relay.clone(), change_tx.subscribe());
+            }
+            Err(error) => warn!("web push disabled: {error}"),
+        }
+
         if providers.is_empty() {
             return Err(
                 "no agent providers are available; install codex or claude CLI".to_string(),
@@ -324,6 +369,22 @@ in thread {thread_id}: {error}"
     #[cfg(test)]
     pub(crate) async fn run_stale_turn_watchdog_once(&self, now: u64) {
         self.stop_stale_turns_at(now).await;
+    }
+
+    /// Register/replace a remote device's Web Push subscription (device-keyed).
+    pub async fn register_push_subscription(
+        &self,
+        input: PushSubscriptionInput,
+    ) -> Result<(), String> {
+        let mut relay = self.relay.write().await;
+        relay.register_push_subscription(input)
+    }
+
+    /// Remove a Web Push subscription by endpoint.
+    pub async fn unregister_push_subscription(&self, endpoint: String) -> Result<(), String> {
+        let mut relay = self.relay.write().await;
+        relay.unregister_push_subscription(&endpoint);
+        Ok(())
     }
 
     pub fn available_providers(&self) -> Vec<String> {

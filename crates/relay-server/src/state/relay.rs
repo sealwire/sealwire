@@ -2,13 +2,14 @@ mod approval;
 mod ask_user_question;
 mod background;
 mod device;
+mod push;
 mod runtime;
 mod transcript;
 
 use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
 use crate::{
     protocol::{
@@ -31,6 +32,10 @@ pub(crate) use self::device::{
     BrokerPendingMessage, ClaimChallenge, CompletedPairing, CompletedRemoteClaim, DeviceRecord,
     IssuedClaimChallenge, PairedDevice, PendingPairing, PendingPairingRequest,
     PendingPairingResult, PendingTranscriptDelta, TranscriptDeltaKind,
+};
+pub(crate) use self::push::{
+    load_or_generate_vapid, vapid_key_path, PushAttentionTracker, PushDispatcher, PushJob,
+    PushKind, PushSubscription, PushSubscriptionInput,
 };
 pub(crate) use self::runtime::ThreadRuntime;
 pub(crate) use self::transcript::TranscriptRecord;
@@ -292,6 +297,21 @@ pub struct RelayState {
     /// reconciles any non-terminal run to the terminal `Interrupted` state (no
     /// orchestrator survives a restart). `pub(super)` so the persistence writer reads it.
     pub(super) workflow_jobs: HashMap<String, WorkflowRun>,
+    /// Web Push subscriptions for remote devices, keyed by `device_id` (a device
+    /// can have several browser subscriptions; deduped by endpoint). Persisted so
+    /// a closed/locked phone keeps receiving pushes across a relay restart.
+    pub(super) push_subscriptions: HashMap<String, Vec<PushSubscription>>,
+    /// Sender into the push dispatcher task. State mutations only enqueue here
+    /// (non-blocking, lock-safe); all network IO happens off the lock in the
+    /// dispatcher. `None` in tests and before the dispatcher is wired.
+    push_tx: Option<mpsc::UnboundedSender<PushJob>>,
+    /// VAPID public key (base64url, uncompressed P-256 point) surfaced to clients
+    /// as `applicationServerKey`. `None` until the dispatcher is wired.
+    push_vapid_public_key: Option<String>,
+    /// Server-side port of `thread-attention.js`: diffs the published snapshot
+    /// stream to fire push notifications on needs_input / completed transitions
+    /// even when the remote app is closed. In-memory only.
+    push_attention: PushAttentionTracker,
 }
 
 impl RelayState {
@@ -353,6 +373,10 @@ impl RelayState {
             reviewer_threads: HashMap::new(),
             reviewer_thread_seq: 0,
             workflow_jobs: HashMap::new(),
+            push_subscriptions: HashMap::new(),
+            push_tx: None,
+            push_vapid_public_key: None,
+            push_attention: PushAttentionTracker::new(),
         };
         state.push_log("info", "Relay booted. Waiting for Codex app-server.");
         state
@@ -361,6 +385,132 @@ impl RelayState {
     pub fn notify(&mut self) {
         self.revision = self.revision.wrapping_add(1);
         let _ = self.change_tx.send(self.revision);
+    }
+
+    // --- Web Push --------------------------------------------------------
+
+    /// Install the dispatcher sender + VAPID public key (production wiring only;
+    /// tests leave these unset so no dispatcher is required).
+    pub(crate) fn set_push_runtime(
+        &mut self,
+        tx: mpsc::UnboundedSender<PushJob>,
+        vapid_public_key: String,
+    ) {
+        self.push_tx = Some(tx);
+        self.push_vapid_public_key = Some(vapid_public_key);
+    }
+
+    /// Enqueue a push job (best-effort; no-op when the dispatcher isn't wired).
+    pub(crate) fn enqueue_push(&self, job: PushJob) {
+        if let Some(tx) = &self.push_tx {
+            let _ = tx.send(job);
+        }
+    }
+
+    /// Register/replace a remote device's push subscription. The device must be
+    /// paired; subscriptions are deduped by endpoint.
+    pub(crate) fn register_push_subscription(
+        &mut self,
+        input: PushSubscriptionInput,
+    ) -> Result<(), String> {
+        let device_id = input
+            .device_id
+            .clone()
+            .ok_or_else(|| "push subscription is missing a device id".to_string())?;
+        if !self.paired_devices.contains_key(&device_id) {
+            return Err("device is not paired".to_string());
+        }
+        if input.endpoint.is_empty() || input.keys.p256dh.is_empty() || input.keys.auth.is_empty() {
+            return Err("push subscription is incomplete".to_string());
+        }
+        let subscription = PushSubscription {
+            endpoint: input.endpoint,
+            p256dh: input.keys.p256dh,
+            auth: input.keys.auth,
+            device_id: device_id.clone(),
+            created_at: unix_now(),
+        };
+        let entry = self.push_subscriptions.entry(device_id).or_default();
+        entry.retain(|existing| existing.endpoint != subscription.endpoint);
+        entry.push(subscription);
+        self.notify();
+        Ok(())
+    }
+
+    /// Remove a subscription by endpoint (across all devices).
+    pub(crate) fn unregister_push_subscription(&mut self, endpoint: &str) {
+        let mut changed = false;
+        self.push_subscriptions.retain(|_, subs| {
+            let before = subs.len();
+            subs.retain(|s| s.endpoint != endpoint);
+            changed |= subs.len() != before;
+            !subs.is_empty()
+        });
+        if changed {
+            self.notify();
+        }
+    }
+
+    /// Drop subscriptions a push service reported as gone (404/410). Does not
+    /// `notify()` — the dispatcher does that once after pruning.
+    pub(crate) fn prune_push_subscriptions(&mut self, gone_endpoints: &[String]) {
+        if gone_endpoints.is_empty() {
+            return;
+        }
+        self.push_subscriptions.retain(|_, subs| {
+            subs.retain(|s| !gone_endpoints.iter().any(|e| e == &s.endpoint));
+            !subs.is_empty()
+        });
+    }
+
+    /// Flattened snapshot of every stored subscription (for the dispatcher).
+    pub(crate) fn push_subscriptions_vec(&self) -> Vec<PushSubscription> {
+        self.push_subscriptions
+            .values()
+            .flat_map(|subs| subs.iter().cloned())
+            .collect()
+    }
+
+    /// Best-effort human label for a thread, for push notification copy.
+    fn thread_display_name(&self, thread_id: &str) -> Option<String> {
+        self.threads
+            .iter()
+            .find(|t| t.id == thread_id)
+            .and_then(|t| {
+                t.name
+                    .as_ref()
+                    .map(|name| name.trim().to_string())
+                    .filter(|name| !name.is_empty())
+            })
+    }
+
+    /// Feed the published snapshot to the attention tracker and enqueue any
+    /// needs_input / completed transitions. Called once per state change by a
+    /// dedicated background task (see `spawn_push_attention_task`).
+    pub(crate) fn note_snapshot_for_push(&mut self, snapshot: &SessionSnapshot) {
+        if self.push_tx.is_none() {
+            return;
+        }
+        let jobs = self.push_attention.ingest(snapshot);
+        for mut job in jobs {
+            job.thread_name = self.thread_display_name(&job.thread_id);
+            self.enqueue_push(job);
+        }
+    }
+
+    /// Notify that an error ended a thread's turn. Suppresses the work→idle
+    /// "completed" the tracker would otherwise emit for the same edge, then
+    /// enqueues an explicit error push.
+    pub(crate) fn enqueue_error_push(&mut self, thread_id: &str, reason: impl Into<String>) {
+        if self.push_tx.is_none() {
+            return;
+        }
+        self.push_attention.suppress_completed(thread_id);
+        let name = self.thread_display_name(thread_id);
+        let job = PushJob::new(PushKind::Error, thread_id)
+            .with_name(name)
+            .with_reason(reason);
+        self.enqueue_push(job);
     }
 
     pub(super) fn bump_transcript_revision(&mut self) -> (u64, u64) {
@@ -1443,6 +1593,7 @@ impl RelayState {
             active_review_jobs: self.active_review_jobs_view(),
             reviewer_threads: self.reviewer_thread_views(),
             reviews_revision: self.reviews_revision(),
+            push_vapid_public_key: self.push_vapid_public_key.clone(),
         }
     }
 
@@ -1734,6 +1885,7 @@ impl RelayState {
         self.allowed_roots = persisted.allowed_roots.clone();
         self.device_records = persisted.device_records.clone();
         self.paired_devices = persisted.paired_devices.clone();
+        self.push_subscriptions = persisted.push_subscriptions.clone();
         // Durable reviewer-thread identity + completed (terminal) review-job cards
         // survive restart. The writer only persists terminal jobs, and we re-apply the
         // same filter here (defense-in-depth): a non-terminal job from a corrupt or
@@ -2152,6 +2304,9 @@ impl RelayState {
                 self.bg_set_active_turn(&thread_id, None, now);
                 self.bg_set_thread_status(&thread_id, "idle".to_string(), Vec::new(), now);
             }
+            // A running turn died — notify remote devices (and suppress the
+            // work→idle "completed" the snapshot diff would otherwise emit).
+            self.enqueue_error_push(&thread_id, "stopped unexpectedly — the agent exited.");
         }
     }
 
@@ -2357,6 +2512,7 @@ impl RelayState {
         self.allowed_roots = persisted.allowed_roots.clone();
         self.device_records = persisted.device_records.clone();
         self.paired_devices = persisted.paired_devices.clone();
+        self.push_subscriptions = persisted.push_subscriptions.clone();
         // Durable reviewer-thread identity + completed (terminal) review-job cards
         // survive restart. The writer only persists terminal jobs, and we re-apply the
         // same filter here (defense-in-depth): a non-terminal job from a corrupt or

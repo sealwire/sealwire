@@ -83,6 +83,7 @@ fn test_persisted_state() -> PersistedRelayState {
         review_jobs: std::collections::HashMap::new(),
         workflow_jobs: std::collections::HashMap::new(),
         thread_forked_from: Default::default(),
+        push_subscriptions: std::collections::HashMap::new(),
     }
 }
 
@@ -290,6 +291,7 @@ fn test_cached_remote_action_result(action_kind: &str, ok: bool) -> CachedRemote
             active_review_jobs: Vec::new(),
             reviewer_threads: Vec::new(),
             reviews_revision: 0,
+            push_vapid_public_key: None,
         }),
         receipt: Some(ApprovalReceipt {
             request_id: "req-1".to_string(),

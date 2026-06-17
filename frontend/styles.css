@@ -2533,6 +2533,12 @@ input:focus, textarea:focus, select:focus {
   line-height: 1.6;
   word-break: break-word;
 }
+.details-hint {
+  margin: 8px 0 0 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
 .meta-chip {
   padding: 4px 12px;
   border-radius: var(--radius-xs);

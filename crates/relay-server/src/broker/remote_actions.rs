@@ -17,7 +17,7 @@ use crate::{
     },
     state::{
         AppState, ApprovalError, AskUserAnswerError, CachedRemoteActionResult,
-        RemoteActionReplayDecision,
+        PushSubscriptionInput, RemoteActionReplayDecision,
     },
 };
 
@@ -126,6 +126,12 @@ pub(super) enum RemoteActionRequest {
         #[serde(default)]
         device_id: Option<String>,
     },
+    RegisterPushSubscription {
+        input: PushSubscriptionInput,
+    },
+    UnregisterPushSubscription {
+        endpoint: String,
+    },
 }
 
 impl RemoteActionRequest {
@@ -156,6 +162,8 @@ impl RemoteActionRequest {
             Self::RequestReview { .. } => RemoteActionKind::RequestReview,
             Self::ResolveReview { .. } => RemoteActionKind::ResolveReview,
             Self::DeleteReview { .. } => RemoteActionKind::DeleteReview,
+            Self::RegisterPushSubscription { .. } => RemoteActionKind::RegisterPushSubscription,
+            Self::UnregisterPushSubscription { .. } => RemoteActionKind::UnregisterPushSubscription,
         }
     }
 
@@ -261,6 +269,13 @@ impl RemoteActionRequest {
                 review_id,
                 device_id: Some(device_id),
             },
+            Self::RegisterPushSubscription { mut input } => {
+                input.device_id = Some(device_id);
+                Self::RegisterPushSubscription { input }
+            }
+            Self::UnregisterPushSubscription { endpoint } => {
+                Self::UnregisterPushSubscription { endpoint }
+            }
         }
     }
 }
@@ -293,6 +308,8 @@ pub(super) enum RemoteActionKind {
     RequestReview,
     ResolveReview,
     DeleteReview,
+    RegisterPushSubscription,
+    UnregisterPushSubscription,
 }
 
 impl RemoteActionKind {
@@ -323,6 +340,8 @@ impl RemoteActionKind {
             Self::RequestReview => "request_review",
             Self::ResolveReview => "resolve_review",
             Self::DeleteReview => "delete_review",
+            Self::RegisterPushSubscription => "register_push_subscription",
+            Self::UnregisterPushSubscription => "unregister_push_subscription",
         }
     }
 }
@@ -1122,6 +1141,14 @@ async fn execute_remote_action(
                 ..RemoteActionOutcome::default()
             })
             .map_err(ask_user_answer_error_message),
+        RemoteActionRequest::RegisterPushSubscription { input } => state
+            .register_push_subscription(input)
+            .await
+            .map(|_| RemoteActionOutcome::default()),
+        RemoteActionRequest::UnregisterPushSubscription { endpoint } => state
+            .unregister_push_subscription(endpoint)
+            .await
+            .map(|_| RemoteActionOutcome::default()),
     }
 }
 
@@ -2256,7 +2283,9 @@ fn remote_action_result_kind(action: RemoteActionKind) -> RemoteActionResultKind
         | RemoteActionKind::ApplyFileChange
         | RemoteActionKind::RequestReview
         | RemoteActionKind::ResolveReview
-        | RemoteActionKind::DeleteReview => RemoteActionResultKind::RemoteActionAck,
+        | RemoteActionKind::DeleteReview
+        | RemoteActionKind::RegisterPushSubscription
+        | RemoteActionKind::UnregisterPushSubscription => RemoteActionResultKind::RemoteActionAck,
     }
 }
 

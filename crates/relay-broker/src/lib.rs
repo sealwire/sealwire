@@ -883,6 +883,22 @@ fn app_with_web_root_and_verifier_and_hardening_and_licenses(
         )
         .route_service("/sw.js", ServeFile::new(web_root.join("remote-sw.js")))
         .route_service("/icon.svg", ServeFile::new(web_root.join("icon.svg")))
+        .route_service(
+            "/apple-touch-icon.png",
+            ServeFile::new(web_root.join("apple-touch-icon.png")),
+        )
+        .route_service(
+            "/icon-192.png",
+            ServeFile::new(web_root.join("icon-192.png")),
+        )
+        .route_service(
+            "/icon-512.png",
+            ServeFile::new(web_root.join("icon-512.png")),
+        )
+        .route_service(
+            "/icon-512-maskable.png",
+            ServeFile::new(web_root.join("icon-512-maskable.png")),
+        )
         .route_service("/", ServeFile::new(web_root.join("remote.html")))
         .nest_service("/static", ServeDir::new(web_root));
 

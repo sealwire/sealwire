@@ -113,6 +113,7 @@ fn make_snapshot() -> SessionSnapshot {
         active_review_jobs: vec![],
         reviewer_threads: vec![],
         reviews_revision: 0,
+        push_vapid_public_key: None,
     }
 }
 

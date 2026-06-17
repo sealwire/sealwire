@@ -78,6 +78,11 @@ pub(super) struct PersistedRelayState {
     /// orchestrator. `#[serde(default)]` keeps old state files loadable (empty map).
     #[serde(default)]
     pub(super) workflow_jobs: std::collections::HashMap<String, WorkflowRun>,
+    /// Web Push subscriptions for remote devices, keyed by device_id. Persisted
+    /// so a closed/locked phone keeps receiving pushes across a relay restart.
+    /// `#[serde(default)]` keeps old state files loadable (empty map).
+    #[serde(default)]
+    pub(super) push_subscriptions: std::collections::HashMap<String, Vec<super::PushSubscription>>,
 }
 
 impl PersistedRelayState {
@@ -132,6 +137,7 @@ impl PersistedRelayState {
             // non-terminal run must survive so the restore side can reconcile it to
             // `Interrupted` and offer a re-run, rather than vanishing on restart.
             workflow_jobs: relay.workflow_jobs.clone(),
+            push_subscriptions: relay.push_subscriptions.clone(),
         }
     }
 

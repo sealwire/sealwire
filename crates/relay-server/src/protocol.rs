@@ -146,6 +146,11 @@ pub struct SessionSnapshot {
     /// liveness/lock gating only.
     #[serde(default)]
     pub reviews_revision: u64,
+    /// VAPID public key (base64url, uncompressed P-256 point) the remote app uses
+    /// as `applicationServerKey` to subscribe to Web Push. `None` until the push
+    /// dispatcher is wired. Not secret — safe to publish in the snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push_vapid_public_key: Option<String>,
 }
 
 /// Uncompacted reviewer-panel payload served on demand (decoupled from the byte-budgeted

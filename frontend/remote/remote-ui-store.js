@@ -5,6 +5,8 @@ import {
   loadLastEffort,
 } from "../shared/last-used-settings.js";
 import { loadDeviceLabel } from "./state.js";
+import { notificationPermission } from "../shared/thread-notify.js";
+import { pushSupported } from "./push-subscribe.js";
 
 export function createDefaultSessionDraft(provider = "codex") {
   return {
@@ -43,6 +45,13 @@ export function createRemoteUiStore(initialState = {}) {
     // presenting a single fallback model when a fetch is pending or failed.
     providerModelsStatus: {},
     providers: [],
+    // Web Push / PWA notification state. Initialized from feature detection and
+    // the current Notification permission (both guarded so a Node/SSR import is
+    // safe).
+    pushSupported: pushSupported(),
+    pushPermission: notificationPermission(),
+    pushSubscribed: false,
+    pushBusy: false,
     sendPending: false,
     sessionDraft: createDefaultSessionDraft(),
     sessionPanelOpen: false,
@@ -131,6 +140,26 @@ export function createRemoteUiStore(initialState = {}) {
     setProviders(providers) {
       set({
         providers: providers || [],
+      });
+    },
+    setPushSupported(value) {
+      set({
+        pushSupported: Boolean(value),
+      });
+    },
+    setPushPermission(value) {
+      set({
+        pushPermission: value || "default",
+      });
+    },
+    setPushSubscribed(value) {
+      set({
+        pushSubscribed: Boolean(value),
+      });
+    },
+    setPushBusy(value) {
+      set({
+        pushBusy: Boolean(value),
       });
     },
     setSendPending(value) {

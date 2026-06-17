@@ -5,13 +5,16 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+aes-gcm.workspace = true
 async-trait = "0.1"
 axum.workspace = true
 claude-code-client-sdk = "0.1"
 base64.workspace = true
 ed25519-dalek.workspace = true
 futures-util.workspace = true
+hkdf.workspace = true
 hmac.workspace = true
+p256.workspace = true
 qrcode.workspace = true
 rand.workspace = true
 reqwest.workspace = true

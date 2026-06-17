@@ -83,6 +83,11 @@ import {
   initializeRemoteSurface,
   installSidebarGestureDebug,
 } from "./remote-runtime.js";
+import { getRemoteServiceWorkerRegistration } from "./pwa.js";
+import {
+  disablePushSubscription,
+  ensurePushSubscription,
+} from "./push-subscribe.js";
 import {
   fetchTranscriptEntryDetail as fetchRemoteTranscriptEntryDetail,
   fetchRemoteReviews,
@@ -153,6 +158,7 @@ import {
   configureThreadNotifications,
   ensureNotificationPermission,
   isDocumentForeground,
+  notificationPermission,
 } from "../shared/thread-notify.js";
 
 // Stable refs for useSyncExternalStore so the thread list re-renders on
@@ -1099,6 +1105,81 @@ function RemoteApp() {
     await handlers.onViewThread?.(threadId);
   }
 
+  // VAPID public key arrives on the session snapshot (null until the server
+  // advertises it). The push subscription manager needs it for `subscribe`.
+  const vapidPublicKey = session?.push_vapid_public_key || null;
+
+  async function resolvePushRegistration() {
+    const captured = getRemoteServiceWorkerRegistration();
+    if (captured) {
+      return captured;
+    }
+    if (typeof navigator !== "undefined" && navigator.serviceWorker?.ready) {
+      try {
+        return await navigator.serviceWorker.ready;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  async function handleEnablePush() {
+    // iOS rule: the permission prompt must be the first awaited call inside the
+    // user-gesture handler, so request it before any other async work.
+    const permission = await ensureNotificationPermission();
+    remoteUiStore.getState().setPushPermission(permission);
+    if (permission !== "granted") {
+      return;
+    }
+    remoteUiStore.getState().setPushBusy(true);
+    try {
+      const registration = await resolvePushRegistration();
+      const result = await ensurePushSubscription({
+        vapidPublicKey,
+        registration,
+      });
+      remoteUiStore.getState().setPushSubscribed(Boolean(result?.ok));
+    } finally {
+      remoteUiStore.getState().setPushBusy(false);
+    }
+  }
+
+  async function handleDisablePush() {
+    remoteUiStore.getState().setPushBusy(true);
+    try {
+      const registration = await resolvePushRegistration();
+      await disablePushSubscription({ registration });
+      remoteUiStore.getState().setPushSubscribed(false);
+    } finally {
+      remoteUiStore.getState().setPushBusy(false);
+    }
+  }
+
+  // Re-register the subscription when the SW reports the push subscription
+  // changed (browser-rotated endpoint). Permission must already be granted.
+  useEffect(() => {
+    if (typeof navigator === "undefined" || !navigator.serviceWorker?.addEventListener) {
+      return undefined;
+    }
+    const onMessage = (event) => {
+      if (event?.data?.type !== "pushsubscriptionchange") {
+        return;
+      }
+      if (notificationPermission() === "granted" && vapidPublicKey) {
+        void (async () => {
+          const registration = await resolvePushRegistration();
+          const result = await ensurePushSubscription({ vapidPublicKey, registration });
+          remoteUiStore.getState().setPushSubscribed(Boolean(result?.ok));
+        })();
+      }
+    };
+    navigator.serviceWorker.addEventListener("message", onMessage);
+    return () => {
+      navigator.serviceWorker.removeEventListener("message", onMessage);
+    };
+  }, [vapidPublicKey, remoteUiStore]);
+
   async function handleSendMessage() {
     remoteUiStore.getState().setSendPending(true);
     try {
@@ -1486,6 +1567,15 @@ function RemoteApp() {
       },
       sessionMetaModel,
       sessionPath: headerModel.sessionPath || "No workspace path yet.",
+      pushModel: {
+        supported: remoteUi.pushSupported,
+        permission: remoteUi.pushPermission,
+        subscribed: remoteUi.pushSubscribed,
+        busy: remoteUi.pushBusy,
+        hasVapidKey: Boolean(vapidPublicKey),
+      },
+      onEnablePush: handleEnablePush,
+      onDisablePush: handleDisablePush,
     })
   );
 }
@@ -2473,6 +2563,9 @@ function RemoteInfoModal({
   open,
   sessionMetaModel,
   sessionPath,
+  pushModel,
+  onEnablePush,
+  onDisablePush,
 }) {
   return h(
     ManagedDialog,
@@ -2506,6 +2599,11 @@ function RemoteInfoModal({
         h("h3", { className: "details-heading" }, "Workspace"),
         h("p", { className: "details-path", id: "remote-session-path" }, sessionPath)
       ),
+      h(RemoteNotificationsSection, {
+        pushModel,
+        onEnablePush,
+        onDisablePush,
+      }),
       h(
         "section",
         { className: "details-section" },
@@ -2517,6 +2615,60 @@ function RemoteInfoModal({
         )
       )
     )
+  );
+}
+
+function RemoteNotificationsSection({ pushModel, onEnablePush, onDisablePush }) {
+  const model = pushModel || {};
+  const supported = Boolean(model.supported);
+  const hasVapidKey = Boolean(model.hasVapidKey);
+  const denied = model.permission === "denied";
+  const subscribed = Boolean(model.subscribed);
+  const busy = Boolean(model.busy);
+
+  // The control is actionable only when push is supported, a VAPID key has been
+  // advertised by the relay, and the user has not blocked notifications.
+  const disabled = busy || !supported || !hasVapidKey || denied;
+
+  let hint = null;
+  if (!supported) {
+    hint = "Requires HTTPS / iOS 16.4+ installed to Home Screen.";
+  } else if (denied) {
+    hint = "Notifications are blocked in your browser settings.";
+  } else if (!hasVapidKey) {
+    hint = "Push isn't available on this relay yet.";
+  } else if (subscribed) {
+    hint = "You'll get push alerts when threads need input or finish, even when the app is closed.";
+  }
+
+  const buttonLabel = busy
+    ? "Working\u2026"
+    : subscribed
+      ? "Disable notifications"
+      : "Enable notifications";
+
+  return h(
+    "section",
+    { className: "details-section" },
+    h("h3", { className: "details-heading" }, "Notifications"),
+    h(
+      "button",
+      {
+        className: "secondary-button",
+        disabled,
+        id: "remote-push-toggle",
+        onClick() {
+          if (subscribed) {
+            void onDisablePush?.();
+          } else {
+            void onEnablePush?.();
+          }
+        },
+        type: "button",
+      },
+      buttonLabel
+    ),
+    hint ? h("p", { className: "details-hint" }, hint) : null
   );
 }
 
