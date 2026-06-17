@@ -371,6 +371,15 @@ async fn handle_notification_for_provider(
                     // follow-up thread/status/changed is missing — a ghost "working"
                     // badge that also blocks reviews on that thread.
                     relay.bg_set_thread_status(&bg_thread_id, "idle".to_string(), Vec::new(), now);
+                    // A failed turn notifies — but only for the CURRENT turn. A
+                    // superseded (stale) completion must not push/suppress, or it
+                    // would swallow the newer turn's real "completed".
+                    if let Some(turn_error) =
+                        value_at(&params, &["turn", "error", "message"]).and_then(Value::as_str)
+                    {
+                        relay.push_log("error", turn_error.to_string());
+                        relay.enqueue_error_push(&bg_thread_id, turn_error);
+                    }
                 }
                 if let Some(turn_id) = completed_turn.as_deref() {
                     relay.bg_set_transcript_item_status(
@@ -379,12 +388,6 @@ async fn handle_notification_for_provider(
                         "completed",
                         now,
                     );
-                }
-                if let Some(turn_error) =
-                    value_at(&params, &["turn", "error", "message"]).and_then(Value::as_str)
-                {
-                    relay.push_log("error", turn_error.to_string());
-                    relay.enqueue_error_push(&bg_thread_id, turn_error);
                 }
                 changed = true;
             } else {
@@ -409,20 +412,22 @@ async fn handle_notification_for_provider(
                         relay.set_thread_status(&thread_id, "idle".to_string(), Vec::new());
                     }
                     relay.clear_progress();
+                    // A failed turn notifies — but only for the CURRENT turn. A
+                    // superseded (stale) completion must not push/suppress, or it
+                    // would swallow the newer turn's real "completed".
+                    if let Some(turn_error) =
+                        value_at(&params, &["turn", "error", "message"]).and_then(Value::as_str)
+                    {
+                        relay.push_log("error", turn_error.to_string());
+                        if let Some(thread_id) = relay.active_thread_id.clone() {
+                            relay.enqueue_error_push(&thread_id, turn_error);
+                        }
+                    }
                     changed = true;
                 }
                 if let Some(turn_id) = completed_turn.as_deref() {
                     changed |= relay
                         .set_transcript_item_status(&format!("turn-diff:{turn_id}"), "completed");
-                }
-                if let Some(turn_error) =
-                    value_at(&params, &["turn", "error", "message"]).and_then(Value::as_str)
-                {
-                    relay.push_log("error", turn_error.to_string());
-                    if let Some(thread_id) = relay.active_thread_id.clone() {
-                        relay.enqueue_error_push(&thread_id, turn_error);
-                    }
-                    changed = true;
                 }
             }
         }

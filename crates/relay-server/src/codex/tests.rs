@@ -550,6 +550,45 @@ async fn background_turn_completed_with_error_enqueues_error_push() {
     assert_eq!(job.thread_id, "bg-thread");
 }
 
+// A late, SUPERSEDED turn/completed carrying an error (turn A's completion
+// arriving while turn B is in flight) must be ignored — pushing/suppressing for
+// it would wrongly swallow turn B's real completion later.
+#[tokio::test]
+async fn superseded_turn_error_does_not_enqueue_push() {
+    let (change_tx, _) = watch::channel(0_u64);
+    let state = std::sync::Arc::new(RwLock::new(RelayState::new(
+        "/tmp/project".to_string(),
+        change_tx,
+        SecurityProfile::private(),
+    )));
+    let (push_tx, mut push_rx) = tokio::sync::mpsc::unbounded_channel();
+    {
+        let mut relay = state.write().await;
+        relay.set_push_runtime(push_tx, "test-key".to_string());
+        relay.active_thread_id = Some("thread-1".to_string());
+        relay.set_thread_status("thread-1", "active".to_string(), Vec::new());
+        // turn B is the current in-flight turn.
+        relay.set_active_turn(Some("turn-B".to_string()));
+    }
+
+    handle_notification(
+        json!({
+            "method": "turn/completed",
+            "params": {
+                "threadId": "thread-1",
+                "turn": { "id": "turn-A", "error": { "message": "stale boom" } }
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    assert!(
+        push_rx.try_recv().is_err(),
+        "a superseded turn's error must not enqueue a push (it would suppress turn B's completion)"
+    );
+}
+
 // P0a / review #3 regression: a delayed turn/completed for an OLD turn must not
 // clear the newer active turn or idle a working thread (which would also let the
 // server permit an overlapping turn).

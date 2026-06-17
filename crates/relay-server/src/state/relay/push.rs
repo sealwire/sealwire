@@ -455,7 +455,19 @@ pub(crate) fn is_acceptable_push_endpoint(endpoint: &str) -> bool {
         Some(url::Host::Ipv4(ip)) => {
             !(ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified())
         }
-        Some(url::Host::Ipv6(ip)) => !(ip.is_loopback() || ip.is_unspecified()),
+        Some(url::Host::Ipv6(ip)) => {
+            if let Some(v4) = ip.to_ipv4_mapped() {
+                // IPv4-mapped (::ffff:a.b.c.d) — classify by the embedded v4 address.
+                !(v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified())
+            } else {
+                let seg0 = ip.segments()[0];
+                // Reject loopback, unspecified, fc00::/7 (unique-local), fe80::/10 (link-local).
+                !(ip.is_loopback()
+                    || ip.is_unspecified()
+                    || (seg0 & 0xfe00) == 0xfc00
+                    || (seg0 & 0xffc0) == 0xfe80)
+            }
+        }
         None => false,
     }
 }
@@ -805,6 +817,16 @@ mod tests {
         assert!(!is_acceptable_push_endpoint("https://10.0.0.5/x"));
         assert!(!is_acceptable_push_endpoint("https://192.168.1.1/x"));
         assert!(!is_acceptable_push_endpoint("not a url"));
+        // IPv6 internal targets (incl. IPv4-mapped loopback/private) must also be rejected.
+        assert!(!is_acceptable_push_endpoint("https://[::1]/x"));
+        assert!(!is_acceptable_push_endpoint("https://[::ffff:127.0.0.1]/x"));
+        assert!(!is_acceptable_push_endpoint("https://[::ffff:10.0.0.5]/x"));
+        assert!(!is_acceptable_push_endpoint("https://[fc00::1]/x"));
+        assert!(!is_acceptable_push_endpoint("https://[fe80::1]/x"));
+        // A public IPv6 literal is still acceptable.
+        assert!(is_acceptable_push_endpoint(
+            "https://[2606:4700:4700::1111]/x"
+        ));
     }
 
     #[test]

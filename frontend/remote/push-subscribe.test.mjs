@@ -66,4 +66,14 @@ test("hasActiveSubscription reflects the registration's subscription", async () 
     }),
     true,
   );
+  assert.equal(
+    await hasActiveSubscription({
+      pushManager: {
+        getSubscription: async () => {
+          throw new Error("boom");
+        },
+      },
+    }),
+    false,
+  );
 });

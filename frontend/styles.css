@@ -2545,7 +2545,8 @@ input:focus, textarea:focus, select:focus {
   left: 12px;
   right: 12px;
   bottom: calc(12px + env(safe-area-inset-bottom, 0px));
-  z-index: 1000;
+  /* Below modals (z-index 1000) so dialogs always win; above page chrome. */
+  z-index: 90;
   display: flex;
   align-items: center;
   gap: 10px;

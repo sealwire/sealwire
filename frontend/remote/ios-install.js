@@ -26,9 +26,18 @@ export function isIosSafari(nav) {
   if (!isIos) {
     return false;
   }
-  // Chrome (CriOS), Firefox (FxiOS), Edge (EdgiOS) and Opera (OPT) on iOS can't
-  // install PWAs — only Safari can — so don't show them Safari-only steps.
-  return !/crios|fxios|edgios|\bopt\//i.test(ua);
+  // Other engines + common in-app WebViews on iOS can't "Add to Home Screen"
+  // (only real Safari can), so don't show them the Safari-only hint.
+  if (
+    /crios|fxios|edgios|opios|opt\/\d|fban|fbav|fbios|instagram|line\/|gsa\/|duckduckgo|ddg\/|micromessenger/i.test(
+      ua,
+    )
+  ) {
+    return false;
+  }
+  // Real Safari carries a "Version/" token; desktop Chrome (which also includes
+  // "Safari/") and most embedded WebViews driving custom UIs do not.
+  return /version\//i.test(ua);
 }
 
 /** True when already running as an installed standalone PWA. */

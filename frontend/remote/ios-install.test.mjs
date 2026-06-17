@@ -11,6 +11,12 @@ const DESKTOP_CHROME =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 const IPAD_SAFARI =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/604.1";
+const IPHONE_FB_WEBVIEW =
+  "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1 [FBAN/FBIOS;FBAV/450.0]";
+const IPHONE_OPERA =
+  "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) OPiOS/16.0.0.0 Mobile/15E148 Safari/9537.53";
+const MAC_CHROME_TOUCH =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
 test("isIosSafari: true for iPhone Safari, false for Chrome-iOS and desktop", () => {
   assert.equal(isIosSafari({ userAgent: IPHONE_SAFARI }), true);
@@ -26,6 +32,15 @@ test("isIosSafari: true for iPadOS (desktop UA + touch points)", () => {
   assert.equal(
     isIosSafari({ userAgent: IPAD_SAFARI, platform: "MacIntel", maxTouchPoints: 5 }),
     true,
+  );
+});
+
+test("isIosSafari: false for in-app WebView, Opera-iOS, and desktop Chrome on a touch Mac", () => {
+  assert.equal(isIosSafari({ userAgent: IPHONE_FB_WEBVIEW }), false);
+  assert.equal(isIosSafari({ userAgent: IPHONE_OPERA }), false);
+  assert.equal(
+    isIosSafari({ userAgent: MAC_CHROME_TOUCH, platform: "MacIntel", maxTouchPoints: 5 }),
+    false,
   );
 });
 
