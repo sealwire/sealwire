@@ -3063,6 +3063,14 @@ body.rail-collapsed .right-rail {
   .chat-header-collapsed-actions,
   .sidebar-top-bar { display: none; }
   body.sidebar-collapsed .chat-header-collapsed-actions { display: none; }
+
+  /* Remote phone surface: the sidebar is a slide-in drawer that doubles as the
+   * home screen, so keep the Sealwire brand lockup (logo + wordmark) pinned to
+   * its top — otherwise the phone UI shows no Sealwire mark anywhere. Only the
+   * desktop-only collapse toggle is dropped (on mobile the drawer is opened
+   * from the chat-header burger, not this toggle). */
+  .remote-app-shell .sidebar-top-bar { display: flex; }
+  .remote-app-shell .sidebar-top-toggle { display: none; }
 }
 
 /* Resize handles — left edge of right rail, right edge of left sidebar */
