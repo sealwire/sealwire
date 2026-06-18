@@ -745,7 +745,8 @@ function RemoteApp() {
   const reviewerActions = useMemo(
     () => ({
       onRequestReview: (values) => handlersRef.current.onRequestReview?.(values),
-      onResolveReview: () => handlersRef.current.onResolveReview?.(),
+      onResolveReview: (reviewJobId) =>
+        handlersRef.current.onResolveReview?.(reviewJobId),
       onDeleteReview: (reviewId) => handlersRef.current.onDeleteReview?.(reviewId),
       fetchReviewerTranscript: (threadId) =>
         Promise.resolve(handlersRef.current.onFetchReviewerTranscript?.(threadId)).then(

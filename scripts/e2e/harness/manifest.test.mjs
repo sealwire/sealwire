@@ -37,6 +37,7 @@ test("browser e2e core suites keep required coverage", async () => {
     "broker",
     "refresh",
     "revoke",
+    "thread-interleaving",
     "transcript-delta",
   ]);
   assertCoverage(manifest, "local-core", [
@@ -44,6 +45,7 @@ test("browser e2e core suites keep required coverage", async () => {
     "file-diff",
     "history",
     "session",
+    "thread-interleaving",
     "thread-groups",
     "transcript-load",
   ]);

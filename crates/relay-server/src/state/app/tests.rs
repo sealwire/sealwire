@@ -6910,7 +6910,8 @@ settings update: {error}"
 
         let mut review_a = review_input("codex");
         review_a.parent_thread_id = Some(parent_a.id.clone());
-        app.request_review(review_a)
+        let receipt_a = app
+            .request_review(review_a)
             .await
             .expect("review on A should start");
 
@@ -6922,6 +6923,38 @@ settings update: {error}"
             .await
             .expect("reviewing a different thread B must not be blocked by A's review");
         assert_eq!(receipt_b.parent_thread_id, parent_b.id);
+
+        let ambiguous = app
+            .cancel_active_review(Some("device-1".to_string()))
+            .await
+            .expect_err("an untargeted stop is ambiguous with two active reviews");
+        assert!(
+            ambiguous.contains("review_job_id is required"),
+            "got: {ambiguous}"
+        );
+
+        app.cancel_review(
+            Some(receipt_b.review_job_id.clone()),
+            Some("device-1".to_string()),
+        )
+        .await
+        .expect("targeted stop should cancel only review B");
+        let relay = app.relay.read().await;
+        assert!(
+            relay
+                .review_job(&receipt_b.review_job_id)
+                .expect("review B")
+                .status
+                .is_terminal(),
+            "review B should be terminal after targeted cancellation"
+        );
+        let review_a = relay
+            .review_job(&receipt_a.review_job_id)
+            .expect("review A");
+        assert!(
+            !review_a.status.is_terminal(),
+            "targeting review B must leave review A running"
+        );
     }
 
     #[tokio::test]

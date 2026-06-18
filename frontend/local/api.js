@@ -106,11 +106,11 @@ export async function requestReview(apiFetch, input, deviceId) {
 
 // Resolve a Blocked review: ask the relay to stop the stuck reviewer and unlock
 // the workspace. Returns the receipt on success; throws on error.
-export async function resolveReview(apiFetch, deviceId) {
+export async function resolveReview(apiFetch, reviewJobId, deviceId) {
   const response = await apiFetch("/api/session/review/resolve", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ device_id: deviceId }),
+    body: JSON.stringify({ review_job_id: reviewJobId, device_id: deviceId }),
   });
   const payload = await response.json();
   if (!response.ok || !payload?.ok) {

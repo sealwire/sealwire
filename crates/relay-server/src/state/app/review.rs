@@ -4,7 +4,8 @@
 //! background task (`run_review_job`) that drives the whole flow: ask the parent
 //! to recap, collect the workspace diff, spin up a clean reviewer thread, run the
 //! review, hand control back to the parent, and post the review into the parent
-//! thread. v1 requires the parent to be idle and serializes one job at a time.
+//! thread. Each job locks only its own parent and reviewer threads, so unrelated
+//! parent threads may be reviewed concurrently.
 //!
 //! The relay model has exactly one active thread, so the reviewer turn runs as a
 //! brief handoff: the reviewer becomes the active thread while it works, then
@@ -132,13 +133,6 @@ impl AppState {
 
         let (parent_thread_id, parent_provider, cwd, locked_provider) = {
             let relay = self.relay.read().await;
-            // One active review at a time (the slot no longer enforces this).
-            if relay.has_active_review() {
-                return Err(
-                    "a review is already running; wait for it to finish before starting another"
-                        .to_string(),
-                );
-            }
             // Reviews and workflows both drive turns on the same parent/cwd; a
             // workflow's background reviewer is excluded from the workspace-working
             // check, so guard the pair explicitly to prevent concurrent writers.
@@ -162,6 +156,12 @@ starting a review"
             let parent_thread_id = non_empty(input.parent_thread_id.clone())
                 .or_else(|| relay.active_thread_id.clone())
                 .ok_or_else(|| "there is no thread to review".to_string())?;
+            if relay.is_thread_review_locked(&parent_thread_id) {
+                return Err(
+                    "a review is already running for this thread; wait for it to finish"
+                        .to_string(),
+                );
+            }
             // The named thread must resolve to a workspace (a live runtime or a cached
             // thread row); otherwise there is nothing to collect a diff from / review.
             let parent_cwd = relay
@@ -1363,7 +1363,7 @@ last message (no recap turn)."
     /// Whether the user has asked to cancel this review (set by
     /// `cancel_active_review`, polled by the orchestrator's wait checkpoints).
     async fn review_cancel_requested(&self, job_id: &str) -> bool {
-        self.cancel_requested_job.lock().await.as_deref() == Some(job_id)
+        self.cancel_requested_jobs.lock().await.contains(job_id)
     }
 
     /// Whether the orchestrator should stop without starting another turn: the user
@@ -1415,10 +1415,7 @@ last message (no recap turn)."
         }
         // The orchestrator has exited; the cancel flag (if any) is moot.
         {
-            let mut slot = self.cancel_requested_job.lock().await;
-            if slot.as_deref() == Some(job_id) {
-                *slot = None;
-            }
+            self.cancel_requested_jobs.lock().await.remove(job_id);
         }
     }
 
@@ -1656,11 +1653,13 @@ stop before unlocking the reviewed thread."
     /// job terminal. No session guard is held.
     async fn enter_blocked(&self, job_id: &str, thread_id: &str) {
         {
-            let mut slot = self.blocked_review.lock().await;
-            *slot = Some(BlockedReview {
-                job_id: job_id.to_string(),
-                thread_id: thread_id.to_string(),
-            });
+            self.blocked_reviews.lock().await.insert(
+                job_id.to_string(),
+                BlockedReview {
+                    job_id: job_id.to_string(),
+                    thread_id: thread_id.to_string(),
+                },
+            );
         }
         self.update_job(job_id, |job| job.set_status(ReviewJobStatus::Blocked))
             .await;
@@ -1770,18 +1769,18 @@ reviewed thread stays locked. Resolve the review (stop the reviewer) to unlock."
         &self,
         device_id: Option<String>,
     ) -> Result<RequestReviewReceipt, String> {
+        self.cancel_review(None, device_id).await
+    }
+
+    pub async fn cancel_review(
+        &self,
+        review_job_id: Option<String>,
+        device_id: Option<String>,
+    ) -> Result<RequestReviewReceipt, String> {
         let device_id = require_device_id(device_id)?;
-        // A cleanup-failed (`Blocked`) review has a dedicated recovery that targets
-        // the exact stuck thread recorded in the blocked slot — reuse it.
-        if self.blocked_review.lock().await.is_some() {
-            return self.resolve_blocked_review(Some(device_id)).await;
-        }
         let (job_id, parent_thread_id, reviewer_thread_id) = {
             let relay = self.relay.read().await;
-            let ids = match relay.active_review_job_ids() {
-                Some(ids) => ids,
-                None => return Err("there is no active review to stop".to_string()),
-            };
+            let ids = relay.active_review_job_ids(review_job_id.as_deref())?;
             // Authorize the stop the SAME way request_review authorizes the start — by the
             // reviewed thread's workspace path-scope, NOT active-session control. A review
             // you could start (path-authorized), you must be able to stop; gating stop on
@@ -1796,8 +1795,19 @@ reviewed thread stays locked. Resolve the review (stop the reviewer) to unlock."
             ids
         };
 
+        // A cleanup-failed (`Blocked`) review has a dedicated recovery that targets
+        // the exact stuck thread recorded for this job — reuse it.
+        if self.blocked_reviews.lock().await.contains_key(&job_id) {
+            return self
+                .resolve_blocked_review_target(Some(job_id), Some(device_id))
+                .await;
+        }
+
         // Tell the orchestrator to bail (so it won't start the next turn).
-        *self.cancel_requested_job.lock().await = Some(job_id.clone());
+        self.cancel_requested_jobs
+            .lock()
+            .await
+            .insert(job_id.clone());
 
         // Stop whichever thread is running the review's turn — confirmed stop.
         let mut targets = vec![parent_thread_id.clone()];
@@ -1827,10 +1837,7 @@ reviewed thread stays locked. Resolve the review (stop the reviewer) to unlock."
         })
         .await;
         {
-            let mut slot = self.blocked_review.lock().await;
-            if slot.as_ref().map(|b| b.job_id == job_id).unwrap_or(false) {
-                *slot = None;
-            }
+            self.blocked_reviews.lock().await.remove(&job_id);
         }
         self.push_runtime_log(
             "info",
@@ -1860,15 +1867,36 @@ reviewed thread stays locked. Resolve the review (stop the reviewer) to unlock."
         &self,
         device_id: Option<String>,
     ) -> Result<RequestReviewReceipt, String> {
+        self.resolve_blocked_review_target(None, device_id).await
+    }
+
+    async fn resolve_blocked_review_target(
+        &self,
+        review_job_id: Option<String>,
+        device_id: Option<String>,
+    ) -> Result<RequestReviewReceipt, String> {
         let device_id = require_device_id(device_id)?;
 
-        // Hold the blocked-slot lock for the whole attempt. If we're cancelled, the
-        // entry stays in the slot and the job stays Blocked (still locked).
-        let mut slot = self.blocked_review.lock().await;
-        let (job_id, thread_id) = match slot.as_ref() {
-            Some(blocked) => (blocked.job_id.clone(), blocked.thread_id.clone()),
-            None => return Err("there is no blocked review to resolve".to_string()),
+        // Hold the map lock for the whole attempt. This preserves the previous
+        // cancellation-safety guarantee while keeping unrelated blocked jobs distinct.
+        let mut blocked_reviews = self.blocked_reviews.lock().await;
+        let blocked = match review_job_id.as_deref() {
+            Some(job_id) => blocked_reviews
+                .get(job_id)
+                .ok_or_else(|| "there is no blocked review with that id".to_string())?,
+            None => match blocked_reviews.values().collect::<Vec<_>>().as_slice() {
+                [] => return Err("there is no blocked review to resolve".to_string()),
+                [blocked] => *blocked,
+                _ => {
+                    return Err(
+                        "review_job_id is required when more than one review is blocked"
+                            .to_string(),
+                    )
+                }
+            },
         };
+        let job_id = blocked.job_id.clone();
+        let thread_id = blocked.thread_id.clone();
         let parent_thread_id = {
             let relay = self.relay.read().await;
             relay
@@ -1905,9 +1933,9 @@ reviewed thread stays locked. Resolve the review (stop the reviewer) to unlock."
             job.fail("review was blocked and has been resolved by stopping the reviewer")
         })
         .await;
-        // Clear the blocked slot atomically after the job is terminal.
-        let _ = slot.take();
-        drop(slot);
+        // Clear only this job's blocked state after it is terminal.
+        blocked_reviews.remove(&job_id);
+        drop(blocked_reviews);
         self.push_runtime_log(
             "info",
             format!(

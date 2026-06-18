@@ -744,7 +744,7 @@ async fn resolve_review(
     // just stuck mid-turn), not only the cleanup-failed `Blocked` case.
     context
         .app
-        .cancel_active_review(input.device_id)
+        .cancel_review(input.review_job_id, input.device_id)
         .await
         .map(|receipt| Json(ApiEnvelope::ok(receipt)))
         .map_err(bad_request)

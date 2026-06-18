@@ -1,4 +1,8 @@
-use std::{collections::HashMap, process::Stdio, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    process::Stdio,
+    sync::Arc,
+};
 
 use tokio::{
     io::AsyncWriteExt,
@@ -72,16 +76,12 @@ pub struct AppState {
     /// before falling back to marking the turn idle locally (so a provider that
     /// never confirms can't wedge the session). Overridable in tests.
     stop_fallback_ms: Arc<std::sync::atomic::AtomicU64>,
-    /// Tracks a review that became `Blocked` (cleanup failed). The job stays in the
-    /// non-terminal `Blocked` status — which keeps its threads review-locked — until
-    /// `resolve_blocked_review` stops the stuck turn and marks the job terminal. The
-    /// mutex provides cancellation-safety for the resolve attempt; no lock is held.
-    blocked_review: Arc<tokio::sync::Mutex<Option<review::BlockedReview>>>,
-    /// Set to a review job id when the user asks to stop/cancel that (non-terminal)
-    /// review. The orchestrator polls it at each wait checkpoint and bails (so it
-    /// won't start the next turn); `cancel_active_review` stops the in-flight turn and
-    /// marks the job `Cancelled`. There is at most one active review at a time.
-    cancel_requested_job: Arc<tokio::sync::Mutex<Option<String>>>,
+    /// Blocked cleanup state keyed by review job id. Each blocked review keeps only
+    /// its own parent/reviewer threads locked and can be resolved independently.
+    blocked_reviews: Arc<tokio::sync::Mutex<HashMap<String, review::BlockedReview>>>,
+    /// Review job ids whose orchestrators must stop before starting another turn.
+    /// A set is required because unrelated parent threads may be reviewed concurrently.
+    cancel_requested_jobs: Arc<tokio::sync::Mutex<HashSet<String>>>,
 }
 
 mod approvals;
@@ -113,8 +113,8 @@ impl AppState {
             review_drain_max_ms: Arc::new(std::sync::atomic::AtomicU64::new(300_000)),
             workflow_drain_max_ms: Arc::new(std::sync::atomic::AtomicU64::new(30_000)),
             stop_fallback_ms: Arc::new(std::sync::atomic::AtomicU64::new(10_000)),
-            blocked_review: Arc::new(tokio::sync::Mutex::new(None)),
-            cancel_requested_job: Arc::new(tokio::sync::Mutex::new(None)),
+            blocked_reviews: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            cancel_requested_jobs: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
         }
     }
 
@@ -190,8 +190,8 @@ impl AppState {
             review_drain_max_ms: Arc::new(std::sync::atomic::AtomicU64::new(300_000)),
             workflow_drain_max_ms: Arc::new(std::sync::atomic::AtomicU64::new(30_000)),
             stop_fallback_ms: Arc::new(std::sync::atomic::AtomicU64::new(10_000)),
-            blocked_review: Arc::new(tokio::sync::Mutex::new(None)),
-            cancel_requested_job: Arc::new(tokio::sync::Mutex::new(None)),
+            blocked_reviews: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            cancel_requested_jobs: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
         };
 
         state.spawn_initial_model_catalog_refresh();

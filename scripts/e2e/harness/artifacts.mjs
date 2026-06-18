@@ -60,8 +60,28 @@ export async function writeFailureArtifacts({
   for (const [index, page] of extraPages.entries()) {
     await writePageArtifacts(artifacts, `remote-${index + 2}`, page, "#remote-client-log");
   }
+  await writeTraceArtifacts(artifacts, [localPage, remotePage, ...extraPages]);
   console.error(`[e2e-artifacts] wrote failure artifacts to ${artifacts.dir}`);
   return artifacts.dir;
+}
+
+async function writeTraceArtifacts(artifacts, pages) {
+  const contexts = [];
+  for (const page of pages) {
+    const context = typeof page?.context === "function" ? page.context() : null;
+    if (context && !contexts.includes(context)) {
+      contexts.push(context);
+    }
+  }
+  for (const [index, context] of contexts.entries()) {
+    const label = contexts.length === 1 ? "browser-trace.zip" : `browser-trace-${index + 1}.zip`;
+    try {
+      await fs.mkdir(artifacts.dir, { recursive: true });
+      await context.tracing.stop({ path: path.join(artifacts.dir, label) });
+    } catch (error) {
+      await artifacts.writeText(`${label}.error.txt`, errorMessage(error));
+    }
+  }
 }
 
 async function writePageArtifacts(artifacts, label, page, logSelector) {

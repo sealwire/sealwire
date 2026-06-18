@@ -2,6 +2,7 @@
   "suites": {
     "local-core": [
       "local-session",
+      "local-thread-interleaving",
       "local-auth",
       "local-allowed-roots",
       "local-file-diff",
@@ -14,6 +15,7 @@
     ],
     "local-full": [
       "local-session",
+      "local-thread-interleaving",
       "local-auth",
       "local-allowed-roots",
       "local-file-diff",
@@ -27,6 +29,7 @@
     ],
     "public-core": [
       "public-transcript-delta",
+      "public-thread-interleaving",
       "public-broker",
       "public-enrollment",
       "public-refresh",
@@ -39,6 +42,7 @@
     "public-full": [
       "public-enrollment",
       "public-transcript-delta",
+      "public-thread-interleaving",
       "public-refresh",
       "public-thread-settings",
       "public-persistence",
@@ -65,6 +69,13 @@
       "transport": "local",
       "coverage": ["session"]
     },
+    "local-thread-interleaving": {
+      "script": "browser-local-thread-interleaving-e2e.mjs",
+      "tier": "core",
+      "provider": "fake",
+      "transport": "local",
+      "coverage": ["thread-interleaving", "background-streaming"]
+    },
     "local-permission-modes": {
       "script": "browser-local-permission-modes-e2e.mjs",
       "tier": "core",
@@ -78,6 +89,13 @@
       "provider": "fake-compatible",
       "transport": "public",
       "coverage": ["settings-load"]
+    },
+    "public-thread-interleaving": {
+      "script": "browser-public-thread-interleaving-e2e.mjs",
+      "tier": "core",
+      "provider": "fake",
+      "transport": "public-broker",
+      "coverage": ["thread-interleaving", "background-streaming", "local-remote-follow"]
     },
     "local-auth": {
       "script": "browser-local-auth-e2e.mjs",

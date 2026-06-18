@@ -1480,10 +1480,10 @@ export async function fetchRemoteReviews() {
   return result?.reviews || null;
 }
 
-export async function resolveRemoteReview() {
+export async function resolveRemoteReview(reviewJobId) {
   renderLog("Stopping the blocked reviewer…");
   try {
-    await dispatchOrRecover("resolve_review", {});
+    await dispatchOrRecover("resolve_review", { review_job_id: reviewJobId });
     await syncRemoteSnapshot("post-review-resolve", true);
     return true;
   } catch (error) {

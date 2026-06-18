@@ -3,6 +3,7 @@ import { chromium } from "playwright";
 export async function launchBrowser({ contextOptions = {} } = {}) {
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext(contextOptions);
+  await context.tracing.start({ screenshots: true, snapshots: true, sources: true });
   await context.addInitScript(() => {
     window.__agentRelayProtocolFrames = [];
     const maxFrames = 500;
