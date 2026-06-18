@@ -52,6 +52,7 @@ export async function writeFailureArtifacts({
   });
   await artifacts.writeProcessLog("broker.log", broker);
   await artifacts.writeProcessLog("relay.log", relay);
+  await writeFakeProviderArtifacts(artifacts, relay?._fakeProviderControlDir);
   if (effectiveRelayPort) {
     await writeRelayApiArtifacts(artifacts, effectiveRelayPort);
   }
@@ -63,6 +64,31 @@ export async function writeFailureArtifacts({
   await writeTraceArtifacts(artifacts, [localPage, remotePage, ...extraPages]);
   console.error(`[e2e-artifacts] wrote failure artifacts to ${artifacts.dir}`);
   return artifacts.dir;
+}
+
+async function writeFakeProviderArtifacts(artifacts, controlDir) {
+  if (!controlDir) {
+    return;
+  }
+  const eventLogPath = path.join(controlDir, "events.ndjson");
+  try {
+    const contents = await fs.readFile(eventLogPath, "utf8");
+    const events = contents
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((line) => {
+        try {
+          return JSON.parse(line);
+        } catch {
+          return { event: "unparseable_fake_provider_event" };
+        }
+      });
+    await artifacts.writeText("fake-provider-events.ndjson", toNdjson(events));
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      await artifacts.writeText("fake-provider-events.error.txt", errorMessage(error));
+    }
+  }
 }
 
 async function writeTraceArtifacts(artifacts, pages) {

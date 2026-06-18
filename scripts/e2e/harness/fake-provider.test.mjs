@@ -24,6 +24,7 @@ test("fake-provider harness writes scenarios and releases observed barriers", as
       config
     );
     assert.equal(harness.env.FAKE_PROVIDER_CONTROL_DIR, harness.controlDir);
+    assert.equal(harness.eventsPath, path.join(harness.controlDir, "events.ndjson"));
 
     await fs.writeFile(
       path.join(harness.controlDir, "turn-a.paused.json"),
@@ -36,6 +37,12 @@ test("fake-provider harness writes scenarios and releases observed barriers", as
       await fs.readFile(path.join(harness.controlDir, "turn-a.release"), "utf8"),
       "release\n"
     );
+    await fs.writeFile(
+      harness.eventsPath,
+      `${JSON.stringify({ seq: 1, event: "turn_started" })}\n`,
+      "utf8"
+    );
+    assert.deepEqual(await harness.readEvents(), [{ seq: 1, event: "turn_started" }]);
   } finally {
     await fs.rm(rootDir, { recursive: true, force: true });
   }

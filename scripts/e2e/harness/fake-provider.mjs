@@ -5,12 +5,14 @@ import { setTimeout as delay } from "node:timers/promises";
 export async function createFakeProviderScenarioHarness(rootDir, config) {
   const controlDir = path.join(rootDir, "fake-provider-control");
   const scenarioPath = path.join(rootDir, "fake-provider-scenarios.json");
+  const eventsPath = path.join(controlDir, "events.ndjson");
   await fs.mkdir(controlDir, { recursive: true });
   await fs.writeFile(scenarioPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
 
   return {
     controlDir,
     scenarioPath,
+    eventsPath,
     env: {
       FAKE_PROVIDER_SCENARIO_PATH: scenarioPath,
       FAKE_PROVIDER_CONTROL_DIR: controlDir,
@@ -32,6 +34,19 @@ export async function createFakeProviderScenarioHarness(rootDir, config) {
     },
     async releaseBarrier(name) {
       await fs.writeFile(barrierPath(controlDir, name, "release"), "release\n", "utf8");
+    },
+    async readEvents() {
+      try {
+        return (await fs.readFile(eventsPath, "utf8"))
+          .split(/\r?\n/)
+          .filter(Boolean)
+          .map((line) => JSON.parse(line));
+      } catch (error) {
+        if (error?.code === "ENOENT") {
+          return [];
+        }
+        throw error;
+      }
     },
   };
 }

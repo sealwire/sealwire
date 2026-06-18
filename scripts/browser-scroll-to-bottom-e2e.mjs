@@ -18,7 +18,8 @@ import { setTimeout as delay } from "node:timers/promises";
 
 import { prepareSeededCodexHome } from "./e2e-codex-home.mjs";
 import { deleteThreadAndWait } from "./e2e-thread-cleanup.mjs";
-import { launchBrowser } from "./e2e/harness/browser.mjs";
+import { writeFailureArtifacts } from "./e2e/harness/artifacts.mjs";
+import { attachPageDebugLogging, launchBrowser } from "./e2e/harness/browser.mjs";
 import { startLocalRelay } from "./e2e/harness/local-relay.mjs";
 import { getFreePort } from "./e2e/harness/ports.mjs";
 import {
@@ -221,6 +222,8 @@ async function main() {
 
   let browser;
   let context;
+  let desktop;
+  let phone;
   const threadIds = [];
   const results = {};
   try {
@@ -248,7 +251,8 @@ async function main() {
     threadIds.push(threadId);
 
     // Desktop.
-    const desktop = await context.newPage();
+    desktop = await context.newPage();
+    attachPageDebugLogging(desktop, "desktop", { prefix: "scroll-to-bottom-e2e" });
     await desktop.setViewportSize({ width: 1280, height: 680 });
     await desktop.goto(`http://127.0.0.1:${relayPort}/?thread=${threadId}`, {
       waitUntil: "domcontentloaded",
@@ -262,7 +266,8 @@ async function main() {
     await desktop.close();
 
     // Phone.
-    const phone = await context.newPage();
+    phone = await context.newPage();
+    attachPageDebugLogging(phone, "phone", { prefix: "scroll-to-bottom-e2e" });
     await phone.setViewportSize({ width: 390, height: 740 });
     await phone.goto(`http://127.0.0.1:${relayPort}/?thread=${threadId}`, {
       waitUntil: "domcontentloaded",
@@ -279,6 +284,16 @@ async function main() {
     console.log(`\nScreenshots written to ${SHOT_DIR}`);
   } catch (error) {
     console.error(error);
+    await writeFailureArtifacts({
+      scenario: "scroll-to-bottom-e2e",
+      relay,
+      relayPort,
+      localPage: desktop,
+      extraPages: phone ? [phone] : [],
+      metadata: { relayPort, workspaceDir, threadIds },
+    }).catch((artifactError) => {
+      console.error(`[e2e-artifacts] failed to write artifacts: ${artifactError.message}`);
+    });
     dumpProcessLogs(relay);
     process.exitCode = 1;
   } finally {

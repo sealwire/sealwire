@@ -37,6 +37,7 @@ test("browser e2e core suites keep required coverage", async () => {
     "broker",
     "refresh",
     "revoke",
+    "mobile-header",
     "thread-interleaving",
     "transcript-delta",
   ]);
@@ -44,10 +45,12 @@ test("browser e2e core suites keep required coverage", async () => {
     "auth",
     "file-diff",
     "history",
+    "scroll-to-bottom",
     "session",
     "thread-interleaving",
     "thread-groups",
     "transcript-load",
+    "view-only-models",
   ]);
 });
 
