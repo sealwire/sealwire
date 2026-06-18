@@ -91,6 +91,36 @@ test("writeFailureArtifacts saves one Playwright trace per browser context", asy
   }
 });
 
+test("writeFailureArtifacts automatically collects redacted fake-provider events", async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-provider-events-test-"));
+  const controlDir = path.join(rootDir, "control");
+  await fs.mkdir(controlDir, { recursive: true });
+  await fs.writeFile(
+    path.join(controlDir, "events.ndjson"),
+    `${JSON.stringify({ seq: 1, event: "approval_requested", token: "provider-token" })}\n`,
+    "utf8"
+  );
+
+  try {
+    const dir = await writeFailureArtifacts(
+      {
+        scenario: "provider-events-test",
+        relay: { _logBuffer: [], _fakeProviderControlDir: controlDir },
+      },
+      { rootDir }
+    );
+    const lines = (await fs.readFile(path.join(dir, "fake-provider-events.ndjson"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    assert.deepEqual(lines, [
+      { seq: 1, event: "approval_requested", token: "[redacted]" },
+    ]);
+  } finally {
+    await fs.rm(rootDir, { recursive: true, force: true });
+  }
+});
+
 function jsonResponse(body, { ok = true, status = 200 } = {}) {
   return {
     ok,

@@ -3,7 +3,8 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 
-import { launchBrowser } from "./e2e/harness/browser.mjs";
+import { writeFailureArtifacts } from "./e2e/harness/artifacts.mjs";
+import { attachPageDebugLogging, launchBrowser } from "./e2e/harness/browser.mjs";
 import { startLocalRelay } from "./e2e/harness/local-relay.mjs";
 import { getFreePort } from "./e2e/harness/ports.mjs";
 import {
@@ -62,11 +63,13 @@ async function main() {
   const base = `http://127.0.0.1:${port}`;
   let browser;
   let context;
+  let page;
 
   try {
     await waitForHealth(`${base}/api/health`);
     ({ browser, context } = await launchBrowser());
-    const page = await context.newPage();
+    page = await context.newPage();
+    attachPageDebugLogging(page, "local", { prefix: "local-view-only-models-e2e" });
     const pageErrors = [];
     page.on("pageerror", (error) => pageErrors.push(error.message));
 
@@ -188,6 +191,19 @@ async function main() {
 
     console.log(JSON.stringify(result, null, 2));
   } catch (error) {
+    await writeFailureArtifacts({
+      scenario: "local-view-only-models-e2e",
+      relay,
+      relayPort: port,
+      localPage: page,
+      metadata: {
+        relayPort: port,
+        activeThreadId: ACTIVE_THREAD_ID,
+        viewedThreadId: VIEWED_THREAD_ID,
+      },
+    }).catch((artifactError) => {
+      console.error(`[e2e-artifacts] failed to write artifacts: ${artifactError.message}`);
+    });
     dumpProcessLogs(relay);
     throw error;
   } finally {

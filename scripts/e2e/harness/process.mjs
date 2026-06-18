@@ -24,6 +24,7 @@ export function spawnManagedProcess(name, command, args, extraEnv = {}) {
 
   child._logName = name;
   child._logBuffer = [];
+  child._fakeProviderControlDir = extraEnv.FAKE_PROVIDER_CONTROL_DIR || null;
   child.stdout.on("data", (chunk) => appendLog(child, chunk));
   child.stderr.on("data", (chunk) => appendLog(child, chunk));
   managedProcesses.push(child);
