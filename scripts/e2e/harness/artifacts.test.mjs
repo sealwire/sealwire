@@ -60,6 +60,37 @@ test("writeFailureArtifacts captures relay state and redacts sensitive fields", 
   }
 });
 
+test("writeFailureArtifacts saves one Playwright trace per browser context", async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-trace-test-"));
+  const traceStops = [];
+  const context = {
+    tracing: {
+      async stop({ path: tracePath }) {
+        traceStops.push(tracePath);
+        await fs.writeFile(tracePath, "trace", "utf8");
+      },
+    },
+  };
+  const page = {
+    context: () => context,
+    textContent: async () => "page log",
+    evaluate: async () => [],
+    screenshot: async ({ path: screenshotPath }) =>
+      fs.writeFile(screenshotPath, "screenshot", "utf8"),
+  };
+
+  try {
+    const dir = await writeFailureArtifacts(
+      { scenario: "trace-test", localPage: page, remotePage: page },
+      { rootDir }
+    );
+    assert.deepEqual(traceStops, [path.join(dir, "browser-trace.zip")]);
+    assert.equal(await fs.readFile(path.join(dir, "browser-trace.zip"), "utf8"), "trace");
+  } finally {
+    await fs.rm(rootDir, { recursive: true, force: true });
+  }
+});
+
 function jsonResponse(body, { ok = true, status = 200 } = {}) {
   return {
     ok,

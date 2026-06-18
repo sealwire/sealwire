@@ -19,12 +19,20 @@ const LOCAL_SESSION_SNAPSHOT_TARGET_BYTES: usize = 16_000;
 const THREADS_RESPONSE_TARGET_BYTES: usize = 20_000;
 
 #[test]
-fn review_action_input_does_not_require_a_thread_id() {
+fn review_action_input_supports_an_explicit_job_and_keeps_legacy_omission() {
+    let targeted: ReviewActionInput = serde_json::from_value(serde_json::json!({
+        "device_id": "device-a",
+        "review_job_id": "review-a"
+    }))
+    .expect("review resolve requests can target a job");
+    assert_eq!(targeted.review_job_id.as_deref(), Some("review-a"));
+
     let input: ReviewActionInput =
         serde_json::from_value(serde_json::json!({ "device_id": "device-a" }))
-            .expect("review resolve/delete requests only target the active review");
+            .expect("legacy review actions may omit the job with one active review");
 
     assert_eq!(input.device_id.as_deref(), Some("device-a"));
+    assert_eq!(input.review_job_id, None);
 }
 
 fn make_snapshot() -> SessionSnapshot {

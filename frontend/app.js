@@ -260,7 +260,7 @@ let clientLogRootElement = null;
 // that run at module load; they only ever fire on user interaction.
 const reviewerActions = {
   onRequestReview: (values) => state.controller?.requestReview(values),
-  onResolveReview: () => state.controller?.resolveReview(),
+  onResolveReview: (reviewJobId) => state.controller?.resolveReview(reviewJobId),
   onDeleteReview: (reviewId) => state.controller?.deleteReview(reviewId),
   fetchReviewerTranscript: (threadId) =>
     Promise.resolve(state.controller?.fetchTranscriptPage(threadId, {})).then(

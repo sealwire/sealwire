@@ -473,10 +473,10 @@ export function createLifecycleController(ctx) {
     }
   }
 
-  async function resolveReview() {
+  async function resolveReview(reviewJobId) {
     logLine("Stopping the blocked reviewer…");
     try {
-      const receipt = await resolveReviewApi(apiFetch, state.deviceId);
+      const receipt = await resolveReviewApi(apiFetch, reviewJobId, state.deviceId);
       logLine(receipt?.message || "Reviewer stopped; workspace unlocked.");
       await loadSession("post-review-resolve");
       return receipt;

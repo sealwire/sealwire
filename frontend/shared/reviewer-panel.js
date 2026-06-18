@@ -46,7 +46,7 @@ function latestAgentText(entries) {
 //   reviewModel:       { providerOptions, models, defaultProvider }
 //   canRequest:        whether a new review can be started (idle + controller)
 //   onRequestReview:   ({reviewerProvider, reviewerModel, instructions}) => void
-//   onResolveReview:   () => void                (stop a blocked reviewer)
+//   onResolveReview:   (jobId) => void           (stop a review)
 //   onDeleteReview:    (jobId) => void           (delete a terminal review)
 //   fetchReviewerTranscript: (threadId) => Promise<entries[]>
 // Join a job to its reviewer thread's display name (falling back to the raw
@@ -339,7 +339,7 @@ function ReviewerJobCard({
               title: blocked
                 ? "The reviewer turn couldn't be stopped and the workspace is locked. Stop it to unlock."
                 : "Stop this review now and unlock the reviewed thread.",
-              onClick: () => onResolveReview?.(),
+              onClick: () => onResolveReview?.(job.id),
             },
             blocked ? "Stop reviewer & unlock" : "Stop review"
           )

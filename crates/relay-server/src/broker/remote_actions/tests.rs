@@ -461,13 +461,19 @@ fn fetch_reviews_action_round_trips_and_is_not_claim_gated() {
 #[test]
 fn resolve_and_delete_review_actions_round_trip_and_bind_device() {
     // resolve_review
-    let resolve: RemoteActionRequest =
-        serde_json::from_value(serde_json::json!({ "type": "resolve_review" }))
-            .expect("resolve_review should parse");
+    let resolve: RemoteActionRequest = serde_json::from_value(serde_json::json!({
+        "type": "resolve_review",
+        "review_job_id": "review-9"
+    }))
+    .expect("resolve_review should parse");
     assert_eq!(resolve.kind(), RemoteActionKind::ResolveReview);
     assert_eq!(RemoteActionKind::ResolveReview.as_str(), "resolve_review");
     match resolve.bind_device("device-9".to_string()) {
-        RemoteActionRequest::ResolveReview { device_id } => {
+        RemoteActionRequest::ResolveReview {
+            review_job_id,
+            device_id,
+        } => {
+            assert_eq!(review_job_id.as_deref(), Some("review-9"));
             assert_eq!(device_id.as_deref(), Some("device-9"));
         }
         other => panic!("unexpected: {other:?}"),

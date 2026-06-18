@@ -1565,6 +1565,10 @@ pub struct StopTurnInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewActionInput {
     pub device_id: Option<String>,
+    /// Explicit review target. Optional only for backward compatibility when a
+    /// single review is active.
+    #[serde(default)]
+    pub review_job_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

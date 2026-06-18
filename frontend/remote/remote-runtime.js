@@ -215,8 +215,8 @@ export function createRemoteAppHandlers() {
     onRequestReview(values) {
       return requestRemoteReview(values);
     },
-    onResolveReview() {
-      return resolveRemoteReview();
+    onResolveReview(reviewJobId) {
+      return resolveRemoteReview(reviewJobId);
     },
     onDeleteReview(reviewId) {
       return deleteRemoteReview(reviewId);

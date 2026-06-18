@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
@@ -9,6 +9,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use serde::Deserialize;
 use tokio::{
     sync::{oneshot, Mutex, RwLock},
     time::{sleep, Duration},
@@ -33,6 +34,123 @@ struct FakeThread {
     transcript: Vec<TranscriptEntryView>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+struct FakeScenarioConfig {
+    #[serde(default)]
+    prompts: HashMap<String, FakeTurnScenario>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct FakeTurnScenario {
+    reply: Option<String>,
+    chunks: Option<Vec<String>>,
+    chunk_delay_ms: Option<u64>,
+    pause_after_chunks: Option<usize>,
+    barrier: Option<String>,
+}
+
+#[derive(Clone)]
+struct FakeScenarioHarness {
+    config: FakeScenarioConfig,
+    control_dir: PathBuf,
+    barrier_timeout: Duration,
+}
+
+impl FakeScenarioHarness {
+    fn from_env() -> Result<Option<Self>, String> {
+        let Some(config_path) = std::env::var_os("FAKE_PROVIDER_SCENARIO_PATH") else {
+            return Ok(None);
+        };
+        let control_dir = std::env::var_os("FAKE_PROVIDER_CONTROL_DIR").ok_or_else(|| {
+            "FAKE_PROVIDER_CONTROL_DIR is required with FAKE_PROVIDER_SCENARIO_PATH".to_string()
+        })?;
+        let contents = std::fs::read(&config_path).map_err(|error| {
+            format!(
+                "failed to read fake-provider scenario {}: {error}",
+                Path::new(&config_path).display()
+            )
+        })?;
+        let config: FakeScenarioConfig = serde_json::from_slice(&contents)
+            .map_err(|error| format!("failed to decode fake-provider scenario: {error}"))?;
+        for scenario in config.prompts.values() {
+            if scenario.pause_after_chunks.is_some() {
+                let barrier = scenario.barrier.as_deref().ok_or_else(|| {
+                    "fake-provider scenario pause_after_chunks requires barrier".to_string()
+                })?;
+                validate_barrier_name(barrier)?;
+            }
+        }
+        let barrier_timeout = std::env::var("FAKE_PROVIDER_BARRIER_TIMEOUT_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(Duration::from_millis)
+            .unwrap_or_else(|| Duration::from_secs(60));
+        Ok(Some(Self {
+            config,
+            control_dir: PathBuf::from(control_dir),
+            barrier_timeout,
+        }))
+    }
+
+    fn scenario_for_prompt(&self, prompt: &str) -> Option<FakeTurnScenario> {
+        self.config.prompts.get(prompt).cloned()
+    }
+
+    async fn wait_for_barrier(
+        &self,
+        barrier: &str,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Result<(), String> {
+        validate_barrier_name(barrier)?;
+        tokio::fs::create_dir_all(&self.control_dir)
+            .await
+            .map_err(|error| {
+                format!("failed to create fake-provider control directory: {error}")
+            })?;
+        let paused_path = self.control_dir.join(format!("{barrier}.paused.json"));
+        let release_path = self.control_dir.join(format!("{barrier}.release"));
+        let _ = tokio::fs::remove_file(&release_path).await;
+        let marker = serde_json::json!({
+            "barrier": barrier,
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+        });
+        tokio::fs::write(
+            &paused_path,
+            serde_json::to_vec_pretty(&marker).expect("barrier marker should encode"),
+        )
+        .await
+        .map_err(|error| format!("failed to publish fake-provider barrier: {error}"))?;
+
+        let deadline = tokio::time::Instant::now() + self.barrier_timeout;
+        while tokio::time::Instant::now() < deadline {
+            if tokio::fs::try_exists(&release_path).await.unwrap_or(false) {
+                let _ = tokio::fs::remove_file(&release_path).await;
+                let _ = tokio::fs::remove_file(&paused_path).await;
+                return Ok(());
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        Err(format!(
+            "timed out waiting for fake-provider barrier '{barrier}'"
+        ))
+    }
+}
+
+fn validate_barrier_name(barrier: &str) -> Result<(), String> {
+    if barrier.is_empty()
+        || !barrier
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err(format!(
+            "fake-provider barrier names may contain only ASCII letters, digits, '-' and '_': {barrier:?}"
+        ));
+    }
+    Ok(())
+}
+
 pub struct FakeProviderBridge {
     state: Arc<RwLock<RelayState>>,
     threads: Arc<Mutex<HashMap<String, FakeThread>>>,
@@ -44,6 +162,7 @@ pub struct FakeProviderBridge {
     // on via FAKE_PROVIDER_ENFORCE_APPROVALS for the permission-mode e2e.
     enforce_approvals: Arc<AtomicBool>,
     approval_gates: Arc<Mutex<HashMap<String, oneshot::Sender<ApprovalDecision>>>>,
+    scenario_harness: Option<FakeScenarioHarness>,
 }
 
 impl FakeProviderBridge {
@@ -60,6 +179,7 @@ impl FakeProviderBridge {
         let enforce_approvals = std::env::var("FAKE_PROVIDER_ENFORCE_APPROVALS")
             .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
+        let scenario_harness = FakeScenarioHarness::from_env()?;
 
         Ok(Self {
             state,
@@ -67,6 +187,7 @@ impl FakeProviderBridge {
             next_id: AtomicU64::new(1),
             enforce_approvals: Arc::new(AtomicBool::new(enforce_approvals)),
             approval_gates: Arc::new(Mutex::new(HashMap::new())),
+            scenario_harness,
         })
     }
 
@@ -225,7 +346,31 @@ impl ProviderBridge for FakeProviderBridge {
 
         let thread_id = thread_id.to_string();
         let prompt = text.to_string();
-        let reply = fake_reply_for_prompt(&prompt);
+        let scenario = self
+            .scenario_harness
+            .as_ref()
+            .and_then(|harness| harness.scenario_for_prompt(&prompt));
+        let chunks = scenario
+            .as_ref()
+            .and_then(|scenario| scenario.chunks.clone())
+            .unwrap_or_else(|| reply_chunks(&fake_reply_for_prompt(&prompt)));
+        let reply = scenario
+            .as_ref()
+            .and_then(|scenario| scenario.reply.clone())
+            .unwrap_or_else(|| chunks.concat());
+        let chunk_delay = Duration::from_millis(
+            scenario
+                .as_ref()
+                .and_then(|scenario| scenario.chunk_delay_ms)
+                .unwrap_or(20),
+        );
+        let pause_after_chunks = scenario
+            .as_ref()
+            .and_then(|scenario| scenario.pause_after_chunks);
+        let barrier = scenario
+            .as_ref()
+            .and_then(|scenario| scenario.barrier.clone());
+        let scenario_harness = self.scenario_harness.clone();
         let turn_id = self.next_token("fake-turn");
         let user_item_id = self.next_token("fake-user");
         let assistant_item_id = self.next_token("fake-assistant");
@@ -354,8 +499,19 @@ impl ProviderBridge for FakeProviderBridge {
                 relay.notify();
             }
 
-            for chunk in reply_chunks(&reply) {
-                sleep(Duration::from_millis(20)).await;
+            if pause_after_chunks == Some(0) {
+                wait_for_scenario_barrier(
+                    &state,
+                    scenario_harness.as_ref(),
+                    barrier.as_deref(),
+                    &thread_id,
+                    &turn_id_for_task,
+                )
+                .await;
+            }
+
+            for (index, chunk) in chunks.into_iter().enumerate() {
+                sleep(chunk_delay).await;
                 let mut relay = state.write().await;
                 if relay.active_thread_id.as_deref() == Some(thread_id.as_str()) {
                     let mutation =
@@ -386,6 +542,18 @@ impl ProviderBridge for FakeProviderBridge {
                     );
                 }
                 relay.notify();
+                drop(relay);
+
+                if pause_after_chunks == Some(index + 1) {
+                    wait_for_scenario_barrier(
+                        &state,
+                        scenario_harness.as_ref(),
+                        barrier.as_deref(),
+                        &thread_id,
+                        &turn_id_for_task,
+                    )
+                    .await;
+                }
             }
 
             {
@@ -465,6 +633,23 @@ impl ProviderBridge for FakeProviderBridge {
 
     fn provider_name(&self) -> &'static str {
         "fake"
+    }
+}
+
+async fn wait_for_scenario_barrier(
+    state: &Arc<RwLock<RelayState>>,
+    harness: Option<&FakeScenarioHarness>,
+    barrier: Option<&str>,
+    thread_id: &str,
+    turn_id: &str,
+) {
+    let (Some(harness), Some(barrier)) = (harness, barrier) else {
+        return;
+    };
+    if let Err(error) = harness.wait_for_barrier(barrier, thread_id, turn_id).await {
+        let mut relay = state.write().await;
+        relay.push_log("error", error);
+        relay.notify();
     }
 }
 
@@ -686,6 +871,57 @@ mod tests {
             model_provider: "fake".to_string(),
             provider: "fake".to_string(),
         }
+    }
+
+    #[tokio::test]
+    async fn scenario_barrier_waits_for_an_explicit_release() {
+        let temp = tempfile::tempdir().expect("temporary control directory");
+        let harness = FakeScenarioHarness {
+            config: FakeScenarioConfig {
+                prompts: HashMap::new(),
+            },
+            control_dir: temp.path().to_path_buf(),
+            barrier_timeout: Duration::from_secs(2),
+        };
+        let waiting_harness = harness.clone();
+        let waiter = tokio::spawn(async move {
+            waiting_harness
+                .wait_for_barrier("turn-a", "thread-a", "turn-a-1")
+                .await
+        });
+        let paused_path = temp.path().join("turn-a.paused.json");
+        for _ in 0..100 {
+            if paused_path.exists() {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            paused_path.exists(),
+            "the paused marker should be published"
+        );
+        assert!(!waiter.is_finished(), "the barrier must wait for release");
+
+        let marker: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&paused_path).expect("read paused marker"))
+                .expect("decode paused marker");
+        assert_eq!(marker["thread_id"], "thread-a");
+        std::fs::write(temp.path().join("turn-a.release"), b"release\n").expect("release barrier");
+        waiter
+            .await
+            .expect("barrier task")
+            .expect("barrier should release");
+        assert!(
+            !paused_path.exists(),
+            "the paused marker should be cleaned up"
+        );
+    }
+
+    #[test]
+    fn scenario_barrier_names_cannot_escape_the_control_directory() {
+        assert!(validate_barrier_name("thread_A-1").is_ok());
+        assert!(validate_barrier_name("../escape").is_err());
+        assert!(validate_barrier_name("").is_err());
     }
 
     // --- approval-gating (permission-mode) behavior --------------------------

@@ -85,15 +85,18 @@ test("requestReview surfaces the server error message when the envelope says !ok
   );
 });
 
-test("resolveReview POSTs the device id to the resolve endpoint", async () => {
+test("resolveReview POSTs the review and device ids to the resolve endpoint", async () => {
   const receipt = { review_job_id: "review-1", status: { status: "failed" } };
   const { apiFetch, calls } = makeFetchStub(jsonResponse({ ok: true, data: receipt }));
 
-  const result = await resolveReview(apiFetch, "device-a");
+  const result = await resolveReview(apiFetch, "review-1", "device-a");
   assert.deepEqual(result, receipt);
   assert.equal(calls[0].input, "/api/session/review/resolve");
   assert.equal(calls[0].init.method, "POST");
-  assert.deepEqual(JSON.parse(calls[0].init.body), { device_id: "device-a" });
+  assert.deepEqual(JSON.parse(calls[0].init.body), {
+    review_job_id: "review-1",
+    device_id: "device-a",
+  });
 });
 
 test("deleteReview POSTs the device id to the per-review delete endpoint", async () => {

@@ -768,19 +768,38 @@ impl RelayState {
             .any(|job| !job.status.is_terminal())
     }
 
-    /// `(job_id, parent_thread_id, reviewer_thread_id)` of the single active
-    /// (non-terminal) review, if any — used by the user-triggered cancel.
-    pub(crate) fn active_review_job_ids(&self) -> Option<(String, String, Option<String>)> {
-        self.review_jobs
+    /// Resolve the non-terminal review targeted by a user stop. Legacy callers may
+    /// omit `job_id` only while exactly one review is active; once reviews run
+    /// concurrently the operation must be explicit.
+    pub(crate) fn active_review_job_ids(
+        &self,
+        job_id: Option<&str>,
+    ) -> Result<(String, String, Option<String>), String> {
+        let active = self
+            .review_jobs
             .values()
-            .find(|job| !job.status.is_terminal())
-            .map(|job| {
-                (
-                    job.id.clone(),
-                    job.parent_thread_id.clone(),
-                    job.reviewer_thread_id.clone(),
-                )
-            })
+            .filter(|job| !job.status.is_terminal())
+            .collect::<Vec<_>>();
+        let job = match job_id {
+            Some(job_id) => active
+                .into_iter()
+                .find(|job| job.id == job_id)
+                .ok_or_else(|| "there is no active review with that id".to_string())?,
+            None => match active.as_slice() {
+                [] => return Err("there is no active review to stop".to_string()),
+                [job] => *job,
+                _ => {
+                    return Err(
+                        "review_job_id is required when more than one review is active".to_string(),
+                    )
+                }
+            },
+        };
+        Ok((
+            job.id.clone(),
+            job.parent_thread_id.clone(),
+            job.reviewer_thread_id.clone(),
+        ))
     }
 
     /// Whether `thread_id` is owned by a non-terminal review (its parent OR its

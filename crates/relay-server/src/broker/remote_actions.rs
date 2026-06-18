@@ -114,6 +114,8 @@ pub(super) enum RemoteActionRequest {
     },
     ResolveReview {
         #[serde(default)]
+        review_job_id: Option<String>,
+        #[serde(default)]
         device_id: Option<String>,
     },
     DeleteReview {
@@ -243,7 +245,8 @@ impl RemoteActionRequest {
                 input.device_id = Some(device_id);
                 Self::RequestReview { input }
             }
-            Self::ResolveReview { .. } => Self::ResolveReview {
+            Self::ResolveReview { review_job_id, .. } => Self::ResolveReview {
+                review_job_id,
                 device_id: Some(device_id),
             },
             Self::DeleteReview { review_id, .. } => Self::DeleteReview {
@@ -938,8 +941,11 @@ async fn execute_remote_action(
             .request_review(input)
             .await
             .map(|_| RemoteActionOutcome::default()),
-        RemoteActionRequest::ResolveReview { device_id } => state
-            .cancel_active_review(device_id)
+        RemoteActionRequest::ResolveReview {
+            review_job_id,
+            device_id,
+        } => state
+            .cancel_review(review_job_id, device_id)
             .await
             .map(|_| RemoteActionOutcome::default()),
         RemoteActionRequest::DeleteReview {
