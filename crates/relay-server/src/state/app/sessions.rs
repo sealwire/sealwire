@@ -465,6 +465,11 @@ impl AppState {
             })
             .or_else(|| default_effort_for_model(&provider_models, &model))
             .unwrap_or(defaults.reasoning_effort);
+        // Last line of defense: never forward an effort the target model rejects
+        // (e.g. a stale Claude "max" on a codex thread -> codex 400 -> "can't
+        // send at all"). Heals poisoned threads and any client that skipped the
+        // frontend clamp.
+        let effort = clamp_effort_to_model(effort, &model, &provider_models);
         let approval_policy = remembered_settings
             .as_ref()
             .map(|settings| settings.approval_policy.clone())
