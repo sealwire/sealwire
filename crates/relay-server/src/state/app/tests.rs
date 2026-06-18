@@ -775,6 +775,7 @@ mod path_scope_tests {
         approval_thread_ids: Arc<Mutex<Vec<String>>>,
         ask_request_ids: Arc<Mutex<Vec<String>>>,
         turn_thread_ids: Arc<Mutex<Vec<String>>>,
+        turn_efforts: Arc<Mutex<Vec<String>>>,
         interrupt_thread_ids: Arc<Mutex<Vec<String>>>,
         resume_thread_ids: Arc<Mutex<Vec<String>>>,
         // Thread ids that are resumable/readable but deliberately omitted from
@@ -802,6 +803,7 @@ mod path_scope_tests {
                 approval_thread_ids: Arc::new(Mutex::new(Vec::new())),
                 ask_request_ids: Arc::new(Mutex::new(Vec::new())),
                 turn_thread_ids: Arc::new(Mutex::new(Vec::new())),
+                turn_efforts: Arc::new(Mutex::new(Vec::new())),
                 interrupt_thread_ids: Arc::new(Mutex::new(Vec::new())),
                 resume_thread_ids: Arc::new(Mutex::new(Vec::new())),
                 hidden_from_list: Arc::new(Mutex::new(std::collections::HashSet::new())),
@@ -969,12 +971,13 @@ mod path_scope_tests {
             thread_id: &str,
             _text: &str,
             _model: &str,
-            _effort: &str,
+            effort: &str,
         ) -> Result<Option<String>, String> {
             self.turn_thread_ids
                 .lock()
                 .await
                 .push(thread_id.to_string());
+            self.turn_efforts.lock().await.push(effort.to_string());
             let turn_id = format!("turn:{thread_id}");
             if self
                 .mark_active_status_before_return
@@ -2115,6 +2118,52 @@ mod path_scope_tests {
             *codex.turn_thread_ids.lock().await,
             vec![thread_a.id.clone()],
             "without a thread_id, the turn goes to the active thread (no take-over)"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_message_clamps_a_foreign_effort_the_model_rejects() {
+        // REGRESSION: a codex thread can carry a foreign/stale reasoning effort
+        // (e.g. Claude's "max", which codex rejects with `unknown variant max,
+        // expected one of none/minimal/low/medium/high/xhigh` -> HTTP 400 and the
+        // user "can't send at all"). The relay must clamp the outgoing effort to
+        // the target model's supported set BEFORE start_turn, so the foreign value
+        // never reaches the provider. This is the last line of defense that heals
+        // every client (incl. the remote app) and any already-poisoned thread.
+        // RecordingProvider's catalog model supports only ["medium"], so "max" is
+        // unsupported and must be clamped to the model default ("medium").
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, codex, _claude) = build_recording_provider_app(cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let thread = codex.thread_summary("codex-thread-a", cwd);
+        {
+            codex
+                .threads
+                .lock()
+                .await
+                .insert(thread.id.clone(), thread.clone());
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("codex".to_string());
+            relay.active_thread_id = Some(thread.id.clone());
+            relay.threads = vec![thread.clone()];
+        }
+
+        app.send_message(SendMessageInput {
+            text: "hi".to_string(),
+            model: Some("codex-model".to_string()),
+            effort: Some("max".to_string()),
+            device_id: Some("device-1".to_string()),
+            thread_id: thread.id.clone(),
+        })
+        .await
+        .expect("send should succeed after clamping the foreign effort");
+
+        assert_eq!(
+            *codex.turn_efforts.lock().await,
+            vec!["medium".to_string()],
+            "codex must receive its supported default, never the foreign `max`",
         );
     }
 
@@ -6838,6 +6887,41 @@ settings update: {error}"
             .await
             .expect_err("second concurrent review should be rejected");
         assert!(error.contains("already running"), "got: {error}");
+    }
+
+    #[tokio::test]
+    async fn concurrent_reviews_of_different_threads_are_allowed() {
+        // Repro (cross-conversation interference): a review in flight on thread A must
+        // NOT block reviewing a DIFFERENT thread B. Each review already locks only its
+        // OWN parent+reviewer (is_thread_review_locked), so two unrelated threads should
+        // be reviewable at once. Today the GLOBAL `has_active_review()` guard serializes
+        // every review, so B is wrongly refused with "a review is already running".
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        // Hold A's review open: its turns never complete, so its job stays non-terminal.
+        providers
+            .get("codex")
+            .unwrap()
+            .complete_turns
+            .store(false, Ordering::Relaxed);
+        let parent_a = start_parent(&app, cwd, "codex").await;
+        let parent_b = start_parent(&app, cwd, "codex").await;
+
+        let mut review_a = review_input("codex");
+        review_a.parent_thread_id = Some(parent_a.id.clone());
+        app.request_review(review_a)
+            .await
+            .expect("review on A should start");
+
+        // A review on a DIFFERENT thread B must be allowed concurrently.
+        let mut review_b = review_input("codex");
+        review_b.parent_thread_id = Some(parent_b.id.clone());
+        let receipt_b = app
+            .request_review(review_b)
+            .await
+            .expect("reviewing a different thread B must not be blocked by A's review");
+        assert_eq!(receipt_b.parent_thread_id, parent_b.id);
     }
 
     #[tokio::test]

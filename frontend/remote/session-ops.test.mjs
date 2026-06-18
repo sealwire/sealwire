@@ -796,6 +796,104 @@ test("successful first send follows a promoted Claude pending thread id", async 
   state.pendingActions.clear();
 });
 
+test("remote send clamps a foreign effort the codex model rejects", async () => {
+  // REGRESSION: the remote composer forwards the live session effort verbatim.
+  // A codex thread carrying a Claude-only "max" (codex rejects `unknown variant
+  // max`) would 400 every send -> "codex can't send at all" on mobile. The send
+  // must clamp the effort to the target model's supported set before dispatch,
+  // mirroring the local lifecycle fix.
+  activeBrowser = installBrowserStubs();
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { handleRemoteBrokerPayload } = await import("./actions.js");
+  const { ensureRemoteRuntimeConfigured } = await import("./remote-runtime.js");
+  const { applySessionSnapshot, clearSessionRuntime, sendMessage } = await import(
+    "./session-ops.js"
+  );
+
+  ensureRemoteRuntimeConfigured();
+  clearSessionRuntime();
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-codex-clamp",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: "claim-token-1",
+    sessionClaimExpiresAt: Math.floor(Date.now() / 1000) + 300,
+  });
+  seedSocketState(state, {
+    socketConnected: true,
+    socketPeerId: "surface-peer-1",
+  });
+  state.pendingActions.clear();
+  seedTranscriptHydrationState(state);
+
+  applySessionSnapshot({
+    active_thread_id: "codex-thread-1",
+    active_turn_id: null,
+    current_cwd: "/tmp/project",
+    current_status: "idle",
+    model: "gpt-5.3-codex",
+    reasoning_effort: "max",
+    available_models: [
+      {
+        model: "gpt-5.3-codex",
+        provider: "codex",
+        supported_reasoning_efforts: ["low", "medium", "high", "xhigh"],
+        default_reasoning_effort: "medium",
+      },
+    ],
+    pending_approvals: [],
+    pending_ask_user_questions: [],
+    transcript: [],
+    transcript_truncated: false,
+  });
+
+  let sentEffort = "<none>";
+  state.socket = {
+    readyState: 1,
+    send(frameText) {
+      const frame = JSON.parse(frameText);
+      sentEffort = frame.payload?.request?.input?.effort ?? null;
+      setImmediate(async () => {
+        await handleRemoteBrokerPayload({
+          kind: "remote_session_result",
+          action_id: frame.payload.action_id,
+          action: "send_message",
+          ok: true,
+          snapshot: {
+            active_thread_id: "codex-thread-1",
+            active_turn_id: "codex-turn-1",
+            current_cwd: "/tmp/project",
+            current_status: "active",
+            pending_approvals: [],
+            pending_ask_user_questions: [],
+            transcript: [],
+            transcript_truncated: false,
+          },
+        });
+      });
+    },
+  };
+
+  // The composer carries the live session effort "max" (poisoned onto a codex
+  // thread); it must reach the relay as the model default, never as "max".
+  assert.equal(await sendMessage("hi", "max", "gpt-5.3-codex"), true);
+  assert.equal(sentEffort, "medium");
+
+  clearSessionRuntime();
+  state.socket = null;
+  state.pendingActions.clear();
+});
+
 test("stale view-only fetch cannot override a newer resume", async () => {
   activeBrowser = installBrowserStubs();
 

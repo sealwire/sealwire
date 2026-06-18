@@ -783,6 +783,38 @@ fn default_effort_for_model(
         .or_else(|| preferred_model(models).map(|model| model.default_reasoning_effort.clone()))
 }
 
+/// Drop a reasoning effort the target model does not accept down to the model's
+/// default, so a foreign/stale value never reaches a provider that would reject
+/// it. Codex, for example, answers `unknown variant max` (a Claude-only effort)
+/// with HTTP 400, which surfaces as "can't send at all". This is the relay's
+/// last line of defense — it heals every client (incl. the remote app) and any
+/// thread already poisoned with a foreign effort, regardless of frontend fixes.
+///
+/// Mirrors the frontend `resolveOutgoingEffort` clamp: only clamp when the model
+/// is KNOWN to not support the effort. An unknown model or an empty/stale catalog
+/// (no supported list) leaves the effort untouched, so a legitimate
+/// provider-specific value (e.g. Claude's "max") is never wrongly downgraded.
+fn clamp_effort_to_model(
+    effort: String,
+    model_name: &str,
+    models: &Option<Vec<ModelOptionView>>,
+) -> String {
+    let Some(option) = models
+        .as_ref()
+        .and_then(|models| models.iter().find(|model| model.model == model_name))
+    else {
+        return effort;
+    };
+    let supported = &option.supported_reasoning_efforts;
+    if supported.is_empty() || supported.iter().any(|value| value == &effort) {
+        return effort;
+    }
+    if !option.default_reasoning_effort.is_empty() {
+        return option.default_reasoning_effort.clone();
+    }
+    supported.first().cloned().unwrap_or(effort)
+}
+
 fn resolve_provider_model(
     provider_name: &str,
     models: &Option<Vec<ModelOptionView>>,

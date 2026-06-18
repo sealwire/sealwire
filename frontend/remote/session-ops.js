@@ -41,6 +41,7 @@ import {
   createRemoteThreadsPatch,
 } from "./surface-state.js";
 import { isReviewInProgressForThread } from "../shared/review-state.js";
+import { resolveOutgoingEffort } from "../shared/reasoning-efforts.js";
 import { threadAttention } from "../shared/thread-attention.js";
 import { isDocumentForeground, notifyThreadEvents } from "../shared/thread-notify.js";
 import { shouldRefreshViewedThread } from "../shared/viewed-thread-refresh.js";
@@ -1260,12 +1261,21 @@ export async function sendMessage(messageDraft, effort, model = "") {
     return false;
   }
 
+  // Clamp the effort to the target model's supported set so a stale/foreign
+  // value (e.g. a Claude-only "max" left on a codex thread) is never forwarded
+  // and rejected with a 400 — the same guard the local composer applies.
+  const outgoingEffort = resolveOutgoingEffort({
+    override: effort,
+    models: state.session?.available_models || [],
+    model: model || state.session?.model || "",
+  });
+
   try {
     await dispatchOrRecover("send_message", {
       input: {
         text,
         model,
-        effort,
+        effort: outgoingEffort,
         thread_id: threadId,
       },
     });
