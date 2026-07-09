@@ -198,7 +198,13 @@ async function waitForTerminalReview(relayPort, jobId, timeoutMs = TIMEOUT_MS) {
   let lastStatus = "(none)";
   while (Date.now() < deadline) {
     const reviews = await fetchEnvelope(relayPort, "/api/session/reviews");
-    const job = (reviews.data || []).find((entry) => entry.id === jobId);
+    assert.ok(reviews.ok, `review list failed: ${JSON.stringify(reviews.error)}`);
+    const jobs = Array.isArray(reviews.data) ? reviews.data : reviews.data?.review_jobs || [];
+    assert.ok(
+      Array.isArray(jobs),
+      `review list returned an unexpected payload: ${JSON.stringify(reviews.data)}`
+    );
+    const job = jobs.find((entry) => entry.id === jobId);
     if (job) {
       lastStatus = job.status;
       if (terminal.has(job.status)) {
