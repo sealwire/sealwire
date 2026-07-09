@@ -37,7 +37,13 @@ if (!relayServerBinary) {
     "No prebuilt relay-server binary was found, and Rust/Cargo is required for the source fallback."
   );
 }
-ensureCommand("codex", "The Codex CLI must be installed and logged in before starting sealwire.");
+if (!hasCommand("codex")) {
+  console.warn(
+    "sealwire: Codex CLI not found on PATH — Codex sessions will be unavailable. " +
+      "Install and log in to the Codex CLI to enable them. " +
+      "Claude Code sessions run via the bundled worker (requires Claude auth)."
+  );
+}
 
 const brokerOrigin =
   args.broker ||
@@ -56,6 +62,16 @@ const env = {
   RELAY_BROKER_PEER_ID: process.env.RELAY_BROKER_PEER_ID || defaultPeerId(),
   CARGO_TARGET_DIR: process.env.CARGO_TARGET_DIR || defaultCargoTargetDir(),
 };
+
+// Point the relay-server at the Claude worker shipped inside this package.
+// Without this, the binary falls back to a compile-time path baked in at build
+// time (the CI machine's checkout), which never exists on a user's machine —
+// so Claude Code sessions would silently fail. Respect a user-provided override
+// (already carried in via ...process.env above).
+const packagedClaudeWorker = path.join(packageRoot, "claude-worker", "worker.mjs");
+if (!process.env.CLAUDE_WORKER_PATH && existsSync(packagedClaudeWorker)) {
+  env.CLAUDE_WORKER_PATH = packagedClaudeWorker;
+}
 
 if (brokerConfig) {
   env.RELAY_BROKER_URL = process.env.RELAY_BROKER_URL || brokerConfig.websocketUrl;
@@ -185,11 +201,15 @@ function normalizeBrokerOrigin(value) {
 }
 
 function ensureCommand(command, message) {
-  const result = spawnSync(command, ["--version"], { stdio: "ignore" });
-  if (result.error?.code === "ENOENT") {
+  if (!hasCommand(command)) {
     console.error(`sealwire: ${message}`);
     process.exit(1);
   }
+}
+
+function hasCommand(command) {
+  const result = spawnSync(command, ["--version"], { stdio: "ignore" });
+  return result.error?.code !== "ENOENT";
 }
 
 function resolveRelayServerBinary() {

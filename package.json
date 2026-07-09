@@ -21,6 +21,16 @@
     "LICENSE",
     "README.md",
     "crates/**",
+    "claude-worker/worker.mjs",
+    "claude-worker/protocol.mjs",
+    "claude-worker/sdk-mapping.mjs",
+    "claude-worker/session-options.mjs",
+    "claude-worker/session-page.mjs",
+    "claude-worker/progress-tracker.mjs",
+    "claude-worker/permissions.mjs",
+    "claude-worker/ask-user-question.mjs",
+    "claude-worker/file-diff.mjs",
+    "claude-worker/package.json",
     "scripts/sealwire.mjs",
     "web/**"
   ],
@@ -91,20 +101,21 @@
     "test:browser:public:fake": "node scripts/e2e/run-browser-suite.mjs --suite public-full --fake"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.156"
+  },
+  "devDependencies": {
     "@noble/hashes": "^2.0.1",
     "@tanstack/query-core": "^5.100.6",
     "@tanstack/virtual-core": "^3.14.0",
+    "eslint": "^9.39.4",
+    "globals": "^17.6.0",
+    "playwright": "^1.58.2",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
     "react-markdown": "^9.1.0",
     "remark-gfm": "^4.0.1",
     "tweetnacl": "^1.0.3",
+    "vite": "^7.2.1",
     "zustand": "^5.0.12"
-  },
-  "devDependencies": {
-    "eslint": "^9.39.4",
-    "globals": "^17.6.0",
-    "playwright": "^1.58.2",
-    "vite": "^7.2.1"
   }
 }
