@@ -15,9 +15,11 @@
 
 use tokio::time::{Duration, Instant};
 
+#[cfg(test)]
+use crate::protocol::ReviewJobView;
 use crate::protocol::{
-    RequestReviewInput, RequestReviewReceipt, ReviewDeleteReceipt, ReviewJobView,
-    TranscriptEntryKind, TranscriptEntryView,
+    RequestReviewInput, RequestReviewReceipt, ReviewDeleteReceipt, TranscriptEntryKind,
+    TranscriptEntryView,
 };
 use crate::state::{
     parent_fix_prompt, parent_recap_prompt, parse_verdict, post_back_message, re_review_prompt,
@@ -344,6 +346,7 @@ to this thread."
         })
     }
 
+    #[cfg(test)]
     pub async fn list_review_jobs(&self) -> Vec<ReviewJobView> {
         let relay = self.relay.read().await;
         relay.active_review_jobs_view()
@@ -1765,6 +1768,7 @@ reviewed thread stays locked. Resolve the review (stop the reviewer) to unlock."
     /// "working" thread, or one ignoring interrupts): it does NOT wait for a drain and
     /// never leaves the review `Blocked`. The cooperative cancel flag stops the
     /// orchestrator from starting another turn.
+    #[cfg(test)]
     pub async fn cancel_active_review(
         &self,
         device_id: Option<String>,
@@ -1863,6 +1867,7 @@ reviewed thread stays locked. Resolve the review (stop the reviewer) to unlock."
     /// turn can't be confirmed stopped (it does not wait for a drain), so the user is
     /// never left with a permanently-blocked review. No active-thread handoff (the parent
     /// was never displaced).
+    #[cfg(test)]
     pub async fn resolve_blocked_review(
         &self,
         device_id: Option<String>,

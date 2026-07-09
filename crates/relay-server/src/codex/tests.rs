@@ -1275,6 +1275,95 @@ fn resolve_codex_policy_translates_bypass_to_yolo_pair() {
 }
 
 #[test]
+fn codex_turn_start_carries_resolved_yolo_policy_per_turn() {
+    // Regression for "Codex YOLO still asks for permission": codex binds the
+    // approval policy only at thread/start & thread/resume, so a turn that
+    // reaches an app-server which never resumed this thread (relay restart,
+    // background thread, or a plain send that skips resume) would fall back to
+    // codex's config default and prompt. Every turn/start must re-assert the
+    // thread's current resolved policy. Mirrors Claude's
+    // `start_turn_sends_the_threads_current_permission_mode`.
+    let params = codex_turn_start_params(
+        "thread-1",
+        "hello",
+        "gpt-5-codex",
+        "medium",
+        Some(("bypass", "workspace-write")),
+    );
+
+    assert_eq!(params["threadId"], json!("thread-1"));
+    assert_eq!(params["input"][0]["text"], json!("hello"));
+    assert_eq!(
+        params["approvalPolicy"],
+        json!("never"),
+        "YOLO turn must carry approvalPolicy=never so codex never prompts"
+    );
+    assert_eq!(
+        params["sandboxPolicy"],
+        json!({ "type": "dangerFullAccess" }),
+        "YOLO turn must re-assert danger-full-access so a fresh/unloaded thread is not sandboxed"
+    );
+}
+
+#[test]
+fn codex_turn_start_reasserts_read_only_sandbox_per_turn() {
+    // read-only is a deliberate safety lockdown. The same unloaded-thread cases
+    // that drop the approval policy also drop the sandbox binding, so a saved
+    // read-only thread could otherwise run under codex's default (writable)
+    // sandbox after a restart/background send. The structured read-only policy
+    // has no config-derived writableRoots to preserve, so we can safely
+    // re-assert it every turn (network stays off, the restrictive direction).
+    let params = codex_turn_start_params(
+        "thread-1",
+        "hello",
+        "gpt-5-codex",
+        "medium",
+        Some(("on-request", "read-only")),
+    );
+
+    assert_eq!(params["approvalPolicy"], json!("on-request"));
+    assert_eq!(
+        params["sandboxPolicy"],
+        json!({ "type": "readOnly", "networkAccess": false }),
+        "read-only turn must re-assert the read-only sandbox so an unloaded thread cannot run writable"
+    );
+}
+
+#[test]
+fn codex_turn_start_leaves_workspace_write_sandbox_to_thread_binding() {
+    // Non-YOLO turns still re-assert the approval policy every turn (so prompting
+    // stays correct), but a workspace-write turn must NOT send a turn-level
+    // sandbox override: codex's structured SandboxPolicy would clobber the
+    // config-derived writableRoots that thread/start & thread/resume already
+    // bound. workspace-write's default fallback is equivalently permissive, so
+    // leaving it to the thread-level mode is safe.
+    let params = codex_turn_start_params(
+        "thread-1",
+        "hello",
+        "gpt-5-codex",
+        "medium",
+        Some(("on-request", "workspace-write")),
+    );
+
+    assert_eq!(params["approvalPolicy"], json!("on-request"));
+    assert!(
+        params.get("sandboxPolicy").is_none(),
+        "workspace-write turn must not override the sandbox: {params}"
+    );
+}
+
+#[test]
+fn codex_turn_start_omits_overrides_when_settings_are_unknown() {
+    // With no relay record for the thread, keep codex on whatever policy
+    // thread/start or thread/resume last bound (legacy behavior) rather than
+    // guessing.
+    let params = codex_turn_start_params("thread-1", "hello", "gpt-5-codex", "medium", None);
+
+    assert!(params.get("approvalPolicy").is_none(), "{params}");
+    assert!(params.get("sandboxPolicy").is_none(), "{params}");
+}
+
+#[test]
 fn resolve_codex_policy_passes_through_non_bypass_values() {
     assert_eq!(
         resolve_codex_policy("untrusted", "workspace-write"),
