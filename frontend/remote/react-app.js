@@ -91,6 +91,8 @@ import {
 } from "./transcript/details.js";
 import {
   captureTranscriptScrollSnapshot,
+  readTranscriptScrollPosition,
+  rememberTranscriptScrollPosition,
   restoreTranscriptScrollPosition,
 } from "./transcript-scroll.js";
 import { ensureProviderModels, fetchModelsWithRetry } from "./provider-model-fetch.js";
@@ -1943,6 +1945,7 @@ function RemoteTranscriptPanel({
     entries: [],
   });
   const anchoredUserIdsRef = useRef(new Map()); // threadId -> Set<userId>
+  const scrollPositionsRef = useRef(new Map()); // relayId:threadId -> scrollTop
 
   const approval = sessionView?.approval || null;
   const entries = session?.transcript || [];
@@ -1966,32 +1969,63 @@ function RemoteTranscriptPanel({
 
     const previous = previousRenderRef.current;
     const remoteThreadId = session?.active_thread_id || null;
-    // Reset anchored set when the active thread changes; otherwise carry it
-    // forward so already-anchored user messages don't re-trigger anchor-user
-    // on intermediate snapshots (mid-hydration, transient subset renders).
-    if (previous?.activeThreadId && previous.activeThreadId !== remoteThreadId) {
-      anchoredUserIdsRef.current.delete(previous.activeThreadId);
+    const remoteScrollKey = remoteThreadId
+      ? `${currentState.activeRelayId || "-"}:${remoteThreadId}`
+      : null;
+    let restoredScrollTop = null;
+    if (previous?.scrollKey && previous.scrollKey !== remoteScrollKey) {
+      const evictedScrollKey = rememberTranscriptScrollPosition(
+        scrollPositionsRef.current,
+        previous.scrollKey,
+        transcript
+      );
+      if (evictedScrollKey) {
+        anchoredUserIdsRef.current.delete(evictedScrollKey);
+      }
+      restoredScrollTop = readTranscriptScrollPosition(
+        scrollPositionsRef.current,
+        remoteScrollKey
+      );
     }
     const anchorsForThread =
-      anchoredUserIdsRef.current.get(remoteThreadId) || new Set();
+      anchoredUserIdsRef.current.get(remoteScrollKey) || new Set();
     const action = restoreTranscriptScrollPosition({
       alreadyAnchoredUserIds: anchorsForThread,
       nextEntries: entries,
       nextThreadId: remoteThreadId,
       previousSnapshot: previous,
+      restoredScrollTop,
       scrollElement: transcript,
     });
     if (action?.kind === "anchor-user" && action.userEntryId) {
       anchorsForThread.add(action.userEntryId);
-      anchoredUserIdsRef.current.set(remoteThreadId, anchorsForThread);
+      anchoredUserIdsRef.current.set(remoteScrollKey, anchorsForThread);
     }
 
-    previousRenderRef.current = captureTranscriptScrollSnapshot({
-      entries,
-      scrollElement: transcript,
-      threadId: remoteThreadId,
-    });
+    const rememberCurrentPosition = () => {
+      const evictedScrollKey = rememberTranscriptScrollPosition(
+        scrollPositionsRef.current,
+        remoteScrollKey,
+        transcript
+      );
+      if (evictedScrollKey) {
+        anchoredUserIdsRef.current.delete(evictedScrollKey);
+      }
+    };
+    rememberCurrentPosition();
+    transcript.addEventListener("scroll", rememberCurrentPosition, { passive: true });
+
+    previousRenderRef.current = {
+      ...captureTranscriptScrollSnapshot({
+        entries,
+        scrollElement: transcript,
+        threadId: remoteThreadId,
+      }),
+      scrollKey: remoteScrollKey,
+    };
     return () => {
+      rememberCurrentPosition();
+      transcript.removeEventListener("scroll", rememberCurrentPosition);
       setRemoteTranscriptElement(null);
     };
   });

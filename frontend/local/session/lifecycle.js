@@ -550,13 +550,6 @@ export function createLifecycleController(ctx) {
     }
     if (snapshot?.active_thread_id !== previousThreadId) {
       state.localUiStore.getState().clearTranscriptDetailLoading();
-      // Scroll state belongs to the previous thread — drop it when the
-      // active thread actually changes so the new thread starts fresh
-      // (jump-to-bottom on first render of the new conversation).
-      state.localTranscriptScrollSnapshot = null;
-      if (state.localTranscriptScrollAnchors && previousThreadId) {
-        state.localTranscriptScrollAnchors.delete(previousThreadId);
-      }
     }
 
     // Deferred-start Claude threads get promoted server-side when the first

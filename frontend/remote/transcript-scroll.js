@@ -9,6 +9,8 @@ export {
   decideTranscriptScrollAction,
   didPrependOlderTranscript,
   findLatestUserEntryId,
+  readTranscriptScrollPosition,
+  rememberTranscriptScrollPosition,
   restoreTranscriptScrollPosition,
   transcriptEntryIdentity,
 } from "../shared/transcript-scroll.js";
