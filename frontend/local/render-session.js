@@ -104,6 +104,8 @@ import {
 import { TranscriptPane } from "../shared/transcript-pane.js";
 import {
   captureTranscriptScrollSnapshot,
+  readTranscriptScrollPosition,
+  rememberTranscriptScrollPosition,
   restoreTranscriptScrollPosition,
 } from "../shared/transcript-scroll.js";
 
@@ -1210,6 +1212,27 @@ export function createSessionRenderer({
     if (!state.localTranscriptScrollAnchors) {
       state.localTranscriptScrollAnchors = new Map();
     }
+    if (!state.localTranscriptScrollPositions) {
+      state.localTranscriptScrollPositions = new Map();
+    }
+    let restoredScrollTop = null;
+    if (
+      previousSnapshot?.activeThreadId
+      && previousSnapshot.activeThreadId !== localThreadId
+    ) {
+      const evictedThreadId = rememberTranscriptScrollPosition(
+        state.localTranscriptScrollPositions,
+        previousSnapshot.activeThreadId,
+        transcript
+      );
+      if (evictedThreadId) {
+        state.localTranscriptScrollAnchors.delete(evictedThreadId);
+      }
+      restoredScrollTop = readTranscriptScrollPosition(
+        state.localTranscriptScrollPositions,
+        localThreadId
+      );
+    }
     const anchorsForThread =
       state.localTranscriptScrollAnchors.get(localThreadId) || new Set();
 
@@ -1261,6 +1284,7 @@ export function createSessionRenderer({
       nextEntries: entries,
       nextThreadId: localThreadId,
       previousSnapshot,
+      restoredScrollTop,
       scrollElement: transcript,
     });
     if (action?.kind === "anchor-user" && action.userEntryId) {

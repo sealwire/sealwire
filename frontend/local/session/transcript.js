@@ -159,6 +159,9 @@ export function createTranscriptController(ctx) {
   function resetTranscriptHydrationState() {
     clearTranscriptHydration(state);
     state.transcriptPreserveScroll = false;
+    state.localTranscriptScrollSnapshot = null;
+    state.localTranscriptScrollPositions?.clear?.();
+    state.localTranscriptScrollAnchors?.clear?.();
   }
 
   function toggleTranscriptExpandKey(expandKey) {

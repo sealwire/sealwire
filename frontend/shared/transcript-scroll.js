@@ -20,6 +20,31 @@
 
 export const TOP_SCROLL_PRESERVE_THRESHOLD_PX = 80;
 export const LATEST_USER_MESSAGE_ATTR = "data-latest-user-message";
+export const MAX_RETAINED_TRANSCRIPT_SCROLL_THREADS = 10;
+
+export function rememberTranscriptScrollPosition(cache, threadId, scrollElement) {
+  if (!(cache instanceof Map) || !threadId || !scrollElement) {
+    return null;
+  }
+  cache.delete(threadId);
+  cache.set(threadId, Math.max(0, Number(scrollElement.scrollTop) || 0));
+  let evictedThreadId = null;
+  while (cache.size > MAX_RETAINED_TRANSCRIPT_SCROLL_THREADS) {
+    evictedThreadId = cache.keys().next().value;
+    cache.delete(evictedThreadId);
+  }
+  return evictedThreadId;
+}
+
+export function readTranscriptScrollPosition(cache, threadId) {
+  if (!(cache instanceof Map) || !threadId || !cache.has(threadId)) {
+    return null;
+  }
+  const scrollTop = cache.get(threadId);
+  cache.delete(threadId);
+  cache.set(threadId, scrollTop);
+  return scrollTop;
+}
 
 export function findLatestUserEntryId(entries) {
   if (!Array.isArray(entries)) return null;
@@ -76,6 +101,7 @@ export function decideTranscriptScrollAction({
   nextEntries = [],
   nextThreadId = null,
   previousSnapshot = null,
+  restoredScrollTop = null,
   scrollElement,
 }) {
   if (!scrollElement) {
@@ -89,9 +115,14 @@ export function decideTranscriptScrollAction({
   const nextLatestUserId = findLatestUserEntryId(nextEntries);
 
   // Thread switch (or first ever view): land the user at the latest message
-  // so the conversation reads top-to-bottom. Without this, they'd open a
-  // freshly resumed thread at the top and have to scroll down themselves.
+  // on first visit, but restore the exact retained offset on switch-back.
   if (!prevThreadId || prevThreadId !== nextThreadId) {
+    if (Number.isFinite(restoredScrollTop)) {
+      return {
+        kind: "restore-thread",
+        scrollTop: Math.max(0, restoredScrollTop),
+      };
+    }
     return {
       kind: "jump-bottom",
       scrollTop: Math.max(0, liveScrollHeight - clientHeight),
@@ -132,7 +163,11 @@ export function decideTranscriptScrollAction({
 export function applyTranscriptScrollAction(action, scrollElement) {
   if (!action || !scrollElement) return;
 
-  if (action.kind === "jump-bottom" || action.kind === "anchor-prepend") {
+  if (
+    action.kind === "jump-bottom"
+    || action.kind === "anchor-prepend"
+    || action.kind === "restore-thread"
+  ) {
     if (typeof action.scrollTop === "number") {
       scrollElement.scrollTop = action.scrollTop;
     }
@@ -160,6 +195,7 @@ export function restoreTranscriptScrollPosition({
   nextEntries = [],
   nextThreadId = null,
   previousSnapshot = null,
+  restoredScrollTop = null,
   scrollElement,
 }) {
   if (!scrollElement) {
@@ -170,6 +206,7 @@ export function restoreTranscriptScrollPosition({
     nextEntries,
     nextThreadId,
     previousSnapshot,
+    restoredScrollTop,
     scrollElement,
   });
   applyTranscriptScrollAction(action, scrollElement);

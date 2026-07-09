@@ -3,12 +3,15 @@ import assert from "node:assert/strict";
 
 import {
   LATEST_USER_MESSAGE_ATTR,
+  MAX_RETAINED_TRANSCRIPT_SCROLL_THREADS,
   TOP_SCROLL_PRESERVE_THRESHOLD_PX,
   applyTranscriptScrollAction,
   captureTranscriptScrollSnapshot,
   decideTranscriptScrollAction,
   didPrependOlderTranscript,
   findLatestUserEntryId,
+  readTranscriptScrollPosition,
+  rememberTranscriptScrollPosition,
   restoreTranscriptScrollPosition,
 } from "./shared/transcript-scroll.js";
 
@@ -82,6 +85,34 @@ test("switching to a different thread snaps to bottom", () => {
     scrollElement: target,
   });
   assert.equal(action.kind, "jump-bottom");
+});
+
+test("switching back to a retained thread restores its exact scroll offset", () => {
+  const { target } = makeScrollElement({ scrollHeight: 3000, clientHeight: 400 });
+  const action = decideTranscriptScrollAction({
+    nextEntries: [userEntry("u1"), agentEntry("a1")],
+    nextThreadId: "thread-1",
+    previousSnapshot: {
+      activeThreadId: "thread-2",
+      entries: [userEntry("u2")],
+      scrollHeight: 1200,
+      scrollTop: 800,
+    },
+    restoredScrollTop: 437,
+    scrollElement: target,
+  });
+  assert.deepEqual(action, { kind: "restore-thread", scrollTop: 437 });
+});
+
+test("per-thread scroll positions use bounded LRU retention", () => {
+  const cache = new Map();
+  for (let index = 0; index <= MAX_RETAINED_TRANSCRIPT_SCROLL_THREADS; index += 1) {
+    rememberTranscriptScrollPosition(cache, `thread-${index}`, { scrollTop: index * 10 });
+  }
+  assert.equal(cache.has("thread-0"), false);
+  assert.equal(readTranscriptScrollPosition(cache, "thread-1"), 10);
+  assert.equal([...cache.keys()].at(-1), "thread-1", "reading refreshes LRU recency");
+  assert.equal(readTranscriptScrollPosition(cache, "missing"), null);
 });
 
 // --- new user message ------------------------------------------------------
@@ -216,6 +247,12 @@ test("applyTranscriptScrollAction anchor-prepend assigns scrollTop", () => {
   const { target } = makeScrollElement({ scrollTop: 0 });
   applyTranscriptScrollAction({ kind: "anchor-prepend", scrollTop: 2000 }, target);
   assert.equal(target.scrollTop, 2000);
+});
+
+test("applyTranscriptScrollAction restore-thread assigns the retained scrollTop", () => {
+  const { target } = makeScrollElement({ scrollTop: 0 });
+  applyTranscriptScrollAction({ kind: "restore-thread", scrollTop: 437 }, target);
+  assert.equal(target.scrollTop, 437);
 });
 
 test("applyTranscriptScrollAction anchor-user scrolls the marked element to top", () => {
