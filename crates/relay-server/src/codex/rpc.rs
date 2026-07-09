@@ -7,7 +7,7 @@ use tokio::{
     sync::RwLock,
     time::{timeout, Duration},
 };
-use tracing::info;
+use tracing::{debug, trace};
 
 use crate::state::{BrokerPendingMessage, PendingTranscriptDelta, RelayState, TranscriptDeltaKind};
 
@@ -287,7 +287,7 @@ async fn handle_notification_for_provider(
     let mut changed = false;
     let notification_thread_id = notification_thread_id(&params);
     if is_session_notification_method(method) {
-        info!(
+        trace!(
             method,
             notification_thread_id = notification_thread_id.as_deref().unwrap_or("-"),
             active_thread_id = relay.active_thread_id.as_deref().unwrap_or("-"),
@@ -578,7 +578,7 @@ async fn handle_notification_for_provider(
                         &turn_id,
                         crate::state::unix_now(),
                     );
-                    info!(
+                    trace!(
                         method,
                         thread_id = %bg_thread_id,
                         item_id = %item_id,
@@ -595,7 +595,7 @@ async fn handle_notification_for_provider(
                         .clone()
                         .or_else(|| relay.active_thread_id.clone())
                         .unwrap_or_default();
-                    info!(
+                    trace!(
                         method,
                         thread_id = %thread_id,
                         item_id = %item_id,
@@ -800,7 +800,7 @@ async fn handle_notification_for_provider(
                             .clone()
                             .or_else(|| relay.active_thread_id.clone())
                             .unwrap_or_default();
-                        info!(
+                        trace!(
                             method,
                             thread_id = %thread_id,
                             item_id = %item_id,
@@ -909,7 +909,7 @@ fn thread_belongs_to_provider(relay: &RelayState, thread_id: &str, provider_key:
 
 fn log_ignored_session_notification(method: &str, thread_id: Option<&str>, relay: &RelayState) {
     let transcript_entries = relay.snapshot().transcript.len();
-    info!(
+    debug!(
         method,
         notification_thread_id = thread_id.unwrap_or("-"),
         active_thread_id = relay.active_thread_id.as_deref().unwrap_or("-"),

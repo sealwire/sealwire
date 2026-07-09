@@ -412,22 +412,26 @@ impl CodexBridge {
         model: &str,
         effort: &str,
     ) -> Result<Option<String>, String> {
-        let result = self
-            .send_request(
-                "turn/start",
-                json!({
-                    "threadId": thread_id,
-                    "model": model,
-                    "effort": effort,
-                    "input": [
-                        {
-                            "type": "text",
-                            "text": text
-                        }
-                    ]
-                }),
-            )
-            .await?;
+        // Re-read the thread's CURRENT settings so every turn re-asserts its
+        // approval policy + sandbox (see `codex_turn_start_params`). Fall back to
+        // no override only when the relay has no record — codex then keeps
+        // whatever policy `thread/start` / `thread/resume` last bound.
+        let policy = {
+            let relay = self.state.read().await;
+            relay
+                .thread_settings(thread_id)
+                .map(|settings| (settings.approval_policy, settings.sandbox))
+        };
+        let params = codex_turn_start_params(
+            thread_id,
+            text,
+            model,
+            effort,
+            policy
+                .as_ref()
+                .map(|(approval, sandbox)| (approval.as_str(), sandbox.as_str())),
+        );
+        let result = self.send_request("turn/start", params).await?;
 
         Ok(value_at(&result, &["turn", "id"])
             .and_then(Value::as_str)
@@ -470,6 +474,72 @@ fn resolve_codex_policy<'a>(approval_policy: &'a str, sandbox: &'a str) -> (&'a 
     } else {
         (approval_policy, sandbox)
     }
+}
+
+/// Build the `turn/start` params for codex. Beyond the message input, this
+/// re-asserts the thread's *current* (resolved) approval policy on EVERY turn.
+/// Codex only binds the approval policy at `thread/start` / `thread/resume`, so a
+/// turn that reaches an app-server which never resumed this thread — after a
+/// relay restart, on a background thread, or via a plain `send` that skips the
+/// resume — otherwise falls back to codex's own config default and starts
+/// prompting, defeating YOLO. Mirrors Claude's per-turn `permissionMode`.
+fn codex_turn_start_params(
+    thread_id: &str,
+    text: &str,
+    model: &str,
+    effort: &str,
+    policy: Option<(&str, &str)>,
+) -> Value {
+    let mut params = json!({
+        "threadId": thread_id,
+        "model": model,
+        "effort": effort,
+        "input": [
+            {
+                "type": "text",
+                "text": text
+            }
+        ]
+    });
+
+    if let Some((approval_policy, sandbox)) = policy {
+        let (approval_policy, sandbox) = resolve_codex_policy(approval_policy, sandbox);
+        let object = params
+            .as_object_mut()
+            .expect("turn/start params is a json object");
+        // `AskForApproval` is the same shape codex accepts on turn/start, so the
+        // resolved policy string ("never", "on-request", …) rides through as-is.
+        object.insert("approvalPolicy".to_string(), json!(approval_policy));
+        // Codex's turn-level sandbox override is the structured `SandboxPolicy`,
+        // not the `SandboxMode` string used by thread/start. We only re-assert the
+        // two policies that have no config-derived fields to preserve, so a
+        // fresh/unloaded thread (relay restart, background thread, or a send that
+        // skips resume) can't drift to codex's default sandbox:
+        //   • `danger-full-access` — YOLO: the whole point is "no restrictions".
+        //   • `read-only` — a deliberate lockdown; its structured form carries no
+        //     writableRoots, and network stays off (the restrictive direction).
+        // `workspace-write` is intentionally left to the mode bound at
+        // thread/start & thread/resume: reconstructing its `writableRoots` /
+        // network access from config would clobber what codex derived, and its
+        // default fallback is equivalently permissive anyway.
+        match sandbox {
+            "danger-full-access" => {
+                object.insert(
+                    "sandboxPolicy".to_string(),
+                    json!({ "type": "dangerFullAccess" }),
+                );
+            }
+            "read-only" => {
+                object.insert(
+                    "sandboxPolicy".to_string(),
+                    json!({ "type": "readOnly", "networkAccess": false }),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    params
 }
 
 fn parse_thread_summary(thread: &Value) -> Result<ThreadSummaryView, String> {
