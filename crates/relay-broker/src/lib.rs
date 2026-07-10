@@ -1,9 +1,14 @@
 pub mod auth;
+pub mod events;
 pub mod join_ticket;
 pub mod protocol;
 pub mod public_control;
 mod state;
 
+pub use events::{
+    usage_event_sink_from_env, FileUsageEventSink, UsageEvent, UsageEventKind, UsageEventSink,
+    USAGE_EVENTS_PATH_ENV,
+};
 pub use state::BrokerState;
 
 use std::path::PathBuf;

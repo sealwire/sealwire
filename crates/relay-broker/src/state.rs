@@ -3,11 +3,15 @@ use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{mpsc, Mutex};
 use tracing::{info, warn};
 
+use crate::events::{UsageEvent, UsageEventKind, UsageEventSink};
 use crate::protocol::{PeerRole, PeerSummary, PresenceKind, ServerMessage};
 
 #[derive(Clone, Default)]
 pub struct BrokerState {
     inner: Arc<Mutex<Inner>>,
+    /// Optional usage event stream. `None` disables usage logging (the default,
+    /// e.g. in tests and when the env var is unset).
+    events: Option<Arc<dyn UsageEventSink>>,
 }
 
 #[derive(Default)]
@@ -32,6 +36,29 @@ pub struct JoinResult {
 }
 
 impl BrokerState {
+    /// Build state that records usage events to the given sink.
+    pub fn with_event_sink(sink: Arc<dyn UsageEventSink>) -> Self {
+        Self {
+            inner: Arc::default(),
+            events: Some(sink),
+        }
+    }
+
+    /// Build state, enabling usage event logging when the environment
+    /// configures it (see [`crate::events::USAGE_EVENTS_PATH_ENV`]).
+    pub fn from_env() -> Self {
+        match crate::events::usage_event_sink_from_env() {
+            Some(sink) => Self::with_event_sink(sink),
+            None => Self::default(),
+        }
+    }
+
+    fn record_event(&self, event: UsageEvent) {
+        if let Some(sink) = &self.events {
+            sink.record(event);
+        }
+    }
+
     pub async fn join(
         &self,
         channel_id: &str,
@@ -84,6 +111,14 @@ impl BrokerState {
             },
         );
 
+        self.record_event(UsageEvent::new(
+            UsageEventKind::Connect,
+            channel_id,
+            peer_id,
+            role,
+            joined_peer.device_id,
+        ));
+
         Ok(JoinResult {
             existing_peers,
             receiver: rx,
@@ -114,6 +149,14 @@ impl BrokerState {
             });
         }
 
+        self.record_event(UsageEvent::new(
+            UsageEventKind::Disconnect,
+            channel_id,
+            peer_id,
+            left_peer.role,
+            left_peer.device_id,
+        ));
+
         if room.peers.is_empty() {
             inner.rooms.remove(channel_id);
         }
@@ -136,15 +179,29 @@ impl BrokerState {
             ));
         }
 
-        let sender_role = room
+        let sender_handle = room
             .peers
             .get(from_peer_id)
-            .expect("sender should exist in room")
-            .role;
+            .expect("sender should exist in room");
+        let sender_role = sender_handle.role;
+        let sender_device_id = sender_handle.device_id.clone();
         let outbound_payload_kind = payload_kind(&payload).to_string();
+
+        // Built now (while the sender is known) but only recorded once the
+        // publish is accepted below, so the usage stream counts delivered
+        // activity rather than malformed frames that fail validation.
+        let publish_event = UsageEvent::new(
+            UsageEventKind::Publish,
+            channel_id,
+            from_peer_id,
+            sender_role,
+            sender_device_id,
+        )
+        .with_payload_kind(outbound_payload_kind.clone());
 
         if is_targeted_messages_payload(&payload) {
             let targeted = parse_targeted_messages_payload(payload)?;
+            self.record_event(publish_event);
             let target_count = targeted.messages.len();
             let inner_kinds = targeted
                 .messages
@@ -205,6 +262,8 @@ impl BrokerState {
             );
             return Ok(());
         }
+
+        self.record_event(publish_event);
 
         let mut recipient_count = 0usize;
         let mut delivered_count = 0usize;
