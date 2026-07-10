@@ -1324,6 +1324,7 @@ export function createSessionRenderer({
       threadsList,
       h(ThreadGroupList, {
         activeThreadId: viewedThreadId,
+        contextMenuThreadId: openCtxThreadId,
         emptyMessage: "Start or open a session to build workspace groups.",
         expandedGroupCwds: threadListUi.expandedGroupCwds || new Set(),
         formatThreadMeta(thread) {

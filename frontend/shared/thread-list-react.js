@@ -30,6 +30,7 @@ export function ThreadGroupList({
   activeThreadId = null,
   collapsedGroupCwds = new Set(),
   collapsible = false,
+  contextMenuThreadId = null,
   emptyMessage = "No saved threads yet.",
   expandedGroupCwds = new Set(),
   formatThreadMeta = (thread) => thread.updated_at || "",
@@ -95,6 +96,7 @@ export function ThreadGroupList({
           },
           h(ThreadListRow, {
             activeThreadId,
+            contextMenuThreadId,
             formatThreadMeta,
             includePreview,
             normalizedSelectedCwd,
@@ -116,6 +118,7 @@ export function ThreadGroupList({
 
 function ThreadListRow({
   activeThreadId,
+  contextMenuThreadId,
   formatThreadMeta,
   includePreview,
   normalizedSelectedCwd,
@@ -153,6 +156,7 @@ function ThreadListRow({
       active: activeThreadId === row.thread.id,
       activity: threadActivity?.get?.(row.thread.id) || null,
       attentionKind: threadAttention?.get?.(row.thread.id) || null,
+      contextMenuThreadId,
       formatThreadMeta,
       group: row.group,
       includePreview,
@@ -328,10 +332,11 @@ function ThreadGroupHeader({
   );
 }
 
-function ThreadGroupItem({
+export function ThreadGroupItem({
   active,
   activity = null,
   attentionKind = null,
+  contextMenuThreadId = null,
   formatThreadMeta,
   group,
   includePreview,
@@ -346,11 +351,18 @@ function ThreadGroupItem({
   // Three-state dot: needs_input (amber) > working (pulse) > completed (blue).
   // See selectThreadDot for why needs_input outranks the live-turn pulse.
   const dot = selectThreadDot({ activity, attentionKind });
+  // The right-click highlight must be React-owned: the thread list re-renders on
+  // every SSE/activity tick, and a re-render that recomputes this button's
+  // className (active flips, virtualizer remounts the row, ...) would otherwise
+  // strip the `is-context-target` class that app.js sets imperatively — leaving
+  // the row highlight flickering off while the menu is still open. Driving the
+  // class from the store's context-menu target keeps it stable across renders.
+  const isContextTarget = contextMenuThreadId === thread.id;
 
   return h(
     "button",
     {
-      className: `conversation-item${active ? " is-active" : ""}`,
+      className: `conversation-item${active ? " is-active" : ""}${isContextTarget ? " is-context-target" : ""}`,
       "data-thread-cwd": group.cwd,
       "data-thread-id": thread.id,
       "data-thread-provider": thread.provider || "",
