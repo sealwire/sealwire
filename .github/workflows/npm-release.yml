@@ -21,8 +21,13 @@ jobs:
             runner: macos-14
             cargo_target: aarch64-apple-darwin
             executable: relay-server
+          # Cross-compile the Intel binary on an Apple Silicon runner. macos-13
+          # (Intel) runners are scarce and queue for a long time / are being
+          # retired; Apple->Apple cross-compilation needs no extra linker, and
+          # cc-built C deps (e.g. rusqlite bundled) pick up `-arch x86_64`
+          # automatically from the target triple.
           - target: darwin-x64
-            runner: macos-13
+            runner: macos-14
             cargo_target: x86_64-apple-darwin
             executable: relay-server
           - target: linux-arm64
