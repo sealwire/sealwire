@@ -1,13 +1,15 @@
 pub mod auth;
+pub mod blocklist;
 pub mod events;
 pub mod join_ticket;
 pub mod protocol;
 pub mod public_control;
 mod state;
 
+pub use blocklist::{Blocklist, BANNED_IPS_POSTGRES_URL_ENV};
 pub use events::{
-    usage_event_sink_from_env, FileUsageEventSink, UsageEvent, UsageEventKind, UsageEventSink,
-    USAGE_EVENTS_PATH_ENV,
+    usage_event_sink_from_env, FileUsageEventSink, PostgresUsageEventSink, UsageEvent,
+    UsageEventKind, UsageEventSink, USAGE_EVENTS_PATH_ENV, USAGE_EVENTS_POSTGRES_URL_ENV,
 };
 pub use state::BrokerState;
 
@@ -26,7 +28,7 @@ use axum::{
         ws::{Message, WebSocket},
         Path, Query, Request, State, WebSocketUpgrade,
     },
-    http::{header, HeaderMap, HeaderValue, StatusCode},
+    http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -92,6 +94,7 @@ pub async fn app(state: BrokerState) -> Router {
         warn!(%error, "invalid broker security header config; HSTS will stay disabled");
         SecurityHeadersConfig::default()
     });
+    let ban_guard = BanGuard::from_env().await;
     app_with_web_root_and_verifier_and_hardening(
         state,
         default_web_root(),
@@ -99,6 +102,93 @@ pub async fn app(state: BrokerState) -> Router {
         hardening,
         security_headers,
     )
+    .layer(middleware::from_fn_with_state(ban_guard, reject_banned_ips))
+}
+
+const TRUSTED_CLIENT_IP_HEADER_ENV: &str = "RELAY_BROKER_TRUSTED_CLIENT_IP_HEADER";
+
+/// The blocklist plus how to find the real client IP. Behind a reverse proxy the
+/// TCP socket IP is the proxy's, not the client's, so the operator opts in to a
+/// trusted forwarded header the proxy sets (e.g. `cf-connecting-ip`, `x-real-ip`,
+/// `x-forwarded-for`). When unset we use the socket IP — correct for direct
+/// connections and local dev. We never trust a forwarded header unless it is
+/// explicitly configured, so a client cannot fake its IP by default.
+#[derive(Clone)]
+struct BanGuard {
+    blocklist: Blocklist,
+    trusted_ip_header: Option<HeaderName>,
+}
+
+impl BanGuard {
+    async fn from_env() -> Self {
+        let blocklist = Blocklist::from_env().await;
+        let trusted_ip_header =
+            trimmed_option_string(std::env::var(TRUSTED_CLIENT_IP_HEADER_ENV).ok()).and_then(
+                |name| match HeaderName::try_from(name.to_ascii_lowercase()) {
+                    Ok(header) => Some(header),
+                    Err(_) => {
+                        warn!(header = %name, "invalid {TRUSTED_CLIENT_IP_HEADER_ENV}; using socket ip");
+                        None
+                    }
+                },
+            );
+        Self {
+            blocklist,
+            trusted_ip_header,
+        }
+    }
+
+    /// Resolve the client IP: the trusted forwarded header when configured,
+    /// otherwise the TCP socket IP. For a multi-value header (e.g.
+    /// `x-forwarded-for`) we take the rightmost entry — the one appended by the
+    /// trusted proxy directly in front of the broker — so a client cannot spoof
+    /// it by prepending values.
+    fn client_ip(&self, headers: &HeaderMap, socket_ip: IpAddr) -> IpAddr {
+        if let Some(name) = &self.trusted_ip_header {
+            // Consider every field line of the header (a proxy may append a
+            // second `X-Forwarded-For:` line instead of editing the first) and
+            // take the last parseable address across all of them — the one the
+            // trusted proxy directly in front of us appended. A client cannot
+            // spoof it by prepending earlier values.
+            if let Some(ip) = headers
+                .get_all(name)
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .flat_map(|value| value.split(','))
+                .filter_map(|entry| entry.trim().parse::<IpAddr>().ok())
+                .last()
+            {
+                return ip;
+            }
+        }
+        socket_ip
+    }
+}
+
+/// Middleware that rejects any request from a banned IP with 403 before it can
+/// reach the control-plane or WebSocket handlers. Fail-open: an empty/disabled
+/// blocklist bans nothing.
+async fn reject_banned_ips(
+    State(guard): State<BanGuard>,
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    let client_ip = guard.client_ip(request.headers(), remote_addr.ip());
+    if client_ip != remote_addr.ip() {
+        // Behind a trusted proxy the socket IP is the proxy's. Rewrite ConnectInfo
+        // so every downstream per-IP check — this ban check plus the per-IP rate
+        // limits, join limits, and connection tracker in the handlers — keys on
+        // the real client IP instead of the shared proxy IP.
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::new(client_ip, remote_addr.port())));
+    }
+    if guard.blocklist.is_banned(client_ip) {
+        debug!(%client_ip, "rejecting request from banned ip");
+        return (StatusCode::FORBIDDEN, "forbidden").into_response();
+    }
+    next.run(request).await
 }
 
 fn summarize_published_payload(payload: &serde_json::Value) -> String {

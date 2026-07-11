@@ -1776,3 +1776,83 @@ fn decode_base64_array<const N: usize>(
 fn relay_enrollment_challenge_message(challenge_id: &str, challenge: &str) -> String {
     format!("agent-relay:relay-enroll:{challenge_id}:{challenge}")
 }
+
+#[cfg(test)]
+mod postgres_round_trip_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// Live-Postgres round-trip: a relay registration written by one instance
+    /// must survive a "restart" and load in a fresh instance against the same
+    /// database. Closes the gap that the JSON path was the only backend with
+    /// automated coverage.
+    ///
+    /// Env-gated so plain `cargo test` stays offline. Run against a throwaway DB:
+    ///   RELAY_BROKER_TEST_POSTGRES_URL=postgres://sealwire:dev@127.0.0.1:5433/sealwire \
+    ///     cargo test -p relay-broker postgres_relay_registration -- --nocapture
+    #[tokio::test]
+    async fn postgres_relay_registration_persists_across_reload() {
+        let Some(url) = trimmed_option_string(std::env::var("RELAY_BROKER_TEST_POSTGRES_URL").ok())
+        else {
+            eprintln!(
+                "skipping postgres round-trip: set RELAY_BROKER_TEST_POSTGRES_URL to a live DB"
+            );
+            return;
+        };
+
+        let issuer = Some("test-issuer-secret".to_string());
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let verify_key = format!("test-verify-key-{unique}");
+
+        // Plane A writes a relay registration -> exercises the Postgres SAVE path.
+        let plane_a = PublicControlPlane::from_parts_with_postgres(
+            issuer.clone(),
+            None,
+            None,
+            Some(url.clone()),
+            None,
+            None,
+        )
+        .await
+        .expect("plane A should connect to postgres");
+        let enrolled = plane_a
+            .issue_relay_registration_for_verify_key(&verify_key, Some("round-trip".to_string()))
+            .await
+            .expect("registration should save to postgres");
+
+        // Plane B is a brand-new instance against the same DB; its constructor
+        // load()s from Postgres -> exercises the LOAD path after a "restart".
+        let plane_b =
+            PublicControlPlane::from_parts_with_postgres(issuer, None, None, Some(url), None, None)
+                .await
+                .expect("plane B should connect to postgres");
+
+        let loaded = plane_b
+            .inner
+            .state
+            .lock()
+            .await
+            .registration_for_verify_key(&verify_key)
+            .expect("registration written by plane A must survive reload in plane B");
+
+        // Clean up this run's unique registration before asserting, so repeated
+        // runs against a shared dev database stay tidy even on failure.
+        {
+            let mut guard = plane_a.inner.state.lock().await;
+            guard.remove_relay_registration_by_verify_key(&verify_key);
+            plane_a
+                .inner
+                .persistence
+                .save(&guard)
+                .await
+                .expect("cleanup save should succeed");
+        }
+
+        assert_eq!(loaded.relay_id, enrolled.relay_id);
+        assert_eq!(loaded.broker_room_id, enrolled.broker_room_id);
+        assert_eq!(loaded.relay_label.as_deref(), Some("round-trip"));
+    }
+}

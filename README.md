@@ -12,7 +12,7 @@ session.
 - Default `private` mode keeps the broker as blind transport: it relays
   encrypted traffic, it doesn't read your prompts, approvals, or code
 - **Rust** backend (`relay-server` + `relay-broker`), Node-based Claude Code
-  worker, Vite web UI — self-hosted, single-owner, run from source today
+  worker, Vite web UI — install with `npx sealwire` on macOS, or run from source
   ([Quick start ↓](#quick-start))
 
 ---
@@ -36,18 +36,54 @@ execution:
 
 ## Quick start
 
-Today `sealwire` runs from source. A published `npx sealwire` package
-is planned but not on npm yet, so the steps below are the supported path.
+The fastest path is the published npm package. On macOS it ships a prebuilt
+`relay-server` binary with the web UI embedded, so you don't need the Rust
+toolchain:
 
-You will need:
+```bash
+npx sealwire
+```
+
+That starts a **localhost-only** relay at <http://localhost:8787>. To pair a
+phone or remote browser through the hosted public broker, point it at the
+broker:
+
+```bash
+npx sealwire --broker wss://agent-relay.up.railway.app
+```
+
+You still need agent auth for whichever provider you use:
+
+- **Codex** — the [`codex`](https://github.com/openai/codex) CLI installed and
+  logged in
+- **Claude Code** — Claude auth only: an `ANTHROPIC_API_KEY`, or an existing
+  Claude Code login. The Claude worker (and its bundled Claude Code CLI) ships
+  inside the package, so the `claude` command does **not** need to be on your
+  PATH
+
+sealwire treats whatever directory you launched it from as your workspace root,
+and stores its state in `.agent-relay/` there. See [`npx sealwire`](#npx-sealwire)
+below for the full flag list.
+
+> **Linux / Windows:** prebuilt binaries are temporarily disabled while those
+> platforms are untested. `npx sealwire` still works there, but it falls back to
+> building `relay-server` from source, which needs the Rust toolchain — the same
+> as the [from-source](#run-from-source) path below.
+
+### Run from source
+
+Running from source is the path for contributors, or for any platform without a
+prebuilt binary. You will need:
 
 - **Rust toolchain** (`cargo`) — to build `relay-server`
 - **Node.js 18+** and `npm` — to build the web UI and run the Claude Code
   worker
-- **At least one agent CLI**, already installed and logged in:
-  - [`codex`](https://github.com/openai/codex) for Codex sessions, and/or
-  - [`claude`](https://docs.claude.com/en/docs/claude-code/overview)
-    for Claude Code sessions
+- **Agent auth** for whichever provider you use:
+  - Codex: the [`codex`](https://github.com/openai/codex) CLI installed and
+    logged in
+  - Claude Code: an `ANTHROPIC_API_KEY`, or an existing
+    [Claude Code](https://docs.claude.com/en/docs/claude-code/overview) login
+    (no separate `claude` CLI required)
 
 Then:
 
@@ -75,9 +111,6 @@ Open <http://localhost:8787> and pair a phone or remote browser from the
 Settings panel. If you only want a localhost-only setup with no remote pairing,
 use `npm run dev:restart:local` (no broker config needed) instead.
 
-The relay treats whatever directory you launched it from as your workspace
-root, and stores its state in `.agent-relay/` there.
-
 More detail on each piece — security model, what is and is not built, the full
 list of env vars, and the self-hosted broker option — is in the rest of this
 README and in [`DEPLOYMENT.md`](DEPLOYMENT.md).
@@ -90,7 +123,7 @@ privacy-first default.
 The recommended deployment shape today is:
 
 - keep `relay-server` on the workstation, VM, or jump host that already has the
-  local workspace and a logged-in `codex` and/or `claude` CLI
+  local workspace and a logged-in `codex` CLI and/or Claude auth
 - use the hosted public broker at <https://agent-relay.up.railway.app/> to pair
   phones and remote browsers without running broker infrastructure yourself, or
   self-host `relay-broker` if you prefer to keep that hop under your control
@@ -245,13 +278,17 @@ Longer-term, the plan is to grow from local-first control into:
 
 ## Run
 
-Requirements:
+The quickest path is `npx sealwire` (prebuilt macOS binary, no Rust needed) —
+see [Quick start](#quick-start). Running from source instead requires:
 
 - Rust toolchain (`cargo`)
 - Node.js 18+ and `npm`
-- at least one agent CLI, installed and logged in:
-  - `codex` CLI (for Codex sessions)
-  - `claude` CLI (for Claude Code sessions)
+
+Either way, you need agent auth for whichever provider you use:
+
+- Codex: the `codex` CLI, installed and logged in
+- Claude Code: an `ANTHROPIC_API_KEY`, or an existing Claude Code login (no
+  separate `claude` CLI required)
 
 The end-to-end build and run steps live in [Quick start](#quick-start) above.
 
@@ -259,31 +296,35 @@ Testing and CI coverage live in [`TESTING.md`](TESTING.md).
 Deployment guidance, including the self-hosted broker option, lives in
 [`DEPLOYMENT.md`](DEPLOYMENT.md).
 
-### Planned: `npx sealwire`
+### `npx sealwire`
 
-A single-command npm release is on the roadmap but **not yet published**. The
-wrapper script and `npm Release` GitHub Actions workflow already exist in the
-repo — the workflow builds prebuilt `relay-server` binaries for macOS, Linux,
-and Windows (with the web UI embedded), stages them under
-`bin/<platform>-<arch>/`, and publishes when `NPM_TOKEN` is configured.
-
-Once published, users will be able to skip the Rust toolchain entirely:
+`sealwire` is published on npm, so on macOS you can skip the Rust toolchain
+entirely:
 
 ```bash
 npx sealwire
 ```
 
-…with the CLI defaulting to the hosted public broker at
-<https://agent-relay.up.railway.app/>. Override flags will look like:
+The `npm Release` GitHub Actions workflow builds a prebuilt `relay-server`
+binary (with the web UI embedded), stages it under `bin/<platform>-<arch>/`,
+and publishes when `NPM_TOKEN` is configured. **Only macOS binaries
+(`darwin-arm64`, `darwin-x64`) ship today** — the Linux and Windows targets are
+temporarily commented out in the workflow while they're untested. On those
+platforms `npx sealwire` still runs, but it falls back to building
+`relay-server` from source via Cargo.
+
+By default `npx sealwire` starts a **localhost-only** relay; it does not attach
+to a broker unless you tell it to. Flags:
 
 ```bash
-sealwire --broker https://agent-relay.up.railway.app/
-sealwire --no-broker
-sealwire --host 127.0.0.1 --port 8787
+# pair remote devices through the hosted public broker
+sealwire --broker wss://agent-relay.up.railway.app
+
+sealwire --no-broker                    # explicit localhost-only
+sealwire --host 127.0.0.1 --port 8787   # bind address / port
 ```
 
-Until that release lands, use the from-source steps in
-[Quick start](#quick-start).
+You can also set `AGENT_RELAY_PUBLIC_BROKER_URL` instead of passing `--broker`.
 
 ### Minimal env vars (public broker)
 

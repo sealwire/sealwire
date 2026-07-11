@@ -7,9 +7,10 @@
 //! `device_id` / `peer_id` / `role`, so usage frequency and unique-device counts
 //! become simple queries over the resulting stream.
 //!
-//! Today the sink appends newline-delimited JSON to a file (cheap, dependency
-//! free, survives restarts). The [`UsageEventSink`] trait keeps this swappable:
-//! a Postgres-backed sink can slot in later without touching the hot path.
+//! Two backends implement the [`UsageEventSink`] trait: [`FileUsageEventSink`]
+//! appends newline-delimited JSON to a file, and [`PostgresUsageEventSink`]
+//! batches rows into a `usage_events` table. Both keep `record` non-blocking on
+//! the broker hot path; the environment selects which one is active.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,19 +20,29 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use relay_util::trimmed_option_string;
 use serde::Serialize;
+use sqlx::postgres::PgPoolOptions;
+use sqlx::{PgPool, Postgres, QueryBuilder};
 use tracing::{error, info, warn};
 
 use crate::protocol::PeerRole;
 
 /// Environment variable pointing at the newline-delimited JSON file that usage
-/// events are appended to. When unset, usage event logging stays disabled.
+/// events are appended to. When unset, file usage logging stays disabled.
 pub const USAGE_EVENTS_PATH_ENV: &str = "RELAY_BROKER_USAGE_EVENTS_PATH";
 
+/// Environment variable pointing at a Postgres URL for usage events. Point it at
+/// the same database as the control plane to get SQL analytics in one place.
+/// Takes precedence over [`USAGE_EVENTS_PATH_ENV`] when both are set.
+pub const USAGE_EVENTS_POSTGRES_URL_ENV: &str = "RELAY_BROKER_USAGE_EVENTS_POSTGRES_URL";
+
 /// Bounded capacity of the in-memory queue between the broker hot path and the
-/// file writer thread. Bounding it caps memory if the writer stalls (e.g. slow
-/// or full disk) on a public broker; excess events are dropped and counted
-/// rather than accumulating without limit. ~8k events is a small, fixed budget.
+/// writer. Bounding it caps memory if the writer stalls (e.g. slow or full disk,
+/// or a Postgres outage) on a public broker; excess events are dropped and
+/// counted rather than accumulating without limit. ~8k events is a small budget.
 const USAGE_EVENT_QUEUE_CAPACITY: usize = 8192;
+
+/// Max rows folded into a single multi-row INSERT by the Postgres writer.
+const USAGE_EVENT_BATCH_MAX: usize = 256;
 
 /// The kind of usage event observed at the broker.
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -43,6 +54,26 @@ pub enum UsageEventKind {
     Disconnect,
     /// A peer published a message (a unit of activity within a session).
     Publish,
+}
+
+impl UsageEventKind {
+    /// Stable column value; must match the serde `snake_case` name so the file
+    /// (NDJSON) and Postgres backends agree.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Connect => "connect",
+            Self::Disconnect => "disconnect",
+            Self::Publish => "publish",
+        }
+    }
+}
+
+/// Stable string for a peer role, matching `PeerRole`'s serde `snake_case` name.
+fn role_str(role: PeerRole) -> &'static str {
+    match role {
+        PeerRole::Relay => "relay",
+        PeerRole::Surface => "surface",
+    }
 }
 
 /// A single usage observation, ready to be persisted as one NDJSON row.
@@ -187,22 +218,157 @@ impl UsageEventSink for FileUsageEventSink {
     }
 }
 
-/// Build the usage event sink from the environment, if configured.
+/// Writes usage events into a Postgres `usage_events` table.
 ///
-/// Returns `None` (usage logging disabled) when [`USAGE_EVENTS_PATH_ENV`] is
-/// unset/blank or the file cannot be opened.
-pub fn usage_event_sink_from_env() -> Option<Arc<dyn UsageEventSink>> {
-    let path = trimmed_option_string(std::env::var(USAGE_EVENTS_PATH_ENV).ok())?;
-    match FileUsageEventSink::spawn(PathBuf::from(&path)) {
-        Ok(sink) => {
-            info!(path = %path, "broker usage event logging enabled");
-            Some(Arc::new(sink))
-        }
-        Err(error) => {
-            warn!(%error, path = %path, "failed to enable broker usage event logging");
-            None
+/// Same shape as [`FileUsageEventSink`]: `record` only does a non-blocking
+/// `try_send` onto a bounded queue; a background async task drains it and folds
+/// events into batched multi-row INSERTs. Overflow (queue full, or the writer
+/// stalled on a Postgres outage) is dropped and counted rather than blocking the
+/// broker hot path or growing memory without bound.
+pub struct PostgresUsageEventSink {
+    tx: tokio::sync::mpsc::Sender<UsageEvent>,
+    dropped: Arc<AtomicU64>,
+}
+
+impl PostgresUsageEventSink {
+    /// Connect to `url`, ensure the `usage_events` schema exists, and spawn the
+    /// batching writer task. Must be called inside a Tokio runtime.
+    pub async fn connect(url: &str) -> Result<Self, String> {
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .connect(url)
+            .await
+            .map_err(|error| {
+                format!("failed to connect to {USAGE_EVENTS_POSTGRES_URL_ENV}: {error}")
+            })?;
+        initialize_usage_events_schema(&pool).await?;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<UsageEvent>(USAGE_EVENT_QUEUE_CAPACITY);
+        tokio::spawn(async move {
+            while let Some(first) = rx.recv().await {
+                let mut batch = vec![first];
+                while batch.len() < USAGE_EVENT_BATCH_MAX {
+                    match rx.try_recv() {
+                        Ok(event) => batch.push(event),
+                        Err(_) => break,
+                    }
+                }
+                if let Err(error) = insert_usage_events(&pool, &batch).await {
+                    // Best-effort: a transient Postgres error drops this batch but
+                    // keeps the writer alive so logging resumes once it recovers.
+                    warn!(%error, count = batch.len(), "failed to write usage events to postgres; dropping batch");
+                }
+            }
+        });
+
+        Ok(Self {
+            tx,
+            dropped: Arc::new(AtomicU64::new(0)),
+        })
+    }
+
+    /// Total events dropped because the queue was full or the writer task exited.
+    pub fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+}
+
+impl UsageEventSink for PostgresUsageEventSink {
+    fn record(&self, event: UsageEvent) {
+        if self.tx.try_send(event).is_err() {
+            let dropped = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
+            if dropped.is_power_of_two() {
+                warn!(
+                    dropped,
+                    "broker usage event queue full or writer gone; dropping usage events"
+                );
+            }
         }
     }
+}
+
+async fn initialize_usage_events_schema(pool: &PgPool) -> Result<(), String> {
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS usage_events (
+            id BIGSERIAL PRIMARY KEY,
+            ts_ms BIGINT NOT NULL,
+            event TEXT NOT NULL,
+            channel_id TEXT NOT NULL,
+            peer_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            device_id TEXT,
+            payload_kind TEXT
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|error| format!("failed to create usage_events table: {error}"))?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS usage_events_ts_ms_idx ON usage_events (ts_ms)")
+        .execute(pool)
+        .await
+        .map_err(|error| format!("failed to create usage_events ts_ms index: {error}"))?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS usage_events_device_id_idx ON usage_events (device_id)",
+    )
+    .execute(pool)
+    .await
+    .map_err(|error| format!("failed to create usage_events device_id index: {error}"))?;
+    Ok(())
+}
+
+async fn insert_usage_events(pool: &PgPool, events: &[UsageEvent]) -> Result<(), sqlx::Error> {
+    if events.is_empty() {
+        return Ok(());
+    }
+    let mut builder = QueryBuilder::<Postgres>::new(
+        "INSERT INTO usage_events (ts_ms, event, channel_id, peer_id, role, device_id, payload_kind) ",
+    );
+    builder.push_values(events, |mut row, event| {
+        row.push_bind(i64::try_from(event.ts_ms).unwrap_or(i64::MAX))
+            .push_bind(event.event.as_str())
+            .push_bind(event.channel_id.as_str())
+            .push_bind(event.peer_id.as_str())
+            .push_bind(role_str(event.role))
+            .push_bind(event.device_id.as_deref())
+            .push_bind(event.payload_kind.as_deref());
+    });
+    builder.build().execute(pool).await?;
+    Ok(())
+}
+
+/// Build the usage event sink from the environment, if configured.
+///
+/// Postgres ([`USAGE_EVENTS_POSTGRES_URL_ENV`]) takes precedence over the file
+/// sink ([`USAGE_EVENTS_PATH_ENV`]). Returns `None` (usage logging disabled) when
+/// neither is set, or the configured backend cannot be initialized.
+pub async fn usage_event_sink_from_env() -> Option<Arc<dyn UsageEventSink>> {
+    if let Some(url) = trimmed_option_string(std::env::var(USAGE_EVENTS_POSTGRES_URL_ENV).ok()) {
+        return match PostgresUsageEventSink::connect(&url).await {
+            Ok(sink) => {
+                info!("broker usage event logging enabled (postgres)");
+                Some(Arc::new(sink))
+            }
+            Err(error) => {
+                warn!(%error, "failed to enable postgres usage event logging");
+                None
+            }
+        };
+    }
+    if let Some(path) = trimmed_option_string(std::env::var(USAGE_EVENTS_PATH_ENV).ok()) {
+        return match FileUsageEventSink::spawn(PathBuf::from(&path)) {
+            Ok(sink) => {
+                info!(path = %path, "broker usage event logging enabled (file)");
+                Some(Arc::new(sink))
+            }
+            Err(error) => {
+                warn!(%error, path = %path, "failed to enable file usage event logging");
+                None
+            }
+        };
+    }
+    None
 }
 
 fn now_ms() -> u128 {
@@ -301,6 +467,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn postgres_record_drops_and_counts_when_queue_is_full() {
+        // No consumer drains the receiver, so a capacity-1 queue fills after the
+        // first send and every later record is dropped and counted. `_rx` stays
+        // bound so the channel is Full (not Closed). Deterministic, no DB needed.
+        let (tx, _rx) = tokio::sync::mpsc::channel::<UsageEvent>(1);
+        let sink = PostgresUsageEventSink {
+            tx,
+            dropped: Arc::new(AtomicU64::new(0)),
+        };
+
+        let make = || {
+            UsageEvent::new(
+                UsageEventKind::Publish,
+                "room-a",
+                "relay-1",
+                PeerRole::Relay,
+                None,
+            )
+        };
+        sink.record(make()); // buffered
+        sink.record(make()); // full -> dropped
+        sink.record(make()); // full -> dropped
+
+        assert_eq!(
+            sink.dropped(),
+            2,
+            "two events should be dropped and counted"
+        );
+    }
+
     fn read_rows_until(path: &std::path::Path, want: usize) -> Vec<String> {
         for _ in 0..200 {
             if let Ok(contents) = std::fs::read_to_string(path) {
@@ -316,5 +513,110 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         Vec::new()
+    }
+
+    /// Live-Postgres test for the batching writer. Env-gated so plain
+    /// `cargo test` stays offline. Run against a throwaway DB:
+    ///   RELAY_BROKER_TEST_POSTGRES_URL=postgres://sealwire:dev@127.0.0.1:5433/sealwire \
+    ///     cargo test -p relay-broker postgres_sink -- --nocapture
+    #[tokio::test]
+    async fn postgres_sink_writes_usage_events() {
+        let Some(url) = trimmed_option_string(std::env::var("RELAY_BROKER_TEST_POSTGRES_URL").ok())
+        else {
+            eprintln!("skipping postgres usage sink: set RELAY_BROKER_TEST_POSTGRES_URL");
+            return;
+        };
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let channel = format!("room-{unique}");
+
+        let sink = PostgresUsageEventSink::connect(&url)
+            .await
+            .expect("sink should connect to postgres");
+        sink.record(UsageEvent::new(
+            UsageEventKind::Connect,
+            &channel,
+            "relay-1",
+            PeerRole::Relay,
+            Some("device-xyz".to_string()),
+        ));
+        sink.record(
+            UsageEvent::new(
+                UsageEventKind::Publish,
+                &channel,
+                "relay-1",
+                PeerRole::Relay,
+                Some("device-xyz".to_string()),
+            )
+            .with_payload_kind("session_snapshot"),
+        );
+        sink.record(UsageEvent::new(
+            UsageEventKind::Disconnect,
+            &channel,
+            "phone-1",
+            PeerRole::Surface,
+            None,
+        ));
+
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("query pool should connect");
+
+        // The writer is async and batched; poll until all three rows land.
+        let mut rows: Vec<(String, Option<String>, Option<String>, String)> = Vec::new();
+        for _ in 0..100 {
+            rows = sqlx::query_as(
+                "SELECT event, device_id, payload_kind, role FROM usage_events \
+                 WHERE channel_id = $1 ORDER BY ts_ms, id",
+            )
+            .bind(&channel)
+            .fetch_all(&pool)
+            .await
+            .expect("query should succeed");
+            if rows.len() >= 3 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        // Clean up before asserting so a failure still leaves the table tidy.
+        let _ = sqlx::query("DELETE FROM usage_events WHERE channel_id = $1")
+            .bind(&channel)
+            .execute(&pool)
+            .await;
+
+        assert_eq!(
+            rows.len(),
+            3,
+            "all three events should be written; got {rows:?}"
+        );
+        assert_eq!(
+            rows[0],
+            (
+                "connect".to_string(),
+                Some("device-xyz".to_string()),
+                None,
+                "relay".to_string()
+            )
+        );
+        assert_eq!(
+            rows[1],
+            (
+                "publish".to_string(),
+                Some("device-xyz".to_string()),
+                Some("session_snapshot".to_string()),
+                "relay".to_string()
+            )
+        );
+        assert_eq!(
+            rows[2],
+            ("disconnect".to_string(), None, None, "surface".to_string())
+        );
+        assert_eq!(sink.dropped(), 0, "nothing should drop on the happy path");
     }
 }

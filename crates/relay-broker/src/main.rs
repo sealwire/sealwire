@@ -29,7 +29,7 @@ async fn main() {
         "relay-broker listening on http://{}:{} and ws://{}:{}/ws/:channel_id",
         host, port, host, port
     );
-    let app = relay_broker::app(relay_broker::BrokerState::from_env()).await;
+    let app = relay_broker::app(relay_broker::BrokerState::from_env().await).await;
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),

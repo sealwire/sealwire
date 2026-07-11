@@ -2247,3 +2247,257 @@ fn summarize_published_payload_reports_transcript_page_stats() {
     assert!(summary.contains("next_cursor=12"));
     assert!(summary.contains("prev_cursor=4"));
 }
+
+async fn spawn_app_with_guard(guard: BanGuard) -> SocketAddr {
+    spawn_app_with_guard_and_hardening(guard, BrokerHardeningConfig::default()).await
+}
+
+async fn spawn_app_with_guard_and_hardening(
+    guard: BanGuard,
+    hardening: BrokerHardeningConfig,
+) -> SocketAddr {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("listener should bind");
+    let address = listener.local_addr().expect("listener should have address");
+    let app = app_with_web_root_and_verifier_and_hardening(
+        BrokerState::default(),
+        test_web_root(),
+        BrokerJoinVerifier::SelfHosted(test_join_ticket_key()),
+        hardening,
+        SecurityHeadersConfig::default(),
+    )
+    .layer(middleware::from_fn_with_state(guard, reject_banned_ips));
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .expect("broker should serve");
+    });
+    address
+}
+
+#[tokio::test]
+async fn banned_socket_ip_gets_403_on_health() {
+    let guard = BanGuard {
+        blocklist: Blocklist::from_entries(&["127.0.0.1"]),
+        trusted_ip_header: None,
+    };
+    let address = spawn_app_with_guard(guard).await;
+    let response = reqwest::get(format!("http://{address}/api/health"))
+        .await
+        .expect("request should complete");
+    assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn unbanned_socket_ip_reaches_health() {
+    let guard = BanGuard {
+        blocklist: Blocklist::from_entries(&["9.9.9.9"]),
+        trusted_ip_header: None,
+    };
+    let address = spawn_app_with_guard(guard).await;
+    let response = reqwest::get(format!("http://{address}/api/health"))
+        .await
+        .expect("request should complete");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+}
+
+#[tokio::test]
+async fn banned_ip_rejects_websocket_upgrade() {
+    let guard = BanGuard {
+        blocklist: Blocklist::from_entries(&["127.0.0.1"]),
+        trusted_ip_header: None,
+    };
+    let address = spawn_app_with_guard(guard).await;
+    let result = connect_async(format!("ws://{address}/ws/room-a?role=relay")).await;
+    assert!(
+        result.is_err(),
+        "banned ip must not be able to upgrade the websocket"
+    );
+}
+
+#[tokio::test]
+async fn banned_client_via_trusted_forwarded_header_gets_403() {
+    let guard = BanGuard {
+        blocklist: Blocklist::from_entries(&["203.0.113.9"]),
+        trusted_ip_header: Some("x-forwarded-for".parse().expect("valid header name")),
+    };
+    let address = spawn_app_with_guard(guard).await;
+    let client = reqwest::Client::new();
+
+    // The banned client IP arrives via the trusted forwarded header -> 403,
+    // even though the socket IP (127.0.0.1) is not itself banned.
+    let banned = client
+        .get(format!("http://{address}/api/health"))
+        .header("x-forwarded-for", "203.0.113.9")
+        .send()
+        .await
+        .expect("request should complete");
+    assert_eq!(banned.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // No forwarded header -> falls back to the socket IP (127.0.0.1), not banned.
+    let allowed = client
+        .get(format!("http://{address}/api/health"))
+        .send()
+        .await
+        .expect("request should complete");
+    assert_eq!(allowed.status(), reqwest::StatusCode::OK);
+}
+
+#[tokio::test]
+async fn duplicate_forwarded_headers_use_the_proxy_appended_value() {
+    let real = "203.0.113.9"; // appended by the trusted proxy (last field)
+    let spoof = "9.9.9.9"; // client-supplied earlier field
+
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.append("x-forwarded-for", spoof.parse().unwrap());
+    headers.append("x-forwarded-for", real.parse().unwrap());
+
+    // Banning the real (last) IP -> 403 despite the spoofed first field.
+    let address = spawn_app_with_guard(BanGuard {
+        blocklist: Blocklist::from_entries(&[real]),
+        trusted_ip_header: Some("x-forwarded-for".parse().unwrap()),
+    })
+    .await;
+    let banned = reqwest::Client::new()
+        .get(format!("http://{address}/api/health"))
+        .headers(headers.clone())
+        .send()
+        .await
+        .expect("request should complete");
+    assert_eq!(banned.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Banning only the spoofed (first) IP -> not blocked; we key on the last value.
+    let address2 = spawn_app_with_guard(BanGuard {
+        blocklist: Blocklist::from_entries(&[spoof]),
+        trusted_ip_header: Some("x-forwarded-for".parse().unwrap()),
+    })
+    .await;
+    let allowed = reqwest::Client::new()
+        .get(format!("http://{address2}/api/health"))
+        .headers(headers)
+        .send()
+        .await
+        .expect("request should complete");
+    assert_eq!(allowed.status(), reqwest::StatusCode::OK);
+}
+
+#[tokio::test]
+async fn per_ip_rate_limit_keys_on_forwarded_client_ip() {
+    let guard = BanGuard {
+        blocklist: Blocklist::disabled(),
+        trusted_ip_header: Some("x-forwarded-for".parse().unwrap()),
+    };
+    let address = spawn_app_with_guard_and_hardening(
+        guard,
+        BrokerHardeningConfig {
+            public_api_rate_limit_per_minute: 1,
+            ..BrokerHardeningConfig::default()
+        },
+    )
+    .await;
+
+    let client = reqwest::Client::new();
+    let url = format!("http://{address}/api/public/relay/ws-token");
+    let body = RelayWsTokenRequest {
+        relay_id: "relay-1".to_string(),
+        broker_room_id: "room-a".to_string(),
+        relay_peer_id: "relay-1".to_string(),
+    };
+
+    // Same forwarded client IP twice: the second exceeds the per-IP limit. (The
+    // rate limiter runs before the auth-mode check, so self-hosted mode is fine —
+    // we only care whether the status is 429.)
+    let first = client
+        .post(&url)
+        .header("x-forwarded-for", "203.0.113.5")
+        .json(&body)
+        .send()
+        .await
+        .expect("request 1")
+        .status();
+    let second = client
+        .post(&url)
+        .header("x-forwarded-for", "203.0.113.5")
+        .json(&body)
+        .send()
+        .await
+        .expect("request 2")
+        .status();
+    // A different forwarded IP gets its own bucket, so it is not rate-limited —
+    // proving the limit keys on the forwarded client IP, not the shared socket IP.
+    let other = client
+        .post(&url)
+        .header("x-forwarded-for", "203.0.113.6")
+        .json(&body)
+        .send()
+        .await
+        .expect("request 3")
+        .status();
+
+    assert_ne!(first, reqwest::StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(second, reqwest::StatusCode::TOO_MANY_REQUESTS);
+    assert_ne!(other, reqwest::StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn websocket_join_rate_limit_keys_on_forwarded_client_ip() {
+    let guard = BanGuard {
+        blocklist: Blocklist::disabled(),
+        trusted_ip_header: Some("x-forwarded-for".parse().unwrap()),
+    };
+    let address = spawn_app_with_guard_and_hardening(
+        guard,
+        BrokerHardeningConfig {
+            join_rate_limit_per_minute: 1,
+            ..BrokerHardeningConfig::default()
+        },
+    )
+    .await;
+
+    // A ws upgrade request carrying the forwarded client IP the proxy would add.
+    let join_request = |pairing_id: &str, xff: &str| {
+        let url = websocket_url(
+            address,
+            "room-a",
+            protocol::PeerRole::Surface,
+            None,
+            JoinTicketClaims::pairing_surface_join("room-a", pairing_id, u64::MAX),
+        );
+        let mut request = url.into_client_request().expect("ws request builds");
+        request
+            .headers_mut()
+            .append("x-forwarded-for", xff.parse().unwrap());
+        request
+    };
+
+    // Same forwarded IP: first join is welcomed, the second hits the per-IP join limit.
+    let (mut a1, _) = connect_async(join_request("pair-a-1", "203.0.113.5"))
+        .await
+        .expect("a1 connects");
+    assert!(matches!(
+        next_server_message(&mut a1).await,
+        ServerMessage::Welcome { .. }
+    ));
+
+    let (mut a2, _) = connect_async(join_request("pair-a-2", "203.0.113.5"))
+        .await
+        .expect("a2 connects");
+    match next_server_message(&mut a2).await {
+        ServerMessage::Error { code, .. } => assert_eq!(code, "rate_limited"),
+        other => panic!("expected rate_limited, got {other:?}"),
+    }
+
+    // A different forwarded IP has its own bucket -> welcomed, proving the WS join
+    // limit keys on the forwarded client IP, not the shared 127.0.0.1 socket.
+    let (mut b1, _) = connect_async(join_request("pair-b-1", "203.0.113.6"))
+        .await
+        .expect("b1 connects");
+    assert!(matches!(
+        next_server_message(&mut b1).await,
+        ServerMessage::Welcome { .. }
+    ));
+}

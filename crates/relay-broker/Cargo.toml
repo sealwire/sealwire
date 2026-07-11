@@ -10,6 +10,7 @@ base64.workspace = true
 ed25519-dalek.workspace = true
 futures-util.workspace = true
 hmac.workspace = true
+ipnet.workspace = true
 rand.workspace = true
 relay-http = { path = "../relay-http" }
 relay-util = { path = "../relay-util" }

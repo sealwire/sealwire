@@ -1414,6 +1414,7 @@ dependencies = [
  "ed25519-dalek",
  "futures-util",
  "hmac",
+ "ipnet",
  "rand 0.8.5",
  "relay-http",
  "relay-util",

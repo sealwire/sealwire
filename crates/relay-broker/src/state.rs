@@ -46,8 +46,8 @@ impl BrokerState {
 
     /// Build state, enabling usage event logging when the environment
     /// configures it (see [`crate::events::USAGE_EVENTS_PATH_ENV`]).
-    pub fn from_env() -> Self {
-        match crate::events::usage_event_sink_from_env() {
+    pub async fn from_env() -> Self {
+        match crate::events::usage_event_sink_from_env().await {
             Some(sink) => Self::with_event_sink(sink),
             None => Self::default(),
         }
