@@ -313,6 +313,12 @@ struct PersistedDeviceGrant {
     device_id: String,
     refresh_token_hash: String,
     created_at: u64,
+    /// Last time this device was seen active (ws-token refresh), updated at most
+    /// once per `LAST_SEEN_THROTTLE_SECS`. `None` = never observed since the
+    /// column was added. Serde-default keeps pre-existing JSON state loadable.
+    /// Durably tracked only on the Postgres backend (see `touch_device_last_seen`).
+    #[serde(default)]
+    last_seen: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -628,10 +634,35 @@ impl PublicControlPlane {
         })
     }
 
+    /// Authenticate a relay bearer against `(relay_id, broker_room_id)` with no
+    /// side effects. Handlers call this before consulting license state so an
+    /// unauthenticated caller cannot probe which relays have active / expired /
+    /// revoked licenses — a bad bearer fails identically regardless of that state.
+    pub async fn authenticate_relay_bearer(
+        &self,
+        bearer_token: &str,
+        relay_id: &str,
+        broker_room_id: &str,
+    ) -> Result<(), String> {
+        self.authenticate_relay(bearer_token, relay_id, broker_room_id)
+            .await
+            .map(|_| ())
+    }
+
+    /// Issue a device grant for a relay-authenticated request.
+    ///
+    /// `device_limit` is the per-license device cap resolved by the caller from
+    /// the license tier (`None` = unlimited, e.g. licensing disabled). The cap is
+    /// enforced only for NET-NEW devices, and BEFORE any state mutation, so:
+    ///   - re-registering an existing `device_id` always succeeds (it adds no
+    ///     seat, and stays allowed even when already over-limit after a downgrade —
+    ///     the grandfather policy), and
+    ///   - a rejected grant never drops an existing grant (no remove-then-reject).
     pub async fn issue_device_grant(
         &self,
         bearer_token: &str,
         request: DeviceGrantRequest,
+        device_limit: Option<u32>,
     ) -> Result<DeviceGrantResponse, String> {
         let registration = self
             .authenticate_relay(bearer_token, &request.relay_id, &request.broker_room_id)
@@ -641,6 +672,20 @@ impl PublicControlPlane {
         let created_at = unix_now();
 
         let mut store = self.lock_state().await?;
+        // Cap check happens first and only for genuinely new devices; a
+        // re-registration of an existing device is a replace, not a new seat.
+        let already_registered = store.has_device_grant(&registration.relay_id, &request.device_id);
+        if !already_registered {
+            if let Some(limit) = device_limit {
+                let current = store.count_device_grants_for_relay(&registration.relay_id);
+                if current as u64 >= u64::from(limit) {
+                    return Err(format!(
+                        "device limit reached: this license allows {limit} device(s); \
+                         remove a device to add a new one"
+                    ));
+                }
+            }
+        }
         store.remove_device_grants(&registration.relay_id, None, Some(&request.device_id));
         store.grants_by_hash.insert(
             refresh_token_hash.clone(),
@@ -650,6 +695,7 @@ impl PublicControlPlane {
                 device_id: request.device_id.clone(),
                 refresh_token_hash,
                 created_at,
+                last_seen: Some(created_at),
             },
         );
         self.inner.persistence.save(&store).await?;
@@ -785,7 +831,36 @@ impl PublicControlPlane {
         &self,
         bearer_token: &str,
     ) -> Result<DeviceWsTokenResponse, String> {
-        let grant = self.device_grant_from_refresh_token(bearer_token).await?;
+        let now = unix_now();
+        let token_hash = sha256_hex(bearer_token.trim());
+        let grant = {
+            let mut store = self.lock_state().await?;
+            let grant = store
+                .grants_by_hash
+                .get(&token_hash)
+                .cloned()
+                .ok_or_else(|| "device refresh token is invalid".to_string())?;
+            // Throttled activity marker: at most one durable write per device per
+            // LAST_SEEN_THROTTLE_SECS, via a targeted single-row UPDATE (never the
+            // whole-state save, which rewrites every table).
+            if should_touch_last_seen(grant.last_seen, now) {
+                if let Some(entry) = store.grants_by_hash.get_mut(&token_hash) {
+                    entry.last_seen = Some(now);
+                }
+                // Best-effort advisory marker: a failed write must NOT deny the
+                // token refresh. Log and continue (on Postgres the next reload
+                // discards the in-memory bump, so it simply retries next time).
+                if let Err(error) = self
+                    .inner
+                    .persistence
+                    .touch_device_last_seen(&token_hash, now)
+                    .await
+                {
+                    warn!(%error, "failed to persist device last_seen; continuing");
+                }
+            }
+            grant
+        };
         let registration = PersistedRelayRegistration {
             relay_id: grant.relay_id,
             broker_room_id: grant.broker_room_id,
@@ -1036,6 +1111,32 @@ impl PublicControlPersistence {
     fn reload_before_use(&self) -> bool {
         matches!(self, Self::Postgres(_))
     }
+
+    /// Persist a single device grant's `last_seen` with a targeted O(1) UPDATE,
+    /// deliberately avoiding the whole-state `save()` (which wipes and rebuilds
+    /// every table). This is a Postgres-only, best-effort activity marker: for
+    /// the in-memory / JSON backends the caller's in-memory update is authoritative
+    /// and nothing more is written.
+    async fn touch_device_last_seen(
+        &self,
+        refresh_token_hash: &str,
+        last_seen: u64,
+    ) -> Result<(), String> {
+        match self {
+            Self::InMemory | Self::Json(_) => Ok(()),
+            Self::Postgres(pool) => {
+                sqlx::query(
+                    "UPDATE public_device_grants SET last_seen = $1 WHERE refresh_token_hash = $2",
+                )
+                .bind(u64_to_i64(last_seen, "last_seen")?)
+                .bind(refresh_token_hash)
+                .execute(pool)
+                .await
+                .map_err(|error| format!("failed to update device last_seen: {error}"))?;
+                Ok(())
+            }
+        }
+    }
 }
 
 impl PublicControlStateStore {
@@ -1087,6 +1188,24 @@ impl PublicControlStateStore {
             device_grants: self.grants_by_hash.values().cloned().collect(),
             client_relay_grants: self.client_relay_grants_by_key.values().cloned().collect(),
         }
+    }
+
+    /// Count device grants currently bound to `relay_id`. One grant row == one
+    /// registered device (device_id is deduped on issue), so this is the seat
+    /// count the per-license limit is compared against.
+    fn count_device_grants_for_relay(&self, relay_id: &str) -> usize {
+        self.grants_by_hash
+            .values()
+            .filter(|grant| grant.relay_id == relay_id)
+            .count()
+    }
+
+    /// Whether a device grant already exists for `(relay_id, device_id)`. Used to
+    /// exempt re-registrations from the cap (they replace a seat, never add one).
+    fn has_device_grant(&self, relay_id: &str, device_id: &str) -> bool {
+        self.grants_by_hash
+            .values()
+            .any(|grant| grant.relay_id == relay_id && grant.device_id == device_id)
     }
 
     fn remove_device_grants(
@@ -1438,6 +1557,7 @@ async fn initialize_postgres_public_control_schema(pool: &PgPool) -> Result<(), 
             broker_room_id TEXT NOT NULL,
             device_id TEXT NOT NULL,
             created_at BIGINT NOT NULL,
+            last_seen BIGINT,
             UNIQUE (relay_id, broker_room_id, device_id)
         )
         "#,
@@ -1486,7 +1606,7 @@ async fn load_public_control_postgres(pool: &PgPool) -> Result<PublicControlStat
     .map_err(|error| format!("failed to load public_client_identities: {error}"))?;
     let device_rows = sqlx::query(
         r#"
-        SELECT relay_id, broker_room_id, device_id, refresh_token_hash, created_at
+        SELECT relay_id, broker_room_id, device_id, refresh_token_hash, created_at, last_seen
         FROM public_device_grants
         "#,
     )
@@ -1553,6 +1673,10 @@ async fn load_public_control_postgres(pool: &PgPool) -> Result<PublicControlStat
                         .try_get("refresh_token_hash")
                         .map_err(postgres_decode_error)?,
                     created_at: row_i64_to_u64(&row, "created_at")?,
+                    last_seen: row
+                        .try_get::<Option<i64>, _>("last_seen")
+                        .map_err(postgres_decode_error)?
+                        .and_then(|value| u64::try_from(value).ok()),
                 })
             })
             .collect::<Result<Vec<_>, String>>()?,
@@ -1642,9 +1766,9 @@ async fn save_public_control_postgres(
         sqlx::query(
             r#"
             INSERT INTO public_device_grants (
-                refresh_token_hash, relay_id, broker_room_id, device_id, created_at
+                refresh_token_hash, relay_id, broker_room_id, device_id, created_at, last_seen
             )
-            VALUES ($1, $2, $3, $4, $5)
+            VALUES ($1, $2, $3, $4, $5, $6)
             "#,
         )
         .bind(grant.refresh_token_hash)
@@ -1652,6 +1776,7 @@ async fn save_public_control_postgres(
         .bind(grant.broker_room_id)
         .bind(grant.device_id)
         .bind(u64_to_i64(grant.created_at, "created_at")?)
+        .bind(grant.last_seen.and_then(|value| i64::try_from(value).ok()))
         .execute(&mut *tx)
         .await
         .map_err(|error| format!("failed to insert public_device_grants: {error}"))?;
@@ -1767,6 +1892,20 @@ fn matches_optional_relay_target(
         && device_id
             .map(|value| value == actual_device_id)
             .unwrap_or(true)
+}
+
+/// Throttle window for persisting device `last_seen`: refresh it at most once per
+/// hour so the frequent ws-token refresh (~every 5 min) does not write on every
+/// call. See device-limit-plan.md.
+const LAST_SEEN_THROTTLE_SECS: u64 = 3600;
+
+/// Whether a device's `last_seen` should be refreshed to `now`. A never-recorded
+/// value (`None`) always refreshes; otherwise only after the throttle window.
+fn should_touch_last_seen(last_seen: Option<u64>, now: u64) -> bool {
+    match last_seen {
+        None => true,
+        Some(previous) => now.saturating_sub(previous) >= LAST_SEEN_THROTTLE_SECS,
+    }
 }
 
 fn row_i64_to_u64(row: &PgRow, column: &str) -> Result<u64, String> {
@@ -2031,6 +2170,264 @@ mod device_revoke_tests {
         assert_eq!(
             remaining, 0,
             "orphan client_relay_grant removal must be persisted"
+        );
+    }
+}
+
+#[cfg(test)]
+mod device_limit_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    async fn in_memory_plane() -> PublicControlPlane {
+        PublicControlPlane::from_parts(
+            Some("device-limit-test-issuer".to_string()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("in-memory plane should build")
+    }
+
+    fn grant_request(enrolled: &RelayEnrollmentResponse, device_id: &str) -> DeviceGrantRequest {
+        DeviceGrantRequest {
+            relay_id: enrolled.relay_id.clone(),
+            broker_room_id: enrolled.broker_room_id.clone(),
+            device_id: device_id.to_string(),
+        }
+    }
+
+    async fn enroll(plane: &PublicControlPlane, tag: &str) -> RelayEnrollmentResponse {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        plane
+            .issue_relay_registration_for_verify_key(&format!("vk-{tag}-{unique}"), None)
+            .await
+            .expect("enroll should succeed")
+    }
+
+    #[tokio::test]
+    async fn device_grant_rejected_once_limit_reached() {
+        let plane = in_memory_plane().await;
+        let enrolled = enroll(&plane, "cap").await;
+        let bearer = &enrolled.relay_refresh_token;
+        let limit = Some(2);
+
+        for i in 1..=2 {
+            plane
+                .issue_device_grant(
+                    bearer,
+                    grant_request(&enrolled, &format!("device-{i}")),
+                    limit,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("device {i} under the cap should succeed: {error}"));
+        }
+        let error = plane
+            .issue_device_grant(bearer, grant_request(&enrolled, "device-3"), limit)
+            .await
+            .expect_err("the third device must be rejected at the cap");
+        assert!(
+            error.contains("device limit"),
+            "expected a device-limit error, got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn regrant_existing_device_at_limit_succeeds() {
+        // Re-registering an EXISTING device_id while at the cap must succeed:
+        // the same-device dedupe frees its slot before the count check runs.
+        let plane = in_memory_plane().await;
+        let enrolled = enroll(&plane, "regrant").await;
+        let bearer = &enrolled.relay_refresh_token;
+        let limit = Some(2);
+
+        plane
+            .issue_device_grant(bearer, grant_request(&enrolled, "device-a"), limit)
+            .await
+            .expect("device-a");
+        plane
+            .issue_device_grant(bearer, grant_request(&enrolled, "device-b"), limit)
+            .await
+            .expect("device-b");
+        plane
+            .issue_device_grant(bearer, grant_request(&enrolled, "device-a"), limit)
+            .await
+            .expect("re-granting an existing device at the cap should succeed");
+        plane
+            .issue_device_grant(bearer, grant_request(&enrolled, "device-c"), limit)
+            .await
+            .expect_err("a genuinely new third device is still rejected");
+    }
+
+    #[tokio::test]
+    async fn no_limit_means_unlimited() {
+        let plane = in_memory_plane().await;
+        let enrolled = enroll(&plane, "unlimited").await;
+        let bearer = &enrolled.relay_refresh_token;
+        for i in 0..5 {
+            plane
+                .issue_device_grant(bearer, grant_request(&enrolled, &format!("d-{i}")), None)
+                .await
+                .expect("with no cap, every grant should succeed");
+        }
+    }
+
+    #[tokio::test]
+    async fn downgrade_grandfathers_existing_devices_but_blocks_new_ones() {
+        // Seed 3 devices with no cap (pre-downgrade state), then apply limit 2.
+        let plane = in_memory_plane().await;
+        let enrolled = enroll(&plane, "grandfather").await;
+        let bearer = &enrolled.relay_refresh_token;
+        for device in ["g1", "g2", "g3"] {
+            plane
+                .issue_device_grant(bearer, grant_request(&enrolled, device), None)
+                .await
+                .unwrap_or_else(|error| panic!("seed {device}: {error}"));
+        }
+
+        let limit = Some(2); // downgraded cap, already exceeded (3 > 2)
+
+        // Re-registering an EXISTING device is grandfathered: no net seat, allowed
+        // even while over-limit.
+        plane
+            .issue_device_grant(bearer, grant_request(&enrolled, "g1"), limit)
+            .await
+            .expect("re-registering an existing device must be allowed over-limit");
+
+        // A genuinely new device is rejected...
+        plane
+            .issue_device_grant(bearer, grant_request(&enrolled, "g4"), limit)
+            .await
+            .expect_err("a new device over the cap must be rejected");
+
+        // ...and that rejection must NOT have dropped any existing grant.
+        let count = plane
+            .lock_state()
+            .await
+            .expect("lock")
+            .count_device_grants_for_relay(&enrolled.relay_id);
+        assert_eq!(
+            count, 3,
+            "grandfathered grants must survive a re-register and a rejected new grant"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoking_a_device_frees_a_slot() {
+        let plane = in_memory_plane().await;
+        let enrolled = enroll(&plane, "revoke").await;
+        let bearer = &enrolled.relay_refresh_token;
+        let limit = Some(2);
+
+        plane
+            .issue_device_grant(bearer, grant_request(&enrolled, "d1"), limit)
+            .await
+            .expect("d1");
+        plane
+            .issue_device_grant(bearer, grant_request(&enrolled, "d2"), limit)
+            .await
+            .expect("d2");
+        plane
+            .issue_device_grant(bearer, grant_request(&enrolled, "d3"), limit)
+            .await
+            .expect_err("at the cap");
+
+        plane
+            .revoke_device_grant(
+                bearer,
+                "d1",
+                DeviceGrantRevokeRequest {
+                    relay_id: enrolled.relay_id.clone(),
+                    broker_room_id: enrolled.broker_room_id.clone(),
+                },
+            )
+            .await
+            .expect("revoke d1");
+
+        plane
+            .issue_device_grant(bearer, grant_request(&enrolled, "d3"), limit)
+            .await
+            .expect("revoking a device frees a slot for a new one");
+    }
+
+    #[test]
+    fn should_touch_last_seen_respects_throttle() {
+        assert!(
+            should_touch_last_seen(None, 100),
+            "never-recorded always touches"
+        );
+        assert!(
+            !should_touch_last_seen(Some(100), 100 + LAST_SEEN_THROTTLE_SECS - 1),
+            "within the throttle window it must NOT touch"
+        );
+        assert!(
+            should_touch_last_seen(Some(100), 100 + LAST_SEEN_THROTTLE_SECS),
+            "at/after the throttle window it must touch"
+        );
+    }
+
+    async fn last_seen_for(plane: &PublicControlPlane, device_id: &str) -> Option<u64> {
+        plane
+            .lock_state()
+            .await
+            .expect("lock")
+            .grants_by_hash
+            .values()
+            .find(|grant| grant.device_id == device_id)
+            .and_then(|grant| grant.last_seen)
+    }
+
+    #[tokio::test]
+    async fn last_seen_is_set_on_grant_and_throttled_on_refresh() {
+        let plane = in_memory_plane().await;
+        let enrolled = enroll(&plane, "lastseen").await;
+        let issued = plane
+            .issue_device_grant(
+                &enrolled.relay_refresh_token,
+                grant_request(&enrolled, "dev"),
+                None,
+            )
+            .await
+            .expect("grant");
+
+        let at_grant = last_seen_for(&plane, "dev").await;
+        assert!(at_grant.is_some(), "last_seen must be set at grant time");
+
+        // Refresh immediately: still inside the throttle window → unchanged.
+        plane
+            .issue_device_ws_token(&issued.device_refresh_token)
+            .await
+            .expect("refresh within window");
+        assert_eq!(
+            last_seen_for(&plane, "dev").await,
+            at_grant,
+            "a refresh inside the throttle window must not bump last_seen"
+        );
+
+        // Age last_seen far into the past, then refresh → it must bump forward.
+        {
+            let mut store = plane.lock_state().await.expect("lock");
+            for grant in store.grants_by_hash.values_mut() {
+                if grant.device_id == "dev" {
+                    grant.last_seen = Some(1); // epoch 1 = well past the throttle window
+                }
+            }
+        }
+        plane
+            .issue_device_ws_token(&issued.device_refresh_token)
+            .await
+            .expect("refresh after window");
+        let bumped = last_seen_for(&plane, "dev")
+            .await
+            .expect("last_seen still present");
+        assert!(
+            bumped > 1,
+            "a refresh after the throttle window must bump last_seen; got {bumped}"
         );
     }
 }

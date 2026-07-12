@@ -71,6 +71,9 @@ struct InMemoryLicense {
     relay_id: Option<String>,
     grant_days: Option<u64>,
     expires_at: Option<u64>,
+    /// Per-license device cap (`None` = unlimited). Mirrors the `device_limit`
+    /// column; the broker reads it to enforce the per-license device limit.
+    device_limit: Option<u32>,
     revoked: bool,
     /// Set on the first successful `redeem` and never cleared — the single-use
     /// "consumed" marker. Distinct from `relay_id`, which is cleared when the
@@ -129,6 +132,7 @@ impl LicenseStore {
                 relay_id: None,
                 grant_days,
                 expires_at: None,
+                device_limit: None,
                 revoked: false,
                 redeemed_at: None,
             })
@@ -153,6 +157,22 @@ impl LicenseStore {
             lic.relay_id = Some(relay_id.to_string());
         } else {
             panic!("force_bind_for_test: code {code:?} not found in store");
+        }
+    }
+
+    /// Set a code's `device_limit` (test only).
+    #[cfg(test)]
+    pub fn force_set_device_limit_for_test(&self, code: &str, device_limit: Option<u32>) {
+        let LicenseBackend::InMemory(ref store) = self.backend else {
+            panic!("force_set_device_limit_for_test only works with InMemory backend");
+        };
+        let mut guard = store
+            .lock()
+            .expect("in-memory license store should not be poisoned");
+        if let Some(lic) = guard.iter_mut().find(|l| l.code == code) {
+            lic.device_limit = device_limit;
+        } else {
+            panic!("force_set_device_limit_for_test: code {code:?} not found in store");
         }
     }
 
@@ -349,6 +369,30 @@ impl LicenseStore {
         }
     }
 
+    /// Resolve the per-license device cap for the relay bound to `relay_id`.
+    ///
+    /// Returns `Ok(Some(n))` when the relay's license sets a `device_limit`,
+    /// `Ok(None)` when it is unlimited (column NULL) or no license row is bound.
+    /// Callers pass this into `issue_device_grant`; `None` means "do not cap".
+    /// This is intentionally independent of expiry/revocation (the grant path
+    /// does not gate on license validity today — see device-limit-plan.md Q7).
+    pub async fn device_limit_for_relay(&self, relay_id: &str) -> Result<Option<u32>, String> {
+        match &self.backend {
+            LicenseBackend::Postgres(pool) => device_limit_for_relay_pg(pool, relay_id).await,
+            #[cfg(test)]
+            LicenseBackend::InMemory(store) => {
+                let guard = store.lock().expect("in-memory license store poisoned");
+                Ok(guard
+                    .iter()
+                    .find(|l| l.relay_id.as_deref() == Some(relay_id))
+                    .and_then(|l| l.device_limit)
+                    // Match the Postgres arm: a non-positive limit is treated as
+                    // unlimited (defensive against misconfiguration), never "0 devices".
+                    .filter(|limit| *limit > 0))
+            }
+        }
+    }
+
     /// Check that the relay's license is still active (not expired, not revoked).
     /// Returns `Ok(())` if a valid license exists, `Err` otherwise.
     pub async fn check_relay_access(&self, relay_id: &str) -> Result<(), String> {
@@ -485,6 +529,23 @@ async fn redeem_pg(pool: &PgPool, code: &str, relay_id: &str) -> Result<(), Stri
     }
 }
 
+async fn device_limit_for_relay_pg(pool: &PgPool, relay_id: &str) -> Result<Option<u32>, String> {
+    // `device_limit` is a Postgres `INTEGER` (int4) → decode as `i32`, NOT `i64`,
+    // or SQLx raises a runtime type-mismatch the moment a non-NULL cap is read.
+    let row: Option<(Option<i32>,)> =
+        sqlx::query_as(r#"SELECT device_limit FROM licenses WHERE relay_id = $1"#)
+            .bind(relay_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| format!("failed to query device_limit: {error}"))?;
+    // NULL column or missing row → unlimited. A stored non-positive value is
+    // treated as unlimited rather than "zero devices" (defensive against bad data).
+    Ok(row
+        .and_then(|(limit,)| limit)
+        .and_then(|limit| u32::try_from(limit).ok())
+        .filter(|limit| *limit > 0))
+}
+
 async fn check_relay_access_pg(pool: &PgPool, relay_id: &str) -> Result<(), String> {
     let now = unix_now() as i64;
     let row: Option<(Option<i64>, Option<i64>)> =
@@ -514,6 +575,7 @@ async fn initialize_licenses_schema(pool: &PgPool) -> Result<(), String> {
             expires_at  BIGINT,
             revoked_at  BIGINT,
             redeemed_at BIGINT,
+            device_limit INTEGER,
             created_at  BIGINT NOT NULL
                             DEFAULT (extract(epoch from now())::bigint)
         )
@@ -784,5 +846,41 @@ mod tests {
             .check_relay_access("relay-no-license")
             .await
             .expect_err("must deny");
+    }
+
+    // In-memory (no Postgres needed): the device cap is read from the license
+    // bound to the relay; NULL / no-license → unlimited (None).
+    #[tokio::test]
+    async fn device_limit_for_relay_reads_bound_license() {
+        let store = LicenseStore::for_test(vec![("LIM-001", None)]);
+        store.redeem("LIM-001", "relay-lim").await.expect("redeem");
+
+        // Default: no device_limit set → unlimited.
+        assert_eq!(
+            store.device_limit_for_relay("relay-lim").await.unwrap(),
+            None,
+            "a license with no device_limit is unlimited"
+        );
+
+        // Operator sets a cap → it is returned for the bound relay.
+        store.force_set_device_limit_for_test("LIM-001", Some(3));
+        assert_eq!(
+            store.device_limit_for_relay("relay-lim").await.unwrap(),
+            Some(3)
+        );
+
+        // A non-positive limit is treated as unlimited, not "zero devices".
+        store.force_set_device_limit_for_test("LIM-001", Some(0));
+        assert_eq!(
+            store.device_limit_for_relay("relay-lim").await.unwrap(),
+            None,
+            "device_limit 0 must be unlimited, consistent with the Postgres arm"
+        );
+
+        // A relay with no license row → unlimited (None), never an error.
+        assert_eq!(
+            store.device_limit_for_relay("relay-unknown").await.unwrap(),
+            None
+        );
     }
 }

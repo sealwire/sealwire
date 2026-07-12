@@ -1130,10 +1130,54 @@ async fn public_issue_device_grant(
     enforce_public_api_rate_limit(&state, remote_addr, "device_grant").await?;
     let control_plane = require_public_control_plane(&state)?;
     let bearer = bearer_token(&headers)?;
+    // Authenticate the relay BEFORE consulting license state, so an unauthenticated
+    // caller cannot probe which relays have active/expired/revoked licenses (the
+    // license lookup below returns a distinguishable 400 vs. the auth 401).
     control_plane
-        .issue_device_grant(bearer, input)
+        .authenticate_relay_bearer(bearer, &input.relay_id, &input.broker_room_id)
+        .await
+        .map_err(public_api_error)?;
+    // Resolve the per-license device cap (and gate on license validity). `None` =
+    // uncapped (licensing disabled, or no cap set for this license).
+    let device_limit = resolve_device_limit(&state, &input.relay_id).await?;
+    control_plane
+        .issue_device_grant(bearer, input, device_limit)
         .await
         .map(Json)
+        .map_err(public_api_error)
+}
+
+/// Authorize a device grant against the relay's license and resolve its cap.
+///
+/// - Licensing disabled → `None` (uncapped; self-hosted/trusted mode).
+/// - Licensing required but the store is unavailable → fail CLOSED with an error,
+///   matching the ws-token / enrollment posture (else "DB down" would silently
+///   grant unlimited devices).
+/// - Licensing required → the relay's license must be present, unexpired, and
+///   unrevoked (`check_relay_access`); otherwise the grant is denied. This closes
+///   the gap where a relay with no valid/bound license resolved to "unlimited",
+///   and disambiguates "no license row" from "license with a NULL limit".
+/// - Passing that gate → the license's configured limit (`None` = unlimited).
+async fn resolve_device_limit(
+    state: &BrokerAppState,
+    relay_id: &str,
+) -> Result<Option<u32>, (StatusCode, Json<ApiErrorBody>)> {
+    if !state.license_required {
+        return Ok(None);
+    }
+    let Some(store) = &state.license_store else {
+        return Err(public_api_error(
+            "license service unavailable; try again later".to_string(),
+        ));
+    };
+    // Gate first: a relay without a valid, bound license may not add devices.
+    store
+        .check_relay_access(relay_id)
+        .await
+        .map_err(public_api_error)?;
+    store
+        .device_limit_for_relay(relay_id)
+        .await
         .map_err(public_api_error)
 }
 

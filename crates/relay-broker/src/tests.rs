@@ -2658,6 +2658,102 @@ async fn license_required_valid_code_enrollment_succeeds() {
         .expect("valid code must allow enrollment");
 }
 
+// Finding 3b / partial Q7: in required-license mode a relay whose license is no
+// longer valid (expired/revoked/unbound) must NOT be able to register new
+// devices. Device-grant issuance now fails closed via check_relay_access.
+#[tokio::test]
+async fn license_required_expired_license_denies_device_grant() {
+    let store = crate::licenses::LicenseStore::for_test(vec![("GATE-001", None)]);
+    let address = spawn_public_mode_app_with_licenses(Some(store.clone()), true).await;
+    let enrolled = enroll_relay(address, "gate-seed", Some("GATE-001"))
+        .await
+        .expect("enroll with a valid code");
+
+    // While the license is valid, a device grant succeeds.
+    let _grant: DeviceGrantResponse = public_post(
+        address,
+        "/api/public/devices",
+        &enrolled.relay_refresh_token,
+        &DeviceGrantRequest {
+            relay_id: enrolled.relay_id.clone(),
+            broker_room_id: enrolled.broker_room_id.clone(),
+            device_id: "d1".to_string(),
+        },
+    )
+    .await;
+
+    // Expire the license (shared Arc state), then a NEW device grant is denied.
+    store.force_expire_for_test("GATE-001");
+    let denied = public_post_response(
+        address,
+        "/api/public/devices",
+        &enrolled.relay_refresh_token,
+        &DeviceGrantRequest {
+            relay_id: enrolled.relay_id.clone(),
+            broker_room_id: enrolled.broker_room_id.clone(),
+            device_id: "d2".to_string(),
+        },
+    )
+    .await;
+    assert!(
+        denied.status().is_client_error(),
+        "an expired-license relay must be denied new device grants, got {}",
+        denied.status()
+    );
+}
+
+// Finding 2: license state must be checked only AFTER relay authentication, so an
+// unauthenticated caller cannot distinguish an active license from an expired one
+// by the response. A bad bearer must yield the same status for both.
+#[tokio::test]
+async fn device_grant_invalid_bearer_hides_license_state() {
+    let store =
+        crate::licenses::LicenseStore::for_test(vec![("ACTIVE-001", None), ("EXPIRED-001", None)]);
+    let address = spawn_public_mode_app_with_licenses(Some(store.clone()), true).await;
+    let active = enroll_relay(address, "leak-active", Some("ACTIVE-001"))
+        .await
+        .expect("enroll active");
+    let expired = enroll_relay(address, "leak-expired", Some("EXPIRED-001"))
+        .await
+        .expect("enroll expired");
+    store.force_expire_for_test("EXPIRED-001");
+
+    let bad_bearer = "totally-not-a-valid-refresh-token";
+    let against_active = public_post_response(
+        address,
+        "/api/public/devices",
+        bad_bearer,
+        &DeviceGrantRequest {
+            relay_id: active.relay_id.clone(),
+            broker_room_id: active.broker_room_id.clone(),
+            device_id: "x".to_string(),
+        },
+    )
+    .await;
+    let against_expired = public_post_response(
+        address,
+        "/api/public/devices",
+        bad_bearer,
+        &DeviceGrantRequest {
+            relay_id: expired.relay_id.clone(),
+            broker_room_id: expired.broker_room_id.clone(),
+            device_id: "x".to_string(),
+        },
+    )
+    .await;
+
+    assert_eq!(
+        against_active.status(),
+        against_expired.status(),
+        "a bad bearer must not reveal license state (active vs expired)"
+    );
+    assert_eq!(
+        against_active.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "a bad bearer should fail authentication (401) before any license check"
+    );
+}
+
 #[tokio::test]
 async fn license_required_code_cannot_be_reused() {
     let store = crate::licenses::LicenseStore::for_test(vec![("ONCE-001", None)]);
