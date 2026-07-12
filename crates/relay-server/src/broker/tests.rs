@@ -383,6 +383,7 @@ async fn broker_config_public_mode_returns_pending_enrollment_until_cached_regis
         Some(identity_path.clone()),
         Some(registration_path.clone()),
         None,
+        None, // license_code
     )
     .await
     .expect("config resolution should parse");
@@ -565,6 +566,7 @@ async fn perform_public_relay_enrollment_uses_relay_keypair_challenge_flow() {
         control_url: Url::parse(&control_url).expect("control url should parse"),
         registration_path: std::path::PathBuf::from(&registration_path),
         identity_path: std::path::PathBuf::from(&identity_path),
+        license_code: None,
     };
 
     let registration = perform_public_relay_enrollment(&reqwest::Client::new(), &pending)

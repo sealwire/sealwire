@@ -2,6 +2,7 @@ pub mod auth;
 pub mod blocklist;
 pub mod events;
 pub mod join_ticket;
+pub mod licenses;
 pub mod protocol;
 pub mod public_control;
 mod state;
@@ -47,8 +48,8 @@ use public_control::{
     DeviceGrantResponse, DeviceGrantRevokeRequest, DeviceGrantRevokeResponse,
     DeviceSessionResponse, DeviceWsTokenResponse, PairingWsTokenRequest, PairingWsTokenResponse,
     PublicControlPlane, RelayEnrollmentChallengeRequest, RelayEnrollmentChallengeResponse,
-    RelayEnrollmentCompleteRequest, RelayEnrollmentResponse, RelayWsTokenRequest,
-    RelayWsTokenResponse,
+    RelayEnrollmentCompleteRequest, RelayEnrollmentResponse, RelayRegistrationSnapshot,
+    RelayWsTokenRequest, RelayWsTokenResponse,
 };
 use rand::{distributions::Alphanumeric, Rng};
 use relay_http::{
@@ -95,12 +96,27 @@ pub async fn app(state: BrokerState) -> Router {
         SecurityHeadersConfig::default()
     });
     let ban_guard = BanGuard::from_env().await;
-    app_with_web_root_and_verifier_and_hardening(
+    // RELAY_BROKER_REQUIRE_LICENSE_CODE is read once here and threaded through
+    // independently of the store so we can fail closed when the store is None
+    // but required=true (e.g. DB outage at startup).
+    let license_required = licenses::license_required_from_env();
+    let license_store = match licenses::LicenseStore::from_env().await {
+        Ok(store) => store,
+        Err(error) => {
+            // Required but DB unavailable: log loudly, keep store=None.
+            // Handlers see required=true + store=None and reject (fail closed).
+            warn!(%error, "FATAL: license backend unavailable; enrollment will be rejected until fixed");
+            None
+        }
+    };
+    app_with_web_root_and_verifier_and_hardening_and_licenses(
         state,
         default_web_root(),
         join_verifier,
         hardening,
         security_headers,
+        license_store,
+        license_required, // may be true even when store=None (DB failure → fail closed)
     )
     .layer(middleware::from_fn_with_state(ban_guard, reject_banned_ips))
 }
@@ -343,7 +359,23 @@ struct BrokerAppState {
     join_verifier: BrokerJoinVerifier,
     hardening: BrokerHardeningState,
     public_monitoring: PublicMonitoringState,
+    license_store: Option<licenses::LicenseStore>,
+    /// Whether `RELAY_BROKER_REQUIRE_LICENSE_CODE=1` was set. Tracked separately
+    /// so handlers can reject when `required=true` but `license_store=None` (the
+    /// store failed to connect — we must fail closed, not open).
+    license_required: bool,
+    /// Per-verify-key locks that serialize relay enrollment completion so that
+    /// enroll + license-redeem is one atomic transition for a given identity.
+    /// This prevents concurrent `/complete` calls for the same verify key from
+    /// racing (where one request's rollback could delete a registration created
+    /// by another). Keyed by relay verify key.
+    enrollment_locks: Arc<StdMutex<HashMap<String, Arc<Mutex<()>>>>>,
 }
+
+/// Bound on the enrollment-lock map: when it grows past this, unused locks
+/// (strong_count == 1, i.e. only the map holds them) are evicted. Evicting an
+/// idle lock is safe — a later request for that key just recreates it.
+const ENROLLMENT_LOCK_MAP_CAP: usize = 4096;
 
 #[derive(Clone)]
 enum BrokerJoinVerifier {
@@ -727,12 +759,39 @@ impl BrokerJoinVerifier {
     }
 }
 
+// Licensing-free convenience wrapper used by the test harness. `app()` uses the
+// `_and_licenses` variant directly.
+#[cfg(test)]
 fn app_with_web_root_and_verifier_and_hardening(
     state: BrokerState,
     web_root: PathBuf,
     join_verifier: BrokerJoinVerifier,
     hardening_config: BrokerHardeningConfig,
     security_headers: SecurityHeadersConfig,
+) -> Router {
+    app_with_web_root_and_verifier_and_hardening_and_licenses(
+        state,
+        web_root,
+        join_verifier,
+        hardening_config,
+        security_headers,
+        None,
+        false, // no license store → licensing disabled, no enforcement
+    )
+}
+
+// `license_required` is passed separately from `license_store` so the production
+// path in `app()` can keep `license_required=true` even when `license_store` is
+// `None` due to a DB failure at startup (fail closed, not open). Test callers
+// should derive `license_required` from the store's `.required` field.
+fn app_with_web_root_and_verifier_and_hardening_and_licenses(
+    state: BrokerState,
+    web_root: PathBuf,
+    join_verifier: BrokerJoinVerifier,
+    hardening_config: BrokerHardeningConfig,
+    security_headers: SecurityHeadersConfig,
+    license_store: Option<licenses::LicenseStore>,
+    license_required: bool,
 ) -> Router {
     if !web_root.join("remote.html").exists() {
         warn!(
@@ -817,6 +876,9 @@ fn app_with_web_root_and_verifier_and_hardening(
                 connection_tracker: ActiveConnectionTracker::default(),
             },
             public_monitoring: PublicMonitoringState::default(),
+            license_store,
+            license_required,
+            enrollment_locks: Arc::new(StdMutex::new(HashMap::new())),
         })
         .layer(middleware::from_fn_with_state(
             security_headers,
@@ -863,18 +925,133 @@ async fn public_create_relay_enrollment_challenge(
         .map_err(public_api_error)
 }
 
+/// Get (or create) the per-verify-key enrollment lock. Evicts idle locks when the
+/// map grows past a cap so a stream of distinct keys can't grow it without bound.
+fn acquire_enrollment_lock(state: &BrokerAppState, verify_key: &str) -> Arc<Mutex<()>> {
+    let mut map = state
+        .enrollment_locks
+        .lock()
+        .expect("enrollment lock map should not be poisoned");
+    if map.len() > ENROLLMENT_LOCK_MAP_CAP {
+        // Only removes locks nobody currently holds/awaits (strong_count == 1).
+        map.retain(|_, lock| Arc::strong_count(lock) > 1);
+    }
+    map.entry(verify_key.to_string()).or_default().clone()
+}
+
 async fn public_complete_relay_enrollment(
     ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
     State(state): State<BrokerAppState>,
     Json(input): Json<RelayEnrollmentCompleteRequest>,
 ) -> Result<Json<RelayEnrollmentResponse>, (StatusCode, Json<ApiErrorBody>)> {
     enforce_public_api_rate_limit(&state, remote_addr, "relay_enrollment_complete").await?;
+
+    let license_code = trimmed_option_string(input.license_code.clone());
+
+    // --- License pre-flight (before touching the control-plane) ---
+    //
+    // F1: fail closed when required but store unavailable (DB outage at startup).
+    if state.license_required && state.license_store.is_none() {
+        return Err(public_api_error(
+            "license service unavailable; try again later".to_string(),
+        ));
+    }
+
+    // Serialize enroll + license-redeem per identity: two `/complete` calls for
+    // the same verify key must not interleave, or one request's rollback could
+    // delete a registration created by the other. Held for the whole operation.
+    let verify_key = trimmed_option_string(Some(input.relay_verify_key.clone()));
+    let enrollment_lock = verify_key
+        .as_deref()
+        .map(|vk| acquire_enrollment_lock(&state, vk));
+    let _enrollment_guard = match &enrollment_lock {
+        Some(lock) => Some(lock.lock().await),
+        None => None,
+    };
+
     let control_plane = require_public_control_plane(&state)?;
-    control_plane
+
+    // Snapshot any existing registration for this verify key. Because we hold the
+    // per-identity lock this is a consistent view, and the snapshot lets us restore
+    // the relay's original refresh credential if re-licensing fails after enrollment
+    // replaced its token. Used to:
+    // (a) detect same-code re-enrollment after cache loss (Renewal path),
+    // (b) identify the relay_id whose expired/revoked binding to clear, and
+    // (c) restore the previous credential on redeem failure (else new relay → delete).
+    let previous_registration: Option<RelayRegistrationSnapshot> = match &verify_key {
+        Some(vk) => control_plane.snapshot_relay_registration(vk).await,
+        None => None,
+    };
+    let existing_relay_id = previous_registration
+        .as_ref()
+        .map(|snap| snap.relay_id().to_string());
+
+    // Validate the license code BEFORE enrollment so a bad code never causes a
+    // registration to be persisted. Also handles re-enrollment (F2): if the code
+    // is already bound to this relay_id, return Renewal and skip redeem.
+    let enrollment_action = if let Some(store) = &state.license_store {
+        match license_code.as_deref() {
+            Some(code) => Some(
+                store
+                    .validate_code_or_reenroll(code, existing_relay_id.as_deref())
+                    .await
+                    .map_err(|msg| public_api_error(msg))?,
+            ),
+            None if state.license_required => {
+                return Err(public_api_error("license_code is required".to_string()));
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+
+    // Enrollment — persists (or re-persists) the relay registration.
+    let response = control_plane
         .complete_relay_enrollment(input)
         .await
-        .map(Json)
-        .map_err(public_api_error)
+        .map_err(|msg| public_api_error(msg))?;
+
+    // Bind the license code to the relay_id, unless this is a Renewal (same relay
+    // re-enrolling with the same code after cache loss — binding already exists).
+    if let (Some(store), Some(code), Some(action)) = (
+        &state.license_store,
+        license_code.as_deref(),
+        &enrollment_action,
+    ) {
+        if *action == licenses::LicenseEnrollmentAction::Fresh {
+            // Clear any expired/revoked binding for this relay so the UNIQUE
+            // constraint doesn't block re-licensing after expiry/revocation.
+            if let Some(ref existing_id) = existing_relay_id {
+                let _ = store
+                    .clear_expired_or_revoked_binding(existing_id, code)
+                    .await;
+            }
+            if let Err(msg) = store.redeem(code, &response.relay_id).await {
+                // Enrollment already replaced the relay's registration (new refresh
+                // token). On redeem failure we must not leave the relay with a token
+                // the client never received:
+                //   - existing relay (had a registration): restore its previous
+                //     registration so the client's originally-cached token still works.
+                //   - brand-new relay (no prior registration): delete what we created,
+                //     keyed by this request's refresh token (safe no-op if replaced).
+                // Both are safe because we hold the per-identity enrollment lock.
+                match previous_registration {
+                    Some(previous) => {
+                        control_plane.restore_relay_registration(previous).await;
+                    }
+                    None => {
+                        control_plane
+                            .rollback_relay_enrollment_by_token(&response.relay_refresh_token)
+                            .await;
+                    }
+                }
+                return Err(public_api_error(msg));
+            }
+        }
+    }
+
+    Ok(Json(response))
 }
 
 async fn public_issue_relay_ws_token(
@@ -884,10 +1061,34 @@ async fn public_issue_relay_ws_token(
     Json(input): Json<RelayWsTokenRequest>,
 ) -> Result<Json<RelayWsTokenResponse>, (StatusCode, Json<ApiErrorBody>)> {
     enforce_public_api_rate_limit(&state, remote_addr, "relay_ws_token").await?;
+
+    // Authenticate first so an unauthenticated caller cannot probe relay IDs to
+    // learn which relays have active/expired/revoked licenses (F3).
     let control_plane = require_public_control_plane(&state)?;
     let bearer = bearer_token(&headers)?;
-    match control_plane.issue_relay_ws_token(bearer, input).await {
+    match control_plane
+        .issue_relay_ws_token(bearer, input.clone())
+        .await
+    {
         Ok(response) => {
+            // License check after successful authentication: deny the token if the
+            // relay's license has expired or been revoked, or if the store is
+            // required but unavailable (fail closed).
+            if state.license_required {
+                match &state.license_store {
+                    None => {
+                        return Err(public_api_error(
+                            "license service unavailable; try again later".to_string(),
+                        ));
+                    }
+                    Some(store) => {
+                        store
+                            .check_relay_access(&response.relay_id)
+                            .await
+                            .map_err(|msg| public_api_error(msg))?;
+                    }
+                }
+            }
             state
                 .public_monitoring
                 .record_refresh_success(RefreshChainKind::RelayWsToken)

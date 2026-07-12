@@ -76,11 +76,17 @@ enum BrokerConfigResolution {
     PendingPublicEnrollment(PendingPublicEnrollment),
 }
 
+/// License code the user sets to activate this relay against the public broker.
+/// Only required when the broker has `RELAY_BROKER_REQUIRE_LICENSE_CODE=1`.
+const RELAY_LICENSE_CODE_ENV: &str = "RELAY_LICENSE_CODE";
+
 #[derive(Clone, Debug)]
 struct PendingPublicEnrollment {
     control_url: Url,
     registration_path: PathBuf,
     identity_path: PathBuf,
+    /// License code to present at enrollment; `None` if not configured.
+    license_code: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -218,6 +224,7 @@ impl BrokerConfig {
             std::env::var(RELAY_BROKER_IDENTITY_PATH_ENV).ok(),
             std::env::var(RELAY_BROKER_REGISTRATION_PATH_ENV).ok(),
             std::env::var(self::auth::RELAY_BROKER_DEVICE_JOIN_TTL_SECS_ENV).ok(),
+            std::env::var(RELAY_LICENSE_CODE_ENV).ok(),
         )
         .await
     }
@@ -252,6 +259,7 @@ impl BrokerConfig {
             relay_identity_path,
             registration_path,
             device_join_ttl_secs,
+            None, // license_code — not used by the test wrapper
         )
         .await?
         {
@@ -277,6 +285,7 @@ impl BrokerConfig {
         relay_identity_path: Option<String>,
         registration_path: Option<String>,
         device_join_ttl_secs: Option<String>,
+        license_code: Option<String>,
     ) -> Result<BrokerConfigResolution, String> {
         let Some(url) = url.and_then(trimmed_string) else {
             return Ok(BrokerConfigResolution::Disabled);
@@ -360,6 +369,18 @@ impl BrokerConfig {
                         load_public_relay_registration(&registration_path, control_url.as_str())
                             .await?
                     {
+                        // F4: warn if a license code is set but the cached registration
+                        // is used instead — the code was only needed at initial enrollment.
+                        // If the relay's license has expired/been revoked, delete the cache
+                        // file to force re-enrollment with a new code.
+                        if trimmed_option_string(license_code.clone()).is_some() {
+                            warn!(
+                                registration_path = %registration_path.display(),
+                                "RELAY_LICENSE_CODE is set but a cached registration already \
+                                 exists — the code is ignored. To re-enroll with a new code, \
+                                 delete the registration file and restart."
+                            );
+                        }
                         (
                             cached.broker_room_id,
                             Some(cached.relay_id),
@@ -375,6 +396,7 @@ impl BrokerConfig {
                                 control_url,
                                 registration_path: registration_path.clone(),
                                 identity_path: identity_path.clone(),
+                                license_code: trimmed_option_string(license_code),
                             }),
                         )
                     }
@@ -641,6 +663,7 @@ async fn perform_public_relay_enrollment(
         challenge.challenge_id,
         challenge_signature,
         None,
+        pending.license_code.clone(),
     )
     .await?;
     save_public_relay_registration(

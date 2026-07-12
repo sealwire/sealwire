@@ -18,6 +18,7 @@ use tokio::{
     fs,
     sync::{Mutex, MutexGuard},
 };
+use tracing::warn;
 
 use crate::join_ticket::{unix_now, JoinTicketClaims, JoinTicketKey};
 
@@ -77,6 +78,10 @@ pub struct RelayEnrollmentCompleteRequest {
     pub challenge_signature: String,
     #[serde(default)]
     pub relay_label: Option<String>,
+    /// License code the relay presents at enrollment. Required when the broker
+    /// has `RELAY_BROKER_REQUIRE_LICENSE_CODE=1`; ignored otherwise.
+    #[serde(default)]
+    pub license_code: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -259,6 +264,17 @@ struct PendingRelayEnrollmentChallenge {
     challenge: String,
     relay_label: Option<String>,
     expires_at: u64,
+}
+
+/// Opaque snapshot of a relay registration captured before re-enrollment, so the
+/// original credential can be restored if a later step (license redemption) fails.
+pub struct RelayRegistrationSnapshot(PersistedRelayRegistration);
+
+impl RelayRegistrationSnapshot {
+    /// The relay_id of the snapshotted registration.
+    pub fn relay_id(&self) -> &str {
+        &self.0.relay_id
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -497,6 +513,74 @@ impl PublicControlPlane {
             .or(pending.relay_label);
         self.issue_relay_registration_for_verify_key(&relay_verify_key, relay_label)
             .await
+    }
+
+    /// Remove the relay registration that was created with the given refresh token.
+    ///
+    /// Keyed by the token's SHA-256 hash so rollback only deletes the exact
+    /// registration this enrollment created. If a concurrent enrollment has since
+    /// replaced this registration with a new token, the hash lookup misses and
+    /// rollback is a safe no-op — avoiding the relay_id-based data-loss race where
+    /// one request's rollback could delete a registration created by another.
+    pub async fn rollback_relay_enrollment_by_token(&self, relay_refresh_token: &str) {
+        let token_hash = sha256_hex(relay_refresh_token);
+        match self.lock_state().await {
+            Ok(mut store) => {
+                if store
+                    .relay_registrations_by_hash
+                    .remove(&token_hash)
+                    .is_some()
+                {
+                    if let Err(error) = self.inner.persistence.save(&store).await {
+                        warn!(%error, "failed to persist relay enrollment rollback");
+                    }
+                }
+                // If the token wasn't found (concurrent enrollment already replaced this
+                // registration), this is an intentional no-op — log at debug only.
+            }
+            Err(error) => {
+                warn!(%error, "rollback_relay_enrollment_by_token: failed to lock state")
+            }
+        }
+    }
+
+    /// Capture the current registration for `verify_key`, if any, without modifying
+    /// state. The returned opaque snapshot lets the caller [`restore_relay_registration`]
+    /// the relay's original refresh credential if a later step (license redemption)
+    /// fails after `complete_relay_enrollment` replaced it with a new token.
+    pub async fn snapshot_relay_registration(
+        &self,
+        verify_key: &str,
+    ) -> Option<RelayRegistrationSnapshot> {
+        self.lock_state()
+            .await
+            .ok()?
+            .registration_for_verify_key(verify_key)
+            .map(RelayRegistrationSnapshot)
+    }
+
+    /// Restore a previously-captured registration, undoing the replacement that
+    /// `complete_relay_enrollment` performed. Removes whatever registration currently
+    /// exists for the same verify key (the failed re-enrollment's new token) and
+    /// re-inserts the original, so the relay's originally-cached refresh token keeps
+    /// working. Caller must hold the per-identity enrollment lock so no concurrent
+    /// enrollment observes the intermediate state.
+    pub async fn restore_relay_registration(&self, snapshot: RelayRegistrationSnapshot) {
+        let registration = snapshot.0;
+        match self.lock_state().await {
+            Ok(mut store) => {
+                if let Some(vk) = registration.relay_verify_key.clone() {
+                    store.remove_relay_registration_by_verify_key(&vk);
+                }
+                store
+                    .relay_registrations_by_hash
+                    .insert(registration.refresh_token_hash.clone(), registration);
+                if let Err(error) = self.inner.persistence.save(&store).await {
+                    warn!(%error, "failed to persist relay registration restore");
+                }
+            }
+            Err(error) => warn!(%error, "restore_relay_registration: failed to lock state"),
+        }
     }
 
     pub async fn issue_relay_ws_token(

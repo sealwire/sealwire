@@ -966,13 +966,27 @@ fn workspace_root() -> PathBuf {
 }
 
 fn default_web_assets() -> WebAssets {
-    if let Some(web_root) = std::env::var(WEB_ROOT_ENV).ok().and_then(trimmed_string) {
+    select_default_web_assets(
+        std::env::var(WEB_ROOT_ENV).ok(),
+        cfg!(debug_assertions),
+        workspace_root,
+    )
+}
+
+fn select_default_web_assets(
+    web_root_override: Option<String>,
+    debug_assertions: bool,
+    resolve_workspace_root: impl FnOnce() -> PathBuf,
+) -> WebAssets {
+    if let Some(web_root) = web_root_override.and_then(trimmed_string) {
         return WebAssets::Directory(PathBuf::from(web_root));
     }
 
-    let workspace_web_root = workspace_root().join("web");
-    if cfg!(debug_assertions) && workspace_web_root.join("index.html").exists() {
-        return WebAssets::Directory(workspace_web_root);
+    if debug_assertions {
+        let workspace_web_root = resolve_workspace_root().join("web");
+        if workspace_web_root.join("index.html").exists() {
+            return WebAssets::Directory(workspace_web_root);
+        }
     }
 
     WebAssets::Embedded

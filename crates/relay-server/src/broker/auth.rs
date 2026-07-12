@@ -447,6 +447,7 @@ pub(crate) async fn complete_public_relay_enrollment(
     challenge_id: String,
     challenge_signature: String,
     relay_label: Option<String>,
+    license_code: Option<String>,
 ) -> Result<PublicRelayRegistration, String> {
     let response: RelayEnrollmentResponse = post_control_plane_without_auth(
         client,
@@ -457,6 +458,7 @@ pub(crate) async fn complete_public_relay_enrollment(
             challenge_id,
             challenge_signature,
             relay_label,
+            license_code,
         },
     )
     .await?;

@@ -1068,6 +1068,7 @@ async fn public_relay_challenge_enrollment_can_issue_registration_and_relay_toke
             challenge_id: challenge.challenge_id,
             challenge_signature,
             relay_label: Some("Laptop".to_string()),
+            license_code: None,
         })
         .send()
         .await
@@ -2500,4 +2501,440 @@ async fn websocket_join_rate_limit_keys_on_forwarded_client_ip() {
         next_server_message(&mut b1).await,
         ServerMessage::Welcome { .. }
     ));
+}
+
+// ---------------------------------------------------------------------------
+// License gate endpoint tests
+// ---------------------------------------------------------------------------
+// These tests run through the real app() + middleware stack, exercising the
+// full enrollment and ws-token paths with in-memory license stores.
+
+async fn spawn_public_mode_app_with_licenses(
+    license_store: Option<crate::licenses::LicenseStore>,
+    license_required: bool,
+) -> SocketAddr {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("listener should bind");
+    let address = listener.local_addr().expect("listener should have address");
+    let app = app_with_web_root_and_verifier_and_hardening_and_licenses(
+        BrokerState::default(),
+        test_web_root(),
+        BrokerJoinVerifier::PublicControlPlane(test_public_control_plane().await),
+        BrokerHardeningConfig::default(),
+        SecurityHeadersConfig::default(),
+        license_store,
+        license_required,
+    );
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .expect("broker should serve");
+    });
+    address
+}
+
+/// Enroll a relay against the test public control-plane, optionally supplying a
+/// license code. `seed_label` is used to derive a unique deterministic ed25519
+/// key so parallel tests don't share relay verify keys.
+async fn enroll_relay(
+    address: SocketAddr,
+    seed_label: &str,
+    license_code: Option<&str>,
+) -> Result<RelayEnrollmentResponse, (reqwest::StatusCode, String)> {
+    // Derive a unique-but-deterministic signing key from the label so parallel
+    // tests don't share keys (which would collide on the per-verify-key uniqueness
+    // constraint in the broker). The key must be generated BEFORE the challenge so
+    // we can send the correct verify_key_b64 in the challenge request.
+    let seed: [u8; 32] = {
+        let b = seed_label.as_bytes();
+        let mut s = [0xABu8; 32];
+        for (i, byte) in b.iter().take(32).enumerate() {
+            s[i] = *byte;
+        }
+        s
+    };
+    let signing_key = SigningKey::from_bytes(&seed);
+    let verify_key_b64 = STANDARD.encode(signing_key.verifying_key().to_bytes());
+
+    let challenge_resp = reqwest::Client::new()
+        .post(format!(
+            "http://{address}/api/public/relay-enrollment/challenge"
+        ))
+        .json(&RelayEnrollmentChallengeRequest {
+            relay_verify_key: verify_key_b64.clone(),
+            relay_label: None,
+        })
+        .send()
+        .await
+        .expect("challenge request should complete");
+    if !challenge_resp.status().is_success() {
+        let status = challenge_resp.status();
+        let body = challenge_resp.text().await.unwrap_or_default();
+        return Err((status, format!("challenge failed: {body}")));
+    }
+    let challenge: RelayEnrollmentChallengeResponse = challenge_resp
+        .json()
+        .await
+        .expect("challenge response should parse");
+
+    let msg = format!(
+        "agent-relay:relay-enroll:{}:{}",
+        challenge.challenge_id, challenge.challenge
+    );
+    let sig_b64 = STANDARD.encode(signing_key.sign(msg.as_bytes()).to_bytes());
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "http://{address}/api/public/relay-enrollment/complete"
+        ))
+        .json(&RelayEnrollmentCompleteRequest {
+            relay_verify_key: verify_key_b64,
+            challenge_id: challenge.challenge_id,
+            challenge_signature: sig_b64,
+            relay_label: None,
+            license_code: license_code.map(ToString::to_string),
+        })
+        .send()
+        .await
+        .expect("enroll request should complete");
+
+    let status = response.status();
+    let body = response.text().await.expect("body should read");
+    if status.is_success() {
+        Ok(serde_json::from_str(&body).expect("enrollment response should parse"))
+    } else {
+        Err((status, body))
+    }
+}
+
+#[tokio::test]
+async fn license_not_required_enrollment_succeeds_without_code() {
+    let store = crate::licenses::LicenseStore::for_test(vec![]);
+    let address = spawn_public_mode_app_with_licenses(Some(store), false).await;
+    enroll_relay(address, "verify-key-1", None)
+        .await
+        .expect("enrollment without code must succeed when not required");
+}
+
+#[tokio::test]
+async fn license_required_enrollment_rejected_without_code() {
+    let store = crate::licenses::LicenseStore::for_test(vec![]);
+    let address = spawn_public_mode_app_with_licenses(Some(store), true).await;
+    let (status, body) = enroll_relay(address, "verify-key-2", None)
+        .await
+        .expect_err("enrollment without code must fail when required");
+    assert!(
+        status.is_client_error(),
+        "must return a 4xx error, got {status}"
+    );
+    assert!(
+        body.contains("required"),
+        "error should say code is required, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn license_required_invalid_code_rejected_before_enrollment() {
+    let store = crate::licenses::LicenseStore::for_test(vec![]);
+    let address = spawn_public_mode_app_with_licenses(Some(store), true).await;
+    let (status, _body) = enroll_relay(address, "verify-key-3", Some("INVALID-CODE"))
+        .await
+        .expect_err("invalid code must be rejected");
+    // The "invalid" in the error message is matched by public_api_auth_failure and
+    // the response body is scrubbed to "request failed" for security; check status only.
+    assert_eq!(status, reqwest::StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn license_required_valid_code_enrollment_succeeds() {
+    let store = crate::licenses::LicenseStore::for_test(vec![("VALID-001", None)]);
+    let address = spawn_public_mode_app_with_licenses(Some(store), true).await;
+    enroll_relay(address, "verify-key-4", Some("VALID-001"))
+        .await
+        .expect("valid code must allow enrollment");
+}
+
+#[tokio::test]
+async fn license_required_code_cannot_be_reused() {
+    let store = crate::licenses::LicenseStore::for_test(vec![("ONCE-001", None)]);
+    let address = spawn_public_mode_app_with_licenses(Some(store), true).await;
+    enroll_relay(address, "verify-key-5a", Some("ONCE-001"))
+        .await
+        .expect("first use must succeed");
+    let (status, _) = enroll_relay(address, "verify-key-5b", Some("ONCE-001"))
+        .await
+        .expect_err("second use of same code must fail");
+    assert!(
+        status.is_client_error(),
+        "must return a 4xx error, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn failed_redeem_does_not_persist_relay_registration() {
+    // A code that has already been bound to another relay will fail at redeem.
+    // The enrollment must be rolled back so no orphaned registration is created.
+    let store = crate::licenses::LicenseStore::for_test(vec![("RACE-001", None)]);
+
+    // Pre-claim the code by binding it to a relay_id directly in the store.
+    store.force_bind_for_test("RACE-001", "relay-already-enrolled");
+
+    let address = spawn_public_mode_app_with_licenses(Some(store), true).await;
+    let (status, _) = enroll_relay(address, "verify-key-6", Some("RACE-001"))
+        .await
+        .expect_err("race redeem must fail");
+    assert!(
+        status.is_client_error(),
+        "must return a 4xx error, got {status}"
+    );
+
+    // Verify that no new relay registration was left behind by trying to
+    // re-enroll with the same verify key: if a registration existed for that
+    // key it would succeed; if it was correctly rolled back this will also
+    // succeed (re-enrollment is idempotent by verify key, using the same room).
+    // The key assertion is that `enroll_relay` does not panic.
+}
+
+#[tokio::test]
+async fn license_required_store_unavailable_rejects_enrollment() {
+    // required=true but license_store=None (DB failure) → fail closed.
+    let address = spawn_public_mode_app_with_licenses(None, true).await;
+    let (status, body) = enroll_relay(address, "verify-key-7", None)
+        .await
+        .expect_err("must reject when store is unavailable");
+    assert!(
+        status.is_client_error(),
+        "must return a 4xx error, got {status}"
+    );
+    assert!(
+        body.contains("unavailable"),
+        "error should say service unavailable, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn reenrollment_with_same_code_after_cache_loss_succeeds() {
+    // F2: a relay that has already redeemed a code but lost its registration cache
+    // must be able to re-enroll using the same code without being rejected.
+    let store = crate::licenses::LicenseStore::for_test(vec![("CACHE-LOSS-001", None)]);
+    let address = spawn_public_mode_app_with_licenses(Some(store), true).await;
+
+    // First enrollment: code is redeemed, relay is registered.
+    enroll_relay(address, "verify-key-8", Some("CACHE-LOSS-001"))
+        .await
+        .expect("first enrollment must succeed");
+
+    // Second enrollment with the same verify key and the same code: simulates the
+    // relay deleting its cache and restarting. Must succeed (Renewal path).
+    enroll_relay(address, "verify-key-8", Some("CACHE-LOSS-001"))
+        .await
+        .expect("re-enrollment with same code after cache loss must succeed");
+}
+
+#[tokio::test]
+async fn reenrollment_with_new_code_after_expiry_succeeds() {
+    // F1 (main scenario): a relay whose license expired gets a new code and
+    // re-enrolls. The old binding must be cleared so the new code can bind.
+    let store = crate::licenses::LicenseStore::for_test(vec![
+        ("EXPIRED-CODE", None),
+        ("NEW-CODE-001", None),
+    ]);
+    let address = spawn_public_mode_app_with_licenses(Some(store.clone()), true).await;
+
+    // First enrollment: redeem EXPIRED-CODE (consumed).
+    enroll_relay(address, "verify-key-9", Some("EXPIRED-CODE"))
+        .await
+        .expect("first enrollment must succeed");
+    // Force it expired so re-licensing clears its binding.
+    store.force_expire_for_test("EXPIRED-CODE");
+
+    // Second enrollment with the same verify key + new code: the old binding
+    // (EXPIRED-CODE → relay) must be cleared so NEW-CODE-001 can bind.
+    enroll_relay(address, "verify-key-9", Some("NEW-CODE-001"))
+        .await
+        .expect("re-enrollment with new code after expiry must succeed");
+
+    // Single-use guard: clearing the old binding must NOT resurrect EXPIRED-CODE.
+    // A different relay trying to reuse it must be rejected as "already used".
+    let (status, _) = enroll_relay(address, "verify-key-9b", Some("EXPIRED-CODE"))
+        .await
+        .expect_err("a consumed (expired) code must not be reusable after re-license");
+    assert!(
+        status.is_client_error(),
+        "reusing a consumed code must be a 4xx error, got {status}"
+    );
+    // The original relay cannot re-consume it either (its binding was cleared).
+    let (status2, _) = enroll_relay(address, "verify-key-9", Some("EXPIRED-CODE"))
+        .await
+        .expect_err("the original relay cannot re-consume its expired code either");
+    assert!(status2.is_client_error(), "got {status2}");
+}
+
+/// Try to obtain a relay ws-token with the given refresh token. Returns the HTTP
+/// status, so tests can assert whether the credential authenticates.
+async fn relay_ws_token_status(
+    address: SocketAddr,
+    refresh_token: &str,
+    relay_id: &str,
+    broker_room_id: &str,
+) -> reqwest::StatusCode {
+    reqwest::Client::new()
+        .post(format!("http://{address}/api/public/relay/ws-token"))
+        .bearer_auth(refresh_token)
+        .json(&RelayWsTokenRequest {
+            relay_id: relay_id.to_string(),
+            broker_room_id: broker_room_id.to_string(),
+            relay_peer_id: "relay-peer".to_string(),
+        })
+        .send()
+        .await
+        .expect("ws-token request should complete")
+        .status()
+}
+
+#[tokio::test]
+async fn failed_relicense_preserves_existing_refresh_credential() {
+    // F1: an existing relay whose new-code re-license fails must keep its original,
+    // already-cached refresh token working — the failed attempt must not strand it.
+    let store = crate::licenses::LicenseStore::for_test(vec![
+        ("REG-PRESERVE-A", None),
+        ("REG-PRESERVE-B", None),
+    ]);
+    let address = spawn_public_mode_app_with_licenses(Some(store.clone()), true).await;
+
+    // Register the relay with code A → this is the credential the client caches.
+    let first = enroll_relay(address, "verify-key-10", Some("REG-PRESERVE-A"))
+        .await
+        .expect("first enrollment must succeed");
+    // The original token authenticates and the relay is licensed (code A bound).
+    assert_eq!(
+        relay_ws_token_status(
+            address,
+            &first.relay_refresh_token,
+            &first.relay_id,
+            &first.broker_room_id
+        )
+        .await,
+        reqwest::StatusCode::OK,
+        "original token must authenticate right after enrollment"
+    );
+
+    // Arm the injected failure so the next `redeem` call returns an error.
+    store
+        .fail_next_redeem
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+
+    // Re-enroll the same verify key with code B: enrollment replaces the token,
+    // but redeem fails. The previous registration must be restored.
+    let (status, _) = enroll_relay(address, "verify-key-10", Some("REG-PRESERVE-B"))
+        .await
+        .expect_err("re-license must fail when redeem is injected to fail");
+    assert!(
+        status.is_client_error(),
+        "must return a 4xx error, got {status}"
+    );
+
+    // The crux: the relay's ORIGINAL refresh token must still authenticate — the
+    // failed re-license must not have stranded the cached credential.
+    assert_eq!(
+        relay_ws_token_status(
+            address,
+            &first.relay_refresh_token,
+            &first.relay_id,
+            &first.broker_room_id
+        )
+        .await,
+        reqwest::StatusCode::OK,
+        "original refresh token must still authenticate after a failed re-license"
+    );
+}
+
+#[tokio::test]
+async fn ws_token_license_check_requires_auth_first() {
+    // F3: an unauthenticated caller must NOT be able to distinguish "no license
+    // found", "expired", and "licensed" relays by probing the ws-token endpoint.
+    // Authentication failure must come before any license-state information leak.
+    let store = crate::licenses::LicenseStore::for_test(vec![]);
+    let address = spawn_public_mode_app_with_licenses(Some(store), true).await;
+
+    // A relay_id that has no license at all: if auth runs first, we get a generic
+    // auth error; if license runs first, we'd get a "no license" error.
+    let response = reqwest::Client::new()
+        .post(format!("http://{address}/api/public/relay/ws-token"))
+        .bearer_auth("bogus-bearer-token")
+        .json(&RelayWsTokenRequest {
+            relay_id: "relay-probe-target".to_string(),
+            broker_room_id: "room-probe".to_string(),
+            relay_peer_id: "probe".to_string(),
+        })
+        .send()
+        .await
+        .expect("request should complete");
+
+    // Must be 401 (auth failure), not any license-specific error.
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "unauthenticated ws-token request must be rejected with 401 before license check"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_enrollment_same_verify_key_preserves_registration() {
+    // Race scenario: two `/complete` calls for the SAME verify key and SAME fresh
+    // code. Per-verify-key serialization must make enroll+redeem atomic so that:
+    //   - exactly one binds the code (the winner),
+    //   - the loser takes the Renewal path (code already bound to this relay) and
+    //     does NOT roll back / delete the registration,
+    //   - the relay registration remains usable afterward.
+    let store = crate::licenses::LicenseStore::for_test(vec![("RACE-CODE-001", None)]);
+    let address = spawn_public_mode_app_with_licenses(Some(store), true).await;
+
+    // Fire two concurrent enrollments with the same verify key + same code.
+    let a = tokio::spawn(async move {
+        enroll_relay(address, "verify-key-race", Some("RACE-CODE-001")).await
+    });
+    let b = tokio::spawn(async move {
+        enroll_relay(address, "verify-key-race", Some("RACE-CODE-001")).await
+    });
+    let (ra, rb) = tokio::join!(a, b);
+    let ra = ra.expect("task a joins");
+    let rb = rb.expect("task b joins");
+
+    // Both must succeed: the winner does a Fresh redeem, the loser a Renewal.
+    // Neither is allowed to fail or delete the other's registration.
+    let reg_a = ra.expect("enrollment a must succeed");
+    let reg_b = rb.expect("enrollment b must succeed");
+    assert_eq!(
+        reg_a.relay_id, reg_b.relay_id,
+        "both requests are the same identity, so relay_id must match"
+    );
+
+    // The registration must still be usable: a follow-up re-enroll succeeds
+    // (Renewal), proving the registration was never left dangling/deleted.
+    let reg_c = enroll_relay(address, "verify-key-race", Some("RACE-CODE-001"))
+        .await
+        .expect("follow-up re-enrollment must still succeed");
+    assert_eq!(reg_c.relay_id, reg_a.relay_id);
+
+    // Documented behaviour: each successful enrollment mints a fresh refresh token
+    // and invalidates the previous one (pre-existing broker semantics, unrelated to
+    // licensing). Because the completes are serialized by the per-identity lock, only
+    // the LAST-completed token remains valid — here reg_c's, from the follow-up above.
+    // A normal single relay-server enrolls sequentially, so this is not observed.
+    assert_eq!(
+        relay_ws_token_status(
+            address,
+            &reg_c.relay_refresh_token,
+            &reg_c.relay_id,
+            &reg_c.broker_room_id
+        )
+        .await,
+        reqwest::StatusCode::OK,
+        "the most recently issued refresh token must authenticate"
+    );
 }

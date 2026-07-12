@@ -360,3 +360,39 @@ fn embedded_asset_content_type_serves_png_as_image() {
         "application/octet-stream"
     );
 }
+
+#[test]
+fn release_web_assets_do_not_resolve_the_build_workspace() {
+    let assets = select_default_web_assets(None, false, || {
+        panic!("release binaries must not resolve their build-time workspace")
+    });
+
+    assert!(matches!(assets, WebAssets::Embedded));
+}
+
+#[test]
+fn debug_web_assets_use_built_workspace_assets_when_present() {
+    let workspace = tempfile::tempdir().expect("temporary workspace should be created");
+    let web_root = workspace.path().join("web");
+    std::fs::create_dir(&web_root).expect("web directory should be created");
+
+    let missing_assets = select_default_web_assets(None, true, || workspace.path().to_path_buf());
+    assert!(matches!(missing_assets, WebAssets::Embedded));
+
+    std::fs::write(web_root.join("index.html"), "test").expect("test web index should be written");
+    let built_assets = select_default_web_assets(None, true, || workspace.path().to_path_buf());
+    assert!(matches!(built_assets, WebAssets::Directory(path) if path == web_root));
+}
+
+#[test]
+fn web_root_override_is_trimmed_and_blank_override_falls_through() {
+    let overridden = select_default_web_assets(Some("  /x  ".to_string()), false, || {
+        panic!("a non-blank override must bypass workspace resolution")
+    });
+    assert!(matches!(overridden, WebAssets::Directory(path) if path == PathBuf::from("/x")));
+
+    let blank = select_default_web_assets(Some("   ".to_string()), false, || {
+        panic!("release binaries must not resolve their build-time workspace")
+    });
+    assert!(matches!(blank, WebAssets::Embedded));
+}
