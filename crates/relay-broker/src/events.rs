@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::TrySendError;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use relay_util::trimmed_option_string;
 use serde::Serialize;
@@ -34,6 +34,20 @@ pub const USAGE_EVENTS_PATH_ENV: &str = "RELAY_BROKER_USAGE_EVENTS_PATH";
 /// the same database as the control plane to get SQL analytics in one place.
 /// Takes precedence over [`USAGE_EVENTS_PATH_ENV`] when both are set.
 pub const USAGE_EVENTS_POSTGRES_URL_ENV: &str = "RELAY_BROKER_USAGE_EVENTS_POSTGRES_URL";
+
+/// Optional retention window (in whole days) for the Postgres usage-events table.
+/// When set to a positive integer, a background task periodically deletes rows
+/// older than this, capping unbounded growth. Unset / `0` / unparseable = keep
+/// forever. Only applies to the Postgres sink; the NDJSON file sink is append-only
+/// and left to external log rotation.
+pub const USAGE_EVENTS_RETENTION_DAYS_ENV: &str = "RELAY_BROKER_USAGE_EVENTS_RETENTION_DAYS";
+
+/// How often the retention task sweeps expired usage events. A few hours keeps the
+/// table bounded without hammering Postgres; the `ts_ms` index makes each sweep cheap.
+const USAGE_EVENT_RETENTION_SWEEP: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// Milliseconds in a day, used to convert the retention window to a `ts_ms` cutoff.
+const MS_PER_DAY: u128 = 24 * 60 * 60 * 1000;
 
 /// Bounded capacity of the in-memory queue between the broker hot path and the
 /// writer. Bounding it caps memory if the writer stalls (e.g. slow or full disk,
@@ -243,6 +257,31 @@ impl PostgresUsageEventSink {
             })?;
         initialize_usage_events_schema(&pool).await?;
 
+        // Optional retention sweeper: cap unbounded growth of the usage_events table.
+        if let Some(retention_days) = retention_days_from_env() {
+            let retention_pool = pool.clone();
+            info!(
+                retention_days,
+                "usage_events retention enabled; sweeping every {}h",
+                USAGE_EVENT_RETENTION_SWEEP.as_secs() / 3600
+            );
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(USAGE_EVENT_RETENTION_SWEEP);
+                loop {
+                    ticker.tick().await;
+                    match prune_usage_events(&retention_pool, retention_days, now_ms()).await {
+                        Ok(0) => {}
+                        Ok(deleted) => {
+                            info!(deleted, retention_days, "pruned expired usage events")
+                        }
+                        Err(error) => {
+                            warn!(%error, "usage_events retention sweep failed; will retry")
+                        }
+                    }
+                }
+            });
+        }
+
         let (tx, mut rx) = tokio::sync::mpsc::channel::<UsageEvent>(USAGE_EVENT_QUEUE_CAPACITY);
         tokio::spawn(async move {
             while let Some(first) = rx.recv().await {
@@ -316,6 +355,35 @@ async fn initialize_usage_events_schema(pool: &PgPool) -> Result<(), String> {
     .await
     .map_err(|error| format!("failed to create usage_events device_id index: {error}"))?;
     Ok(())
+}
+
+/// Parse the retention window from the environment. Returns `Some(days)` only for
+/// a positive integer; unset / `0` / unparseable all mean "keep forever" (`None`).
+fn retention_days_from_env() -> Option<u32> {
+    trimmed_option_string(std::env::var(USAGE_EVENTS_RETENTION_DAYS_ENV).ok())
+        .and_then(|raw| raw.parse::<u32>().ok())
+        .filter(|days| *days > 0)
+}
+
+/// Delete usage events older than `retention_days` relative to `now_ms`. Returns
+/// the number of rows removed. `now_ms` is a parameter (not read from the clock)
+/// so retention is deterministically testable. A `retention_days` of 0 is a no-op.
+async fn prune_usage_events(
+    pool: &PgPool,
+    retention_days: u32,
+    now_ms: u128,
+) -> Result<u64, sqlx::Error> {
+    if retention_days == 0 {
+        return Ok(0);
+    }
+    // Saturating so a small `now_ms` (only realistic in tests) can't underflow.
+    let cutoff_ms = now_ms.saturating_sub(u128::from(retention_days) * MS_PER_DAY);
+    let cutoff = i64::try_from(cutoff_ms).unwrap_or(i64::MAX);
+    let result = sqlx::query("DELETE FROM usage_events WHERE ts_ms < $1")
+        .bind(cutoff)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected())
 }
 
 async fn insert_usage_events(pool: &PgPool, events: &[UsageEvent]) -> Result<(), sqlx::Error> {
@@ -618,5 +686,102 @@ mod tests {
             ("disconnect".to_string(), None, None, "surface".to_string())
         );
         assert_eq!(sink.dropped(), 0, "nothing should drop on the happy path");
+    }
+
+    /// `retention_days_from_env` treats only a positive integer as a real window;
+    /// unset / 0 / junk all mean "keep forever".
+    #[test]
+    fn retention_days_env_parsing() {
+        let key = USAGE_EVENTS_RETENTION_DAYS_ENV;
+        let restore = std::env::var(key).ok();
+
+        std::env::remove_var(key);
+        assert_eq!(retention_days_from_env(), None, "unset = keep forever");
+
+        std::env::set_var(key, "0");
+        assert_eq!(retention_days_from_env(), None, "0 = keep forever");
+
+        std::env::set_var(key, "  30 ");
+        assert_eq!(retention_days_from_env(), Some(30), "trimmed positive int");
+
+        std::env::set_var(key, "not-a-number");
+        assert_eq!(retention_days_from_env(), None, "junk = keep forever");
+
+        match restore {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    /// Live-Postgres retention test: seed one stale and one fresh event, prune with
+    /// a 30-day window, and assert only the stale one is deleted. Env-gated like the
+    /// writer test. Deterministic because `prune_usage_events` takes `now_ms`.
+    ///   RELAY_BROKER_TEST_POSTGRES_URL=postgres://sealwire:dev@127.0.0.1:5433/sealwire \
+    ///     cargo test -p relay-broker prune_usage_events -- --nocapture
+    #[tokio::test]
+    async fn prune_usage_events_deletes_only_stale_rows() {
+        let Some(url) = trimmed_option_string(std::env::var("RELAY_BROKER_TEST_POSTGRES_URL").ok())
+        else {
+            eprintln!("skipping postgres retention test: set RELAY_BROKER_TEST_POSTGRES_URL");
+            return;
+        };
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let channel = format!("retention-{unique}");
+
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("query pool should connect");
+        initialize_usage_events_schema(&pool)
+            .await
+            .expect("schema init");
+
+        // Anchor "now" well past the retention window so the arithmetic is unambiguous.
+        let now_ms: u128 = 1_000 * MS_PER_DAY;
+        let stale_ts = now_ms - 40 * MS_PER_DAY; // outside a 30-day window
+        let fresh_ts = now_ms - 1 * MS_PER_DAY; // inside a 30-day window
+
+        for (ts, event) in [(stale_ts, "connect"), (fresh_ts, "connect")] {
+            sqlx::query(
+                "INSERT INTO usage_events (ts_ms, event, channel_id, peer_id, role) \
+                 VALUES ($1, $2, $3, 'relay-1', 'relay')",
+            )
+            .bind(i64::try_from(ts).unwrap())
+            .bind(event)
+            .bind(&channel)
+            .execute(&pool)
+            .await
+            .expect("seed event");
+        }
+
+        let deleted = prune_usage_events(&pool, 30, now_ms)
+            .await
+            .expect("prune should succeed");
+
+        let remaining: Vec<(i64,)> =
+            sqlx::query_as("SELECT ts_ms FROM usage_events WHERE channel_id = $1 ORDER BY ts_ms")
+                .bind(&channel)
+                .fetch_all(&pool)
+                .await
+                .expect("query remaining");
+
+        // Clean up before asserting so a failure still leaves the table tidy.
+        let _ = sqlx::query("DELETE FROM usage_events WHERE channel_id = $1")
+            .bind(&channel)
+            .execute(&pool)
+            .await;
+
+        assert_eq!(deleted, 1, "exactly the stale row should be deleted");
+        assert_eq!(remaining.len(), 1, "only the fresh row should survive");
+        assert_eq!(
+            remaining[0].0,
+            i64::try_from(fresh_ts).unwrap(),
+            "the surviving row should be the fresh one"
+        );
     }
 }

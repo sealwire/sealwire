@@ -19,7 +19,7 @@ use std::{
     collections::{HashMap, VecDeque},
     net::{IpAddr, SocketAddr},
     sync::{Arc, Mutex as StdMutex},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use auth::BrokerAuthMode;
@@ -117,6 +117,7 @@ pub async fn app(state: BrokerState) -> Router {
         security_headers,
         license_store,
         license_required, // may be true even when store=None (DB failure → fail closed)
+        admin_token_from_env(),
     )
     .layer(middleware::from_fn_with_state(ban_guard, reject_banned_ips))
 }
@@ -370,6 +371,21 @@ struct BrokerAppState {
     /// racing (where one request's rollback could delete a registration created
     /// by another). Keyed by relay verify key.
     enrollment_locks: Arc<StdMutex<HashMap<String, Arc<Mutex<()>>>>>,
+    /// Operator token for `/api/admin/stats` (see [`ADMIN_TOKEN_ENV`]). `None` =
+    /// the admin endpoint is disabled and returns 404 (never reveals it exists).
+    admin_token: Option<Arc<str>>,
+}
+
+/// Operator bearer token that gates `/api/admin/stats`. Keep it independent of any
+/// user credential and only reachable on a trusted network / behind your proxy.
+/// Unset = the admin endpoint is disabled entirely.
+pub const ADMIN_TOKEN_ENV: &str = "RELAY_BROKER_ADMIN_TOKEN";
+
+/// Read and trim the operator admin token from the environment (`None` when unset
+/// or blank → admin endpoint disabled).
+fn admin_token_from_env() -> Option<Arc<str>> {
+    trimmed_option_string(std::env::var(ADMIN_TOKEN_ENV).ok())
+        .map(|token| Arc::from(token.as_str()))
 }
 
 /// Bound on the enrollment-lock map: when it grows past this, unused locks
@@ -777,6 +793,7 @@ fn app_with_web_root_and_verifier_and_hardening(
         security_headers,
         None,
         false, // no license store → licensing disabled, no enforcement
+        None,  // no admin token → /api/admin/stats not mounted
     )
 }
 
@@ -792,6 +809,7 @@ fn app_with_web_root_and_verifier_and_hardening_and_licenses(
     security_headers: SecurityHeadersConfig,
     license_store: Option<licenses::LicenseStore>,
     license_required: bool,
+    admin_token: Option<Arc<str>>,
 ) -> Router {
     if !web_root.join("remote.html").exists() {
         warn!(
@@ -806,7 +824,7 @@ fn app_with_web_root_and_verifier_and_hardening_and_licenses(
             warn!(%error, "broker websocket joins will be rejected");
         }
     }
-    Router::new()
+    let mut router = Router::new()
         .route("/api/health", get(health))
         .route(
             "/api/public/relay-enrollment/challenge",
@@ -866,7 +884,16 @@ fn app_with_web_root_and_verifier_and_hardening_and_licenses(
         .route_service("/sw.js", ServeFile::new(web_root.join("remote-sw.js")))
         .route_service("/icon.svg", ServeFile::new(web_root.join("icon.svg")))
         .route_service("/", ServeFile::new(web_root.join("remote.html")))
-        .nest_service("/static", ServeDir::new(web_root))
+        .nest_service("/static", ServeDir::new(web_root));
+
+    // Mount the operator stats endpoint ONLY when a token is configured, so a
+    // disabled deployment is indistinguishable from any other unmounted path
+    // (the router's generic 404) rather than replying with a telltale body.
+    if admin_token.is_some() {
+        router = router.route("/api/admin/stats", get(admin_stats));
+    }
+
+    router
         .with_state(BrokerAppState {
             broker: state,
             join_verifier,
@@ -879,6 +906,7 @@ fn app_with_web_root_and_verifier_and_hardening_and_licenses(
             license_store,
             license_required,
             enrollment_locks: Arc::new(StdMutex::new(HashMap::new())),
+            admin_token,
         })
         .layer(middleware::from_fn_with_state(
             security_headers,
@@ -909,6 +937,157 @@ struct ApiErrorBody {
 #[derive(Debug, Clone, serde::Serialize)]
 struct DeviceSessionClearResponse {
     cleared: bool,
+}
+
+/// Default number of relay rows returned by `/api/admin/stats` when `?top=` is
+/// omitted. Busiest relays (by device count) come first.
+const ADMIN_STATS_DEFAULT_TOP: usize = 100;
+
+#[derive(Debug, serde::Deserialize)]
+struct AdminStatsQuery {
+    /// Cap on the number of relay rows returned. `0` = unlimited.
+    top: Option<usize>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct AdminRelayRow {
+    relay_id: String,
+    broker_room_id: String,
+    relay_label: Option<String>,
+    device_count: u64,
+    client_count: u64,
+    last_seen: Option<u64>,
+    /// License attribution (code/tier/revoked/…), present when a license store is
+    /// configured and the relay has a bound license.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    license: Option<licenses::LicenseSummary>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct AdminStatsResponse {
+    generated_at: u64,
+    totals: public_control::AdminTotals,
+    relays: Vec<AdminRelayRow>,
+}
+
+/// Outcome of checking an operator admin request's bearer token.
+#[derive(Debug, PartialEq, Eq)]
+enum AdminAuthOutcome {
+    /// No admin token configured → the endpoint is disabled (respond 404).
+    Disabled,
+    /// A token was required but the presented one was missing/wrong (respond 401).
+    Unauthorized,
+    /// The presented token matched the configured one.
+    Authorized,
+}
+
+/// Decide an admin request's fate from the configured vs. presented token. Pure so
+/// the auth policy is unit-testable without constructing HTTP state.
+fn admin_auth_outcome(configured: Option<&str>, presented: Option<&str>) -> AdminAuthOutcome {
+    let Some(configured) = configured else {
+        return AdminAuthOutcome::Disabled;
+    };
+    match presented {
+        Some(token) if constant_time_eq(token.as_bytes(), configured.as_bytes()) => {
+            AdminAuthOutcome::Authorized
+        }
+        _ => AdminAuthOutcome::Unauthorized,
+    }
+}
+
+/// Constant-time byte comparison so token verification does not leak the token via
+/// early-exit timing. Length still short-circuits (token length is not secret).
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+fn unix_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// Operator stats: per-relay device/client counts (busiest first) with license
+/// attribution, so a spammy relay can be traced to its code and revoked. Gated by
+/// [`ADMIN_TOKEN_ENV`]; disabled (404) when no token is configured.
+async fn admin_stats(
+    State(state): State<BrokerAppState>,
+    headers: HeaderMap,
+    Query(query): Query<AdminStatsQuery>,
+) -> Result<Json<AdminStatsResponse>, (StatusCode, Json<ApiErrorBody>)> {
+    // Authorize before touching any state. A disabled endpoint 404s (so its
+    // existence is not revealed); a bad/missing token 401s.
+    let presented = bearer_token(&headers).ok();
+    match admin_auth_outcome(state.admin_token.as_deref(), presented) {
+        AdminAuthOutcome::Authorized => {}
+        AdminAuthOutcome::Disabled => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ApiErrorBody {
+                    error: "not_found",
+                    message: "admin endpoint is disabled".to_string(),
+                }),
+            ));
+        }
+        AdminAuthOutcome::Unauthorized => {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(ApiErrorBody {
+                    error: "unauthorized",
+                    message: "invalid or missing admin token".to_string(),
+                }),
+            ));
+        }
+    }
+
+    let control_plane = require_public_control_plane(&state)?;
+    let top = query.top.unwrap_or(ADMIN_STATS_DEFAULT_TOP);
+    let stats = control_plane
+        .admin_stats(top)
+        .await
+        .map_err(public_api_error)?;
+
+    // Enrich with license attribution when a license store is configured.
+    let relay_ids: Vec<String> = stats.relays.iter().map(|r| r.relay_id.clone()).collect();
+    let mut licenses_by_relay = if let Some(store) = &state.license_store {
+        store
+            .license_summaries_for_relays(&relay_ids)
+            .await
+            .map_err(public_api_error)?
+    } else {
+        HashMap::new()
+    };
+
+    let relays = stats
+        .relays
+        .into_iter()
+        .map(|relay| {
+            let license = licenses_by_relay.remove(&relay.relay_id);
+            AdminRelayRow {
+                relay_id: relay.relay_id,
+                broker_room_id: relay.broker_room_id,
+                relay_label: relay.relay_label,
+                device_count: relay.device_count,
+                client_count: relay.client_count,
+                last_seen: relay.last_seen,
+                license,
+            }
+        })
+        .collect();
+
+    Ok(Json(AdminStatsResponse {
+        generated_at: unix_now_secs(),
+        totals: stats.totals,
+        relays,
+    }))
 }
 
 async fn public_create_relay_enrollment_challenge(

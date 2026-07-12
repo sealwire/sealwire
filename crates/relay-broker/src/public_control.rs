@@ -357,6 +357,38 @@ struct PublicControlStateStore {
     client_relay_grants_by_key: HashMap<String, PersistedClientRelayGrant>,
 }
 
+/// Aggregate control-plane counts for the operator `/api/admin/stats` endpoint.
+#[derive(Debug, Clone, Serialize)]
+pub struct AdminTotals {
+    /// Distinct relays that either have a registration or hold device grants.
+    pub relays: u64,
+    /// Total device grants across all relays.
+    pub devices: u64,
+    /// Total registered client identities.
+    pub clients: u64,
+}
+
+/// Per-relay device/client counts, sorted by `device_count` descending so the
+/// noisiest relays surface first. License attribution is joined on separately by
+/// the caller (the license table lives outside the control-plane store).
+#[derive(Debug, Clone, Serialize)]
+pub struct AdminRelayStat {
+    pub relay_id: String,
+    pub broker_room_id: String,
+    pub relay_label: Option<String>,
+    pub device_count: u64,
+    pub client_count: u64,
+    /// Most recent `last_seen` across this relay's devices, if any.
+    pub last_seen: Option<u64>,
+}
+
+/// Snapshot returned by [`PublicControlPlane::admin_stats`].
+#[derive(Debug, Clone, Serialize)]
+pub struct AdminStats {
+    pub totals: AdminTotals,
+    pub relays: Vec<AdminRelayStat>,
+}
+
 impl PublicControlPlane {
     pub async fn from_env() -> Result<Self, String> {
         Self::from_parts_with_postgres(
@@ -715,6 +747,112 @@ impl PublicControlPlane {
             device_ws_token: issued.device_ws_token,
             device_ws_token_expires_at: issued.device_ws_token_expires_at,
         })
+    }
+
+    /// Aggregate per-relay device/client counts for the operator stats endpoint.
+    /// Read-only. `top_n` caps the returned relay rows (0 = unlimited); the busiest
+    /// relays (by device count) are kept.
+    pub async fn admin_stats(&self, top_n: usize) -> Result<AdminStats, String> {
+        let store = self.lock_state().await?;
+
+        // Device counts + freshest last_seen per relay.
+        let mut device_counts: HashMap<&str, u64> = HashMap::new();
+        let mut last_seen: HashMap<&str, u64> = HashMap::new();
+        for grant in store.grants_by_hash.values() {
+            *device_counts.entry(grant.relay_id.as_str()).or_default() += 1;
+            if let Some(seen) = grant.last_seen {
+                let entry = last_seen.entry(grant.relay_id.as_str()).or_default();
+                if seen > *entry {
+                    *entry = seen;
+                }
+            }
+        }
+
+        // Distinct client identities granted to each relay.
+        let mut clients_per_relay: HashMap<&str, BTreeSet<&str>> = HashMap::new();
+        for grant in store.client_relay_grants_by_key.values() {
+            clients_per_relay
+                .entry(grant.relay_id.as_str())
+                .or_default()
+                .insert(grant.client_id.as_str());
+        }
+
+        // Registration lookup (label + room). One relay_id → one registration.
+        let registrations: HashMap<&str, &PersistedRelayRegistration> = store
+            .relay_registrations_by_hash
+            .values()
+            .map(|reg| (reg.relay_id.as_str(), reg))
+            .collect();
+
+        // The relay set is the union of registered relays and any relay that holds
+        // device OR client grants — so an orphaned-grant relay (registration gone,
+        // grants linger) still surfaces, which is exactly the abuse case to spot.
+        // Omitting any grant class here would silently undercount `totals.relays`.
+        let mut relay_ids: BTreeSet<&str> = BTreeSet::new();
+        relay_ids.extend(registrations.keys().copied());
+        relay_ids.extend(device_counts.keys().copied());
+        relay_ids.extend(clients_per_relay.keys().copied());
+
+        let mut rows: Vec<AdminRelayStat> = relay_ids
+            .into_iter()
+            .map(|relay_id| {
+                let registration = registrations.get(relay_id);
+                AdminRelayStat {
+                    relay_id: relay_id.to_string(),
+                    broker_room_id: registration
+                        .map(|reg| reg.broker_room_id.clone())
+                        .unwrap_or_default(),
+                    relay_label: registration.and_then(|reg| reg.relay_label.clone()),
+                    device_count: device_counts.get(relay_id).copied().unwrap_or(0),
+                    client_count: clients_per_relay
+                        .get(relay_id)
+                        .map(|clients| clients.len() as u64)
+                        .unwrap_or(0),
+                    last_seen: last_seen.get(relay_id).copied(),
+                }
+            })
+            .collect();
+
+        let totals = AdminTotals {
+            relays: rows.len() as u64,
+            devices: store.grants_by_hash.len() as u64,
+            clients: store.client_registrations_by_hash.len() as u64,
+        };
+
+        // Busiest first (device_count desc, then client_count desc), then a stable
+        // relay_id tiebreak so the output is deterministic.
+        rows.sort_by(|a, b| {
+            b.device_count
+                .cmp(&a.device_count)
+                .then(b.client_count.cmp(&a.client_count))
+                .then(a.relay_id.cmp(&b.relay_id))
+        });
+        if top_n > 0 {
+            rows.truncate(top_n);
+        }
+
+        Ok(AdminStats {
+            totals,
+            relays: rows,
+        })
+    }
+
+    /// Test-only: seed a client→relay grant directly, bypassing enrollment, to
+    /// simulate an orphaned grant (no registration, no device grant) — the state a
+    /// dangling `client_relay_grant` leaves behind.
+    #[cfg(test)]
+    async fn seed_client_relay_grant_for_test(&self, relay_id: &str, client_id: &str) {
+        let mut store = self.lock_state().await.expect("lock state");
+        store.upsert_client_relay_grant(PersistedClientRelayGrant {
+            client_id: client_id.to_string(),
+            relay_id: relay_id.to_string(),
+            broker_room_id: format!("room-{relay_id}"),
+            device_id: format!("dev-{client_id}"),
+            granted_at: 0,
+            relay_label: None,
+            device_label: None,
+        });
+        self.inner.persistence.save(&store).await.expect("save");
     }
 
     pub async fn issue_client_grant(
@@ -2382,6 +2520,87 @@ mod device_limit_tests {
             error.contains("device limit"),
             "expected a device-limit error, got: {error}"
         );
+    }
+
+    #[tokio::test]
+    async fn admin_stats_counts_devices_per_relay_sorted() {
+        let plane = in_memory_plane().await;
+
+        // Busy relay: 3 devices.
+        let busy = enroll(&plane, "busy").await;
+        for device in ["d1", "d2", "d3"] {
+            plane
+                .issue_device_grant(
+                    &busy.relay_refresh_token,
+                    grant_request(&busy, device),
+                    None,
+                )
+                .await
+                .expect("busy grant");
+        }
+        // Re-granting an existing device must NOT inflate the count.
+        plane
+            .issue_device_grant(&busy.relay_refresh_token, grant_request(&busy, "d1"), None)
+            .await
+            .expect("regrant");
+
+        // Quiet relay: 1 device.
+        let quiet = enroll(&plane, "quiet").await;
+        plane
+            .issue_device_grant(
+                &quiet.relay_refresh_token,
+                grant_request(&quiet, "only"),
+                None,
+            )
+            .await
+            .expect("quiet grant");
+
+        let stats = plane.admin_stats(10).await.expect("admin_stats");
+
+        assert_eq!(stats.totals.relays, 2, "two relays are registered");
+        assert_eq!(stats.totals.devices, 4, "3 + 1 device grants total");
+        assert_eq!(stats.relays.len(), 2);
+        // Busiest relay first.
+        assert_eq!(stats.relays[0].relay_id, busy.relay_id);
+        assert_eq!(stats.relays[0].device_count, 3, "dedupe keeps it at 3");
+        assert_eq!(stats.relays[1].relay_id, quiet.relay_id);
+        assert_eq!(stats.relays[1].device_count, 1);
+    }
+
+    #[tokio::test]
+    async fn admin_stats_includes_client_only_orphan_relays() {
+        // Regression: a relay with a dangling client_relay_grant but NO registration
+        // and NO device grant must still surface (and count in totals), or the abuse
+        // signal for orphaned grants is silently dropped.
+        let plane = in_memory_plane().await;
+        plane
+            .seed_client_relay_grant_for_test("orphan-relay", "client-1")
+            .await;
+
+        let stats = plane.admin_stats(10).await.expect("admin_stats");
+        assert_eq!(stats.totals.relays, 1, "the orphan relay must be counted");
+        let row = stats
+            .relays
+            .iter()
+            .find(|r| r.relay_id == "orphan-relay")
+            .expect("orphan relay should appear in the rows");
+        assert_eq!(row.device_count, 0, "it has no device grants");
+        assert_eq!(row.client_count, 1, "its client grant is surfaced");
+    }
+
+    #[tokio::test]
+    async fn admin_stats_top_n_caps_rows() {
+        let plane = in_memory_plane().await;
+        for tag in ["a", "b", "c"] {
+            let relay = enroll(&plane, tag).await;
+            plane
+                .issue_device_grant(&relay.relay_refresh_token, grant_request(&relay, "d"), None)
+                .await
+                .expect("grant");
+        }
+        let stats = plane.admin_stats(2).await.expect("admin_stats");
+        assert_eq!(stats.totals.relays, 3, "totals count all relays");
+        assert_eq!(stats.relays.len(), 2, "but only top_n rows are returned");
     }
 
     #[tokio::test]

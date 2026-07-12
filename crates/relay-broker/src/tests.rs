@@ -2513,6 +2513,14 @@ async fn spawn_public_mode_app_with_licenses(
     license_store: Option<crate::licenses::LicenseStore>,
     license_required: bool,
 ) -> SocketAddr {
+    spawn_public_mode_app_full(None, license_store, license_required).await
+}
+
+async fn spawn_public_mode_app_full(
+    admin_token: Option<std::sync::Arc<str>>,
+    license_store: Option<crate::licenses::LicenseStore>,
+    license_required: bool,
+) -> SocketAddr {
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .await
         .expect("listener should bind");
@@ -2525,6 +2533,7 @@ async fn spawn_public_mode_app_with_licenses(
         SecurityHeadersConfig::default(),
         license_store,
         license_required,
+        admin_token,
     );
     tokio::spawn(async move {
         axum::serve(
@@ -3081,5 +3090,130 @@ async fn concurrent_enrollment_same_verify_key_preserves_registration() {
         .await,
         reqwest::StatusCode::OK,
         "the most recently issued refresh token must authenticate"
+    );
+}
+
+#[test]
+fn admin_auth_outcome_disabled_when_no_token_configured() {
+    // No configured token → endpoint disabled regardless of what is presented.
+    assert_eq!(
+        admin_auth_outcome(None, None),
+        AdminAuthOutcome::Disabled,
+        "unset admin token disables the endpoint"
+    );
+    assert_eq!(
+        admin_auth_outcome(None, Some("anything")),
+        AdminAuthOutcome::Disabled,
+        "a presented token cannot enable a disabled endpoint"
+    );
+}
+
+#[test]
+fn admin_auth_outcome_requires_exact_token() {
+    assert_eq!(
+        admin_auth_outcome(Some("s3cret"), None),
+        AdminAuthOutcome::Unauthorized,
+        "missing token is unauthorized"
+    );
+    assert_eq!(
+        admin_auth_outcome(Some("s3cret"), Some("wrong")),
+        AdminAuthOutcome::Unauthorized,
+        "wrong token is unauthorized"
+    );
+    assert_eq!(
+        admin_auth_outcome(Some("s3cret"), Some("s3cret")),
+        AdminAuthOutcome::Authorized,
+        "exact token is authorized"
+    );
+}
+
+#[test]
+fn constant_time_eq_matches_only_identical_bytes() {
+    assert!(constant_time_eq(b"abc", b"abc"));
+    assert!(!constant_time_eq(b"abc", b"abd"));
+    assert!(
+        !constant_time_eq(b"abc", b"ab"),
+        "length mismatch is not equal"
+    );
+    assert!(constant_time_eq(b"", b""), "empty equals empty");
+}
+
+// --- HTTP-level /api/admin/stats coverage -----------------------------------
+
+#[tokio::test]
+async fn admin_stats_disabled_is_indistinguishable_from_missing_route() {
+    // With no admin token configured the route is not mounted, so hitting it must
+    // look exactly like any other unknown path (same 404, same body) — no telltale.
+    let address = spawn_public_mode_app_full(None, None, false).await;
+    let client = reqwest::Client::new();
+
+    let admin = client
+        .get(format!("http://{address}/api/admin/stats"))
+        .send()
+        .await
+        .expect("admin request");
+    let missing = client
+        .get(format!("http://{address}/api/definitely-not-a-route"))
+        .send()
+        .await
+        .expect("missing request");
+
+    assert_eq!(admin.status(), reqwest::StatusCode::NOT_FOUND);
+    assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
+    let admin_body = admin.text().await.expect("admin body");
+    let missing_body = missing.text().await.expect("missing body");
+    assert_eq!(
+        admin_body, missing_body,
+        "a disabled admin endpoint must not be distinguishable by its body"
+    );
+}
+
+#[tokio::test]
+async fn admin_stats_requires_valid_token_and_returns_stats() {
+    let token: std::sync::Arc<str> = std::sync::Arc::from("s3cret-operator-token");
+    let address = spawn_public_mode_app_full(Some(token.clone()), None, false).await;
+    let client = reqwest::Client::new();
+
+    // Missing token → 401.
+    let no_token = client
+        .get(format!("http://{address}/api/admin/stats"))
+        .send()
+        .await
+        .expect("no-token request");
+    assert_eq!(no_token.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // Wrong token → 401.
+    let wrong = client
+        .get(format!("http://{address}/api/admin/stats"))
+        .bearer_auth("not-the-token")
+        .send()
+        .await
+        .expect("wrong-token request");
+    assert_eq!(wrong.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // Enroll a relay so the stats are non-trivial.
+    let enrolled = enroll_relay(address, "admin-http", None)
+        .await
+        .expect("enroll should succeed");
+
+    // Correct token → 200 with a stats payload reflecting the enrolled relay.
+    let ok = client
+        .get(format!("http://{address}/api/admin/stats"))
+        .bearer_auth(token.as_ref())
+        .send()
+        .await
+        .expect("valid-token request");
+    assert_eq!(ok.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = ok.json().await.expect("stats json");
+    assert!(
+        body["totals"]["relays"].as_u64().unwrap_or(0) >= 1,
+        "totals should count at least the enrolled relay, got {body}"
+    );
+    let relays = body["relays"].as_array().expect("relays is an array");
+    assert!(
+        relays
+            .iter()
+            .any(|r| r["relay_id"] == serde_json::json!(enrolled.relay_id)),
+        "the enrolled relay must appear in the stats rows"
     );
 }

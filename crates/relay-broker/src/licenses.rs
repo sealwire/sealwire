@@ -16,6 +16,7 @@
 //! Revoke:
 //!   UPDATE licenses SET revoked_at = extract(epoch from now())::bigint WHERE code = '...';
 
+use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use relay_util::trimmed_option_string;
@@ -32,6 +33,47 @@ pub const LICENSES_POSTGRES_URL_ENV: &str = "RELAY_BROKER_PUBLIC_POSTGRES_URL";
 /// When set to `1` / `true`, relay enrollment requires a valid license code and
 /// ws-tokens are denied for relays whose license has expired or been revoked.
 pub const REQUIRE_LICENSE_ENV: &str = "RELAY_BROKER_REQUIRE_LICENSE_CODE";
+
+/// Optional per-tier default device caps, as `tier:limit` pairs joined by commas,
+/// e.g. `free:2,pro:10`. A relay's per-code `device_limit` column always wins;
+/// this only supplies a default for licenses whose column is NULL, so you can set
+/// "free = 2 devices" once instead of stamping every free code. Tier names are
+/// matched case-insensitively; a non-positive or unparseable limit is ignored
+/// (that tier stays unlimited). Unset = no tier defaults.
+pub const TIER_DEVICE_LIMITS_ENV: &str = "RELAY_BROKER_TIER_DEVICE_LIMITS";
+
+/// Parse a `free:2,pro:10` tier→limit spec. Malformed entries and non-positive
+/// limits are skipped (that tier just gets no default); tier keys are lowercased.
+fn parse_tier_device_limits(raw: &str) -> HashMap<String, u32> {
+    let mut map = HashMap::new();
+    for entry in raw.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let Some((tier, limit)) = entry.split_once(':') else {
+            continue;
+        };
+        let tier = tier.trim().to_ascii_lowercase();
+        if tier.is_empty() {
+            continue;
+        }
+        match limit.trim().parse::<u32>() {
+            Ok(limit) if limit > 0 => {
+                map.insert(tier, limit);
+            }
+            _ => continue,
+        }
+    }
+    map
+}
+
+/// Read the tier→limit defaults from the environment (empty map when unset).
+fn tier_device_limits_from_env() -> HashMap<String, u32> {
+    trimmed_option_string(std::env::var(TIER_DEVICE_LIMITS_ENV).ok())
+        .map(|raw| parse_tier_device_limits(&raw))
+        .unwrap_or_default()
+}
 
 /// Parse `RELAY_BROKER_REQUIRE_LICENSE_CODE` from the environment. Exported so
 /// `app()` can read it once independently of the store connection, which allows
@@ -63,6 +105,17 @@ pub enum LicenseEnrollmentAction {
     Renewal,
 }
 
+/// License attribution for a relay, used to enrich the operator stats endpoint so
+/// a noisy relay can be traced to its code/tier and revoked.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LicenseSummary {
+    pub code: String,
+    pub tier: Option<String>,
+    pub revoked: bool,
+    pub expires_at: Option<u64>,
+    pub device_limit: Option<u32>,
+}
+
 /// A license row in the in-memory store (test only).
 #[cfg(test)]
 #[derive(Clone)]
@@ -74,6 +127,10 @@ struct InMemoryLicense {
     /// Per-license device cap (`None` = unlimited). Mirrors the `device_limit`
     /// column; the broker reads it to enforce the per-license device limit.
     device_limit: Option<u32>,
+    /// Tier name (`None` in the in-memory default; mirrors the `tier` column).
+    /// Used only to look up a per-tier default device cap when `device_limit` is
+    /// NULL.
+    tier: Option<String>,
     revoked: bool,
     /// Set on the first successful `redeem` and never cleared — the single-use
     /// "consumed" marker. Distinct from `relay_id`, which is cleared when the
@@ -94,6 +151,9 @@ pub struct LicenseStore {
     /// When `true`, enrollment requires a valid code and ws-tokens check the
     /// relay's license. When `false`, license codes are optional (no-op if absent).
     pub required: bool,
+    /// Per-tier default device caps (see [`TIER_DEVICE_LIMITS_ENV`]). Consulted only
+    /// when a license's own `device_limit` is NULL. Empty = no tier defaults.
+    tier_device_limits: HashMap<String, u32>,
     /// Test-only: make the next `redeem` call fail so the rollback path can be
     /// tested deterministically without needing real concurrency.
     #[cfg(test)]
@@ -106,6 +166,7 @@ impl LicenseStore {
         Ok(Self {
             backend: LicenseBackend::Postgres(pool),
             required,
+            tier_device_limits: tier_device_limits_from_env(),
             #[cfg(test)]
             fail_next_redeem: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
@@ -133,6 +194,7 @@ impl LicenseStore {
                 grant_days,
                 expires_at: None,
                 device_limit: None,
+                tier: None,
                 revoked: false,
                 redeemed_at: None,
             })
@@ -140,7 +202,34 @@ impl LicenseStore {
         Self {
             backend: LicenseBackend::InMemory(Arc::new(StdMutex::new(licenses))),
             required,
+            tier_device_limits: HashMap::new(),
             fail_next_redeem: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    /// Test-only: set the per-tier default device caps (mirrors what
+    /// [`TIER_DEVICE_LIMITS_ENV`] would configure in production).
+    #[cfg(test)]
+    pub fn set_tier_device_limits_for_test(&mut self, pairs: &[(&str, u32)]) {
+        self.tier_device_limits = pairs
+            .iter()
+            .map(|(tier, limit)| (tier.to_ascii_lowercase(), *limit))
+            .collect();
+    }
+
+    /// Test-only: set a code's `tier`.
+    #[cfg(test)]
+    pub fn force_set_tier_for_test(&self, code: &str, tier: &str) {
+        let LicenseBackend::InMemory(ref store) = self.backend else {
+            panic!("force_set_tier_for_test only works with InMemory backend");
+        };
+        let mut guard = store
+            .lock()
+            .expect("in-memory license store should not be poisoned");
+        if let Some(lic) = guard.iter_mut().find(|l| l.code == code) {
+            lic.tier = Some(tier.to_string());
+        } else {
+            panic!("force_set_tier_for_test: code {code:?} not found in store");
         }
     }
 
@@ -369,26 +458,50 @@ impl LicenseStore {
         }
     }
 
+    /// Look up the configured default device cap for `tier` (case-insensitive).
+    fn tier_default_limit(&self, tier: &str) -> Option<u32> {
+        self.tier_device_limits
+            .get(&tier.to_ascii_lowercase())
+            .copied()
+    }
+
     /// Resolve the per-license device cap for the relay bound to `relay_id`.
     ///
-    /// Returns `Ok(Some(n))` when the relay's license sets a `device_limit`,
-    /// `Ok(None)` when it is unlimited (column NULL) or no license row is bound.
+    /// Precedence: the license's own `device_limit` column wins; if it is NULL,
+    /// fall back to the per-tier default (see [`TIER_DEVICE_LIMITS_ENV`]). Returns
+    /// `Ok(None)` when neither is set (unlimited) or no license row is bound.
     /// Callers pass this into `issue_device_grant`; `None` means "do not cap".
     /// This is intentionally independent of expiry/revocation (the grant path
     /// does not gate on license validity today — see device-limit-plan.md Q7).
     pub async fn device_limit_for_relay(&self, relay_id: &str) -> Result<Option<u32>, String> {
         match &self.backend {
-            LicenseBackend::Postgres(pool) => device_limit_for_relay_pg(pool, relay_id).await,
+            LicenseBackend::Postgres(pool) => {
+                let Some((per_code, tier)) = license_cap_row_pg(pool, relay_id).await? else {
+                    return Ok(None); // no license row bound → unlimited
+                };
+                Ok(per_code.or_else(|| {
+                    tier.as_deref()
+                        .and_then(|tier| self.tier_default_limit(tier))
+                }))
+            }
             #[cfg(test)]
             LicenseBackend::InMemory(store) => {
                 let guard = store.lock().expect("in-memory license store poisoned");
-                Ok(guard
+                let Some(license) = guard
                     .iter()
                     .find(|l| l.relay_id.as_deref() == Some(relay_id))
-                    .and_then(|l| l.device_limit)
-                    // Match the Postgres arm: a non-positive limit is treated as
-                    // unlimited (defensive against misconfiguration), never "0 devices".
-                    .filter(|limit| *limit > 0))
+                else {
+                    return Ok(None);
+                };
+                // A non-positive limit is treated as unlimited (defensive against
+                // misconfiguration), never "0 devices" — consistent with Postgres.
+                let per_code = license.device_limit.filter(|limit| *limit > 0);
+                Ok(per_code.or_else(|| {
+                    license
+                        .tier
+                        .as_deref()
+                        .and_then(|tier| self.tier_default_limit(tier))
+                }))
             }
         }
     }
@@ -416,6 +529,88 @@ impl LicenseStore {
             }
         }
     }
+
+    /// Fetch license attribution (code/tier/revoked/expiry/cap) for the given
+    /// relays in one query. Relays without a bound license are simply absent from
+    /// the returned map. Used to enrich `/api/admin/stats`.
+    pub async fn license_summaries_for_relays(
+        &self,
+        relay_ids: &[String],
+    ) -> Result<HashMap<String, LicenseSummary>, String> {
+        if relay_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        match &self.backend {
+            LicenseBackend::Postgres(pool) => license_summaries_pg(pool, relay_ids).await,
+            #[cfg(test)]
+            LicenseBackend::InMemory(store) => {
+                let wanted: std::collections::HashSet<&str> =
+                    relay_ids.iter().map(String::as_str).collect();
+                let guard = store.lock().expect("in-memory license store poisoned");
+                Ok(guard
+                    .iter()
+                    .filter_map(|l| {
+                        let relay_id = l.relay_id.as_deref()?;
+                        if !wanted.contains(relay_id) {
+                            return None;
+                        }
+                        Some((
+                            relay_id.to_string(),
+                            LicenseSummary {
+                                code: l.code.clone(),
+                                tier: l.tier.clone(),
+                                revoked: l.revoked,
+                                expires_at: l.expires_at,
+                                device_limit: l.device_limit,
+                            },
+                        ))
+                    })
+                    .collect())
+            }
+        }
+    }
+}
+
+async fn license_summaries_pg(
+    pool: &PgPool,
+    relay_ids: &[String],
+) -> Result<HashMap<String, LicenseSummary>, String> {
+    // `device_limit` is INTEGER (i32); revoked_at/expires_at are BIGINT (i64).
+    let rows: Vec<(
+        String,
+        String,
+        Option<String>,
+        Option<i64>,
+        Option<i64>,
+        Option<i32>,
+    )> = sqlx::query_as(
+        r#"SELECT relay_id, code, tier, revoked_at, expires_at, device_limit
+                 FROM licenses
+                WHERE relay_id = ANY($1)"#,
+    )
+    .bind(relay_ids)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| format!("failed to query license summaries: {error}"))?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(relay_id, code, tier, revoked_at, expires_at, device_limit)| {
+                (
+                    relay_id,
+                    LicenseSummary {
+                        code,
+                        tier,
+                        revoked: revoked_at.is_some(),
+                        expires_at: expires_at.and_then(|value| u64::try_from(value).ok()),
+                        device_limit: device_limit
+                            .and_then(|value| u32::try_from(value).ok())
+                            .filter(|limit| *limit > 0),
+                    },
+                )
+            },
+        )
+        .collect())
 }
 
 async fn validate_code_or_reenroll_pg(
@@ -529,21 +724,28 @@ async fn redeem_pg(pool: &PgPool, code: &str, relay_id: &str) -> Result<(), Stri
     }
 }
 
-async fn device_limit_for_relay_pg(pool: &PgPool, relay_id: &str) -> Result<Option<u32>, String> {
+/// Fetch `(per_code_device_limit, tier)` for the relay's bound license.
+/// `Ok(None)` when no license row is bound. The per-code limit is normalized to
+/// `None` when NULL / non-positive (defensive against bad data); the caller then
+/// applies the per-tier default.
+async fn license_cap_row_pg(
+    pool: &PgPool,
+    relay_id: &str,
+) -> Result<Option<(Option<u32>, Option<String>)>, String> {
     // `device_limit` is a Postgres `INTEGER` (int4) → decode as `i32`, NOT `i64`,
     // or SQLx raises a runtime type-mismatch the moment a non-NULL cap is read.
-    let row: Option<(Option<i32>,)> =
-        sqlx::query_as(r#"SELECT device_limit FROM licenses WHERE relay_id = $1"#)
+    let row: Option<(Option<i32>, Option<String>)> =
+        sqlx::query_as(r#"SELECT device_limit, tier FROM licenses WHERE relay_id = $1"#)
             .bind(relay_id)
             .fetch_optional(pool)
             .await
             .map_err(|error| format!("failed to query device_limit: {error}"))?;
-    // NULL column or missing row → unlimited. A stored non-positive value is
-    // treated as unlimited rather than "zero devices" (defensive against bad data).
-    Ok(row
-        .and_then(|(limit,)| limit)
-        .and_then(|limit| u32::try_from(limit).ok())
-        .filter(|limit| *limit > 0))
+    Ok(row.map(|(limit, tier)| {
+        let per_code = limit
+            .and_then(|limit| u32::try_from(limit).ok())
+            .filter(|limit| *limit > 0);
+        (per_code, tier)
+    }))
 }
 
 async fn check_relay_access_pg(pool: &PgPool, relay_id: &str) -> Result<(), String> {
@@ -882,6 +1084,95 @@ mod tests {
         assert_eq!(
             store.device_limit_for_relay("relay-unknown").await.unwrap(),
             None
+        );
+    }
+
+    // Pure parser: `free:2,pro:10` and its messy variants.
+    #[test]
+    fn parse_tier_device_limits_handles_messy_input() {
+        let map = parse_tier_device_limits(" free:2 , PRO:10 ,bad, zero:0 ,:5,noodle: ,x:abc ");
+        assert_eq!(map.get("free"), Some(&2), "trimmed pair");
+        assert_eq!(map.get("pro"), Some(&10), "tier keys lowercased");
+        assert_eq!(map.get("zero"), None, "0 = unlimited, not stored");
+        assert_eq!(map.get(""), None, "empty tier skipped");
+        assert_eq!(map.get("noodle"), None, "empty limit skipped");
+        assert_eq!(map.get("x"), None, "non-numeric limit skipped");
+        assert_eq!(map.len(), 2, "only the two valid pairs survive");
+    }
+
+    // In-memory: license attribution is returned only for bound relays we ask for.
+    #[tokio::test]
+    async fn license_summaries_map_relays_to_their_codes() {
+        let store =
+            LicenseStore::for_test(vec![("SUM-A", None), ("SUM-B", None), ("SUM-UNUSED", None)]);
+        store.force_set_tier_for_test("SUM-A", "pro");
+        store.force_set_device_limit_for_test("SUM-A", Some(4));
+        store.redeem("SUM-A", "relay-a").await.expect("redeem a");
+        store.redeem("SUM-B", "relay-b").await.expect("redeem b");
+
+        let summaries = store
+            .license_summaries_for_relays(&[
+                "relay-a".to_string(),
+                "relay-b".to_string(),
+                "relay-missing".to_string(),
+            ])
+            .await
+            .expect("summaries");
+
+        assert_eq!(summaries.len(), 2, "only bound, requested relays appear");
+        let a = summaries.get("relay-a").expect("relay-a present");
+        assert_eq!(a.code, "SUM-A");
+        assert_eq!(a.tier.as_deref(), Some("pro"));
+        assert_eq!(a.device_limit, Some(4));
+        assert!(!a.revoked);
+        assert!(summaries.contains_key("relay-b"));
+        assert!(
+            !summaries.contains_key("relay-missing"),
+            "a relay with no license is absent, not an error"
+        );
+    }
+
+    // In-memory: a per-tier default applies only when the license has no per-code
+    // `device_limit`; the column always wins; an unmapped tier stays unlimited.
+    #[tokio::test]
+    async fn tier_default_device_limit_is_fallback_for_null_column() {
+        let mut store = LicenseStore::for_test(vec![
+            ("TIER-FREE", None),
+            ("TIER-OVERRIDE", None),
+            ("TIER-ENT", None),
+        ]);
+        store.set_tier_device_limits_for_test(&[("free", 2), ("pro", 10)]);
+
+        // free tier, no per-code limit → tier default (2).
+        store.force_set_tier_for_test("TIER-FREE", "free");
+        store.force_bind_for_test("TIER-FREE", "relay-free");
+
+        // free tier, but a per-code limit of 5 → the column wins.
+        store.force_set_tier_for_test("TIER-OVERRIDE", "Free"); // case-insensitive
+        store.force_set_device_limit_for_test("TIER-OVERRIDE", Some(5));
+        store.force_bind_for_test("TIER-OVERRIDE", "relay-override");
+
+        // enterprise tier is not in the map, no per-code limit → unlimited.
+        store.force_set_tier_for_test("TIER-ENT", "enterprise");
+        store.force_bind_for_test("TIER-ENT", "relay-ent");
+
+        assert_eq!(
+            store.device_limit_for_relay("relay-free").await.unwrap(),
+            Some(2),
+            "NULL device_limit should fall back to the free tier default"
+        );
+        assert_eq!(
+            store
+                .device_limit_for_relay("relay-override")
+                .await
+                .unwrap(),
+            Some(5),
+            "a per-code device_limit must override the tier default"
+        );
+        assert_eq!(
+            store.device_limit_for_relay("relay-ent").await.unwrap(),
+            None,
+            "a tier with no configured default stays unlimited"
         );
     }
 
