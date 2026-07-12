@@ -263,6 +263,7 @@ export function mapSdkMessage(msg) {
                 typeof block.content === "string"
                   ? block.content
                   : JSON.stringify(block.content),
+              ...(block.is_error === true ? { is_error: true } : {}),
             });
             break;
           default:
@@ -294,6 +295,7 @@ export function mapSdkMessage(msg) {
             typeof block.content === "string"
               ? block.content
               : JSON.stringify(block.content ?? ""),
+          ...(block.is_error === true ? { is_error: true } : {}),
         });
       }
       return events.length === 0 ? null : events.length === 1 ? events[0] : events;

@@ -96,6 +96,42 @@ export function createFileDiffTracker(cwd) {
       calls.delete(event.id);
 
       const after = await readTextSnapshot(call.absolutePath);
+      const fallbackChange = fileChangeFromToolInput(call.toolName, call.input);
+      // A failed tool result never landed on disk, so the input-derived
+      // reconstruction must never stand in for it — otherwise a failed Edit (the
+      // common no/non-unique-match case that leaves the file untouched) would be
+      // shown as a completed change. Only the authoritative on-disk diff is
+      // trustworthy on failure; when nothing changed that is an empty diff.
+      const failed = event.is_error === true;
+
+      // edit/multiedit/write/notebookedit never DELETE a file. If the re-read
+      // finds the file gone or empty even though it held content before, it did
+      // not observe the tool's write — a truncate-then-write window, a path that
+      // moved or was removed after the turn, or a filesystem race — so an
+      // on-disk diff would be a bogus whole-file deletion (-N/+0) that renders a
+      // one-line edit as the entire file being removed. Rebuild the diff from the
+      // tool input applied to the captured preimage so it stays a correct,
+      // appliable `modify`. On a failed result, or when the input cannot be
+      // reconstructed (NotebookEdit, an old_string that never matched), emit no
+      // diff rather than fabricate one.
+      const beforeHadContent = call.before.exists && call.before.content !== "";
+      const afterVanished = !after.skipped && (!after.exists || after.content === "");
+      if (beforeHadContent && afterVanished) {
+        const postimage = failed
+          ? null
+          : intendedPostimage(call.toolName, call.input, call.before.content);
+        const reconstructed = postimage != null
+          ? buildFileChange(call.filePath, call.before.content, postimage)
+          : { path: call.filePath, change_type: "modify", diff: "" };
+        const tool = fileChangeTool({
+          toolName: call.toolName,
+          input: call.input,
+          resultPreview: event.content ?? null,
+          fileChange: reconstructed,
+        });
+        return tool ? { ...event, tool } : event;
+      }
+
       const fileChange =
         call.before.skipped || after.skipped
           ? {
@@ -108,12 +144,15 @@ export function createFileDiffTracker(cwd) {
               call.before.exists ? call.before.content : null,
               after.exists ? after.content : null
             );
-      const fallbackChange = fileChangeFromToolInput(call.toolName, call.input);
+
+      // Fill in from the input-reconstructed fallback only when the on-disk diff
+      // is empty AND the result succeeded — never for a failed edit.
+      const useFallback = !failed && Boolean(fallbackChange) && !fileChange?.diff;
       const tool = fileChangeTool({
         toolName: call.toolName,
         input: call.input,
         resultPreview: event.content ?? null,
-        fileChange: fileChange?.diff || !fallbackChange ? fileChange : fallbackChange,
+        fileChange: useFallback ? fallbackChange : fileChange,
       });
       return tool ? { ...event, tool } : event;
     },
@@ -166,6 +205,46 @@ function changeType(oldExists, newExists) {
   if (!oldExists && newExists) return "add";
   if (oldExists && !newExists) return "delete";
   return "modify";
+}
+
+// Reconstruct the intended post-edit content by applying the tool input to the
+// captured pre-edit content. Used only when the on-disk re-read is unusable, so
+// the diff is computed against the real preimage (a correct, appliable modify).
+// Returns null when the input cannot be applied — an unknown/notebook tool,
+// missing fields, or an old_string that isn't present in the preimage (i.e. the
+// edit would not have matched) — so the caller can degrade to an empty diff
+// instead of fabricating one.
+function intendedPostimage(toolName, input, beforeContent) {
+  const name = normalizeToolName(toolName);
+  if (name === "write") {
+    return typeof input?.content === "string" ? input.content : null;
+  }
+  if (typeof beforeContent !== "string") return null;
+  if (name === "edit") {
+    return applyStringEdit(beforeContent, input?.old_string, input?.new_string, input?.replace_all);
+  }
+  if (name === "multiedit" && Array.isArray(input?.edits)) {
+    let content = beforeContent;
+    for (const edit of input.edits) {
+      content = applyStringEdit(content, edit?.old_string, edit?.new_string, edit?.replace_all);
+      if (content == null) return null;
+    }
+    return content;
+  }
+  return null;
+}
+
+// Literal (non-regex) string replacement mirroring the Claude Edit tool. Uses
+// index/slice so `$`-sequences in new_string are inserted verbatim. Returns null
+// when old_string is absent, so an edit that never matched can't be reconstructed.
+function applyStringEdit(content, oldString, newString, replaceAll) {
+  if (typeof oldString !== "string" || typeof newString !== "string" || oldString === "") {
+    return null;
+  }
+  if (!content.includes(oldString)) return null;
+  if (replaceAll) return content.split(oldString).join(newString);
+  const at = content.indexOf(oldString);
+  return content.slice(0, at) + newString + content.slice(at + oldString.length);
 }
 
 function renderFileDiff(filePath, oldContent, newContent, { oldExists = true, newExists = true } = {}) {

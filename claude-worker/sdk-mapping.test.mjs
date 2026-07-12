@@ -433,6 +433,41 @@ test("mapSessionMessages enriches Claude edit tools with file change diffs", () 
   assert.equal(toolEntry?.tool?.result_preview, "Updated frontend/styles.css");
 });
 
+// The file-diff tracker relies on `is_error` to avoid reporting a failed edit as
+// a successful diff, so both tool_result shapes must carry it through.
+test("mapSdkMessage carries is_error through a failed user-shaped tool_result", () => {
+  const mapped = mapSdkMessage({
+    type: "user",
+    uuid: "user-1",
+    message: { content: [{ type: "tool_result", tool_use_id: "tool-1", content: "boom", is_error: true }] },
+  });
+  const event = Array.isArray(mapped) ? mapped[0] : mapped;
+  assert.equal(event.type, "tool_call_result");
+  assert.equal(event.is_error, true);
+});
+
+test("mapSdkMessage carries is_error through a failed assistant-shaped tool_result", () => {
+  const mapped = mapSdkMessage({
+    type: "assistant",
+    uuid: "assistant-1",
+    message: { content: [{ type: "tool_result", tool_use_id: "tool-1", content: "boom", is_error: true }] },
+  });
+  const event = Array.isArray(mapped) ? mapped[0] : mapped;
+  assert.equal(event.type, "tool_call_result");
+  assert.equal(event.is_error, true);
+});
+
+test("mapSdkMessage omits is_error on a successful tool_result", () => {
+  const mapped = mapSdkMessage({
+    type: "user",
+    uuid: "user-1",
+    message: { content: [{ type: "tool_result", tool_use_id: "tool-1", content: "ok" }] },
+  });
+  const event = Array.isArray(mapped) ? mapped[0] : mapped;
+  assert.equal(event.type, "tool_call_result");
+  assert.equal("is_error" in event, false);
+});
+
 test("mapSessionMessages preserves full AskUserQuestion JSON for the transcript card", () => {
   // The transcript renders AskUserQuestion as a structured card by parsing
   // tool.input_preview as JSON. The default 1KB cap was truncating real
