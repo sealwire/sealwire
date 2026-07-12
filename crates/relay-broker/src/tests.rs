@@ -2754,6 +2754,55 @@ async fn device_grant_invalid_bearer_hides_license_state() {
     );
 }
 
+// End-to-end cap: license `device_limit` (looked up by relay_id) → N+1 device
+// grant is rejected through the real /api/public/devices endpoint with the
+// machine-readable `device_limit_reached` code.
+#[tokio::test]
+async fn license_device_limit_enforced_through_endpoint() {
+    let store = crate::licenses::LicenseStore::for_test(vec![("CAP-001", None)]);
+    let address = spawn_public_mode_app_with_licenses(Some(store.clone()), true).await;
+    let enrolled = enroll_relay(address, "cap-seed", Some("CAP-001"))
+        .await
+        .expect("enroll with a valid code");
+    store.force_set_device_limit_for_test("CAP-001", Some(1));
+
+    // First device fits under the cap of 1.
+    let _first: DeviceGrantResponse = public_post(
+        address,
+        "/api/public/devices",
+        &enrolled.relay_refresh_token,
+        &DeviceGrantRequest {
+            relay_id: enrolled.relay_id.clone(),
+            broker_room_id: enrolled.broker_room_id.clone(),
+            device_id: "d1".to_string(),
+        },
+    )
+    .await;
+
+    // Second device exceeds it → 403 with a machine-readable code.
+    let response = public_post_response(
+        address,
+        "/api/public/devices",
+        &enrolled.relay_refresh_token,
+        &DeviceGrantRequest {
+            relay_id: enrolled.relay_id.clone(),
+            broker_room_id: enrolled.broker_room_id.clone(),
+            device_id: "d2".to_string(),
+        },
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::FORBIDDEN,
+        "an over-cap device grant must be rejected with 403"
+    );
+    let body: serde_json::Value = response.json().await.expect("error body should be JSON");
+    assert_eq!(
+        body["error"], "device_limit_reached",
+        "the rejection must carry the machine-readable device_limit_reached code"
+    );
+}
+
 #[tokio::test]
 async fn license_required_code_cannot_be_reused() {
     let store = crate::licenses::LicenseStore::for_test(vec![("ONCE-001", None)]);

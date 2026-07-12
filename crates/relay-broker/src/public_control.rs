@@ -34,6 +34,11 @@ const DEFAULT_PUBLIC_DEVICE_WS_TTL_SECS: u64 = 300;
 const DEFAULT_RELAY_ENROLLMENT_CHALLENGE_TTL_SECS: u64 = 300;
 const PUBLIC_CONTROL_STATE_VERSION: u32 = 2;
 
+/// Stable prefix on the per-license device-cap error, so the HTTP layer can map
+/// it to a machine-readable `device_limit_reached` code (and callers/UI can match
+/// it) without fragile full-string comparisons.
+pub const DEVICE_LIMIT_REACHED_ERROR_PREFIX: &str = "device limit reached";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RelayRegistrationConfig {
     pub relay_id: String,
@@ -680,8 +685,8 @@ impl PublicControlPlane {
                 let current = store.count_device_grants_for_relay(&registration.relay_id);
                 if current as u64 >= u64::from(limit) {
                     return Err(format!(
-                        "device limit reached: this license allows {limit} device(s); \
-                         remove a device to add a new one"
+                        "{DEVICE_LIMIT_REACHED_ERROR_PREFIX}: this license allows {limit} \
+                         device(s); remove a device to add a new one"
                     ));
                 }
             }
@@ -2002,6 +2007,17 @@ fn relay_enrollment_challenge_message(challenge_id: &str, challenge: &str) -> St
     format!("agent-relay:relay-enroll:{challenge_id}:{challenge}")
 }
 
+/// Live-Postgres round-trip tests.
+///
+/// SAFETY / ISOLATION: these tests write through the whole-state save path
+/// (`save_public_control_postgres` DELETEs and rebuilds every public-control
+/// table from the test instance's snapshot). They are therefore destructive to
+/// any concurrent writer. `RELAY_BROKER_TEST_POSTGRES_URL` MUST reference a
+/// DISPOSABLE database — never a shared or running broker's DB — and the suite
+/// MUST run with `--test-threads=1` (also avoids a concurrent `CREATE TABLE IF
+/// NOT EXISTS` race on `pg_type_typname_nsp_index`). Example:
+///   RELAY_BROKER_TEST_POSTGRES_URL=postgres://user:pw@127.0.0.1:5433/throwaway \
+///     cargo test -p relay-broker postgres -- --test-threads=1
 #[cfg(test)]
 mod postgres_round_trip_tests {
     use super::*;
@@ -2012,9 +2028,10 @@ mod postgres_round_trip_tests {
     /// database. Closes the gap that the JSON path was the only backend with
     /// automated coverage.
     ///
-    /// Env-gated so plain `cargo test` stays offline. Run against a throwaway DB:
-    ///   RELAY_BROKER_TEST_POSTGRES_URL=postgres://sealwire:dev@127.0.0.1:5433/sealwire \
-    ///     cargo test -p relay-broker postgres_relay_registration -- --nocapture
+    /// Env-gated so plain `cargo test` stays offline. Run ONLY against a
+    /// DISPOSABLE database, serially (see the module-level SAFETY note):
+    ///   RELAY_BROKER_TEST_POSTGRES_URL=postgres://user:pw@127.0.0.1:5433/throwaway \
+    ///     cargo test -p relay-broker postgres_relay_registration -- --test-threads=1
     #[tokio::test]
     async fn postgres_relay_registration_persists_across_reload() {
         let Some(url) = trimmed_option_string(std::env::var("RELAY_BROKER_TEST_POSTGRES_URL").ok())
@@ -2050,10 +2067,16 @@ mod postgres_round_trip_tests {
 
         // Plane B is a brand-new instance against the same DB; its constructor
         // load()s from Postgres -> exercises the LOAD path after a "restart".
-        let plane_b =
-            PublicControlPlane::from_parts_with_postgres(issuer, None, None, Some(url), None, None)
-                .await
-                .expect("plane B should connect to postgres");
+        let plane_b = PublicControlPlane::from_parts_with_postgres(
+            issuer,
+            None,
+            None,
+            Some(url.clone()),
+            None,
+            None,
+        )
+        .await
+        .expect("plane B should connect to postgres");
 
         let loaded = plane_b
             .inner
@@ -2063,22 +2086,146 @@ mod postgres_round_trip_tests {
             .registration_for_verify_key(&verify_key)
             .expect("registration written by plane A must survive reload in plane B");
 
-        // Clean up this run's unique registration before asserting, so repeated
-        // runs against a shared dev database stay tidy even on failure.
-        {
-            let mut guard = plane_a.inner.state.lock().await;
-            guard.remove_relay_registration_by_verify_key(&verify_key);
-            plane_a
-                .inner
-                .persistence
-                .save(&guard)
-                .await
-                .expect("cleanup save should succeed");
-        }
+        // Row-scoped cleanup: a targeted DELETE of only THIS run's registration
+        // (never the whole-state save, which rebuilds every table and could drop
+        // an unrelated writer's rows) before asserting, so failures still clean up.
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("aux pool");
+        sqlx::query("DELETE FROM public_relay_registrations WHERE relay_id = $1")
+            .bind(&enrolled.relay_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup relay registration");
 
         assert_eq!(loaded.relay_id, enrolled.relay_id);
         assert_eq!(loaded.broker_room_id, enrolled.broker_room_id);
         assert_eq!(loaded.relay_label.as_deref(), Some("round-trip"));
+    }
+
+    /// Live-Postgres round-trip for device grants: a grant (with `last_seen`) must
+    /// survive reload, and a throttled ws-token refresh must bump `last_seen` via
+    /// the targeted single-row UPDATE (`touch_device_last_seen`). Env-gated.
+    ///
+    /// DANGER: this test exercises the whole-state save path (`issue_*` → `save()`
+    /// rebuilds every public-control table). Point `RELAY_BROKER_TEST_POSTGRES_URL`
+    /// at a DISPOSABLE database ONLY, and run with `--test-threads=1`. Never point
+    /// it at a shared or running broker's database — a concurrent writer's rows can
+    /// be lost. Cleanup below is row-scoped (targeted DELETEs, not a whole-state
+    /// save) to minimise blast radius.
+    #[tokio::test]
+    async fn postgres_device_grant_last_seen_round_trips_and_touches() {
+        let Some(url) = trimmed_option_string(std::env::var("RELAY_BROKER_TEST_POSTGRES_URL").ok())
+        else {
+            eprintln!(
+                "skipping postgres device-grant round-trip: set RELAY_BROKER_TEST_POSTGRES_URL"
+            );
+            return;
+        };
+        let issuer = Some("test-issuer-secret".to_string());
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let verify_key = format!("test-verify-key-devgrant-{unique}");
+        let device_id = format!("device-{unique}");
+
+        let plane_a = PublicControlPlane::from_parts_with_postgres(
+            issuer.clone(),
+            None,
+            None,
+            Some(url.clone()),
+            None,
+            None,
+        )
+        .await
+        .expect("plane A should connect");
+        let enrolled = plane_a
+            .issue_relay_registration_for_verify_key(&verify_key, None)
+            .await
+            .expect("relay enroll");
+        let grant = plane_a
+            .issue_device_grant(
+                &enrolled.relay_refresh_token,
+                DeviceGrantRequest {
+                    relay_id: enrolled.relay_id.clone(),
+                    broker_room_id: enrolled.broker_room_id.clone(),
+                    device_id: device_id.clone(),
+                },
+                Some(5),
+            )
+            .await
+            .expect("device grant should save to postgres");
+
+        // (1) A fresh instance loads the grant (with last_seen) from Postgres.
+        let plane_b = PublicControlPlane::from_parts_with_postgres(
+            issuer.clone(),
+            None,
+            None,
+            Some(url.clone()),
+            None,
+            None,
+        )
+        .await
+        .expect("plane B should connect");
+        let reloaded_last_seen = {
+            let guard = plane_b.inner.state.lock().await;
+            guard
+                .grants_by_hash
+                .values()
+                .find(|candidate| candidate.device_id == device_id)
+                .map(|candidate| candidate.last_seen)
+        };
+
+        // (2) Age last_seen in the DB, then a ws-token refresh must bump it via the
+        // targeted UPDATE (touch_device_last_seen), not the whole-state save.
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("aux pool");
+        sqlx::query("UPDATE public_device_grants SET last_seen = 1 WHERE device_id = $1")
+            .bind(&device_id)
+            .execute(&pool)
+            .await
+            .expect("age last_seen");
+        plane_a
+            .issue_device_ws_token(&grant.device_refresh_token)
+            .await
+            .expect("ws-token refresh");
+        let (bumped,): (Option<i64>,) =
+            sqlx::query_as("SELECT last_seen FROM public_device_grants WHERE device_id = $1")
+                .bind(&device_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read last_seen");
+
+        // Row-scoped cleanup before asserting — targeted DELETEs so we only touch
+        // THIS test's rows (never the whole-state save, which would rebuild every
+        // table from this instance's snapshot and could drop unrelated rows).
+        sqlx::query("DELETE FROM public_device_grants WHERE relay_id = $1")
+            .bind(&enrolled.relay_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup device grants");
+        sqlx::query("DELETE FROM public_relay_registrations WHERE relay_id = $1")
+            .bind(&enrolled.relay_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup relay registration");
+
+        assert!(
+            reloaded_last_seen
+                .expect("device grant must survive reload")
+                .is_some(),
+            "last_seen (set at grant time) must persist across reload"
+        );
+        assert!(
+            bumped.unwrap_or(0) > 1,
+            "a ws-token refresh must bump last_seen via the targeted UPDATE, got {bumped:?}"
+        );
     }
 }
 

@@ -49,7 +49,7 @@ use public_control::{
     DeviceSessionResponse, DeviceWsTokenResponse, PairingWsTokenRequest, PairingWsTokenResponse,
     PublicControlPlane, RelayEnrollmentChallengeRequest, RelayEnrollmentChallengeResponse,
     RelayEnrollmentCompleteRequest, RelayEnrollmentResponse, RelayRegistrationSnapshot,
-    RelayWsTokenRequest, RelayWsTokenResponse,
+    RelayWsTokenRequest, RelayWsTokenResponse, DEVICE_LIMIT_REACHED_ERROR_PREFIX,
 };
 use rand::{distributions::Alphanumeric, Rng};
 use relay_http::{
@@ -1144,7 +1144,24 @@ async fn public_issue_device_grant(
         .issue_device_grant(bearer, input, device_limit)
         .await
         .map(Json)
-        .map_err(public_api_error)
+        .map_err(device_grant_error)
+}
+
+/// Map a device-grant error. The per-license cap becomes a machine-readable
+/// `device_limit_reached` (403) so the relay and UI can distinguish it from a
+/// generic failure and show "remove a device"; everything else uses the standard
+/// mapping.
+fn device_grant_error(error: String) -> (StatusCode, Json<ApiErrorBody>) {
+    if error.starts_with(DEVICE_LIMIT_REACHED_ERROR_PREFIX) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ApiErrorBody {
+                error: "device_limit_reached",
+                message: error,
+            }),
+        );
+    }
+    public_api_error(error)
 }
 
 /// Authorize a device grant against the relay's license and resolve its cap.

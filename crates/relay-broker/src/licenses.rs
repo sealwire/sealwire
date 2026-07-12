@@ -618,9 +618,10 @@ mod tests {
         LicenseStore::new(pool, true).await.expect("store init")
     }
 
-    /// Env-gated live-Postgres test. Run with:
-    ///   RELAY_BROKER_TEST_POSTGRES_URL=postgres://sealwire:dev@127.0.0.1:5433/sealwire \
-    ///     cargo test -p relay-broker license -- --nocapture
+    /// Env-gated live-Postgres test. Point at a DISPOSABLE database and run
+    /// serially (`--test-threads=1`) to avoid the concurrent schema-init race:
+    ///   RELAY_BROKER_TEST_POSTGRES_URL=postgres://user:pw@127.0.0.1:5433/throwaway \
+    ///     cargo test -p relay-broker license -- --test-threads=1 --nocapture
     async fn pg_pool() -> Option<PgPool> {
         let url = trimmed_option_string(std::env::var("RELAY_BROKER_TEST_POSTGRES_URL").ok())?;
         Some(
@@ -881,6 +882,61 @@ mod tests {
         assert_eq!(
             store.device_limit_for_relay("relay-unknown").await.unwrap(),
             None
+        );
+    }
+
+    // Live-Postgres regression for the INTEGER/i64 decode bug: a non-NULL
+    // `device_limit` must decode (as i32) instead of erroring at query time.
+    // Env-gated: set RELAY_BROKER_TEST_POSTGRES_URL to run. This test is
+    // row-scoped (touches only its own codes via targeted INSERT/DELETE — no
+    // whole-state save), so it is safe on a shared DB, but still run the suite
+    // with `--test-threads=1` to avoid the concurrent schema-init CREATE race.
+    #[tokio::test]
+    async fn device_limit_for_relay_reads_postgres_integer() {
+        let Some(pool) = pg_pool().await else {
+            eprintln!("skipping: set RELAY_BROKER_TEST_POSTGRES_URL");
+            return;
+        };
+        let store = test_store(pool.clone()).await;
+
+        let code = "TEST-DEVLIMIT-001";
+        let relay = "relay-test-devlimit-001";
+        let code_null = "TEST-DEVLIMIT-NULL-001";
+        let relay_null = "relay-test-devlimit-null-001";
+        cleanup(&pool, code).await;
+        cleanup(&pool, code_null).await;
+
+        sqlx::query("INSERT INTO licenses (code, tier, device_limit) VALUES ($1, 'free', 3)")
+            .bind(code)
+            .execute(&pool)
+            .await
+            .expect("insert code with device_limit");
+        store.redeem(code, relay).await.expect("redeem");
+
+        sqlx::query("INSERT INTO licenses (code, tier) VALUES ($1, 'free')")
+            .bind(code_null)
+            .execute(&pool)
+            .await
+            .expect("insert code without device_limit");
+        store
+            .redeem(code_null, relay_null)
+            .await
+            .expect("redeem null");
+
+        let limit = store.device_limit_for_relay(relay).await;
+        let limit_null = store.device_limit_for_relay(relay_null).await;
+        cleanup(&pool, code).await;
+        cleanup(&pool, code_null).await;
+
+        assert_eq!(
+            limit.expect("device_limit query should succeed"),
+            Some(3),
+            "a non-NULL INTEGER device_limit must decode to Some(3)"
+        );
+        assert_eq!(
+            limit_null.expect("device_limit query should succeed"),
+            None,
+            "a NULL device_limit must be unlimited"
         );
     }
 }

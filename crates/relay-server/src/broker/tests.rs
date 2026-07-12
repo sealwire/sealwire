@@ -364,6 +364,66 @@ async fn broker_config_public_mode_uses_control_plane_tokens() {
     assert_eq!(client_grant.relay_label.as_deref(), Some("Demo Relay"));
 }
 
+/// A broker that rejects device grants with the `device_limit_reached` 403.
+async fn spawn_device_limit_mock() -> String {
+    async fn device_grant_over_limit() -> (axum::http::StatusCode, Json<serde_json::Value>) {
+        (
+            axum::http::StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "device_limit_reached",
+                "message": "device limit reached: this license allows 2 device(s); \
+                            remove a device to add a new one",
+            })),
+        )
+    }
+    let app = Router::new().route("/api/public/devices", post(device_grant_over_limit));
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("listener should bind");
+    let address = listener.local_addr().expect("listener should resolve");
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("device-limit mock should serve");
+    });
+    format!("http://{address}")
+}
+
+// Cross-layer contract: when the broker rejects a device grant over the cap, the
+// relay must surface the human-readable reason (so the approving operator sees
+// "remove a device"), not a generic failure. Guards the error-body shape the
+// relay depends on.
+#[tokio::test]
+async fn device_broker_credential_surfaces_device_limit_error() {
+    let control_url = spawn_device_limit_mock().await;
+    let config = BrokerConfig::from_parts(
+        Some("wss://broker.example.com".to_string()),
+        Some("wss://public-broker.example.com".to_string()),
+        Some(control_url),
+        Some("demo-room".to_string()),
+        Some("relay-1".to_string()),
+        Some("public".to_string()),
+        None,
+        Some("relay-owner-1".to_string()),
+        Some("relay-refresh-1".to_string()),
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("config should parse")
+    .expect("config should be enabled");
+
+    let error = config
+        .device_broker_credential("device-x", None)
+        .await
+        .expect_err("an over-cap device grant must surface an error");
+    assert!(
+        error.contains("device limit reached"),
+        "the operator-facing error must explain the device limit, got: {error}"
+    );
+}
+
 #[tokio::test]
 async fn broker_config_public_mode_returns_pending_enrollment_until_cached_registration_exists() {
     let control_url = spawn_public_control_mock().await;
