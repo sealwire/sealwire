@@ -1832,12 +1832,25 @@ function openThreadContextMenu(threadId, clientX, clientY) {
   threadContextMenu.style.left = `${left}px`;
   threadContextMenu.style.top = `${top}px`;
 
-  threadsList
-    .querySelectorAll(".conversation-item")
-    .forEach((item) => item.classList.toggle("is-context-target", item.dataset.threadId === threadId));
+  // Re-render the thread list so the `is-context-target` highlight lands via
+  // React (driven by the store's context-menu target we just set). Opening the
+  // menu is otherwise a store-only mutation with no subscriber, so without this
+  // the class would only appear on the NEXT incidental render (an SSE/activity
+  // tick or the 12s poll). Painting it imperatively here instead is fragile: any
+  // React re-render in that window recomputes the row className from frozen props
+  // (contextMenuThreadId=null) and strips it — the flake the delete-thread e2e hit.
+  renderThreads();
 }
 
-function closeThreadContextMenu() {
+// `rerender` re-renders the thread list so React drops the `is-context-target`
+// highlight (mirrors openThreadContextMenu). Callers that are already inside
+// renderThreads() — or that render their own thread-list content immediately
+// after — pass `{ rerender: false }` to avoid a redundant/re-entrant render.
+function closeThreadContextMenu({ rerender = true } = {}) {
+  // Only worth a re-render if a menu was actually open — Escape/blur/resize call
+  // this unconditionally, and we don't want to re-render the thread list on every
+  // one of those when there's no highlight to clear.
+  const wasOpen = readThreadListContextMenu(state.threadListStore).threadId != null;
   state.threadListStore.getState().closeContextMenu();
   if (threadContextMenu) {
     threadContextMenu.hidden = true;
@@ -1850,9 +1863,9 @@ function closeThreadContextMenu() {
     deleteThreadButton.disabled = false;
     deleteThreadButton.textContent = "Delete permanently";
   }
-  threadsList
-    .querySelectorAll(".conversation-item")
-    .forEach((item) => item.classList.remove("is-context-target"));
+  if (rerender && wasOpen) {
+    renderThreads();
+  }
 }
 
 async function archiveThreadFromContextMenu() {

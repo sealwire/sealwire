@@ -351,12 +351,13 @@ export function ThreadGroupItem({
   // Three-state dot: needs_input (amber) > working (pulse) > completed (blue).
   // See selectThreadDot for why needs_input outranks the live-turn pulse.
   const dot = selectThreadDot({ activity, attentionKind });
-  // The right-click highlight must be React-owned: the thread list re-renders on
-  // every SSE/activity tick, and a re-render that recomputes this button's
-  // className (active flips, virtualizer remounts the row, ...) would otherwise
-  // strip the `is-context-target` class that app.js sets imperatively — leaving
-  // the row highlight flickering off while the menu is still open. Driving the
-  // class from the store's context-menu target keeps it stable across renders.
+  // The right-click highlight is React-owned, driven off the store's context-menu
+  // target (opening/closing the menu re-renders the thread list). It must NOT be
+  // painted imperatively: the list re-renders on every SSE/activity tick, and a
+  // re-render that recomputes this button's className (active flips, virtualizer
+  // remounts the row, ...) would strip an imperatively-set class — leaving the
+  // highlight flickering off while the menu is still open. Owning it here keeps
+  // it stable across renders.
   const isContextTarget = contextMenuThreadId === thread.id;
 
   return h(

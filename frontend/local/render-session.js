@@ -1307,9 +1307,15 @@ export function createSessionRenderer({
         ? state.pendingThreadHistoryScrollTop ??
           Math.max(state.threadHistoryScrollTop, threadsList?.scrollTop || 0)
         : 0;
-    const openCtxThreadId = readThreadListContextMenu(state.threadListStore).threadId;
+    // Read the context-menu target so React can paint the `is-context-target`
+    // highlight on the matching row below. If that thread has vanished (deleted
+    // out from under an open menu), close the menu — but WITHOUT re-rendering,
+    // since we're already inside renderThreads() and continue on to render the
+    // list; then re-sync the local id so this pass doesn't highlight a ghost row.
+    let openCtxThreadId = readThreadListContextMenu(state.threadListStore).threadId;
     if (openCtxThreadId && !state.threads.some((entry) => entry.id === openCtxThreadId)) {
-      closeThreadContextMenu();
+      closeThreadContextMenu({ rerender: false });
+      openCtxThreadId = readThreadListContextMenu(state.threadListStore).threadId;
     }
 
     const groups = state.threadGroups || [];
@@ -1391,7 +1397,9 @@ export function createSessionRenderer({
   }
 
   function renderThreadListMessage(countLabel, message) {
-    closeThreadContextMenu();
+    // rerender:false — this function renders its own (empty) thread-list content
+    // just below, so let closeThreadContextMenu skip its own renderThreads().
+    closeThreadContextMenu({ rerender: false });
     threadsCount.textContent = countLabel;
     threadsCount.title = "";
     resumeLatestButton.disabled = true;
