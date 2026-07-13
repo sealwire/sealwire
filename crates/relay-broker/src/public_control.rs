@@ -18,7 +18,7 @@ use tokio::{
     fs,
     sync::{Mutex, MutexGuard},
 };
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::join_ticket::{unix_now, JoinTicketClaims, JoinTicketKey};
 
@@ -1215,8 +1215,20 @@ impl PublicControlPersistence {
             (Some(_), Some(_)) => Err(format!(
                 "set only one of {PUBLIC_STATE_PATH_ENV} or {PUBLIC_POSTGRES_URL_ENV}"
             )),
-            (Some(path), None) => Ok(Self::Json(path)),
+            (Some(path), None) => {
+                info!(
+                    backend = "json",
+                    path = %path.display(),
+                    "public control-plane persistence: JSON file"
+                );
+                Ok(Self::Json(path))
+            }
             (None, Some(url)) => {
+                info!(
+                    backend = "postgres",
+                    target = %redact_postgres_url(&url),
+                    "public control-plane persistence: Postgres (connecting)"
+                );
                 let pool = PgPoolOptions::new()
                     .max_connections(5)
                     .connect(&url)
@@ -1225,9 +1237,19 @@ impl PublicControlPersistence {
                         format!("failed to connect to {PUBLIC_POSTGRES_URL_ENV}: {error}")
                     })?;
                 initialize_postgres_public_control_schema(&pool).await?;
+                info!(
+                    backend = "postgres",
+                    target = %redact_postgres_url(&url),
+                    "public control-plane persistence: Postgres schema ready"
+                );
                 Ok(Self::Postgres(pool))
             }
-            (None, None) => Ok(Self::InMemory),
+            (None, None) => {
+                warn!(
+                    "public control-plane persistence: in-memory only (set {PUBLIC_STATE_PATH_ENV} or {PUBLIC_POSTGRES_URL_ENV} to persist)"
+                );
+                Ok(Self::InMemory)
+            }
         }
     }
 
@@ -1625,6 +1647,16 @@ async fn save_public_control_json(
         .await
         .map_err(|error| format!("failed to replace {}: {error}", path.display()))?;
     Ok(())
+}
+
+/// Redact credentials from a Postgres URL for logging. Keeps only the portion
+/// after the first `@` (host/port/db/params) so `user:password` never reaches
+/// the logs. URLs without credentials are returned unchanged (nothing secret).
+fn redact_postgres_url(url: &str) -> String {
+    match url.split_once('@') {
+        Some((_credentials, host_and_rest)) => host_and_rest.to_string(),
+        None => url.to_string(),
+    }
 }
 
 async fn initialize_postgres_public_control_schema(pool: &PgPool) -> Result<(), String> {
