@@ -2,7 +2,10 @@ use std::{
     collections::{BTreeSet, HashMap},
     net::IpAddr,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -26,6 +29,11 @@ pub const PUBLIC_ISSUER_SECRET_ENV: &str = "RELAY_BROKER_PUBLIC_ISSUER_SECRET";
 pub const PUBLIC_RELAY_REGISTRATIONS_ENV: &str = "RELAY_BROKER_PUBLIC_RELAYS_JSON";
 pub const PUBLIC_STATE_PATH_ENV: &str = "RELAY_BROKER_PUBLIC_STATE_PATH";
 pub const PUBLIC_POSTGRES_URL_ENV: &str = "RELAY_BROKER_PUBLIC_POSTGRES_URL";
+/// Opt back into reloading the whole control-plane state from Postgres before
+/// every operation. Only needed for multi-instance deployments that share one
+/// database; a single broker (the default) keeps the in-memory state as the
+/// source of truth and skips the per-op reload for much lower latency.
+pub const PUBLIC_POSTGRES_RELOAD_ENV: &str = "RELAY_BROKER_PUBLIC_POSTGRES_RELOAD_BEFORE_USE";
 pub const PUBLIC_RELAY_WS_TTL_SECS_ENV: &str = "RELAY_BROKER_PUBLIC_RELAY_WS_TTL_SECS";
 pub const PUBLIC_DEVICE_WS_TTL_SECS_ENV: &str = "RELAY_BROKER_PUBLIC_DEVICE_WS_TTL_SECS";
 
@@ -260,7 +268,25 @@ struct PublicControlPlaneInner {
 enum PublicControlPersistence {
     InMemory,
     Json(PathBuf),
-    Postgres(PgPool),
+    Postgres {
+        pool: PgPool,
+        /// Reload the whole state from Postgres before every operation. Only
+        /// needed when multiple broker instances share this database (so each
+        /// sees the others' writes). Defaults to `false`: with a single instance
+        /// (railway.toml `numReplicas = 1`) the in-memory state is authoritative,
+        /// and reloading every op is pure latency. Re-enable via
+        /// `RELAY_BROKER_PUBLIC_POSTGRES_RELOAD_BEFORE_USE=1` before scaling out.
+        reload_before_use: bool,
+        /// Snapshot of what is currently persisted. `save()` diffs the live state
+        /// against this and writes only the rows that actually changed (targeted
+        /// upsert/delete) instead of wiping and rebuilding every table. Shared
+        /// across clones (same DB) and kept in sync by `load()` and `save()`.
+        last_saved: Arc<Mutex<PublicControlStateStore>>,
+        /// Set when a save failed AND the reconciling reload also failed, so the
+        /// true DB outcome is unknown. Forces the next `lock_state()` to reload and
+        /// repair (even with `reload_before_use` off); cleared by a successful load.
+        needs_reload: Arc<AtomicBool>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -282,7 +308,7 @@ impl RelayRegistrationSnapshot {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct PersistedRelayRegistration {
     relay_id: String,
     broker_room_id: String,
@@ -311,7 +337,7 @@ struct PersistedPublicControlState {
     client_relay_grants: Vec<PersistedClientRelayGrant>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct PersistedDeviceGrant {
     relay_id: String,
     broker_room_id: String,
@@ -326,7 +352,7 @@ struct PersistedDeviceGrant {
     last_seen: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct PersistedClientIdentity {
     client_id: String,
     client_verify_key: String,
@@ -336,7 +362,7 @@ struct PersistedClientIdentity {
     client_label: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct PersistedClientRelayGrant {
     client_id: String,
     relay_id: String,
@@ -349,7 +375,7 @@ struct PersistedClientRelayGrant {
     device_label: Option<String>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq)]
 struct PublicControlStateStore {
     relay_registrations_by_hash: HashMap<String, PersistedRelayRegistration>,
     client_registrations_by_hash: HashMap<String, PersistedClientIdentity>,
@@ -443,7 +469,7 @@ impl PublicControlPlane {
         let seeded =
             state.seed_relay_registrations(parse_relay_registrations(relay_registrations_json)?);
         if seeded {
-            persistence.save(&state).await?;
+            persistence.save(&mut state).await?;
         }
 
         Ok(Self {
@@ -574,7 +600,7 @@ impl PublicControlPlane {
                     .remove(&token_hash)
                     .is_some()
                 {
-                    if let Err(error) = self.inner.persistence.save(&store).await {
+                    if let Err(error) = self.inner.persistence.save(&mut store).await {
                         warn!(%error, "failed to persist relay enrollment rollback");
                     }
                 }
@@ -618,7 +644,7 @@ impl PublicControlPlane {
                 store
                     .relay_registrations_by_hash
                     .insert(registration.refresh_token_hash.clone(), registration);
-                if let Err(error) = self.inner.persistence.save(&store).await {
+                if let Err(error) = self.inner.persistence.save(&mut store).await {
                     warn!(%error, "failed to persist relay registration restore");
                 }
             }
@@ -735,7 +761,7 @@ impl PublicControlPlane {
                 last_seen: Some(created_at),
             },
         );
-        self.inner.persistence.save(&store).await?;
+        self.inner.persistence.save(&mut store).await?;
 
         let issued =
             self.issue_device_ws_token_for_registration(&registration, &request.device_id)?;
@@ -852,7 +878,7 @@ impl PublicControlPlane {
             relay_label: None,
             device_label: None,
         });
-        self.inner.persistence.save(&store).await.expect("save");
+        self.inner.persistence.save(&mut store).await.expect("save");
     }
 
     pub async fn issue_client_grant(
@@ -887,7 +913,7 @@ impl PublicControlPlane {
             relay_label: registration.relay_label.clone(),
             device_label,
         });
-        self.inner.persistence.save(&store).await?;
+        self.inner.persistence.save(&mut store).await?;
         Ok(ClientGrantResponse {
             client_id,
             client_refresh_token,
@@ -947,7 +973,7 @@ impl PublicControlPlane {
         let client = self.authenticate_client(bearer_token).await?;
         let mut store = self.lock_state().await?;
         let refreshed_token = store.rotate_client_identity(&client);
-        self.inner.persistence.save(&store).await?;
+        self.inner.persistence.save(&mut store).await?;
         Ok((client.client_id, refreshed_token))
     }
 
@@ -960,7 +986,7 @@ impl PublicControlPlane {
         let revoked_identity_count = store.remove_client_identity_by_client_id(&client.client_id);
         let revoked_grant_count = store.remove_client_relay_grants_by_client_id(&client.client_id);
         if revoked_identity_count > 0 || revoked_grant_count > 0 {
-            self.inner.persistence.save(&store).await?;
+            self.inner.persistence.save(&mut store).await?;
         }
         Ok(ClientIdentityRevokeResponse {
             client_id: client.client_id,
@@ -984,8 +1010,8 @@ impl PublicControlPlane {
                 .cloned()
                 .ok_or_else(|| "device refresh token is invalid".to_string())?;
             // Throttled activity marker: at most one durable write per device per
-            // LAST_SEEN_THROTTLE_SECS, via a targeted single-row UPDATE (never the
-            // whole-state save, which rewrites every table).
+            // LAST_SEEN_THROTTLE_SECS, via a targeted single-row UPDATE that stays
+            // off the diff-based save() path entirely (this is the hottest write).
             if should_touch_last_seen(grant.last_seen, now) {
                 if let Some(entry) = store.grants_by_hash.get_mut(&token_hash) {
                     entry.last_seen = Some(now);
@@ -1038,7 +1064,7 @@ impl PublicControlPlane {
         // Persist if EITHER removal happened, so an orphan client_relay_grant
         // (no matching device grant) is still cleaned up durably.
         if revoked_grant_count > 0 || revoked_client_grant_count > 0 {
-            self.inner.persistence.save(&store).await?;
+            self.inner.persistence.save(&mut store).await?;
         }
         Ok(DeviceGrantRevokeResponse {
             relay_id: registration.relay_id.clone(),
@@ -1069,7 +1095,7 @@ impl PublicControlPlane {
             &request.keep_device_id,
         );
         if !revoked_device_ids.is_empty() {
-            self.inner.persistence.save(&store).await?;
+            self.inner.persistence.save(&mut store).await?;
         }
         Ok(DeviceGrantBulkRevokeResponse {
             relay_id: registration.relay_id.clone(),
@@ -1184,7 +1210,7 @@ impl PublicControlPlane {
         store
             .relay_registrations_by_hash
             .insert(refresh_token_hash, registration);
-        self.inner.persistence.save(&store).await?;
+        self.inner.persistence.save(&mut store).await?;
         Ok(RelayEnrollmentResponse {
             relay_id,
             broker_room_id,
@@ -1242,7 +1268,22 @@ impl PublicControlPersistence {
                     target = %redact_postgres_url(&url),
                     "public control-plane persistence: Postgres schema ready"
                 );
-                Ok(Self::Postgres(pool))
+                let reload_before_use = std::env::var(PUBLIC_POSTGRES_RELOAD_ENV)
+                    .ok()
+                    .map(|value| {
+                        let value = value.trim();
+                        value == "1" || value.eq_ignore_ascii_case("true")
+                    })
+                    .unwrap_or(false);
+                if reload_before_use {
+                    info!("public control-plane: reload-before-use ON (multi-instance mode)");
+                }
+                Ok(Self::Postgres {
+                    pool,
+                    reload_before_use,
+                    last_saved: Arc::new(Mutex::new(PublicControlStateStore::default())),
+                    needs_reload: Arc::new(AtomicBool::new(false)),
+                })
             }
             (None, None) => {
                 warn!(
@@ -1261,20 +1302,113 @@ impl PublicControlPersistence {
         match self {
             Self::InMemory => Ok(PublicControlStateStore::default()),
             Self::Json(path) => load_public_control_json(path).await,
-            Self::Postgres(pool) => load_public_control_postgres(pool).await,
+            Self::Postgres {
+                pool,
+                last_saved,
+                needs_reload,
+                ..
+            } => {
+                let store = load_public_control_postgres(pool).await?;
+                // Snapshot mirrors exactly what is in the DB right now, so the
+                // next save() diffs against reality (not an empty baseline).
+                *last_saved.lock().await = store.clone();
+                // A successful reload reconciled memory with the DB, clearing any
+                // pending "state indeterminate" marker set by a failed save.
+                needs_reload.store(false, Ordering::SeqCst);
+                Ok(store)
+            }
         }
     }
 
-    async fn save(&self, state: &PublicControlStateStore) -> Result<(), String> {
+    /// Persist the live `state` (the intended `next`). Takes `&mut` so the failure
+    /// path can reconcile memory with the database.
+    ///
+    /// On a save error the outcome is not necessarily a rollback: a COMMIT failure
+    /// is AMBIGUOUS — Postgres may have durably committed `next` even though the
+    /// client got an error (connection dropped after COMMIT, before the ack). So we
+    /// re-read the authoritative DB state and decide from what actually persisted:
+    ///   - DB == `next`  → the commit landed → return `Ok(())` so the caller
+    ///     delivers the freshly-issued credential (it was NOT stranded);
+    ///   - DB == `prev`  → definite rollback → restore memory, return the error;
+    ///   - DB == neither → indeterminate → reconcile memory to the DB, return error;
+    ///   - reload fails  → outcome unknown → force a repair-reload on the next op.
+    async fn save(&self, state: &mut PublicControlStateStore) -> Result<(), String> {
         match self {
             Self::InMemory => Ok(()),
             Self::Json(path) => save_public_control_json(path, state).await,
-            Self::Postgres(pool) => save_public_control_postgres(pool, state).await,
+            Self::Postgres {
+                pool,
+                last_saved,
+                needs_reload,
+                ..
+            } => {
+                // Diff the live state against the last-persisted snapshot and write
+                // only the rows that changed. Hold the snapshot lock across the
+                // write so it advances atomically with the DB.
+                let mut snapshot = last_saved.lock().await;
+                match save_public_control_postgres(pool, &snapshot, state).await {
+                    Ok(()) => {
+                        *snapshot = state.clone();
+                        Ok(())
+                    }
+                    Err(error) => match load_public_control_postgres(pool).await {
+                        Ok(reconciled) => {
+                            match classify_save_reconciliation(&reconciled, &snapshot, state) {
+                                SaveReconciliation::Committed => {
+                                    // The intended write is durably in the DB — the
+                                    // commit actually landed despite the error. Treat
+                                    // as success so the caller returns the credential
+                                    // instead of stranding it. `state` already == next.
+                                    *snapshot = reconciled;
+                                    Ok(())
+                                }
+                                SaveReconciliation::RolledBack => {
+                                    // Definite rollback: the DB still holds `prev`.
+                                    // Restore memory and surface the error; the old
+                                    // credential stays valid and the op can be retried.
+                                    *state = reconciled;
+                                    Err(error)
+                                }
+                                SaveReconciliation::Indeterminate => {
+                                    // The DB matches neither `prev` nor `next` (e.g. an
+                                    // external writer). Reconcile memory to the DB truth
+                                    // and surface the error; don't claim issuance won.
+                                    *state = reconciled.clone();
+                                    *snapshot = reconciled;
+                                    Err(error)
+                                }
+                            }
+                        }
+                        Err(reload_error) => {
+                            // Can't reach the DB to determine the outcome. Force the
+                            // next operation to reload (repairing state once the DB is
+                            // reachable) and surface both errors — never silently claim
+                            // success or a specific state here.
+                            needs_reload.store(true, Ordering::SeqCst);
+                            warn!(
+                                %error,
+                                %reload_error,
+                                "public control-plane save failed and the reconciling \
+                                 reload also failed; forcing a reload on the next \
+                                 operation (state indeterminate until then)"
+                            );
+                            Err(error)
+                        }
+                    },
+                }
+            }
         }
     }
 
     fn reload_before_use(&self) -> bool {
-        matches!(self, Self::Postgres(_))
+        match self {
+            Self::Postgres {
+                reload_before_use,
+                needs_reload,
+                ..
+            } => *reload_before_use || needs_reload.load(Ordering::SeqCst),
+            _ => false,
+        }
     }
 
     /// Persist a single device grant's `last_seen` with a targeted O(1) UPDATE,
@@ -1289,7 +1423,7 @@ impl PublicControlPersistence {
     ) -> Result<(), String> {
         match self {
             Self::InMemory | Self::Json(_) => Ok(()),
-            Self::Postgres(pool) => {
+            Self::Postgres { pool, .. } => {
                 sqlx::query(
                     "UPDATE public_device_grants SET last_seen = $1 WHERE refresh_token_hash = $2",
                 )
@@ -1874,7 +2008,226 @@ async fn load_public_control_postgres(pool: &PgPool) -> Result<PublicControlStat
     })
 }
 
+/// What the reconciling reload proved about a save whose client-side result was an
+/// error (which, for a COMMIT failure, is ambiguous).
+#[derive(Debug, PartialEq, Eq)]
+enum SaveReconciliation {
+    /// DB matches the intended `next`: the commit actually landed (lost ack) — the
+    /// save should be reported as success so the caller delivers the credential.
+    Committed,
+    /// DB matches the prior snapshot `prev`: the transaction rolled back.
+    RolledBack,
+    /// DB matches neither (e.g. a concurrent external writer): outcome unknown.
+    Indeterminate,
+}
+
+/// Decide a failed save's true outcome from the reloaded DB state. `next` is
+/// checked first so a no-op save (`prev == next`) counts as committed.
+fn classify_save_reconciliation(
+    reconciled: &PublicControlStateStore,
+    prev: &PublicControlStateStore,
+    next: &PublicControlStateStore,
+) -> SaveReconciliation {
+    if reconciled == next {
+        SaveReconciliation::Committed
+    } else if reconciled == prev {
+        SaveReconciliation::RolledBack
+    } else {
+        SaveReconciliation::Indeterminate
+    }
+}
+
+/// Persist the delta between the last-saved snapshot (`prev`) and the live state
+/// (`next`) using targeted upserts/deletes inside one transaction. Only rows that
+/// were added or changed are upserted; only rows that were removed are deleted.
+/// End state is identical to a full rebuild, but the cost is O(changed rows), not
+/// O(total rows) — approving one device becomes a couple of statements instead of
+/// wiping and re-inserting every table.
 async fn save_public_control_postgres(
+    pool: &PgPool,
+    prev: &PublicControlStateStore,
+    next: &PublicControlStateStore,
+) -> Result<(), String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| format!("failed to begin public control-plane transaction: {error}"))?;
+
+    // ORDER MATTERS: delete every removed row across ALL tables FIRST, then upsert
+    // added/changed rows. A credential rotation (relay re-enroll, client rotation,
+    // device re-registration) changes the PK `refresh_token_hash` but keeps a
+    // SECONDARY unique column (relay_id / broker_room_id / relay_verify_key /
+    // client_id / client_verify_key / `(relay_id, broker_room_id, device_id)`). If
+    // the new row were inserted before the old one is deleted, that insert would
+    // collide with the surviving old row on the secondary unique index and abort
+    // the whole transaction — wedging the control plane. Deleting up front makes
+    // rotation a clean delete-then-insert.
+
+    // --- Phase 1: DELETE rows present in the snapshot but gone from live state ---
+    for hash in prev.relay_registrations_by_hash.keys() {
+        if !next.relay_registrations_by_hash.contains_key(hash) {
+            sqlx::query("DELETE FROM public_relay_registrations WHERE refresh_token_hash = $1")
+                .bind(hash)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| format!("failed to delete public_relay_registrations: {error}"))?;
+        }
+    }
+    for hash in prev.client_registrations_by_hash.keys() {
+        if !next.client_registrations_by_hash.contains_key(hash) {
+            sqlx::query("DELETE FROM public_client_identities WHERE refresh_token_hash = $1")
+                .bind(hash)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| format!("failed to delete public_client_identities: {error}"))?;
+        }
+    }
+    for hash in prev.grants_by_hash.keys() {
+        if !next.grants_by_hash.contains_key(hash) {
+            sqlx::query("DELETE FROM public_device_grants WHERE refresh_token_hash = $1")
+                .bind(hash)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| format!("failed to delete public_device_grants: {error}"))?;
+        }
+    }
+    for (key, grant) in &prev.client_relay_grants_by_key {
+        if !next.client_relay_grants_by_key.contains_key(key) {
+            sqlx::query(
+                "DELETE FROM public_client_relay_grants WHERE client_id = $1 AND relay_id = $2",
+            )
+            .bind(&grant.client_id)
+            .bind(&grant.relay_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("failed to delete public_client_relay_grants: {error}"))?;
+        }
+    }
+
+    // --- Phase 2: UPSERT rows that were added or changed ---
+    // public_relay_registrations (PK: refresh_token_hash)
+    for (hash, reg) in &next.relay_registrations_by_hash {
+        if prev.relay_registrations_by_hash.get(hash) != Some(reg) {
+            sqlx::query(
+                r#"
+                INSERT INTO public_relay_registrations (
+                    refresh_token_hash, relay_id, broker_room_id, created_at, relay_label, relay_verify_key
+                )
+                VALUES ($1, $2, $3, $4, $5, $6)
+                ON CONFLICT (refresh_token_hash) DO UPDATE SET
+                    relay_id = EXCLUDED.relay_id,
+                    broker_room_id = EXCLUDED.broker_room_id,
+                    created_at = EXCLUDED.created_at,
+                    relay_label = EXCLUDED.relay_label,
+                    relay_verify_key = EXCLUDED.relay_verify_key
+                "#,
+            )
+            .bind(&reg.refresh_token_hash)
+            .bind(&reg.relay_id)
+            .bind(&reg.broker_room_id)
+            .bind(u64_to_i64(reg.created_at, "created_at")?)
+            .bind(&reg.relay_label)
+            .bind(&reg.relay_verify_key)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("failed to upsert public_relay_registrations: {error}"))?;
+        }
+    }
+    // public_client_identities (PK: refresh_token_hash)
+    for (hash, client) in &next.client_registrations_by_hash {
+        if prev.client_registrations_by_hash.get(hash) != Some(client) {
+            sqlx::query(
+                r#"
+                INSERT INTO public_client_identities (
+                    refresh_token_hash, client_id, client_verify_key, created_at, client_label
+                )
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (refresh_token_hash) DO UPDATE SET
+                    client_id = EXCLUDED.client_id,
+                    client_verify_key = EXCLUDED.client_verify_key,
+                    created_at = EXCLUDED.created_at,
+                    client_label = EXCLUDED.client_label
+                "#,
+            )
+            .bind(&client.refresh_token_hash)
+            .bind(&client.client_id)
+            .bind(&client.client_verify_key)
+            .bind(u64_to_i64(client.created_at, "created_at")?)
+            .bind(&client.client_label)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("failed to upsert public_client_identities: {error}"))?;
+        }
+    }
+    // public_device_grants (PK: refresh_token_hash)
+    for (hash, grant) in &next.grants_by_hash {
+        if prev.grants_by_hash.get(hash) != Some(grant) {
+            sqlx::query(
+                r#"
+                INSERT INTO public_device_grants (
+                    refresh_token_hash, relay_id, broker_room_id, device_id, created_at, last_seen
+                )
+                VALUES ($1, $2, $3, $4, $5, $6)
+                ON CONFLICT (refresh_token_hash) DO UPDATE SET
+                    relay_id = EXCLUDED.relay_id,
+                    broker_room_id = EXCLUDED.broker_room_id,
+                    device_id = EXCLUDED.device_id,
+                    created_at = EXCLUDED.created_at,
+                    last_seen = EXCLUDED.last_seen
+                "#,
+            )
+            .bind(&grant.refresh_token_hash)
+            .bind(&grant.relay_id)
+            .bind(&grant.broker_room_id)
+            .bind(&grant.device_id)
+            .bind(u64_to_i64(grant.created_at, "created_at")?)
+            .bind(grant.last_seen.and_then(|value| i64::try_from(value).ok()))
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("failed to upsert public_device_grants: {error}"))?;
+        }
+    }
+    // public_client_relay_grants (PK: (client_id, relay_id))
+    for (key, grant) in &next.client_relay_grants_by_key {
+        if prev.client_relay_grants_by_key.get(key) != Some(grant) {
+            sqlx::query(
+                r#"
+                INSERT INTO public_client_relay_grants (
+                    client_id, relay_id, broker_room_id, device_id, granted_at, relay_label, device_label
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                ON CONFLICT (client_id, relay_id) DO UPDATE SET
+                    broker_room_id = EXCLUDED.broker_room_id,
+                    device_id = EXCLUDED.device_id,
+                    granted_at = EXCLUDED.granted_at,
+                    relay_label = EXCLUDED.relay_label,
+                    device_label = EXCLUDED.device_label
+                "#,
+            )
+            .bind(&grant.client_id)
+            .bind(&grant.relay_id)
+            .bind(&grant.broker_room_id)
+            .bind(&grant.device_id)
+            .bind(u64_to_i64(grant.granted_at, "granted_at")?)
+            .bind(&grant.relay_label)
+            .bind(&grant.device_label)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("failed to upsert public_client_relay_grants: {error}"))?;
+        }
+    }
+
+    tx.commit()
+        .await
+        .map_err(|error| format!("failed to commit public control-plane transaction: {error}"))?;
+    Ok(())
+}
+
+/// Pre-optimization full wipe-and-rebuild save. Kept ONLY so the persistence
+/// benchmark can measure the targeted diff-save against the old behavior; it is
+/// not wired into any live code path.
+#[cfg(test)]
+async fn save_public_control_postgres_full_rebuild(
     pool: &PgPool,
     state: &PublicControlStateStore,
 ) -> Result<(), String> {
@@ -2179,13 +2532,12 @@ fn relay_enrollment_challenge_message(challenge_id: &str, challenge: &str) -> St
 
 /// Live-Postgres round-trip tests.
 ///
-/// SAFETY / ISOLATION: these tests write through the whole-state save path
-/// (`save_public_control_postgres` DELETEs and rebuilds every public-control
-/// table from the test instance's snapshot). They are therefore destructive to
-/// any concurrent writer. `RELAY_BROKER_TEST_POSTGRES_URL` MUST reference a
-/// DISPOSABLE database — never a shared or running broker's DB — and the suite
-/// MUST run with `--test-threads=1` (also avoids a concurrent `CREATE TABLE IF
-/// NOT EXISTS` race on `pg_type_typname_nsp_index`). Example:
+/// SAFETY / ISOLATION: these tests write and delete public-control rows and some
+/// truncate whole tables in setup/teardown. They are therefore destructive to any
+/// concurrent writer. `RELAY_BROKER_TEST_POSTGRES_URL` MUST reference a DISPOSABLE
+/// database — never a shared or running broker's DB — and the suite MUST run with
+/// `--test-threads=1` (also avoids a concurrent `CREATE TABLE IF NOT EXISTS` race
+/// on `pg_type_typname_nsp_index`). Example:
 ///   RELAY_BROKER_TEST_POSTGRES_URL=postgres://user:pw@127.0.0.1:5433/throwaway \
 ///     cargo test -p relay-broker postgres -- --test-threads=1
 #[cfg(test)]
@@ -2257,8 +2609,8 @@ mod postgres_round_trip_tests {
             .expect("registration written by plane A must survive reload in plane B");
 
         // Row-scoped cleanup: a targeted DELETE of only THIS run's registration
-        // (never the whole-state save, which rebuilds every table and could drop
-        // an unrelated writer's rows) before asserting, so failures still clean up.
+        // before asserting, so failures still clean up without touching any other
+        // rows in the (disposable) database.
         let pool = PgPoolOptions::new()
             .max_connections(1)
             .connect(&url)
@@ -2279,8 +2631,8 @@ mod postgres_round_trip_tests {
     /// survive reload, and a throttled ws-token refresh must bump `last_seen` via
     /// the targeted single-row UPDATE (`touch_device_last_seen`). Env-gated.
     ///
-    /// DANGER: this test exercises the whole-state save path (`issue_*` → `save()`
-    /// rebuilds every public-control table). Point `RELAY_BROKER_TEST_POSTGRES_URL`
+    /// DANGER: this test writes and deletes public-control rows (`issue_*` →
+    /// targeted `save()`, plus row-scoped cleanup). Point `RELAY_BROKER_TEST_POSTGRES_URL`
     /// at a DISPOSABLE database ONLY, and run with `--test-threads=1`. Never point
     /// it at a shared or running broker's database — a concurrent writer's rows can
     /// be lost. Cleanup below is row-scoped (targeted DELETEs, not a whole-state
@@ -2349,8 +2701,11 @@ mod postgres_round_trip_tests {
                 .map(|candidate| candidate.last_seen)
         };
 
-        // (2) Age last_seen in the DB, then a ws-token refresh must bump it via the
-        // targeted UPDATE (touch_device_last_seen), not the whole-state save.
+        // (2) Age last_seen, then a ws-token refresh must bump it via the targeted
+        // UPDATE (touch_device_last_seen), not the whole-state save. The throttle
+        // decision reads the IN-MEMORY last_seen, so with reload-before-use off
+        // (single-instance default) we must age the in-memory value — not just the
+        // DB row — to simulate a device unseen for longer than the throttle window.
         let pool = PgPoolOptions::new()
             .max_connections(1)
             .connect(&url)
@@ -2361,6 +2716,14 @@ mod postgres_round_trip_tests {
             .execute(&pool)
             .await
             .expect("age last_seen");
+        {
+            let mut store = plane_a.inner.state.lock().await;
+            for grant in store.grants_by_hash.values_mut() {
+                if grant.device_id == device_id {
+                    grant.last_seen = Some(1); // epoch 1 = well past the throttle window
+                }
+            }
+        }
         plane_a
             .issue_device_ws_token(&grant.device_refresh_token)
             .await
@@ -2373,8 +2736,7 @@ mod postgres_round_trip_tests {
                 .expect("read last_seen");
 
         // Row-scoped cleanup before asserting — targeted DELETEs so we only touch
-        // THIS test's rows (never the whole-state save, which would rebuild every
-        // table from this instance's snapshot and could drop unrelated rows).
+        // THIS test's rows in the (disposable) database.
         sqlx::query("DELETE FROM public_device_grants WHERE relay_id = $1")
             .bind(&enrolled.relay_id)
             .execute(&pool)
@@ -2453,7 +2815,7 @@ mod device_revoke_tests {
             plane
                 .inner
                 .persistence
-                .save(&store)
+                .save(&mut store)
                 .await
                 .expect("seed save");
         }
@@ -2826,6 +3188,671 @@ mod device_limit_tests {
         assert!(
             bumped > 1,
             "a refresh after the throttle window must bump last_seen; got {bumped}"
+        );
+    }
+}
+
+/// Correctness + performance coverage for the single-instance Postgres
+/// optimization: targeted diff-save (`save_public_control_postgres`) and the
+/// reload-before-use skip. Env-gated on `RELAY_BROKER_TEST_POSTGRES_URL` and,
+/// like the other pg tests, MUST run against a DISPOSABLE database with
+/// `--test-threads=1` (these helpers DELETE every public-control row).
+#[cfg(test)]
+mod postgres_persistence_opt_tests {
+    use super::*;
+    use std::time::Instant;
+
+    fn relay_reg(hash: &str, label: Option<&str>) -> PersistedRelayRegistration {
+        PersistedRelayRegistration {
+            relay_id: format!("relay-{hash}"),
+            broker_room_id: format!("room-{hash}"),
+            refresh_token_hash: hash.to_string(),
+            created_at: 100,
+            relay_label: label.map(|s| s.to_string()),
+            relay_verify_key: Some(format!("vk-{hash}")),
+        }
+    }
+    fn client_ident(hash: &str) -> PersistedClientIdentity {
+        PersistedClientIdentity {
+            client_id: format!("client-{hash}"),
+            client_verify_key: format!("cvk-{hash}"),
+            refresh_token_hash: hash.to_string(),
+            created_at: 300,
+            client_label: None,
+        }
+    }
+    fn device_grant(hash: &str, last_seen: Option<u64>) -> PersistedDeviceGrant {
+        PersistedDeviceGrant {
+            relay_id: format!("relay-{hash}"),
+            broker_room_id: format!("room-{hash}"),
+            device_id: format!("dev-{hash}"),
+            refresh_token_hash: hash.to_string(),
+            created_at: 200,
+            last_seen,
+        }
+    }
+    fn client_relay_grant(client_id: &str, relay_id: &str) -> PersistedClientRelayGrant {
+        PersistedClientRelayGrant {
+            client_id: client_id.to_string(),
+            relay_id: relay_id.to_string(),
+            broker_room_id: format!("room-{relay_id}"),
+            device_id: format!("dev-{client_id}"),
+            granted_at: 400,
+            relay_label: None,
+            device_label: None,
+        }
+    }
+    fn store_from(
+        regs: Vec<PersistedRelayRegistration>,
+        clients: Vec<PersistedClientIdentity>,
+        grants: Vec<PersistedDeviceGrant>,
+        crg: Vec<PersistedClientRelayGrant>,
+    ) -> PublicControlStateStore {
+        let mut s = PublicControlStateStore::default();
+        for r in regs {
+            s.relay_registrations_by_hash
+                .insert(r.refresh_token_hash.clone(), r);
+        }
+        for c in clients {
+            s.client_registrations_by_hash
+                .insert(c.refresh_token_hash.clone(), c);
+        }
+        for g in grants {
+            s.grants_by_hash.insert(g.refresh_token_hash.clone(), g);
+        }
+        for g in crg {
+            s.client_relay_grants_by_key
+                .insert(client_relay_grant_key(&g.client_id, &g.relay_id), g);
+        }
+        s
+    }
+    async fn truncate_all(pool: &PgPool) {
+        for table in [
+            "public_client_relay_grants",
+            "public_device_grants",
+            "public_client_identities",
+            "public_relay_registrations",
+        ] {
+            sqlx::query(&format!("DELETE FROM {table}"))
+                .execute(pool)
+                .await
+                .expect("truncate table");
+        }
+    }
+    async fn connect_and_init(url: &str) -> PgPool {
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .connect(url)
+            .await
+            .expect("connect test postgres");
+        initialize_postgres_public_control_schema(&pool)
+            .await
+            .expect("init schema");
+        pool
+    }
+    fn test_url() -> Option<String> {
+        trimmed_option_string(std::env::var("RELAY_BROKER_TEST_POSTGRES_URL").ok())
+    }
+
+    /// The diff-save must apply adds, in-place updates, AND deletes so a reload
+    /// reproduces the live state exactly — this is the regression guard that the
+    /// switch away from wipe-and-rebuild did not silently drop or stale any row.
+    #[tokio::test]
+    async fn postgres_targeted_save_applies_add_update_delete() {
+        let Some(url) = test_url() else {
+            eprintln!("skipping: set RELAY_BROKER_TEST_POSTGRES_URL to a disposable DB");
+            return;
+        };
+        let pool = connect_and_init(&url).await;
+        truncate_all(&pool).await;
+
+        // (1) ADD from empty.
+        let empty = PublicControlStateStore::default();
+        let v1 = store_from(
+            vec![relay_reg("r1", Some("first"))],
+            vec![client_ident("c1")],
+            vec![device_grant("g1", Some(7))],
+            vec![client_relay_grant("client-c1", "relay-r1")],
+        );
+        save_public_control_postgres(&pool, &empty, &v1)
+            .await
+            .expect("save v1");
+        let loaded1 = load_public_control_postgres(&pool).await.expect("load v1");
+        assert_eq!(
+            loaded1.relay_registrations_by_hash, v1.relay_registrations_by_hash,
+            "add relay registration"
+        );
+        assert_eq!(
+            loaded1.client_registrations_by_hash, v1.client_registrations_by_hash,
+            "add client identity"
+        );
+        assert_eq!(
+            loaded1.grants_by_hash, v1.grants_by_hash,
+            "add device grant"
+        );
+        assert_eq!(
+            loaded1.client_relay_grants_by_key, v1.client_relay_grants_by_key,
+            "add client-relay grant"
+        );
+
+        // (2) One save carrying an add/update/delete for EVERY table:
+        //   relay:        in-place label update (r1)
+        //   client:       in-place label update (c1)
+        //   device grant: delete g1 + add g2
+        //   client-relay: delete the only grant
+        let updated_client = PersistedClientIdentity {
+            client_label: Some("renamed-client".to_string()),
+            ..client_ident("c1")
+        };
+        let v2 = store_from(
+            vec![relay_reg("r1", Some("renamed"))],
+            vec![updated_client],
+            vec![device_grant("g2", None)],
+            vec![], // client-relay grant removed
+        );
+        save_public_control_postgres(&pool, &v1, &v2)
+            .await
+            .expect("save v2");
+        let loaded2 = load_public_control_postgres(&pool).await.expect("load v2");
+        assert_eq!(
+            loaded2.relay_registrations_by_hash, v2.relay_registrations_by_hash,
+            "in-place relay label update must persist"
+        );
+        assert_eq!(
+            loaded2.client_registrations_by_hash, v2.client_registrations_by_hash,
+            "in-place client label update must persist"
+        );
+        assert!(
+            !loaded2.grants_by_hash.contains_key("g1"),
+            "removed device grant must be deleted, not left stale"
+        );
+        assert_eq!(
+            loaded2.grants_by_hash, v2.grants_by_hash,
+            "delete g1 + add g2 must both persist"
+        );
+        assert!(
+            loaded2.client_relay_grants_by_key.is_empty(),
+            "removed client-relay grant must be deleted"
+        );
+
+        truncate_all(&pool).await;
+    }
+
+    /// Credential rotation (relay re-enroll, client rotation, device re-registration)
+    /// changes the PK `refresh_token_hash` while KEEPING a secondary UNIQUE column
+    /// (relay_id / broker_room_id / relay_verify_key / client_id / client_verify_key /
+    /// `(relay_id, broker_room_id, device_id)`). The diff-save must delete the old row
+    /// BEFORE inserting the new one, or the insert collides with the surviving old row
+    /// on that secondary unique index and the whole transaction aborts — wedging the
+    /// control plane. This is the regression guard for that ordering.
+    #[tokio::test]
+    async fn postgres_targeted_save_handles_credential_rotation() {
+        let Some(url) = test_url() else {
+            eprintln!("skipping: set RELAY_BROKER_TEST_POSTGRES_URL to a disposable DB");
+            return;
+        };
+        let pool = connect_and_init(&url).await;
+        truncate_all(&pool).await;
+
+        // Seed one row per rotating table.
+        let v1 = store_from(
+            vec![relay_reg("rot1", Some("v1"))],
+            vec![client_ident("rotc1")],
+            vec![device_grant("rotg1", Some(1))],
+            vec![],
+        );
+        save_public_control_postgres(&pool, &PublicControlStateStore::default(), &v1)
+            .await
+            .expect("seed rotation baseline");
+
+        // Rotate the PK (refresh_token_hash) while every secondary UNIQUE column
+        // stays identical — exactly what re-enrollment / rotation / re-grant do.
+        let mut rotated_relay = relay_reg("rot1", Some("v2"));
+        rotated_relay.refresh_token_hash = "rot1-NEW".to_string();
+        let mut rotated_client = client_ident("rotc1");
+        rotated_client.refresh_token_hash = "rotc1-NEW".to_string();
+        let mut rotated_grant = device_grant("rotg1", Some(2));
+        rotated_grant.refresh_token_hash = "rotg1-NEW".to_string();
+        let v2 = store_from(
+            vec![rotated_relay],
+            vec![rotated_client],
+            vec![rotated_grant],
+            vec![],
+        );
+
+        save_public_control_postgres(&pool, &v1, &v2)
+            .await
+            .expect("rotation must not violate secondary unique constraints");
+
+        let loaded = load_public_control_postgres(&pool).await.expect("load");
+        assert_eq!(
+            loaded.relay_registrations_by_hash.len(),
+            1,
+            "old relay row must be gone, only the rotated one remains"
+        );
+        assert!(loaded.relay_registrations_by_hash.contains_key("rot1-NEW"));
+        assert!(loaded
+            .client_registrations_by_hash
+            .contains_key("rotc1-NEW"));
+        assert!(loaded.grants_by_hash.contains_key("rotg1-NEW"));
+        assert!(!loaded.relay_registrations_by_hash.contains_key("rot1"));
+
+        truncate_all(&pool).await;
+    }
+
+    /// Rotation exercised through the real `PublicControlPlane` save path (not just
+    /// the low-level diff helper): re-enrolling the same relay verify key rotates the
+    /// refresh token but keeps relay_id/room/verify_key, which must persist.
+    #[tokio::test]
+    async fn postgres_relay_reenrollment_through_save_path_persists() {
+        let Some(url) = test_url() else {
+            eprintln!("skipping: set RELAY_BROKER_TEST_POSTGRES_URL to a disposable DB");
+            return;
+        };
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let verify_key = format!("reenroll-vk-{unique}");
+
+        let plane = PublicControlPlane::from_parts_with_postgres(
+            Some("test-issuer-secret".to_string()),
+            None,
+            None,
+            Some(url.clone()),
+            None,
+            None,
+        )
+        .await
+        .expect("plane connects");
+
+        let first = plane
+            .issue_relay_registration_for_verify_key(&verify_key, Some("first".to_string()))
+            .await
+            .expect("initial enroll");
+        // Second enroll with the SAME verify key = re-enrollment: rotates the refresh
+        // token, keeps relay_id/room. With insert-before-delete this aborted on the
+        // relay_verify_key / relay_id unique index.
+        let second = plane
+            .issue_relay_registration_for_verify_key(&verify_key, Some("second".to_string()))
+            .await
+            .expect("re-enrollment must succeed through the save path");
+        assert_eq!(second.relay_id, first.relay_id, "re-enroll keeps relay_id");
+
+        // Fresh instance loads from Postgres → the rotated registration survived.
+        let plane_b = PublicControlPlane::from_parts_with_postgres(
+            Some("test-issuer-secret".to_string()),
+            None,
+            None,
+            Some(url.clone()),
+            None,
+            None,
+        )
+        .await
+        .expect("plane B connects");
+        let loaded = plane_b
+            .inner
+            .state
+            .lock()
+            .await
+            .registration_for_verify_key(&verify_key)
+            .expect("rotated registration must survive reload");
+        assert_eq!(loaded.relay_id, second.relay_id);
+
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("aux pool");
+        sqlx::query("DELETE FROM public_relay_registrations WHERE relay_id = $1")
+            .bind(&second.relay_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup");
+    }
+
+    /// Build a store that fails the save via a transaction-local constraint
+    /// violation: a second registration reuses relay_id `relay-A`, so its upsert
+    /// hits the `relay_id` UNIQUE index and the transaction aborts WITHOUT dropping
+    /// the table (so the DB stays inspectable). Contains the original A row too.
+    fn store_that_violates_relay_id_unique() -> PublicControlStateStore {
+        let mut bad = store_from(vec![relay_reg("A", Some("orig"))], vec![], vec![], vec![]);
+        let mut dup = relay_reg("A", Some("orig")); // same relay_id = relay-A
+        dup.refresh_token_hash = "DUP".to_string();
+        bad.relay_registrations_by_hash
+            .insert("DUP".to_string(), dup);
+        bad
+    }
+
+    /// Pre-commit failure (definite rollback): a save that aborts mid-transaction
+    /// must leave BOTH the DB and memory at the original credential A — memory must
+    /// never run ahead of the database.
+    #[tokio::test]
+    async fn postgres_save_failure_reconciles_memory_with_db() {
+        let Some(url) = test_url() else {
+            eprintln!("skipping: set RELAY_BROKER_TEST_POSTGRES_URL to a disposable DB");
+            return;
+        };
+        let pool = connect_and_init(&url).await;
+        truncate_all(&pool).await;
+
+        let persistence = PublicControlPersistence::Postgres {
+            pool: pool.clone(),
+            reload_before_use: false,
+            last_saved: std::sync::Arc::new(tokio::sync::Mutex::new(
+                PublicControlStateStore::default(),
+            )),
+            needs_reload: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+
+        // Persist the original credential A.
+        let mut store = store_from(vec![relay_reg("A", Some("orig"))], vec![], vec![], vec![]);
+        persistence.save(&mut store).await.expect("initial save");
+
+        // A save that violates the relay_id UNIQUE index aborts pre-commit.
+        let mut bad = store_that_violates_relay_id_unique();
+        assert!(
+            persistence.save(&mut bad).await.is_err(),
+            "duplicate relay_id must fail the save"
+        );
+
+        // Memory: only A, the un-persisted DUP is gone.
+        assert!(bad.relay_registrations_by_hash.contains_key("A"));
+        assert!(
+            !bad.relay_registrations_by_hash.contains_key("DUP"),
+            "the un-persisted row must not survive in memory"
+        );
+
+        // DB: also still exactly A (transaction rolled back cleanly).
+        let db_hashes: Vec<String> = sqlx::query_scalar(
+            "SELECT refresh_token_hash FROM public_relay_registrations ORDER BY refresh_token_hash",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("read db");
+        assert_eq!(db_hashes, vec!["A".to_string()], "DB must remain at A");
+
+        truncate_all(&pool).await;
+    }
+
+    /// AMBIGUOUS commit failure: Postgres may durably commit `next` even though the
+    /// client sees a save error (connection dropped after COMMIT, before the ack).
+    /// We simulate the resulting state — the DB has moved ahead of the last snapshot
+    /// — then trigger a failed save, and assert the failure handler reconciles memory
+    /// to the ACTUAL DB state instead of blindly restoring the stale snapshot (which
+    /// would drop the durably-committed row). Red→green guard for the ambiguous fix:
+    /// restoring the snapshot yields {A} and fails the `contains_key("B")` assert.
+    #[tokio::test]
+    async fn postgres_ambiguous_save_failure_reconciles_to_db_truth() {
+        let Some(url) = test_url() else {
+            eprintln!("skipping: set RELAY_BROKER_TEST_POSTGRES_URL to a disposable DB");
+            return;
+        };
+        let pool = connect_and_init(&url).await;
+        truncate_all(&pool).await;
+
+        let persistence = PublicControlPersistence::Postgres {
+            pool: pool.clone(),
+            reload_before_use: false,
+            last_saved: std::sync::Arc::new(tokio::sync::Mutex::new(
+                PublicControlStateStore::default(),
+            )),
+            needs_reload: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+
+        // Snapshot = {A}.
+        let mut store = store_from(vec![relay_reg("A", Some("orig"))], vec![], vec![], vec![]);
+        persistence.save(&mut store).await.expect("initial save");
+
+        // Out of band, the DB gains B — standing in for a committed-but-unacked row.
+        // The DB is now {A, B} while the in-memory snapshot is still {A}.
+        sqlx::query(
+            "INSERT INTO public_relay_registrations \
+             (refresh_token_hash, relay_id, broker_room_id, created_at, relay_verify_key) \
+             VALUES ('B', 'relay-B', 'room-B', 1, 'vk-B')",
+        )
+        .execute(&pool)
+        .await
+        .expect("inject committed row B");
+
+        // A save that fails (duplicate relay_id) leaves the DB at {A, B}.
+        let mut bad = store_that_violates_relay_id_unique();
+        assert!(
+            persistence.save(&mut bad).await.is_err(),
+            "duplicate relay_id must fail the save"
+        );
+
+        // Memory must reconcile to the ACTUAL DB state {A, B}, NOT the stale snapshot
+        // {A}. Restoring the snapshot would drop the durably-committed B.
+        assert!(
+            bad.relay_registrations_by_hash.contains_key("A"),
+            "A present"
+        );
+        assert!(
+            bad.relay_registrations_by_hash.contains_key("B"),
+            "failure handling must reload the DB truth (B), not restore the stale snapshot"
+        );
+        assert!(
+            !bad.relay_registrations_by_hash.contains_key("DUP"),
+            "the un-persisted DUP must not survive"
+        );
+
+        truncate_all(&pool).await;
+    }
+
+    /// The decision that turns a failed-but-committed save into `Ok` (so the caller
+    /// delivers the credential) vs `Err`. Pure, no DB. This is the guard for "when
+    /// the reconciled DB holds the intended rotation B, save() reports success".
+    #[test]
+    fn classify_save_reconciliation_maps_db_truth_to_outcome() {
+        let a = store_from(vec![relay_reg("A", None)], vec![], vec![], vec![]);
+        let b = store_from(vec![relay_reg("B", None)], vec![], vec![], vec![]);
+        let c = store_from(vec![relay_reg("C", None)], vec![], vec![], vec![]);
+        // prev = A, next = B.
+        // DB == next(B): the commit landed → Committed → save() returns Ok, B delivered.
+        assert_eq!(
+            classify_save_reconciliation(&b, &a, &b),
+            SaveReconciliation::Committed
+        );
+        // DB == prev(A): rolled back → RolledBack → save() returns Err, A still valid.
+        assert_eq!(
+            classify_save_reconciliation(&a, &a, &b),
+            SaveReconciliation::RolledBack
+        );
+        // DB == neither → Indeterminate → save() returns Err, memory follows the DB.
+        assert_eq!(
+            classify_save_reconciliation(&c, &a, &b),
+            SaveReconciliation::Indeterminate
+        );
+    }
+
+    /// When a save fails AND the reconciling reload also fails (DB unreachable), the
+    /// outcome is unknown: save() must surface the error AND arm a forced reload so
+    /// the next reachable operation repairs memory (rather than silently trusting a
+    /// possibly-stale snapshot with reload-before-use off).
+    #[tokio::test]
+    async fn postgres_save_and_reload_both_failing_arms_forced_reload() {
+        let Some(url) = test_url() else {
+            eprintln!("skipping: set RELAY_BROKER_TEST_POSTGRES_URL to a disposable DB");
+            return;
+        };
+        let pool = connect_and_init(&url).await;
+        truncate_all(&pool).await;
+
+        let persistence = PublicControlPersistence::Postgres {
+            pool: pool.clone(),
+            reload_before_use: false,
+            last_saved: std::sync::Arc::new(tokio::sync::Mutex::new(
+                PublicControlStateStore::default(),
+            )),
+            needs_reload: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+
+        let mut store = store_from(vec![relay_reg("A", Some("orig"))], vec![], vec![], vec![]);
+        persistence.save(&mut store).await.expect("initial save");
+
+        // Drop every table so BOTH the save and the reconciling reload fail.
+        for table in [
+            "public_client_relay_grants",
+            "public_device_grants",
+            "public_client_identities",
+            "public_relay_registrations",
+        ] {
+            sqlx::query(&format!("DROP TABLE {table}"))
+                .execute(&pool)
+                .await
+                .expect("drop table");
+        }
+
+        let mut next = store_from(vec![relay_reg("B", Some("new"))], vec![], vec![], vec![]);
+        assert!(
+            persistence.save(&mut next).await.is_err(),
+            "save must fail with all tables dropped"
+        );
+        // The reload could not determine the outcome → a forced reload must be armed.
+        if let PublicControlPersistence::Postgres { needs_reload, .. } = &persistence {
+            assert!(
+                needs_reload.load(std::sync::atomic::Ordering::SeqCst),
+                "an indeterminate save failure must arm a forced reload"
+            );
+        } else {
+            panic!("expected a Postgres persistence");
+        }
+
+        // cleanup: recreate the tables on the disposable DB.
+        initialize_postgres_public_control_schema(&pool)
+            .await
+            .expect("recreate tables");
+        truncate_all(&pool).await;
+    }
+
+    /// Not a pass/fail test — prints timings so we can compare JSON vs Postgres
+    /// (full-rebuild vs targeted) and the reload-before-use cost. `#[ignore]` so
+    /// normal runs skip it; run with:
+    ///   RELAY_BROKER_TEST_POSTGRES_URL=postgres://sealwire:dev@127.0.0.1:5433/sealwire_test \
+    ///     cargo test -p relay-broker bench_persistence_backends -- --ignored --nocapture --test-threads=1
+    #[tokio::test]
+    #[ignore = "perf benchmark; needs RELAY_BROKER_TEST_POSTGRES_URL; run with --ignored --nocapture"]
+    async fn bench_persistence_backends() {
+        let Some(url) = test_url() else {
+            eprintln!("skipping benchmark: set RELAY_BROKER_TEST_POSTGRES_URL");
+            return;
+        };
+        let pool = connect_and_init(&url).await;
+
+        const N: usize = 200; // baseline rows in each of two tables
+        const M: u32 = 20; // timed iterations
+
+        let mut base = PublicControlStateStore::default();
+        for i in 0..N {
+            let h = format!("seed-{i}");
+            base.relay_registrations_by_hash
+                .insert(h.clone(), relay_reg(&h, Some("seed")));
+            let g = format!("seed-grant-{i}");
+            base.grants_by_hash
+                .insert(g.clone(), device_grant(&g, Some(1)));
+        }
+
+        // SAVE — full rebuild: every save re-writes all rows.
+        truncate_all(&pool).await;
+        save_public_control_postgres_full_rebuild(&pool, &base)
+            .await
+            .expect("seed for full-rebuild");
+        let t_full = {
+            let start = Instant::now();
+            for i in 0..M {
+                let mut s = base.clone();
+                let h = format!("extra-full-{i}");
+                s.grants_by_hash.insert(h.clone(), device_grant(&h, None));
+                save_public_control_postgres_full_rebuild(&pool, &s)
+                    .await
+                    .expect("full save");
+            }
+            start.elapsed() / M
+        };
+
+        // SAVE — targeted: every save writes only the one new grant.
+        truncate_all(&pool).await;
+        save_public_control_postgres_full_rebuild(&pool, &base)
+            .await
+            .expect("seed for targeted");
+        let t_targeted = {
+            let mut prev = base.clone();
+            let start = Instant::now();
+            for i in 0..M {
+                let mut next = prev.clone();
+                let h = format!("extra-tgt-{i}");
+                next.grants_by_hash
+                    .insert(h.clone(), device_grant(&h, None));
+                save_public_control_postgres(&pool, &prev, &next)
+                    .await
+                    .expect("targeted save");
+                prev = next;
+            }
+            start.elapsed() / M
+        };
+
+        // SAVE — JSON baseline: whole-file write.
+        let json_path =
+            std::env::temp_dir().join(format!("bench-public-control-{}.json", std::process::id()));
+        save_public_control_json(&json_path, &base)
+            .await
+            .expect("seed json");
+        let t_json_save = {
+            let start = Instant::now();
+            for i in 0..M {
+                let mut s = base.clone();
+                let h = format!("extra-json-{i}");
+                s.grants_by_hash.insert(h.clone(), device_grant(&h, None));
+                save_public_control_json(&json_path, &s)
+                    .await
+                    .expect("json save");
+            }
+            start.elapsed() / M
+        };
+
+        // READ — PG full reload (the per-op cost reload_before_use pays) vs JSON file read.
+        truncate_all(&pool).await;
+        save_public_control_postgres_full_rebuild(&pool, &base)
+            .await
+            .expect("seed for read");
+        let t_pg_reload = {
+            let start = Instant::now();
+            for _ in 0..M {
+                load_public_control_postgres(&pool)
+                    .await
+                    .expect("pg reload");
+            }
+            start.elapsed() / M
+        };
+        let t_json_read = {
+            let start = Instant::now();
+            for _ in 0..M {
+                load_public_control_json(&json_path)
+                    .await
+                    .expect("json read");
+            }
+            start.elapsed() / M
+        };
+
+        let _ = tokio::fs::remove_file(&json_path).await;
+        truncate_all(&pool).await;
+
+        eprintln!(
+            "\n=== persistence benchmark (N={N} rows x2 tables, M={M} iters, LOCAL pg = ~0 network RTT) ==="
+        );
+        eprintln!("SAVE one mutation @ {N} baseline rows:");
+        eprintln!("  PG full-rebuild (old): {t_full:?}/op");
+        eprintln!("  PG targeted     (new): {t_targeted:?}/op");
+        eprintln!("  JSON file            : {t_json_save:?}/op");
+        eprintln!("READ whole state @ {N} baseline rows:");
+        eprintln!("  PG full reload (reload_before_use=ON): {t_pg_reload:?}/op");
+        eprintln!("  JSON file read                       : {t_json_read:?}/op");
+        eprintln!("  in-memory (reload_before_use=OFF)    : ~0 (no I/O at all)");
+        eprintln!(
+            "NOTE: Railway adds network RTT per round-trip. full-rebuild does O(rows) round-trips \
+             and reload does O(1) SELECTs returning all rows; targeted save + reload-off do far \
+             fewer, which is the win you feel over the wire.\n"
         );
     }
 }

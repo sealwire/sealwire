@@ -84,6 +84,22 @@ Broker env:
 - `RELAY_BROKER_PUBLIC_ISSUER_SECRET`
 - `RELAY_BROKER_PUBLIC_STATE_PATH` in production or any non-loopback bind
 - optional `RELAY_BROKER_PUBLIC_STATE_PATH` for localhost-only development
+- optional `RELAY_BROKER_PUBLIC_POSTGRES_URL` — durable control-plane state in
+  Postgres instead of the JSON file (set exactly one of state path or Postgres URL)
+- optional `RELAY_BROKER_PUBLIC_POSTGRES_RELOAD_BEFORE_USE=1` — **cross-instance
+  revocation visibility** (NOT full HA). With a single broker process the
+  in-memory control plane is authoritative and the broker skips reloading from
+  Postgres before every operation (much lower QR / approval / login latency). Set
+  this to `1` if more than one broker process can run against the same database at
+  once — including brief blue/green or rolling-deploy overlap — so each instance
+  re-reads committed state before every op; otherwise a revoke or credential
+  rotation on one instance is not observed by another until it restarts. NOTE:
+  this only bounds how stale a *read* can be. It does NOT serialize cross-instance
+  invariants — operations are still read-modify-write outside the SQL transaction,
+  so e.g. two instances can each pass the same device-limit check and both insert
+  a grant. True multi-broker HA needs database-level locking, which this flag does
+  not provide. A single-replica deployment (`railway.toml numReplicas = 1`, no
+  deploy overlap) does not need it.
 - optional `RELAY_BROKER_PUBLIC_RELAY_WS_TTL_SECS`
 - optional `RELAY_BROKER_PUBLIC_DEVICE_WS_TTL_SECS`
 
