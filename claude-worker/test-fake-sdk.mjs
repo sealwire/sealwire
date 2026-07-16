@@ -59,6 +59,30 @@ export function query({ prompt, options = {} }) {
   // Every turn emits the SAME result uuid — models a literal replay of an older
   // turn's `result` landing on a later turn; the worker must dedup it by uuid.
   const replayResultUuid = process.env.CLAUDE_FAKE_REPLAY_RESULT_UUID === "1";
+  // After turn 1 settles, the SDK CONTINUES ON ITS OWN — no new user message
+  // from the worker. This models the real behavior that broke turn liveness: a
+  // background subagent finishes, the SDK injects a `<task-notification>` user
+  // message and runs another turn on the same persistent stream. The worker only
+  // ever armed a turn from its own `send`/`start`, so such a turn streamed with
+  // no turn id and a stopped progress tracker.
+  //
+  // ⚠️ This knob is DUMBER THAN THE REAL SDK: it fires on a timer, so pairing it
+  // with a knob that holds a user turn open (CLAUDE_FAKE_HOLD_AFTER_FIRST) runs
+  // the continuation CONCURRENTLY with that turn. The real SDK cannot reach that
+  // state: a session's input is serialized through ONE queue that user messages
+  // and task-notifications share, so a continuation arriving mid-turn waits for
+  // the running turn to finish instead of streaming alongside it. (Verified
+  // against real session transcripts: 365 enqueue→dequeue pairs, 364 dequeued
+  // immediately while the agent was idle, one held 9.7s until the agent was free.)
+  // Two concurrent turns would make `result` unattributable — it carries no turn
+  // identity — which is the SDK-contract violation documented on `decorateEvent`
+  // in worker.mjs, not a case any worker-side bookkeeping can disambiguate.
+  const spontaneousTurn = process.env.CLAUDE_FAKE_SPONTANEOUS_TURN === "1";
+  // A spontaneous continuation that FAILS before emitting any assistant/tool
+  // output: its terminal is the only stream message it ever produces. Nothing
+  // "activity"-shaped exists to notice the turn by, so the terminal itself has to
+  // be what tells the worker the turn happened.
+  const spontaneousResultOnly = process.env.CLAUDE_FAKE_SPONTANEOUS_RESULT_ONLY === "1";
 
   writeLine({
     type: "__query",
@@ -136,6 +160,34 @@ export function query({ prompt, options = {} }) {
                 ended = true;
                 drain();
               }
+            } else if (userTurnCount === 1 && spontaneousResultOnly) {
+              pushOut({ type: "result", usage: {} });
+              setTimeout(() => {
+                pushOut({
+                  type: "result",
+                  subtype: "error_during_execution",
+                  is_error: true,
+                  // Raw provider content the worker must NOT copy into logs.
+                  errors: ["RAW_PROVIDER_ERROR_BODY"],
+                  result: "RAW_PARTIAL_ASSISTANT_OUTPUT",
+                  uuid: "spontaneous-fail-uuid",
+                  usage: {},
+                });
+              }, 20);
+            } else if (userTurnCount === 1 && spontaneousTurn) {
+              pushOut({ type: "result", usage: {} });
+              // The turn has settled. Now the SDK keeps going by itself: the
+              // subagent's task-notification lands as a user message it injects
+              // internally (never surfaced as an SDK message we see), followed by
+              // a fresh assistant turn on the same stream.
+              setTimeout(() => {
+                pushOut({
+                  type: "assistant",
+                  uuid: "spontaneous-assistant-uuid",
+                  message: { content: [{ type: "text", text: "subagent finished" }] },
+                });
+                pushOut({ type: "result", usage: {} });
+              }, 20);
             } else if (userTurnCount === 1 && firstTurnLateIdleMs > 0) {
               pushOut({ type: "result", usage: {} });
               setTimeout(() => {

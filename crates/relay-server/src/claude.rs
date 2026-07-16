@@ -1272,6 +1272,46 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
             relay.notify();
         }
 
+        // A turn the SDK started on its own. Every other turn is armed by our own
+        // send path (`sessions.rs` seeds `active_turn_id` from `start_turn`), but
+        // when a background subagent finishes, the SDK injects a
+        // `<task-notification>` and continues the conversation with no send from
+        // us to seed anything. The worker announces exactly those turns here (see
+        // `armSpontaneousTurn` in worker.mjs) and stamps their terminal `done`
+        // with the same id, so `completion_matches_turn` settles them normally.
+        //
+        // Before this arm the event stream could only ever CLEAR liveness — a
+        // subagent-continued turn streamed a full transcript while every liveness
+        // surface (sidebar badge, stop button, working indicator) showed idle
+        // until the user typed again.
+        "turn_started" => {
+            let Some(turn_id) = string_at(&payload, &["turn_id"]) else {
+                relay.push_log("error", "Claude turn_started event is missing a turn_id");
+                return;
+            };
+            match claude_thread_route(&relay, event_thread_id.as_deref()) {
+                ClaudeThreadRoute::Active => {
+                    let thread_id = relay.active_thread_id.clone().unwrap_or_default();
+                    relay.set_active_turn(Some(turn_id));
+                    relay.set_thread_status(&thread_id, "active".to_string(), Vec::new());
+                    // Seed a phase immediately: the composer's working indicator is
+                    // phase-driven, and the worker's progress ticks only start
+                    // arriving after its silence window.
+                    relay.touch_progress(Some("thinking"), None);
+                }
+                // Both `bg_` calls drop the event for a locally-deleted thread, so
+                // a late continuation can't resurrect a ghost working runtime (SR3).
+                ClaudeThreadRoute::Background(thread_id) => {
+                    let now = crate::state::unix_now();
+                    relay.bg_set_active_turn(&thread_id, Some(turn_id), now);
+                    relay.bg_set_thread_status(&thread_id, "active".to_string(), Vec::new(), now);
+                }
+                ClaudeThreadRoute::Drop => return,
+            }
+            relay.push_log("info", "Claude started a follow-up turn on its own.");
+            relay.notify();
+        }
+
         "progress_tick" => {
             let phase = string_at(&payload, &["phase"]);
             let tool = string_at(&payload, &["tool"]);
@@ -2629,6 +2669,353 @@ mod tests {
         assert_eq!(relay.current_phase, None);
         assert_eq!(relay.current_tool, None);
         assert_eq!(relay.last_progress_at, None);
+    }
+
+    // --- SDK-spontaneous turns (subagent task-notification continuations) ----
+    //
+    // Every OTHER turn in this relay is armed by our own send path: `start_turn`
+    // returns a turn id and `sessions.rs` seeds `active_turn_id` from it. The
+    // Claude SDK breaks that assumption — when a background subagent finishes it
+    // injects a `<task-notification>` user message and CONTINUES the conversation
+    // on the same persistent stream, with no send from us to seed anything.
+    //
+    // The event stream used to only ever CLEAR liveness (`done` →
+    // set_active_turn(None)) and never re-arm it, so such a turn streamed a full
+    // transcript while `active_turn_id` stayed None: the sidebar badge, the stop
+    // button and the working indicator all showed idle until the user typed
+    // again. `turn_started` is the worker's authoritative "a turn is live again"
+    // signal; these tests pin that it re-arms liveness on both routes and that it
+    // can never resurrect a locally-deleted thread.
+
+    #[tokio::test]
+    async fn turn_started_rearms_the_active_threads_turn_after_a_done() {
+        let state = new_test_state();
+        {
+            let mut relay = state.write().await;
+            relay.set_provider_name("claude_code".to_string());
+            relay.active_thread_id = Some("claude-thread".to_string());
+            relay.set_active_turn(Some("turn-1".to_string()));
+            relay.set_thread_status("claude-thread", "active".to_string(), Vec::new());
+        }
+
+        // The user-initiated turn ends (the agent spawned a background subagent
+        // and handed control back).
+        handle_worker_event(
+            json!({
+                "type": "done",
+                "provider_session_id": "claude-thread",
+                "turn_id": "turn-1"
+            }),
+            &state,
+        )
+        .await;
+        {
+            let relay = state.read().await;
+            assert_eq!(
+                relay.active_turn_id, None,
+                "precondition: the settled turn must clear liveness"
+            );
+        }
+
+        // The subagent finishes; the SDK injects its task-notification and starts
+        // a turn entirely on its own.
+        handle_worker_event(
+            json!({
+                "type": "turn_started",
+                "provider_session_id": "claude-thread",
+                "turn_id": "turn-auto-1"
+            }),
+            &state,
+        )
+        .await;
+
+        let relay = state.read().await;
+        assert_eq!(
+            relay.active_turn_id.as_deref(),
+            Some("turn-auto-1"),
+            "an SDK-started turn must re-arm the relay's turn liveness"
+        );
+        let runtime = relay
+            .runtime_for_thread("claude-thread")
+            .expect("active runtime");
+        assert!(
+            runtime.is_working(),
+            "the thread must read as working while the SDK-started turn runs"
+        );
+        // `has_live_turn` is what the send path's busy guard reads
+        // (state/app/sessions.rs) — an SDK-started turn must make the thread
+        // exclusive too, or a prompt sent into it would race the running agent.
+        assert!(
+            runtime.has_live_turn(),
+            "an SDK-started turn must gate the busy-send check like any other turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_started_rearms_a_background_threads_turn_after_a_done() {
+        let state = test_relay_with_active_b().await;
+        let now = crate::state::unix_now();
+        {
+            let mut relay = state.write().await;
+            relay.bg_set_active_turn("thread-a", Some("turn-a".to_string()), now);
+        }
+
+        handle_worker_event(
+            json!({
+                "type": "done",
+                "provider_session_id": "thread-a",
+                "turn_id": "turn-a"
+            }),
+            &state,
+        )
+        .await;
+        {
+            let relay = state.read().await;
+            assert!(
+                relay
+                    .runtime_for_thread("thread-a")
+                    .is_some_and(|runtime| runtime.active_turn_id.is_none()),
+                "precondition: the settled background turn must clear liveness"
+            );
+        }
+
+        handle_worker_event(
+            json!({
+                "type": "turn_started",
+                "provider_session_id": "thread-a",
+                "turn_id": "turn-auto-a"
+            }),
+            &state,
+        )
+        .await;
+
+        let relay = state.read().await;
+        let background = relay
+            .runtime_for_thread("thread-a")
+            .expect("background runtime");
+        assert_eq!(
+            background.active_turn_id.as_deref(),
+            Some("turn-auto-a"),
+            "an SDK-started turn on a background thread must re-arm its liveness"
+        );
+        assert!(background.is_working());
+        assert_eq!(
+            relay.active_thread_id.as_deref(),
+            Some("thread-b"),
+            "re-arming a background turn must not steal the active thread"
+        );
+        assert!(
+            relay.active_turn_id.is_none(),
+            "a background thread's turn must not leak onto the viewed thread"
+        );
+        assert!(
+            relay
+                .snapshot()
+                .thread_activity
+                .iter()
+                .any(|activity| activity.thread_id == "thread-a"),
+            "the re-armed background thread must surface in the activity badges"
+        );
+    }
+
+    // --- the turn_started propagation window ---------------------------------
+    //
+    // The worker arms a spontaneous turn and announces it, but the relay applies
+    // that announcement a few ms later. A send whose busy-check slips into that
+    // gap reaches the worker, which overwrites its `currentTurnId` — so the
+    // spontaneous turn's terminal arrives stamped with the USER's turn id.
+    //
+    // These two pin why that cannot corrupt liveness, and are load-bearing for
+    // the decision to accept the window (see `armSpontaneousTurn` in worker.mjs):
+    // the relay can never adopt the racing turn id, so the mis-stamped terminal
+    // can never match — it is rejected as stale, and the user's turn re-arms
+    // under its own announcement when the SDK dequeues it.
+
+    #[tokio::test]
+    async fn a_mis_stamped_completion_cannot_settle_a_spontaneous_turn() {
+        let state = new_test_state();
+        {
+            let mut relay = state.write().await;
+            relay.set_provider_name("claude_code".to_string());
+            relay.active_thread_id = Some("claude-thread".to_string());
+        }
+
+        handle_worker_event(
+            json!({
+                "type": "turn_started",
+                "provider_session_id": "claude-thread",
+                "turn_id": "auto-turn-x"
+            }),
+            &state,
+        )
+        .await;
+
+        // The spontaneous turn's terminal, mis-stamped with the racing user turn
+        // id because the worker's currentTurnId was overwritten mid-flight.
+        handle_worker_event(
+            json!({
+                "type": "done",
+                "provider_session_id": "claude-thread",
+                "turn_id": "relay-turn-2"
+            }),
+            &state,
+        )
+        .await;
+
+        let relay = state.read().await;
+        assert_eq!(
+            relay.active_turn_id.as_deref(),
+            Some("auto-turn-x"),
+            "a completion for a turn we never armed must not settle the live one"
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_started_bumps_the_turn_revision_so_a_racing_send_cannot_seed() {
+        // `send_message_to_thread` captures thread_turn_revision BEFORE calling
+        // start_turn and only seeds active_turn_id if it is unchanged
+        // (state/app/sessions.rs). Announcing a spontaneous turn must bump it, or
+        // a send racing the announcement would overwrite the live spontaneous
+        // turn with its own id — and then the mis-stamped terminal above WOULD
+        // match and settle a turn that is still running.
+        let state = new_test_state();
+        {
+            let mut relay = state.write().await;
+            relay.set_provider_name("claude_code".to_string());
+            relay.active_thread_id = Some("claude-thread".to_string());
+        }
+        let revision_before = state.read().await.thread_turn_revision("claude-thread");
+
+        handle_worker_event(
+            json!({
+                "type": "turn_started",
+                "provider_session_id": "claude-thread",
+                "turn_id": "auto-turn-x"
+            }),
+            &state,
+        )
+        .await;
+
+        assert_ne!(
+            state.read().await.thread_turn_revision("claude-thread"),
+            revision_before,
+            "an SDK-started turn must bump the turn revision the send path guards on"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_announced_terminal_only_turn_settles_and_keeps_its_failure_visible() {
+        // The full racing sequence, end to end. A user send slipped into the
+        // turn_started propagation window and made the worker mis-stamp the
+        // spontaneous turn's terminal; the queued user turn then FAILS before
+        // emitting any output, so its terminal is the only trace it ever leaves.
+        //
+        // The worker announces that terminal's turn (worker.mjs
+        // TURN_REVEALING_EVENTS), which is what lets both invariants hold here:
+        // liveness settles instead of stranding until the 600s watchdog, and the
+        // durable failure entry survives — claude.rs writes it only PAST the
+        // stale-completion guard, so an unmatched terminal would lose it.
+        let state = new_test_state();
+        {
+            let mut relay = state.write().await;
+            relay.set_provider_name("claude_code".to_string());
+            relay.active_thread_id = Some("claude-thread".to_string());
+        }
+
+        handle_worker_event(
+            json!({
+                "type": "turn_started",
+                "provider_session_id": "claude-thread",
+                "turn_id": "auto-turn-x"
+            }),
+            &state,
+        )
+        .await;
+        // The spontaneous turn's terminal, mis-stamped with the racing user turn.
+        handle_worker_event(
+            json!({
+                "type": "done",
+                "provider_session_id": "claude-thread",
+                "turn_id": "relay-turn-2"
+            }),
+            &state,
+        )
+        .await;
+
+        // The queued user turn runs and fails before any output. Its terminal
+        // announces itself first, so the relay can match it.
+        handle_worker_event(
+            json!({
+                "type": "turn_started",
+                "provider_session_id": "claude-thread",
+                "turn_id": "auto-turn-y"
+            }),
+            &state,
+        )
+        .await;
+        handle_worker_event(
+            json!({
+                "type": "done",
+                "provider_session_id": "claude-thread",
+                "turn_id": "auto-turn-y",
+                "failed": true,
+                "reason": "Claude turn failed: an error occurred during execution"
+            }),
+            &state,
+        )
+        .await;
+
+        let relay = state.read().await;
+        assert_eq!(
+            relay.active_turn_id, None,
+            "an announced terminal must settle liveness, not strand it until the watchdog"
+        );
+        assert_eq!(relay.current_status, "idle");
+        let failure = relay
+            .snapshot()
+            .transcript
+            .into_iter()
+            .find(|entry| entry.kind == TranscriptEntryKind::Error)
+            .expect("a failed turn must leave a durable failure entry, not just a log line");
+        assert_eq!(failure.status, "failed");
+        assert_eq!(failure.turn_id.as_deref(), Some("auto-turn-y"));
+    }
+
+    #[tokio::test]
+    async fn turn_started_cannot_resurrect_a_locally_deleted_thread() {
+        // A late SDK continuation for a thread the user deleted must not
+        // re-create a ghost "working" runtime (SR3 — see background.rs).
+        let state = test_relay_with_active_b().await;
+        {
+            let mut relay = state.write().await;
+            relay.mark_thread_deleted("thread-a");
+        }
+
+        handle_worker_event(
+            json!({
+                "type": "turn_started",
+                "provider_session_id": "thread-a",
+                "turn_id": "turn-auto-a"
+            }),
+            &state,
+        )
+        .await;
+
+        let relay = state.read().await;
+        assert!(
+            relay
+                .runtime_for_thread("thread-a")
+                .is_none_or(|runtime| !runtime.is_working()),
+            "a deleted thread must never be resurrected as working by a late turn_started"
+        );
+        assert!(
+            !relay
+                .snapshot()
+                .thread_activity
+                .iter()
+                .any(|activity| activity.thread_id == "thread-a"),
+            "a deleted thread must not surface in the activity badges"
+        );
     }
 
     #[tokio::test]

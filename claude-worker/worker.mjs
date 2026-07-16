@@ -650,6 +650,97 @@ async function* dedupResultReplays(stream, entry) {
   }
 }
 
+// Events that reveal a turn nobody armed. The `<task-notification>` user message
+// the SDK injects is internal (mapSdkMessage maps a text-only user message to
+// null), so an agent event is the only signal such a turn ever gives us.
+//
+// The TERMINAL is in here too, and load-bearing: a turn that fails before
+// emitting any output (an auth/context/rate-limit error on its first request)
+// produces `error` + `done` and nothing else. An unannounced terminal carries no
+// turn id, and the relay rejects a turn-id-less completion as stale while it
+// holds a live turn — stranding liveness until the 600s watchdog AND dropping the
+// durable failure entry, which claude.rs only writes PAST that guard. So the
+// terminal has to be able to announce the turn it settles.
+const TURN_REVEALING_EVENTS = new Set([
+  "assistant_message",
+  "assistant_delta",
+  "tool_call_requested",
+  "tool_call_result",
+  "done",
+]);
+
+// Arm a turn the relay never asked for.
+//
+// Every turn used to be armed by our own command loop (`start`/`send` set
+// currentTurnId + running + progressTracker), because every turn began with a
+// prompt from the relay. The SDK breaks that assumption: when a background
+// subagent finishes, it injects a `<task-notification>` user message and
+// continues the conversation ITSELF on the same persistent stream. `done` had
+// already cleared currentTurnId and stopped the progress tracker, so that turn
+// streamed a full transcript while the relay — whose only liveness authority is
+// active_turn_id — showed the thread idle until the user typed again.
+//
+// So treat the first activity event after a settled turn as the start of a new
+// one: mint an id, restart progress, and ANNOUNCE it (before the event that
+// triggered it, since decorateEvent runs ahead of the emit) so the relay can
+// re-arm. The turn's terminal `result` carries no turn identity of its own and
+// is stamped with currentTurnId below, so it settles this turn exactly like a
+// relay-armed one.
+//
+// Arming only from an IDLE entry is safe because a session's input is serialized
+// through one queue (see the contract note in test-fake-sdk.mjs): a continuation
+// and a user turn can never stream at once, so `running` is false exactly when a
+// spontaneous turn begins.
+//
+// ACCEPTED RESIDUAL WINDOW: a user send can land in the few ms between this
+// announcement and the relay applying it (the relay's busy-send guard only
+// rejects sends once it has), and the send handler below overwrites
+// currentTurnId — so this turn's terminal goes out stamped with the USER's turn
+// id. That is survivable by construction, and deliberately left alone:
+//
+//   1. This announcement bumps the relay's turn revision, and its send path only
+//      seeds active_turn_id when that revision is UNCHANGED across start_turn
+//      (state/app/sessions.rs) — so the racing send never adopts its own id.
+//   2. The relay therefore still holds THIS turn's id, and the mis-stamped
+//      terminal is rejected as a stale completion rather than settling it.
+//   3. When the SDK dequeues the user's turn, it re-arms liveness right here
+//      under a fresh id and settles normally — on its first activity event, or
+//      on its TERMINAL if it fails before producing any (which is why the
+//      terminal is in TURN_REVEALING_EVENTS; without that, step 3 had a
+//      no-activity hole that stranded liveness and dropped the failure entry).
+//
+// All three are pinned by tests in claude.rs (see
+// `a_mis_stamped_completion_cannot_settle_a_spontaneous_turn`,
+// `turn_started_bumps_the_turn_revision_so_a_racing_send_cannot_seed`, and
+// `an_announced_terminal_only_turn_settles_and_keeps_its_failure_visible`). The
+// cost is cosmetic: the racing turn is tracked under a worker-minted id instead
+// of the relay's, and one stale-completion warning is logged.
+//
+// Making the ids exact would need the worker to own a QUEUE of turn ids and
+// announce each as it becomes current — a deliberate reshaping of the
+// turn-completion contract, not a bolt-on to this fix.
+function armSpontaneousTurn(entry, event) {
+  if (entry.running || entry.cancelFlag.current) return;
+  if (!TURN_REVEALING_EVENTS.has(event.type)) return;
+
+  // A uuid, not a counter: ids must not collide with the relay's own
+  // `claude-turn-N` (its counter resets every relay restart, ours would too).
+  const turnId = `auto-turn-${randomUUID()}`;
+  entry.currentTurnId = turnId;
+  entry.running = true;
+  entry.progressTracker?.start();
+  const providerSessionId = entry.providerSessionId || entry.pendingThreadId || null;
+  diag("spontaneous_turn_armed", { turn_id: turnId, psid: providerSessionId });
+  emit(
+    {
+      type: "turn_started",
+      turn_id: turnId,
+      ...(providerSessionId ? { provider_session_id: providerSessionId } : {}),
+    },
+    entry.progressTracker,
+  );
+}
+
 function startSessionStream(sessions, entry, context) {
   if (!entry.session || entry.streamTask) return;
   entry.cancelFlag.current = false;
@@ -664,6 +755,10 @@ function startSessionStream(sessions, entry, context) {
       if (entry.pendingThreadId && !event.pending_thread_id) {
         event.pending_thread_id = entry.pendingThreadId;
       }
+      // A turn the SDK started on its own (subagent task-notification) has no
+      // arming command behind it — this event IS its start signal. Arm it first
+      // so the stamp below gives it, and its terminal, one shared turn id.
+      armSpontaneousTurn(entry, event);
       // Stamp the CURRENT turn id onto SDK-derived events that lack one.
       // ASSUMPTION (relied on for turn_id-safe completion): the SDK delivers at
       // most one terminal (`result`) per running turn, in order, and the relay

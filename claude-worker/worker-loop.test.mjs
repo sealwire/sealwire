@@ -576,3 +576,95 @@ test("cancel timeout returns an error but emits stopped only after the real drai
     await worker.close();
   }
 });
+
+test("an SDK-spontaneous turn after done re-arms liveness with a fresh turn id", async () => {
+  // The bug this pins: the worker only ever armed a turn from its OWN send/start
+  // path. When a background subagent finishes, the SDK injects a
+  // `<task-notification>` and continues the conversation itself on the same
+  // persistent stream — a turn nobody armed. `done` had already cleared
+  // currentTurnId and stopped the progress tracker, so the relay saw a fully
+  // streaming turn with no live turn id and showed the thread as idle until the
+  // user typed again.
+  const worker = spawnWorker({ CLAUDE_FAKE_SPONTANEOUS_TURN: "1" });
+  try {
+    worker.send({ ...START_DEFAULT, turn_id: "relay-turn-1" });
+    await worker.waitFor(isStarted("sess-1"), { label: "session_started" });
+
+    const firstDone = await worker.waitFor(isDone, { label: "done#1" });
+    assert.equal(firstDone.turn_id, "relay-turn-1", "the relay-armed turn settles under its own id");
+
+    // The SDK continues on its own — the worker must announce the new turn.
+    const started = await worker.waitFor((event) => event.type === "turn_started", {
+      label: "turn_started",
+    });
+    assert.equal(started.provider_session_id, "sess-1");
+    assert.ok(started.turn_id, "an SDK-started turn must carry a turn id the relay can arm on");
+    assert.notEqual(
+      started.turn_id,
+      "relay-turn-1",
+      "a spontaneous turn must get its OWN id, not resurrect the settled one",
+    );
+
+    // The turn must be announced BEFORE the output it carries, or the relay
+    // would append a transcript entry to a thread it still believes is idle.
+    // (Await the text first — turn_started is emitted ahead of it, so its waiter
+    // resolving says nothing about the text having arrived yet.)
+    const text = await worker.waitFor(
+      (event) => event.type === "assistant_message" && event.text === "subagent finished",
+      { label: "spontaneous turn text" },
+    );
+    assert.ok(
+      worker.events.indexOf(started) < worker.events.indexOf(text),
+      "turn_started must precede the turn's output",
+    );
+
+    // ...and it must settle under that same id, or the relay's
+    // completion_matches_turn drops the terminal and the thread hangs "running".
+    const secondDone = await worker.waitFor(isDone, { count: 2, label: "done#2" });
+    assert.equal(
+      secondDone.turn_id,
+      started.turn_id,
+      "the spontaneous turn's terminal must carry the id it was announced with",
+    );
+  } finally {
+    await worker.close();
+  }
+});
+
+test("a spontaneous turn whose only message is its terminal is still announced", async () => {
+  // The no-activity hole in arming: a continuation that fails before emitting
+  // any assistant/tool output has NO activity event to arm on, so its terminal
+  // used to go out with no turn id. The relay (holding a live turn id) rejects a
+  // turn-id-less completion as stale — stranding liveness until the 600s
+  // watchdog AND dropping the durable failure entry, which is written only after
+  // that guard. The terminal itself has to announce the turn it settles.
+  const worker = spawnWorker({ CLAUDE_FAKE_SPONTANEOUS_RESULT_ONLY: "1" });
+  try {
+    worker.send({ ...START_DEFAULT, turn_id: "relay-turn-1" });
+    await worker.waitFor(isStarted("sess-1"), { label: "session_started" });
+    const firstDone = await worker.waitFor(isDone, { label: "done#1" });
+    assert.equal(firstDone.turn_id, "relay-turn-1");
+
+    const started = await worker.waitFor((event) => event.type === "turn_started", {
+      label: "turn_started",
+    });
+    const secondDone = await worker.waitFor(isDone, { count: 2, label: "done#2" });
+    assert.equal(
+      secondDone.turn_id,
+      started.turn_id,
+      "the terminal must settle the turn it announced, so the relay can match it",
+    );
+    assert.equal(secondDone.failed, true, "the failure must survive the announcement");
+    assert.match(
+      secondDone.reason || "",
+      /Claude turn failed/,
+      "the sanitized failure reason must ride the terminal, so the relay can make it durable",
+    );
+    assert.ok(
+      !JSON.stringify(worker.events).includes("RAW_PROVIDER_ERROR_BODY"),
+      "raw provider error content must never leave the worker",
+    );
+  } finally {
+    await worker.close();
+  }
+});
