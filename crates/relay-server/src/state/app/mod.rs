@@ -353,7 +353,7 @@ in thread {thread_id}: {error}"
         let defaults = self.defaults().await;
         let settings = {
             let relay = self.relay.read().await;
-            relay.thread_settings(thread_id)
+            relay.remembered_thread_settings(thread_id)
         };
         let approval_policy = settings
             .as_ref()
@@ -384,7 +384,17 @@ in thread {thread_id}: {error}"
             ensure_path_within_device_scope(&data.thread.cwd, &device_scope, &relay.allowed_roots)?;
         }
         let mut relay = self.relay.write().await;
-        relay.hydrate_background_runtime(data, &approval_policy, &sandbox, &effort, &model);
+        if settings.is_some() {
+            relay.hydrate_background_runtime(data, &approval_policy, &sandbox, &effort, &model);
+        } else {
+            relay.hydrate_background_runtime_without_remembering_settings(
+                data,
+                &approval_policy,
+                &sandbox,
+                &effort,
+                &model,
+            );
+        }
         Ok(())
     }
 

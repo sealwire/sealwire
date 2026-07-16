@@ -419,7 +419,7 @@ impl CodexBridge {
         let policy = {
             let relay = self.state.read().await;
             relay
-                .thread_settings(thread_id)
+                .remembered_thread_settings(thread_id)
                 .map(|settings| (settings.approval_policy, settings.sandbox))
         };
         let params = codex_turn_start_params(
@@ -431,7 +431,49 @@ impl CodexBridge {
                 .as_ref()
                 .map(|(approval, sandbox)| (approval.as_str(), sandbox.as_str())),
         );
-        let result = self.send_request("turn/start", params).await?;
+        let result = match self.send_request("turn/start", params.clone()).await {
+            Ok(result) => result,
+            // The thread exists on disk but was never materialized in the
+            // app-server WE spawned — a thread created by the Codex VSCode
+            // extension / CLI, or any thread left over from a previous relay
+            // process. Codex serves its history from disk (so the relay hydrated
+            // a runtime and rendered the transcript happily) but rejects
+            // `turn/start` for it, which surfaced as a 400 "can't send at all".
+            //
+            // Materialize it here, on the provider that actually owns the gap.
+            // The send path deliberately does NOT resume: 1084b0a decoupled
+            // viewing from control, and the take-over resume it removed had the
+            // side effect of displacing the active thread's controller. Healing
+            // in the bridge restores turn-startability with none of the
+            // take-over semantics, and — because it keys off codex's own error
+            // rather than relay-side bookkeeping — it also covers the case where
+            // the relay HAS a hydrated runtime but codex still has no handle.
+            Err(error) if is_thread_not_loaded_error(&error) => {
+                // Resume binds the approval policy + sandbox. With no remembered
+                // settings we'd have to invent them, and guessing wrong here
+                // silently widens what the turn may do — so fail closed and
+                // report the original error instead.
+                let Some((approval_policy, sandbox)) = policy.as_ref() else {
+                    return Err(error);
+                };
+                if let Err(resume_error) = self
+                    .resume_thread(thread_id, approval_policy, sandbox)
+                    .await
+                {
+                    let mut relay = self.state.write().await;
+                    relay.push_log(
+                        "warn",
+                        format!(
+                            "Could not resume thread {thread_id} to recover from `{error}`: {resume_error}"
+                        ),
+                    );
+                    relay.notify();
+                    return Err(error);
+                }
+                self.send_request("turn/start", params).await?
+            }
+            Err(error) => return Err(error),
+        };
 
         Ok(value_at(&result, &["turn", "id"])
             .and_then(Value::as_str)
@@ -461,6 +503,15 @@ impl CodexBridge {
         }))
         .await
     }
+}
+
+/// Does this `turn/start` failure mean "codex has no live handle for this
+/// thread" (as opposed to a genuine turn error)? Codex serves `thread/read` off
+/// disk but only accepts `turn/start` for a thread that `thread/start` /
+/// `thread/resume` materialized in THIS app-server process, and reports the gap
+/// as `thread not found: <id>`.
+fn is_thread_not_loaded_error(error: &str) -> bool {
+    error.to_ascii_lowercase().contains("thread not found")
 }
 
 /// Translate the relay-level approval_policy + sandbox pair into the

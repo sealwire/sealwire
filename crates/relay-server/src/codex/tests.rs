@@ -2510,3 +2510,200 @@ async fn handle_notification_keeps_full_turn_lifecycle_for_prior_thread() {
         "active_turn_id must reflect the runtime turn/completed"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Bridge <-> fake-app-server integration (B-layer).
+//
+// These spawn the real CodexBridge against scripts/fake-codex-app-server.mjs,
+// which models the one app-server rule the relay kept violating: `turn/start`
+// only accepts threads that thread/start or thread/resume has materialized in
+// THIS process, even though thread/read serves any rollout off disk.
+// ---------------------------------------------------------------------------
+
+fn fake_codex_path() -> &'static str {
+    let crate_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = crate_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| ".".to_string());
+    let path = format!("{workspace_root}/scripts/fake-codex-app-server.mjs");
+    assert!(
+        std::path::Path::new(&path).is_file(),
+        "missing fake Codex app-server script at {path}; this regression coverage must not be skipped"
+    );
+    // CodexBridge::spawn takes a &'static binary name; leak the resolved fake
+    // path so the test can point it at a script instead of the real binary.
+    Box::leak(path.into_boxed_str())
+}
+
+async fn spawn_fake_codex_bridge() -> (CodexBridge, std::sync::Arc<RwLock<RelayState>>) {
+    let (change_tx, _) = watch::channel(0_u64);
+    let state = std::sync::Arc::new(RwLock::new(RelayState::new(
+        "/tmp/project".to_string(),
+        change_tx,
+        SecurityProfile::private(),
+    )));
+    let bridge = CodexBridge::spawn(state.clone(), fake_codex_path(), "Fake Codex", "codex")
+        .await
+        .unwrap_or_else(|error| panic!("spawn fake Codex app-server for regression test: {error}"));
+    (bridge, state)
+}
+
+/// The JSON-RPC methods the fake app-server actually received, oldest first.
+///
+/// The fake echoes every received message to stderr, which the bridge's stderr
+/// reader funnels into the relay log buffer — but `push_log` inserts at the
+/// front, so the buffer is newest-first. Reverse it here: an ordering assertion
+/// that reads backwards is worse than none, since a symmetric sequence (say
+/// turn/start → thread/resume → turn/start) passes either way and proves
+/// nothing about order.
+async fn codex_recv_methods(state: &std::sync::Arc<RwLock<RelayState>>) -> Vec<String> {
+    state
+        .read()
+        .await
+        .snapshot()
+        .logs
+        .iter()
+        .rev()
+        .filter_map(|log| log.message.strip_prefix("CODEX RECV ").map(str::to_string))
+        .filter_map(|line| serde_json::from_str::<Value>(&line).ok())
+        .filter_map(|payload| {
+            payload
+                .get("method")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn start_turn_resumes_a_thread_the_app_server_has_not_loaded() {
+    // Regression for "codex 没法发消息" — POST /api/session/message -> 400
+    // `thread not found: <id>` on a thread whose transcript renders fine.
+    //
+    // A thread created by the Codex VSCode extension / CLI (or any thread left
+    // over from a previous relay process) exists on disk but was never
+    // materialized in the app-server the relay spawned. thread/read serves it
+    // off disk, so the relay hydrates a runtime and shows the transcript — but
+    // turn/start rejects it, and the send path has no resume left to save it.
+    //
+    // 1084b0a ("Decouple thread viewing from targeted control") removed the
+    // take-over resume that used to cover this:
+    //     if needs_takeover { self.resume_session_inner(...).await?; }
+    // and replaced it with ensure_thread_runtime_loaded, which is relay-local
+    // (read_thread + hydrate_background_runtime) and never touches the provider.
+    // The old take-over must NOT come back — it displaced the active thread's
+    // control, which is exactly what that commit set out to fix — so the bridge
+    // materializes the provider session itself, with no take-over semantics.
+    let (bridge, state) = spawn_fake_codex_bridge().await;
+    {
+        let mut relay = state.write().await;
+        relay.remember_thread_settings(
+            "thread-cold",
+            "on-request",
+            "workspace-write",
+            "low",
+            "gpt-5.6-sol",
+        );
+    }
+
+    let turn_id = bridge
+        .start_turn("thread-cold", "hello", "gpt-5.6-sol", "low")
+        .await
+        .expect("sending to a thread the app-server has not loaded must still start a turn");
+
+    assert!(
+        turn_id.is_some(),
+        "a healed turn/start must still return the turn id"
+    );
+
+    let methods = codex_recv_methods(&state).await;
+    assert_eq!(
+        methods
+            .iter()
+            .filter(|method| *method == "turn/start" || *method == "thread/resume")
+            .collect::<Vec<_>>(),
+        vec!["turn/start", "thread/resume", "turn/start"],
+        "the bridge must retry turn/start once, after resuming the thread it \
+         learned was not loaded"
+    );
+}
+
+#[tokio::test]
+async fn start_turn_does_not_resume_a_thread_the_app_server_already_has() {
+    // The heal is a recovery path, not a preamble. Resuming on every send would
+    // cost an extra round-trip per message and re-bind the thread's policy
+    // underneath a live session — so it must fire only on codex's own
+    // "not loaded" error, never speculatively.
+    let (bridge, state) = spawn_fake_codex_bridge().await;
+    {
+        let mut relay = state.write().await;
+        relay.remember_thread_settings(
+            "thread-warm",
+            "on-request",
+            "workspace-write",
+            "low",
+            "gpt-5.6-sol",
+        );
+    }
+    bridge
+        .resume_thread("thread-warm", "on-request", "workspace-write")
+        .await
+        .expect("fake app-server resumes a thread on disk");
+
+    bridge
+        .start_turn("thread-warm", "hello", "gpt-5.6-sol", "low")
+        .await
+        .expect("a loaded thread starts a turn on the first try");
+
+    let methods = codex_recv_methods(&state).await;
+    assert_eq!(
+        methods
+            .iter()
+            .filter(|method| *method == "turn/start" || *method == "thread/resume")
+            .collect::<Vec<_>>(),
+        vec!["thread/resume", "turn/start"],
+        "a thread the app-server already holds must not be resumed again on send"
+    );
+}
+
+#[tokio::test]
+async fn start_turn_does_not_resume_a_thread_whose_settings_are_unknown() {
+    // Resume binds the approval policy + sandbox. With no remembered settings
+    // the bridge would have to invent them, and inventing them wrong silently
+    // widens what the turn is allowed to do (e.g. handing a read-only thread a
+    // writable sandbox). Fail closed: surface codex's error, resume nothing.
+    let (bridge, state) = spawn_fake_codex_bridge().await;
+
+    let error = bridge
+        .start_turn("thread-unknown", "hello", "gpt-5.6-sol", "low")
+        .await
+        .expect_err("a thread with no remembered settings must not be silently resumed");
+
+    assert!(
+        error.contains("thread not found"),
+        "the original app-server error must survive, got: {error}"
+    );
+    assert!(
+        !codex_recv_methods(&state)
+            .await
+            .iter()
+            .any(|method| method == "thread/resume"),
+        "no policy may be guessed for a thread the relay has no settings for"
+    );
+}
+
+#[test]
+fn is_thread_not_loaded_error_matches_only_the_not_loaded_failure() {
+    // Too broad a matcher would retry real turn failures (double-sending the
+    // user's message); too narrow and the bug comes straight back.
+    assert!(is_thread_not_loaded_error(
+        "thread not found: 019f6c95-c5e1-7633-a9cd-44c4587261ef"
+    ));
+    assert!(is_thread_not_loaded_error("Thread not found"));
+    assert!(!is_thread_not_loaded_error("turn failed: model overloaded"));
+    assert!(!is_thread_not_loaded_error(
+        "thread '019f6c95' was not found on any provider"
+    ));
+}

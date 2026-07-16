@@ -63,7 +63,7 @@ impl AppState {
                 let defaults = self.defaults().await;
                 let settings = {
                     let relay = self.relay.read().await;
-                    relay.thread_settings(&input.thread_id)
+                    relay.remembered_thread_settings(&input.thread_id)
                 };
                 let approval_policy = settings
                     .as_ref()
@@ -87,13 +87,23 @@ impl AppState {
                 let prev_cursor = page.prev_cursor;
                 {
                     let mut relay = self.relay.write().await;
-                    relay.hydrate_background_runtime(
-                        page.sync,
-                        &approval_policy,
-                        &sandbox,
-                        &effort,
-                        &model,
-                    );
+                    if settings.is_some() {
+                        relay.hydrate_background_runtime(
+                            page.sync,
+                            &approval_policy,
+                            &sandbox,
+                            &effort,
+                            &model,
+                        );
+                    } else {
+                        relay.hydrate_background_runtime_without_remembering_settings(
+                            page.sync,
+                            &approval_policy,
+                            &sandbox,
+                            &effort,
+                            &model,
+                        );
+                    }
                     let runtime = relay.ensure_runtime_for_thread(&input.thread_id);
                     runtime.provider_history_paged = paged;
                     runtime.provider_history_cursor = prev_cursor;

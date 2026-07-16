@@ -234,6 +234,7 @@ mod workspace_diff_tests {
 #[cfg(test)]
 mod path_scope_tests {
     use super::super::*;
+    use crate::codex::CodexBridge;
     use crate::fake_provider::FakeProviderBridge;
     use crate::protocol::{
         ApprovalDecision, ApprovalDecisionInput, ApprovalScope, AskUserOptionView,
@@ -1068,6 +1069,57 @@ mod path_scope_tests {
         )
     }
 
+    fn fake_codex_path() -> &'static str {
+        let crate_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let workspace_root = crate_dir
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| ".".to_string());
+        let path = format!("{workspace_root}/scripts/fake-codex-app-server.mjs");
+        assert!(
+            std::path::Path::new(&path).is_file(),
+            "missing fake Codex app-server script at {path}; AppState send regression must not be skipped"
+        );
+        Box::leak(path.into_boxed_str())
+    }
+
+    async fn build_fake_codex_app(cwd: &str) -> AppState {
+        let (change_tx, _) = watch::channel(0_u64);
+        let relay = Arc::new(RwLock::new(RelayState::new(
+            cwd.to_string(),
+            change_tx.clone(),
+            SecurityProfile::private(),
+        )));
+        let bridge = CodexBridge::spawn(relay.clone(), fake_codex_path(), "Fake Codex", "codex")
+            .await
+            .unwrap_or_else(|error| {
+                panic!("spawn fake Codex app-server for AppState regression: {error}")
+            });
+        let mut providers: HashMap<String, Arc<dyn ProviderBridge>> = HashMap::new();
+        providers.insert("codex".to_string(), Arc::new(bridge));
+        AppState::from_parts(relay, providers, change_tx)
+    }
+
+    async fn codex_recv_methods(app: &AppState) -> Vec<String> {
+        app.relay
+            .read()
+            .await
+            .snapshot()
+            .logs
+            .iter()
+            .rev()
+            .filter_map(|log| log.message.strip_prefix("CODEX RECV ").map(str::to_string))
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(&line).ok())
+            .filter_map(|payload| {
+                payload
+                    .get("method")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect()
+    }
+
     #[tokio::test]
     async fn approval_response_routes_to_pending_thread_provider() {
         let project = TempDir::new().expect("project tempdir");
@@ -1179,6 +1231,75 @@ mod path_scope_tests {
         assert!(
             codex.resume_thread_ids.lock().await.is_empty(),
             "targeted send must not resume the provider session first"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_to_cold_codex_thread_with_unknown_settings_fails_closed_after_hydration() {
+        let app = build_fake_codex_app("/tmp/project").await;
+        pair_device(&app, "device-1", Vec::new()).await;
+        let thread_id = "thread-imported";
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("codex".to_string());
+            relay.approval_policy = "bypass".to_string();
+            relay.sandbox = "danger-full-access".to_string();
+            relay.threads = vec![crate::protocol::ThreadSummaryView {
+                id: thread_id.to_string(),
+                name: Some("imported codex thread".to_string()),
+                preview: String::new(),
+                cwd: "/tmp/project".to_string(),
+                updated_at: unix_now(),
+                source: "codex".to_string(),
+                status: "idle".to_string(),
+                model_provider: "codex".to_string(),
+                provider: "codex".to_string(),
+            }];
+        }
+
+        let error = app
+            .send_message(SendMessageInput {
+                text: "resume unsafely?".to_string(),
+                model: None,
+                effort: None,
+                device_id: Some("device-1".to_string()),
+                thread_id: thread_id.to_string(),
+            })
+            .await
+            .expect_err("unknown Codex settings must fail closed after cold hydration");
+
+        assert!(
+            error.contains("thread not found"),
+            "the original Codex not-loaded error must survive, got: {error}"
+        );
+        {
+            let relay = app.relay.read().await;
+            assert!(
+                relay.runtime_for_thread(thread_id).is_some(),
+                "send preflight should have hydrated a runtime for the readable thread"
+            );
+            assert!(
+                relay.remembered_thread_settings(thread_id).is_none(),
+                "cold hydration must not turn permissive relay defaults into remembered settings"
+            );
+            assert!(
+                relay.thread_settings(thread_id).is_some(),
+                "the runtime can still expose display settings without authorizing Codex resume"
+            );
+        }
+
+        let methods = codex_recv_methods(&app).await;
+        assert_eq!(
+            methods
+                .iter()
+                .filter(|method| *method == "turn/start")
+                .count(),
+            1,
+            "the bridge may probe turn/start once, but must not retry after guessing policy"
+        );
+        assert!(
+            !methods.iter().any(|method| method == "thread/resume"),
+            "send must not resume a cold Codex thread when approval/sandbox settings are unknown"
         );
     }
 

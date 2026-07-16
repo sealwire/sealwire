@@ -428,7 +428,7 @@ impl AppState {
             let relay = self.relay.read().await;
             (
                 target_thread.clone(),
-                relay.thread_settings(&target_thread),
+                relay.remembered_thread_settings(&target_thread),
                 relay
                     .runtime_for_thread(&target_thread)
                     .map(|runtime| runtime.current_cwd.clone())
@@ -491,7 +491,17 @@ impl AppState {
             let data = bridge.read_thread(&target_thread).await?;
             let cwd = data.thread.cwd.clone();
             let mut relay = self.relay.write().await;
-            relay.hydrate_background_runtime(data, &approval_policy, &sandbox, &effort, &model);
+            if remembered_settings.is_some() {
+                relay.hydrate_background_runtime(data, &approval_policy, &sandbox, &effort, &model);
+            } else {
+                relay.hydrate_background_runtime_without_remembering_settings(
+                    data,
+                    &approval_policy,
+                    &sandbox,
+                    &effort,
+                    &model,
+                );
+            }
             cwd
         };
         {

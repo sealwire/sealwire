@@ -1544,6 +1544,29 @@ impl RelayState {
         effort: &str,
         model: &str,
     ) {
+        self.hydrate_background_runtime_inner(data, approval_policy, sandbox, effort, model, true);
+    }
+
+    pub(crate) fn hydrate_background_runtime_without_remembering_settings(
+        &mut self,
+        data: ThreadSyncData,
+        approval_policy: &str,
+        sandbox: &str,
+        effort: &str,
+        model: &str,
+    ) {
+        self.hydrate_background_runtime_inner(data, approval_policy, sandbox, effort, model, false);
+    }
+
+    fn hydrate_background_runtime_inner(
+        &mut self,
+        data: ThreadSyncData,
+        approval_policy: &str,
+        sandbox: &str,
+        effort: &str,
+        model: &str,
+        remember_settings: bool,
+    ) {
         let thread_id = data.thread.id.clone();
         if self.runtimes.contains_key(&thread_id) {
             return;
@@ -1558,7 +1581,9 @@ impl RelayState {
             now,
         );
         self.runtimes.insert(thread_id.clone(), runtime);
-        self.remember_thread_settings(&thread_id, approval_policy, sandbox, effort, model);
+        if remember_settings {
+            self.remember_thread_settings(&thread_id, approval_policy, sandbox, effort, model);
+        }
         self.upsert_thread(data.thread);
     }
 
@@ -1841,10 +1866,12 @@ impl RelayState {
     }
 
     pub fn thread_settings(&self, thread_id: &str) -> Option<ThreadSessionSettings> {
-        self.thread_settings
-            .get(thread_id)
-            .cloned()
+        self.remembered_thread_settings(thread_id)
             .or_else(|| self.runtimes.get(thread_id).map(ThreadRuntime::settings))
+    }
+
+    pub fn remembered_thread_settings(&self, thread_id: &str) -> Option<ThreadSessionSettings> {
+        self.thread_settings.get(thread_id).cloned()
     }
 
     pub fn remember_thread_settings(
