@@ -1453,13 +1453,16 @@ async fn public_client_refresh_token_can_rotate() {
         .expect("bearer-auth rotate should return a fresh refresh token");
     assert_ne!(new_refresh_token, grant.client_refresh_token);
 
-    let old_error = reqwest::Client::new()
+    // The rotated-away token stays valid within the rotation grace window, so a
+    // client that never received the fresh credential is not locked out (explicit
+    // revocation still cuts access immediately — covered by the revoke tests).
+    let old_token_response = reqwest::Client::new()
         .get(format!("http://{address}/api/public/relays"))
         .bearer_auth(&grant.client_refresh_token)
         .send()
         .await
         .expect("old token request should complete");
-    assert_eq!(old_error.status(), reqwest::StatusCode::UNAUTHORIZED);
+    assert_eq!(old_token_response.status(), reqwest::StatusCode::OK);
 
     let relays: ClientRelaysResponse =
         public_get(address, "/api/public/relays", &new_refresh_token).await;
@@ -1519,16 +1522,16 @@ async fn public_client_session_cookie_can_rotate() {
     assert_eq!(rotated.client_refresh_token, None);
     assert_ne!(rotated_cookie, original_cookie);
 
+    // The pre-rotation cookie stays valid within the rotation grace window (a
+    // browser that missed the Set-Cookie must not be locked out); revocation
+    // tests cover the immediate-cutoff path.
     let old_cookie_response = reqwest::Client::new()
         .get(format!("http://{address}/api/public/relays"))
         .header(reqwest::header::COOKIE, original_cookie)
         .send()
         .await
         .expect("old cookie request should complete");
-    assert_eq!(
-        old_cookie_response.status(),
-        reqwest::StatusCode::UNAUTHORIZED
-    );
+    assert_eq!(old_cookie_response.status(), reqwest::StatusCode::OK);
 
     let new_cookie_response = reqwest::Client::new()
         .get(format!("http://{address}/api/public/relays"))

@@ -9327,3 +9327,196 @@ turn) must allow a review: {error:?}"
         assert!(message.contains("being reviewed"), "got: {message}");
     }
 }
+
+// The "slow approve button" double-tap: approving a pairing makes two sequential
+// broker HTTP calls BEFORE marking the request decided, so a second tap that
+// lands inside that window used to (a) issue a second credential — rotating the
+// first tap's freshly-delivered tokens out from under the phone — and then,
+// after losing the decide race, (b) roll back by revoking the device credential
+// by device_id, deleting the winner's grant (and its client-relay grant) outright.
+// Net effect: the device the operator just approved was bricked, and the DB was
+// left with an orphan client identity and zero grants. The approve flow must
+// claim the pairing request atomically before issuing anything, so the losing
+// tap fails fast without issuing or revoking.
+#[cfg(test)]
+mod double_approve_race {
+    use super::super::*;
+    use crate::protocol::{PairingDecision, PairingDecisionInput};
+    use crate::state::security::SecurityProfile;
+    use axum::{extract::Path as AxumPath, routing::post, Json, Router};
+    use std::collections::HashMap;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use std::time::Duration;
+    use tokio::net::TcpListener;
+    use tokio::sync::{watch, RwLock};
+
+    struct MockCounts {
+        device_grants: AtomicUsize,
+        revokes: AtomicUsize,
+    }
+
+    /// Mock public control plane whose device-grant endpoint responds slowly,
+    /// holding the approve flow inside its broker window long enough for an
+    /// overlapping second tap to enter it too.
+    async fn spawn_slow_control_plane(counts: Arc<MockCounts>) -> String {
+        let grant_counts = counts.clone();
+        let device_grant = move |Json(body): Json<serde_json::Value>| {
+            let grant_counts = grant_counts.clone();
+            async move {
+                grant_counts.device_grants.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                Json(serde_json::json!({
+                    "relay_id": "relay-owner-1",
+                    "broker_room_id": "demo-room",
+                    "device_id": body["device_id"],
+                    "device_refresh_token": "dref-attempt",
+                    "device_ws_token": "ws-attempt",
+                    "device_ws_token_expires_at": 4102444800_u64,
+                }))
+            }
+        };
+        let client_grant = |Json(body): Json<serde_json::Value>| async move {
+            Json(serde_json::json!({
+                "client_id": "client-1",
+                "client_refresh_token": "cref-attempt",
+                "relay_id": "relay-owner-1",
+                "broker_room_id": "demo-room",
+                "device_id": body["device_id"],
+                "relay_label": "Demo Relay",
+            }))
+        };
+        let revoke_counts = counts;
+        let revoke = move |AxumPath(device_id): AxumPath<String>,
+                           Json(_body): Json<serde_json::Value>| {
+            let revoke_counts = revoke_counts.clone();
+            async move {
+                revoke_counts.revokes.fetch_add(1, Ordering::SeqCst);
+                Json(serde_json::json!({
+                    "relay_id": "relay-owner-1",
+                    "broker_room_id": "demo-room",
+                    "device_id": device_id,
+                    "revoked": true,
+                    "revoked_grant_count": 1,
+                }))
+            }
+        };
+        let app = Router::new()
+            .route("/api/public/devices", post(device_grant))
+            .route("/api/public/clients/grants", post(client_grant))
+            .route("/api/public/devices/:device_id/revoke", post(revoke));
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("mock control plane should bind");
+        let address = listener.local_addr().expect("mock address");
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("mock control plane should serve");
+        });
+        format!("http://{address}")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn double_approve_must_not_reissue_or_revoke_the_winning_credential() {
+        let counts = Arc::new(MockCounts {
+            device_grants: AtomicUsize::new(0),
+            revokes: AtomicUsize::new(0),
+        });
+        let control_url = spawn_slow_control_plane(counts.clone()).await;
+
+        // decide_pairing_request resolves its broker config from env.
+        let broker_env = [
+            ("RELAY_BROKER_URL", "wss://broker.example.com"),
+            ("RELAY_BROKER_CONTROL_URL", control_url.as_str()),
+            ("RELAY_BROKER_CHANNEL_ID", "demo-room"),
+            ("RELAY_BROKER_PEER_ID", "relay-1"),
+            ("RELAY_BROKER_AUTH_MODE", "public"),
+            ("RELAY_BROKER_RELAY_ID", "relay-owner-1"),
+            ("RELAY_BROKER_RELAY_REFRESH_TOKEN", "relay-refresh-1"),
+        ];
+        for (key, value) in broker_env {
+            std::env::set_var(key, value);
+        }
+
+        let (change_tx, _change_rx) = watch::channel(0_u64);
+        let relay = Arc::new(RwLock::new(RelayState::new(
+            "/tmp/project".to_string(),
+            change_tx.clone(),
+            SecurityProfile::private(),
+        )));
+        let pairing_id = {
+            let mut relay = relay.write().await;
+            let prepared = relay
+                .prepare_pairing_ticket(Some(600), Vec::new())
+                .expect("pairing ticket should prepare");
+            relay
+                .register_pairing_request(
+                    &prepared.pairing_id,
+                    Some("phone-1".to_string()),
+                    Some("Phone".to_string()),
+                    "surface-1",
+                    "vk-double-approve".to_string(),
+                    crate::state::unix_now(),
+                )
+                .expect("pairing request should register");
+            prepared.pairing_id
+        };
+        let app = AppState::from_parts(relay, HashMap::new(), change_tx);
+
+        let first_tap = {
+            let app = app.clone();
+            let pairing_id = pairing_id.clone();
+            tokio::spawn(async move {
+                app.decide_pairing_request(
+                    &pairing_id,
+                    PairingDecisionInput {
+                        decision: PairingDecision::Approve,
+                    },
+                )
+                .await
+            })
+        };
+        // The second tap lands while the first is waiting on the slow broker.
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let second_tap = {
+            let app = app.clone();
+            let pairing_id = pairing_id.clone();
+            tokio::spawn(async move {
+                app.decide_pairing_request(
+                    &pairing_id,
+                    PairingDecisionInput {
+                        decision: PairingDecision::Approve,
+                    },
+                )
+                .await
+            })
+        };
+        let first = first_tap.await.expect("first tap should not panic");
+        let second = second_tap.await.expect("second tap should not panic");
+
+        for (key, _) in broker_env {
+            std::env::remove_var(key);
+        }
+
+        assert_eq!(
+            u8::from(first.is_ok()) + u8::from(second.is_ok()),
+            1,
+            "exactly one tap must win (first ok: {}, second ok: {})",
+            first.is_ok(),
+            second.is_ok()
+        );
+        assert_eq!(
+            counts.device_grants.load(Ordering::SeqCst),
+            1,
+            "the losing tap must not issue (and thereby rotate) a second device credential"
+        );
+        assert_eq!(
+            counts.revokes.load(Ordering::SeqCst),
+            0,
+            "the losing tap must not revoke the winner's freshly-delivered credential"
+        );
+    }
+}

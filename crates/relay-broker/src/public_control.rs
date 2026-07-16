@@ -36,9 +36,20 @@ pub const PUBLIC_POSTGRES_URL_ENV: &str = "RELAY_BROKER_PUBLIC_POSTGRES_URL";
 pub const PUBLIC_POSTGRES_RELOAD_ENV: &str = "RELAY_BROKER_PUBLIC_POSTGRES_RELOAD_BEFORE_USE";
 pub const PUBLIC_RELAY_WS_TTL_SECS_ENV: &str = "RELAY_BROKER_PUBLIC_RELAY_WS_TTL_SECS";
 pub const PUBLIC_DEVICE_WS_TTL_SECS_ENV: &str = "RELAY_BROKER_PUBLIC_DEVICE_WS_TTL_SECS";
+/// Grace window during which a rotated-away client/device refresh token keeps
+/// authenticating. Every approval rotates these tokens, but the fresh token only
+/// reaches the session that completes that pairing handshake — an already-paired
+/// device that never sees it would otherwise be bricked by the very approval
+/// meant to (re-)authorize it. Uses within the window slide the expiry forward;
+/// explicit revocation still kills current and superseded tokens immediately.
+pub const PUBLIC_ROTATION_GRACE_SECS_ENV: &str = "RELAY_BROKER_PUBLIC_ROTATION_GRACE_SECS";
 
 const DEFAULT_PUBLIC_RELAY_WS_TTL_SECS: u64 = 300;
 const DEFAULT_PUBLIC_DEVICE_WS_TTL_SECS: u64 = 300;
+const DEFAULT_PUBLIC_ROTATION_GRACE_SECS: u64 = 60 * 60 * 48;
+/// Upper bound on retained superseded tokens per credential, so repeated
+/// re-approvals cannot grow rows without bound (oldest entries drop first).
+const MAX_SUPERSEDED_TOKENS: usize = 16;
 const DEFAULT_RELAY_ENROLLMENT_CHALLENGE_TTL_SECS: u64 = 300;
 const PUBLIC_CONTROL_STATE_VERSION: u32 = 2;
 
@@ -259,6 +270,7 @@ struct PublicControlPlaneInner {
     issuer_key: JoinTicketKey,
     relay_ws_ttl_secs: u64,
     device_ws_ttl_secs: u64,
+    rotation_grace_secs: u64,
     persistence: PublicControlPersistence,
     state: Mutex<PublicControlStateStore>,
     relay_enrollment_challenges: Mutex<HashMap<String, PendingRelayEnrollmentChallenge>>,
@@ -337,6 +349,14 @@ struct PersistedPublicControlState {
     client_relay_grants: Vec<PersistedClientRelayGrant>,
 }
 
+/// A refresh token hash that was rotated away but stays valid until
+/// `expires_at` (see [`PUBLIC_ROTATION_GRACE_SECS_ENV`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct SupersededToken {
+    refresh_token_hash: String,
+    expires_at: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct PersistedDeviceGrant {
     relay_id: String,
@@ -350,6 +370,9 @@ struct PersistedDeviceGrant {
     /// Durably tracked only on the Postgres backend (see `touch_device_last_seen`).
     #[serde(default)]
     last_seen: Option<u64>,
+    /// Rotated-away refresh tokens still inside the rotation grace window.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    superseded: Vec<SupersededToken>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -360,6 +383,9 @@ struct PersistedClientIdentity {
     created_at: u64,
     #[serde(default)]
     client_label: Option<String>,
+    /// Rotated-away refresh tokens still inside the rotation grace window.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    superseded: Vec<SupersededToken>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -485,6 +511,11 @@ impl PublicControlPlane {
                     device_ws_ttl_secs,
                 )?
                 .unwrap_or(DEFAULT_PUBLIC_DEVICE_WS_TTL_SECS),
+                rotation_grace_secs: parse_optional_u64(
+                    PUBLIC_ROTATION_GRACE_SECS_ENV,
+                    std::env::var(PUBLIC_ROTATION_GRACE_SECS_ENV).ok(),
+                )?
+                .unwrap_or(DEFAULT_PUBLIC_ROTATION_GRACE_SECS),
                 persistence,
                 state: Mutex::new(state),
                 relay_enrollment_challenges: Mutex::new(HashMap::new()),
@@ -749,6 +780,24 @@ impl PublicControlPlane {
                 }
             }
         }
+        // A re-registration rotates the device refresh token; keep the replaced
+        // token honored for the grace window so an already-paired device that
+        // never receives this new credential is not bricked by the approval.
+        let superseded = store
+            .grants_by_hash
+            .values()
+            .find(|grant| {
+                grant.relay_id == registration.relay_id && grant.device_id == request.device_id
+            })
+            .map(|previous| {
+                carry_superseded(
+                    &previous.superseded,
+                    previous.refresh_token_hash.clone(),
+                    created_at,
+                    self.inner.rotation_grace_secs,
+                )
+            })
+            .unwrap_or_default();
         store.remove_device_grants(&registration.relay_id, None, Some(&request.device_id));
         store.grants_by_hash.insert(
             refresh_token_hash.clone(),
@@ -759,6 +808,7 @@ impl PublicControlPlane {
                 refresh_token_hash,
                 created_at,
                 last_seen: Some(created_at),
+                superseded,
             },
         );
         self.inner.persistence.save(&mut store).await?;
@@ -902,8 +952,12 @@ impl PublicControlPlane {
             .filter(|label| !label.is_empty());
         let created_at = unix_now();
         let mut store = self.lock_state().await?;
-        let (client_id, client_refresh_token) =
-            store.issue_or_rotate_client_identity(&client_verify_key, client_label, created_at);
+        let (client_id, client_refresh_token) = store.issue_or_rotate_client_identity(
+            &client_verify_key,
+            client_label,
+            created_at,
+            self.inner.rotation_grace_secs,
+        );
         store.upsert_client_relay_grant(PersistedClientRelayGrant {
             client_id: client_id.clone(),
             relay_id: registration.relay_id.clone(),
@@ -972,7 +1026,8 @@ impl PublicControlPlane {
     ) -> Result<(String, String), String> {
         let client = self.authenticate_client(bearer_token).await?;
         let mut store = self.lock_state().await?;
-        let refreshed_token = store.rotate_client_identity(&client);
+        let refreshed_token =
+            store.rotate_client_identity(&client, unix_now(), self.inner.rotation_grace_secs);
         self.inner.persistence.save(&mut store).await?;
         Ok((client.client_id, refreshed_token))
     }
@@ -1004,16 +1059,33 @@ impl PublicControlPlane {
         let token_hash = sha256_hex(bearer_token.trim());
         let grant = {
             let mut store = self.lock_state().await?;
-            let grant = store
-                .grants_by_hash
-                .get(&token_hash)
-                .cloned()
-                .ok_or_else(|| "device refresh token is invalid".to_string())?;
+            let mut found = find_device_grant_for_token(&store, &token_hash, now);
+            if found.is_none() && self.reload_state_on_miss(&mut store).await? {
+                found = find_device_grant_for_token(&store, &token_hash, now);
+            }
+            let (primary_hash, grant) =
+                found.ok_or_else(|| "device refresh token is invalid".to_string())?;
+            if primary_hash != token_hash {
+                // Matched via a superseded token inside its grace window: slide
+                // the window forward (throttled, best-effort).
+                if let Some(live) = store.grants_by_hash.get_mut(&primary_hash) {
+                    if bump_superseded_expiry(
+                        &mut live.superseded,
+                        &token_hash,
+                        now,
+                        self.inner.rotation_grace_secs,
+                    ) {
+                        if let Err(error) = self.inner.persistence.save(&mut store).await {
+                            warn!(%error, "failed to persist device grace renewal; continuing");
+                        }
+                    }
+                }
+            }
             // Throttled activity marker: at most one durable write per device per
             // LAST_SEEN_THROTTLE_SECS, via a targeted single-row UPDATE that stays
             // off the diff-based save() path entirely (this is the hottest write).
             if should_touch_last_seen(grant.last_seen, now) {
-                if let Some(entry) = store.grants_by_hash.get_mut(&token_hash) {
+                if let Some(entry) = store.grants_by_hash.get_mut(&primary_hash) {
                     entry.last_seen = Some(now);
                 }
                 // Best-effort advisory marker: a failed write must NOT deny the
@@ -1022,7 +1094,7 @@ impl PublicControlPlane {
                 if let Err(error) = self
                     .inner
                     .persistence
-                    .touch_device_last_seen(&token_hash, now)
+                    .touch_device_last_seen(&primary_hash, now)
                     .await
                 {
                     warn!(%error, "failed to persist device last_seen; continuing");
@@ -1114,18 +1186,34 @@ impl PublicControlPlane {
         Ok(store)
     }
 
+    /// A token miss against a shared backend may just mean this instance's
+    /// memory is stale — reload the authoritative state once so the caller can
+    /// retry the lookup before rejecting the credential. Returns whether a
+    /// reload happened.
+    async fn reload_state_on_miss(
+        &self,
+        store: &mut PublicControlStateStore,
+    ) -> Result<bool, String> {
+        if !self.inner.persistence.shared_backend() {
+            return Ok(false);
+        }
+        *store = self.inner.persistence.load().await?;
+        Ok(true)
+    }
+
     async fn authenticate_relay(
         &self,
         bearer_token: &str,
         relay_id: &str,
         broker_room_id: &str,
     ) -> Result<PersistedRelayRegistration, String> {
-        let store = self.lock_state().await?;
-        let registration = clone_entry_from_bearer_token(
-            &store.relay_registrations_by_hash,
-            bearer_token,
-            "relay refresh token is invalid",
-        )?;
+        let mut store = self.lock_state().await?;
+        let token_hash = sha256_hex(bearer_token.trim());
+        let mut found = store.relay_registrations_by_hash.get(&token_hash).cloned();
+        if found.is_none() && self.reload_state_on_miss(&mut store).await? {
+            found = store.relay_registrations_by_hash.get(&token_hash).cloned();
+        }
+        let registration = found.ok_or_else(|| "relay refresh token is invalid".to_string())?;
         if registration.relay_id != relay_id {
             return Err("relay refresh token does not match relay_id".to_string());
         }
@@ -1139,12 +1227,34 @@ impl PublicControlPlane {
         &self,
         bearer_token: &str,
     ) -> Result<PersistedClientIdentity, String> {
-        let store = self.lock_state().await?;
-        clone_entry_from_bearer_token(
-            &store.client_registrations_by_hash,
-            bearer_token,
-            "client refresh token is invalid",
-        )
+        let mut store = self.lock_state().await?;
+        let token_hash = sha256_hex(bearer_token.trim());
+        let now = unix_now();
+        let mut found = find_client_identity_for_token(&store, &token_hash, now);
+        if found.is_none() && self.reload_state_on_miss(&mut store).await? {
+            found = find_client_identity_for_token(&store, &token_hash, now);
+        }
+        let (primary_hash, identity) =
+            found.ok_or_else(|| "client refresh token is invalid".to_string())?;
+        if primary_hash != token_hash {
+            // Matched via a superseded token inside its grace window: slide the
+            // window forward (throttled) so an actively-used device keeps working
+            // until it picks up a fresh credential. Best-effort persistence — a
+            // failed write must not deny authentication.
+            if let Some(live) = store.client_registrations_by_hash.get_mut(&primary_hash) {
+                if bump_superseded_expiry(
+                    &mut live.superseded,
+                    &token_hash,
+                    now,
+                    self.inner.rotation_grace_secs,
+                ) {
+                    if let Err(error) = self.inner.persistence.save(&mut store).await {
+                        warn!(%error, "failed to persist client grace renewal; continuing");
+                    }
+                }
+            }
+        }
+        Ok(identity)
     }
 
     fn issue_device_ws_token_for_registration(
@@ -1172,12 +1282,30 @@ impl PublicControlPlane {
         &self,
         bearer_token: &str,
     ) -> Result<PersistedDeviceGrant, String> {
-        let store = self.lock_state().await?;
-        clone_entry_from_bearer_token(
-            &store.grants_by_hash,
-            bearer_token,
-            "device refresh token is invalid",
-        )
+        let mut store = self.lock_state().await?;
+        let token_hash = sha256_hex(bearer_token.trim());
+        let now = unix_now();
+        let mut found = find_device_grant_for_token(&store, &token_hash, now);
+        if found.is_none() && self.reload_state_on_miss(&mut store).await? {
+            found = find_device_grant_for_token(&store, &token_hash, now);
+        }
+        let (primary_hash, grant) =
+            found.ok_or_else(|| "device refresh token is invalid".to_string())?;
+        if primary_hash != token_hash {
+            if let Some(live) = store.grants_by_hash.get_mut(&primary_hash) {
+                if bump_superseded_expiry(
+                    &mut live.superseded,
+                    &token_hash,
+                    now,
+                    self.inner.rotation_grace_secs,
+                ) {
+                    if let Err(error) = self.inner.persistence.save(&mut store).await {
+                        warn!(%error, "failed to persist device grace renewal; continuing");
+                    }
+                }
+            }
+        }
+        Ok(grant)
     }
 
     async fn issue_relay_registration_for_verify_key(
@@ -1411,6 +1539,15 @@ impl PublicControlPersistence {
         }
     }
 
+    /// Whether a token lookup miss may be caused by this instance's in-memory
+    /// state trailing a shared authoritative backend (rolling-deploy overlap, a
+    /// second replica, a commit that outran the snapshot) — i.e. whether a
+    /// one-shot reload-and-retry is meaningful. Only Postgres is shared; the
+    /// JSON/in-memory backends are process-exclusive, so memory is never behind.
+    fn shared_backend(&self) -> bool {
+        matches!(self, Self::Postgres { .. })
+    }
+
     /// Persist a single device grant's `last_seen` with a targeted O(1) UPDATE,
     /// deliberately avoiding the whole-state `save()` (which wipes and rebuilds
     /// every table). This is a Postgres-only, best-effort activity marker: for
@@ -1582,14 +1719,21 @@ impl PublicControlStateStore {
         client_verify_key: &str,
         client_label: Option<String>,
         created_at: u64,
+        grace_secs: u64,
     ) -> (String, String) {
-        let (client_id, carried_label) =
+        let (client_id, carried_label, superseded) =
             if let Some(existing) = self.client_identity_for_verify_key(client_verify_key) {
                 let client_id = existing.client_id.clone();
                 self.remove_client_identity_by_client_id(&client_id);
-                (client_id, existing.client_label.clone())
+                let superseded = carry_superseded(
+                    &existing.superseded,
+                    existing.refresh_token_hash.clone(),
+                    created_at,
+                    grace_secs,
+                );
+                (client_id, existing.client_label.clone(), superseded)
             } else {
-                (issue_client_id(client_verify_key), None)
+                (issue_client_id(client_verify_key), None, Vec::new())
             };
         let client_refresh_token = format!("cref-{}", random_token(40).to_ascii_lowercase());
         let refresh_token_hash = sha256_hex(&client_refresh_token);
@@ -1601,12 +1745,33 @@ impl PublicControlStateStore {
                 refresh_token_hash,
                 created_at,
                 client_label: client_label.or(carried_label),
+                superseded,
             },
         );
         (client_id, client_refresh_token)
     }
 
-    fn rotate_client_identity(&mut self, client: &PersistedClientIdentity) -> String {
+    fn rotate_client_identity(
+        &mut self,
+        client: &PersistedClientIdentity,
+        now: u64,
+        grace_secs: u64,
+    ) -> String {
+        // Collect grace entries from the LIVE rows (not the caller's clone), so a
+        // rotation chains correctly even if the row changed since authentication.
+        let mut superseded: Vec<SupersededToken> = Vec::new();
+        for registration in self
+            .client_registrations_by_hash
+            .values()
+            .filter(|registration| registration.client_id == client.client_id)
+        {
+            superseded = carry_superseded(
+                &[registration.superseded.clone(), superseded].concat(),
+                registration.refresh_token_hash.clone(),
+                now,
+                grace_secs,
+            );
+        }
         self.remove_client_identity_by_client_id(&client.client_id);
         let client_refresh_token = format!("cref-{}", random_token(40).to_ascii_lowercase());
         let refresh_token_hash = sha256_hex(&client_refresh_token);
@@ -1618,6 +1783,7 @@ impl PublicControlStateStore {
                 refresh_token_hash,
                 created_at: client.created_at,
                 client_label: client.client_label.clone(),
+                superseded,
             },
         );
         client_refresh_token
@@ -1891,7 +2057,35 @@ async fn initialize_postgres_public_control_schema(pool: &PgPool) -> Result<(), 
     .execute(pool)
     .await
     .map_err(|error| format!("failed to create public_client_relay_grants: {error}"))?;
+    // Additive columns for the rotation grace window (JSON-encoded
+    // Vec<SupersededToken>; NULL/absent = empty). ADD COLUMN IF NOT EXISTS keeps
+    // pre-existing deployments loadable without a schema-version bump.
+    for table in ["public_client_identities", "public_device_grants"] {
+        sqlx::query(&format!(
+            "ALTER TABLE {table} ADD COLUMN IF NOT EXISTS superseded_tokens TEXT"
+        ))
+        .execute(pool)
+        .await
+        .map_err(|error| format!("failed to add superseded_tokens to {table}: {error}"))?;
+    }
     Ok(())
+}
+
+fn encode_superseded(superseded: &[SupersededToken]) -> Result<Option<String>, String> {
+    if superseded.is_empty() {
+        return Ok(None);
+    }
+    serde_json::to_string(superseded)
+        .map(Some)
+        .map_err(|error| format!("failed to encode superseded tokens: {error}"))
+}
+
+fn decode_superseded(raw: Option<String>) -> Result<Vec<SupersededToken>, String> {
+    match raw {
+        None => Ok(Vec::new()),
+        Some(raw) => serde_json::from_str(&raw)
+            .map_err(|error| format!("failed to decode superseded tokens: {error}")),
+    }
 }
 
 async fn load_public_control_postgres(pool: &PgPool) -> Result<PublicControlStateStore, String> {
@@ -1906,7 +2100,8 @@ async fn load_public_control_postgres(pool: &PgPool) -> Result<PublicControlStat
     .map_err(|error| format!("failed to load public_relay_registrations: {error}"))?;
     let client_rows = sqlx::query(
         r#"
-        SELECT client_id, client_verify_key, refresh_token_hash, created_at, client_label
+        SELECT client_id, client_verify_key, refresh_token_hash, created_at, client_label,
+               superseded_tokens
         FROM public_client_identities
         "#,
     )
@@ -1915,7 +2110,8 @@ async fn load_public_control_postgres(pool: &PgPool) -> Result<PublicControlStat
     .map_err(|error| format!("failed to load public_client_identities: {error}"))?;
     let device_rows = sqlx::query(
         r#"
-        SELECT relay_id, broker_room_id, device_id, refresh_token_hash, created_at, last_seen
+        SELECT relay_id, broker_room_id, device_id, refresh_token_hash, created_at, last_seen,
+               superseded_tokens
         FROM public_device_grants
         "#,
     )
@@ -1966,6 +2162,10 @@ async fn load_public_control_postgres(pool: &PgPool) -> Result<PublicControlStat
                         .map_err(postgres_decode_error)?,
                     created_at: row_i64_to_u64(&row, "created_at")?,
                     client_label: row.try_get("client_label").map_err(postgres_decode_error)?,
+                    superseded: decode_superseded(
+                        row.try_get("superseded_tokens")
+                            .map_err(postgres_decode_error)?,
+                    )?,
                 })
             })
             .collect::<Result<Vec<_>, String>>()?,
@@ -1986,6 +2186,10 @@ async fn load_public_control_postgres(pool: &PgPool) -> Result<PublicControlStat
                         .try_get::<Option<i64>, _>("last_seen")
                         .map_err(postgres_decode_error)?
                         .and_then(|value| u64::try_from(value).ok()),
+                    superseded: decode_superseded(
+                        row.try_get("superseded_tokens")
+                            .map_err(postgres_decode_error)?,
+                    )?,
                 })
             })
             .collect::<Result<Vec<_>, String>>()?,
@@ -2139,14 +2343,16 @@ async fn save_public_control_postgres(
             sqlx::query(
                 r#"
                 INSERT INTO public_client_identities (
-                    refresh_token_hash, client_id, client_verify_key, created_at, client_label
+                    refresh_token_hash, client_id, client_verify_key, created_at, client_label,
+                    superseded_tokens
                 )
-                VALUES ($1, $2, $3, $4, $5)
+                VALUES ($1, $2, $3, $4, $5, $6)
                 ON CONFLICT (refresh_token_hash) DO UPDATE SET
                     client_id = EXCLUDED.client_id,
                     client_verify_key = EXCLUDED.client_verify_key,
                     created_at = EXCLUDED.created_at,
-                    client_label = EXCLUDED.client_label
+                    client_label = EXCLUDED.client_label,
+                    superseded_tokens = EXCLUDED.superseded_tokens
                 "#,
             )
             .bind(&client.refresh_token_hash)
@@ -2154,6 +2360,7 @@ async fn save_public_control_postgres(
             .bind(&client.client_verify_key)
             .bind(u64_to_i64(client.created_at, "created_at")?)
             .bind(&client.client_label)
+            .bind(encode_superseded(&client.superseded)?)
             .execute(&mut *tx)
             .await
             .map_err(|error| format!("failed to upsert public_client_identities: {error}"))?;
@@ -2165,15 +2372,17 @@ async fn save_public_control_postgres(
             sqlx::query(
                 r#"
                 INSERT INTO public_device_grants (
-                    refresh_token_hash, relay_id, broker_room_id, device_id, created_at, last_seen
+                    refresh_token_hash, relay_id, broker_room_id, device_id, created_at, last_seen,
+                    superseded_tokens
                 )
-                VALUES ($1, $2, $3, $4, $5, $6)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
                 ON CONFLICT (refresh_token_hash) DO UPDATE SET
                     relay_id = EXCLUDED.relay_id,
                     broker_room_id = EXCLUDED.broker_room_id,
                     device_id = EXCLUDED.device_id,
                     created_at = EXCLUDED.created_at,
-                    last_seen = EXCLUDED.last_seen
+                    last_seen = EXCLUDED.last_seen,
+                    superseded_tokens = EXCLUDED.superseded_tokens
                 "#,
             )
             .bind(&grant.refresh_token_hash)
@@ -2182,6 +2391,7 @@ async fn save_public_control_postgres(
             .bind(&grant.device_id)
             .bind(u64_to_i64(grant.created_at, "created_at")?)
             .bind(grant.last_seen.and_then(|value| i64::try_from(value).ok()))
+            .bind(encode_superseded(&grant.superseded)?)
             .execute(&mut *tx)
             .await
             .map_err(|error| format!("failed to upsert public_device_grants: {error}"))?;
@@ -2363,16 +2573,49 @@ fn parse_relay_registrations(
     Ok(parsed)
 }
 
-fn clone_entry_from_bearer_token<T: Clone>(
-    entries: &HashMap<String, T>,
-    bearer_token: &str,
-    invalid_message: &str,
-) -> Result<T, String> {
-    let token_hash = sha256_hex(bearer_token.trim());
-    entries
-        .get(&token_hash)
-        .cloned()
-        .ok_or_else(|| invalid_message.to_string())
+/// Resolve a client identity from a presented token hash: exact match on the
+/// current token, or a superseded token still inside its grace window. Returns
+/// the row's primary hash (map key) alongside the identity so callers can tell
+/// which case matched and address the live row.
+fn find_client_identity_for_token(
+    store: &PublicControlStateStore,
+    token_hash: &str,
+    now: u64,
+) -> Option<(String, PersistedClientIdentity)> {
+    if let Some(identity) = store.client_registrations_by_hash.get(token_hash) {
+        return Some((token_hash.to_string(), identity.clone()));
+    }
+    store
+        .client_registrations_by_hash
+        .iter()
+        .find(|(_, identity)| {
+            identity
+                .superseded
+                .iter()
+                .any(|token| token.refresh_token_hash == token_hash && token.expires_at > now)
+        })
+        .map(|(hash, identity)| (hash.clone(), identity.clone()))
+}
+
+/// Device-grant twin of [`find_client_identity_for_token`].
+fn find_device_grant_for_token(
+    store: &PublicControlStateStore,
+    token_hash: &str,
+    now: u64,
+) -> Option<(String, PersistedDeviceGrant)> {
+    if let Some(grant) = store.grants_by_hash.get(token_hash) {
+        return Some((token_hash.to_string(), grant.clone()));
+    }
+    store
+        .grants_by_hash
+        .iter()
+        .find(|(_, grant)| {
+            grant
+                .superseded
+                .iter()
+                .any(|token| token.refresh_token_hash == token_hash && token.expires_at > now)
+        })
+        .map(|(hash, grant)| (hash.clone(), grant.clone()))
 }
 
 fn remove_matching_entries<T>(
@@ -2471,6 +2714,55 @@ fn random_token(length: usize) -> String {
 
 fn client_relay_grant_key(client_id: &str, relay_id: &str) -> String {
     format!("{client_id}:{relay_id}")
+}
+
+/// Build the superseded-token list for a credential rotation: keep the still
+/// unexpired entries, add the token being rotated away with a fresh grace
+/// deadline, and cap the list (oldest first out). A `grace_secs` of 0 disables
+/// the grace window entirely (the new entry is already expired).
+fn carry_superseded(
+    previous: &[SupersededToken],
+    rotated_hash: String,
+    now: u64,
+    grace_secs: u64,
+) -> Vec<SupersededToken> {
+    let mut kept: Vec<SupersededToken> = previous
+        .iter()
+        .filter(|token| token.expires_at > now && token.refresh_token_hash != rotated_hash)
+        .cloned()
+        .collect();
+    kept.push(SupersededToken {
+        refresh_token_hash: rotated_hash,
+        expires_at: now.saturating_add(grace_secs),
+    });
+    if kept.len() > MAX_SUPERSEDED_TOKENS {
+        let excess = kept.len() - MAX_SUPERSEDED_TOKENS;
+        kept.drain(..excess);
+    }
+    kept
+}
+
+/// Sliding-window renewal: a successful use of a superseded token pushes its
+/// expiry forward (throttled to at most one bump per half-window, so steady
+/// use does not turn into a durable write per request). Returns whether the
+/// entry changed and should be persisted.
+fn bump_superseded_expiry(
+    superseded: &mut [SupersededToken],
+    token_hash: &str,
+    now: u64,
+    grace_secs: u64,
+) -> bool {
+    for token in superseded {
+        if token.refresh_token_hash == token_hash && token.expires_at > now {
+            let renewed = now.saturating_add(grace_secs);
+            if token.expires_at < now.saturating_add(grace_secs / 2) && renewed > token.expires_at {
+                token.expires_at = renewed;
+                return true;
+            }
+            return false;
+        }
+    }
+    false
 }
 
 fn issue_client_id(client_verify_key: &str) -> String {
@@ -2889,6 +3181,162 @@ mod device_limit_tests {
             .expect("enroll should succeed")
     }
 
+    fn test_client_verify_key(seed: u8) -> String {
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
+        STANDARD.encode(signing_key.verifying_key().to_bytes())
+    }
+
+    fn client_grant_request(
+        enrolled: &RelayEnrollmentResponse,
+        device_id: &str,
+        verify_key: &str,
+    ) -> ClientGrantRequest {
+        ClientGrantRequest {
+            relay_id: enrolled.relay_id.clone(),
+            broker_room_id: enrolled.broker_room_id.clone(),
+            device_id: device_id.to_string(),
+            client_verify_key: verify_key.to_string(),
+            client_label: None,
+            device_label: None,
+        }
+    }
+
+    /// Approving a pairing rotates the client identity token; the fresh token is
+    /// only delivered to the session that completes THAT pairing handshake. When a
+    /// relay re-approves (duplicate tap, stale request, "re-authorizing" a device
+    /// that seems broken), the already-paired phone never sees the new token — so
+    /// its stored credential must keep authenticating for a grace window instead
+    /// of getting bricked by the very action meant to restore its access.
+    #[tokio::test]
+    async fn reapprove_must_not_brick_previous_client_token() {
+        let plane = in_memory_plane().await;
+        let enrolled = enroll(&plane, "regrant-client").await;
+        let bearer = &enrolled.relay_refresh_token;
+        let verify_key = test_client_verify_key(21);
+
+        let first = plane
+            .issue_client_grant(
+                bearer,
+                client_grant_request(&enrolled, "phone-1", &verify_key),
+            )
+            .await
+            .expect("first approve");
+        // The phone holds `first.client_refresh_token`. The relay approves again;
+        // the phone never receives the rotated credential.
+        plane
+            .issue_client_grant(
+                bearer,
+                client_grant_request(&enrolled, "phone-1", &verify_key),
+            )
+            .await
+            .expect("re-approve");
+
+        plane
+            .issue_client_session(&first.client_refresh_token)
+            .await
+            .expect(
+                "a client token superseded by a re-approve the client never received \
+                 must keep authenticating within the rotation grace window",
+            );
+    }
+
+    /// Same invariant for the device chain: re-issuing a grant for the same
+    /// device_id rotates the device refresh token; the previous token must keep
+    /// working within the grace window.
+    #[tokio::test]
+    async fn reapprove_must_not_brick_previous_device_token() {
+        let plane = in_memory_plane().await;
+        let enrolled = enroll(&plane, "regrant-device").await;
+        let bearer = &enrolled.relay_refresh_token;
+
+        let first = plane
+            .issue_device_grant(bearer, grant_request(&enrolled, "phone-1"), None)
+            .await
+            .expect("first approve");
+        plane
+            .issue_device_grant(bearer, grant_request(&enrolled, "phone-1"), None)
+            .await
+            .expect("re-approve");
+
+        plane
+            .issue_device_session(&first.device_refresh_token)
+            .await
+            .expect(
+                "a device token superseded by a re-approve the device never received \
+                 must keep authenticating within the rotation grace window",
+            );
+    }
+
+    /// The grace window is a window, not immortality: once a superseded token's
+    /// expiry passes, it must be rejected.
+    #[tokio::test]
+    async fn superseded_token_expires_after_grace_window() {
+        let plane = in_memory_plane().await;
+        let enrolled = enroll(&plane, "grace-expiry").await;
+        let bearer = &enrolled.relay_refresh_token;
+
+        let first = plane
+            .issue_device_grant(bearer, grant_request(&enrolled, "phone-1"), None)
+            .await
+            .expect("first approve");
+        plane
+            .issue_device_grant(bearer, grant_request(&enrolled, "phone-1"), None)
+            .await
+            .expect("re-approve");
+        {
+            let mut store = plane.inner.state.lock().await;
+            for grant in store.grants_by_hash.values_mut() {
+                for token in &mut grant.superseded {
+                    token.expires_at = 0;
+                }
+            }
+        }
+
+        plane
+            .issue_device_session(&first.device_refresh_token)
+            .await
+            .expect_err("an expired superseded token must be rejected");
+    }
+
+    /// Explicit revocation is the immediate-cutoff path: it must kill the
+    /// current token AND every superseded token in the same stroke.
+    #[tokio::test]
+    async fn revoke_kills_superseded_tokens_immediately() {
+        let plane = in_memory_plane().await;
+        let enrolled = enroll(&plane, "grace-revoke").await;
+        let bearer = &enrolled.relay_refresh_token;
+        let verify_key = test_client_verify_key(23);
+
+        let first = plane
+            .issue_client_grant(
+                bearer,
+                client_grant_request(&enrolled, "phone-1", &verify_key),
+            )
+            .await
+            .expect("first approve");
+        let second = plane
+            .issue_client_grant(
+                bearer,
+                client_grant_request(&enrolled, "phone-1", &verify_key),
+            )
+            .await
+            .expect("re-approve");
+
+        plane
+            .revoke_client_identity(&second.client_refresh_token)
+            .await
+            .expect("revoke with the current token");
+
+        plane
+            .issue_client_session(&first.client_refresh_token)
+            .await
+            .expect_err("a superseded token must not survive an explicit revoke");
+        plane
+            .issue_client_session(&second.client_refresh_token)
+            .await
+            .expect_err("the revoked current token must be rejected");
+    }
+
     #[tokio::test]
     async fn device_grant_rejected_once_limit_reached() {
         let plane = in_memory_plane().await;
@@ -3219,6 +3667,7 @@ mod postgres_persistence_opt_tests {
             refresh_token_hash: hash.to_string(),
             created_at: 300,
             client_label: None,
+            superseded: Vec::new(),
         }
     }
     fn device_grant(hash: &str, last_seen: Option<u64>) -> PersistedDeviceGrant {
@@ -3229,6 +3678,7 @@ mod postgres_persistence_opt_tests {
             refresh_token_hash: hash.to_string(),
             created_at: 200,
             last_seen,
+            superseded: Vec::new(),
         }
     }
     fn client_relay_grant(client_id: &str, relay_id: &str) -> PersistedClientRelayGrant {
@@ -3724,6 +4174,112 @@ mod postgres_persistence_opt_tests {
             .await
             .expect("recreate tables");
         truncate_all(&pool).await;
+    }
+
+    /// Build a Postgres-backed plane with an EMPTY in-memory state — models a serving
+    /// broker whose in-memory map does not (yet) know about a client identity that IS
+    /// durably persisted in Postgres. Real ways to reach this on a "single instance":
+    /// a rotation committed by the other container during a rolling-deploy window, a
+    /// second replica, or a committed-but-unacked rotation whose row is in the DB.
+    /// `reload_before_use` picks the two production modes.
+    fn postgres_plane(pool: PgPool, reload_before_use: bool) -> PublicControlPlane {
+        PublicControlPlane {
+            inner: Arc::new(PublicControlPlaneInner {
+                issuer_key: JoinTicketKey::from_secret(b"client-lockout-repro-issuer")
+                    .expect("issuer key"),
+                relay_ws_ttl_secs: DEFAULT_PUBLIC_RELAY_WS_TTL_SECS,
+                device_ws_ttl_secs: DEFAULT_PUBLIC_DEVICE_WS_TTL_SECS,
+                rotation_grace_secs: DEFAULT_PUBLIC_ROTATION_GRACE_SECS,
+                persistence: PublicControlPersistence::Postgres {
+                    pool,
+                    reload_before_use,
+                    last_saved: Arc::new(Mutex::new(PublicControlStateStore::default())),
+                    needs_reload: Arc::new(AtomicBool::new(false)),
+                },
+                state: Mutex::new(PublicControlStateStore::default()),
+                relay_enrollment_challenges: Mutex::new(HashMap::new()),
+            }),
+        }
+    }
+
+    /// Insert a client identity straight into Postgres (bypassing the in-memory
+    /// state), returning nothing — the caller keeps the plaintext token the "client"
+    /// now holds. Stands in for a rotation whose row is durably in the DB.
+    async fn inject_client_identity_into_db(pool: &PgPool, client_id: &str, token: &str) {
+        sqlx::query(
+            "INSERT INTO public_client_identities \
+             (refresh_token_hash, client_id, client_verify_key, created_at, client_label) \
+             VALUES ($1, $2, $3, 300, NULL)",
+        )
+        .bind(sha256_hex(token))
+        .bind(client_id)
+        .bind(format!("cvk-{client_id}"))
+        .execute(pool)
+        .await
+        .expect("inject client identity row");
+    }
+
+    /// RED — reproduces the production client-side lockout. A client holds a refresh
+    /// token whose identity is DURABLY in Postgres, but the serving broker's in-memory
+    /// state does not have it (rolling-deploy window / concurrent writer /
+    /// committed-but-unacked). With the single-instance default
+    /// (`reload_before_use = false`) the broker consults ONLY its stale in-memory map,
+    /// so a token that IS valid in the database is rejected as
+    /// "client refresh token is invalid" — exactly the repeated
+    /// `invalid refresh token was reused chain=client_identity` seen right after an
+    /// approval. INVARIANT: a durably-persisted client token must authenticate.
+    /// This assertion currently FAILS (the bug); it is the regression guard for the fix.
+    #[tokio::test]
+    async fn client_token_in_db_but_not_in_memory_is_rejected_without_reload() {
+        let Some(url) = test_url() else {
+            eprintln!("skipping: set RELAY_BROKER_TEST_POSTGRES_URL to a disposable DB");
+            return;
+        };
+        let pool = connect_and_init(&url).await;
+        truncate_all(&pool).await;
+
+        let token = "cref-lockout-repro-token";
+        inject_client_identity_into_db(&pool, "client-lockout", token).await;
+
+        let plane = postgres_plane(pool.clone(), false);
+        let result = plane.issue_client_session(token).await;
+
+        truncate_all(&pool).await;
+
+        assert!(
+            result.is_ok(),
+            "a client refresh token durably persisted in Postgres must authenticate, \
+             but the single-instance default (reload_before_use=false) rejected it: {result:?}"
+        );
+    }
+
+    /// GREEN mitigation — turning `reload_before_use` ON (env
+    /// `RELAY_BROKER_PUBLIC_POSTGRES_RELOAD_BEFORE_USE=1`) makes the broker reload the
+    /// authoritative DB state before authenticating, so the SAME durably-persisted
+    /// token that the default rejects is now accepted. Confirms the env-var stopgap
+    /// covers the "DB has it, memory doesn't" class (deploy window / concurrent writer /
+    /// committed-but-unacked). It does NOT cover a token that is genuinely gone from the
+    /// DB (the rotation-protocol lockout / follow-up A) — that needs a grace period.
+    #[tokio::test]
+    async fn client_token_in_db_authenticates_with_reload_before_use() {
+        let Some(url) = test_url() else {
+            eprintln!("skipping: set RELAY_BROKER_TEST_POSTGRES_URL to a disposable DB");
+            return;
+        };
+        let pool = connect_and_init(&url).await;
+        truncate_all(&pool).await;
+
+        let token = "cref-lockout-repro-token";
+        inject_client_identity_into_db(&pool, "client-lockout", token).await;
+
+        let plane = postgres_plane(pool.clone(), true);
+        let session = plane.issue_client_session(token).await;
+
+        truncate_all(&pool).await;
+
+        let session =
+            session.expect("reload-before-use must consult the DB and accept the persisted token");
+        assert_eq!(session.client_id, "client-lockout");
     }
 
     /// Not a pass/fail test — prints timings so we can compare JSON vs Postgres

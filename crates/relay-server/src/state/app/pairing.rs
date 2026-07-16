@@ -129,45 +129,72 @@ impl AppState {
         })?;
         let now = unix_now();
         let approved = matches!(input.decision, PairingDecision::Approve);
-        let pending_request = if approved {
-            Some({
-                let relay = self.relay.read().await;
-                relay
-                    .pending_pairing_requests
-                    .get(pairing_id)
-                    .map(|request| {
-                        (
-                            request.device_id.clone(),
-                            request.label.clone(),
-                            request.device_verify_key.clone(),
-                        )
-                    })
-                    .ok_or_else(|| "pairing request is not waiting for approval".to_string())?
-            })
+        // Claim the request atomically BEFORE issuing any broker credential. The
+        // broker calls below take seconds; an overlapping second approval
+        // (double-tap, retry) that also passed a mere existence check would issue
+        // a second credential — rotating the winner's freshly-delivered tokens —
+        // and then, losing the decide race, revoke the winner's grant outright.
+        // With the claim, the loser fails fast here having issued nothing.
+        let claimed_request = if approved {
+            let mut relay = self.relay.write().await;
+            Some(relay.claim_pairing_request(pairing_id, now)?)
         } else {
             None
         };
-        let broker_credential = if let Some((device_id, _, _)) = pending_request.as_ref() {
-            Some(
-                broker
-                    .device_broker_credential(
-                        device_id,
-                        broker.predicted_device_join_expires_at(now),
-                    )
-                    .await?,
-            )
+        let restore_claim = |claimed: Option<_>| async {
+            if let Some(request) = claimed {
+                self.relay.write().await.restore_pairing_request(request);
+            }
+        };
+        let broker_credential = if let Some(request) = claimed_request.as_ref() {
+            match broker
+                .device_broker_credential(
+                    &request.device_id,
+                    broker.predicted_device_join_expires_at(now),
+                )
+                .await
+            {
+                Ok(credential) => Some(credential),
+                Err(error) => {
+                    // Nothing durable was issued; release the claim so the
+                    // operator can retry the approval.
+                    restore_claim(claimed_request).await;
+                    return Err(error);
+                }
+            }
         } else {
             None
         };
-        let client_grant =
-            if let Some((device_id, device_label, device_verify_key)) = pending_request.as_ref() {
-                broker
-                    .client_broker_grant(device_id, device_verify_key, Some(device_label.clone()))
-                    .await?
-            } else {
-                None
-            };
+        let client_grant = if let Some(request) = claimed_request.as_ref() {
+            match broker
+                .client_broker_grant(
+                    &request.device_id,
+                    &request.device_verify_key,
+                    Some(request.label.clone()),
+                )
+                .await
+            {
+                Ok(grant) => grant,
+                Err(error) => {
+                    // Roll back THIS attempt's device credential (exclusive by
+                    // claim, so it cannot be anyone else's) and release the claim.
+                    if let Some(request) = claimed_request.as_ref() {
+                        let _ = broker.revoke_device_credential(&request.device_id).await;
+                    }
+                    restore_claim(claimed_request).await;
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
         let mut relay = self.relay.write().await;
+        // Hand the claim back under the SAME write guard that runs the decide, so
+        // no other flow can steal it in between.
+        let claimed_device_id = claimed_request.as_ref().map(|req| req.device_id.clone());
+        if let Some(request) = claimed_request {
+            relay.restore_pairing_request(request);
+        }
         let mut result = match relay.decide_pairing_request(
             pairing_id,
             approved,
@@ -179,7 +206,10 @@ impl AppState {
             Ok(result) => result,
             Err(error) => {
                 drop(relay);
-                if let Some((device_id, _, _)) = pending_request.as_ref() {
+                // The pairing itself failed (e.g. ticket expired); revoke THIS
+                // attempt's freshly-issued credential — the claim guarantees it
+                // is not some other approval's live grant.
+                if let Some(device_id) = claimed_device_id.as_ref() {
                     let _ = broker.revoke_device_credential(device_id).await;
                 }
                 return Err(error);

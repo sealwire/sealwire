@@ -144,6 +144,17 @@ export function createPairingController(ctx) {
     if (!pairingId || !decision) {
       return;
     }
+    // The decision takes seconds (broker round-trips behind the relay
+    // endpoint); serialize per pairing_id so a double-tap cannot fire a
+    // duplicate decision, and surface the in-flight state on the buttons.
+    const pendingDecisions = (state.pendingPairingDecisions ||= {});
+    if (pendingDecisions[pairingId]) {
+      return;
+    }
+    pendingDecisions[pairingId] = decision;
+    if (state.session) {
+      renderSession(state.session);
+    }
 
     logLine(`Submitting ${decision} for pairing ${shortId(pairingId)}.`);
 
@@ -165,6 +176,11 @@ export function createPairingController(ctx) {
       await loadSession("post-pairing-decision refresh");
     } catch (error) {
       logLine(`Pairing decision failed: ${error.message}`);
+    } finally {
+      delete pendingDecisions[pairingId];
+      if (state.session) {
+        renderSession(state.session);
+      }
     }
   }
 

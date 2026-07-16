@@ -922,7 +922,10 @@ function openSecurityModal() {
   });
   renderPairingPanel(state.currentPairing);
   renderDeviceRecords(state.session?.device_records || []);
-  renderPendingPairingRequests(state.session?.pending_pairing_requests || []);
+  renderPendingPairingRequests(
+    state.session?.pending_pairing_requests || [],
+    state.pendingPairingDecisions || {}
+  );
   securityModal?.showModal();
 }
 

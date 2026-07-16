@@ -107,24 +107,26 @@ export function renderDeviceRecords(records = []) {
   );
 }
 
-export function renderPendingPairingRequests(requests = []) {
+export function renderPendingPairingRequests(requests = [], pendingDecisions = {}) {
   renderReactContent(
     pendingPairingsList,
     h(PendingPairingRequestsList, {
       formatTimestamp: helpers.formatTimestamp,
       requests,
       shortId: helpers.shortId,
+      pendingDecisions,
     })
   );
 }
 
-export function renderPairingApprovalModal(requests = []) {
+export function renderPairingApprovalModal(requests = [], pendingDecisions = {}) {
   renderReactContent(
     pairingApprovalList,
     h(PendingPairingRequestsList, {
       formatTimestamp: helpers.formatTimestamp,
       requests,
       shortId: helpers.shortId,
+      pendingDecisions,
     })
   );
 }

@@ -178,6 +178,11 @@ export function PendingPairingRequestsList({
   formatTimestamp = (value) => String(value || ""),
   requests = [],
   shortId = (value) => String(value || ""),
+  // pairing_id -> "approve" | "reject" for decisions currently in flight. The
+  // decision takes seconds (broker round-trips); disabling the card's buttons
+  // and showing progress prevents the double-tap that used to rotate + revoke
+  // the freshly-issued device credentials.
+  pendingDecisions = {},
 }) {
   if (!requests.length) {
     return h(EmptyPanelMessage, null, "No devices are waiting for local approval.");
@@ -228,8 +233,9 @@ export function PendingPairingRequestsList({
               "data-pairing-decision": "approve",
               "data-pairing-id": request.pairing_id,
               type: "button",
+              disabled: Boolean(pendingDecisions[request.pairing_id]),
             },
-            "Approve"
+            pendingDecisions[request.pairing_id] === "approve" ? "Approving…" : "Approve"
           ),
           h(
             "button",
@@ -238,8 +244,9 @@ export function PendingPairingRequestsList({
               "data-pairing-decision": "reject",
               "data-pairing-id": request.pairing_id,
               type: "button",
+              disabled: Boolean(pendingDecisions[request.pairing_id]),
             },
-            "Reject"
+            pendingDecisions[request.pairing_id] === "reject" ? "Rejecting…" : "Reject"
           )
         )
       )

@@ -428,6 +428,31 @@ impl RelayState {
         Ok(view)
     }
 
+    /// Atomically take exclusive ownership of a pending pairing request before
+    /// any broker credential is issued for it. An approval flow makes slow
+    /// broker HTTP calls between looking at the request and deciding it; without
+    /// this claim, an overlapping second approval (double-tap on a slow button,
+    /// a retried request) issues a second credential — rotating the winner's
+    /// freshly-delivered tokens — and its losing rollback then revokes the
+    /// winner's grant outright. The loser of this claim fails fast instead.
+    pub fn claim_pairing_request(
+        &mut self,
+        pairing_id: &str,
+        now: u64,
+    ) -> Result<PendingPairingRequest, String> {
+        self.prune_expired_pairings(now);
+        self.pending_pairing_requests
+            .remove(pairing_id)
+            .ok_or_else(|| "pairing request is not waiting for approval".to_string())
+    }
+
+    /// Put a claimed pairing request back (broker issuance failed, or the claim
+    /// is being handed to `decide_pairing_request` under the same lock).
+    pub fn restore_pairing_request(&mut self, request: PendingPairingRequest) {
+        self.pending_pairing_requests
+            .insert(request.pairing_id.clone(), request);
+    }
+
     pub fn decide_pairing_request(
         &mut self,
         pairing_id: &str,

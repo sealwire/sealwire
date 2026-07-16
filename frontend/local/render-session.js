@@ -370,9 +370,9 @@ export function createSessionRenderer({
       });
       renderPairingPanel(state.currentPairing);
       renderDeviceRecords(session.device_records || []);
-      renderPendingPairingRequests(pendingPairings);
+      renderPendingPairingRequests(pendingPairings, state.pendingPairingDecisions || {});
     }
-    renderPairingApprovalModal(pendingPairings);
+    renderPairingApprovalModal(pendingPairings, state.pendingPairingDecisions || {});
     announceNewPendingPairings(pendingPairings);
     syncPairingApprovalDialog(pendingPairings);
     schedulePairingExpiryTick(pendingPairings);

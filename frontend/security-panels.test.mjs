@@ -140,3 +140,59 @@ test("React.createElement is the producer behind the tree (smoke check)", () => 
   ]);
   assert.ok(tree && tree.type === React.Fragment, "top node should be a Fragment");
 });
+
+// The approve flow takes seconds (two broker HTTP round-trips); with no
+// in-flight state a slow button invites a double-tap, and the duplicate
+// decision used to rotate + revoke the first tap's freshly-issued credentials
+// server-side. While a decision for a request is pending, both of its buttons
+// must be disabled and the tapped one must show progress — sibling requests
+// stay untouched.
+test("PendingPairingRequestsList: an in-flight decision disables that card's buttons and shows progress", () => {
+  const requests = [
+    { pairing_id: "p1", device_id: "d1", label: "iPad", lifecycle_state: "pending", requested_at: 1, broker_peer_id: "peer-1", fingerprint: "AA:BB" },
+    { pairing_id: "p2", device_id: "d2", label: "Phone", lifecycle_state: "pending", requested_at: 2, broker_peer_id: "peer-2", fingerprint: "CC:DD" },
+  ];
+  const tree = PendingPairingRequestsList({
+    requests,
+    formatTimestamp: (value) => `ts:${value}`,
+    shortId: (value) => `short:${value}`,
+    pendingDecisions: { p1: "approve" },
+  });
+
+  const buttons = collect(tree, isDecisionButton);
+  const buttonFor = (id, decision) =>
+    buttons.find(
+      (b) => b.props["data-pairing-id"] === id && b.props["data-pairing-decision"] === decision
+    );
+
+  const p1Approve = buttonFor("p1", "approve");
+  const p1Reject = buttonFor("p1", "reject");
+  assert.equal(p1Approve.props.disabled, true, "in-flight approve must be disabled");
+  assert.equal(p1Reject.props.disabled, true, "sibling reject must be disabled while deciding");
+  assert.equal(p1Approve.props.children, "Approving…", "tapped button must show progress");
+  assert.equal(p1Reject.props.children, "Reject", "untapped sibling keeps its label");
+
+  const p2Approve = buttonFor("p2", "approve");
+  const p2Reject = buttonFor("p2", "reject");
+  assert.ok(!p2Approve.props.disabled, "other requests stay actionable");
+  assert.ok(!p2Reject.props.disabled, "other requests stay actionable");
+  assert.equal(p2Approve.props.children, "Approve");
+});
+
+test("PendingPairingRequestsList: an in-flight reject shows progress on the reject button", () => {
+  const tree = PendingPairingRequestsList({
+    requests: [
+      { pairing_id: "p1", device_id: "d1", label: "iPad", lifecycle_state: "pending", requested_at: 1, broker_peer_id: "peer-1", fingerprint: "AA:BB" },
+    ],
+    formatTimestamp: (value) => `ts:${value}`,
+    shortId: (value) => `short:${value}`,
+    pendingDecisions: { p1: "reject" },
+  });
+  const buttons = collect(tree, isDecisionButton);
+  const reject = buttons.find((b) => b.props["data-pairing-decision"] === "reject");
+  const approve = buttons.find((b) => b.props["data-pairing-decision"] === "approve");
+  assert.equal(reject.props.disabled, true);
+  assert.equal(reject.props.children, "Rejecting…");
+  assert.equal(approve.props.disabled, true);
+  assert.equal(approve.props.children, "Approve");
+});
