@@ -207,6 +207,19 @@ test("mapModelInfo appends the Claude version from a versioned model id", () => 
   );
 });
 
+test("mapModelInfo appends the version for fable wire ids (incl. the 1M variant)", () => {
+  // When supportedModels() DOES surface fable it uses the wire id with a bare
+  // "Fable" label; version it like every other family for a consistent picker.
+  assert.equal(
+    mapModelInfo({ value: "claude-fable-5", displayName: "Fable" }).displayName,
+    "Fable 5"
+  );
+  assert.equal(
+    mapModelInfo({ value: "claude-fable-5[1m]", displayName: "Fable" }).displayName,
+    "Fable 5"
+  );
+});
+
 test("mapModelInfo leaves Claude SDK aliases unversioned", () => {
   assert.equal(
     mapModelInfo({
@@ -261,10 +274,13 @@ test("mapModelInfos marks exactly one default, preferring the first sonnet", () 
     { value: "claude-sonnet-4-6", displayName: "Sonnet" },
     { value: "claude-sonnet-4-7", displayName: "Sonnet" },
   ]);
+  // Curated extras (e.g. fable) append after the SDK rows; assert on the SDK
+  // portion so the default-selection invariant stays independent of them.
   assert.deepEqual(
-    models.map((model) => model.isDefault),
+    models.slice(0, 3).map((model) => model.isDefault),
     [false, true, false]
   );
+  assert.equal(models.filter((model) => model.isDefault).length, 1);
 });
 
 test("mapModelInfos treats Claude SDK sonnet aliases as sonnet defaults", () => {
@@ -273,9 +289,108 @@ test("mapModelInfos treats Claude SDK sonnet aliases as sonnet defaults", () => 
     { value: "sonnet", displayName: "Sonnet" },
     { value: "sonnet[1m]", displayName: "Sonnet (1M context)" },
   ]);
+  // Curated extras (e.g. fable) append after the SDK rows; assert on the SDK
+  // portion so the default-selection invariant stays independent of them.
   assert.deepEqual(
-    models.map((model) => model.isDefault),
+    models.slice(0, 3).map((model) => model.isDefault),
     [false, true, false]
+  );
+  assert.equal(models.filter((model) => model.isDefault).length, 1);
+});
+
+test("mapModelInfos surfaces the curated fable model when supportedModels omits it", () => {
+  // Headless SDK sessions can't render the fable consent/credits dialog, so
+  // supportedModels() drops fable even though the CLI still accepts `model:
+  // "fable"`. We union in a curated entry so the picker can offer it.
+  // See anthropics/claude-code#73333, agentclientprotocol/claude-agent-acp#762.
+  const models = mapModelInfos([
+    { value: "default", displayName: "Default (recommended)" },
+    { value: "sonnet", displayName: "Sonnet" },
+    { value: "haiku", displayName: "Haiku" },
+  ]);
+  const fable = models.find((model) => model.model === "fable");
+  assert.ok(fable, "expected a fable entry in the mapped model list");
+  assert.equal(fable.displayName, "Fable 5");
+  assert.equal(fable.provider, "anthropic");
+  assert.equal(fable.isDefault, false);
+  // The curated entry never steals the default from sonnet.
+  assert.deepEqual(
+    models.filter((model) => model.isDefault).map((model) => model.model),
+    ["sonnet"]
+  );
+});
+
+test("mapModelInfos does not duplicate fable when the SDK already returns it", () => {
+  const byAlias = mapModelInfos([
+    { value: "sonnet", displayName: "Sonnet" },
+    { value: "fable", displayName: "Fable" },
+  ]);
+  assert.equal(
+    byAlias.filter((model) => model.model === "fable").length,
+    1
+  );
+  // Bare alias with no resolvedModel/description carries no version anywhere, so
+  // "Fable" is the only derivable label — nothing to append a version from.
+  assert.equal(
+    byAlias.find((model) => model.model === "fable").displayName,
+    "Fable"
+  );
+
+  const byWireId = mapModelInfos([
+    { value: "sonnet", displayName: "Sonnet" },
+    { value: "fable", resolvedModel: "claude-fable-5", displayName: "Fable" },
+  ]);
+  assert.equal(
+    byWireId.filter((model) => model.model === "fable").length,
+    1
+  );
+  // The SDK's own row wins the dedupe, and the version is derived from
+  // resolvedModel (claude-fable-5) even though `value` is the bare "fable" alias.
+  assert.equal(
+    byWireId.find((model) => model.model === "fable").displayName,
+    "Fable 5"
+  );
+
+  // Real shape observed from supportedModels() when fable IS surfaced: the SDK
+  // returns the 1M variant `claude-fable-5[1m]` with resolvedModel
+  // `claude-fable-5`. Our curated `fable` extra must dedupe against the resolved
+  // wire id so exactly one fable-family row survives (no `fable` + `[1m]` pair).
+  const byWireVariant = mapModelInfos([
+    { value: "sonnet", displayName: "Sonnet" },
+    { value: "claude-fable-5[1m]", resolvedModel: "claude-fable-5", displayName: "Fable" },
+  ]);
+  assert.equal(
+    byWireVariant.filter((model) => model.model.includes("fable")).length,
+    1
+  );
+});
+
+test("mapModelInfos leaves an empty SDK catalog empty (never injects fable)", () => {
+  // An empty list means the SDK failed to ENUMERATE models — a transient
+  // condition the relay refuses to cache (see claude.rs "cache only a non-empty
+  // catalog"). Injecting curated extras here would convert that failure into a
+  // bogus "Fable only" catalog that drops Sonnet/Haiku and defaults users onto a
+  // credits-gated model. Curated extras augment a real catalog, never manufacture
+  // one.
+  assert.deepEqual(mapModelInfos([]), []);
+});
+
+test("mapModelInfos returns an empty list for non-array input", () => {
+  assert.deepEqual(mapModelInfos(undefined), []);
+  assert.deepEqual(mapModelInfos(null), []);
+  assert.deepEqual(mapModelInfos("nope"), []);
+});
+
+test("mapModelInfo derives the fable version from resolvedModel on alias rows", () => {
+  // Alias-shaped SDK rows put the version only on resolvedModel; the label must
+  // still read "Fable 5", not a bare "Fable".
+  assert.equal(
+    mapModelInfo({
+      value: "fable",
+      resolvedModel: "claude-fable-5",
+      displayName: "Fable",
+    }).displayName,
+    "Fable 5"
   );
 });
 

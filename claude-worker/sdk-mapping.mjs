@@ -68,7 +68,9 @@ function titleCase(value) {
 }
 
 function parseClaudeModelVersion(model) {
-  const match = /^claude-(opus|sonnet|haiku)-(\d+)(?:-(\d+))?(?:$|-)/.exec(model);
+  // The trailing `\[` boundary lets the 1M-context wire ids (e.g.
+  // `claude-fable-5[1m]`) match on their version too.
+  const match = /^claude-(opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\d+))?(?:$|-|\[)/.exec(model);
   if (!match) return null;
   return {
     family: match[1],
@@ -78,7 +80,7 @@ function parseClaudeModelVersion(model) {
 
 function parseClaudeDescriptionVersion(description) {
   if (typeof description !== "string") return null;
-  const match = /\b(opus|sonnet|haiku)\s+(\d+(?:\.\d+)?)/i.exec(description);
+  const match = /\b(opus|sonnet|haiku|fable|mythos)\s+(\d+(?:\.\d+)?)/i.exec(description);
   if (!match) return null;
   return {
     family: match[1].toLowerCase(),
@@ -101,8 +103,11 @@ function appendModelVersion(base, parsed) {
   return `${base} (${versionLabel})`;
 }
 
-function displayNameWithVersion(model, displayName, description) {
+function displayNameWithVersion(model, displayName, description, resolvedModel) {
+  // Alias rows (value "fable") carry the version only on resolvedModel
+  // ("claude-fable-5"), so fall back to it before the description heuristic.
   const parsed = parseClaudeModelVersion(model)
+    ?? parseClaudeModelVersion(resolvedModel)
     ?? parseClaudeDescriptionVersion(description);
   const base = typeof displayName === "string" && displayName.trim()
     ? displayName.trim()
@@ -123,6 +128,7 @@ export function mapModelInfo(modelInfo, options = {}) {
       model,
       modelInfo?.displayName,
       modelInfo?.description,
+      modelInfo?.resolvedModel,
     ),
     provider: "anthropic",
     supportedReasoningEfforts: efforts,
@@ -134,8 +140,71 @@ export function mapModelInfo(modelInfo, options = {}) {
   };
 }
 
+// Models the Claude CLI accepts but that supportedModels() can omit in headless
+// sessions. Newer models (e.g. fable) are gated behind an interactive
+// consent/credits dialog that can't render without a TTY, so the SDK drops them
+// from the enumerated list even though a real request with `model: "fable"`
+// succeeds and the CLI stays the authoritative validator (bogus ids still
+// error). We union these in so the picker can offer them. Adding a future model
+// (e.g. mythos) is a one-line data change here. See anthropics/claude-code#73333,
+// agentclientprotocol/claude-agent-acp#762.
+//
+// NOTE: a gated/out-of-credits account picking this model surfaces only as a
+// generic turn failure today — we deliberately do NOT map the SDK's
+// `rate_limit_event` (errorCode "credits_required") to a worker `error`, since
+// that event is log-only (stripped from broker-bound snapshots as non-remote-safe)
+// and the progress tracker treats `error` as a turn terminal, contradicting that
+// this event is not one. A real "credits required" UX needs the credits context
+// folded into the eventual failed `result`'s reason, not a bolted-on log line.
+const EXTRA_MODEL_INFOS = [
+  {
+    value: "fable",
+    resolvedModel: "claude-fable-5",
+    displayName: "Fable 5",
+    description: "Fable 5",
+    supportsEffort: true,
+    supportedEffortLevels: ["low", "medium", "high", "xhigh", "max"],
+    supportsAdaptiveThinking: true,
+  },
+];
+
+function modelIdentifiers(modelInfo) {
+  const ids = [];
+  if (typeof modelInfo?.value === "string" && modelInfo.value) {
+    ids.push(modelInfo.value);
+  }
+  if (typeof modelInfo?.resolvedModel === "string" && modelInfo.resolvedModel) {
+    ids.push(modelInfo.resolvedModel);
+  }
+  return ids;
+}
+
+// Union the SDK's list with EXTRA_MODEL_INFOS, letting the SDK's own row win when
+// it already covers a model (matched by alias OR resolved wire id) so nothing
+// duplicates once supportedModels() catches up.
+//
+// CRITICAL: only augment a catalog the SDK actually produced. An empty or
+// non-array list means the SDK failed to ENUMERATE models — a transient
+// condition the relay deliberately refuses to cache (see claude.rs: "cache only
+// a non-empty catalog"). Manufacturing a Fable-only list here would let that
+// transient failure be cached as the real catalog, dropping Sonnet/Haiku and
+// defaulting users onto a credits-gated model. Extras augment; they never
+// fabricate a catalog from nothing.
+function withExtraModels(modelInfos) {
+  if (!Array.isArray(modelInfos) || modelInfos.length === 0) return [];
+  const list = modelInfos.slice();
+  const seen = new Set(list.flatMap(modelIdentifiers));
+  for (const extra of EXTRA_MODEL_INFOS) {
+    const ids = modelIdentifiers(extra);
+    if (ids.some((id) => seen.has(id))) continue;
+    list.push(extra);
+    for (const id of ids) seen.add(id);
+  }
+  return list;
+}
+
 export function mapModelInfos(modelInfos) {
-  const models = (Array.isArray(modelInfos) ? modelInfos : [])
+  const models = withExtraModels(modelInfos)
     .map((modelInfo) => mapModelInfo(modelInfo, { isDefault: false }));
   const defaultIndex = models.findIndex((model) => isSonnetModel(model.model));
   if (defaultIndex >= 0) {
