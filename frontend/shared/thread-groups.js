@@ -15,6 +15,14 @@ export function canonicalizeWorkspace(cwd) {
 export const UNKNOWN_WORKSPACE_CWD = "__unknown_workspace__";
 export const UNKNOWN_WORKSPACE_LABEL = "Unknown workspace";
 
+// `UNKNOWN_WORKSPACE_CWD` is a DISPLAY grouping key, not a directory. It must
+// never flow into a cwd operation: the local group header is clickable and its
+// handler writes the value straight into the workspace input, so an unguarded
+// sentinel would be sent to the relay as a path when starting a session.
+export function isUnknownWorkspace(cwd) {
+  return cwd === UNKNOWN_WORKSPACE_CWD;
+}
+
 // Navigation policy, shared by every surface that renders the thread list.
 //
 // A thread whose cwd could not be recovered must still be REACHABLE. cwd

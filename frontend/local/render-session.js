@@ -41,6 +41,7 @@ import {
   summarizeThreadGroups,
 } from "../shared/thread-groups.js";
 import { selectWorkspaceSuggestionsModel } from "../shared/workspace-suggestions.js";
+import { isUnknownWorkspace } from "../shared/thread-groups.js";
 import { canForkInSession } from "../shared/fork-fields.js";
 import {
   readThreadListContextMenu,
@@ -1357,6 +1358,10 @@ export function createSessionRenderer({
           }
         },
         onSelectWorkspace(cwd) {
+          // Defence in depth: the Unknown-workspace header is not rendered as a
+          // button, but this value ends up in the workspace input verbatim, so
+          // refuse the display sentinel here too.
+          if (isUnknownWorkspace(cwd)) return;
           setSelectedCwd(cwd || "");
           renderThreads();
           renderOverviewState(state.session);

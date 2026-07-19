@@ -12,7 +12,7 @@ import {
   observeElementOffset,
   observeElementRect,
 } from "@tanstack/virtual-core";
-import { canonicalizeWorkspace } from "./thread-groups.js";
+import { canonicalizeWorkspace, isUnknownWorkspace } from "./thread-groups.js";
 import { createThreadListRows } from "./thread-list-state.js";
 import { providerLabel, providerTone } from "./provider-labels.js";
 import { selectThreadDot } from "./thread-dot.js";
@@ -282,7 +282,9 @@ function measureScrollMargin(node, scrollElement) {
   return rootRect.top - scrollRect.top + scrollElement.scrollTop;
 }
 
-function ThreadGroupHeader({
+// Exported for unit tests: the list itself virtualizes and renders nothing
+// under SSR, so the sentinel guard below cannot be observed through it.
+export function ThreadGroupHeader({
   collapsible,
   group,
   isCollapsed,
@@ -306,7 +308,11 @@ function ThreadGroupHeader({
     );
   }
 
-  if (onSelectWorkspace) {
+  // The Unknown-workspace group key is a display sentinel, not a directory —
+  // selecting it would write "__unknown_workspace__" into the workspace input
+  // and then send it to the relay as a path. Render its header as a static
+  // label so the value cannot leave the display layer.
+  if (onSelectWorkspace && !isUnknownWorkspace(group.cwd)) {
     return h(
       "button",
       {
@@ -325,7 +331,8 @@ function ThreadGroupHeader({
     "div",
     {
       className: "thread-group-header thread-group-header-static",
-      title: group.cwd,
+      // The sentinel is an internal grouping key — never show it as a path.
+      title: isUnknownWorkspace(group.cwd) ? group.label : group.cwd,
     },
     h("span", { "aria-hidden": "true", className: "thread-group-icon" }),
     h("span", { className: "thread-group-name" }, group.label)
