@@ -56,6 +56,10 @@ export function query({ prompt, options = {} }) {
   const endWithoutTerminal = process.env.CLAUDE_FAKE_END_WITHOUT_TERMINAL === "1";
   // Turn 1 ends with a FAILURE result (an SDKResultError) instead of success.
   const errorResult = process.env.CLAUDE_FAKE_ERROR_RESULT === "1";
+  // Models an SDK-INJECTED user record (e.g. a <task-notification> re-arming a
+  // spontaneous turn): a user message the relay never sent, so its uuid is
+  // absent from the worker's relay-minted set.
+  const injectUserRecord = process.env.CLAUDE_FAKE_INJECT_USER_RECORD === "1";
   // Every turn emits the SAME result uuid — models a literal replay of an older
   // turn's `result` landing on a later turn; the worker must dedup it by uuid.
   const replayResultUuid = process.env.CLAUDE_FAKE_REPLAY_RESULT_UUID === "1";
@@ -130,6 +134,16 @@ export function query({ prompt, options = {} }) {
           recordUserMessage(sessionId, message);
           if (!holdTurns) {
             userTurnCount += 1;
+            if (userTurnCount === 1 && injectUserRecord) {
+              pushOut({
+                type: "user",
+                uuid: "sdk-injected-uuid",
+                message: {
+                  role: "user",
+                  content: "<task-notification>INJECTED-BY-SDK</task-notification>",
+                },
+              });
+            }
             if (replayResultUuid) {
               // Same uuid on every turn: the 2nd+ occurrence is a literal replay
               // the worker must drop (otherwise it completes the running turn).

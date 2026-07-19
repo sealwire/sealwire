@@ -283,7 +283,7 @@ export function failedTurnReason(subtype) {
   return "Claude turn reported an error";
 }
 
-export function mapSdkMessage(msg) {
+export function mapSdkMessage(msg, options = {}) {
   switch (msg.type) {
     case "system": {
       if (msg.subtype === "init") {
@@ -367,6 +367,31 @@ export function mapSdkMessage(msg) {
           ...(block.is_error === true ? { is_error: true } : {}),
         });
       }
+
+      // User TEXT needs provenance. The relay mints and upserts its own user
+      // messages before handing them to the SDK, so echoing those back would
+      // duplicate them. But the SDK also injects user records the relay never
+      // sent (a <task-notification> that re-arms a spontaneous turn), and
+      // dropping every user text meant those existed only after history
+      // hydration — the same thread rendered differently live vs on resume.
+      //
+      // `relayUserMessageUuids` is the provenance signal. Absent it we emit
+      // nothing: a missing message is recoverable on hydration, a duplicated
+      // one is not.
+      const relayUuids = options.relayUserMessageUuids;
+      const uuid = msg.uuid || "";
+      if (relayUuids && uuid && !relayUuids.has(uuid)) {
+        const text = textFromContent(msg.message?.content);
+        if (text) {
+          events.push({
+            type: "user_message",
+            item_id: `user:${uuid}`,
+            turn_id: uuid,
+            text,
+          });
+        }
+      }
+
       return events.length === 0 ? null : events.length === 1 ? events[0] : events;
     }
 

@@ -807,3 +807,56 @@ test("fork_session on an SDK without forkSession fails loudly", async () => {
     await rm(legacySdk, { force: true });
   }
 });
+
+// End-to-end wiring for the live/hydration gap: the relay-minted uuid set must
+// actually be populated and handed to the mapper, otherwise an SDK-injected
+// user record (a <task-notification> that re-arms a spontaneous turn) reaches
+// the transcript only after a resume — the same thread rendering differently
+// live vs hydrated.
+test("an SDK-injected user record reaches the live stream", async () => {
+  const worker = spawnWorker({ CLAUDE_FAKE_INJECT_USER_RECORD: "1" });
+  try {
+    worker.send(START_DEFAULT);
+    await worker.waitFor(isStarted("sess-1"), { label: "session_started" });
+
+    const injected = await worker.waitFor(
+      (event) => event.type === "user_message" && /INJECTED-BY-SDK/.test(event.text || ""),
+      { label: "injected user_message" },
+    );
+    assert.equal(injected.item_id, "user:sdk-injected-uuid");
+    assert.equal(injected.provider_session_id, "sess-1");
+  } finally {
+    await worker.close();
+  }
+});
+
+test("the relay's own user message is not echoed back as a duplicate", async () => {
+  const worker = spawnWorker();
+  try {
+    worker.send(START_DEFAULT);
+    await worker.waitFor(isStarted("sess-1"), { label: "session_started" });
+    await worker.waitFor(isDone, { label: "done#1" });
+
+    worker.send({
+      type: "send",
+      provider_session_id: "sess-1",
+      model: "claude-sonnet-4-6",
+      permissionMode: "default",
+      prompt: "only once please",
+      turn_id: "relay-turn-9",
+      user_item_id: "user:relay-turn-9",
+      user_message_uuid: "relay-uuid-9",
+    });
+    await worker.waitFor(
+      (event) => event.type === "done" && event.turn_id === "relay-turn-9",
+      { label: "done#2" },
+    );
+
+    const echoes = worker.events.filter(
+      (event) => event.type === "user_message" && event.text === "only once please",
+    );
+    assert.equal(echoes.length, 1, `relay-sent message must appear once, got ${echoes.length}`);
+  } finally {
+    await worker.close();
+  }
+});

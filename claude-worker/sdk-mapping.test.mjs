@@ -650,3 +650,71 @@ test("mapSessionMessages still truncates non-AskUserQuestion inputs aggressively
   assert.ok(preview.length <= 1000, `expected <=1000 chars, got ${preview.length}`);
   assert.match(preview, /\.\.\.$/);
 });
+
+// A user record the RELAY minted is already in the relay's transcript (the
+// relay upserts it before sending), so re-emitting it live would duplicate the
+// message. But the SDK also injects user records the relay never sent — a
+// <task-notification> that re-arms a spontaneous turn is one — and those were
+// dropped entirely, so the live transcript was missing a message that history
+// hydration later supplies. That made the same thread show different content
+// (and different fork points) live vs after a resume.
+test("an SDK-injected user message is surfaced live", () => {
+  const mapped = mapSdkMessage(
+    {
+      type: "user",
+      uuid: "injected-1",
+      message: { role: "user", content: "<task-notification>build finished</task-notification>" },
+    },
+    { relayUserMessageUuids: new Set(["relay-sent-1"]) }
+  );
+
+  assert.ok(mapped, "an injected user record must not be dropped");
+  const event = Array.isArray(mapped) ? mapped[0] : mapped;
+  assert.equal(event.type, "user_message");
+  assert.equal(event.item_id, "user:injected-1");
+  assert.match(event.text, /task-notification/);
+});
+
+test("a relay-minted user message is still suppressed (no duplicate)", () => {
+  const mapped = mapSdkMessage(
+    {
+      type: "user",
+      uuid: "relay-sent-1",
+      message: { role: "user", content: "do the thing" },
+    },
+    { relayUserMessageUuids: new Set(["relay-sent-1"]) }
+  );
+
+  assert.equal(mapped, null, "the relay already wrote this one");
+});
+
+test("without provenance info no user text is emitted (safe default)", () => {
+  // Callers that cannot tell relay-sent from injected must not risk duplicates.
+  const mapped = mapSdkMessage({
+    type: "user",
+    uuid: "unknown-1",
+    message: { role: "user", content: "ambiguous" },
+  });
+  assert.equal(mapped, null);
+});
+
+test("tool results still ride alongside an injected user record", () => {
+  const mapped = mapSdkMessage(
+    {
+      type: "user",
+      uuid: "injected-2",
+      message: {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "toolu_1", content: "ok" },
+          { type: "text", text: "and a note" },
+        ],
+      },
+    },
+    { relayUserMessageUuids: new Set() }
+  );
+
+  const events = Array.isArray(mapped) ? mapped : [mapped];
+  assert.ok(events.some((e) => e.type === "tool_call_result"));
+  assert.ok(events.some((e) => e.type === "user_message" && /and a note/.test(e.text)));
+});
