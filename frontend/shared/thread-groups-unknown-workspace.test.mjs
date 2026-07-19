@@ -144,6 +144,21 @@ test("the unknown group header is not a workspace button", async () => {
     "and the internal key is never shown to the user"
   );
 
+  // Remote renders collapsible headers; the internal key must not leak there
+  // either (it is a tooltip, not a directory operation, but it is still shown
+  // to the user).
+  const collapsible = renderToStaticMarkup(
+    React.createElement(ThreadGroupHeader, {
+      collapsible: true,
+      group: { cwd: UNKNOWN_WORKSPACE_CWD, label: UNKNOWN_WORKSPACE_LABEL },
+      isCollapsed: false,
+      normalizedCwd: UNKNOWN_WORKSPACE_CWD,
+      onToggleGroup: () => {},
+    })
+  );
+  assert.doesNotMatch(collapsible, /__unknown_workspace__/);
+  assert.match(collapsible, /Unknown workspace/);
+
   const real = render("/repo", "repo");
   assert.match(real, /data-select-workspace="\/repo"/, "real workspaces stay selectable");
 });

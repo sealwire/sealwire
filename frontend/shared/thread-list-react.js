@@ -292,6 +292,10 @@ export function ThreadGroupHeader({
   onSelectWorkspace,
   onToggleGroup,
 }) {
+  // The unknown-workspace key is internal; every branch shows the label
+  // instead so it is never presented to the user as a path.
+  const headerTitle = isUnknownWorkspace(group.cwd) ? group.label : group.cwd;
+
   if (collapsible) {
     return h(
       "button",
@@ -299,7 +303,7 @@ export function ThreadGroupHeader({
         "aria-expanded": isCollapsed ? "false" : "true",
         className: "thread-group-header",
         onClick: () => onToggleGroup?.(normalizedCwd),
-        title: group.cwd,
+        title: headerTitle,
         type: "button",
       },
       h("span", { "aria-hidden": "true", className: "thread-group-icon" }),
@@ -319,7 +323,7 @@ export function ThreadGroupHeader({
         className: "thread-group-header",
         "data-select-workspace": group.cwd,
         onClick: () => onSelectWorkspace(group.cwd),
-        title: group.cwd,
+        title: headerTitle,
         type: "button",
       },
       h("span", { "aria-hidden": "true", className: "thread-group-icon" }),
@@ -331,8 +335,7 @@ export function ThreadGroupHeader({
     "div",
     {
       className: "thread-group-header thread-group-header-static",
-      // The sentinel is an internal grouping key — never show it as a path.
-      title: isUnknownWorkspace(group.cwd) ? group.label : group.cwd,
+      title: headerTitle,
     },
     h("span", { "aria-hidden": "true", className: "thread-group-icon" }),
     h("span", { className: "thread-group-name" }, group.label)
