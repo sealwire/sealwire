@@ -56,6 +56,9 @@ export function query({ prompt, options = {} }) {
   const endWithoutTerminal = process.env.CLAUDE_FAKE_END_WITHOUT_TERMINAL === "1";
   // Turn 1 ends with a FAILURE result (an SDKResultError) instead of success.
   const errorResult = process.env.CLAUDE_FAKE_ERROR_RESULT === "1";
+  // Models the resume path: the SDK replays historical messages
+  // (SDKUserMessageReplay, `isReplay: true`) onto an idle stream.
+  const replayHistory = process.env.CLAUDE_FAKE_REPLAY_HISTORY === "1";
   // Every turn emits the SAME result uuid — models a literal replay of an older
   // turn's `result` landing on a later turn; the worker must dedup it by uuid.
   const replayResultUuid = process.env.CLAUDE_FAKE_REPLAY_RESULT_UUID === "1";
@@ -130,6 +133,28 @@ export function query({ prompt, options = {} }) {
           recordUserMessage(sessionId, message);
           if (!holdTurns) {
             userTurnCount += 1;
+            if (userTurnCount === 1 && replayHistory) {
+              // Replayed AFTER the turn settles, onto an idle stream.
+              pushOut({ type: "result", usage: {} });
+              setTimeout(() => {
+                pushOut({
+                  type: "user",
+                  uuid: "replayed-history-uuid",
+                  isReplay: true,
+                  message: {
+                    role: "user",
+                    content: [
+                      {
+                        type: "tool_result",
+                        tool_use_id: "toolu_historical",
+                        content: "HISTORICAL OUTPUT",
+                      },
+                    ],
+                  },
+                });
+              }, 20);
+              continue;
+            }
             if (replayResultUuid) {
               // Same uuid on every turn: the 2nd+ occurrence is a literal replay
               // the worker must drop (otherwise it completes the running turn).

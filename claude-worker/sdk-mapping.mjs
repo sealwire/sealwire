@@ -352,6 +352,17 @@ export function mapSdkMessage(msg) {
     }
 
     case "user": {
+      // SDKUserMessageReplay carries `isReplay: true` and is how the SDK
+      // re-sends history on resume. Its blocks describe work that already
+      // finished, so they must be discarded BEFORE anything is derived from
+      // them: a replayed tool_result became a live `tool_call_result`, which is
+      // turn-revealing, so an idle resume could arm a turn that does not exist
+      // and leave the thread "active" — blocking send/fork — until a terminal
+      // or the watchdog cleared it.
+      if (msg.isReplay === true) {
+        return null;
+      }
+
       const events = [];
       const blocks = Array.isArray(msg.message?.content) ? msg.message.content : [];
       for (const block of blocks) {

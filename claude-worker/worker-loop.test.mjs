@@ -807,3 +807,32 @@ test("fork_session on an SDK without forkSession fails loudly", async () => {
     await rm(legacySdk, { force: true });
   }
 });
+
+// Resume path: the SDK replays history onto an idle stream. Those replayed
+// tool results must not manufacture live turn state — `tool_call_result` is
+// turn-revealing, so before the isReplay guard this armed a spontaneous turn
+// that did not exist and left the thread active (blocking send/fork) until a
+// terminal or the 600s watchdog.
+test("replayed history on resume does not arm a turn", async () => {
+  const worker = spawnWorker({ CLAUDE_FAKE_REPLAY_HISTORY: "1" });
+  try {
+    worker.send(START_DEFAULT);
+    await worker.waitFor(isStarted("sess-1"), { label: "session_started" });
+    await worker.waitFor(isDone, { label: "done#1" });
+    // Give the replay (pushed 20ms after the terminal) time to land.
+    await new Promise((resolve) => setTimeout(resolve, 400));
+
+    const afterTerminal = worker.events.slice(
+      worker.events.findIndex((event) => event.type === "done") + 1,
+    );
+    assert.deepEqual(
+      afterTerminal.filter((event) =>
+        ["tool_call_result", "turn_started", "assistant_message"].includes(event.type),
+      ),
+      [],
+      `replayed history leaked live events: ${JSON.stringify(afterTerminal)}`,
+    );
+  } finally {
+    await worker.close();
+  }
+});

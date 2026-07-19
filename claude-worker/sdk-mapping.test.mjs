@@ -674,3 +674,41 @@ test("a tool-result-only record emits no user_message", () => {
     "tool output must not surface as a user message"
   );
 });
+
+// SDKUserMessageReplay is `type: "user"` with an explicit `isReplay: true`.
+// On resume the SDK replays historical messages; their tool_result blocks were
+// being turned into live `tool_call_result` events, which are TURN-REVEALING
+// (worker.mjs TURN_REVEALING_EVENTS). An idle resume could therefore arm a
+// spontaneous turn that does not exist, mark the thread active, and block
+// send/fork until a terminal or the 600s watchdog cleared it.
+test("a replayed user message contributes nothing to the live stream", () => {
+  const mapped = mapSdkMessage({
+    type: "user",
+    uuid: "replayed-1",
+    isReplay: true,
+    message: {
+      role: "user",
+      content: [
+        { type: "tool_result", tool_use_id: "toolu_old", content: "HISTORICAL OUTPUT" },
+        { type: "text", text: "historical text" },
+      ],
+    },
+  });
+
+  assert.equal(mapped, null, "replayed history must not become live activity");
+});
+
+test("a live tool result is still mapped", () => {
+  const mapped = mapSdkMessage({
+    type: "user",
+    uuid: "live-1",
+    message: {
+      role: "user",
+      content: [{ type: "tool_result", tool_use_id: "toolu_live", content: "ok" }],
+    },
+  });
+
+  const events = Array.isArray(mapped) ? mapped : [mapped];
+  assert.equal(events[0].type, "tool_call_result");
+  assert.equal(events[0].id, "toolu_live");
+});
