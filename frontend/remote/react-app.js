@@ -35,6 +35,7 @@ import {
   applyForkProviderChange,
   canForkInSession,
   defaultForkFields,
+  resolveForkSourceThread,
   threadIsBusyForFork,
 } from "../shared/fork-fields.js";
 import { copyTextToClipboard } from "../shared/clipboard.js";
@@ -1008,7 +1009,14 @@ function RemoteApp() {
   }
 
   function handleOpenForkDialog(threadId, upToItemId = "") {
-    const thread = currentState.threads.find((entry) => entry.id === threadId);
+    // See resolveForkSourceThread: the thread list may not be loaded (or may
+    // not contain an older thread) when the transcript already shows its fork
+    // buttons. Bailing here used to fail silently on this surface.
+    const thread = resolveForkSourceThread({
+      threadId,
+      threads: currentState.threads,
+      session,
+    });
     if (!thread) return;
     // Match the relay's guard up front instead of failing on submit; a
     // BACKGROUND thread can be mid-turn too.

@@ -143,6 +143,7 @@ import { ForkSessionDialog } from "./shared/fork-session-dialog.js";
 import {
   applyForkProviderChange,
   defaultForkFields,
+  resolveForkSourceThread,
   threadIsBusyForFork,
 } from "./shared/fork-fields.js";
 import { isReviewInProgressForThread } from "./shared/review-state.js";
@@ -1889,7 +1890,15 @@ function threadIsBusy(thread) {
 }
 
 function openForkDialogForThread(threadId, upToItemId = "") {
-  const thread = resolveActiveThread(threadId) || state.threads.find((entry) => entry.id === threadId);
+  // Falls back to the viewed session snapshot: on a deep link the transcript
+  // (and its fork buttons) render before the sidebar thread list exists, and
+  // the list is paged so an older thread may never appear in it.
+  const thread = resolveForkSourceThread({
+    threadId,
+    threads: state.threads,
+    session: state.session,
+    viewedThread: state.viewOnlyThread,
+  });
   if (!thread) {
     logLine(`Cannot fork unknown thread ${threadId}`);
     return;

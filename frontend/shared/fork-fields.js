@@ -45,6 +45,47 @@ export function applyForkProviderChange(fields, provider, models) {
   };
 }
 
+// Resolve the thread a fork will branch from.
+//
+// The fork button lives in the TRANSCRIPT, which renders on a deep link
+// (`/?thread=<id>`) before the sidebar thread list has loaded — and the list is
+// paged, so an older thread may never be in it. Requiring a list hit made fork
+// bail with "Cannot fork unknown thread" on local and fail silently on remote.
+// The viewed session snapshot already describes the thread being viewed, so it
+// is a sufficient fallback: the relay only needs the id, and resolves cwd,
+// provider and settings from the thread itself.
+export function resolveForkSourceThread({
+  threadId,
+  threads = [],
+  session = null,
+  viewedThread = null,
+} = {}) {
+  if (!threadId) return null;
+  const fromList = (threads || []).find((entry) => entry?.id === threadId);
+  if (fromList) return fromList;
+  // The viewed-thread pin. On local, `session` stays the LIVE session while you
+  // view a saved thread (the view-only projection is a render-time value), so
+  // this is the only source that describes the thread actually on screen.
+  const viewedId = viewedThread?.threadId || viewedThread?.id || "";
+  if (viewedId === threadId) {
+    return {
+      id: threadId,
+      name: null,
+      provider: viewedThread.provider || "",
+      cwd: viewedThread.cwd || "",
+      status: viewedThread.currentStatus || viewedThread.status || "",
+    };
+  }
+  if (session?.active_thread_id !== threadId) return null;
+  return {
+    id: threadId,
+    name: null,
+    provider: session.provider || "",
+    cwd: session.current_cwd || "",
+    status: session.current_status || "",
+  };
+}
+
 // Whether a session view may offer the fork affordance at all.
 //
 // Deliberately NOT gated on `view_only`. That flag means "you are looking at a
@@ -66,7 +107,18 @@ export function canForkInSession(session) {
 // so the affordance matches the server invariant: gating only on "is the
 // ACTIVE thread running" lets a background thread mid-turn open the dialog and
 // fail on submit. Keep the non-working set in sync with the Rust one.
-const NON_WORKING_STATUSES = new Set(["", "idle", "viewing", "completed", "unknown"]);
+// Keep in sync with `thread_status_is_working` in state/relay.rs. `notloaded`
+// is Codex's status for a saved thread the app-server has not opened — the most
+// idle state there is; classifying it as working made the client refuse to even
+// open the fork dialog for any saved Codex thread.
+const NON_WORKING_STATUSES = new Set([
+  "",
+  "idle",
+  "viewing",
+  "completed",
+  "unknown",
+  "notloaded",
+]);
 
 export function threadIsBusyForFork(thread, session = null) {
   if (!thread?.id) return false;

@@ -179,7 +179,17 @@ export function selectReviewerCatalogState({
 // disagree on an idle word — Claude hardcodes `idle`, but a saved Codex thread reports
 // `unknown` (a `thread/list` summary with no live status) — so a literal `=== "idle"`
 // test wrongly disabled the CTA for not-running Codex threads.
-const NOT_WORKING_STATUSES = new Set(["", "idle", "viewing", "completed", "unknown"]);
+// `notloaded` is Codex's status for a saved thread the app-server has not
+// opened — the most idle state there is. It was missing here for the same
+// reason `unknown` once was.
+const NOT_WORKING_STATUSES = new Set([
+  "",
+  "idle",
+  "viewing",
+  "completed",
+  "unknown",
+  "notloaded",
+]);
 
 // `.toLowerCase()` is defensive: today every provider status is already lowercase
 // (Codex `status.type`, Claude hardcodes "idle"), so this never diverges from the

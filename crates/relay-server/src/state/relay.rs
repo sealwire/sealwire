@@ -74,10 +74,16 @@ pub const MAX_REVIEW_JOBS_PUB: usize = MAX_REVIEW_JOBS;
 /// treat that as working — `active_turn_id` only covers relay-driven turns, so the
 /// cwd mutation-race guard is best-effort for externally-driven sessions (v1
 /// already cannot observe foreign turns; a worktree/snapshot mode is the real fix).
+/// `notLoaded` belongs to the same class: Codex reports it for a saved thread
+/// the app-server has not opened — the most idle state there is — and treating
+/// it as working made every saved Codex thread refuse to fork ("a turn is in
+/// progress") while Claude threads, which report `idle`, worked fine.
+/// Comparison is case-insensitive because the word is provider formatting, not
+/// semantics (Codex sends camelCase, the others lowercase).
 pub(crate) fn thread_status_is_working(status: &str) -> bool {
     !matches!(
-        status.trim(),
-        "" | "idle" | "viewing" | "completed" | "unknown"
+        status.trim().to_ascii_lowercase().as_str(),
+        "" | "idle" | "viewing" | "completed" | "unknown" | "notloaded"
     )
 }
 

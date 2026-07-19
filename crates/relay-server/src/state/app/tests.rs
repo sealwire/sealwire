@@ -239,13 +239,15 @@ mod path_scope_tests {
     use crate::protocol::{
         ApprovalDecision, ApprovalDecisionInput, ApprovalScope, AskUserOptionView,
         AskUserQuestionView, ForkSessionInput, ReadThreadTranscriptInput, ResumeSessionInput,
-        SendMessageInput, StartSessionInput, SubmitAskUserAnswerInput, UpdateSessionSettingsInput,
+        SendMessageInput, StartSessionInput, SubmitAskUserAnswerInput, ThreadSummaryView,
+        UpdateSessionSettingsInput,
     };
     use crate::state::security::SecurityProfile;
     use crate::state::{
         ApprovalKind, PendingApproval, PendingAskUserQuestion, DEFAULT_APPROVAL_POLICY,
         DEFAULT_EFFORT, DEFAULT_MODEL, DEFAULT_SANDBOX,
     };
+    use std::collections::HashSet;
     use std::sync::{
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc,
@@ -267,6 +269,55 @@ mod path_scope_tests {
             .expect("fake provider should spawn");
         let mut providers: HashMap<String, Arc<dyn ProviderBridge>> = HashMap::new();
         providers.insert("fake".to_string(), Arc::new(bridge));
+        (
+            AppState::from_parts(relay, providers, change_tx),
+            project,
+            outside,
+        )
+    }
+
+    async fn build_status_app(cwd: &str, read_status: &str) -> (AppState, TempDir, TempDir) {
+        let project = TempDir::new().expect("project tempdir");
+        let outside = TempDir::new().expect("outside tempdir");
+        let (change_tx, _) = watch::channel(0_u64);
+        let relay = Arc::new(RwLock::new(RelayState::new(
+            cwd.to_string(),
+            change_tx.clone(),
+            SecurityProfile::private(),
+        )));
+        let mut providers: HashMap<String, Arc<dyn ProviderBridge>> = HashMap::new();
+        providers.insert(
+            "statusy".to_string(),
+            Arc::new(StatusProviderBridge::new("statusy", read_status)),
+        );
+        (
+            AppState::from_parts(relay, providers, change_tx),
+            project,
+            outside,
+        )
+    }
+
+    /// Two independent providers in one relay, for cross-provider isolation.
+    async fn build_two_provider_app(cwd: &str) -> (AppState, TempDir, TempDir) {
+        let project = TempDir::new().expect("project tempdir");
+        let outside = TempDir::new().expect("outside tempdir");
+        let (change_tx, _) = watch::channel(0_u64);
+        let relay = Arc::new(RwLock::new(RelayState::new(
+            cwd.to_string(),
+            change_tx.clone(),
+            SecurityProfile::private(),
+        )));
+        let mut providers: HashMap<String, Arc<dyn ProviderBridge>> = HashMap::new();
+        providers.insert(
+            "alpha".to_string(),
+            Arc::new(StatusProviderBridge::new("alpha", "idle")),
+        );
+        providers.insert(
+            "beta".to_string(),
+            // Beta reports Codex's saved-thread status, so the symmetry tests
+            // also cover the notLoaded classification.
+            Arc::new(StatusProviderBridge::new("beta", "notLoaded")),
+        );
         (
             AppState::from_parts(relay, providers, change_tx),
             project,
@@ -352,7 +403,7 @@ mod path_scope_tests {
         {
             let mut relay = relay.write().await;
             relay.activate_thread(
-                crate::protocol::ThreadSummaryView {
+                ThreadSummaryView {
                     id: "ghost-thread".to_string(),
                     name: None,
                     preview: String::new(),
@@ -677,7 +728,7 @@ mod path_scope_tests {
         {
             let mut relay = app.relay.write().await;
             relay.activate_thread(
-                crate::protocol::ThreadSummaryView {
+                ThreadSummaryView {
                     id: thread_id.to_string(),
                     name: None,
                     preview: String::new(),
@@ -774,7 +825,7 @@ mod path_scope_tests {
     #[derive(Clone)]
     struct RecordingProvider {
         name: &'static str,
-        threads: Arc<Mutex<HashMap<String, crate::protocol::ThreadSummaryView>>>,
+        threads: Arc<Mutex<HashMap<String, ThreadSummaryView>>>,
         approval_thread_ids: Arc<Mutex<Vec<String>>>,
         ask_request_ids: Arc<Mutex<Vec<String>>>,
         turn_thread_ids: Arc<Mutex<Vec<String>>>,
@@ -821,8 +872,8 @@ mod path_scope_tests {
             }
         }
 
-        fn thread_summary(&self, id: &str, cwd: &str) -> crate::protocol::ThreadSummaryView {
-            crate::protocol::ThreadSummaryView {
+        fn thread_summary(&self, id: &str, cwd: &str) -> ThreadSummaryView {
+            ThreadSummaryView {
                 id: id.to_string(),
                 name: Some(format!("{} thread", self.name)),
                 preview: String::new(),
@@ -839,10 +890,7 @@ mod path_scope_tests {
 
     #[async_trait::async_trait]
     impl ProviderBridge for RecordingProvider {
-        async fn list_threads(
-            &self,
-            limit: usize,
-        ) -> Result<Vec<crate::protocol::ThreadSummaryView>, String> {
+        async fn list_threads(&self, limit: usize) -> Result<Vec<ThreadSummaryView>, String> {
             let hidden = self.hidden_from_list.lock().await;
             let mut threads = self
                 .threads
@@ -1247,7 +1295,7 @@ mod path_scope_tests {
             relay.set_provider_name("codex".to_string());
             relay.approval_policy = "bypass".to_string();
             relay.sandbox = "danger-full-access".to_string();
-            relay.threads = vec![crate::protocol::ThreadSummaryView {
+            relay.threads = vec![ThreadSummaryView {
                 id: thread_id.to_string(),
                 name: Some("imported codex thread".to_string()),
                 preview: String::new(),
@@ -2689,7 +2737,7 @@ mod path_scope_tests {
         {
             let mut relay = app.relay.write().await;
             relay.activate_thread(
-                crate::protocol::ThreadSummaryView {
+                ThreadSummaryView {
                     id: "thread-1".to_string(),
                     name: Some("AskUser thread".to_string()),
                     preview: "pending ask-user".to_string(),
@@ -2746,8 +2794,180 @@ mod path_scope_tests {
 
     #[derive(Clone)]
     struct ConsumedInitialThread {
-        summary: crate::protocol::ThreadSummaryView,
+        summary: ThreadSummaryView,
         transcript: Vec<crate::protocol::TranscriptEntryView>,
+    }
+
+    /// Minimal bridge whose provider name AND the `status` it reports from
+    /// `read_thread` are both configurable. Needed because `FakeProviderBridge`
+    /// hardcodes `provider_name() == "fake"` and always reports an idle-ish
+    /// status, so it can model neither a Codex-style `notLoaded` thread nor a
+    /// two-provider relay.
+    struct StatusProviderBridge {
+        name: &'static str,
+        read_status: String,
+        threads: Arc<std::sync::Mutex<HashMap<String, ThreadSummaryView>>>,
+        running: Arc<std::sync::Mutex<HashSet<String>>>,
+        next_id: AtomicU64,
+    }
+
+    impl StatusProviderBridge {
+        fn new(name: &'static str, read_status: &str) -> Self {
+            Self {
+                name,
+                read_status: read_status.to_string(),
+                threads: Arc::new(std::sync::Mutex::new(HashMap::new())),
+                running: Arc::new(std::sync::Mutex::new(HashSet::new())),
+                next_id: AtomicU64::new(1),
+            }
+        }
+
+        fn summary(&self, id: &str, cwd: &str) -> ThreadSummaryView {
+            ThreadSummaryView {
+                id: id.to_string(),
+                name: Some(format!("{} thread", self.name)),
+                preview: String::new(),
+                cwd: cwd.to_string(),
+                updated_at: 1,
+                source: self.name.to_string(),
+                status: self.read_status.clone(),
+                model_provider: self.name.to_string(),
+                provider: self.name.to_string(),
+                forked_from: None,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ProviderBridge for StatusProviderBridge {
+        async fn list_threads(&self, _limit: usize) -> Result<Vec<ThreadSummaryView>, String> {
+            Ok(self.threads.lock().unwrap().values().cloned().collect())
+        }
+
+        async fn list_models(&self) -> Result<Vec<crate::protocol::ModelOptionView>, String> {
+            Ok(Vec::new())
+        }
+
+        async fn start_thread(
+            &self,
+            cwd: &str,
+            _model: &str,
+            _approval_policy: &str,
+            _sandbox: &str,
+            initial_prompt: Option<&str>,
+        ) -> Result<StartThreadResult, String> {
+            let id = format!(
+                "{}-thread-{}",
+                self.name,
+                self.next_id.fetch_add(1, Ordering::Relaxed)
+            );
+            let thread = self.summary(&id, cwd);
+            self.threads
+                .lock()
+                .unwrap()
+                .insert(id.clone(), thread.clone());
+            // A prompt means this thread is now mid-turn and stays that way,
+            // modelling "another session is running".
+            if initial_prompt.is_some() {
+                self.running.lock().unwrap().insert(id.clone());
+            }
+            Ok(StartThreadResult {
+                thread,
+                consumed_initial_prompt: initial_prompt.is_some(),
+                initial_user_message: None,
+                started_turn_id: initial_prompt.map(|_| format!("{id}-turn")),
+            })
+        }
+
+        async fn resume_thread(
+            &self,
+            _thread_id: &str,
+            _approval_policy: &str,
+            _sandbox: &str,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn read_thread(&self, thread_id: &str) -> Result<ThreadSyncData, String> {
+            let thread = self
+                .threads
+                .lock()
+                .unwrap()
+                .get(thread_id)
+                .cloned()
+                .ok_or_else(|| format!("unknown thread {thread_id}"))?;
+            let running = self.running.lock().unwrap().contains(thread_id);
+            Ok(ThreadSyncData {
+                thread,
+                status: if running {
+                    "active".to_string()
+                } else {
+                    self.read_status.clone()
+                },
+                active_flags: Vec::new(),
+                transcript: Vec::new(),
+            })
+        }
+
+        async fn read_thread_entry_detail(
+            &self,
+            _thread_id: &str,
+            _item_id: &str,
+        ) -> Result<Option<crate::protocol::TranscriptEntryView>, String> {
+            Ok(None)
+        }
+
+        async fn archive_thread(&self, _thread_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn delete_thread_permanently(
+            &self,
+            _thread_id: &str,
+        ) -> Result<crate::codex_local::LocalThreadDeleteSummary, String> {
+            Ok(crate::codex_local::LocalThreadDeleteSummary {
+                deleted_paths: Vec::new(),
+                deleted_thread_row: false,
+            })
+        }
+
+        async fn start_turn(
+            &self,
+            thread_id: &str,
+            _text: &str,
+            _model: &str,
+            _effort: &str,
+        ) -> Result<Option<String>, String> {
+            Ok(Some(format!("{thread_id}-turn")))
+        }
+
+        async fn request_turn_stop(
+            &self,
+            _thread_id: &str,
+            _turn_id: Option<&str>,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn respond_to_approval(
+            &self,
+            _pending: &PendingApproval,
+            _input: &crate::protocol::ApprovalDecisionInput,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn respond_to_ask_user_question(
+            &self,
+            _request_id: &str,
+            _answers: &serde_json::Map<String, serde_json::Value>,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn provider_name(&self) -> &'static str {
+            self.name
+        }
     }
 
     #[derive(Default)]
@@ -2782,12 +3002,8 @@ mod path_scope_tests {
             }
         }
 
-        fn thread_summary(
-            thread_id: String,
-            cwd: &str,
-            preview: String,
-        ) -> crate::protocol::ThreadSummaryView {
-            crate::protocol::ThreadSummaryView {
+        fn thread_summary(thread_id: String, cwd: &str, preview: String) -> ThreadSummaryView {
+            ThreadSummaryView {
                 id: thread_id,
                 name: Some("Consumed Initial Prompt Session".to_string()),
                 preview,
@@ -2804,10 +3020,7 @@ mod path_scope_tests {
 
     #[async_trait::async_trait]
     impl ProviderBridge for ConsumedInitialPromptProvider {
-        async fn list_threads(
-            &self,
-            limit: usize,
-        ) -> Result<Vec<crate::protocol::ThreadSummaryView>, String> {
+        async fn list_threads(&self, limit: usize) -> Result<Vec<ThreadSummaryView>, String> {
             let mut threads = self
                 .threads
                 .lock()
@@ -3457,6 +3670,129 @@ mod path_scope_tests {
             user_text.contains("continue on the fork"),
             "fork replay prompt should include the requested fork prompt: {user_text}"
         );
+    }
+
+    // Codex reports `notLoaded` for a saved thread that the app-server has not
+    // opened — the MOST idle state there is. `thread_status_is_working` only
+    // whitelisted idle/viewing/completed/unknown, so every saved Codex thread
+    // read as busy and fork was refused with "a turn is in progress". Claude
+    // reports `idle` and was unaffected, which is why this looked like a
+    // Codex-only failure.
+    #[test]
+    fn a_not_loaded_thread_is_not_working() {
+        use crate::state::relay::thread_status_is_working;
+        assert!(!thread_status_is_working("notLoaded"));
+        // Case is provider-formatting, not semantics.
+        assert!(!thread_status_is_working("notloaded"));
+        assert!(!thread_status_is_working("NotLoaded"));
+        // The genuinely-working statuses must stay working.
+        assert!(thread_status_is_working("active"));
+        assert!(thread_status_is_working("running"));
+    }
+
+    #[tokio::test]
+    async fn fork_session_accepts_a_saved_thread_reported_as_not_loaded() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, _p, _o) = build_status_app(cwd, "notLoaded").await;
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let source = app
+            .start_session(StartSessionInput {
+                device_id: Some("device-1".to_string()),
+                cwd: Some(cwd.to_string()),
+                model: None,
+                effort: None,
+                approval_policy: None,
+                sandbox: None,
+                provider: Some("statusy".to_string()),
+                initial_prompt: None,
+            })
+            .await
+            .expect("start source");
+        let source_thread_id = source.active_thread_id.clone().expect("source thread id");
+
+        app.fork_session(ForkSessionInput {
+            source_thread_id,
+            up_to_item_id: None,
+            cwd: Some(cwd.to_string()),
+            initial_prompt: Some("continue".to_string()),
+            model: None,
+            approval_policy: None,
+            sandbox: None,
+            effort: None,
+            device_id: Some("device-1".to_string()),
+            provider: Some("statusy".to_string()),
+        })
+        .await
+        .expect("a saved (notLoaded) thread must be forkable");
+    }
+
+    // Symmetry: a turn running on one provider must not block forking a thread
+    // that belongs to a DIFFERENT provider. Asserted in both directions so a
+    // future guard that reaches across providers fails here.
+    async fn assert_cross_provider_fork_is_unblocked(busy: &str, forked: &str) {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, _p, _o) = build_two_provider_app(cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        // The thread we will fork: created first, then left idle.
+        let quiet = app
+            .start_session(StartSessionInput {
+                device_id: Some("device-1".to_string()),
+                cwd: Some(cwd.to_string()),
+                model: None,
+                effort: None,
+                approval_policy: None,
+                sandbox: None,
+                provider: Some(forked.to_string()),
+                initial_prompt: None,
+            })
+            .await
+            .expect("start quiet thread");
+        let quiet_thread_id = quiet.active_thread_id.clone().expect("quiet thread id");
+
+        // Now start a thread on the other provider and leave its turn running.
+        app.start_session(StartSessionInput {
+            device_id: Some("device-1".to_string()),
+            cwd: Some(cwd.to_string()),
+            model: None,
+            effort: None,
+            approval_policy: None,
+            sandbox: None,
+            provider: Some(busy.to_string()),
+            initial_prompt: Some("keep this turn running briefly".to_string()),
+        })
+        .await
+        .expect("start busy thread");
+
+        app.fork_session(ForkSessionInput {
+            source_thread_id: quiet_thread_id,
+            up_to_item_id: None,
+            cwd: Some(cwd.to_string()),
+            initial_prompt: Some("continue".to_string()),
+            model: None,
+            approval_policy: None,
+            sandbox: None,
+            effort: None,
+            device_id: Some("device-1".to_string()),
+            provider: Some(forked.to_string()),
+        })
+        .await
+        .unwrap_or_else(|error| {
+            panic!("a running {busy} turn must not block forking a {forked} thread: {error}")
+        });
+    }
+
+    #[tokio::test]
+    async fn a_running_alpha_turn_does_not_block_forking_a_beta_thread() {
+        assert_cross_provider_fork_is_unblocked("alpha", "beta").await;
+    }
+
+    #[tokio::test]
+    async fn a_running_beta_turn_does_not_block_forking_an_alpha_thread() {
+        assert_cross_provider_fork_is_unblocked("beta", "alpha").await;
     }
 
     #[tokio::test]
@@ -4296,7 +4632,7 @@ mod path_scope_tests {
     struct ModelStrictProvider {
         name: &'static str,
         accepts_default: bool,
-        threads: Arc<Mutex<HashMap<String, crate::protocol::ThreadSummaryView>>>,
+        threads: Arc<Mutex<HashMap<String, ThreadSummaryView>>>,
         seen_models: Arc<Mutex<Vec<String>>>,
     }
 
@@ -4328,10 +4664,7 @@ mod path_scope_tests {
 
     #[async_trait::async_trait]
     impl ProviderBridge for ModelStrictProvider {
-        async fn list_threads(
-            &self,
-            _limit: usize,
-        ) -> Result<Vec<crate::protocol::ThreadSummaryView>, String> {
+        async fn list_threads(&self, _limit: usize) -> Result<Vec<ThreadSummaryView>, String> {
             Ok(Vec::new())
         }
 
@@ -4355,7 +4688,7 @@ mod path_scope_tests {
                 return Err(err);
             }
             let id = format!("{}-thread-1", self.name);
-            let thread = crate::protocol::ThreadSummaryView {
+            let thread = ThreadSummaryView {
                 id: id.clone(),
                 name: Some(format!("{} thread", self.name)),
                 preview: String::new(),
@@ -5414,7 +5747,7 @@ mod review_tests {
         let reviewer_id = "reviewer-vscode-sourced";
         {
             let mut relay = app.relay.write().await;
-            let thread = crate::protocol::ThreadSummaryView {
+            let thread = ThreadSummaryView {
                 id: reviewer_id.to_string(),
                 name: None,
                 preview: String::new(),
@@ -5457,7 +5790,7 @@ mod review_tests {
         let reviewer_id = "reviewer-grouped-by-job";
         {
             let mut relay = app.relay.write().await;
-            let thread = crate::protocol::ThreadSummaryView {
+            let thread = ThreadSummaryView {
                 id: reviewer_id.to_string(),
                 name: None,
                 preview: String::new(),
@@ -5577,7 +5910,7 @@ mod review_tests {
         let (app, _providers) = build_review_app(in_cwd, &["codex"]).await;
         {
             let mut relay = app.relay.write().await;
-            let mk_thread = |id: &str, cwd: &str| crate::protocol::ThreadSummaryView {
+            let mk_thread = |id: &str, cwd: &str| ThreadSummaryView {
                 id: id.to_string(),
                 name: None,
                 preview: String::new(),
@@ -5687,7 +6020,7 @@ mod review_tests {
         let (app, _providers) = build_review_app(in_cwd, &["codex"]).await;
         {
             let mut relay = app.relay.write().await;
-            let mk_thread = |id: &str, cwd: &str| crate::protocol::ThreadSummaryView {
+            let mk_thread = |id: &str, cwd: &str| ThreadSummaryView {
                 id: id.to_string(),
                 name: None,
                 preview: String::new(),
@@ -5783,7 +6116,7 @@ mod review_tests {
         let reviewer_id = "reviewer-codex-orphan";
         {
             let mut relay = app.relay.write().await;
-            let thread = crate::protocol::ThreadSummaryView {
+            let thread = ThreadSummaryView {
                 id: reviewer_id.to_string(),
                 name: None,
                 preview: String::new(),
@@ -5823,7 +6156,7 @@ mod review_tests {
         let reviewer_id = "reviewer-codex-clobber";
         {
             let mut relay = app.relay.write().await;
-            let mut thread = crate::protocol::ThreadSummaryView {
+            let mut thread = ThreadSummaryView {
                 id: reviewer_id.to_string(),
                 name: None,
                 preview: String::new(),
@@ -7750,7 +8083,7 @@ settings update: {error}"
             relay.insert_review_job(job);
             // Atomic: register the row AND assign reviewer_thread_id together.
             relay.register_background_thread(
-                crate::protocol::ThreadSummaryView {
+                ThreadSummaryView {
                     id: pending.to_string(),
                     name: None,
                     preview: String::new(),
@@ -9226,7 +9559,7 @@ turn) must allow a review: {error:?}"
                 job.reviewer_thread_id = Some(pending.to_string())
             });
             relay.register_background_thread(
-                crate::protocol::ThreadSummaryView {
+                ThreadSummaryView {
                     id: pending.to_string(),
                     name: None,
                     preview: String::new(),

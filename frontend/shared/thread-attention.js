@@ -29,7 +29,16 @@
 // `completed`); classifying them as working made saved threads look busy
 // forever and showed a Stop/Take-over the backend then rejects with "no running
 // turn". Keep this set in lockstep with `thread_status_is_working` (relay.rs).
-const NON_WORKING_STATUSES = new Set(["", "idle", "viewing", "completed", "unknown"]);
+// Mirrors `thread_status_is_working` (state/relay.rs); `notloaded` is Codex's
+// saved-thread status and must not read as working.
+const NON_WORKING_STATUSES = new Set([
+  "",
+  "idle",
+  "viewing",
+  "completed",
+  "unknown",
+  "notloaded",
+]);
 
 export function statusIsWorking(status) {
   return typeof status === "string" && !NON_WORKING_STATUSES.has(status);

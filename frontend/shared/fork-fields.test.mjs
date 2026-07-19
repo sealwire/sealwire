@@ -7,6 +7,7 @@ import {
   forkFieldsToPayload,
   canForkInSession,
   forkIsLossy,
+  resolveForkSourceThread,
   threadIsBusyForFork,
 } from "./fork-fields.js";
 
@@ -158,4 +159,79 @@ test("a saved / view-only thread still offers fork", () => {
   assert.equal(canForkInSession({ view_only: false }), true, "live session");
   assert.equal(canForkInSession({}), true, "no view_only field");
   assert.equal(canForkInSession(null), false, "nothing to fork from");
+});
+
+// Mirrors the Rust guard: Codex reports `notLoaded` for a saved thread the
+// app-server has not opened. Treating it as busy made the client refuse to
+// open the fork dialog for every saved Codex thread, while Claude threads
+// (status `idle`) worked — the asymmetry that looked like "codex can't fork".
+test("a notLoaded (saved Codex) thread is forkable", () => {
+  assert.equal(threadIsBusyForFork({ id: "t", status: "notLoaded" }, null), false);
+  assert.equal(threadIsBusyForFork({ id: "t", status: "notloaded" }, null), false);
+  // A genuinely running thread still blocks.
+  assert.equal(threadIsBusyForFork({ id: "t", status: "active" }, null), true);
+});
+
+// The fork button lives in the TRANSCRIPT, which renders on a deep link
+// (`/?thread=<id>`) before — or independently of — the sidebar thread list.
+// Requiring the thread to be present in that list made fork fail with
+// "Cannot fork unknown thread" on local (a log line the user never sees) and
+// fail silently on remote. The viewed session snapshot already describes the
+// thread being viewed, so it is a sufficient source.
+test("the fork source resolves from the session when the thread list is empty", () => {
+  const session = {
+    active_thread_id: "t-1",
+    provider: "codex",
+    current_cwd: "/repo",
+    current_status: "notLoaded",
+  };
+
+  const resolved = resolveForkSourceThread({ threadId: "t-1", threads: [], session });
+
+  assert.ok(resolved, "must not bail just because the list has not loaded");
+  assert.equal(resolved.id, "t-1");
+  assert.equal(resolved.provider, "codex");
+  assert.equal(resolved.cwd, "/repo");
+});
+
+test("a loaded thread-list entry wins over the session projection", () => {
+  const threads = [{ id: "t-1", provider: "claude_code", cwd: "/from-list", status: "idle" }];
+  const session = { active_thread_id: "t-1", provider: "codex", current_cwd: "/from-session" };
+
+  const resolved = resolveForkSourceThread({ threadId: "t-1", threads, session });
+
+  assert.equal(resolved.cwd, "/from-list");
+  assert.equal(resolved.provider, "claude_code");
+});
+
+test("an unrelated thread id still resolves to nothing", () => {
+  const session = { active_thread_id: "t-1", provider: "codex" };
+  assert.equal(
+    resolveForkSourceThread({ threadId: "other", threads: [], session }),
+    null
+  );
+  assert.equal(resolveForkSourceThread({ threadId: "", threads: [], session }), null);
+});
+
+// On local, `state.session` stays the LIVE session while you view a saved
+// thread — the view-only projection is built at render time. So the viewed
+// thread's own pin is the authoritative source, and without it forking any
+// thread other than the live one failed with "Cannot fork unknown thread".
+test("the fork source resolves from the viewed-thread pin", () => {
+  const resolved = resolveForkSourceThread({
+    threadId: "viewed-1",
+    threads: [],
+    session: { active_thread_id: "live-9", provider: "claude_code" },
+    viewedThread: {
+      threadId: "viewed-1",
+      provider: "codex",
+      cwd: "/other/repo",
+      status: "notLoaded",
+    },
+  });
+
+  assert.ok(resolved, "viewing a saved thread must be forkable");
+  assert.equal(resolved.id, "viewed-1");
+  assert.equal(resolved.provider, "codex", "uses the VIEWED thread's provider");
+  assert.equal(resolved.cwd, "/other/repo", "not the live session's cwd");
 });
