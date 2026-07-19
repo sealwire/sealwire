@@ -3799,6 +3799,62 @@ mod path_scope_tests {
         );
     }
 
+    // Inherited effort is conditional on the model surviving: choosing a
+    // different model explicitly must take THAT model's default effort, not
+    // carry over a level the source ran at (which the new model need not
+    // support). Implemented, but nothing asserted it directly.
+    #[tokio::test]
+    async fn an_explicit_model_switch_does_not_inherit_the_source_effort() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, _p, _o) = build_status_app(cwd, "idle").await;
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        // Source runs the fancy model at "low". Crucially "low" IS supported by
+        // the model we switch to — so clamping cannot mask a wrong answer, and
+        // the assertion tests the inheritance CONDITION rather than the clamp.
+        // (An unsupported level would be clamped either way, which is how the
+        // first version of this test passed for the wrong reason.)
+        let source = app
+            .start_session(StartSessionInput {
+                device_id: Some("device-1".to_string()),
+                cwd: Some(cwd.to_string()),
+                model: Some("statusy-fancy".to_string()),
+                effort: Some("low".to_string()),
+                approval_policy: None,
+                sandbox: None,
+                provider: Some("statusy".to_string()),
+                initial_prompt: None,
+            })
+            .await
+            .expect("start source");
+        let source_thread_id = source.active_thread_id.clone().expect("source thread id");
+        assert_eq!(source.reasoning_effort, "low");
+
+        let forked = app
+            .fork_session(ForkSessionInput {
+                source_thread_id,
+                up_to_item_id: None,
+                cwd: Some(cwd.to_string()),
+                initial_prompt: Some("continue".to_string()),
+                // Explicitly switching models within the same provider.
+                model: Some("statusy-default".to_string()),
+                effort: None,
+                approval_policy: None,
+                sandbox: None,
+                device_id: Some("device-1".to_string()),
+                provider: Some("statusy".to_string()),
+            })
+            .await
+            .expect("fork with an explicit model");
+
+        assert_eq!(forked.model, "statusy-default");
+        assert_eq!(
+            forked.reasoning_effort, "medium",
+            "the chosen model's default, not the source's still-valid 'low'"
+        );
+    }
+
     // The other half of the rule: inheritance must NOT cross providers. A
     // source model id is meaningless to a different bridge, and
     // resolve_provider_model passes an explicit model through unchecked — so

@@ -2726,3 +2726,52 @@ async fn the_codex_bridge_declares_the_capability_it_implements() {
         "thread/fork always branches at the tip"
     );
 }
+
+/// Full received payloads (oldest first), for assertions about request params
+/// rather than just which method was called.
+async fn codex_recv_payloads(state: &std::sync::Arc<RwLock<RelayState>>) -> Vec<Value> {
+    state
+        .read()
+        .await
+        .snapshot()
+        .logs
+        .iter()
+        .rev()
+        .filter_map(|log| log.message.strip_prefix("CODEX RECV ").map(str::to_string))
+        .filter_map(|line| serde_json::from_str::<Value>(&line).ok())
+        .collect()
+}
+
+// End-to-end for the inheritance rule: the model fork_session resolved must
+// reach the provider. Asserting only the returned snapshot would not prove the
+// value left the relay — `thread/fork` is what actually creates the branch.
+#[tokio::test]
+async fn a_native_fork_sends_the_resolved_model_to_the_provider() {
+    let (bridge, state) = spawn_fake_codex_bridge().await;
+
+    crate::provider::ProviderBridge::fork_thread(
+        &bridge,
+        crate::provider::ProviderForkRequest {
+            source_thread_id: "thread-src".to_string(),
+            up_to_item_id: None,
+            cwd: "/tmp/project".to_string(),
+            model: "inherited-model".to_string(),
+            approval_policy: "never".to_string(),
+            sandbox: "workspace-write".to_string(),
+        },
+    )
+    .await
+    .expect("fork_thread should reach the app-server");
+
+    let fork = codex_recv_payloads(&state)
+        .await
+        .into_iter()
+        .find(|payload| payload.get("method").and_then(Value::as_str) == Some("thread/fork"))
+        .expect("the bridge must send thread/fork");
+
+    assert_eq!(
+        fork["params"]["model"], "inherited-model",
+        "the resolved model must reach the provider: {fork}"
+    );
+    assert_eq!(fork["params"]["threadId"], "thread-src");
+}

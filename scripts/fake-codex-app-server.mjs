@@ -84,6 +84,14 @@ function handle(payload) {
       loaded.add(threadId);
       return ok(id, { thread: threadSummary(threadId) });
 
+    // Branches the source thread at its tip. The real server returns a NEW
+    // thread; the relay then resumes/starts a turn on it, so it must be loaded.
+    case "thread/fork": {
+      const forked = `thread-${++counter}-fork`;
+      loaded.add(forked);
+      return ok(id, { thread: threadSummary(forked) });
+    }
+
     // Reads come off disk: they work whether or not the thread is loaded.
     case "thread/read":
       return ok(id, { thread: { ...threadSummary(threadId), turns: [] } });
