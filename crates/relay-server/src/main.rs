@@ -443,13 +443,7 @@ async fn workspace_diff(
         .workspace_diff(None)
         .await
         .map(|response| Json(ApiEnvelope::ok(response)))
-        .map_err(|error| {
-            if is_path_policy_error(&error) {
-                bad_request(error)
-            } else {
-                bad_gateway(error)
-            }
-        })
+        .map_err(|error| classify_session_error(error))
 }
 
 async fn session_stream(
@@ -528,13 +522,7 @@ async fn thread_transcript(
         })
         .await
         .map(|transcript| Json(ApiEnvelope::ok(transcript)))
-        .map_err(|error| {
-            if is_path_policy_error(&error) {
-                bad_request(error)
-            } else {
-                bad_gateway(error)
-            }
-        })
+        .map_err(|error| classify_session_error(error))
 }
 
 async fn thread_entry_detail(
@@ -556,13 +544,7 @@ async fn thread_entry_detail(
         })
         .await
         .map(|detail| Json(ApiEnvelope::ok(detail)))
-        .map_err(|error| {
-            if is_path_policy_error(&error) {
-                bad_request(error)
-            } else {
-                bad_gateway(error)
-            }
-        })
+        .map_err(|error| classify_session_error(error))
 }
 
 async fn update_allowed_roots(
@@ -644,13 +626,7 @@ async fn start_session(
         .start_session(input)
         .await
         .map(|snapshot| Json(ApiEnvelope::ok(compact_local_snapshot(snapshot))))
-        .map_err(|error| {
-            if is_path_policy_error(&error) {
-                bad_request(error)
-            } else {
-                bad_gateway(error)
-            }
-        })
+        .map_err(|error| classify_session_error(error))
 }
 
 async fn fork_session(
@@ -665,13 +641,7 @@ async fn fork_session(
         .fork_session(input)
         .await
         .map(|snapshot| Json(ApiEnvelope::ok(compact_local_snapshot(snapshot))))
-        .map_err(|error| {
-            if is_path_policy_error(&error) {
-                bad_request(error)
-            } else {
-                bad_gateway(error)
-            }
-        })
+        .map_err(|error| classify_session_error(error))
 }
 
 async fn resume_session(
@@ -686,13 +656,7 @@ async fn resume_session(
         .resume_session(input)
         .await
         .map(|snapshot| Json(ApiEnvelope::ok(compact_local_snapshot(snapshot))))
-        .map_err(|error| {
-            if is_path_policy_error(&error) {
-                bad_request(error)
-            } else {
-                bad_gateway(error)
-            }
-        })
+        .map_err(|error| classify_session_error(error))
 }
 
 async fn update_session_settings(
@@ -1062,6 +1026,48 @@ fn bad_gateway(message: String) -> (StatusCode, Json<ApiError>) {
         StatusCode::BAD_GATEWAY,
         Json(ApiError::new("provider_bridge_error", message)),
     )
+}
+
+/// Classify a session-layer failure into an HTTP status.
+///
+/// Everything non-path-policy used to collapse into 502
+/// `provider_bridge_error`, which reads as "the upstream agent broke" and
+/// invites a retry. Two of the classes here are not that: a caller error never
+/// succeeds on retry, and a conflict succeeds only once the state changes.
+/// Clients read `error.message`, so this changes semantics, not text.
+///
+/// Matching on message text is a stopgap — the session layer returns `String`
+/// errors. A typed error enum is the real fix; until then these markers are the
+/// exact phrases the session layer emits, and the fallback stays 502 so an
+/// unrecognized failure is never mislabelled as the caller's fault.
+const CALLER_ERROR_MARKERS: &[&str] = &[
+    "is not part of the source thread transcript",
+    "is required",
+    "unknown thread",
+];
+
+const CONFLICT_MARKERS: &[&str] = &["turn is in progress", "a review is in progress"];
+
+fn classify_session_error(message: String) -> (StatusCode, Json<ApiError>) {
+    if is_path_policy_error(&message) {
+        return bad_request(message);
+    }
+    if CONFLICT_MARKERS
+        .iter()
+        .any(|marker| message.contains(marker))
+    {
+        return (
+            StatusCode::CONFLICT,
+            Json(ApiError::new("session_conflict", message)),
+        );
+    }
+    if CALLER_ERROR_MARKERS
+        .iter()
+        .any(|marker| message.contains(marker))
+    {
+        return bad_request(message);
+    }
+    bad_gateway(message)
 }
 
 fn is_path_policy_error(message: &str) -> bool {

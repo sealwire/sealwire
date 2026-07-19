@@ -396,3 +396,45 @@ fn web_root_override_is_trimmed_and_blank_override_falls_through() {
     });
     assert!(matches!(blank, WebAssets::Embedded));
 }
+
+// Session endpoints mapped every non-path-policy failure to 502
+// `provider_bridge_error`, so a bad request body and a state conflict both
+// looked like the provider had failed. Clients read `error.message` so nothing
+// broke visibly, but the status was actively misleading: 502 invites a retry,
+// and these two are not retryable in the same way (a conflict clears when the
+// turn ends; a bad fork point never does).
+#[test]
+fn session_errors_are_classified_by_cause_not_lumped_into_502() {
+    // Caller supplied something that will never work: 400.
+    for message in [
+        "fork point item-9 is not part of the source thread transcript",
+        "source_thread_id is required",
+        "device_id is required",
+    ] {
+        let (status, _) = classify_session_error(message.to_string());
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{message} is a caller error"
+        );
+    }
+
+    // Transient state conflict — retryable once the state changes: 409.
+    for message in [
+        "cannot fork a thread while a turn is in progress",
+        "a review is in progress; wait for it to finish before changing the session",
+    ] {
+        let (status, _) = classify_session_error(message.to_string());
+        assert_eq!(status, StatusCode::CONFLICT, "{message} is a conflict");
+    }
+
+    // Path policy keeps its existing 400.
+    let (status, _) =
+        classify_session_error("/etc is outside this relay's allowed roots".to_string());
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Anything else is still attributed to the provider.
+    let (status, body) = classify_session_error("codex app-server exited".to_string());
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(body.0.error.code, "provider_bridge_error");
+}
