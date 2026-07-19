@@ -426,6 +426,20 @@ impl RelayState {
         if !is_acceptable_push_endpoint(&input.endpoint) {
             return Err("push endpoint must be a public https URL".to_string());
         }
+        // Idempotent no-op when this exact subscription is already stored. The
+        // client re-asserts its subscription on every load (the register action is
+        // fire-and-forget and can be lost in transit), so this keeps that reconcile
+        // free of spurious re-inserts / notify() broadcasts. A rotated key on the
+        // same endpoint differs here, so it still updates below.
+        if let Some(existing) = self.push_subscriptions.get(&device_id) {
+            if existing.iter().any(|s| {
+                s.endpoint == input.endpoint
+                    && s.p256dh == input.keys.p256dh
+                    && s.auth == input.keys.auth
+            }) {
+                return Ok(());
+            }
+        }
         let subscription = PushSubscription {
             endpoint: input.endpoint,
             p256dh: input.keys.p256dh,

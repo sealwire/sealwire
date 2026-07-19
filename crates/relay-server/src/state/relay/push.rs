@@ -1008,6 +1008,75 @@ mod tests {
     }
 
     #[test]
+    fn registering_identical_push_subscription_is_a_noop() {
+        // The client re-asserts its subscription to the relay on every load (the
+        // register action is fire-and-forget and can be lost), so an identical
+        // re-register must be free: no re-insert, no notify (no spurious
+        // broadcast/persist). A rotated key on the same endpoint must still update.
+        let (change_tx, rx) = tokio::sync::watch::channel(0_u64);
+        let mut relay = RelayState::new(
+            "/tmp/push-noop".to_string(),
+            change_tx,
+            crate::state::SecurityProfile::private(),
+        );
+        relay.paired_devices.insert(
+            "dev".to_string(),
+            crate::state::relay::device::PairedDevice {
+                device_id: "dev".to_string(),
+                label: "Dev".to_string(),
+                payload_secret: "secret".to_string(),
+                device_verify_key: "verify-key".to_string(),
+                created_at: 0,
+                last_seen_at: None,
+                last_peer_id: None,
+                broker_join_ticket_expires_at: None,
+                path_scope: Vec::new(),
+            },
+        );
+        let input = || PushSubscriptionInput {
+            endpoint: "https://push.example.com/e".to_string(),
+            keys: PushSubscriptionKeys {
+                p256dh: "p".to_string(),
+                auth: "a".to_string(),
+            },
+            device_id: Some("dev".to_string()),
+        };
+
+        relay.register_push_subscription(input()).unwrap();
+        let rev_after_first = *rx.borrow();
+
+        // Identical re-register: no notify, no duplicate.
+        relay.register_push_subscription(input()).unwrap();
+        assert_eq!(
+            *rx.borrow(),
+            rev_after_first,
+            "identical re-register must not bump the revision / notify"
+        );
+        assert_eq!(
+            relay.push_subscriptions.get("dev").map(|v| v.len()),
+            Some(1),
+            "identical re-register must not create a duplicate"
+        );
+
+        // Same endpoint, rotated keys: must still update (and notify).
+        relay
+            .register_push_subscription(PushSubscriptionInput {
+                endpoint: "https://push.example.com/e".to_string(),
+                keys: PushSubscriptionKeys {
+                    p256dh: "p2".to_string(),
+                    auth: "a2".to_string(),
+                },
+                device_id: Some("dev".to_string()),
+            })
+            .unwrap();
+        assert_ne!(
+            *rx.borrow(),
+            rev_after_first,
+            "a rotated key on the same endpoint must still update / notify"
+        );
+    }
+
+    #[test]
     fn vapid_keygen_roundtrips() {
         let dir = std::env::temp_dir().join(format!("vapid-test-{}", std::process::id()));
         let path = dir.join("vapid.key");

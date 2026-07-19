@@ -1154,13 +1154,21 @@ function RemoteApp() {
     }
     void (async () => {
       const registration = await resolvePushRegistration();
-      const active = await hasActiveSubscription(registration);
-      if (active) {
+      // Always (re-)assert the subscription to the relay. The browser subscription
+      // persists across reloads, but the relay may have missed the original
+      // register (it's fire-and-forget and can be lost in transit).
+      // ensurePushSubscription reuses the existing browser subscription, and the
+      // relay dedups an identical register, so this reconcile is idempotent and
+      // cheap — one request per load, and the relay no-ops when nothing changed.
+      const result = await ensurePushSubscription({ vapidPublicKey, registration });
+      if (result?.ok) {
         remoteUiStore.getState().setPushSubscribed(true);
         return;
       }
-      const result = await ensurePushSubscription({ vapidPublicKey, registration });
-      remoteUiStore.getState().setPushSubscribed(Boolean(result?.ok));
+      // The re-assert failed (e.g. offline). Still reflect an existing browser
+      // subscription so the status isn't misleading; it re-asserts on the next load.
+      const active = await hasActiveSubscription(registration);
+      remoteUiStore.getState().setPushSubscribed(active);
     })();
   }, [vapidPublicKey, remoteUi.pushSupported, remoteUi.pushPermission, remoteUiStore]);
 
