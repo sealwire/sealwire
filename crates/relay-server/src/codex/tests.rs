@@ -2711,3 +2711,18 @@ fn is_thread_not_loaded_error_matches_only_the_not_loaded_failure() {
         "thread '019f6c95' was not found on any provider"
     ));
 }
+
+// Calls the SHIPPED bridge rather than comparing constants to literals:
+// removing the override must fail here. Codex `thread/fork` is tip-only, and
+// fork_thread returns Ok(None) for a mid-thread branch — the capability has to
+// say so or the UI labels that replay as a native fork.
+#[tokio::test]
+async fn the_codex_bridge_declares_the_capability_it_implements() {
+    let (bridge, _state) = spawn_fake_codex_bridge().await;
+    let capability = crate::provider::ProviderBridge::fork_capability(&bridge);
+    assert!(capability.native_fork, "codex implements thread/fork");
+    assert!(
+        !capability.native_fork_at_message,
+        "thread/fork always branches at the tip"
+    );
+}

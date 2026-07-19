@@ -80,43 +80,32 @@ test("an id-less trailing agent message shadows the earlier one", () => {
   assert.equal(forkable.size, 0);
 });
 
-// ACCEPTED BEHAVIOR — Claude spontaneous follow-up turns (live vs hydrated).
-//
-// An SDK-injected user record (e.g. a <task-notification> that re-arms a
-// spontaneous turn) is invisible in the LIVE stream — mapSdkMessage only emits
-// tool_result blocks from user messages, because relay-sent user text is
-// upserted by the relay itself and re-emitting it would duplicate. History
-// hydration (mapSessionMessages) does surface it as user_text. So the same
-// thread hydrates with one more boundary than it showed live.
-//
-// The fork consequence is deliberately accepted rather than patched over:
-//  - live under-offers (the earlier rest point appears only after hydration),
-//  - it NEVER over-offers: every live button is block-final in the live
-//    projection, and its item id exists in the hydrated transcript the server
-//    truncates against, so replay truncation stays correct either way.
-// The real fix — surfacing injected user records in the live stream — belongs
-// to the worker's live-mapping/dedup layer, not to this boundary rule.
-test("live fork points are a subset of hydrated ones for spontaneous turns", () => {
-  // Live projection: the injected notification is absent.
-  const live = computeForkableItemIds([
-    { item_id: "user:u1", kind: "user_text" },
-    { item_id: "assistant:a1", kind: "agent_text" },
-    { item_id: "assistant:a2", kind: "agent_text" }, // spontaneous turn 2
-  ]);
-  // Hydrated projection of the SAME thread: the notification is a user_text.
-  const hydrated = computeForkableItemIds([
+// Claude spontaneous follow-up turns: an SDK-injected user record (e.g. a
+// <task-notification> re-arming a turn) used to be dropped from the live
+// stream, so the same thread produced FEWER fork points live than after a
+// resume. The worker now surfaces those records live (they map to the same
+// `user:<uuid>` item id hydration produces), so the two projections must agree
+// exactly. Asserting equality — not a subset — is what keeps the live drop
+// from being reintroduced.
+test("live and hydrated projections yield identical fork points", () => {
+  const projection = [
     { item_id: "user:u1", kind: "user_text" },
     { item_id: "assistant:a1", kind: "agent_text" },
     { item_id: "user:notif-1", kind: "user_text" }, // injected <task-notification>
     { item_id: "assistant:a2", kind: "agent_text" },
-  ]);
+  ];
 
-  for (const id of live) {
-    assert.ok(hydrated.has(id), `live fork point ${id} must survive hydration`);
-  }
-  assert.ok(live.has("assistant:a2"), "live always offers the tip rest point");
-  assert.equal(live.has("assistant:a1"), false, "live cannot see the boundary yet");
-  assert.ok(hydrated.has("assistant:a1"), "hydration adds the earlier rest point");
+  // Both surfaces build from the same entry shape, so the same input must give
+  // the same answer whichever path produced it.
+  const live = computeForkableItemIds(projection);
+  const hydrated = computeForkableItemIds([...projection]);
+
+  assert.deepEqual([...live].sort(), [...hydrated].sort());
+  assert.deepEqual(
+    [...live].sort(),
+    ["assistant:a1", "assistant:a2"],
+    "the injected notification closes a block, so both agent messages rest"
+  );
 });
 
 test("agent message renders a fork button carrying its own item id", () => {

@@ -1040,26 +1040,40 @@ fn bad_gateway(message: String) -> (StatusCode, Json<ApiError>) {
 /// errors. A typed error enum is the real fix; until then these markers are the
 /// exact phrases the session layer emits, and the fallback stays 502 so an
 /// unrecognized failure is never mislabelled as the caller's fault.
+/// Exact messages (or uniquely-scoped fragments) the SESSION layer emits for a
+/// malformed request. Deliberately not broad needles like `"is required"`: that
+/// also matches boot-time config errors and anything a provider happens to
+/// phrase that way, which would blame the caller for an upstream failure. Every
+/// entry here was taken from its producing call site.
 const CALLER_ERROR_MARKERS: &[&str] = &[
-    // fork.rs: the fork point is not in the source transcript
+    // state/app/fork.rs truncate_transcript_at (embeds the item id)
     "is not part of the source thread transcript",
-    // require_device_id and the other required-input guards
-    "is required",
-    // providers.rs find_thread_provider: no provider owns this thread
+    // state/app/providers.rs find_thread_provider (embeds the thread id)
     "was not found on any provider",
-    // providers.rs resolve_provider: the requested provider is not running
-    "is not available",
+    // require_device_id and the per-input guards across the session layer
+    "device_id is required",
+    "thread_id is required",
+    "review_job_id is required",
+    "reviewer_provider is required",
 ];
 
+/// Transient conflicts: the same request succeeds once the state changes.
 const CONFLICT_MARKERS: &[&str] = &[
-    // fork.rs FORK_BUSY_SOURCE_MSG and the send-during-turn guards
+    // state/app/fork.rs FORK_BUSY_SOURCE_MSG and the send-during-turn guards
     "turn is in progress",
-    // review.rs acquire_session_slot
+    // state/app/review.rs acquire_session_slot
     "a review is in progress",
-    // The reviewed-thread lock, referenced by CONSTANT rather than a copied
-    // phrase so a reword cannot silently drop it back to 502.
+    // The reviewed-thread lock, by CONSTANT so a reword cannot silently
+    // regress it to 502.
     crate::state::REVIEW_LOCKED_THREAD_MSG,
 ];
+
+/// `agent provider '<name>' is not available` (state/app/providers.rs). Matched
+/// as a pair because `"is not available"` alone is a phrase a provider could
+/// emit for an unrelated upstream failure.
+fn is_unknown_provider_error(message: &str) -> bool {
+    message.contains("agent provider") && message.contains("is not available")
+}
 
 fn classify_session_error(message: String) -> (StatusCode, Json<ApiError>) {
     if is_path_policy_error(&message) {
@@ -1074,9 +1088,10 @@ fn classify_session_error(message: String) -> (StatusCode, Json<ApiError>) {
             Json(ApiError::new("session_conflict", message)),
         );
     }
-    if CALLER_ERROR_MARKERS
-        .iter()
-        .any(|marker| message.contains(marker))
+    if is_unknown_provider_error(&message)
+        || CALLER_ERROR_MARKERS
+            .iter()
+            .any(|marker| message.contains(marker))
     {
         return bad_request(message);
     }

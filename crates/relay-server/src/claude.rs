@@ -2626,6 +2626,23 @@ mod tests {
         );
     }
 
+    // Calls the SHIPPED bridge rather than comparing constants to literals:
+    // removing the override must fail here. The capability must agree with
+    // fork_thread — claiming native while replaying makes the UI tell the user
+    // context was preserved when it was not.
+    #[tokio::test]
+    async fn the_claude_bridge_declares_the_capability_it_implements() {
+        let Some((bridge, _state)) = spawn_fake_bridge().await else {
+            return;
+        };
+        let capability = ProviderBridge::fork_capability(&bridge);
+        assert!(capability.native_fork, "claude implements fork_thread");
+        assert!(
+            capability.native_fork_at_message,
+            "the SDK fork takes upToMessageId"
+        );
+    }
+
     #[tokio::test]
     async fn fork_thread_on_a_pending_thread_falls_back_to_replay() {
         // A `claude-pending-…` thread has no SDK session yet, so there is

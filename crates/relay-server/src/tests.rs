@@ -449,7 +449,19 @@ fn session_errors_are_classified_by_cause_not_lumped_into_502() {
 
     // Anything unrecognized is still attributed to the provider — the safe
     // fallback, so an unknown failure is never blamed on the caller.
-    let (status, body) = classify_session_error("codex app-server exited".to_string());
-    assert_eq!(status, StatusCode::BAD_GATEWAY);
-    assert_eq!(body.0.error.code, "provider_bridge_error");
+    for message in [
+        "codex app-server exited",
+        // Broad needles would have caught these: an upstream failure that
+        // happens to be phrased like a caller error must NOT become a 400.
+        "codex: model is required for this request",
+        "the requested tool is not available in this workspace",
+    ] {
+        let (status, body) = classify_session_error(message.to_string());
+        assert_eq!(
+            status,
+            StatusCode::BAD_GATEWAY,
+            "{message} is an upstream failure"
+        );
+        assert_eq!(body.0.error.code, "provider_bridge_error");
+    }
 }

@@ -3722,28 +3722,6 @@ mod path_scope_tests {
         }
     }
 
-    // The real bridges must not drift from what they actually implement.
-    #[test]
-    fn shipped_bridges_declare_the_capability_they_implement() {
-        use crate::provider::ProviderForkCapability;
-        // Codex `thread/fork` is tip-only; the Claude SDK takes upToMessageId.
-        assert_eq!(
-            ProviderForkCapability::NATIVE_TIP_ONLY,
-            ProviderForkCapability {
-                native_fork: true,
-                native_fork_at_message: false,
-            }
-        );
-        assert_eq!(
-            ProviderForkCapability::NATIVE_AT_MESSAGE,
-            ProviderForkCapability {
-                native_fork: true,
-                native_fork_at_message: true,
-            }
-        );
-        assert!(!ProviderForkCapability::REPLAY_ONLY.native_fork);
-    }
-
     #[tokio::test]
     async fn fork_session_accepts_a_saved_thread_reported_as_not_loaded() {
         let project = TempDir::new().expect("project tempdir");
