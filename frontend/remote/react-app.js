@@ -85,10 +85,10 @@ import {
 } from "./remote-runtime.js";
 import { getRemoteServiceWorkerRegistration } from "./pwa.js";
 import {
-  disablePushSubscription,
   ensurePushSubscription,
   hasActiveSubscription,
 } from "./push-subscribe.js";
+import { remoteNotificationsHint, shouldAutoSubscribe } from "./notifications-view.js";
 import {
   fetchTranscriptEntryDetail as fetchRemoteTranscriptEntryDetail,
   fetchRemoteReviews,
@@ -1100,15 +1100,26 @@ function RemoteApp() {
   async function handleResumeThread(threadId) {
     closeRemoteNavigation();
     // Opening a thread clears its attention dot; treat the click as the user
-    // gesture that unlocks notification permission for later events.
+    // gesture that unlocks notification permission for later events. Store the
+    // result so the auto-enroll effect can react to a grant made here (e.g. after
+    // the user dismissed the prompt during pairing).
     threadAttention.clear(threadId);
-    void ensureNotificationPermission();
+    void requestAndStorePermission();
     await handlers.onViewThread?.(threadId);
   }
 
   // VAPID public key arrives on the session snapshot (null until the server
   // advertises it). The push subscription manager needs it for `subscribe`.
   const vapidPublicKey = session?.push_vapid_public_key || null;
+
+  // Centralize permission requests so every gesture path (pairing, thread-open)
+  // writes the result into the store. The auto-enroll effect keys off
+  // `pushPermission`, so a grant that isn't stored would never trigger subscribe.
+  async function requestAndStorePermission() {
+    const permission = await ensureNotificationPermission();
+    remoteUiStore.getState().setPushPermission(permission);
+    return permission;
+  }
 
   async function resolvePushRegistration() {
     const captured = getRemoteServiceWorkerRegistration();
@@ -1125,55 +1136,33 @@ function RemoteApp() {
     return null;
   }
 
-  async function handleEnablePush() {
-    // iOS rule: the permission prompt must be the first awaited call inside the
-    // user-gesture handler, so request it before any other async work.
-    const permission = await ensureNotificationPermission();
-    remoteUiStore.getState().setPushPermission(permission);
-    if (permission !== "granted") {
-      return;
-    }
-    remoteUiStore.getState().setPushBusy(true);
-    try {
-      const registration = await resolvePushRegistration();
-      const result = await ensurePushSubscription({
-        vapidPublicKey,
-        registration,
-      });
-      remoteUiStore.getState().setPushSubscribed(Boolean(result?.ok));
-    } finally {
-      remoteUiStore.getState().setPushBusy(false);
-    }
-  }
-
-  async function handleDisablePush() {
-    remoteUiStore.getState().setPushBusy(true);
-    try {
-      const registration = await resolvePushRegistration();
-      const result = await disablePushSubscription({ registration });
-      // Only flip the toggle off if the unsubscribe actually succeeded —
-      // otherwise the device is still subscribed and the UI must reflect that.
-      if (result?.ok) {
-        remoteUiStore.getState().setPushSubscribed(false);
-      }
-    } finally {
-      remoteUiStore.getState().setPushBusy(false);
-    }
-  }
-
-  // Reconcile the toggle with the actual browser subscription on load. A push
-  // subscription persists in the SW across reloads, so the stored default
-  // (`pushSubscribed: false`) would otherwise show "Enable" for a subscribed user.
+  // Auto-enroll: once notification permission is granted (typically the moment
+  // the user pairs this device) and the relay has advertised a VAPID key, this
+  // device subscribes on its own — there is no in-app "Enable"/"Disable"; the
+  // browser permission is the on/off switch. Also reconciles the state on load,
+  // since a push subscription persists in the SW across reloads. Re-runs when the
+  // VAPID key arrives or the permission flips (set at pairing / thread-open).
   useEffect(() => {
-    if (notificationPermission() !== "granted") {
+    if (
+      !shouldAutoSubscribe({
+        supported: remoteUi.pushSupported,
+        hasVapidKey: Boolean(vapidPublicKey),
+        permissionGranted: notificationPermission() === "granted",
+      })
+    ) {
       return;
     }
     void (async () => {
       const registration = await resolvePushRegistration();
       const active = await hasActiveSubscription(registration);
-      remoteUiStore.getState().setPushSubscribed(active);
+      if (active) {
+        remoteUiStore.getState().setPushSubscribed(true);
+        return;
+      }
+      const result = await ensurePushSubscription({ vapidPublicKey, registration });
+      remoteUiStore.getState().setPushSubscribed(Boolean(result?.ok));
     })();
-  }, [remoteUiStore]);
+  }, [vapidPublicKey, remoteUi.pushSupported, remoteUi.pushPermission, remoteUiStore]);
 
   // Re-register the subscription when the SW reports the push subscription
   // changed (browser-rotated endpoint). Permission must already be granted.
@@ -1343,6 +1332,12 @@ function RemoteApp() {
   }
 
   async function handleBeginPairing(rawValue) {
+    // Fold notification opt-in into pairing so there's no separate "Enable" step.
+    // The browser permission prompt must be the first awaited call in the gesture
+    // (iOS rule), so request it before the pairing round-trip. Actual push
+    // subscription then happens automatically once the device is paired and
+    // permission is granted (see the auto-subscribe effect below).
+    await requestAndStorePermission();
     const started = await handlers.onBeginPairing(rawValue, remoteUi.deviceLabelDraft);
     if (started) {
       remoteUiStore.getState().setPairingModalOpen(false);
@@ -1590,11 +1585,8 @@ function RemoteApp() {
         supported: remoteUi.pushSupported,
         permission: remoteUi.pushPermission,
         subscribed: remoteUi.pushSubscribed,
-        busy: remoteUi.pushBusy,
         hasVapidKey: Boolean(vapidPublicKey),
       },
-      onEnablePush: handleEnablePush,
-      onDisablePush: handleDisablePush,
     })
   );
 }
@@ -2583,8 +2575,6 @@ function RemoteInfoModal({
   sessionMetaModel,
   sessionPath,
   pushModel,
-  onEnablePush,
-  onDisablePush,
 }) {
   return h(
     ManagedDialog,
@@ -2620,8 +2610,6 @@ function RemoteInfoModal({
       ),
       h(RemoteNotificationsSection, {
         pushModel,
-        onEnablePush,
-        onDisablePush,
       }),
       h(
         "section",
@@ -2637,57 +2625,16 @@ function RemoteInfoModal({
   );
 }
 
-function RemoteNotificationsSection({ pushModel, onEnablePush, onDisablePush }) {
-  const model = pushModel || {};
-  const supported = Boolean(model.supported);
-  const hasVapidKey = Boolean(model.hasVapidKey);
-  const denied = model.permission === "denied";
-  const subscribed = Boolean(model.subscribed);
-  const busy = Boolean(model.busy);
-
-  // The control is actionable only when push is supported, a VAPID key has been
-  // advertised by the relay, and the user has not blocked notifications.
-  const disabled = busy || !supported || !hasVapidKey || denied;
-
-  let hint = null;
-  if (!supported) {
-    hint = "Requires HTTPS / iOS 16.4+ installed to Home Screen.";
-  } else if (denied) {
-    hint = "Notifications are blocked in your browser settings.";
-  } else if (!hasVapidKey) {
-    hint = "Push isn't available on this relay yet.";
-  } else if (subscribed) {
-    hint = "You'll get push alerts when threads need input or finish, even when the app is closed.";
-  }
-
-  const buttonLabel = busy
-    ? "Working\u2026"
-    : subscribed
-      ? "Disable notifications"
-      : "Enable notifications";
+function RemoteNotificationsSection({ pushModel }) {
+  // Purely informational: enrollment rides device pairing and the browser's own
+  // notification permission is the on/off switch, so there's no in-app control.
+  const hint = remoteNotificationsHint(pushModel || {});
 
   return h(
     "section",
     { className: "details-section" },
     h("h3", { className: "details-heading" }, "Notifications"),
-    h(
-      "button",
-      {
-        className: "secondary-button",
-        disabled,
-        id: "remote-push-toggle",
-        onClick() {
-          if (subscribed) {
-            void onDisablePush?.();
-          } else {
-            void onEnablePush?.();
-          }
-        },
-        type: "button",
-      },
-      buttonLabel
-    ),
-    hint ? h("p", { className: "details-hint" }, hint) : null
+    hint ? h("p", { className: "details-hint", id: "remote-push-status" }, hint) : null
   );
 }
 

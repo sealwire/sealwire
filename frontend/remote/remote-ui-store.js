@@ -51,7 +51,6 @@ export function createRemoteUiStore(initialState = {}) {
     pushSupported: pushSupported(),
     pushPermission: notificationPermission(),
     pushSubscribed: false,
-    pushBusy: false,
     sendPending: false,
     sessionDraft: createDefaultSessionDraft(),
     sessionPanelOpen: false,
@@ -155,11 +154,6 @@ export function createRemoteUiStore(initialState = {}) {
     setPushSubscribed(value) {
       set({
         pushSubscribed: Boolean(value),
-      });
-    },
-    setPushBusy(value) {
-      set({
-        pushBusy: Boolean(value),
       });
     },
     setSendPending(value) {
