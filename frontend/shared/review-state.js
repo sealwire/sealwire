@@ -1,4 +1,5 @@
 import { providerOptions } from "./provider-settings.js";
+import { isWorkingThreadStatus } from "./thread-status.js";
 
 const REVIEW_STATUS_LABELS = {
   pending_parent_recap: "Recapping changes",
@@ -173,31 +174,14 @@ export function selectReviewerCatalogState({
   return { models: reviewerModels, modelsStatus, needsLoad };
 }
 
-// Provider-reported statuses that mean a turn is actively in flight. Mirror of the
-// backend `thread_status_is_working` (state/relay.rs): the NOT-working set is empty /
-// `idle` / `viewing` / `completed` / `unknown`. The last two matter because providers
-// disagree on an idle word — Claude hardcodes `idle`, but a saved Codex thread reports
-// `unknown` (a `thread/list` summary with no live status) — so a literal `=== "idle"`
-// test wrongly disabled the CTA for not-running Codex threads.
-// `notloaded` is Codex's status for a saved thread the app-server has not
-// opened — the most idle state there is. It was missing here for the same
-// reason `unknown` once was.
-const NOT_WORKING_STATUSES = new Set([
-  "",
-  "idle",
-  "viewing",
-  "completed",
-  "unknown",
-  "notloaded",
-]);
-
-// `.toLowerCase()` is defensive: today every provider status is already lowercase
-// (Codex `status.type`, Claude hardcodes "idle"), so this never diverges from the
-// backend `thread_status_is_working` (which only trims). The BACKEND is authoritative —
-// this gate only governs UI affordances; a mismatch would at worst enable a control the
-// server then rejects, never the reverse.
+// Mirror of the backend `thread_status_is_working` (state/relay.rs). The status
+// vocabulary and its normalization live in shared/thread-status.js — providers
+// disagree on an idle word (Claude `idle`, Codex `notLoaded`/`unknown`) and a
+// literal `=== "idle"` test wrongly disabled the CTA for not-running Codex
+// threads. The BACKEND is authoritative; this gate only governs UI affordances,
+// so a mismatch would at worst enable a control the server then rejects.
 export function isAgentStatusWorking(status) {
-  return !NOT_WORKING_STATUSES.has((status || "").trim().toLowerCase());
+  return isWorkingThreadStatus(status);
 }
 
 // Whether a specific thread is busy (mid-turn / working) per the snapshot. The ACTIVE

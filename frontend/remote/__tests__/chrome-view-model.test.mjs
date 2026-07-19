@@ -410,3 +410,49 @@ test("selectStatusBadgeRenderModel shows disconnected server state", () => {
     { label: "Server disconnected", tone: "offline" }
   );
 });
+
+// The user-visible regression behind the `notLoaded` status bug: a saved Codex
+// thread (view-only, no turn in flight) read as "working", so the remote surface
+// claimed a background thread was running and offered Stop / Take-over that the
+// backend then rejects with "no running turn".
+test("a view-only Codex thread reported as notLoaded shows no running banner", () => {
+  const state = {
+    remoteAuth: { deviceId: "device-1" },
+    socketConnected: true,
+  };
+  const session = {
+    active_thread_id: "thread-saved",
+    active_turn_id: null,
+    active_controller_device_id: "__view_only__",
+    view_only: true,
+    current_status: "notLoaded", // exactly what Codex sends
+    pending_approvals: [],
+    provider_connected: true,
+  };
+
+  const model = selectSessionChromeRenderModel(state, session);
+
+  assert.equal(model.controlBanner.summary === "Background thread is running", false);
+  assert.equal(model.agentWorkingIndicator.hidden, true, "no working indicator");
+});
+
+test("a view-only thread that IS running still shows the banner", () => {
+  const state = {
+    remoteAuth: { deviceId: "device-1" },
+    socketConnected: true,
+  };
+  const session = {
+    active_thread_id: "thread-bg",
+    active_turn_id: "turn-7",
+    active_controller_device_id: "__view_only__",
+    view_only: true,
+    current_status: "active",
+    pending_approvals: [],
+    provider_connected: true,
+  };
+
+  const model = selectSessionChromeRenderModel(state, session);
+
+  assert.equal(model.controlBanner.summary, "Background thread is running");
+  assert.equal(model.controlBanner.hidden, false);
+});

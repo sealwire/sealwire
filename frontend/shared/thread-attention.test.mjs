@@ -305,3 +305,29 @@ test("snapshotMap returns an independent copy", () => {
   map.delete("b");
   assert.equal(tracker.kindFor("b"), "completed");
 });
+
+// Codex sends camelCase `notLoaded` for a saved thread the app-server has not
+// opened. This predicate compared the raw string against a lowercase set, so
+// the real value never matched and every saved Codex thread read as working —
+// surfacing a bogus "Background thread is running" banner plus Stop/Take-over
+// controls the backend then rejects.
+test("statusIsWorking normalizes provider casing (Codex notLoaded)", () => {
+  assert.equal(statusIsWorking("notLoaded"), false, "the value Codex actually sends");
+  assert.equal(statusIsWorking("notloaded"), false);
+  assert.equal(statusIsWorking("  notLoaded  "), false, "and is whitespace tolerant");
+  assert.equal(statusIsWorking("IDLE"), false, "casing is formatting, not semantics");
+  // Genuinely working statuses must stay working.
+  assert.equal(statusIsWorking("active"), true);
+});
+
+test("sessionIsWorking is false for a saved Codex thread with no turn", () => {
+  assert.equal(
+    sessionIsWorking(snapshot({ current_status: "notLoaded", active_turn_id: null })),
+    false
+  );
+  // An in-flight turn still wins regardless of the status word.
+  assert.equal(
+    sessionIsWorking(snapshot({ current_status: "notLoaded", active_turn_id: "turn-1" })),
+    true
+  );
+});

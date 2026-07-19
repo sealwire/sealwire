@@ -1,3 +1,5 @@
+import { isWorkingThreadStatus } from "./thread-status.js";
+
 /**
  * Client-side "needs attention" tracker for threads.
  *
@@ -28,20 +30,10 @@
 // saved-but-not-running Codex thread parses to `unknown`, Claude reports
 // `completed`); classifying them as working made saved threads look busy
 // forever and showed a Stop/Take-over the backend then rejects with "no running
-// turn". Keep this set in lockstep with `thread_status_is_working` (relay.rs).
-// Mirrors `thread_status_is_working` (state/relay.rs); `notloaded` is Codex's
-// saved-thread status and must not read as working.
-const NON_WORKING_STATUSES = new Set([
-  "",
-  "idle",
-  "viewing",
-  "completed",
-  "unknown",
-  "notloaded",
-]);
-
+// turn". The vocabulary itself lives in shared/thread-status.js so this cannot
+// drift from the backend (or from the other frontend predicates) again.
 export function statusIsWorking(status) {
-  return typeof status === "string" && !NON_WORKING_STATUSES.has(status);
+  return isWorkingThreadStatus(status);
 }
 
 // Single source of truth for "is this thread working?", mirroring

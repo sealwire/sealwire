@@ -1,3 +1,5 @@
+import { isWorkingThreadStatus } from "./thread-status.js";
+
 // Fork dialog field model, shared by the local and remote surfaces.
 //
 // The important rule here: a field the user did not explicitly choose is sent
@@ -107,23 +109,12 @@ export function canForkInSession(session) {
 // so the affordance matches the server invariant: gating only on "is the
 // ACTIVE thread running" lets a background thread mid-turn open the dialog and
 // fail on submit. Keep the non-working set in sync with the Rust one.
-// Keep in sync with `thread_status_is_working` in state/relay.rs. `notloaded`
-// is Codex's status for a saved thread the app-server has not opened — the most
-// idle state there is; classifying it as working made the client refuse to even
-// open the fork dialog for any saved Codex thread.
-const NON_WORKING_STATUSES = new Set([
-  "",
-  "idle",
-  "viewing",
-  "completed",
-  "unknown",
-  "notloaded",
-]);
+
 
 export function threadIsBusyForFork(thread, session = null) {
   if (!thread?.id) return false;
   if (session?.active_thread_id === thread.id && session?.active_turn_id) return true;
-  return !NON_WORKING_STATUSES.has(String(thread.status || "").trim().toLowerCase());
+  return isWorkingThreadStatus(thread.status);
 }
 
 // Whether the fork will go through transcript replay (lossy) instead of a
