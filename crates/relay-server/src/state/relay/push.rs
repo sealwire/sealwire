@@ -880,6 +880,133 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn dispatcher_skips_subscription_when_device_revoked_mid_batch() {
+        use std::collections::HashSet;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Mutex;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // One paired device with TWO subscriptions. Vec order within a device is
+        // deterministic (unlike two devices in a HashMap), so "/s1" is always sent
+        // before "/s2". A local push server revokes the device the instant it
+        // receives the first push — i.e. after the dispatcher has already cloned
+        // both subscriptions, but before the second send. Without the per-send
+        // pairing re-check the dispatcher would still deliver "/s2"; with it, the
+        // second send is skipped and the server only ever sees "/s1".
+        let (change_tx, _rx) = tokio::sync::watch::channel(0_u64);
+        let relay = Arc::new(RwLock::new(RelayState::new(
+            "/tmp/push-race".to_string(),
+            change_tx,
+            crate::state::SecurityProfile::private(),
+        )));
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+        let revoked = Arc::new(AtomicBool::new(false));
+        {
+            let seen = seen.clone();
+            let revoked = revoked.clone();
+            let relay = relay.clone();
+            tokio::spawn(async move {
+                while let Ok((mut sock, _)) = listener.accept().await {
+                    let seen = seen.clone();
+                    let revoked = revoked.clone();
+                    let relay = relay.clone();
+                    tokio::spawn(async move {
+                        let mut buf = [0u8; 4096];
+                        while let Ok(n) = sock.read(&mut buf).await {
+                            if n == 0 {
+                                break;
+                            }
+                            let chunk = &buf[..n];
+                            let mut got = false;
+                            if chunk.windows(3).any(|w| w == b"/s1") {
+                                seen.lock().unwrap().insert("s1".to_string());
+                                got = true;
+                            }
+                            if chunk.windows(3).any(|w| w == b"/s2") {
+                                seen.lock().unwrap().insert("s2".to_string());
+                                got = true;
+                            }
+                            if !got {
+                                continue;
+                            }
+                            // First push received: revoke the device mid-batch.
+                            if !revoked.swap(true, Ordering::SeqCst) {
+                                relay.write().await.revoke_paired_device("phone", 1);
+                            }
+                            let _ = sock
+                                .write_all(b"HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n")
+                                .await;
+                            let _ = sock.flush().await;
+                        }
+                    });
+                }
+            });
+        }
+
+        // A real P-256 receiver key so send_one encrypts and actually POSTs.
+        let recv = SecretKey::random(&mut OsRng);
+        let p256dh = URL_SAFE_NO_PAD.encode(recv.public_key().to_encoded_point(false).as_bytes());
+        let mut auth = [0u8; 16];
+        OsRng.fill_bytes(&mut auth);
+        let auth = URL_SAFE_NO_PAD.encode(auth);
+        let sub = |path: &str| PushSubscription {
+            endpoint: format!("http://{addr}/{path}"),
+            p256dh: p256dh.clone(),
+            auth: auth.clone(),
+            device_id: "phone".to_string(),
+            created_at: 0,
+        };
+
+        {
+            let mut guard = relay.write().await;
+            guard.paired_devices.insert(
+                "phone".to_string(),
+                crate::state::relay::device::PairedDevice {
+                    device_id: "phone".to_string(),
+                    label: "Phone".to_string(),
+                    payload_secret: "secret".to_string(),
+                    device_verify_key: "verify-key".to_string(),
+                    created_at: 0,
+                    last_seen_at: None,
+                    last_peer_id: None,
+                    broker_join_ticket_expires_at: None,
+                    path_scope: Vec::new(),
+                },
+            );
+            guard
+                .push_subscriptions
+                .insert("phone".to_string(), vec![sub("s1"), sub("s2")]);
+        }
+
+        let dir = std::env::temp_dir().join(format!("vapid-race-{}", std::process::id()));
+        let path = dir.join("vapid.key");
+        let _ = std::fs::remove_dir_all(&dir);
+        let vapid = load_or_generate_vapid(&path).expect("vapid");
+        let dispatcher = PushDispatcher {
+            relay: relay.clone(),
+            http: build_push_client(),
+            vapid,
+        };
+        dispatcher
+            .handle(PushJob::new(PushKind::NeedsInput, "t1"))
+            .await;
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let seen = seen.lock().unwrap().clone();
+        assert!(
+            seen.contains("s1"),
+            "the first subscription should have been delivered"
+        );
+        assert!(
+            !seen.contains("s2"),
+            "the second subscription must be skipped once the device is revoked mid-batch (saw {seen:?})"
+        );
+    }
+
     #[test]
     fn vapid_keygen_roundtrips() {
         let dir = std::env::temp_dir().join(format!("vapid-test-{}", std::process::id()));
