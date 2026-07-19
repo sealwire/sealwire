@@ -17,11 +17,11 @@ pub use self::app::{AppState, ApprovalError, AskUserAnswerError};
 #[cfg(test)]
 use self::relay::TranscriptRecord;
 pub(crate) use self::relay::{
-    parse_ask_user_questions, ApprovalKind, BrokerPendingMessage, CachedRemoteActionResult,
-    ClaimChallenge, CompletedRemoteClaim, DeviceRecord, IssuedClaimChallenge, PairedDevice,
-    PendingApproval, PendingAskUserQuestion, PendingPairingResult, PendingTranscriptDelta,
-    RelayState, RemoteActionReplayDecision, ReviewerThread, ThreadSessionSettings,
-    TranscriptDeltaKind, MAX_REVIEWERS_PER_PARENT,
+    parse_ask_user_questions, thread_status_is_working, ApprovalKind, BrokerPendingMessage,
+    CachedRemoteActionResult, ClaimChallenge, CompletedRemoteClaim, DeviceRecord,
+    IssuedClaimChallenge, PairedDevice, PendingApproval, PendingAskUserQuestion,
+    PendingPairingResult, PendingTranscriptDelta, RelayState, RemoteActionReplayDecision,
+    ReviewerThread, ThreadSessionSettings, TranscriptDeltaKind, MAX_REVIEWERS_PER_PARENT,
 };
 pub(crate) use self::review::{
     parent_fix_prompt, parent_recap_prompt, parse_verdict, post_back_message, re_review_prompt,

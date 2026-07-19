@@ -15,8 +15,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { rm, writeFile } from "node:fs/promises";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WORKER = path.join(HERE, "worker.mjs");
@@ -666,5 +668,142 @@ test("a spontaneous turn whose only message is its terminal is still announced",
     );
   } finally {
     await worker.close();
+  }
+});
+
+// --- native session forking --------------------------------------------------
+//
+// A claude_code -> claude_code fork must reach the SDK's real `forkSession`
+// (which copies the transcript into a new session file, remapping uuids). If the
+// worker has no `fork_session` command the Rust bridge cannot fork natively and
+// every claude fork silently degrades to a lossy truncated-text replay — the bug
+// these tests pin down.
+
+const isResponse = (id) => (event) => event.type === "response" && event.id === id;
+
+test("fork_session returns a new provider_session_id distinct from the source", async () => {
+  const worker = spawnWorker();
+  try {
+    worker.send(START_DEFAULT);
+    await worker.waitFor(isStarted("sess-1"), { label: "session_started" });
+    await worker.waitFor(isDone, { label: "done" });
+
+    worker.send({
+      type: "fork_session",
+      id: "fork-1",
+      provider_session_id: "sess-1",
+      cwd: "/tmp",
+    });
+    const response = await worker.waitFor(isResponse("fork-1"), { label: "fork response" });
+    assert.equal(response.ok, true, `fork_session must succeed: ${JSON.stringify(response)}`);
+    assert.ok(
+      response.result?.provider_session_id,
+      "the fork must report the new session id under provider_session_id",
+    );
+    assert.notEqual(
+      response.result.provider_session_id,
+      "sess-1",
+      "a fork must be a NEW session, never an alias of the source",
+    );
+  } finally {
+    await worker.close();
+  }
+});
+
+test("fork_session forwards up_to_message_id to the SDK as upToMessageId", async () => {
+  const worker = spawnWorker();
+  try {
+    worker.send(START_DEFAULT);
+    await worker.waitFor(isStarted("sess-1"), { label: "session_started" });
+    await worker.waitFor(isDone, { label: "done" });
+
+    worker.send({
+      type: "fork_session",
+      id: "fork-2",
+      provider_session_id: "sess-1",
+      cwd: "/work/dir",
+      up_to_message_id: "11111111-2222-4333-8444-555555555555",
+    });
+    await worker.waitFor(isResponse("fork-2"), { label: "fork response" });
+
+    const forkCall = worker.events.find((event) => event.type === "__fork");
+    assert.ok(forkCall, "the worker must actually call the SDK's forkSession");
+    assert.equal(forkCall.source_session_id, "sess-1");
+    assert.equal(
+      forkCall.upToMessageId,
+      "11111111-2222-4333-8444-555555555555",
+      "the branch point must reach the SDK, otherwise the fork silently takes the whole thread",
+    );
+    assert.equal(forkCall.dir, "/work/dir", "the fork must be looked up in the session's cwd");
+  } finally {
+    await worker.close();
+  }
+});
+
+test("fork_session omits upToMessageId when no branch point was given", async () => {
+  const worker = spawnWorker();
+  try {
+    worker.send(START_DEFAULT);
+    await worker.waitFor(isStarted("sess-1"), { label: "session_started" });
+    await worker.waitFor(isDone, { label: "done" });
+
+    worker.send({
+      type: "fork_session",
+      id: "fork-3",
+      provider_session_id: "sess-1",
+      cwd: "/tmp",
+    });
+    await worker.waitFor(isResponse("fork-3"), { label: "fork response" });
+
+    const forkCall = worker.events.find((event) => event.type === "__fork");
+    assert.ok(forkCall, "the worker must call the SDK's forkSession");
+    assert.equal(
+      forkCall.upToMessageIdPresent,
+      false,
+      "with no branch point the option key must be absent, not an explicit undefined/null",
+    );
+  } finally {
+    await worker.close();
+  }
+});
+
+test("fork_session without a provider_session_id is an error response", async () => {
+  const worker = spawnWorker();
+  try {
+    worker.send({ type: "fork_session", id: "fork-4", cwd: "/tmp" });
+    const response = await worker.waitFor(isResponse("fork-4"), { label: "fork response" });
+    assert.equal(response.ok, false);
+    assert.match(String(response.error?.message), /provider_session_id/);
+  } finally {
+    await worker.close();
+  }
+});
+
+test("fork_session on an SDK without forkSession fails loudly", async () => {
+  // An older @anthropic-ai/claude-agent-sdk has no forkSession. Pretending the
+  // fork succeeded would hand the relay the SOURCE session id and silently make
+  // the "branch" write into the thread it forked from.
+  const legacySdk = path.join(
+    os.tmpdir(),
+    `claude-legacy-sdk-${process.pid}-${Date.now()}.mjs`,
+  );
+  await writeFile(
+    legacySdk,
+    `export { query, getSessionInfo, getSessionMessages, listSessions, deleteSession } from ${JSON.stringify(pathToFileURL(FAKE_SDK).href)};\n`,
+  );
+  const worker = spawnWorker({ CLAUDE_WORKER_SDK_MODULE: pathToFileURL(legacySdk).href });
+  try {
+    worker.send({
+      type: "fork_session",
+      id: "fork-5",
+      provider_session_id: "sess-1",
+      cwd: "/tmp",
+    });
+    const response = await worker.waitFor(isResponse("fork-5"), { label: "fork response" });
+    assert.equal(response.ok, false, "a missing SDK capability must not look like success");
+    assert.match(String(response.error?.message), /forkSession/);
+  } finally {
+    await worker.close();
+    await rm(legacySdk, { force: true });
   }
 });

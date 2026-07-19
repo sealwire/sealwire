@@ -238,8 +238,8 @@ mod path_scope_tests {
     use crate::fake_provider::FakeProviderBridge;
     use crate::protocol::{
         ApprovalDecision, ApprovalDecisionInput, ApprovalScope, AskUserOptionView,
-        AskUserQuestionView, ReadThreadTranscriptInput, ResumeSessionInput, SendMessageInput,
-        StartSessionInput, SubmitAskUserAnswerInput, UpdateSessionSettingsInput,
+        AskUserQuestionView, ForkSessionInput, ReadThreadTranscriptInput, ResumeSessionInput,
+        SendMessageInput, StartSessionInput, SubmitAskUserAnswerInput, UpdateSessionSettingsInput,
     };
     use crate::state::security::SecurityProfile;
     use crate::state::{
@@ -362,6 +362,7 @@ mod path_scope_tests {
                     status: "active".to_string(),
                     model_provider: "fake".to_string(),
                     provider: "fake".to_string(),
+                    forked_from: None,
                 },
                 &cwd,
                 DEFAULT_MODEL,
@@ -686,6 +687,7 @@ mod path_scope_tests {
                     status: "idle".to_string(),
                     model_provider: "fake".to_string(),
                     provider: "fake".to_string(),
+                    forked_from: None,
                 },
                 &cwd,
                 DEFAULT_MODEL,
@@ -830,6 +832,7 @@ mod path_scope_tests {
                 status: "idle".to_string(),
                 model_provider: self.name.to_string(),
                 provider: self.name.to_string(),
+                forked_from: None,
             }
         }
     }
@@ -1254,6 +1257,7 @@ mod path_scope_tests {
                 status: "idle".to_string(),
                 model_provider: "codex".to_string(),
                 provider: "codex".to_string(),
+                forked_from: None,
             }];
         }
 
@@ -2695,6 +2699,7 @@ mod path_scope_tests {
                     status: "active".to_string(),
                     model_provider: "fake".to_string(),
                     provider: "fake".to_string(),
+                    forked_from: None,
                 },
                 "/tmp/project",
                 DEFAULT_MODEL,
@@ -2792,6 +2797,7 @@ mod path_scope_tests {
                 status: "idle".to_string(),
                 model_provider: "consumed-initial".to_string(),
                 provider: "consumed-initial".to_string(),
+                forked_from: None,
             }
         }
     }
@@ -3082,6 +3088,418 @@ mod path_scope_tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         panic!("fake agent reply never landed in the active transcript");
+    }
+
+    // Waiting for "idle" alone is not enough right after `send_message`: the
+    // turn may not have flipped the thread to working yet, so the idle check
+    // passes on the PREVIOUS turn's settled state and the fork then races the
+    // turn that is just starting. Wait for the new turn's reply to land first.
+    async fn wait_for_completed_agent_texts(app: &AppState, count: usize) {
+        for _ in 0..400 {
+            let snap = app.snapshot().await;
+            let completed = snap
+                .transcript
+                .iter()
+                .filter(|entry| {
+                    entry.kind == crate::protocol::TranscriptEntryKind::AgentText
+                        && entry.status == "completed"
+                })
+                .count();
+            if completed >= count {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("expected {count} completed agent replies");
+    }
+
+    // `wait_for_completed_agent_text` returns as soon as ANY completed agent
+    // entry exists, so after a second turn it can return while that turn is
+    // still running. Forking needs the thread actually settled.
+    async fn wait_for_idle_active_thread(app: &AppState) {
+        for _ in 0..200 {
+            let snap = app.snapshot().await;
+            if snap.active_turn_id.is_none()
+                && !crate::state::relay::thread_status_is_working(&snap.current_status)
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("active thread never settled");
+    }
+
+    // The per-message fork button sends the item it is rendered on. Without
+    // truncation the branch silently inherits everything that happened AFTER
+    // the point the user picked.
+    #[tokio::test]
+    async fn fork_session_branches_at_the_requested_message() {
+        use crate::protocol::TranscriptEntryKind;
+
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, _p, _o) = build_app(cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let source = app
+            .start_session(StartSessionInput {
+                device_id: Some("device-1".to_string()),
+                cwd: Some(cwd.to_string()),
+                model: Some("fake-echo".to_string()),
+                effort: None,
+                approval_policy: None,
+                sandbox: None,
+                provider: Some("fake".to_string()),
+                initial_prompt: Some("EARLY-MARKER first goal".to_string()),
+            })
+            .await
+            .expect("start source");
+        let source_thread_id = source.active_thread_id.clone().expect("source thread id");
+        wait_for_completed_agent_text(&app).await;
+
+        // The branch point: the last entry that exists before the second turn.
+        let fork_point = app
+            .snapshot()
+            .await
+            .transcript
+            .iter()
+            .filter(|entry| entry.kind == TranscriptEntryKind::AgentText)
+            .last()
+            .and_then(|entry| entry.item_id.clone())
+            .expect("an agent entry to fork from");
+
+        app.send_message(SendMessageInput {
+            text: "LATE-MARKER second goal".to_string(),
+            model: None,
+            effort: None,
+            device_id: Some("device-1".to_string()),
+            thread_id: source_thread_id.clone(),
+        })
+        .await
+        .expect("second turn");
+        wait_for_completed_agent_texts(&app, 2).await;
+        wait_for_idle_active_thread(&app).await;
+
+        let forked = app
+            .fork_session(ForkSessionInput {
+                source_thread_id: source_thread_id.clone(),
+                up_to_item_id: Some(fork_point),
+                cwd: Some(cwd.to_string()),
+                initial_prompt: Some("continue on the fork".to_string()),
+                model: Some("fake-echo".to_string()),
+                approval_policy: None,
+                sandbox: None,
+                effort: None,
+                device_id: Some("device-1".to_string()),
+                provider: Some("fake".to_string()),
+            })
+            .await
+            .expect("fork at message");
+        assert_ne!(
+            forked.active_thread_id.clone().expect("fork thread id"),
+            source_thread_id
+        );
+
+        let mut user_text = String::new();
+        for _ in 0..100 {
+            let snap = app.snapshot().await;
+            user_text = snap
+                .transcript
+                .iter()
+                .find(|entry| entry.kind == TranscriptEntryKind::UserText)
+                .and_then(|entry| entry.text.clone())
+                .unwrap_or_default();
+            if user_text.contains("EARLY-MARKER") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            user_text.contains("EARLY-MARKER"),
+            "replay must carry context up to the fork point: {user_text}"
+        );
+        assert!(
+            !user_text.contains("LATE-MARKER"),
+            "replay must NOT carry anything after the fork point: {user_text}"
+        );
+    }
+
+    // The relay resolves omitted approval/sandbox from the SOURCE thread. This
+    // is what keeps a fork of a restricted thread from silently inheriting the
+    // permissions of whatever session happens to be active.
+    #[tokio::test]
+    async fn fork_session_inherits_source_thread_settings_when_unspecified() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, _p, _o) = build_app(cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let source = app
+            .start_session(StartSessionInput {
+                device_id: Some("device-1".to_string()),
+                cwd: Some(cwd.to_string()),
+                model: Some("fake-echo".to_string()),
+                effort: None,
+                approval_policy: Some("untrusted".to_string()),
+                sandbox: Some("read-only".to_string()),
+                provider: Some("fake".to_string()),
+                initial_prompt: Some("restricted work".to_string()),
+            })
+            .await
+            .expect("start source");
+        let source_thread_id = source.active_thread_id.clone().expect("source thread id");
+        wait_for_completed_agent_text(&app).await;
+
+        // Move the live projection to a permissive session, the way an open
+        // full-access session would sit next to the restricted thread.
+        app.start_session(StartSessionInput {
+            device_id: Some("device-1".to_string()),
+            cwd: Some(cwd.to_string()),
+            model: Some("fake-echo".to_string()),
+            effort: None,
+            approval_policy: Some("on-request".to_string()),
+            sandbox: Some("danger-full-access".to_string()),
+            provider: Some("fake".to_string()),
+            initial_prompt: None,
+        })
+        .await
+        .expect("start permissive session");
+
+        let forked = app
+            .fork_session(ForkSessionInput {
+                source_thread_id: source_thread_id.clone(),
+                up_to_item_id: None,
+                cwd: Some(cwd.to_string()),
+                initial_prompt: Some("continue".to_string()),
+                model: None,
+                approval_policy: None,
+                sandbox: None,
+                effort: None,
+                device_id: Some("device-1".to_string()),
+                provider: Some("fake".to_string()),
+            })
+            .await
+            .expect("fork inherits");
+
+        assert_eq!(
+            forked.sandbox, "read-only",
+            "fork must inherit the SOURCE thread's sandbox, not the live session's"
+        );
+        assert_eq!(
+            forked.approval_policy, "untrusted",
+            "fork must inherit the SOURCE thread's approval policy"
+        );
+    }
+
+    // Lineage must be recorded on BOTH fork paths. Recording it only for
+    // native forks means every cross-provider (replay) fork — the majority —
+    // silently loses the link back to its source.
+    #[tokio::test]
+    async fn fork_session_records_lineage_on_the_replay_path() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, _p, _o) = build_app(cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let source = app
+            .start_session(StartSessionInput {
+                device_id: Some("device-1".to_string()),
+                cwd: Some(cwd.to_string()),
+                model: Some("fake-echo".to_string()),
+                effort: None,
+                approval_policy: None,
+                sandbox: None,
+                provider: Some("fake".to_string()),
+                initial_prompt: Some("source work".to_string()),
+            })
+            .await
+            .expect("start source");
+        let source_thread_id = source.active_thread_id.clone().expect("source thread id");
+        wait_for_completed_agent_text(&app).await;
+        wait_for_idle_active_thread(&app).await;
+
+        // The fake bridge has no native fork, so this exercises the replay path.
+        let forked = app
+            .fork_session(ForkSessionInput {
+                source_thread_id: source_thread_id.clone(),
+                up_to_item_id: None,
+                cwd: Some(cwd.to_string()),
+                initial_prompt: Some("continue".to_string()),
+                model: Some("fake-echo".to_string()),
+                approval_policy: None,
+                sandbox: None,
+                effort: None,
+                device_id: Some("device-1".to_string()),
+                provider: Some("fake".to_string()),
+            })
+            .await
+            .expect("replay fork");
+        let forked_thread_id = forked.active_thread_id.clone().expect("fork thread id");
+
+        let threads = app
+            .list_threads(20, Some("device-1".to_string()))
+            .await
+            .expect("list threads");
+        let forked_row = threads
+            .threads
+            .iter()
+            .find(|thread| thread.id == forked_thread_id)
+            .expect("forked thread is listed");
+        assert_eq!(
+            forked_row.forked_from.as_deref(),
+            Some(source_thread_id.as_str()),
+            "a replay fork must record its source thread too"
+        );
+    }
+
+    #[tokio::test]
+    async fn fork_session_rejects_an_unknown_fork_point() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, _p, _o) = build_app(cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let source = app
+            .start_session(StartSessionInput {
+                device_id: Some("device-1".to_string()),
+                cwd: Some(cwd.to_string()),
+                model: Some("fake-echo".to_string()),
+                effort: None,
+                approval_policy: None,
+                sandbox: None,
+                provider: Some("fake".to_string()),
+                initial_prompt: Some("some work".to_string()),
+            })
+            .await
+            .expect("start source");
+        let source_thread_id = source.active_thread_id.clone().expect("source thread id");
+        wait_for_completed_agent_text(&app).await;
+
+        let error = app
+            .fork_session(ForkSessionInput {
+                source_thread_id,
+                up_to_item_id: Some("does-not-exist".to_string()),
+                cwd: Some(cwd.to_string()),
+                initial_prompt: None,
+                model: None,
+                approval_policy: None,
+                sandbox: None,
+                effort: None,
+                device_id: Some("device-1".to_string()),
+                provider: Some("fake".to_string()),
+            })
+            .await
+            .expect_err("unknown fork point must not silently fork the whole thread");
+        assert!(error.contains("fork point"), "unexpected error: {error}");
+    }
+
+    #[tokio::test]
+    async fn fork_session_replays_source_context_into_new_thread() {
+        use crate::protocol::TranscriptEntryKind;
+
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, _p, _o) = build_app(cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let source = app
+            .start_session(StartSessionInput {
+                device_id: Some("device-1".to_string()),
+                cwd: Some(cwd.to_string()),
+                model: Some("fake-echo".to_string()),
+                effort: None,
+                approval_policy: None,
+                sandbox: None,
+                provider: Some("fake".to_string()),
+                initial_prompt: Some("source goal: build fork support".to_string()),
+            })
+            .await
+            .expect("start source");
+        let source_thread_id = source.active_thread_id.clone().expect("source thread id");
+        wait_for_completed_agent_text(&app).await;
+
+        let forked = app
+            .fork_session(ForkSessionInput {
+                source_thread_id: source_thread_id.clone(),
+                cwd: Some(cwd.to_string()),
+                initial_prompt: Some("continue on the fork".to_string()),
+                model: Some("fake-echo".to_string()),
+                approval_policy: None,
+                sandbox: None,
+                effort: None,
+                device_id: Some("device-1".to_string()),
+                provider: Some("fake".to_string()),
+                up_to_item_id: None,
+            })
+            .await
+            .expect("fork source");
+        let forked_thread_id = forked.active_thread_id.clone().expect("fork thread id");
+        assert_ne!(forked_thread_id, source_thread_id);
+        let mut user_text = String::new();
+        for _ in 0..100 {
+            let snap = app.snapshot().await;
+            user_text = snap
+                .transcript
+                .iter()
+                .find(|entry| entry.kind == TranscriptEntryKind::UserText)
+                .and_then(|entry| entry.text.clone())
+                .unwrap_or_default();
+            if user_text.contains("source goal: build fork support") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            user_text.contains("source goal: build fork support"),
+            "fork replay prompt should include source context: {user_text}"
+        );
+        assert!(
+            user_text.contains("continue on the fork"),
+            "fork replay prompt should include the requested fork prompt: {user_text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fork_session_rejects_running_source_thread() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, _p, _o) = build_app(cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let source = app
+            .start_session(StartSessionInput {
+                device_id: Some("device-1".to_string()),
+                cwd: Some(cwd.to_string()),
+                model: Some("fake-echo".to_string()),
+                effort: None,
+                approval_policy: None,
+                sandbox: None,
+                provider: Some("fake".to_string()),
+                initial_prompt: Some("keep this turn running briefly".to_string()),
+            })
+            .await
+            .expect("start source");
+        let source_thread_id = source.active_thread_id.clone().expect("source thread id");
+
+        let error = app
+            .fork_session(ForkSessionInput {
+                source_thread_id,
+                cwd: Some(cwd.to_string()),
+                initial_prompt: None,
+                model: Some("fake-echo".to_string()),
+                approval_policy: None,
+                sandbox: None,
+                effort: None,
+                device_id: Some("device-1".to_string()),
+                provider: Some("fake".to_string()),
+                up_to_item_id: None,
+            })
+            .await
+            .expect_err("running source must not fork");
+        assert!(
+            error.contains("turn is in progress"),
+            "unexpected fork rejection: {error}"
+        );
     }
 
     #[tokio::test]
@@ -3947,6 +4365,7 @@ mod path_scope_tests {
                 status: "idle".to_string(),
                 model_provider: self.name.to_string(),
                 provider: self.name.to_string(),
+                forked_from: None,
             };
             self.threads.lock().await.insert(id, thread.clone());
             Ok(crate::provider::StartThreadResult {
@@ -4292,6 +4711,7 @@ mod review_tests {
                 status: "idle".to_string(),
                 model_provider: self.name.to_string(),
                 provider: self.name.to_string(),
+                forked_from: None,
             }
         }
     }
@@ -4751,6 +5171,7 @@ mod review_tests {
             status: snap.current_status.clone(),
             model_provider: provider.to_string(),
             provider: provider.to_string(),
+            forked_from: None,
         }
     }
 
@@ -5003,6 +5424,7 @@ mod review_tests {
                 status: "idle".to_string(),
                 model_provider: "vscode".to_string(),
                 provider: String::new(),
+                forked_from: None,
             };
             relay.register_background_thread(thread, cwd, "model", "never", "read-only", "low");
             relay.register_reviewer_thread(reviewer_id.to_string(), "parent-1".to_string());
@@ -5045,6 +5467,7 @@ mod review_tests {
                 status: "idle".to_string(),
                 model_provider: "vscode".to_string(),
                 provider: String::new(),
+                forked_from: None,
             };
             relay.register_background_thread(thread, cwd, "model", "never", "read-only", "low");
             relay.register_reviewer_thread(reviewer_id.to_string(), "parent-1".to_string());
@@ -5164,6 +5587,7 @@ mod review_tests {
                 status: "idle".to_string(),
                 model_provider: "codex".to_string(),
                 provider: "codex".to_string(),
+                forked_from: None,
             };
             for (parent, reviewer, cwd, job_id) in [
                 ("parent-in", "rev-in", in_cwd, "job-in"),
@@ -5273,6 +5697,7 @@ mod review_tests {
                 status: "idle".to_string(),
                 model_provider: "codex".to_string(),
                 provider: "codex".to_string(),
+                forked_from: None,
             };
             for (parent, reviewer, cwd, job_id) in [
                 ("parent-in", "rev-in", in_cwd, "job-in"),
@@ -5368,6 +5793,7 @@ mod review_tests {
                 status: "idle".to_string(),
                 model_provider: "codex".to_string(),
                 provider: "codex".to_string(),
+                forked_from: None,
             };
             relay.register_background_thread(thread, cwd, "model", "never", "read-only", "low");
             // Drop the routing-cache row while the live runtime survives (and the
@@ -5407,6 +5833,7 @@ mod review_tests {
                 status: "idle".to_string(),
                 model_provider: "codex".to_string(),
                 provider: "codex".to_string(),
+                forked_from: None,
             };
             relay.register_background_thread(
                 thread.clone(),
@@ -7333,6 +7760,7 @@ settings update: {error}"
                     status: "active".to_string(),
                     model_provider: "anthropic".to_string(),
                     provider: "claude_code".to_string(),
+                    forked_from: None,
                 },
                 cwd,
                 "claude-model",
@@ -8808,6 +9236,7 @@ turn) must allow a review: {error:?}"
                     status: "active".to_string(),
                     model_provider: "anthropic".to_string(),
                     provider: "claude_code".to_string(),
+                    forked_from: None,
                 },
                 cwd,
                 "claude-model",
@@ -9276,6 +9705,7 @@ turn) must allow a review: {error:?}"
                 status: "active".to_string(),
                 model_provider: "codex".to_string(),
                 provider: "codex".to_string(),
+                forked_from: None,
             });
             relay.bg_set_active_turn("bg-thread", Some("bg-turn".to_string()), unix_now());
         }
@@ -9321,6 +9751,7 @@ turn) must allow a review: {error:?}"
                 status: "active".to_string(),
                 model_provider: "codex".to_string(),
                 provider: "codex".to_string(),
+                forked_from: None,
             });
             relay.bg_set_active_turn("bg-thread", Some("bg-turn".to_string()), unix_now());
         }

@@ -37,6 +37,19 @@ pub struct StartThreadResult {
     pub started_turn_id: Option<String>,
 }
 
+#[derive(Clone)]
+pub struct ProviderForkRequest {
+    pub source_thread_id: String,
+    /// Branch point (transcript item id), inclusive. A bridge that cannot fork
+    /// at an arbitrary point must return `Ok(None)` when this is set so the
+    /// caller falls back to transcript replay, which truncates correctly.
+    pub up_to_item_id: Option<String>,
+    pub cwd: String,
+    pub model: String,
+    pub approval_policy: String,
+    pub sandbox: String,
+}
+
 #[async_trait]
 pub trait ProviderBridge: Send + Sync {
     async fn list_threads(&self, limit: usize) -> Result<Vec<ThreadSummaryView>, String>;
@@ -49,6 +62,12 @@ pub trait ProviderBridge: Send + Sync {
         sandbox: &str,
         initial_prompt: Option<&str>,
     ) -> Result<StartThreadResult, String>;
+    async fn fork_thread(
+        &self,
+        _request: ProviderForkRequest,
+    ) -> Result<Option<StartThreadResult>, String> {
+        Ok(None)
+    }
     async fn resume_thread(
         &self,
         thread_id: &str,

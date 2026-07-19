@@ -73,6 +73,11 @@ function resultFor(cmd, sessionId) {
       };
     case "delete_session":
       return { provider_session_id: sessionId };
+    case "fork_session":
+      return {
+        provider_session_id: `${sessionId}-fork`,
+        source_provider_session_id: sessionId,
+      };
     default:
       return {};
   }
@@ -97,11 +102,19 @@ for await (const line of rl) {
     cmd.pending_thread_id ||
     `claude-fake-session-${(counter += 1)}`;
 
-  // The line the Rust test asserts on. Keep the key=value shape stable.
+  // The line the Rust test asserts on. Keep the key=value shape stable;
+  // append new keys at the end so existing `contains` assertions keep matching.
+  //
+  // `upToKey` reports whether the KEY was present at all, separately from its
+  // value: forking the whole thread must omit `up_to_message_id` entirely (the
+  // SDK branches at the tip only when `upToMessageId` is absent), and an
+  // explicit null would be indistinguishable from absent by value alone.
   recv(
     `WORKER RECV type=${cmd.type} permissionMode=${cmd.permissionMode ?? "-"} ` +
       `model=${cmd.model ?? "-"} session=${sessionId} ` +
-      `prompt=${cmd.prompt ? "yes" : "no"} cwd=${cmd.cwd ?? "-"}`,
+      `prompt=${cmd.prompt ? "yes" : "no"} cwd=${cmd.cwd ?? "-"} ` +
+      `upTo=${cmd.up_to_message_id ?? "-"} ` +
+      `upToKey=${Object.prototype.hasOwnProperty.call(cmd, "up_to_message_id") ? "yes" : "no"}`,
   );
 
   if (cmd.type === "shutdown") {

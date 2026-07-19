@@ -182,6 +182,7 @@ export function createSessionController({
     loadSession: controller.loadSession,
     loadThreads: controller.loadThreads,
     maybeLoadOlderTranscript: controller.maybeLoadOlderTranscript,
+    forkSession: controller.forkSession,
     resumeLatestSession: controller.resumeLatestSession,
     resumeSession: controller.resumeSession,
     revokeOtherDevices: controller.revokeOtherDevices,

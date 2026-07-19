@@ -24,7 +24,10 @@ use crate::{
         ApprovalDecision, ApprovalDecisionInput, ModelOptionView, ThreadSummaryView, ToolCallView,
         TranscriptEntryKind, TranscriptEntryView,
     },
-    provider::{ProviderBridge, StartThreadResult, ThreadSyncData, ThreadTranscriptPageData},
+    provider::{
+        ProviderBridge, ProviderForkRequest, StartThreadResult, ThreadSyncData,
+        ThreadTranscriptPageData,
+    },
     state::{
         BrokerPendingMessage, PendingApproval, PendingTranscriptDelta, RelayState,
         TranscriptDeltaKind,
@@ -342,6 +345,7 @@ impl ProviderBridge for ClaudeCodeBridge {
                 status: "active".to_string(),
                 model_provider: "anthropic".to_string(),
                 provider: "claude_code".to_string(),
+                forked_from: None,
             };
             return Ok(StartThreadResult {
                 thread,
@@ -373,6 +377,79 @@ impl ProviderBridge for ClaudeCodeBridge {
             initial_user_message,
             started_turn_id,
         })
+    }
+
+    async fn fork_thread(
+        &self,
+        request: ProviderForkRequest,
+    ) -> Result<Option<StartThreadResult>, String> {
+        // A `claude-pending-…` thread never reached the SDK, so there is no
+        // session file to copy. Fall back to replay instead of erroring.
+        let Some(real_session_id) = self.resolve_real_session_id(&request.source_thread_id) else {
+            return Ok(None);
+        };
+
+        // The SDK branches on a *message uuid*. Only `assistant:`/`user:`
+        // transcript items carry one; anything else (a `tool:` item, a synthetic
+        // turn-diff row) has no uuid we could branch at, and guessing would
+        // branch at the wrong message. Replay truncates correctly, so defer.
+        let up_to_message_id = match request.up_to_item_id.as_deref() {
+            None => None,
+            Some(item_id) => match fork_point_message_uuid(item_id) {
+                Some(uuid) => Some(uuid),
+                None => return Ok(None),
+            },
+        };
+
+        let cwd = if request.cwd.is_empty() {
+            self.cwd_for_thread(&request.source_thread_id)
+                .await
+                .unwrap_or_default()
+        } else {
+            request.cwd.clone()
+        };
+
+        let mut cmd = json!({
+            "provider_session_id": real_session_id,
+        });
+        if !cwd.is_empty() {
+            cmd["cwd"] = Value::String(cwd.clone());
+        }
+        // Omitted (not null) for a tip fork: the SDK takes the whole thread only
+        // when `upToMessageId` is absent.
+        if let Some(uuid) = up_to_message_id {
+            cmd["up_to_message_id"] = Value::String(uuid);
+        }
+
+        let result = self.send_request("fork_session", cmd).await?;
+        let forked_session_id = value_at(&result, &["provider_session_id"])
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| "fork_session did not return a provider_session_id".to_string())?
+            .to_string();
+
+        // Synthesize the summary the way the start paths do; the caller
+        // immediately `read_thread`s the fork for its real preview/name, and
+        // stamps `forked_from` itself.
+        let thread = ThreadSummaryView {
+            id: forked_session_id,
+            name: None,
+            preview: String::new(),
+            cwd,
+            updated_at: unix_now(),
+            source: self.provider_name().to_string(),
+            status: "active".to_string(),
+            model_provider: "anthropic".to_string(),
+            provider: self.provider_name().to_string(),
+            forked_from: None,
+        };
+
+        Ok(Some(StartThreadResult {
+            thread,
+            consumed_initial_prompt: false,
+            initial_user_message: None,
+            started_turn_id: None,
+        }))
     }
 
     async fn resume_thread(
@@ -416,6 +493,7 @@ impl ProviderBridge for ClaudeCodeBridge {
                     status: "active".to_string(),
                     model_provider: "anthropic".to_string(),
                     provider: "claude_code".to_string(),
+                    forked_from: None,
                 },
                 status: "idle".to_string(),
                 active_flags: Vec::new(),
@@ -834,6 +912,22 @@ fn is_sonnet_model(model: &str) -> bool {
     model == "sonnet" || model.starts_with("sonnet[") || model.starts_with("claude-sonnet")
 }
 
+/// Map a transcript item id to the SDK message uuid a native fork can branch at.
+///
+/// `mapSessionMessages` (claude-worker/sdk-mapping.mjs) formats message items as
+/// `assistant:<uuid>` / `user:<uuid>`; those uuids are exactly what
+/// `forkSession`'s `upToMessageId` expects. Everything else — `tool:<tool_use_id>`,
+/// synthetic turn-diff rows, bare ids — has no message uuid, so it returns `None`
+/// and the caller falls back to transcript replay rather than branching at a
+/// guessed message.
+fn fork_point_message_uuid(item_id: &str) -> Option<String> {
+    ["assistant:", "user:"]
+        .iter()
+        .find_map(|prefix| item_id.strip_prefix(prefix))
+        .filter(|uuid| !uuid.is_empty())
+        .map(ToOwned::to_owned)
+}
+
 async fn handle_worker_line(
     line: &str,
     pending_responses: &PendingResponses,
@@ -966,6 +1060,7 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                 status: "active".to_string(),
                 model_provider: "anthropic".to_string(),
                 provider: "claude_code".to_string(),
+                forked_from: None,
             });
             relay.notify();
         }
@@ -1834,6 +1929,7 @@ mod tests {
             status: "idle".to_string(),
             model_provider: "anthropic".to_string(),
             provider: "claude_code".to_string(),
+            forked_from: None,
         }
     }
 
@@ -2435,6 +2531,166 @@ mod tests {
         );
     }
 
+    // --- native forking ----------------------------------------------------
+    //
+    // A claude_code -> claude_code fork must reach the SDK's `forkSession` via
+    // the worker. Without it the bridge inherits `ProviderBridge::fork_thread`'s
+    // default `Ok(None)` and every Claude fork silently degrades to the lossy
+    // truncated-text replay path.
+    #[tokio::test]
+    async fn fork_thread_sends_fork_session_with_the_mapped_message_uuid() {
+        let Some((bridge, state)) = spawn_fake_bridge().await else {
+            return;
+        };
+
+        let result = bridge
+            .fork_thread(ProviderForkRequest {
+                source_thread_id: "sess-src".to_string(),
+                up_to_item_id: Some("assistant:11111111-2222-4333-8444-555555555555".to_string()),
+                cwd: "/tmp/fork".to_string(),
+                model: "claude-sonnet-4-6".to_string(),
+                approval_policy: "bypass".to_string(),
+                sandbox: "workspace-write".to_string(),
+            })
+            .await
+            .expect("fork_thread should reach the worker");
+
+        let started = result.expect("claude must fork NATIVELY, not degrade to transcript replay");
+        assert_eq!(started.thread.id, "sess-src-fork");
+        assert_eq!(started.thread.provider, "claude_code");
+        assert_eq!(started.thread.source, "claude_code");
+        assert_eq!(started.thread.cwd, "/tmp/fork");
+        assert_eq!(
+            started.thread.forked_from, None,
+            "the caller stamps lineage"
+        );
+        assert!(!started.consumed_initial_prompt);
+        assert!(started.initial_user_message.is_none());
+        assert!(started.started_turn_id.is_none());
+
+        // The transcript item id must reach the worker stripped to the bare SDK
+        // message uuid — sending `assistant:<uuid>` would branch at nothing.
+        assert!(
+            wait_for_log(
+                &state,
+                "WORKER RECV type=fork_session permissionMode=- model=- session=sess-src \
+                 prompt=no cwd=/tmp/fork \
+                 upTo=11111111-2222-4333-8444-555555555555 upToKey=yes",
+                5,
+            )
+            .await,
+            "bridge did not send fork_session with the mapped message uuid",
+        );
+    }
+
+    #[tokio::test]
+    async fn fork_thread_without_a_branch_point_omits_up_to_message_id() {
+        // Forking the whole thread must NOT send an empty/null branch point —
+        // the SDK branches at the tip only when `upToMessageId` is absent.
+        let Some((bridge, state)) = spawn_fake_bridge().await else {
+            return;
+        };
+
+        bridge
+            .fork_thread(ProviderForkRequest {
+                source_thread_id: "sess-tip".to_string(),
+                up_to_item_id: None,
+                cwd: "/tmp/fork".to_string(),
+                model: "claude-sonnet-4-6".to_string(),
+                approval_policy: "default".to_string(),
+                sandbox: "workspace-write".to_string(),
+            })
+            .await
+            .expect("fork_thread should reach the worker")
+            .expect("whole-thread fork is native");
+
+        // `upToKey=no` asserts the KEY is absent, not merely null — the SDK
+        // branches at the tip only when `upToMessageId` is omitted.
+        assert!(
+            wait_for_log(&state, "type=fork_session", 5).await,
+            "bridge did not send fork_session at all",
+        );
+        assert!(
+            wait_for_log(
+                &state,
+                "session=sess-tip prompt=no cwd=/tmp/fork upTo=- upToKey=no",
+                5
+            )
+            .await,
+            "a tip fork must omit the branch point entirely",
+        );
+    }
+
+    #[tokio::test]
+    async fn fork_thread_on_a_pending_thread_falls_back_to_replay() {
+        // A `claude-pending-…` thread has no SDK session yet, so there is
+        // nothing to fork. That must be a graceful `Ok(None)` (replay) rather
+        // than an error that fails the whole fork.
+        let Some((bridge, _state)) = spawn_fake_bridge().await else {
+            return;
+        };
+
+        let result = bridge
+            .fork_thread(ProviderForkRequest {
+                source_thread_id: "claude-pending-abc-1".to_string(),
+                up_to_item_id: None,
+                cwd: "/tmp/fork".to_string(),
+                model: "claude-sonnet-4-6".to_string(),
+                approval_policy: "default".to_string(),
+                sandbox: "workspace-write".to_string(),
+            })
+            .await
+            .expect("a pending fork must not be an error");
+        assert!(
+            result.is_none(),
+            "a pending thread has no SDK session; the caller must fall back to replay",
+        );
+    }
+
+    #[tokio::test]
+    async fn fork_thread_at_an_unmappable_item_falls_back_to_replay() {
+        // Only `assistant:<uuid>` / `user:<uuid>` carry an SDK message uuid. A
+        // `tool:` item (or an unprefixed id) cannot be mapped, and guessing
+        // would branch at the WRONG message — fall back to replay, which
+        // truncates correctly.
+        let Some((bridge, _state)) = spawn_fake_bridge().await else {
+            return;
+        };
+
+        for item_id in ["tool:toolu_123", "turn-diff-7", "assistant:", "user:"] {
+            let result = bridge
+                .fork_thread(ProviderForkRequest {
+                    source_thread_id: "sess-src".to_string(),
+                    up_to_item_id: Some(item_id.to_string()),
+                    cwd: "/tmp/fork".to_string(),
+                    model: "claude-sonnet-4-6".to_string(),
+                    approval_policy: "default".to_string(),
+                    sandbox: "workspace-write".to_string(),
+                })
+                .await
+                .expect("an unmappable fork point must not be an error");
+            assert!(
+                result.is_none(),
+                "`{item_id}` has no SDK message uuid; the caller must fall back to replay",
+            );
+        }
+    }
+
+    #[test]
+    fn fork_point_message_uuid_only_maps_message_items() {
+        assert_eq!(
+            fork_point_message_uuid("assistant:abc-123"),
+            Some("abc-123".to_string()),
+        );
+        assert_eq!(
+            fork_point_message_uuid("user:abc-123"),
+            Some("abc-123".to_string()),
+        );
+        assert_eq!(fork_point_message_uuid("tool:toolu_1"), None);
+        assert_eq!(fork_point_message_uuid("abc-123"), None);
+        assert_eq!(fork_point_message_uuid("assistant:"), None);
+    }
+
     #[tokio::test]
     async fn background_claude_assistant_delta_does_not_mutate_active_transcript() {
         let state = test_relay_with_active_b().await;
@@ -2530,6 +2786,7 @@ mod tests {
                     status: "active".to_string(),
                     model_provider: "codex".to_string(),
                     provider: "codex".to_string(),
+                    forked_from: None,
                 },
                 "/tmp/codex",
                 "gpt-5.5",

@@ -1160,6 +1160,7 @@ fn threads_response_compact_for_broker_limits_serialized_size() {
                 status: "idle".to_string(),
                 model_provider: "openai".to_string(),
                 provider: "codex".to_string(),
+                forked_from: None,
             })
             .collect(),
     };
@@ -1188,6 +1189,7 @@ fn threads_response_compact_for_local_web_is_less_aggressive() {
                 status: "idle".to_string(),
                 model_provider: "openai".to_string(),
                 provider: "codex".to_string(),
+                forked_from: None,
             })
             .collect(),
     };
@@ -1218,6 +1220,7 @@ fn threads_response_compact_for_ios_surface_currently_reuses_remote_budget() {
                 status: "idle".to_string(),
                 model_provider: "openai".to_string(),
                 provider: "codex".to_string(),
+                forked_from: None,
             })
             .collect(),
     };

@@ -10,6 +10,9 @@
  *   {"type":"list_sessions","id":"...","cwd":"...","limit":80}
  *   {"type":"read_session","id":"...","provider_session_id":"...","cwd":"..."}
  *   {"type":"read_session_page","id":"...","provider_session_id":"...","cwd":"...","before_cursor":123}
+ *   {"type":"delete_session","id":"...","provider_session_id":"...","cwd":"..."}
+ *   {"type":"fork_session","id":"...","provider_session_id":"...","cwd":"...","up_to_message_id":"<uuid>"}
+ *   {"type":"send","provider_session_id":"...","prompt":"...","turn_id":"..."}
  *   {"type":"approval_decision","id":"...","approval_id":"...","decision":"approve|deny|cancel","scope":"once|session"}
  *   {"type":"ask_user_question_answer","id":"...","request_id":"...","answers":{"<question text>":"<chosen label>"}}
  *   {"type":"cancel"}
@@ -23,6 +26,8 @@
  *   {"type":"approval_requested","id":"...","action":"...","data":{}}
  *   {"type":"ask_user_question_requested","id":"...","tool_use_id":"...","questions":[...]}
  *   {"type":"error",           "message":"..."}
+ *   {"type":"response","id":"...","ok":true,"result":{}}   // reply to a command carrying an `id`
+ *   {"type":"response","id":"...","ok":false,"error":"..."}
  *   {"type":"done"}
  *   {"type":"session_stopped", "provider_session_id":"..."}
  */
@@ -1331,6 +1336,38 @@ async function main() {
           }
           await sdk.deleteSession(sessionId, { dir: cmd.cwd || undefined });
           emitResponse(cmd.id, { provider_session_id: sessionId });
+        } catch (err) {
+          emitErrorResponse(cmd.id, String(err));
+        }
+        break;
+      }
+
+      case "fork_session": {
+        try {
+          const sessionId = cmd.provider_session_id;
+          if (!sessionId) throw new Error("fork_session requires provider_session_id");
+          if (typeof sdk.forkSession !== "function") {
+            // Older @anthropic-ai/claude-agent-sdk. Failing loudly matters: a
+            // "success" here would hand the relay back the SOURCE session id and
+            // the branch would write into the thread it forked from.
+            throw new Error(
+              "the installed @anthropic-ai/claude-agent-sdk does not support forkSession",
+            );
+          }
+          const options = { dir: cmd.cwd || undefined };
+          // Omit the key entirely when unset — the SDK branches at the tip only
+          // when `upToMessageId` is absent.
+          if (cmd.up_to_message_id) options.upToMessageId = cmd.up_to_message_id;
+
+          const forked = await sdk.forkSession(sessionId, options);
+          const forkedSessionId = forked?.sessionId;
+          if (!forkedSessionId) {
+            throw new Error("forkSession did not return a sessionId");
+          }
+          emitResponse(cmd.id, {
+            provider_session_id: forkedSessionId,
+            source_provider_session_id: sessionId,
+          });
         } catch (err) {
           emitErrorResponse(cmd.id, String(err));
         }

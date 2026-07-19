@@ -948,6 +948,7 @@ mod disconnect_tests {
             status: "active".to_string(),
             model_provider: "openai".to_string(),
             provider: "codex".to_string(),
+            forked_from: None,
         };
         relay.upsert_thread(summary.clone());
         relay.bg_set_active_turn("codex-thread", Some("turn-1".to_string()), 1);

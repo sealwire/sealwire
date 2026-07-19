@@ -20,7 +20,7 @@ use crate::{
         truncate_with_ellipsis, ApprovalDecisionInput, FileChangeDiffView, ModelOptionView,
         ThreadSummaryView, ToolCallView, TranscriptEntryKind, TranscriptEntryView,
     },
-    provider::{ProviderBridge, StartThreadResult, ThreadSyncData},
+    provider::{ProviderBridge, ProviderForkRequest, StartThreadResult, ThreadSyncData},
     state::{ApprovalKind, PendingApproval, RelayState},
 };
 
@@ -82,6 +82,25 @@ impl ProviderBridge for CodexBridge {
             initial_user_message: None,
             started_turn_id: None,
         })
+    }
+
+    async fn fork_thread(
+        &self,
+        request: ProviderForkRequest,
+    ) -> Result<Option<StartThreadResult>, String> {
+        // `thread/fork` always branches at the thread tip. Forking from an
+        // earlier message has to go through transcript replay, which can
+        // truncate at the requested item.
+        if request.up_to_item_id.is_some() {
+            return Ok(None);
+        }
+        let thread = CodexBridge::fork_thread(self, request).await?;
+        Ok(Some(StartThreadResult {
+            thread,
+            consumed_initial_prompt: false,
+            initial_user_message: None,
+            started_turn_id: None,
+        }))
     }
 
     async fn resume_thread(
@@ -300,6 +319,36 @@ impl CodexBridge {
             .ok_or_else(|| "thread/start did not return a thread".to_string())?;
 
         parse_thread_summary(thread)
+    }
+
+    pub async fn fork_thread(
+        &self,
+        request: ProviderForkRequest,
+    ) -> Result<ThreadSummaryView, String> {
+        let (approval_policy, sandbox) =
+            resolve_codex_policy(&request.approval_policy, &request.sandbox);
+        let result = self
+            .send_request(
+                "thread/fork",
+                json!({
+                    "threadId": request.source_thread_id,
+                    "cwd": request.cwd,
+                    "model": request.model,
+                    "approvalPolicy": approval_policy,
+                    "sandbox": sandbox,
+                    "threadSource": "agent-relay"
+                }),
+            )
+            .await?;
+
+        let thread = value_at(&result, &["thread"])
+            .ok_or_else(|| "thread/fork did not return a thread".to_string())?;
+        let mut summary = parse_thread_summary(thread)?;
+        summary.provider = self.provider_name.to_string();
+        if summary.source.is_empty() || summary.source == "unknown" {
+            summary.source = self.provider_name.to_string();
+        }
+        Ok(summary)
     }
 
     pub async fn resume_thread(
@@ -607,6 +656,7 @@ fn parse_thread_summary(thread: &Value) -> Result<ThreadSummaryView, String> {
         model_provider: string_at(thread, &["modelProvider"])
             .unwrap_or_else(|| "unknown".to_string()),
         provider: String::new(),
+        forked_from: None,
     })
 }
 

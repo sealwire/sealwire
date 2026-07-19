@@ -60,11 +60,11 @@ export function SessionSettingsFields({
     h(
       "label",
       { className: "field field-full" },
-      h("span", null, "Initial Prompt"),
+      h("span", null, labels.initialPrompt || "Initial Prompt"),
       h("textarea", {
         id: fieldId(idPrefix, "start-prompt"),
         onChange: (event) => onFieldChange?.("initialPrompt", event.target.value),
-        placeholder: "Optional first task.",
+        placeholder: labels.initialPromptPlaceholder || "Optional first task.",
         rows: 4,
         // Leave undefined when the caller doesn't manage initial prompt state — keeps
         // the textarea uncontrolled so user input isn't wiped on the next re-render.

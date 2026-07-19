@@ -1405,6 +1405,10 @@ pub struct ThreadSummaryView {
     pub status: String,
     pub model_provider: String,
     pub provider: String,
+    /// Thread this one was forked from, when the relay recorded the lineage.
+    /// Providers do not track fork relationships, so this is relay-owned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1513,6 +1517,23 @@ pub struct AllowedRootsReceipt {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartSessionInput {
+    pub cwd: Option<String>,
+    pub initial_prompt: Option<String>,
+    pub model: Option<String>,
+    pub approval_policy: Option<String>,
+    pub sandbox: Option<String>,
+    pub effort: Option<String>,
+    pub device_id: Option<String>,
+    pub provider: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForkSessionInput {
+    pub source_thread_id: String,
+    /// Transcript item the fork branches at, inclusive. `None` forks the whole
+    /// thread. The per-message fork button sends the item id it is rendered on.
+    #[serde(default)]
+    pub up_to_item_id: Option<String>,
     pub cwd: Option<String>,
     pub initial_prompt: Option<String>,
     pub model: Option<String>,

@@ -82,6 +82,7 @@ fn test_persisted_state() -> PersistedRelayState {
         reviewer_threads: std::collections::HashMap::new(),
         review_jobs: std::collections::HashMap::new(),
         workflow_jobs: std::collections::HashMap::new(),
+        thread_forked_from: Default::default(),
     }
 }
 
@@ -171,6 +172,7 @@ fn test_thread(id: &str, cwd: &str) -> ThreadSummaryView {
         status: "idle".to_string(),
         model_provider: "openai".to_string(),
         provider: "codex".to_string(),
+        forked_from: None,
     }
 }
 

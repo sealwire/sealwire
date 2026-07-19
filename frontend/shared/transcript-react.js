@@ -14,7 +14,8 @@ import {
   observeWindowRect,
   windowScroll,
 } from "@tanstack/virtual-core";
-import { CHECK_SVG, COPY_SVG, SPARKLES_SVG } from "../svg.js";
+import { CHECK_SVG, COPY_SVG, FORK_SVG, SPARKLES_SVG } from "../svg.js";
+import { computeForkableItemIds, isForkableEntry } from "./transcript-fork.js";
 import {
   buildFileDisplayPathMap,
   diffStats,
@@ -32,6 +33,7 @@ const COLLAPSIBLE_LINE_THRESHOLD = 12;
 const INITIAL_DIFF_ROW_LIMIT = 400;
 const TRANSCRIPT_VIRTUALIZATION_THRESHOLD = 20;
 const TRANSCRIPT_VIRTUAL_OVERSCAN = 6;
+const EMPTY_FORKABLE_IDS = new Set();
 
 function isCollapsible(value) {
   if (!value) {
@@ -153,38 +155,67 @@ function renderMessageBody(text) {
   return renderMarkdown(text);
 }
 
-// "Copy response" affordance for agent messages. The raw answer text is stashed
-// on the button via `data-copy-message`; the transcript click delegators in
-// app.js (local) and react-app.js (remote) read it and write to the clipboard.
-// Both icons are rendered up front and toggled by CSS off `data-copied`.
-function renderCopyMessageButton(text) {
-  const value = String(text ?? "");
-  if (!value.trim()) {
+// Per-message action row for agent messages.
+//
+// "Copy response": the raw answer text is stashed on the button via
+// `data-copy-message`; the transcript click delegators in app.js (local) and
+// react-app.js (remote) read it and write to the clipboard.
+//
+// "Fork from here": only rendered on turn-final agent messages (see
+// shared/transcript-fork.js). The button carries `data-fork-from-item` so the
+// same delegators can open the fork dialog branched at exactly this message.
+// It is a real button in the message flow rather than a thread-list context
+// menu because contextmenu never fires for touch long-press on iOS, which
+// would leave the phone — the surface fork matters most on — with no way in.
+// Both copy icons are rendered up front and toggled by CSS off `data-copied`.
+function renderMessageActions(entry, showFork) {
+  const value = String(entry?.text ?? "");
+  const showCopy = Boolean(value.trim());
+  if (!showCopy && !showFork) {
     return null;
   }
   return h(
     "div",
     { className: "message-actions" },
-    h(
-      "button",
-      {
-        type: "button",
-        className: "message-copy-button",
-        "data-copy-message": value,
-        title: "Copy response",
-        "aria-label": "Copy response",
-      },
-      h("span", {
-        className: "message-copy-icon message-copy-icon-default",
-        "aria-hidden": "true",
-        dangerouslySetInnerHTML: { __html: COPY_SVG },
-      }),
-      h("span", {
-        className: "message-copy-icon message-copy-icon-done",
-        "aria-hidden": "true",
-        dangerouslySetInnerHTML: { __html: CHECK_SVG },
-      })
-    )
+    showCopy
+      ? h(
+          "button",
+          {
+            type: "button",
+            className: "message-copy-button",
+            "data-copy-message": value,
+            title: "Copy response",
+            "aria-label": "Copy response",
+          },
+          h("span", {
+            className: "message-copy-icon message-copy-icon-default",
+            "aria-hidden": "true",
+            dangerouslySetInnerHTML: { __html: COPY_SVG },
+          }),
+          h("span", {
+            className: "message-copy-icon message-copy-icon-done",
+            "aria-hidden": "true",
+            dangerouslySetInnerHTML: { __html: CHECK_SVG },
+          })
+        )
+      : null,
+    showFork
+      ? h(
+          "button",
+          {
+            type: "button",
+            className: "message-fork-button",
+            "data-fork-from-item": entry.item_id || entry.id || "",
+            title: "Fork from here",
+            "aria-label": "Fork conversation from this message",
+          },
+          h("span", {
+            className: "message-fork-icon",
+            "aria-hidden": "true",
+            dangerouslySetInnerHTML: { __html: FORK_SVG },
+          })
+        )
+      : null
   );
 }
 
@@ -209,7 +240,11 @@ function UserEntryImpl({ entry, isLatestUser = false, isJustPrepended = false })
 // tail entry gets a new reference and re-renders.
 const UserEntry = React.memo(UserEntryImpl);
 
-function AgentEntryImpl({ entry, isJustPrepended = false }) {
+// `isForkable` is threaded in as a plain boolean rather than reading it off
+// `options` inside the component: options gets a fresh identity on every
+// transcript change, which would defeat React.memo for every agent message in
+// a long thread.
+function AgentEntryImpl({ entry, isJustPrepended = false, isForkable = false }) {
   return h(
     "article",
     transcriptEntryDomAttrs(entry, "chat-message chat-message-assistant", null, {
@@ -224,7 +259,7 @@ function AgentEntryImpl({ entry, isJustPrepended = false }) {
       "div",
       { className: "message-card" },
       h("div", { className: "message-body" }, renderMessageBody(entry.text)),
-      renderCopyMessageButton(entry.text)
+      renderMessageActions(entry, isForkable)
     )
   );
 }
@@ -1687,7 +1722,11 @@ export function TranscriptEntry({
     return h(UserEntry, { entry, isJustPrepended, isLatestUser });
   }
   if (kind === "agent_text") {
-    return h(AgentEntry, { entry, isJustPrepended });
+    return h(AgentEntry, {
+      entry,
+      isJustPrepended,
+      isForkable: isForkableEntry(entry, options),
+    });
   }
   if (kind === "command") {
     return h(CommandEntry, { entry, isJustPrepended, options });
@@ -1923,10 +1962,16 @@ export function TranscriptContent({
     }
     return "";
   }, [entries]);
+  // Computed once per transcript rather than per entry: the turn-final scan is
+  // O(n) overall here, but O(n²) if each agent message looked ahead itself.
+  const forkableItemIds = React.useMemo(
+    () => (options?.canFork ? computeForkableItemIds(entries) : EMPTY_FORKABLE_IDS),
+    [entries, options?.canFork]
+  );
   const effectiveOptions = React.useMemo(() => {
-    if (!options) return { lastTurnDiffItemId };
-    return { ...options, lastTurnDiffItemId };
-  }, [options, lastTurnDiffItemId]);
+    if (!options) return { lastTurnDiffItemId, forkableItemIds };
+    return { ...options, lastTurnDiffItemId, forkableItemIds };
+  }, [options, lastTurnDiffItemId, forkableItemIds]);
   const justPrependedItemIds = useJustPrependedItemIds(entries);
   const nodes = [];
 

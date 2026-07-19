@@ -51,6 +51,7 @@ function Sidebar({ launchModel = null, onLaunchFieldChange = null, onLaunchStart
     h(LaunchPanel, { launchModel, onLaunchFieldChange, onLaunchStart }),
     h(ThreadDrawer),
     h(ThreadContextMenu),
+    h("div", { id: "fork-session-dialog-root" }),
     h(
       "div",
       { className: "sidebar-bottom-bar" },
@@ -184,6 +185,7 @@ function ThreadContextMenu() {
   return h(
     "div",
     { className: "context-menu", hidden: true, id: "thread-context-menu" },
+    h("button", { className: "context-menu-button", id: "fork-thread-button", type: "button" }, "Fork session"),
     h("button", { className: "context-menu-button", id: "archive-thread-button", type: "button" }, "Archive session"),
     h("button", {
       className: "context-menu-button context-menu-button-danger",

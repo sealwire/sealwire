@@ -39,6 +39,10 @@ pub(super) struct PersistedRelayState {
     pub(super) provider_name: String,
     #[serde(default)]
     pub(super) thread_settings: std::collections::HashMap<String, ThreadSessionSettings>,
+    /// Fork lineage (forked thread id -> source thread id). `#[serde(default)]`
+    /// keeps pre-fork state files loadable.
+    #[serde(default)]
+    pub(super) thread_forked_from: std::collections::HashMap<String, String>,
     /// Honest per-thread last-activity timestamps (unix secs) used as the
     /// thread-list sort key instead of the resume-polluted provider mtime.
     /// `#[serde(default)]` keeps old state files loadable (empty map).
@@ -100,6 +104,7 @@ impl PersistedRelayState {
             reasoning_effort: relay.reasoning_effort.clone(),
             provider_name: relay.provider_name.clone(),
             thread_settings: relay.thread_settings.clone(),
+            thread_forked_from: relay.thread_forked_from.clone(),
             thread_last_activity_at: relay.thread_last_activity_at.clone(),
             allowed_roots: relay.allowed_roots.clone(),
             device_records: relay.device_records.clone(),

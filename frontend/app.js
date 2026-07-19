@@ -22,6 +22,8 @@ import {
   cwdInput,
   deleteThreadButton,
   directoryForm,
+  forkSessionDialogRoot,
+  forkThreadButton,
   goConsoleHomeButton,
   goConsoleHomeSidebarButton,
   launchSettingsModal,
@@ -137,6 +139,12 @@ import {
 import { installThreadListWheelProxy } from "./shared/thread-list-scroll.js";
 import { fetchBuildInfo } from "./shared/build-badge.js";
 import { providerLabel } from "./shared/provider-labels.js";
+import { ForkSessionDialog } from "./shared/fork-session-dialog.js";
+import {
+  applyForkProviderChange,
+  defaultForkFields,
+  threadIsBusyForFork,
+} from "./shared/fork-fields.js";
 import { isReviewInProgressForThread } from "./shared/review-state.js";
 import {
   buildViewOnlyPin,
@@ -232,6 +240,12 @@ const state = {
   pendingThreadHistoryScrollTop: null,
   providerModels: {},
   providers: [],
+  forkDialog: {
+    open: false,
+    pending: false,
+    sourceThread: null,
+    fields: null,
+  },
   threadGroups: [],
   threadHistoryScrollTop: 0,
   threadListStore: createThreadListStore(),
@@ -254,6 +268,7 @@ const apiFetch = createApiFetch({
 const workspaceDiffStore = createWorkspaceDiffStore({ apiFetch, surface: "local" });
 let clientLogRootHandle = null;
 let clientLogRootElement = null;
+let forkSessionRoot = null;
 
 // Reviewer-tab actions. Bound late through `state.controller` (assigned after
 // the controller is built) so these can be wired into the rail + sheet mounts
@@ -871,6 +886,7 @@ const {
   connectSessionStream,
   copyPairingLink,
   decidePairingRequest,
+  forkSession,
   loadSession,
   loadThreads,
   resumeLatestSession,
@@ -1032,6 +1048,13 @@ archiveThreadButton?.addEventListener("click", () => {
   void archiveThreadFromContextMenu();
 });
 
+forkThreadButton?.addEventListener("click", () => {
+  const threadId = readThreadListContextMenu(state.threadListStore).threadId;
+  if (threadId) {
+    openForkDialogForThread(threadId);
+  }
+});
+
 deleteThreadButton?.addEventListener("click", () => {
   void deleteThreadFromContextMenu();
 });
@@ -1186,6 +1209,13 @@ transcript.addEventListener("click", (event) => {
   const copyButton = event.target.closest("[data-copy-message]");
   if (copyButton) {
     void copyTextToClipboard(copyButton.dataset.copyMessage || "", copyButton);
+    return;
+  }
+
+  const forkButton = event.target.closest("[data-fork-from-item]");
+  if (forkButton) {
+    const threadId = state.viewThreadId || state.session?.active_thread_id || null;
+    openForkDialogForThread(threadId, forkButton.dataset.forkFromItem || "");
     return;
   }
 
@@ -1811,6 +1841,148 @@ function resolveActiveThread(threadId) {
   return state.threads.find((thread) => thread.id === threadId) || null;
 }
 
+function renderForkSessionDialog() {
+  if (!forkSessionDialogRoot) {
+    return;
+  }
+  if (!forkSessionRoot) {
+    forkSessionRoot = createRoot(forkSessionDialogRoot);
+  }
+  const dialogState = state.forkDialog;
+  if (!dialogState.open || !dialogState.sourceThread) {
+    flushSync(() => forkSessionRoot.render(null));
+    return;
+  }
+
+  const fields = dialogState.fields || defaultForkFields(dialogState.sourceThread);
+  const provider = fields.provider || defaultProvider(state.providers);
+  const models = modelsForProvider(provider, state.session?.available_models || []);
+  const settings = providerSettings(provider);
+  const selectedModel = fields.model || defaultModelForProvider(provider);
+  const dialog = React.createElement(ForkSessionDialog, {
+    id: "local-fork-session-dialog",
+    sourceThread: dialogState.sourceThread,
+    fields,
+    pending: dialogState.pending,
+    error: dialogState.error || "",
+    providerOptions: providerOptions(state.providers),
+    models: models.length
+      ? models
+      : [{ model: selectedModel, display_name: selectedModel }],
+    modelsStatus: models.length ? "ready" : "loading",
+    approvalOptions: settings.approvalOptions,
+    effortOptions: buildReasoningEffortOptions(models, selectedModel, provider),
+    onFieldChange: handleForkDialogFieldChange,
+    onFork: submitForkDialog,
+    onRequestClose: closeForkDialog,
+  });
+
+  flushSync(() => forkSessionRoot.render(dialog));
+  const element = document.getElementById("local-fork-session-dialog");
+  if (element && !element.open) {
+    element.showModal();
+  }
+}
+
+function threadIsBusy(thread) {
+  return threadIsBusyForFork(thread, state.session);
+}
+
+function openForkDialogForThread(threadId, upToItemId = "") {
+  const thread = resolveActiveThread(threadId) || state.threads.find((entry) => entry.id === threadId);
+  if (!thread) {
+    logLine(`Cannot fork unknown thread ${threadId}`);
+    return;
+  }
+  // A thread mid-turn is rejected by the relay (the transcript is still being
+  // written), so refuse here instead of letting the user fill in the whole
+  // dialog first. Background threads count — they have their own live runtime.
+  if (threadIsBusy(thread)) {
+    logLine("Cannot fork a thread while a turn is in progress.");
+    return;
+  }
+  const models = modelsForProvider(thread.provider, state.session?.available_models || []);
+  state.forkDialog = {
+    open: true,
+    pending: false,
+    sourceThread: thread,
+    fields: {
+      ...defaultForkFields({ thread, models, session: state.session }),
+      cwd: thread.cwd || state.session?.current_cwd || state.selectedCwd || "",
+      upToItemId: upToItemId || "",
+    },
+  };
+  closeThreadContextMenu();
+  renderForkSessionDialog();
+  // The source thread's catalog is usually not the active session's, so fetch
+  // it before the user can submit a model that belongs to another provider.
+  void ensureForkProviderModels(thread.provider);
+}
+
+function closeForkDialog() {
+  state.forkDialog = {
+    open: false,
+    pending: false,
+    sourceThread: null,
+    fields: null,
+    error: "",
+  };
+  renderForkSessionDialog();
+}
+
+// Fetch a provider's model catalog so the fork dialog can offer that
+// provider's own models. Without this a cross-provider fork sits on
+// "Loading models..." forever and can submit a foreign model id.
+async function ensureForkProviderModels(provider) {
+  if (!provider) return;
+  if (modelsForProvider(provider, state.session?.available_models || []).length) return;
+  try {
+    await refreshProviderCatalogs(
+      state.session || { provider, available_models: [] }
+    );
+  } catch (error) {
+    logLine(`Could not load ${providerLabel(provider) || provider} models: ${error.message}`);
+  }
+  renderForkSessionDialog();
+}
+
+function handleForkDialogFieldChange(field, value) {
+  const current = state.forkDialog.fields;
+  let next = { ...current, [field]: value };
+  if (field === "provider") {
+    const models = modelsForProvider(value, state.session?.available_models || []);
+    next = applyForkProviderChange(next, value, models);
+    void ensureForkProviderModels(value);
+  }
+  state.forkDialog = { ...state.forkDialog, fields: next, error: "" };
+  renderForkSessionDialog();
+}
+
+async function submitForkDialog() {
+  const dialogState = state.forkDialog;
+  if (!dialogState.sourceThread?.id || dialogState.pending) {
+    return;
+  }
+  state.forkDialog = { ...dialogState, pending: true };
+  renderForkSessionDialog();
+  const result = await forkSession({
+    ...dialogState.fields,
+    sourceThreadId: dialogState.sourceThread.id,
+  });
+  if (result?.ok) {
+    closeForkDialog();
+    return;
+  }
+  // Surface the failure IN the dialog. Reporting only through logLine left the
+  // button silently re-enabling with no visible reason, so users retried.
+  state.forkDialog = {
+    ...state.forkDialog,
+    pending: false,
+    error: result?.error || "Failed to fork session.",
+  };
+  renderForkSessionDialog();
+}
+
 function openThreadContextMenu(threadId, clientX, clientY) {
   if (!threadContextMenu || !archiveThreadButton || !deleteThreadButton || !threadId) {
     return;
@@ -1820,6 +1992,19 @@ function openThreadContextMenu(threadId, clientX, clientY) {
   const isActive = state.session?.active_thread_id === threadId;
   const isRunningActiveSession =
     isActive && Boolean(state.session?.active_turn_id);
+  if (forkThreadButton) {
+    // Background threads can be mid-turn too, and the relay rejects those as
+    // well — gate on the same rule the server uses, not just "is active".
+    const contextThread =
+      resolveActiveThread(threadId)
+      || state.threads.find((entry) => entry.id === threadId)
+      || null;
+    const forkBlocked = threadIsBusy(contextThread);
+    forkThreadButton.disabled = forkBlocked;
+    forkThreadButton.textContent = forkBlocked
+      ? "Running session cannot be forked"
+      : "Fork session";
+  }
   archiveThreadButton.disabled = isRunningActiveSession;
   archiveThreadButton.textContent = isRunningActiveSession
     ? "Running session cannot be archived"
@@ -1857,6 +2042,10 @@ function closeThreadContextMenu({ rerender = true } = {}) {
   state.threadListStore.getState().closeContextMenu();
   if (threadContextMenu) {
     threadContextMenu.hidden = true;
+  }
+  if (forkThreadButton) {
+    forkThreadButton.disabled = false;
+    forkThreadButton.textContent = "Fork session";
   }
   if (archiveThreadButton) {
     archiveThreadButton.disabled = false;

@@ -367,6 +367,7 @@ impl ProviderBridge for FakeProviderBridge {
             status: "idle".to_string(),
             model_provider: "fake".to_string(),
             provider: "fake".to_string(),
+            forked_from: None,
         };
         self.threads.lock().await.insert(
             thread.id.clone(),
@@ -1138,6 +1139,7 @@ async fn restore_threads_from_relay(
         status: snapshot.current_status,
         model_provider: "fake".to_string(),
         provider: "fake".to_string(),
+        forked_from: None,
     };
 
     HashMap::from([(
@@ -1324,6 +1326,7 @@ mod tests {
             status: "idle".to_string(),
             model_provider: "fake".to_string(),
             provider: "fake".to_string(),
+            forked_from: None,
         }
     }
 

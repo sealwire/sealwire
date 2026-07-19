@@ -20,6 +20,7 @@ import {
 import { loadLastEffort, saveLastApprovalPolicy } from "../../shared/last-used-settings.js";
 import { resolveOutgoingEffort } from "../../shared/reasoning-efforts.js";
 import { providerLabel } from "../../shared/provider-labels.js";
+import { forkFieldsToPayload } from "../../shared/fork-fields.js";
 import { buildThreadGroups, findLatestThread } from "../../shared/thread-groups.js";
 import { createThreadListQueryOptions } from "../../shared/thread-queries.js";
 import { readThreadListUi } from "../../shared/thread-list-store.js";
@@ -255,6 +256,58 @@ export function createLifecycleController(ctx) {
       return false;
     } finally {
       state.pendingThreadHistoryScrollTop = null;
+    }
+  }
+
+  async function forkSession(forkDraft) {
+    const sourceThreadId = forkDraft?.sourceThreadId || "";
+    if (!sourceThreadId) {
+      return { ok: false, error: "Choose a thread before forking a session." };
+    }
+    const cwd = String(forkDraft?.cwd || "").trim();
+    if (!cwd) {
+      return { ok: false, error: "Choose a directory before forking a session." };
+    }
+    const provider = forkDraft?.provider || null;
+    const agentName = providerLabel(provider) || "agent";
+    logLine(`Forking thread ${sourceThreadId} into ${agentName}.`);
+
+    try {
+      const response = await apiFetch("/api/session/fork", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        // Settings the user did not explicitly choose go out as null so the
+        // relay resolves them from the SOURCE thread. Sending the live
+        // session's values here would silently re-permission the fork.
+        body: JSON.stringify({
+          ...forkFieldsToPayload({ ...forkDraft, sourceThreadId, cwd }),
+          device_id: state.deviceId,
+        }),
+      });
+      const payload = await response.json();
+
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload?.error?.message || "Failed to fork session");
+      }
+
+      state.defaultsSeeded = false;
+      await runViewTransition(() => {
+        setSelectedCwd(payload.data.current_cwd || cwd);
+        setThreadRoute(payload.data.active_thread_id || null);
+        seedDefaults(payload.data);
+        applySessionSnapshot(payload.data);
+      });
+      if (canCurrentDeviceWrite(payload.data)) {
+        messageInput.focus();
+      }
+      await loadThreads("post-fork refresh");
+      logLine(`Forked thread ${sourceThreadId}`);
+      return { ok: true };
+    } catch (error) {
+      logLine(`Fork failed: ${error.message}`);
+      return { ok: false, error: error.message };
     }
   }
 
@@ -608,6 +661,7 @@ export function createLifecycleController(ctx) {
     loadSession,
     loadThreads,
     startSession,
+    forkSession,
     resumeSession,
     updateSessionSettings,
     resumeLatestSession,

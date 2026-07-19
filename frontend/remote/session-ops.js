@@ -43,6 +43,7 @@ import {
 import { isReviewInProgressForThread } from "../shared/review-state.js";
 import { resolveOutgoingEffort } from "../shared/reasoning-efforts.js";
 import { threadAttention } from "../shared/thread-attention.js";
+import { forkFieldsToPayload } from "../shared/fork-fields.js";
 import { isDocumentForeground, notifyThreadEvents } from "../shared/thread-notify.js";
 import { shouldRefreshViewedThread } from "../shared/viewed-thread-refresh.js";
 import { createFrameRenderQueue } from "./frame-render-queue.js";
@@ -964,6 +965,31 @@ export async function startRemoteSession(sessionDraftOverride = null) {
   } catch (error) {
     renderLog(`Remote start failed: ${error.message}`);
     return false;
+  }
+}
+
+export async function forkRemoteSession(forkDraft = null) {
+  invalidateViewOnlyNavigation();
+  if (!forkDraft?.sourceThreadId) {
+    return { ok: false, error: "Choose a thread before forking a remote session." };
+  }
+  const cwd = String(forkDraft.cwd || "").trim();
+  if (!cwd) {
+    return { ok: false, error: "Choose a workspace before forking a remote session." };
+  }
+
+  renderLog(`Forking remote thread ${forkDraft.sourceThreadId}.`);
+
+  try {
+    // Untouched settings go out as null so the relay inherits them from the
+    // SOURCE thread rather than from whatever session is open here.
+    await dispatchOrRecover("fork_session", {
+      input: forkFieldsToPayload({ ...forkDraft, cwd }),
+    });
+    return { ok: true };
+  } catch (error) {
+    renderLog(`Remote fork failed: ${error.message}`);
+    return { ok: false, error: error.message };
   }
 }
 

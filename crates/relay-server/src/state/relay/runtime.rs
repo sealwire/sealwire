@@ -53,6 +53,7 @@ impl ThreadRuntime {
                 status: "active".to_string(),
                 model_provider: String::new(),
                 provider: String::new(),
+                forked_from: None,
             }),
             active_turn_id: None,
             turn_revision: 0,
@@ -473,6 +474,7 @@ mod tests {
             status: status.to_string(),
             model_provider: "fake".to_string(),
             provider: "fake".to_string(),
+            forked_from: None,
         }
     }
 

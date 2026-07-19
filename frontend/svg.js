@@ -19,6 +19,10 @@ export const ARROW_RETURN_SVG = `<svg ${ICON_ATTRS}><polyline points="9 10 4 15 
 
 export const COPY_SVG = `<svg ${ICON_ATTRS}><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>`;
 
+// Git-branch glyph: one trunk, one branch splitting off — the fork affordance
+// on turn-final agent messages.
+export const FORK_SVG = `<svg ${ICON_ATTRS}><line x1="6" x2="6" y1="3" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>`;
+
 export const CHECK_SVG = `<svg ${ICON_ATTRS}><polyline points="20 6 9 17 4 12"/></svg>`;
 
 export const CHEVRON_DOWN_SVG = `<svg ${ICON_ATTRS}><polyline points="6 9 12 15 18 9"/></svg>`;

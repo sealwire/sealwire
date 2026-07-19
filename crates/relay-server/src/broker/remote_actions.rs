@@ -8,12 +8,12 @@ use tracing::{info, warn};
 use crate::{
     protocol::{
         ApplyFileChangeInput, ApprovalDecisionInput, ApprovalReceipt, AskUserAnswerReceipt,
-        AskUserQuestionDetailResponse, HeartbeatInput, ModelOptionView, ReadThreadEntriesInput,
-        ReadThreadEntryDetailInput, ReadThreadTranscriptInput, RequestReviewInput,
-        ResumeSessionInput, ReviewsResponse, SendMessageInput, SessionSnapshot, StartSessionInput,
-        StopTurnInput, SubmitAskUserAnswerInput, TakeOverInput, ThreadEntriesResponse,
-        ThreadEntryDetailResponse, ThreadTranscriptResponse, ThreadsQuery, ThreadsResponse,
-        UpdateSessionSettingsInput, WorkspaceDiffResponse,
+        AskUserQuestionDetailResponse, ForkSessionInput, HeartbeatInput, ModelOptionView,
+        ReadThreadEntriesInput, ReadThreadEntryDetailInput, ReadThreadTranscriptInput,
+        RequestReviewInput, ResumeSessionInput, ReviewsResponse, SendMessageInput, SessionSnapshot,
+        StartSessionInput, StopTurnInput, SubmitAskUserAnswerInput, TakeOverInput,
+        ThreadEntriesResponse, ThreadEntryDetailResponse, ThreadTranscriptResponse, ThreadsQuery,
+        ThreadsResponse, UpdateSessionSettingsInput, WorkspaceDiffResponse,
     },
     state::{
         AppState, ApprovalError, AskUserAnswerError, CachedRemoteActionResult,
@@ -49,6 +49,9 @@ pub(super) enum RemoteActionRequest {
     },
     StartSession {
         input: StartSessionInput,
+    },
+    ForkSession {
+        input: ForkSessionInput,
     },
     ResumeSession {
         input: ResumeSessionInput,
@@ -131,6 +134,7 @@ impl RemoteActionRequest {
             Self::ClaimChallenge { .. } => RemoteActionKind::ClaimChallenge,
             Self::ClaimDevice { .. } => RemoteActionKind::ClaimDevice,
             Self::StartSession { .. } => RemoteActionKind::StartSession,
+            Self::ForkSession { .. } => RemoteActionKind::ForkSession,
             Self::ResumeSession { .. } => RemoteActionKind::ResumeSession,
             Self::UpdateSessionSettings { .. } => RemoteActionKind::UpdateSessionSettings,
             Self::SendMessage { .. } => RemoteActionKind::SendMessage,
@@ -168,6 +172,10 @@ impl RemoteActionRequest {
             Self::StartSession { mut input } => {
                 input.device_id = Some(device_id);
                 Self::StartSession { input }
+            }
+            Self::ForkSession { mut input } => {
+                input.device_id = Some(device_id);
+                Self::ForkSession { input }
             }
             Self::ResumeSession { mut input } => {
                 input.device_id = Some(device_id);
@@ -263,6 +271,7 @@ pub(super) enum RemoteActionKind {
     ClaimChallenge,
     ClaimDevice,
     StartSession,
+    ForkSession,
     ResumeSession,
     UpdateSessionSettings,
     SendMessage,
@@ -292,6 +301,7 @@ impl RemoteActionKind {
             Self::ClaimChallenge { .. } => "claim_challenge",
             Self::ClaimDevice { .. } => "claim_device",
             Self::StartSession => "start_session",
+            Self::ForkSession => "fork_session",
             Self::ResumeSession => "resume_session",
             Self::UpdateSessionSettings => "update_session_settings",
             Self::SendMessage => "send_message",
@@ -925,6 +935,10 @@ async fn execute_remote_action(
             .start_session(input)
             .await
             .map(|_| RemoteActionOutcome::default()),
+        RemoteActionRequest::ForkSession { input } => state
+            .fork_session(input)
+            .await
+            .map(|_| RemoteActionOutcome::default()),
         RemoteActionRequest::ResumeSession { input } => state
             .resume_session(input)
             .await
@@ -1164,6 +1178,7 @@ fn issues_session_claim(action: RemoteActionKind) -> bool {
     matches!(
         action,
         RemoteActionKind::StartSession
+            | RemoteActionKind::ForkSession
             | RemoteActionKind::ResumeSession
             | RemoteActionKind::TakeOver
     )
@@ -2205,6 +2220,7 @@ fn remote_action_result_snapshot(
 fn remote_action_result_kind(action: RemoteActionKind) -> RemoteActionResultKind {
     match action {
         RemoteActionKind::StartSession
+        | RemoteActionKind::ForkSession
         | RemoteActionKind::ResumeSession
         | RemoteActionKind::UpdateSessionSettings => RemoteActionResultKind::RemoteSessionResult,
         RemoteActionKind::ClaimChallenge
@@ -2238,6 +2254,7 @@ fn remote_action_result_allows_snapshot(action: RemoteActionKind) -> bool {
     matches!(
         action,
         RemoteActionKind::StartSession
+            | RemoteActionKind::ForkSession
             | RemoteActionKind::ResumeSession
             | RemoteActionKind::UpdateSessionSettings
     )

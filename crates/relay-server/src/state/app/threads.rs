@@ -88,6 +88,7 @@ impl AppState {
         // value.
         for thread in &mut threads {
             thread.updated_at = relay.thread_last_activity_or(&thread.id, thread.updated_at);
+            thread.forked_from = relay.thread_forked_from(&thread.id);
         }
         sort_threads_by_recency(&mut threads);
         threads.truncate(limit);

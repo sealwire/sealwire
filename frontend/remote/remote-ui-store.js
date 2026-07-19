@@ -29,6 +29,13 @@ export function createRemoteUiStore(initialState = {}) {
     deviceLabelDraft: loadDeviceLabel(),
     pairingInputValue: "",
     pairingModalOpen: false,
+    forkDialog: {
+      open: false,
+      pending: false,
+      sourceThread: null,
+      fields: null,
+      error: "",
+    },
     remoteInfoModalOpen: false,
     providerModels: {},
     // Per-provider catalog fetch status: "loading" | "ready" | "error".
@@ -79,6 +86,25 @@ export function createRemoteUiStore(initialState = {}) {
     setPairingModalOpen(open) {
       set({
         pairingModalOpen: Boolean(open),
+      });
+    },
+    setForkDialog(next) {
+      set((state) => ({
+        forkDialog: {
+          ...state.forkDialog,
+          ...(next || {}),
+        },
+      }));
+    },
+    closeForkDialog() {
+      set({
+        forkDialog: {
+          open: false,
+          pending: false,
+          sourceThread: null,
+          fields: null,
+          error: "",
+        },
       });
     },
     setRemoteInfoModalOpen(open) {

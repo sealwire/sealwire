@@ -81,6 +81,18 @@ pub(crate) fn thread_status_is_working(status: &str) -> bool {
     )
 }
 
+/// Whether relay-local state shows a turn in flight on `thread_id`, covering
+/// background threads (their own runtime) as well as the selected/control
+/// projection. Forking a thread mid-turn would branch from a transcript the
+/// provider is still writing.
+pub(crate) fn relay_thread_is_busy(relay: &RelayState, thread_id: &str) -> bool {
+    relay
+        .runtime_for_thread(thread_id)
+        .is_some_and(|runtime| runtime.has_live_turn() || runtime.is_working())
+        || (relay.active_thread_id.as_deref() == Some(thread_id)
+            && relay.active_thread_has_live_turn())
+}
+
 /// Whether a status means the turn is DEFINITIVELY over — strictly stronger than
 /// `!thread_status_is_working`. Used only by the two destructive turn-end sites
 /// (clearing the progress phase, dropping orphaned approval / ask-user requests),
@@ -203,6 +215,10 @@ pub struct RelayState {
     pub sandbox: String,
     pub reasoning_effort: String,
     pub(super) thread_settings: HashMap<String, ThreadSessionSettings>,
+    /// Fork lineage: forked thread id -> the thread it branched from. Recorded
+    /// at fork time because neither provider tracks the relationship, and
+    /// retrofitting it once forked threads exist would need a migration.
+    pub(super) thread_forked_from: HashMap<String, String>,
     /// Honest "last real activity" timestamp per thread (unix secs), used as
     /// the thread-list sort/display key INSTEAD of the provider's raw
     /// `updated_at`. A no-prompt resume/selection spins up a live SDK session
@@ -300,6 +316,7 @@ impl RelayState {
             sandbox: DEFAULT_SANDBOX.to_string(),
             reasoning_effort: DEFAULT_EFFORT.to_string(),
             thread_settings: HashMap::new(),
+            thread_forked_from: HashMap::new(),
             thread_last_activity_at: HashMap::new(),
             allowed_roots: Vec::new(),
             available_models: Vec::new(),
@@ -1701,6 +1718,7 @@ impl RelayState {
         self.thread_settings
             .entry(data.thread.id.clone())
             .or_insert(materialized);
+        self.thread_forked_from = persisted.thread_forked_from.clone();
         self.allowed_roots = persisted.allowed_roots.clone();
         self.device_records = persisted.device_records.clone();
         self.paired_devices = persisted.paired_devices.clone();
@@ -1872,6 +1890,18 @@ impl RelayState {
 
     pub fn remembered_thread_settings(&self, thread_id: &str) -> Option<ThreadSessionSettings> {
         self.thread_settings.get(thread_id).cloned()
+    }
+
+    pub fn set_thread_forked_from(&mut self, thread_id: &str, source_thread_id: &str) {
+        if thread_id.is_empty() || source_thread_id.is_empty() {
+            return;
+        }
+        self.thread_forked_from
+            .insert(thread_id.to_string(), source_thread_id.to_string());
+    }
+
+    pub fn thread_forked_from(&self, thread_id: &str) -> Option<String> {
+        self.thread_forked_from.get(thread_id).cloned()
     }
 
     pub fn remember_thread_settings(
@@ -2304,6 +2334,7 @@ impl RelayState {
             self.model = settings.model.clone();
             self.thread_settings.entry(thread_id).or_insert(settings);
         }
+        self.thread_forked_from = persisted.thread_forked_from.clone();
         self.allowed_roots = persisted.allowed_roots.clone();
         self.device_records = persisted.device_records.clone();
         self.paired_devices = persisted.paired_devices.clone();

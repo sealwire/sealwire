@@ -507,9 +507,53 @@
   display: inline-flex;
 }
 
-/* Touch devices have no hover, so keep the button gently visible. */
+/* "Fork from here" — same reveal behavior as copy, sitting beside it in the
+   action row. Only rendered on turn-final agent messages. */
+.message-fork-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms ease, color 120ms ease, background 120ms ease,
+    border-color 120ms ease;
+}
+
+.chat-message-assistant:hover .message-fork-button,
+.message-fork-button:focus-visible {
+  opacity: 1;
+}
+
+.message-fork-button:hover:not(:disabled) {
+  color: var(--text-1);
+  background: var(--surface-2);
+  border-color: var(--border-soft);
+}
+
+.message-fork-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.message-fork-icon svg {
+  width: 15px;
+  height: 15px;
+}
+
+/* Touch devices have no hover, so keep the buttons gently visible. This is the
+   only fork entry point that works on iOS — thread-row contextmenu never fires
+   for touch long-press. */
 @media (hover: none) {
-  .message-copy-button {
+  .message-copy-button,
+  .message-fork-button {
     opacity: 0.55;
   }
 }

@@ -28,6 +28,7 @@ pub(super) fn parse_thread_summary(value: &Value) -> Result<ThreadSummaryView, S
         model_provider: string_at(value, &["model_provider"])
             .unwrap_or_else(|| "anthropic".to_string()),
         provider: string_at(value, &["provider"]).unwrap_or_else(|| "claude_code".to_string()),
+        forked_from: None,
     })
 }
 

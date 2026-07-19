@@ -76,6 +76,7 @@ fn make_threads() -> ThreadsResponse {
                 status: "idle".to_string(),
                 model_provider: "openai".to_string(),
                 provider: "codex".to_string(),
+                forked_from: None,
             })
             .collect(),
     }
@@ -85,21 +86,26 @@ fn make_threads() -> ThreadsResponse {
 fn cached_remote_action_result_keeps_canonical_snapshot_for_session_lifecycle() {
     let snapshot = make_snapshot();
 
-    let cached = cached_remote_action_result(
+    for action in [
         RemoteActionKind::StartSession,
-        snapshot.clone(),
-        RemoteActionOutcome::default(),
-        None,
-        true,
-        None,
-    );
-    let cached_snapshot = cached.snapshot.expect("allowed snapshot");
+        RemoteActionKind::ForkSession,
+    ] {
+        let cached = cached_remote_action_result(
+            action,
+            snapshot.clone(),
+            RemoteActionOutcome::default(),
+            None,
+            true,
+            None,
+        );
+        let cached_snapshot = cached.snapshot.expect("allowed snapshot");
 
-    assert_eq!(cached_snapshot.transcript.len(), snapshot.transcript.len());
-    assert_eq!(
-        cached_snapshot.transcript_truncated,
-        snapshot.transcript_truncated
-    );
+        assert_eq!(cached_snapshot.transcript.len(), snapshot.transcript.len());
+        assert_eq!(
+            cached_snapshot.transcript_truncated,
+            snapshot.transcript_truncated
+        );
+    }
 }
 
 #[test]
@@ -131,10 +137,43 @@ fn high_frequency_remote_actions_do_not_emit_info_logs() {
     ));
 
     assert!(remote_action_emits_info_log(RemoteActionKind::StartSession));
+    assert!(remote_action_emits_info_log(RemoteActionKind::ForkSession));
     assert!(remote_action_emits_info_log(RemoteActionKind::SendMessage));
     assert!(remote_action_emits_info_log(
         RemoteActionKind::DecideApproval
     ));
+}
+
+#[test]
+fn fork_session_action_round_trips_and_issues_session_claim() {
+    let request: RemoteActionRequest = serde_json::from_value(serde_json::json!({
+        "type": "fork_session",
+        "input": {
+            "source_thread_id": "thread-source",
+            "provider": "claude_code",
+            "initial_prompt": "continue here"
+        }
+    }))
+    .expect("fork_session should parse");
+    assert_eq!(request.kind(), RemoteActionKind::ForkSession);
+    assert_eq!(RemoteActionKind::ForkSession.as_str(), "fork_session");
+
+    match request.bind_device("device-9".to_string()) {
+        RemoteActionRequest::ForkSession { input } => {
+            assert_eq!(input.device_id.as_deref(), Some("device-9"));
+            assert_eq!(input.source_thread_id, "thread-source");
+            assert_eq!(input.provider.as_deref(), Some("claude_code"));
+            assert_eq!(input.initial_prompt.as_deref(), Some("continue here"));
+        }
+        other => panic!("unexpected bound request: {other:?}"),
+    }
+
+    assert!(matches!(
+        remote_action_result_kind(RemoteActionKind::ForkSession),
+        RemoteActionResultKind::RemoteSessionResult
+    ));
+    assert!(issues_session_claim(RemoteActionKind::ForkSession));
+    assert!(!requires_session_claim(RemoteActionKind::ForkSession));
 }
 
 #[test]

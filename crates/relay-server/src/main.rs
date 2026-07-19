@@ -35,15 +35,15 @@ use futures_util::stream::{self, StreamExt};
 use protocol::{
     AllowedRootsInput, AllowedRootsReceipt, ApiEnvelope, ApiError, ApplyFileChangeInput,
     ApplyFileChangeReceipt, ApprovalDecisionInput, ApprovalReceipt, AskUserAnswerReceipt,
-    AuthSessionInput, AuthSessionView, BulkRevokeDevicesReceipt, DeleteThreadInput, HealthResponse,
-    HeartbeatInput, ModelOptionView, PairingDecisionInput, PairingDecisionReceipt,
-    PairingStartInput, PairingTicketView, ReadThreadEntryDetailInput, ReadThreadTranscriptInput,
-    RequestReviewInput, RequestReviewReceipt, ResumeSessionInput, ReviewActionInput,
-    ReviewDeleteReceipt, ReviewsResponse, RevokeDeviceReceipt, SendMessageInput, SessionSnapshot,
-    SessionSnapshotCompactProfile, StartSessionInput, StopTurnInput, SubmitAskUserAnswerInput,
-    TakeOverInput, ThreadArchiveReceipt, ThreadDeleteReceipt, ThreadEntryDetailResponse,
-    ThreadTranscriptResponse, ThreadsQuery, ThreadsResponse, UpdateSessionSettingsInput,
-    WorkspaceDiffResponse,
+    AuthSessionInput, AuthSessionView, BulkRevokeDevicesReceipt, DeleteThreadInput,
+    ForkSessionInput, HealthResponse, HeartbeatInput, ModelOptionView, PairingDecisionInput,
+    PairingDecisionReceipt, PairingStartInput, PairingTicketView, ReadThreadEntryDetailInput,
+    ReadThreadTranscriptInput, RequestReviewInput, RequestReviewReceipt, ResumeSessionInput,
+    ReviewActionInput, ReviewDeleteReceipt, ReviewsResponse, RevokeDeviceReceipt, SendMessageInput,
+    SessionSnapshot, SessionSnapshotCompactProfile, StartSessionInput, StopTurnInput,
+    SubmitAskUserAnswerInput, TakeOverInput, ThreadArchiveReceipt, ThreadDeleteReceipt,
+    ThreadEntryDetailResponse, ThreadTranscriptResponse, ThreadsQuery, ThreadsResponse,
+    UpdateSessionSettingsInput, WorkspaceDiffResponse,
 };
 use relay_http::{
     apply_standard_security_headers, header_origin, parse_optional_string_env, request_origin,
@@ -182,6 +182,7 @@ fn build_router(context: AppContext, web_assets: WebAssets) -> Router {
         )
         .route("/api/file-changes/:item_id/apply", post(apply_file_change))
         .route("/api/session/start", post(start_session))
+        .route("/api/session/fork", post(fork_session))
         .route("/api/session/resume", post(resume_session))
         .route("/api/session/settings", post(update_session_settings))
         .route("/api/session/heartbeat", post(session_heartbeat))
@@ -641,6 +642,27 @@ async fn start_session(
     context
         .app
         .start_session(input)
+        .await
+        .map(|snapshot| Json(ApiEnvelope::ok(compact_local_snapshot(snapshot))))
+        .map_err(|error| {
+            if is_path_policy_error(&error) {
+                bad_request(error)
+            } else {
+                bad_gateway(error)
+            }
+        })
+}
+
+async fn fork_session(
+    State(context): State<AppContext>,
+    headers: HeaderMap,
+    uri: Uri,
+    Json(input): Json<ForkSessionInput>,
+) -> Result<Json<ApiEnvelope<SessionSnapshot>>, (StatusCode, Json<ApiError>)> {
+    authorize_api(&context, &headers, &uri)?;
+    context
+        .app
+        .fork_session(input)
         .await
         .map(|snapshot| Json(ApiEnvelope::ok(compact_local_snapshot(snapshot))))
         .map_err(|error| {

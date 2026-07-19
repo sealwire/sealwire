@@ -257,3 +257,39 @@ export async function listSessions(_options) {
 export async function deleteSession(_sessionId, _options) {
   return true;
 }
+
+let forkCounter = 0;
+
+// Models the real SDK's `forkSession`: copies the source session's messages into
+// a NEW session id, truncating at `upToMessageId` when one is given. The
+// `__fork` marker (same idea as `__query`) records exactly what options the
+// worker passed, so a test can assert the branch point actually reached the SDK
+// instead of being silently dropped — which is what makes a fork take the whole
+// thread.
+export async function forkSession(sessionId, options = {}) {
+  const forkedSessionId = `${sessionId}-fork-${(forkCounter += 1)}`;
+  const hasUpTo = Object.prototype.hasOwnProperty.call(options, "upToMessageId");
+
+  writeLine({
+    type: "__fork",
+    source_session_id: sessionId,
+    upToMessageId: options.upToMessageId ?? null,
+    upToMessageIdPresent: hasUpTo,
+    dir: options.dir ?? null,
+    title: options.title ?? null,
+    session_id: forkedSessionId,
+  });
+
+  const source = sessionMessages.get(sessionId) ?? [];
+  let copied = source;
+  if (hasUpTo && options.upToMessageId) {
+    const cut = source.findIndex((message) => message.uuid === options.upToMessageId);
+    copied = cut >= 0 ? source.slice(0, cut + 1) : source;
+  }
+  sessionMessages.set(
+    forkedSessionId,
+    copied.map((message) => ({ ...message, session_id: forkedSessionId })),
+  );
+
+  return { sessionId: forkedSessionId };
+}

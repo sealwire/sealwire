@@ -30,6 +30,13 @@ import {
   providerSettings,
 } from "../shared/provider-settings.js";
 import { RefreshButton } from "../shared/refresh-button.js";
+import { ForkSessionDialog } from "../shared/fork-session-dialog.js";
+import {
+  applyForkProviderChange,
+  canForkInSession,
+  defaultForkFields,
+  threadIsBusyForFork,
+} from "../shared/fork-fields.js";
 import { copyTextToClipboard } from "../shared/clipboard.js";
 import { ThemePickerRow } from "../shared/theme-picker.js";
 import { installThreadListWheelProxy } from "../shared/thread-list-scroll.js";
@@ -394,6 +401,14 @@ function RemoteApp() {
       cancelled = true;
     };
   }, [currentState.remoteAuth?.relayId, currentState.remoteAuth?.payloadSecret, selectedProvider, currentState.socketConnected, remoteUi.providers]);
+
+  useEffect(() => {
+    if (!remoteUi.forkDialog?.open) return;
+    const dialog = document.getElementById("remote-fork-session-dialog");
+    if (dialog && !dialog.open) {
+      dialog.showModal();
+    }
+  }, [remoteUi.forkDialog?.open]);
 
   useEffect(() => {
     const models = currentState.session?.available_models;
@@ -838,6 +853,31 @@ function RemoteApp() {
     onEnsureProviderModels: ensureRemoteProviderModels,
   };
   const canRequestRemoteReview = canRequestReview(session, remoteDeviceId, remoteViewedThreadId);
+  const forkDialog = remoteUi.forkDialog || {};
+  // Gated on the dialog actually being open: RemoteApp re-renders on every
+  // snapshot/transcript delta while streaming, and this derivation used to run
+  // on all of them for a dialog that is almost always closed.
+  const forkView = React.useMemo(() => {
+    if (!forkDialog.open) return null;
+    const fields = forkDialog.fields || {};
+    const provider = fields.provider || forkDialog.sourceThread?.provider || "";
+    const models = remoteUi.providerModels[provider] || [];
+    return {
+      fields,
+      provider,
+      models,
+      settings: providerSettings(provider),
+      modelsStatus: models.length
+        ? "ready"
+        : remoteUi.providerModelsStatus[provider] || "loading",
+    };
+  }, [
+    forkDialog.open,
+    forkDialog.fields,
+    forkDialog.sourceThread,
+    remoteUi.providerModels,
+    remoteUi.providerModelsStatus,
+  ]);
 
   useEffect(() => {
     void bootRemoteRuntime();
@@ -964,6 +1004,77 @@ function RemoteApp() {
       return started;
     } finally {
       remoteUiStore.getState().setSessionStartPending(false);
+    }
+  }
+
+  function handleOpenForkDialog(threadId, upToItemId = "") {
+    const thread = currentState.threads.find((entry) => entry.id === threadId);
+    if (!thread) return;
+    // Match the relay's guard up front instead of failing on submit; a
+    // BACKGROUND thread can be mid-turn too.
+    if (threadIsBusyForFork(thread, session)) {
+      remoteUiStore.getState().setForkDialog({
+        open: true,
+        pending: false,
+        sourceThread: thread,
+        fields: {
+          ...defaultForkFields({ thread, models: [], session }),
+          upToItemId,
+        },
+        error: "Cannot fork a thread while a turn is in progress.",
+      });
+      return;
+    }
+    const models = remoteUiStore.getState().providerModels[thread.provider] || [];
+    remoteUiStore.getState().setForkDialog({
+      open: true,
+      pending: false,
+      sourceThread: thread,
+      fields: {
+        ...defaultForkFields({ thread, models, session }),
+        cwd: thread.cwd || session?.current_cwd || "",
+        upToItemId,
+      },
+      error: "",
+    });
+    // The source thread's provider is usually not the active session's, and
+    // nothing else fetches that catalog — without this the model select sits
+    // on "Loading models..." forever.
+    void ensureRemoteProviderModels(thread.provider);
+  }
+
+  function handleForkFieldChange(field, value) {
+    const dialog = remoteUiStore.getState().forkDialog;
+    let next = { ...dialog.fields, [field]: value };
+    if (field === "provider") {
+      const models = remoteUiStore.getState().providerModels[value] || [];
+      next = applyForkProviderChange(next, value, models);
+      void ensureRemoteProviderModels(value);
+    }
+    remoteUiStore.getState().setForkDialog({ fields: next, error: "" });
+  }
+
+  async function handleForkSession() {
+    const dialog = remoteUiStore.getState().forkDialog;
+    if (!dialog.sourceThread?.id || dialog.pending) return false;
+    remoteUiStore.getState().setForkDialog({ pending: true });
+    try {
+      const result = await handlers.onForkSession?.({
+        ...dialog.fields,
+        sourceThreadId: dialog.sourceThread.id,
+      });
+      if (result?.ok) {
+        closeRemoteNavigation();
+        remoteUiStore.getState().closeForkDialog();
+        await runThreadRefresh("post-fork refresh", { silent: true });
+        return true;
+      }
+      remoteUiStore.getState().setForkDialog({
+        error: result?.error || "Failed to fork session.",
+      });
+      return false;
+    } finally {
+      remoteUiStore.getState().setForkDialog({ pending: false });
     }
   }
 
@@ -1157,6 +1268,7 @@ function RemoteApp() {
           void runThreadRefresh("manual refresh");
         },
         onResumeThread: handleResumeThread,
+        onContextThread: handleOpenForkDialog,
         onSelectRelay(relayId) {
           closeRemoteNavigation();
           void handlers.onSelectRelay(relayId);
@@ -1222,6 +1334,7 @@ function RemoteApp() {
         }),
         h(RemoteThreadPanel, {
           agentWorkingIndicatorModel,
+          onForkFromMessage: handleOpenForkDialog,
           composerModel,
           composerDraft: remoteUi.composerDraft,
           composerEffort: remoteUi.composerEffort,
@@ -1309,6 +1422,29 @@ function RemoteApp() {
       h(RemoteWorkspaceChangesRail, { reviewer: reviewerActions })
     ),
     h(RemoteWorkspaceDiffModal, { reviewer: reviewerActions }),
+    forkDialog.open && forkView
+      ? h(ForkSessionDialog, {
+          id: "remote-fork-session-dialog",
+          sourceThread: forkDialog.sourceThread,
+          fields: forkView.fields,
+          pending: forkDialog.pending,
+          error: forkDialog.error || "",
+          providerOptions: providerOptions(remoteUi.providers),
+          models: forkView.models,
+          modelsStatus: forkView.modelsStatus,
+          approvalOptions: forkView.settings.approvalOptions,
+          effortOptions: buildReasoningEffortOptions(
+            forkView.models,
+            forkView.fields.model,
+            forkView.provider
+          ),
+          onFieldChange: handleForkFieldChange,
+          onFork: () => void handleForkSession(),
+          onRequestClose() {
+            remoteUiStore.getState().closeForkDialog();
+          },
+        })
+      : null,
     h(PairingModal, {
       deviceChromeModel,
       deviceLabel: remoteUi.deviceLabelDraft,
@@ -1364,6 +1500,7 @@ function RemoteSidebar({
   onRefreshThreads,
   remoteUiState,
   onResumeThread,
+  onContextThread,
   onSelectRelay,
   onStartSession,
   onToggleExpandedGroup,
@@ -1556,6 +1693,7 @@ function RemoteSidebar({
           },
           groups: threadsModel.groups || [],
           includePreview: true,
+          onContextThread,
           onResumeThread,
           onToggleExpandedGroup,
           onToggleGroup,
@@ -1746,6 +1884,7 @@ function RemoteHeader({
 }
 
 function RemoteThreadPanel({
+  onForkFromMessage,
   agentWorkingIndicatorModel,
   composerModel,
   composerDraft,
@@ -1786,6 +1925,7 @@ function RemoteThreadPanel({
         currentState,
         emptyStateModel,
         onApplyFileChange,
+        onForkFromMessage,
         onSelectRelay,
         onToggleExpandableBlock,
         onToggleTranscriptItem,
@@ -1924,6 +2064,7 @@ function RemoteTranscriptPanel({
   currentState,
   emptyStateModel,
   onApplyFileChange,
+  onForkFromMessage,
   onSelectRelay,
   onToggleExpandableBlock,
   onSubmitDecision,
@@ -2076,6 +2217,9 @@ function RemoteTranscriptPanel({
         expandedItemIds: uiState.transcriptExpandedItemIds,
         expandedKeys: uiState.transcriptExpandedItemIds,
         loadingItemIds: uiState.transcriptLoadingItemIds,
+        // The per-message fork button is the ONLY fork entry that works on
+        // iOS: thread-row contextmenu never fires for touch long-press.
+        canFork: canForkInSession(session),
         onEnsureFileChangeDetail,
         pendingAskUserQuestions,
         onSubmitAskUserAnswers: (requestId, answers) => {
@@ -2094,6 +2238,16 @@ function RemoteTranscriptPanel({
         if (copyButton) {
           event.preventDefault();
           void copyTextToClipboard(copyButton.dataset.copyMessage || "", copyButton);
+          return;
+        }
+
+        const forkButton = event.target.closest?.("[data-fork-from-item]");
+        if (forkButton) {
+          event.preventDefault();
+          onForkFromMessage?.(
+            session?.active_thread_id || "",
+            forkButton.dataset.forkFromItem || ""
+          );
           return;
         }
 

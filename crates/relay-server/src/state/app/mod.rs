@@ -19,16 +19,18 @@ use crate::{
         AllowedRootsInput, AllowedRootsReceipt, ApplyFileChangeInput, ApplyFileChangeReceipt,
         ApprovalDecision, ApprovalDecisionInput, ApprovalReceipt, AskUserAnswerReceipt,
         AskUserQuestionDetailResponse, BulkRevokeDevicesReceipt, FileChangeApplyDirection,
-        FileChangeDiffView, HeartbeatInput, ModelOptionView, PairingDecision, PairingDecisionInput,
-        PairingDecisionReceipt, PairingStartInput, PairingTicketView, ReadThreadEntriesInput,
-        ReadThreadEntryDetailInput, ReadThreadTranscriptInput, ResumeSessionInput,
-        RevokeDeviceReceipt, SendMessageInput, SessionSnapshot, StartSessionInput, StopTurnInput,
-        SubmitAskUserAnswerInput, TakeOverInput, ThreadArchiveReceipt, ThreadDeleteReceipt,
-        ThreadEntriesResponse, ThreadEntryDetailResponse, ThreadStateView,
-        ThreadTranscriptResponse, ThreadsResponse, UpdateSessionSettingsInput,
-        WorkspaceDiffResponse,
+        FileChangeDiffView, ForkSessionInput, HeartbeatInput, ModelOptionView, PairingDecision,
+        PairingDecisionInput, PairingDecisionReceipt, PairingStartInput, PairingTicketView,
+        ReadThreadEntriesInput, ReadThreadEntryDetailInput, ReadThreadTranscriptInput,
+        ResumeSessionInput, RevokeDeviceReceipt, SendMessageInput, SessionSnapshot,
+        StartSessionInput, StopTurnInput, SubmitAskUserAnswerInput, TakeOverInput,
+        ThreadArchiveReceipt, ThreadDeleteReceipt, ThreadEntriesResponse,
+        ThreadEntryDetailResponse, ThreadStateView, ThreadTranscriptResponse, ThreadsResponse,
+        UpdateSessionSettingsInput, WorkspaceDiffResponse,
     },
-    provider::{spawn_providers, ProviderBridge},
+    provider::{
+        spawn_providers, ProviderBridge, ProviderForkRequest, StartThreadResult, ThreadSyncData,
+    },
 };
 
 use super::persistence::{spawn_persistence_task, PersistedRelayState, PersistenceStore};
@@ -36,9 +38,9 @@ use super::{
     ensure_path_within_allowed_roots, ensure_path_within_device_scope, expire_controller_if_needed,
     non_empty, normalize_allowed_roots, normalize_cwd, path_within_allowed_roots,
     path_within_device_scope, require_device_id, short_device_id, sort_threads_by_recency,
-    unix_now, BrokerPendingMessage, CachedRemoteActionResult, ClaimChallenge, CompletedRemoteClaim,
-    IssuedClaimChallenge, PendingPairingResult, RelayState, RemoteActionReplayDecision,
-    SecurityProfile, DEFAULT_MODEL, STALE_TURN_PROGRESS_TIMEOUT_SECS,
+    thread_status_is_working, unix_now, BrokerPendingMessage, CachedRemoteActionResult,
+    ClaimChallenge, CompletedRemoteClaim, IssuedClaimChallenge, PendingPairingResult, RelayState,
+    RemoteActionReplayDecision, SecurityProfile, DEFAULT_MODEL, STALE_TURN_PROGRESS_TIMEOUT_SECS,
 };
 
 /// Error returned when a user op targets a thread that a non-terminal review
@@ -86,6 +88,7 @@ pub struct AppState {
 
 mod approvals;
 mod broker;
+mod fork;
 mod pairing;
 mod providers;
 mod review;

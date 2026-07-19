@@ -41,6 +41,7 @@ import {
   summarizeThreadGroups,
 } from "../shared/thread-groups.js";
 import { selectWorkspaceSuggestionsModel } from "../shared/workspace-suggestions.js";
+import { canForkInSession } from "../shared/fork-fields.js";
 import {
   readThreadListContextMenu,
   readThreadListUi,
@@ -1259,6 +1260,11 @@ export function createSessionRenderer({
             !isReviewInProgressForThread(session, session.active_thread_id),
           expandedKeys: localUi.transcriptExpandedItemIds,
           loadingItemIds: localUi.transcriptLoadingItemIds,
+          // Enables the per-message "Fork from here" affordance on turn-final
+          // agent messages. Saved/view-only threads included: forking reads a
+          // thread's history into a NEW session, it never writes to the thread
+          // you are looking at.
+          canFork: canForkInSession(session),
           onEnsureFileChangeDetail: (itemId) => {
             void state.controller?.ensureFileChangeDetail?.(itemId);
           },
