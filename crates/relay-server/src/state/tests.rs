@@ -2386,6 +2386,48 @@ fn pairing_rejects_invalid_secret_and_mints_a_fresh_payload_secret() {
 }
 
 #[test]
+fn revoking_paired_device_prunes_its_push_subscriptions() {
+    let mut relay = test_state();
+    let ticket = issue_test_pairing_ticket(
+        &mut relay,
+        "ws://127.0.0.1:8789",
+        "room-a",
+        "relay-a",
+        Some(60),
+    );
+    let (device, _token) = relay
+        .consume_pairing_ticket(
+            &ticket.pairing_id,
+            &ticket.pairing_secret,
+            Some("tablet".to_string()),
+            Some("Tablet".to_string()),
+            TEST_VERIFY_KEY_B64.to_string(),
+            None,
+            "surface-tablet",
+            100,
+        )
+        .expect("pairing should succeed");
+
+    relay.push_subscriptions.insert(
+        device.device_id.clone(),
+        vec![crate::state::PushSubscription {
+            endpoint: "https://push.example.com/abc".to_string(),
+            p256dh: "p".to_string(),
+            auth: "a".to_string(),
+            device_id: device.device_id.clone(),
+            created_at: 0,
+        }],
+    );
+    assert!(!relay.push_subscriptions_vec().is_empty());
+
+    assert!(relay.revoke_paired_device(&device.device_id, 101));
+    assert!(
+        relay.push_subscriptions_vec().is_empty(),
+        "revoking a device must prune its push subscriptions"
+    );
+}
+
+#[test]
 fn revoking_paired_device_removes_it() {
     let mut relay = test_state();
     let ticket = issue_test_pairing_ticket(

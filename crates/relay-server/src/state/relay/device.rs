@@ -603,6 +603,9 @@ impl RelayState {
         let Some(device) = self.paired_devices.remove(device_id) else {
             return false;
         };
+        // Stop all relay-originated push to a revoked device: drop its stored
+        // subscriptions so the dispatcher no longer sends thread names/status to it.
+        self.push_subscriptions.remove(device_id);
         self.record_revoked_device(&device, now);
         if self.active_controller_device_id.as_deref() == Some(device_id) {
             self.active_controller_device_id = None;

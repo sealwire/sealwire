@@ -589,12 +589,7 @@ impl PushDispatcher {
         let (tx, rx) = mpsc::unbounded_channel();
         let dispatcher = Self {
             relay,
-            // A per-request timeout so one hung push endpoint can't wedge the
-            // serial dispatch queue.
-            http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(10))
-                .build()
-                .unwrap_or_default(),
+            http: build_push_client(),
             vapid,
         };
         tokio::spawn(dispatcher.run(rx));
@@ -695,6 +690,18 @@ impl PushDispatcher {
             }
         }
     }
+}
+
+/// HTTP client for sending pushes. A per-request timeout stops a hung push
+/// endpoint wedging the serial dispatch queue; redirects are disabled so a
+/// registered public-https endpoint can't 3xx-redirect the relay to an internal
+/// address (SSRF) after the register-time host check.
+fn build_push_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap_or_default()
 }
 
 fn now() -> u64 {
@@ -827,6 +834,40 @@ mod tests {
         assert!(is_acceptable_push_endpoint(
             "https://[2606:4700:4700::1111]/x"
         ));
+    }
+
+    #[tokio::test]
+    async fn push_client_does_not_follow_redirects() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // A server that 302-redirects to a port nothing listens on. If the client
+        // follows the redirect it errors (connection refused); if it does not, it
+        // returns the 302 itself. This guards against a registered public-https
+        // endpoint redirecting the relay to an internal address (SSRF).
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                let _ = sock
+                    .write_all(
+                        b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/internal\r\nContent-Length: 0\r\n\r\n",
+                    )
+                    .await;
+                let _ = sock.flush().await;
+            }
+        });
+
+        let response = build_push_client()
+            .get(format!("http://{addr}/redirect"))
+            .send()
+            .await
+            .expect("request must not error (the client must not follow the redirect)");
+        assert_eq!(
+            response.status().as_u16(),
+            302,
+            "push client must not follow redirects (SSRF guard)"
+        );
     }
 
     #[test]
