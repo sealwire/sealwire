@@ -20,7 +20,10 @@ use crate::{
         truncate_with_ellipsis, ApprovalDecisionInput, FileChangeDiffView, ModelOptionView,
         ThreadSummaryView, ToolCallView, TranscriptEntryKind, TranscriptEntryView,
     },
-    provider::{ProviderBridge, ProviderForkRequest, StartThreadResult, ThreadSyncData},
+    provider::{
+        ProviderBridge, ProviderForkCapability, ProviderForkRequest, StartThreadResult,
+        ThreadSyncData,
+    },
     state::{ApprovalKind, PendingApproval, RelayState},
 };
 
@@ -101,6 +104,12 @@ impl ProviderBridge for CodexBridge {
             initial_user_message: None,
             started_turn_id: None,
         }))
+    }
+
+    // `thread/fork` always branches at the tip; a mid-thread branch falls back
+    // to replay in `fork_thread` above.
+    fn fork_capability(&self) -> ProviderForkCapability {
+        ProviderForkCapability::NATIVE_TIP_ONLY
     }
 
     async fn resume_thread(

@@ -118,25 +118,46 @@ export function threadIsBusyForFork(thread, session = null) {
 }
 
 // Whether the fork will go through transcript replay (lossy) instead of a
-// provider-native fork. Kept next to the field model so both surfaces label it
-// the same way and neither has to hardcode provider pairs in UI strings.
-// Allowlist, not a denylist: a provider is labelled native only if its bridge
-// actually implements ProviderBridge::fork_thread. The default trait impl
-// returns Ok(None) and silently replays, so assuming "same provider ⇒ native"
-// mislabels every bridge without a real fork (the `fake` provider does exactly
-// this). Add a provider here only when its bridge gains a native fork.
-const NATIVE_FORK_PROVIDERS = new Set(["codex", "claude_code"]);
-
-export function forkIsLossy({ sourceProvider = "", targetProvider = "", upToItemId = "" } = {}) {
+// provider-native fork.
+//
+// Driven by the capability the RELAY reports on the snapshot
+// (`provider_fork_capabilities`), not by provider names. Guessing from names
+// mislabels any bridge whose `fork_thread` is the default replay stub, and
+// cannot express that Codex branches only at the thread tip. Absent
+// capabilities (an older relay) we assume lossy: over-warning about context
+// loss is recoverable, silently claiming context was preserved is not.
+export function forkIsLossy({
+  sourceProvider = "",
+  targetProvider = "",
+  upToItemId = "",
+  forkPointIsTip = false,
+  capabilities = [],
+} = {}) {
   const target = targetProvider || sourceProvider;
   if (!sourceProvider || !target) return true;
   if (sourceProvider !== target) return true;
-  if (!NATIVE_FORK_PROVIDERS.has(sourceProvider)) return true;
-  // Codex `thread/fork` always branches at the thread tip, so branching from an
-  // earlier message falls back to replay. Claude's SDK fork takes an
-  // upToMessageId and stays native.
-  if (sourceProvider === "codex" && upToItemId) return true;
+
+  const capability = (capabilities || []).find((entry) => entry?.provider === target);
+  if (!capability?.native_fork) return true;
+
+  // A branch point at the transcript tip drops nothing, so it names the same
+  // branch as a whole-thread fork — the relay normalizes it away (see
+  // normalize_fork_point). Only a genuine mid-thread branch needs the provider
+  // to support branching at a message.
+  const branchesMidThread = Boolean(upToItemId) && !forkPointIsTip;
+  if (branchesMidThread && !capability.native_fork_at_message) return true;
+
   return false;
+}
+
+// Mirrors the relay's `normalize_fork_point`: exact, because any entry after
+// the fork point (tool calls included — their results are real context) means
+// the branch genuinely drops something.
+export function forkPointIsTranscriptTip(entries, upToItemId) {
+  if (!upToItemId) return false;
+  const last = (entries || [])[entries.length - 1];
+  const lastId = last?.item_id || last?.id || "";
+  return lastId === upToItemId;
 }
 
 function orNull(value) {

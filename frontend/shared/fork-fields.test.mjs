@@ -120,35 +120,6 @@ test("fork eligibility matches the server guard, including background threads", 
   assert.equal(threadIsBusyForFork({ id: "bg-4", status: "" }, session), false);
 });
 
-test("lossy labelling follows provider capability, not a hardcoded pair list", () => {
-  assert.equal(forkIsLossy({ sourceProvider: "codex", targetProvider: "claude_code" }), true);
-  assert.equal(forkIsLossy({ sourceProvider: "codex", targetProvider: "codex" }), false);
-  // codex thread/fork is tip-only, so a mid-thread branch degrades to replay
-  assert.equal(
-    forkIsLossy({ sourceProvider: "codex", targetProvider: "codex", upToItemId: "x" }),
-    true
-  );
-  // the Claude SDK fork takes upToMessageId and stays native
-  assert.equal(
-    forkIsLossy({ sourceProvider: "claude_code", targetProvider: "claude_code", upToItemId: "x" }),
-    false
-  );
-});
-
-// The label is a claim about what the server will do. Guessing "native" for
-// any same-provider pair was wrong for the fake provider (which has no native
-// fork and silently replays), so only providers known to implement
-// ProviderBridge::fork_thread may be labelled native.
-test("only providers with a real native fork are labelled native", () => {
-  assert.equal(forkIsLossy({ sourceProvider: "fake", targetProvider: "fake" }), true);
-  assert.equal(forkIsLossy({ sourceProvider: "whatever", targetProvider: "whatever" }), true);
-  assert.equal(forkIsLossy({ sourceProvider: "codex", targetProvider: "codex" }), false);
-  assert.equal(
-    forkIsLossy({ sourceProvider: "claude_code", targetProvider: "claude_code" }),
-    false
-  );
-});
-
 // Forking does not write to the thread you are looking at — it starts a NEW
 // session from that thread's history, and the relay accepts any non-busy
 // thread regardless of which one is active. Gating the affordance on the
@@ -234,4 +205,59 @@ test("the fork source resolves from the viewed-thread pin", () => {
   assert.equal(resolved.id, "viewed-1");
   assert.equal(resolved.provider, "codex", "uses the VIEWED thread's provider");
   assert.equal(resolved.cwd, "/other/repo", "not the live session's cwd");
+});
+
+// The client used to infer the fork mechanism from provider NAMES, which is a
+// guess: it mislabels any bridge without a native fork, and cannot know that a
+// branch point at the transcript tip drops nothing (so a tip-only native fork
+// still applies). The relay now reports capability on the snapshot.
+const CAPS = [
+  { provider: "codex", native_fork: true, native_fork_at_message: false },
+  { provider: "claude_code", native_fork: true, native_fork_at_message: true },
+  { provider: "fake", native_fork: false, native_fork_at_message: false },
+];
+
+test("lossy labelling follows reported capability", () => {
+  const lossy = (o) => forkIsLossy({ capabilities: CAPS, ...o });
+
+  assert.equal(lossy({ sourceProvider: "codex", targetProvider: "codex" }), false);
+  assert.equal(lossy({ sourceProvider: "claude_code", targetProvider: "claude_code" }), false);
+  // No native fork reported -> replay, whatever the provider is called.
+  assert.equal(lossy({ sourceProvider: "fake", targetProvider: "fake" }), true);
+  // Cross-provider is always replay.
+  assert.equal(lossy({ sourceProvider: "codex", targetProvider: "claude_code" }), true);
+});
+
+test("a branch point only forces replay when the provider cannot honour it", () => {
+  const lossy = (o) => forkIsLossy({ capabilities: CAPS, ...o });
+
+  // Codex is tip-only: a MID-thread branch degrades...
+  assert.equal(
+    lossy({ sourceProvider: "codex", targetProvider: "codex", upToItemId: "x" }),
+    true
+  );
+  // ...but branching at the tip drops nothing, so it stays native.
+  assert.equal(
+    lossy({
+      sourceProvider: "codex",
+      targetProvider: "codex",
+      upToItemId: "x",
+      forkPointIsTip: true,
+    }),
+    false
+  );
+  // Claude takes upToMessageId, so a mid-thread branch stays native.
+  assert.equal(
+    lossy({ sourceProvider: "claude_code", targetProvider: "claude_code", upToItemId: "x" }),
+    false
+  );
+});
+
+test("an unknown provider is assumed lossy", () => {
+  assert.equal(
+    forkIsLossy({ capabilities: CAPS, sourceProvider: "mystery", targetProvider: "mystery" }),
+    true
+  );
+  // No capabilities reported at all (older relay): assume the safe answer.
+  assert.equal(forkIsLossy({ sourceProvider: "codex", targetProvider: "codex" }), true);
 });

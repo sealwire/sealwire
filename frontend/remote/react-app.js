@@ -35,6 +35,7 @@ import {
   applyForkProviderChange,
   canForkInSession,
   defaultForkFields,
+  forkPointIsTranscriptTip,
   resolveForkSourceThread,
   threadIsBusyForFork,
 } from "../shared/fork-fields.js";
@@ -1042,6 +1043,7 @@ function RemoteApp() {
         ...defaultForkFields({ thread, models, session }),
         cwd: thread.cwd || session?.current_cwd || "",
         upToItemId,
+        forkPointIsTip: forkPointIsTranscriptTip(session?.transcript || [], upToItemId),
       },
       error: "",
     });
@@ -1446,6 +1448,7 @@ function RemoteApp() {
             forkView.fields.model,
             forkView.provider
           ),
+          forkCapabilities: session?.provider_fork_capabilities || [],
           onFieldChange: handleForkFieldChange,
           onFork: () => void handleForkSession(),
           onRequestClose() {

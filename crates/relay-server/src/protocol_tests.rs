@@ -37,6 +37,7 @@ fn review_action_input_supports_an_explicit_job_and_keeps_legacy_omission() {
 
 fn make_snapshot() -> SessionSnapshot {
     SessionSnapshot {
+        provider_fork_capabilities: Vec::new(),
         revision: 7,
         transcript_revision: 3,
         server_time: 11,

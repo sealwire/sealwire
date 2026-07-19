@@ -143,6 +143,7 @@ import { ForkSessionDialog } from "./shared/fork-session-dialog.js";
 import {
   applyForkProviderChange,
   defaultForkFields,
+  forkPointIsTranscriptTip,
   resolveForkSourceThread,
   threadIsBusyForFork,
 } from "./shared/fork-fields.js";
@@ -1873,6 +1874,7 @@ function renderForkSessionDialog() {
     modelsStatus: models.length ? "ready" : "loading",
     approvalOptions: settings.approvalOptions,
     effortOptions: buildReasoningEffortOptions(models, selectedModel, provider),
+    forkCapabilities: state.session?.provider_fork_capabilities || [],
     onFieldChange: handleForkDialogFieldChange,
     onFork: submitForkDialog,
     onRequestClose: closeForkDialog,
@@ -1919,6 +1921,12 @@ function openForkDialogForThread(threadId, upToItemId = "") {
       ...defaultForkFields({ thread, models, session: state.session }),
       cwd: thread.cwd || state.session?.current_cwd || state.selectedCwd || "",
       upToItemId: upToItemId || "",
+      // Branching at the tip drops nothing, so the relay collapses it to a
+      // whole-thread fork — which keeps a tip-only native fork native.
+      forkPointIsTip: forkPointIsTranscriptTip(
+        state.session?.transcript || [],
+        upToItemId || ""
+      ),
     },
   };
   closeThreadContextMenu();

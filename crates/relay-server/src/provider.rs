@@ -37,7 +37,29 @@ pub struct StartThreadResult {
     pub started_turn_id: Option<String>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderForkCapability {
+    pub native_fork: bool,
+    pub native_fork_at_message: bool,
+}
+
+impl ProviderForkCapability {
+    pub const REPLAY_ONLY: Self = Self {
+        native_fork: false,
+        native_fork_at_message: false,
+    };
+    /// A native fork that always branches at the thread tip (Codex).
+    pub const NATIVE_TIP_ONLY: Self = Self {
+        native_fork: true,
+        native_fork_at_message: false,
+    };
+    /// A native fork that accepts a branch point (Claude `upToMessageId`).
+    pub const NATIVE_AT_MESSAGE: Self = Self {
+        native_fork: true,
+        native_fork_at_message: true,
+    };
+}
+
 pub struct ProviderForkRequest {
     pub source_thread_id: String,
     /// Branch point (transcript item id), inclusive. A bridge that cannot fork
@@ -67,6 +89,13 @@ pub trait ProviderBridge: Send + Sync {
         _request: ProviderForkRequest,
     ) -> Result<Option<StartThreadResult>, String> {
         Ok(None)
+    }
+
+    /// Must agree with `fork_thread`: the default impl replays, so the default
+    /// capability claims nothing. A bridge that implements one without the
+    /// other makes the UI lie about whether context is preserved.
+    fn fork_capability(&self) -> ProviderForkCapability {
+        ProviderForkCapability::REPLAY_ONLY
     }
     async fn resume_thread(
         &self,

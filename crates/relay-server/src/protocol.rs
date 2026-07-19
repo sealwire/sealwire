@@ -81,6 +81,10 @@ pub struct SessionSnapshot {
     pub transcript_revision: u64,
     pub server_time: u64,
     pub provider: String,
+    /// Static per relay process; rides the snapshot so both surfaces get it
+    /// through the channel they already consume (no extra remote action).
+    #[serde(default)]
+    pub provider_fork_capabilities: Vec<ProviderForkCapabilityView>,
     pub service_ready: bool,
     pub provider_connected: bool,
     pub broker_connected: bool,
@@ -1409,6 +1413,21 @@ pub struct ThreadSummaryView {
     /// Providers do not track fork relationships, so this is relay-owned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from: Option<String>,
+}
+
+/// What a provider's bridge can actually do when forking. The client used to
+/// infer this from provider NAMES, which silently mislabels any bridge without
+/// a native fork (the default trait impl replays) and cannot know that Codex
+/// branches only at the thread tip.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderForkCapabilityView {
+    pub provider: String,
+    /// The bridge implements `ProviderBridge::fork_thread` (vs. the default
+    /// `Ok(None)`, which makes the caller fall back to transcript replay).
+    pub native_fork: bool,
+    /// The native fork accepts a branch point. Codex `thread/fork` is tip-only;
+    /// the Claude SDK takes `upToMessageId`.
+    pub native_fork_at_message: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

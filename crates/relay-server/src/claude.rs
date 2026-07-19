@@ -25,8 +25,8 @@ use crate::{
         TranscriptEntryKind, TranscriptEntryView,
     },
     provider::{
-        ProviderBridge, ProviderForkRequest, StartThreadResult, ThreadSyncData,
-        ThreadTranscriptPageData,
+        ProviderBridge, ProviderForkCapability, ProviderForkRequest, StartThreadResult,
+        ThreadSyncData, ThreadTranscriptPageData,
     },
     state::{
         BrokerPendingMessage, PendingApproval, PendingTranscriptDelta, RelayState,
@@ -450,6 +450,11 @@ impl ProviderBridge for ClaudeCodeBridge {
             initial_user_message: None,
             started_turn_id: None,
         }))
+    }
+
+    // The SDK fork takes `upToMessageId`, so a mid-thread branch stays native.
+    fn fork_capability(&self) -> ProviderForkCapability {
+        ProviderForkCapability::NATIVE_AT_MESSAGE
     }
 
     async fn resume_thread(

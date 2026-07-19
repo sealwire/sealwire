@@ -46,9 +46,13 @@ impl AppState {
         let source_cwd = non_empty(Some(source_data.thread.cwd.clone()))
             .unwrap_or_else(|| defaults.current_cwd.clone());
         let cwd = normalize_cwd(&non_empty(input.cwd).unwrap_or(source_cwd.clone()));
-        let up_to_item_id = non_empty(input.up_to_item_id);
+        let requested_fork_point = non_empty(input.up_to_item_id);
+        // Validate against the real transcript BEFORE normalizing, so a bogus
+        // id is still an error rather than being silently collapsed away.
         let forked_transcript =
-            truncate_transcript_at(&source_data.transcript, up_to_item_id.as_deref())?;
+            truncate_transcript_at(&source_data.transcript, requested_fork_point.as_deref())?;
+        let up_to_item_id =
+            normalize_fork_point(&source_data.transcript, requested_fork_point.as_deref());
 
         let source_settings = {
             let relay = self.relay.read().await;
@@ -399,6 +403,30 @@ fn build_fork_replay_prompt(
     }
 }
 
+// A fork point that is the transcript's FINAL entry drops nothing, so it names
+// the same branch as forking the whole thread. Collapsing it to `None` lets a
+// tip-only native fork (Codex `thread/fork`) stay native instead of degrading
+// to a lossy replay just because the client named the message it clicked.
+//
+// Deliberately exact: if ANY entry follows the fork point — including tool
+// calls, whose results are real context — the point stays explicit. Treating
+// "last agent message with trailing tool calls" as a whole-thread fork would
+// hand the branch results the user branched before.
+fn normalize_fork_point(
+    transcript: &[TranscriptEntryView],
+    up_to_item_id: Option<&str>,
+) -> Option<String> {
+    let item_id = up_to_item_id?;
+    let is_final_entry = transcript
+        .last()
+        .and_then(|entry| entry.item_id.as_deref())
+        .is_some_and(|last| last == item_id);
+    if is_final_entry {
+        return None;
+    }
+    Some(item_id.to_string())
+}
+
 // A fork branches at a specific message, so the replayed context must stop
 // there. Without this the branch silently inherits everything that happened
 // after the point the user picked.
@@ -681,6 +709,56 @@ mod tests {
 
         assert_eq!(truncated.len(), 2);
         assert_eq!(truncated[1].item_id.as_deref(), Some("a2"));
+    }
+
+    // A fork point that IS the last entry drops nothing, so it is the same
+    // branch as forking the whole thread. Normalizing it lets a tip-only native
+    // fork (Codex `thread/fork`) stay native instead of falling back to a lossy
+    // replay just because the client named the message it clicked.
+    #[test]
+    fn a_fork_point_at_the_final_entry_normalizes_to_a_whole_thread_fork() {
+        let transcript = vec![agent_entry("a1", "one"), agent_entry("a2", "two")];
+        assert_eq!(normalize_fork_point(&transcript, Some("a2")), None);
+    }
+
+    #[test]
+    fn a_fork_point_with_entries_after_it_is_preserved() {
+        let transcript = vec![agent_entry("a1", "one"), agent_entry("a2", "two")];
+        assert_eq!(
+            normalize_fork_point(&transcript, Some("a1")),
+            Some("a1".to_string())
+        );
+    }
+
+    // Trailing tool calls are real context. Forking at the last AGENT message
+    // when tool entries follow it must NOT be treated as a whole-thread fork —
+    // that would silently hand the branch results the user branched before.
+    #[test]
+    fn trailing_tool_entries_keep_the_fork_point_explicit() {
+        let mut transcript = vec![agent_entry("a1", "one")];
+        transcript.push(TranscriptEntryView {
+            item_id: Some("tool-1".to_string()),
+            kind: TranscriptEntryKind::ToolCall,
+            text: None,
+            status: "completed".to_string(),
+            turn_id: Some("turn-a1".to_string()),
+            tool: None,
+            content_state: crate::protocol::TranscriptContentState::Full,
+        });
+        assert_eq!(
+            normalize_fork_point(&transcript, Some("a1")),
+            Some("a1".to_string())
+        );
+    }
+
+    #[test]
+    fn an_absent_fork_point_stays_absent() {
+        let transcript = vec![agent_entry("a1", "one")];
+        assert_eq!(normalize_fork_point(&transcript, None), None);
+        assert_eq!(
+            normalize_fork_point(&[], Some("a1")),
+            Some("a1".to_string())
+        );
     }
 
     #[test]

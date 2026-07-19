@@ -22,6 +22,7 @@ export function ForkSessionDialog({
   onFork = null,
   pending = false,
   error = "",
+  forkCapabilities = [],
   providerOptions = [],
   models = [],
   modelsStatus = "ready",
@@ -37,6 +38,8 @@ export function ForkSessionDialog({
     sourceProvider,
     targetProvider,
     upToItemId: fields.upToItemId || "",
+    forkPointIsTip: Boolean(fields.forkPointIsTip),
+    capabilities: forkCapabilities,
   });
   const closeDialog = () => {
     onRequestClose?.();

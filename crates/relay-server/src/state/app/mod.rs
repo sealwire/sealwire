@@ -106,6 +106,23 @@ impl AppState {
         providers: HashMap<String, Arc<dyn ProviderBridge>>,
         change_tx: watch::Sender<u64>,
     ) -> Self {
+        // Seed fork capability once: it is a property of which bridges exist,
+        // not of any session, and both surfaces read it off the snapshot.
+        let capabilities = providers
+            .iter()
+            .map(|(name, bridge)| {
+                let capability = bridge.fork_capability();
+                crate::protocol::ProviderForkCapabilityView {
+                    provider: name.clone(),
+                    native_fork: capability.native_fork,
+                    native_fork_at_message: capability.native_fork_at_message,
+                }
+            })
+            .collect::<Vec<_>>();
+        if let Ok(mut state) = relay.try_write() {
+            state.set_provider_fork_capabilities(capabilities);
+        }
+
         Self {
             relay,
             providers,

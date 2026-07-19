@@ -225,6 +225,10 @@ pub struct RelayState {
     /// at fork time because neither provider tracks the relationship, and
     /// retrofitting it once forked threads exist would need a migration.
     pub(super) thread_forked_from: HashMap<String, String>,
+    /// Static per relay process, seeded from the spawned bridges. Rides the
+    /// snapshot so both surfaces learn fork capability through the channel they
+    /// already consume, instead of inferring it from provider names.
+    pub(super) provider_fork_capabilities: Vec<crate::protocol::ProviderForkCapabilityView>,
     /// Honest "last real activity" timestamp per thread (unix secs), used as
     /// the thread-list sort/display key INSTEAD of the provider's raw
     /// `updated_at`. A no-prompt resume/selection spins up a live SDK session
@@ -323,6 +327,7 @@ impl RelayState {
             reasoning_effort: DEFAULT_EFFORT.to_string(),
             thread_settings: HashMap::new(),
             thread_forked_from: HashMap::new(),
+            provider_fork_capabilities: Vec::new(),
             thread_last_activity_at: HashMap::new(),
             allowed_roots: Vec::new(),
             available_models: Vec::new(),
@@ -1369,6 +1374,7 @@ impl RelayState {
         crate::protocol::strip_file_change_diffs_for_snapshot(&mut transcript);
 
         SessionSnapshot {
+            provider_fork_capabilities: self.provider_fork_capabilities.clone(),
             revision: self.revision,
             transcript_revision,
             server_time: unix_now(),
@@ -1896,6 +1902,13 @@ impl RelayState {
 
     pub fn remembered_thread_settings(&self, thread_id: &str) -> Option<ThreadSessionSettings> {
         self.thread_settings.get(thread_id).cloned()
+    }
+
+    pub fn set_provider_fork_capabilities(
+        &mut self,
+        capabilities: Vec<crate::protocol::ProviderForkCapabilityView>,
+    ) {
+        self.provider_fork_capabilities = capabilities;
     }
 
     pub fn set_thread_forked_from(&mut self, thread_id: &str, source_thread_id: &str) {
