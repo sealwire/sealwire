@@ -651,69 +651,19 @@ test("mapSessionMessages still truncates non-AskUserQuestion inputs aggressively
   assert.match(preview, /\.\.\.$/);
 });
 
-// A user record the RELAY minted is already in the relay's transcript (the
-// relay upserts it before sending), so re-emitting it live would duplicate the
-// message. But the SDK also injects user records the relay never sent — a
-// <task-notification> that re-arms a spontaneous turn is one — and those were
-// dropped entirely, so the live transcript was missing a message that history
-// hydration later supplies. That made the same thread show different content
-// (and different fork points) live vs after a resume.
-test("an SDK-injected user message is surfaced live", () => {
-  const mapped = mapSdkMessage(
-    {
-      type: "user",
-      uuid: "injected-1",
-      message: { role: "user", content: "<task-notification>build finished</task-notification>" },
-    },
-    { relayUserMessageUuids: new Set(["relay-sent-1"]) }
-  );
-
-  assert.ok(mapped, "an injected user record must not be dropped");
-  const event = Array.isArray(mapped) ? mapped[0] : mapped;
-  assert.equal(event.type, "user_message");
-  assert.equal(event.item_id, "user:injected-1");
-  assert.match(event.text, /task-notification/);
-});
-
-test("a relay-minted user message is still suppressed (no duplicate)", () => {
-  const mapped = mapSdkMessage(
-    {
-      type: "user",
-      uuid: "relay-sent-1",
-      message: { role: "user", content: "do the thing" },
-    },
-    { relayUserMessageUuids: new Set(["relay-sent-1"]) }
-  );
-
-  assert.equal(mapped, null, "the relay already wrote this one");
-});
-
-test("without provenance info no user text is emitted (safe default)", () => {
-  // Callers that cannot tell relay-sent from injected must not risk duplicates.
-  const mapped = mapSdkMessage({
-    type: "user",
-    uuid: "unknown-1",
-    message: { role: "user", content: "ambiguous" },
-  });
-  assert.equal(mapped, null);
-});
-
 // A user record carrying ONLY tool results is how the SDK reports every tool
 // call — it is not a message the user wrote. Emitting a user_message for it
 // would republish raw tool output as chat, and (because a user message is a
 // turn boundary) invent a fork point after every tool call.
 test("a tool-result-only record emits no user_message", () => {
-  const mapped = mapSdkMessage(
-    {
-      type: "user",
-      uuid: "tool-carrier-1",
-      message: {
-        role: "user",
-        content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "RAW TOOL OUTPUT" }],
-      },
+  const mapped = mapSdkMessage({
+    type: "user",
+    uuid: "tool-carrier-1",
+    message: {
+      role: "user",
+      content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "RAW TOOL OUTPUT" }],
     },
-    { relayUserMessageUuids: new Set() }
-  );
+  });
 
   const events = Array.isArray(mapped) ? mapped : [mapped].filter(Boolean);
   assert.equal(events.length, 1);
@@ -723,28 +673,4 @@ test("a tool-result-only record emits no user_message", () => {
     false,
     "tool output must not surface as a user message"
   );
-});
-
-test("a mixed record emits only its explicit text as the user message", () => {
-  const mapped = mapSdkMessage(
-    {
-      type: "user",
-      uuid: "injected-2",
-      message: {
-        role: "user",
-        content: [
-          { type: "tool_result", tool_use_id: "toolu_1", content: "RAW TOOL OUTPUT" },
-          { type: "text", text: "and a note" },
-        ],
-      },
-    },
-    { relayUserMessageUuids: new Set() }
-  );
-
-  const events = Array.isArray(mapped) ? mapped : [mapped];
-  assert.ok(events.some((e) => e.type === "tool_call_result"));
-  const user = events.find((e) => e.type === "user_message");
-  assert.ok(user, "explicit text is a real message");
-  assert.equal(user.text, "and a note", "tool output must not be spliced in");
-  assert.doesNotMatch(user.text, /RAW TOOL OUTPUT/);
 });

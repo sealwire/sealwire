@@ -21,20 +21,6 @@ function textFromContent(content) {
     .join("\n");
 }
 
-// The user-authored text of a message, ignoring tool_result payloads.
-function explicitUserText(content) {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .map((block) => {
-      if (typeof block === "string") return block;
-      if (block?.type === "text") return block.text || "";
-      return "";
-    })
-    .filter(Boolean)
-    .join("\n");
-}
-
 function previewJson(value, max = 1000) {
   let text;
   try {
@@ -297,7 +283,7 @@ export function failedTurnReason(subtype) {
   return "Claude turn reported an error";
 }
 
-export function mapSdkMessage(msg, options = {}) {
+export function mapSdkMessage(msg) {
   switch (msg.type) {
     case "system": {
       if (msg.subtype === "init") {
@@ -382,35 +368,18 @@ export function mapSdkMessage(msg, options = {}) {
         });
       }
 
-      // User TEXT needs provenance. The relay mints and upserts its own user
-      // messages before handing them to the SDK, so echoing those back would
-      // duplicate them. But the SDK also injects user records the relay never
-      // sent (a <task-notification> that re-arms a spontaneous turn), and
-      // dropping every user text meant those existed only after history
-      // hydration — the same thread rendered differently live vs on resume.
-      //
-      // `relayUserMessageUuids` is the provenance signal. Absent it we emit
-      // nothing: a missing message is recoverable on hydration, a duplicated
-      // one is not.
-      const relayUuids = options.relayUserMessageUuids;
-      const uuid = msg.uuid || "";
-      if (relayUuids && uuid && !relayUuids.has(uuid)) {
-        // EXPLICIT text blocks only — never textFromContent, which folds
-        // tool_result content into the string. A user record carrying only
-        // tool results is how the SDK reports every tool call; treating that as
-        // a message would republish raw tool output as chat and, since a user
-        // message is a turn boundary, invent a fork point after every tool call.
-        const text = explicitUserText(msg.message?.content);
-        if (text) {
-          events.push({
-            type: "user_message",
-            item_id: `user:${uuid}`,
-            turn_id: uuid,
-            text,
-          });
-        }
-      }
-
+      // User-shaped stream messages are NOT a channel for chat text:
+      //   • a `user` message carrying tool_result blocks is how the SDK
+      //     reports every tool call (handled above);
+      //   • SDKUserMessageReplay is also `type: "user"` and replays historical
+      //     messages on resume — emitting those would resurrect old turns into
+      //     the live projection;
+      //   • the relay mints and upserts its own user messages before handing
+      //     them to the SDK, so echoing them back duplicates.
+      // A subagent's `<task-notification>` is NOT a user message either — the
+      // SDK models it as `type: "system", subtype: "task_notification"`
+      // (SDKTaskNotificationMessage). Surfacing that is a separate change and
+      // has to arm the spontaneous turn (TURN_REVEALING_EVENTS) too.
       return events.length === 0 ? null : events.length === 1 ? events[0] : events;
     }
 

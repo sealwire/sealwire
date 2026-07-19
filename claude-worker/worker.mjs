@@ -171,7 +171,6 @@ async function flushEvents(
   onProviderSessionId = null,
   decorateEvent = null,
   progressTracker = null,
-  relayUserMessageUuids = null,
 ) {
   let streamProviderSessionId = initialProviderSessionId;
   try {
@@ -189,7 +188,7 @@ async function flushEvents(
         diag("sdk_msg", buildSdkMsgProbe(msg));
       }
 
-      const mapped = mapSdkMessage(msg, { relayUserMessageUuids });
+      const mapped = mapSdkMessage(msg);
       if (!mapped) continue;
 
       if (Array.isArray(mapped)) {
@@ -428,11 +427,6 @@ function createSessionEntry({ key, providerSessionId = null, cmd, pendingStartRe
     stopGeneration: 0,
     stopOperation: null,
     lastUsedAt: Date.now(),
-    // Uuids of user messages the RELAY minted and already wrote to its own
-    // transcript. Anything the SDK reports that is NOT in here was injected by
-    // the SDK itself (e.g. a <task-notification>) and must reach the live
-    // stream — see mapSdkMessage's `user` case.
-    relayUserMessageUuids: new Set(),
     cwd: cmd.cwd ?? process.cwd(),
     model: cmd.model ?? "claude-sonnet-4-6",
     pendingThreadId: cmd.pending_thread_id || null,
@@ -786,7 +780,6 @@ function startSessionStream(sessions, entry, context) {
       }
     },
     entry.progressTracker,
-    entry.relayUserMessageUuids,
   ).finally(() => {
     settleUnexpectedStreamEnd(sessions, entry, context);
     if (entry.streamTask === streamTask) {
@@ -1051,7 +1044,6 @@ async function main() {
             entry.currentTurnId = userTurn.event.turn_id;
             entry.running = true;
             entry.progressTracker.start();
-            entry.relayUserMessageUuids.add(userTurn.sdkMessage.uuid);
             await entry.session.send(userTurn.sdkMessage);
           }
 
@@ -1117,7 +1109,6 @@ async function main() {
             entry.running = true;
             entry.progressTracker.start();
             emit(userTurn.event, entry.progressTracker);
-            entry.relayUserMessageUuids.add(userTurn.sdkMessage.uuid);
             await entry.session.send(userTurn.sdkMessage);
           }
 
@@ -1182,7 +1173,6 @@ async function main() {
           entry.running = true;
           touchSessionEntry(entry);
           emit(userTurn.event, entry.progressTracker);
-          entry.relayUserMessageUuids.add(userTurn.sdkMessage.uuid);
             await entry.session.send(userTurn.sdkMessage);
           log("streaming response");
           log("send complete");

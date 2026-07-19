@@ -80,31 +80,37 @@ test("an id-less trailing agent message shadows the earlier one", () => {
   assert.equal(forkable.size, 0);
 });
 
-// Claude spontaneous follow-up turns: an SDK-injected user record (e.g. a
-// <task-notification> re-arming a turn) used to be dropped from the live
-// stream, so the same thread produced FEWER fork points live than after a
-// resume. The worker now surfaces those records live (they map to the same
-// `user:<uuid>` item id hydration produces), so the two projections must agree
-// exactly. Asserting equality — not a subset — is what keeps the live drop
-// from being reintroduced.
-test("live and hydrated projections yield identical fork points", () => {
-  const projection = [
+// KNOWN GAP (not fixed here): a subagent's <task-notification> re-arms a
+// Claude turn. The SDK models it as `type: "system", subtype:
+// "task_notification"` — NOT a user message — and the worker does not map it,
+// so it is absent from the live stream while the persisted transcript records
+// it as a user record. The same thread can therefore expose one FEWER fork
+// point live than after a resume.
+//
+// The direction is safe: live under-offers and never invents a branch point,
+// and the server truncates against the hydrated transcript either way. Closing
+// it means mapping the system/task_notification message AND adding it to the
+// worker's TURN_REVEALING_EVENTS, since it also marks a turn nobody armed.
+// This test pins the shape both projections agree on today.
+test("a boundary present in both projections yields the same fork points", () => {
+  const withBoundary = [
     { item_id: "user:u1", kind: "user_text" },
     { item_id: "assistant:a1", kind: "agent_text" },
-    { item_id: "user:notif-1", kind: "user_text" }, // injected <task-notification>
+    { item_id: "user:notif-1", kind: "user_text" },
     { item_id: "assistant:a2", kind: "agent_text" },
   ];
+  // The live projection today, with the notification still missing.
+  const withoutBoundary = withBoundary.filter((e) => e.item_id !== "user:notif-1");
 
-  // Both surfaces build from the same entry shape, so the same input must give
-  // the same answer whichever path produced it.
-  const live = computeForkableItemIds(projection);
-  const hydrated = computeForkableItemIds([...projection]);
-
-  assert.deepEqual([...live].sort(), [...hydrated].sort());
   assert.deepEqual(
-    [...live].sort(),
+    [...computeForkableItemIds(withBoundary)].sort(),
     ["assistant:a1", "assistant:a2"],
-    "the injected notification closes a block, so both agent messages rest"
+    "hydrated: the notification closes a block"
+  );
+  assert.deepEqual(
+    [...computeForkableItemIds(withoutBoundary)].sort(),
+    ["assistant:a2"],
+    "live: one fewer rest point until the notification is mapped"
   );
 });
 
