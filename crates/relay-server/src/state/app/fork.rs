@@ -83,36 +83,42 @@ impl AppState {
             .load_provider_model_catalog(&target_provider_name, &target_bridge)
             .await;
 
-        let requested_model = non_empty(input.model);
+        let same_provider = target_provider_name == source_provider_name;
         let source_model = source_settings
             .as_ref()
             .map(|settings| settings.model.clone())
-            .filter(|model| !model.is_empty())
-            .unwrap_or_else(|| defaults.model.clone());
-        let model_fallback = if target_provider_name == source_provider_name {
-            source_model
-        } else {
-            defaults.model.clone()
-        };
-        let model = resolve_provider_model(
-            &target_provider_name,
-            &provider_models,
-            requested_model.clone(),
-            model_fallback.clone(),
-        );
-        let requested_effort = non_empty(input.effort);
+            .filter(|model| !model.is_empty());
         let source_effort = source_settings
             .as_ref()
             .map(|settings| settings.reasoning_effort.clone())
             .filter(|effort| !effort.is_empty());
-        let effort = requested_effort
+
+        // Resolve inheritance HERE rather than leaning on
+        // `resolve_provider_model`'s fallback: that helper prefers the catalog
+        // default whenever the request omits a model, so the source model it is
+        // handed is only reached with an empty catalog. A thread on a
+        // non-default model therefore forked onto the provider default — the
+        // dialog's "Inherit from source session" promising the opposite.
+        //
+        // Only within the same provider: a codex model id means nothing to
+        // Claude, and effort options are model-specific. The helper is shared
+        // by seven call sites, so its ordering is left alone.
+        let requested_model = non_empty(input.model)
+            .or_else(|| same_provider.then(|| source_model.clone()).flatten());
+        let model = resolve_provider_model(
+            &target_provider_name,
+            &provider_models,
+            requested_model.clone(),
+            defaults.model.clone(),
+        );
+
+        // Inherited effort applies only while the model is also the inherited
+        // one — carrying an effort across a model switch can name a level the
+        // new model does not support.
+        let inherited_model_kept = same_provider && Some(&model) == source_model.as_ref();
+        let effort = non_empty(input.effort)
             .or_else(|| {
-                (model != model_fallback)
-                    .then(|| default_effort_for_model(&provider_models, &model))
-                    .flatten()
-            })
-            .or_else(|| {
-                (target_provider_name == source_provider_name)
+                inherited_model_kept
                     .then(|| source_effort.clone())
                     .flatten()
             })

@@ -2845,7 +2845,28 @@ mod path_scope_tests {
         }
 
         async fn list_models(&self) -> Result<Vec<crate::protocol::ModelOptionView>, String> {
-            Ok(Vec::new())
+            // Two models so a thread can use a NON-default one — the case where
+            // "inherit" and "provider default" diverge.
+            Ok(vec![
+                crate::protocol::ModelOptionView {
+                    model: format!("{}-default", self.name),
+                    display_name: "Default".to_string(),
+                    provider: self.name.to_string(),
+                    supported_reasoning_efforts: vec!["low".to_string(), "medium".to_string()],
+                    default_reasoning_effort: "medium".to_string(),
+                    hidden: false,
+                    is_default: true,
+                },
+                crate::protocol::ModelOptionView {
+                    model: format!("{}-fancy", self.name),
+                    display_name: "Fancy".to_string(),
+                    provider: self.name.to_string(),
+                    supported_reasoning_efforts: vec!["low".to_string(), "high".to_string()],
+                    default_reasoning_effort: "low".to_string(),
+                    hidden: false,
+                    is_default: false,
+                },
+            ])
         }
 
         async fn start_thread(
@@ -3720,6 +3741,116 @@ mod path_scope_tests {
             );
             assert!(!entry.native_fork_at_message);
         }
+    }
+
+    // "Inherit from source session" must mean the SOURCE thread's model and
+    // effort. The shared resolve_provider_model prefers the catalog default
+    // when the request omits a model, so the source fallback it is handed was
+    // only ever reached with an empty catalog — a thread on a non-default model
+    // silently forked onto the provider default instead.
+    #[tokio::test]
+    async fn fork_session_inherits_a_non_default_source_model_and_effort() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, _p, _o) = build_status_app(cwd, "idle").await;
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let source = app
+            .start_session(StartSessionInput {
+                device_id: Some("device-1".to_string()),
+                cwd: Some(cwd.to_string()),
+                // NOT the catalog default.
+                model: Some("statusy-fancy".to_string()),
+                effort: Some("high".to_string()),
+                approval_policy: None,
+                sandbox: None,
+                provider: Some("statusy".to_string()),
+                initial_prompt: None,
+            })
+            .await
+            .expect("start source");
+        let source_thread_id = source.active_thread_id.clone().expect("source thread id");
+        assert_eq!(source.model, "statusy-fancy", "source runs the fancy model");
+
+        let forked = app
+            .fork_session(ForkSessionInput {
+                source_thread_id,
+                up_to_item_id: None,
+                cwd: Some(cwd.to_string()),
+                initial_prompt: Some("continue".to_string()),
+                // Omitted: the user chose "inherit from source".
+                model: None,
+                effort: None,
+                approval_policy: None,
+                sandbox: None,
+                device_id: Some("device-1".to_string()),
+                provider: Some("statusy".to_string()),
+            })
+            .await
+            .expect("fork");
+
+        assert_eq!(
+            forked.model, "statusy-fancy",
+            "inherit must keep the source model, not fall back to the catalog default"
+        );
+        assert_eq!(
+            forked.reasoning_effort, "high",
+            "and the source effort, not the new model's default"
+        );
+    }
+
+    // The other half of the rule: inheritance must NOT cross providers. A
+    // source model id is meaningless to a different bridge, and
+    // resolve_provider_model passes an explicit model through unchecked — so
+    // leaking it here would send e.g. a codex model id to Claude.
+    #[tokio::test]
+    async fn a_cross_provider_fork_does_not_inherit_the_source_model() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, _p, _o) = build_two_provider_app(cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let source = app
+            .start_session(StartSessionInput {
+                device_id: Some("device-1".to_string()),
+                cwd: Some(cwd.to_string()),
+                model: Some("alpha-fancy".to_string()),
+                effort: Some("high".to_string()),
+                approval_policy: None,
+                sandbox: None,
+                provider: Some("alpha".to_string()),
+                initial_prompt: None,
+            })
+            .await
+            .expect("start source");
+        let source_thread_id = source.active_thread_id.clone().expect("source thread id");
+
+        let forked = app
+            .fork_session(ForkSessionInput {
+                source_thread_id,
+                up_to_item_id: None,
+                cwd: Some(cwd.to_string()),
+                initial_prompt: Some("continue".to_string()),
+                model: None,
+                effort: None,
+                approval_policy: None,
+                sandbox: None,
+                device_id: Some("device-1".to_string()),
+                provider: Some("beta".to_string()),
+            })
+            .await
+            .expect("cross-provider fork");
+
+        assert!(
+            !forked.model.starts_with("alpha-"),
+            "an alpha model id must not reach beta: {}",
+            forked.model
+        );
+        assert!(
+            forked.model.starts_with("beta-"),
+            "the target provider's own catalog answers: {}",
+            forked.model
+        );
     }
 
     #[tokio::test]
