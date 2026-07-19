@@ -469,11 +469,28 @@ impl RelayState {
         });
     }
 
-    /// Flattened snapshot of every stored subscription (for the dispatcher).
+    /// Whether a device is currently paired (gates push delivery).
+    pub(crate) fn is_device_paired(&self, device_id: &str) -> bool {
+        self.paired_devices.contains_key(device_id)
+    }
+
+    /// Drop any push subscription whose device is no longer paired — e.g. a stale
+    /// entry restored from a state file written before revoke-time pruning existed.
+    pub(crate) fn prune_orphaned_push_subscriptions(&mut self) {
+        let paired: HashSet<String> = self.paired_devices.keys().cloned().collect();
+        self.push_subscriptions
+            .retain(|device_id, _| paired.contains(device_id));
+    }
+
+    /// Flattened snapshot of every stored subscription for a CURRENTLY-PAIRED
+    /// device (for the dispatcher). Orphaned subscriptions — a revoked device, or a
+    /// stale entry restored from an old state file — are excluded so the dispatcher
+    /// never sends to an unpaired device.
     pub(crate) fn push_subscriptions_vec(&self) -> Vec<PushSubscription> {
         self.push_subscriptions
-            .values()
-            .flat_map(|subs| subs.iter().cloned())
+            .iter()
+            .filter(|(device_id, _)| self.paired_devices.contains_key(device_id.as_str()))
+            .flat_map(|(_, subs)| subs.iter().cloned())
             .collect()
     }
 
@@ -1898,6 +1915,7 @@ impl RelayState {
         self.device_records = persisted.device_records.clone();
         self.paired_devices = persisted.paired_devices.clone();
         self.push_subscriptions = persisted.push_subscriptions.clone();
+        self.prune_orphaned_push_subscriptions();
         // Durable reviewer-thread identity + completed (terminal) review-job cards
         // survive restart. The writer only persists terminal jobs, and we re-apply the
         // same filter here (defense-in-depth): a non-terminal job from a corrupt or
@@ -2525,6 +2543,7 @@ impl RelayState {
         self.device_records = persisted.device_records.clone();
         self.paired_devices = persisted.paired_devices.clone();
         self.push_subscriptions = persisted.push_subscriptions.clone();
+        self.prune_orphaned_push_subscriptions();
         // Durable reviewer-thread identity + completed (terminal) review-job cards
         // survive restart. The writer only persists terminal jobs, and we re-apply the
         // same filter here (defense-in-depth): a non-terminal job from a corrupt or

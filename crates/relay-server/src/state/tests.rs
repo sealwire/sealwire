@@ -2386,6 +2386,49 @@ fn pairing_rejects_invalid_secret_and_mints_a_fresh_payload_secret() {
 }
 
 #[test]
+fn restore_prunes_orphaned_push_subscriptions() {
+    let mut relay = test_state();
+    let mut persisted = test_persisted_state();
+    // An orphaned subscription whose device is NOT in persisted.paired_devices —
+    // e.g. a state file written before revoke-time pruning existed.
+    persisted.push_subscriptions.insert(
+        "orphan-device".to_string(),
+        vec![crate::state::PushSubscription {
+            endpoint: "https://push.example.com/x".to_string(),
+            p256dh: "p".to_string(),
+            auth: "a".to_string(),
+            device_id: "orphan-device".to_string(),
+            created_at: 0,
+        }],
+    );
+    relay.apply_persisted(&persisted);
+    assert!(
+        !relay.push_subscriptions.contains_key("orphan-device"),
+        "an orphaned persisted subscription must be pruned from state on restore"
+    );
+}
+
+#[test]
+fn push_subscriptions_vec_excludes_unpaired_devices() {
+    let mut relay = test_state();
+    relay.push_subscriptions.insert(
+        "ghost-device".to_string(),
+        vec![crate::state::PushSubscription {
+            endpoint: "https://push.example.com/y".to_string(),
+            p256dh: "p".to_string(),
+            auth: "a".to_string(),
+            device_id: "ghost-device".to_string(),
+            created_at: 0,
+        }],
+    );
+    // ghost-device is not paired, so the dispatcher must not see its subscription.
+    assert!(
+        relay.push_subscriptions_vec().is_empty(),
+        "push_subscriptions_vec must exclude subscriptions for unpaired devices"
+    );
+}
+
+#[test]
 fn revoking_paired_device_prunes_its_push_subscriptions() {
     let mut relay = test_state();
     let ticket = issue_test_pairing_ticket(

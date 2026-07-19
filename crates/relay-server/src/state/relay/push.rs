@@ -613,6 +613,16 @@ impl PushDispatcher {
         let payload = build_payload_bytes(&job);
         let mut gone = Vec::new();
         for subscription in subscriptions {
+            // Re-check pairing right before sending: a device revoked between the
+            // clone above and this send must not receive one last notification.
+            if !self
+                .relay
+                .read()
+                .await
+                .is_device_paired(&subscription.device_id)
+            {
+                continue;
+            }
             match self.send_one(&subscription, &payload).await {
                 SendOutcome::Gone => gone.push(subscription.endpoint),
                 SendOutcome::Delivered | SendOutcome::Failed => {}
