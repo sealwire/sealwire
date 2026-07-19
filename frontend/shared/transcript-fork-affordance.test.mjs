@@ -29,7 +29,12 @@ test("only the last agent message of each turn is forkable", () => {
   assert.equal(forkable.has("tool1"), false, "tool calls are not forkable");
 });
 
-test("a turn boundary is detected from turn_id changes even without a user entry", () => {
+// turn_id is deliberately IGNORED as a boundary. Its semantics are
+// provider-specific: Claude stamps every assistant message with its own uuid
+// as turn_id (so trusting it made every Claude message "turn-final" — button
+// spam), while Codex shares one turn_id per turn. The only provider-neutral
+// boundary is the next user message.
+test("turn_id changes alone are not a boundary — only user messages are", () => {
   const entries = [
     { item_id: "a1", kind: "agent_text", turn_id: "t1" },
     { item_id: "a2", kind: "agent_text", turn_id: "t2" },
@@ -37,8 +42,24 @@ test("a turn boundary is detected from turn_id changes even without a user entry
 
   const forkable = computeForkableItemIds(entries);
 
-  assert.equal(forkable.has("a1"), true, "last agent message of turn t1");
-  assert.equal(forkable.has("a2"), true, "last agent message of turn t2");
+  assert.equal(forkable.has("a1"), false, "not final: another agent message follows");
+  assert.equal(forkable.has("a2"), true, "final agent message of the block");
+});
+
+test("reasoning and tool entries do not close a block", () => {
+  const entries = [
+    { item_id: "u1", kind: "user_text" },
+    { item_id: "a1", kind: "agent_text", turn_id: "x1" },
+    { item_id: "r1", kind: "reasoning", turn_id: "x1" },
+    { item_id: "tool1", kind: "tool_call", turn_id: "x1" },
+    { item_id: "a2", kind: "agent_text", turn_id: "x2" },
+    { item_id: "u2", kind: "user_text" },
+    { item_id: "a3", kind: "agent_text", turn_id: "x3" },
+  ];
+
+  const forkable = computeForkableItemIds(entries);
+
+  assert.deepEqual([...forkable].sort(), ["a2", "a3"]);
 });
 
 test("entries without item ids are never forkable", () => {
@@ -46,6 +67,56 @@ test("entries without item ids are never forkable", () => {
     { kind: "agent_text", turn_id: "t1", text: "no id" },
   ]);
   assert.equal(forkable.size, 0);
+});
+
+test("an id-less trailing agent message shadows the earlier one", () => {
+  // Offering a1 would be a mid-block fork: the agent kept going after it.
+  // The block's true rest point (the id-less entry) cannot carry a button,
+  // so the block offers nothing rather than a wrong branch point.
+  const forkable = computeForkableItemIds([
+    { item_id: "a1", kind: "agent_text" },
+    { kind: "agent_text", text: "trailing, no id" },
+  ]);
+  assert.equal(forkable.size, 0);
+});
+
+// ACCEPTED BEHAVIOR — Claude spontaneous follow-up turns (live vs hydrated).
+//
+// An SDK-injected user record (e.g. a <task-notification> that re-arms a
+// spontaneous turn) is invisible in the LIVE stream — mapSdkMessage only emits
+// tool_result blocks from user messages, because relay-sent user text is
+// upserted by the relay itself and re-emitting it would duplicate. History
+// hydration (mapSessionMessages) does surface it as user_text. So the same
+// thread hydrates with one more boundary than it showed live.
+//
+// The fork consequence is deliberately accepted rather than patched over:
+//  - live under-offers (the earlier rest point appears only after hydration),
+//  - it NEVER over-offers: every live button is block-final in the live
+//    projection, and its item id exists in the hydrated transcript the server
+//    truncates against, so replay truncation stays correct either way.
+// The real fix — surfacing injected user records in the live stream — belongs
+// to the worker's live-mapping/dedup layer, not to this boundary rule.
+test("live fork points are a subset of hydrated ones for spontaneous turns", () => {
+  // Live projection: the injected notification is absent.
+  const live = computeForkableItemIds([
+    { item_id: "user:u1", kind: "user_text" },
+    { item_id: "assistant:a1", kind: "agent_text" },
+    { item_id: "assistant:a2", kind: "agent_text" }, // spontaneous turn 2
+  ]);
+  // Hydrated projection of the SAME thread: the notification is a user_text.
+  const hydrated = computeForkableItemIds([
+    { item_id: "user:u1", kind: "user_text" },
+    { item_id: "assistant:a1", kind: "agent_text" },
+    { item_id: "user:notif-1", kind: "user_text" }, // injected <task-notification>
+    { item_id: "assistant:a2", kind: "agent_text" },
+  ]);
+
+  for (const id of live) {
+    assert.ok(hydrated.has(id), `live fork point ${id} must survive hydration`);
+  }
+  assert.ok(live.has("assistant:a2"), "live always offers the tip rest point");
+  assert.equal(live.has("assistant:a1"), false, "live cannot see the boundary yet");
+  assert.ok(hydrated.has("assistant:a1"), "hydration adds the earlier rest point");
 });
 
 test("agent message renders a fork button carrying its own item id", () => {

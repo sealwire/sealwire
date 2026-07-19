@@ -1,44 +1,43 @@
 // Fork affordance placement.
 //
-// A turn is `user_text -> (reasoning | tool_call | agent_text)*`. The only
-// branch points worth offering are the ones where the agent came to rest: a
-// mid-turn agent message is a state the agent itself never treated as final
-// (tool still in flight, reasoning half-emitted), so branching there produces a
-// fork whose context stops mid-thought.
+// A block is everything between two user messages. The only branch point worth
+// offering is where the agent came to rest: the LAST agent message of a block.
+// Forking from a mid-block agent message would branch from a state the agent
+// never treated as final (tool still in flight, reasoning half-emitted).
+//
+// The boundary is the next `user_text` entry — deliberately NOT `turn_id`.
+// turn_id semantics are provider-specific: Claude stamps every assistant
+// message with its own uuid as turn_id (trusting it made every Claude message
+// "final" — one fork button per message, pure noise), while Codex shares one
+// turn_id across a turn. User messages mean the same thing on every provider.
 //
 // This lives in shared/ on purpose — the local and remote surfaces must agree
 // on which messages are forkable, and the server truncates the replayed
 // transcript at exactly the item id the button carries.
 
-function isTurnFinalAgentEntry(entries, index) {
-  const turnId = entries[index]?.turn_id || "";
-  for (let next = index + 1; next < entries.length; next += 1) {
-    const candidate = entries[next];
-    if (!candidate) continue;
-    // A new user message always closes the previous turn.
-    if (candidate.kind === "user_text") return true;
-    const candidateTurn = candidate.turn_id || "";
-    // Providers that stamp turn ids let us detect the boundary even when two
-    // turns run back to back without an intervening user entry (spontaneous
-    // continuations, replayed history).
-    if (turnId && candidateTurn && candidateTurn !== turnId) return true;
-    // A later agent message inside the same turn means this one is not final.
-    if (candidate.kind === "agent_text") return false;
-  }
-  return true;
-}
-
 export function computeForkableItemIds(entries = []) {
   const forkable = new Set();
-  for (let index = 0; index < entries.length; index += 1) {
-    const entry = entries[index];
-    if (!entry || entry.kind !== "agent_text") continue;
-    const itemId = entry.item_id || entry.id || "";
-    if (!itemId) continue;
-    if (isTurnFinalAgentEntry(entries, index)) {
-      forkable.add(itemId);
+  // The last agent entry seen in the current block — tracked even when it has
+  // no item id, so an id-less trailing message still shadows the one before it
+  // (offering the earlier message would be a mid-block fork).
+  let lastAgent = null;
+  const flush = () => {
+    const itemId = lastAgent?.item_id || lastAgent?.id || "";
+    if (itemId) forkable.add(itemId);
+    lastAgent = null;
+  };
+  for (const entry of entries) {
+    if (!entry) continue;
+    if (entry.kind === "user_text") {
+      flush();
+      continue;
     }
+    if (entry.kind === "agent_text") {
+      lastAgent = entry;
+    }
+    // reasoning / tool_call / command / error never close a block.
   }
+  flush();
   return forkable;
 }
 
