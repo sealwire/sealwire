@@ -1,5 +1,5 @@
 import {
-  buildThreadGroups,
+  buildNavigationThreadGroups,
   summarizeThreadGroups,
 } from "../shared/thread-groups.js";
 import { isReviewInProgressForThread } from "../shared/review-state.js";
@@ -89,9 +89,7 @@ export function selectThreadsRenderModel({
     }
   }
 
-  const groups = buildThreadGroups(normalizedThreads, {
-    includeUnknownWorkspace: true,
-  });
+  const groups = buildNavigationThreadGroups(normalizedThreads);
 
   if (!remoteAuth) {
     return {

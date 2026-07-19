@@ -39,6 +39,13 @@ impl AppState {
             .as_deref()
             .map(|id| relay.device_path_scope(id))
             .unwrap_or_default();
+        for thread in &mut all_threads {
+            if thread.cwd.is_empty() {
+                if let Some(cwd) = relay.thread_cwd(&thread.id) {
+                    thread.cwd = cwd;
+                }
+            }
+        }
         // Reviewer threads are owned by their review (surfaced through the
         // Reviewer panel), not peer sessions — keep them out of the thread list
         // ENTIRELY, even while the reviewer is briefly the active thread during

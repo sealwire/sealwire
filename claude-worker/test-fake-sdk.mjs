@@ -276,6 +276,15 @@ export async function getSessionMessages(sessionId, _options) {
 }
 
 export async function listSessions(_options) {
+  if (process.env.CLAUDE_FAKE_LIST_SESSION_ID) {
+    return [
+      {
+        sessionId: process.env.CLAUDE_FAKE_LIST_SESSION_ID,
+        summary: process.env.CLAUDE_FAKE_LIST_SESSION_SUMMARY || "listed session",
+        lastModified: 1_784_466_588_000,
+      },
+    ];
+  }
   return [];
 }
 

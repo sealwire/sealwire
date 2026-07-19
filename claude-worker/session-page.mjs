@@ -7,6 +7,7 @@ const DEFAULT_TARGET_BYTES = 14_000;
 const READ_CHUNK_BYTES = 64 * 1024;
 const READ_LINE_CHUNK_BYTES = 4 * 1024;
 const PARENT_SEARCH_CHUNK_BYTES = 4 * 1024;
+const CWD_SCAN_MAX_BYTES = 1024 * 1024;
 const SESSION_ID_PATTERN = /^[0-9a-f-]{16,}$/i;
 
 export async function findLocalSessionFile({
@@ -141,6 +142,56 @@ export async function readSessionMessagePage({
     };
   } finally {
     await handle.close();
+  }
+}
+
+export async function readSessionCwdFromFile({
+  filePath,
+  maxBytes = CWD_SCAN_MAX_BYTES,
+}) {
+  const handle = await open(filePath, "r");
+  try {
+    const fileSize = (await handle.stat()).size;
+    const buffer = Buffer.alloc(READ_CHUNK_BYTES);
+    let position = 0;
+    let pending = "";
+
+    while (position < fileSize && position < maxBytes) {
+      const length = Math.min(buffer.length, fileSize - position, maxBytes - position);
+      const result = await handle.read(buffer, 0, length, position);
+      if (!result.bytesRead) {
+        break;
+      }
+      position += result.bytesRead;
+      pending += buffer.subarray(0, result.bytesRead).toString("utf8");
+
+      let newline;
+      while ((newline = pending.indexOf("\n")) >= 0) {
+        const line = pending.slice(0, newline);
+        pending = pending.slice(newline + 1);
+        const cwd = cwdFromJsonLine(line);
+        if (cwd) {
+          return cwd;
+        }
+      }
+    }
+
+    return cwdFromJsonLine(pending);
+  } finally {
+    await handle.close();
+  }
+}
+
+function cwdFromJsonLine(line) {
+  const trimmed = String(line || "").trim();
+  if (!trimmed) {
+    return "";
+  }
+  try {
+    const record = JSON.parse(trimmed);
+    return typeof record?.cwd === "string" && record.cwd.trim() ? record.cwd : "";
+  } catch {
+    return "";
   }
 }
 

@@ -21,7 +21,7 @@ import { loadLastEffort, saveLastApprovalPolicy } from "../../shared/last-used-s
 import { resolveOutgoingEffort } from "../../shared/reasoning-efforts.js";
 import { providerLabel } from "../../shared/provider-labels.js";
 import { forkFieldsToPayload } from "../../shared/fork-fields.js";
-import { buildThreadGroups, findLatestThread } from "../../shared/thread-groups.js";
+import { buildNavigationThreadGroups, findLatestThread } from "../../shared/thread-groups.js";
 import { createThreadListQueryOptions } from "../../shared/thread-queries.js";
 import { readThreadListUi } from "../../shared/thread-list-store.js";
 import { shouldRenderThreadListLoadingPlaceholder } from "../../shared/thread-list-state.js";
@@ -120,7 +120,7 @@ export function createLifecycleController(ctx) {
           )
         : await fetchThreadList({ limit: 120 });
 
-      state.threadGroups = buildThreadGroups(threads);
+      state.threadGroups = buildNavigationThreadGroups(threads);
       state.threads = state.threadGroups.flatMap((group) => group.threads);
       state.threadListStore.getState().finishRefresh();
       renderThreads();

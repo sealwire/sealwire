@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { readSessionMessagePage } from "./session-page.mjs";
+import { readSessionCwdFromFile, readSessionMessagePage } from "./session-page.mjs";
 
 test("cold transcript page parses only the tail chain instead of the whole session", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "sealwire-claude-page-"));
@@ -93,6 +93,27 @@ test("provider cursor follows a parent written after its child without returning
   });
   assert.deepEqual(older.messages.map((entry) => entry.uuid), ["a", "b"]);
   assert.equal(older.nextCursor, null);
+});
+
+test("session cwd can be recovered from a local jsonl record when SDK list omits it", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "sealwire-claude-cwd-"));
+  const filePath = path.join(dir, "session.jsonl");
+  await writeFile(
+    filePath,
+    [
+      JSON.stringify({ type: "noise", payload: "x".repeat(200_000) }),
+      JSON.stringify({
+        cwd: "/Users/luchi/git/agent-relay",
+        sessionId: "session-1",
+        type: "user",
+      }),
+    ].join("\n") + "\n",
+  );
+
+  assert.equal(
+    await readSessionCwdFromFile({ filePath }),
+    "/Users/luchi/git/agent-relay",
+  );
 });
 
 function message(uuid, parentUuid) {

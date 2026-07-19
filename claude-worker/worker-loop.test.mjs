@@ -17,7 +17,7 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import os from "node:os";
 import path from "node:path";
-import { rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -469,6 +469,98 @@ test("send streams a user id that a later history read reproduces", async () => 
     );
   } finally {
     await worker.close();
+  }
+});
+
+test("list_sessions fills missing cwd from the local session jsonl", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "sealwire-worker-home-"));
+  const sessionId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const projectDir = path.join(home, ".claude", "projects", "-Users-luchi-git-agent-relay");
+  await mkdir(projectDir, { recursive: true });
+  await writeFile(
+    path.join(projectDir, `${sessionId}.jsonl`),
+    `${JSON.stringify({
+      cwd: "/Users/luchi/git/agent-relay",
+      sessionId,
+      type: "user",
+    })}\n`,
+  );
+
+  const worker = spawnWorker({
+    CLAUDE_FAKE_LIST_SESSION_ID: sessionId,
+    HOME: home,
+  });
+  try {
+    worker.send({ type: "list_sessions", id: "list-1", limit: 20 });
+    const response = await worker.waitFor(
+      (event) => event.type === "response" && event.id === "list-1",
+      { label: "list_sessions response" },
+    );
+    assert.equal(response.ok, true);
+    assert.equal(response.result.threads[0].id, sessionId);
+    assert.equal(response.result.threads[0].cwd, "/Users/luchi/git/agent-relay");
+  } finally {
+    await worker.close();
+    await rm(home, { force: true, recursive: true });
+  }
+});
+
+// cwd recovery is best-effort by design. Every failure path must still return
+// the row: a thread the client never sees is worse than one with no workspace,
+// because the local sidebar drops unknown-cwd rows out of `state.threads`
+// entirely, making the thread unopenable and unforkable.
+test("list_sessions still returns the row when cwd recovery fails", async () => {
+  const cases = [
+    {
+      label: "no session file on disk",
+      sessionId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      write: null,
+    },
+    {
+      label: "session id does not match the scan pattern",
+      sessionId: "not-a-uuid",
+      write: null,
+    },
+    {
+      label: "session file carries no cwd",
+      sessionId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      write: JSON.stringify({ sessionId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", type: "user" }),
+    },
+    {
+      label: "session file is not valid jsonl",
+      sessionId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      write: "{ this is not json",
+    },
+  ];
+
+  for (const scenario of cases) {
+    const home = await mkdtemp(path.join(os.tmpdir(), "sealwire-worker-home-"));
+    if (scenario.write !== null) {
+      const projectDir = path.join(home, ".claude", "projects", "-some-project");
+      await mkdir(projectDir, { recursive: true });
+      await writeFile(path.join(projectDir, `${scenario.sessionId}.jsonl`), `${scenario.write}\n`);
+    }
+
+    const worker = spawnWorker({
+      CLAUDE_FAKE_LIST_SESSION_ID: scenario.sessionId,
+      HOME: home,
+    });
+    try {
+      worker.send({ type: "list_sessions", id: "list-fail", limit: 20 });
+      const response = await worker.waitFor(
+        (event) => event.type === "response" && event.id === "list-fail",
+        { label: `list_sessions response (${scenario.label})` },
+      );
+      assert.equal(response.ok, true, `${scenario.label}: must not error`);
+      assert.equal(
+        response.result.threads[0].id,
+        scenario.sessionId,
+        `${scenario.label}: the row must survive`,
+      );
+    } finally {
+      await worker.close();
+      await rm(home, { force: true, recursive: true });
+    }
   }
 });
 

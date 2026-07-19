@@ -129,7 +129,7 @@ import {
 } from "./local/ui-store.js";
 import { openSessionStream, sessionStreamUrl } from "./session-stream.js";
 import {
-  buildThreadGroups,
+  buildNavigationThreadGroups,
 } from "./shared/thread-groups.js";
 import {
   createThreadListStore,
@@ -2125,7 +2125,7 @@ async function archiveThreadFromContextMenu() {
     }
 
     state.threads = state.threads.filter((entry) => entry.id !== threadId);
-    state.threadGroups = buildThreadGroups(state.threads);
+    state.threadGroups = buildNavigationThreadGroups(state.threads);
     renderThreads();
     await loadSession("post-archive refresh");
     await loadThreads("post-archive refresh");
@@ -2183,7 +2183,7 @@ async function deleteThreadFromContextMenu() {
     }
 
     state.threads = state.threads.filter((entry) => entry.id !== threadId);
-    state.threadGroups = buildThreadGroups(state.threads);
+    state.threadGroups = buildNavigationThreadGroups(state.threads);
     renderThreads();
     await loadThreads("post-delete refresh");
     if (shouldPreserveConversation) {

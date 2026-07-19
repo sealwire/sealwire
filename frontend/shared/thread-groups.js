@@ -15,6 +15,24 @@ export function canonicalizeWorkspace(cwd) {
 export const UNKNOWN_WORKSPACE_CWD = "__unknown_workspace__";
 export const UNKNOWN_WORKSPACE_LABEL = "Unknown workspace";
 
+// Navigation policy, shared by every surface that renders the thread list.
+//
+// A thread whose cwd could not be recovered must still be REACHABLE. cwd
+// recovery is best-effort at both layers (the relay's runtime/cache memory, and
+// the worker's local-JSONL scan), so an empty cwd is always possible: the
+// session file may be gone, the id may not match the scan pattern, or the relay
+// may have restarted. Dropping those rows made a real forked session vanish
+// from the sidebar with no error while it existed on disk and in the relay —
+// and, because the local refresh writes the grouped result back to
+// `state.threads`, it also became unforkable and unopenable.
+//
+// This exists as a function rather than an option each caller remembers to
+// pass: local surfaces did not pass it while remote did, so the same thread was
+// visible on the phone and gone on the desktop.
+export function buildNavigationThreadGroups(threads) {
+  return buildThreadGroups(threads, { includeUnknownWorkspace: true });
+}
+
 export function buildThreadGroups(threads, options = {}) {
   const includeUnknownWorkspace = options.includeUnknownWorkspace === true;
   const groups = new Map();

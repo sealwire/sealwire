@@ -63,6 +63,7 @@ import { buildSessionOptionsBase } from "./session-options.mjs";
 import { createProgressTracker } from "./progress-tracker.mjs";
 import {
   findLocalSessionFile,
+  readSessionCwdFromFile,
   readSessionMessagePage,
 } from "./session-page.mjs";
 
@@ -377,6 +378,29 @@ async function readThreadInfoOrFallback(sdk, sessionId, cmd) {
   } catch {
     return fallbackThread(sessionId, cmd);
   }
+}
+
+async function hydrateMissingSessionCwds(sessions) {
+  return Promise.all(
+    (sessions || []).map(async (session) => {
+      if (session?.cwd || !session?.sessionId) {
+        return session;
+      }
+      const filePath = await findLocalSessionFile({
+        cwd: "",
+        sessionId: session.sessionId,
+      });
+      if (!filePath) {
+        return session;
+      }
+      try {
+        const cwd = await readSessionCwdFromFile({ filePath });
+        return cwd ? { ...session, cwd } : session;
+      } catch {
+        return session;
+      }
+    }),
+  );
 }
 
 async function readSupportedModels(sdk, cmd) {
@@ -1228,7 +1252,8 @@ async function main() {
             dir: cmd.cwd || undefined,
             limit: cmd.limit ?? 80,
           });
-          emitResponse(cmd.id, { threads: sessions.map(mapSessionInfo) });
+          const hydrated = await hydrateMissingSessionCwds(sessions);
+          emitResponse(cmd.id, { threads: hydrated.map(mapSessionInfo) });
         } catch (err) {
           emitErrorResponse(cmd.id, String(err));
         }

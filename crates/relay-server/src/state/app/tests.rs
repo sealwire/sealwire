@@ -8218,6 +8218,79 @@ settings update: {error}"
         );
     }
 
+    #[tokio::test]
+    async fn list_threads_fills_empty_provider_cwd_from_known_runtime() {
+        // Claude SDK listSessions can omit cwd for sessions created by
+        // forkSession unless the list is scoped by dir. The relay already knows
+        // the cwd from the fork/start runtime; the nav-visible list must not let
+        // the provider's partial summary erase it, because the local sidebar
+        // groups by cwd and drops empty-workspace rows.
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["claude_code"]).await;
+        let thread = start_parent(&app, cwd, "claude_code").await;
+
+        {
+            let provider = providers.get("claude_code").expect("provider");
+            let mut threads = provider.threads.lock().await;
+            threads
+                .get_mut(&thread.id)
+                .expect("provider thread")
+                .cwd
+                .clear();
+        }
+
+        let listed = app.list_threads(50, None).await.expect("list_threads");
+        let row = listed
+            .threads
+            .iter()
+            .find(|item| item.id == thread.id)
+            .expect("thread should remain nav-visible");
+        assert_eq!(
+            std::fs::canonicalize(&row.cwd).expect("row cwd canonicalizes"),
+            std::fs::canonicalize(cwd).expect("expected cwd canonicalizes")
+        );
+    }
+
+    // The runtime fallback only covers threads this process has loaded. After a
+    // restart the relay has no runtime for a saved thread, so the cached thread
+    // row is the remaining source — without it the row goes out with an empty
+    // cwd and the local sidebar drops it.
+    #[tokio::test]
+    async fn list_threads_fills_empty_provider_cwd_from_the_thread_cache() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["claude_code"]).await;
+        let thread = start_parent(&app, cwd, "claude_code").await;
+
+        {
+            // Drop the runtime so only the cached row can answer, then blank the
+            // provider's cwd the way Claude's listSessions does.
+            let mut relay = app.relay.write().await;
+            relay.runtimes.remove(&thread.id);
+        }
+        {
+            let provider = providers.get("claude_code").expect("provider");
+            let mut threads = provider.threads.lock().await;
+            threads
+                .get_mut(&thread.id)
+                .expect("provider thread")
+                .cwd
+                .clear();
+        }
+
+        let listed = app.list_threads(50, None).await.expect("list_threads");
+        let row = listed
+            .threads
+            .iter()
+            .find(|item| item.id == thread.id)
+            .expect("thread must stay nav-visible after a restart-like state");
+        assert!(
+            !row.cwd.is_empty(),
+            "the cached thread row must supply the cwd"
+        );
+    }
+
     // Regression guard for the Codex creep the reviewer flagged: a provider whose
     // read_thread.updated_at may be a resume-bumped mtime must NOT advance the
     // tracked activity key on a no-prompt selection — repeated selection would
