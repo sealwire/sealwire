@@ -398,18 +398,41 @@ fn web_root_override_is_trimmed_and_blank_override_falls_through() {
 }
 
 // Session endpoints mapped every non-path-policy failure to 502
-// `provider_bridge_error`, so a bad request body and a state conflict both
-// looked like the provider had failed. Clients read `error.message` so nothing
-// broke visibly, but the status was actively misleading: 502 invites a retry,
-// and these two are not retryable in the same way (a conflict clears when the
-// turn ends; a bad fork point never does).
+// `provider_bridge_error`, so a malformed request and a state conflict both
+// read as "the upstream agent broke". 502 invites a retry, which is wrong for
+// both: a bad fork point never succeeds, a conflict succeeds only once the
+// turn ends.
+//
+// These cases are driven from the REAL producing sites, not hand-written
+// examples — an earlier version of this test used invented phrasings and so
+// passed while three real error paths still returned 502.
 #[test]
 fn session_errors_are_classified_by_cause_not_lumped_into_502() {
-    // Caller supplied something that will never work: 400.
+    // Conflicts: retryable once the state changes.
     for message in [
+        // state/app/fork.rs FORK_BUSY_SOURCE_MSG
+        "cannot fork a thread while a turn is in progress".to_string(),
+        // state/app/review.rs acquire_session_slot
+        "a review is in progress; wait for it to finish before changing the session".to_string(),
+        // state/app/mod.rs REVIEW_LOCKED_THREAD_MSG, by constant
+        crate::state::REVIEW_LOCKED_THREAD_MSG.to_string(),
+    ] {
+        let (status, _) = classify_session_error(message.clone());
+        assert_eq!(status, StatusCode::CONFLICT, "{message} is a conflict");
+    }
+
+    // Caller errors: never succeed on retry.
+    for message in [
+        // state/app/fork.rs truncate_transcript_at
         "fork point item-9 is not part of the source thread transcript",
-        "source_thread_id is required",
+        // require_device_id
         "device_id is required",
+        // state/app/fork.rs
+        "source_thread_id is required",
+        // state/app/providers.rs find_thread_provider
+        "thread 'abc' was not found on any provider",
+        // state/app/providers.rs resolve_provider
+        "agent provider 'nope' is not available",
     ] {
         let (status, _) = classify_session_error(message.to_string());
         assert_eq!(
@@ -419,21 +442,13 @@ fn session_errors_are_classified_by_cause_not_lumped_into_502() {
         );
     }
 
-    // Transient state conflict — retryable once the state changes: 409.
-    for message in [
-        "cannot fork a thread while a turn is in progress",
-        "a review is in progress; wait for it to finish before changing the session",
-    ] {
-        let (status, _) = classify_session_error(message.to_string());
-        assert_eq!(status, StatusCode::CONFLICT, "{message} is a conflict");
-    }
-
     // Path policy keeps its existing 400.
     let (status, _) =
         classify_session_error("/etc is outside this relay's allowed roots".to_string());
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
-    // Anything else is still attributed to the provider.
+    // Anything unrecognized is still attributed to the provider — the safe
+    // fallback, so an unknown failure is never blamed on the caller.
     let (status, body) = classify_session_error("codex app-server exited".to_string());
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     assert_eq!(body.0.error.code, "provider_bridge_error");

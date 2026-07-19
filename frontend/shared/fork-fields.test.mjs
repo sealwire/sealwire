@@ -7,6 +7,7 @@ import {
   forkFieldsToPayload,
   canForkInSession,
   forkIsLossy,
+  forkPointIsTranscriptTip,
   resolveForkSourceThread,
   threadIsBusyForFork,
 } from "./fork-fields.js";
@@ -260,4 +261,23 @@ test("an unknown provider is assumed lossy", () => {
   );
   // No capabilities reported at all (older relay): assume the safe answer.
   assert.equal(forkIsLossy({ sourceProvider: "codex", targetProvider: "codex" }), true);
+});
+
+// Same trap as resolveForkSourceThread: on local, `session.transcript` is the
+// LIVE session's, while the saved thread on screen has its own entries. Reading
+// the wrong one labels a tip fork of a viewed Codex thread as replay even
+// though the relay performs a native fork.
+test("tip detection uses the entries actually on screen", () => {
+  const liveEntries = [{ item_id: "live-tail", kind: "agent_text" }];
+  const viewedEntries = [
+    { item_id: "viewed-a", kind: "agent_text" },
+    { item_id: "viewed-tail", kind: "agent_text" },
+  ];
+
+  assert.equal(forkPointIsTranscriptTip(viewedEntries, "viewed-tail"), true);
+  assert.equal(forkPointIsTranscriptTip(viewedEntries, "viewed-a"), false);
+  // The live transcript must not answer for the viewed one.
+  assert.equal(forkPointIsTranscriptTip(liveEntries, "viewed-tail"), false);
+  assert.equal(forkPointIsTranscriptTip([], "viewed-tail"), false);
+  assert.equal(forkPointIsTranscriptTip(viewedEntries, ""), false);
 });

@@ -47,7 +47,7 @@ use super::{
 /// currently owns (its parent or reviewer thread). Such a thread is frozen for
 /// send/stop while the review runs in the background; every OTHER thread stays
 /// fully usable.
-pub(super) const REVIEW_LOCKED_THREAD_MSG: &str =
+pub(crate) const REVIEW_LOCKED_THREAD_MSG: &str =
     "this thread is being reviewed; switch to another thread or wait for the review to finish";
 
 #[derive(Clone)]
@@ -99,6 +99,28 @@ mod threads;
 mod transcript;
 mod workflow;
 
+/// Fork capability is a property of WHICH BRIDGES EXIST, not of any session,
+/// so it is derived once at construction. Every constructor must seed it: a
+/// path that forgets publishes an empty list, and clients then label every fork
+/// as lossy replay even when the relay performs a native fork.
+pub(crate) fn fork_capability_views(
+    providers: &HashMap<String, Arc<dyn ProviderBridge>>,
+) -> Vec<crate::protocol::ProviderForkCapabilityView> {
+    let mut views = providers
+        .iter()
+        .map(|(name, bridge)| {
+            let capability = bridge.fork_capability();
+            crate::protocol::ProviderForkCapabilityView {
+                provider: name.clone(),
+                native_fork: capability.native_fork,
+                native_fork_at_message: capability.native_fork_at_message,
+            }
+        })
+        .collect::<Vec<_>>();
+    views.sort_by(|a, b| a.provider.cmp(&b.provider));
+    views
+}
+
 impl AppState {
     #[cfg(test)]
     pub(crate) fn from_parts(
@@ -106,21 +128,8 @@ impl AppState {
         providers: HashMap<String, Arc<dyn ProviderBridge>>,
         change_tx: watch::Sender<u64>,
     ) -> Self {
-        // Seed fork capability once: it is a property of which bridges exist,
-        // not of any session, and both surfaces read it off the snapshot.
-        let capabilities = providers
-            .iter()
-            .map(|(name, bridge)| {
-                let capability = bridge.fork_capability();
-                crate::protocol::ProviderForkCapabilityView {
-                    provider: name.clone(),
-                    native_fork: capability.native_fork,
-                    native_fork_at_message: capability.native_fork_at_message,
-                }
-            })
-            .collect::<Vec<_>>();
         if let Ok(mut state) = relay.try_write() {
-            state.set_provider_fork_capabilities(capabilities);
+            state.set_provider_fork_capabilities(fork_capability_views(&providers));
         }
 
         Self {
@@ -197,6 +206,7 @@ impl AppState {
                 "info",
                 format!("Agent providers initialized: {:?}", provider_names),
             );
+            relay.set_provider_fork_capabilities(fork_capability_views(&providers));
             relay.notify();
         }
 

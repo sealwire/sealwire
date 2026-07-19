@@ -1041,12 +1041,25 @@ fn bad_gateway(message: String) -> (StatusCode, Json<ApiError>) {
 /// exact phrases the session layer emits, and the fallback stays 502 so an
 /// unrecognized failure is never mislabelled as the caller's fault.
 const CALLER_ERROR_MARKERS: &[&str] = &[
+    // fork.rs: the fork point is not in the source transcript
     "is not part of the source thread transcript",
+    // require_device_id and the other required-input guards
     "is required",
-    "unknown thread",
+    // providers.rs find_thread_provider: no provider owns this thread
+    "was not found on any provider",
+    // providers.rs resolve_provider: the requested provider is not running
+    "is not available",
 ];
 
-const CONFLICT_MARKERS: &[&str] = &["turn is in progress", "a review is in progress"];
+const CONFLICT_MARKERS: &[&str] = &[
+    // fork.rs FORK_BUSY_SOURCE_MSG and the send-during-turn guards
+    "turn is in progress",
+    // review.rs acquire_session_slot
+    "a review is in progress",
+    // The reviewed-thread lock, referenced by CONSTANT rather than a copied
+    // phrase so a reword cannot silently drop it back to 502.
+    crate::state::REVIEW_LOCKED_THREAD_MSG,
+];
 
 fn classify_session_error(message: String) -> (StatusCode, Json<ApiError>) {
     if is_path_policy_error(&message) {

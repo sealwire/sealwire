@@ -21,6 +21,20 @@ function textFromContent(content) {
     .join("\n");
 }
 
+// The user-authored text of a message, ignoring tool_result payloads.
+function explicitUserText(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((block) => {
+      if (typeof block === "string") return block;
+      if (block?.type === "text") return block.text || "";
+      return "";
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
 function previewJson(value, max = 1000) {
   let text;
   try {
@@ -381,7 +395,12 @@ export function mapSdkMessage(msg, options = {}) {
       const relayUuids = options.relayUserMessageUuids;
       const uuid = msg.uuid || "";
       if (relayUuids && uuid && !relayUuids.has(uuid)) {
-        const text = textFromContent(msg.message?.content);
+        // EXPLICIT text blocks only — never textFromContent, which folds
+        // tool_result content into the string. A user record carrying only
+        // tool results is how the SDK reports every tool call; treating that as
+        // a message would republish raw tool output as chat and, since a user
+        // message is a turn boundary, invent a fork point after every tool call.
+        const text = explicitUserText(msg.message?.content);
         if (text) {
           events.push({
             type: "user_message",

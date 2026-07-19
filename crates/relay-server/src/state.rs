@@ -13,6 +13,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+pub(crate) use self::app::REVIEW_LOCKED_THREAD_MSG;
 pub use self::app::{AppState, ApprovalError, AskUserAnswerError};
 #[cfg(test)]
 use self::relay::TranscriptRecord;

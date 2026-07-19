@@ -1923,8 +1923,14 @@ function openForkDialogForThread(threadId, upToItemId = "") {
       upToItemId: upToItemId || "",
       // Branching at the tip drops nothing, so the relay collapses it to a
       // whole-thread fork — which keeps a tip-only native fork native.
+      // The entries ACTUALLY on screen: while viewing a saved thread,
+      // `state.session` is still the live session (same trap as
+      // resolveForkSourceThread), so its transcript would answer for the
+      // wrong thread.
       forkPointIsTip: forkPointIsTranscriptTip(
-        state.session?.transcript || [],
+        state.viewOnlyThread?.threadId === threadId
+          ? state.viewOnlyThread.entries || []
+          : state.session?.transcript || [],
         upToItemId || ""
       ),
     },

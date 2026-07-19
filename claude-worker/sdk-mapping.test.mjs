@@ -698,7 +698,34 @@ test("without provenance info no user text is emitted (safe default)", () => {
   assert.equal(mapped, null);
 });
 
-test("tool results still ride alongside an injected user record", () => {
+// A user record carrying ONLY tool results is how the SDK reports every tool
+// call — it is not a message the user wrote. Emitting a user_message for it
+// would republish raw tool output as chat, and (because a user message is a
+// turn boundary) invent a fork point after every tool call.
+test("a tool-result-only record emits no user_message", () => {
+  const mapped = mapSdkMessage(
+    {
+      type: "user",
+      uuid: "tool-carrier-1",
+      message: {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "RAW TOOL OUTPUT" }],
+      },
+    },
+    { relayUserMessageUuids: new Set() }
+  );
+
+  const events = Array.isArray(mapped) ? mapped : [mapped].filter(Boolean);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].type, "tool_call_result");
+  assert.equal(
+    events.some((e) => e.type === "user_message"),
+    false,
+    "tool output must not surface as a user message"
+  );
+});
+
+test("a mixed record emits only its explicit text as the user message", () => {
   const mapped = mapSdkMessage(
     {
       type: "user",
@@ -706,7 +733,7 @@ test("tool results still ride alongside an injected user record", () => {
       message: {
         role: "user",
         content: [
-          { type: "tool_result", tool_use_id: "toolu_1", content: "ok" },
+          { type: "tool_result", tool_use_id: "toolu_1", content: "RAW TOOL OUTPUT" },
           { type: "text", text: "and a note" },
         ],
       },
@@ -716,5 +743,8 @@ test("tool results still ride alongside an injected user record", () => {
 
   const events = Array.isArray(mapped) ? mapped : [mapped];
   assert.ok(events.some((e) => e.type === "tool_call_result"));
-  assert.ok(events.some((e) => e.type === "user_message" && /and a note/.test(e.text)));
+  const user = events.find((e) => e.type === "user_message");
+  assert.ok(user, "explicit text is a real message");
+  assert.equal(user.text, "and a note", "tool output must not be spliced in");
+  assert.doesNotMatch(user.text, /RAW TOOL OUTPUT/);
 });

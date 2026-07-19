@@ -3690,6 +3690,60 @@ mod path_scope_tests {
         assert!(thread_status_is_working("running"));
     }
 
+    // Capability seeding was once done only in the test constructor, so
+    // production snapshots published an empty list and every client labelled
+    // every fork as lossy replay. Both constructors now call one helper; this
+    // pins the helper's output AND that it reaches the snapshot.
+    #[tokio::test]
+    async fn fork_capabilities_are_derived_from_the_bridges_and_reach_the_snapshot() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, _p, _o) = build_two_provider_app(cwd).await;
+
+        let snapshot = app.snapshot().await;
+        let names = snapshot
+            .provider_fork_capabilities
+            .iter()
+            .map(|entry| entry.provider.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec!["alpha", "beta"],
+            "every configured provider must be described"
+        );
+        // StatusProviderBridge does not override fork_capability, so it takes
+        // the trait default — which must agree with its replaying fork_thread.
+        for entry in &snapshot.provider_fork_capabilities {
+            assert!(
+                !entry.native_fork,
+                "a replaying bridge must not claim native"
+            );
+            assert!(!entry.native_fork_at_message);
+        }
+    }
+
+    // The real bridges must not drift from what they actually implement.
+    #[test]
+    fn shipped_bridges_declare_the_capability_they_implement() {
+        use crate::provider::ProviderForkCapability;
+        // Codex `thread/fork` is tip-only; the Claude SDK takes upToMessageId.
+        assert_eq!(
+            ProviderForkCapability::NATIVE_TIP_ONLY,
+            ProviderForkCapability {
+                native_fork: true,
+                native_fork_at_message: false,
+            }
+        );
+        assert_eq!(
+            ProviderForkCapability::NATIVE_AT_MESSAGE,
+            ProviderForkCapability {
+                native_fork: true,
+                native_fork_at_message: true,
+            }
+        );
+        assert!(!ProviderForkCapability::REPLAY_ONLY.native_fork);
+    }
+
     #[tokio::test]
     async fn fork_session_accepts_a_saved_thread_reported_as_not_loaded() {
         let project = TempDir::new().expect("project tempdir");
