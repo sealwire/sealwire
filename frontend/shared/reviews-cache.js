@@ -44,6 +44,16 @@ export function createReviewsCache() {
         if (inflightRevision !== snapshotRevision) {
           return;
         }
+        // A response carrying NO payload is not an answer — it's a failure that didn't
+        // throw (the remote fetch resolves to null when the transport drops the field).
+        // Accepting it would latch `loaded` with empty lists, and since callers fall back
+        // via `cache || snapshot`, a truthy-but-empty cache SHADOWS that fallback for good.
+        // Treat it exactly like a thrown error: keep the prior cache, leave the revision
+        // unsynced so a later sync retries. An explicitly empty ReviewsResponse is a real
+        // answer and still loads normally.
+        if (resp == null) {
+          return;
+        }
         syncedRevision = snapshotRevision;
         loaded = true;
         data = {

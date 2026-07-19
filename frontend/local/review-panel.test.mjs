@@ -480,9 +480,15 @@ test("canRequestReview gates on the reviewed thread being idle + no review runni
   // it must still allow a review, mirroring the backend `thread_status_is_working`.
   assert.equal(canRequestReview({ ...base, current_status: "unknown" }, "device-a"), true);
   assert.equal(canRequestReview({ ...base, current_status: "completed" }, "device-a"), true);
-  // A review already in progress (one at a time, global).
+  // A review already in progress ON THE REVIEWED THREAD blocks. The fixture must name the
+  // parent: the gate is per-thread (mirroring the backend `is_thread_review_locked`), so a
+  // job with no parent is a job on no thread and locks nothing. See the concurrent-reviews
+  // test below for the other half of this invariant.
   assert.equal(
-    canRequestReview({ ...base, active_review_jobs: [{ status: "waiting_for_reviewer" }] }, "device-a"),
+    canRequestReview(
+      { ...base, active_review_jobs: [{ parent_thread_id: "t1", status: "waiting_for_reviewer" }] },
+      "device-a"
+    ),
     false
   );
   // No thread to review at all (no active, no viewed) → still false.
@@ -549,6 +555,47 @@ test("canRequestReview gates on the VIEWED thread, not the active thread (review
       "busy-bg"
     ),
     false
+  );
+});
+
+test("canRequestReview scopes the review-in-progress gate to the reviewed thread (concurrent reviews)", () => {
+  // Regression: a review running on SOME OTHER thread used to disable "Request review"
+  // on every thread in the workspace, because the gate called the workspace-global
+  // `isReviewInProgress`. The backend lock (`is_thread_review_locked`) is per-thread —
+  // it only refuses when the named parent is itself the parent OR the reviewer of a
+  // non-terminal job — so the UI was strictly stricter than the server and silently
+  // serialized reviews that the relay would happily have run concurrently.
+  const session = {
+    active_thread_id: "active-idle",
+    active_turn_id: null,
+    current_status: "idle",
+    thread_activity: [],
+    pending_approvals: [],
+    active_review_jobs: [
+      {
+        parent_thread_id: "other-parent",
+        reviewer_thread_id: "other-reviewer",
+        status: "waiting_for_reviewer",
+      },
+    ],
+  };
+  // The thread under review, and the reviewer thread doing the reviewing, stay locked.
+  assert.equal(canRequestReview(session, "device-a", "other-parent"), false);
+  assert.equal(canRequestReview(session, "device-a", "other-reviewer"), false);
+  // Any UNRELATED thread must remain requestable while that review runs.
+  assert.equal(canRequestReview(session, "device-a", "unrelated-idle"), true);
+  assert.equal(canRequestReview(session, "device-a", "active-idle"), true);
+  // A terminal job on the viewed thread does not lock it (re-review must stay available).
+  assert.equal(
+    canRequestReview(
+      {
+        ...session,
+        active_review_jobs: [{ parent_thread_id: "done-parent", status: "complete" }],
+      },
+      "device-a",
+      "done-parent"
+    ),
+    true
   );
 });
 

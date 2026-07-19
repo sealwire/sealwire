@@ -122,6 +122,11 @@ pub(super) enum OutboundBrokerPayload {
         thread_entry_detail: Option<ThreadEntryDetailResponse>,
         thread_transcript: Option<ThreadTranscriptResponse>,
         workspace_diff: Option<crate::protocol::WorkspaceDiffResponse>,
+        /// The `fetch_reviews` payload (review cards + reviewer threads). Without this the
+        /// PLAINTEXT path silently dropped it — the sealed path serializes
+        /// `RemoteActionResultPlaintext` wholesale and always carried it — so a phone's
+        /// reuse picker in "Request review" showed no existing reviewers while local did.
+        reviews: Option<crate::protocol::ReviewsResponse>,
         ask_user_question_detail: Option<AskUserQuestionDetailResponse>,
         error: Option<String>,
     },

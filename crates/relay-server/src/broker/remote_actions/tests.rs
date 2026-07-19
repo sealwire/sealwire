@@ -323,6 +323,8 @@ fn remote_action_result_size_breakdown_reports_large_thread_transcript_payloads(
         None,
         Some(&thread_transcript),
         None,
+        // reviews
+        None,
         None,
         None,
         None,
@@ -604,4 +606,71 @@ fn large_ask_user_detail_result_chunks_fit_within_broker_limit() {
     assert!(encrypted_payloads
         .iter()
         .all(|payload| frame_bytes_for_payload(payload) <= MAX_BROKER_TEXT_FRAME_BYTES));
+}
+
+#[test]
+fn plain_fetch_reviews_result_carries_the_reviews_payload_to_the_device() {
+    // REPRO (remote reuse picker is empty): `fetch_reviews` computes the full
+    // ReviewsResponse server-side and puts it on the outcome, but the PLAINTEXT broker
+    // envelope for a transcript-kind result never forwards it — OutboundBrokerPayload::
+    // RemoteTranscriptResult has no `reviews` field at all. So the phone's
+    // fetchRemoteReviews() reads `result.reviews` as undefined and the reuse dropdown in
+    // "Request review" shows no existing reviewers, while local (which reads the same data
+    // over /api/session/reviews) shows them.
+    //
+    // Only this ONE path lost it, which is why the symptom was intermittent: the encrypted
+    // path and the plaintext CHUNKED fallback both serialize RemoteActionResultPlaintext
+    // wholesale (it has a `reviews` field), so they always carried it. A reviews payload
+    // only chunks when it exceeds MAX_BROKER_TEXT_FRAME_BYTES — so the field survived on
+    // big workspaces and vanished on small ones.
+    let reviews = crate::protocol::ReviewsResponse {
+        reviews_revision: 99,
+        review_jobs: Vec::new(),
+        reviewer_threads: vec![crate::protocol::ReviewerThreadView {
+            reviewer_thread_id: "reviewer-1".to_string(),
+            parent_thread_id: "parent-1".to_string(),
+            reviewer_provider: Some("codex".to_string()),
+            name: Some("reviewer one".to_string()),
+            updated_at: Some(5),
+        }],
+    };
+    let result = RemoteActionResultPlaintext {
+        kind: remote_action_result_kind(RemoteActionKind::FetchReviews),
+        action: RemoteActionKind::FetchReviews,
+        ok: true,
+        snapshot: None,
+        receipt: None,
+        ask_user_answer_receipt: None,
+        providers: None,
+        models: None,
+        threads: None,
+        thread_entries: None,
+        thread_entry_detail: None,
+        thread_transcript: None,
+        workspace_diff: None,
+        reviews: Some(reviews),
+        ask_user_question_detail: None,
+        session_claim: None,
+        session_claim_expires_at: None,
+        claim_challenge_id: None,
+        claim_challenge: None,
+        claim_challenge_expires_at: None,
+        error: None,
+    };
+
+    let payload = build_plain_remote_action_result_payload("action-reviews", "surface-1", &result)
+        .expect("reviews payload");
+    let json = serde_json::to_value(&payload).expect("serialize reviews payload");
+    let carried = json
+        .get("reviews")
+        .unwrap_or(&serde_json::Value::Null)
+        .clone();
+    assert!(
+        !carried.is_null(),
+        "the plaintext fetch_reviews envelope must carry `reviews` to the device; got: {json}"
+    );
+    assert_eq!(
+        carried["reviewer_threads"][0]["reviewer_thread_id"], "reviewer-1",
+        "the device needs the reviewer threads to populate the reuse picker"
+    );
 }

@@ -57,6 +57,20 @@ export function isReviewInProgressForThread(session, threadId) {
   );
 }
 
+// Mirror of the backend `RelayState::is_thread_review_locked` (state/relay.rs): a thread
+// is locked while it is EITHER the parent under review OR the reviewer thread doing the
+// reviewing, for any non-terminal job. This is deliberately per-thread — the relay holds
+// its session slot only for the length of the `request_review` call and then runs the
+// review in the background, so reviews on DIFFERENT threads may run concurrently.
+export function isThreadReviewLocked(session, threadId) {
+  if (!threadId) return false;
+  return (session?.active_review_jobs || []).some(
+    (job) =>
+      !TERMINAL_REVIEW_STATUSES.has(job.status) &&
+      (job.parent_thread_id === threadId || job.reviewer_thread_id === threadId)
+  );
+}
+
 export function reviewChipTone(status) {
   if (status === "failed" || status === "escalated") return "alert";
   if (status === "complete") return "ready";
@@ -214,6 +228,10 @@ export function canRequestReview(session, deviceId, viewedThreadId = null) {
   ) {
     return false;
   }
-  if (isReviewInProgress(session)) return false;
+  // Per-thread, NOT workspace-global: a review running on some other thread leaves this
+  // one requestable. This used to call the global `isReviewInProgress`, a leftover from
+  // when a review held the session slot for its whole lifetime — it made the UI stricter
+  // than the backend and silently serialized reviews the relay would have run in parallel.
+  if (isThreadReviewLocked(session, target)) return false;
   return true;
 }
