@@ -1064,13 +1064,15 @@ function RemoteApp() {
     remoteUiStore.getState().setForkDialog({ fields: next, error: "" });
   }
 
-  async function handleForkSession() {
+  // See submitForkDialog on the local surface: the dialog hands back its
+  // NORMALIZED fields, which are what the user actually sees.
+  async function handleForkSession(submittedFields = null) {
     const dialog = remoteUiStore.getState().forkDialog;
     if (!dialog.sourceThread?.id || dialog.pending) return false;
     remoteUiStore.getState().setForkDialog({ pending: true });
     try {
       const result = await handlers.onForkSession?.({
-        ...dialog.fields,
+        ...(submittedFields || dialog.fields),
         sourceThreadId: dialog.sourceThread.id,
       });
       if (result?.ok) {
@@ -1450,7 +1452,7 @@ function RemoteApp() {
           ),
           forkCapabilities: session?.provider_fork_capabilities || [],
           onFieldChange: handleForkFieldChange,
-          onFork: () => void handleForkSession(),
+          onFork: (submitted) => void handleForkSession(submitted),
           onRequestClose() {
             remoteUiStore.getState().closeForkDialog();
           },

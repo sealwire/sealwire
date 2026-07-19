@@ -6,9 +6,11 @@ import {
   defaultForkFields,
   forkFieldsToPayload,
   canForkInSession,
+  forkFieldsAreSubmittable,
   forkInheritableFields,
   forkIsLossy,
   forkPointIsTranscriptTip,
+  normalizeForkFields,
   resolveForkSourceThread,
   threadIsBusyForFork,
 } from "./fork-fields.js";
@@ -313,4 +315,58 @@ test("model and effort are only inheritable within the same provider", () => {
 test("an unknown target provider is treated as a change", () => {
   const crossed = forkInheritableFields({ sourceProvider: "codex", targetProvider: "" });
   assert.equal(crossed.has("model"), true, "no target yet means no change yet");
+});
+
+// After a provider change the dialog stops offering the empty "inherit" option
+// for model/effort, but the field could still HOLD it — a controlled select
+// with a value absent from its options. The browser shows the first option
+// while the state stays "", so submitting sends null and the relay silently
+// picks its own default: the user sees one thing and gets another.
+test("fields are normalized to a concrete value when inherit is not offered", () => {
+  const models = [
+    { model: "claude-sonnet-4-6", display_name: "Sonnet", is_default: true,
+      supported_reasoning_efforts: ["low", "high"], default_reasoning_effort: "high" },
+  ];
+
+  const normalized = normalizeForkFields(
+    { provider: "claude_code", model: INHERIT, effort: INHERIT },
+    { sourceProvider: "codex", models }
+  );
+
+  assert.equal(normalized.model, "claude-sonnet-4-6");
+  assert.equal(normalized.effort, "high", "the model's own default, not the first option");
+});
+
+test("same-provider fields keep inherit, which is still offered", () => {
+  const normalized = normalizeForkFields(
+    { provider: "codex", model: INHERIT, effort: INHERIT },
+    { sourceProvider: "codex", models: [{ model: "gpt-5.4", is_default: true }] }
+  );
+
+  assert.equal(normalized.model, INHERIT);
+  assert.equal(normalized.effort, INHERIT);
+});
+
+// A cold target catalog cannot be normalized yet. The fields must stay empty
+// (there is nothing honest to show) and the dialog must refuse to submit,
+// rather than send null and let the relay choose unseen.
+test("a cold catalog leaves the field empty and blocks submission", () => {
+  const fields = { provider: "claude_code", model: INHERIT, effort: INHERIT };
+  const normalized = normalizeForkFields(fields, { sourceProvider: "codex", models: [] });
+
+  assert.equal(normalized.model, INHERIT);
+  assert.equal(forkFieldsAreSubmittable(normalized, { sourceProvider: "codex" }), false);
+});
+
+test("submission is allowed once a concrete model exists", () => {
+  const fields = { provider: "claude_code", model: "claude-sonnet-4-6", effort: "high" };
+  assert.equal(forkFieldsAreSubmittable(fields, { sourceProvider: "codex" }), true);
+  // Same-provider inherit is submittable — the relay resolves it.
+  assert.equal(
+    forkFieldsAreSubmittable(
+      { provider: "codex", model: INHERIT, effort: INHERIT },
+      { sourceProvider: "codex" }
+    ),
+    true
+  );
 });

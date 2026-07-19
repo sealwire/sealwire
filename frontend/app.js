@@ -1981,7 +1981,11 @@ function handleForkDialogFieldChange(field, value) {
   renderForkSessionDialog();
 }
 
-async function submitForkDialog() {
+// `submittedFields` are the dialog's NORMALIZED fields — the values actually on
+// screen. Submitting `dialogState.fields` instead would send the raw state,
+// which after a provider change can still hold the withdrawn empty "inherit"
+// value: the user sees a concrete model and the relay resolves its own.
+async function submitForkDialog(submittedFields = null) {
   const dialogState = state.forkDialog;
   if (!dialogState.sourceThread?.id || dialogState.pending) {
     return;
@@ -1989,7 +1993,7 @@ async function submitForkDialog() {
   state.forkDialog = { ...dialogState, pending: true };
   renderForkSessionDialog();
   const result = await forkSession({
-    ...dialogState.fields,
+    ...(submittedFields || dialogState.fields),
     sourceThreadId: dialogState.sourceThread.id,
   });
   if (result?.ok) {

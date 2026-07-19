@@ -51,6 +51,52 @@ export function forkInheritableFields({ sourceProvider = "", targetProvider = ""
   return new Set(providerChanged ? always : [...always, "model", "effort"]);
 }
 
+function catalogEntry(models, model) {
+  return (models || []).find((entry) => entry?.model === model) || null;
+}
+
+function defaultEffortForModel(models, model) {
+  const entry = catalogEntry(models, model);
+  return entry?.default_reasoning_effort || entry?.supported_reasoning_efforts?.[0] || INHERIT;
+}
+
+// Keep the field state consistent with the options the dialog will actually
+// render. When a provider change withdraws the empty "inherit" option, a field
+// still holding it becomes a controlled select whose value is absent from its
+// options: the browser shows the first entry while the state stays empty, so
+// the user sees one model and the relay silently resolves another.
+//
+// A cold target catalog cannot be normalized — there is no honest concrete
+// value yet — so the field stays empty and `forkFieldsAreSubmittable` blocks
+// the submit until the catalog arrives.
+export function normalizeForkFields(fields, { sourceProvider = "", models = [] } = {}) {
+  const inheritable = forkInheritableFields({
+    sourceProvider,
+    targetProvider: fields?.provider || "",
+  });
+  const next = { ...fields };
+
+  if (!inheritable.has("model") && !next.model) {
+    next.model = firstCatalogModel(models);
+  }
+  if (!inheritable.has("effort") && !next.effort) {
+    next.effort = defaultEffortForModel(models, next.model);
+  }
+  return next;
+}
+
+// Whether the dialog may submit. A field the relay will NOT resolve from the
+// source thread must carry a concrete value; otherwise the request omits it and
+// the relay picks a default the user never saw.
+export function forkFieldsAreSubmittable(fields, { sourceProvider = "" } = {}) {
+  const inheritable = forkInheritableFields({
+    sourceProvider,
+    targetProvider: fields?.provider || "",
+  });
+  if (!inheritable.has("model") && !fields?.model) return false;
+  return true;
+}
+
 // Re-seed the model when the target provider changes: the previously selected
 // model belongs to the provider the user just switched away from.
 export function applyForkProviderChange(fields, provider, models) {

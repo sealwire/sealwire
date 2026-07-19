@@ -1,6 +1,12 @@
 import React from "react";
 import { SessionSettingsFields } from "./session-settings-fields.js";
-import { INHERIT, forkInheritableFields, forkIsLossy } from "./fork-fields.js";
+import {
+  INHERIT,
+  forkFieldsAreSubmittable,
+  forkInheritableFields,
+  forkIsLossy,
+  normalizeForkFields,
+} from "./fork-fields.js";
 import { providerLabel } from "./provider-labels.js";
 
 const h = React.createElement;
@@ -41,6 +47,11 @@ export function ForkSessionDialog({
   const sourceProvider = sourceThread?.provider || "";
   const targetProvider = fields.provider || sourceProvider;
   const inheritable = forkInheritableFields({ sourceProvider, targetProvider });
+  // Normalize at render time so a catalog that arrives asynchronously seeds the
+  // field too — a provider switch made before the models load would otherwise
+  // leave the select holding a value it never offers.
+  const shownFields = normalizeForkFields(fields, { sourceProvider, models });
+  const submittable = forkFieldsAreSubmittable(shownFields, { sourceProvider });
   const lossy = forkIsLossy({
     sourceProvider,
     targetProvider,
@@ -112,7 +123,7 @@ export function ForkSessionDialog({
         })
       ),
       h(SessionSettingsFields, {
-        fields,
+        fields: shownFields,
         idPrefix: id,
         labels: {
           initialPrompt: "Fork Prompt",
@@ -165,8 +176,9 @@ export function ForkSessionDialog({
         "button",
         {
           className: "start-session-button",
-          disabled: pending || !sourceThread?.id || !fields.cwd?.trim(),
-          onClick: () => onFork?.(),
+          disabled:
+            pending || !sourceThread?.id || !shownFields.cwd?.trim() || !submittable,
+          onClick: () => onFork?.(shownFields),
           type: "button",
         },
         pending ? "Forking..." : "Fork Session"
