@@ -1,6 +1,6 @@
 import React from "react";
 import { SessionSettingsFields } from "./session-settings-fields.js";
-import { INHERIT, forkIsLossy } from "./fork-fields.js";
+import { INHERIT, forkInheritableFields, forkIsLossy } from "./fork-fields.js";
 import { providerLabel } from "./provider-labels.js";
 
 const h = React.createElement;
@@ -10,8 +10,14 @@ const INHERIT_LABEL = "Inherit from source session";
 // Untouched settings must reach the relay as null so it can resolve them from
 // the SOURCE thread. Showing a concrete value here would be a lie — the relay
 // would not use it — and sending one silently re-permissions the fork.
-function withInheritOption(options) {
-  return [{ value: INHERIT, label: INHERIT_LABEL }, ...(options || [])];
+//
+// But the option is only offered for fields the relay actually inherits: after
+// a provider change it ignores the source model and effort (see
+// forkInheritableFields), so offering "inherit" there would promise something
+// that never happens.
+function withInheritOption(options, inheritable) {
+  const rest = options || [];
+  return inheritable ? [{ value: INHERIT, label: INHERIT_LABEL }, ...rest] : rest;
 }
 
 export function ForkSessionDialog({
@@ -34,6 +40,7 @@ export function ForkSessionDialog({
   const cwdId = `${id}-cwd`;
   const sourceProvider = sourceThread?.provider || "";
   const targetProvider = fields.provider || sourceProvider;
+  const inheritable = forkInheritableFields({ sourceProvider, targetProvider });
   const lossy = forkIsLossy({
     sourceProvider,
     targetProvider,
@@ -112,9 +119,11 @@ export function ForkSessionDialog({
           initialPromptPlaceholder: "Optional task for the forked agent.",
         },
         model: {
-          approvalOptions: withInheritOption(approvalOptions),
-          effortOptions: withInheritOption(effortOptions),
-          models: [{ model: INHERIT, display_name: INHERIT_LABEL }, ...(models || [])],
+          approvalOptions: withInheritOption(approvalOptions, inheritable.has("approvalPolicy")),
+          effortOptions: withInheritOption(effortOptions, inheritable.has("effort")),
+          models: inheritable.has("model")
+            ? [{ model: INHERIT, display_name: INHERIT_LABEL }, ...(models || [])]
+            : models || [],
           providerOptions,
         },
         onFieldChange,

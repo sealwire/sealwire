@@ -6,6 +6,7 @@ import {
   defaultForkFields,
   forkFieldsToPayload,
   canForkInSession,
+  forkInheritableFields,
   forkIsLossy,
   forkPointIsTranscriptTip,
   resolveForkSourceThread,
@@ -280,4 +281,36 @@ test("tip detection uses the entries actually on screen", () => {
   assert.equal(forkPointIsTranscriptTip(liveEntries, "viewed-tail"), false);
   assert.equal(forkPointIsTranscriptTip([], "viewed-tail"), false);
   assert.equal(forkPointIsTranscriptTip(viewedEntries, ""), false);
+});
+
+// "Inherit from source session" must only be offered for fields the relay will
+// ACTUALLY inherit. Its chain in fork_session gates model and effort on
+// `target_provider == source_provider` (a codex model id is meaningless to
+// Claude, and effort options are model-specific), while approval policy and
+// sandbox are provider-neutral and inherit either way. Offering inherit for a
+// field the server ignores is a lie the user cannot see through.
+test("model and effort are only inheritable within the same provider", () => {
+  const same = forkInheritableFields({
+    sourceProvider: "codex",
+    targetProvider: "codex",
+  });
+  assert.equal(same.has("model"), true);
+  assert.equal(same.has("effort"), true);
+  assert.equal(same.has("approvalPolicy"), true);
+  assert.equal(same.has("sandbox"), true);
+
+  const crossed = forkInheritableFields({
+    sourceProvider: "codex",
+    targetProvider: "claude_code",
+  });
+  assert.equal(crossed.has("model"), false, "a codex model id means nothing to Claude");
+  assert.equal(crossed.has("effort"), false, "effort options are model-specific");
+  // These are provider-neutral, and the relay inherits them regardless.
+  assert.equal(crossed.has("approvalPolicy"), true);
+  assert.equal(crossed.has("sandbox"), true);
+});
+
+test("an unknown target provider is treated as a change", () => {
+  const crossed = forkInheritableFields({ sourceProvider: "codex", targetProvider: "" });
+  assert.equal(crossed.has("model"), true, "no target yet means no change yet");
 });

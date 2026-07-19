@@ -92,3 +92,64 @@ test("fork button invokes onFork", () => {
 
   assert.equal(calls, 1);
 });
+
+// Switching the target provider must not leave "Inherit from source session"
+// on model/effort: the relay ignores the source thread's model and effort once
+// the provider differs (a codex model id means nothing to Claude), so the
+// option would promise something that never happens.
+function selectOptions(markup, idSuffix) {
+  const match = markup.match(
+    new RegExp(`<select[^>]*id="[^"]*${idSuffix}"[^>]*>([\\s\\S]*?)</select>`)
+  );
+  if (!match) return null;
+  return [...match[1].matchAll(/<option[^>]*>([^<]*)<\/option>/g)].map((m) => m[1]);
+}
+
+test("a cross-provider fork drops the inherit option for model and effort", () => {
+  const dialog = renderDialog({
+    sourceThread: { id: "t-1", provider: "codex", cwd: "/repo" },
+    fields: { provider: "claude_code", cwd: "/repo", model: "claude-sonnet-4-6" },
+    models: [{ model: "claude-sonnet-4-6", display_name: "Sonnet" }],
+    effortOptions: [{ value: "high", label: "High" }],
+    approvalOptions: [{ value: "untrusted", label: "Ask first" }],
+  });
+
+  const effort = selectOptions(dialog, "-start-effort");
+  assert.ok(effort, "the effort select renders");
+  assert.equal(
+    effort.includes("Inherit from source session"),
+    false,
+    "effort is model-specific, so it cannot be inherited across providers"
+  );
+
+  const model = selectOptions(dialog, "-model-input");
+  assert.ok(model, "the model select renders");
+  assert.equal(
+    model.includes("Inherit from source session"),
+    false,
+    "a codex model id means nothing to Claude"
+  );
+
+  // Provider-neutral settings still inherit — the relay does honour those.
+  const approval = selectOptions(dialog, "-approval-policy-input");
+  assert.equal(approval.includes("Inherit from source session"), true);
+});
+
+test("a same-provider fork keeps the inherit option", () => {
+  const dialog = renderDialog({
+    sourceThread: { id: "t-1", provider: "codex", cwd: "/repo" },
+    fields: { provider: "codex", cwd: "/repo" },
+    models: [{ model: "gpt-5.4", display_name: "GPT" }],
+    effortOptions: [{ value: "high", label: "High" }],
+    approvalOptions: [{ value: "untrusted", label: "Ask first" }],
+  });
+
+  assert.equal(
+    selectOptions(dialog, "-start-effort").includes("Inherit from source session"),
+    true
+  );
+  assert.equal(
+    selectOptions(dialog, "-model-input").includes("Inherit from source session"),
+    true
+  );
+});

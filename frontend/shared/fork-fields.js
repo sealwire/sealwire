@@ -36,6 +36,21 @@ export function defaultForkFields({ thread = null, models = [], session = null }
   };
 }
 
+// Which settings the dialog may honestly offer as "inherit from source".
+//
+// Mirrors the relay's resolution chain in fork_session: model and effort are
+// only taken from the source thread when `target_provider == source_provider`
+// (a codex model id means nothing to Claude, and effort options are
+// model-specific), while approval policy and sandbox are provider-neutral and
+// inherit either way. Offering inherit for a field the server will ignore
+// promises something that silently does not happen.
+export function forkInheritableFields({ sourceProvider = "", targetProvider = "" } = {}) {
+  const always = ["approvalPolicy", "sandbox"];
+  const providerChanged =
+    Boolean(sourceProvider) && Boolean(targetProvider) && sourceProvider !== targetProvider;
+  return new Set(providerChanged ? always : [...always, "model", "effort"]);
+}
+
 // Re-seed the model when the target provider changes: the previously selected
 // model belongs to the provider the user just switched away from.
 export function applyForkProviderChange(fields, provider, models) {
