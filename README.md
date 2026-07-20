@@ -115,6 +115,25 @@ More detail on each piece — security model, what is and is not built, the full
 list of env vars, and the self-hosted broker option — is in the rest of this
 README and in [`DEPLOYMENT.md`](DEPLOYMENT.md).
 
+### Desktop app preview
+
+The macOS desktop shell is a Tauri app that supervises the existing
+`relay-server` binary as a sidecar. It keeps the local and remote web surfaces
+as separate native webview windows and adds a small control window for workspace
+selection, broker mode, restart/stop, and relay logs.
+
+```bash
+npm run desktop:dev
+npm run desktop:check
+npm run desktop:build
+```
+
+The desktop scripts build the Vite web assets, compile `relay-server`, download
+and verify a fixed Node.js LTS runtime, stage `claude-worker` with production
+dependencies, and copy the sidecars into `src-tauri/binaries/` with Tauri's
+target-triple sidecar names. Generated sidecars, runtime caches, staged
+resources, and bundles are ignored by git.
+
 ## Current status
 
 `sealwire` is now usable as a single-owner self-hosted MVP with a

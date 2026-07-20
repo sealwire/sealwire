@@ -50,6 +50,10 @@
     "dev:restart:local": "sh scripts/restart-dev.sh --local",
     "dev:restart:public": "sh scripts/restart-dev-public.sh",
     "dev:restart:public:pg": "sh scripts/restart-dev-public-pg.sh",
+    "desktop:dev": "tauri dev",
+    "desktop:build": "tauri build",
+    "desktop:prepare-sidecar": "node scripts/tauri-prepare-sidecar.mjs",
+    "desktop:check": "node scripts/tauri-before-build.mjs && cargo check --manifest-path src-tauri/Cargo.toml",
     "test": "node --test claude-worker/*.test.mjs frontend/*.test.mjs frontend/shared/*.test.mjs frontend/local/*.test.mjs frontend/local/session/*.test.mjs frontend/local/transcript/*.test.mjs frontend/remote/*.test.mjs frontend/remote/__tests__/*.test.mjs frontend/remote/transcript/*.test.mjs scripts/*.test.mjs scripts/e2e/harness/*.test.mjs && vite build",
     "test:harness": "node --test scripts/e2e/harness/*.test.mjs",
     "test:message-drop-harness": "cargo test -p relay-server replay_harness -- --nocapture && cargo test -p relay-server compact_for_broker_trims_many_file_changes_without_clearing_transcript -- --nocapture",
@@ -102,12 +106,15 @@
     "test:browser:public:fake": "node scripts/e2e/run-browser-suite.mjs --suite public-full --fake"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.210"
+    "@anthropic-ai/claude-agent-sdk": "^0.3.210",
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-dialog": "^2.7.2"
   },
   "devDependencies": {
     "@noble/hashes": "^2.0.1",
     "@tanstack/query-core": "^5.100.6",
     "@tanstack/virtual-core": "^3.14.0",
+    "@tauri-apps/cli": "^2.11.4",
     "eslint": "^9.39.4",
     "globals": "^17.6.0",
     "playwright": "^1.58.2",

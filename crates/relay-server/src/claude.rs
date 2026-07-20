@@ -105,7 +105,9 @@ impl ClaudeCodeBridge {
         state: Arc<RwLock<RelayState>>,
         worker_path: &str,
     ) -> Result<Self, String> {
-        let mut command = Command::new("node");
+        let node_binary =
+            std::env::var("CLAUDE_NODE_BINARY").unwrap_or_else(|_| "node".to_string());
+        let mut command = Command::new(node_binary);
         command
             .arg(worker_path)
             .stdin(Stdio::piped())

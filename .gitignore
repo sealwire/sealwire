@@ -1,6 +1,11 @@
 # Rust
 /target
 /bin
+/src-tauri/binaries/
+/src-tauri/.cache/
+/src-tauri/gen/
+/src-tauri/resources/
+/src-tauri/target/
 
 # Frontend
 /dist

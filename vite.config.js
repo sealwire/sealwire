@@ -128,6 +128,7 @@ export default defineConfig({
     emptyOutDir: true,
     rollupOptions: {
       input: {
+        desktop: resolve(rootDir, "frontend/desktop.html"),
         index: resolve(rootDir, "frontend/index.html"),
         remote: resolve(rootDir, "frontend/remote.html"),
       },

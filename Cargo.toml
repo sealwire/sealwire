@@ -1,5 +1,11 @@
 [workspace]
-members = ["crates/relay-broker", "crates/relay-http", "crates/relay-server", "crates/relay-util"]
+members = [
+    "crates/relay-broker",
+    "crates/relay-http",
+    "crates/relay-server",
+    "crates/relay-util",
+]
+exclude = ["src-tauri"]
 resolver = "2"
 
 [workspace.package]
