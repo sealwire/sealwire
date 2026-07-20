@@ -8,28 +8,17 @@ import {
   cpSync,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
 } from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { selectWorkerFiles } from "./tauri-worker-files.mjs";
 
 const NODE_VERSION = process.env.TAURI_NODE_VERSION || "v22.23.1";
 const NODE_SIDECAR = "node";
 const RELAY_SIDECAR = "relay-server";
-const CLAUDE_WORKER_FILES = [
-  "ask-user-question.mjs",
-  "file-diff.mjs",
-  "package-lock.json",
-  "package.json",
-  "permissions.mjs",
-  "progress-tracker.mjs",
-  "protocol.mjs",
-  "sdk-mapping.mjs",
-  "session-options.mjs",
-  "session-page.mjs",
-  "worker.mjs",
-];
 
 const release = process.argv.includes("--release");
 const targetTriple = resolveTargetTriple();
@@ -121,7 +110,8 @@ function prepareClaudeWorkerResources() {
   rmSync(targetDir, { recursive: true, force: true });
   mkdirSync(targetDir, { recursive: true });
 
-  for (const file of CLAUDE_WORKER_FILES) {
+  const files = selectWorkerFiles(readdirSync(sourceDir));
+  for (const file of files) {
     cpSync(path.join(sourceDir, file), path.join(targetDir, file), {
       recursive: true,
     });

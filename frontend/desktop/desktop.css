@@ -98,6 +98,10 @@ button {
   background: #38a169;
 }
 
+.status-pill[data-starting="true"] .status-dot {
+  background: #d69e2e;
+}
+
 .desktop-main {
   display: grid;
   grid-template-columns: minmax(360px, 420px) minmax(0, 1fr);

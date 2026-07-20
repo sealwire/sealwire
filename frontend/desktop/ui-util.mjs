@@ -1,0 +1,126 @@
+// Pure helpers for the desktop shell UI. Kept free of Tauri/CSS imports so they
+// can be unit-tested under `node --test` with a lightweight document stub.
+
+export const DEFAULT_PORT = 8787;
+export const LOG_VIEW_LIMIT = 400;
+
+// F10: never let a bad form value become NaN (which serializes to JSON `null`
+// and fails the Rust-side `u16` deserialization).
+export function parsePort(value, fallback = DEFAULT_PORT) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return fallback;
+  }
+  const port = Math.trunc(numeric);
+  if (port < 1 || port > 65535) {
+    return fallback;
+  }
+  return port;
+}
+
+// F7: append a single streamed log entry, dropping the oldest beyond `limit`,
+// without mutating the caller's array.
+export function pushLogEntry(logs, entry, limit = LOG_VIEW_LIMIT) {
+  const next = Array.isArray(logs) ? logs.slice() : [];
+  next.push(entry);
+  if (next.length > limit) {
+    next.splice(0, next.length - limit);
+  }
+  return next;
+}
+
+// Backend ready/exit transitions are delivered via a dedicated `relay-status`
+// event; only that authoritative payload may move `relay` state. A streamed log
+// line appends to the log list and leaves `relay` (and its buttons) untouched.
+export function applyLogEntry(status, entry, limit = LOG_VIEW_LIMIT) {
+  if (!status) {
+    return status;
+  }
+  return { ...status, logs: pushLogEntry(status.logs, entry, limit) };
+}
+
+export function applyStatusUpdate(prevStatus, payload) {
+  return payload || prevStatus;
+}
+
+export function openSurfaceDisabled(relay) {
+  return !relay?.ready;
+}
+
+export function startDisabled(relay, saving) {
+  return Boolean(saving) || Boolean(relay?.running);
+}
+
+export function stopDisabled(relay, saving) {
+  return Boolean(saving) || !relay?.running;
+}
+
+const DRAFT_FIELD_IDS = ["workspace-dir", "preferred-port", "custom-broker-url"];
+
+// F1: capture the user's in-progress (unsaved) form edits + focus so a re-render
+// triggered by an async event (e.g. a streamed relay log) does not wipe them.
+export function captureFormDraft(doc) {
+  if (!doc) {
+    return null;
+  }
+  const values = {};
+  for (const id of DRAFT_FIELD_IDS) {
+    const node = doc.querySelector(`#${id}`);
+    if (node && typeof node.value === "string") {
+      values[id] = node.value;
+    }
+  }
+
+  const pressed = doc.querySelector("[data-broker-mode][aria-pressed='true']");
+  const brokerMode = pressed?.dataset?.brokerMode || null;
+
+  const active = doc.activeElement;
+  const focusId = active && active.id ? active.id : null;
+  const draft = { values, brokerMode, focusId };
+  if (active && typeof active.selectionStart === "number") {
+    draft.selectionStart = active.selectionStart;
+    draft.selectionEnd = active.selectionEnd;
+  }
+  return draft;
+}
+
+export function restoreFormDraft(doc, draft) {
+  if (!doc || !draft) {
+    return;
+  }
+
+  for (const [id, value] of Object.entries(draft.values || {})) {
+    const node = doc.querySelector(`#${id}`);
+    if (node && typeof node.value === "string") {
+      node.value = value;
+    }
+  }
+
+  if (draft.brokerMode) {
+    for (const button of doc.querySelectorAll("[data-broker-mode]")) {
+      const selected = button.dataset?.brokerMode === draft.brokerMode;
+      button.setAttribute?.("aria-pressed", String(selected));
+    }
+    const customInput = doc.querySelector("#custom-broker-url");
+    if (customInput) {
+      customInput.disabled = draft.brokerMode !== "custom";
+    }
+  }
+
+  if (draft.focusId) {
+    const node = doc.querySelector(`#${draft.focusId}`);
+    if (node && typeof node.focus === "function") {
+      node.focus();
+      if (
+        typeof draft.selectionStart === "number" &&
+        typeof node.setSelectionRange === "function"
+      ) {
+        try {
+          node.setSelectionRange(draft.selectionStart, draft.selectionEnd);
+        } catch {
+          // Non-text inputs (e.g. number) can reject setSelectionRange; ignore.
+        }
+      }
+    }
+  }
+}

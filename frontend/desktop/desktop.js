@@ -1,6 +1,17 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
+import {
+  applyLogEntry,
+  applyStatusUpdate,
+  captureFormDraft,
+  openSurfaceDisabled,
+  parsePort,
+  restoreFormDraft,
+  startDisabled,
+  stopDisabled,
+  LOG_VIEW_LIMIT,
+} from "./ui-util.mjs";
 import "./desktop.css";
 
 const root = document.querySelector("#desktop-root");
@@ -12,8 +23,44 @@ const state = {
 
 window.addEventListener("DOMContentLoaded", () => {
   refreshStatus();
-  listen("desktop://relay-log", refreshStatus);
+  listen("desktop://relay-log", (event) => onRelayLog(event?.payload));
+  listen("desktop://relay-status", (event) => onRelayStatus(event?.payload));
 });
+
+// F1/F7: a streamed relay log must not rebuild the whole shell (which would wipe
+// unsaved form edits and focus, and cost a full IPC round-trip per line). Append
+// the delivered entry and repaint only the log panel — relay state is untouched.
+function onRelayLog(entry) {
+  if (!entry || !state.status) {
+    refreshStatus();
+    return;
+  }
+  state.status = applyLogEntry(state.status, entry, LOG_VIEW_LIMIT);
+  updateLogPanel(state.status.logs);
+}
+
+// Backend-driven transitions (relay became ready, or exited/crashed) arrive here,
+// not via a log line — so the shell must adopt the authoritative status and
+// re-render (which re-derives the Open/Start/Stop buttons). Form edits + focus
+// survive via captureFormDraft/restoreFormDraft in render().
+function onRelayStatus(status) {
+  if (!status) {
+    refreshStatus();
+    return;
+  }
+  state.status = applyStatusUpdate(state.status, status);
+  state.error = "";
+  render();
+}
+
+function updateLogPanel(logs) {
+  const panel = root.querySelector(".log-panel");
+  if (!panel) {
+    render();
+    return;
+  }
+  panel.replaceChildren(...renderLogRows(logs || []));
+}
 
 async function refreshStatus() {
   try {
@@ -31,6 +78,8 @@ function render() {
   const relay = status?.relay || { running: false };
   const logs = status?.logs || [];
 
+  // F1: preserve any unsaved edits + focus across the wipe-and-rebuild.
+  const draft = captureFormDraft(document);
   root.innerHTML = "";
   const shell = el("div", { className: "desktop-shell" }, [
     renderHeader(relay),
@@ -42,6 +91,7 @@ function render() {
   root.append(shell);
 
   bindControls(config);
+  restoreFormDraft(document, draft);
 }
 
 function renderHeader(relay) {
@@ -53,11 +103,32 @@ function renderHeader(relay) {
         el("span", {}, [relay.running ? relay.workspaceDir || "" : "Relay stopped"]),
       ]),
     ]),
-    el("div", { className: "status-pill", "data-running": String(Boolean(relay.running)) }, [
+    el("div", {
+      className: "status-pill",
+      "data-running": String(Boolean(relay.ready)),
+      "data-starting": String(Boolean(relay.running && !relay.ready)),
+    }, [
       el("span", { className: "status-dot" }),
-      relay.running ? `Running on ${relay.port}` : "Stopped",
+      relayPillLabel(relay),
     ]),
   ]);
+}
+
+function relayPillLabel(relay) {
+  if (!relay.running) {
+    return "Stopped";
+  }
+  return relay.ready ? `Running on ${relay.port}` : `Starting on ${relay.port}`;
+}
+
+function surfaceCopy(relay) {
+  if (!relay.running) {
+    return "Start the relay first";
+  }
+  if (!relay.ready) {
+    return "Waiting for the relay to come up…";
+  }
+  return relay.brokerLabel || "Local relay";
 }
 
 function renderControls(config, relay) {
@@ -123,13 +194,13 @@ function renderControls(config, relay) {
         }, [state.saving ? "Restarting" : "Save & Restart"]),
         el("button", {
           className: "desktop-button secondary",
-          disabled: state.saving || relay.running,
+          disabled: startDisabled(relay, state.saving),
           id: "start-relay",
           type: "button",
         }, ["Start"]),
         el("button", {
           className: "desktop-button danger",
-          disabled: state.saving || !relay.running,
+          disabled: stopDisabled(relay, state.saving),
           id: "stop-relay",
           type: "button",
         }, ["Stop"]),
@@ -145,19 +216,19 @@ function renderSurfacePane(relay, logs) {
       el("div", {}, [
         el("h1", {}, ["Surfaces"]),
         el("p", { className: "surface-copy" }, [
-          relay.running ? relay.brokerLabel || "Local relay" : "Start the relay first",
+          surfaceCopy(relay),
         ]),
       ]),
       el("div", { className: "button-row" }, [
         el("button", {
           className: "desktop-button",
-          disabled: !relay.running,
+          disabled: openSurfaceDisabled(relay),
           id: "open-local",
           type: "button",
         }, ["Open Local"]),
         el("button", {
           className: "desktop-button secondary",
-          disabled: !relay.running,
+          disabled: openSurfaceDisabled(relay),
           id: "open-remote",
           type: "button",
         }, ["Open Remote"]),
@@ -179,18 +250,20 @@ function renderUrls(relay) {
 }
 
 function renderLogs(logs) {
+  return el("div", { className: "log-panel" }, renderLogRows(logs));
+}
+
+function renderLogRows(logs) {
   if (!logs.length) {
-    return el("div", { className: "log-panel" }, [
-      el("div", { className: "log-empty" }, ["No relay logs yet."]),
-    ]);
+    return [el("div", { className: "log-empty" }, ["No relay logs yet."])];
   }
-  return el("div", { className: "log-panel" }, logs.slice(-160).map((line) =>
+  return logs.slice(-160).map((line) =>
     el("div", { className: "log-line" }, [
       el("span", {}, [formatTime(line.timestampMs)]),
       el("span", { className: "stream" }, [line.stream]),
       el("span", {}, [line.message]),
     ])
-  ));
+  );
 }
 
 function bindControls(config) {
@@ -269,7 +342,7 @@ function readConfigForm() {
   const selected = document.querySelector("[data-broker-mode][aria-pressed='true']");
   return {
     workspaceDir: document.querySelector("#workspace-dir")?.value || "",
-    preferredPort: Number(document.querySelector("#preferred-port")?.value || 8787),
+    preferredPort: parsePort(document.querySelector("#preferred-port")?.value),
     brokerMode: selected?.dataset.brokerMode || "localOnly",
     customBrokerUrl: document.querySelector("#custom-broker-url")?.value || "",
   };

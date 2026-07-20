@@ -1,12 +1,13 @@
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::VecDeque,
+    collections::{hash_map::DefaultHasher, VecDeque},
     ffi::OsString,
     fs,
-    net::{Ipv4Addr, SocketAddrV4, TcpListener},
+    hash::{Hash, Hasher},
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_shell::{
@@ -48,6 +49,7 @@ struct DesktopStatus {
 #[serde(rename_all = "camelCase")]
 struct RelayStatus {
     running: bool,
+    ready: bool,
     pid: Option<u32>,
     port: Option<u16>,
     local_url: Option<String>,
@@ -70,6 +72,7 @@ struct RelayProcess {
     child: CommandChild,
     pid: u32,
     port: u16,
+    ready: bool,
     broker_url: Option<String>,
     broker_label: String,
     workspace_dir: String,
@@ -174,6 +177,30 @@ impl RelaySupervisor {
         }
     }
 
+    /// Marks the tracked process ready once its port accepts connections.
+    /// Returns true only on the transition (so callers log/emit exactly once).
+    fn mark_ready(&self, pid: u32) -> bool {
+        let mut process = self
+            .process
+            .lock()
+            .expect("relay process lock should not be poisoned");
+        if let Some(current) = process.as_mut() {
+            if current.pid == pid && !current.ready {
+                current.ready = true;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Pushes the authoritative relay status to the UI. Backend-driven state
+    /// changes (ready, exit) happen outside any command, so they must be
+    /// broadcast explicitly — a `desktop://relay-log` append alone would leave
+    /// `state.status.relay` stale (Open buttons stuck, crashes unnoticed).
+    fn emit_status(&self, app: &AppHandle) {
+        let _ = app.emit("desktop://relay-status", self.status());
+    }
+
     fn push_log(
         &self,
         app: Option<&AppHandle>,
@@ -207,6 +234,7 @@ impl RelayStatus {
     fn stopped() -> Self {
         Self {
             running: false,
+            ready: false,
             pid: None,
             port: None,
             local_url: None,
@@ -221,6 +249,7 @@ impl RelayStatus {
     fn from_process(process: &RelayProcess) -> Self {
         Self {
             running: true,
+            ready: process.ready,
             pid: Some(process.pid),
             port: Some(process.port),
             local_url: Some(local_url(process.port)),
@@ -289,12 +318,14 @@ async fn start_relay(
     let broker = broker_runtime_config(&config)?;
     let workspace = PathBuf::from(&config.workspace_dir);
     ensure_workspace(&workspace)?;
-    let port = pick_port(config.preferred_port)?;
 
     supervisor.save_config(config.clone())?;
+    // F3: stop any running relay BEFORE picking a port, so the preferred port it
+    // was holding is released and can be reused instead of drifting each restart.
     if let Some(previous) = supervisor.take_process() {
         let _ = previous.child.kill();
     }
+    let port = pick_port(config.preferred_port)?;
 
     let envs = relay_env(&app, &workspace, port, broker.as_ref())?;
     let command = app
@@ -312,6 +343,7 @@ async fn start_relay(
         child,
         pid,
         port,
+        ready: false,
         broker_url: broker.as_ref().map(|value| value.websocket_url.clone()),
         broker_label: broker
             .as_ref()
@@ -320,12 +352,44 @@ async fn start_relay(
         workspace_dir: workspace.display().to_string(),
         started_at_ms: now_ms(),
     };
-    supervisor.replace_process(process);
+    // F5: don't leak a process a concurrent start may have slipped into the slot.
+    if let Some(orphan) = supervisor.replace_process(process) {
+        let _ = orphan.child.kill();
+    }
     supervisor.push_log(
         Some(&app),
         "relay",
         format!("started relay-server pid {pid} on http://127.0.0.1:{port}"),
     );
+    // Broadcast running=true, ready=false (covers the auto-start-on-launch case
+    // where the UI's initial fetch can race ahead of the spawned process).
+    supervisor.emit_status(&app);
+
+    // F4: flip the surface buttons on only once the port actually accepts
+    // connections, so "Open Local" can't race ahead of the listener.
+    let ready_app = app.clone();
+    let ready_supervisor = supervisor.clone();
+    std::thread::spawn(move || {
+        for _ in 0..100 {
+            if port_is_ready(port) {
+                if ready_supervisor.mark_ready(pid) {
+                    ready_supervisor.push_log(
+                        Some(&ready_app),
+                        "relay",
+                        format!("relay-server pid {pid} is ready on http://127.0.0.1:{port}"),
+                    );
+                    ready_supervisor.emit_status(&ready_app);
+                }
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(150));
+        }
+        ready_supervisor.push_log(
+            Some(&ready_app),
+            "error",
+            format!("relay-server pid {pid} did not accept connections within timeout"),
+        );
+    });
 
     let log_app = app.clone();
     let log_supervisor = supervisor.clone();
@@ -352,6 +416,9 @@ async fn start_relay(
                         format!("relay-server pid {pid} exited with code {:?}", payload.code),
                     );
                     log_supervisor.clear_process_if_pid(pid);
+                    // Surface running=false so the UI doesn't keep believing a
+                    // crashed/exited relay is still up.
+                    log_supervisor.emit_status(&log_app);
                     break;
                 }
                 _ => {}
@@ -483,8 +550,18 @@ fn relay_env(
         None
     };
 
+    let peer_seed = app
+        .path()
+        .app_config_dir()
+        .ok()
+        .map(|dir| dir.display().to_string())
+        .unwrap_or_else(|| workspace.display().to_string());
     upsert_env(&mut envs, "RELAY_SECURITY_MODE", "private");
-    upsert_env(&mut envs, "RELAY_BROKER_PEER_ID", default_peer_id());
+    upsert_env(
+        &mut envs,
+        "RELAY_BROKER_PEER_ID",
+        default_peer_id(&peer_seed),
+    );
     upsert_env(
         &mut envs,
         "PATH",
@@ -671,8 +748,15 @@ fn ensure_workspace(workspace: &Path) -> Result<(), String> {
 }
 
 fn pick_port(preferred: u16) -> Result<u16, String> {
-    if port_is_available(preferred) {
-        return Ok(preferred);
+    // A relay we just killed can take a brief moment to release its listening
+    // socket; give the preferred port a short window before drifting away.
+    for attempt in 0..20 {
+        if port_is_available(preferred) {
+            return Ok(preferred);
+        }
+        if attempt + 1 < 20 {
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
     for port in 8788..=8877 {
         if port_is_available(port) {
@@ -689,6 +773,14 @@ fn pick_port(preferred: u16) -> Result<u16, String> {
 
 fn port_is_available(port: u16) -> bool {
     TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)).is_ok()
+}
+
+fn port_is_ready(port: u16) -> bool {
+    TcpStream::connect_timeout(
+        &SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+        Duration::from_millis(250),
+    )
+    .is_ok()
 }
 
 fn default_config(app: &AppHandle) -> DesktopConfig {
@@ -758,12 +850,8 @@ fn resolve_bundled_node() -> Option<PathBuf> {
         .filter(|candidate| candidate.exists())
 }
 
-fn default_peer_id() -> String {
-    let hostname = std::env::var("HOSTNAME")
-        .or_else(|_| std::env::var("COMPUTERNAME"))
-        .unwrap_or_else(|_| "desktop".to_string());
-    let sanitized: String = hostname
-        .chars()
+fn sanitize_peer_id(raw: &str) -> String {
+    raw.chars()
         .map(|ch| {
             if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '-') {
                 ch
@@ -772,12 +860,29 @@ fn default_peer_id() -> String {
             }
         })
         .take(48)
-        .collect();
-    if sanitized.is_empty() {
-        "desktop-relay".to_string()
+        .collect()
+}
+
+/// Builds a peer id that is stable for a given install (via `seed`) yet differs
+/// across installs, so distinct desktops don't collide on a shared broker even
+/// when the hostname env is empty (common on macOS).
+fn build_peer_id(host_raw: &str, seed: &str) -> String {
+    let host = sanitize_peer_id(host_raw);
+    let base = if host.is_empty() {
+        "relay".to_string()
     } else {
-        format!("desktop-relay-{sanitized}")
-    }
+        host
+    };
+    let mut hasher = DefaultHasher::new();
+    seed.hash(&mut hasher);
+    format!("desktop-relay-{base}-{:08x}", hasher.finish() as u32)
+}
+
+fn default_peer_id(seed: &str) -> String {
+    let host = std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("COMPUTERNAME"))
+        .unwrap_or_default();
+    build_peer_id(&host, seed)
 }
 
 fn home_dir_from_env() -> Option<PathBuf> {
@@ -850,6 +955,134 @@ fn main() {
                 }
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Sealwire desktop");
+        .build(tauri::generate_context!())
+        .expect("error while building Sealwire desktop")
+        .run(|app_handle, event| {
+            // F2: guarantee the relay-server (and its node worker / codex children)
+            // are killed on every quit path — Cmd+Q, app-menu Quit, last window
+            // closing — not just the main window's close button.
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                if let Some(supervisor) = app_handle.try_state::<Arc<RelaySupervisor>>() {
+                    stop_relay(app_handle, supervisor.inner());
+                }
+            }
+        });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(mode: BrokerMode, custom: &str) -> DesktopConfig {
+        DesktopConfig {
+            workspace_dir: "/tmp".to_string(),
+            preferred_port: 8787,
+            broker_mode: mode,
+            custom_broker_url: custom.to_string(),
+        }
+    }
+
+    // F8 documentation: RELAY_BROKER_PUBLIC_URL must stay a ws/wss URL (relay-server
+    // rejects http(s) there), while the control URL is the http(s) counterpart.
+    #[test]
+    fn broker_local_only_is_none() {
+        assert!(broker_runtime_config(&cfg(BrokerMode::LocalOnly, ""))
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn broker_hosted_normalizes_schemes() {
+        let broker = broker_runtime_config(&cfg(BrokerMode::Hosted, ""))
+            .unwrap()
+            .unwrap();
+        assert!(broker.websocket_url.starts_with("wss://"));
+        assert!(broker.control_url.starts_with("https://"));
+        assert_eq!(broker.label, "Hosted public broker");
+    }
+
+    #[test]
+    fn broker_custom_https_maps_to_wss_and_https() {
+        let broker = broker_runtime_config(&cfg(BrokerMode::Custom, "https://broker.example.com"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(broker.websocket_url, "wss://broker.example.com");
+        assert_eq!(broker.control_url, "https://broker.example.com");
+    }
+
+    #[test]
+    fn broker_custom_ws_maps_to_http_control() {
+        let broker = broker_runtime_config(&cfg(BrokerMode::Custom, "ws://127.0.0.1:9000"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(broker.websocket_url, "ws://127.0.0.1:9000");
+        assert_eq!(broker.control_url, "http://127.0.0.1:9000");
+    }
+
+    #[test]
+    fn broker_custom_requires_a_url() {
+        assert!(broker_runtime_config(&cfg(BrokerMode::Custom, "   ")).is_err());
+    }
+
+    #[test]
+    fn broker_custom_rejects_unknown_scheme() {
+        assert!(broker_runtime_config(&cfg(BrokerMode::Custom, "ftp://nope")).is_err());
+    }
+
+    // F9: peer id must be stable per install, sanitized, and vary across installs.
+    #[test]
+    fn sanitize_peer_id_replaces_unsafe_chars() {
+        assert_eq!(sanitize_peer_id("My Mac.local"), "My-Mac.local");
+        assert_eq!(sanitize_peer_id("a/b:c"), "a-b-c");
+        assert_eq!(sanitize_peer_id(""), "");
+    }
+
+    #[test]
+    fn build_peer_id_is_stable_and_seed_sensitive() {
+        let a = build_peer_id("host", "/Users/alice/config");
+        let b = build_peer_id("host", "/Users/alice/config");
+        let c = build_peer_id("host", "/Users/bob/config");
+        assert_eq!(a, b, "same host+seed is stable across calls");
+        assert_ne!(a, c, "different seed yields a different peer id");
+        assert!(a.starts_with("desktop-relay-host-"));
+    }
+
+    #[test]
+    fn build_peer_id_handles_empty_host() {
+        assert!(build_peer_id("", "seed").starts_with("desktop-relay-relay-"));
+    }
+
+    // F3: a busy preferred port falls back; a free preferred port is reused.
+    #[test]
+    fn pick_port_prefers_free_and_falls_back_when_busy() {
+        let occupied = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let busy = occupied.local_addr().unwrap().port();
+        let chosen = pick_port(busy).unwrap();
+        assert_ne!(chosen, busy, "does not choose a busy preferred port");
+        assert!(port_is_available(chosen));
+        drop(occupied);
+
+        let probe = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let free = probe.local_addr().unwrap().port();
+        drop(probe);
+        assert_eq!(
+            pick_port(free).unwrap(),
+            free,
+            "reuses a free preferred port"
+        );
+    }
+
+    // F4: readiness reflects whether the port actually accepts connections.
+    #[test]
+    fn port_is_ready_reflects_listener_presence() {
+        let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(port_is_ready(port), "ready while a listener is up");
+        drop(listener);
+
+        let probe = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let closed = probe.local_addr().unwrap().port();
+        drop(probe);
+        assert!(!port_is_ready(closed), "not ready with no listener");
+    }
 }
