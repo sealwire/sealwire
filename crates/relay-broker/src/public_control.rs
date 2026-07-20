@@ -1001,7 +1001,30 @@ impl PublicControlPlane {
         &self,
         bearer_token: &str,
     ) -> Result<DeviceSessionResponse, String> {
-        let grant = self.device_grant_from_refresh_token(bearer_token).await?;
+        self.issue_device_session_inner(bearer_token, None).await
+    }
+
+    /// Room-scoped establish: the resolved grant must belong to `expected_room`,
+    /// otherwise the token is rejected with the generic invalid-token error.
+    pub async fn issue_device_session_scoped(
+        &self,
+        bearer_token: &str,
+        expected_room: &str,
+    ) -> Result<DeviceSessionResponse, String> {
+        self.issue_device_session_inner(bearer_token, Some(expected_room))
+            .await
+    }
+
+    async fn issue_device_session_inner(
+        &self,
+        bearer_token: &str,
+        expected_room: Option<&str>,
+    ) -> Result<DeviceSessionResponse, String> {
+        // The room check lives inside `_scoped` (before the grace-window bump), so
+        // a wrong-room establish is fully side-effect-free.
+        let grant = self
+            .device_grant_from_refresh_token_scoped(bearer_token, expected_room)
+            .await?;
         Ok(DeviceSessionResponse {
             broker_room_id: grant.broker_room_id,
             device_id: grant.device_id,
@@ -1055,6 +1078,28 @@ impl PublicControlPlane {
         &self,
         bearer_token: &str,
     ) -> Result<DeviceWsTokenResponse, String> {
+        self.issue_device_ws_token_inner(bearer_token, None).await
+    }
+
+    /// Room-scoped ws-token: the resolved grant must belong to `expected_room`.
+    /// The check happens BEFORE any side effect (grace-window slide, `last_seen`
+    /// touch), so a mismatch — e.g. a legacy origin-wide cookie carrying a sibling
+    /// relay's token — leaves all durable state untouched. The generic error keeps
+    /// the endpoint from revealing which rooms exist.
+    pub async fn issue_device_ws_token_scoped(
+        &self,
+        bearer_token: &str,
+        expected_room: &str,
+    ) -> Result<DeviceWsTokenResponse, String> {
+        self.issue_device_ws_token_inner(bearer_token, Some(expected_room))
+            .await
+    }
+
+    async fn issue_device_ws_token_inner(
+        &self,
+        bearer_token: &str,
+        expected_room: Option<&str>,
+    ) -> Result<DeviceWsTokenResponse, String> {
         let now = unix_now();
         let token_hash = sha256_hex(bearer_token.trim());
         let grant = {
@@ -1065,6 +1110,11 @@ impl PublicControlPlane {
             }
             let (primary_hash, grant) =
                 found.ok_or_else(|| "device refresh token is invalid".to_string())?;
+            if let Some(expected) = expected_room {
+                if grant.broker_room_id != expected {
+                    return Err("device refresh token is invalid".to_string());
+                }
+            }
             if primary_hash != token_hash {
                 // Matched via a superseded token inside its grace window: slide
                 // the window forward (throttled, best-effort).
@@ -1278,9 +1328,10 @@ impl PublicControlPlane {
         })
     }
 
-    async fn device_grant_from_refresh_token(
+    async fn device_grant_from_refresh_token_scoped(
         &self,
         bearer_token: &str,
+        expected_room: Option<&str>,
     ) -> Result<PersistedDeviceGrant, String> {
         let mut store = self.lock_state().await?;
         let token_hash = sha256_hex(bearer_token.trim());
@@ -1291,6 +1342,14 @@ impl PublicControlPlane {
         }
         let (primary_hash, grant) =
             found.ok_or_else(|| "device refresh token is invalid".to_string())?;
+        // Verify the room BEFORE the grace-window bump below, so a wrong-room
+        // request has zero side effects (it must not renew a superseded token's
+        // grace and thereby extend a credential's validity).
+        if let Some(expected) = expected_room {
+            if grant.broker_room_id != expected {
+                return Err("device refresh token is invalid".to_string());
+            }
+        }
         if primary_hash != token_hash {
             if let Some(live) = store.grants_by_hash.get_mut(&primary_hash) {
                 if bump_superseded_expiry(
@@ -1306,6 +1365,23 @@ impl PublicControlPlane {
             }
         }
         Ok(grant)
+    }
+
+    pub async fn device_refresh_token_matches_room(
+        &self,
+        bearer_token: &str,
+        expected_room: &str,
+    ) -> Result<bool, String> {
+        let mut store = self.lock_state().await?;
+        let token_hash = sha256_hex(bearer_token.trim());
+        let now = unix_now();
+        let mut found = find_device_grant_for_token(&store, &token_hash, now);
+        if found.is_none() && self.reload_state_on_miss(&mut store).await? {
+            found = find_device_grant_for_token(&store, &token_hash, now);
+        }
+        Ok(found
+            .map(|(_, grant)| grant.broker_room_id == expected_room)
+            .unwrap_or(false))
     }
 
     async fn issue_relay_registration_for_verify_key(
@@ -3265,6 +3341,97 @@ mod device_limit_tests {
                 "a device token superseded by a re-approve the device never received \
                  must keep authenticating within the rotation grace window",
             );
+    }
+
+    /// A room-scoped ws-token must only authenticate against its OWN relay's room,
+    /// and a mismatch must have zero side effects (no `last_seen` touch) — this is
+    /// what keeps a legacy/sibling token from silently refreshing the wrong relay.
+    #[tokio::test]
+    async fn issue_device_ws_token_scoped_verifies_room_without_side_effects() {
+        let plane = in_memory_plane().await;
+        let enrolled = enroll(&plane, "scoped-room").await;
+        let bearer = &enrolled.relay_refresh_token;
+        let grant = plane
+            .issue_device_grant(bearer, grant_request(&enrolled, "phone-1"), None)
+            .await
+            .expect("device grant");
+        let room = &enrolled.broker_room_id;
+
+        let ok = plane
+            .issue_device_ws_token_scoped(&grant.device_refresh_token, room)
+            .await
+            .expect("matching room must authenticate");
+        assert_eq!(&ok.broker_room_id, room);
+
+        {
+            let mut store = plane.inner.state.lock().await;
+            for grant in store.grants_by_hash.values_mut() {
+                if grant.device_id == "phone-1" {
+                    grant.last_seen = Some(0);
+                }
+            }
+        }
+        let before = last_seen_for(&plane, "phone-1").await;
+        let err = plane
+            .issue_device_ws_token_scoped(&grant.device_refresh_token, "room-someone-else")
+            .await
+            .expect_err("mismatched room must be rejected");
+        assert_eq!(err, "device refresh token is invalid");
+        assert_eq!(
+            last_seen_for(&plane, "phone-1").await,
+            before,
+            "a rejected room mismatch must not touch last_seen"
+        );
+    }
+
+    /// The scoped establish (session) path must also verify the room BEFORE the
+    /// grace-window renewal, so a wrong-room request using a superseded token can't
+    /// silently extend that token's validity.
+    #[tokio::test]
+    async fn issue_device_session_scoped_room_mismatch_does_not_renew_grace() {
+        let plane = in_memory_plane().await;
+        let enrolled = enroll(&plane, "scoped-session-grace").await;
+        let bearer = &enrolled.relay_refresh_token;
+        let first = plane
+            .issue_device_grant(bearer, grant_request(&enrolled, "phone-1"), None)
+            .await
+            .expect("first grant");
+        plane
+            .issue_device_grant(bearer, grant_request(&enrolled, "phone-1"), None)
+            .await
+            .expect("re-grant supersedes the first token");
+
+        // Pin the superseded token's grace expiry to a known value.
+        let pinned = unix_now().saturating_add(3600);
+        {
+            let mut store = plane.inner.state.lock().await;
+            for grant in store.grants_by_hash.values_mut() {
+                for token in &mut grant.superseded {
+                    token.expires_at = pinned;
+                }
+            }
+        }
+
+        let err = plane
+            .issue_device_session_scoped(&first.device_refresh_token, "room-not-mine")
+            .await
+            .expect_err("wrong-room establish must be rejected");
+        assert_eq!(err, "device refresh token is invalid");
+
+        let after = {
+            let store = plane.inner.state.lock().await;
+            store
+                .grants_by_hash
+                .values()
+                .flat_map(|grant| grant.superseded.iter())
+                .map(|token| token.expires_at)
+                .max()
+        };
+        assert_eq!(
+            after,
+            Some(pinned),
+            "a wrong-room establish must not renew the grace window"
+        );
     }
 
     /// The grace window is a window, not immortality: once a superseded token's

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { chromium } from "playwright";
 
 export async function launchBrowser({ contextOptions = {} } = {}) {
@@ -118,11 +119,23 @@ export async function dumpBrowserState({ localPage, remotePage } = {}) {
   }
 }
 
-export async function readDeviceSessionCookie(context, origin) {
-  const cookies = await context.cookies(
-    new URL("/api/public/device/ws-token", origin).toString()
-  );
-  return cookies.find((cookie) => cookie.name === "agent_relay_device_session") || null;
+export async function readDeviceSessionCookie(context, origin, room = null) {
+  // Device sessions are per-relay: the cookie name is derived from the broker
+  // room. Without a room this falls back to the legacy origin-wide cookie for
+  // pre-migration checks.
+  const scoped =
+    typeof room === "string" &&
+    room.length >= 1 &&
+    Buffer.byteLength(room, "utf8") <= 512 &&
+    !/[\u0000-\u001f\u007f-\u009f]/.test(room);
+  const path = scoped
+    ? `/api/public/device/${encodeURIComponent(room)}/ws-token`
+    : "/api/public/device/ws-token";
+  const name = scoped
+    ? `agent_relay_device_session_${createHash("sha256").update(room).digest("hex")}`
+    : "agent_relay_device_session";
+  const cookies = await context.cookies(new URL(path, origin).toString());
+  return cookies.find((cookie) => cookie.name === name) || null;
 }
 
 export async function readStoredRemoteAuth(page) {

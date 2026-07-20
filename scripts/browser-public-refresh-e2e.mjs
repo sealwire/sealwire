@@ -109,7 +109,7 @@ async function main() {
     attachPageDebugLogging(remotePage, "remote", { prefix: "public-refresh-e2e" });
     await remotePage.setViewportSize({ width: 390, height: 844 });
     remotePage.on("request", (request) => {
-      if (request.url().endsWith("/api/public/device/ws-token")) {
+      if (/\/api\/public\/device\/(?:[^/]+\/)?ws-token$/.test(new URL(request.url()).pathname)) {
         refreshRequests.push(request.url());
       }
     });
@@ -162,7 +162,8 @@ async function main() {
     assertRemoteAuthUsesCookieOnly(authBeforeExpiry);
     const deviceSessionCookie = await readDeviceSessionCookie(
       context,
-      `http://${lanIp}:${brokerPort}`
+      `http://${lanIp}:${brokerPort}`,
+      authBeforeExpiry?.brokerChannelId || null
     );
     assert.ok(deviceSessionCookie, "paired remote should establish a device session cookie");
 

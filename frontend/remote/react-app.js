@@ -2295,7 +2295,11 @@ function RemoteTranscriptPanel({
 
   let body = null;
 
-  if (!session?.active_thread_id) {
+  if (emptyStateModel.showMissingCredentials) {
+    body = h(MissingCredentialsState, {
+      remoteAuth: emptyStateModel.remoteAuth,
+    });
+  } else if (!session?.active_thread_id) {
     if (emptyStateModel.showServerDisconnected) {
       body = h(ConversationEmptyState, {
         copy: emptyStateModel.serverDisconnectedCopy,
@@ -2308,10 +2312,6 @@ function RemoteTranscriptPanel({
         onRenameRelay: saveRelayNickname,
         onSelectRelay,
         relayDirectory: emptyStateModel.relayDirectory,
-      });
-    } else if (emptyStateModel.showMissingCredentials) {
-      body = h(MissingCredentialsState, {
-        remoteAuth: emptyStateModel.remoteAuth,
       });
     } else {
       body = h(ConversationEmptyState, {

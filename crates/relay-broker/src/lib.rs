@@ -72,6 +72,8 @@ const DEFAULT_MAX_CONNECTIONS_PER_IP: usize = 24;
 const DEFAULT_MAX_TEXT_FRAME_BYTES: usize = 64 * 1024;
 const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 120;
 const DEVICE_SESSION_COOKIE_NAME: &str = "agent_relay_device_session";
+const DEVICE_SCOPED_SESSION_COOKIE_PATH: &str = "/api/public/device";
+const DEVICE_SESSION_ROOM_MAX_BYTES: usize = 512;
 const CLIENT_SESSION_COOKIE_NAME: &str = "agent_relay_client_session";
 const DEVICE_SESSION_COOKIE_MAX_AGE_SECS: u64 = 60 * 60 * 24 * 400;
 const PUBLIC_API_RATE_LIMIT_ENV: &str = "RELAY_BROKER_PUBLIC_API_RATE_LIMIT_PER_MINUTE";
@@ -868,6 +870,18 @@ fn app_with_web_root_and_verifier_and_hardening_and_licenses(
             "/api/public/device/ws-token",
             post(public_issue_device_ws_token),
         )
+        // Per-relay (room-scoped) device sessions. The room in the path scopes the
+        // cookie to a single relay so forgetting/switching one relay never touches
+        // another on the same broker. The legacy routes above stay for old clients
+        // and are what a legacy cookie upgrades away from on first use.
+        .route(
+            "/api/public/device/:room/session",
+            post(public_issue_device_session_scoped).delete(public_clear_device_session_scoped),
+        )
+        .route(
+            "/api/public/device/:room/ws-token",
+            post(public_issue_device_ws_token_scoped),
+        )
         .route(
             "/api/public/devices/:device_id/revoke",
             post(public_revoke_device_grant),
@@ -1643,6 +1657,122 @@ async fn public_issue_device_ws_token(
     }
 }
 
+async fn public_issue_device_session_scoped(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    State(state): State<BrokerAppState>,
+    Path(room): Path<String>,
+    headers: HeaderMap,
+) -> Result<(HeaderMap, Json<DeviceSessionResponse>), (StatusCode, Json<ApiErrorBody>)> {
+    enforce_public_api_rate_limit(&state, remote_addr, "device_session").await?;
+    let control_plane = require_public_control_plane(&state)?;
+    validate_room_id(&room)?;
+    let bearer = bearer_token(&headers)?;
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(
+        header::SET_COOKIE,
+        build_device_session_cookie_for_room(&room, bearer, request_uses_https(&headers, None))?,
+    );
+    control_plane
+        .issue_device_session_scoped(bearer, &room)
+        .await
+        .map(|response| (response_headers, Json(response)))
+        .map_err(public_api_error)
+}
+
+async fn public_clear_device_session_scoped(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    State(state): State<BrokerAppState>,
+    Path(room): Path<String>,
+    headers: HeaderMap,
+) -> Result<(HeaderMap, Json<DeviceSessionClearResponse>), (StatusCode, Json<ApiErrorBody>)> {
+    enforce_public_api_rate_limit(&state, remote_addr, "clear_device_session").await?;
+    let control_plane = require_public_control_plane(&state)?;
+    validate_room_id(&room)?;
+    let secure = request_uses_https(&headers, None);
+    let mut response_headers = HeaderMap::new();
+    response_headers.append(
+        header::SET_COOKIE,
+        clear_device_session_cookie_for_room(&room, secure),
+    );
+    if let Some(legacy) = device_session_cookie(&headers) {
+        match control_plane
+            .device_refresh_token_matches_room(legacy, &room)
+            .await
+        {
+            Ok(true) => {
+                response_headers.append(header::SET_COOKIE, clear_device_session_cookie(secure));
+            }
+            Ok(false) => {}
+            Err(error) => {
+                warn!(
+                    %error,
+                    room = %room,
+                    "failed to match legacy device session cookie during scoped clear; clearing scoped cookie only"
+                );
+            }
+        }
+    }
+    Ok((
+        response_headers,
+        Json(DeviceSessionClearResponse { cleared: true }),
+    ))
+}
+
+async fn public_issue_device_ws_token_scoped(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    State(state): State<BrokerAppState>,
+    Path(room): Path<String>,
+    headers: HeaderMap,
+) -> Result<(HeaderMap, Json<DeviceWsTokenResponse>), (StatusCode, Json<ApiErrorBody>)> {
+    enforce_public_api_rate_limit(&state, remote_addr, "device_ws_token").await?;
+    let control_plane = require_public_control_plane(&state)?;
+    validate_room_id(&room)?;
+    let (source, bearer) = device_refresh_token_scoped(&headers, &room)?;
+    let secure = request_uses_https(&headers, None);
+    match control_plane
+        .issue_device_ws_token_scoped(bearer, &room)
+        .await
+    {
+        Ok(response) => {
+            state
+                .public_monitoring
+                .record_refresh_success(RefreshChainKind::DeviceWsToken)
+                .await;
+            state
+                .public_monitoring
+                .observe_chain_environment(
+                    format!("device:{}:{}", response.broker_room_id, response.device_id),
+                    &headers,
+                )
+                .await;
+            // Refresh (slide) this relay's per-room cookie. `append` (not `insert`)
+            // so the optional legacy-clear below is a second Set-Cookie, not an
+            // overwrite.
+            let mut response_headers = HeaderMap::new();
+            response_headers.append(
+                header::SET_COOKIE,
+                build_device_session_cookie_for_room(&room, bearer, secure)?,
+            );
+            if matches!(source, DeviceTokenSource::Legacy) {
+                // Upgrade-on-use: this device authenticated via the old origin-wide
+                // cookie. We just set its per-room replacement, so delete the legacy
+                // one. (Only reached when the legacy token's grant matches `room`.)
+                response_headers.append(header::SET_COOKIE, clear_device_session_cookie(secure));
+            }
+            Ok((response_headers, Json(response)))
+        }
+        Err(error) => {
+            state
+                .public_monitoring
+                .record_refresh_failure(RefreshChainKind::DeviceWsToken, bearer, &error)
+                .await;
+            // No Set-Cookie on failure: a room mismatch must NOT clear the legacy
+            // cookie, since a sibling relay may still need it to migrate.
+            Err(public_api_error(error))
+        }
+    }
+}
+
 async fn public_revoke_device_grant(
     ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
     State(state): State<BrokerAppState>,
@@ -2104,6 +2234,68 @@ fn device_refresh_token(headers: &HeaderMap) -> Result<&str, (StatusCode, Json<A
     bearer_token(headers)
 }
 
+/// Where a room-scoped device request's credential came from. `Legacy` triggers
+/// the upgrade-on-use path (replace the old origin-wide cookie with a per-room one).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeviceTokenSource {
+    PerRoom,
+    Bearer,
+    Legacy,
+}
+
+/// Resolve the device refresh token for a room-scoped request, preferring an
+/// explicit bearer, then the per-room cookie, then the legacy origin-wide cookie
+/// (for not-yet-migrated devices). The `room`-scoped ws-token handler then
+/// verifies the resolved grant actually belongs to `room`.
+fn device_refresh_token_scoped<'a>(
+    headers: &'a HeaderMap,
+    room: &str,
+) -> Result<(DeviceTokenSource, &'a str), (StatusCode, Json<ApiErrorBody>)> {
+    // An explicit Authorization bearer wins over any cookie: the client only sends
+    // one when it deliberately wants that token used (the establish-failed fallback
+    // during pairing), and a stale per-room cookie must not mask it. In normal
+    // cookie-mode operation no bearer is sent, so the per-room cookie is used.
+    if let Ok(bearer) = bearer_token(headers) {
+        return Ok((DeviceTokenSource::Bearer, bearer));
+    }
+    if let Some(cookie) = device_session_cookie_for_room(headers, room) {
+        return Ok((DeviceTokenSource::PerRoom, cookie));
+    }
+    if let Some(cookie) = device_session_cookie(headers) {
+        return Ok((DeviceTokenSource::Legacy, cookie));
+    }
+    Err((
+        StatusCode::UNAUTHORIZED,
+        Json(ApiErrorBody {
+            error: "unauthorized",
+            message: "missing bearer token".to_string(),
+        }),
+    ))
+}
+
+/// Validate a room id coming from the request URL. Static registrations accept
+/// arbitrary non-empty broker_room_id values, so the scoped endpoint must not
+/// narrow support to a cookie-name-safe subset. The raw room is only used for the
+/// control-plane lookup; cookie names are derived from `sha256(room)` and use a
+/// fixed path, so slashes, dots, and other static ids do not degrade to the
+/// origin-wide legacy cookie.
+fn validate_room_id(room: &str) -> Result<(), (StatusCode, Json<ApiErrorBody>)> {
+    let ok = !room.is_empty()
+        && room.len() <= DEVICE_SESSION_ROOM_MAX_BYTES
+        && !room.chars().any(char::is_control);
+    if ok {
+        Ok(())
+    } else {
+        Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiErrorBody {
+                error: "bad_request",
+                message: "invalid room".to_string(),
+            }),
+        ))
+    }
+}
+
 fn client_refresh_token(headers: &HeaderMap) -> Result<&str, (StatusCode, Json<ApiErrorBody>)> {
     client_refresh_auth(headers).map(ClientRefreshAuth::token)
 }
@@ -2177,6 +2369,48 @@ fn build_device_session_cookie(
 
 fn clear_device_session_cookie(secure: bool) -> HeaderValue {
     clear_session_cookie(DEVICE_SESSION_COOKIE_NAME, "/api/public/device", secure)
+}
+
+/// Per-room device cookie name. A distinct name (not just a distinct Path)
+/// avoids same-name collisions in `named_cookie` during the legacy→per-room
+/// migration window. The room is hashed so every non-empty static broker_room_id
+/// can remain scoped without embedding raw path/header-sensitive text in the
+/// cookie name.
+fn device_session_cookie_name(room: &str) -> String {
+    format!("{DEVICE_SESSION_COOKIE_NAME}_{}", sha256_hex(room))
+}
+
+/// Per-room device cookies use a fixed path and room-derived names. Browsers may
+/// send multiple room cookies on sibling device endpoints, but `named_cookie`
+/// selects only the hash-derived name for the requested room.
+fn device_session_path() -> &'static str {
+    DEVICE_SCOPED_SESSION_COOKIE_PATH
+}
+
+fn build_device_session_cookie_for_room(
+    room: &str,
+    refresh_token: &str,
+    secure: bool,
+) -> Result<HeaderValue, (StatusCode, Json<ApiErrorBody>)> {
+    build_session_cookie(
+        &device_session_cookie_name(room),
+        refresh_token,
+        device_session_path(),
+        secure,
+        "device session cookie could not be created",
+    )
+}
+
+fn clear_device_session_cookie_for_room(room: &str, secure: bool) -> HeaderValue {
+    clear_session_cookie(
+        &device_session_cookie_name(room),
+        device_session_path(),
+        secure,
+    )
+}
+
+fn device_session_cookie_for_room<'a>(headers: &'a HeaderMap, room: &str) -> Option<&'a str> {
+    named_cookie(headers, &device_session_cookie_name(room))
 }
 
 fn build_client_session_cookie(

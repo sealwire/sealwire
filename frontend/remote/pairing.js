@@ -10,6 +10,7 @@ import {
   clearDeviceRefreshSession,
   closeBrokerSocket,
   connectBroker,
+  cancelDeviceRefreshesForRelay,
   establishClientRefreshSession,
   establishDeviceRefreshSession,
   sendBrokerFrame,
@@ -199,13 +200,17 @@ export async function handleEncryptedPairingResult(payload) {
     sessionClaimExpiresAt: null,
   };
   if (remoteAuth.deviceRefreshToken) {
+    cancelDeviceRefreshesForRelay(remoteAuth.relayId);
     try {
-      await establishDeviceRefreshSession(
+      const session = await establishDeviceRefreshSession(
         remoteAuth.deviceRefreshToken,
-        remoteAuth.brokerUrl
+        remoteAuth.brokerUrl,
+        remoteAuth.brokerChannelId || null
       );
-      remoteAuth.deviceRefreshMode = "cookie";
-      remoteAuth.deviceRefreshToken = null;
+      if (session.deviceEndpointMode === "scoped") {
+        remoteAuth.deviceRefreshMode = "cookie";
+        remoteAuth.deviceRefreshToken = null;
+      }
     } catch (error) {
       renderLog(
         `Broker device session cookie could not be established yet: ${error.message}`
@@ -243,6 +248,13 @@ export async function handleEncryptedPairingResult(payload) {
 
 export function forgetCurrentDevice() {
   const brokerUrl = state.remoteAuth?.brokerUrl || null;
+  const relayId = state.remoteAuth?.relayId || null;
+  // Capture the room BEFORE forgetCurrentRemoteProfile() nulls remoteAuth, so the
+  // session clear below is scoped to THIS relay only — siblings on the same broker
+  // keep their own per-room cookies.
+  const room = state.remoteAuth?.brokerChannelId || null;
+  const allowLegacyFallback = !hasSiblingOnBroker(brokerUrl, relayId);
+  cancelDeviceRefreshesForRelay(relayId);
   applyRemoteSurfacePatch(createPairingStatePatch({
     pairingError: null,
     pairingPhase: null,
@@ -257,6 +269,28 @@ export function forgetCurrentDevice() {
   }));
   clearPairingQueryFromUrl();
   closeBrokerSocket();
-  void clearDeviceRefreshSession(brokerUrl);
+  void clearDeviceRefreshSession(brokerUrl, room, { allowLegacyFallback });
   renderLog("Forgot the stored remote device for this browser.");
+}
+
+function hasSiblingOnBroker(brokerUrl, relayId) {
+  if (!brokerUrl) {
+    return false;
+  }
+  let controlUrl;
+  try {
+    controlUrl = brokerControlUrl(brokerUrl);
+  } catch {
+    return false;
+  }
+  return Object.values(state.remoteProfiles).some((profile) => {
+    if (!profile || profile.relayId === relayId || !profile.brokerUrl) {
+      return false;
+    }
+    try {
+      return brokerControlUrl(profile.brokerUrl) === controlUrl;
+    } catch {
+      return false;
+    }
+  });
 }

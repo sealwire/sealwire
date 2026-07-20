@@ -66,6 +66,9 @@ function deriveStatusBadge(currentState, session, approval) {
   if (approval) {
     return { label: "Approval required", tone: "alert" };
   }
+  if (selectedRelayNeedsRepair(currentState)) {
+    return { label: "Re-pair required", tone: "alert" };
+  }
   if (isSessionOffline(currentState, session)) {
     return { label: "Offline", tone: "offline" };
   }
@@ -181,6 +184,10 @@ export function selectDeviceChromeRenderModel(currentState) {
 }
 
 export function selectStatusBadgeRenderModel(currentState, session = currentState.session) {
+  if (selectedRelayNeedsRepair(currentState)) {
+    return { label: "Re-pair required", tone: "alert" };
+  }
+
   if (session) {
     if (session.pending_approvals?.length) {
       return { label: "Approval required", tone: "alert" };
@@ -219,10 +226,6 @@ export function selectStatusBadgeRenderModel(currentState, session = currentStat
 
   if (!currentState.remoteAuth && currentState.relayDirectory?.length) {
     return { label: "Home", tone: "ready" };
-  }
-
-  if (selectedRelayNeedsRepair(currentState)) {
-    return { label: "Re-pair required", tone: "alert" };
   }
 
   return {
@@ -580,5 +583,9 @@ function pairingButtonLabel(currentState) {
 }
 
 function selectedRelayNeedsRepair(currentState) {
-  return Boolean(currentState.remoteAuth && !currentState.remoteAuth.payloadSecret);
+  return Boolean(
+    currentState.remoteAuth &&
+      (currentState.remoteAuth.payloadSecret === null ||
+        currentState.remoteAuth.deviceSessionExpired === true)
+  );
 }

@@ -89,7 +89,8 @@ async function main() {
     assertCookieOnlyDeviceAuth(authBeforeRestart);
     const deviceSessionCookie = await readDeviceSessionCookie(
       remoteContext,
-      `http://${lanIp}:${brokerPort}`
+      `http://${lanIp}:${brokerPort}`,
+      authBeforeRestart?.brokerChannelId || null
     );
     assert.ok(deviceSessionCookie, "paired remote should establish a device session cookie");
 
@@ -113,7 +114,8 @@ async function main() {
 
     const refreshed = await issueDeviceWsTokenWithCookie(
       brokerPort,
-      `${deviceSessionCookie.name}=${deviceSessionCookie.value}`
+      `${deviceSessionCookie.name}=${deviceSessionCookie.value}`,
+      authBeforeRestart?.brokerChannelId || null
     );
     assert.ok(refreshed.device_ws_token, "broker restart should still allow device ws token minting");
     assert.equal(
@@ -213,8 +215,14 @@ async function waitForPersistedDeviceGrant(statePath, deviceId, timeoutMs = TIME
   throw new Error(`timed out waiting for persisted device grant for ${deviceId}`);
 }
 
-async function issueDeviceWsTokenWithCookie(brokerPort, cookieHeader) {
-  const response = await fetch(`http://127.0.0.1:${brokerPort}/api/public/device/ws-token`, {
+async function issueDeviceWsTokenWithCookie(brokerPort, cookieHeader, room = null) {
+  const path =
+    room &&
+    Buffer.byteLength(room, "utf8") <= 512 &&
+    !/[\u0000-\u001f\u007f]/.test(room)
+      ? `/api/public/device/${encodeURIComponent(room)}/ws-token`
+      : "/api/public/device/ws-token";
+  const response = await fetch(`http://127.0.0.1:${brokerPort}${path}`, {
     method: "POST",
     headers: {
       Cookie: cookieHeader,

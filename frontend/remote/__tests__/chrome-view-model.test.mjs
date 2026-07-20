@@ -39,6 +39,55 @@ test("selectDeviceChromeRenderModel exposes re-pair state and pairing controls",
   assert.equal(model.pairingControls.connectLabel, "Pair");
 });
 
+test("selectDeviceChromeRenderModel exposes re-pair state for expired device sessions", () => {
+  const model = selectDeviceChromeRenderModel({
+    clientAuth: { clientId: "client-1", brokerControlUrl: "https://broker.example.test" },
+    pairingError: null,
+    pairingPhase: null,
+    pairingTicket: null,
+    relayDirectory: [],
+    remoteAuth: {
+      relayId: "relay-1",
+      relayLabel: "Work Mac",
+      brokerChannelId: "room-a",
+      relayPeerId: "relay-peer-1",
+      securityMode: "private",
+      deviceId: "device-1",
+      deviceLabel: "Primary Phone",
+      payloadSecret: "payload-secret-1",
+      deviceSessionExpired: true,
+    },
+    session: null,
+  });
+
+  assert.equal(model.deviceMeta.cards[0].badges[0].label, "Re-pair required");
+  assert.equal(model.deviceMeta.cards[0].badges[0].tone, "alert");
+  assert.match(model.deviceMeta.cards[0].metaLines[2], /pair it again/i);
+});
+
+test("selectSessionChromeRenderModel prioritizes re-pair over offline for expired device sessions", () => {
+  const state = {
+    remoteAuth: {
+      relayId: "relay-1",
+      deviceId: "device-1",
+      payloadSecret: "payload-secret-1",
+      deviceSessionExpired: true,
+    },
+    serverConnectionState: "disconnected",
+    socketConnected: false,
+  };
+  const session = {
+    active_thread_id: "thread-1",
+    current_status: "idle",
+    pending_approvals: [],
+    provider_connected: false,
+  };
+
+  const model = selectSessionChromeRenderModel(state, session);
+  assert.equal(model.statusBadge.label, "Re-pair required");
+  assert.equal(model.statusBadge.tone, "alert");
+});
+
 test("selectSessionChromeRenderModel derives header, status, and control banner", () => {
   const state = {
     pairingError: null,

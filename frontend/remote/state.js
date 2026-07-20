@@ -132,6 +132,11 @@ export function connectionTarget() {
 }
 
 export function canRefreshDeviceJoinTicket() {
+  if (state.remoteAuth?.deviceSessionExpired) {
+    // Cookie/token are both gone (a prior refresh 401'd); claiming we can refresh
+    // would loop silently. Report false so the "re-pair this device" path fires.
+    return false;
+  }
   return Boolean(
     state.remoteAuth?.deviceRefreshMode === "cookie" || state.remoteAuth?.deviceRefreshToken
   );
@@ -417,6 +422,19 @@ export function saveRemoteAuth(value) {
   }
 }
 
+export function updateRemoteProfile(relayId, updates) {
+  const patch = createRemoteProfileUpdatePatch(state, relayId, updates);
+  if (!patch) {
+    return false;
+  }
+
+  patchRemoteState(patch, { persist: true });
+  if (updates?.payloadSecret) {
+    void persistProtectedPayloadSecret(relayId, updates.payloadSecret);
+  }
+  return true;
+}
+
 export function selectRelayProfile(relayId) {
   const patch = createSelectedRelayProfilePatch(state, relayId);
   if (!patch) {
@@ -617,6 +635,11 @@ function normalizeRemoteProfile(profile, options = {}) {
       fromStorage && usesBrokerCookieRefresh ? null : profile.deviceJoinTicketExpiresAt ?? null,
     sessionClaim: fromStorage ? null : profile.sessionClaim ?? null,
     sessionClaimExpiresAt: fromStorage ? null : profile.sessionClaimExpiresAt ?? null,
+    // Set when a cookie-mode ws-token refresh 401s (device session cookie gone /
+    // invalid, no token fallback). Gates canRefreshDeviceJoinTicket() so the app
+    // surfaces a re-pair prompt instead of looping. Cleared on a successful
+    // refresh or a re-pair (which rebuilds the profile).
+    deviceSessionExpired: profile.deviceSessionExpired === true,
   };
 }
 
@@ -667,6 +690,7 @@ function persistRemoteStore() {
             profile.deviceRefreshMode === "cookie"
               ? null
               : profile.deviceJoinTicketExpiresAt || null,
+          deviceSessionExpired: profile.deviceSessionExpired === true ? true : null,
         }),
       ])
     ),

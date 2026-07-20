@@ -90,14 +90,22 @@ async function main() {
     );
     await waitForDeviceState(relayPort, deviceA.auth.deviceId, "revoked");
 
-    const revokedOneRefresh = await tryIssueDeviceWsToken(brokerPort, deviceA.cookie);
+    const revokedOneRefresh = await tryIssueDeviceWsToken(
+      brokerPort,
+      deviceA.cookie,
+      deviceA.auth.brokerChannelId
+    );
     assert.equal(
       revokedOneRefresh.ok,
       false,
       "revoke one should make the old device refresh token unusable"
     );
 
-    const keptBeforeBulkRefresh = await issueDeviceWsToken(brokerPort, deviceB.cookie);
+    const keptBeforeBulkRefresh = await issueDeviceWsToken(
+      brokerPort,
+      deviceB.cookie,
+      deviceB.auth.brokerChannelId
+    );
     assert.ok(
       keptBeforeBulkRefresh.device_ws_token,
       "a non-revoked device should still refresh after revoke one"
@@ -115,14 +123,22 @@ async function main() {
     await waitForDeviceState(relayPort, deviceB.auth.deviceId, "approved");
     await waitForDeviceState(relayPort, deviceC.auth.deviceId, "revoked");
 
-    const revokedOtherRefresh = await tryIssueDeviceWsToken(brokerPort, deviceC.cookie);
+    const revokedOtherRefresh = await tryIssueDeviceWsToken(
+      brokerPort,
+      deviceC.cookie,
+      deviceC.auth.brokerChannelId
+    );
     assert.equal(
       revokedOtherRefresh.ok,
       false,
       "bulk revoke should make the revoked device refresh token unusable"
     );
 
-    const keptAfterBulkRefresh = await issueDeviceWsToken(brokerPort, deviceB.cookie);
+    const keptAfterBulkRefresh = await issueDeviceWsToken(
+      brokerPort,
+      deviceB.cookie,
+      deviceB.auth.brokerChannelId
+    );
     assert.ok(
       keptAfterBulkRefresh.device_ws_token,
       "the kept device should still be able to refresh after bulk revoke"
@@ -199,7 +215,11 @@ async function pairDevice(browser, localPage, lanIp, brokerPort, label) {
   assert.equal(auth?.deviceRefreshToken, undefined);
   assert.equal(auth?.deviceJoinTicket, undefined);
   assert.equal(auth?.sessionClaim, undefined);
-  const cookie = await readDeviceSessionCookie(context, `http://${lanIp}:${brokerPort}`);
+  const cookie = await readDeviceSessionCookie(
+    context,
+    `http://${lanIp}:${brokerPort}`,
+    auth?.brokerChannelId || null
+  );
   assert.ok(cookie, "paired remote should establish a device session cookie");
   return {
     auth,
@@ -225,8 +245,14 @@ async function postRelayJson(relayPort, pathName, body) {
   return payload.data;
 }
 
-async function tryIssueDeviceWsToken(brokerPort, cookieHeader) {
-  const response = await fetch(`http://127.0.0.1:${brokerPort}/api/public/device/ws-token`, {
+async function tryIssueDeviceWsToken(brokerPort, cookieHeader, room = null) {
+  const path =
+    room &&
+    Buffer.byteLength(room, "utf8") <= 512 &&
+    !/[\u0000-\u001f\u007f]/.test(room)
+      ? `/api/public/device/${encodeURIComponent(room)}/ws-token`
+      : "/api/public/device/ws-token";
+  const response = await fetch(`http://127.0.0.1:${brokerPort}${path}`, {
     method: "POST",
     headers: {
       Cookie: cookieHeader,
@@ -240,8 +266,8 @@ async function tryIssueDeviceWsToken(brokerPort, cookieHeader) {
   };
 }
 
-async function issueDeviceWsToken(brokerPort, cookieHeader) {
-  const result = await tryIssueDeviceWsToken(brokerPort, cookieHeader);
+async function issueDeviceWsToken(brokerPort, cookieHeader, room = null) {
+  const result = await tryIssueDeviceWsToken(brokerPort, cookieHeader, room);
   if (!result.ok) {
     throw new Error(
       result.payload?.message || result.payload?.error || "device ws token refresh failed"

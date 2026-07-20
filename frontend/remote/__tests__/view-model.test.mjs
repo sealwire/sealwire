@@ -377,6 +377,23 @@ test("selectEmptyStateRenderModel exposes relay-home and re-pair branches", () =
   });
   assert.equal(missingCredentials.showRelayHome, false);
   assert.equal(missingCredentials.showMissingCredentials, true);
+
+  const expiredDeviceSession = selectEmptyStateRenderModel({
+    clientAuth: { clientId: "client-1" },
+    pairingTicket: null,
+    relayDirectory: [],
+    remoteAuth: {
+      relayId: "relay-1",
+      payloadSecret: "payload-secret-1",
+      deviceSessionExpired: true,
+    },
+    serverConnectionMessage: "Server disconnected. Retrying connection.",
+    serverConnectionState: "disconnected",
+    socketConnected: false,
+  });
+  assert.equal(expiredDeviceSession.showRelayHome, false);
+  assert.equal(expiredDeviceSession.showMissingCredentials, true);
+  assert.equal(expiredDeviceSession.showServerDisconnected, false);
 });
 
 test("selectEmptyStateRenderModel exposes server disconnected state", () => {

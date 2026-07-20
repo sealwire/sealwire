@@ -274,6 +274,47 @@ fn set_cookie_name_value(response: &reqwest::Response) -> String {
         .expect("set-cookie header should include a name=value pair")
 }
 
+fn set_cookie_values(response: &reqwest::Response) -> Vec<String> {
+    response
+        .headers()
+        .get_all(reqwest::header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .map(str::to_string)
+        .collect()
+}
+
+async fn public_post_with_cookie_response<TReq>(
+    address: SocketAddr,
+    path: &str,
+    cookie: &str,
+    request: &TReq,
+) -> reqwest::Response
+where
+    TReq: serde::Serialize + ?Sized,
+{
+    reqwest::Client::new()
+        .post(format!("http://{address}{path}"))
+        .header(reqwest::header::COOKIE, cookie)
+        .json(request)
+        .send()
+        .await
+        .expect("request should succeed")
+}
+
+async fn public_delete_with_cookie_response(
+    address: SocketAddr,
+    path: &str,
+    cookie: &str,
+) -> reqwest::Response {
+    reqwest::Client::new()
+        .delete(format!("http://{address}{path}"))
+        .header(reqwest::header::COOKIE, cookie)
+        .send()
+        .await
+        .expect("request should succeed")
+}
+
 async fn public_post_expect_status<TReq>(
     address: SocketAddr,
     path: &str,
@@ -334,6 +375,25 @@ fn test_join_ticket_key() -> JoinTicketKey {
 
 async fn test_public_control_plane() -> PublicControlPlane {
     test_public_control_plane_with_parts(None, Some("300"), Some("300")).await
+}
+
+async fn test_public_control_plane_with_room(room: &str) -> PublicControlPlane {
+    PublicControlPlane::from_parts(
+        Some("public-broker-issuer-secret".to_string()),
+        Some(
+            serde_json::to_string(&vec![serde_json::json!({
+                "relay_id": "relay-1",
+                "broker_room_id": room,
+                "refresh_token": "relay-refresh-1"
+            })])
+            .expect("relay registrations should encode"),
+        ),
+        None,
+        Some("300".to_string()),
+        Some("300".to_string()),
+    )
+    .await
+    .expect("public control plane should configure")
 }
 
 async fn test_public_control_plane_with_parts(
@@ -1720,6 +1780,341 @@ async fn public_device_session_cookie_can_refresh_ws_tokens() {
     )
     .await;
     assert_eq!(refreshed.device_id, "device-cookie");
+}
+
+#[tokio::test]
+async fn public_device_session_scoped_round_trips_per_room_cookie() {
+    let address = spawn_public_mode_app().await;
+    let device_grant: DeviceGrantResponse = public_post(
+        address,
+        "/api/public/devices",
+        "relay-refresh-1",
+        &DeviceGrantRequest {
+            relay_id: "relay-1".to_string(),
+            broker_room_id: "room-a".to_string(),
+            device_id: "device-scoped".to_string(),
+        },
+    )
+    .await;
+
+    let session_response = public_post_response(
+        address,
+        "/api/public/device/room-a/session",
+        &device_grant.device_refresh_token,
+        &serde_json::json!({}),
+    )
+    .await
+    .error_for_status()
+    .expect("scoped device session request should succeed");
+    let cookie = set_cookie_name_value(&session_response);
+    assert!(
+        cookie.starts_with(&format!("{}=", device_session_cookie_name("room-a"))),
+        "expected a per-room cookie name, got {cookie}"
+    );
+
+    let refreshed: DeviceWsTokenResponse = public_post_with_cookie(
+        address,
+        "/api/public/device/room-a/ws-token",
+        &cookie,
+        &serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(refreshed.device_id, "device-scoped");
+}
+
+#[tokio::test]
+async fn public_device_session_scoped_round_trips_static_room_with_slash() {
+    let address = spawn_public_mode_app_with(
+        test_public_control_plane_with_room("team/prod").await,
+        BrokerHardeningConfig::default(),
+        SecurityHeadersConfig::default(),
+    )
+    .await;
+    let device_grant: DeviceGrantResponse = public_post(
+        address,
+        "/api/public/devices",
+        "relay-refresh-1",
+        &DeviceGrantRequest {
+            relay_id: "relay-1".to_string(),
+            broker_room_id: "team/prod".to_string(),
+            device_id: "device-static-slash".to_string(),
+        },
+    )
+    .await;
+
+    let session_response = public_post_response(
+        address,
+        "/api/public/device/team%2Fprod/session",
+        &device_grant.device_refresh_token,
+        &serde_json::json!({}),
+    )
+    .await
+    .error_for_status()
+    .expect("scoped device session request should succeed");
+    let cookie = set_cookie_name_value(&session_response);
+    let expected_cookie_name = device_session_cookie_name("team/prod");
+    assert!(
+        cookie.starts_with(&format!("{expected_cookie_name}=")),
+        "static rooms must get their own hashed scoped cookie name, got {cookie}"
+    );
+    assert!(
+        !cookie.starts_with("agent_relay_device_session="),
+        "static room must not degrade to the shared legacy cookie, got {cookie}"
+    );
+
+    let refreshed: DeviceWsTokenResponse = public_post_with_cookie(
+        address,
+        "/api/public/device/team%2Fprod/ws-token",
+        &cookie,
+        &serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(refreshed.device_id, "device-static-slash");
+    assert_eq!(refreshed.broker_room_id, "team/prod");
+}
+
+#[tokio::test]
+async fn public_device_ws_token_scoped_rejects_room_mismatch() {
+    let address = spawn_public_mode_app().await;
+    let device_grant: DeviceGrantResponse = public_post(
+        address,
+        "/api/public/devices",
+        "relay-refresh-1",
+        &DeviceGrantRequest {
+            relay_id: "relay-1".to_string(),
+            broker_room_id: "room-a".to_string(),
+            device_id: "device-mismatch".to_string(),
+        },
+    )
+    .await;
+
+    // A room-a token presented (as a bearer) to room-b's endpoint must be rejected,
+    // and the error must not reveal the real room.
+    let body = public_post_expect_status(
+        address,
+        "/api/public/device/room-b/ws-token",
+        &device_grant.device_refresh_token,
+        &serde_json::json!({}),
+        reqwest::StatusCode::UNAUTHORIZED,
+    )
+    .await;
+    assert!(
+        !body.contains("room-a"),
+        "error must not leak the real room"
+    );
+}
+
+#[tokio::test]
+async fn public_device_ws_token_scoped_upgrades_legacy_cookie_on_match_only() {
+    let address = spawn_public_mode_app().await;
+    let device_grant: DeviceGrantResponse = public_post(
+        address,
+        "/api/public/devices",
+        "relay-refresh-1",
+        &DeviceGrantRequest {
+            relay_id: "relay-1".to_string(),
+            broker_room_id: "room-a".to_string(),
+            device_id: "device-legacy".to_string(),
+        },
+    )
+    .await;
+
+    // A not-yet-migrated device: the legacy origin-wide cookie carrying room-a's
+    // token, presented to the new room-a route → upgrade on use.
+    let legacy = format!(
+        "agent_relay_device_session={}",
+        device_grant.device_refresh_token
+    );
+    let response = public_post_with_cookie_response(
+        address,
+        "/api/public/device/room-a/ws-token",
+        &legacy,
+        &serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let set_cookies = set_cookie_values(&response);
+    assert!(
+        set_cookies.iter().any(|c| c
+            .starts_with(&format!("{}=", device_session_cookie_name("room-a")))
+            && !c.contains("Max-Age=0")),
+        "upgrade must set the per-room cookie: {set_cookies:?}"
+    );
+    assert!(
+        set_cookies
+            .iter()
+            .any(|c| c.starts_with("agent_relay_device_session=") && c.contains("Max-Age=0")),
+        "upgrade must clear the legacy cookie: {set_cookies:?}"
+    );
+
+    // The SAME legacy cookie presented to a DIFFERENT room must 401 and must NOT
+    // clear the legacy cookie — a sibling relay may still need it to migrate.
+    let response_b = public_post_with_cookie_response(
+        address,
+        "/api/public/device/room-b/ws-token",
+        &legacy,
+        &serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(response_b.status(), reqwest::StatusCode::UNAUTHORIZED);
+    assert!(
+        set_cookie_values(&response_b).is_empty(),
+        "room mismatch must not emit any Set-Cookie"
+    );
+}
+
+#[tokio::test]
+async fn public_device_session_scoped_delete_clears_matching_legacy_cookie_only() {
+    let address = spawn_public_mode_app().await;
+    let device_grant: DeviceGrantResponse = public_post(
+        address,
+        "/api/public/devices",
+        "relay-refresh-1",
+        &DeviceGrantRequest {
+            relay_id: "relay-1".to_string(),
+            broker_room_id: "room-a".to_string(),
+            device_id: "device-legacy-forget".to_string(),
+        },
+    )
+    .await;
+
+    let legacy = format!(
+        "agent_relay_device_session={}",
+        device_grant.device_refresh_token
+    );
+    let response =
+        public_delete_with_cookie_response(address, "/api/public/device/room-a/session", &legacy)
+            .await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let set_cookies = set_cookie_values(&response);
+    assert!(
+        set_cookies.iter().any(|c| c
+            .starts_with(&format!("{}=", device_session_cookie_name("room-a")))
+            && c.contains("Max-Age=0")),
+        "forget must clear the room-a per-room cookie: {set_cookies:?}"
+    );
+    assert!(
+        set_cookies
+            .iter()
+            .any(|c| c.starts_with("agent_relay_device_session=") && c.contains("Max-Age=0")),
+        "forget must clear the legacy cookie when it belongs to room-a: {set_cookies:?}"
+    );
+
+    let mismatch =
+        public_delete_with_cookie_response(address, "/api/public/device/room-b/session", &legacy)
+            .await;
+    assert_eq!(mismatch.status(), reqwest::StatusCode::OK);
+    let mismatch_cookies = set_cookie_values(&mismatch);
+    assert!(
+        mismatch_cookies.iter().any(|c| c
+            .starts_with(&format!("{}=", device_session_cookie_name("room-b")))
+            && c.contains("Max-Age=0")),
+        "forget must clear the requested room-b per-room cookie: {mismatch_cookies:?}"
+    );
+    assert!(
+        !mismatch_cookies
+            .iter()
+            .any(|c| c.starts_with("agent_relay_device_session=") && c.contains("Max-Age=0")),
+        "wrong-room forget must not clear a sibling's legacy cookie: {mismatch_cookies:?}"
+    );
+}
+
+#[tokio::test]
+async fn public_device_ws_token_scoped_prefers_bearer_over_stale_room_cookie() {
+    let address = spawn_public_mode_app().await;
+    let device_grant: DeviceGrantResponse = public_post(
+        address,
+        "/api/public/devices",
+        "relay-refresh-1",
+        &DeviceGrantRequest {
+            relay_id: "relay-1".to_string(),
+            broker_room_id: "room-a".to_string(),
+            device_id: "device-bearer".to_string(),
+        },
+    )
+    .await;
+
+    // The frontend falls back to Authorization bearer if cookie establishment
+    // fails, but browsers may still attach a stale per-room cookie. The bearer
+    // must win or the fallback is masked by the stale cookie and returns 401.
+    let response = reqwest::Client::new()
+        .post(format!(
+            "http://{address}/api/public/device/room-a/ws-token"
+        ))
+        .header(
+            reqwest::header::COOKIE,
+            format!(
+                "{}=stale-refresh-token",
+                device_session_cookie_name("room-a")
+            ),
+        )
+        .bearer_auth(&device_grant.device_refresh_token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("request should succeed")
+        .error_for_status()
+        .expect("bearer should authenticate despite a stale per-room cookie");
+    let refreshed: DeviceWsTokenResponse = response.json().await.expect("response should decode");
+    assert_eq!(refreshed.device_id, "device-bearer");
+}
+
+#[tokio::test]
+async fn public_device_scoped_accepts_non_prefixed_static_room() {
+    // Static registrations allow arbitrary non-empty room ids. validate_room_id
+    // must accept URL-sensitive but non-control ids and proceed to token
+    // resolution (401 for a bogus token) instead of rejecting the room as invalid
+    // (400).
+    let address = spawn_public_mode_app().await;
+    public_post_expect_status(
+        address,
+        "/api/public/device/team.prod/ws-token",
+        "bogus-token",
+        &serde_json::json!({}),
+        reqwest::StatusCode::UNAUTHORIZED,
+    )
+    .await;
+    public_post_expect_status(
+        address,
+        "/api/public/device/team%2Fprod/ws-token",
+        "bogus-token",
+        &serde_json::json!({}),
+        reqwest::StatusCode::UNAUTHORIZED,
+    )
+    .await;
+    public_post_expect_status(
+        address,
+        "/api/public/device/room-%3Bevil/ws-token",
+        "bogus-token",
+        &serde_json::json!({}),
+        reqwest::StatusCode::UNAUTHORIZED,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn public_device_scoped_rejects_invalid_room() {
+    let address = spawn_public_mode_app().await;
+    // Control characters are not valid static broker_room_id values in a URL
+    // path, and are rejected before they can reach cookie/header handling.
+    public_post_expect_status(
+        address,
+        "/api/public/device/room-%0Aevil/ws-token",
+        "any-token",
+        &serde_json::json!({}),
+        reqwest::StatusCode::BAD_REQUEST,
+    )
+    .await;
+    let long_room = "a".repeat(DEVICE_SESSION_ROOM_MAX_BYTES + 1);
+    let long_path = format!("/api/public/device/{long_room}/ws-token");
+    public_post_expect_status(
+        address,
+        &long_path,
+        "any-token",
+        &serde_json::json!({}),
+        reqwest::StatusCode::BAD_REQUEST,
+    )
+    .await;
 }
 
 #[tokio::test]

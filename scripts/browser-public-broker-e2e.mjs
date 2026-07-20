@@ -113,7 +113,7 @@ async function main() {
     remotePage = await context.newPage();
     attachPageDebugLogging(remotePage, "remote", { prefix: "public-broker-e2e" });
     remotePage.on("request", (request) => {
-      if (request.url().endsWith("/api/public/device/ws-token")) {
+      if (/\/api\/public\/device\/(?:[^/]+\/)?ws-token$/.test(new URL(request.url()).pathname)) {
         refreshRequests.push(request.url());
         logStep("captured refresh request", { count: refreshRequests.length });
       }
@@ -172,7 +172,8 @@ async function main() {
     assert.equal(authBeforeRestart?.sessionClaim, undefined);
     const deviceSessionCookie = await readDeviceSessionCookie(
       context,
-      `http://${lanIp}:${brokerPort}`
+      `http://${lanIp}:${brokerPort}`,
+      authBeforeRestart?.brokerChannelId || null
     );
     assert.ok(deviceSessionCookie, "paired remote should establish a device session cookie");
     logStep("device session cookie captured");
@@ -228,7 +229,7 @@ async function main() {
     logStep("relay reconnected after revoke restart");
 
     const revokedRefreshResponse = await fetch(
-      `http://127.0.0.1:${brokerPort}/api/public/device/ws-token`,
+      `http://127.0.0.1:${brokerPort}/api/public/device/${encodeURIComponent(authBeforeRestart?.brokerChannelId || "")}/ws-token`,
       {
         method: "POST",
         headers: {

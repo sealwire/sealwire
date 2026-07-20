@@ -166,8 +166,14 @@ export function selectEmptyStateRenderModel({
   serverConnectionState,
   socketConnected,
 }) {
+  const showMissingCredentials = Boolean(
+    remoteAuth &&
+      (remoteAuth.payloadSecret === null || remoteAuth.deviceSessionExpired === true) &&
+      !pairingTicket
+  );
   const showServerDisconnected = Boolean(
     remoteAuth
+      && !showMissingCredentials
       && (
         serverConnectionState === "disconnected"
         || serverConnectionMessage
@@ -179,7 +185,7 @@ export function selectEmptyStateRenderModel({
     clientAuth,
     relayDirectory,
     remoteAuth,
-    showMissingCredentials: Boolean(remoteAuth && !remoteAuth.payloadSecret && !pairingTicket),
+    showMissingCredentials,
     showRelayHome: Boolean(!remoteAuth && !pairingTicket),
     showServerDisconnected,
     serverDisconnectedCopy:

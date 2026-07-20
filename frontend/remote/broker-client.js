@@ -10,8 +10,8 @@ import {
   saveClientAuth,
   setSocketPeerId,
   setRelayDirectory,
-  saveRemoteAuth,
   state,
+  updateRemoteProfile,
 } from "./state.js";
 import {
   applyRemoteSurfacePatch,
@@ -21,11 +21,13 @@ import {
 
 const BROKER_PROTOCOL_VERSION = 1;
 const RELAY_PROTOCOL_VERSION = 1;
+const DEVICE_SESSION_ROOM_MAX_BYTES = 512;
 
 let onBrokerReady = () => {};
 let onBrokerPayload = async () => {};
 let onBrokerDisconnect = () => {};
 let onRelayPresence = () => {};
+const inFlightDeviceRefreshes = new Map();
 
 export function configureBrokerClient(handlers) {
   onBrokerReady = handlers.onBrokerReady || onBrokerReady;
@@ -34,12 +36,81 @@ export function configureBrokerClient(handlers) {
   onRelayPresence = handlers.onRelayPresence || onRelayPresence;
 }
 
+function currentConnectionSelectionKey() {
+  if (state.pairingTicket?.pairing_id) {
+    return `pairing:${state.pairingTicket.pairing_id}`;
+  }
+  if (state.remoteAuth?.relayId) {
+    return `relay:${state.remoteAuth.relayId}`;
+  }
+  return null;
+}
+
+export function cancelDeviceRefreshesForRelay(relayId = null) {
+  for (const [key, refresh] of inFlightDeviceRefreshes.entries()) {
+    if (!relayId || refresh.relayId === relayId) {
+      refresh.controller.abort();
+      inFlightDeviceRefreshes.delete(key);
+    }
+  }
+}
+
+class StaleDeviceRefreshError extends Error {
+  constructor() {
+    super("stale broker token refresh ignored");
+    this.name = "StaleDeviceRefreshError";
+  }
+}
+
+function bearerDeviceRefreshOptions(refreshToken, signal) {
+  return {
+    method: "POST",
+    credentials: "same-origin",
+    signal,
+    headers: {
+      Authorization: `Bearer ${refreshToken}`,
+    },
+  };
+}
+
+function deviceRefreshProfileSignature(profile) {
+  if (!profile) {
+    return null;
+  }
+  return JSON.stringify({
+    relayId: profile.relayId || null,
+    brokerUrl: profile.brokerUrl || null,
+    brokerChannelId: profile.brokerChannelId || null,
+    deviceId: profile.deviceId || null,
+    payloadSecret: profile.payloadSecret || null,
+    deviceRefreshMode: profile.deviceRefreshMode || null,
+    deviceRefreshToken: profile.deviceRefreshToken || null,
+  });
+}
+
+async function ensureDeviceRefreshStillOwnsProfile(relayId, expectedSignature, brokerUrl, room) {
+  if (deviceRefreshProfileSignature(state.remoteProfiles[relayId]) === expectedSignature) {
+    return;
+  }
+
+  await clearDeviceRefreshSession(brokerUrl, room, { allowLegacyFallback: false });
+  throw new StaleDeviceRefreshError();
+}
+
 export async function connectBroker(reason) {
+  const selectionKey = currentConnectionSelectionKey();
   if (!state.pairingTicket && state.remoteAuth && !connectionTarget() && canRefreshDeviceJoinTicket()) {
     try {
       await refreshDeviceJoinTicket(reason);
     } catch (error) {
+      if (error?.name === "AbortError" || error instanceof StaleDeviceRefreshError) {
+        return;
+      }
       renderLog(`Device broker token refresh failed: ${error.message}`);
+      return;
+    }
+    if (currentConnectionSelectionKey() !== selectionKey) {
+      renderLog("Broker connect skipped because the relay selection changed during refresh.");
       return;
     }
   }
@@ -61,6 +132,10 @@ export async function connectBroker(reason) {
       return;
     }
     renderLog("Broker connect skipped because no pairing or saved device is present.");
+    return;
+  }
+  if (currentConnectionSelectionKey() !== selectionKey) {
+    renderLog("Broker connect skipped because the relay selection changed.");
     return;
   }
 
@@ -193,15 +268,67 @@ export function sendBrokerFrame(payload) {
   );
 }
 
-export async function establishDeviceRefreshSession(refreshToken, brokerUrl) {
-  const url = new URL("/api/public/device/session", brokerControlUrl(brokerUrl));
-  const response = await fetch(url, {
+function isScopedDeviceSessionRoom(room) {
+  return (
+    typeof room === "string" &&
+    room.length >= 1 &&
+    new TextEncoder().encode(room).length <= DEVICE_SESSION_ROOM_MAX_BYTES &&
+    !/[\u0000-\u001f\u007f-\u009f]/.test(room)
+  );
+}
+
+// Build a device-session endpoint URL. Any non-empty broker room id that can be
+// carried in one URL segment uses `/api/public/device/{room}/{kind}`; the broker
+// hashes the room into the cookie name so static ids such as `team/prod` still
+// get isolated cookies instead of degrading to the origin-wide legacy cookie.
+function deviceEndpointUrl(brokerUrl, room, kind, { legacy = false } = {}) {
+  const base = brokerControlUrl(brokerUrl);
+  return !legacy && isScopedDeviceSessionRoom(room)
+    ? new URL(`/api/public/device/${encodeURIComponent(room)}/${kind}`, base)
+    : new URL(`/api/public/device/${kind}`, base);
+}
+
+async function fetchDeviceEndpoint(
+  brokerUrl,
+  room,
+  kind,
+  options,
+  { allowLegacyFallback = false, legacyFallbackOptions = options } = {}
+) {
+  const scoped = isScopedDeviceSessionRoom(room);
+  const response = await fetch(deviceEndpointUrl(brokerUrl, room, kind), options);
+  if (scoped && allowLegacyFallback && response.status === 404) {
+    return {
+      endpointMode: "legacy",
+      response: await fetch(
+        deviceEndpointUrl(brokerUrl, room, kind, { legacy: true }),
+        legacyFallbackOptions
+      ),
+      usedLegacyFallback: true,
+    };
+  }
+  return {
+    endpointMode: scoped ? "scoped" : "legacy",
+    response,
+    usedLegacyFallback: false,
+  };
+}
+
+export async function establishDeviceRefreshSession(
+  refreshToken,
+  brokerUrl,
+  room = null,
+  { signal } = {}
+) {
+  const result = await fetchDeviceEndpoint(brokerUrl, room, "session", {
     method: "POST",
     credentials: "same-origin",
+    signal,
     headers: {
       Authorization: `Bearer ${refreshToken}`,
     },
   });
+  const { endpointMode, response, usedLegacyFallback } = result;
   let payload;
   try {
     payload = await response.json();
@@ -211,7 +338,11 @@ export async function establishDeviceRefreshSession(refreshToken, brokerUrl) {
   if (!response.ok) {
     throw new Error(payload?.message || payload?.error || "device session setup failed");
   }
-  return payload;
+  return {
+    ...payload,
+    deviceEndpointMode: endpointMode,
+    deviceEndpointUsedLegacyFallback: usedLegacyFallback,
+  };
 }
 
 export async function establishClientRefreshSession(refreshToken, brokerUrl) {
@@ -235,15 +366,20 @@ export async function establishClientRefreshSession(refreshToken, brokerUrl) {
   return payload;
 }
 
-export async function clearDeviceRefreshSession(brokerUrl) {
+export async function clearDeviceRefreshSession(
+  brokerUrl,
+  room = null,
+  { allowLegacyFallback = true } = {}
+) {
   if (!brokerUrl) {
     return;
   }
 
-  const url = new URL("/api/public/device/session", brokerControlUrl(brokerUrl));
-  await fetch(url, {
+  await fetchDeviceEndpoint(brokerUrl, room, "session", {
     method: "DELETE",
     credentials: "same-origin",
+  }, {
+    allowLegacyFallback,
   }).catch(() => {});
 }
 
@@ -429,11 +565,13 @@ function cancelSocketReconnect() {
 }
 
 async function refreshDeviceJoinTicket(reason) {
-  if (!state.remoteAuth) {
+  const remoteAuth = state.remoteAuth;
+  if (!remoteAuth) {
     throw new Error("no paired device is stored");
   }
 
-  const brokerUrl = state.remoteAuth.brokerUrl;
+  const relayId = remoteAuth.relayId;
+  const brokerUrl = remoteAuth.brokerUrl;
   if (!brokerUrl) {
     throw new Error("no broker url is stored");
   }
@@ -442,52 +580,128 @@ async function refreshDeviceJoinTicket(reason) {
     throw new Error("no device refresh token is stored");
   }
 
-  const url = new URL("/api/public/device/ws-token", brokerControlUrl(brokerUrl));
+  // Room-scoped device session: each relay on a broker gets its own cookie, so
+  // forgetting/switching one never touches another. Falls back to the legacy
+  // origin-wide endpoint only if the profile predates room ids.
+  const room = remoteAuth.brokerChannelId || null;
+  const refreshKey = Symbol(relayId);
+  const controller = new AbortController();
+  const expectedProfileSignature = deviceRefreshProfileSignature(remoteAuth);
+  inFlightDeviceRefreshes.set(refreshKey, {
+    controller,
+    relayId,
+  });
   renderLog(`Refreshing broker access token (${reason}).`);
-  let response;
-  if (state.remoteAuth.deviceRefreshMode === "cookie") {
-    response = await fetch(url, {
-      method: "POST",
-      credentials: "same-origin",
-    });
-  } else {
-    const refreshToken = state.remoteAuth.deviceRefreshToken;
-    if (!refreshToken) {
-      throw new Error("no device refresh token is stored");
-    }
-
-    let cookieSessionReady = false;
-    try {
-      await establishDeviceRefreshSession(refreshToken, brokerUrl);
-      state.remoteAuth.deviceRefreshMode = "cookie";
-      state.remoteAuth.deviceRefreshToken = null;
-      saveRemoteAuth(state.remoteAuth);
-      cookieSessionReady = true;
-    } catch {
-      cookieSessionReady = false;
-    }
-
-    response = await fetch(url, {
-      method: "POST",
-      credentials: "same-origin",
-      headers: cookieSessionReady
-        ? undefined
-        : {
-            Authorization: `Bearer ${refreshToken}`,
-          },
-    });
-  }
-  let payload = null;
   try {
-    payload = await response.json();
-  } catch {
-    payload = null;
-  }
-  if (!response.ok) {
-    throw new Error(payload?.message || payload?.error || "broker token refresh failed");
-  }
+    let refreshToken = null;
+    let sessionEndpointMode = null;
+    let tokenResult;
+    if (remoteAuth.deviceRefreshMode === "cookie") {
+      const cookieOptions = {
+        method: "POST",
+        credentials: "same-origin",
+        signal: controller.signal,
+      };
+      // Against an old broker without the scoped routes (rollback / staggered
+      // deploy), a scoped ws-token 404s. Fall back to the legacy origin-wide
+      // ws-token with the same-origin cookie so a not-yet-migrated cookie profile
+      // can still reconnect. A migrated profile (legacy cookie already cleared)
+      // then 401s on the legacy route and is marked expired → re-pair prompt,
+      // instead of silently looping.
+      tokenResult = await fetchDeviceEndpoint(brokerUrl, room, "ws-token", cookieOptions, {
+        allowLegacyFallback: true,
+        legacyFallbackOptions: cookieOptions,
+      });
+    } else {
+      refreshToken = remoteAuth.deviceRefreshToken;
+      if (!refreshToken) {
+        throw new Error("no device refresh token is stored");
+      }
 
-  state.remoteAuth.deviceJoinTicket = payload.device_ws_token;
-  state.remoteAuth.deviceJoinTicketExpiresAt = payload.device_ws_token_expires_at || null;
-  renderLog("Refreshed broker access token for this device.");
+      try {
+        const session = await establishDeviceRefreshSession(refreshToken, brokerUrl, room, {
+          signal: controller.signal,
+        });
+        await ensureDeviceRefreshStillOwnsProfile(relayId, expectedProfileSignature, brokerUrl, room);
+        sessionEndpointMode = session.deviceEndpointMode;
+      } catch (error) {
+        if (error?.name === "AbortError" || error instanceof StaleDeviceRefreshError) {
+          throw error;
+        }
+        sessionEndpointMode = null;
+      }
+
+      const cookieSessionReady = sessionEndpointMode === "scoped";
+      tokenResult = await fetchDeviceEndpoint(
+        brokerUrl,
+        room,
+        "ws-token",
+        cookieSessionReady
+          ? {
+              method: "POST",
+              credentials: "same-origin",
+              signal: controller.signal,
+            }
+          : bearerDeviceRefreshOptions(refreshToken, controller.signal),
+        {
+          allowLegacyFallback: true,
+          legacyFallbackOptions: bearerDeviceRefreshOptions(refreshToken, controller.signal),
+        }
+      );
+    }
+
+    const { endpointMode, response } = tokenResult;
+    let payload = null;
+    try {
+      payload = await response.json();
+    } catch {
+      payload = null;
+    }
+
+    await ensureDeviceRefreshStillOwnsProfile(relayId, expectedProfileSignature, brokerUrl, room);
+    if (!response.ok) {
+      // A 401 means the stored refresh credential (cookie or retained bearer) is
+      // gone/invalid. Mark the profile expired so canRefreshDeviceJoinTicket()
+      // stops the silent retry loop and the existing re-pair prompt fires instead.
+      if (response.status === 401) {
+        updateRemoteProfile(relayId, {
+          deviceJoinTicket: null,
+          deviceJoinTicketExpiresAt: null,
+          deviceSessionExpired: true,
+        });
+      }
+      throw new Error(payload?.message || payload?.error || "broker token refresh failed");
+    }
+
+    if (
+      !payload?.device_ws_token ||
+      payload.broker_room_id !== room ||
+      payload.device_id !== remoteAuth.deviceId
+    ) {
+      await clearDeviceRefreshSession(brokerUrl, room, { allowLegacyFallback: false });
+      throw new Error("broker token refresh returned credentials for the wrong device");
+    }
+
+    const updates = {
+      deviceSessionExpired: false,
+      deviceJoinTicket: payload.device_ws_token,
+      deviceJoinTicketExpiresAt: payload.device_ws_token_expires_at || null,
+    };
+    // A scoped ws-token success sets the per-room cookie server-side even when the
+    // earlier /session establish failed (bearer fallback). So switch to cookie
+    // mode whenever the ws-token itself used the scoped route — otherwise the next
+    // reload loses refreshability, since the bearer is never persisted.
+    if (refreshToken && endpointMode === "scoped") {
+      updates.deviceRefreshMode = "cookie";
+      updates.deviceRefreshToken = null;
+    }
+    const updated = updateRemoteProfile(relayId, updates);
+    if (!updated) {
+      await clearDeviceRefreshSession(brokerUrl, room, { allowLegacyFallback: false });
+      throw new Error("saved relay profile is no longer available");
+    }
+    renderLog("Refreshed broker access token for this device.");
+  } finally {
+    inFlightDeviceRefreshes.delete(refreshKey);
+  }
 }
