@@ -153,3 +153,30 @@ test("a same-provider fork keeps the inherit option", () => {
     true
   );
 });
+
+// A thread's preview can be its full first message — replay-fork handoff blobs
+// and reviewer prompts run to tens of thousands of characters. The dialog put
+// the whole thing in the "Source:" line, overflowing the dialog before the
+// fork was even created. The title must be clamped to a short label.
+test("a huge source preview is clamped, not rendered whole", () => {
+  const preview = "You are starting from a forked agent session. ".repeat(3000);
+  const html = renderDialog({
+    sourceThread: { id: "thread-1", preview },
+  });
+
+  const sourceLine = html.match(/Source:[^<]*/)?.[0] || "";
+  assert.ok(sourceLine.length > 0, "the source line renders");
+  assert.ok(
+    sourceLine.length < 200,
+    `source line must be a short label, got ${sourceLine.length} chars`
+  );
+  assert.ok(
+    html.length < preview.length,
+    "the full preview must not reach the DOM"
+  );
+});
+
+test("a short source title is shown in full", () => {
+  const html = renderDialog({ sourceThread: { id: "t", name: "My session" } });
+  assert.match(html, /Source: My session/);
+});

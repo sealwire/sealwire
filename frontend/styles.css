@@ -1631,7 +1631,7 @@ input:focus, textarea:focus, select:focus {
   font-size: 13px;
 }
 .control-summary { margin: 0; font-weight: 500; font-size: 13px; color: var(--text-primary); }
-.control-hint { margin: 4px 0 0; font-size: 12px; color: var(--text-secondary); }
+.control-hint { margin: 4px 0 0; font-size: 12px; color: var(--text-secondary); overflow-wrap: anywhere; }
 .control-banner-compact .control-button {
   font-size: 12px;
   padding: 4px 10px;

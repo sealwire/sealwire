@@ -13,6 +13,19 @@ const h = React.createElement;
 
 const INHERIT_LABEL = "Inherit from source session";
 
+// A thread's preview can be its entire first message — a replay-fork handoff
+// blob or a reviewer prompt runs to tens of thousands of characters. Rendering
+// that whole string in the "Source:" line overflowed the dialog before the
+// fork was even created. Collapse to the first line and cap the length.
+const MAX_SOURCE_LABEL_CHARS = 80;
+function forkSourceLabel(sourceThread) {
+  const raw = sourceThread?.name || sourceThread?.preview || sourceThread?.id || "thread";
+  const firstLine = String(raw).split("\n", 1)[0].trim() || "thread";
+  return firstLine.length > MAX_SOURCE_LABEL_CHARS
+    ? `${firstLine.slice(0, MAX_SOURCE_LABEL_CHARS - 1)}…`
+    : firstLine;
+}
+
 // Untouched settings must reach the relay as null so it can resolve them from
 // the SOURCE thread. Showing a concrete value here would be a lie — the relay
 // would not use it — and sending one silently re-permissions the fork.
@@ -42,7 +55,7 @@ export function ForkSessionDialog({
   effortOptions = [],
   onRequestClose = null,
 }) {
-  const sourceTitle = sourceThread?.name || sourceThread?.preview || sourceThread?.id || "thread";
+  const sourceTitle = forkSourceLabel(sourceThread);
   const cwdId = `${id}-cwd`;
   const sourceProvider = sourceThread?.provider || "";
   const targetProvider = fields.provider || sourceProvider;
