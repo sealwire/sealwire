@@ -14,7 +14,7 @@ watchPatterns = [
 ]
 
 [deploy]
-startCommand = "sh -c 'state_dir=${RAILWAY_VOLUME_MOUNT_PATH:-/data}; mkdir -p $state_dir; export RELAY_BROKER_AUTH_MODE=${RELAY_BROKER_AUTH_MODE:-public} RUST_LOG=${RUST_LOG:-relay_broker=info,tower_http=info}; if [ -z \"${RELAY_BROKER_PUBLIC_POSTGRES_URL:-}\" ]; then export RELAY_BROKER_PUBLIC_STATE_PATH=${RELAY_BROKER_PUBLIC_STATE_PATH:-$state_dir/public-control.json}; fi; exec relay-broker'"
+startCommand = "sh -c 'state_dir=${RAILWAY_VOLUME_MOUNT_PATH:-/data}; mkdir -p $state_dir; export RELAY_BROKER_AUTH_MODE=${RELAY_BROKER_AUTH_MODE:-public} RUST_LOG=${RUST_LOG:-relay_broker=info,tower_http=info} RELAY_VAPID_KEY_PATH=${RELAY_VAPID_KEY_PATH:-$state_dir/vapid.key}; if [ -z \"${RELAY_BROKER_PUBLIC_POSTGRES_URL:-}\" ]; then export RELAY_BROKER_PUBLIC_STATE_PATH=${RELAY_BROKER_PUBLIC_STATE_PATH:-$state_dir/public-control.json}; fi; exec relay-broker'"
 healthcheckPath = "/api/health"
 healthcheckTimeout = 30
 restartPolicyType = "ON_FAILURE"

@@ -33,6 +33,11 @@ node_modules/
 /.agent-relay
 /.githooks
 
+# Web-push VAPID private key material — never commit. The deployed key lives on
+# the Railway /data volume; the local one under /.agent-relay. Belt-and-suspenders.
+*.key
+/data/
+
 # macOS
 .DS_Store
 
