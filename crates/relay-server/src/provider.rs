@@ -177,6 +177,37 @@ struct ProviderEntry {
     provider_key: &'static str,
 }
 
+/// Static per-provider identity captured while spawning, one entry per
+/// *configured* provider (in configured order). `spawn_error` is `None` when
+/// the bridge spawned OK, or the raw error string when the spawn attempt
+/// failed — the string that used to be dropped on the floor at the `warn!`
+/// site. The relay pairs this with the live connection map to derive a
+/// `ProviderStatusView` on every snapshot.
+#[derive(Debug, Clone)]
+pub struct ProviderStatusBase {
+    pub provider_key: String,
+    pub display_name: String,
+    pub spawn_error: Option<String>,
+}
+
+/// Best-effort classification of a spawn-error string into "the binary isn't
+/// there" vs. "it's there but failed". Heuristic on purpose: it keys off the
+/// OS ENOENT wording that `Command::spawn` surfaces, and reflects whatever
+/// binary actually failed to exec (e.g. `node` for the Claude worker), which
+/// is the most honest signal available without a separate PATH probe.
+pub fn classify_spawn_error(reason: &str) -> crate::protocol::ProviderStatusKind {
+    let low = reason.to_ascii_lowercase();
+    if low.contains("no such file")
+        || low.contains("os error 2")
+        || low.contains("not found")
+        || low.contains("cannot find")
+    {
+        crate::protocol::ProviderStatusKind::NotInstalled
+    } else {
+        crate::protocol::ProviderStatusKind::Failed
+    }
+}
+
 const DEFAULT_PROVIDERS: &[ProviderEntry] = &[
     ProviderEntry {
         binary_name: "codex",
@@ -239,8 +270,14 @@ fn configured_providers() -> Vec<&'static ProviderEntry> {
 
 pub async fn spawn_providers(
     state: Arc<RwLock<RelayState>>,
-) -> HashMap<String, Arc<dyn ProviderBridge>> {
+) -> (
+    HashMap<String, Arc<dyn ProviderBridge>>,
+    Vec<ProviderStatusBase>,
+) {
     let mut providers: HashMap<String, Arc<dyn ProviderBridge>> = HashMap::new();
+    // One entry per *configured* provider, in configured order, whether or not
+    // it spawned — so the status panel can show failed providers too.
+    let mut status_base: Vec<ProviderStatusBase> = Vec::new();
 
     for entry in configured_providers() {
         let timeout_secs = provider_start_timeout_secs();
@@ -257,21 +294,28 @@ pub async fn spawn_providers(
             )),
         };
 
-        match result {
+        let spawn_error = match result {
             Ok(bridge) => {
                 let name = bridge.provider_name().to_string();
                 providers.insert(name, bridge);
+                None
             }
             Err(error) => {
                 warn!(
                     "Failed to start {} agent provider: {}",
                     entry.display_name, error
                 );
+                Some(error)
             }
-        }
+        };
+        status_base.push(ProviderStatusBase {
+            provider_key: entry.provider_key.to_string(),
+            display_name: entry.display_name.to_string(),
+            spawn_error,
+        });
     }
 
-    providers
+    (providers, status_base)
 }
 
 async fn spawn_provider(

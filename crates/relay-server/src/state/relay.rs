@@ -234,6 +234,11 @@ pub struct RelayState {
     /// snapshot so both surfaces learn fork capability through the channel they
     /// already consume, instead of inferring it from provider names.
     pub(super) provider_fork_capabilities: Vec<crate::protocol::ProviderForkCapabilityView>,
+    /// Static per-provider identity + spawn outcome, one entry per configured
+    /// provider (in configured order). Combined with `provider_connections` at
+    /// snapshot time to derive the live `provider_status` panel — including
+    /// providers that failed to launch, which never enter the providers map.
+    pub(super) provider_status_base: Vec<crate::provider::ProviderStatusBase>,
     /// Honest "last real activity" timestamp per thread (unix secs), used as
     /// the thread-list sort/display key INSTEAD of the provider's raw
     /// `updated_at`. A no-prompt resume/selection spins up a live SDK session
@@ -348,6 +353,7 @@ impl RelayState {
             thread_settings: HashMap::new(),
             thread_forked_from: HashMap::new(),
             provider_fork_capabilities: Vec::new(),
+            provider_status_base: Vec::new(),
             thread_last_activity_at: HashMap::new(),
             allowed_roots: Vec::new(),
             available_models: Vec::new(),
@@ -1568,6 +1574,7 @@ impl RelayState {
 
         SessionSnapshot {
             provider_fork_capabilities: self.provider_fork_capabilities.clone(),
+            provider_status: self.provider_status_view(),
             revision: self.revision,
             transcript_revision,
             server_time: unix_now(),
@@ -2105,6 +2112,43 @@ impl RelayState {
         capabilities: Vec<crate::protocol::ProviderForkCapabilityView>,
     ) {
         self.provider_fork_capabilities = capabilities;
+    }
+
+    pub fn set_provider_status_base(&mut self, base: Vec<crate::provider::ProviderStatusBase>) {
+        self.provider_status_base = base;
+    }
+
+    /// Derive the live per-provider status panel: static spawn outcome folded
+    /// with the current connection map. Recomputed on every snapshot so a
+    /// disconnect/reconnect streams to clients without any extra plumbing.
+    fn provider_status_view(&self) -> Vec<crate::protocol::ProviderStatusView> {
+        use crate::protocol::{ProviderStatusKind, ProviderStatusView};
+        self.provider_status_base
+            .iter()
+            .map(|base| {
+                let (status, connected, reason) = match &base.spawn_error {
+                    // Spawn failed: classify why, and carry the raw reason.
+                    Some(reason) => (
+                        crate::provider::classify_spawn_error(reason),
+                        false,
+                        Some(reason.clone()),
+                    ),
+                    // Spawn succeeded: fold in the live connection signal.
+                    None => match self.provider_connections.get(&base.provider_key) {
+                        Some(true) => (ProviderStatusKind::Connected, true, None),
+                        Some(false) => (ProviderStatusKind::Disconnected, false, None),
+                        None => (ProviderStatusKind::Starting, false, None),
+                    },
+                };
+                ProviderStatusView {
+                    provider: base.provider_key.clone(),
+                    display_name: base.display_name.clone(),
+                    status,
+                    connected,
+                    reason,
+                }
+            })
+            .collect()
     }
 
     pub fn set_thread_forked_from(&mut self, thread_id: &str, source_thread_id: &str) {

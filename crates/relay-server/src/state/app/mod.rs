@@ -149,6 +149,37 @@ pub(crate) fn fork_capability_views(
     views
 }
 
+/// Test-only: build a status base from an already-spawned providers map (every
+/// entry `spawn_error: None`). Real `AppState::new` gets its base straight from
+/// `spawn_providers`, which is the only path that also knows about *failed*
+/// providers; tests that seed the failed case do so on `RelayState` directly.
+#[cfg(test)]
+pub(crate) fn provider_status_base_from_map(
+    providers: &HashMap<String, Arc<dyn ProviderBridge>>,
+) -> Vec<crate::provider::ProviderStatusBase> {
+    let mut base = providers
+        .keys()
+        .map(|key| crate::provider::ProviderStatusBase {
+            provider_key: key.clone(),
+            display_name: provider_display_name(key),
+            spawn_error: None,
+        })
+        .collect::<Vec<_>>();
+    base.sort_by(|a, b| a.provider_key.cmp(&b.provider_key));
+    base
+}
+
+#[cfg(test)]
+fn provider_display_name(provider_key: &str) -> String {
+    match provider_key {
+        "codex" => "Codex",
+        "claude_code" => "Claude Code",
+        "fake" => "Fake",
+        other => other,
+    }
+    .to_string()
+}
+
 impl AppState {
     #[cfg(test)]
     pub(crate) fn from_parts(
@@ -158,6 +189,7 @@ impl AppState {
     ) -> Self {
         if let Ok(mut state) = relay.try_write() {
             state.set_provider_fork_capabilities(fork_capability_views(&providers));
+            state.set_provider_status_base(provider_status_base_from_map(&providers));
         }
 
         Self {
@@ -218,7 +250,7 @@ impl AppState {
             relay.push_log("info", security.summary());
         }
 
-        let providers = spawn_providers(relay.clone()).await;
+        let (providers, provider_status_base) = spawn_providers(relay.clone()).await;
         spawn_persistence_task(relay.clone(), change_tx.subscribe(), persistence.clone());
 
         // Web Push: load/generate the VAPID keypair, install the dispatcher, and
@@ -252,6 +284,7 @@ impl AppState {
                 format!("Agent providers initialized: {:?}", provider_names),
             );
             relay.set_provider_fork_capabilities(fork_capability_views(&providers));
+            relay.set_provider_status_base(provider_status_base);
             relay.notify();
         }
 

@@ -248,6 +248,7 @@ fn test_cached_remote_action_result(action_kind: &str, ok: bool) -> CachedRemote
         ok,
         snapshot: Some(SessionSnapshot {
             provider_fork_capabilities: Vec::new(),
+            provider_status: Vec::new(),
             revision: 7,
             transcript_revision: 3,
             server_time: 11,
@@ -754,6 +755,83 @@ fn snapshot_thread_activity_empty_when_active_thread_idle() {
 
     // No active turn and no progress phase => nothing is working.
     assert!(relay.snapshot().thread_activity.is_empty());
+}
+
+#[test]
+fn snapshot_surfaces_failed_provider_with_reason_and_connected_provider() {
+    use crate::protocol::ProviderStatusKind;
+    let mut relay = test_state();
+    relay.set_provider_status_base(vec![
+        crate::provider::ProviderStatusBase {
+            provider_key: "codex".to_string(),
+            display_name: "Codex".to_string(),
+            spawn_error: None,
+        },
+        crate::provider::ProviderStatusBase {
+            provider_key: "claude_code".to_string(),
+            display_name: "Claude Code".to_string(),
+            spawn_error: Some(
+                "failed to start `claude`: No such file or directory (os error 2)".to_string(),
+            ),
+        },
+        crate::provider::ProviderStatusBase {
+            provider_key: "fake".to_string(),
+            display_name: "Fake".to_string(),
+            spawn_error: Some("handshake rejected the session".to_string()),
+        },
+    ]);
+    relay.set_provider_connection("codex", true);
+
+    let statuses = relay.snapshot().provider_status;
+    assert_eq!(statuses.len(), 3, "one row per configured provider");
+
+    // Configured order is preserved.
+    let codex = &statuses[0];
+    assert_eq!(codex.provider, "codex");
+    assert_eq!(codex.status, ProviderStatusKind::Connected);
+    assert!(codex.connected);
+    assert!(codex.reason.is_none());
+
+    // ENOENT-shaped spawn error => NotInstalled, with the reason surfaced.
+    let claude = &statuses[1];
+    assert_eq!(claude.provider, "claude_code");
+    assert_eq!(claude.status, ProviderStatusKind::NotInstalled);
+    assert!(!claude.connected);
+    assert!(claude.reason.is_some());
+
+    // Any other spawn error => Failed (not NotInstalled).
+    let fake = &statuses[2];
+    assert_eq!(fake.provider, "fake");
+    assert_eq!(fake.status, ProviderStatusKind::Failed);
+    assert!(fake.reason.is_some());
+}
+
+#[test]
+fn set_provider_connection_false_flips_provider_status_to_disconnected() {
+    use crate::protocol::ProviderStatusKind;
+    let mut relay = test_state();
+    relay.set_provider_status_base(vec![crate::provider::ProviderStatusBase {
+        provider_key: "codex".to_string(),
+        display_name: "Codex".to_string(),
+        spawn_error: None,
+    }]);
+
+    // Spawned but no connection signal yet => Starting.
+    assert_eq!(
+        relay.snapshot().provider_status[0].status,
+        ProviderStatusKind::Starting
+    );
+
+    relay.set_provider_connection("codex", true);
+    assert_eq!(
+        relay.snapshot().provider_status[0].status,
+        ProviderStatusKind::Connected
+    );
+
+    relay.set_provider_connection("codex", false);
+    let row = &relay.snapshot().provider_status[0];
+    assert_eq!(row.status, ProviderStatusKind::Disconnected);
+    assert!(!row.connected);
 }
 
 #[test]

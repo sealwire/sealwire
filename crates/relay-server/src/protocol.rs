@@ -85,6 +85,11 @@ pub struct SessionSnapshot {
     /// through the channel they already consume (no extra remote action).
     #[serde(default)]
     pub provider_fork_capabilities: Vec<ProviderForkCapabilityView>,
+    /// Per-provider health (incl. providers that failed to spawn). Rides the
+    /// snapshot for the same reason as `provider_fork_capabilities`, but its
+    /// `status`/`connected` are recomputed live so drops/reconnects stream.
+    #[serde(default)]
+    pub provider_status: Vec<ProviderStatusView>,
     pub service_ready: bool,
     pub provider_connected: bool,
     pub broker_connected: bool,
@@ -1433,6 +1438,43 @@ pub struct ProviderForkCapabilityView {
     /// The native fork accepts a branch point. Codex `thread/fork` is tip-only;
     /// the Claude SDK takes `upToMessageId`.
     pub native_fork_at_message: bool,
+}
+
+/// Health of a single *configured* provider, derived live at snapshot time.
+/// Unlike `available_providers()` (which lists only bridges that spawned OK),
+/// this surfaces providers that failed to launch too, so the UI can explain
+/// *why* a provider is unusable instead of silently dropping it.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderStatusKind {
+    /// The provider binary could not be found/executed (ENOENT-shaped failure).
+    NotInstalled,
+    /// The provider was configured but its spawn attempt failed for some other
+    /// reason (handshake error, timeout, crash on boot, …).
+    Failed,
+    /// The bridge spawned but hasn't reported a connection either way yet.
+    Starting,
+    /// The bridge is spawned and reports a live connection.
+    Connected,
+    /// The bridge spawned but its connection has since dropped.
+    Disconnected,
+}
+
+/// One row of the provider-status panel. Static identity (`provider`,
+/// `display_name`, and any spawn `reason`) is seeded once per process; the
+/// `status`/`connected` fields are recomputed on every snapshot from the live
+/// connection map, so a drop/reconnect updates over the stream for free.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderStatusView {
+    /// Provider key: "codex" | "claude_code" | "fake".
+    pub provider: String,
+    /// Human label: "Codex" | "Claude Code" | "Fake".
+    pub display_name: String,
+    pub status: ProviderStatusKind,
+    pub connected: bool,
+    /// Populated only for `NotInstalled` / `Failed` — the raw spawn error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
