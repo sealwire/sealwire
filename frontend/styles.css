@@ -135,7 +135,10 @@
   --text-warning: var(--warn-fg);
   --diff-add-fg: var(--ok-fg);
   --diff-del-fg: var(--err-fg);
-  --surface-muted: rgba(127, 127, 127, 0.14);
+  /* Neutral metadata-chip fill (reviewer effort badge). Folded onto the
+     theme-aware neutral-status fill instead of a fixed grey, so it tints with
+     the surface in both themes. */
+  --surface-muted: var(--status-neutral-bg);
 
   /* Color-guard corral: these five had NO token reference at all (naked
      literals). --qr-surface is intentionally the same in both themes — a QR
