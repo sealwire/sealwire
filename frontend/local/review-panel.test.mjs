@@ -379,10 +379,7 @@ test("reviewStatusLabel maps each job status to a human label", () => {
   assert.equal(reviewStatusLabel("failed"), "Review failed");
   // Phase 5 iterative-loop statuses.
   assert.equal(reviewStatusLabel("addressing_findings"), "Author addressing findings…");
-  assert.equal(
-    reviewStatusLabel("escalated"),
-    "Reviewer still has concerns — over to you"
-  );
+  assert.equal(reviewStatusLabel("escalated"), "Reviewer still has concerns");
   // Unknown statuses fall back to a sane default.
   assert.equal(reviewStatusLabel("something_new"), "something_new");
 });

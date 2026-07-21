@@ -13,7 +13,7 @@ const REVIEW_STATUS_LABELS = {
   blocked: "Review blocked — action needed",
   complete: "Review complete",
   failed: "Review failed",
-  escalated: "Reviewer still has concerns — over to you",
+  escalated: "Reviewer still has concerns",
   cancelled: "Review cancelled",
 };
 

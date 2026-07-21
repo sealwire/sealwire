@@ -492,18 +492,11 @@ pub(crate) fn review_approved_message(reviewer_provider: &str, round: u32, revie
 }
 
 /// Message posted to the parent when a multi-round review ends without approval and
-/// control returns to the user. `rounds` is the number of rounds ACTUALLY run (so an
-/// early hand-off — e.g. the author's fix needs approval — doesn't claim the whole
-/// budget ran).
-pub(crate) fn review_escalated_message(
-    reviewer_provider: &str,
-    rounds: u32,
-    review: &str,
-) -> String {
+/// control returns to the user. The round count is already shown on the reviewer
+/// card, so it's deliberately left out of this message to keep it short.
+pub(crate) fn review_escalated_message(reviewer_provider: &str, review: &str) -> String {
     format!(
-        "After {rounds} round{plural} the {provider} reviewer still has concerns — over \
-to you. Latest review:\n\n{review}",
-        plural = if rounds == 1 { "" } else { "s" },
+        "{provider} reviewer still has concerns:\n\n{review}",
         provider = provider_label(reviewer_provider),
         review = review.trim(),
     )
@@ -580,5 +573,21 @@ mod tests {
         // Reaching terminal still works (and then sticks).
         job.set_status(ReviewJobStatus::Complete);
         assert_eq!(job.status, ReviewJobStatus::Complete);
+    }
+
+    #[test]
+    fn escalated_message_is_short_and_omits_the_round_count() {
+        // The round count is already shown on the reviewer card (Round X/Y), so the
+        // handed-back message must not repeat it, and must drop the old verbose
+        // "— over to you. Latest review:" tail. Exact assertion so future copy drift
+        // is caught (the review body is trimmed).
+        let message = review_escalated_message("codex", "  please address the failing test\n");
+        assert_eq!(
+            message,
+            "Codex reviewer still has concerns:\n\nplease address the failing test"
+        );
+        // Guard the specific things we deliberately removed.
+        assert!(!message.contains("over to you"));
+        assert!(!message.to_lowercase().contains("round"));
     }
 }

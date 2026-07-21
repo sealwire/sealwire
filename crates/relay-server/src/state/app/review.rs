@@ -783,7 +783,7 @@ last message (no recap turn)."
                 return;
             }
             if round >= max_rounds {
-                let message = review_escalated_message(&reviewer_provider, round, &review);
+                let message = review_escalated_message(&reviewer_provider, &review);
                 self.finish_review_to_parent(
                     &job_id,
                     &parent_thread_id,
@@ -839,7 +839,7 @@ last message (no recap turn)."
                     // The author's fix needs a human (its sandbox prompts on a write,
                     // or it asked a question). Stop the turn and escalate to the user.
                     if self.stop_thread_or_block(&job_id, &parent_thread_id).await {
-                        let message = review_escalated_message(&reviewer_provider, round, &review);
+                        let message = review_escalated_message(&reviewer_provider, &review);
                         self.finish_review_to_parent(
                             &job_id,
                             &parent_thread_id,
