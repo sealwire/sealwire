@@ -174,6 +174,9 @@ test("selectSessionChromeRenderModel derives header, status, and control banner"
   assert.equal(model.sessionMeta.chips.find((chip) => chip.label === "Model").value, "gpt-5.4");
   assert.equal(model.sessionMeta.chips.find((chip) => chip.label === "Effort").value, "medium");
   assert.equal(model.sessionMeta.chips.find((chip) => chip.label === "Control").value, "Available");
+  // The details "Status" chip speaks the same task language as the header pill / local
+  // overview (Idle here), not a raw provider word ("idle").
+  assert.equal(model.sessionMeta.chips.find((chip) => chip.label === "Status").value, "Idle");
 });
 
 test("remote control banner remains visible while another device is running the thread", () => {

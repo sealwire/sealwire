@@ -299,7 +299,10 @@ function WorkspaceChangesEntry({ store, state, stats, expanded }) {
         "span",
         { className: "workspace-changes-row-main" },
         h("span", { className: "workspace-changes-row-icon", "aria-hidden": "true" }, "±"),
-        h("span", { className: "workspace-changes-row-label" }, "Changes"),
+        // Always the workspace git working tree (path-scoped, never session-scoped) — name
+        // that subject so it doesn't read as "the current agent's output" when idle. Matches
+        // the modal's "Workspace diff" title.
+        h("span", { className: "workspace-changes-row-label" }, "Workspace changes"),
         renderStatsBadge(state, stats)
       ),
       h(

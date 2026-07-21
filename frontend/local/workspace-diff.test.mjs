@@ -1,7 +1,28 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 
-import { computeChangeStats } from "./workspace-diff.js";
+import { computeChangeStats, WorkspaceChangesPanel } from "./workspace-diff.js";
+
+// Minimal external store for useSyncExternalStore: never notifies, just serves state.
+function fakeStore(state) {
+  return { subscribe: () => () => {}, getState: () => state };
+}
+
+// #10: with no active session the diff panel reads as "the current agent's output",
+// but it is always the workspace git working tree (path-scoped, never session-scoped).
+// The row must name that subject — matching the modal's existing "Workspace diff" title —
+// instead of a bare "Changes" that implies ownership by whatever session is (not) running.
+test("workspace changes row names its subject ('Workspace changes', not a bare 'Changes')", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(WorkspaceChangesPanel, {
+      store: fakeStore({ status: "loaded", data: { file_changes: [] }, expanded: false }),
+    })
+  );
+  assert.match(html, /Workspace changes/);
+  assert.doesNotMatch(html, />Changes</);
+});
 
 test("computeChangeStats returns zero stats for null data", () => {
   const stats = computeChangeStats(null);

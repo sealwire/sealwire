@@ -541,7 +541,10 @@ function currentStatusLabel(currentState, session = currentState.session) {
       return "Offline";
     }
 
-    return session.current_status || "Ready";
+    // Same task language as the folded header pill and the local overview — the details
+    // panel must not show a raw provider word ("idle"/"active") while everything else reads
+    // "Idle"/"Working". Approval / offline / re-pair are handled above; this is the live tail.
+    return describeSessionStatus(session).task.label;
   }
 
   if (currentState.socketConnected) {
