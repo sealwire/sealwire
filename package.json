@@ -64,6 +64,7 @@
     "preview": "vite preview --host",
     "smoke:pairing": "node scripts/pairing-smoke.mjs",
     "test:browser:smoke": "npm run build && node scripts/browser-page-smoke-e2e.mjs",
+    "test:browser:desktop-launcher": "npm run build && node scripts/browser-desktop-launcher-e2e.mjs",
     "test:claude:provider": "node scripts/claude-provider-e2e.mjs",
     "test:claude:browser": "node scripts/e2e/run-browser-suite.mjs --suite real-provider",
     "test:claude": "npm run test:claude:provider && npm run test:claude:browser",
