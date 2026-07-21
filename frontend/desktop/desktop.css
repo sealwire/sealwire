@@ -52,7 +52,7 @@
 }
 
 .desktop-shell .desktop-title strong {
-  font-size: 17px;
+  font-size: var(--text-md);
   font-weight: 700;
 }
 
@@ -283,7 +283,7 @@
 
 .desktop-shell .surface-actions h1 {
   margin: 0;
-  font-size: 18px;
+  font-size: var(--text-lg);
   color: var(--text-1);
 }
 

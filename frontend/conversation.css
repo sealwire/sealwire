@@ -229,7 +229,7 @@
 
 .thread-empty h2 {
   margin: 0;
-  font-size: 18px;
+  font-size: var(--text-lg);
   font-weight: 500;
 }
 
@@ -594,7 +594,7 @@
   border-radius: 0;
   padding: 3px 60px 3px 12px;
   font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-size: var(--text-sm);
   line-height: 1.5;
   color: var(--text-primary);
 }
@@ -676,7 +676,7 @@
   padding: 12px;
   border-radius: var(--r-sm);
   font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-size: var(--text-sm);
   line-height: 1.55;
   white-space: pre-wrap;
   overflow-x: auto;
@@ -694,7 +694,7 @@
 }
 .message-body code {
   font-family: var(--font-mono);
-  font-size: 0.92em;
+  font-size: var(--text-ui);
   padding: 1px 6px;
   border-radius: 4px;
   background: var(--surface-2);
@@ -708,7 +708,7 @@
   border: 1px solid var(--border-faint);
   border-radius: var(--r-sm);
   font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-size: var(--text-sm);
   line-height: 1.55;
   overflow-x: auto;
   white-space: pre-wrap;
@@ -752,10 +752,10 @@
   font-weight: 600;
   letter-spacing: -0.005em;
 }
-.message-body h1 { font-size: 1.15em; }
-.message-body h2 { font-size: 1.10em; }
-.message-body h3 { font-size: 1.05em; }
-.message-body h4, .message-body h5, .message-body h6 { font-size: 1em; }
+.message-body h1 { font-size: var(--text-md); }
+.message-body h2 { font-size: var(--text-md); }
+.message-body h3 { font-size: var(--text-body); }
+.message-body h4, .message-body h5, .message-body h6 { font-size: var(--text-body); }
 .message-body table {
   display: block;
   max-width: 100%;
@@ -896,7 +896,7 @@
 .tool-log-subtitle {
   color: var(--text-secondary);
   font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-size: var(--text-sm);
   word-break: break-word;
   overflow-wrap: anywhere;
 }
@@ -914,7 +914,7 @@
   border: 0;
   padding: 0;
   font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-size: var(--text-sm);
   line-height: 1.5;
   white-space: pre-wrap;
   overflow-x: auto;
@@ -983,7 +983,7 @@
 
 .ask-user-question-text {
   margin: 0 0 8px;
-  font-size: 13.5px;
+  font-size: var(--text-body);
   font-weight: 600;
   color: var(--text-primary);
   line-height: 1.4;
@@ -1161,7 +1161,7 @@
   border-radius: 6px;
   background: color-mix(in srgb, var(--err-fg, #ef4444) 12%, var(--bg-surface));
   border: 1px solid color-mix(in srgb, var(--err-fg, #ef4444) 30%, var(--border-faint));
-  font-size: 12.5px;
+  font-size: var(--text-sm);
   color: var(--text-primary);
 }
 
@@ -1227,14 +1227,14 @@
 
 .ask-user-option-description {
   margin-top: 2px;
-  font-size: 11.5px;
+  font-size: var(--text-sm);
   line-height: 1.4;
   color: var(--text-secondary);
 }
 
 .ask-user-freeform-answer {
   margin-top: 6px;
-  font-size: 12.5px;
+  font-size: var(--text-sm);
   color: var(--text-primary);
   padding: 6px 8px;
   border-radius: 6px;

@@ -15,7 +15,7 @@ import { dirname, join } from "node:path";
 //
 // So the only passing state is total === BASELINE. Migrating text to tokens is a
 // two-line change: swap the literal for a token, then drop BASELINE to match.
-const BASELINE = 28;
+const BASELINE = 0;
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FILES = ["styles.css", "conversation.css", "desktop/desktop.css"];
