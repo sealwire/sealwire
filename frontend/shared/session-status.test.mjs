@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { describeSessionStatus } from "./session-status.js";
+import { describeSessionStatus, describeStatusChips } from "./session-status.js";
 
 test("no session → providers offline, no task", () => {
   const s = describeSessionStatus(null);
@@ -63,4 +63,22 @@ test("provider outage outranks task state in the collapsed pill", () => {
   assert.equal(s.providers.ready, false);
   assert.equal(s.task.state, "idle");
   assert.equal(s.primaryLabel, "Providers offline");
+});
+
+test("describeStatusChips renders the provider + task subjects as a status line", () => {
+  assert.deepEqual(describeStatusChips({ provider_connected: true }), [
+    { label: "Providers", value: "Ready" },
+    { label: "Task", value: "No active task" },
+  ]);
+  assert.deepEqual(
+    describeStatusChips({ provider_connected: true, active_thread_id: "t1", active_turn_id: "x" }),
+    [
+      { label: "Providers", value: "Ready" },
+      { label: "Task", value: "Working" },
+    ]
+  );
+  assert.deepEqual(describeStatusChips({ provider_connected: false }), [
+    { label: "Providers", value: "Offline" },
+    { label: "Task", value: "No active task" },
+  ]);
 });

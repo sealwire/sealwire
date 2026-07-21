@@ -99,6 +99,7 @@ import {
 } from "./react-session-panels.js";
 import { ThreadGroupList } from "../shared/thread-list-react.js";
 import { buildThreadActivityMap } from "../shared/thread-activity.js";
+import { describeStatusChips } from "../shared/session-status.js";
 import { selectStatusBadge } from "./status-badge.js";
 import { sessionIsWorking, threadAttention } from "../shared/thread-attention.js";
 import {
@@ -848,9 +849,12 @@ export function createSessionRenderer({
       return;
     }
 
-    // Trust posture only — Access + Sharing + Remote. Device count lives in the Devices hero;
-    // Provider/Model/Control are session-scoped (surfaced in the chat header or transcript).
+    // Status subjects first (Providers · Task, from the shared session-status seam) so the
+    // standby dashboard names what's actually running instead of leaving it to one ambiguous
+    // pill, then trust posture (Access · Sharing · Remote). Device count lives in the Devices
+    // hero; Model/Control are session-scoped (surfaced in the chat header or transcript).
     const securityBadges = [
+      ...describeStatusChips(session),
       ...(pendingPairings > 0 ? [overviewBadge("Pending", String(pendingPairings))] : []),
       overviewBadge("Access", securityModeLabel(session)),
       overviewBadge("Sharing", contentVisibilityLabel(session)),

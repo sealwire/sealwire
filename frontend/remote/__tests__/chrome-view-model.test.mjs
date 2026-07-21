@@ -165,7 +165,7 @@ test("selectSessionChromeRenderModel derives header, status, and control banner"
   assert.equal(model.header.subtitle, "/Users/luchi/git/agent-relay");
   assert.equal(model.header.modelLabel, "Codex · gpt-5.4");
   assert.equal(model.header.modelTitle, "Codex · gpt-5.4 · effort medium");
-  assert.equal(model.statusBadge.label, "Live");
+  assert.equal(model.statusBadge.label, "Idle");
   assert.equal(model.agentWorkingIndicator.hidden, true);
   assert.equal(model.controlBanner.hidden, true);
   assert.equal(model.controlBanner.takeOverHidden, true);
@@ -279,7 +279,7 @@ test("remote status badge surfaces 'Review blocked' regardless of which thread i
   assert.equal(model.statusBadge.tone, "alert");
 });
 
-test("remote status badge stays 'Live' when a review runs on a non-active thread", () => {
+test("remote status badge shows the active thread's own task (Idle), not a review label, when a review runs on a non-active thread", () => {
   const state = { remoteAuth: { deviceId: "device-1" }, socketConnected: true };
   const session = {
     active_thread_id: "thread-2",
@@ -291,7 +291,20 @@ test("remote status badge stays 'Live' when a review runs on a non-active thread
   };
 
   const model = selectSessionChromeRenderModel(state, session);
-  assert.equal(model.statusBadge.label, "Live");
+  assert.equal(model.statusBadge.label, "Idle");
+  assert.equal(model.statusBadge.tone, "ready");
+});
+
+test("remote status badge reads 'No active task' with no active thread (task subject via the shared seam)", () => {
+  const state = { remoteAuth: { deviceId: "device-1" }, socketConnected: true };
+  const session = {
+    active_thread_id: null,
+    pending_approvals: [],
+    provider_connected: true,
+  };
+
+  const model = selectSessionChromeRenderModel(state, session);
+  assert.equal(model.statusBadge.label, "No active task");
   assert.equal(model.statusBadge.tone, "ready");
 });
 
@@ -398,7 +411,7 @@ test("selectSessionChromeRenderModel surfaces phase verb in the working indicato
   };
 
   const model = selectSessionChromeRenderModel(state, session);
-  assert.equal(model.statusBadge.label, "Live");
+  assert.equal(model.statusBadge.label, "Working");
   assert.equal(model.statusBadge.tone, "ready");
   assert.equal(model.agentWorkingIndicator.hidden, false);
   assert.equal(model.agentWorkingIndicator.label, "Pondering…");
@@ -428,7 +441,7 @@ test("selectSessionChromeRenderModel surfaces tool gerund in the working indicat
   };
 
   const model = selectSessionChromeRenderModel(state, session);
-  assert.equal(model.statusBadge.label, "Live");
+  assert.equal(model.statusBadge.label, "Working");
   assert.equal(model.agentWorkingIndicator.label, "Bashing…");
 });
 
@@ -456,7 +469,7 @@ test("selectSessionChromeRenderModel flips to Stalled? when last_progress_at goe
   };
 
   const model = selectSessionChromeRenderModel(state, session);
-  assert.equal(model.statusBadge.label, "Live");
+  assert.equal(model.statusBadge.label, "Working");
   assert.equal(model.statusBadge.tone, "ready");
   assert.equal(model.agentWorkingIndicator.hidden, false);
   assert.equal(model.agentWorkingIndicator.label, "Stalled?");

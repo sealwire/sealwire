@@ -44,6 +44,26 @@ export function describeSessionStatus(session, { approval = null } = {}) {
   };
 }
 
+/**
+ * The provider + task subjects as label:value chips for a status line / overview
+ * row — e.g. `Providers: Ready · Task: No active task`. This is the visible
+ * realization of the decomposition (UX critique #4): the surface names each
+ * subject instead of collapsing them into one ambiguous word. Attention (a
+ * pending approval) is intentionally NOT a chip — it rides the salient header
+ * pill via `primaryLabel`.
+ *
+ * @param {object|null} session
+ * @param {{ approval?: object|null }} [opts]
+ * @returns {Array<{ label: string, value: string }>}
+ */
+export function describeStatusChips(session, { approval = null } = {}) {
+  const { providers, task } = describeSessionStatus(session, { approval });
+  return [
+    { label: "Providers", value: providers.label },
+    { label: "Task", value: task.label },
+  ];
+}
+
 // The "task" subject answers "what is the agent doing for me?" — distinct from
 // "is the service up?" (providers). An open-but-quiet thread is `idle`, NOT the
 // same as having no session at all (`none`); the old single label called both

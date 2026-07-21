@@ -10,6 +10,7 @@ import {
   progressPhaseLabel,
 } from "../progress-verbs.js";
 import { sessionIsWorking } from "../shared/thread-attention.js";
+import { describeSessionStatus } from "../shared/session-status.js";
 
 function isSessionOffline(currentState, session) {
   return Boolean(
@@ -80,10 +81,11 @@ function deriveStatusBadge(currentState, session, approval) {
   if (review) {
     return review;
   }
-  if (!session.active_thread_id) {
-    return { label: "Standby", tone: "ready" };
-  }
-  return { label: "Live", tone: "ready" };
+  // Task wording comes from the shared session-status seam so it matches the local
+  // surface (No active task / Idle / Working) instead of a remote-only Standby/Live.
+  // Provider/transport outage is handled above by isSessionOffline — broader than the
+  // seam's provider-only `providers` subject — so we borrow only the TASK subject here.
+  return { label: describeSessionStatus(session).task.label, tone: "ready" };
 }
 
 function deriveAgentWorkingIndicator(currentState, session, approval) {
