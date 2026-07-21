@@ -58,7 +58,7 @@
 
 .desktop-shell .desktop-title span {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .desktop-shell .status-pill {
@@ -70,7 +70,7 @@
   border-radius: var(--r-pill);
   background: var(--status-neutral-bg);
   color: var(--text-2);
-  font-size: 13px;
+  font-size: var(--text-ui);
   white-space: nowrap;
 }
 
@@ -125,7 +125,7 @@
   justify-content: space-between;
   gap: 12px;
   color: var(--text-2);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -139,7 +139,7 @@
 .desktop-shell .field label,
 .desktop-shell .field-label {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 600;
 }
 
@@ -186,7 +186,7 @@
   background: transparent;
   color: var(--text-2);
   cursor: pointer;
-  font-size: 13px;
+  font-size: var(--text-ui);
   font-weight: 600;
   transition: background-color 0.15s ease, color 0.15s ease;
 }
@@ -257,7 +257,7 @@
   gap: 8px;
   align-items: center;
   color: var(--text-2);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .desktop-shell .url-row code {
@@ -290,7 +290,7 @@
 .desktop-shell .surface-copy {
   margin: 4px 0 0;
   color: var(--text-3);
-  font-size: 13px;
+  font-size: var(--text-ui);
 }
 
 .desktop-shell .provider-pane {
@@ -307,6 +307,6 @@
   border-radius: var(--r-md);
   background: var(--err-bg);
   color: var(--err-fg);
-  font-size: 13px;
+  font-size: var(--text-ui);
   font-weight: 600;
 }
