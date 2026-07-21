@@ -101,6 +101,7 @@ import { ThreadGroupList } from "../shared/thread-list-react.js";
 import { buildThreadActivityMap } from "../shared/thread-activity.js";
 import { describeStatusChips } from "../shared/session-status.js";
 import { selectStatusBadge } from "./status-badge.js";
+import { selectStandbyEmptyModel, buildStandbyEmptyActions } from "./standby-empty-state.js";
 import { sessionIsWorking, threadAttention } from "../shared/thread-attention.js";
 import {
   configureThreadNotifications,
@@ -1108,6 +1109,25 @@ export function createSessionRenderer({
     pendingActionBanner.hidden = true;
   }
 
+  // #9 standby home: lead with the task, not with plumbing. On return, offer to continue
+  // the most recent thread (same view-navigation as clicking it in the sidebar); on first
+  // use, welcome + quick-start starters. Replaces the old "Start a session from the sidebar"
+  // dead-end. Decision logic + action wiring are the pure standby-empty-state helpers; the
+  // starters open the real New session dialog (data-start-session), handled in app.js — NOT
+  // a composer prefill, which dead-ends in standby (no active thread → composer disabled).
+  function buildStandbyEmptyContent() {
+    const model = selectStandbyEmptyModel({
+      threads: state.threads || [],
+      selectedCwd: state.selectedCwd || "",
+    });
+    return h(ConversationEmptyState, {
+      actions: buildStandbyEmptyActions(model),
+      copy: model.copy,
+      details: model.selectedCwd ? [`Selected workspace: ${model.selectedCwd}`] : [],
+      title: model.title,
+    });
+  }
+
   function renderTranscript(session, approval) {
     const viewingConversation = isViewingConversation(session);
     const entries = session.transcript || [];
@@ -1208,33 +1228,7 @@ export function createSessionRenderer({
       renderConversationContent(
         h(TranscriptPane, {
           canWrite: canCurrentDeviceWrite(session),
-          emptyContent: session.active_thread_id
-            ? null
-            : h(ConversationEmptyState, {
-              actions: [
-                {
-                  attrs: {
-                    "data-suggestion": "Summarize the structure of this repo and point out the important entry points.",
-                  },
-                  label: "Summarize this repo",
-                },
-                {
-                  attrs: {
-                    "data-suggestion": "Find the bug in this project and explain the likely root cause before changing code.",
-                  },
-                  label: "Find the bug",
-                },
-                {
-                  attrs: {
-                    "data-suggestion": "Review this codebase for areas that feel too complex and suggest a cleanup plan.",
-                  },
-                  label: "Suggest a cleanup",
-                },
-              ],
-              copy: "Pick a workspace, then use this console to launch or open a session while keeping an eye on control, trust, and audit state.",
-              details: state.selectedCwd ? [`Selected workspace: ${state.selectedCwd}`] : [],
-              title: "Relay standing by",
-            }),
+          emptyContent: session.active_thread_id ? null : buildStandbyEmptyContent(),
           readyState: session.active_thread_id
             ? {
               readyCopy: `${providerLabel(session?.provider) || "The agent"} is connected. Send the first prompt below when you're ready.`,

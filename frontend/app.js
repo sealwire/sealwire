@@ -1258,6 +1258,21 @@ transcript.addEventListener("click", (event) => {
     return;
   }
 
+  // Standby "start a task" actions (#9): open the real New session dialog, seeding its
+  // initial-prompt field when the starter carries one. This is the actionable path — the
+  // composer is disabled with no active thread, so prefilling it (data-suggestion) dead-ends.
+  const startSessionAction = event.target.closest("[data-start-session]");
+  if (startSessionAction) {
+    const seedPrompt = startSessionAction.dataset.startPrompt || "";
+    if (seedPrompt) {
+      state.localUiStore.getState().setSessionDraftField("initialPrompt", seedPrompt);
+      const promptInput = document.getElementById("start-prompt");
+      if (promptInput) promptInput.value = seedPrompt;
+    }
+    document.getElementById("launch-start-session-dialog")?.setAttribute("open", "");
+    return;
+  }
+
   const openThreadButton = event.target.closest("[data-open-thread-id]");
   if (openThreadButton) {
     const threadId = openThreadButton.dataset.openThreadId;

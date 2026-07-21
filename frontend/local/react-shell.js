@@ -445,7 +445,7 @@ function ConsoleFooterHint() {
   return h(
     "p",
     { className: "console-footer-hint" },
-    "Start a session from the sidebar to open the live transcript."
+    "Continue a recent task or start a new one from the main panel."
   );
 }
 

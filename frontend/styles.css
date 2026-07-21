@@ -514,6 +514,17 @@ button:disabled {
   border-color: var(--border-soft);
 }
 
+/* The standby home's primary "Continue <last task>" action — subtle accent emphasis so it
+   leads the eye over the quick-start prompts, reusing the shared accent token. */
+.suggestion-button.is-primary {
+  border-color: var(--accent-primary, #4c8bf5);
+  color: var(--accent-primary, #4c8bf5);
+}
+.suggestion-button.is-primary:hover:not(:disabled) {
+  border-color: var(--accent-primary, #4c8bf5);
+  background: color-mix(in srgb, var(--accent-primary, #4c8bf5) 12%, transparent);
+}
+
 .secondary-button {
   width: 100%;
 }
