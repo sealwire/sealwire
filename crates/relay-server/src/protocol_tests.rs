@@ -136,6 +136,57 @@ fn compaction_preserves_reviews_revision_so_the_panel_can_refetch() {
 }
 
 #[test]
+fn remote_compaction_strips_provider_status_reason_but_keeps_status() {
+    use crate::protocol::{ProviderStatusKind, ProviderStatusView};
+    let mut snapshot = make_snapshot();
+    snapshot.provider_status = vec![ProviderStatusView {
+        provider: "codex".to_string(),
+        display_name: "Codex".to_string(),
+        status: ProviderStatusKind::Failed,
+        connected: false,
+        reason: Some(
+            "failed to start `/Users/someone/private/path/codex app-server`: handshake rejected"
+                .to_string(),
+        ),
+    }];
+
+    let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::RemoteSurface);
+    assert_eq!(compacted.provider_status.len(), 1);
+    // The status kind still tells remote devices the provider is down…
+    assert_eq!(
+        compacted.provider_status[0].status,
+        ProviderStatusKind::Failed
+    );
+    // …but the raw spawn/init diagnostics (may carry local paths) must NOT be
+    // broadcast to every paired device — same confidentiality gate as logs.
+    assert_eq!(compacted.provider_status[0].reason, None);
+}
+
+#[test]
+fn local_compaction_keeps_provider_status_reason_but_bounds_its_length() {
+    use crate::protocol::{ProviderStatusKind, ProviderStatusView};
+    let mut snapshot = make_snapshot();
+    snapshot.provider_status = vec![ProviderStatusView {
+        provider: "codex".to_string(),
+        display_name: "Codex".to_string(),
+        status: ProviderStatusKind::NotInstalled,
+        connected: false,
+        reason: Some("x".repeat(5_000)),
+    }];
+
+    let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::LocalWeb);
+    let reason = compacted.provider_status[0]
+        .reason
+        .as_ref()
+        .expect("the operator's own surface keeps the reason");
+    assert!(
+        reason.chars().count() <= 320,
+        "reason must be length-bounded even locally, got {}",
+        reason.chars().count()
+    );
+}
+
+#[test]
 fn compact_for_broker_limits_logs_and_transcript() {
     let compacted = make_snapshot().compact_for(SessionSnapshotCompactProfile::RemoteSurface);
 

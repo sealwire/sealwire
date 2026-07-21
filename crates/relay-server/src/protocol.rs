@@ -526,6 +526,21 @@ impl SessionSnapshot {
             self.logs.retain(|entry| entry.remote_safe);
         }
 
+        // `provider_status.reason` carries the raw spawn/init error, which can
+        // include local filesystem paths or provider diagnostics — operator-only
+        // content, same class as the logs stripped above. Drop it from
+        // broker-bound snapshots (the status kind alone still tells remote
+        // devices the provider is down); keep it for the operator's own surface,
+        // but bound its length on every profile so a pathological init error
+        // can't bloat the snapshot.
+        for status in &mut self.provider_status {
+            if budget.drop_operator_only_logs {
+                status.reason = None;
+            } else if let Some(reason) = &mut status.reason {
+                truncate_with_ellipsis(reason, budget.max_log_chars);
+            }
+        }
+
         if self.logs.len() > budget.max_logs {
             self.logs.truncate(budget.max_logs);
         }

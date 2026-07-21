@@ -190,17 +190,20 @@ pub struct ProviderStatusBase {
     pub spawn_error: Option<String>,
 }
 
-/// Best-effort classification of a spawn-error string into "the binary isn't
-/// there" vs. "it's there but failed". Heuristic on purpose: it keys off the
-/// OS ENOENT wording that `Command::spawn` surfaces, and reflects whatever
-/// binary actually failed to exec (e.g. `node` for the Claude worker), which
-/// is the most honest signal available without a separate PATH probe.
+/// Classify a spawn-error string into "the binary isn't there" (`NotInstalled`)
+/// vs. "it's there but failed" (`Failed`). Matches ONLY the canonical OS
+/// exec-failure (ENOENT) signatures that `Command::spawn` surfaces — not a
+/// loose "not found" substring, which wrongly caught POST-spawn RPC/handshake
+/// errors like "method not found" (the binary launched, so it IS installed;
+/// `initialize().await?` failed). Still a heuristic, but scoped to exec errors,
+/// and it reflects whatever binary actually failed to exec (e.g. `node` for the
+/// Claude worker) without needing a separate PATH probe.
 pub fn classify_spawn_error(reason: &str) -> crate::protocol::ProviderStatusKind {
     let low = reason.to_ascii_lowercase();
-    if low.contains("no such file")
-        || low.contains("os error 2")
-        || low.contains("not found")
-        || low.contains("cannot find")
+    if low.contains("os error 2")                 // ENOENT errno (Unix + Windows)
+        || low.contains("no such file or directory") // Unix ENOENT text
+        || low.contains("cannot find the file")   // Windows ENOENT text
+        || low.contains("program not found")
     {
         crate::protocol::ProviderStatusKind::NotInstalled
     } else {
@@ -342,4 +345,43 @@ where
     T: ProviderBridge + 'static,
 {
     result.map(|bridge| Arc::new(bridge) as Arc<dyn ProviderBridge>)
+}
+
+#[cfg(test)]
+mod classify_tests {
+    use super::classify_spawn_error;
+    use crate::protocol::ProviderStatusKind;
+
+    #[test]
+    fn enoent_from_command_spawn_is_not_installed() {
+        assert_eq!(
+            classify_spawn_error(
+                "failed to start `codex app-server`: No such file or directory (os error 2)"
+            ),
+            ProviderStatusKind::NotInstalled
+        );
+    }
+
+    #[test]
+    fn post_spawn_method_not_found_is_failed_not_not_installed() {
+        // These come from `initialize().await?` AFTER the binary launched, so
+        // the binary IS installed and the classification must be `Failed`. A
+        // loose "not found" substring used to mislabel them as `NotInstalled`.
+        assert_eq!(
+            classify_spawn_error("initialize failed: Method not found (-32601)"),
+            ProviderStatusKind::Failed
+        );
+        assert_eq!(
+            classify_spawn_error("handshake rejected: method not found"),
+            ProviderStatusKind::Failed
+        );
+    }
+
+    #[test]
+    fn timeout_is_failed() {
+        assert_eq!(
+            classify_spawn_error("timed out after 30s while starting Codex"),
+            ProviderStatusKind::Failed
+        );
+    }
 }
