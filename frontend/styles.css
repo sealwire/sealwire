@@ -3,12 +3,12 @@
 :root {
   color-scheme: dark;
 
-  /* Surfaces — neutral near-black, no blue tint */
-  --surface-0: #0a0a0b;
-  --surface-1: #131316;
-  --surface-2: #1c1c20;
-  --surface-3: #26262c;
-  --surface-overlay: rgba(10, 10, 11, 0.72);
+  /* Surfaces — brand navy ramp, drawn from the seal mark (#022042) */
+  --surface-0: #0b1a2b;
+  --surface-1: #0f2236;
+  --surface-2: #13293f;
+  --surface-3: #213b4d;
+  --surface-overlay: rgba(6, 14, 24, 0.72);
 
   /* Legacy aliases — keep existing rules working */
   --bg-base: var(--surface-0);
@@ -23,31 +23,31 @@
   --border-subtle: var(--border-soft);
   --border-prominent: var(--border-firm);
 
-  /* Typography */
-  --text-1: #f4f4f5;
-  --text-2: #a1a1aa;
-  --text-3: #71717a;
-  --text-faint: #52525b;
+  /* Typography — cool white / blue-grey on navy */
+  --text-1: #eaf1f7;
+  --text-2: #9db2cc;
+  --text-3: #6f86a3;
+  --text-faint: #4d616c;
   --text-primary: var(--text-1);
   --text-secondary: var(--text-2);
   --text-tertiary: var(--text-3);
 
-  /* Accent — warm indigo/violet, single hue */
-  --accent: #818cf8;
-  --accent-hover-color: #a5b4fc;
-  --accent-soft-bg: rgba(129, 140, 248, 0.12);
-  --accent-on: #ffffff;
+  /* Accent — the brand teal (seal ring), the "agent is alive" colour */
+  --accent: #0098ae;
+  --accent-hover-color: #25b1c8;
+  --accent-soft-bg: rgba(0, 152, 174, 0.14);
+  --accent-on: #04222a;
   --accent-primary: var(--accent);
   --accent-hover: var(--accent-hover-color);
   --accent-contrast: var(--accent-on);
 
-  /* Semantic — desaturated */
-  --ok-fg: #4ade80;
-  --ok-bg: rgba(74, 222, 128, 0.10);
-  --warn-fg: #facc15;
-  --warn-bg: rgba(250, 204, 21, 0.10);
-  --err-fg: #f87171;
-  --err-bg: rgba(248, 113, 113, 0.10);
+  /* Semantic — text-legible (>=4.5:1 on surface) green / amber / red */
+  --ok-fg: #2e944e;
+  --ok-bg: rgba(46, 148, 78, 0.14);
+  --warn-fg: #c48225;
+  --warn-bg: rgba(196, 130, 37, 0.14);
+  --err-fg: #d95b56;
+  --err-bg: rgba(217, 91, 86, 0.14);
   --status-ready-bg: var(--ok-bg);
   --status-ready-text: var(--ok-fg);
   --status-alert-bg: var(--warn-bg);
@@ -119,29 +119,22 @@
   --modal-backdrop: rgba(0, 0, 0, 0.7);
   --drawer-backdrop: rgba(15, 23, 42, 0.58);
 
-  /* Diff highlights */
-  --diff-add-bg: rgba(37, 128, 84, 0.16);
-  --diff-del-bg: rgba(180, 58, 58, 0.16);
+  /* Diff highlights — tints of the new success/danger */
+  --diff-add-bg: rgba(46, 148, 78, 0.16);
+  --diff-del-bg: rgba(217, 91, 86, 0.16);
   --diff-meta-bg: rgba(255, 255, 255, 0.035);
 
-  /* Color-guard corral (color ratchet baseline 59 -> 0): these six were already
-     REFERENCED throughout the app as `var(--token, #hex)` — someone had already
-     reached for a token by this exact name, it just had no :root definition, so
-     every reference silently rendered its literal fallback in BOTH themes (the
-     fallback doesn't care which theme is active). Defining them here preserves
-     today's exact rendering with zero visual change; it does not merge them into
-     the separate --ok-fg/--warn-fg/--err-fg system below, even where the role
-     looks similar — that consolidation is a deliberate design decision for the
-     next (color-system) pass, not a side effect of corralling raw literals.
-     --diff-del-fg intentionally stays distinct from --err-fg (#f87171): today
-     workspace-changes-del/workspace-diff-chip-del already render a different red
-     (#ef4444) than message-card-error/ask-user-error's --err-fg — a real,
-     pre-existing inconsistency this step preserves rather than silently fixes. */
-  --accent-warning: #e6a23c;
-  --status-alert: #e07a5f;
-  --text-warning: #b54708;
-  --diff-add-fg: #22c55e;
-  --diff-del-fg: #ef4444;
+  /* Semantic aliases — every "warning/attention", "success/added", and
+     "error/deleted" reference in the app now resolves to the ONE canonical
+     --warn-fg / --ok-fg / --err-fg per theme (the consolidation approved with
+     the color-system swap). Previously these carried near-but-different literals
+     (two reds, several ambers); folding them here removes that drift. Being
+     aliases, they follow the theme automatically. */
+  --accent-warning: var(--warn-fg);
+  --status-alert: var(--warn-fg);
+  --text-warning: var(--warn-fg);
+  --diff-add-fg: var(--ok-fg);
+  --diff-del-fg: var(--err-fg);
   --surface-muted: rgba(127, 127, 127, 0.14);
 
   /* Color-guard corral: these five had NO token reference at all (naked
@@ -162,20 +155,20 @@
   --provider-claude-bg: rgba(234, 88, 12, 0.20);
   --provider-claude-border: color-mix(in srgb, #ea580c 28%, var(--border-subtle));
   --provider-claude-fill: color-mix(in srgb, #ea580c 18%, transparent);
-  --provider-codex-fg: #67e8f9;
-  --provider-codex-bg: rgba(8, 145, 178, 0.20);
-  --provider-codex-border: color-mix(in srgb, #0891b2 24%, var(--border-subtle));
-  --provider-codex-fill: color-mix(in srgb, #0891b2 18%, transparent);
+  --provider-codex-fg: #5485c4;
+  --provider-codex-bg: rgba(84, 133, 196, 0.20);
+  --provider-codex-border: color-mix(in srgb, #5485c4 24%, var(--border-subtle));
+  --provider-codex-fill: color-mix(in srgb, #5485c4 18%, transparent);
 }
 
 :root[data-theme="light"] {
     color-scheme: light;
 
-    /* Surfaces — near-white, neutral */
-    --surface-0: #fafafa;
+    /* Surfaces — pale brand-tinted cool white */
+    --surface-0: #eef2f6;
     --surface-1: #ffffff;
-    --surface-2: #f4f4f5;
-    --surface-3: #e4e4e7;
+    --surface-2: #e4e9ef;
+    --surface-3: #d0d9de;
     --surface-overlay: rgba(255, 255, 255, 0.72);
 
     /* Borders — hairline darks on light */
@@ -183,24 +176,25 @@
     --border-soft:  rgba(0, 0, 0, 0.09);
     --border-firm:  rgba(0, 0, 0, 0.14);
 
-    /* Typography — invert lightness, keep ramp */
-    --text-1: #18181b;
-    --text-2: #52525b;
-    --text-3: #71717a;
-    --text-faint: #a1a1aa;
+    /* Typography — deep navy / blue-grey on the cool-white surface */
+    --text-1: #0a1d26;
+    --text-2: #315260;
+    --text-3: #4f6f79;
+    --text-faint: #738a94;
 
-    /* Accent — darker indigo for AA contrast on white */
-    --accent: #6366f1;
-    --accent-hover-color: #4f46e5;
-    --accent-soft-bg: rgba(99, 102, 241, 0.10);
+    /* Accent — teal darkened for AA contrast on white; on-accent flips to near-white */
+    --accent: #006291;
+    --accent-hover-color: #00557c;
+    --accent-soft-bg: rgba(0, 98, 145, 0.10);
+    --accent-on: #f2fbfd;
 
-    /* Semantic — darker hues for AA contrast on light */
-    --ok-fg:  #16a34a;
-    --ok-bg:  rgba(22, 163, 74, 0.10);
-    --warn-fg:#ca8a04;
-    --warn-bg:rgba(202, 138, 4, 0.10);
-    --err-fg: #dc2626;
-    --err-bg: rgba(220, 38, 38, 0.10);
+    /* Semantic — text-legible (>=4.5:1) green / amber / red on light */
+    --ok-fg:  #1b6a14;
+    --ok-bg:  rgba(27, 106, 20, 0.12);
+    --warn-fg:#9d5e00;
+    --warn-bg:rgba(157, 94, 0, 0.12);
+    --err-fg: #c13045;
+    --err-bg: rgba(193, 48, 69, 0.12);
     --status-neutral-bg: rgba(0, 0, 0, 0.06);
 
     /* Shadows — shorter, softer on light */
@@ -220,9 +214,9 @@
     --modal-backdrop: rgba(0, 0, 0, 0.4);
     --drawer-backdrop: rgba(0, 0, 0, 0.3);
 
-    /* Diff highlights — brighter on light bg */
-    --diff-add-bg: rgba(34, 197, 94, 0.14);
-    --diff-del-bg: rgba(239, 68, 68, 0.14);
+    /* Diff highlights — tints of the new success/danger on light bg */
+    --diff-add-bg: rgba(27, 106, 20, 0.12);
+    --diff-del-bg: rgba(193, 48, 69, 0.12);
     --diff-meta-bg: rgba(0, 0, 0, 0.035);
 
     /* Provider brand accents — darker text for AA contrast on light */
@@ -231,10 +225,10 @@
     --provider-claude-bg: rgba(234, 88, 12, 0.12);
     --provider-claude-border: color-mix(in srgb, #ea580c 35%, var(--border-subtle));
     --provider-claude-fill: color-mix(in srgb, #ea580c 12%, transparent);
-    --provider-codex-fg: #0e7490;
-    --provider-codex-bg: rgba(8, 145, 178, 0.12);
-    --provider-codex-border: color-mix(in srgb, #0891b2 35%, var(--border-subtle));
-    --provider-codex-fill: color-mix(in srgb, #0891b2 12%, transparent);
+    --provider-codex-fg: #376daf;
+    --provider-codex-bg: rgba(55, 109, 175, 0.12);
+    --provider-codex-border: color-mix(in srgb, #376daf 35%, var(--border-subtle));
+    --provider-codex-fill: color-mix(in srgb, #376daf 12%, transparent);
 }
 
 * {
