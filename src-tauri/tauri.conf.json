@@ -26,6 +26,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "icon": ["icons/icon.png"],
     "externalBin": ["binaries/relay-server", "binaries/node"],
     "resources": {
       "resources/claude-worker/": "claude-worker/"

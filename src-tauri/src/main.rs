@@ -9,7 +9,11 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
+use tauri::{
+    menu::{Menu, MenuItem, PredefinedMenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder,
+};
 use tauri_plugin_shell::{
     process::{CommandChild, CommandEvent},
     ShellExt,
@@ -18,6 +22,10 @@ use url::Url;
 
 const HOSTED_BROKER_URL: &str = "wss://agent-relay.up.railway.app";
 const LOG_LIMIT: usize = 400;
+const TRAY_ID: &str = "sealwire-tray";
+const TRAY_OPEN_LOCAL_ID: &str = "open-local";
+const TRAY_OPEN_LAUNCHER_ID: &str = "open-launcher";
+const TRAY_QUIT_ID: &str = "quit";
 // Tauri flattens externalBin next to the executable by basename; the shell
 // plugin resolves .sidecar(name) as <exe_dir>/name verbatim. Must be the bare
 // basename (NOT "binaries/relay-server", which would resolve to a missing
@@ -525,6 +533,9 @@ fn open_surface_window(
             .show()
             .map_err(|error| format!("failed to show {title}: {error}"))?;
         window
+            .unminimize()
+            .map_err(|error| format!("failed to restore {title}: {error}"))?;
+        window
             .set_focus()
             .map_err(|error| format!("failed to focus {title}: {error}"))?;
         return Ok(());
@@ -536,6 +547,87 @@ fn open_surface_window(
         .min_inner_size(900.0, 620.0)
         .build()
         .map_err(|error| format!("failed to open {title}: {error}"))?;
+    Ok(())
+}
+
+fn show_main_window(app: &AppHandle) -> Result<(), String> {
+    let Some(window) = app.get_webview_window("main") else {
+        return Err("launcher window is not available".to_string());
+    };
+    window
+        .show()
+        .map_err(|error| format!("failed to show Sealwire: {error}"))?;
+    window
+        .unminimize()
+        .map_err(|error| format!("failed to restore Sealwire: {error}"))?;
+    window
+        .set_focus()
+        .map_err(|error| format!("failed to focus Sealwire: {error}"))
+}
+
+fn open_local_or_launcher(app: &AppHandle) {
+    let local_result = app
+        .try_state::<Arc<RelaySupervisor>>()
+        .ok_or_else(|| "relay supervisor is not available".to_string())
+        .and_then(|supervisor| {
+            let status = supervisor.status().relay;
+            if !status.ready {
+                return Err("relay is not ready".to_string());
+            }
+            let port = status
+                .port
+                .ok_or_else(|| "relay is not running".to_string())?;
+            open_surface_window(app, "sealwire-local", "Sealwire Local", &local_url(port))
+        });
+
+    if let Err(error) = local_result {
+        if let Some(supervisor) = app.try_state::<Arc<RelaySupervisor>>() {
+            supervisor.push_log(Some(app), "desktop", format!("open local failed: {error}"));
+        }
+        let _ = show_main_window(app);
+    }
+}
+
+fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
+    let open_local = MenuItem::with_id(app, TRAY_OPEN_LOCAL_ID, "Open Local", true, None::<&str>)?;
+    let open_launcher = MenuItem::with_id(
+        app,
+        TRAY_OPEN_LAUNCHER_ID,
+        "Show Launcher",
+        true,
+        None::<&str>,
+    )?;
+    let separator = PredefinedMenuItem::separator(app)?;
+    let quit = MenuItem::with_id(app, TRAY_QUIT_ID, "Quit Sealwire", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&open_local, &open_launcher, &separator, &quit])?;
+
+    let mut tray = TrayIconBuilder::with_id(TRAY_ID)
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .tooltip("Sealwire");
+    if let Some(icon) = app.default_window_icon().cloned() {
+        tray = tray.icon(icon).icon_as_template(true);
+    }
+    tray.on_menu_event(|app, event| match event.id().as_ref() {
+        TRAY_OPEN_LOCAL_ID => open_local_or_launcher(app),
+        TRAY_OPEN_LAUNCHER_ID => {
+            let _ = show_main_window(app);
+        }
+        TRAY_QUIT_ID => app.exit(0),
+        _ => {}
+    })
+    .on_tray_icon_event(|tray, event| {
+        if let TrayIconEvent::Click {
+            button: MouseButton::Left,
+            button_state: MouseButtonState::Up,
+            ..
+        } = event
+        {
+            open_local_or_launcher(tray.app_handle());
+        }
+    })
+    .build(app)?;
+
     Ok(())
 }
 
@@ -1068,6 +1160,7 @@ fn main() {
             let startup_supervisor = supervisor.clone();
             let startup_app = handle.clone();
             app.manage(supervisor);
+            setup_tray(app)?;
             tauri::async_runtime::spawn(async move {
                 if let Err(error) =
                     start_relay(startup_app.clone(), startup_supervisor.clone(), None).await
@@ -1079,9 +1172,9 @@ fn main() {
         })
         .on_window_event(|window, event| {
             if window.label() == "main" {
-                if let tauri::WindowEvent::CloseRequested { .. } = event {
-                    let supervisor = window.state::<Arc<RelaySupervisor>>();
-                    stop_relay(&window.app_handle(), supervisor.inner());
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
                 }
             }
         })
@@ -1089,8 +1182,8 @@ fn main() {
         .expect("error while building Sealwire desktop")
         .run(|app_handle, event| {
             // F2: guarantee the relay-server (and its node worker / codex children)
-            // are killed on every quit path — Cmd+Q, app-menu Quit, last window
-            // closing — not just the main window's close button.
+            // are killed on true app quit (tray Quit, Cmd+Q, app-menu Quit).
+            // Closing the launcher window is now a background/minimize action.
             if let tauri::RunEvent::ExitRequested { .. } = event {
                 if let Some(supervisor) = app_handle.try_state::<Arc<RelaySupervisor>>() {
                     stop_relay(app_handle, supervisor.inner());
