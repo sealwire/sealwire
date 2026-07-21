@@ -53,7 +53,7 @@
 
 .desktop-shell .desktop-title strong {
   font-size: var(--text-md);
-  font-weight: 700;
+  font-weight: var(--weight-strong);
 }
 
 .desktop-shell .desktop-title span {
@@ -126,7 +126,7 @@
   gap: 12px;
   color: var(--text-2);
   font-size: var(--text-sm);
-  font-weight: 700;
+  font-weight: var(--weight-strong);
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
@@ -140,7 +140,7 @@
 .desktop-shell .field-label {
   color: var(--text-3);
   font-size: var(--text-sm);
-  font-weight: 600;
+  font-weight: var(--weight-strong);
 }
 
 .desktop-shell .input-row {
@@ -187,7 +187,7 @@
   color: var(--text-2);
   cursor: pointer;
   font-size: var(--text-ui);
-  font-weight: 600;
+  font-weight: var(--weight-strong);
   transition: background-color 0.15s ease, color 0.15s ease;
 }
 
@@ -213,7 +213,7 @@
   background: var(--accent);
   color: var(--accent-on);
   cursor: pointer;
-  font-weight: 600;
+  font-weight: var(--weight-strong);
   transition: background-color 0.15s ease, border-color 0.15s ease;
 }
 
@@ -308,5 +308,5 @@
   background: var(--err-bg);
   color: var(--err-fg);
   font-size: var(--text-ui);
-  font-weight: 600;
+  font-weight: var(--weight-strong);
 }
