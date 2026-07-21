@@ -5191,6 +5191,17 @@ mod review_tests {
         // When true, a parent FIX turn (driven between rounds) parks on an approval —
         // exercising the "author's fix needs the user → escalate" path.
         raise_approval_on_fix_turn: Arc<AtomicBool>,
+        // When true, a parent FIX turn COMPLETES normally but emits NO assistant
+        // message — modeling a Claude author that addresses findings via tool edits
+        // without a trailing text block (its worker only emits `assistant_message`
+        // when a turn has a text block). The review loop must still advance to the
+        // next round instead of mistaking the text-less fix for a no-op author.
+        suppress_fix_reply: Arc<AtomicBool>,
+        // When set (marker line), a parent FIX turn appends that marker to the
+        // tracked `seed.txt` in the thread's cwd — modeling an author that edits
+        // code. Lets a test assert the NEXT round re-reviews the REFRESHED workspace
+        // diff (the marker surfaces in the reviewer's re-review prompt).
+        mutate_cwd_on_fix_turn: Arc<Mutex<Option<String>>>,
         // Threads "evicted" by a simulated provider/app-server restart: a turn can't
         // start on one until it is re-loaded via `resume_thread`. Models Codex, where
         // approvalPolicy/sandbox attach on thread/resume, not turn/start.
@@ -5236,6 +5247,8 @@ mod review_tests {
                 suppress_reviewer_reply: Arc::new(AtomicBool::new(false)),
                 reviewer_verdicts: Arc::new(Mutex::new(std::collections::VecDeque::new())),
                 raise_approval_on_fix_turn: Arc::new(AtomicBool::new(false)),
+                suppress_fix_reply: Arc::new(AtomicBool::new(false)),
+                mutate_cwd_on_fix_turn: Arc::new(Mutex::new(None)),
                 unloaded_threads: Arc::new(Mutex::new(std::collections::HashSet::new())),
                 resumes: Arc::new(Mutex::new(Vec::new())),
                 complete_delay_ms: Arc::new(AtomicU64::new(15)),
@@ -5451,11 +5464,33 @@ mod review_tests {
             // A reviewer/re-review turn always carries the relay-collected workspace
             // diff; recap/other turns do not.
             let is_reviewer_diff_turn = text.contains("Workspace diff collected by the relay");
-            let emit_assistant = self.emit_assistant.load(Ordering::Relaxed)
-                && !(is_reviewer_diff_turn && self.suppress_reviewer_reply.load(Ordering::Relaxed));
             let is_reviewer_turn = text.contains("You are reviewing another agent's work");
             // The parent fix turn (driven between rounds) carries this marker.
             let is_fix_turn = text.contains("Address the findings below");
+            // Model an author that EDITS code on its fix turn: append the configured
+            // marker to the tracked `seed.txt` in this thread's cwd, so the NEXT
+            // round's freshly-collected workspace diff reflects the change.
+            if is_fix_turn {
+                if let Some(marker) = self.mutate_cwd_on_fix_turn.lock().await.clone() {
+                    let cwd = self
+                        .start_thread_cwds
+                        .lock()
+                        .await
+                        .iter()
+                        .find(|(id, _)| id == &thread_id)
+                        .map(|(_, cwd)| cwd.clone());
+                    if let Some(cwd) = cwd {
+                        let path = std::path::Path::new(&cwd).join("seed.txt");
+                        let mut contents = std::fs::read_to_string(&path).unwrap_or_default();
+                        contents.push_str(&marker);
+                        contents.push('\n');
+                        std::fs::write(&path, contents).expect("author fix should edit seed.txt");
+                    }
+                }
+            }
+            let emit_assistant = self.emit_assistant.load(Ordering::Relaxed)
+                && !(is_reviewer_diff_turn && self.suppress_reviewer_reply.load(Ordering::Relaxed))
+                && !(is_fix_turn && self.suppress_fix_reply.load(Ordering::Relaxed));
             // A reviewer turn ends with the verdict the test queued (default needs-changes).
             let reply_text = if is_reviewer_diff_turn {
                 let verdict = self
@@ -7745,6 +7780,144 @@ settings update: {error}"
             2
         );
         assert_eq!(count_turns_with(&turns, "Address the findings below"), 1);
+    }
+
+    #[tokio::test]
+    async fn review_loop_continues_when_claude_author_fix_emits_no_text() {
+        // Regression: a Codex reviewer reviewing a Claude author. Round 1 is
+        // NEEDS_CHANGES; the Claude author addresses the findings by EDITING files
+        // but ends the turn with no trailing text block — so its worker emits no
+        // `assistant_message` and the parent thread gains no fresh AgentText entry.
+        // The loop used to gate the next round on a fresh author *reply* and so
+        // escalated after round 1 ("codex review claude, then only 1 round"). The
+        // fix turn completed normally, so the review must ADVANCE to round 2.
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["claude_code", "codex"]).await;
+        // Author (parent) = Claude; reviewer = Codex.
+        start_parent(&app, cwd, "claude_code").await;
+        let claude = providers.get("claude_code").unwrap();
+        // The Claude author's between-round fix turn edits code but emits no text.
+        claude.suppress_fix_reply.store(true, Ordering::Relaxed);
+        // The Codex reviewer: NEEDS_CHANGES first, then APPROVE on the re-review.
+        queue_verdicts(
+            providers.get("codex").unwrap(),
+            &["NEEDS_CHANGES", "APPROVE"],
+        )
+        .await;
+
+        let mut input = review_input("codex");
+        input.max_rounds = Some(3);
+        let receipt = app
+            .request_review(input)
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+
+        assert_eq!(
+            job.status, "complete",
+            "a text-less author fix must not be mistaken for a no-op (job err: {:?})",
+            job.error
+        );
+        assert_eq!(
+            job.round, 2,
+            "the review must advance to round 2 after the author's text-less fix"
+        );
+        assert_eq!(job.verdict.as_deref(), Some("approve"));
+        // Exactly one fix turn ran between the two rounds, and the reviewer
+        // re-reviewed (two diff-carrying reviewer turns).
+        let codex_turns = providers.get("codex").unwrap().turns.lock().await.clone();
+        assert_eq!(
+            count_turns_with(&codex_turns, "Workspace diff collected by the relay"),
+            2,
+            "the reviewer ran both the initial review and the re-review"
+        );
+        let claude_turns = claude.turns.lock().await.clone();
+        assert_eq!(
+            count_turns_with(&claude_turns, "Address the findings below"),
+            1,
+            "one author fix turn between the two rounds"
+        );
+    }
+
+    // Initialize `cwd` as a git work tree with a committed `seed.txt`, so
+    // `collect_workspace_diff` yields a real diff once the file is modified.
+    fn init_git_seed(cwd: &str) {
+        use std::process::Command;
+        let git = |args: &[&str]| {
+            let ok = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("git runs")
+                .status
+                .success();
+            assert!(ok, "git {args:?} failed");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "Test"]);
+        std::fs::write(std::path::Path::new(cwd).join("seed.txt"), "line1\nline2\n").unwrap();
+        git(&["add", "seed.txt"]);
+        git(&["commit", "-q", "-m", "seed"]);
+    }
+
+    #[tokio::test]
+    async fn review_loop_re_reviews_the_refreshed_diff_after_a_text_less_author_fix() {
+        // Stronger end-to-end guard for the Codex-reviews-Claude fix: it's not enough
+        // that the loop ADVANCES past a text-less author fix — the next round must
+        // re-review the REFRESHED workspace diff (the author's actual edits), not a
+        // stale one. Here the Claude author edits `seed.txt` on its fix turn while
+        // emitting no assistant text, and the Codex reviewer must see that edit on the
+        // re-review before approving.
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        init_git_seed(cwd);
+
+        let (app, providers) = build_review_app(cwd, &["claude_code", "codex"]).await;
+        start_parent(&app, cwd, "claude_code").await;
+        let claude = providers.get("claude_code").unwrap();
+        // Claude author: fix turn edits code (adds a marker) but emits no text block.
+        claude.suppress_fix_reply.store(true, Ordering::Relaxed);
+        *claude.mutate_cwd_on_fix_turn.lock().await = Some("AUTHOR_FIX_MARKER".to_string());
+        // Codex reviewer: NEEDS_CHANGES on the clean tree, APPROVE once it sees the fix.
+        queue_verdicts(
+            providers.get("codex").unwrap(),
+            &["NEEDS_CHANGES", "APPROVE"],
+        )
+        .await;
+
+        let mut input = review_input("codex");
+        input.max_rounds = Some(3);
+        let receipt = app
+            .request_review(input)
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+
+        assert_eq!(job.status, "complete", "job err: {:?}", job.error);
+        assert_eq!(
+            job.round, 2,
+            "approved on the re-review of the refreshed diff"
+        );
+
+        // The two diff-carrying reviewer turns: the first saw the clean tree, the
+        // second (re-review) must carry the author's edit — proving the loop
+        // re-reviewed the REFRESHED diff rather than a stale one.
+        let codex_turns = providers.get("codex").unwrap().turns.lock().await.clone();
+        let review_turns: Vec<&(String, String)> = codex_turns
+            .iter()
+            .filter(|(_, text)| text.contains("Workspace diff collected by the relay"))
+            .collect();
+        assert_eq!(review_turns.len(), 2, "an initial review and one re-review");
+        assert!(
+            !review_turns[0].1.contains("AUTHOR_FIX_MARKER"),
+            "the initial review saw the clean tree (no marker yet)"
+        );
+        assert!(
+            review_turns[1].1.contains("AUTHOR_FIX_MARKER"),
+            "the re-review must see the author's refreshed workspace diff"
+        );
     }
 
     #[tokio::test]

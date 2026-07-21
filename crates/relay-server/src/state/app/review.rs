@@ -798,10 +798,6 @@ last message (no recap turn)."
             self.set_job_status(&job_id, ReviewJobStatus::AddressingFindings)
                 .await;
             let fix_prompt = parent_fix_prompt(&reviewer_provider, &review, round, max_rounds);
-            let parent_baseline = self
-                .latest_assistant_entry(&parent_thread_id)
-                .await
-                .map(|(item_id, _)| item_id);
             // The verdict/post-back decision ran outside a wait checkpoint; re-check so a
             // cancel can't trigger an orphaned author fix turn (which would edit code).
             if self.review_aborted(&job_id).await {
@@ -855,24 +851,20 @@ last message (no recap turn)."
                     return;
                 }
             }
-            // Require a FRESH author reply; if the fix turn produced none, escalate
-            // rather than re-review an unchanged tree forever.
-            let author_responded = match self.latest_assistant_entry(&parent_thread_id).await {
-                Some((item_id, _)) => parent_baseline.as_deref() != Some(item_id.as_str()),
-                None => false,
-            };
-            if !author_responded {
-                let message = review_escalated_message(&reviewer_provider, round, &review);
-                self.finish_review_to_parent(
-                    &job_id,
-                    &parent_thread_id,
-                    message,
-                    ReviewJobStatus::Escalated,
-                )
-                .await;
-                return;
-            }
-            // Loop to the next round: fresh diff + re-review of the author's changes.
+            // The author's fix turn completed normally (a cancel / approval / ask /
+            // stall already returned above). Advance to the next round and re-review
+            // the resulting tree — the loop is bounded by `max_rounds`, so a no-op
+            // author is capped, not infinite.
+            //
+            // We deliberately do NOT gate this on a fresh assistant *text* reply. A
+            // Claude author often addresses findings by editing files and ending the
+            // turn with no trailing text block, so its worker emits no
+            // `assistant_message` and the parent thread gains no new AgentText entry.
+            // Keying "did the author respond?" on a fresh text message mistook that
+            // valid, code-changing fix for a no-op and escalated after round 1 (the
+            // "Codex reviews Claude never gets a round 2" bug). The workspace diff we
+            // collect at the top of the next round is the authoritative signal of
+            // what actually changed.
         }
     }
 
