@@ -700,6 +700,130 @@ test("viewing the live thread stays pinned when another client moves live focus"
   assert.equal(state.session.transcript[0].text, "thread A");
 });
 
+test("remote view of an idle saved Codex thread stays composable despite stale activity", async () => {
+  activeBrowser = installBrowserStubs();
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { handleRemoteBrokerPayload } = await import("./actions.js");
+  const { canComposeThread } = await import("../shared/thread-compose.js");
+  const { sessionIsWorking } = await import("../shared/thread-attention.js");
+  const {
+    applySessionSnapshot,
+    applyTranscriptDelta,
+    clearSessionRuntime,
+    viewRemoteThread,
+  } = await import("./session-ops.js");
+
+  clearSessionRuntime();
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-view-idle",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: null,
+    sessionClaimExpiresAt: null,
+  });
+  seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
+  state.pendingActions.clear();
+  state.threads = [
+    { id: "saved-codex", cwd: "/tmp/saved", provider: "codex", status: "unknown" },
+  ];
+  seedTranscriptHydrationState(state);
+  state.socket = {
+    readyState: 1,
+    send(frameText) {
+      const frame = JSON.parse(frameText);
+      setImmediate(async () => {
+        await handleRemoteBrokerPayload({
+          kind: "remote_action_result",
+          action_id: frame.payload.action_id,
+          action: "fetch_thread_transcript",
+          ok: true,
+          snapshot: {},
+          thread_transcript: {
+            thread_id: "saved-codex",
+            server_time: 101,
+            entries: [{ item_id: "tail", kind: "agent_text", text: "done", status: "completed" }],
+            prev_cursor: null,
+            thread_state: {
+              active_turn_id: null,
+              current_cwd: "/tmp/saved",
+              current_phase: null,
+              current_status: "notLoaded",
+              current_tool: null,
+              provider: "codex",
+              review_locked: false,
+              settings_writable: true,
+            },
+          },
+        });
+      });
+    },
+  };
+
+  const staleLiveSnapshot = {
+    active_thread_id: "live-thread",
+    active_turn_id: "turn-live",
+    current_status: "active",
+    pending_approvals: [],
+    pending_ask_user_questions: [],
+    server_time: 100,
+    thread_activity: [{ thread_id: "saved-codex", phase: "thinking", tool: "bash" }],
+    transcript: [],
+    transcript_truncated: false,
+  };
+  applySessionSnapshot(staleLiveSnapshot);
+
+  assert.equal(await viewRemoteThread("saved-codex"), true);
+  assert.equal(state.session.active_thread_id, "saved-codex");
+  assert.equal(state.session.active_turn_id, null);
+  assert.equal(state.session.current_status, "notLoaded");
+  assert.equal(state.session.current_phase, null);
+  assert.equal(state.session.current_tool, null);
+  assert.equal(state.session.view_last_refresh_server_time, 101);
+  assert.equal(sessionIsWorking(state.session), false);
+  assert.equal(
+    canComposeThread({
+      activeTurnId: state.session.active_turn_id,
+      hasActiveSession: Boolean(state.session.active_thread_id),
+      hasControllerLease: false,
+      reviewLocked: false,
+    }),
+    true
+  );
+
+  applySessionSnapshot(staleLiveSnapshot);
+  assert.equal(state.session.active_turn_id, null);
+  assert.equal(state.session.current_phase, null);
+  assert.equal(state.session.view_last_refresh_server_time, 101);
+
+  applyTranscriptDelta({
+    thread_id: "live-thread",
+    item_id: "live-delta",
+    turn_id: "turn-live",
+    delta: "still live",
+    delta_kind: "agent_text",
+    revision: 1,
+    server_time: 102,
+  });
+  assert.equal(state.realSession.server_time, 102);
+  assert.equal(state.realSession.thread_activity_server_time, 100);
+  assert.equal(state.session.active_turn_id, null);
+  assert.equal(state.session.current_phase, null);
+
+  clearSessionRuntime();
+  state.socket = null;
+  state.pendingActions.clear();
+});
+
 test("successful first send follows a promoted Claude pending thread id", async () => {
   activeBrowser = installBrowserStubs();
 
@@ -3980,4 +4104,57 @@ test("projectRemoteViewedSession keeps the viewed thread's reviewers across re-p
     reprojected.reviewer_threads.some((r) => r.reviewer_thread_id === "rev-of-viewed"),
     "re-projection (snapshot/delta) must KEEP the viewed thread's reviewers, not collapse to []"
   );
+});
+
+test("projectRemoteViewedSession keeps same-second activity authoritative", async () => {
+  activeBrowser = installBrowserStubs();
+  const { projectRemoteViewedSession } = await import("./session-ops.js");
+  const { sessionIsWorking } = await import("../shared/thread-attention.js");
+
+  const projected = projectRemoteViewedSession(
+    {
+      active_thread_id: "live-thread",
+      server_time: 200,
+      thread_activity: [{ thread_id: "viewed-thread", phase: "tool", tool: "bash" }],
+    },
+    "viewed-thread",
+    {
+      active_thread_id: "viewed-thread",
+      view_last_refresh_server_time: 200,
+      thread_state: {
+        active_turn_id: null,
+        current_status: "notLoaded",
+      },
+    }
+  );
+
+  assert.equal(projected.active_turn_id, "view:viewed-thread");
+  assert.equal(projected.current_phase, "tool");
+  assert.equal(projected.current_tool, "bash");
+  assert.equal(sessionIsWorking(projected), true);
+});
+
+test("projectRemoteViewedSession keeps activity authoritative without server_time", async () => {
+  activeBrowser = installBrowserStubs();
+  const { projectRemoteViewedSession } = await import("./session-ops.js");
+  const { sessionIsWorking } = await import("../shared/thread-attention.js");
+
+  const projected = projectRemoteViewedSession(
+    {
+      active_thread_id: "live-thread",
+      thread_activity: [{ thread_id: "viewed-thread", phase: "thinking", tool: null }],
+    },
+    "viewed-thread",
+    {
+      active_thread_id: "viewed-thread",
+      view_last_refresh_server_time: 200,
+      thread_state: {
+        active_turn_id: null,
+        current_status: "notLoaded",
+      },
+    }
+  );
+
+  assert.equal(projected.active_turn_id, "view:viewed-thread");
+  assert.equal(sessionIsWorking(projected), true);
 });

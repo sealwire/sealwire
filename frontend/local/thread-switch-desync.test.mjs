@@ -25,7 +25,9 @@ import {
   viewOnlySelfHealThreadId,
   VIEW_ONLY_LOAD_RETRY_BACKOFF_MS,
 } from "./view-only-thread.js";
+import { canComposeThread, composerButtonState } from "../shared/thread-compose.js";
 import { isReviewInProgressForThread } from "../shared/review-state.js";
+import { sessionIsWorking } from "../shared/thread-attention.js";
 
 function snap(activeThreadId, transcript = [], extra = {}) {
   return {
@@ -151,4 +153,111 @@ test("the active thread is never view-only loaded, and absent inputs load nothin
   );
   assert.equal(viewOnlySelfHealThreadId(snap("B"), { viewThreadId: null, now: 0 }), null);
   assert.equal(viewOnlySelfHealThreadId(null, { viewThreadId: "A", now: 0 }), null);
+});
+
+test("view-only idle saved Codex session remains composable", () => {
+  const viewThreadId = "saved-codex";
+  const staleSnapshotServerTime = 1_784_662_800;
+  const projected = projectViewOnlySession(snap("live-thread", [], {
+    // This is the bad transient: an older compact snapshot still claims the
+    // viewed thread is active, but the freshly loaded thread_state says it is
+    // a saved idle Codex thread (`notLoaded`).
+    server_time: staleSnapshotServerTime,
+    thread_activity: [{ thread_id: viewThreadId, phase: "thinking", tool: null }],
+  }), {
+    viewThreadId,
+    viewOnlyThread: buildViewOnlyPin({
+      threadId: viewThreadId,
+      page: { thread_id: viewThreadId, entries: [{ item_id: "tail" }], prev_cursor: null },
+      activeTurnId: null,
+      currentStatus: "notLoaded",
+      lastRefreshAt: staleSnapshotServerTime * 1000 + 500,
+      lastRefreshServerTime: staleSnapshotServerTime + 1,
+      settingsWritable: true,
+    }),
+  });
+  const canWrite = projected.active_controller_device_id !== "__view_only__";
+  const canCompose = canComposeThread({
+    activeTurnId: projected.active_turn_id,
+    hasActiveSession: Boolean(projected.active_thread_id),
+    hasControllerLease: canWrite,
+    reviewLocked: false,
+  });
+  const buttons = composerButtonState({
+    composerReady:
+      Boolean(projected.active_thread_id) &&
+      canCompose &&
+      isViewingConversation(viewThreadId, projected),
+    turnRunning: Boolean(projected.active_turn_id),
+    threadWorking: sessionIsWorking(projected),
+    activeThreadFrozen: false,
+    canWrite,
+    viewOnly: projected.view_only,
+    submitInFlight: false,
+  });
+
+  assert.equal(projected.current_status, "notLoaded");
+  assert.equal(projected.current_phase, null);
+  assert.equal(projected.current_tool, null);
+  assert.equal(sessionIsWorking(projected), false);
+  assert.equal(canCompose, true);
+  assert.equal(buttons.sendDisabled, false);
+  assert.equal(
+    !projected.active_thread_id ||
+      !canCompose ||
+      !isViewingConversation(viewThreadId, projected),
+    false,
+    "textarea should stay enabled for an idle targeted-send view"
+  );
+});
+
+test("a newer snapshot activity row keeps a viewed thread working", () => {
+  const viewThreadId = "saved-codex";
+  const projected = projectViewOnlySession(snap("live-thread", [], {
+    server_time: 20,
+    thread_activity: [{ thread_id: viewThreadId, phase: "tool", tool: "bash" }],
+  }), {
+    viewThreadId,
+    viewOnlyThread: buildViewOnlyPin({
+      threadId: viewThreadId,
+      page: { thread_id: viewThreadId, entries: [{ item_id: "tail" }], prev_cursor: null },
+      currentStatus: "notLoaded",
+      lastRefreshAt: 99_999,
+      lastRefreshServerTime: 19,
+    }),
+  });
+  const buttons = composerButtonState({
+    composerReady: false,
+    turnRunning: Boolean(projected.active_turn_id),
+    threadWorking: sessionIsWorking(projected),
+    activeThreadFrozen: false,
+    canWrite: false,
+    viewOnly: projected.view_only,
+    submitInFlight: false,
+  });
+
+  assert.equal(projected.active_turn_id, `view:${viewThreadId}`);
+  assert.equal(projected.current_phase, "tool");
+  assert.equal(projected.current_tool, "bash");
+  assert.equal(sessionIsWorking(projected), true);
+  assert.equal(buttons.stopHidden, false);
+  assert.equal(buttons.sendHidden, true);
+});
+
+test("without server_time, view-only projection keeps activity authoritative", () => {
+  const viewThreadId = "saved-codex";
+  const projected = projectViewOnlySession(snap("live-thread", [], {
+    thread_activity: [{ thread_id: viewThreadId, phase: "thinking", tool: null }],
+  }), {
+    viewThreadId,
+    viewOnlyThread: buildViewOnlyPin({
+      threadId: viewThreadId,
+      page: { thread_id: viewThreadId, entries: [{ item_id: "tail" }], prev_cursor: null },
+      currentStatus: "notLoaded",
+      lastRefreshServerTime: 20,
+    }),
+  });
+
+  assert.equal(projected.active_turn_id, `view:${viewThreadId}`);
+  assert.equal(sessionIsWorking(projected), true);
 });

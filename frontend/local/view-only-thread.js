@@ -16,6 +16,7 @@
 // always stays the REAL session so heartbeat/lease/controller logic is untouched.
 
 import { isReviewInProgressForThread } from "../shared/review-state.js";
+import { isWorkingThreadStatus } from "../shared/thread-status.js";
 
 // Any non-active thread can be viewed read-only. (The active thread is live —
 // projecting it would hide approvals/streaming, so it is never eligible.)
@@ -43,6 +44,7 @@ export function buildViewOnlyPin({
   availableModels = [],
   status = null,
   lastRefreshAt = 0,
+  lastRefreshServerTime = null,
   wasWorking = false,
   priorEntries = [],
   priorOlderCursor = null,
@@ -72,6 +74,7 @@ export function buildViewOnlyPin({
     availableModels,
     status,
     lastRefreshAt,
+    lastRefreshServerTime,
     wasWorking,
     loading,
     // True when the last load for this pin FAILED (fetch error). Lets the
@@ -138,6 +141,19 @@ function settledThreadStatus(status) {
     : status || "idle";
 }
 
+function serverTimeSeconds(value) {
+  const seconds = Number(value);
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
+}
+
+function snapshotServerTime(session) {
+  return serverTimeSeconds(session?.server_time);
+}
+
+function pinServerTime(pin) {
+  return serverTimeSeconds(pin?.lastRefreshServerTime);
+}
+
 // Prepend an older history page into the pin. Entries already present (by
 // item_id) are dropped so an overlapping page can't duplicate; a page for a
 // different thread is ignored outright (stale response after navigation).
@@ -176,7 +192,29 @@ export function projectViewOnlySession(realSession, { viewThreadId, viewOnlyThre
   const activity = (realSession.thread_activity || []).find(
     (entry) => entry?.thread_id === viewThreadId
   );
-  const isWorking = Boolean(activity);
+  const explicitTurnId = viewOnlyThread.activeTurnId || null;
+  const explicitStatus =
+    viewOnlyThread.currentStatus == null ? "" : String(viewOnlyThread.currentStatus).trim();
+  const hasExplicitThreadState = Boolean(explicitTurnId || explicitStatus);
+  const explicitWorking = Boolean(
+    explicitTurnId || (explicitStatus && isWorkingThreadStatus(explicitStatus))
+  );
+  // The pin's thread_state is fetched independently of the compact live snapshot.
+  // If that fetch is newer and says the viewed thread is idle, do not let an
+  // older thread_activity row keep the composer stuck in "running" forever.
+  const pinTime = pinServerTime(viewOnlyThread);
+  const snapshotTime = snapshotServerTime(realSession);
+  const activityFreshEnough =
+    !pinTime || !snapshotTime || snapshotTime >= pinTime;
+  const isWorking = explicitWorking || Boolean(
+    activity && (!hasExplicitThreadState || activityFreshEnough)
+  );
+  const currentPhase = isWorking
+    ? viewOnlyThread.currentPhase ?? activity?.phase ?? null
+    : null;
+  const currentTool = isWorking
+    ? viewOnlyThread.currentTool ?? activity?.tool ?? null
+    : null;
   const settings = viewOnlyThread.settings || {};
   const pendingApprovals = (realSession.pending_approvals || []).filter(
     (entry) => entry?.thread_id === viewThreadId
@@ -187,7 +225,7 @@ export function projectViewOnlySession(realSession, { viewThreadId, viewOnlyThre
   return {
     ...realSession,
     active_thread_id: viewThreadId,
-    active_turn_id: viewOnlyThread.activeTurnId || (isWorking ? `view:${viewThreadId}` : null),
+    active_turn_id: explicitTurnId || (isWorking ? `view:${viewThreadId}` : null),
     pending_approvals: pendingApprovals,
     pending_ask_user_questions: pendingQuestions,
     // A sentinel controller id makes canCurrentDeviceWrite() false → read-only.
@@ -196,8 +234,8 @@ export function projectViewOnlySession(realSession, { viewThreadId, viewOnlyThre
     transcript_truncated: viewOnlyThread.olderCursor != null,
     current_status: viewOnlyThread.currentStatus
       || (isWorking ? "active" : settledThreadStatus(viewOnlyThread.status)),
-    current_phase: viewOnlyThread.currentPhase ?? activity?.phase ?? null,
-    current_tool: viewOnlyThread.currentTool ?? activity?.tool ?? null,
+    current_phase: currentPhase,
+    current_tool: currentTool,
     last_progress_at: viewOnlyThread.lastProgressAt ?? null,
     view_only: true,
     // A read-only saved-thread view must never present the LIVE session's

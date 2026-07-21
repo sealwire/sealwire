@@ -46,6 +46,7 @@ import { threadAttention } from "../shared/thread-attention.js";
 import { forkFieldsToPayload } from "../shared/fork-fields.js";
 import { isDocumentForeground, notifyThreadEvents } from "../shared/thread-notify.js";
 import { shouldRefreshViewedThread } from "../shared/viewed-thread-refresh.js";
+import { isWorkingThreadStatus } from "../shared/thread-status.js";
 import { createFrameRenderQueue } from "./frame-render-queue.js";
 
 const fetchRawTranscriptPage = createTranscriptPageFetcher(dispatchOrRecover);
@@ -526,7 +527,9 @@ export function applySessionSnapshot(snapshot) {
     console.log(message);
     return;
   }
-  const displaySnapshot = preserveVisibleTranscriptText(state.realSession, snapshot);
+  const displaySnapshot = stampThreadActivitySnapshotTime(
+    preserveVisibleTranscriptText(state.realSession, snapshot)
+  );
   state.realSession = displaySnapshot;
   const previousThreadId = state.session?.active_thread_id || "-";
   const viewingLiveThread =
@@ -685,6 +688,30 @@ export function projectRemoteViewedSession(realSession, threadId, currentView) {
     (entry) => entry?.thread_id === threadId
   );
   const threadState = currentView?.thread_state || currentView || {};
+  const explicitTurnId = threadState.active_turn_id || null;
+  const explicitStatus =
+    threadState.current_status == null ? "" : String(threadState.current_status).trim();
+  const hasExplicitThreadState = Boolean(explicitTurnId || explicitStatus);
+  const explicitWorking = Boolean(
+    explicitTurnId || (explicitStatus && isWorkingThreadStatus(explicitStatus))
+  );
+  // The viewed thread state comes from an independent transcript-page fetch. When
+  // that fetch is newer and says the viewed thread is idle, ignore an older
+  // thread_activity row from the compact live snapshot so mobile does not keep
+  // the composer locked forever.
+  const viewRefreshTime = viewedRefreshServerTime(currentView);
+  const snapshotTime = threadActivityServerTime(realSession);
+  const activityFreshEnough =
+    !viewRefreshTime || !snapshotTime || snapshotTime >= viewRefreshTime;
+  const isWorking = explicitWorking || Boolean(
+    activity && (!hasExplicitThreadState || activityFreshEnough)
+  );
+  const currentPhase = isWorking
+    ? threadState.current_phase ?? activity?.phase ?? null
+    : null;
+  const currentTool = isWorking
+    ? threadState.current_tool ?? activity?.tool ?? null
+    : null;
   const pendingApprovals = (realSession?.pending_approvals || []).filter(
     (entry) => entry?.thread_id === threadId
   );
@@ -697,13 +724,13 @@ export function projectRemoteViewedSession(realSession, threadId, currentView) {
     active_controller_last_seen_at: null,
     active_flags: [],
     active_thread_id: threadId,
-    active_turn_id: threadState.active_turn_id || (activity ? `view:${threadId}` : null),
+    active_turn_id: explicitTurnId || (isWorking ? `view:${threadId}` : null),
     controller_lease_expires_at: null,
     current_cwd: threadState.current_cwd || thread?.cwd || "",
-    current_phase: threadState.current_phase ?? activity?.phase ?? null,
+    current_phase: currentPhase,
     current_status: threadState.current_status
-      || (activity ? "active" : settledThreadStatus(thread?.status)),
-    current_tool: threadState.current_tool ?? activity?.tool ?? null,
+      || (isWorking ? "active" : settledThreadStatus(thread?.status)),
+    current_tool: currentTool,
     last_progress_at: threadState.last_progress_at ?? null,
     provider: threadState.provider || thread?.provider || "",
     model: threadState.model || "",
@@ -732,7 +759,40 @@ export function projectRemoteViewedSession(realSession, threadId, currentView) {
         ? Boolean(currentView.transcript_truncated)
         : false,
     view_only: true,
+    view_last_refresh_server_time: viewRefreshTime || null,
   };
+}
+
+function serverTimeSeconds(value) {
+  const seconds = Number(value);
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
+}
+
+function snapshotServerTime(session) {
+  return serverTimeSeconds(session?.server_time);
+}
+
+function threadActivityServerTime(session) {
+  return serverTimeSeconds(session?.thread_activity_server_time) || snapshotServerTime(session);
+}
+
+function viewedRefreshServerTime(currentView) {
+  return serverTimeSeconds(
+    currentView?.view_last_refresh_server_time ?? currentView?.server_time
+  );
+}
+
+function stampThreadActivitySnapshotTime(snapshot) {
+  if (!snapshot) {
+    return snapshot;
+  }
+  const snapshotTime = snapshotServerTime(snapshot);
+  return snapshotTime
+    ? {
+      ...snapshot,
+      thread_activity_server_time: snapshotTime,
+    }
+    : snapshot;
 }
 
 function settledThreadStatus(status) {
@@ -840,12 +900,17 @@ function applySessionMetadataPatch(patch) {
     transcript_truncated: _transcriptTruncated,
     ...metadata
   } = patch;
-  commitLiveSession({
+  const nextSession = {
     ...currentSession,
     ...metadata,
     transcript: currentSession.transcript,
     transcript_truncated: currentSession.transcript_truncated,
-  });
+  };
+  if (Object.prototype.hasOwnProperty.call(metadata, "thread_activity")) {
+    nextSession.thread_activity_server_time =
+      serverTimeSeconds(metadata.server_time) || currentSession.thread_activity_server_time || null;
+  }
+  commitLiveSession(nextSession);
 }
 
 function shouldAcceptTranscriptRevision(event) {
@@ -1232,6 +1297,7 @@ export async function viewRemoteThread(threadId) {
           transcript_revision: page.revision || 0,
           transcript_truncated: page.prev_cursor != null,
           thread_state: page.thread_state || null,
+          view_last_refresh_server_time: page.server_time ?? null,
         }
       ),
       {

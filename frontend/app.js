@@ -599,6 +599,7 @@ renderer.renderSession = function wrappedRenderSession(session) {
       provider: summary?.provider ?? previousLiveSession.provider ?? null,
       status: previousLiveSession.current_status || "idle",
       lastRefreshAt: Date.now(),
+      lastRefreshServerTime: previousLiveSession.server_time ?? null,
       wasWorking: Boolean(previousLiveSession.active_turn_id),
     });
   }
@@ -673,6 +674,7 @@ async function loadViewOnlyTranscript(threadId) {
     settingsWritable: Boolean(prior?.settingsWritable),
     availableModels: prior?.availableModels || [],
     lastRefreshAt: Date.now(),
+    lastRefreshServerTime: prior?.lastRefreshServerTime ?? null,
     wasWorking: isWorking,
     priorEntries: prior?.entries || [],
     priorOlderCursor: prior?.olderCursor ?? null,
@@ -712,6 +714,7 @@ async function loadViewOnlyTranscript(threadId) {
       settingsWritable: Boolean(normalized.thread_state?.settings_writable),
       availableModels: normalized.thread_state?.available_models || [],
       lastRefreshAt: Date.now(),
+      lastRefreshServerTime: normalized.server_time ?? null,
       wasWorking: isWorking,
     });
   } catch (error) {
@@ -733,6 +736,7 @@ async function loadViewOnlyTranscript(threadId) {
       settingsWritable: Boolean(prior?.settingsWritable),
       availableModels: prior?.availableModels || [],
       lastRefreshAt: Date.now(),
+      lastRefreshServerTime: prior?.lastRefreshServerTime ?? null,
       wasWorking: isWorking,
       priorEntries: prior?.entries || [],
       priorOlderCursor: prior?.olderCursor ?? null,
