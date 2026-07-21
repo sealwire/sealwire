@@ -18,7 +18,11 @@ use url::Url;
 
 const HOSTED_BROKER_URL: &str = "wss://agent-relay.up.railway.app";
 const LOG_LIMIT: usize = 400;
-const RELAY_SIDECAR: &str = "binaries/relay-server";
+// Tauri flattens externalBin next to the executable by basename; the shell
+// plugin resolves .sidecar(name) as <exe_dir>/name verbatim. Must be the bare
+// basename (NOT "binaries/relay-server", which would resolve to a missing
+// <exe_dir>/binaries/relay-server and fail to spawn with ENOENT).
+const RELAY_SIDECAR: &str = "relay-server";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1084,5 +1088,41 @@ mod tests {
         let closed = probe.local_addr().unwrap().port();
         drop(probe);
         assert!(!port_is_ready(closed), "not ready with no listener");
+    }
+
+    // Tauri flattens externalBin next to the executable by basename, and the
+    // shell plugin's relative_command_path joins the .sidecar() argument onto
+    // the exe dir verbatim (no triple, no dir stripping). So the sidecar name
+    // must be a bare basename — a "binaries/…" prefix resolves to
+    // <exe>/binaries/… which does not exist -> ENOENT at spawn.
+    #[test]
+    fn relay_sidecar_is_a_bare_basename_matching_external_bin() {
+        assert!(
+            !RELAY_SIDECAR.contains('/') && !RELAY_SIDECAR.contains('\\'),
+            "RELAY_SIDECAR must be a bare basename, got {RELAY_SIDECAR:?}"
+        );
+        let conf: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tauri.conf.json"))
+                .expect("read tauri.conf.json"),
+        )
+        .expect("parse tauri.conf.json");
+        let basenames: Vec<String> = conf["bundle"]["externalBin"]
+            .as_array()
+            .expect("externalBin is an array")
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .expect("externalBin entry is a string")
+                    .rsplit('/')
+                    .next()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        assert!(
+            basenames.iter().any(|name| name == RELAY_SIDECAR),
+            "RELAY_SIDECAR {RELAY_SIDECAR:?} must match an externalBin basename {basenames:?}"
+        );
     }
 }

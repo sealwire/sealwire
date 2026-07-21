@@ -4,6 +4,7 @@ import { spawn, spawnSync } from "node:child_process";
 import process from "node:process";
 
 run("npm", ["run", "build"]);
+run(process.execPath, ["scripts/tauri-rewrite-launcher.mjs"]);
 run(process.execPath, ["scripts/tauri-prepare-sidecar.mjs"]);
 
 const vite = spawn("vite", ["--host", "127.0.0.1"], {

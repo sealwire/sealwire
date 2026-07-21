@@ -6,6 +6,7 @@ import process from "node:process";
 const release = process.argv.includes("--release");
 
 run("npm", ["run", "build"]);
+run(process.execPath, ["scripts/tauri-rewrite-launcher.mjs"]);
 run(process.execPath, [
   "scripts/tauri-prepare-sidecar.mjs",
   ...(release ? ["--release"] : []),

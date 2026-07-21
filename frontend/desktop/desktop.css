@@ -1,321 +1,335 @@
-:root {
-  color-scheme: light dark;
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  background: #f5f2ec;
-  color: #191a1c;
-}
-
-* {
-  box-sizing: border-box;
-}
-
-body {
-  margin: 0;
-  min-width: 860px;
-  min-height: 620px;
-  background: #f5f2ec;
-}
-
-button,
-input {
-  font: inherit;
-}
-
-button {
-  border: 0;
-}
+/*
+ * Desktop launcher/control shell.
+ *
+ * Base element styles, design tokens (:root + [data-theme="light"]) and theme
+ * switching all come from the shared web design system (frontend/styles.css +
+ * theme-init.js, linked in desktop.html). This file only styles the .desktop-*
+ * shell chrome, using the same semantic tokens as the web UI so the launcher
+ * stays visually unified with it and inherits dark/light automatically.
+ *
+ * Everything is scoped under .desktop-shell to avoid colliding with shared
+ * component classes (e.g. .field) that also live in styles.css.
+ */
 
 .desktop-shell {
   min-height: 100vh;
   display: grid;
   grid-template-rows: auto 1fr;
+  background: var(--bg-base);
+  color: var(--text-1);
+  font-family: var(--font-sans);
 }
 
-.desktop-header {
+.desktop-shell .desktop-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 20px;
   padding: 18px 24px;
-  background: #101113;
-  color: #f8f4ed;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  background: var(--bg-surface);
+  color: var(--text-1);
+  border-bottom: 1px solid var(--border-soft);
 }
 
-.desktop-brand {
+.desktop-shell .desktop-brand {
   display: flex;
   align-items: center;
   gap: 12px;
   min-width: 0;
 }
 
-.desktop-logo {
+.desktop-shell .desktop-logo {
   width: 34px;
   height: 34px;
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   object-fit: cover;
-  background: #f8f4ed;
+  background: var(--bg-elevated);
 }
 
-.desktop-title {
+.desktop-shell .desktop-title {
   display: grid;
   gap: 2px;
 }
 
-.desktop-title strong {
+.desktop-shell .desktop-title strong {
   font-size: 17px;
   font-weight: 700;
-  letter-spacing: 0;
 }
 
-.desktop-title span {
-  color: #b9b3aa;
+.desktop-shell .desktop-title span {
+  color: var(--text-3);
   font-size: 12px;
 }
 
-.status-pill {
+.desktop-shell .status-pill {
   display: inline-flex;
   align-items: center;
   gap: 8px;
   min-height: 30px;
   padding: 5px 10px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.09);
-  color: #d8d2c8;
+  border-radius: var(--r-pill);
+  background: var(--status-neutral-bg);
+  color: var(--text-2);
   font-size: 13px;
   white-space: nowrap;
 }
 
-.status-dot {
+.desktop-shell .status-dot {
   width: 8px;
   height: 8px;
-  border-radius: 999px;
-  background: #9b9285;
+  border-radius: var(--r-pill);
+  background: var(--text-3);
 }
 
-.status-pill[data-running="true"] .status-dot {
-  background: #38a169;
+.desktop-shell .status-pill[data-running="true"] .status-dot {
+  background: var(--ok-fg);
 }
 
-.status-pill[data-starting="true"] .status-dot {
-  background: #d69e2e;
+.desktop-shell .status-pill[data-starting="true"] .status-dot {
+  background: var(--warn-fg);
 }
 
-.desktop-main {
+.desktop-shell .desktop-main {
   display: grid;
   grid-template-columns: minmax(360px, 420px) minmax(0, 1fr);
   gap: 0;
   min-height: 0;
 }
 
-.control-pane {
+.desktop-shell .control-pane {
   display: grid;
   align-content: start;
   gap: 20px;
   padding: 24px;
-  background: #fffaf2;
-  border-right: 1px solid #ddd6ca;
+  background: var(--bg-surface);
+  border-right: 1px solid var(--border-soft);
   overflow: auto;
 }
 
-.surface-pane {
+.desktop-shell .surface-pane {
   display: grid;
   grid-template-rows: auto 1fr;
   min-width: 0;
   min-height: 0;
-  background: #ede8df;
+  background: var(--bg-base);
 }
 
-.section {
+.desktop-shell .section {
   display: grid;
   gap: 12px;
 }
 
-.section-title {
+.desktop-shell .section-title {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  color: #252629;
-  font-size: 13px;
+  color: var(--text-2);
+  font-size: 12px;
   font-weight: 700;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
 }
 
-.field {
+.desktop-shell .field {
   display: grid;
   gap: 6px;
 }
 
-.field label,
-.field-label {
-  color: #55504a;
+.desktop-shell .field label,
+.desktop-shell .field-label {
+  color: var(--text-3);
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
-.input-row {
+.desktop-shell .input-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
 }
 
-.desktop-input {
+.desktop-shell .desktop-input {
   width: 100%;
   min-height: 38px;
-  border: 1px solid #cfc5b7;
-  border-radius: 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-md);
   padding: 8px 10px;
-  background: #fff;
-  color: #171717;
+  background: var(--bg-base);
+  color: var(--text-1);
+  transition: border-color 0.15s ease;
 }
 
-.desktop-input:focus {
-  border-color: #1f7a5a;
-  outline: 2px solid rgba(31, 122, 90, 0.18);
-  outline-offset: 1px;
+.desktop-shell .desktop-input:focus {
+  border-color: var(--accent);
+  outline: 3px solid var(--accent-soft-bg);
+  outline-offset: 0;
 }
 
-.segmented {
+.desktop-shell .desktop-input:disabled {
+  opacity: 0.55;
+}
+
+.desktop-shell .segmented {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 4px;
   padding: 4px;
-  border: 1px solid #cfc5b7;
-  border-radius: 8px;
-  background: #ebe3d7;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-md);
+  background: var(--bg-base);
 }
 
-.segment-button {
+.desktop-shell .segment-button {
   min-height: 34px;
-  border-radius: 6px;
+  border-radius: var(--r-sm);
   background: transparent;
-  color: #4b453d;
+  color: var(--text-2);
   cursor: pointer;
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 600;
+  transition: background-color 0.15s ease, color 0.15s ease;
 }
 
-.segment-button[aria-pressed="true"] {
-  background: #171717;
-  color: #fffaf2;
+.desktop-shell .segment-button:hover {
+  background: var(--bg-hover);
 }
 
-.button-row {
+.desktop-shell .segment-button[aria-pressed="true"] {
+  background: var(--accent);
+  color: var(--accent-on);
+}
+
+.desktop-shell .button-row {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
 }
 
-.desktop-button {
+.desktop-shell .desktop-button {
   min-height: 38px;
-  border-radius: 8px;
+  border-radius: var(--r-md);
   padding: 8px 12px;
-  background: #171717;
-  color: #fffaf2;
+  background: var(--accent);
+  color: var(--accent-on);
   cursor: pointer;
-  font-weight: 700;
+  font-weight: 600;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
 }
 
-.desktop-button.secondary {
-  background: #e4ddd2;
-  color: #1f2023;
+.desktop-shell .desktop-button:hover:not(:disabled) {
+  background: var(--accent-hover);
 }
 
-.desktop-button.danger {
-  background: #7c2d2d;
+.desktop-shell .desktop-button.secondary {
+  background: var(--bg-elevated);
+  color: var(--text-1);
+  border: 1px solid var(--border-soft);
 }
 
-.desktop-button:disabled {
+.desktop-shell .desktop-button.secondary:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.desktop-shell .desktop-button.danger {
+  background: var(--err-bg);
+  color: var(--err-fg);
+  border: 1px solid transparent;
+}
+
+.desktop-shell .desktop-button.danger:hover:not(:disabled) {
+  border-color: var(--err-fg);
+}
+
+.desktop-shell .desktop-button:disabled {
   cursor: not-allowed;
   opacity: 0.5;
 }
 
-.url-list {
+.desktop-shell .url-list {
   display: grid;
   gap: 8px;
 }
 
-.url-row {
+.desktop-shell .url-row {
   display: grid;
   grid-template-columns: 72px minmax(0, 1fr);
   gap: 8px;
   align-items: center;
-  color: #4b453d;
+  color: var(--text-2);
   font-size: 12px;
 }
 
-.url-row code {
+.desktop-shell .url-row code {
   overflow: hidden;
   padding: 6px 8px;
-  border-radius: 6px;
-  background: #e6dfd4;
-  color: #171717;
+  border-radius: var(--r-sm);
+  background: var(--bg-elevated);
+  color: var(--text-1);
+  font-family: var(--font-mono);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.surface-actions {
+.desktop-shell .surface-actions {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
   padding: 18px 22px;
-  background: #f7f3ec;
-  border-bottom: 1px solid #d9d0c4;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-soft);
 }
 
-.surface-actions h1 {
+.desktop-shell .surface-actions h1 {
   margin: 0;
   font-size: 18px;
-  letter-spacing: 0;
+  color: var(--text-1);
 }
 
-.surface-copy {
+.desktop-shell .surface-copy {
   margin: 4px 0 0;
-  color: #686159;
+  color: var(--text-3);
   font-size: 13px;
 }
 
-.log-panel {
+.desktop-shell .log-panel {
   min-height: 0;
   overflow: auto;
   padding: 18px 22px;
-  font-family:
-    "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.5;
 }
 
-.log-empty {
-  color: #746d64;
+.desktop-shell .log-empty {
+  color: var(--text-3);
   font-family: inherit;
 }
 
-.log-line {
+.desktop-shell .log-line {
   display: grid;
   grid-template-columns: 76px 54px minmax(0, 1fr);
   gap: 10px;
   padding: 2px 0;
-  color: #252629;
+  color: var(--text-2);
 }
 
-.log-line span {
+.desktop-shell .log-line span {
   min-width: 0;
   overflow-wrap: anywhere;
 }
 
-.log-line .stream {
-  color: #686159;
+.desktop-shell .log-line .stream {
+  color: var(--text-3);
   text-transform: uppercase;
 }
 
-.error-banner {
+.desktop-shell .error-banner {
   padding: 10px 12px;
-  border-radius: 8px;
-  background: #f7d7d7;
-  color: #681f1f;
+  border-radius: var(--r-md);
+  background: var(--err-bg);
+  color: var(--err-fg);
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 600;
 }

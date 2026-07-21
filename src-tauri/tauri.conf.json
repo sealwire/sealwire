@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "node scripts/tauri-dev.mjs",
     "beforeBuildCommand": "node scripts/tauri-before-build.mjs --release",
-    "devUrl": "http://127.0.0.1:5173/desktop.html",
+    "devUrl": "http://127.0.0.1:5173/static/desktop.html",
     "frontendDist": "../web"
   },
   "app": {
