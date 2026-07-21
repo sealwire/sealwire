@@ -293,36 +293,13 @@
   font-size: 13px;
 }
 
-.desktop-shell .log-panel {
+.desktop-shell .provider-pane {
   min-height: 0;
   overflow: auto;
   padding: 18px 22px;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-.desktop-shell .log-empty {
-  color: var(--text-3);
-  font-family: inherit;
-}
-
-.desktop-shell .log-line {
   display: grid;
-  grid-template-columns: 76px 54px minmax(0, 1fr);
-  gap: 10px;
-  padding: 2px 0;
-  color: var(--text-2);
-}
-
-.desktop-shell .log-line span {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-
-.desktop-shell .log-line .stream {
-  color: var(--text-3);
-  text-transform: uppercase;
+  gap: 12px;
+  align-content: start;
 }
 
 .desktop-shell .error-banner {

@@ -54,6 +54,7 @@ struct DesktopStatus {
 struct RelayStatus {
     running: bool,
     ready: bool,
+    provider_status: Vec<ProviderStatusRow>,
     pid: Option<u32>,
     port: Option<u16>,
     local_url: Option<String>,
@@ -72,11 +73,26 @@ struct LogEntry {
     message: String,
 }
 
+/// One provider row surfaced to the launcher (mirrors relay-server's
+/// `ProviderStatusView`). Serialized camelCase for the webview; the incoming
+/// relay JSON is snake_case and parsed by hand in `parse_provider_status`.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct ProviderStatusRow {
+    provider: String,
+    display_name: String,
+    status: String,
+    connected: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
 struct RelayProcess {
     child: CommandChild,
     pid: u32,
     port: u16,
     ready: bool,
+    provider_status: Vec<ProviderStatusRow>,
     broker_url: Option<String>,
     broker_label: String,
     workspace_dir: String,
@@ -205,6 +221,32 @@ impl RelaySupervisor {
         let _ = app.emit("desktop://relay-status", self.status());
     }
 
+    /// True while `pid` is still the tracked relay (so a poll loop knows to stop
+    /// once its process is replaced/terminated).
+    fn is_current_pid(&self, pid: u32) -> bool {
+        self.process
+            .lock()
+            .expect("relay process lock should not be poisoned")
+            .as_ref()
+            .is_some_and(|current| current.pid == pid)
+    }
+
+    /// Stores the latest provider health for `pid`. Returns true only when it
+    /// actually changed (so the caller emits a status event only on a delta).
+    fn set_provider_status(&self, pid: u32, rows: Vec<ProviderStatusRow>) -> bool {
+        let mut process = self
+            .process
+            .lock()
+            .expect("relay process lock should not be poisoned");
+        if let Some(current) = process.as_mut() {
+            if current.pid == pid && current.provider_status != rows {
+                current.provider_status = rows;
+                return true;
+            }
+        }
+        false
+    }
+
     fn push_log(
         &self,
         app: Option<&AppHandle>,
@@ -239,6 +281,7 @@ impl RelayStatus {
         Self {
             running: false,
             ready: false,
+            provider_status: Vec::new(),
             pid: None,
             port: None,
             local_url: None,
@@ -254,6 +297,7 @@ impl RelayStatus {
         Self {
             running: true,
             ready: process.ready,
+            provider_status: process.provider_status.clone(),
             pid: Some(process.pid),
             port: Some(process.port),
             local_url: Some(local_url(process.port)),
@@ -348,6 +392,7 @@ async fn start_relay(
         pid,
         port,
         ready: false,
+        provider_status: Vec::new(),
         broker_url: broker.as_ref().map(|value| value.websocket_url.clone()),
         broker_label: broker
             .as_ref()
@@ -369,30 +414,50 @@ async fn start_relay(
     // where the UI's initial fetch can race ahead of the spawned process).
     supervisor.emit_status(&app);
 
-    // F4: flip the surface buttons on only once the port actually accepts
-    // connections, so "Open Local" can't race ahead of the listener.
+    // F4 + provider panel: once the port accepts connections, flip the surface
+    // buttons on, then poll the relay's /api/session provider health so the
+    // launcher's Providers panel reflects which providers came up (or failed).
     let ready_app = app.clone();
     let ready_supervisor = supervisor.clone();
     std::thread::spawn(move || {
+        let mut became_ready = false;
         for _ in 0..100 {
             if port_is_ready(port) {
-                if ready_supervisor.mark_ready(pid) {
-                    ready_supervisor.push_log(
-                        Some(&ready_app),
-                        "relay",
-                        format!("relay-server pid {pid} is ready on http://127.0.0.1:{port}"),
-                    );
-                    ready_supervisor.emit_status(&ready_app);
-                }
-                return;
+                became_ready = true;
+                break;
             }
             std::thread::sleep(Duration::from_millis(150));
         }
-        ready_supervisor.push_log(
-            Some(&ready_app),
-            "error",
-            format!("relay-server pid {pid} did not accept connections within timeout"),
-        );
+        if !became_ready {
+            ready_supervisor.push_log(
+                Some(&ready_app),
+                "error",
+                format!("relay-server pid {pid} did not accept connections within timeout"),
+            );
+            return;
+        }
+        if ready_supervisor.mark_ready(pid) {
+            ready_supervisor.push_log(
+                Some(&ready_app),
+                "relay",
+                format!("relay-server pid {pid} is ready on http://127.0.0.1:{port}"),
+            );
+        }
+        // Seed the provider panel immediately, then keep it fresh while this
+        // relay is the tracked process (drops/reconnects stream in).
+        let rows = fetch_provider_status(port);
+        ready_supervisor.set_provider_status(pid, rows);
+        ready_supervisor.emit_status(&ready_app);
+        loop {
+            std::thread::sleep(Duration::from_millis(4000));
+            if !ready_supervisor.is_current_pid(pid) {
+                return;
+            }
+            let rows = fetch_provider_status(port);
+            if ready_supervisor.set_provider_status(pid, rows) {
+                ready_supervisor.emit_status(&ready_app);
+            }
+        }
     });
 
     let log_app = app.clone();
@@ -543,7 +608,7 @@ fn relay_env(
     broker: Option<&BrokerRuntimeConfig>,
 ) -> Result<Vec<(OsString, OsString)>, String> {
     let mut envs: Vec<(OsString, OsString)> = std::env::vars_os()
-        .filter(|(key, _)| !is_relay_broker_env(key))
+        .filter(|(key, _)| !is_launcher_managed_env(&key.to_string_lossy()))
         .collect();
 
     upsert_env(&mut envs, "PORT", port.to_string());
@@ -639,11 +704,18 @@ fn relay_env(
     Ok(envs)
 }
 
-fn is_relay_broker_env(key: &OsString) -> bool {
+/// Env vars the launcher takes full control of, so a value inherited from the
+/// user's shell can never leak into the relay sidecar. Broker vars are set from
+/// the picker; `RELAY_API_TOKEN` is scrubbed because the desktop relay is a
+/// zero-config loopback server with auth disabled — inheriting a token would
+/// enable auth and make both the local webview and `/api/session` provider
+/// polling demand a bearer the launcher never sends.
+fn is_launcher_managed_env(key: &str) -> bool {
     matches!(
-        key.to_string_lossy().as_ref(),
+        key,
         "AGENT_RELAY_PUBLIC_BROKER_ORIGIN"
             | "AGENT_RELAY_PUBLIC_BROKER_URL"
+            | "RELAY_API_TOKEN"
             | "RELAY_BROKER_AUTH_MODE"
             | "RELAY_BROKER_CONTROL_URL"
             | "RELAY_BROKER_PUBLIC_URL"
@@ -785,6 +857,60 @@ fn port_is_ready(port: u16) -> bool {
         Duration::from_millis(250),
     )
     .is_ok()
+}
+
+/// Pulls the per-provider health rows out of a relay `/api/session` envelope
+/// (`{ ok, data: { provider_status: [...] } }`). The relay JSON is snake_case,
+/// so fields are read by hand rather than derived, keeping the serialize side
+/// camelCase for the webview. Returns empty on any parse/shape mismatch.
+fn parse_provider_status(body: &str) -> Vec<ProviderStatusRow> {
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(body) else {
+        return Vec::new();
+    };
+    let Some(array) = json
+        .get("data")
+        .and_then(|data| data.get("provider_status"))
+        .and_then(|value| value.as_array())
+    else {
+        return Vec::new();
+    };
+    array
+        .iter()
+        .filter_map(|row| {
+            Some(ProviderStatusRow {
+                provider: row.get("provider")?.as_str()?.to_string(),
+                display_name: row
+                    .get("display_name")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                status: row.get("status")?.as_str()?.to_string(),
+                connected: row
+                    .get("connected")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false),
+                reason: row
+                    .get("reason")
+                    .and_then(|value| value.as_str())
+                    .map(|value| value.to_string()),
+            })
+        })
+        .collect()
+}
+
+fn fetch_provider_status(port: u16) -> Vec<ProviderStatusRow> {
+    let url = format!("http://127.0.0.1:{port}/api/session");
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_millis(1000))
+        .timeout_read(Duration::from_millis(2000))
+        .build();
+    match agent.get(&url).call() {
+        Ok(response) => response
+            .into_string()
+            .map(|body| parse_provider_status(&body))
+            .unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
 }
 
 fn default_config(app: &AppHandle) -> DesktopConfig {
@@ -1124,5 +1250,45 @@ mod tests {
             basenames.iter().any(|name| name == RELAY_SIDECAR),
             "RELAY_SIDECAR {RELAY_SIDECAR:?} must match an externalBin basename {basenames:?}"
         );
+    }
+
+    #[test]
+    fn parse_provider_status_extracts_rows_from_session_envelope() {
+        let body = r#"{"ok":true,"data":{"provider_status":[
+            {"provider":"claude_code","display_name":"Claude Code","status":"connected","connected":true},
+            {"provider":"codex","display_name":"Codex","status":"not_installed","connected":false,"reason":"codex: command not found"}
+        ]}}"#;
+        let rows = parse_provider_status(body);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].provider, "claude_code");
+        assert_eq!(rows[0].display_name, "Claude Code");
+        assert_eq!(rows[0].status, "connected");
+        assert!(rows[0].connected);
+        assert_eq!(rows[0].reason, None);
+        assert_eq!(rows[1].status, "not_installed");
+        assert_eq!(rows[1].reason.as_deref(), Some("codex: command not found"));
+    }
+
+    #[test]
+    fn parse_provider_status_is_empty_on_garbage_or_missing_field() {
+        assert!(parse_provider_status("not json at all").is_empty());
+        assert!(parse_provider_status(r#"{"ok":true,"data":{}}"#).is_empty());
+    }
+
+    // The desktop relay is loopback + auth-disabled by design. An inherited
+    // RELAY_API_TOKEN would flip auth on and make the local webview and the
+    // provider poll demand a bearer the launcher never sends, so it must be
+    // scrubbed from the sidecar env alongside the broker vars.
+    #[test]
+    fn launcher_scrubs_inherited_auth_and_broker_env() {
+        assert!(
+            is_launcher_managed_env("RELAY_API_TOKEN"),
+            "inherited RELAY_API_TOKEN must be scrubbed"
+        );
+        assert!(is_launcher_managed_env("RELAY_BROKER_URL"));
+        assert!(is_launcher_managed_env("RELAY_BROKER_AUTH_MODE"));
+        assert!(!is_launcher_managed_env("PATH"));
+        assert!(!is_launcher_managed_env("HOME"));
+        assert!(!is_launcher_managed_env("CLAUDE_WORKER_PATH"));
     }
 }

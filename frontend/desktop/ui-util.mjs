@@ -1,6 +1,8 @@
 // Pure helpers for the desktop shell UI. Kept free of Tauri/CSS imports so they
 // can be unit-tested under `node --test` with a lightweight document stub.
 
+import { providerStatusMeta } from "../shared/provider-status.js";
+
 export const DEFAULT_PORT = 8787;
 export const LOG_VIEW_LIMIT = 400;
 
@@ -53,6 +55,21 @@ export function startDisabled(relay, saving) {
 
 export function stopDisabled(relay, saving) {
   return Boolean(saving) || !relay?.running;
+}
+
+// Maps one relay provider_status row to the shared status meta (label/dot),
+// reusing the exact vocabulary the local/remote sidebars use so the launcher's
+// Providers panel can never drift from them.
+export function providerRowView(row) {
+  const meta = providerStatusMeta(row?.status);
+  return {
+    provider: row?.provider || "",
+    name: row?.displayName || row?.provider || "",
+    status: row?.status || "starting",
+    label: meta.label,
+    dotClass: meta.dotClass,
+    reason: row?.reason || "",
+  };
 }
 
 const DRAFT_FIELD_IDS = ["workspace-dir", "preferred-port", "custom-broker-url"];

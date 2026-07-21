@@ -2,15 +2,14 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
-  applyLogEntry,
   applyStatusUpdate,
   captureFormDraft,
   openSurfaceDisabled,
   parsePort,
+  providerRowView,
   restoreFormDraft,
   startDisabled,
   stopDisabled,
-  LOG_VIEW_LIMIT,
 } from "./ui-util.mjs";
 import "./desktop.css";
 
@@ -23,26 +22,13 @@ const state = {
 
 window.addEventListener("DOMContentLoaded", () => {
   refreshStatus();
-  listen("desktop://relay-log", (event) => onRelayLog(event?.payload));
   listen("desktop://relay-status", (event) => onRelayStatus(event?.payload));
 });
 
-// F1/F7: a streamed relay log must not rebuild the whole shell (which would wipe
-// unsaved form edits and focus, and cost a full IPC round-trip per line). Append
-// the delivered entry and repaint only the log panel — relay state is untouched.
-function onRelayLog(entry) {
-  if (!entry || !state.status) {
-    refreshStatus();
-    return;
-  }
-  state.status = applyLogEntry(state.status, entry, LOG_VIEW_LIMIT);
-  updateLogPanel(state.status.logs);
-}
-
-// Backend-driven transitions (relay became ready, or exited/crashed) arrive here,
-// not via a log line — so the shell must adopt the authoritative status and
-// re-render (which re-derives the Open/Start/Stop buttons). Form edits + focus
-// survive via captureFormDraft/restoreFormDraft in render().
+// Backend-driven changes (relay became ready, exited/crashed, or provider health
+// shifted) arrive as authoritative status events, so the shell adopts them and
+// re-renders (which re-derives the Open/Start/Stop buttons and the Providers
+// panel). Form edits + focus survive via captureFormDraft/restoreFormDraft.
 function onRelayStatus(status) {
   if (!status) {
     refreshStatus();
@@ -51,15 +37,6 @@ function onRelayStatus(status) {
   state.status = applyStatusUpdate(state.status, status);
   state.error = "";
   render();
-}
-
-function updateLogPanel(logs) {
-  const panel = root.querySelector(".log-panel");
-  if (!panel) {
-    render();
-    return;
-  }
-  panel.replaceChildren(...renderLogRows(logs || []));
 }
 
 async function refreshStatus() {
@@ -76,7 +53,6 @@ function render() {
   const status = state.status;
   const config = status?.config || defaultConfig();
   const relay = status?.relay || { running: false };
-  const logs = status?.logs || [];
 
   // F1: preserve any unsaved edits + focus across the wipe-and-rebuild.
   const draft = captureFormDraft(document);
@@ -85,7 +61,7 @@ function render() {
     renderHeader(relay),
     el("div", { className: "desktop-main" }, [
       renderControls(config, relay),
-      renderSurfacePane(relay, logs),
+      renderSurfacePane(relay),
     ]),
   ]);
   root.append(shell);
@@ -210,7 +186,7 @@ function renderControls(config, relay) {
   ].filter(Boolean));
 }
 
-function renderSurfacePane(relay, logs) {
+function renderSurfacePane(relay) {
   return el("section", { className: "surface-pane" }, [
     el("div", { className: "surface-actions" }, [
       el("div", {}, [
@@ -234,7 +210,34 @@ function renderSurfacePane(relay, logs) {
         }, ["Open Remote"]),
       ]),
     ]),
-    renderLogs(logs),
+    renderProviders(relay),
+  ]);
+}
+
+function renderProviders(relay) {
+  const rows = Array.isArray(relay.providerStatus) ? relay.providerStatus : [];
+  return el("div", { className: "provider-pane" }, [
+    el("div", { className: "section-title" }, ["Providers"]),
+    rows.length
+      ? el("div", { className: "provider-status-panel" }, [
+          el("div", { className: "provider-status-list" }, rows.map(renderProviderRow)),
+        ])
+      : el("p", { className: "surface-copy" }, [
+          relay.ready ? "No providers reported." : "Waiting for the relay…",
+        ]),
+  ]);
+}
+
+function renderProviderRow(row) {
+  const view = providerRowView(row);
+  return el("div", {
+    className: "provider-status-row",
+    "data-status": view.status,
+    title: view.reason || undefined,
+  }, [
+    el("span", { className: `provider-status-dot ${view.dotClass}` }),
+    el("span", { className: "provider-status-name" }, [view.name]),
+    el("span", { className: "provider-status-state" }, [view.label]),
   ]);
 }
 
@@ -249,22 +252,6 @@ function renderUrls(relay) {
   ]);
 }
 
-function renderLogs(logs) {
-  return el("div", { className: "log-panel" }, renderLogRows(logs));
-}
-
-function renderLogRows(logs) {
-  if (!logs.length) {
-    return [el("div", { className: "log-empty" }, ["No relay logs yet."])];
-  }
-  return logs.slice(-160).map((line) =>
-    el("div", { className: "log-line" }, [
-      el("span", {}, [formatTime(line.timestampMs)]),
-      el("span", { className: "stream" }, [line.stream]),
-      el("span", {}, [line.message]),
-    ])
-  );
-}
 
 function bindControls(config) {
   document.querySelector("#browse-workspace")?.addEventListener("click", async () => {
@@ -406,13 +393,4 @@ function formatError(error) {
     return error.message;
   }
   return String(error);
-}
-
-function formatTime(timestampMs) {
-  const date = new Date(timestampMs);
-  return date.toLocaleTimeString([], {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
 }

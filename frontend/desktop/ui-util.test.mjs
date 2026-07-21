@@ -10,6 +10,7 @@ import {
   openSurfaceDisabled,
   startDisabled,
   stopDisabled,
+  providerRowView,
 } from "./ui-util.mjs";
 
 // --- F10: readConfigForm port parsing must never produce NaN/out-of-range ---
@@ -209,4 +210,30 @@ test("applyLogEntry leaves the relay object untouched", () => {
 test("applyStatusUpdate falls back to previous status on empty payload", () => {
   const prev = { relay: { running: true, ready: true }, logs: [] };
   assert.equal(applyStatusUpdate(prev, null), prev);
+});
+
+// Providers panel: map a relay provider_status row to the shared status meta,
+// falling back to the provider key when there's no display name.
+test("providerRowView maps status -> label/dot and names the provider", () => {
+  const connected = providerRowView({
+    provider: "claude_code",
+    displayName: "Claude Code",
+    status: "connected",
+  });
+  assert.equal(connected.name, "Claude Code");
+  assert.equal(connected.label, "Connected");
+  assert.equal(connected.dotClass, "provider-dot-connected");
+  assert.equal(connected.status, "connected");
+
+  const failed = providerRowView({
+    provider: "codex",
+    status: "not_installed",
+    reason: "codex: command not found",
+  });
+  assert.equal(failed.name, "codex", "name falls back to the provider key");
+  assert.equal(failed.dotClass, "provider-dot-not-installed");
+  assert.equal(failed.reason, "codex: command not found");
+
+  // Unknown/absent status uses the neutral "starting" meta, never throws.
+  assert.equal(providerRowView({}).label, "Starting");
 });
