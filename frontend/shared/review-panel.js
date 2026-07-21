@@ -280,7 +280,7 @@ export function ReviewPanel({
       h(
         "p",
         { className: "panel-modal-copy" },
-        "Ask another agent to review the current changes. The reviewer runs in its own thread and posts its findings back into this conversation."
+        "Ask another agent to review the current changes. The reviewer runs in its own session and posts its findings back into this conversation."
       ),
       h("label", { className: "sidebar-label", htmlFor: `${id}-provider` }, "Reviewer provider"),
       h(
@@ -398,7 +398,7 @@ export function ReviewPanel({
         ? h(
             "p",
             { className: "panel-modal-copy" },
-            "Reusing this reviewer thread — it keeps its earlier review context. Switching the provider starts a new reviewer instead."
+            "Reusing this reviewer session — it keeps its earlier review context. Switching the provider starts a new reviewer instead."
           )
         : null,
       h(
@@ -458,7 +458,7 @@ export function ReviewPanel({
         ? h(
             "p",
             { className: "panel-modal-copy" },
-            "The reviewer and the author iterate until the reviewer approves or the rounds run out (then it's handed back to you). The author thread must be able to edit without approval prompts."
+            "The reviewer and the author iterate until the reviewer approves or the rounds run out (then it's handed back to you). The author session must be able to edit without approval prompts."
           )
         : null,
       // A rejected request stays here (the modal no longer closes optimistically),

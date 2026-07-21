@@ -83,7 +83,7 @@ export function finishThreadListRefresh(threadList) {
 export function failThreadListRefresh(threadList, message) {
   return {
     ...threadList,
-    error: message || "Failed to load threads",
+    error: message || "Failed to load sessions",
     loading: false,
   };
 }

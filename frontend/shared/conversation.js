@@ -55,7 +55,7 @@ export function ReadyConversationState({
   readyTitle = "Session ready",
   session,
   shortId = fallbackShortId,
-  waitingCopy = "This thread is open, but another device currently has control. Take over to send the first prompt from here.",
+  waitingCopy = "This session is open, but another device currently has control. Take over to send the first prompt from here.",
   waitingTitle = "Session active on another device",
 }) {
   const detailParts = [];
@@ -64,7 +64,7 @@ export function ReadyConversationState({
     detailParts.push(`Workspace: ${session.current_cwd}`);
   }
   if (session?.active_thread_id) {
-    detailParts.push(`Thread: ${shortId(session.active_thread_id)}`);
+    detailParts.push(`Session: ${shortId(session.active_thread_id)}`);
   }
 
   return h(ConversationEmptyState, {

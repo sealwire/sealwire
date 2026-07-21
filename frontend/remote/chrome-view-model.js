@@ -303,7 +303,7 @@ function selectSessionMetaRenderModel(currentState, session) {
           : "Unclaimed",
       },
       ...(session.active_thread_id
-        ? [{ label: "Thread", value: shortId(session.active_thread_id) }]
+        ? [{ label: "Session", value: shortId(session.active_thread_id) }]
         : []),
     ],
     emptyMessage: session.active_thread_id ? null : "No live session yet.",
@@ -334,8 +334,8 @@ function selectControlBannerRenderModel(currentState, session) {
   if (session.view_only && sessionWorking && !activeUnderReview) {
     return {
       hidden: false,
-      hint: "This background thread is still running. Stop it or take over to continue here.",
-      summary: "Background thread is running",
+      hint: "This background session is still running. Stop it or take over to continue here.",
+      summary: "Background session is running",
       takeOverHidden: false,
     };
   }
@@ -365,7 +365,7 @@ function selectControlBannerRenderModel(currentState, session) {
   return {
     hidden: false,
     hint: activeUnderReview
-      ? "This thread is being reviewed; it unlocks when the review finishes."
+      ? "This session is being reviewed; it unlocks when the review finishes."
       : "Read-only for sending until you take over. Approvals can still be handled here.",
     summary: `Controlled by ${controllerLabel(currentState, session.active_controller_device_id)}`,
     takeOverHidden: activeUnderReview,
@@ -502,7 +502,7 @@ function workspaceSubtitle(currentState) {
     if (selectedRelayNeedsRepair(currentState)) {
       return "Local encrypted credentials are unavailable in this browser. Pair this relay again on this device to restore remote access.";
     }
-    return "Remote device paired. Start a session, open one from history, or wait for a live thread.";
+    return "Remote device paired. Start a session, open one from history, or wait for a live session.";
   }
   if (currentState.pairingTicket) {
     return pairingCopy(currentState);

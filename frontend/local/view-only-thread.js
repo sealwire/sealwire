@@ -96,7 +96,7 @@ export const VIEW_ONLY_LOAD_RETRY_BACKOFF_MS = 1000;
 // only the ACTIVE thread's transcript), so a non-active viewed thread MUST keep a
 // good pin. The old code armed the load "once per navigated thread" and never
 // reset that guard, so a single missed/failed load (a rapid-switch race dropped
-// it, or the relay was unreachable) left the thread stuck on "Loading thread"
+// it, or the relay was unreachable) left the thread stuck on "Loading session"
 // forever. Instead, re-arm whenever there is no good pin and no load is in
 // flight — with a backoff on failures so a failing fetch (which re-renders
 // synchronously) can't form a tight loop.

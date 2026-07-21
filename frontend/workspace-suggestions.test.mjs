@@ -21,10 +21,26 @@ test("buildWorkspaceSuggestions merges selected cwd, session cwd, threads, and a
   assert.deepEqual(suggestions, [
     { cwd: "/tmp/draft", label: "Selected workspace" },
     { cwd: "/tmp/current", label: "Current session" },
-    { cwd: "/tmp/root-a", label: "root-a (1 threads)" },
-    { cwd: "/tmp/history", label: "history (1 threads)" },
+    { cwd: "/tmp/root-a", label: "root-a (1 session)" },
+    { cwd: "/tmp/history", label: "history (1 session)" },
     { cwd: "/tmp/root-b", label: "Allowed root" },
   ]);
+});
+
+test("workspace suggestion session counts pluralize (1 session vs N sessions)", () => {
+  const suggestions = buildWorkspaceSuggestions({
+    allowedRoots: [],
+    currentCwd: "",
+    selectedCwd: "",
+    threads: [
+      { cwd: "/tmp/solo", id: "a", preview: "", updated_at: 1 },
+      { cwd: "/tmp/multi", id: "b", preview: "", updated_at: 2 },
+      { cwd: "/tmp/multi", id: "c", preview: "", updated_at: 3 },
+    ],
+  });
+  const labels = Object.fromEntries(suggestions.map((s) => [s.cwd, s.label]));
+  assert.equal(labels["/tmp/solo"], "solo (1 session)");
+  assert.equal(labels["/tmp/multi"], "multi (2 sessions)");
 });
 
 test("selectWorkspaceSuggestionsModel maps session fields into shared suggestions", () => {
@@ -42,7 +58,7 @@ test("selectWorkspaceSuggestionsModel maps session fields into shared suggestion
   assert.deepEqual(suggestions, [
     { cwd: "/tmp/draft", label: "Selected workspace" },
     { cwd: "/tmp/current", label: "Current session" },
-    { cwd: "/tmp/history", label: "history (1 threads)" },
+    { cwd: "/tmp/history", label: "history (1 session)" },
     { cwd: "/tmp/root-a", label: "Allowed root" },
   ]);
 });

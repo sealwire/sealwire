@@ -160,10 +160,10 @@ function ThreadDrawer() {
       h(
         "div",
         null,
-        h("p", { className: "sidebar-caption" }, "Threads"),
+        h("p", { className: "sidebar-caption" }, "Sessions"),
         h("p", { className: "sidebar-hint", id: "threads-count" }, "Loading workspace groups...")
       ),
-      h(RefreshButton, { id: "threads-refresh-button", label: "Refresh threads" })
+      h(RefreshButton, { id: "threads-refresh-button", label: "Refresh sessions" })
     ),
     h(
       "div",
@@ -181,7 +181,7 @@ function ThreadDrawer() {
           "data-thread-list-scroll-root": "",
           id: "threads-list",
         },
-        h("p", { className: "sidebar-empty" }, "Threads will appear here once the relay loads saved workspaces.")
+        h("p", { className: "sidebar-empty" }, "Sessions will appear here once the relay loads saved workspaces.")
       )
     )
   );

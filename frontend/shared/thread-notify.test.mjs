@@ -20,7 +20,7 @@ test("formatThreadNotification distinguishes needs_input vs completed", () => {
 
 test("formatThreadNotification falls back when no name is known", () => {
   const done = formatThreadNotification({ kind: "completed" }, null);
-  assert.match(done.body, /A thread/);
+  assert.match(done.body, /A session/);
 });
 
 function withFakeWindow(permission, run) {

@@ -365,7 +365,7 @@ test("ReviewerPanel treats an escalated review as terminal (Delete enabled)", ()
   );
   // The Delete button shows its TERMINAL title only when the job is terminal — so an
   // An escalated job is deletable (and its transcript is fetched, gated by the same flag).
-  assert.match(html, /Delete this review and its reviewer thread/);
+  assert.match(html, /Delete this review and its reviewer session/);
   assert.doesNotMatch(html, /Stop the reviewer before deleting/);
 });
 
@@ -392,7 +392,7 @@ test("ReviewerPanel shows the reviewer model + the (long) thread name with a ful
   // so hovering reveals all of it.
   assert.match(html, /reviewer-job-thread/);
   assert.match(html, new RegExp(`title="${longName.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&")}"`));
-  assert.match(html, /aria-label="Reviewer thread: Review: refactor/);
+  assert.match(html, /aria-label="Reviewer session: Review: refactor/);
 });
 
 test("ReviewerPanel shows the reviewer effort chip beside the model, with a reasoning-effort tooltip", () => {

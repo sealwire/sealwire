@@ -45,7 +45,7 @@ export function remoteNotificationsHint(model = {}) {
     return "Push isn't available on this relay yet.";
   }
   if (subscribed) {
-    return "You'll get push alerts when threads need input or finish, even when the app is closed.";
+    return "You'll get push alerts when sessions need input or finish, even when the app is closed.";
   }
   return "Notifications turn on automatically when you pair this device.";
 }

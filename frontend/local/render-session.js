@@ -304,7 +304,7 @@ export function createSessionRenderer({
         activeThread?.name || activeThread?.preview || shortId(session.active_thread_id);
       workspaceSubtitle.textContent = state.viewOnlyThread?.review
         ? `read-only · review in progress · ${threadLabel}`
-        : `read-only · saved thread · ${threadLabel}`;
+        : `read-only · saved session · ${threadLabel}`;
     } else if (viewingConversation && session.active_thread_id) {
       const threadLabel =
         activeThread?.name || activeThread?.preview || shortId(session.active_thread_id);
@@ -312,7 +312,7 @@ export function createSessionRenderer({
     } else if (session.active_thread_id) {
       const threadLabel =
         activeThread?.name || activeThread?.preview || shortId(session.active_thread_id);
-      workspaceSubtitle.textContent = `live thread · ${threadLabel}`;
+      workspaceSubtitle.textContent = `live session · ${threadLabel}`;
     } else if (workspace) {
       workspaceSubtitle.textContent = "standby";
     } else {
@@ -446,17 +446,17 @@ export function createSessionRenderer({
       activeThreadFrozen ||
       submitInFlight;
     messageInput.placeholder = activeThreadFrozen
-      ? "This thread is being reviewed…"
+      ? "This session is being reviewed…"
       : !hasActiveSession
       ? "Start or open a session first."
       : !viewingConversation
-        ? "Open the thread page to send a message."
+        ? "Open the session page to send a message."
         : canCompose
           // Name the active thread's own provider — never a hardcoded "Codex".
           ? (providerLabel(session?.provider)
             ? `Message ${providerLabel(session.provider)}...`
             : "Message...")
-          : "This thread is currently running on another device.";
+          : "This session is currently running on another device.";
   }
 
   function renderSessionUnavailable(message) {
@@ -495,7 +495,7 @@ export function createSessionRenderer({
     openSessionDetailsButton.disabled = true;
     renderOverviewState(null, message);
     renderWorkspaceSuggestions(null);
-    renderThreadListMessage("Sign in", "Enter RELAY_API_TOKEN to load threads.");
+    renderThreadListMessage("Sign in", "Enter RELAY_API_TOKEN to load sessions.");
     renderHeaderModelBadge(null);
     renderProviderStatus(null);
     statusBadge.textContent = "Sign in";
@@ -832,7 +832,7 @@ export function createSessionRenderer({
           metaChip("Permissions", session.approval_policy),
           metaChip("Effort", session.reasoning_effort),
           metaChip("Control", controllerStateLabel(session)),
-          metaChip("Thread", shortId(session.active_thread_id)),
+          metaChip("Session", shortId(session.active_thread_id)),
           ...reviewChips(session),
         ],
       })
@@ -1006,9 +1006,9 @@ export function createSessionRenderer({
       renderReactContent(
         controlBanner,
         h(ControlBannerContent, {
-          hint: "This background thread is still running. Stop it or take over to continue here.",
+          hint: "This background session is still running. Stop it or take over to continue here.",
           showTakeOver: true,
-          summary: "Background thread is running",
+          summary: "Background session is running",
         })
       );
       return;
@@ -1031,7 +1031,7 @@ export function createSessionRenderer({
       controlBanner,
       h(ControlBannerContent, {
         hint: activeUnderReview
-          ? "This thread is being reviewed; it unlocks when the review finishes."
+          ? "This session is being reviewed; it unlocks when the review finishes."
           : "You can still approve from this device. Take over when you want to type or continue the session.",
         // The review owns the reviewed thread's turn sequence — don't let a
         // take-over reassign its controller mid-review.
@@ -1169,15 +1169,15 @@ export function createSessionRenderer({
                 label: "Back to console",
               },
             ],
-            copy: "This saved thread is loading.",
+            copy: "This saved session is loading.",
             details: [
-              `Requested thread: ${
+              `Requested session: ${
                 requestedThread
                   ? requestedThread.name || requestedThread.preview || shortId(requestedThread.id)
                   : shortId(state.viewThreadId)
               }`,
             ],
-            title: "Loading thread",
+            title: "Loading session",
           })
         );
         return;
@@ -1196,8 +1196,8 @@ export function createSessionRenderer({
             ],
             badge: "Live",
             className: "thread-empty-ready",
-            copy: "A live session is running, but the conversation stays behind its own thread page so the local home does not default into chat.",
-            details: [`Current thread: ${threadLabel}`],
+            copy: "A live session is running, but the conversation stays behind its own session page so the local home does not default into chat.",
+            details: [`Current session: ${threadLabel}`],
             title: "Relay console home",
           })
         );
@@ -1216,8 +1216,8 @@ export function createSessionRenderer({
           badge: reviewView ? "Review" : "Read-only",
           className: "thread-empty-ready",
           copy: reviewView
-            ? "Loading this thread's conversation. Another agent is reviewing it — its progress shows in the Reviewer panel."
-            : "Loading this saved thread's conversation…",
+            ? "Loading this session's conversation. Another agent is reviewing it — its progress shows in the Reviewer panel."
+            : "Loading this saved session's conversation…",
           title: reviewView ? "Review in progress" : "Read-only view",
         })
       );
@@ -1234,7 +1234,7 @@ export function createSessionRenderer({
               readyCopy: `${providerLabel(session?.provider) || "The agent"} is connected. Send the first prompt below when you're ready.`,
               session,
               shortId,
-              waitingCopy: "This thread is open, but another device currently has control. Take over to send the first prompt from here.",
+              waitingCopy: "This session is open, but another device currently has control. Take over to send the first prompt from here.",
             }
             : null,
         })

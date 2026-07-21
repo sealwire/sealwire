@@ -1,7 +1,7 @@
 {
   "name": "Sealwire Remote",
   "short_name": "Sealwire",
-  "description": "Pair a remote device, open Codex threads, and approve actions away from the terminal.",
+  "description": "Pair a remote device, open Codex sessions, and approve actions away from the terminal.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

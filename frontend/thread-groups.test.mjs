@@ -176,6 +176,6 @@ test("summarizeThreadGroups and canonicalizeWorkspace produce stable display val
   ]);
 
   assert.equal(canonicalizeWorkspace("/tmp/demo///"), "/tmp/demo");
-  assert.equal(summarizeThreadGroups(groups), "2 folders · 2 threads");
-  assert.equal(summarizeThreadGroups([]), "No saved threads yet.");
+  assert.equal(summarizeThreadGroups(groups), "2 folders · 2 sessions");
+  assert.equal(summarizeThreadGroups([]), "No saved sessions yet.");
 });

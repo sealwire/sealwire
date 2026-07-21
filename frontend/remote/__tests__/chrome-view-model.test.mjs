@@ -169,7 +169,7 @@ test("selectSessionChromeRenderModel derives header, status, and control banner"
   assert.equal(model.agentWorkingIndicator.hidden, true);
   assert.equal(model.controlBanner.hidden, true);
   assert.equal(model.controlBanner.takeOverHidden, true);
-  assert.equal(model.sessionMeta.chips.find((chip) => chip.label === "Thread").value, "thread-1");
+  assert.equal(model.sessionMeta.chips.find((chip) => chip.label === "Session").value, "thread-1");
   assert.equal(model.sessionMeta.chips.find((chip) => chip.label === "Provider").value, "Codex");
   assert.equal(model.sessionMeta.chips.find((chip) => chip.label === "Model").value, "gpt-5.4");
   assert.equal(model.sessionMeta.chips.find((chip) => chip.label === "Effort").value, "medium");
@@ -532,7 +532,7 @@ test("a view-only Codex thread reported as notLoaded shows no running banner", (
 
   const model = selectSessionChromeRenderModel(state, session);
 
-  assert.equal(model.controlBanner.summary === "Background thread is running", false);
+  assert.equal(model.controlBanner.summary === "Background session is running", false);
   assert.equal(model.agentWorkingIndicator.hidden, true, "no working indicator");
 });
 
@@ -553,6 +553,6 @@ test("a view-only thread that IS running still shows the banner", () => {
 
   const model = selectSessionChromeRenderModel(state, session);
 
-  assert.equal(model.controlBanner.summary, "Background thread is running");
+  assert.equal(model.controlBanner.summary, "Background session is running");
   assert.equal(model.controlBanner.hidden, false);
 });

@@ -19,8 +19,8 @@ const INHERIT_LABEL = "Inherit from source session";
 // fork was even created. Collapse to the first line and cap the length.
 const MAX_SOURCE_LABEL_CHARS = 80;
 function forkSourceLabel(sourceThread) {
-  const raw = sourceThread?.name || sourceThread?.preview || sourceThread?.id || "thread";
-  const firstLine = String(raw).split("\n", 1)[0].trim() || "thread";
+  const raw = sourceThread?.name || sourceThread?.preview || sourceThread?.id || "session";
+  const firstLine = String(raw).split("\n", 1)[0].trim() || "session";
   return firstLine.length > MAX_SOURCE_LABEL_CHARS
     ? `${firstLine.slice(0, MAX_SOURCE_LABEL_CHARS - 1)}…`
     : firstLine;
@@ -115,7 +115,7 @@ export function ForkSessionDialog({
             { className: "control-hint", "data-fork-mode": "replay" },
             sourceProvider && targetProvider && sourceProvider !== targetProvider
               ? `Handing off ${providerLabel(sourceProvider)} → ${providerLabel(targetProvider)} via transcript replay — provider-native state (tool results, cached context) will not carry over.`
-              : "Branching mid-thread uses transcript replay — provider-native state will not carry over."
+              : "Branching mid-session uses transcript replay — provider-native state will not carry over."
           )
         : h(
             "p",

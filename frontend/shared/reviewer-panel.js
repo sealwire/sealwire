@@ -147,7 +147,7 @@ export function ReviewerPanel({
           h(
             "p",
             { className: "reviewer-empty-copy" },
-            "Ask another agent to review the current changes. The reviewer runs in its own thread and reports back here."
+            "Ask another agent to review the current changes. The reviewer runs in its own session and reports back here."
           ),
           canLaunch ? launcher() : null,
           !canRequest
@@ -285,7 +285,7 @@ function ReviewerJobCard({
           {
             className: "reviewer-job-thread",
             title: threadName,
-            "aria-label": `Reviewer thread: ${threadName}`,
+            "aria-label": `Reviewer session: ${threadName}`,
           },
           threadName
         )
@@ -338,7 +338,7 @@ function ReviewerJobCard({
               className: "header-button review-resolve-button",
               title: blocked
                 ? "The reviewer turn couldn't be stopped and the workspace is locked. Stop it to unlock."
-                : "Stop this review now and unlock the reviewed thread.",
+                : "Stop this review now and unlock the reviewed session.",
               onClick: () => onResolveReview?.(job.id),
             },
             blocked ? "Stop reviewer & unlock" : "Stop review"
@@ -380,7 +380,7 @@ function ReviewerJobCard({
           className: "header-button reviewer-delete-button",
           disabled: !terminal,
           title: terminal
-            ? "Delete this review and its reviewer thread (the findings stay in the conversation)"
+            ? "Delete this review and its reviewer session (the findings stay in the conversation)"
             : "Stop the reviewer before deleting it",
           onClick: () => terminal && onDeleteReview?.(job.id),
         },

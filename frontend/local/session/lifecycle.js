@@ -106,7 +106,7 @@ export function createLifecycleController(ctx) {
     ) {
       renderThreadListMessage("Loading...", "Loading saved workspace groups...");
     }
-    logLine(`Fetching thread list across saved workspaces (${reason})`);
+    logLine(`Fetching session list across saved workspaces (${reason})`);
 
     try {
       const threads = queryClient
@@ -136,15 +136,15 @@ export function createLifecycleController(ctx) {
       if (state.authRequired && !state.authenticated) {
         state.threadGroups = [];
         state.threads = [];
-        renderThreadListMessage("Sign in", "Enter RELAY_API_TOKEN to load threads.");
-        logLine(`Thread fetch blocked by local auth: ${error.message}`);
+        renderThreadListMessage("Sign in", "Enter RELAY_API_TOKEN to load sessions.");
+        logLine(`Session list fetch blocked by local auth: ${error.message}`);
         return;
       }
 
       state.threadGroups = [];
       state.threads = [];
       renderThreadListMessage("Error", error.message);
-      logLine(`Thread fetch failed: ${error.message}`);
+      logLine(`Session list fetch failed: ${error.message}`);
     } finally {
       scheduleThreadsPoll();
     }
@@ -174,7 +174,7 @@ export function createLifecycleController(ctx) {
     setStartControlsBusy(true);
     // Name the provider being started — not a hardcoded "Codex".
     const agentName = providerLabel(liveProviderInput?.value) || "agent";
-    logLine(`Starting a new ${agentName} thread in ${cwd}`);
+    logLine(`Starting a new ${agentName} session in ${cwd}`);
 
     try {
       const response = await apiFetch("/api/session/start", {
@@ -210,7 +210,7 @@ export function createLifecycleController(ctx) {
         messageInput.focus();
       }
       await loadThreads("post-start refresh");
-      logLine(`Started a new ${agentName} thread`);
+      logLine(`Started a new ${agentName} session`);
     } catch (error) {
       logLine(`Session start failed: ${error.message}`);
     } finally {
@@ -219,7 +219,7 @@ export function createLifecycleController(ctx) {
   }
 
   async function resumeSession(threadId) {
-    logLine(`Resuming thread ${threadId}`);
+    logLine(`Resuming session ${threadId}`);
     state.pendingThreadHistoryScrollTop = threadsList?.scrollTop || state.threadHistoryScrollTop || 0;
 
     try {
@@ -249,7 +249,7 @@ export function createLifecycleController(ctx) {
       if (canCurrentDeviceWrite(payload.data)) {
         messageInput.focus();
       }
-      logLine(`Resumed thread ${threadId}`);
+      logLine(`Resumed session ${threadId}`);
       return true;
     } catch (error) {
       logLine(`Resume failed: ${error.message}`);
@@ -262,7 +262,7 @@ export function createLifecycleController(ctx) {
   async function forkSession(forkDraft) {
     const sourceThreadId = forkDraft?.sourceThreadId || "";
     if (!sourceThreadId) {
-      return { ok: false, error: "Choose a thread before forking a session." };
+      return { ok: false, error: "Choose a session to fork." };
     }
     const cwd = String(forkDraft?.cwd || "").trim();
     if (!cwd) {
@@ -270,7 +270,7 @@ export function createLifecycleController(ctx) {
     }
     const provider = forkDraft?.provider || null;
     const agentName = providerLabel(provider) || "agent";
-    logLine(`Forking thread ${sourceThreadId} into ${agentName}.`);
+    logLine(`Forking session ${sourceThreadId} into ${agentName}.`);
 
     try {
       const response = await apiFetch("/api/session/fork", {
@@ -303,7 +303,7 @@ export function createLifecycleController(ctx) {
         messageInput.focus();
       }
       await loadThreads("post-fork refresh");
-      logLine(`Forked thread ${sourceThreadId}`);
+      logLine(`Forked session ${sourceThreadId}`);
       return { ok: true };
     } catch (error) {
       logLine(`Fork failed: ${error.message}`);
@@ -422,7 +422,7 @@ export function createLifecycleController(ctx) {
       return;
     }
     if (!threadId) {
-      logLine("No thread is selected.");
+      logLine("No session is selected.");
       return;
     }
 
@@ -519,7 +519,7 @@ export function createLifecycleController(ctx) {
       return receipt;
     } catch (error) {
       // Log AND re-raise: the request modal surfaces the relay's reason inline so a
-      // rejected review (e.g. "another thread is running in this workspace") no longer
+      // rejected review (e.g. "another session is running in this workspace") no longer
       // looks like a silent no-op buried in the activity log.
       logLine(`Review request failed: ${error.message}`);
       throw error;
@@ -632,7 +632,7 @@ export function createLifecycleController(ctx) {
       });
       notifyThreadEvents(events);
     } catch (error) {
-      logLine(`Thread attention update failed: ${error.message}`);
+      logLine(`Session attention update failed: ${error.message}`);
     }
 
     syncLiveTranscriptEntryDetailsFromSnapshot(state, snapshot);
@@ -651,7 +651,7 @@ export function createLifecycleController(ctx) {
     const payload = await response.json();
 
     if (!response.ok || !payload.ok) {
-      throw new Error(payload?.error?.message || "Failed to load threads");
+      throw new Error(payload?.error?.message || "Failed to load sessions");
     }
 
     return payload.data?.threads || [];

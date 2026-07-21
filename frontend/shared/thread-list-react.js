@@ -31,7 +31,7 @@ export function ThreadGroupList({
   collapsedGroupCwds = new Set(),
   collapsible = false,
   contextMenuThreadId = null,
-  emptyMessage = "No saved threads yet.",
+  emptyMessage = "No saved sessions yet.",
   expandedGroupCwds = new Set(),
   formatThreadMeta = (thread) => thread.updated_at || "",
   groups = [],

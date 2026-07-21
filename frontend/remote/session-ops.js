@@ -930,7 +930,7 @@ export async function syncRemoteSnapshot(reason, silent = false) {
   try {
     await refreshRemoteThreads(reason, { silent: true });
   } catch (error) {
-    renderLog(`Remote thread sync failed: ${error.message}`);
+    renderLog(`Remote session sync failed: ${error.message}`);
   }
 }
 
@@ -971,14 +971,14 @@ export async function startRemoteSession(sessionDraftOverride = null) {
 export async function forkRemoteSession(forkDraft = null) {
   invalidateViewOnlyNavigation();
   if (!forkDraft?.sourceThreadId) {
-    return { ok: false, error: "Choose a thread before forking a remote session." };
+    return { ok: false, error: "Choose a session to fork." };
   }
   const cwd = String(forkDraft.cwd || "").trim();
   if (!cwd) {
     return { ok: false, error: "Choose a workspace before forking a remote session." };
   }
 
-  renderLog(`Forking remote thread ${forkDraft.sourceThreadId}.`);
+  renderLog(`Forking remote session ${forkDraft.sourceThreadId}.`);
 
   try {
     // Untouched settings go out as null so the relay inherits them from the
@@ -1015,7 +1015,7 @@ export async function refreshRemoteThreads(reason, options = {}) {
   const { silent = false } = options;
 
   if (!silent) {
-    renderLog(`Fetching remote thread list (${reason}).`);
+    renderLog(`Fetching remote session list (${reason}).`);
   }
 
   try {
@@ -1031,7 +1031,7 @@ export async function refreshRemoteThreads(reason, options = {}) {
     return threads;
   } catch (error) {
     if (!silent) {
-      renderLog(`Remote thread refresh failed: ${error.message}`);
+      renderLog(`Remote session refresh failed: ${error.message}`);
     }
     throw error;
   } finally {
@@ -1108,7 +1108,7 @@ export async function resumeRemoteSession(threadId, _sessionDraftOverride = null
   // Explicit live action: invalidate pending view fetches and let live snapshots flow.
   invalidateViewOnlyNavigation();
 
-  renderLog(`Resuming remote thread ${threadId}.`);
+  renderLog(`Resuming remote session ${threadId}.`);
 
   try {
     await dispatchOrRecover("resume_session", {
@@ -1182,7 +1182,7 @@ export async function viewRemoteThread(threadId) {
   }
 
   const navigationGeneration = ++viewOnlyNavigationGeneration;
-  renderLog(`Viewing remote thread ${threadId}.`);
+  renderLog(`Viewing remote session ${threadId}.`);
   if (state.realSession?.active_thread_id === threadId) {
     viewOnlyThreadId = threadId;
     viewOnlyLastRefreshAt = Date.now();
@@ -1240,7 +1240,7 @@ export async function viewRemoteThread(threadId) {
     );
     return true;
   } catch (error) {
-    renderLog(`Remote thread view failed: ${error.message}`);
+    renderLog(`Remote session view failed: ${error.message}`);
     return false;
   }
 }
@@ -1283,7 +1283,7 @@ export async function sendMessage(messageDraft, effort, model = "") {
   }
   const threadId = state.session?.active_thread_id;
   if (!threadId) {
-    renderLog("No thread is selected.");
+    renderLog("No session is selected.");
     return false;
   }
 
@@ -1355,7 +1355,7 @@ export async function stopActiveTurn() {
 export async function takeOverControl() {
   const threadId = state.session?.active_thread_id || null;
   if (!threadId) {
-    renderLog("There is no thread to take over.");
+    renderLog("There is no session to take over.");
     return false;
   }
   try {
@@ -1424,7 +1424,7 @@ export async function applyFileChange(itemId, direction) {
   }
   const threadId = state.session?.active_thread_id;
   if (!threadId) {
-    renderLog("No thread is selected.");
+    renderLog("No session is selected.");
     return;
   }
 

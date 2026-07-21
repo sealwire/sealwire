@@ -37,9 +37,10 @@ export function buildWorkspaceSuggestions({
   addSuggestion(currentCwd, "Current session");
 
   for (const group of buildThreadGroups(threads || [])) {
+    const count = group.threads?.length || 0;
     addSuggestion(
       group.cwd,
-      `${workspaceBasename(group.cwd)} (${group.threads?.length || 0} threads)`
+      `${workspaceBasename(group.cwd)} (${count} ${count === 1 ? "session" : "sessions"})`
     );
   }
 

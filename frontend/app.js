@@ -740,7 +740,7 @@ async function loadViewOnlyTranscript(threadId) {
       // load after a backoff instead of treating the empty shell as settled.
       error: true,
     });
-    logLine(`Couldn't load the read-only thread view: ${error.message}`);
+    logLine(`Couldn't load the read-only session view: ${error.message}`);
   }
   if (state.session) renderer.renderSession(state.session);
 }
@@ -1150,7 +1150,7 @@ async function runComposerSubmit() {
   if (pin?.review) {
     // A thread mid-review can't be sent to (the relay rejects resume/send for it).
     if (text.trim()) {
-      logLine("This thread is being reviewed — you can’t send to it right now.");
+      logLine("This session is being reviewed — you can’t send to it right now.");
     }
     return;
   }
@@ -1917,14 +1917,14 @@ function openForkDialogForThread(threadId, upToItemId = "") {
     viewedThread: state.viewOnlyThread,
   });
   if (!thread) {
-    logLine(`Cannot fork unknown thread ${threadId}`);
+    logLine(`Cannot fork unknown session ${threadId}`);
     return;
   }
   // A thread mid-turn is rejected by the relay (the transcript is still being
   // written), so refuse here instead of letting the user fill in the whole
   // dialog first. Background threads count — they have their own live runtime.
   if (threadIsBusy(thread)) {
-    logLine("Cannot fork a thread while a turn is in progress.");
+    logLine("Cannot fork a session while a turn is in progress.");
     return;
   }
   const models = modelsForProvider(thread.provider, state.session?.available_models || []);
@@ -2127,9 +2127,9 @@ async function archiveThreadFromContextMenu() {
   let deleteReviewers;
   if (reviewerCount > 0) {
     deleteReviewers = window.confirm(
-      `This conversation has ${reviewerCount} reviewer thread${reviewerCount === 1 ? "" : "s"}.\n\n` +
-        "OK: delete the reviewer thread(s) too.\n" +
-        "Cancel: keep them as normal threads (they'll appear in your thread list)."
+      `This conversation has ${reviewerCount} reviewer session${reviewerCount === 1 ? "" : "s"}.\n\n` +
+        "OK: delete the reviewer session(s) too.\n" +
+        "Cancel: keep them as normal sessions (they'll appear in your session list)."
     );
   }
 
@@ -2170,7 +2170,7 @@ async function deleteThreadFromContextMenu() {
   // non-Claude provider (incl. future ones) as "Codex".
   const providerName = providerLabel(thread?.provider) || "agent";
   const confirmed = window.confirm(
-    `Permanently delete "${title}" from local ${providerName} storage?\n\nThis removes the local thread file and related local index/state entries. This cannot be undone.`
+    `Permanently delete "${title}" from local ${providerName} storage?\n\nThis removes the local session file and related local index/state entries. This cannot be undone.`
   );
   if (!confirmed) {
     return;
@@ -2185,9 +2185,9 @@ async function deleteThreadFromContextMenu() {
   let deleteReviewers;
   if (reviewerCount > 0) {
     deleteReviewers = window.confirm(
-      `This conversation has ${reviewerCount} reviewer thread${reviewerCount === 1 ? "" : "s"}.\n\n` +
-        "OK: delete the reviewer thread(s) too.\n" +
-        "Cancel: keep them as normal threads (they'll appear in your thread list)."
+      `This conversation has ${reviewerCount} reviewer session${reviewerCount === 1 ? "" : "s"}.\n\n` +
+        "OK: delete the reviewer session(s) too.\n" +
+        "Cancel: keep them as normal sessions (they'll appear in your session list)."
     );
   }
 

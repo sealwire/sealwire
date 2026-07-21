@@ -113,7 +113,7 @@ export function applyForkProviderChange(fields, provider, models) {
 // The fork button lives in the TRANSCRIPT, which renders on a deep link
 // (`/?thread=<id>`) before the sidebar thread list has loaded — and the list is
 // paged, so an older thread may never be in it. Requiring a list hit made fork
-// bail with "Cannot fork unknown thread" on local and fail silently on remote.
+// bail with "Cannot fork unknown session" on local and fail silently on remote.
 // The viewed session snapshot already describes the thread being viewed, so it
 // is a sufficient fallback: the relay only needs the id, and resolves cwd,
 // provider and settings from the thread itself.

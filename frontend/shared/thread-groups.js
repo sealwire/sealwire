@@ -100,10 +100,10 @@ export function summarizeThreadGroups(groups) {
   const totalThreads = safeGroups.reduce((count, group) => count + (group.threads?.length || 0), 0);
 
   if (totalThreads === 0) {
-    return "No saved threads yet.";
+    return "No saved sessions yet.";
   }
 
   return `${safeGroups.length} ${safeGroups.length === 1 ? "folder" : "folders"} · ${totalThreads} ${
-    totalThreads === 1 ? "thread" : "threads"
+    totalThreads === 1 ? "session" : "sessions"
   }`;
 }

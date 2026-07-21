@@ -1039,7 +1039,7 @@ function RemoteApp() {
           ...defaultForkFields({ thread, models: [], session }),
           upToItemId,
         },
-        error: "Cannot fork a thread while a turn is in progress.",
+        error: "Cannot fork a session while a turn is in progress.",
       });
       return;
     }
@@ -1832,7 +1832,7 @@ function RemoteSidebar({
         h("p", { className: "sidebar-caption", id: "remote-threads-count" }, threadsModel.countLabel),
         h(RefreshButton, {
           id: "remote-threads-refresh-button",
-          label: "Refresh threads",
+          label: "Refresh sessions",
           disabled: threadsModel.loading || !hasUsableRelay,
           onClick: () => onRefreshThreads(),
         })
@@ -2367,7 +2367,7 @@ function RemoteTranscriptPanel({
         readyCopy: "The remote session is live. Send the first prompt below when you're ready.",
         session,
         shortId,
-        waitingCopy: "This thread is already open, but another device currently has control. You can still approve or decline requests here; take over only if you want to send messages from this device.",
+        waitingCopy: "This session is already open, but another device currently has control. You can still approve or decline requests here; take over only if you want to send messages from this device.",
       },
       transcriptOptions: {
         currentCwd: session?.current_cwd || "",

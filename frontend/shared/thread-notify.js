@@ -79,7 +79,7 @@ export function isDocumentForeground() {
  * @returns {{ title: string, body: string }}
  */
 export function formatThreadNotification(event, name) {
-  const label = name || "A thread";
+  const label = name || "A session";
   if (event?.kind === "needs_input") {
     return { title: "Agent needs your input", body: `${label} is waiting for you.` };
   }

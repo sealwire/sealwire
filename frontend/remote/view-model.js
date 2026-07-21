@@ -49,7 +49,7 @@ export function selectSessionRenderModel({ session, previousSession, hasControll
     hasActiveSession,
     hasControllerLease,
     messagePlaceholder: activeThreadFrozen
-      ? "This thread is being reviewed…"
+      ? "This session is being reviewed…"
       : !hasActiveSession
       ? "Start a remote session first."
       : canCompose
@@ -58,7 +58,7 @@ export function selectSessionRenderModel({ session, previousSession, hasControll
         ? (providerLabel(session.provider)
           ? `Message ${providerLabel(session.provider)} remotely...`
           : "Message remotely...")
-        : "This thread is currently running on another device.",
+        : "This session is currently running on another device.",
     scrollDebug: {
       thread: session.active_thread_id || "-",
       prevThread: previousSession?.active_thread_id || "-",
