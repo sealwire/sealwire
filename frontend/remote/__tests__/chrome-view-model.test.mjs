@@ -2,10 +2,45 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  buildProviderStatusModel,
   selectDeviceChromeRenderModel,
   selectSessionChromeRenderModel,
   selectStatusBadgeRenderModel,
 } from "../chrome-view-model.js";
+
+test("buildProviderStatusModel surfaces a failed provider with its reason and tone", () => {
+  const model = buildProviderStatusModel({
+    provider_status: [
+      { provider: "codex", display_name: "Codex", status: "connected", connected: true },
+      {
+        provider: "claude_code",
+        display_name: "Claude Code",
+        status: "failed",
+        connected: false,
+        reason: "boom",
+      },
+    ],
+  });
+
+  assert.equal(model.length, 2);
+  assert.equal(model[0].label, "Codex");
+  assert.equal(model[0].tone, "ready");
+  assert.equal(model[0].connected, true);
+  assert.equal(model[0].reason, null);
+
+  const claude = model[1];
+  assert.equal(claude.label, "Claude"); // provider-labels shortens claude_code -> Claude
+  assert.equal(claude.status, "failed");
+  assert.equal(claude.tone, "alert");
+  assert.equal(claude.statusLabel, "Failed to start");
+  assert.equal(claude.reason, "boom");
+  assert.equal(claude.dotClass, "provider-dot-failed");
+});
+
+test("buildProviderStatusModel tolerates an old snapshot without provider_status", () => {
+  assert.deepEqual(buildProviderStatusModel({}), []);
+  assert.deepEqual(buildProviderStatusModel(null), []);
+});
 
 test("selectDeviceChromeRenderModel exposes re-pair state and pairing controls", () => {
   const model = selectDeviceChromeRenderModel({

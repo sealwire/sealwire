@@ -16,6 +16,8 @@ import {
   pairingApprovalHint,
   pairingApprovalModal,
   pendingActionBanner,
+  providerStatusPanel,
+  providerStatusList,
   resumeLatestButton,
   sendButton,
   sessionHistoryDrawer,
@@ -51,6 +53,7 @@ import {
   readLocalUiState,
 } from "./ui-store.js";
 import { providerLabel } from "../shared/provider-labels.js";
+import { providerStatusMeta } from "../shared/provider-status.js";
 import { isProgressStalled } from "../progress-verbs.js";
 import {
   earliestPairingExpiry,
@@ -357,6 +360,9 @@ export function createSessionRenderer({
       statusBadge.className = "status-badge status-badge-ready";
     }
     renderHeaderModelBadge(session);
+    // Provider status is relay-global; read the real session, not the
+    // (possibly view-only) projection above.
+    renderProviderStatus(state.session);
 
     if (!viewingConversation) {
       renderOverviewState(session);
@@ -471,6 +477,7 @@ export function createSessionRenderer({
     renderOverviewState(null, message);
     renderWorkspaceSuggestions(null);
     renderHeaderModelBadge(null);
+    renderProviderStatus(null);
     statusBadge.textContent = "Offline";
     statusBadge.className = "status-badge status-badge-offline";
     if (sessionDetailsPath) {
@@ -504,6 +511,7 @@ export function createSessionRenderer({
     renderWorkspaceSuggestions(null);
     renderThreadListMessage("Sign in", "Enter RELAY_API_TOKEN to load threads.");
     renderHeaderModelBadge(null);
+    renderProviderStatus(null);
     statusBadge.textContent = "Sign in";
     statusBadge.className = "status-badge status-badge-offline";
     if (sessionDetailsPath) {
@@ -620,6 +628,49 @@ export function createSessionRenderer({
         ? `${modelLabel} · effort ${session.reasoning_effort}`
         : modelLabel
       : "";
+  }
+
+  // Sidebar "Providers" panel: one row per configured provider from the
+  // snapshot's `provider_status`, including any that failed to spawn (with the
+  // reason as a hover title). Independent of which thread is being viewed, so it
+  // reads the real session, not the view-only projection.
+  function renderProviderStatus(session) {
+    if (!providerStatusList) {
+      return;
+    }
+    const rows = Array.isArray(session?.provider_status)
+      ? session.provider_status
+      : [];
+    if (providerStatusPanel) {
+      providerStatusPanel.hidden = rows.length === 0;
+    }
+    providerStatusList.replaceChildren();
+    for (const row of rows) {
+      const meta = providerStatusMeta(row.status);
+      const item = document.createElement("li");
+      item.className = "provider-status-row";
+      item.dataset.provider = row.provider || "";
+      item.dataset.status = row.status || "";
+      if (row.reason) {
+        item.title = row.reason;
+      }
+
+      const dot = document.createElement("span");
+      dot.className = `provider-status-dot ${meta.dotClass}`;
+      dot.setAttribute("aria-hidden", "true");
+
+      const name = document.createElement("span");
+      name.className = "provider-status-name";
+      name.textContent =
+        providerLabel(row.provider) || row.display_name || row.provider || "";
+
+      const statusEl = document.createElement("span");
+      statusEl.className = "provider-status-state";
+      statusEl.textContent = meta.label;
+
+      item.append(dot, name, statusEl);
+      providerStatusList.append(item);
+    }
   }
 
   function renderLiveSurfaces(session, activeThread) {

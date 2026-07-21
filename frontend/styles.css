@@ -1373,6 +1373,68 @@ input:focus, textarea:focus, select:focus {
   color: var(--err-fg);
 }
 
+/* PROVIDER STATUS — sidebar panel listing each configured provider's health.
+   Shared by the local and remote surfaces; colour is carried by the dot and,
+   for error states, by the status text. */
+.provider-status-panel {
+  display: grid;
+  gap: 8px;
+}
+.provider-status-panel[hidden] {
+  display: none;
+}
+.provider-status-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+}
+.provider-status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 2px;
+  font-size: var(--t-xs);
+  color: var(--text-2);
+}
+.provider-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: var(--text-3);
+}
+.provider-status-name {
+  font-weight: 500;
+}
+.provider-status-state {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  color: var(--text-3);
+}
+.provider-dot-connected {
+  background: var(--ok-fg);
+}
+.provider-dot-starting {
+  background: var(--warn-fg);
+}
+.provider-dot-disconnected {
+  background: var(--text-3);
+}
+.provider-dot-failed,
+.provider-dot-not-installed {
+  background: var(--err-fg);
+}
+.provider-status-row[data-status="disconnected"] .provider-status-state {
+  color: var(--warn-fg);
+}
+.provider-status-row[data-status="failed"] .provider-status-state,
+.provider-status-row[data-status="not_installed"] .provider-status-state {
+  color: var(--err-fg);
+}
+
 /* OVERVIEW STRIP — slim metadata line, not a hero block */
 .overview-strip {
   padding: 14px 32px 0;

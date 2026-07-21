@@ -1,5 +1,6 @@
 import { formatTimestamp, shortId, workspaceBasename } from "./utils.js";
 import { providerLabel } from "../shared/provider-labels.js";
+import { providerStatusMeta } from "../shared/provider-status.js";
 import {
   isReviewInProgressForThread,
   reviewStatusBadge,
@@ -181,6 +182,27 @@ export function selectDeviceChromeRenderModel(currentState) {
           titleTitle: "",
         },
   };
+}
+
+// Rows for the sidebar "Providers" panel. Reads the snapshot's `provider_status`
+// (see the Rust `ProviderStatusView`) and folds in the shared label/tone/dot
+// mapping so the local and remote surfaces render identically. Tolerates an old
+// relay that predates the field by defaulting to an empty list.
+export function buildProviderStatusModel(session) {
+  const rows = session?.provider_status || [];
+  return rows.map((row) => {
+    const meta = providerStatusMeta(row.status);
+    return {
+      key: row.provider,
+      label: providerLabel(row.provider) || row.display_name || row.provider,
+      status: row.status,
+      connected: Boolean(row.connected),
+      reason: row.reason || null,
+      statusLabel: meta.label,
+      tone: meta.tone,
+      dotClass: meta.dotClass,
+    };
+  });
 }
 
 export function selectStatusBadgeRenderModel(currentState, session = currentState.session) {

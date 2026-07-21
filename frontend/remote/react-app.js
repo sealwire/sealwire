@@ -45,6 +45,7 @@ import { installThreadListWheelProxy } from "../shared/thread-list-scroll.js";
 import { selectWorkspaceSuggestionsModel } from "../shared/workspace-suggestions.js";
 import { createVerbCycler } from "../progress-verbs.js";
 import {
+  buildProviderStatusModel,
   selectDeviceChromeRenderModel,
   selectResetChromeRenderModel,
   selectSessionChromeRenderModel,
@@ -1612,6 +1613,39 @@ function findThreadNameInGroups(groups, threadId) {
   return null;
 }
 
+function ProviderStatusSection({ model }) {
+  if (!model || model.length === 0) {
+    return null;
+  }
+  return h(
+    "section",
+    { className: "remote-access-shell provider-status-shell" },
+    h("p", { className: "sidebar-caption" }, "Providers"),
+    h(
+      "ul",
+      { className: "provider-status-list", id: "remote-provider-status-list" },
+      ...model.map((row) =>
+        h(
+          "li",
+          {
+            key: row.key,
+            className: "provider-status-row",
+            "data-provider": row.key,
+            "data-status": row.status,
+            title: row.reason || undefined,
+          },
+          h("span", {
+            className: `provider-status-dot ${row.dotClass}`,
+            "aria-hidden": "true",
+          }),
+          h("span", { className: "provider-status-name" }, row.label),
+          h("span", { className: "provider-status-state" }, row.statusLabel)
+        )
+      )
+    )
+  );
+}
+
 function RemoteSidebar({
   currentState,
   hasRelay,
@@ -1723,6 +1757,7 @@ function RemoteSidebar({
       },
       "New session"
     ),
+    h(ProviderStatusSection, { model: buildProviderStatusModel(session) }),
     h(
       "section",
       { className: "remote-access-shell remote-relay-shell" },

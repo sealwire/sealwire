@@ -49,6 +49,12 @@ function Sidebar({ launchModel = null, onLaunchFieldChange = null, onLaunchStart
     ),
     h(AuthForm),
     h(LaunchPanel, { launchModel, onLaunchFieldChange, onLaunchStart }),
+    h(
+      "section",
+      { className: "provider-status-panel", id: "provider-status-panel", hidden: true },
+      h("p", { className: "sidebar-caption" }, "Providers"),
+      h("ul", { className: "provider-status-list", id: "provider-status-list" })
+    ),
     h(ThreadDrawer),
     h(ThreadContextMenu),
     h("div", { id: "fork-session-dialog-root" }),
