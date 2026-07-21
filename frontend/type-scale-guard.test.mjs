@@ -86,3 +86,48 @@ ratchet({
   hint: "--leading-*",
   isCompliant: (v) => isVar(v) || v === "inherit" || v === "0",
 });
+
+// Colors are the one axis where a raw literal has a legitimate home: the token
+// DEFINITION (`--surface: #15161b`). So the rule is "colors may only be defined
+// in a --token; everywhere else use var(--...)". We scan declarations and skip
+// custom-property definitions, counting raw color literals in normal values.
+// Baseline is 17 (not yet consolidated); it drops as raws move to semantic tokens.
+const COLOR_RE = /#[0-9a-fA-F]{3,8}\b|rgba?\([^)]*\)|hsla?\([^)]*\)/g;
+// Property is `[-a-zA-Z]+` so it matches BOTH plain props (color, background) and
+// hyphenated / custom ones (border-color, --surface). An earlier `--?[a-zA-Z]…`
+// only matched hyphenated props and silently missed color:/background:/fill:.
+const DECL_RE = /([-a-zA-Z]+)\s*:\s*([^;{}]+)/g;
+const COLOR_BASELINE = 59;
+
+function countRawColors() {
+  const perFile = {};
+  let total = 0;
+  for (const rel of FILES) {
+    const css = readFileSync(join(HERE, rel), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    let n = 0;
+    for (const decl of css.matchAll(DECL_RE)) {
+      if (decl[1].startsWith("--")) continue; // token definition — colors live here
+      for (const _ of decl[2].matchAll(COLOR_RE)) n += 1;
+    }
+    perFile[rel] = n;
+    total += n;
+  }
+  return { total, perFile };
+}
+
+test(`type tokens: raw colors in component values stay at baseline (${COLOR_BASELINE})`, () => {
+  const { total, perFile } = countRawColors();
+  if (total > COLOR_BASELINE) {
+    assert.fail(
+      `Raw colors rose to ${total} (baseline ${COLOR_BASELINE}). Colors may only be ` +
+        `defined in a --token; use var(--...) in component values. ${JSON.stringify(perFile)}`
+    );
+  }
+  if (total < COLOR_BASELINE) {
+    assert.fail(
+      `Raw colors dropped to ${total} — nice. Now lower COLOR_BASELINE from ` +
+        `${COLOR_BASELINE} to ${total}. ${JSON.stringify(perFile)}`
+    );
+  }
+  assert.equal(total, COLOR_BASELINE);
+});
