@@ -124,6 +124,38 @@
   --diff-del-bg: rgba(180, 58, 58, 0.16);
   --diff-meta-bg: rgba(255, 255, 255, 0.035);
 
+  /* Color-guard corral (color ratchet baseline 59 -> 0): these six were already
+     REFERENCED throughout the app as `var(--token, #hex)` — someone had already
+     reached for a token by this exact name, it just had no :root definition, so
+     every reference silently rendered its literal fallback in BOTH themes (the
+     fallback doesn't care which theme is active). Defining them here preserves
+     today's exact rendering with zero visual change; it does not merge them into
+     the separate --ok-fg/--warn-fg/--err-fg system below, even where the role
+     looks similar — that consolidation is a deliberate design decision for the
+     next (color-system) pass, not a side effect of corralling raw literals.
+     --diff-del-fg intentionally stays distinct from --err-fg (#f87171): today
+     workspace-changes-del/workspace-diff-chip-del already render a different red
+     (#ef4444) than message-card-error/ask-user-error's --err-fg — a real,
+     pre-existing inconsistency this step preserves rather than silently fixes. */
+  --accent-warning: #e6a23c;
+  --status-alert: #e07a5f;
+  --text-warning: #b54708;
+  --diff-add-fg: #22c55e;
+  --diff-del-fg: #ef4444;
+  --surface-muted: rgba(127, 127, 127, 0.14);
+
+  /* Color-guard corral: these five had NO token reference at all (naked
+     literals). --qr-surface is intentionally the same in both themes — a QR
+     code needs a literal white background to scan, not a themed surface. The
+     shadow tokens preserve each spot's existing (subtler-than-the-shadow-1/2/3
+     scale) opacity exactly; reconciling them onto the standard shadow scale is
+     deferred, same as above. */
+  --qr-surface: #ffffff;
+  --shadow-popover: 0 10px 30px rgba(0, 0, 0, 0.18);
+  --shadow-popover-mobile: 0 -10px 30px rgba(0, 0, 0, 0.25);
+  --shadow-segmented-selected: 0 1px 2px rgba(0, 0, 0, 0.12);
+  --shadow-ios-hint: 0 8px 28px rgba(0, 0, 0, 0.45);
+
   /* Provider brand accents — Claude (orange) / Codex (cyan) */
   --provider-claude-fg: #fbbf77;
   --provider-claude-fg-outline: #fed7aa;
@@ -533,12 +565,12 @@ button:disabled {
 /* The standby home's primary "Continue <last task>" action — subtle accent emphasis so it
    leads the eye over the quick-start prompts, reusing the shared accent token. */
 .suggestion-button.is-primary {
-  border-color: var(--accent-primary, #4c8bf5);
-  color: var(--accent-primary, #4c8bf5);
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
 }
 .suggestion-button.is-primary:hover:not(:disabled) {
-  border-color: var(--accent-primary, #4c8bf5);
-  background: color-mix(in srgb, var(--accent-primary, #4c8bf5) 12%, transparent);
+  border-color: var(--accent-primary);
+  background: color-mix(in srgb, var(--accent-primary) 12%, transparent);
 }
 
 .secondary-button {
@@ -1012,8 +1044,8 @@ input:focus, textarea:focus, select:focus {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: var(--accent-primary, #4c8bf5);
-  box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent-primary, #4c8bf5) 60%, transparent);
+  background: var(--accent-primary);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent-primary) 60%, transparent);
   animation: agent-working-indicator-pulse 1.4s ease-in-out infinite;
 }
 /* Under review: a separate reviewer thread is working on this (idle) parent
@@ -1021,7 +1053,7 @@ input:focus, textarea:focus, select:focus {
    already supplies it — so it reads as "busy on your behalf". The modifier is an
    explicit hook so this state can be differentiated later without touching JS. */
 .conversation-activity-dot.is-reviewing {
-  background: var(--accent-primary, #4c8bf5);
+  background: var(--accent-primary);
 }
 /* Attention states: the thread is no longer working but wants the user. Steady
    (no pulse) so it reads as "resolved, waiting for you" rather than "busy". */
@@ -1031,7 +1063,7 @@ input:focus, textarea:focus, select:focus {
   box-shadow: none;
 }
 .conversation-activity-dot.is-attention-input {
-  background: var(--accent-warning, #e6a23c);
+  background: var(--accent-warning);
 }
 @media (prefers-reduced-motion: reduce) {
   .conversation-activity-dot { animation: none; }
@@ -1572,7 +1604,7 @@ input:focus, textarea:focus, select:focus {
   border-radius: var(--radius-md);
   border: 1px solid var(--border-prominent);
   background: var(--bg-surface);
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
+  box-shadow: var(--shadow-popover);
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -1678,7 +1710,7 @@ input:focus, textarea:focus, select:focus {
 .settings-segmented-option.is-selected {
   background: var(--bg-surface);
   color: var(--text-primary);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+  box-shadow: var(--shadow-segmented-selected);
 }
 .settings-segmented.is-disabled .settings-segmented-option { cursor: not-allowed; opacity: 0.6; }
 
@@ -1693,7 +1725,7 @@ input:focus, textarea:focus, select:focus {
     border-bottom: none;
     padding: 16px 18px env(safe-area-inset-bottom, 16px);
     min-width: 0;
-    box-shadow: 0 -10px 30px rgba(0, 0, 0, 0.25);
+    box-shadow: var(--shadow-popover-mobile);
     gap: 16px;
   }
 }
@@ -1732,8 +1764,8 @@ input:focus, textarea:focus, select:focus {
   font-size: var(--text-sm);
   padding: 4px 10px;
   font-weight: var(--weight-medium);
-  background: var(--accent, #6366f1);
-  color: var(--accent-on, #fff);
+  background: var(--accent);
+  color: var(--accent-on);
   border: none;
   border-radius: 6px;
   cursor: pointer;
@@ -2406,14 +2438,14 @@ input:focus, textarea:focus, select:focus {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: var(--accent-primary, #4c8bf5);
-  box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent-primary, #4c8bf5) 60%, transparent);
+  background: var(--accent-primary);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent-primary) 60%, transparent);
   animation: agent-working-indicator-pulse 1.4s ease-in-out infinite;
 }
 
 .agent-working-indicator-alert .agent-working-indicator-dot {
-  background: var(--status-alert, #e07a5f);
-  box-shadow: 0 0 0 0 color-mix(in srgb, var(--status-alert, #e07a5f) 60%, transparent);
+  background: var(--status-alert);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--status-alert) 60%, transparent);
 }
 
 .agent-working-indicator-label {
@@ -2567,7 +2599,7 @@ input:focus, textarea:focus, select:focus {
   border: 1px dashed var(--border-prominent);
 }
 /* QR code background stays white in both themes — required for scanner contrast. */
-.pairing-qr { background: #FFFFFF; padding: 12px; border-radius: var(--radius-sm); text-align: center; }
+.pairing-qr { background: var(--qr-surface); padding: 12px; border-radius: var(--radius-sm); text-align: center; }
 .pairing-qr-image { display: block; width: 100%; height: auto; max-width: 240px; margin: 0 auto; }
 .paired-device-card {
   padding: 16px;
@@ -2648,10 +2680,10 @@ input:focus, textarea:focus, select:focus {
   gap: 10px;
   padding: 11px 14px;
   border-radius: 12px;
-  background: var(--surface-3, #26262c);
-  color: var(--text-primary, #f3f3f5);
-  border: 1px solid var(--surface-2, #1c1c20);
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  background: var(--surface-3);
+  color: var(--text-primary);
+  border: 1px solid var(--surface-2);
+  box-shadow: var(--shadow-ios-hint);
   font-size: var(--text-ui);
   line-height: var(--leading-normal);
 }
@@ -2980,7 +3012,7 @@ input:focus, textarea:focus, select:focus {
   font-size: var(--text-sm);
   color: var(--text-secondary);
   background: transparent;
-  border: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.3));
+  border: 1px solid var(--border-subtle);
   border-radius: 6px;
   cursor: pointer;
   box-shadow: none;
@@ -3010,7 +3042,7 @@ input:focus, textarea:focus, select:focus {
   max-width: 480px;
 }
 .workspace-diff-warning {
-  color: var(--text-warning, #b54708);
+  color: var(--text-warning);
 }
 .workspace-diff-hint {
   font-style: italic;
@@ -3236,7 +3268,7 @@ body.rail-collapsed .right-rail {
 .right-rail-resize:focus-visible,
 body.is-resizing-panel .sidebar-resize,
 body.is-resizing-panel .right-rail-resize {
-  background: var(--accent, #6366f1);
+  background: var(--accent);
   outline: none;
 }
 body.is-resizing-panel {
@@ -3309,7 +3341,7 @@ body.is-resizing-panel {
   background: var(--bg-elevated);
 }
 .workspace-changes-row:focus-visible {
-  outline: 2px solid var(--accent, #6366f1);
+  outline: 2px solid var(--accent);
   outline-offset: -1px;
 }
 .workspace-changes-row-main {
@@ -3335,8 +3367,8 @@ body.is-resizing-panel {
   font-family: var(--font-mono);
   font-size: var(--text-sm);
 }
-.workspace-changes-add { color: var(--diff-add-fg, #22c55e); }
-.workspace-changes-del { color: var(--diff-del-fg, #ef4444); }
+.workspace-changes-add { color: var(--diff-add-fg); }
+.workspace-changes-del { color: var(--diff-del-fg); }
 .workspace-changes-row-pending,
 .workspace-changes-row-empty {
   font-size: var(--text-sm);
@@ -3391,7 +3423,7 @@ body.is-resizing-panel {
 .workspace-changes-error-inline {
   margin: 0 10px 8px;
   font-size: var(--text-sm);
-  color: var(--text-warning, #b54708);
+  color: var(--text-warning);
 }
 
 /* Right-panel tabs (Changes | Reviewer) ---------------------------------- */
@@ -3507,7 +3539,7 @@ body.is-resizing-panel {
   background: var(--bg-elevated);
   box-shadow: var(--shadow-1);
 }
-.reviewer-job-alert { border-color: var(--text-warning, #b54708); }
+.reviewer-job-alert { border-color: var(--text-warning); }
 .reviewer-job-head {
   display: flex;
   align-items: center;
@@ -3548,7 +3580,7 @@ body.is-resizing-panel {
   padding: 0 6px;
   border-radius: 999px;
   color: var(--text-secondary);
-  background: var(--surface-muted, rgba(127, 127, 127, 0.14));
+  background: var(--surface-muted);
   white-space: nowrap;
   text-transform: capitalize;
 }
@@ -3571,8 +3603,8 @@ body.is-resizing-panel {
   color: var(--text-secondary);
   white-space: nowrap;
 }
-.reviewer-job-status-alert { color: var(--text-warning, #b54708); }
-.reviewer-job-status-ready { color: var(--diff-add-fg, #22c55e); }
+.reviewer-job-status-alert { color: var(--text-warning); }
+.reviewer-job-status-ready { color: var(--diff-add-fg); }
 .reviewer-job-review {
   font-size: var(--text-ui);
   line-height: var(--leading-relaxed);
@@ -3589,7 +3621,7 @@ body.is-resizing-panel {
   font-size: var(--text-sm);
   color: var(--text-secondary);
 }
-.reviewer-job-error { color: var(--text-warning, #b54708); }
+.reviewer-job-error { color: var(--text-warning); }
 .reviewer-job-actions {
   display: flex;
   align-items: center;
@@ -3647,17 +3679,17 @@ body.is-resizing-panel {
   .workspace-diff-chip:hover { background: var(--bg-surface-2, var(--bg-elevated)); }
   .workspace-diff-chip-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .workspace-diff-chip-sep { color: var(--text-tertiary, var(--text-secondary)); opacity: 0.6; }
-  .workspace-diff-chip-add { color: var(--diff-add-fg, #22c55e); font-family: var(--font-mono); font-size: var(--text-xs); }
-  .workspace-diff-chip-del { color: var(--diff-del-fg, #ef4444); font-family: var(--font-mono); font-size: var(--text-xs); }
+  .workspace-diff-chip-add { color: var(--diff-add-fg); font-family: var(--font-mono); font-size: var(--text-xs); }
+  .workspace-diff-chip-del { color: var(--diff-del-fg); font-family: var(--font-mono); font-size: var(--text-xs); }
   .workspace-diff-chip-review { font-size: var(--text-sm); line-height: var(--leading-none); }
-  .workspace-diff-chip-review.is-active { color: var(--accent, #3b82f6); }
-  .workspace-diff-chip-review.is-blocked { color: var(--text-warning, #b54708); }
-  .workspace-diff-chip-review.is-done { color: var(--diff-add-fg, #22c55e); }
+  .workspace-diff-chip-review.is-active { color: var(--accent); }
+  .workspace-diff-chip-review.is-blocked { color: var(--text-warning); }
+  .workspace-diff-chip-review.is-done { color: var(--diff-add-fg); }
   /* Dedicated Reviewer pill: a clear, labeled tap target with a status accent. */
   .reviewer-chip-icon { font-size: var(--text-sm); line-height: var(--leading-none); }
-  .reviewer-chip.is-active { border-color: var(--accent, #3b82f6); color: var(--text-primary); }
-  .reviewer-chip.is-blocked { border-color: var(--text-warning, #b54708); color: var(--text-warning, #b54708); }
-  .reviewer-chip.is-done { border-color: var(--diff-add-fg, #22c55e); }
+  .reviewer-chip.is-active { border-color: var(--accent); color: var(--text-primary); }
+  .reviewer-chip.is-blocked { border-color: var(--text-warning); color: var(--text-warning); }
+  .reviewer-chip.is-done { border-color: var(--diff-add-fg); }
 }
 
 /* Responsive: hide right rail and show chip on mobile */

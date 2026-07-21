@@ -300,8 +300,8 @@
   align-self: center;
   width: 18px;
   height: 18px;
-  border: 2px solid color-mix(in srgb, var(--text-secondary, #9aa0a6) 18%, transparent 82%);
-  border-top-color: var(--text-secondary, #9aa0a6);
+  border: 2px solid color-mix(in srgb, var(--text-secondary) 18%, transparent 82%);
+  border-top-color: var(--text-secondary);
   border-radius: 50%;
   margin: 0 0 4px;
   animation: transcript-history-spinner-rotate 0.7s linear infinite;
@@ -319,7 +319,7 @@
   }
   .transcript-history-spinner {
     animation: none;
-    border-top-color: var(--text-secondary, #9aa0a6);
+    border-top-color: var(--text-secondary);
   }
 }
 
@@ -329,14 +329,14 @@
   gap: 8px;
   padding: 16px;
   border-radius: var(--radius-sm, 12px);
-  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.08));
-  background: color-mix(in srgb, var(--bg-elevated, #1c1c1f) 92%, transparent 8%);
+  border: 1px solid var(--border-subtle);
+  background: color-mix(in srgb, var(--bg-elevated) 92%, transparent 8%);
 }
 
 .transcript-history-skeleton-user {
   align-self: flex-end;
   width: min(60%, 480px);
-  background: color-mix(in srgb, var(--bg-elevated, #1c1c1f) 80%, transparent 20%);
+  background: color-mix(in srgb, var(--bg-elevated) 80%, transparent 20%);
 }
 
 .transcript-history-skeleton-line {
@@ -344,9 +344,9 @@
   border-radius: 999px;
   background: linear-gradient(
     90deg,
-    color-mix(in srgb, var(--text-secondary, #9aa0a6) 12%, transparent 88%) 0%,
-    color-mix(in srgb, var(--text-secondary, #9aa0a6) 22%, transparent 78%) 50%,
-    color-mix(in srgb, var(--text-secondary, #9aa0a6) 12%, transparent 88%) 100%
+    color-mix(in srgb, var(--text-secondary) 12%, transparent 88%) 0%,
+    color-mix(in srgb, var(--text-secondary) 22%, transparent 78%) 50%,
+    color-mix(in srgb, var(--text-secondary) 12%, transparent 88%) 100%
   );
   background-size: 200% 100%;
   animation: transcript-history-skeleton-shimmer 1.4s ease-in-out infinite;
@@ -376,7 +376,7 @@
 @media (prefers-reduced-motion: reduce) {
   .transcript-history-skeleton-line {
     animation: none;
-    background: color-mix(in srgb, var(--text-secondary, #9aa0a6) 18%, transparent 82%);
+    background: color-mix(in srgb, var(--text-secondary) 18%, transparent 82%);
   }
 }
 
@@ -577,13 +577,13 @@
 
 /* A failed turn: red accent so it can never read as a clean completion. */
 .message-card-error {
-  background: color-mix(in srgb, var(--err-fg, #ef4444) 8%, var(--surface-1));
-  border-color: color-mix(in srgb, var(--err-fg, #ef4444) 30%, var(--border-faint));
-  border-left: 2px solid var(--err-fg, #ef4444);
+  background: color-mix(in srgb, var(--err-fg) 8%, var(--surface-1));
+  border-color: color-mix(in srgb, var(--err-fg) 30%, var(--border-faint));
+  border-left: 2px solid var(--err-fg);
 }
 
 .message-card-error .message-meta strong {
-  color: var(--err-fg, #ef4444);
+  color: var(--err-fg);
 }
 
 .message-card-tool {
@@ -1159,8 +1159,8 @@
 .ask-user-error {
   padding: 8px 10px;
   border-radius: 6px;
-  background: color-mix(in srgb, var(--err-fg, #ef4444) 12%, var(--bg-surface));
-  border: 1px solid color-mix(in srgb, var(--err-fg, #ef4444) 30%, var(--border-faint));
+  background: color-mix(in srgb, var(--err-fg) 12%, var(--bg-surface));
+  border: 1px solid color-mix(in srgb, var(--err-fg) 30%, var(--border-faint));
   font-size: var(--text-sm);
   color: var(--text-primary);
 }

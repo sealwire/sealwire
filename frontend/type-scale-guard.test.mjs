@@ -97,7 +97,7 @@ const COLOR_RE = /#[0-9a-fA-F]{3,8}\b|rgba?\([^)]*\)|hsla?\([^)]*\)/g;
 // hyphenated / custom ones (border-color, --surface). An earlier `--?[a-zA-Z]…`
 // only matched hyphenated props and silently missed color:/background:/fill:.
 const DECL_RE = /([-a-zA-Z]+)\s*:\s*([^;{}]+)/g;
-const COLOR_BASELINE = 59;
+const COLOR_BASELINE = 0;
 
 function countRawColors() {
   const perFile = {};
