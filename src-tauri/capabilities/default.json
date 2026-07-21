@@ -2,6 +2,6 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default desktop shell permissions",
-  "windows": ["main"],
+  "windows": ["main", "launcher"],
   "permissions": ["core:default", "dialog:default"]
 }

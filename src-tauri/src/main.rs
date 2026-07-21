@@ -26,6 +26,17 @@ const TRAY_ID: &str = "sealwire-tray";
 const TRAY_OPEN_LOCAL_ID: &str = "open-local";
 const TRAY_OPEN_LAUNCHER_ID: &str = "open-launcher";
 const TRAY_QUIT_ID: &str = "quit";
+// Window labels. Windows in IPC_WINDOW_LABELS load the Tauri UI (desktop.html) and
+// therefore depend on IPC + dialog capabilities: in Tauri v2 a window that matches
+// no capability opens with NO IPC access, so its controls silently do nothing.
+// Every label here MUST appear in capabilities/default.json's `windows` list —
+// enforced by test `tauri_ipc_windows_are_capability_covered`. (Product windows
+// created by open_surface_window load an External http(s) URL and talk to the relay
+// directly, so they need no Tauri capability and are intentionally not listed.)
+const MAIN_WINDOW_LABEL: &str = "main";
+const LAUNCHER_WINDOW_LABEL: &str = "launcher";
+#[cfg(test)]
+const IPC_WINDOW_LABELS: &[&str] = &[MAIN_WINDOW_LABEL, LAUNCHER_WINDOW_LABEL];
 // Tauri flattens externalBin next to the executable by basename; the shell
 // plugin resolves .sidecar(name) as <exe_dir>/name verbatim. Must be the bare
 // basename (NOT "binaries/relay-server", which would resolve to a missing
@@ -451,6 +462,17 @@ async fn start_relay(
                 format!("relay-server pid {pid} is ready on http://127.0.0.1:{port}"),
             );
         }
+        // Land the main window on the live local product the moment the relay is
+        // up, instead of leaving it on the launcher config. This runs inside every
+        // start_relay (including Save & Restart), so a port change re-points the
+        // window automatically. Navigating to the external local URL drops Tauri
+        // IPC for this window — intentional: the product is a plain web app; the
+        // relay-lifecycle IPC lives in the launcher window (tray → Launcher).
+        if let Some(main) = ready_app.get_webview_window(MAIN_WINDOW_LABEL) {
+            if let Ok(url) = Url::parse(&local_url(port)) {
+                let _ = main.navigate(url);
+            }
+        }
         // Seed the provider panel immediately, then keep it fresh while this
         // relay is the tracked process (drops/reconnects stream in).
         let rows = fetch_provider_status(port);
@@ -551,7 +573,7 @@ fn open_surface_window(
 }
 
 fn show_main_window(app: &AppHandle) -> Result<(), String> {
-    let Some(window) = app.get_webview_window("main") else {
+    let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else {
         return Err("launcher window is not available".to_string());
     };
     window
@@ -565,35 +587,48 @@ fn show_main_window(app: &AppHandle) -> Result<(), String> {
         .map_err(|error| format!("failed to focus Sealwire: {error}"))
 }
 
-fn open_local_or_launcher(app: &AppHandle) {
-    let local_result = app
-        .try_state::<Arc<RelaySupervisor>>()
-        .ok_or_else(|| "relay supervisor is not available".to_string())
-        .and_then(|supervisor| {
-            let status = supervisor.status().relay;
-            if !status.ready {
-                return Err("relay is not ready".to_string());
-            }
-            let port = status
-                .port
-                .ok_or_else(|| "relay is not running".to_string())?;
-            open_surface_window(app, "sealwire-local", "Sealwire Local", &local_url(port))
-        });
+// The main window IS the local product now (it navigates to the relay's local URL
+// on ready — see the ready poll in start_relay), so "open Sealwire" just brings
+// that window to the front. There is no separate product window in the primary
+// flow anymore.
+fn bring_app_to_front(app: &AppHandle) {
+    let _ = show_main_window(app);
+}
 
-    if let Err(error) = local_result {
-        if let Some(supervisor) = app.try_state::<Arc<RelaySupervisor>>() {
-            supervisor.push_log(Some(app), "desktop", format!("open local failed: {error}"));
-        }
-        let _ = show_main_window(app);
+// The launcher (workspace / port / broker config + start/stop) is now a dedicated,
+// on-demand window rather than the primary one. It loads the same desktop.html in
+// the Tauri context; its LAUNCHER_WINDOW_LABEL is covered by capabilities/default.json
+// so it keeps IPC access to the relay-lifecycle commands and the file dialog.
+fn show_launcher_window(app: &AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(LAUNCHER_WINDOW_LABEL) {
+        window
+            .show()
+            .map_err(|error| format!("failed to show launcher: {error}"))?;
+        let _ = window.unminimize();
+        return window
+            .set_focus()
+            .map_err(|error| format!("failed to focus launcher: {error}"));
     }
+    WebviewWindowBuilder::new(
+        app,
+        LAUNCHER_WINDOW_LABEL,
+        WebviewUrl::App("desktop.html".into()),
+    )
+    .title("Sealwire Launcher")
+    .inner_size(1180.0, 760.0)
+    .min_inner_size(860.0, 620.0)
+    .build()
+    .map(|_| ())
+    .map_err(|error| format!("failed to open launcher: {error}"))
 }
 
 fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
-    let open_local = MenuItem::with_id(app, TRAY_OPEN_LOCAL_ID, "Open Local", true, None::<&str>)?;
+    let open_local =
+        MenuItem::with_id(app, TRAY_OPEN_LOCAL_ID, "Open Sealwire", true, None::<&str>)?;
     let open_launcher = MenuItem::with_id(
         app,
         TRAY_OPEN_LAUNCHER_ID,
-        "Show Launcher",
+        "Launcher (advanced)…",
         true,
         None::<&str>,
     )?;
@@ -609,9 +644,17 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
         tray = tray.icon(icon).icon_as_template(true);
     }
     tray.on_menu_event(|app, event| match event.id().as_ref() {
-        TRAY_OPEN_LOCAL_ID => open_local_or_launcher(app),
+        TRAY_OPEN_LOCAL_ID => bring_app_to_front(app),
         TRAY_OPEN_LAUNCHER_ID => {
-            let _ = show_main_window(app);
+            if let Err(error) = show_launcher_window(app) {
+                if let Some(supervisor) = app.try_state::<Arc<RelaySupervisor>>() {
+                    supervisor.push_log(
+                        Some(app),
+                        "desktop",
+                        format!("open launcher failed: {error}"),
+                    );
+                }
+            }
         }
         TRAY_QUIT_ID => app.exit(0),
         _ => {}
@@ -623,7 +666,7 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
             ..
         } = event
         {
-            open_local_or_launcher(tray.app_handle());
+            bring_app_to_front(tray.app_handle());
         }
     })
     .build(app)?;
@@ -1171,7 +1214,7 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if window.label() == "main" {
+            if window.label() == MAIN_WINDOW_LABEL {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
                     let _ = window.hide();
@@ -1202,6 +1245,32 @@ mod tests {
             preferred_port: 8787,
             broker_mode: mode,
             custom_broker_url: custom.to_string(),
+        }
+    }
+
+    // Every window that loads the Tauri UI (desktop.html) must be covered by a
+    // capability, or in Tauri v2 it opens with NO IPC access: desktop_status, the
+    // start/stop commands, and the file dialog all silently fail. This regressed
+    // once when the launcher moved from the (covered) "main" window to a freshly
+    // built "launcher" window that no capability matched.
+    #[test]
+    fn tauri_ipc_windows_are_capability_covered() {
+        let caps: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/default.json"))
+                .expect("capabilities/default.json parses");
+        let covered: Vec<&str> = caps["windows"]
+            .as_array()
+            .expect("capability has a `windows` array")
+            .iter()
+            .map(|w| w.as_str().expect("window label is a string"))
+            .collect();
+        for label in IPC_WINDOW_LABELS {
+            assert!(
+                covered.iter().any(|w| *w == "*" || w == label),
+                "window {label:?} loads the Tauri IPC UI but is not covered by \
+                 capabilities/default.json `windows` {covered:?}; add it or its IPC \
+                 (status/start/stop/dialog) is dead"
+            );
         }
     }
 
