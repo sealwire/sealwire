@@ -79,11 +79,10 @@ import {
   reusableReviewersFromReviews,
 } from "../shared/reviews-cache.js";
 import {
+  buildReviewingThreadSet,
   canRequestReview,
   isReviewBlocked,
   isReviewInProgressForThread,
-  REVIEW_BLOCKED_BADGE,
-  REVIEW_IN_PROGRESS_BADGE,
   reviewStatusLabel,
   selectReviewLaunchModel,
 } from "../shared/review-state.js";
@@ -100,6 +99,7 @@ import {
 } from "./react-session-panels.js";
 import { ThreadGroupList } from "../shared/thread-list-react.js";
 import { buildThreadActivityMap } from "../shared/thread-activity.js";
+import { selectStatusBadge } from "./status-badge.js";
 import { sessionIsWorking, threadAttention } from "../shared/thread-attention.js";
 import {
   configureThreadNotifications,
@@ -329,36 +329,20 @@ export function createSessionRenderer({
 
     syncThreadHistoryScroll();
 
-    if (approval) {
-      statusBadge.textContent = "Approval required";
-      statusBadge.className = "status-badge status-badge-alert";
-    } else if (pendingPairings.length > 0) {
-      statusBadge.textContent =
-        pendingPairings.length === 1
-          ? "Pairing request"
-          : `${pendingPairings.length} pairing requests`;
-      statusBadge.className = "status-badge status-badge-alert";
-    } else if (!session.provider_connected) {
-      statusBadge.textContent = "Offline";
-      statusBadge.className = "status-badge status-badge-offline";
-    } else if (reviewBlocked) {
-      // A blocked review locks the workspace until the user stops the reviewer —
-      // surface it globally (not just inside the Reviewer tab) so it can't be missed.
-      // Shared constant → identical wording/tone to the remote surface.
-      statusBadge.textContent = REVIEW_BLOCKED_BADGE.label;
-      statusBadge.className = `status-badge status-badge-${REVIEW_BLOCKED_BADGE.tone}`;
-    } else if (isProgressStalled(session)) {
-      statusBadge.textContent = "Stalled?";
-      statusBadge.className = "status-badge status-badge-alert";
-    } else if (activeThreadFrozen) {
-      // Only badge the thread you're viewing as under review; a background review
-      // on another thread leaves this conversation live.
-      statusBadge.textContent = REVIEW_IN_PROGRESS_BADGE.label;
-      statusBadge.className = `status-badge status-badge-${REVIEW_IN_PROGRESS_BADGE.tone}`;
-    } else {
-      statusBadge.textContent = sessionStatusLabel(session, approval);
-      statusBadge.className = "status-badge status-badge-ready";
-    }
+    // One salience-ordered decision in a single tested place (status-badge.js), so
+    // the provider-outage and task labels come from the shared session-status seam
+    // instead of a second hardcoded copy that silently drifts. Local-only transient
+    // states (pairing, blocked/in-progress review, a stalled turn) layer on top.
+    const statusBadgeModel = selectStatusBadge({
+      session,
+      approval,
+      pendingPairingCount: pendingPairings.length,
+      reviewBlocked,
+      stalled: isProgressStalled(session),
+      activeThreadFrozen,
+    });
+    statusBadge.textContent = statusBadgeModel.text;
+    statusBadge.className = `status-badge status-badge-${statusBadgeModel.tone}`;
     renderHeaderModelBadge(session);
     // Provider status is relay-global; read the real session, not the
     // (possibly view-only) projection above.
@@ -1424,6 +1408,7 @@ export function createSessionRenderer({
         selectedCwd,
         threadActivity: buildThreadActivityMap(state.session),
         threadAttention: threadAttention.snapshotMap(),
+        threadReviewing: buildReviewingThreadSet(state.session),
       })
     );
 
@@ -1566,22 +1551,6 @@ export function createSessionRenderer({
 
   function overviewBadge(label, value) {
     return { label, value };
-  }
-
-  function sessionStatusLabel(session, approval) {
-    if (approval) {
-      return "Approval required";
-    }
-
-    if (!session?.provider_connected) {
-      return "Offline";
-    }
-
-    if (!session?.active_thread_id) {
-      return "Standby";
-    }
-
-    return "Live";
   }
 
   function classifyAuditEntry(entry) {

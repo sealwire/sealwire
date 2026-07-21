@@ -71,6 +71,22 @@ export function isThreadReviewLocked(session, threadId) {
   );
 }
 
+// Set of thread ids that are the PARENT of a non-terminal review, i.e. threads
+// currently being reviewed. Built once per render so the sidebar can badge each
+// reviewed thread's row with a blue "Reviewing" dot without re-scanning
+// `active_review_jobs` per thread (mirrors buildThreadActivityMap's shape). Keyed
+// by the parent — the reviewer thread itself already shows its own working dot via
+// `thread_activity`.
+export function buildReviewingThreadSet(session) {
+  const set = new Set();
+  for (const job of session?.active_review_jobs || []) {
+    if (job?.parent_thread_id && !TERMINAL_REVIEW_STATUSES.has(job.status)) {
+      set.add(job.parent_thread_id);
+    }
+  }
+  return set;
+}
+
 export function reviewChipTone(status) {
   if (status === "failed" || status === "escalated") return "alert";
   if (status === "complete") return "ready";

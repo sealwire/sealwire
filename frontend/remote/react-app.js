@@ -123,6 +123,7 @@ import {
   triggerRemoteWorkspaceDiffRefresh,
 } from "./workspace-diff-host.js";
 import {
+  buildReviewingThreadSet,
   canRequestReview,
   isReviewBlocked,
   isReviewInProgressForThread,
@@ -1856,6 +1857,7 @@ function RemoteSidebar({
           onToggleGroup,
           threadActivity: buildThreadActivityMap(session),
           threadAttention: threadAttention.snapshotMap(),
+          threadReviewing: buildReviewingThreadSet(session),
         })
       )
     ),

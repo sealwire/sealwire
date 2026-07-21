@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   REVIEW_BLOCKED_BADGE,
   REVIEW_IN_PROGRESS_BADGE,
+  buildReviewingThreadSet,
   reviewStatusBadge,
 } from "./review-state.js";
 
@@ -54,4 +55,27 @@ test("reviewStatusBadge returns null with no reviews or no session (never throws
   assert.equal(reviewStatusBadge({ active_review_jobs: [] }, "t1"), null);
   assert.equal(reviewStatusBadge(null, "t1"), null);
   assert.equal(reviewStatusBadge(undefined, undefined), null);
+});
+
+test("buildReviewingThreadSet collects non-terminal review parents only", () => {
+  const session = {
+    active_review_jobs: [
+      { parent_thread_id: "p1", reviewer_thread_id: "r1", status: "waiting_for_reviewer" },
+      { parent_thread_id: "p2", reviewer_thread_id: "r2", status: "complete" },
+      { parent_thread_id: "p3", reviewer_thread_id: "r3", status: "blocked" },
+    ],
+  };
+  const set = buildReviewingThreadSet(session);
+  assert.ok(set.has("p1"), "in-progress parent is reviewing");
+  assert.ok(set.has("p3"), "blocked parent is still under review");
+  assert.equal(set.has("p2"), false, "a completed review no longer marks its parent");
+  // The set is keyed by parent, not the reviewer thread doing the work.
+  assert.equal(set.has("r1"), false);
+});
+
+test("buildReviewingThreadSet is empty and never throws without jobs", () => {
+  assert.equal(buildReviewingThreadSet({ active_review_jobs: [] }).size, 0);
+  assert.equal(buildReviewingThreadSet(null).size, 0);
+  assert.equal(buildReviewingThreadSet(undefined).size, 0);
+  assert.equal(buildReviewingThreadSet({}).size, 0);
 });

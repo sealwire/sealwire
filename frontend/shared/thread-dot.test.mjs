@@ -42,3 +42,31 @@ test("working outranks a stale completed flag", () => {
   const dot = selectThreadDot({ activity: { tool: null }, attentionKind: "completed" });
   assert.equal(dot.className, "conversation-activity-dot");
 });
+
+test("under review only → blue reviewing dot", () => {
+  // The parent thread is idle while a *separate* reviewer thread works on it, so it
+  // has no activity of its own. It should still carry a blue dot to signal there is
+  // a live review running against it.
+  const dot = selectThreadDot({ activity: null, attentionKind: null, reviewing: true });
+  assert.equal(dot.className, "conversation-activity-dot is-reviewing");
+  assert.equal(dot.label, "Reviewing");
+});
+
+test("the thread's own working turn outranks a review dot", () => {
+  const dot = selectThreadDot({ activity: { tool: "bash" }, reviewing: true });
+  assert.equal(dot.className, "conversation-activity-dot");
+  assert.equal(dot.label, "Working · bash");
+});
+
+test("needs_input WINS over a review dot", () => {
+  const dot = selectThreadDot({ attentionKind: "needs_input", reviewing: true });
+  assert.equal(dot.className, "conversation-activity-dot is-attention-input");
+});
+
+test("an active review outranks a stale completed flag", () => {
+  // A completed thread that is now being re-reviewed should read as the live
+  // "Reviewing" state, not the steady "Completed" one.
+  const dot = selectThreadDot({ attentionKind: "completed", reviewing: true });
+  assert.equal(dot.className, "conversation-activity-dot is-reviewing");
+  assert.equal(dot.label, "Reviewing");
+});

@@ -45,6 +45,7 @@ export function ThreadGroupList({
   selectedCwd = "",
   threadActivity = null,
   threadAttention = null,
+  threadReviewing = null,
 }) {
   if (!groups.length) {
     return h("p", { className: "sidebar-empty" }, emptyMessage);
@@ -109,6 +110,7 @@ export function ThreadGroupList({
             row,
             threadActivity,
             threadAttention,
+            threadReviewing,
           })
         );
       })
@@ -131,6 +133,7 @@ function ThreadListRow({
   row,
   threadActivity,
   threadAttention,
+  threadReviewing,
 }) {
   if (row.type === "group") {
     const isSelected = normalizedSelectedCwd && row.normalizedCwd === normalizedSelectedCwd;
@@ -156,6 +159,7 @@ function ThreadListRow({
       active: activeThreadId === row.thread.id,
       activity: threadActivity?.get?.(row.thread.id) || null,
       attentionKind: threadAttention?.get?.(row.thread.id) || null,
+      reviewing: threadReviewing?.has?.(row.thread.id) || false,
       contextMenuThreadId,
       formatThreadMeta,
       group: row.group,
@@ -346,6 +350,7 @@ export function ThreadGroupItem({
   active,
   activity = null,
   attentionKind = null,
+  reviewing = false,
   contextMenuThreadId = null,
   formatThreadMeta,
   group,
@@ -358,9 +363,9 @@ export function ThreadGroupItem({
   const title = thread.name || thread.preview || shortId(thread.id);
   const provider = providerLabel(thread.provider);
   const providerToneClass = `is-${providerTone(thread.provider)}`;
-  // Three-state dot: needs_input (amber) > working (pulse) > completed (blue).
-  // See selectThreadDot for why needs_input outranks the live-turn pulse.
-  const dot = selectThreadDot({ activity, attentionKind });
+  // Four-state dot: needs_input (amber) > working (pulse) > reviewing (blue pulse)
+  // > completed (steady blue). See selectThreadDot for the full ordering rationale.
+  const dot = selectThreadDot({ activity, attentionKind, reviewing });
   // The right-click highlight is React-owned, driven off the store's context-menu
   // target (opening/closing the menu re-renders the thread list). It must NOT be
   // painted imperatively: the list re-renders on every SSE/activity tick, and a

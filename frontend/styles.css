@@ -989,6 +989,13 @@ input:focus, textarea:focus, select:focus {
   box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent-primary, #4c8bf5) 60%, transparent);
   animation: agent-working-indicator-pulse 1.4s ease-in-out infinite;
 }
+/* Under review: a separate reviewer thread is working on this (idle) parent
+   thread. Same live blue pulse as "working" — the base .conversation-activity-dot
+   already supplies it — so it reads as "busy on your behalf". The modifier is an
+   explicit hook so this state can be differentiated later without touching JS. */
+.conversation-activity-dot.is-reviewing {
+  background: var(--accent-primary, #4c8bf5);
+}
 /* Attention states: the thread is no longer working but wants the user. Steady
    (no pulse) so it reads as "resolved, waiting for you" rather than "busy". */
 .conversation-activity-dot.is-attention-done,
