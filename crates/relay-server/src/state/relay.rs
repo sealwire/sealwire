@@ -3008,6 +3008,30 @@ mod tests {
         );
     }
 
+    // When the delta cap evicts the oldest deltas, an interleaved pairing result
+    // must survive — eviction only removes TranscriptDelta entries.
+    #[test]
+    fn delta_eviction_preserves_interleaved_pairing_results() {
+        let mut relay = test_relay();
+        relay.broker_configured = true;
+        relay.queue_broker_message(dummy_pairing());
+        for _ in 0..5000 {
+            relay.queue_broker_message(dummy_delta());
+        }
+        let pairings = relay
+            .pending_broker_messages
+            .iter()
+            .filter(|m| matches!(m, BrokerPendingMessage::PairingResult(_)))
+            .count();
+        let deltas = relay
+            .pending_broker_messages
+            .iter()
+            .filter(|m| matches!(m, BrokerPendingMessage::TranscriptDelta(_)))
+            .count();
+        assert_eq!(pairings, 1, "pairing result must survive delta eviction");
+        assert_eq!(deltas, 4096, "deltas are capped at the bound");
+    }
+
     #[test]
     fn stale_turn_liveness_enqueues_error_push() {
         let (push_tx, mut push_rx) = tokio::sync::mpsc::unbounded_channel();
