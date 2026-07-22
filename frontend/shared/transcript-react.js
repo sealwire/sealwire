@@ -24,7 +24,10 @@ import {
   parseUnifiedDiffRows,
 } from "./file-change-diff.js";
 import { renderMarkdown } from "./markdown.js";
-import { didPrependOlderTranscript } from "./transcript-scroll.js";
+import {
+  didPrependOlderTranscript,
+  dispatchTranscriptScrollActionEvent,
+} from "./transcript-scroll.js";
 
 const h = React.createElement;
 
@@ -2106,6 +2109,14 @@ export function TranscriptContent({
       virtualizer.scrollToIndex(latestUserNodeIndex, {
         align: "start",
       });
+      // This anchor bypasses applyTranscriptScrollAction, so broadcast the
+      // intent here too — the stick-to-bottom follower must release its live
+      // follow or the next streamed token would drag the reader away from the
+      // message we just pinned.
+      dispatchTranscriptScrollActionEvent(
+        virtualizer.scrollTargetRef?.current,
+        "anchor-user"
+      );
     }
   }, [
     latestUserEntryId,

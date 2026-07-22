@@ -5,6 +5,7 @@
       "local-thread-interleaving",
       "local-view-only-models",
       "local-scroll-to-bottom",
+      "local-stick-to-bottom",
       "local-auth",
       "local-allowed-roots",
       "local-file-diff",
@@ -20,6 +21,7 @@
       "local-thread-interleaving",
       "local-view-only-models",
       "local-scroll-to-bottom",
+      "local-stick-to-bottom",
       "local-auth",
       "local-allowed-roots",
       "local-file-diff",
@@ -73,210 +75,296 @@
       "tier": "core",
       "provider": "fake-compatible",
       "transport": "local",
-      "coverage": ["session"]
+      "coverage": [
+        "session"
+      ]
     },
     "local-thread-interleaving": {
       "script": "browser-local-thread-interleaving-e2e.mjs",
       "tier": "core",
       "provider": "fake",
       "transport": "local",
-      "coverage": ["thread-interleaving", "background-streaming"]
+      "coverage": [
+        "thread-interleaving",
+        "background-streaming"
+      ]
     },
     "local-view-only-models": {
       "script": "browser-local-view-only-models-e2e.mjs",
       "tier": "core",
       "provider": "fake",
       "transport": "local",
-      "coverage": ["view-only-models", "provider-model-isolation"]
+      "coverage": [
+        "view-only-models",
+        "provider-model-isolation"
+      ]
     },
     "local-scroll-to-bottom": {
       "script": "browser-scroll-to-bottom-e2e.mjs",
       "tier": "core",
       "provider": "fake",
       "transport": "local",
-      "coverage": ["scroll-to-bottom", "desktop-layout", "mobile-layout"]
+      "coverage": [
+        "scroll-to-bottom",
+        "desktop-layout",
+        "mobile-layout"
+      ]
     },
     "local-permission-modes": {
       "script": "browser-local-permission-modes-e2e.mjs",
       "tier": "core",
       "provider": "fake-compatible",
       "transport": "local",
-      "coverage": ["permission-modes"]
+      "coverage": [
+        "permission-modes"
+      ]
     },
     "public-settings-load": {
       "script": "browser-public-settings-load-e2e.mjs",
       "tier": "core",
       "provider": "fake-compatible",
       "transport": "public",
-      "coverage": ["settings-load"]
+      "coverage": [
+        "settings-load"
+      ]
     },
     "public-thread-interleaving": {
       "script": "browser-public-thread-interleaving-e2e.mjs",
       "tier": "core",
       "provider": "fake",
       "transport": "public-broker",
-      "coverage": ["thread-interleaving", "background-streaming", "local-remote-follow"]
+      "coverage": [
+        "thread-interleaving",
+        "background-streaming",
+        "local-remote-follow"
+      ]
     },
     "remote-mobile-header": {
       "script": "browser-remote-mobile-header-e2e.mjs",
       "tier": "core",
       "provider": "stub",
       "transport": "static-remote",
-      "coverage": ["mobile-header", "mobile-layout", "transcript-scroll"]
+      "coverage": [
+        "mobile-header",
+        "mobile-layout",
+        "transcript-scroll"
+      ]
     },
     "local-auth": {
       "script": "browser-local-auth-e2e.mjs",
       "tier": "core",
       "provider": "fake-compatible",
       "transport": "local",
-      "coverage": ["auth"]
+      "coverage": [
+        "auth"
+      ]
     },
     "local-allowed-roots": {
       "script": "browser-local-allowed-roots-e2e.mjs",
       "tier": "core",
       "provider": "fake-compatible",
       "transport": "local",
-      "coverage": ["allowed-roots"]
+      "coverage": [
+        "allowed-roots"
+      ]
     },
     "local-file-diff": {
       "script": "browser-local-file-diff-e2e.mjs",
       "tier": "core",
       "provider": "fake-compatible",
       "transport": "local",
-      "coverage": ["file-diff"]
+      "coverage": [
+        "file-diff"
+      ]
     },
     "local-history-scroll": {
       "script": "browser-local-history-scroll-e2e.mjs",
       "tier": "core",
       "provider": "fake-compatible",
       "transport": "local",
-      "coverage": ["history"]
+      "coverage": [
+        "history"
+      ]
     },
     "local-drawer-scroll": {
       "script": "browser-local-drawer-scroll-e2e.mjs",
       "tier": "core",
       "provider": "fake-compatible",
       "transport": "local",
-      "coverage": ["drawer-scroll"]
+      "coverage": [
+        "drawer-scroll"
+      ]
     },
     "local-transcript-load": {
       "script": "browser-local-transcript-load-e2e.mjs",
       "tier": "core",
       "provider": "fake-compatible",
       "transport": "local",
-      "coverage": ["transcript-load"]
+      "coverage": [
+        "transcript-load"
+      ]
     },
     "local-thread-settings": {
       "script": "browser-local-thread-settings-e2e.mjs",
       "tier": "core",
       "provider": "fake-compatible",
       "transport": "local",
-      "coverage": ["thread-settings"]
+      "coverage": [
+        "thread-settings"
+      ]
     },
     "local-thread-groups": {
       "script": "browser-local-thread-groups-e2e.mjs",
       "tier": "core",
       "provider": "fake-compatible",
       "transport": "local",
-      "coverage": ["thread-groups"]
+      "coverage": [
+        "thread-groups"
+      ]
     },
     "local-delete": {
       "script": "browser-local-delete-e2e.mjs",
       "tier": "full",
       "provider": "fake-compatible",
       "transport": "local",
-      "coverage": ["delete"]
+      "coverage": [
+        "delete"
+      ]
     },
     "public-transcript-delta": {
       "script": "browser-public-transcript-delta-e2e.mjs",
       "tier": "core",
       "provider": "fake-compatible",
       "transport": "public-broker",
-      "coverage": ["transcript-delta"]
+      "coverage": [
+        "transcript-delta"
+      ]
     },
     "public-broker": {
       "script": "browser-public-broker-e2e.mjs",
       "tier": "core",
       "provider": "fake-compatible",
       "transport": "public-broker",
-      "coverage": ["broker", "reconnect", "duplicate-start-session", "revoke"]
+      "coverage": [
+        "broker",
+        "reconnect",
+        "duplicate-start-session",
+        "revoke"
+      ]
     },
     "public-enrollment": {
       "script": "browser-public-enrollment-e2e.mjs",
       "tier": "core",
       "provider": "fake-compatible",
       "transport": "public-broker",
-      "coverage": ["enrollment"]
+      "coverage": [
+        "enrollment"
+      ]
     },
     "public-refresh": {
       "script": "browser-public-refresh-e2e.mjs",
       "tier": "core",
       "provider": "fake-compatible",
       "transport": "public-broker",
-      "coverage": ["refresh"]
+      "coverage": [
+        "refresh"
+      ]
     },
     "public-thread-settings": {
       "script": "browser-public-thread-settings-e2e.mjs",
       "tier": "core",
       "provider": "fake-compatible",
       "transport": "public-broker",
-      "coverage": ["thread-settings"]
+      "coverage": [
+        "thread-settings"
+      ]
     },
     "public-persistence": {
       "script": "browser-public-persistence-e2e.mjs",
       "tier": "core",
       "provider": "fake-compatible",
       "transport": "public-broker",
-      "coverage": ["persistence"]
+      "coverage": [
+        "persistence"
+      ]
     },
     "public-revoke": {
       "script": "browser-public-revoke-e2e.mjs",
       "tier": "core",
       "provider": "fake-compatible",
       "transport": "public-broker",
-      "coverage": ["revoke"]
+      "coverage": [
+        "revoke"
+      ]
     },
     "public-reclaim": {
       "script": "browser-public-reclaim-e2e.mjs",
       "tier": "core",
       "provider": "fake-compatible",
       "transport": "public-broker",
-      "coverage": ["reclaim"]
+      "coverage": [
+        "reclaim"
+      ]
     },
     "public-long-transcript": {
       "script": "browser-public-long-transcript-e2e.mjs",
       "tier": "full",
       "provider": "fake-compatible",
       "transport": "public-broker",
-      "coverage": ["long-transcript"]
+      "coverage": [
+        "long-transcript"
+      ]
     },
     "public-remote-follow": {
       "script": "browser-public-remote-follow-e2e.mjs",
       "tier": "full",
       "provider": "fake-compatible",
       "transport": "public-broker",
-      "coverage": ["remote-follow"]
+      "coverage": [
+        "remote-follow"
+      ]
     },
     "public-multi-remote-follow": {
       "script": "browser-public-multi-remote-follow-e2e.mjs",
       "tier": "full",
       "provider": "fake-compatible",
       "transport": "public-broker",
-      "coverage": ["multi-remote-follow"]
+      "coverage": [
+        "multi-remote-follow"
+      ]
     },
     "self-hosted-pairing": {
       "script": "browser-pairing-e2e.mjs",
       "tier": "core",
       "provider": "fake-compatible",
       "transport": "self-hosted-broker",
-      "coverage": ["pairing", "broker"]
+      "coverage": [
+        "pairing",
+        "broker"
+      ]
     },
     "claude-local": {
       "script": "browser-claude-local-e2e.mjs",
       "tier": "manual",
       "provider": "claude_code",
       "transport": "local",
-      "coverage": ["real-provider"]
+      "coverage": [
+        "real-provider"
+      ]
+    },
+    "local-stick-to-bottom": {
+      "script": "browser-stick-to-bottom-e2e.mjs",
+      "tier": "core",
+      "provider": "fake",
+      "transport": "local",
+      "coverage": [
+        "stick-to-bottom",
+        "live-follow",
+        "send-anchor",
+        "virtualized-transcript",
+        "desktop-layout",
+        "mobile-layout"
+      ]
     }
   }
 }

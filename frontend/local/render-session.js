@@ -1225,6 +1225,31 @@ export function createSessionRenderer({
     }
 
     if (!entries.length && !approval) {
+      // Leaving another thread for this empty one: retain its reading offset
+      // BEFORE rendering the empty state — the swap shrinks the transcript
+      // and the browser clamps the live scrollTop, so reading it afterwards
+      // would retain a clamped (often zero) offset instead of the reader's
+      // place. Mirrors the ordering and bounded-eviction cleanup of the
+      // non-empty thread-switch path below.
+      const emptyThreadId = session?.active_thread_id || null;
+      const previousEmptySnapshot = state.localTranscriptScrollSnapshot || null;
+      if (
+        previousEmptySnapshot?.activeThreadId
+        && previousEmptySnapshot.activeThreadId !== emptyThreadId
+      ) {
+        if (!state.localTranscriptScrollPositions) {
+          state.localTranscriptScrollPositions = new Map();
+        }
+        const evictedThreadId = rememberTranscriptScrollPosition(
+          state.localTranscriptScrollPositions,
+          previousEmptySnapshot.activeThreadId,
+          transcript
+        );
+        if (evictedThreadId) {
+          state.localTranscriptScrollAnchors?.delete?.(evictedThreadId);
+        }
+      }
+
       renderConversationContent(
         h(TranscriptPane, {
           canWrite: canCurrentDeviceWrite(session),
@@ -1239,6 +1264,18 @@ export function createSessionRenderer({
             : null,
         })
       );
+      // Record the (empty) scroll snapshot for this genuinely-empty ready
+      // thread. Without it, the FIRST entries would classify as "first view of
+      // a thread" (jump-bottom, which briefly makes the follower sticky)
+      // instead of "new user message" (anchor-user) — the first prompt must
+      // anchor exactly like every later send. Deliberately NOT done for the
+      // loading/view-only branches above: their entries arrive as loaded
+      // history and must keep landing via jump-bottom.
+      state.localTranscriptScrollSnapshot = captureTranscriptScrollSnapshot({
+        entries: [],
+        scrollElement: transcript,
+        threadId: emptyThreadId,
+      });
       return;
     }
 

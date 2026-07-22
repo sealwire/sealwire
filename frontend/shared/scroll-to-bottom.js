@@ -7,6 +7,7 @@ import {
   nextSettleScrollTop,
   readScrollMetrics,
 } from "./scroll-to-bottom-core.js";
+import { dispatchTranscriptScrollActionEvent } from "./transcript-scroll.js";
 
 const h = React.createElement;
 
@@ -100,6 +101,13 @@ export function ScrollToBottomButton({ entries = [], label = "Scroll to latest" 
     // Defensive: the remote surface delegates clicks via a React onClick on
     // `.transcript-react-root`; keep this (non-transcript) click from reaching it.
     event.stopPropagation();
+
+    // Tell the stick-to-bottom follower the reader explicitly asked for the
+    // latest content. Click fires for mouse, keyboard (Enter/Space) and
+    // assistive-tech activation alike, so this intent channel — unlike input
+    // gesture heuristics — covers all of them, and it releases the
+    // send-anchor's rejoin hold so live following resumes after the settle.
+    dispatchTranscriptScrollActionEvent(anchorRef.current, "rejoin-bottom");
 
     if (settleRafRef.current != null && typeof cancelAnimationFrame === "function") {
       cancelAnimationFrame(settleRafRef.current);

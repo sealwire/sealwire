@@ -22,6 +22,14 @@ export const TOP_SCROLL_PRESERVE_THRESHOLD_PX = 80;
 export const LATEST_USER_MESSAGE_ATTR = "data-latest-user-message";
 export const MAX_RETAINED_TRANSCRIPT_SCROLL_THREADS = 10;
 
+// Dispatched on the scroll element after a programmatic scroll action is
+// APPLIED, with `detail.kind` set to the action kind. This is how the
+// stick-to-bottom follower (stick-to-bottom.js) learns about transitions that
+// carry intent — "the reader was just anchored to their sent message", "we
+// just landed at the bottom of a thread" — which geometry alone cannot
+// distinguish from user scrolling.
+export const TRANSCRIPT_SCROLL_ACTION_EVENT = "transcript-scroll-action";
+
 export function rememberTranscriptScrollPosition(cache, threadId, scrollElement) {
   if (!(cache instanceof Map) || !threadId || !scrollElement) {
     return null;
@@ -160,6 +168,27 @@ export function decideTranscriptScrollAction({
   return { kind: "preserve" };
 }
 
+// Broadcast an applied scroll action to the stick-to-bottom follower. Fired
+// AFTER the scroll is applied so listeners read post-scroll geometry. Only
+// actions that carry stickiness intent are broadcast: jump-bottom /
+// restore-thread (where did we land?) and anchor-user (release the follow).
+// `anchor-prepend` keeps the reader's place and "preserve"/"noop" do nothing,
+// so neither says anything about following. Guarded so pure-object fakes in
+// tests (no dispatchEvent) and exotic embeds (no CustomEvent) stay valid.
+export function dispatchTranscriptScrollActionEvent(element, kind) {
+  const target = element?.closest?.(".chat-thread") || element;
+  if (
+    !target
+    || typeof target.dispatchEvent !== "function"
+    || typeof CustomEvent !== "function"
+  ) {
+    return;
+  }
+  target.dispatchEvent(
+    new CustomEvent(TRANSCRIPT_SCROLL_ACTION_EVENT, { detail: { kind } })
+  );
+}
+
 export function applyTranscriptScrollAction(action, scrollElement) {
   if (!action || !scrollElement) return;
 
@@ -170,6 +199,9 @@ export function applyTranscriptScrollAction(action, scrollElement) {
   ) {
     if (typeof action.scrollTop === "number") {
       scrollElement.scrollTop = action.scrollTop;
+      if (action.kind !== "anchor-prepend") {
+        dispatchTranscriptScrollActionEvent(scrollElement, action.kind);
+      }
     }
     return;
   }
@@ -178,14 +210,18 @@ export function applyTranscriptScrollAction(action, scrollElement) {
     const target = scrollElement.querySelector?.(
       `[${LATEST_USER_MESSAGE_ATTR}="true"]`
     );
+    // Without a rendered target nothing scrolled, so there is no intent to
+    // broadcast — in virtualized transcripts the scrollToIndex path (see
+    // transcript-react.js) performs the anchor and broadcasts instead.
     if (!target) return;
     if (typeof target.scrollIntoView === "function") {
       target.scrollIntoView({ block: "start", behavior: "auto" });
-      return;
+    } else {
+      // Test/JSDOM fallback: position via offsetTop relative to the scroller.
+      const offsetTop = typeof target.offsetTop === "number" ? target.offsetTop : 0;
+      scrollElement.scrollTop = Math.max(0, offsetTop);
     }
-    // Test/JSDOM fallback: position via offsetTop relative to the scroller.
-    const offsetTop = typeof target.offsetTop === "number" ? target.offsetTop : 0;
-    scrollElement.scrollTop = Math.max(0, offsetTop);
+    dispatchTranscriptScrollActionEvent(scrollElement, "anchor-user");
   }
   // "preserve" / "noop": intentionally do nothing.
 }
