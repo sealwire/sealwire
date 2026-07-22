@@ -49,13 +49,30 @@ pub async fn read_desktop_config(path: &PathBuf) -> Result<DesktopConfig, String
 /// Watch the desktop config file for changes and signal on broker config changes.
 /// This is a long-running task; call it via tokio::spawn.
 ///
-/// Returns a receiver that gets a signal whenever the broker config part changes.
-/// The receiver is closed when this task exits (config file becomes unreadable or deleted).
-/// Does NOT emit the initial config as a change; only signals on actual changes after startup.
+/// Establishes a baseline by reading the file immediately (blocking), then
+/// spawns a background poller. Returns (receiver, baseline) so the caller knows
+/// the initial state and can detect changes that occur between watcher creation
+/// and the first poll.
+///
+/// The receiver gets a signal whenever the broker config part changes.
+/// The receiver is closed when the watcher task exits (config file becomes unreadable).
 pub async fn watch_broker_config_changes(
     config_path: PathBuf,
-) -> Result<tokio::sync::broadcast::Receiver<BrokerConfigPart>, String> {
+) -> Result<
+    (
+        tokio::sync::broadcast::Receiver<BrokerConfigPart>,
+        BrokerConfigPart,
+    ),
+    String,
+> {
+    // Establish baseline immediately, before returning, to avoid missing changes
+    // that occur between watcher creation and the first poll.
+    let baseline_config = read_desktop_config(&config_path)
+        .await
+        .map(|cfg| BrokerConfigPart::from_desktop(&cfg))?;
+
     let (tx, rx) = tokio::sync::broadcast::channel::<BrokerConfigPart>(1);
+    let baseline = baseline_config.clone();
 
     // Poll the file every 500ms for changes, using content hash (not mtime) to avoid
     // missing rapid updates within the same second.
@@ -64,8 +81,7 @@ pub async fn watch_broker_config_changes(
         use std::hash::{Hash, Hasher};
 
         let mut last_content_hash: u64 = 0;
-        let mut last_config: Option<BrokerConfigPart> = None;
-        let mut initialized = false;
+        let mut last_config = baseline;
 
         loop {
             sleep(Duration::from_millis(500)).await;
@@ -87,24 +103,19 @@ pub async fn watch_broker_config_changes(
                             Ok(config) => {
                                 let broker_part = BrokerConfigPart::from_desktop(&config);
 
-                                // On first successful read, just record it (don't signal as a change).
-                                if !initialized {
-                                    debug!("broker watcher initialized, baseline config loaded");
-                                    last_config = Some(broker_part);
-                                    initialized = true;
-                                } else if last_config.as_ref() != Some(&broker_part) {
-                                    // Broker config actually changed; signal it.
+                                if last_config != broker_part {
+                                    // Broker config changed; signal it.
                                     debug!(
                                         broker_mode = %broker_part.mode,
                                         "desktop config broker part changed, signaling"
                                     );
-                                    last_config = Some(broker_part.clone());
+                                    last_config = broker_part.clone();
                                     let _ = tx.send(broker_part);
                                 }
                             }
                             Err(e) => {
                                 warn!("failed to parse broker config from file: {e}");
-                                // Don't update last_mtime, so we retry on next change.
+                                // Don't update hash, so we retry on next change.
                             }
                         }
                     }
@@ -118,5 +129,5 @@ pub async fn watch_broker_config_changes(
         }
     });
 
-    Ok(rx)
+    Ok((rx, baseline_config))
 }
