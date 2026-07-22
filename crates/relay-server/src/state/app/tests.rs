@@ -333,6 +333,57 @@ mod path_scope_tests {
         assert!(!app.stop_broker().await);
     }
 
+    // apply_broker_mode with local-only tears the running broker down. (localOnly
+    // resolves without any env, so this is deterministic offline.)
+    #[tokio::test]
+    async fn apply_broker_mode_local_only_stops_the_broker() {
+        let (app, _project, _outside) = build_app("/tmp/broker-apply-local").await;
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        app.set_broker_task(never_ending_task(dropped.clone()))
+            .await;
+
+        crate::broker::apply_broker_mode(&app, "localOnly", "", Some("wss://h.example.com"))
+            .await
+            .expect("local-only apply should succeed");
+
+        assert!(
+            wait_until(&dropped).await,
+            "switching to local-only must abort the running broker task"
+        );
+        assert!(
+            !app.stop_broker().await,
+            "no broker should remain after switching to local-only"
+        );
+    }
+
+    // An invalid mode/URL must be rejected BEFORE the current broker is touched, so
+    // a bad edit never knocks the relay off its working broker.
+    #[tokio::test]
+    async fn apply_broker_mode_invalid_preserves_the_current_broker() {
+        let (app, _project, _outside) = build_app("/tmp/broker-apply-invalid").await;
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        app.set_broker_task(never_ending_task(dropped.clone()))
+            .await;
+
+        // Bad custom URL → resolver errors before anything is stopped.
+        assert!(
+            crate::broker::apply_broker_mode(&app, "custom", "not-a-url", None)
+                .await
+                .is_err(),
+            "an invalid broker URL must be rejected"
+        );
+        assert!(
+            !dropped.load(Ordering::SeqCst),
+            "a rejected apply must not abort the current broker"
+        );
+        assert!(
+            app.stop_broker().await,
+            "the original broker task must still be installed after a rejected apply"
+        );
+    }
+
     #[tokio::test]
     async fn set_broker_task_aborts_the_previous_task() {
         let (app, _project, _outside) = build_app("/tmp/broker-supervisor-replace").await;
