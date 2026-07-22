@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { ReviewerPanel } from "../shared/reviewer-panel.js";
+import { ReviewerPanel, renderReviewerText } from "../shared/reviewer-panel.js";
 import { RightPanelTabs } from "../shared/right-panel-tabs.js";
 import {
   ReviewerChip,
@@ -12,6 +12,10 @@ import {
 } from "./workspace-diff.js";
 
 const h = React.createElement;
+
+function renderReviewerMarkdown(markdown) {
+  return renderToStaticMarkup(h(React.Fragment, null, renderReviewerText(markdown)));
+}
 
 function makeStore(stateOverrides = {}) {
   const state = {
@@ -28,6 +32,16 @@ function makeStore(stateOverrides = {}) {
     setReview() {},
   };
 }
+
+test("reviewer replies reuse the transcript markdown renderer", () => {
+  const html = renderReviewerMarkdown(
+    "Findings:\n\n- **Fix** [link](javascript:alert(1))"
+  );
+  assert.match(html, /<ul>/);
+  assert.match(html, /<strong>Fix<\/strong>/);
+  assert.match(html, /href="#blocked"/);
+  assert.doesNotMatch(html, /javascript:/i);
+});
 
 test("ReviewerPanel empty state shows the CTA + launcher when a review can be requested", () => {
   const html = renderToStaticMarkup(

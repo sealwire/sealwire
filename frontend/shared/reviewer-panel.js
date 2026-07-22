@@ -1,5 +1,6 @@
 import React from "react";
 
+import { renderMarkdown } from "./markdown.js";
 import { ReviewLauncher } from "./review-panel.js";
 import {
   isTerminalReviewStatus,
@@ -38,6 +39,11 @@ function latestAgentText(entries) {
     }
   }
   return null;
+}
+
+export function renderReviewerText(text) {
+  if (!text) return "";
+  return renderMarkdown(text);
 }
 
 // Pure-presentational reviewer surface. All data + actions are injected so the
@@ -321,7 +327,11 @@ function ReviewerJobCard({
                 "Reviewer's latest message (review not final):"
               )
             : null,
-          h("div", { className: "reviewer-job-review" }, review.text)
+          h(
+            "div",
+            { className: "reviewer-job-review message-body" },
+            renderReviewerText(review.text)
+          )
         )
       : null,
     h(
