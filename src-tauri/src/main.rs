@@ -175,10 +175,6 @@ impl RelaySupervisor {
         }
     }
 
-    fn get_config_path(&self) -> &Path {
-        &self.config_path
-    }
-
     fn current_config(&self) -> DesktopConfig {
         self.config
             .lock()
@@ -189,12 +185,11 @@ impl RelaySupervisor {
     fn save_config(&self, config: DesktopConfig) -> Result<(), String> {
         let serialized = serde_json::to_string_pretty(&config)
             .map_err(|error| format!("failed to serialize desktop config: {error}"))?;
-        // Write atomically: temp file → sync → rename. This ensures the relay's
-        // watcher (in Phase 2) won't see truncate/write windows and parse partial JSON.
+        // Write atomically (temp file → sync → rename) so a crash or a concurrent
+        // reader never sees a truncated/half-written config.
         let temp_path = self.config_path.with_extension("json.tmp");
         fs::write(&temp_path, format!("{serialized}\n"))
             .map_err(|error| format!("failed to write temp desktop config: {error}"))?;
-        // Sync to disk so relay watcher sees complete data.
         if let Ok(file) = std::fs::File::open(&temp_path) {
             let _ = file.sync_all();
         }
@@ -452,13 +447,7 @@ async fn start_relay(
     }
     let port = pick_port(config.preferred_port)?;
 
-    let envs = relay_env(
-        &app,
-        &workspace,
-        port,
-        broker.as_ref(),
-        supervisor.get_config_path(),
-    )?;
+    let envs = relay_env(&app, &workspace, port, broker.as_ref())?;
     let command = app
         .shell()
         .sidecar(RELAY_SIDECAR)
@@ -821,7 +810,6 @@ fn relay_env(
     workspace: &Path,
     port: u16,
     broker: Option<&BrokerRuntimeConfig>,
-    config_path: &Path,
 ) -> Result<Vec<(OsString, OsString)>, String> {
     let mut envs: Vec<(OsString, OsString)> = std::env::vars_os()
         .filter(|(key, _)| !is_launcher_managed_env(&key.to_string_lossy()))
@@ -851,15 +839,6 @@ fn relay_env(
         &mut envs,
         "PATH",
         expanded_path(bundled_node.as_ref().and_then(|node| node.parent())),
-    );
-    // Prepared for Phase 2: relay will watch this file to detect broker config
-    // changes and reboots the broker task (if any) without restarting the relay
-    // core. For now (Phase 1), changing broker mode requires restarting the relay.
-    // Config writes are atomic (temp + rename) so Phase 2 won't parse partial JSON.
-    upsert_env(
-        &mut envs,
-        "RELAY_CONFIG_PATH",
-        config_path.display().to_string(),
     );
     upsert_env(
         &mut envs,

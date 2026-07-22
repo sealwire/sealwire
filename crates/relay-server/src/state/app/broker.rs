@@ -1,66 +1,6 @@
 use super::*;
 
 impl AppState {
-    /// Store the handle to the running broker task, aborting AND awaiting any
-    /// previous one so two broker loops never run concurrently after a hot restart
-    /// and the old loop can't write broker state after the new one is installed.
-    pub(crate) async fn set_broker_task(&self, handle: tokio::task::JoinHandle<()>) {
-        let previous = self.broker_task.lock().await.replace(handle);
-        abort_and_join(previous).await;
-    }
-
-    /// Enable or disable the configured broker at runtime WITHOUT restarting the
-    /// relay core. Enabling re-runs the exact startup path (`spawn_broker_task`), so
-    /// it reuses the same env-derived config, credentials, and enrollment — a switch
-    /// can never send one broker's credentials to another origin, because the origin
-    /// never changes (changing WHICH broker is a restart, not this). Disabling tears
-    /// the publishing task down. The enabled flag's Mutex is held across the whole
-    /// transition, so concurrent toggles serialize and never leave torn broker state.
-    /// Returns Err only if enabling fails to resolve the configured broker (bad env);
-    /// the flag then stays disabled.
-    #[allow(dead_code)] // consumed by the broker control HTTP API (next narrow brick)
-    pub(crate) async fn set_broker_enabled(&self, enabled: bool) -> Result<(), String> {
-        let mut flag = self.broker_enabled.lock().await;
-        if *flag == enabled {
-            return Ok(());
-        }
-        if enabled {
-            crate::broker::spawn_broker_task(self.clone()).await?;
-        } else {
-            self.stop_broker().await;
-        }
-        *flag = enabled;
-        Ok(())
-    }
-
-    /// Whether the configured broker is currently enabled (publishing).
-    #[allow(dead_code)] // consumed by the broker control HTTP API (next narrow brick)
-    pub(crate) async fn broker_enabled(&self) -> bool {
-        *self.broker_enabled.lock().await
-    }
-
-    /// Stop the running broker task (if any) and clear broker presence/target so
-    /// status reflects "no broker". Returns whether a broker task was stopped.
-    /// Hot broker switching calls this to tear the old broker down before starting
-    /// a new one, or when switching to local-only.
-    #[allow(dead_code)] // consumed by the broker control HTTP API (next narrow brick)
-    pub(crate) async fn stop_broker(&self) -> bool {
-        let handle = self.broker_task.lock().await.take();
-        let had_broker = handle.is_some();
-        // Await the aborted task so its future is fully dropped before we clear and
-        // return — the old reconnect loop cannot write broker status/channel after
-        // this point, so a switch never leaves stale state (no generation guard
-        // needed). Safe from deadlock: never called from within the broker task.
-        abort_and_join(handle).await;
-        if had_broker {
-            self.set_broker_connection(false).await;
-            self.set_broker_channel(None, None).await;
-            self.push_runtime_log("info", "Broker publishing stopped.".to_string())
-                .await;
-        }
-        had_broker
-    }
-
     pub(crate) async fn set_broker_channel(
         &self,
         channel_id: Option<String>,
@@ -144,15 +84,5 @@ impl AppState {
     ) {
         let mut relay = self.relay.write().await;
         relay.store_remote_action_result(device_id, action_id, result, unix_now());
-    }
-}
-
-/// Abort a broker task and await its teardown so its future is fully dropped
-/// before the caller proceeds. `None` is a no-op. The `JoinError` from a
-/// cancelled task is expected and ignored.
-async fn abort_and_join(handle: Option<tokio::task::JoinHandle<()>>) {
-    if let Some(handle) = handle {
-        handle.abort();
-        let _ = handle.await;
     }
 }

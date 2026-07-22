@@ -479,11 +479,9 @@ pub async fn spawn_broker_task(state: AppState) -> Result<(), String> {
     Ok(())
 }
 
-/// Apply a broker mode at runtime (hot switch) without restarting the relay core:
-/// Spawn the broker task for an already-resolved config and store its handle so it
-/// can be cancelled/replaced later (hot broker switching). `Disabled` spawns
-/// nothing. Shared by startup (`spawn_broker_task`) and runtime enable/disable so
-/// both drive the exact same publish/enrollment path.
+/// Spawn the broker task for an already-resolved config. `Disabled` spawns nothing.
+/// Broker on/off is done by restarting the relay (the desktop restarts the sidecar
+/// with the new broker config), so there is no runtime cancel path here.
 async fn launch_broker(state: AppState, resolution: BrokerConfigResolution) {
     let (config, pending_public_enrollment) = match resolution {
         BrokerConfigResolution::Disabled => return,
@@ -498,10 +496,9 @@ async fn launch_broker(state: AppState, resolution: BrokerConfigResolution) {
             "relay-server is waiting for public broker enrollment"
         );
         let broker_state = state.clone();
-        let handle = tokio::spawn(async move {
+        tokio::spawn(async move {
             run_public_broker_enrollment_loop(broker_state, pending).await;
         });
-        state.set_broker_task(handle).await;
         return;
     }
 
@@ -524,7 +521,7 @@ async fn launch_broker(state: AppState, resolution: BrokerConfigResolution) {
 
     let change_rx = state.subscribe();
     let broker_state = state.clone();
-    let handle = tokio::spawn(async move {
+    tokio::spawn(async move {
         broker_state
             .set_broker_channel(
                 Some(config.broker_room_id().to_string()),
@@ -555,7 +552,6 @@ async fn launch_broker(state: AppState, resolution: BrokerConfigResolution) {
         }
         run_broker_loop(broker_state, change_rx, config).await;
     });
-    state.set_broker_task(handle).await;
 }
 
 async fn run_broker_loop(
