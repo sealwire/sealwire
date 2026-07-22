@@ -81,6 +81,7 @@ struct RelayStatus {
     remote_url: Option<String>,
     broker_url: Option<String>,
     broker_label: String,
+    broker_status: Option<String>, // "disabled"/"connecting"/"connected"/"offline"
     workspace_dir: Option<String>,
     started_at_ms: Option<u128>,
 }
@@ -174,6 +175,10 @@ impl RelaySupervisor {
         }
     }
 
+    fn get_config_path(&self) -> &Path {
+        &self.config_path
+    }
+
     fn current_config(&self) -> DesktopConfig {
         self.config
             .lock()
@@ -184,8 +189,17 @@ impl RelaySupervisor {
     fn save_config(&self, config: DesktopConfig) -> Result<(), String> {
         let serialized = serde_json::to_string_pretty(&config)
             .map_err(|error| format!("failed to serialize desktop config: {error}"))?;
-        fs::write(&self.config_path, format!("{serialized}\n"))
-            .map_err(|error| format!("failed to write desktop config: {error}"))?;
+        // Write atomically: temp file → sync → rename. This ensures the relay's
+        // watcher (in Phase 2) won't see truncate/write windows and parse partial JSON.
+        let temp_path = self.config_path.with_extension("json.tmp");
+        fs::write(&temp_path, format!("{serialized}\n"))
+            .map_err(|error| format!("failed to write temp desktop config: {error}"))?;
+        // Sync to disk so relay watcher sees complete data.
+        if let Ok(file) = std::fs::File::open(&temp_path) {
+            let _ = file.sync_all();
+        }
+        fs::rename(&temp_path, &self.config_path)
+            .map_err(|error| format!("failed to rename desktop config: {error}"))?;
         *self
             .config
             .lock()
@@ -308,12 +322,20 @@ impl RelayStatus {
             remote_url: None,
             broker_url: None,
             broker_label: "Stopped".to_string(),
+            broker_status: None,
             workspace_dir: None,
             started_at_ms: None,
         }
     }
 
     fn from_process(process: &RelayProcess) -> Self {
+        // Phase 1: broker_status is set based on broker_url presence. Phase 2 will
+        // update this in real-time as the broker connection state changes.
+        let broker_status = if process.broker_url.is_some() {
+            Some("connecting".to_string())
+        } else {
+            Some("disabled".to_string())
+        };
         Self {
             running: true,
             ready: process.ready,
@@ -324,6 +346,7 @@ impl RelayStatus {
             remote_url: Some(remote_url(process.port)),
             broker_url: process.broker_url.clone(),
             broker_label: process.broker_label.clone(),
+            broker_status,
             workspace_dir: Some(process.workspace_dir.clone()),
             started_at_ms: Some(process.started_at_ms),
         }
@@ -429,7 +452,13 @@ async fn start_relay(
     }
     let port = pick_port(config.preferred_port)?;
 
-    let envs = relay_env(&app, &workspace, port, broker.as_ref())?;
+    let envs = relay_env(
+        &app,
+        &workspace,
+        port,
+        broker.as_ref(),
+        supervisor.get_config_path(),
+    )?;
     let command = app
         .shell()
         .sidecar(RELAY_SIDECAR)
@@ -792,6 +821,7 @@ fn relay_env(
     workspace: &Path,
     port: u16,
     broker: Option<&BrokerRuntimeConfig>,
+    config_path: &Path,
 ) -> Result<Vec<(OsString, OsString)>, String> {
     let mut envs: Vec<(OsString, OsString)> = std::env::vars_os()
         .filter(|(key, _)| !is_launcher_managed_env(&key.to_string_lossy()))
@@ -821,6 +851,15 @@ fn relay_env(
         &mut envs,
         "PATH",
         expanded_path(bundled_node.as_ref().and_then(|node| node.parent())),
+    );
+    // Prepared for Phase 2: relay will watch this file to detect broker config
+    // changes and reboots the broker task (if any) without restarting the relay
+    // core. For now (Phase 1), changing broker mode requires restarting the relay.
+    // Config writes are atomic (temp + rename) so Phase 2 won't parse partial JSON.
+    upsert_env(
+        &mut envs,
+        "RELAY_CONFIG_PATH",
+        config_path.display().to_string(),
     );
     upsert_env(
         &mut envs,

@@ -141,3 +141,31 @@ export function restoreFormDraft(doc, draft) {
     }
   }
 }
+
+// Broker status meta: "disabled" | "connecting" | "connected" | "offline".
+// Follows the same tone/dotClass/label pattern as providers for visual consistency.
+export function brokerStatusMeta(status) {
+  const meta = {
+    disabled: {
+      label: "Not configured",
+      tone: "offline",
+      dotClass: "broker-dot-disabled",
+    },
+    connecting: {
+      label: "Connecting…",
+      tone: "active",
+      dotClass: "broker-dot-connecting",
+    },
+    connected: {
+      label: "Connected",
+      tone: "ready",
+      dotClass: "broker-dot-connected",
+    },
+    offline: {
+      label: "Offline",
+      tone: "alert",
+      dotClass: "broker-dot-offline",
+    },
+  };
+  return meta[status] || meta.connecting; // Default to neutral "connecting"
+}
