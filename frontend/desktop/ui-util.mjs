@@ -91,9 +91,15 @@ export function captureFormDraft(doc) {
   const pressed = doc.querySelector("[data-broker-mode][aria-pressed='true']");
   const brokerMode = pressed?.dataset?.brokerMode || null;
 
+  const brokerToggle = doc.querySelector("#broker-enabled");
+  const brokerEnabled =
+    brokerToggle && typeof brokerToggle.checked === "boolean"
+      ? brokerToggle.checked
+      : undefined;
+
   const active = doc.activeElement;
   const focusId = active && active.id ? active.id : null;
-  const draft = { values, brokerMode, focusId };
+  const draft = { values, brokerMode, brokerEnabled, focusId };
   if (active && typeof active.selectionStart === "number") {
     draft.selectionStart = active.selectionStart;
     draft.selectionEnd = active.selectionEnd;
@@ -110,6 +116,13 @@ export function restoreFormDraft(doc, draft) {
     const node = doc.querySelector(`#${id}`);
     if (node && typeof node.value === "string") {
       node.value = value;
+    }
+  }
+
+  if (typeof draft.brokerEnabled === "boolean") {
+    const toggle = doc.querySelector("#broker-enabled");
+    if (toggle && "checked" in toggle) {
+      toggle.checked = draft.brokerEnabled;
     }
   }
 

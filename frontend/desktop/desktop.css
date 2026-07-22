@@ -311,6 +311,45 @@
   font-weight: var(--weight-strong);
 }
 
+.desktop-shell .broker-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 4px 0 10px;
+  cursor: pointer;
+}
+
+.desktop-shell .broker-toggle input {
+  margin-top: 2px;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.desktop-shell .broker-toggle-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: var(--text-ui);
+  color: var(--text-1);
+}
+
+.desktop-shell .broker-toggle-hint {
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+.desktop-shell .broker-detail {
+  display: grid;
+  gap: 12px;
+  transition: opacity 0.15s ease;
+}
+
+.desktop-shell .broker-detail[data-broker-off="true"] {
+  opacity: 0.45;
+}
+
 .desktop-shell .broker-status {
   display: flex;
   align-items: center;

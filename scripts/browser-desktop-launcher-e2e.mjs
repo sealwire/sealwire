@@ -215,8 +215,16 @@ async function main() {
     );
 
     // 4) Save & Restart → desktop_restart with the LIVE form (proves readConfigForm
-    //    reads the DOM, not the stale seed): change port + broker mode first.
+    //    reads the DOM, not the stale seed): change port, turn the broker ON (the
+    //    status seed is local-only, so the provider buttons start disabled), and pick
+    //    the official provider.
     await page.fill("#preferred-port", "9999");
+    assert.equal(
+      await page.isDisabled('[data-broker-mode="hosted"]'),
+      true,
+      "provider buttons are disabled while the broker toggle is off"
+    );
+    await page.check("#broker-enabled");
     await page.click('[data-broker-mode="hosted"]');
     await page.click("#restart-relay");
     const restart = await waitForInvoke(page, "desktop_restart");

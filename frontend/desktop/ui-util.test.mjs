@@ -162,6 +162,25 @@ test("captureFormDraft + restoreFormDraft: keep unsaved edits and focus across a
   assert.equal(workspace2.selectionEnd, 9, "selection end restored");
 });
 
+test("captureFormDraft + restoreFormDraft: preserve the broker on/off toggle across a re-render", () => {
+  const toggleOn = { id: "broker-enabled", checked: true, dataset: {}, attrs: {} };
+  const before = makeDoc([toggleOn]);
+
+  const draft = captureFormDraft(before);
+  assert.equal(draft.brokerEnabled, true, "toggle state captured");
+
+  // Re-render rebuilds the checkbox from config as OFF; the unsaved ON must survive.
+  const toggleOff = { id: "broker-enabled", checked: false, dataset: {}, attrs: {} };
+  const after = makeDoc([toggleOff]);
+  restoreFormDraft(after, draft);
+  assert.equal(toggleOff.checked, true, "unsaved broker toggle restored to on");
+});
+
+test("captureFormDraft: omits brokerEnabled when there is no toggle", () => {
+  const draft = captureFormDraft(makeDoc([makeInput("workspace-dir", "/x")]));
+  assert.equal(draft.brokerEnabled, undefined);
+});
+
 test("restoreFormDraft: tolerates missing draft / missing document", () => {
   assert.doesNotThrow(() => restoreFormDraft(makeDoc([]), null));
   assert.doesNotThrow(() => restoreFormDraft(null, { values: {} }));

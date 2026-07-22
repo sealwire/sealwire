@@ -69,6 +69,9 @@ function render() {
 
   bindControls(config);
   restoreFormDraft(document, draft);
+  // The draft may have restored a different on/off state than `config` rendered,
+  // so re-sync the provider controls' enabled/dimmed state to the toggle.
+  syncBrokerControls();
 }
 
 function renderHeader(relay) {
@@ -119,6 +122,51 @@ function renderBrokerStatus(relay) {
   ]);
 }
 
+// Broker "off" is just local-only; "on" means a provider (official/self-hosted)
+// is selected. Changing which broker, and turning it on/off, both take effect on
+// Save & Restart (broker on/off is a relay restart under the current design).
+function brokerIsOn(config) {
+  return config.brokerMode !== "localOnly";
+}
+
+// The provider to preselect: the real mode when on, else a sensible default so a
+// segment is always pressed (the toggle, not the segment, encodes on/off).
+function effectiveBrokerMode(config) {
+  return config.brokerMode === "custom" ? "custom" : "hosted";
+}
+
+function renderBrokerToggle(config) {
+  return el("label", { className: "broker-toggle" }, [
+    el("input", {
+      type: "checkbox",
+      id: "broker-enabled",
+      checked: brokerIsOn(config),
+    }),
+    el("span", { className: "broker-toggle-text" }, [
+      el("strong", {}, ["Connect to a broker"]),
+      el("span", { className: "broker-toggle-hint" }, [
+        "lets phones and remote devices reach this relay",
+      ]),
+    ]),
+  ]);
+}
+
+// Enable/disable the provider controls to match the on/off toggle (dim when off).
+// Called on initial bind, on toggle change, and after a draft restore.
+function syncBrokerControls() {
+  const on = Boolean(document.querySelector("#broker-enabled")?.checked);
+  const detail = document.querySelector(".broker-detail");
+  detail?.setAttribute("data-broker-off", String(!on));
+  for (const button of document.querySelectorAll("[data-broker-mode]")) {
+    button.disabled = !on;
+  }
+  const pressed = document.querySelector("[data-broker-mode][aria-pressed='true']");
+  const input = document.querySelector("#custom-broker-url");
+  if (input) {
+    input.disabled = !on || pressed?.dataset.brokerMode !== "custom";
+  }
+}
+
 function renderControls(config, relay) {
   return el("aside", { className: "control-pane" }, [
     state.error ? el("div", { className: "error-banner" }, [state.error]) : null,
@@ -155,21 +203,25 @@ function renderControls(config, relay) {
     ]),
     el("section", { className: "section" }, [
       el("div", { className: "section-title" }, ["Broker"]),
-      el("div", { className: "segmented", role: "group", "aria-label": "Broker mode" }, [
-        brokerButton("localOnly", "Local", config.brokerMode),
-        brokerButton("hosted", "Hosted", config.brokerMode),
-        brokerButton("custom", "Custom", config.brokerMode),
-      ]),
-      el("div", { className: "field" }, [
-        el("label", { htmlFor: "custom-broker-url" }, ["Custom broker URL"]),
-        el("input", {
-          className: "desktop-input",
-          disabled: config.brokerMode !== "custom",
-          id: "custom-broker-url",
-          placeholder: "wss://broker.example.com",
-          spellcheck: "false",
-          value: config.customBrokerUrl || "",
-        }),
+      renderBrokerToggle(config),
+      // Which broker to use — always rendered so a re-render never changes the
+      // layout (which would fight the form-draft preservation); dimmed + disabled
+      // when the broker is off. `data-broker-off` drives the dim styling.
+      el("div", { className: "broker-detail", "data-broker-off": String(!brokerIsOn(config)) }, [
+        el("div", { className: "segmented", role: "group", "aria-label": "Broker provider" }, [
+          brokerButton("hosted", "Official", effectiveBrokerMode(config)),
+          brokerButton("custom", "Self-hosted", effectiveBrokerMode(config)),
+        ]),
+        el("div", { className: "field" }, [
+          el("label", { htmlFor: "custom-broker-url" }, ["Self-hosted broker URL"]),
+          el("input", {
+            className: "desktop-input",
+            id: "custom-broker-url",
+            placeholder: "wss://broker.example.com",
+            spellcheck: "false",
+            value: config.customBrokerUrl || "",
+          }),
+        ]),
       ]),
       renderBrokerStatus(relay),
     ]),
@@ -278,17 +330,20 @@ function bindControls(config) {
     }
   });
 
+  document.querySelector("#broker-enabled")?.addEventListener("change", () => {
+    syncBrokerControls();
+  });
+
   for (const button of document.querySelectorAll("[data-broker-mode]")) {
     button.addEventListener("click", () => {
       for (const item of document.querySelectorAll("[data-broker-mode]")) {
         item.setAttribute("aria-pressed", String(item === button));
       }
-      const input = document.querySelector("#custom-broker-url");
-      if (input) {
-        input.disabled = button.dataset.brokerMode !== "custom";
-      }
+      syncBrokerControls();
     });
   }
+
+  syncBrokerControls();
 
   document.querySelector("#restart-relay")?.addEventListener("click", () => restartRelay());
   document.querySelector("#start-relay")?.addEventListener("click", () => startRelay());
@@ -339,11 +394,14 @@ async function withSaving(action) {
 }
 
 function readConfigForm() {
+  const brokerOn = Boolean(document.querySelector("#broker-enabled")?.checked);
   const selected = document.querySelector("[data-broker-mode][aria-pressed='true']");
+  // Off ⇒ local-only; on ⇒ the selected provider (default official).
+  const brokerMode = brokerOn ? selected?.dataset.brokerMode || "hosted" : "localOnly";
   return {
     workspaceDir: document.querySelector("#workspace-dir")?.value || "",
     preferredPort: parsePort(document.querySelector("#preferred-port")?.value),
-    brokerMode: selected?.dataset.brokerMode || "localOnly",
+    brokerMode,
     customBrokerUrl: document.querySelector("#custom-broker-url")?.value || "",
   };
 }
