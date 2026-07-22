@@ -41,6 +41,10 @@ import {
   createRemoteThreadsPatch,
 } from "./surface-state.js";
 import { isReviewInProgressForThread } from "../shared/review-state.js";
+import {
+  detectDeferredThreadPromotion,
+  shouldRebindPinnedViewOnPromotion,
+} from "../shared/thread-promotion.js";
 import { resolveOutgoingEffort } from "../shared/reasoning-efforts.js";
 import { threadAttention } from "../shared/thread-attention.js";
 import { forkFieldsToPayload } from "../shared/fork-fields.js";
@@ -504,6 +508,10 @@ export function applySessionSnapshot(snapshot) {
   if (typeof window !== "undefined" && typeof window.__snapshotCount === "number") {
     window.__snapshotCount++;
   }
+  // Captured before the realSession sync below so an INBOUND pending->real
+  // promotion (another device sent the first message) is still visible.
+  const previousActiveThreadId =
+    state.realSession?.active_thread_id || state.session?.active_thread_id || null;
   // Keep the authoritative live snapshot aligned with the rendered session
   // whenever no client-local projection is active. This also preserves live
   // transcript deltas that arrived after the previous full snapshot.
@@ -526,6 +534,34 @@ export function applySessionSnapshot(snapshot) {
     renderLog(message);
     console.log(message);
     return;
+  }
+  // Deferred-Claude promotion seen from the SNAPSHOT side — this is how every
+  // client that didn't send the first message (a second remote observer, or a
+  // remote watching while the local UI sends) learns about it. The sender path
+  // in sendMessage() handles its own client explicitly.
+  const inboundPromotion = detectDeferredThreadPromotion({
+    previousThreadId: previousActiveThreadId,
+    nextThreadId: snapshot?.active_thread_id || null,
+    nextThreadPromotedFrom: snapshot?.active_thread_promoted_from || null,
+  });
+  if (inboundPromotion) {
+    // One-shot scroll-bookkeeping alias for the transcript pane (it clears it
+    // after rekeying).
+    state.promotedThreadAlias = inboundPromotion;
+    if (
+      shouldRebindPinnedViewOnPromotion({
+        pinnedThreadId: viewOnlyThreadId,
+        promotion: inboundPromotion,
+      })
+    ) {
+      // The pending thread ceased to exist; without re-pinning, the
+      // projection would keep rendering the stale pending transcript forever.
+      viewOnlyNavigationGeneration += 1;
+      viewOnlyThreadId = inboundPromotion.to;
+      viewOnlyLastRefreshAt = Date.now();
+      viewOnlyWasWorking = Boolean(snapshot?.active_turn_id);
+      clearTranscriptHydration(state);
+    }
   }
   const displaySnapshot = stampThreadActivitySnapshotTime(
     preserveVisibleTranscriptText(state.realSession, snapshot)
@@ -1386,6 +1422,14 @@ export async function sendMessage(messageDraft, effort, model = "") {
       viewOnlyThreadId = promotedThreadId;
       viewOnlyLastRefreshAt = Date.now();
       viewOnlyWasWorking = Boolean(state.realSession?.active_turn_id);
+      // One-shot alias for the transcript pane: it keeps per-thread scroll
+      // bookkeeping keyed by thread id, and must rekey it (same logical
+      // thread, new public id) instead of treating the promotion as a thread
+      // switch — which would jump-bottom and briefly re-enable live follow on
+      // top of the freshly send-anchored message. Only this send path KNOWS
+      // it's a promotion; a pending→other-id transition seen by the pane alone
+      // could also be the user switching threads.
+      state.promotedThreadAlias = { from: threadId, to: promotedThreadId };
       clearTranscriptHydration(state);
       applyRenderedSession(state.realSession);
     }

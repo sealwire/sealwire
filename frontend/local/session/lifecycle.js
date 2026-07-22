@@ -18,6 +18,8 @@ import {
   deleteReview as deleteReviewApi,
 } from "../api.js";
 import { loadLastEffort, saveLastApprovalPolicy } from "../../shared/last-used-settings.js";
+import { retargetTranscriptScrollThread } from "../../shared/transcript-scroll.js";
+import { detectDeferredThreadPromotion } from "../../shared/thread-promotion.js";
 import { resolveOutgoingEffort } from "../../shared/reasoning-efforts.js";
 import { providerLabel } from "../../shared/provider-labels.js";
 import { forkFieldsToPayload } from "../../shared/fork-fields.js";
@@ -611,14 +613,20 @@ export function createLifecycleController(ctx) {
     // we don't trap the back button) so isViewingConversation stays true.
     // Scoped to the pending-prefix transition so initial loads with a seeded
     // active_thread_id don't auto-enter conversation view.
-    if (
-      previousThreadId
-      && previousThreadId.startsWith("claude-pending-")
-      && snapshot?.active_thread_id
-      && snapshot.active_thread_id !== previousThreadId
-      && state.viewThreadId === previousThreadId
-    ) {
-      setThreadRoute(snapshot.active_thread_id, { replace: true });
+    const threadPromotion = detectDeferredThreadPromotion({
+      previousThreadId,
+      nextThreadId: snapshot?.active_thread_id || null,
+      nextThreadPromotedFrom: snapshot?.active_thread_promoted_from || null,
+    });
+    if (threadPromotion) {
+      // Same logical thread, new public id: move the scroll bookkeeping over,
+      // or the first reply classifies as a thread switch (jump-bottom, which
+      // briefly re-enables the stick-to-bottom follow) instead of keeping the
+      // user's freshly anchored message in place.
+      retargetTranscriptScrollThread(state, threadPromotion.from, threadPromotion.to);
+      if (state.viewThreadId === threadPromotion.from) {
+        setThreadRoute(threadPromotion.to, { replace: true });
+      }
     }
 
     // Update per-thread attention + fire notifications here — the single

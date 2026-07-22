@@ -30,6 +30,81 @@ export const MAX_RETAINED_TRANSCRIPT_SCROLL_THREADS = 10;
 // distinguish from user scrolling.
 export const TRANSCRIPT_SCROLL_ACTION_EVENT = "transcript-scroll-action";
 
+// Rekey the per-thread scroll bookkeeping when a thread's public id changes
+// while remaining the same logical thread — the deferred-Claude case, where a
+// synthetic `claude-pending-*` id is promoted to the real session id on the
+// first send. Without this, the promoted id reads as a thread SWITCH and the
+// first reply lands via jump-bottom (briefly sticky) instead of anchoring the
+// user's message. Returns true if anything was rekeyed.
+export function retargetTranscriptScrollThread(state, fromThreadId, toThreadId) {
+  if (!state || !fromThreadId || !toThreadId || fromThreadId === toThreadId) {
+    return false;
+  }
+  let changed = false;
+  const snapshot = state.localTranscriptScrollSnapshot;
+  if (snapshot?.activeThreadId === fromThreadId) {
+    snapshot.activeThreadId = toThreadId;
+    changed = true;
+  }
+  const positions = state.localTranscriptScrollPositions;
+  if (positions instanceof Map && positions.has(fromThreadId)) {
+    positions.set(toThreadId, positions.get(fromThreadId));
+    positions.delete(fromThreadId);
+    changed = true;
+  }
+  const anchors = state.localTranscriptScrollAnchors;
+  if (anchors instanceof Map && anchors.has(fromThreadId)) {
+    anchors.set(toThreadId, anchors.get(fromThreadId));
+    anchors.delete(fromThreadId);
+    changed = true;
+  }
+  return changed;
+}
+
+// Remote-surface flavor of the promotion rekey: the remote pane keys its
+// retained maps by `relayId:threadId` scroll keys and keeps its previous-render
+// snapshot in a ref, so both the keys and the snapshot need rebinding when a
+// `claude-pending-*` id is promoted. Returns true if anything was rekeyed.
+export function retargetRemoteTranscriptScroll(options) {
+  const {
+    anchoredUserIds,
+    scrollPositions,
+    snapshot,
+    fromScrollKey,
+    toScrollKey,
+    fromThreadId,
+    toThreadId,
+  } = options || {};
+  if (
+    !fromScrollKey
+    || !toScrollKey
+    || !fromThreadId
+    || !toThreadId
+    || fromScrollKey === toScrollKey
+  ) {
+    return false;
+  }
+  let changed = false;
+  if (snapshot?.activeThreadId === fromThreadId) {
+    snapshot.activeThreadId = toThreadId;
+    if (snapshot.scrollKey === fromScrollKey) {
+      snapshot.scrollKey = toScrollKey;
+    }
+    changed = true;
+  }
+  if (scrollPositions instanceof Map && scrollPositions.has(fromScrollKey)) {
+    scrollPositions.set(toScrollKey, scrollPositions.get(fromScrollKey));
+    scrollPositions.delete(fromScrollKey);
+    changed = true;
+  }
+  if (anchoredUserIds instanceof Map && anchoredUserIds.has(fromScrollKey)) {
+    anchoredUserIds.set(toScrollKey, anchoredUserIds.get(fromScrollKey));
+    anchoredUserIds.delete(fromScrollKey);
+    changed = true;
+  }
+  return changed;
+}
+
 export function rememberTranscriptScrollPosition(cache, threadId, scrollElement) {
   if (!(cache instanceof Map) || !threadId || !scrollElement) {
     return null;

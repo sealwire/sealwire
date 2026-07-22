@@ -13,6 +13,8 @@ import {
   readTranscriptScrollPosition,
   rememberTranscriptScrollPosition,
   restoreTranscriptScrollPosition,
+  retargetRemoteTranscriptScroll,
+  retargetTranscriptScrollThread,
 } from "./shared/transcript-scroll.js";
 
 function userEntry(id) {
@@ -372,4 +374,134 @@ test("didPrependOlderTranscript returns false when entries diverge", () => {
 
 test("LATEST_USER_MESSAGE_ATTR is the documented data attribute name", () => {
   assert.equal(LATEST_USER_MESSAGE_ATTR, "data-latest-user-message");
+});
+
+// --- deferred-thread promotion (claude-pending-* -> real id) -----------------
+
+test("retargetTranscriptScrollThread rekeys snapshot, positions and anchors", () => {
+  const { target } = makeScrollElement();
+  const state = {
+    localTranscriptScrollSnapshot: captureTranscriptScrollSnapshot({
+      entries: [],
+      scrollElement: target,
+      threadId: "claude-pending-7",
+    }),
+    localTranscriptScrollPositions: new Map([["claude-pending-7", 480]]),
+    localTranscriptScrollAnchors: new Map([["claude-pending-7", new Set(["u1"])]]),
+  };
+  assert.equal(
+    retargetTranscriptScrollThread(state, "claude-pending-7", "real-thread-9"),
+    true
+  );
+  assert.equal(state.localTranscriptScrollSnapshot.activeThreadId, "real-thread-9");
+  assert.equal(state.localTranscriptScrollPositions.get("real-thread-9"), 480);
+  assert.equal(state.localTranscriptScrollPositions.has("claude-pending-7"), false);
+  assert.ok(state.localTranscriptScrollAnchors.get("real-thread-9").has("u1"));
+  assert.equal(state.localTranscriptScrollAnchors.has("claude-pending-7"), false);
+});
+
+test("retargetTranscriptScrollThread is a safe no-op for unrelated or missing state", () => {
+  assert.equal(retargetTranscriptScrollThread(null, "a", "b"), false);
+  assert.equal(retargetTranscriptScrollThread({}, "a", "b"), false);
+  const state = {
+    localTranscriptScrollSnapshot: { activeThreadId: "other" },
+    localTranscriptScrollPositions: new Map([["other", 10]]),
+  };
+  assert.equal(retargetTranscriptScrollThread(state, "a", "b"), false);
+  assert.equal(state.localTranscriptScrollSnapshot.activeThreadId, "other");
+  assert.equal(retargetTranscriptScrollThread(state, "a", "a"), false);
+});
+
+test("first send after pending->real promotion still anchors (not jump-bottom)", () => {
+  // A deferred Claude session records its empty snapshot under the synthetic
+  // `claude-pending-*` id; the first send promotes the thread to its real id.
+  // After retargeting, the first entries must classify as a new user message
+  // (anchor-user) — NOT as a thread switch (jump-bottom + brief sticky).
+  const { target } = makeScrollElement();
+  const state = {
+    localTranscriptScrollSnapshot: captureTranscriptScrollSnapshot({
+      entries: [],
+      scrollElement: target,
+      threadId: "claude-pending-42",
+    }),
+  };
+  retargetTranscriptScrollThread(state, "claude-pending-42", "real-42");
+  const action = decideTranscriptScrollAction({
+    nextEntries: [userEntry("u1")],
+    nextThreadId: "real-42",
+    previousSnapshot: state.localTranscriptScrollSnapshot,
+    scrollElement: target,
+  });
+  assert.equal(action.kind, "anchor-user");
+});
+
+test("retargetRemoteTranscriptScroll rekeys pane refs across a pending promotion", () => {
+  const anchoredUserIds = new Map([["relay-1:claude-pending-3", new Set(["u1"])]]);
+  const scrollPositions = new Map([["relay-1:claude-pending-3", 640]]);
+  const snapshot = {
+    activeThreadId: "claude-pending-3",
+    entries: [],
+    scrollKey: "relay-1:claude-pending-3",
+  };
+  assert.equal(
+    retargetRemoteTranscriptScroll({
+      anchoredUserIds,
+      scrollPositions,
+      snapshot,
+      fromScrollKey: "relay-1:claude-pending-3",
+      toScrollKey: "relay-1:real-3",
+      fromThreadId: "claude-pending-3",
+      toThreadId: "real-3",
+    }),
+    true
+  );
+  assert.equal(snapshot.activeThreadId, "real-3");
+  assert.equal(snapshot.scrollKey, "relay-1:real-3");
+  assert.equal(scrollPositions.get("relay-1:real-3"), 640);
+  assert.equal(scrollPositions.has("relay-1:claude-pending-3"), false);
+  assert.ok(anchoredUserIds.get("relay-1:real-3").has("u1"));
+});
+
+test("remote promotion rekey keeps the first send classified as anchor-user", () => {
+  const { target } = makeScrollElement();
+  const snapshot = {
+    ...captureTranscriptScrollSnapshot({
+      entries: [],
+      scrollElement: target,
+      threadId: "claude-pending-9",
+    }),
+    scrollKey: "relay-1:claude-pending-9",
+  };
+  retargetRemoteTranscriptScroll({
+    anchoredUserIds: new Map(),
+    scrollPositions: new Map(),
+    snapshot,
+    fromScrollKey: "relay-1:claude-pending-9",
+    toScrollKey: "relay-1:real-9",
+    fromThreadId: "claude-pending-9",
+    toThreadId: "real-9",
+  });
+  const action = decideTranscriptScrollAction({
+    nextEntries: [userEntry("u1")],
+    nextThreadId: "real-9",
+    previousSnapshot: snapshot,
+    scrollElement: target,
+  });
+  assert.equal(action.kind, "anchor-user");
+});
+
+test("retargetRemoteTranscriptScroll is a safe no-op when nothing matches", () => {
+  assert.equal(
+    retargetRemoteTranscriptScroll({
+      anchoredUserIds: new Map(),
+      scrollPositions: new Map(),
+      snapshot: { activeThreadId: "other", scrollKey: "r:other" },
+      fromScrollKey: "r:a",
+      toScrollKey: "r:b",
+      fromThreadId: "a",
+      toThreadId: "b",
+    }),
+    false
+  );
+  assert.equal(retargetRemoteTranscriptScroll(null), false);
 });

@@ -100,6 +100,13 @@ pub struct SessionSnapshot {
     pub broker_can_read_content: bool,
     pub audit_enabled: bool,
     pub active_thread_id: Option<String>,
+    /// When the ACTIVE thread was promoted from a deferred `claude-pending-…`
+    /// id at first send: that pending id. Authoritative promotion signal for
+    /// every client (observers included) — the active-id sequence alone cannot
+    /// distinguish a promotion from a normal thread switch. `#[serde(default)]`
+    /// keeps older peers parseable; consumers treat absence as "no promotion".
+    #[serde(default)]
+    pub active_thread_promoted_from: Option<String>,
     pub active_controller_device_id: Option<String>,
     pub active_controller_last_seen_at: Option<u64>,
     pub controller_lease_expires_at: Option<u64>,

@@ -83,6 +83,7 @@ fn test_persisted_state() -> PersistedRelayState {
         review_jobs: std::collections::HashMap::new(),
         workflow_jobs: std::collections::HashMap::new(),
         thread_forked_from: Default::default(),
+        thread_promoted_from: Default::default(),
         push_subscriptions: std::collections::HashMap::new(),
     }
 }
@@ -263,6 +264,7 @@ fn test_cached_remote_action_result(action_kind: &str, ok: bool) -> CachedRemote
             broker_can_read_content: false,
             audit_enabled: false,
             active_thread_id: Some("thread-1".to_string()),
+            active_thread_promoted_from: None,
             active_controller_device_id: Some("device-a".to_string()),
             active_controller_last_seen_at: Some(100),
             controller_lease_expires_at: Some(115),
@@ -680,6 +682,43 @@ fn promote_background_thread_migrates_last_activity_keeping_most_recent() {
     assert!(!relay
         .thread_last_activity_at
         .contains_key("claude-pending-2"));
+}
+
+#[test]
+fn promotion_records_lineage_and_rides_the_snapshot() {
+    // The pending->real id transition is, from a client's point of view,
+    // indistinguishable from another device switching the relay to an
+    // unrelated thread. The snapshot must therefore carry the lineage
+    // authoritatively so every client (observers included) can rekey its
+    // scroll bookkeeping / pinned view only on REAL promotions.
+    let mut relay = test_state();
+    relay.promote_background_thread("claude-pending-9", "real-9");
+    assert_eq!(
+        relay.thread_promoted_from.get("real-9"),
+        Some(&"claude-pending-9".to_string()),
+        "promotion must record its lineage"
+    );
+
+    relay.active_thread_id = Some("real-9".to_string());
+    assert_eq!(
+        relay.snapshot().active_thread_promoted_from,
+        Some("claude-pending-9".to_string()),
+        "the active thread's pending lineage must ride the snapshot"
+    );
+
+    // An unrelated active thread exposes no lineage.
+    relay.active_thread_id = Some("other-thread".to_string());
+    assert_eq!(relay.snapshot().active_thread_promoted_from, None);
+
+    // Lineage survives persistence (mirrors thread_forked_from).
+    let persisted = PersistedRelayState::from_relay(&relay);
+    let mut restored = test_state();
+    restored.apply_persisted(&persisted);
+    assert_eq!(
+        restored.thread_promoted_from.get("real-9"),
+        Some(&"claude-pending-9".to_string()),
+        "promotion lineage must survive a relay restart"
+    );
 }
 
 #[test]

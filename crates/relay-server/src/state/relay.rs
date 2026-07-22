@@ -235,6 +235,12 @@ pub struct RelayState {
     /// at fork time because neither provider tracks the relationship, and
     /// retrofitting it once forked threads exist would need a migration.
     pub(super) thread_forked_from: HashMap<String, String>,
+    /// Deferred-thread lineage: promoted (real) thread id -> the synthetic
+    /// `claude-pending-…` id it grew out of at first send. Rides the snapshot
+    /// as `active_thread_promoted_from` so EVERY client — including observers
+    /// that never sent — can recognize the promotion authoritatively; the id
+    /// sequence alone is indistinguishable from a normal thread switch.
+    pub(super) thread_promoted_from: HashMap<String, String>,
     /// Static per relay process, seeded from the spawned bridges. Rides the
     /// snapshot so both surfaces learn fork capability through the channel they
     /// already consume, instead of inferring it from provider names.
@@ -358,6 +364,7 @@ impl RelayState {
             reasoning_effort: DEFAULT_EFFORT.to_string(),
             thread_settings: HashMap::new(),
             thread_forked_from: HashMap::new(),
+            thread_promoted_from: HashMap::new(),
             provider_fork_capabilities: Vec::new(),
             provider_status_base: Vec::new(),
             thread_last_activity_at: HashMap::new(),
@@ -913,6 +920,12 @@ impl RelayState {
         if pending_id == real_id || pending_id.is_empty() || real_id.is_empty() {
             return;
         }
+        // Record the lineage FIRST: it rides the snapshot
+        // (`active_thread_promoted_from`) so every client — observers included —
+        // can authoritatively tell this promotion apart from a normal thread
+        // switch (the active-id sequence alone cannot).
+        self.thread_promoted_from
+            .insert(real_id.to_string(), pending_id.to_string());
         if let Some(mut runtime) = self.runtimes.remove(pending_id) {
             if let Some(summary) = runtime.summary.as_mut() {
                 summary.id = real_id.to_string();
@@ -1595,6 +1608,10 @@ impl RelayState {
             broker_can_read_content: self.security.broker_can_read_content(),
             audit_enabled: self.security.audit_enabled(),
             active_thread_id: self.active_thread_id.clone(),
+            active_thread_promoted_from: self
+                .active_thread_id
+                .as_ref()
+                .and_then(|id| self.thread_promoted_from.get(id).cloned()),
             active_controller_device_id: self.active_controller_device_id.clone(),
             active_controller_last_seen_at: self.active_controller_last_seen_at,
             controller_lease_expires_at: self.controller_lease_expires_at(),
@@ -1938,6 +1955,7 @@ impl RelayState {
             .entry(data.thread.id.clone())
             .or_insert(materialized);
         self.thread_forked_from = persisted.thread_forked_from.clone();
+        self.thread_promoted_from = persisted.thread_promoted_from.clone();
         self.allowed_roots = persisted.allowed_roots.clone();
         self.device_records = persisted.device_records.clone();
         self.paired_devices = persisted.paired_devices.clone();
@@ -2642,6 +2660,7 @@ impl RelayState {
             self.thread_settings.entry(thread_id).or_insert(settings);
         }
         self.thread_forked_from = persisted.thread_forked_from.clone();
+        self.thread_promoted_from = persisted.thread_promoted_from.clone();
         self.allowed_roots = persisted.allowed_roots.clone();
         self.device_records = persisted.device_records.clone();
         self.paired_devices = persisted.paired_devices.clone();

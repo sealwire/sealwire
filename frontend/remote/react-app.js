@@ -110,6 +110,7 @@ import {
   readTranscriptScrollPosition,
   rememberTranscriptScrollPosition,
   restoreTranscriptScrollPosition,
+  retargetRemoteTranscriptScroll,
 } from "./transcript-scroll.js";
 import { ensureProviderModels, fetchModelsWithRetry } from "./provider-model-fetch.js";
 import { useRemoteSessionRuntime } from "./use-remote-session-runtime.js";
@@ -2272,6 +2273,32 @@ function RemoteTranscriptPanel({
     const remoteScrollKey = remoteThreadId
       ? `${currentState.activeRelayId || "-"}:${remoteThreadId}`
       : null;
+
+    // Deferred-Claude promotion (send path sets the one-shot alias): same
+    // logical thread under a new public id — rekey the retained bookkeeping
+    // instead of treating it as a thread switch, so the first reply keeps the
+    // send-anchor instead of jump-bottom briefly re-enabling live follow.
+    const promotion = currentState.promotedThreadAlias || null;
+    if (
+      promotion
+      && previous?.activeThreadId === promotion.from
+      && remoteThreadId === promotion.to
+    ) {
+      retargetRemoteTranscriptScroll({
+        anchoredUserIds: anchoredUserIdsRef.current,
+        scrollPositions: scrollPositionsRef.current,
+        snapshot: previous,
+        fromScrollKey: `${currentState.activeRelayId || "-"}:${promotion.from}`,
+        toScrollKey: remoteScrollKey,
+        fromThreadId: promotion.from,
+        toThreadId: remoteThreadId,
+      });
+      // Consumed: the alias is one-shot. (An alias whose transition this pane
+      // never renders stays until the next promotion overwrites it — pending
+      // ids are unique, so it can never match anything else.)
+      currentState.promotedThreadAlias = null;
+    }
+
     let restoredScrollTop = null;
     if (previous?.scrollKey && previous.scrollKey !== remoteScrollKey) {
       const evictedScrollKey = rememberTranscriptScrollPosition(
