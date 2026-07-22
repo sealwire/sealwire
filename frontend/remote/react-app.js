@@ -77,6 +77,7 @@ import {
   selectRelayDirectoryRenderModel,
   selectSessionRenderModel,
   selectThreadsRenderModel,
+  visiblePendingAskUserQuestions,
 } from "./view-model.js";
 import {
   bootRemoteRuntime,
@@ -2116,9 +2117,10 @@ function RemoteThreadPanel({
         onEnsureFileChangeDetail,
         onSubmitDecision,
         onSubmitAskUserAnswers,
-        pendingAskUserQuestions: sessionView.activeThreadFrozen
-          ? []
-          : pendingAskUserQuestions,
+        pendingAskUserQuestions: visiblePendingAskUserQuestions(
+          sessionView,
+          pendingAskUserQuestions
+        ),
         session,
         transcriptDetailEntries,
         askUserDetailErrors,

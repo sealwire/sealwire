@@ -6,6 +6,7 @@ import {
   selectRelayDirectoryRenderModel,
   selectSessionRenderModel,
   selectThreadsRenderModel,
+  visiblePendingAskUserQuestions,
 } from "../view-model.js";
 import { isReviewInProgressForThread } from "../../shared/review-state.js";
 import { isWorkflowInProgressForThread } from "../../shared/workflow-state.js";
@@ -520,4 +521,29 @@ test("selectEmptyStateRenderModel exposes server disconnected state", () => {
 
   assert.equal(relayDisconnected.showServerDisconnected, true);
   assert.match(relayDisconnected.serverDisconnectedCopy, /Relay server disconnected/);
+});
+
+// Before any session exists (a fresh remote.html load), the render model is
+// `null` — there is nothing to derive it from. The transcript panel still
+// renders, so every read of the session view has to survive that. Dereferencing
+// it directly crashed the whole remote page on load ("Cannot read properties of
+// null (reading 'activeThreadFrozen')") and #remote-root never mounted.
+test("visiblePendingAskUserQuestions tolerates a null session view", () => {
+  const questions = [{ request_id: "req-1" }];
+
+  assert.deepEqual(visiblePendingAskUserQuestions(null, questions), questions);
+  assert.deepEqual(visiblePendingAskUserQuestions(undefined, questions), questions);
+});
+
+test("visiblePendingAskUserQuestions hides questions while the active thread is frozen", () => {
+  const questions = [{ request_id: "req-1" }];
+
+  assert.deepEqual(
+    visiblePendingAskUserQuestions({ activeThreadFrozen: true }, questions),
+    []
+  );
+  assert.deepEqual(
+    visiblePendingAskUserQuestions({ activeThreadFrozen: false }, questions),
+    questions
+  );
 });

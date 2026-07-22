@@ -25,6 +25,14 @@ function createActiveSessionThread(session) {
   };
 }
 
+// A frozen thread (under review / Code Flow) is driven by the orchestrator, so
+// its AskUser prompts are not the human's to answer — hide them. `sessionView`
+// is null until a session exists (fresh remote.html load) and the transcript
+// panel renders before then, so this must never assume a model is there.
+export function visiblePendingAskUserQuestions(sessionView, pendingAskUserQuestions) {
+  return sessionView?.activeThreadFrozen ? [] : pendingAskUserQuestions;
+}
+
 export function selectSessionRenderModel({ session, previousSession, hasControllerLease }) {
   const approval = session.pending_approvals?.[0] || null;
   const hasActiveSession = Boolean(session.active_thread_id);

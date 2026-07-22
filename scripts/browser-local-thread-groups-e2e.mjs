@@ -5,6 +5,10 @@ import path from "node:path";
 import process from "node:process";
 import { setTimeout as delay } from "node:timers/promises";
 
+import {
+  buildThreadGroups,
+  summarizeThreadGroups,
+} from "../frontend/shared/thread-groups.js";
 import { prepareSeededCodexHome } from "./e2e-codex-home.mjs";
 import { deleteThreadAndWait, fetchSession } from "./e2e-thread-cleanup.mjs";
 import { writeFailureArtifacts } from "./e2e/harness/artifacts.mjs";
@@ -163,8 +167,13 @@ async function main() {
         .every((row) => row.rowType === "thread"),
       `fixture threads should render through thread virtual rows: ${JSON.stringify(grouping.threadRows)}`
     );
-    assert(
-      grouping.countText.includes("folders") && grouping.countText.includes("threads"),
+    // Derive the expected copy from the shared summarizer rather than spelling
+    // the wording out here: this assertion silently rotted for 40 commits after
+    // the user-facing "thread" -> "session" rename, because it hardcoded the old
+    // noun and nothing tied it back to the source of truth.
+    assert.equal(
+      grouping.countText,
+      summarizeThreadGroups(buildThreadGroups(threadFixtures)),
       `threads count should summarize grouped history: ${grouping.countText}`
     );
     assert.equal(
