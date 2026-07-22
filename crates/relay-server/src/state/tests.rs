@@ -1752,6 +1752,11 @@ fn review_jobs_view_shows_one_card_per_reviewer_thread_keeping_the_latest() {
     let view = relay.active_review_jobs_view();
     let ids: Vec<&str> = view.iter().map(|v| v.id.as_str()).collect();
     assert_eq!(view.len(), 2, "one card per reviewer thread, got {ids:?}");
+    assert_eq!(
+        ids,
+        vec!["job-new", "job-other"],
+        "review cards should show recently used reviewers first"
+    );
     assert!(
         ids.contains(&"job-new"),
         "the latest run for the shared reviewer is shown"

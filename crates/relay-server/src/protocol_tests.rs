@@ -119,6 +119,33 @@ fn make_snapshot() -> SessionSnapshot {
     }
 }
 
+fn review_job_view(
+    id: impl Into<String>,
+    status: &str,
+    updated_at: u64,
+    payload_chars: usize,
+) -> ReviewJobView {
+    let id = id.into();
+    ReviewJobView {
+        id: id.clone(),
+        parent_thread_id: "thread-1".to_string(),
+        reviewer_provider: "claude_code".to_string(),
+        reviewer_model: Some("claude-opus-4-6".to_string()),
+        reviewer_effort: Some("high".to_string()),
+        reviewer_thread_id: Some(format!("reviewer-{id}")),
+        status: status.to_string(),
+        error: None,
+        updated_at,
+        round: 1,
+        max_rounds: 3,
+        verdict: Some(if payload_chars > 0 {
+            "v".repeat(payload_chars)
+        } else {
+            "no blocking findings".to_string()
+        }),
+    }
+}
+
 #[test]
 fn compaction_preserves_reviews_revision_so_the_panel_can_refetch() {
     // The reviewer panel reads its cards from a dedicated (uncompacted) reviews channel and
@@ -755,6 +782,7 @@ fn control_plane_flood_keeps_both_surfaces_bounded_without_shelling_live_text() 
             })
             .collect();
         snapshot.active_review_jobs = (0..120)
+            .rev()
             .map(|index| ReviewJobView {
                 id: format!("review-job-{index:03}-{}", "a".repeat(40)),
                 parent_thread_id: "thread-1".to_string(),
@@ -971,60 +999,89 @@ fn compact_for_broker_stays_under_budget_even_with_oversized_cwd() {
 }
 
 #[test]
-fn control_plane_cap_keeps_non_terminal_review_jobs() {
-    // Review finding F2: the active_review_jobs cap keeps the newest by
-    // updated_at, but a non-terminal (running/blocked) job has an OLD updated_at
-    // and would be dropped while newer terminal jobs survive. The UI derives the
-    // blocked-review alert and send/lock gating from this global list
-    // (review-state.js), so a non-terminal job must never be dropped by the cap.
+fn control_plane_cap_keeps_non_terminal_and_newest_review_jobs() {
+    // The producer sends active_review_jobs newest-first. The hard cap must keep
+    // all non-terminal jobs, then fill the remaining slots with the newest
+    // terminal jobs. The UI derives the blocked-review alert and send/lock
+    // gating from this global list (review-state.js), so a non-terminal job must
+    // never be dropped by the cap even when it is older than terminal cards.
     let mut snapshot = make_snapshot();
     snapshot.logs.clear();
     snapshot.pending_approvals.clear();
     snapshot.transcript.clear();
     snapshot.transcript_truncated = false;
     let mut jobs = Vec::new();
-    // One old BLOCKED (non-terminal) job at the head (oldest updated_at)...
-    jobs.push(ReviewJobView {
-        id: "review-blocked".to_string(),
-        parent_thread_id: "background-thread".to_string(),
-        reviewer_provider: "claude_code".to_string(),
-        reviewer_model: Some("claude-opus-4-6".to_string()),
-        reviewer_effort: Some("high".to_string()),
-        reviewer_thread_id: Some("reviewer-blocked".to_string()),
-        status: "blocked".to_string(),
-        error: None,
-        updated_at: 1,
-        round: 1,
-        max_rounds: 3,
-        verdict: None,
-    });
-    // ...followed by 30 newer terminal (complete) jobs, exceeding the broker cap.
-    for index in 0..30 {
-        jobs.push(ReviewJobView {
-            id: format!("review-complete-{index:02}"),
-            parent_thread_id: format!("thread-{index:02}"),
-            reviewer_provider: "claude_code".to_string(),
-            reviewer_model: Some("claude-opus-4-6".to_string()),
-            reviewer_effort: Some("high".to_string()),
-            reviewer_thread_id: Some(format!("reviewer-{index:02}")),
-            status: "complete".to_string(),
-            error: None,
-            updated_at: 1_000 + index,
-            round: 1,
-            max_rounds: 3,
-            verdict: Some("no blocking findings".to_string()),
-        });
+    // Thirty terminal jobs in producer order (newest first), exceeding the broker cap.
+    for index in (0..30).rev() {
+        jobs.push(review_job_view(
+            format!("review-complete-{index:02}"),
+            "complete",
+            1_000 + index,
+            0,
+        ));
     }
+    // One old BLOCKED (non-terminal) job at the tail (oldest updated_at).
+    jobs.push(review_job_view("review-blocked", "blocked", 1, 0));
     snapshot.active_review_jobs = jobs;
 
     let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::RemoteSurface);
+    let kept_ids: Vec<_> = compacted
+        .active_review_jobs
+        .iter()
+        .map(|job| job.id.as_str())
+        .collect();
 
     assert!(
-        compacted
-            .active_review_jobs
-            .iter()
-            .any(|job| job.status == "blocked"),
+        kept_ids.contains(&"review-blocked"),
         "the cap dropped a non-terminal (blocked) review job while keeping terminal ones"
+    );
+    assert!(
+        kept_ids.contains(&"review-complete-29"),
+        "the cap dropped the newest terminal review job: kept {kept_ids:?}"
+    );
+    assert!(
+        !kept_ids.contains(&"review-complete-00"),
+        "the cap kept the oldest terminal review job instead of a newer one: kept {kept_ids:?}"
+    );
+}
+
+#[test]
+fn byte_pressure_removes_oldest_terminal_review_job_from_newest_first_list() {
+    // active_review_jobs now arrives newest-first. The byte-budget drain must
+    // remove terminal jobs from the least-important end (the tail), otherwise a
+    // bloated old card can cause the newest card to disappear first and still
+    // force more removals.
+    let mut snapshot = make_snapshot();
+    snapshot.logs.clear();
+    snapshot.pending_approvals.clear();
+    snapshot.transcript.clear();
+    snapshot.transcript_truncated = false;
+    snapshot.reviewer_threads.clear();
+    snapshot.device_records.clear();
+    snapshot.active_review_jobs = vec![
+        review_job_view("review-newest", "complete", 200, 0),
+        review_job_view("review-oldest-heavy", "complete", 100, 20_000),
+    ];
+
+    let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::RemoteSurface);
+    let kept_ids: Vec<_> = compacted
+        .active_review_jobs
+        .iter()
+        .map(|job| job.id.as_str())
+        .collect();
+    let bytes = serde_json::to_vec(&compacted).unwrap().len();
+
+    assert!(
+        bytes <= SESSION_SNAPSHOT_TARGET_BYTES,
+        "compacted snapshot stayed over budget: {bytes}"
+    );
+    assert!(
+        kept_ids.contains(&"review-newest"),
+        "byte pressure dropped the newest terminal review job first: kept {kept_ids:?}"
+    );
+    assert!(
+        !kept_ids.contains(&"review-oldest-heavy"),
+        "byte pressure kept the oldest oversized terminal review job: kept {kept_ids:?}"
     );
 }
 

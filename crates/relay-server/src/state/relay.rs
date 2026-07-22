@@ -1186,8 +1186,8 @@ impl RelayState {
     /// thread: when a reviewer thread is reused across several reviews, only the
     /// most-recently-updated job for it is shown (older runs collapse into the latest);
     /// jobs not yet bound to a reviewer thread are each kept. Terminal jobs persist here
-    /// (the Reviewer panel keeps them until deleted). Ordered oldest-updated first for
-    /// a stable UI.
+    /// (the Reviewer panel keeps them until deleted). Ordered newest-updated first so
+    /// recently used reviewers stay at the top of the Reviewer panel.
     pub(crate) fn active_review_jobs_view(&self) -> Vec<crate::protocol::ReviewJobView> {
         let mut latest_by_reviewer: std::collections::HashMap<&str, &ReviewJob> =
             std::collections::HashMap::new();
@@ -1227,9 +1227,10 @@ impl RelayState {
             .map(|job| job.view())
             .collect();
         views.sort_by(|left, right| {
-            left.updated_at
-                .cmp(&right.updated_at)
-                .then_with(|| left.id.cmp(&right.id))
+            right
+                .updated_at
+                .cmp(&left.updated_at)
+                .then_with(|| right.id.cmp(&left.id))
         });
         views
     }

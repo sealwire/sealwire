@@ -484,8 +484,8 @@ impl SessionSnapshot {
         // of the transcript) under real pressure.
         // Each collection is dropped from its LEAST-important end (matching the
         // producer's sort) so the cap retains what the active view needs:
-        //   * active_review_jobs is sorted updated_at-ascending → keep the newest
-        //     tail (drop the oldest head);
+        //   * active_review_jobs is sorted updated_at-descending → keep the newest
+        //     head (drop the oldest tail);
         //   * device_records is sorted Pending→Approved→Rejected→Revoked → keep
         //     the actionable head (drop terminal junk from the tail);
         //   * reviewer_threads has an arbitrary (id-sorted) order → float the
@@ -495,16 +495,21 @@ impl SessionSnapshot {
             // Never drop a non-terminal (blocked/running) job — keep all of them
             // (they are serialized one at a time, so the count is tiny) and fill
             // the remaining budget with the newest terminal jobs (the list is
-            // updated_at-ascending, so the newest are at the tail).
+            // updated_at-descending, so the newest are at the head).
             let max = budget.max_active_review_jobs;
             let (non_terminal, terminal): (Vec<_>, Vec<_>) =
                 std::mem::take(&mut self.active_review_jobs)
                     .into_iter()
                     .partition(|job| !review_job_status_is_terminal(&job.status));
             let terminal_keep = max.saturating_sub(non_terminal.len());
-            let terminal_skip = terminal.len().saturating_sub(terminal_keep);
             let mut kept = non_terminal;
-            kept.extend(terminal.into_iter().skip(terminal_skip));
+            kept.extend(terminal.into_iter().take(terminal_keep));
+            kept.sort_by(|left, right| {
+                right
+                    .updated_at
+                    .cmp(&left.updated_at)
+                    .then_with(|| right.id.cmp(&left.id))
+            });
             self.active_review_jobs = kept;
         }
         if self.reviewer_threads.len() > budget.max_reviewer_threads {
@@ -749,7 +754,7 @@ impl SessionSnapshot {
             if let Some(pos) = self
                 .active_review_jobs
                 .iter()
-                .position(|job| review_job_status_is_terminal(&job.status))
+                .rposition(|job| review_job_status_is_terminal(&job.status))
             {
                 self.active_review_jobs.remove(pos);
                 continue;
