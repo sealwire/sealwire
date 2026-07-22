@@ -8,15 +8,15 @@
 //   - the snapshot serialization the browser actually consumes
 //   - the real frontend rendering a WorkflowRunCard from active_workflow_runs
 //
-// KNOWN LIMITATION (documented, not a workflow bug): with the `fake` reviewer
-// provider the background reviewer thread never clears `is_working`, so the
-// review turn does not settle and the run never reaches a TERMINAL status. This
-// is a fake-provider gap shared verbatim by the shipped single-shot review
-// feature (see scripts/review-fake-e2e-compare.mjs during investigation) — a
-// real `codex` reviewer settles normally. So this smoke asserts the run reaches
-// the REVIEW step (as far as fake can drive it) plus the card render, which is
-// the coverage the unit tests can't give: the real HTTP route + real subprocess
-// + real snapshot + real UI.
+// TREE-SIZE CAVEAT (not a bug): the `fake` reviewer ECHOES its prompt one line
+// per ~20ms, and the reviewer prompt embeds the workspace diff. So if this repo's
+// working tree has a large uncommitted diff, streaming a single review turn can
+// take a minute — it LOOKS stuck but is just latency (on a clean tree the whole
+// run escalates in ~3s). To stay fast and independent of the ambient tree size,
+// this smoke asserts the run reaches the REVIEW step (reviewer thread spawned)
+// plus the card render — the coverage the unit tests can't give: the real HTTP
+// route + real provider + real snapshot + real UI. A stronger variant that runs
+// against a clean temp git repo and asserts a TERMINAL status is a good follow-up.
 //
 // Run from the repo ROOT:
 //   E2E_USE_BUILT_BINARIES=1 AGENT_PROVIDERS=fake node scripts/workflow-code-flow-e2e.mjs

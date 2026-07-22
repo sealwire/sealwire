@@ -1329,6 +1329,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn background_thread_turn_settles_and_records_reply() {
+        // Regression + coverage: the REAL FakeProvider must drive a BACKGROUND
+        // (non-active) thread's turn to completion — settling `is_working()` and
+        // recording the reply — exactly as it does for the active thread. Workflow
+        // and review reviewers run on background threads, but the app-level tests
+        // only exercise a MOCK `ProviderBridge`, so the real fake's background path
+        // was never covered. `wait_for_step_idle`/`wait_for_thread_idle_outcome`
+        // poll `is_working()`; if a background turn never cleared it, the reviewer
+        // step would hang forever.
+        //
+        // NOTE: the fake echoes its prompt one line per 20ms, so a LARGE echoed
+        // reply (e.g. a reviewer prompt embedding a multi-thousand-line workspace
+        // diff) can take a minute to stream — that is streaming latency, NOT a
+        // hang. Here the reply is a single line, so the turn settles promptly.
+        let (change_tx, _change_rx) = watch::channel(0);
+        let state = Arc::new(RwLock::new(RelayState::new(
+            "/tmp/project".to_string(),
+            change_tx,
+            SecurityProfile::private(),
+        )));
+
+        // An ACTIVE parent thread, so the reviewer thread below is BACKGROUND.
+        {
+            let mut relay = state.write().await;
+            relay.activate_thread(
+                test_thread("active-parent", "/tmp/project"),
+                "/tmp/project",
+                "fake-echo",
+                "never",
+                "workspace-write",
+                "medium",
+                "device-1",
+            );
+        }
+
+        let bridge = FakeProviderBridge::spawn(state.clone())
+            .await
+            .expect("fake provider");
+
+        // Spawn a background reviewer thread the way the workflow/review runner does.
+        let start = bridge
+            .start_thread("/tmp/project", "fake-echo", "never", "read-only", None)
+            .await
+            .expect("start background reviewer thread");
+        let bg_id = start.thread.id.clone();
+        {
+            let mut relay = state.write().await;
+            relay.register_background_thread(
+                start.thread,
+                "/tmp/project",
+                "fake-echo",
+                "never",
+                "read-only",
+                "medium",
+            );
+        }
+
+        bridge
+            .start_turn(
+                &bg_id,
+                "Reply with exactly: reviewed",
+                "fake-echo",
+                "medium",
+            )
+            .await
+            .expect("background thread should accept a turn");
+
+        // The reply lands on the background thread (the turn ran to completion).
+        assert!(
+            wait_for_thread_text(&bridge, &bg_id, "reviewed").await,
+            "background reviewer reply should be stored"
+        );
+
+        // ...and the turn SETTLED: `is_working()` is false, so a reviewer-idle wait
+        // on this thread would complete instead of hanging.
+        let mut settled = false;
+        for _ in 0..100 {
+            {
+                let relay = state.read().await;
+                if !relay
+                    .runtime_for_thread(&bg_id)
+                    .map(|rt| rt.is_working())
+                    .unwrap_or(true)
+                {
+                    settled = true;
+                    break;
+                }
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            settled,
+            "background reviewer turn never cleared is_working() — a reviewer-idle wait \
+             on this thread would hang forever"
+        );
+    }
+
+    #[tokio::test]
     async fn scenario_barrier_waits_for_an_explicit_release() {
         let temp = tempfile::tempdir().expect("temporary control directory");
         let harness = FakeScenarioHarness {
