@@ -1417,6 +1417,21 @@ mod tests {
         );
     }
 
+    // URL-based inference is ONLY the legacy fallback for configs with no remembered
+    // provider. An explicit brokerProvider always wins, even against a retained
+    // custom URL — so a user who picked Official while off keeps Official.
+    #[test]
+    fn resolve_broker_provider_explicit_choice_beats_url_inference() {
+        assert_eq!(
+            resolve_broker_provider(
+                &BrokerMode::LocalOnly,
+                Some(BrokerProvider::Hosted),
+                "wss://self.example.com"
+            ),
+            BrokerProvider::Hosted
+        );
+    }
+
     // When the broker is ON, mode and provider can never disagree: the mode wins,
     // so a stale/inconsistent provider can't send traffic to the wrong broker.
     #[test]
