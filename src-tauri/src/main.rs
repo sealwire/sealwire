@@ -51,6 +51,14 @@ struct DesktopConfig {
     preferred_port: u16,
     broker_mode: BrokerMode,
     custom_broker_url: String,
+    /// The selected broker provider, remembered independently of the on/off
+    /// (broker_mode == LocalOnly). Turning the broker off must not forget whether
+    /// the user chose the official or a self-hosted broker — otherwise turning it
+    /// back on could silently connect to a different trust boundary. Optional for
+    /// backward compatibility with pre-existing configs; sanitize_config fills it
+    /// in (migrating from broker_mode when absent).
+    #[serde(default)]
+    broker_provider: Option<BrokerProvider>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -59,6 +67,30 @@ enum BrokerMode {
     LocalOnly,
     Hosted,
     Custom,
+}
+
+/// Which broker the user picked (independent of on/off). Persisted so disabling
+/// the broker and re-enabling it later keeps the same provider.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum BrokerProvider {
+    Hosted,
+    Custom,
+}
+
+/// Resolve the remembered broker provider: trust an explicit value, otherwise
+/// migrate from broker_mode (a pre-existing config), defaulting to Hosted.
+fn resolve_broker_provider(
+    broker_mode: &BrokerMode,
+    provider: Option<BrokerProvider>,
+) -> BrokerProvider {
+    match provider {
+        Some(provider) => provider,
+        None => match broker_mode {
+            BrokerMode::Custom => BrokerProvider::Custom,
+            _ => BrokerProvider::Hosted,
+        },
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -974,11 +1006,17 @@ fn sanitize_config(input: DesktopConfig, app: &AppHandle) -> Result<DesktopConfi
         input.preferred_port
     };
     let custom_broker_url = input.custom_broker_url.trim().to_string();
+    // Remember the provider independently of on/off, migrating older configs.
+    let broker_provider = Some(resolve_broker_provider(
+        &input.broker_mode,
+        input.broker_provider,
+    ));
     let config = DesktopConfig {
         workspace_dir,
         preferred_port,
         broker_mode: input.broker_mode,
         custom_broker_url,
+        broker_provider,
     };
     let _ = broker_runtime_config(&config)?;
     Ok(config)
@@ -1131,6 +1169,7 @@ fn default_config(app: &AppHandle) -> DesktopConfig {
         preferred_port: 8787,
         broker_mode: BrokerMode::LocalOnly,
         custom_broker_url: String::new(),
+        broker_provider: Some(BrokerProvider::Hosted),
     }
 }
 
@@ -1151,6 +1190,10 @@ fn load_config(path: &Path, default_config: DesktopConfig) -> Result<DesktopConf
         } else {
             parsed.preferred_port
         },
+        broker_provider: Some(resolve_broker_provider(
+            &parsed.broker_mode,
+            parsed.broker_provider,
+        )),
         broker_mode: parsed.broker_mode,
         custom_broker_url: parsed.custom_broker_url,
     })
@@ -1314,7 +1357,53 @@ mod tests {
             preferred_port: 8787,
             broker_mode: mode,
             custom_broker_url: custom.to_string(),
+            broker_provider: None,
         }
+    }
+
+    // Turning the broker off (localOnly) must not forget the selected provider —
+    // an explicit choice is preserved, so re-enabling can't silently connect to a
+    // different broker/trust boundary.
+    #[test]
+    fn resolve_broker_provider_preserves_explicit_choice_when_off() {
+        assert_eq!(
+            resolve_broker_provider(&BrokerMode::LocalOnly, Some(BrokerProvider::Custom)),
+            BrokerProvider::Custom
+        );
+        assert_eq!(
+            resolve_broker_provider(&BrokerMode::LocalOnly, Some(BrokerProvider::Hosted)),
+            BrokerProvider::Hosted
+        );
+    }
+
+    // A pre-existing config (no broker_provider) migrates from broker_mode.
+    #[test]
+    fn resolve_broker_provider_migrates_from_broker_mode() {
+        assert_eq!(
+            resolve_broker_provider(&BrokerMode::Custom, None),
+            BrokerProvider::Custom
+        );
+        assert_eq!(
+            resolve_broker_provider(&BrokerMode::Hosted, None),
+            BrokerProvider::Hosted
+        );
+        // Local-only with nothing remembered defaults to the official broker.
+        assert_eq!(
+            resolve_broker_provider(&BrokerMode::LocalOnly, None),
+            BrokerProvider::Hosted
+        );
+    }
+
+    // Old configs without brokerProvider deserialize (serde default None).
+    #[test]
+    fn desktop_config_without_broker_provider_deserializes() {
+        let json = r#"{"workspaceDir":"/tmp","preferredPort":8787,"brokerMode":"custom","customBrokerUrl":"wss://self.example.com"}"#;
+        let parsed: DesktopConfig = serde_json::from_str(json).expect("parse legacy config");
+        assert!(parsed.broker_provider.is_none());
+        assert_eq!(
+            resolve_broker_provider(&parsed.broker_mode, parsed.broker_provider),
+            BrokerProvider::Custom
+        );
     }
 
     // Every window that loads the Tauri UI (desktop.html) must be covered by a

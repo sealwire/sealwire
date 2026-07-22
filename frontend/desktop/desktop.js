@@ -129,10 +129,18 @@ function brokerIsOn(config) {
   return config.brokerMode !== "localOnly";
 }
 
-// The provider to preselect: the real mode when on, else a sensible default so a
-// segment is always pressed (the toggle, not the segment, encodes on/off).
+// The provider to preselect. Prefer the remembered provider (brokerProvider,
+// which survives turning the broker off), then the live mode, then official — so
+// a segment is always pressed (the toggle, not the segment, encodes on/off) and
+// turning the broker back on never silently switches which broker it connects to.
 function effectiveBrokerMode(config) {
-  return config.brokerMode === "custom" ? "custom" : "hosted";
+  const provider =
+    config.brokerProvider ||
+    (config.brokerMode === "custom" || config.brokerMode === "hosted"
+      ? config.brokerMode
+      : null) ||
+    "hosted";
+  return provider === "custom" ? "custom" : "hosted";
 }
 
 function renderBrokerToggle(config) {
@@ -396,12 +404,15 @@ async function withSaving(action) {
 function readConfigForm() {
   const brokerOn = Boolean(document.querySelector("#broker-enabled")?.checked);
   const selected = document.querySelector("[data-broker-mode][aria-pressed='true']");
-  // Off ⇒ local-only; on ⇒ the selected provider (default official).
-  const brokerMode = brokerOn ? selected?.dataset.brokerMode || "hosted" : "localOnly";
+  const provider = selected?.dataset.brokerMode === "custom" ? "custom" : "hosted";
+  // Off ⇒ local-only, but the provider choice is persisted separately so turning
+  // the broker back on restores the same broker (not silently the official one).
+  const brokerMode = brokerOn ? provider : "localOnly";
   return {
     workspaceDir: document.querySelector("#workspace-dir")?.value || "",
     preferredPort: parsePort(document.querySelector("#preferred-port")?.value),
     brokerMode,
+    brokerProvider: provider,
     customBrokerUrl: document.querySelector("#custom-broker-url")?.value || "",
   };
 }
