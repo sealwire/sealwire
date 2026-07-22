@@ -9,11 +9,41 @@ impl AppState {
         abort_and_join(previous).await;
     }
 
+    /// Enable or disable the configured broker at runtime WITHOUT restarting the
+    /// relay core. Enabling re-runs the exact startup path (`spawn_broker_task`), so
+    /// it reuses the same env-derived config, credentials, and enrollment — a switch
+    /// can never send one broker's credentials to another origin, because the origin
+    /// never changes (changing WHICH broker is a restart, not this). Disabling tears
+    /// the publishing task down. The enabled flag's Mutex is held across the whole
+    /// transition, so concurrent toggles serialize and never leave torn broker state.
+    /// Returns Err only if enabling fails to resolve the configured broker (bad env);
+    /// the flag then stays disabled.
+    #[allow(dead_code)] // consumed by the broker control HTTP API (next narrow brick)
+    pub(crate) async fn set_broker_enabled(&self, enabled: bool) -> Result<(), String> {
+        let mut flag = self.broker_enabled.lock().await;
+        if *flag == enabled {
+            return Ok(());
+        }
+        if enabled {
+            crate::broker::spawn_broker_task(self.clone()).await?;
+        } else {
+            self.stop_broker().await;
+        }
+        *flag = enabled;
+        Ok(())
+    }
+
+    /// Whether the configured broker is currently enabled (publishing).
+    #[allow(dead_code)] // consumed by the broker control HTTP API (next narrow brick)
+    pub(crate) async fn broker_enabled(&self) -> bool {
+        *self.broker_enabled.lock().await
+    }
+
     /// Stop the running broker task (if any) and clear broker presence/target so
     /// status reflects "no broker". Returns whether a broker task was stopped.
     /// Hot broker switching calls this to tear the old broker down before starting
     /// a new one, or when switching to local-only.
-    #[allow(dead_code)] // consumed by the broker control HTTP API (next Phase 2 step)
+    #[allow(dead_code)] // consumed by the broker control HTTP API (next narrow brick)
     pub(crate) async fn stop_broker(&self) -> bool {
         let handle = self.broker_task.lock().await.take();
         let had_broker = handle.is_some();

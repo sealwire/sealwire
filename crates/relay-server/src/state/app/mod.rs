@@ -117,6 +117,11 @@ pub struct AppState {
     /// relay core — aborting this handle tears down the reconnect loop. `None` when no
     /// broker is configured (local-only).
     broker_task: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    /// Whether the configured broker should be publishing. This Mutex doubles as the
+    /// broker lifecycle lock: `set_broker_enabled` holds it across the entire
+    /// stop/spawn transition so concurrent toggles serialize and never leave torn
+    /// broker state. Default true — startup spawns the configured broker as before.
+    broker_enabled: Arc<tokio::sync::Mutex<bool>>,
 }
 
 mod approvals;
@@ -210,6 +215,7 @@ impl AppState {
             blocked_reviews: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             cancel_requested_jobs: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             broker_task: Arc::new(tokio::sync::Mutex::new(None)),
+            broker_enabled: Arc::new(tokio::sync::Mutex::new(true)),
         }
     }
 
@@ -307,6 +313,7 @@ impl AppState {
             blocked_reviews: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             cancel_requested_jobs: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             broker_task: Arc::new(tokio::sync::Mutex::new(None)),
+            broker_enabled: Arc::new(tokio::sync::Mutex::new(true)),
         };
 
         state.spawn_initial_model_catalog_refresh();

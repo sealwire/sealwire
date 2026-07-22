@@ -361,6 +361,92 @@ mod path_scope_tests {
         app.stop_broker().await;
     }
 
+    #[tokio::test]
+    async fn broker_is_enabled_by_default() {
+        let (app, _project, _outside) = build_app("/tmp/broker-enabled-default").await;
+        assert!(
+            app.broker_enabled().await,
+            "the broker should default to enabled (startup spawns it as before)"
+        );
+    }
+
+    #[tokio::test]
+    async fn disabling_the_broker_stops_the_publishing_task() {
+        let (app, _project, _outside) = build_app("/tmp/broker-disable").await;
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        app.set_broker_task(never_ending_task(dropped.clone()))
+            .await;
+
+        app.set_broker_enabled(false)
+            .await
+            .expect("disable should succeed");
+
+        assert!(
+            !app.broker_enabled().await,
+            "flag must be off after disable"
+        );
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "disabling must tear down the publishing task (stop_broker awaits abort)"
+        );
+        assert!(
+            !app.stop_broker().await,
+            "no broker task should remain after disabling"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_broker_enabled_is_idempotent() {
+        let (app, _project, _outside) = build_app("/tmp/broker-idempotent").await;
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        app.set_broker_task(never_ending_task(dropped.clone()))
+            .await;
+
+        app.set_broker_enabled(false).await.unwrap();
+        // Second disable is a no-op — it must NOT spawn or stop anything.
+        app.set_broker_enabled(false).await.unwrap();
+        assert!(!app.broker_enabled().await);
+    }
+
+    // Enabling reuses spawn_broker_task (the startup path). This pins the flag
+    // transitions and that enabling never errors. Whether a task is installed
+    // depends on the ambient broker env, so it is not asserted here (covered by the
+    // fake-broker end-to-end test); any spawned task is cleaned up at the end.
+    #[tokio::test]
+    async fn enabling_the_broker_sets_the_flag_without_error() {
+        let (app, _project, _outside) = build_app("/tmp/broker-enable-flag").await;
+
+        app.set_broker_enabled(false).await.unwrap();
+        assert!(!app.broker_enabled().await, "flag off after disable");
+
+        app.set_broker_enabled(true)
+            .await
+            .expect("enabling must not error");
+        assert!(app.broker_enabled().await, "flag on after enable");
+
+        app.stop_broker().await; // clean up any env-spawned broker task
+    }
+
+    // The enabled Mutex serializes the whole stop/spawn transition: concurrent
+    // toggles must not deadlock and must converge to a single consistent state.
+    #[tokio::test]
+    async fn concurrent_toggles_are_serialized() {
+        let (app, _project, _outside) = build_app("/tmp/broker-concurrent").await;
+
+        let a = app.clone();
+        let b = app.clone();
+        let (r1, r2) = tokio::join!(a.set_broker_enabled(false), b.set_broker_enabled(false));
+        r1.expect("first toggle ok");
+        r2.expect("second toggle ok");
+
+        assert!(
+            !app.broker_enabled().await,
+            "final state must be consistent"
+        );
+    }
+
     async fn build_status_app(cwd: &str, read_status: &str) -> (AppState, TempDir, TempDir) {
         let project = TempDir::new().expect("project tempdir");
         let outside = TempDir::new().expect("outside tempdir");
