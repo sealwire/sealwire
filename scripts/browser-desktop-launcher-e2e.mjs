@@ -292,9 +292,11 @@ async function main() {
       relay: RUNNING_STATUS.relay,
       logs: [],
     };
-    // A later addInitScript wins for window.__tauriFixtures / __invokeLog, so the
-    // reloaded page boots from this persisted config with a clean invoke log.
-    await context.addInitScript(installTauriStub, {
+    // Use a FRESH context (its own single init script) so the boot fixture is
+    // deterministic — Playwright leaves the ordering of multiple addInitScript calls
+    // on one context undefined, which would make this security regression flaky.
+    const reopenContext = await browser.newContext();
+    await reopenContext.addInitScript(installTauriStub, {
       responses: {
         desktop_status: rememberedCustom,
         desktop_restart: rememberedCustom,
@@ -303,32 +305,43 @@ async function main() {
       },
       browseResult: BROWSE_RESULT,
     });
-    await page.goto(baseUrl, { waitUntil: "load", timeout: TIMEOUT_MS });
-    await page.waitForSelector("#desktop-root .desktop-shell", { timeout: TIMEOUT_MS });
+    const reopenPage = await reopenContext.newPage();
+    attachPageDebugLogging(reopenPage, "desktop-launcher-reopen");
+    reopenPage.on("pageerror", (error) => pageErrors.push(error));
+    try {
+      await reopenPage.goto(baseUrl, { waitUntil: "load", timeout: TIMEOUT_MS });
+      await reopenPage.waitForSelector("#desktop-root .desktop-shell", { timeout: TIMEOUT_MS });
 
-    assert.equal(
-      await page.isChecked("#broker-enabled"),
-      false,
-      "reopened local-only config shows the broker off"
-    );
-    assert.equal(
-      await page.getAttribute('[data-broker-mode="custom"]', "aria-pressed"),
-      "true",
-      "a remembered self-hosted provider stays preselected while the broker is off"
-    );
-    assert.equal(
-      await page.getAttribute('[data-broker-mode="hosted"]', "aria-pressed"),
-      "false",
-      "the official broker must not be silently preselected"
-    );
-    // Turning the broker back on + saving must target the remembered self-hosted
-    // provider, not the official one.
-    await page.check("#broker-enabled");
-    await page.click("#restart-relay");
-    await waitForInvoke(page, "desktop_restart");
-    const reEnable = await lastInvoke(page, "desktop_restart");
-    assert.equal(reEnable.payload.input.brokerMode, "custom", "re-enabling targets the remembered broker");
-    assert.equal(reEnable.payload.input.brokerProvider, "custom");
+      assert.equal(
+        await reopenPage.isChecked("#broker-enabled"),
+        false,
+        "reopened local-only config shows the broker off"
+      );
+      assert.equal(
+        await reopenPage.getAttribute('[data-broker-mode="custom"]', "aria-pressed"),
+        "true",
+        "a remembered self-hosted provider stays preselected while the broker is off"
+      );
+      assert.equal(
+        await reopenPage.getAttribute('[data-broker-mode="hosted"]', "aria-pressed"),
+        "false",
+        "the official broker must not be silently preselected"
+      );
+      // Turning the broker back on + saving must target the remembered self-hosted
+      // provider, not the official one.
+      await reopenPage.check("#broker-enabled");
+      await reopenPage.click("#restart-relay");
+      await waitForInvoke(reopenPage, "desktop_restart");
+      const reEnable = await lastInvoke(reopenPage, "desktop_restart");
+      assert.equal(
+        reEnable.payload.input.brokerMode,
+        "custom",
+        "re-enabling targets the remembered broker"
+      );
+      assert.equal(reEnable.payload.input.brokerProvider, "custom");
+    } finally {
+      await reopenContext.close().catch(() => {});
+    }
 
     assert.deepEqual(pageErrors, [], `launcher must not raise page errors: ${pageErrors}`);
     console.log("desktop-launcher e2e: PASS");

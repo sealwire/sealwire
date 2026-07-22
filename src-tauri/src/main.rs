@@ -78,17 +78,26 @@ enum BrokerProvider {
     Custom,
 }
 
-/// Resolve the remembered broker provider: trust an explicit value, otherwise
-/// migrate from broker_mode (a pre-existing config), defaulting to Hosted.
+/// Resolve the persisted broker provider so `broker_mode` and `broker_provider`
+/// can never disagree:
+/// - When the broker is ON (Hosted/Custom), the provider IS that mode.
+/// - When OFF (LocalOnly), trust an explicit remembered provider; otherwise
+///   migrate a legacy config — a retained self-hosted `custom_broker_url` means
+///   the user had configured a self-hosted broker, so migrate to Custom rather
+///   than silently defaulting to the official (external) broker. Only a truly
+///   blank local-only config defaults to Hosted.
 fn resolve_broker_provider(
     broker_mode: &BrokerMode,
     provider: Option<BrokerProvider>,
+    custom_broker_url: &str,
 ) -> BrokerProvider {
-    match provider {
-        Some(provider) => provider,
-        None => match broker_mode {
-            BrokerMode::Custom => BrokerProvider::Custom,
-            _ => BrokerProvider::Hosted,
+    match broker_mode {
+        BrokerMode::Hosted => BrokerProvider::Hosted,
+        BrokerMode::Custom => BrokerProvider::Custom,
+        BrokerMode::LocalOnly => match provider {
+            Some(provider) => provider,
+            None if custom_broker_url.trim().is_empty() => BrokerProvider::Hosted,
+            None => BrokerProvider::Custom,
         },
     }
 }
@@ -1010,6 +1019,7 @@ fn sanitize_config(input: DesktopConfig, app: &AppHandle) -> Result<DesktopConfi
     let broker_provider = Some(resolve_broker_provider(
         &input.broker_mode,
         input.broker_provider,
+        &custom_broker_url,
     ));
     let config = DesktopConfig {
         workspace_dir,
@@ -1193,6 +1203,7 @@ fn load_config(path: &Path, default_config: DesktopConfig) -> Result<DesktopConf
         broker_provider: Some(resolve_broker_provider(
             &parsed.broker_mode,
             parsed.broker_provider,
+            &parsed.custom_broker_url,
         )),
         broker_mode: parsed.broker_mode,
         custom_broker_url: parsed.custom_broker_url,
@@ -1367,41 +1378,72 @@ mod tests {
     #[test]
     fn resolve_broker_provider_preserves_explicit_choice_when_off() {
         assert_eq!(
-            resolve_broker_provider(&BrokerMode::LocalOnly, Some(BrokerProvider::Custom)),
+            resolve_broker_provider(&BrokerMode::LocalOnly, Some(BrokerProvider::Custom), ""),
             BrokerProvider::Custom
         );
         assert_eq!(
-            resolve_broker_provider(&BrokerMode::LocalOnly, Some(BrokerProvider::Hosted)),
+            resolve_broker_provider(&BrokerMode::LocalOnly, Some(BrokerProvider::Hosted), ""),
             BrokerProvider::Hosted
         );
     }
 
-    // A pre-existing config (no broker_provider) migrates from broker_mode.
+    // A pre-existing config (no broker_provider) migrates safely.
     #[test]
     fn resolve_broker_provider_migrates_from_broker_mode() {
         assert_eq!(
-            resolve_broker_provider(&BrokerMode::Custom, None),
+            resolve_broker_provider(&BrokerMode::Custom, None, ""),
             BrokerProvider::Custom
         );
         assert_eq!(
-            resolve_broker_provider(&BrokerMode::Hosted, None),
+            resolve_broker_provider(&BrokerMode::Hosted, None, ""),
             BrokerProvider::Hosted
         );
-        // Local-only with nothing remembered defaults to the official broker.
+        // A truly blank local-only config defaults to the official broker.
         assert_eq!(
-            resolve_broker_provider(&BrokerMode::LocalOnly, None),
+            resolve_broker_provider(&BrokerMode::LocalOnly, None, ""),
             BrokerProvider::Hosted
+        );
+    }
+
+    // A LEGACY local-only config that retained a self-hosted URL (the old UI kept
+    // customBrokerUrl when switching to Local) must migrate to Custom, NOT silently
+    // default to the official broker — otherwise enabling it would redirect traffic
+    // to an unintended trust boundary.
+    #[test]
+    fn resolve_broker_provider_migrates_legacy_local_only_with_custom_url_to_custom() {
+        assert_eq!(
+            resolve_broker_provider(&BrokerMode::LocalOnly, None, "wss://self.example.com"),
+            BrokerProvider::Custom
+        );
+    }
+
+    // When the broker is ON, mode and provider can never disagree: the mode wins,
+    // so a stale/inconsistent provider can't send traffic to the wrong broker.
+    #[test]
+    fn resolve_broker_provider_forces_mode_provider_agreement_when_on() {
+        assert_eq!(
+            resolve_broker_provider(&BrokerMode::Hosted, Some(BrokerProvider::Custom), "wss://x"),
+            BrokerProvider::Hosted
+        );
+        assert_eq!(
+            resolve_broker_provider(&BrokerMode::Custom, Some(BrokerProvider::Hosted), ""),
+            BrokerProvider::Custom
         );
     }
 
     // Old configs without brokerProvider deserialize (serde default None).
     #[test]
     fn desktop_config_without_broker_provider_deserializes() {
-        let json = r#"{"workspaceDir":"/tmp","preferredPort":8787,"brokerMode":"custom","customBrokerUrl":"wss://self.example.com"}"#;
+        let json = r#"{"workspaceDir":"/tmp","preferredPort":8787,"brokerMode":"localOnly","customBrokerUrl":"wss://self.example.com"}"#;
         let parsed: DesktopConfig = serde_json::from_str(json).expect("parse legacy config");
         assert!(parsed.broker_provider.is_none());
+        // Legacy local-only + retained self-hosted URL migrates to Custom.
         assert_eq!(
-            resolve_broker_provider(&parsed.broker_mode, parsed.broker_provider),
+            resolve_broker_provider(
+                &parsed.broker_mode,
+                parsed.broker_provider,
+                &parsed.custom_broker_url
+            ),
             BrokerProvider::Custom
         );
     }
