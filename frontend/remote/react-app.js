@@ -861,7 +861,7 @@ function RemoteApp() {
       // sent as the review's parent so the backend reviews this thread explicitly.
       parentThreadId: remoteViewedThreadId,
       canRequest: canRequestReview(session, remoteDeviceId, remoteViewedThreadId),
-      canStartWorkflow: hasControllerLease && canStartWorkflow(session),
+      canStartWorkflow: hasControllerLease && canStartWorkflow(session, remoteViewedThreadId),
       blocked:
         isReviewBlocked({ active_review_jobs: remoteThreadReviewJobs }) ||
         remoteThreadWorkflowRuns.some((run) => run?.status === "blocked"),

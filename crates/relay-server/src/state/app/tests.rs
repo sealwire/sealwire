@@ -7361,6 +7361,7 @@ mod review_tests {
                 Some("device-1".to_string()),
                 workflow_code_flow("codex", 3),
                 "anchor-item".to_string(),
+                None,
             )
             .await
             .expect("workflow should start");
@@ -7406,6 +7407,7 @@ mod review_tests {
                 reviewer_instructions: Some("focus on regression coverage".to_string()),
                 max_rounds: Some(2),
                 anchor_item_id: Some("anchor-item".to_string()),
+                parent_thread_id: None,
                 device_id: Some("device-1".to_string()),
             })
             .await
@@ -7444,6 +7446,57 @@ mod review_tests {
         );
     }
 
+    #[tokio::test]
+    async fn start_code_workflow_honors_parent_thread_id() {
+        // Code Flow must run on the NAMED author thread (mirroring how Request review
+        // targets the viewed thread), not silently on the active thread. A bogus id is
+        // the discriminator: the pre-parity runner ignored the field entirely, so it
+        // could not reject; the parity runner resolves it and refuses.
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+
+        let bogus = app
+            .start_code_workflow(StartWorkflowInput {
+                workflow_id: Some("code_flow".to_string()),
+                task_prompt: "do it".to_string(),
+                reviewer_provider: "codex".to_string(),
+                reviewer_model: None,
+                reviewer_instructions: None,
+                max_rounds: Some(1),
+                anchor_item_id: None,
+                parent_thread_id: Some("no-such-thread".to_string()),
+                device_id: Some("device-1".to_string()),
+            })
+            .await;
+        assert!(
+            bogus.is_err(),
+            "a nonexistent parent thread must be rejected, proving the id is consulted"
+        );
+
+        // Explicitly naming the real (here active) author thread is honored and runs.
+        queue_verdicts(providers.get("codex").unwrap(), &["APPROVE"]).await;
+        let receipt = app
+            .start_code_workflow(StartWorkflowInput {
+                workflow_id: Some("code_flow".to_string()),
+                task_prompt: "do it".to_string(),
+                reviewer_provider: "codex".to_string(),
+                reviewer_model: None,
+                reviewer_instructions: None,
+                max_rounds: Some(1),
+                anchor_item_id: None,
+                parent_thread_id: Some(parent.id.clone()),
+                device_id: Some("device-1".to_string()),
+            })
+            .await
+            .expect("named-parent code flow should start");
+        assert_eq!(receipt.parent_thread_id, parent.id);
+        let status =
+            wait_for_workflow_status(&app, &receipt.workflow_run_id, WORKFLOW_TERMINAL).await;
+        assert_eq!(status, "done");
+    }
+
     // Sibling of the review-gate bug, SAME root cause: start_workflow's status gate is
     // the literal `current_status != "idle"` (workflow.rs), while its cwd-quiet check went
     // semantic — so a saved Codex thread ("unknown"/"completed", no live turn) hits the
@@ -7471,6 +7524,7 @@ mod review_tests {
                     Some("device-1".to_string()),
                     workflow_code_flow("codex", 2),
                     "anchor-item".to_string(),
+                    None,
                 )
                 .await
                 .unwrap_or_else(|error| {
@@ -7563,6 +7617,7 @@ settings update: {error}"
                 Some("device-1".to_string()),
                 workflow_code_flow("codex", 2),
                 "anchor-item".to_string(),
+                None,
             )
             .await
             .expect_err("a working status must still block start_workflow");
@@ -7606,6 +7661,7 @@ settings update: {error}"
                 Some("device-1".to_string()),
                 workflow_code_flow("codex", 2),
                 "anchor-item".to_string(),
+                None,
             )
             .await
             .expect("workflow should start");
@@ -7646,6 +7702,7 @@ settings update: {error}"
                 Some("device-1".to_string()),
                 workflow_code_flow("codex", 1),
                 "anchor-item".to_string(),
+                None,
             )
             .await
             .expect("workflow should start");
@@ -7691,6 +7748,7 @@ settings update: {error}"
                 Some("device-1".to_string()),
                 workflow_code_flow("codex", 3),
                 "anchor-item".to_string(),
+                None,
             )
             .await
             .expect("workflow should start");
@@ -7733,6 +7791,7 @@ settings update: {error}"
                 Some("device-1".to_string()),
                 workflow_code_flow("codex", 3),
                 "anchor-item".to_string(),
+                None,
             )
             .await
             .expect("workflow should start");
@@ -7773,6 +7832,7 @@ settings update: {error}"
                 Some("device-1".to_string()),
                 workflow_code_flow("codex", 3),
                 "anchor-item".to_string(),
+                None,
             )
             .await
             .expect("workflow should start");
@@ -7810,6 +7870,7 @@ settings update: {error}"
                 Some("device-1".to_string()),
                 workflow_code_flow("codex", 3),
                 "anchor-item".to_string(),
+                None,
             )
             .await
             .expect("workflow should start");
@@ -7854,6 +7915,7 @@ settings update: {error}"
                 Some("device-1".to_string()),
                 workflow_code_flow("codex", 3),
                 "anchor-item".to_string(),
+                None,
             )
             .await
             .expect("workflow should start");
@@ -7925,6 +7987,7 @@ settings update: {error}"
                 Some("device-1".to_string()),
                 workflow_code_flow("codex", 3),
                 "anchor-item".to_string(),
+                None,
             )
             .await
             .expect("workflow should start");
@@ -7979,6 +8042,7 @@ settings update: {error}"
                 Some("device-1".to_string()),
                 workflow_code_flow("codex", 3),
                 "anchor-item".to_string(),
+                None,
             )
             .await
             .expect("workflow should start");
@@ -8011,6 +8075,7 @@ settings update: {error}"
                 Some("device-1".to_string()),
                 workflow_code_flow("codex", 3),
                 "anchor-item".to_string(),
+                None,
             )
             .await
             .expect("workflow should start");
@@ -8045,6 +8110,7 @@ settings update: {error}"
                 Some("device-1".to_string()),
                 workflow_code_flow("codex", 1),
                 "anchor-item".to_string(),
+                None,
             )
             .await
             .expect("workflow should start");
@@ -8144,6 +8210,7 @@ settings update: {error}"
                 Some("device-1".to_string()),
                 workflow_code_flow("codex", 1),
                 "anchor-item".to_string(),
+                None,
             )
             .await
             .expect("workflow should start");
@@ -8188,6 +8255,7 @@ settings update: {error}"
                 Some("device-1".to_string()),
                 workflow_code_flow("codex", 3),
                 "anchor-item".to_string(),
+                None,
             )
             .await
             .expect("first workflow should start");
@@ -8198,6 +8266,7 @@ settings update: {error}"
                 Some("device-1".to_string()),
                 workflow_code_flow("codex", 3),
                 "anchor-item".to_string(),
+                None,
             )
             .await
             .expect_err("a second workflow must be refused");

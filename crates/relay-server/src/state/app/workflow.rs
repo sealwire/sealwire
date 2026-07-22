@@ -139,9 +139,17 @@ impl AppState {
         let reviewer_provider = non_empty(Some(input.reviewer_provider.clone()))
             .ok_or_else(|| "reviewer_provider is required".to_string())?;
         let max_rounds = input.max_rounds.unwrap_or(2).clamp(1, MAX_CODE_FLOW_ROUNDS);
+        // The author steps run on the parent (viewed-or-active) thread, so the author
+        // provider must be THAT thread's own provider — not the active session's.
         let author_provider = {
-            let relay = self.relay.read().await;
-            relay.provider_name.clone()
+            let named = {
+                let relay = self.relay.read().await;
+                non_empty(input.parent_thread_id.clone()).or_else(|| relay.active_thread_id.clone())
+            };
+            match named {
+                Some(thread_id) => self.find_thread_provider(&thread_id).await?.0.to_string(),
+                None => self.relay.read().await.provider_name.clone(),
+            }
         };
         let workflow = code_flow_workflow(
             &author_provider,
@@ -154,7 +162,12 @@ impl AppState {
         let mut anchor_item_id = input.anchor_item_id.unwrap_or_default();
         truncate_utf8_bytes_with_ellipsis(&mut anchor_item_id, WORKFLOW_ANCHOR_STORED_BYTES);
         let run_id = self
-            .start_workflow(input.device_id, workflow, anchor_item_id)
+            .start_workflow(
+                input.device_id,
+                workflow,
+                anchor_item_id,
+                input.parent_thread_id,
+            )
             .await?;
         let (parent_thread_id, status) = {
             let relay = self.relay.read().await;
@@ -183,6 +196,7 @@ and the author will revise until approved or the round budget runs out."
         device_id: Option<String>,
         workflow: Workflow,
         mut anchor_item_id: String,
+        parent_thread_id: Option<String>,
     ) -> Result<String, String> {
         truncate_utf8_bytes_with_ellipsis(&mut anchor_item_id, WORKFLOW_ANCHOR_STORED_BYTES);
         let device_id = require_device_id(device_id)?;
@@ -196,7 +210,26 @@ and the author will revise until approved or the round budget runs out."
         // Briefly hold the session slot so validate + record is atomic against a
         // concurrent start (the run itself executes in the background).
         let _slot = self.acquire_session_slot()?;
-        let (parent_thread_id, cwd, parent_provider) = {
+
+        // Run on the NAMED author thread (the viewed thread), falling back to the
+        // active thread — exactly like `request_review`. All liveness/lock/path-scope
+        // gating below targets THAT thread, so Code Flow can be launched on an idle
+        // background thread while the active session is busy elsewhere.
+        let parent_thread_id = {
+            let relay = self.relay.read().await;
+            non_empty(parent_thread_id)
+                .or_else(|| relay.active_thread_id.clone())
+                .ok_or_else(|| "there is no thread to run a workflow on".to_string())?
+        };
+        // The author provider is the parent thread's OWN provider (resolved outside the
+        // read lock because it may probe the bridge).
+        let parent_provider = self
+            .find_thread_provider(&parent_thread_id)
+            .await?
+            .0
+            .to_string();
+
+        let cwd = {
             let relay = self.relay.read().await;
             // One workflow at a time (checked under the slot, so check + insert is
             // atomic against another start).
@@ -218,45 +251,52 @@ starting a workflow"
                 );
             }
             relay.ensure_device_can_send_message(&device_id)?;
-            let parent = relay
-                .active_thread_id
-                .clone()
-                .ok_or_else(|| "there is no active thread to run a workflow on".to_string())?;
-            if relay.active_thread_has_live_turn() {
+            // The named thread must resolve to a workspace (a live runtime or a cached
+            // thread row); otherwise there is nothing to author against.
+            let parent_cwd = relay
+                .thread_cwd(&parent_thread_id)
+                .ok_or_else(|| "cannot resolve the thread to run a workflow on".to_string())?;
+            // Liveness/approvals are checked on the NAMED parent, not the active thread.
+            if relay
+                .runtime_for_thread(&parent_thread_id)
+                .map(|runtime| runtime.has_live_turn())
+                .unwrap_or(false)
+            {
                 return Err("cannot start a workflow while a turn is in progress".to_string());
             }
-            if !relay.pending_approvals.is_empty() {
+            if relay
+                .pending_approvals
+                .values()
+                .any(|approval| approval.thread_id == parent_thread_id)
+            {
                 return Err("cannot start a workflow while approvals are pending".to_string());
             }
-            // Semantic liveness, NOT a literal `== "idle"`: mirrors the review gate so a
-            // saved Codex thread (status `unknown`/`completed`, no live turn) isn't treated
-            // as busy. `active_turn_id` (above) remains the authoritative in-flight signal.
-            if relay.active_agent_is_working() {
-                return Err(format!(
-                    "cannot start a workflow while the agent is `{}`",
-                    relay.current_status
-                ));
+            // Semantic liveness, NOT a literal `== "idle"` (per-thread mirror of the
+            // review gate): a saved Codex thread (`unknown`/`completed`, no live turn)
+            // isn't treated as busy. The live-turn check above is authoritative.
+            if let Some(runtime) = relay.runtime_for_thread(&parent_thread_id) {
+                if runtime.is_working() {
+                    return Err(format!(
+                        "cannot start a workflow while the agent is `{}`",
+                        runtime.current_status
+                    ));
+                }
             }
-            if relay.has_working_thread_in_cwd(&relay.current_cwd) {
+            // Code Flow's author WRITES the tree, so — unlike a read-only review — refuse
+            // to start while ANOTHER thread is working the same workspace (concurrent
+            // writers corrupt the diff/edits). This is the one gate stricter than review.
+            if relay.has_working_thread_in_cwd(&parent_cwd) {
                 return Err(
                     "another thread is running in this workspace; wait for it to \
 finish before starting a workflow"
                         .to_string(),
                 );
             }
-            // The controlling device must be allowed to act in this workspace —
-            // the run launches file-mutating turns on the active thread.
+            // The device must be allowed to act in the parent thread's workspace — the
+            // run launches file-mutating turns there.
             let device_scope = relay.device_path_scope(&device_id);
-            ensure_path_within_device_scope(
-                &relay.current_cwd,
-                &device_scope,
-                &relay.allowed_roots,
-            )?;
-            (
-                parent,
-                relay.current_cwd.clone(),
-                relay.provider_name.clone(),
-            )
+            ensure_path_within_device_scope(&parent_cwd, &device_scope, &relay.allowed_roots)?;
+            parent_cwd
         };
 
         // Reject any workflow shape the phase-1 runner does not actually honor,

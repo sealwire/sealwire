@@ -127,6 +127,8 @@ export function ReviewerPanel({
       defaultProvider: workflowModel.defaultProvider || "",
       providerModelsStatus: workflowModel.providerModelsStatus || {},
       activeProvider: workflowModel.activeProvider || "",
+      // Author on the VIEWED thread (same parent the review launcher targets).
+      parentThreadId,
       onEnsureProviderModels: workflowModel.onEnsureProviderModels,
       disabled: requesting || !canStartWorkflow,
       onSubmit: onStartWorkflow,

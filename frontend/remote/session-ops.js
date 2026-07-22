@@ -1616,6 +1616,7 @@ export async function startRemoteWorkflow({
   reviewerInstructions,
   maxRounds,
   anchorItemId,
+  parentThreadId,
 } = {}) {
   if (!taskPrompt?.trim()) {
     renderLog("Enter a task before starting Code Flow.");
@@ -1636,6 +1637,7 @@ export async function startRemoteWorkflow({
         reviewer_instructions: reviewerInstructions || null,
         max_rounds: maxRounds || 2,
         anchor_item_id: anchorItemId || null,
+        parent_thread_id: parentThreadId || null,
       },
     });
     await syncRemoteSnapshot("post-workflow-start", true);

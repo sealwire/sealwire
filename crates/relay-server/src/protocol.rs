@@ -1880,6 +1880,11 @@ pub struct StartWorkflowInput {
     /// `code_flow` so local callers can omit it.
     #[serde(default)]
     pub workflow_id: Option<String>,
+    /// Thread whose work the Code Flow runs on (the author thread). Defaults to the
+    /// active thread. Mirrors `RequestReviewInput::parent_thread_id` so Code Flow can
+    /// target the VIEWED thread, exactly as Request review does.
+    #[serde(default)]
+    pub parent_thread_id: Option<String>,
     /// The author turn prompt. For a Claude author thread this is the "Claude
     /// writes code" step before the Codex review step.
     pub task_prompt: String,

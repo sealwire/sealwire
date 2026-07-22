@@ -1,6 +1,5 @@
 import { providerOptions } from "./provider-settings.js";
-import { isReviewInProgress } from "./review-state.js";
-import { isWorkingThreadStatus } from "./thread-status.js";
+import { isReviewInProgress, isThreadBusy } from "./review-state.js";
 
 const TERMINAL_WORKFLOW_STATUSES = new Set([
   "done",
@@ -83,23 +82,21 @@ export function isWorkflowInProgressForThread(session, threadId) {
   return Boolean(session?.workflow_locked && session?.active_thread_id === threadId);
 }
 
-function activeThreadBusy(session) {
-  if (!session?.active_thread_id) return false;
-  if (session.active_turn_id) return true;
-  if (isWorkingThreadStatus(session.current_status)) return true;
-  return (session.thread_activity || []).some(
-    (entry) => entry?.thread_id === session.active_thread_id
-  );
-}
-
-export function canStartWorkflow(session) {
-  if (!session?.active_thread_id) return false;
-  if (activeThreadBusy(session)) return false;
+// Whether Code Flow can be launched against `viewedThreadId` (default: the active
+// thread). Deliberately mirrors `canRequestReview`: the gate targets the VIEWED
+// thread — its own liveness (`isThreadBusy`) and pending approvals — so viewing an
+// idle background thread while the active chat is busy still allows a launch, the
+// same way Request review does. Workflow/review mutual exclusion stays GLOBAL to
+// match the backend (`has_active_workflow`/`has_active_review`).
+export function canStartWorkflow(session, viewedThreadId = null) {
+  const target = viewedThreadId || session?.active_thread_id || null;
+  if (!target) return false;
+  if (isThreadBusy(session, target)) return false;
   if (isReviewInProgress(session)) return false;
   if (activeWorkflowRunning(session)) return false;
   if (
-    Array.isArray(session.pending_approvals) &&
-    session.pending_approvals.some((approval) => approval?.thread_id === session.active_thread_id)
+    Array.isArray(session?.pending_approvals) &&
+    session.pending_approvals.some((approval) => approval?.thread_id === target)
   ) {
     return false;
   }

@@ -16,6 +16,7 @@ export function workflowSubmitPayload({
   reviewerModel,
   reviewerInstructions,
   maxRounds,
+  parentThreadId,
 } = {}) {
   return {
     taskPrompt: (taskPrompt || "").trim(),
@@ -23,6 +24,10 @@ export function workflowSubmitPayload({
     reviewerModel: reviewerModel || null,
     reviewerInstructions: (reviewerInstructions || "").trim() || null,
     maxRounds: clampReviewRounds(maxRounds || 2),
+    // The thread the panel is showing — Code Flow authors on THIS thread, mirroring
+    // how Request review targets the viewed thread. Falls through to the active
+    // thread server-side when null.
+    parentThreadId: parentThreadId || null,
   };
 }
 
@@ -33,6 +38,7 @@ export function CodeFlowPanel({
   defaultProvider = "",
   providerModelsStatus = {},
   activeProvider = "",
+  parentThreadId = null,
   onEnsureProviderModels,
   submitting: submittingProp = false,
   onSubmit,
@@ -85,6 +91,7 @@ export function CodeFlowPanel({
           reviewerModel,
           reviewerInstructions,
           maxRounds,
+          parentThreadId,
         })
       );
       if (result === false) {
@@ -257,6 +264,7 @@ export function CodeFlowLauncher({
   defaultProvider = "",
   providerModelsStatus = {},
   activeProvider = "",
+  parentThreadId = null,
   onEnsureProviderModels,
   disabled = false,
   label = "Run code flow",
@@ -284,6 +292,7 @@ export function CodeFlowLauncher({
       defaultProvider,
       providerModelsStatus,
       activeProvider,
+      parentThreadId,
       onEnsureProviderModels,
       onSubmit,
     })

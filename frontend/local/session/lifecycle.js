@@ -537,6 +537,7 @@ export function createLifecycleController(ctx) {
     reviewerInstructions,
     maxRounds,
     anchorItemId,
+    parentThreadId,
   } = {}) {
     if (!taskPrompt?.trim()) {
       logLine("Enter a task before starting Code Flow.");
@@ -560,6 +561,7 @@ export function createLifecycleController(ctx) {
           reviewer_instructions: reviewerInstructions || null,
           max_rounds: maxRounds || 2,
           anchor_item_id: anchorItemId || null,
+          parent_thread_id: parentThreadId || null,
         },
         state.deviceId
       );

@@ -10,9 +10,37 @@ import {
   isTerminalWorkflowStatus,
   workflowStatusLabel,
 } from "./workflow-state.js";
+import { canRequestReview } from "./review-state.js";
 import { WorkflowRunCard } from "./workflow-panel.js";
 
 const h = React.createElement;
+
+test("canStartWorkflow gates on the VIEWED thread, like Request review", () => {
+  // The active thread is a busy chat, but the user is VIEWING a different, idle
+  // thread. Request review is launchable there (it targets the viewed thread), so
+  // Code Flow must be too — the two gates must agree on the same thread.
+  const session = {
+    active_thread_id: "chat-active",
+    active_turn_id: "turn-9", // active thread is mid-turn (busy)
+    current_status: "active",
+    thread_activity: [], // the viewed thread is NOT working
+    active_review_jobs: [],
+    active_workflow_runs: [],
+    pending_approvals: [],
+  };
+  const viewed = "idle-thread";
+
+  // Review can be requested on the idle viewed thread...
+  assert.equal(canRequestReview(session, "device-1", viewed), true);
+  // ...so Code Flow must be startable on it too (regression: was gated on the
+  // busy ACTIVE thread and returned false).
+  assert.equal(canStartWorkflow(session, viewed), true);
+
+  // When the VIEWED thread itself is busy, both are disabled.
+  const busyViewed = { ...session, thread_activity: [{ thread_id: viewed }] };
+  assert.equal(canRequestReview(busyViewed, "device-1", viewed), false);
+  assert.equal(canStartWorkflow(busyViewed, viewed), false);
+});
 
 test("blocked workflow runs remain active and keep launch disabled", () => {
   const session = {

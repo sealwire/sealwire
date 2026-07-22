@@ -980,7 +980,7 @@ export function createSessionRenderer({
       canRequest:
         typeof requestReview === "function" &&
         canRequestReview(session, state.deviceId, viewedThreadId),
-      canStartWorkflow: viewingWritableAuthor && canStartWorkflow(session),
+      canStartWorkflow: viewingWritableAuthor && canStartWorkflow(session, viewedThreadId),
       blocked: isReviewBlocked({
         active_review_jobs: (session?.active_review_jobs || []).filter(
           (job) => job.parent_thread_id === viewedThreadId

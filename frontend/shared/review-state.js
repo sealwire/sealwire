@@ -235,7 +235,7 @@ export function isAgentStatusWorking(status) {
 // Whether a specific thread is busy (mid-turn / working) per the snapshot. The ACTIVE
 // thread's liveness is the top-level turn/status; a background (non-active) thread's is
 // its presence in `thread_activity` — the same signal the view-only projection uses.
-function isThreadBusy(session, threadId) {
+export function isThreadBusy(session, threadId) {
   if (threadId && threadId === session?.active_thread_id) {
     if (session.active_turn_id) return true;
     return isAgentStatusWorking(session.current_status);
