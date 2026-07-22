@@ -492,6 +492,37 @@ test("canRequestReview gates on the reviewed thread being idle + no review runni
   assert.equal(canRequestReview({ ...base, active_thread_id: null }, "device-a"), false);
 });
 
+test("canRequestReview mirrors backend workflow mutual exclusion", () => {
+  const base = {
+    active_thread_id: "t1",
+    active_turn_id: null,
+    current_status: "idle",
+    thread_activity: [],
+    pending_approvals: [],
+    active_review_jobs: [],
+  };
+  for (const status of ["queued", "running", "blocked", "resolving"]) {
+    assert.equal(
+      canRequestReview(
+        { ...base, active_workflow_runs: [{ id: `wf-${status}`, status, parent_thread_id: "other" }] },
+        "device-a"
+      ),
+      false,
+      `${status} workflow should disable review requests globally`
+    );
+  }
+  for (const status of ["done", "escalated", "failed", "interrupted", "cancelled"]) {
+    assert.equal(
+      canRequestReview(
+        { ...base, active_workflow_runs: [{ id: `wf-${status}`, status, parent_thread_id: "other" }] },
+        "device-a"
+      ),
+      true,
+      `${status} workflow should not disable review requests`
+    );
+  }
+});
+
 test("canRequestReview corner cases: no-thread, no-active-but-viewed, and per-thread approvals", () => {
   // No active thread AND no viewed thread → nothing to review.
   assert.equal(canRequestReview({ active_review_jobs: [] }, "device-a"), false);

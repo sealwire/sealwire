@@ -170,10 +170,12 @@ impl AppState {
             .runtime_for_thread(thread_id)
             .ok_or_else(|| format!("thread `{thread_id}` is not loaded"))?;
         let review_locked = relay.is_thread_review_locked(thread_id);
+        let workflow_locked = relay.is_thread_or_cwd_workflow_locked(thread_id);
         let settings_writable = !runtime.has_live_turn()
             && runtime.pending_approvals.is_empty()
             && !runtime.is_working()
-            && !review_locked;
+            && !review_locked
+            && !workflow_locked;
 
         // This thread's OWN reviewers. The global snapshot scopes reviewer_threads
         // to the active parent for broker-bound (remote/iOS) surfaces, so a remote
@@ -208,6 +210,7 @@ impl AppState {
             available_models,
             reviewers,
             review_locked,
+            workflow_locked,
             settings_writable,
         })
     }

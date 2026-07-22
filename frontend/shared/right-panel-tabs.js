@@ -3,6 +3,7 @@ import React from "react";
 import { SegmentedControl } from "./session-settings-panel.js";
 import { ReviewerPanel } from "./reviewer-panel.js";
 import { isTerminalReviewStatus } from "./review-state.js";
+import { isTerminalWorkflowStatus } from "./workflow-state.js";
 
 const h = React.createElement;
 
@@ -14,7 +15,15 @@ function useStoreState(store) {
   );
 }
 
-const EMPTY_REVIEW = { reviewJobs: [], reviewModel: {}, canRequest: false, blocked: false };
+const EMPTY_REVIEW = {
+  reviewJobs: [],
+  workflowRuns: [],
+  reviewModel: {},
+  workflowModel: {},
+  canRequest: false,
+  canStartWorkflow: false,
+  blocked: false,
+};
 
 // Composes the existing "Changes" body (passed in as `changes`, since the rail
 // and the mobile sheet render it differently) with a "Reviewer" tab. Tab state
@@ -31,13 +40,16 @@ export function RightPanelTabs({ store, changes, reviewer = {}, panelId = "revie
   const inProgress = (review.reviewJobs || []).filter(
     (job) => !isTerminalReviewStatus(job.status)
   ).length;
+  const workflowInProgress = (review.workflowRuns || []).filter(
+    (run) => !isTerminalWorkflowStatus(run.status)
+  ).length;
 
   // NEVER auto-switch the tab — the review must not yank the user's view around.
   // A running/blocked review only surfaces PASSIVELY here: the tab label gets a dot
   // ("Reviewer •") or a warning ("Reviewer ⚠"), and the user switches when they want.
   const reviewerLabel = blocked
     ? "Reviewer ⚠"
-    : inProgress > 0
+    : inProgress > 0 || workflowInProgress > 0
     ? "Reviewer •"
     : "Reviewer";
 
@@ -61,14 +73,19 @@ export function RightPanelTabs({ store, changes, reviewer = {}, panelId = "revie
       ? h(ReviewerPanel, {
           panelId,
           reviewJobs: review.reviewJobs || [],
+          workflowRuns: review.workflowRuns || [],
           reviewModel: review.reviewModel || {},
+          workflowModel: review.workflowModel || {},
           reusableReviewers: review.reusableReviewers || [],
           reviewerThreads: review.reviewerThreads || [],
           parentThreadId: review.parentThreadId || null,
           canRequest: Boolean(review.canRequest),
+          canStartWorkflow: Boolean(review.canStartWorkflow),
           requesting: Boolean(review.requesting),
           onRequestReview: reviewer.onRequestReview,
+          onStartWorkflow: reviewer.onStartWorkflow,
           onResolveReview: reviewer.onResolveReview,
+          onResolveWorkflow: reviewer.onResolveWorkflow,
           onDeleteReview: reviewer.onDeleteReview,
           fetchReviewerTranscript: reviewer.fetchReviewerTranscript,
         })

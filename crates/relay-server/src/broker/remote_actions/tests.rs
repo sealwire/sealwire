@@ -63,6 +63,8 @@ fn make_snapshot() -> SessionSnapshot {
         active_review_jobs: vec![],
         reviewer_threads: vec![],
         reviews_revision: 0,
+        active_workflow_runs: vec![],
+        workflows_revision: 0,
         push_vapid_public_key: None,
     }
 }
@@ -527,6 +529,46 @@ fn request_review_action_round_trips_and_binds_device() {
 }
 
 #[test]
+fn start_workflow_action_round_trips_and_binds_device() {
+    let json = serde_json::json!({
+        "type": "start_workflow",
+        "input": {
+            "workflow_id": "code_flow",
+            "task_prompt": "implement the cache fix",
+            "reviewer_provider": "codex",
+            "reviewer_model": "gpt-5.5",
+            "reviewer_instructions": "focus on tests",
+            "max_rounds": 3,
+        }
+    });
+    let request: RemoteActionRequest =
+        serde_json::from_value(json).expect("start_workflow should parse");
+    assert_eq!(request.kind(), RemoteActionKind::StartWorkflow);
+    assert_eq!(RemoteActionKind::StartWorkflow.as_str(), "start_workflow");
+
+    let serialized = serde_json::to_value(&request).expect("serialize start_workflow");
+    assert_eq!(serialized["type"], "start_workflow");
+    assert_eq!(serialized["input"]["workflow_id"], "code_flow");
+    assert_eq!(serialized["input"]["reviewer_provider"], "codex");
+
+    match request.bind_device("device-9".to_string()) {
+        RemoteActionRequest::StartWorkflow { input } => {
+            assert_eq!(input.device_id.as_deref(), Some("device-9"));
+            assert_eq!(input.task_prompt, "implement the cache fix");
+            assert_eq!(input.reviewer_provider, "codex");
+            assert_eq!(input.max_rounds, Some(3));
+        }
+        other => panic!("unexpected bound request: {other:?}"),
+    }
+
+    assert!(matches!(
+        remote_action_result_kind(RemoteActionKind::StartWorkflow),
+        RemoteActionResultKind::RemoteActionAck
+    ));
+    assert!(requires_session_claim(RemoteActionKind::StartWorkflow));
+}
+
+#[test]
 fn fetch_reviews_action_round_trips_and_is_not_claim_gated() {
     // The dedicated reviewer-panel channel for remote: a read-only data fetch (mirrors
     // fetch_workspace_diff / fetch_thread_transcript). It must parse, bind the device, NOT
@@ -573,6 +615,28 @@ fn resolve_and_delete_review_actions_round_trip_and_bind_device() {
         other => panic!("unexpected: {other:?}"),
     }
 
+    // resolve_workflow
+    let resolve_workflow: RemoteActionRequest = serde_json::from_value(serde_json::json!({
+        "type": "resolve_workflow",
+        "workflow_run_id": "workflow-9"
+    }))
+    .expect("resolve_workflow should parse");
+    assert_eq!(resolve_workflow.kind(), RemoteActionKind::ResolveWorkflow);
+    assert_eq!(
+        RemoteActionKind::ResolveWorkflow.as_str(),
+        "resolve_workflow"
+    );
+    match resolve_workflow.bind_device("device-9".to_string()) {
+        RemoteActionRequest::ResolveWorkflow {
+            workflow_run_id,
+            device_id,
+        } => {
+            assert_eq!(workflow_run_id.as_deref(), Some("workflow-9"));
+            assert_eq!(device_id.as_deref(), Some("device-9"));
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+
     // delete_review
     let delete: RemoteActionRequest = serde_json::from_value(
         serde_json::json!({ "type": "delete_review", "review_id": "review-1" }),
@@ -594,6 +658,7 @@ fn resolve_and_delete_review_actions_round_trip_and_bind_device() {
     // Both are ack-style and gated behind a session claim.
     for kind in [
         RemoteActionKind::ResolveReview,
+        RemoteActionKind::ResolveWorkflow,
         RemoteActionKind::DeleteReview,
     ] {
         assert!(matches!(

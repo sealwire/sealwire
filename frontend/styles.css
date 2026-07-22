@@ -3483,6 +3483,13 @@ body.is-resizing-panel {
   text-transform: uppercase;
   letter-spacing: 0.08em;
 }
+.reviewer-panel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
 .reviewer-panel-list {
   display: flex;
   flex-direction: column;
@@ -3506,7 +3513,7 @@ body.is-resizing-panel {
 /* The panel's single primary action: promote it from the ghost header-button
    look to the accent fill and span it across the card so it reads as the CTA. */
 .reviewer-empty .review-launch-button {
-  width: 100%;
+  flex: 1 1 150px;
   background: var(--accent);
   color: var(--accent-on);
   border-color: transparent;

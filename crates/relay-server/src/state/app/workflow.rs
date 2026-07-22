@@ -12,24 +12,22 @@
 //! does not honor (more than one step per role; a loop that isn't review→revise;
 //! a non-`ReviewerApproved` stop; an author step whose provider differs from the
 //! active thread). The reviewer thread is spawned read-only with provider-correct
-//! model resolution (honoring `step.model`); a parked/timed-out turn is stopped
-//! before the run goes terminal. Crash-safety (a lifeguard) and a full
-//! working-tree lock are later chunks; every error path here still drives the run
-//! to a terminal state.
-
-// Phase-1 workflow runner: fully implemented and exercised by `state/app/tests.rs`,
-// but not yet wired into the production request handlers, so every item reads as
-// dead in a non-test build. Suppress module-wide until the handlers land (see
-// `markdown/workflow-runner-design.md`).
-#![allow(dead_code)]
+//! model resolution (honoring `step.model`); a parked/timed-out turn must confirm
+//! stopped before the run unlocks. Cleanup that cannot confirm a stopped turn
+//! leaves the run `Blocked`, keeping the workspace locked until recovery.
 
 use std::time::Duration;
 
 use tokio::time::Instant;
 
+use crate::protocol::{
+    truncate_utf8_bytes_with_ellipsis, StartWorkflowInput, StartWorkflowReceipt,
+    WorkflowActionInput, WorkflowActionReceipt, WorkflowRunStatusView,
+    WORKFLOW_ANCHOR_STORED_BYTES,
+};
 use crate::state::{
-    parse_verdict, re_review_prompt, reviewer_prompt, ArtifactKind, RunStatus, StepRole,
-    StopCondition, Workflow, WorkflowRun, WorkflowVerdict,
+    parse_verdict, re_review_prompt, reviewer_prompt, ArtifactKind, LoopSpec, RunStatus, StepRole,
+    StopCondition, Workflow, WorkflowRun, WorkflowStep, WorkflowVerdict, MAX_REVIEWERS_PER_PARENT,
 };
 
 use super::review::{random_suffix, reviewer_thread_settings};
@@ -42,6 +40,9 @@ const MAX_WORKFLOW_ROUNDS: u32 = 20;
 /// the turn completes; this only trips on a step that makes no progress at all
 /// for the whole window (a wedged provider), never on a normally-running step.
 const WORKFLOW_STEP_STALL_SECS: u64 = 600;
+const CODE_FLOW_WORKFLOW_ID: &str = "code_flow";
+const CODE_FLOW_REVIEW_STEP_ID: &str = "review";
+const MAX_CODE_FLOW_ROUNDS: u32 = 10;
 
 /// Outcome of waiting for a step's in-flight turn to settle.
 enum StepOutcome {
@@ -57,15 +58,133 @@ struct WorkflowRunFields {
     cwd: String,
 }
 
+/// Crash-safety net for `run_workflow_job`. If the orchestrator task exits while
+/// the run is still non-terminal, first stop owned turns. A confirmed drain
+/// reconciles to `Interrupted`; an unconfirmed drain leaves the run `Blocked` so
+/// workflow locks stay held until the user resolves it.
+struct WorkflowRunLifeguard {
+    app: AppState,
+    run_id: String,
+    disarmed: bool,
+}
+
+impl WorkflowRunLifeguard {
+    fn disarm(&mut self) {
+        self.disarmed = true;
+    }
+}
+
+impl Drop for WorkflowRunLifeguard {
+    fn drop(&mut self) {
+        if self.disarmed {
+            return;
+        }
+        let app = self.app.clone();
+        let run_id = self.run_id.clone();
+        tokio::spawn(async move {
+            app.interrupt_workflow_if_stranded(&run_id).await;
+        });
+    }
+}
+
+/// Cancellation-safety net for explicit blocked-workflow recovery. The recovery
+/// request marks a run `Resolving` before awaiting provider drains; if that
+/// future is aborted while waiting, restore `Blocked` so the lock remains visible
+/// and the user can retry.
+struct WorkflowRecoveryGuard {
+    app: AppState,
+    run_id: String,
+    disarmed: bool,
+}
+
+impl WorkflowRecoveryGuard {
+    fn disarm(&mut self) {
+        self.disarmed = true;
+    }
+}
+
+impl Drop for WorkflowRecoveryGuard {
+    fn drop(&mut self) {
+        if self.disarmed {
+            return;
+        }
+        let app = self.app.clone();
+        let run_id = self.run_id.clone();
+        tokio::spawn(async move {
+            app.restore_resolving_workflow_as_blocked(
+                &run_id,
+                "workflow recovery was interrupted before owned turns confirmed stopped",
+            )
+            .await;
+        });
+    }
+}
+
 impl AppState {
+    pub async fn start_code_workflow(
+        &self,
+        input: StartWorkflowInput,
+    ) -> Result<StartWorkflowReceipt, String> {
+        match non_empty(input.workflow_id.clone()).as_deref() {
+            None | Some(CODE_FLOW_WORKFLOW_ID) | Some("code") => {}
+            Some(other) => {
+                return Err(format!(
+                    "unknown workflow `{other}`; phase 1 supports `{CODE_FLOW_WORKFLOW_ID}` only"
+                ))
+            }
+        }
+
+        let task_prompt = non_empty(Some(input.task_prompt.clone()))
+            .ok_or_else(|| "task_prompt is required".to_string())?;
+        let reviewer_provider = non_empty(Some(input.reviewer_provider.clone()))
+            .ok_or_else(|| "reviewer_provider is required".to_string())?;
+        let max_rounds = input.max_rounds.unwrap_or(2).clamp(1, MAX_CODE_FLOW_ROUNDS);
+        let author_provider = {
+            let relay = self.relay.read().await;
+            relay.provider_name.clone()
+        };
+        let workflow = code_flow_workflow(
+            &author_provider,
+            &task_prompt,
+            &reviewer_provider,
+            input.reviewer_model.clone(),
+            input.reviewer_instructions.clone(),
+            max_rounds,
+        );
+        let mut anchor_item_id = input.anchor_item_id.unwrap_or_default();
+        truncate_utf8_bytes_with_ellipsis(&mut anchor_item_id, WORKFLOW_ANCHOR_STORED_BYTES);
+        let run_id = self
+            .start_workflow(input.device_id, workflow, anchor_item_id)
+            .await?;
+        let (parent_thread_id, status) = {
+            let relay = self.relay.read().await;
+            let run = relay
+                .workflow_run(&run_id)
+                .ok_or_else(|| "workflow run was not recorded".to_string())?;
+            (
+                run.parent_thread_id.clone(),
+                run.status.as_str().to_string(),
+            )
+        };
+        Ok(StartWorkflowReceipt {
+            workflow_run_id: run_id,
+            parent_thread_id,
+            status: WorkflowRunStatusView { status },
+            message: "Code Flow started. The author will implement, the reviewer will inspect, \
+and the author will revise until approved or the round budget runs out."
+                .to_string(),
+        })
+    }
+
     /// Validate, record a `WorkflowRun`, and spawn the orchestrator. Returns the
     /// run id immediately; progress is observable via the snapshot stream.
     pub async fn start_workflow(
         &self,
         device_id: Option<String>,
         workflow: Workflow,
-        anchor_item_id: String,
+        mut anchor_item_id: String,
     ) -> Result<String, String> {
+        truncate_utf8_bytes_with_ellipsis(&mut anchor_item_id, WORKFLOW_ANCHOR_STORED_BYTES);
         let device_id = require_device_id(device_id)?;
         self.expire_stale_controller_if_needed().await;
 
@@ -169,10 +288,80 @@ finish before starting a workflow"
         let app = self.clone();
         let task_run_id = run_id.clone();
         tokio::spawn(async move {
+            let mut lifeguard = WorkflowRunLifeguard {
+                app: app.clone(),
+                run_id: task_run_id.clone(),
+                disarmed: false,
+            };
             app.run_workflow_job(task_run_id, workflow).await;
+            lifeguard.disarm();
         });
 
         Ok(run_id)
+    }
+
+    pub async fn resolve_blocked_workflow(
+        &self,
+        input: WorkflowActionInput,
+    ) -> Result<WorkflowActionReceipt, String> {
+        let device_id = require_device_id(input.device_id)?;
+        let (run_id, parent_thread_id, cwd, owned_threads) = {
+            let mut relay = self.relay.write().await;
+            let target =
+                relay.begin_resolving_workflow_run(input.workflow_run_id.as_deref(), &device_id)?;
+            relay.notify();
+            target
+        };
+        let mut recovery_guard = WorkflowRecoveryGuard {
+            app: self.clone(),
+            run_id: run_id.clone(),
+            disarmed: false,
+        };
+
+        let mut drained = true;
+        for thread_id in &owned_threads {
+            drained &= self.stop_and_drain(thread_id).await;
+        }
+        if !drained {
+            self.block_run(
+                &run_id,
+                "workflow is still blocked; at least one owned turn did not confirm stopping",
+            )
+            .await;
+            recovery_guard.disarm();
+            return Err(
+                "workflow is still blocked because an owned turn did not confirm stopping"
+                    .to_string(),
+            );
+        }
+
+        {
+            let mut relay = self.relay.write().await;
+            relay.update_workflow_run(&run_id, |run| {
+                run.resolve_blocked_as_failed(
+                    "workflow was blocked and has been resolved by stopping owned turns"
+                        .to_string(),
+                );
+            });
+            relay.push_log(
+                "info",
+                format!(
+                    "Workflow {run_id} unblocked for {cwd}; owned turns are stopped and the workspace is unlocked."
+                ),
+            );
+            relay.notify();
+        }
+        recovery_guard.disarm();
+
+        Ok(WorkflowActionReceipt {
+            workflow_run_id: run_id,
+            parent_thread_id,
+            status: WorkflowRunStatusView {
+                status: "failed".to_string(),
+            },
+            message: "Workflow unblocked; owned turns were stopped and the workspace is unlocked."
+                .to_string(),
+        })
     }
 
     #[cfg(test)]
@@ -232,7 +421,7 @@ finish before starting a workflow"
                 &artifact,
             );
             if self
-                .run_turn(&parent_thread_id, &prompt, step.model.as_deref())
+                .run_turn(&run_id, &parent_thread_id, &prompt, step.model.as_deref())
                 .await
                 .is_none()
             {
@@ -320,7 +509,9 @@ finish before starting a workflow"
             let verdict = if approved {
                 WorkflowVerdict::approved()
             } else {
-                WorkflowVerdict::needs_changes(Vec::new())
+                let mut verdict = WorkflowVerdict::needs_changes(vec![review_text.clone()]);
+                verdict.summary = Some("The reviewer requested changes.".to_string());
+                verdict
             };
             {
                 let round_now = round;
@@ -360,7 +551,12 @@ finish before starting a workflow"
                 &diff.diff,
             );
             if self
-                .run_turn(&parent_thread_id, &revise_prompt, revise.model.as_deref())
+                .run_turn(
+                    &run_id,
+                    &parent_thread_id,
+                    &revise_prompt,
+                    revise.model.as_deref(),
+                )
                 .await
                 .is_none()
             {
@@ -379,7 +575,17 @@ finish before starting a workflow"
     /// wait for the turn to settle, and return the fresh assistant reply text.
     /// `None` on any failure or if no new reply landed; a parked/timed-out turn is
     /// stopped before returning so it can't keep mutating files after the run ends.
-    async fn run_turn(&self, thread_id: &str, prompt: &str, model: Option<&str>) -> Option<String> {
+    async fn run_turn(
+        &self,
+        run_id: &str,
+        thread_id: &str,
+        prompt: &str,
+        model: Option<&str>,
+    ) -> Option<String> {
+        if let Err(error) = self.workflow_turn_preflight(run_id, thread_id).await {
+            self.block_run(run_id, error).await;
+            return None;
+        }
         let baseline = self
             .latest_assistant_entry(thread_id)
             .await
@@ -394,14 +600,32 @@ finish before starting a workflow"
             // either way so a started turn can't keep mutating after the run goes
             // terminal.
             Ok(None) | Err(_) => {
-                self.stop_and_drain(thread_id).await;
+                if !self.stop_and_drain(thread_id).await {
+                    self.block_run(
+                        run_id,
+                        format!(
+                            "thread {thread_id}'s turn did not confirm stopping after an \
+uncertain workflow turn start; the workflow remains locked"
+                        ),
+                    )
+                    .await;
+                }
                 return None;
             }
         }
         match self.wait_for_step_idle(thread_id).await {
             StepOutcome::Completed => {}
             StepOutcome::NeedsHuman | StepOutcome::TimedOut => {
-                self.stop_and_drain(thread_id).await;
+                if !self.stop_and_drain(thread_id).await {
+                    self.block_run(
+                        run_id,
+                        format!(
+                            "thread {thread_id}'s workflow turn did not confirm stopping; the \
+workflow remains locked"
+                        ),
+                    )
+                    .await;
+                }
                 return None;
             }
         }
@@ -424,6 +648,13 @@ finish before starting a workflow"
         prompt: &str,
         model: Option<&str>,
     ) -> Option<String> {
+        if let Err(error) = self
+            .workflow_turn_preflight(run_id, reviewer_thread_id)
+            .await
+        {
+            self.block_run(run_id, error).await;
+            return None;
+        }
         let baseline = self
             .latest_assistant_entry(reviewer_thread_id)
             .await
@@ -436,7 +667,16 @@ finish before starting a workflow"
             // Uncertain start (no turn id, or a started turn lost to an error) —
             // drain before failing so it can't keep running after the run ends.
             Ok(None) | Err(_) => {
-                self.stop_and_drain(reviewer_thread_id).await;
+                if !self.stop_and_drain(reviewer_thread_id).await {
+                    self.block_run(
+                        run_id,
+                        format!(
+                            "reviewer thread {reviewer_thread_id}'s turn did not confirm \
+stopping after an uncertain workflow turn start; the workflow remains locked"
+                        ),
+                    )
+                    .await;
+                }
                 return None;
             }
         }
@@ -447,7 +687,16 @@ finish before starting a workflow"
         match self.wait_for_step_idle(&current).await {
             StepOutcome::Completed => {}
             StepOutcome::NeedsHuman | StepOutcome::TimedOut => {
-                self.stop_and_drain(&current).await;
+                if !self.stop_and_drain(&current).await {
+                    self.block_run(
+                        run_id,
+                        format!(
+                            "reviewer thread {current}'s workflow turn did not confirm stopping; \
+the workflow remains locked"
+                        ),
+                    )
+                    .await;
+                }
                 return None;
             }
         }
@@ -519,9 +768,10 @@ finish before starting a workflow"
     /// run goes terminal. A stop request is acknowledgement, not proof the turn
     /// ended (see `ProviderBridge::request_turn_stop`), and a file-mutating author
     /// turn must not keep running after the run reports failure. Re-issues the stop
-    /// while waiting; bounded by `WORKFLOW_DRAIN_MAX_SECS` so a provider that never
-    /// confirms can't wedge the run forever.
-    async fn stop_and_drain(&self, thread_id: &str) {
+    /// while waiting; bounded by `WORKFLOW_DRAIN_MAX_SECS`. Returns false when the
+    /// stop cannot be confirmed; callers must leave the workflow non-terminal.
+    async fn stop_and_drain(&self, thread_id: &str) -> bool {
+        self.deny_thread_approvals_best_effort(thread_id).await;
         let drain_ms = self
             .workflow_drain_max_ms
             .load(std::sync::atomic::Ordering::Relaxed);
@@ -537,15 +787,10 @@ finish before starting a workflow"
                     .unwrap_or(false)
             };
             if !working {
-                return;
+                self.clear_thread_interactions(thread_id).await;
+                return true;
             }
             if Instant::now() >= deadline {
-                // Couldn't confirm the turn stopped within the window. For Codex an
-                // ID-less cancel is rejected, so a turn begun after a lost start
-                // response can still be running. The complete fix is review's
-                // non-terminal `Blocked` state, which needs the lifeguard + a thread
-                // lock (chunks 4-5); until then, surface a warning and let the run go
-                // terminal.
                 self.push_runtime_log(
                     "warn",
                     format!(
@@ -554,7 +799,7 @@ the drain window; it may still be running."
                     ),
                 )
                 .await;
-                return;
+                return false;
             }
             tokio::select! {
                 _ = rx.changed() => {}
@@ -614,15 +859,17 @@ the drain window; it may still be running."
                 &sandbox,
                 &effort,
             );
-            // Record the reviewer thread ON THE RUN so it is hidden from navigation
-            // (reviewer_thread_ids derives from step_threads). It is owned by the run,
-            // NOT the review reviewer_threads map, so review's per-parent FIFO cap can
-            // never delete a workflow reviewer's transcript. Per-run cap/cleanup of
-            // these threads is deferred to the drill-down UI chunk (retention policy).
+            // Record the reviewer thread both on the run (ownership) and in the
+            // durable reviewer map (navigation hiding across restart/run pruning).
             relay.update_workflow_run(run_id, |run| {
                 run.step_threads
                     .insert(step_id.to_string(), thread_id.clone());
             });
+            let parent_thread_id = relay
+                .workflow_run(run_id)
+                .map(|run| run.parent_thread_id.clone())
+                .unwrap_or_default();
+            relay.register_reviewer_thread(thread_id.clone(), parent_thread_id);
             let note = if read_only_enforced {
                 "read-only sandbox enforced"
             } else {
@@ -634,6 +881,26 @@ workflow denies"
                 format!("Workflow: started a {provider_name} background reviewer thread in {cwd}: {note}."),
             );
             relay.notify();
+        }
+        let evict_ids = {
+            let relay = self.relay.read().await;
+            let parent_thread_id = relay
+                .workflow_run(run_id)
+                .map(|run| run.parent_thread_id.clone())
+                .unwrap_or_default();
+            relay.reviewers_to_evict(&parent_thread_id, MAX_REVIEWERS_PER_PARENT)
+        };
+        if !evict_ids.is_empty() {
+            self.push_runtime_log(
+                "info",
+                format!(
+                    "Workflow reviewer cap reached: evicting {} oldest reviewer thread(s) (keep {}).",
+                    evict_ids.len(),
+                    MAX_REVIEWERS_PER_PARENT
+                ),
+            )
+            .await;
+            self.handle_parent_reviewer_threads(evict_ids, true).await;
         }
         Ok((thread_id, model))
     }
@@ -679,22 +946,181 @@ workflow denies"
     }
 
     async fn finish_run(&self, run_id: &str, status: RunStatus) {
-        self.update_run(run_id, move |run| run.set_status(status))
-            .await;
-        self.push_runtime_log(
-            "info",
-            format!("Workflow {run_id} finished: {}.", status.as_str()),
-        )
-        .await;
+        let mut applied = false;
+        {
+            let mut relay = self.relay.write().await;
+            relay.update_workflow_run(run_id, |run| {
+                applied = !run.status.is_terminal()
+                    && !matches!(run.status, RunStatus::Blocked | RunStatus::Resolving);
+                run.set_status(status);
+            });
+            if applied {
+                relay.push_log(
+                    "info",
+                    format!("Workflow {run_id} finished: {}.", status.as_str()),
+                );
+            }
+            relay.notify();
+        }
     }
 
     async fn fail_run(&self, run_id: &str, error: impl Into<String>) {
         let error = error.into();
         let logged = error.clone();
-        self.update_run(run_id, move |run| run.fail(error)).await;
-        self.push_runtime_log("warn", format!("Workflow {run_id} failed: {logged}"))
-            .await;
+        let mut applied = false;
+        {
+            let mut relay = self.relay.write().await;
+            relay.update_workflow_run(run_id, |run| {
+                applied = !run.status.is_terminal()
+                    && !matches!(run.status, RunStatus::Blocked | RunStatus::Resolving);
+                run.fail(error);
+            });
+            if applied {
+                relay.push_log("warn", format!("Workflow {run_id} failed: {logged}"));
+            }
+            relay.notify();
+        }
     }
+
+    async fn block_run(&self, run_id: &str, error: impl Into<String>) {
+        let error = error.into();
+        let logged = error.clone();
+        let mut applied = false;
+        {
+            let mut relay = self.relay.write().await;
+            relay.update_workflow_run(run_id, |run| {
+                applied = !run.status.is_terminal();
+                run.block(error);
+            });
+            if applied {
+                relay.push_log("error", format!("Workflow {run_id} blocked: {logged}"));
+            }
+            relay.notify();
+        }
+    }
+
+    async fn restore_resolving_workflow_as_blocked(&self, run_id: &str, error: impl Into<String>) {
+        let error = error.into();
+        let logged = error.clone();
+        let mut applied = false;
+        {
+            let mut relay = self.relay.write().await;
+            relay.update_workflow_run(run_id, |run| {
+                applied = run.restore_resolving_as_blocked(error);
+            });
+            if applied {
+                relay.push_log(
+                    "warn",
+                    format!("Workflow {run_id} recovery interrupted: {logged}"),
+                );
+            }
+            relay.notify();
+        }
+    }
+
+    async fn interrupt_workflow_if_stranded(&self, run_id: &str) {
+        let Some(threads) = self.active_workflow_owned_threads(run_id).await else {
+            return;
+        };
+        let mut drained = true;
+        for thread_id in &threads {
+            drained &= self.stop_and_drain(thread_id).await;
+        }
+        if !drained {
+            self.block_run(
+                run_id,
+                "the workflow task ended unexpectedly and at least one owned turn did not confirm stopping",
+            )
+            .await;
+            return;
+        }
+
+        let mut interrupted = false;
+        {
+            let mut relay = self.relay.write().await;
+            relay.update_workflow_run(run_id, |run| {
+                if !run.status.is_terminal()
+                    && !matches!(run.status, RunStatus::Blocked | RunStatus::Resolving)
+                {
+                    run.error = Some("the workflow task ended unexpectedly".to_string());
+                    interrupted = run.mark_interrupted_if_stranded();
+                }
+            });
+            if interrupted {
+                relay.push_log(
+                    "warn",
+                    format!(
+                        "Workflow {run_id} was interrupted because its task exited; owned turns were stopped."
+                    ),
+                );
+            }
+            relay.notify();
+        }
+    }
+
+    async fn active_workflow_owned_threads(&self, run_id: &str) -> Option<Vec<String>> {
+        let relay = self.relay.read().await;
+        let run = relay.workflow_run(run_id)?;
+        if run.status.is_terminal()
+            || matches!(run.status, RunStatus::Blocked | RunStatus::Resolving)
+        {
+            return None;
+        }
+        Some(workflow_owned_threads(run))
+    }
+
+    async fn workflow_turn_preflight(&self, run_id: &str, thread_id: &str) -> Result<(), String> {
+        let relay = self.relay.read().await;
+        let run = relay
+            .workflow_run(run_id)
+            .ok_or_else(|| format!("workflow {run_id} no longer exists"))?;
+        if run.status.is_terminal()
+            || matches!(run.status, RunStatus::Blocked | RunStatus::Resolving)
+        {
+            return Err(format!(
+                "workflow {run_id} is already {}; refusing to start another turn",
+                run.status.as_str()
+            ));
+        }
+        let owned = run.parent_thread_id == thread_id
+            || run
+                .step_threads
+                .values()
+                .any(|owned_thread_id| owned_thread_id == thread_id);
+        if !owned {
+            return Err(format!(
+                "workflow {run_id} does not own thread {thread_id}; refusing to start a turn"
+            ));
+        }
+        let thread_has_live_turn = relay
+            .runtime_for_thread(thread_id)
+            .map(|runtime| runtime.has_live_turn())
+            .unwrap_or(false)
+            || (relay.active_thread_id.as_deref() == Some(thread_id)
+                && relay.active_thread_has_live_turn());
+        if thread_has_live_turn {
+            return Err(format!(
+                "thread {thread_id} already has a live turn; workflow {run_id} remains locked"
+            ));
+        }
+        if relay.has_working_thread_in_cwd(&run.cwd) {
+            return Err(format!(
+                "another thread is working in {}; workflow {run_id} remains locked",
+                run.cwd
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn workflow_owned_threads(run: &WorkflowRun) -> Vec<String> {
+    let mut threads = vec![run.parent_thread_id.clone()];
+    for thread_id in run.step_threads.values() {
+        if !threads.contains(thread_id) {
+            threads.push(thread_id.clone());
+        }
+    }
+    threads
 }
 
 fn role_label(role: StepRole) -> &'static str {
@@ -702,6 +1128,45 @@ fn role_label(role: StepRole) -> &'static str {
         StepRole::Execute => "execute",
         StepRole::Review => "review",
         StepRole::Revise => "revise",
+    }
+}
+
+fn code_flow_workflow(
+    author_provider: &str,
+    task_prompt: &str,
+    reviewer_provider: &str,
+    reviewer_model: Option<String>,
+    reviewer_instructions: Option<String>,
+    max_rounds: u32,
+) -> Workflow {
+    let author = |id: &str, role: StepRole, prompt: &str| WorkflowStep {
+        id: id.to_string(),
+        agent: author_provider.to_string(),
+        role,
+        model: None,
+        prompt: prompt.to_string(),
+    };
+    Workflow {
+        id: CODE_FLOW_WORKFLOW_ID.to_string(),
+        name: "Code Flow".to_string(),
+        artifact: ArtifactKind::Diff,
+        steps: vec![
+            author("execute", StepRole::Execute, task_prompt),
+            WorkflowStep {
+                id: CODE_FLOW_REVIEW_STEP_ID.to_string(),
+                agent: reviewer_provider.to_string(),
+                role: StepRole::Review,
+                model: reviewer_model,
+                prompt: non_empty(reviewer_instructions).unwrap_or_default(),
+            },
+            author("revise", StepRole::Revise, ""),
+        ],
+        loop_: Some(LoopSpec {
+            from_step: CODE_FLOW_REVIEW_STEP_ID.to_string(),
+            to_step: "revise".to_string(),
+            max_rounds,
+            stop_when: StopCondition::ReviewerApproved,
+        }),
     }
 }
 

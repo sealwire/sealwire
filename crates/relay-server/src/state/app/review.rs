@@ -1700,7 +1700,7 @@ reviewed thread stays locked. Resolve the review (stop the reviewer) to unlock."
     /// Best-effort deny every pending approval on a thread via its provider. Does
     /// not remove them from relay state (the caller clears them only once the turn
     /// is confirmed stopped, so a failed deny stays visible).
-    async fn deny_thread_approvals_best_effort(&self, thread_id: &str) {
+    pub(super) async fn deny_thread_approvals_best_effort(&self, thread_id: &str) {
         let pending: Vec<crate::state::PendingApproval> = {
             let relay = self.relay.read().await;
             relay
@@ -1725,7 +1725,7 @@ reviewed thread stays locked. Resolve the review (stop the reviewer) to unlock."
 
     /// Clear a thread's pending approvals + AskUser questions from relay state.
     /// Only called once the thread's turn is confirmed stopped (so they're moot).
-    async fn clear_thread_interactions(&self, thread_id: &str) {
+    pub(super) async fn clear_thread_interactions(&self, thread_id: &str) {
         let mut relay = self.relay.write().await;
         let approvals: Vec<String> = relay
             .pending_approvals

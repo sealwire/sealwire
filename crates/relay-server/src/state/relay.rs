@@ -21,9 +21,9 @@ use crate::{
 };
 
 use super::{
-    persistence::PersistedRelayState, unix_now, ReviewJob, SecurityProfile, WorkflowRun,
-    CONTROLLER_LEASE_SECS, DEFAULT_APPROVAL_POLICY, DEFAULT_EFFORT, DEFAULT_MODEL, DEFAULT_SANDBOX,
-    STALE_TURN_PROGRESS_TIMEOUT_SECS,
+    ensure_path_within_device_scope, persistence::PersistedRelayState, unix_now, ReviewJob,
+    RunStatus, SecurityProfile, WorkflowRun, CONTROLLER_LEASE_SECS, DEFAULT_APPROVAL_POLICY,
+    DEFAULT_EFFORT, DEFAULT_MODEL, DEFAULT_SANDBOX, STALE_TURN_PROGRESS_TIMEOUT_SECS,
 };
 
 pub use self::approval::{ApprovalKind, PendingApproval};
@@ -727,6 +727,19 @@ impl RelayState {
             .retain(|_, job| job.reviewer_thread_id.as_deref() != Some(reviewer_id));
     }
 
+    /// Drop terminal workflow cards whose owned reviewer thread was deleted or
+    /// promoted to a normal thread. Non-terminal workflow runs are protected by
+    /// `reviewers_to_evict` and by the workflow lock guards.
+    pub(crate) fn drop_workflow_runs_for_reviewer(&mut self, reviewer_id: &str) {
+        self.workflow_jobs.retain(|_, run| {
+            !run.status.is_terminal()
+                || !run
+                    .step_threads
+                    .values()
+                    .any(|owned_thread_id| owned_thread_id == reviewer_id)
+        });
+    }
+
     /// Drop only the TERMINAL review jobs for `reviewer_id`. Used by `delete_review`,
     /// which collapses a reviewer's finished run-cards but must NOT delete a
     /// concurrently-started in-progress job for the same reviewer (created in the window
@@ -811,8 +824,8 @@ impl RelayState {
 
     /// Reviewer threads of `parent_id` to evict so it keeps at most `keep`: the
     /// oldest by registration `seq` beyond the cap, FIFO. Reviewers currently bound
-    /// to a non-terminal review job are protected (never evicted mid-review). Returns
-    /// ids only; the caller performs the actual provider delete.
+    /// to a non-terminal review/workflow job are protected (never evicted mid-turn).
+    /// Returns ids only; the caller performs the actual provider delete.
     pub(crate) fn reviewers_to_evict(&self, parent_id: &str, keep: usize) -> Vec<String> {
         let mut owned: Vec<(&String, u64)> = self
             .reviewer_threads
@@ -825,11 +838,17 @@ impl RelayState {
         }
         // Oldest first (seq is unique; id is a defensive tiebreak only).
         owned.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(b.0)));
-        let protected: HashSet<&str> = self
+        let protected: HashSet<String> = self
             .review_jobs
             .values()
             .filter(|job| !job.status.is_terminal())
-            .filter_map(|job| job.reviewer_thread_id.as_deref())
+            .filter_map(|job| job.reviewer_thread_id.clone())
+            .chain(
+                self.workflow_jobs
+                    .values()
+                    .filter(|run| !run.status.is_terminal())
+                    .flat_map(|run| run.step_threads.values().cloned()),
+            )
             .collect();
         let excess = owned.len() - keep;
         let mut evict = Vec::new();
@@ -1060,6 +1079,36 @@ impl RelayState {
         })
     }
 
+    /// Whether `thread_id` is owned by a non-terminal workflow run (its parent OR
+    /// any workflow-owned step thread). A `Blocked` workflow is intentionally
+    /// non-terminal, so this lock remains until recovery/restart reconciliation.
+    pub(crate) fn is_thread_workflow_locked(&self, thread_id: &str) -> bool {
+        self.workflow_jobs.values().any(|run| {
+            !run.status.is_terminal()
+                && (run.parent_thread_id == thread_id
+                    || run
+                        .step_threads
+                        .values()
+                        .any(|owned_thread_id| owned_thread_id == thread_id))
+        })
+    }
+
+    /// Whether a non-terminal workflow currently owns the workspace at `cwd`.
+    /// Workflow author turns mutate the working tree, so the lock is workspace-
+    /// scoped, not just parent-thread scoped.
+    pub(crate) fn is_cwd_workflow_locked(&self, cwd: &str) -> bool {
+        self.workflow_jobs
+            .values()
+            .any(|run| !run.status.is_terminal() && run.cwd == cwd)
+    }
+
+    pub(crate) fn is_thread_or_cwd_workflow_locked(&self, thread_id: &str) -> bool {
+        self.is_thread_workflow_locked(thread_id)
+            || self
+                .thread_cwd(thread_id)
+                .is_some_and(|cwd| self.is_cwd_workflow_locked(&cwd))
+    }
+
     /// Hard-cap the total retained review jobs (evicting the oldest terminal jobs
     /// first) so review bodies can't pile up. Terminal jobs are NOT dropped by age
     /// — the persistent Reviewer panel keeps them until the user deletes them.
@@ -1102,7 +1151,6 @@ impl RelayState {
         self.review_jobs.get(id)
     }
 
-    #[allow(dead_code)]
     pub(crate) fn insert_workflow_run(&mut self, run: WorkflowRun) {
         self.prune_workflow_runs();
         self.workflow_jobs.insert(run.id.clone(), run);
@@ -1113,7 +1161,6 @@ impl RelayState {
         self.workflow_jobs.remove(id)
     }
 
-    #[allow(dead_code)]
     pub(crate) fn update_workflow_run<F: FnOnce(&mut WorkflowRun)>(
         &mut self,
         id: &str,
@@ -1128,9 +1175,69 @@ impl RelayState {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) fn workflow_run(&self, id: &str) -> Option<&WorkflowRun> {
         self.workflow_jobs.get(id)
+    }
+
+    pub(crate) fn begin_resolving_workflow_run(
+        &mut self,
+        run_id: Option<&str>,
+        device_id: &str,
+    ) -> Result<(String, String, String, Vec<String>), String> {
+        let blocked = self.blocked_workflow_run_ids(run_id)?;
+        let device_scope = self.device_path_scope(device_id);
+        let run = self
+            .workflow_jobs
+            .get(&blocked)
+            .ok_or_else(|| "blocked workflow was not found".to_string())?;
+        ensure_path_within_device_scope(&run.cwd, &device_scope, &self.allowed_roots)?;
+
+        let run = self
+            .workflow_jobs
+            .get_mut(&blocked)
+            .ok_or_else(|| "blocked workflow was not found".to_string())?;
+        if !run.begin_resolving_blocked() {
+            return Err("workflow is already resolving or no longer blocked".to_string());
+        }
+
+        let mut owned_threads = vec![run.parent_thread_id.clone()];
+        for thread_id in run.step_threads.values() {
+            if !owned_threads.contains(thread_id) {
+                owned_threads.push(thread_id.clone());
+            }
+        }
+        Ok((
+            blocked,
+            run.parent_thread_id.clone(),
+            run.cwd.clone(),
+            owned_threads,
+        ))
+    }
+
+    pub(crate) fn blocked_workflow_run_ids(&self, run_id: Option<&str>) -> Result<String, String> {
+        if let Some(run_id) = run_id {
+            return match self.workflow_jobs.get(run_id) {
+                Some(run) if matches!(run.status, RunStatus::Blocked) => Ok(run.id.clone()),
+                Some(run) if matches!(run.status, RunStatus::Resolving) => {
+                    Err("workflow is already resolving".to_string())
+                }
+                Some(_) => Err("workflow is not blocked".to_string()),
+                None => Err("there is no blocked workflow with that id".to_string()),
+            };
+        }
+
+        let blocked = self
+            .workflow_jobs
+            .values()
+            .filter(|run| matches!(run.status, RunStatus::Blocked))
+            .collect::<Vec<_>>();
+        match blocked.as_slice() {
+            [] => Err("there is no blocked workflow to resolve".to_string()),
+            [run] => Ok(run.id.clone()),
+            _ => Err(
+                "workflow_run_id is required when more than one workflow is blocked".to_string(),
+            ),
+        }
     }
 
     /// Whether any workflow run is still non-terminal. One workflow at a time
@@ -1145,7 +1252,6 @@ impl RelayState {
     /// Hard-cap retained workflow runs, evicting the oldest TERMINAL runs first
     /// (mirrors `prune_review_jobs`). Non-terminal runs are never auto-evicted —
     /// they have a live or restart-recoverable orchestrator.
-    #[allow(dead_code)]
     fn prune_workflow_runs(&mut self) {
         if self.workflow_jobs.len() < MAX_WORKFLOW_RUNS {
             return;
@@ -1315,6 +1421,77 @@ impl RelayState {
                 .filter(|view| in_scope(&view.parent_thread_id))
                 .collect(),
         }
+    }
+
+    /// Compact views of retained workflow runs for the snapshot. Workflow runs
+    /// are serialized one at a time in phase 1 but terminal runs remain visible
+    /// briefly, mirroring review cards.
+    pub(crate) fn active_workflow_runs_view(&self) -> Vec<crate::protocol::WorkflowRunView> {
+        let mut views: Vec<_> = self
+            .workflow_jobs
+            .values()
+            .map(|run| {
+                let mut view = run.view();
+                if !run.status.is_terminal() {
+                    view.locked_thread_ids = self.workflow_locked_thread_ids(run);
+                }
+                view
+            })
+            .collect();
+        views.sort_by(|left, right| {
+            right
+                .updated_at
+                .cmp(&left.updated_at)
+                .then_with(|| right.id.cmp(&left.id))
+        });
+        views
+    }
+
+    pub(crate) fn workflows_revision(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut acc: u64 = 0;
+        for run in self.active_workflow_runs_view() {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            run.id.hash(&mut h);
+            run.workflow_id.hash(&mut h);
+            run.parent_thread_id.hash(&mut h);
+            run.status.hash(&mut h);
+            run.current_step.hash(&mut h);
+            run.round.hash(&mut h);
+            run.reviewer_thread_id.hash(&mut h);
+            run.locked_thread_ids.hash(&mut h);
+            run.last_verdict.hash(&mut h);
+            run.updated_at.hash(&mut h);
+            run.error.hash(&mut h);
+            acc ^= h.finish();
+        }
+        acc
+    }
+
+    fn workflow_locked_thread_ids(&self, run: &WorkflowRun) -> Vec<String> {
+        let mut ids = vec![run.parent_thread_id.clone()];
+        ids.extend(run.step_threads.values().cloned());
+        ids.extend(
+            self.runtimes
+                .iter()
+                .filter(|(thread_id, runtime)| {
+                    runtime.current_cwd == run.cwd
+                        && !self.locally_deleted_thread_ids.contains(thread_id.as_str())
+                })
+                .map(|(thread_id, _)| thread_id.clone()),
+        );
+        ids.extend(
+            self.threads
+                .iter()
+                .filter(|thread| {
+                    thread.cwd == run.cwd
+                        && !self.locally_deleted_thread_ids.contains(thread.id.as_str())
+                })
+                .map(|thread| thread.id.clone()),
+        );
+        ids.sort();
+        ids.dedup();
+        ids
     }
 
     pub(crate) fn ensure_runtime_for_thread(&mut self, thread_id: &str) -> &mut ThreadRuntime {
@@ -1667,6 +1844,8 @@ impl RelayState {
             active_review_jobs: self.active_review_jobs_view(),
             reviewer_threads: self.reviewer_thread_views(),
             reviews_revision: self.reviews_revision(),
+            active_workflow_runs: self.active_workflow_runs_view(),
+            workflows_revision: self.workflows_revision(),
             push_vapid_public_key: self.push_vapid_public_key.clone(),
         }
     }
@@ -2937,6 +3116,7 @@ mod tests {
         BrokerPendingMessage, PendingPairingResult, PendingTranscriptDelta, PersistedRelayState,
         RelayState, SecurityProfile, TranscriptDeltaKind, WorkflowRun, MAX_WORKFLOW_RUNS,
     };
+    use crate::protocol::ThreadSummaryView;
     use crate::state::RunStatus;
     use std::collections::HashMap;
     use tokio::sync::watch;
@@ -3111,6 +3291,52 @@ mod tests {
         );
         run.set_status(status);
         run
+    }
+
+    fn test_thread(id: &str, cwd: &str) -> ThreadSummaryView {
+        ThreadSummaryView {
+            id: id.to_string(),
+            name: None,
+            preview: id.to_string(),
+            cwd: cwd.to_string(),
+            updated_at: 0,
+            source: "fake".to_string(),
+            status: "idle".to_string(),
+            model_provider: "fake".to_string(),
+            provider: "fake".to_string(),
+            forked_from: None,
+        }
+    }
+
+    #[test]
+    fn workflow_run_view_exposes_same_cwd_locked_threads() {
+        let mut relay = test_relay();
+        relay.threads = vec![
+            test_thread("parent", "/tmp/project"),
+            test_thread("same-cwd", "/tmp/project"),
+            test_thread("other-cwd", "/tmp/other"),
+        ];
+        relay.insert_workflow_run(run_with_status("running", RunStatus::Running));
+
+        let view = relay
+            .active_workflow_runs_view()
+            .into_iter()
+            .find(|run| run.id == "running")
+            .expect("running workflow view");
+        assert!(view.locked_thread_ids.contains(&"parent".to_string()));
+        assert!(view.locked_thread_ids.contains(&"same-cwd".to_string()));
+        assert!(!view.locked_thread_ids.contains(&"other-cwd".to_string()));
+
+        relay.insert_workflow_run(run_with_status("done", RunStatus::Done));
+        let done = relay
+            .active_workflow_runs_view()
+            .into_iter()
+            .find(|run| run.id == "done")
+            .expect("terminal workflow view");
+        assert!(
+            done.locked_thread_ids.is_empty(),
+            "terminal runs should not publish live lock metadata"
+        );
     }
 
     #[test]

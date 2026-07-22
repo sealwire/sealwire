@@ -190,6 +190,9 @@ impl AppState {
             if relay.is_thread_review_locked(thread_id) {
                 return Err(REVIEW_LOCKED_THREAD_MSG.to_string());
             }
+            if relay.is_thread_or_cwd_workflow_locked(thread_id) {
+                return Err(WORKFLOW_LOCKED_THREAD_MSG.to_string());
+            }
         }
         let reviewer_threads = {
             let relay = self.relay.read().await;
@@ -273,6 +276,9 @@ impl AppState {
             if relay.is_thread_review_locked(thread_id) {
                 return Err(REVIEW_LOCKED_THREAD_MSG.to_string());
             }
+            if relay.is_thread_or_cwd_workflow_locked(thread_id) {
+                return Err(WORKFLOW_LOCKED_THREAD_MSG.to_string());
+            }
         }
         let reviewer_threads = {
             let relay = self.relay.read().await;
@@ -340,6 +346,7 @@ normal thread instead."
             // Drop any stale in-memory review job referencing this reviewer.
             let mut relay = self.relay.write().await;
             relay.drop_review_jobs_for_reviewer(&reviewer_id);
+            relay.drop_workflow_runs_for_reviewer(&reviewer_id);
             relay.notify();
         }
         failed

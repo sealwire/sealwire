@@ -148,6 +148,7 @@ import {
   threadIsBusyForFork,
 } from "./shared/fork-fields.js";
 import { isReviewInProgressForThread } from "./shared/review-state.js";
+import { isWorkflowInProgressForThread } from "./shared/workflow-state.js";
 import {
   buildViewOnlyPin,
   mergeOlderViewOnlyPage,
@@ -277,7 +278,9 @@ let forkSessionRoot = null;
 // that run at module load; they only ever fire on user interaction.
 const reviewerActions = {
   onRequestReview: (values) => state.controller?.requestReview(values),
+  onStartWorkflow: (values) => state.controller?.startWorkflow(values),
   onResolveReview: (reviewJobId) => state.controller?.resolveReview(reviewJobId),
+  onResolveWorkflow: (workflowRunId) => state.controller?.resolveWorkflow(workflowRunId),
   onDeleteReview: (reviewId) => state.controller?.deleteReview(reviewId),
   fetchReviewerTranscript: (threadId) =>
     Promise.resolve(state.controller?.fetchTranscriptPage(threadId, {})).then(
@@ -546,6 +549,9 @@ const renderer = createSessionRenderer({
   requestReview(values) {
     return controller?.requestReview(values);
   },
+  startWorkflow(values) {
+    return controller?.startWorkflow(values);
+  },
   setReviewSlice(slice) {
     workspaceDiffStore.setReview(slice);
   },
@@ -645,6 +651,7 @@ async function loadViewOnlyTranscript(threadId) {
   }
 
   const review = isReviewInProgressForThread(session, threadId);
+  const workflowLocked = isWorkflowInProgressForThread(session, threadId);
   const generation = (state.viewOnlyGeneration = (state.viewOnlyGeneration || 0) + 1);
   const reviewSig = review ? viewOnlyReviewSignature(session, threadId) : null;
   // The viewed thread's own metadata (workspace + provider), so the projection
@@ -661,6 +668,7 @@ async function loadViewOnlyTranscript(threadId) {
     threadId,
     generation,
     review,
+    workflowLocked,
     reviewSig,
     cwd,
     provider,
@@ -694,6 +702,7 @@ async function loadViewOnlyTranscript(threadId) {
       page: normalized,
       generation,
       review,
+      workflowLocked: Boolean(normalized.thread_state?.workflow_locked ?? workflowLocked),
       reviewSig,
       cwd: normalized.thread_state?.current_cwd ?? cwd,
       provider: normalized.thread_state?.provider ?? provider,
@@ -723,6 +732,7 @@ async function loadViewOnlyTranscript(threadId) {
       threadId,
       generation,
       review,
+      workflowLocked,
       reviewSig,
       cwd,
       provider,

@@ -24,6 +24,14 @@ const TERMINAL_REVIEW_STATUSES = new Set([
   "cancelled",
 ]);
 
+const TERMINAL_WORKFLOW_STATUSES = new Set([
+  "done",
+  "escalated",
+  "failed",
+  "interrupted",
+  "cancelled",
+]);
+
 // Single source of truth for "this review is finished" — used by the panel, the
 // tab label, and the chip so they can never drift (e.g. `escalated` being terminal
 // in one place but not another).
@@ -43,6 +51,16 @@ export function isReviewInProgress(session) {
 
 export function isReviewBlocked(session) {
   return (session?.active_review_jobs || []).some((job) => job.status === "blocked");
+}
+
+export function isWorkflowBlocked(session) {
+  return (session?.active_workflow_runs || []).some((run) => run?.status === "blocked");
+}
+
+function isWorkflowInProgress(session) {
+  return (session?.active_workflow_runs || []).some(
+    (run) => !TERMINAL_WORKFLOW_STATUSES.has(run?.status)
+  );
 }
 
 // True when a non-terminal review is reviewing `threadId` as its parent. During
@@ -104,7 +122,7 @@ export function reviewStatusBadge(session, activeThreadId) {
   // A blocked review locks the workspace until the user stops the reviewer — surface it
   // regardless of which thread is active. An in-progress review only badges the thread the
   // user is actually viewing (a background review on another thread leaves this one live).
-  if (isReviewBlocked(session)) return REVIEW_BLOCKED_BADGE;
+  if (isReviewBlocked(session) || isWorkflowBlocked(session)) return REVIEW_BLOCKED_BADGE;
   if (isReviewInProgressForThread(session, activeThreadId)) return REVIEW_IN_PROGRESS_BADGE;
   return null;
 }
@@ -229,14 +247,13 @@ function isThreadBusy(session, threadId) {
 // A review is a BACKGROUND action authorized SERVER-SIDE by workspace path-scope — NOT by
 // who controls the active session — so this gate intentionally does NOT check control or
 // the active-thread lease (`deviceId` is accepted for call-signature stability but unused).
-// It stays OPTIMISTIC: it only suppresses the CTA for states the user can already see are
-// non-actionable — the reviewed thread is mid-turn, an approval is pending on it, or a
-// review is already running — and lets the backend be authoritative for everything else,
-// surfacing any rejection inline in the request modal. Used for the Reviewer-tab CTA +
-// idle nudge.
+// It stays OPTIMISTIC except for workflow mutual exclusion: the backend currently rejects
+// every review while any workflow is non-terminal, so mirror that global policy to avoid a
+// CTA that can only fail. Used for the Reviewer-tab CTA + idle nudge.
 export function canRequestReview(session, deviceId, viewedThreadId = null) {
   const target = viewedThreadId || session?.active_thread_id || null;
   if (!target) return false;
+  if (isWorkflowInProgress(session)) return false;
   if (isThreadBusy(session, target)) return false;
   if (
     Array.isArray(session?.pending_approvals) &&

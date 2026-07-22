@@ -3,6 +3,7 @@ import {
   summarizeThreadGroups,
 } from "../shared/thread-groups.js";
 import { isReviewInProgressForThread } from "../shared/review-state.js";
+import { isWorkflowInProgressForThread } from "../shared/workflow-state.js";
 import { canComposeThread } from "../shared/thread-compose.js";
 import { providerLabel } from "../shared/provider-labels.js";
 import { workspaceBasename } from "./utils.js";
@@ -27,9 +28,14 @@ function createActiveSessionThread(session) {
 export function selectSessionRenderModel({ session, previousSession, hasControllerLease }) {
   const approval = session.pending_approvals?.[0] || null;
   const hasActiveSession = Boolean(session.active_thread_id);
-  // The active thread is frozen only when it is itself being reviewed; a
-  // background review on another thread leaves this conversation usable.
-  const activeThreadFrozen = isReviewInProgressForThread(session, session.active_thread_id);
+  // The active thread is frozen only when it is itself owned by review/workflow;
+  // background work on another thread leaves this conversation usable.
+  const activeThreadUnderReview = isReviewInProgressForThread(session, session.active_thread_id);
+  const activeThreadUnderWorkflow = isWorkflowInProgressForThread(
+    session,
+    session.active_thread_id
+  );
+  const activeThreadFrozen = activeThreadUnderReview || activeThreadUnderWorkflow;
   const canWrite = hasControllerLease && !activeThreadFrozen;
   // Sending to an idle thread is itself the atomic claim. The relay serializes
   // concurrent sends, so no separate take-over step is needed.
@@ -48,8 +54,12 @@ export function selectSessionRenderModel({ session, previousSession, hasControll
     currentApprovalId: approval?.request_id || null,
     hasActiveSession,
     hasControllerLease,
+    activeThreadFrozen,
+    activeThreadUnderWorkflow,
     messagePlaceholder: activeThreadFrozen
-      ? "This session is being reviewed…"
+      ? activeThreadUnderWorkflow
+        ? "This session is locked by Code Flow…"
+        : "This session is being reviewed…"
       : !hasActiveSession
       ? "Start a remote session first."
       : canCompose

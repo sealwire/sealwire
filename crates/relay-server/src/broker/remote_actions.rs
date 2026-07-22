@@ -11,9 +11,10 @@ use crate::{
         AskUserQuestionDetailResponse, ForkSessionInput, HeartbeatInput, ModelOptionView,
         ReadThreadEntriesInput, ReadThreadEntryDetailInput, ReadThreadTranscriptInput,
         RequestReviewInput, ResumeSessionInput, ReviewsResponse, SendMessageInput, SessionSnapshot,
-        StartSessionInput, StopTurnInput, SubmitAskUserAnswerInput, TakeOverInput,
-        ThreadEntriesResponse, ThreadEntryDetailResponse, ThreadTranscriptResponse, ThreadsQuery,
-        ThreadsResponse, UpdateSessionSettingsInput, WorkspaceDiffResponse,
+        StartSessionInput, StartWorkflowInput, StopTurnInput, SubmitAskUserAnswerInput,
+        TakeOverInput, ThreadEntriesResponse, ThreadEntryDetailResponse, ThreadTranscriptResponse,
+        ThreadsQuery, ThreadsResponse, UpdateSessionSettingsInput, WorkflowActionInput,
+        WorkspaceDiffResponse,
     },
     state::{
         AppState, ApprovalError, AskUserAnswerError, CachedRemoteActionResult,
@@ -115,9 +116,18 @@ pub(super) enum RemoteActionRequest {
     RequestReview {
         input: RequestReviewInput,
     },
+    StartWorkflow {
+        input: StartWorkflowInput,
+    },
     ResolveReview {
         #[serde(default)]
         review_job_id: Option<String>,
+        #[serde(default)]
+        device_id: Option<String>,
+    },
+    ResolveWorkflow {
+        #[serde(default)]
+        workflow_run_id: Option<String>,
         #[serde(default)]
         device_id: Option<String>,
     },
@@ -162,7 +172,9 @@ impl RemoteActionRequest {
             Self::FetchAskUserQuestionDetail { .. } => RemoteActionKind::FetchAskUserQuestionDetail,
             Self::SubmitAskUserAnswer { .. } => RemoteActionKind::SubmitAskUserAnswer,
             Self::RequestReview { .. } => RemoteActionKind::RequestReview,
+            Self::StartWorkflow { .. } => RemoteActionKind::StartWorkflow,
             Self::ResolveReview { .. } => RemoteActionKind::ResolveReview,
+            Self::ResolveWorkflow { .. } => RemoteActionKind::ResolveWorkflow,
             Self::DeleteReview { .. } => RemoteActionKind::DeleteReview,
             Self::RegisterPushSubscription { .. } => RemoteActionKind::RegisterPushSubscription,
             Self::UnregisterPushSubscription { .. } => RemoteActionKind::UnregisterPushSubscription,
@@ -263,8 +275,18 @@ impl RemoteActionRequest {
                 input.device_id = Some(device_id);
                 Self::RequestReview { input }
             }
+            Self::StartWorkflow { mut input } => {
+                input.device_id = Some(device_id);
+                Self::StartWorkflow { input }
+            }
             Self::ResolveReview { review_job_id, .. } => Self::ResolveReview {
                 review_job_id,
+                device_id: Some(device_id),
+            },
+            Self::ResolveWorkflow {
+                workflow_run_id, ..
+            } => Self::ResolveWorkflow {
+                workflow_run_id,
                 device_id: Some(device_id),
             },
             Self::DeleteReview { review_id, .. } => Self::DeleteReview {
@@ -309,7 +331,9 @@ pub(super) enum RemoteActionKind {
     FetchAskUserQuestionDetail,
     SubmitAskUserAnswer,
     RequestReview,
+    StartWorkflow,
     ResolveReview,
+    ResolveWorkflow,
     DeleteReview,
     RegisterPushSubscription,
     UnregisterPushSubscription,
@@ -318,8 +342,8 @@ pub(super) enum RemoteActionKind {
 impl RemoteActionKind {
     pub(super) fn as_str(self) -> &'static str {
         match self {
-            Self::ClaimChallenge { .. } => "claim_challenge",
-            Self::ClaimDevice { .. } => "claim_device",
+            Self::ClaimChallenge => "claim_challenge",
+            Self::ClaimDevice => "claim_device",
             Self::StartSession => "start_session",
             Self::ForkSession => "fork_session",
             Self::ResumeSession => "resume_session",
@@ -341,7 +365,9 @@ impl RemoteActionKind {
             Self::FetchAskUserQuestionDetail => "fetch_ask_user_question_detail",
             Self::SubmitAskUserAnswer => "submit_ask_user_answer",
             Self::RequestReview => "request_review",
+            Self::StartWorkflow => "start_workflow",
             Self::ResolveReview => "resolve_review",
+            Self::ResolveWorkflow => "resolve_workflow",
             Self::DeleteReview => "delete_review",
             Self::RegisterPushSubscription => "register_push_subscription",
             Self::UnregisterPushSubscription => "unregister_push_subscription",
@@ -978,11 +1004,25 @@ async fn execute_remote_action(
             .request_review(input)
             .await
             .map(|_| RemoteActionOutcome::default()),
+        RemoteActionRequest::StartWorkflow { input } => state
+            .start_code_workflow(input)
+            .await
+            .map(|_| RemoteActionOutcome::default()),
         RemoteActionRequest::ResolveReview {
             review_job_id,
             device_id,
         } => state
             .cancel_review(review_job_id, device_id)
+            .await
+            .map(|_| RemoteActionOutcome::default()),
+        RemoteActionRequest::ResolveWorkflow {
+            workflow_run_id,
+            device_id,
+        } => state
+            .resolve_blocked_workflow(WorkflowActionInput {
+                workflow_run_id,
+                device_id,
+            })
             .await
             .map(|_| RemoteActionOutcome::default()),
         RemoteActionRequest::DeleteReview {
@@ -1167,7 +1207,9 @@ fn requires_session_claim(action: RemoteActionKind) -> bool {
         RemoteActionKind::SendMessage
             | RemoteActionKind::ApplyFileChange
             | RemoteActionKind::RequestReview
+            | RemoteActionKind::StartWorkflow
             | RemoteActionKind::ResolveReview
+            | RemoteActionKind::ResolveWorkflow
             | RemoteActionKind::DeleteReview
     )
 }
@@ -2291,7 +2333,9 @@ fn remote_action_result_kind(action: RemoteActionKind) -> RemoteActionResultKind
         RemoteActionKind::SendMessage
         | RemoteActionKind::ApplyFileChange
         | RemoteActionKind::RequestReview
+        | RemoteActionKind::StartWorkflow
         | RemoteActionKind::ResolveReview
+        | RemoteActionKind::ResolveWorkflow
         | RemoteActionKind::DeleteReview
         | RemoteActionKind::RegisterPushSubscription
         | RemoteActionKind::UnregisterPushSubscription => RemoteActionResultKind::RemoteActionAck,

@@ -34,6 +34,15 @@ test("reviewStatusBadge surfaces blocked regardless of which thread is active", 
   assert.deepEqual(reviewStatusBadge(session, null), REVIEW_BLOCKED_BADGE);
 });
 
+test("reviewStatusBadge surfaces blocked workflows regardless of active thread", () => {
+  const session = {
+    active_review_jobs: [],
+    active_workflow_runs: [{ id: "wf1", status: "blocked", parent_thread_id: "t1" }],
+  };
+  assert.deepEqual(reviewStatusBadge(session, "t2"), REVIEW_BLOCKED_BADGE);
+  assert.deepEqual(reviewStatusBadge(session, null), REVIEW_BLOCKED_BADGE);
+});
+
 test("reviewStatusBadge: blocked takes precedence over in-progress", () => {
   const session = {
     active_review_jobs: [

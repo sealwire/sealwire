@@ -6,6 +6,10 @@ import {
   reviewStatusBadge,
 } from "../shared/review-state.js";
 import {
+  isWorkflowBlocked,
+  isWorkflowInProgressForThread,
+} from "../shared/workflow-state.js";
+import {
   isProgressStalled,
   progressPhaseLabel,
 } from "../progress-verbs.js";
@@ -77,9 +81,15 @@ function deriveStatusBadge(currentState, session, approval) {
   // Surface the under-review state in the header (parity with local) — the remote
   // surface previously only froze the composer, so a remote user had no "Review in
   // progress / blocked" indicator. Shared helper → identical wording/tone to local.
+  if (isWorkflowBlocked(session)) {
+    return { label: "Code Flow blocked — action needed", tone: "alert" };
+  }
   const review = reviewStatusBadge(session, session.active_thread_id);
   if (review) {
     return review;
+  }
+  if (isWorkflowInProgressForThread(session, session.active_thread_id)) {
+    return { label: "Code Flow in progress", tone: "alert" };
   }
   // Task wording comes from the shared session-status seam so it matches the local
   // surface (No active task / Idle / Working) instead of a remote-only Standby/Live.
@@ -330,8 +340,10 @@ function sessionModelTitle(session) {
 
 function selectControlBannerRenderModel(currentState, session) {
   const activeUnderReview = isReviewInProgressForThread(session, session.active_thread_id);
+  const activeUnderWorkflow = isWorkflowInProgressForThread(session, session.active_thread_id);
+  const activeLockedByAgent = activeUnderReview || activeUnderWorkflow;
   const sessionWorking = sessionIsWorking(session);
-  if (session.view_only && sessionWorking && !activeUnderReview) {
+  if (session.view_only && sessionWorking && !activeLockedByAgent) {
     return {
       hidden: false,
       hint: "This background session is still running. Stop it or take over to continue here.",
@@ -342,7 +354,7 @@ function selectControlBannerRenderModel(currentState, session) {
   if (
     !session.active_thread_id
     || !session.active_controller_device_id
-    || (!sessionWorking && !activeUnderReview)
+    || (!sessionWorking && !activeLockedByAgent)
   ) {
     return {
       hidden: true,
@@ -361,14 +373,16 @@ function selectControlBannerRenderModel(currentState, session) {
     };
   }
 
-  // Only the thread actually under review is off-limits for take-over.
+  // Only the thread actually owned by review/workflow is off-limits for take-over.
   return {
     hidden: false,
-    hint: activeUnderReview
-      ? "This session is being reviewed; it unlocks when the review finishes."
+    hint: activeLockedByAgent
+      ? activeUnderWorkflow
+        ? "This session is locked by Code Flow; it unlocks when the workflow finishes."
+        : "This session is being reviewed; it unlocks when the review finishes."
       : "Read-only for sending until you take over. Approvals can still be handled here.",
     summary: `Controlled by ${controllerLabel(currentState, session.active_controller_device_id)}`,
-    takeOverHidden: activeUnderReview,
+    takeOverHidden: activeLockedByAgent,
   };
 }
 

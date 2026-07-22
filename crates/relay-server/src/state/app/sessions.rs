@@ -12,6 +12,9 @@ impl AppState {
             let relay = self.relay.read().await;
             let device_scope = relay.device_path_scope(&device_id);
             ensure_path_within_device_scope(&cwd, &device_scope, &relay.allowed_roots)?;
+            if relay.is_cwd_workflow_locked(&cwd) {
+                return Err(WORKFLOW_LOCKED_THREAD_MSG.to_string());
+            }
         }
         let requested_model = non_empty(input.model);
         let approval_policy = non_empty(input.approval_policy).unwrap_or(defaults.approval_policy);
@@ -139,6 +142,9 @@ impl AppState {
             if relay.is_thread_review_locked(&input.thread_id) {
                 return Err(REVIEW_LOCKED_THREAD_MSG.to_string());
             }
+            if relay.is_thread_workflow_locked(&input.thread_id) {
+                return Err(WORKFLOW_LOCKED_THREAD_MSG.to_string());
+            }
         }
         self.resume_session_inner(input).await
     }
@@ -194,6 +200,11 @@ impl AppState {
                 &device_scope,
                 &relay.allowed_roots,
             )?;
+            if relay.is_thread_workflow_locked(&input.thread_id)
+                || relay.is_cwd_workflow_locked(&preview.thread.cwd)
+            {
+                return Err(WORKFLOW_LOCKED_THREAD_MSG.to_string());
+            }
         }
 
         bridge
@@ -293,6 +304,9 @@ impl AppState {
 
             if relay.is_thread_review_locked(&thread_id) {
                 return Err(REVIEW_LOCKED_THREAD_MSG.to_string());
+            }
+            if relay.is_thread_or_cwd_workflow_locked(&thread_id) {
+                return Err(WORKFLOW_LOCKED_THREAD_MSG.to_string());
             }
             let next_approval_policy =
                 non_empty(input.approval_policy).unwrap_or_else(|| runtime.approval_policy.clone());
@@ -399,6 +413,9 @@ impl AppState {
             let relay = self.relay.read().await;
             if relay.is_thread_review_locked(&target_thread) {
                 return Err(REVIEW_LOCKED_THREAD_MSG.to_string());
+            }
+            if relay.is_thread_or_cwd_workflow_locked(&target_thread) {
+                return Err(WORKFLOW_LOCKED_THREAD_MSG.to_string());
             }
             // A thread with a turn ALREADY IN FLIGHT must not receive a second
             // prompt: taking it over and calling start_turn again would double-start
@@ -508,6 +525,11 @@ impl AppState {
             let relay = self.relay.read().await;
             let device_scope = relay.device_path_scope(&device_id);
             ensure_path_within_device_scope(&target_cwd, &device_scope, &relay.allowed_roots)?;
+            if relay.is_thread_workflow_locked(&target_thread)
+                || relay.is_cwd_workflow_locked(&target_cwd)
+            {
+                return Err(WORKFLOW_LOCKED_THREAD_MSG.to_string());
+            }
         }
 
         let turn_revision = {
@@ -578,6 +600,9 @@ impl AppState {
             )?;
             if relay.is_thread_review_locked(&thread_id) {
                 return Err(REVIEW_LOCKED_THREAD_MSG.to_string());
+            }
+            if relay.is_thread_or_cwd_workflow_locked(&thread_id) {
+                return Err(WORKFLOW_LOCKED_THREAD_MSG.to_string());
             }
             (thread_id, runtime.active_turn_id.clone())
         };
@@ -735,6 +760,9 @@ marking idle locally."
         // thread is fine — the review runs in the background and is unaffected.
         if relay.is_thread_review_locked(&thread_id) {
             return Err(REVIEW_LOCKED_THREAD_MSG.to_string());
+        }
+        if relay.is_thread_or_cwd_workflow_locked(&thread_id) {
+            return Err(WORKFLOW_LOCKED_THREAD_MSG.to_string());
         }
 
         relay.focus_thread_runtime(&thread_id, &device_id);

@@ -36,6 +36,9 @@ impl AppState {
             if relay.is_thread_review_locked(&source_thread_id) {
                 return Err(REVIEW_LOCKED_THREAD_MSG.to_string());
             }
+            if relay.is_thread_or_cwd_workflow_locked(&source_thread_id) {
+                return Err(WORKFLOW_LOCKED_THREAD_MSG.to_string());
+            }
             if relay_thread_is_busy(&relay, &source_thread_id) {
                 return Err(FORK_BUSY_SOURCE_MSG.to_string());
             }
@@ -68,6 +71,12 @@ impl AppState {
             let device_scope = relay.device_path_scope(&device_id);
             ensure_path_within_device_scope(&source_cwd, &device_scope, &relay.allowed_roots)?;
             ensure_path_within_device_scope(&cwd, &device_scope, &relay.allowed_roots)?;
+            if relay.is_thread_workflow_locked(&source_thread_id)
+                || relay.is_cwd_workflow_locked(&source_cwd)
+                || relay.is_cwd_workflow_locked(&cwd)
+            {
+                return Err(WORKFLOW_LOCKED_THREAD_MSG.to_string());
+            }
             relay.remembered_thread_settings(&source_thread_id)
         };
 

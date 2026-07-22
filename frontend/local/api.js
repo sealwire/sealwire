@@ -104,6 +104,21 @@ export async function requestReview(apiFetch, input, deviceId) {
   return payload.data;
 }
 
+// Start the built-in Code Flow: author execute -> reviewer review -> author revise.
+// Returns the StartWorkflowReceipt on success; throws on error.
+export async function startWorkflow(apiFetch, input, deviceId) {
+  const response = await apiFetch("/api/session/workflow", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...input, device_id: deviceId }),
+  });
+  const payload = await response.json();
+  if (!response.ok || !payload?.ok) {
+    throw new Error(payload?.error?.message || "Failed to start workflow");
+  }
+  return payload.data;
+}
+
 // Resolve a Blocked review: ask the relay to stop the stuck reviewer and unlock
 // the workspace. Returns the receipt on success; throws on error.
 export async function resolveReview(apiFetch, reviewJobId, deviceId) {
@@ -115,6 +130,21 @@ export async function resolveReview(apiFetch, reviewJobId, deviceId) {
   const payload = await response.json();
   if (!response.ok || !payload?.ok) {
     throw new Error(payload?.error?.message || "Failed to resolve the blocked review");
+  }
+  return payload.data;
+}
+
+// Resolve a Blocked workflow: ask the relay to stop owned author/reviewer turns
+// and unlock the workspace. Returns the receipt on success; throws on error.
+export async function resolveWorkflow(apiFetch, workflowRunId, deviceId) {
+  const response = await apiFetch("/api/session/workflow/resolve", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ workflow_run_id: workflowRunId, device_id: deviceId }),
+  });
+  const payload = await response.json();
+  if (!response.ok || !payload?.ok) {
+    throw new Error(payload?.error?.message || "Failed to resolve the blocked workflow");
   }
   return payload.data;
 }

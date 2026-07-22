@@ -10,20 +10,22 @@
 //! point of "the task just sits there." Because a persisted run has no live
 //! orchestrator after a restart, the restore side reconciles every non-terminal
 //! run to the terminal `Interrupted` state (deterministic fail-and-re-run, not
-//! resume); a `WorkflowRunLifeguard` does the same on mid-session task death.
+//! resume). A `WorkflowRunLifeguard` does the same on mid-session task death only
+//! after owned turns confirm stopped; otherwise it preserves the lock as `Blocked`.
 //!
 //! Phase 1 supports a linear pipeline + one loop construct; the free-form graph
 //! editor and per-run worktree isolation are phase 2. See
 //! `markdown/workflow-runner-design.md`.
 
-// Phase-1 workflow projection: implemented and unit-tested below, but not yet
-// referenced by a live (non-test) code path, so its types/methods read as dead in a
-// normal build. Suppress module-wide until the runner is wired to the handlers.
+// Some phase-2 graph/editing fields and helpers are intentionally ahead of the
+// production Code Flow surface.
 #![allow(dead_code)]
 
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+
+use crate::protocol::{WorkflowRunView, WorkflowVerdictView};
 
 use super::unix_now;
 
@@ -126,6 +128,14 @@ impl WorkflowVerdict {
             findings,
         }
     }
+
+    pub(crate) fn view(&self) -> WorkflowVerdictView {
+        WorkflowVerdictView {
+            approved: self.approved,
+            summary: self.summary.clone(),
+            findings: self.findings.clone(),
+        }
+    }
 }
 
 /// Normalized identity keys for a round's findings, used by the (provisional)
@@ -183,6 +193,14 @@ pub(crate) enum RunStatus {
     /// decodes to a safe TERMINAL state that can never strand a tree lock.
     #[default]
     Failed,
+    /// A cleanup/stop path could not confirm that a file-mutating turn actually
+    /// stopped. Non-terminal on purpose: the workflow continues to own its thread
+    /// and workspace until restart reconciliation or an explicit recovery action.
+    Blocked,
+    /// An explicit recovery action is stopping owned turns. Non-terminal so the
+    /// workflow continues to own its thread/workspace and duplicate recovery
+    /// attempts cannot drain the same threads.
+    Resolving,
     /// The run's orchestrator was lost (relay restart, or mid-session task death)
     /// while still non-terminal. The restore/lifeguard path reconciles to this so
     /// the run is never persisted `Running` with no driver. TERMINAL — the card
@@ -201,6 +219,8 @@ impl RunStatus {
             RunStatus::Done => "done",
             RunStatus::Escalated => "escalated",
             RunStatus::Failed => "failed",
+            RunStatus::Blocked => "blocked",
+            RunStatus::Resolving => "resolving",
             RunStatus::Interrupted => "interrupted",
             RunStatus::Cancelled => "cancelled",
         }
@@ -290,7 +310,9 @@ impl WorkflowRun {
     /// the same guard `ReviewJob` uses so a cancel/interrupt that won a race can't
     /// be clobbered by the orchestrator's next between-step write.
     pub(crate) fn set_status(&mut self, status: RunStatus) {
-        if self.status.is_terminal() {
+        if self.status.is_terminal()
+            || matches!(self.status, RunStatus::Blocked | RunStatus::Resolving)
+        {
             return;
         }
         self.status = status;
@@ -303,11 +325,48 @@ impl WorkflowRun {
     }
 
     pub(crate) fn fail(&mut self, error: impl Into<String>) {
-        if self.status.is_terminal() {
+        if self.status.is_terminal()
+            || matches!(self.status, RunStatus::Blocked | RunStatus::Resolving)
+        {
             return;
         }
         self.error = Some(error.into());
         self.set_status(RunStatus::Failed);
+    }
+
+    pub(crate) fn block(&mut self, error: impl Into<String>) {
+        if self.status.is_terminal() {
+            return;
+        }
+        self.error = Some(error.into());
+        self.status = RunStatus::Blocked;
+        self.updated_at = unix_now();
+    }
+
+    pub(crate) fn begin_resolving_blocked(&mut self) -> bool {
+        if !matches!(self.status, RunStatus::Blocked) {
+            return false;
+        }
+        self.status = RunStatus::Resolving;
+        self.updated_at = unix_now();
+        true
+    }
+
+    pub(crate) fn resolve_blocked_as_failed(&mut self, error: impl Into<String>) {
+        if !matches!(self.status, RunStatus::Resolving) {
+            return;
+        }
+        self.error = Some(error.into());
+        self.status = RunStatus::Failed;
+        self.updated_at = unix_now();
+    }
+
+    pub(crate) fn restore_resolving_as_blocked(&mut self, error: impl Into<String>) -> bool {
+        if !matches!(self.status, RunStatus::Resolving) {
+            return false;
+        }
+        self.block(error);
+        true
     }
 
     /// Reconcile a run whose orchestrator is gone (restart / task death): if it is
@@ -324,6 +383,24 @@ impl WorkflowRun {
         self.status = RunStatus::Interrupted;
         self.updated_at = unix_now();
         true
+    }
+
+    pub(crate) fn view(&self) -> WorkflowRunView {
+        WorkflowRunView {
+            id: self.id.clone(),
+            workflow_id: self.workflow_id.clone(),
+            parent_thread_id: self.parent_thread_id.clone(),
+            anchor_item_id: self.anchor_item_id.clone(),
+            status: self.status.as_str().to_string(),
+            current_step: self.current_step.clone(),
+            round: self.round,
+            reviewer_thread_id: self.step_threads.get("review").cloned(),
+            locked_thread_ids: Vec::new(),
+            last_verdict: self.last_verdict.as_ref().map(|verdict| verdict.view()),
+            requested_at: self.requested_at,
+            updated_at: self.updated_at,
+            error: self.error.clone(),
+        }
     }
 }
 
@@ -364,6 +441,45 @@ mod tests {
                 "a terminal run ({terminal:?}) was resurrected by a later status write",
             );
         }
+    }
+
+    #[test]
+    fn blocked_status_keeps_run_non_terminal_and_stable() {
+        let mut run = sample_run();
+        run.set_status(RunStatus::Running);
+        run.block("turn did not confirm stopping");
+        assert_eq!(run.status, RunStatus::Blocked);
+        assert!(!run.status.is_terminal());
+        assert!(run.error.is_some());
+
+        run.fail("late failure must not unlock it");
+        assert_eq!(run.status, RunStatus::Blocked);
+
+        assert!(run.mark_interrupted_if_stranded());
+        assert_eq!(run.status, RunStatus::Interrupted);
+
+        let mut run = sample_run();
+        run.set_status(RunStatus::Running);
+        run.block("turn did not confirm stopping");
+        run.resolve_blocked_as_failed("resolved without resolving");
+        assert_eq!(
+            run.status,
+            RunStatus::Blocked,
+            "blocked runs must enter Resolving before terminal recovery"
+        );
+        assert!(run.begin_resolving_blocked());
+        assert_eq!(run.status, RunStatus::Resolving);
+        assert!(!run.status.is_terminal());
+        assert!(!run.begin_resolving_blocked());
+        run.fail("late failure must not unlock resolving");
+        assert_eq!(run.status, RunStatus::Resolving);
+        assert!(run.restore_resolving_as_blocked("recovery interrupted"));
+        assert_eq!(run.status, RunStatus::Blocked);
+        assert_eq!(run.error.as_deref(), Some("recovery interrupted"));
+        assert!(run.begin_resolving_blocked());
+        run.resolve_blocked_as_failed("resolved");
+        assert_eq!(run.status, RunStatus::Failed);
+        assert_eq!(run.error.as_deref(), Some("resolved"));
     }
 
     #[test]
@@ -441,6 +557,8 @@ mod tests {
             RunStatus::Done,
             RunStatus::Escalated,
             RunStatus::Failed,
+            RunStatus::Blocked,
+            RunStatus::Resolving,
             RunStatus::Interrupted,
             RunStatus::Cancelled,
         ] {

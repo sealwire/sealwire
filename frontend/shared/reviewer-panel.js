@@ -2,6 +2,7 @@ import React from "react";
 
 import { renderMarkdown } from "./markdown.js";
 import { ReviewLauncher } from "./review-panel.js";
+import { CodeFlowLauncher, WorkflowRunCard } from "./workflow-panel.js";
 import {
   isTerminalReviewStatus,
   reviewChipTone,
@@ -49,10 +50,13 @@ export function renderReviewerText(text) {
 // Pure-presentational reviewer surface. All data + actions are injected so the
 // same component works on the local (apiFetch) and remote (broker) surfaces.
 //   reviewJobs:        Vec<ReviewJobView> from session.active_review_jobs
+//   workflowRuns:      Vec<WorkflowRunView> from session.active_workflow_runs
 //   reviewModel:       { providerOptions, models, defaultProvider }
 //   canRequest:        whether a new review can be started (idle + controller)
 //   onRequestReview:   ({reviewerProvider, reviewerModel, instructions}) => void
+//   onStartWorkflow:   ({taskPrompt, reviewerProvider, reviewerModel}) => void
 //   onResolveReview:   (jobId) => void           (stop a review)
+//   onResolveWorkflow: (runId) => void           (stop a workflow)
 //   onDeleteReview:    (jobId) => void           (delete a terminal review)
 //   fetchReviewerTranscript: (threadId) => Promise<entries[]>
 // Join a job to its reviewer thread's display name (falling back to the raw
@@ -67,22 +71,30 @@ function reviewerThreadName(job, reviewerThreads) {
 
 export function ReviewerPanel({
   reviewJobs = [],
+  workflowRuns = [],
   reviewModel = {},
+  workflowModel = {},
   reusableReviewers = [],
   reviewerThreads = [],
   // The thread this panel is showing (the viewed thread). Sent as the review's parent
   // so "Request review" targets the thread in view, not the relay's active thread.
   parentThreadId = null,
   canRequest = false,
+  canStartWorkflow = false,
   requesting = false,
   onRequestReview,
+  onStartWorkflow,
   onResolveReview,
+  onResolveWorkflow,
   onDeleteReview,
   fetchReviewerTranscript,
   panelId = "review-panel",
 }) {
   const hasJobs = reviewJobs.length > 0;
+  const hasWorkflowRuns = workflowRuns.length > 0;
+  const hasCards = hasJobs || hasWorkflowRuns;
   const canLaunch = typeof onRequestReview === "function";
+  const canLaunchWorkflow = typeof onStartWorkflow === "function";
   // The launcher is ALWAYS rendered (when wiring exists) so the affordance is
   // discoverable; it's just disabled when a review can't be started right now.
   const launcher = () =>
@@ -103,6 +115,22 @@ export function ReviewerPanel({
       disabled: requesting || !canRequest,
       onSubmit: onRequestReview,
     });
+  const workflowLauncher = () =>
+    h(CodeFlowLauncher, {
+      panelId: `${panelId}-code-flow`,
+      label: "Run code flow",
+      title: canStartWorkflow
+        ? "Run the author, reviewer, and revise loop"
+        : "Available on an idle writable author session with no active review or workflow",
+      providerOptions: workflowModel.providerOptions || [],
+      models: workflowModel.models || [],
+      defaultProvider: workflowModel.defaultProvider || "",
+      providerModelsStatus: workflowModel.providerModelsStatus || {},
+      activeProvider: workflowModel.activeProvider || "",
+      onEnsureProviderModels: workflowModel.onEnsureProviderModels,
+      disabled: requesting || !canStartWorkflow,
+      onSubmit: onStartWorkflow,
+    });
 
   return h(
     "section",
@@ -114,18 +142,30 @@ export function ReviewerPanel({
     // card padding) — so we drop it and let the self-contained card, which carries
     // its own launcher, stand alone. (Exactly one launcher mounts per panelId either
     // way: in the header when populated, inside the card when empty.)
-    hasJobs
+    hasCards
       ? h(
           "header",
           { className: "reviewer-panel-header" },
           h("h2", { className: "reviewer-panel-title" }, "Reviewer"),
-          canLaunch ? launcher() : null
+          h(
+            "div",
+            { className: "reviewer-panel-actions" },
+            canLaunchWorkflow ? workflowLauncher() : null,
+            canLaunch ? launcher() : null
+          )
         )
       : null,
-    hasJobs
+    hasCards
       ? h(
           "div",
           { className: "reviewer-panel-list" },
+          ...workflowRuns.map((run) =>
+            h(WorkflowRunCard, {
+              key: run.id,
+              run,
+              onResolveWorkflow,
+            })
+          ),
           ...reviewJobs.map((job) =>
             h(ReviewerJobCard, {
               key: job.id,
@@ -155,12 +195,19 @@ export function ReviewerPanel({
             { className: "reviewer-empty-copy" },
             "Ask another agent to review the current changes. The reviewer runs in its own session and reports back here."
           ),
-          canLaunch ? launcher() : null,
-          !canRequest
+          h(
+            "div",
+            { className: "reviewer-panel-actions" },
+            canLaunchWorkflow ? workflowLauncher() : null,
+            canLaunch ? launcher() : null
+          ),
+          !canRequest && !canStartWorkflow
             ? h(
                 "p",
                 { className: "reviewer-empty-hint" },
-                "Available when the agent is idle and no other device has control."
+                canLaunchWorkflow
+                  ? "Available when the author session is idle and writable."
+                  : "Available when the agent is idle and no other device has control."
               )
             : null
         )

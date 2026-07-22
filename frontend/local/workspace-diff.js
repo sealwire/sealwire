@@ -31,7 +31,15 @@ export function createWorkspaceDiffStore({ apiFetch, fetchDiff = null, surface =
     error: null,
     expanded: false,
     activeTab: readStoredTab(tabStorageKey),
-    review: { reviewJobs: [], reviewModel: {}, canRequest: false, blocked: false },
+    review: {
+      reviewJobs: [],
+      workflowRuns: [],
+      reviewModel: {},
+      workflowModel: {},
+      canRequest: false,
+      canStartWorkflow: false,
+      blocked: false,
+    },
   };
   const listeners = new Set();
 
@@ -452,27 +460,31 @@ export function ReviewerChip({ store, onTap }) {
   const state = useStoreState(store);
   const review = state.review || {};
   const reviewJobs = review.reviewJobs || [];
+  const workflowRuns = review.workflowRuns || [];
   const blocked = Boolean(review.blocked);
   const active = reviewJobs.some((job) => !TERMINAL_REVIEW.has(job.status));
-  const hasReviews = reviewJobs.length > 0;
+  const activeWorkflow = workflowRuns.some(
+    (run) => !["done", "escalated", "failed", "interrupted", "cancelled"].includes(run.status)
+  );
+  const hasReviews = reviewJobs.length > 0 || workflowRuns.length > 0;
   // Only surface once there's an actual review to track (in progress / blocked /
   // done) — that's when the status badge carries signal. In the pure-idle "you
   // could start one" state the chip says nothing and just competes for composer
   // space with the diff chip and the "Want a second opinion?" idle nudge already
   // shown there, so stay hidden and let those handle discovery + launch.
   if (!hasReviews) return null;
-  const badge = blocked ? "⚠" : active ? "•" : hasReviews ? "✓" : null;
+  const badge = blocked ? "⚠" : active || activeWorkflow ? "•" : hasReviews ? "✓" : null;
   const modifier = blocked
     ? "is-blocked"
-    : active
+    : active || activeWorkflow
     ? "is-active"
     : hasReviews
     ? "is-done"
     : "is-idle";
   const title = blocked
     ? "Review blocked — tap to resolve"
-    : active
-    ? "Review in progress — tap to view"
+    : active || activeWorkflow
+    ? "Review workflow in progress — tap to view"
     : hasReviews
     ? "Review complete — tap to view findings"
     : "Ask another agent to review — tap to start";

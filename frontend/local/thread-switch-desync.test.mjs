@@ -27,6 +27,7 @@ import {
 } from "./view-only-thread.js";
 import { canComposeThread, composerButtonState } from "../shared/thread-compose.js";
 import { isReviewInProgressForThread } from "../shared/review-state.js";
+import { isWorkflowInProgressForThread } from "../shared/workflow-state.js";
 import { sessionIsWorking } from "../shared/thread-attention.js";
 
 function snap(activeThreadId, transcript = [], extra = {}) {
@@ -209,6 +210,72 @@ test("view-only idle saved Codex session remains composable", () => {
     false,
     "textarea should stay enabled for an idle targeted-send view"
   );
+});
+
+test("view-only workflow-locked same-cwd session is not composable", () => {
+  const viewThreadId = "same-cwd-sibling";
+  const projected = projectViewOnlySession(snap("live-thread", [], {
+    active_workflow_runs: [
+      {
+        id: "wf1",
+        status: "running",
+        parent_thread_id: "parent-thread",
+        locked_thread_ids: ["parent-thread", viewThreadId],
+      },
+    ],
+  }), {
+    viewThreadId,
+    viewOnlyThread: buildViewOnlyPin({
+      threadId: viewThreadId,
+      page: { thread_id: viewThreadId, entries: [{ item_id: "tail" }], prev_cursor: null },
+      currentStatus: "notLoaded",
+      workflowLocked: true,
+    }),
+  });
+  const activeThreadFrozen = isWorkflowInProgressForThread(projected, projected.active_thread_id);
+  const canCompose = canComposeThread({
+    activeTurnId: projected.active_turn_id,
+    hasActiveSession: Boolean(projected.active_thread_id),
+    hasControllerLease: projected.active_controller_device_id !== "__view_only__",
+    reviewLocked: activeThreadFrozen,
+  });
+
+  assert.equal(projected.workflow_locked, true);
+  assert.equal(activeThreadFrozen, true);
+  assert.equal(canCompose, false);
+});
+
+test("view-only different-cwd session stays composable during unrelated workflow", () => {
+  const viewThreadId = "different-cwd";
+  const projected = projectViewOnlySession(snap("live-thread", [], {
+    active_workflow_runs: [
+      {
+        id: "wf1",
+        status: "running",
+        parent_thread_id: "parent-thread",
+        locked_thread_ids: ["parent-thread", "same-cwd-sibling"],
+      },
+    ],
+  }), {
+    viewThreadId,
+    viewOnlyThread: buildViewOnlyPin({
+      threadId: viewThreadId,
+      page: { thread_id: viewThreadId, entries: [{ item_id: "tail" }], prev_cursor: null },
+      currentStatus: "notLoaded",
+      workflowLocked: false,
+    }),
+  });
+  const activeThreadFrozen = isWorkflowInProgressForThread(projected, projected.active_thread_id);
+  const canCompose = canComposeThread({
+    activeTurnId: projected.active_turn_id,
+    hasActiveSession: Boolean(projected.active_thread_id),
+    hasControllerLease: projected.active_controller_device_id !== "__view_only__",
+    reviewLocked: activeThreadFrozen,
+  });
+
+  assert.equal(projected.workflow_locked, false);
+  assert.equal(activeThreadFrozen, false);
+  assert.equal(canCompose, true);
 });
 
 test("a newer snapshot activity row keeps a viewed thread working", () => {

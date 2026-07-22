@@ -294,6 +294,8 @@ fn test_cached_remote_action_result(action_kind: &str, ok: bool) -> CachedRemote
             active_review_jobs: Vec::new(),
             reviewer_threads: Vec::new(),
             reviews_revision: 0,
+            active_workflow_runs: Vec::new(),
+            workflows_revision: 0,
             push_vapid_public_key: None,
         }),
         receipt: Some(ApprovalReceipt {
@@ -1975,6 +1977,54 @@ fn reviewers_to_evict_protects_active_review_reviewer() {
     assert_eq!(
         relay.reviewers_to_evict("parent-1", 5),
         vec!["rev-2".to_string()]
+    );
+}
+
+#[test]
+fn reviewers_to_evict_protects_active_workflow_reviewer() {
+    let mut relay = test_state();
+    for index in 1..=6u64 {
+        relay.register_reviewer_thread(format!("rev-{index}"), "parent-1".to_string());
+    }
+
+    let mut active = WorkflowRun::new(
+        "workflow-active".to_string(),
+        "code_flow".to_string(),
+        "parent-1".to_string(),
+        "anchor".to_string(),
+        "/tmp/project".to_string(),
+        "device-1".to_string(),
+    );
+    active.set_status(RunStatus::Running);
+    active
+        .step_threads
+        .insert("review".to_string(), "rev-1".to_string());
+    relay.insert_workflow_run(active);
+
+    assert_eq!(
+        relay.reviewers_to_evict("parent-1", 5),
+        vec!["rev-2".to_string()],
+        "active workflow reviewer is protected, so the next-oldest evicts"
+    );
+
+    let mut terminal = WorkflowRun::new(
+        "workflow-terminal".to_string(),
+        "code_flow".to_string(),
+        "parent-1".to_string(),
+        "anchor".to_string(),
+        "/tmp/project".to_string(),
+        "device-1".to_string(),
+    );
+    terminal.set_status(RunStatus::Done);
+    terminal
+        .step_threads
+        .insert("review".to_string(), "rev-2".to_string());
+    relay.insert_workflow_run(terminal);
+
+    assert_eq!(
+        relay.reviewers_to_evict("parent-1", 5),
+        vec!["rev-2".to_string()],
+        "terminal workflow reviewers are eligible for bounded cleanup"
     );
 }
 

@@ -4106,6 +4106,28 @@ test("projectRemoteViewedSession keeps the viewed thread's reviewers across re-p
   );
 });
 
+test("projectRemoteViewedSession preserves the viewed thread workflow lock", async () => {
+  activeBrowser = installBrowserStubs();
+  const { projectRemoteViewedSession } = await import("./session-ops.js");
+
+  const realSession = { active_thread_id: "live-thread" };
+  const entry = projectRemoteViewedSession(realSession, "viewed-thread", {
+    active_thread_id: "viewed-thread",
+    thread_state: {
+      workflow_locked: true,
+      current_status: "notLoaded",
+    },
+  });
+  assert.equal(entry.workflow_locked, true);
+
+  const reprojected = projectRemoteViewedSession(realSession, "viewed-thread", entry);
+  assert.equal(
+    reprojected.workflow_locked,
+    true,
+    "snapshot/delta re-projection should not lose the per-thread workflow lock"
+  );
+});
+
 test("projectRemoteViewedSession keeps same-second activity authoritative", async () => {
   activeBrowser = installBrowserStubs();
   const { projectRemoteViewedSession } = await import("./session-ops.js");

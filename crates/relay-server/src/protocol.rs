@@ -158,6 +158,15 @@ pub struct SessionSnapshot {
     /// liveness/lock gating only.
     #[serde(default)]
     pub reviews_revision: u64,
+    /// Active (and recently-finished) relay-owned workflow runs. Phase 1 exposes
+    /// built-in Code Flow runs here so local and broker-bound clients can render
+    /// progress without a second channel.
+    #[serde(default)]
+    pub active_workflow_runs: Vec<WorkflowRunView>,
+    /// Content revision for `active_workflow_runs`, used by clients that want a
+    /// cheap change detector without diffing cards.
+    #[serde(default)]
+    pub workflows_revision: u64,
     /// VAPID public key (base64url, uncompressed P-256 point) the remote app uses
     /// as `applicationServerKey` to subscribe to Web Push. `None` until the push
     /// dispatcher is wired. Not secret — safe to publish in the snapshot.
@@ -228,6 +237,45 @@ fn review_job_status_is_terminal(status: &str) -> bool {
     matches!(status, "complete" | "failed" | "escalated" | "cancelled")
 }
 
+fn workflow_run_status_is_terminal(status: &str) -> bool {
+    matches!(
+        status,
+        "done" | "escalated" | "failed" | "interrupted" | "cancelled"
+    )
+}
+
+fn compact_workflow_runs(
+    runs: &mut [WorkflowRunView],
+    max_field_bytes: usize,
+    max_verdict_bytes: usize,
+    max_verdict_findings: usize,
+) {
+    for run in runs {
+        truncate_utf8_bytes_with_ellipsis(&mut run.anchor_item_id, max_field_bytes);
+        truncate_utf8_bytes_with_ellipsis(&mut run.current_step, max_field_bytes);
+        if let Some(error) = &mut run.error {
+            truncate_utf8_bytes_with_ellipsis(error, max_field_bytes);
+        }
+        if run.locked_thread_ids.len() > max_verdict_findings * 8 {
+            run.locked_thread_ids.truncate(max_verdict_findings * 8);
+        }
+        for thread_id in &mut run.locked_thread_ids {
+            truncate_utf8_bytes_with_ellipsis(thread_id, max_field_bytes);
+        }
+        if let Some(verdict) = &mut run.last_verdict {
+            if let Some(summary) = &mut verdict.summary {
+                truncate_utf8_bytes_with_ellipsis(summary, max_verdict_bytes);
+            }
+            if verdict.findings.len() > max_verdict_findings {
+                verdict.findings.truncate(max_verdict_findings);
+            }
+            for finding in &mut verdict.findings {
+                truncate_utf8_bytes_with_ellipsis(finding, max_verdict_bytes);
+            }
+        }
+    }
+}
+
 /// When even per-field fallback truncation can't get a snapshot under budget
 /// (e.g. an oversized non-transcript field such as a very long cwd), the
 /// surviving transcript tail is reduced to identity shells whose text is clipped
@@ -239,6 +287,13 @@ pub(crate) const EMERGENCY_TRANSCRIPT_SHELL_CHARS: usize = 24;
 /// an over-budget frame (see the emergency-shell path). Generous enough to keep a
 /// realistically deep path readable, but bounded so it cannot blow the byte cap.
 const EMERGENCY_TRANSCRIPT_CWD_CHARS: usize = 512;
+pub(crate) const WORKFLOW_ANCHOR_STORED_BYTES: usize = 512;
+const WORKFLOW_FIELD_REMOTE_BYTES: usize = 256;
+const WORKFLOW_FIELD_LOCAL_BYTES: usize = 512;
+const WORKFLOW_VERDICT_REMOTE_BYTES: usize = 768;
+const WORKFLOW_VERDICT_LOCAL_BYTES: usize = 1_536;
+const WORKFLOW_VERDICT_REMOTE_FINDINGS: usize = 4;
+const WORKFLOW_VERDICT_LOCAL_FINDINGS: usize = 6;
 
 const SESSION_SNAPSHOT_REMOTE_SURFACE_BUDGET: SessionSnapshotCompactBudget =
     SessionSnapshotCompactBudget {
@@ -262,6 +317,10 @@ const SESSION_SNAPSHOT_REMOTE_SURFACE_BUDGET: SessionSnapshotCompactBudget =
         drop_operator_only_logs: true,
         emergency_shell_transcript: true,
         max_active_review_jobs: 8,
+        max_active_workflow_runs: 8,
+        max_workflow_field_bytes: WORKFLOW_FIELD_REMOTE_BYTES,
+        max_workflow_verdict_bytes: WORKFLOW_VERDICT_REMOTE_BYTES,
+        max_workflow_verdict_findings: WORKFLOW_VERDICT_REMOTE_FINDINGS,
         max_reviewer_threads: 8,
         max_device_records: 12,
     };
@@ -292,6 +351,10 @@ const SESSION_SNAPSHOT_LOCAL_WEB_BUDGET: SessionSnapshotCompactBudget =
         // transcript/inline field — not by accumulated review/device metadata.
         emergency_shell_transcript: true,
         max_active_review_jobs: 24,
+        max_active_workflow_runs: 24,
+        max_workflow_field_bytes: WORKFLOW_FIELD_LOCAL_BYTES,
+        max_workflow_verdict_bytes: WORKFLOW_VERDICT_LOCAL_BYTES,
+        max_workflow_verdict_findings: WORKFLOW_VERDICT_LOCAL_FINDINGS,
         max_reviewer_threads: 48,
         max_device_records: 48,
     };
@@ -364,7 +427,7 @@ const THREAD_ENTRY_DETAIL_INLINE_CHARS: usize = 12_000;
 const THREAD_ENTRY_DETAIL_INITIAL_CHUNK_CHARS: usize = 4_000;
 const THREAD_ENTRY_DETAIL_CHUNK_CHARS: usize = 12_000;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum SessionSnapshotCompactProfile {
     LocalWeb,
     RemoteSurface,
@@ -412,6 +475,15 @@ struct SessionSnapshotCompactBudget {
     /// Hard cap on `active_review_jobs`. These are high-churn, low-value chips;
     /// without a bound they could displace transcript content from the snapshot.
     max_active_review_jobs: usize,
+    /// Hard cap on workflow run cards. Non-terminal runs are never dropped.
+    max_active_workflow_runs: usize,
+    /// Hard caps for workflow card strings in the snapshot. Full reviewer
+    /// transcripts live on the reviewer thread; the high-frequency snapshot must
+    /// stay bounded even if a client submits a huge anchor or a reviewer emits a
+    /// huge final message.
+    max_workflow_field_bytes: usize,
+    max_workflow_verdict_bytes: usize,
+    max_workflow_verdict_findings: usize,
     /// Hard cap on `reviewer_threads` retained in the snapshot (applied after the
     /// active-parent scoping above). Bounds an otherwise unbounded map.
     max_reviewer_threads: usize,
@@ -432,7 +504,7 @@ struct ThreadsResponseReductionStage {
     max_preview_chars: Option<usize>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum ThreadsResponseCompactProfile {
     // Constructed only from tests so far; not yet wired into a live path.
     #[allow(dead_code)]
@@ -512,6 +584,29 @@ impl SessionSnapshot {
             });
             self.active_review_jobs = kept;
         }
+        if self.active_workflow_runs.len() > budget.max_active_workflow_runs {
+            let max = budget.max_active_workflow_runs;
+            let (non_terminal, terminal): (Vec<_>, Vec<_>) =
+                std::mem::take(&mut self.active_workflow_runs)
+                    .into_iter()
+                    .partition(|run| !workflow_run_status_is_terminal(&run.status));
+            let terminal_keep = max.saturating_sub(non_terminal.len());
+            let mut kept = non_terminal;
+            kept.extend(terminal.into_iter().take(terminal_keep));
+            kept.sort_by(|left, right| {
+                right
+                    .updated_at
+                    .cmp(&left.updated_at)
+                    .then_with(|| right.id.cmp(&left.id))
+            });
+            self.active_workflow_runs = kept;
+        }
+        compact_workflow_runs(
+            &mut self.active_workflow_runs,
+            budget.max_workflow_field_bytes,
+            budget.max_workflow_verdict_bytes,
+            budget.max_workflow_verdict_findings,
+        );
         if self.reviewer_threads.len() > budget.max_reviewer_threads {
             let active = self.active_thread_id.clone();
             self.reviewer_threads
@@ -750,7 +845,10 @@ impl SessionSnapshot {
             // comment above): the oldest TERMINAL review job (never a non-terminal
             // one — the blocked/running alert depends on it), the terminal device
             // record (tail), and the non-active-parent reviewer (tail — the
-            // up-front cap floats active-parent reviewers to the front).
+            // up-front cap floats active-parent reviewers to the front). Terminal
+            // workflow cards are held until after transcript shelling because they
+            // have no independent detail channel; dropping them is a true last
+            // resort.
             if let Some(pos) = self
                 .active_review_jobs
                 .iter()
@@ -816,6 +914,16 @@ impl SessionSnapshot {
                             truncate_with_ellipsis(url, EMERGENCY_TRANSCRIPT_SHELL_CHARS);
                         }
                     }
+                }
+            }
+            if serialized_len(&self) > budget.target_bytes {
+                if let Some(pos) = self
+                    .active_workflow_runs
+                    .iter()
+                    .rposition(|run| workflow_run_status_is_terminal(&run.status))
+                {
+                    self.active_workflow_runs.remove(pos);
+                    continue;
                 }
             }
             break;
@@ -926,6 +1034,30 @@ pub(crate) fn truncate_with_ellipsis(value: &mut String, max_chars: usize) -> bo
         .chars()
         .take(max_chars.saturating_sub(ELLIPSIS_LEN))
         .collect::<String>();
+    truncated.push_str("...");
+    *value = truncated;
+    true
+}
+
+pub(crate) fn truncate_utf8_bytes_with_ellipsis(value: &mut String, max_bytes: usize) -> bool {
+    if value.len() <= max_bytes {
+        return false;
+    }
+    if max_bytes <= ELLIPSIS_LEN {
+        *value = ".".repeat(max_bytes);
+        return true;
+    }
+
+    let content_max = max_bytes - ELLIPSIS_LEN;
+    let mut end = 0;
+    for (idx, ch) in value.char_indices() {
+        let next = idx + ch.len_utf8();
+        if next > content_max {
+            break;
+        }
+        end = next;
+    }
+    let mut truncated = value[..end].to_string();
     truncated.push_str("...");
     *value = truncated;
     true
@@ -1411,6 +1543,7 @@ pub struct ThreadStateView {
     /// `available_models`.
     pub reviewers: Vec<ReviewerThreadView>,
     pub review_locked: bool,
+    pub workflow_locked: bool,
     pub settings_writable: bool,
 }
 
@@ -1741,6 +1874,62 @@ pub struct RequestReviewReceipt {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartWorkflowInput {
+    /// Phase 1 accepts only the built-in `code_flow` template. `None` also means
+    /// `code_flow` so local callers can omit it.
+    #[serde(default)]
+    pub workflow_id: Option<String>,
+    /// The author turn prompt. For a Claude author thread this is the "Claude
+    /// writes code" step before the Codex review step.
+    pub task_prompt: String,
+    /// Reviewer provider key. Today this should be a provider with a hard
+    /// read-only sandbox, normally `codex`.
+    pub reviewer_provider: String,
+    #[serde(default)]
+    pub reviewer_model: Option<String>,
+    #[serde(default)]
+    pub reviewer_instructions: Option<String>,
+    /// Round budget for review/revise. `None` defaults to 2; clamped server-side.
+    #[serde(default)]
+    pub max_rounds: Option<u32>,
+    /// Optional UI placement anchor. If absent, the run is still visible in the
+    /// workflow cards.
+    #[serde(default)]
+    pub anchor_item_id: Option<String>,
+    #[serde(default)]
+    pub device_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkflowRunStatusView {
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StartWorkflowReceipt {
+    pub workflow_run_id: String,
+    pub parent_thread_id: String,
+    pub status: WorkflowRunStatusView,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WorkflowActionInput {
+    #[serde(default)]
+    pub workflow_run_id: Option<String>,
+    #[serde(default)]
+    pub device_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkflowActionReceipt {
+    pub workflow_run_id: String,
+    pub parent_thread_id: String,
+    pub status: WorkflowRunStatusView,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ReviewDeleteReceipt {
     pub review_job_id: String,
@@ -1772,6 +1961,30 @@ pub struct ReviewJobView {
     pub round: u32,
     pub max_rounds: u32,
     pub verdict: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Hash)]
+pub struct WorkflowVerdictView {
+    pub approved: bool,
+    pub summary: Option<String>,
+    pub findings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct WorkflowRunView {
+    pub id: String,
+    pub workflow_id: String,
+    pub parent_thread_id: String,
+    pub anchor_item_id: String,
+    pub status: String,
+    pub current_step: String,
+    pub round: u32,
+    pub reviewer_thread_id: Option<String>,
+    pub locked_thread_ids: Vec<String>,
+    pub last_verdict: Option<WorkflowVerdictView>,
+    pub requested_at: u64,
+    pub updated_at: u64,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

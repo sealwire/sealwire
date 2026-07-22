@@ -130,6 +130,11 @@ import {
   isReviewInProgressForThread,
   selectReviewLaunchModel,
 } from "../shared/review-state.js";
+import {
+  canStartWorkflow,
+  selectWorkflowLaunchModel,
+  workflowRunsForThread,
+} from "../shared/workflow-state.js";
 import { ReviewLauncher } from "../shared/review-panel.js";
 import {
   createReviewsCache,
@@ -774,8 +779,11 @@ function RemoteApp() {
   const reviewerActions = useMemo(
     () => ({
       onRequestReview: (values) => handlersRef.current.onRequestReview?.(values),
+      onStartWorkflow: (values) => handlersRef.current.onStartWorkflow?.(values),
       onResolveReview: (reviewJobId) =>
         handlersRef.current.onResolveReview?.(reviewJobId),
+      onResolveWorkflow: (workflowRunId) =>
+        handlersRef.current.onResolveWorkflow?.(workflowRunId),
       onDeleteReview: (reviewId) => handlersRef.current.onDeleteReview?.(reviewId),
       fetchReviewerTranscript: (threadId) =>
         Promise.resolve(handlersRef.current.onFetchReviewerTranscript?.(threadId)).then(
@@ -796,6 +804,7 @@ function RemoteApp() {
   const remoteThreadReviewJobs = (session?.active_review_jobs || []).filter(
     (job) => job.parent_thread_id === remoteViewedThreadId
   );
+  const remoteThreadWorkflowRuns = workflowRunsForThread(session, remoteViewedThreadId);
   // Reviewer-panel data over the dedicated (uncompacted) `fetch_reviews` channel, cached and
   // re-fetched only when the snapshot's `reviews_revision` changes — so the panel survives
   // live-turn compaction (which drains the snapshot's `active_review_jobs`).
@@ -818,8 +827,9 @@ function RemoteApp() {
       review_jobs: session?.active_review_jobs || [],
       reviewer_threads: session?.reviewer_threads || [],
     };
-    getRemoteWorkspaceDiffStore().setReview({
-      reviewJobs: reviewCardsForViewedThread(reviewsData, remoteViewedThreadId),
+      getRemoteWorkspaceDiffStore().setReview({
+        reviewJobs: reviewCardsForViewedThread(reviewsData, remoteViewedThreadId),
+        workflowRuns: remoteThreadWorkflowRuns,
       reviewModel: {
         ...selectReviewLaunchModel({
           providers: remoteUi.providers,
@@ -832,6 +842,16 @@ function RemoteApp() {
         activeProvider: session?.provider || "",
         onEnsureProviderModels: ensureRemoteProviderModels,
       },
+      workflowModel: {
+        ...selectWorkflowLaunchModel({
+          providers: remoteUi.providers,
+          providerModels: remoteUi.providerModels,
+          session,
+        }),
+        providerModelsStatus: remoteUi.providerModelsStatus,
+        activeProvider: session?.provider || "",
+        onEnsureProviderModels: ensureRemoteProviderModels,
+      },
       reusableReviewers: reusableReviewersFromReviews(reviewsData, remoteViewedThreadId, null),
       // Full reviewer-thread list so each card can show its reviewer thread's
       // (long, truncated-with-tooltip) name by joining on reviewer_thread_id.
@@ -840,7 +860,10 @@ function RemoteApp() {
       // sent as the review's parent so the backend reviews this thread explicitly.
       parentThreadId: remoteViewedThreadId,
       canRequest: canRequestReview(session, remoteDeviceId, remoteViewedThreadId),
-      blocked: isReviewBlocked({ active_review_jobs: remoteThreadReviewJobs }),
+      canStartWorkflow: hasControllerLease && canStartWorkflow(session),
+      blocked:
+        isReviewBlocked({ active_review_jobs: remoteThreadReviewJobs }) ||
+        remoteThreadWorkflowRuns.some((run) => run?.status === "blocked"),
     });
   }, [
     session,
@@ -849,6 +872,7 @@ function RemoteApp() {
     remoteUi.providerModels,
     remoteUi.providerModelsStatus,
     remoteDeviceId,
+    hasControllerLease,
   ]);
 
   // Inputs for the composer idle nudge ("Want a second opinion on these
@@ -2092,7 +2116,9 @@ function RemoteThreadPanel({
         onEnsureFileChangeDetail,
         onSubmitDecision,
         onSubmitAskUserAnswers,
-        pendingAskUserQuestions,
+        pendingAskUserQuestions: sessionView.activeThreadFrozen
+          ? []
+          : pendingAskUserQuestions,
         session,
         transcriptDetailEntries,
         askUserDetailErrors,

@@ -45,6 +45,11 @@ impl AppState {
             if relay.is_thread_review_locked(&pending.thread_id) {
                 return Err(ApprovalError::Bridge(REVIEW_LOCKED_THREAD_MSG.to_string()));
             }
+            if relay.is_thread_or_cwd_workflow_locked(&pending.thread_id) {
+                return Err(ApprovalError::Bridge(
+                    WORKFLOW_LOCKED_THREAD_MSG.to_string(),
+                ));
+            }
             pending
         };
 
@@ -118,6 +123,11 @@ impl AppState {
             if relay.is_thread_review_locked(&pending.thread_id) {
                 return Err(AskUserAnswerError::Bridge(
                     REVIEW_LOCKED_THREAD_MSG.to_string(),
+                ));
+            }
+            if relay.is_thread_or_cwd_workflow_locked(&pending.thread_id) {
+                return Err(AskUserAnswerError::Bridge(
+                    WORKFLOW_LOCKED_THREAD_MSG.to_string(),
                 ));
             }
         }
@@ -207,6 +217,9 @@ impl AppState {
             let thread_id = requested_thread;
             if relay.is_thread_review_locked(&thread_id) {
                 return Err(REVIEW_LOCKED_THREAD_MSG.to_string());
+            }
+            if relay.is_thread_or_cwd_workflow_locked(&thread_id) {
+                return Err(WORKFLOW_LOCKED_THREAD_MSG.to_string());
             }
             let runtime = relay
                 .runtime_for_thread(&thread_id)

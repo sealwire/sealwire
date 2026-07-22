@@ -1,12 +1,13 @@
 use crate::protocol::strip_file_change_diffs_for_snapshot;
 use crate::protocol::{
-    truncate_with_ellipsis, ApprovalRequestView, AskUserOptionView, AskUserQuestionRequestView,
-    AskUserQuestionView, DeleteThreadInput, DeviceLifecycleState, DeviceRecordView,
-    FileChangeDiffView, LogEntryView, ReviewActionInput, ReviewJobView, ReviewerThreadView,
-    SecurityMode, SessionSnapshot, SessionSnapshotCompactProfile, ThreadEntriesResponse,
-    ThreadEntryDetailResponse, ThreadSummaryView, ThreadTranscriptResponse, ThreadsResponse,
-    ThreadsResponseCompactProfile, ToolCallView, TranscriptContentState, TranscriptEntryKind,
-    TranscriptEntryView, EMERGENCY_TRANSCRIPT_SHELL_CHARS,
+    truncate_utf8_bytes_with_ellipsis, truncate_with_ellipsis, ApprovalRequestView,
+    AskUserOptionView, AskUserQuestionRequestView, AskUserQuestionView, DeleteThreadInput,
+    DeviceLifecycleState, DeviceRecordView, FileChangeDiffView, LogEntryView, ReviewActionInput,
+    ReviewJobView, ReviewerThreadView, SecurityMode, SessionSnapshot,
+    SessionSnapshotCompactProfile, ThreadEntriesResponse, ThreadEntryDetailResponse,
+    ThreadSummaryView, ThreadTranscriptResponse, ThreadsResponse, ThreadsResponseCompactProfile,
+    ToolCallView, TranscriptContentState, TranscriptEntryKind, TranscriptEntryView,
+    WorkflowRunView, WorkflowVerdictView, EMERGENCY_TRANSCRIPT_SHELL_CHARS,
 };
 
 const MAX_BROKER_LOGS: usize = 8;
@@ -115,6 +116,8 @@ fn make_snapshot() -> SessionSnapshot {
         active_review_jobs: vec![],
         reviewer_threads: vec![],
         reviews_revision: 0,
+        active_workflow_runs: vec![],
+        workflows_revision: 0,
         push_vapid_public_key: None,
     }
 }
@@ -144,6 +147,41 @@ fn review_job_view(
             "no blocking findings".to_string()
         }),
     }
+}
+
+fn workflow_run_view(id: impl Into<String>, status: &str, payload_chars: usize) -> WorkflowRunView {
+    let id = id.into();
+    WorkflowRunView {
+        id,
+        workflow_id: "code_flow".to_string(),
+        parent_thread_id: "thread-1".to_string(),
+        anchor_item_id: "anchor-1".to_string(),
+        status: status.to_string(),
+        current_step: "review".to_string(),
+        round: 1,
+        reviewer_thread_id: Some("reviewer-thread-1".to_string()),
+        locked_thread_ids: Vec::new(),
+        last_verdict: Some(WorkflowVerdictView {
+            approved: false,
+            summary: Some("s".repeat(payload_chars)),
+            findings: vec!["f".repeat(payload_chars)],
+        }),
+        requested_at: 1,
+        updated_at: 2,
+        error: None,
+    }
+}
+
+fn workflow_budget_snapshot(status: &str, payload_chars: usize) -> SessionSnapshot {
+    let mut snapshot = make_snapshot();
+    snapshot.active_turn_id = None;
+    snapshot.transcript.clear();
+    snapshot.logs.clear();
+    snapshot.pending_approvals.clear();
+    snapshot.reviewer_threads.clear();
+    snapshot.device_records.clear();
+    snapshot.active_workflow_runs = vec![workflow_run_view("workflow-1", status, payload_chars)];
+    snapshot
 }
 
 #[test]
@@ -251,6 +289,157 @@ fn compact_for_broker_limits_logs_and_transcript() {
         .map(|value| value.chars().count() <= 800)
         .unwrap_or(true));
     assert!(serde_json::to_vec(&compacted).unwrap().len() <= SESSION_SNAPSHOT_TARGET_BYTES);
+}
+
+#[test]
+fn compact_for_broker_truncates_oversized_non_terminal_workflow_verdict() {
+    let snapshot = workflow_budget_snapshot("blocked", 50_000);
+    let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::RemoteSurface);
+    let bytes = serde_json::to_vec(&compacted).unwrap().len();
+
+    assert!(
+        bytes <= SESSION_SNAPSHOT_TARGET_BYTES,
+        "compacted snapshot stayed over budget: {bytes}"
+    );
+    assert_eq!(compacted.active_workflow_runs.len(), 1);
+    let verdict = compacted.active_workflow_runs[0]
+        .last_verdict
+        .as_ref()
+        .expect("blocked workflow verdict should remain visible");
+    assert!(verdict.summary.as_ref().unwrap().ends_with("..."));
+    assert!(verdict.summary.as_ref().unwrap().len() <= 768);
+    assert!(verdict.findings[0].ends_with("..."));
+    assert!(verdict.findings[0].len() <= 768);
+}
+
+#[test]
+fn compact_for_broker_preserves_terminal_workflow_verdict_after_truncating() {
+    let snapshot = workflow_budget_snapshot("escalated", 50_000);
+    let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::RemoteSurface);
+    let bytes = serde_json::to_vec(&compacted).unwrap().len();
+
+    assert!(
+        bytes <= SESSION_SNAPSHOT_TARGET_BYTES,
+        "compacted snapshot stayed over budget: {bytes}"
+    );
+    assert_eq!(compacted.active_workflow_runs.len(), 1);
+    let run = &compacted.active_workflow_runs[0];
+    assert_eq!(run.status, "escalated");
+    let verdict = run
+        .last_verdict
+        .as_ref()
+        .expect("terminal workflow verdict should stay available when it fits after truncation");
+    assert_eq!(verdict.approved, false);
+    assert!(verdict.findings[0].ends_with("..."));
+    assert!(verdict.findings[0].len() <= 768);
+}
+
+#[test]
+fn compact_for_broker_preserves_terminal_workflow_verdict_in_populated_snapshot() {
+    let mut snapshot = workflow_budget_snapshot("escalated", 50_000);
+    snapshot.current_cwd = "/tmp/".to_string() + &"超长路径".repeat(3_000);
+    snapshot.transcript = (0..3)
+        .map(|index| TranscriptEntryView {
+            item_id: Some(format!("item-{index}")),
+            kind: TranscriptEntryKind::AgentText,
+            text: Some(format!("visible conversation tail {index}")),
+            status: "completed".to_string(),
+            turn_id: Some(format!("turn-{index}")),
+            tool: None,
+            content_state: TranscriptContentState::Full,
+        })
+        .collect();
+
+    let compacted = snapshot.compact_for(SessionSnapshotCompactProfile::RemoteSurface);
+    let bytes = serde_json::to_vec(&compacted).unwrap().len();
+
+    assert!(
+        bytes <= SESSION_SNAPSHOT_TARGET_BYTES,
+        "compacted snapshot stayed over budget: {bytes}"
+    );
+    assert_eq!(
+        compacted.active_workflow_runs.len(),
+        1,
+        "terminal workflow card is the only workflow findings surface"
+    );
+    let verdict = compacted.active_workflow_runs[0]
+        .last_verdict
+        .as_ref()
+        .expect("terminal workflow verdict remains visible");
+    assert_eq!(verdict.approved, false);
+    assert!(verdict.findings[0].contains("f"));
+}
+
+#[test]
+fn compact_for_surfaces_bounds_workflow_anchor_and_many_unicode_findings() {
+    for (profile, target, max_field_bytes, max_verdict_bytes, max_findings) in [
+        (
+            SessionSnapshotCompactProfile::RemoteSurface,
+            SESSION_SNAPSHOT_TARGET_BYTES,
+            256,
+            768,
+            4,
+        ),
+        (
+            SessionSnapshotCompactProfile::LocalWeb,
+            LOCAL_SESSION_SNAPSHOT_TARGET_BYTES,
+            512,
+            1536,
+            6,
+        ),
+    ] {
+        let mut snapshot = workflow_budget_snapshot("blocked", 0);
+        let run = snapshot
+            .active_workflow_runs
+            .first_mut()
+            .expect("workflow fixture");
+        run.anchor_item_id = "锚".repeat(20_000);
+        run.current_step = "审".repeat(20_000);
+        run.error = Some("错".repeat(20_000));
+        run.last_verdict = Some(WorkflowVerdictView {
+            approved: false,
+            summary: Some("总".repeat(20_000)),
+            findings: (0..40)
+                .map(|index| format!("问题 {index}: {}", "细".repeat(20_000)))
+                .collect(),
+        });
+
+        let compacted = snapshot.compact_for(profile);
+        let bytes = serde_json::to_vec(&compacted).unwrap().len();
+
+        assert!(
+            bytes <= target,
+            "profile {profile:?} compacted snapshot stayed over budget: {bytes}"
+        );
+        let run = compacted
+            .active_workflow_runs
+            .first()
+            .expect("non-terminal workflow must be retained");
+        assert!(run.anchor_item_id.ends_with("..."));
+        assert!(run.anchor_item_id.len() <= max_field_bytes);
+        assert!(run.current_step.ends_with("..."));
+        assert!(run.current_step.len() <= max_field_bytes);
+        assert!(run.error.as_ref().unwrap().ends_with("..."));
+        assert!(run.error.as_ref().unwrap().len() <= max_field_bytes);
+
+        let verdict = run.last_verdict.as_ref().expect("verdict retained");
+        assert!(verdict.summary.as_ref().unwrap().ends_with("..."));
+        assert!(verdict.summary.as_ref().unwrap().len() <= max_verdict_bytes);
+        assert_eq!(verdict.findings.len(), max_findings);
+        for finding in &verdict.findings {
+            assert!(finding.ends_with("..."));
+            assert!(finding.len() <= max_verdict_bytes);
+        }
+    }
+}
+
+#[test]
+fn truncate_utf8_bytes_with_ellipsis_preserves_character_boundaries() {
+    let mut value = "锚点abcdef".to_string();
+    assert!(truncate_utf8_bytes_with_ellipsis(&mut value, 8));
+    assert!(value.ends_with("..."));
+    assert!(value.len() <= 8);
+    assert!(std::str::from_utf8(value.as_bytes()).is_ok());
 }
 
 #[test]

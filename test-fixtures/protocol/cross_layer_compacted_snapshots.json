@@ -8,6 +8,7 @@
     "active_thread_id": "thread-preview",
     "active_thread_promoted_from": null,
     "active_turn_id": "turn-1",
+    "active_workflow_runs": [],
     "allowed_roots": [],
     "approval_policy": "untrusted",
     "audit_enabled": false,
@@ -74,7 +75,8 @@
       }
     ],
     "transcript_revision": 3,
-    "transcript_truncated": true
+    "transcript_truncated": true,
+    "workflows_revision": 0
   },
   "remote_omitted_authoritative_entries": [
     {
@@ -104,6 +106,7 @@
     "active_thread_id": "thread-omitted",
     "active_thread_promoted_from": null,
     "active_turn_id": "turn-1",
+    "active_workflow_runs": [],
     "allowed_roots": [],
     "approval_policy": "untrusted",
     "audit_enabled": false,
@@ -161,6 +164,7 @@
       }
     ],
     "transcript_revision": 3,
-    "transcript_truncated": true
+    "transcript_truncated": true,
+    "workflows_revision": 0
   }
 }

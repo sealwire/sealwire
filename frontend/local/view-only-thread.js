@@ -31,6 +31,7 @@ export function buildViewOnlyPin({
   page = null,
   generation = 0,
   review = false,
+  workflowLocked = false,
   reviewSig = null,
   cwd = null,
   provider = null,
@@ -57,6 +58,7 @@ export function buildViewOnlyPin({
     olderCursor: page ? page.prev_cursor ?? null : priorOlderCursor,
     generation,
     review,
+    workflowLocked,
     reviewSig,
     // The viewed thread's own metadata, from its thread summary. The projection
     // uses these so a cross-workspace saved thread shows ITS workspace/provider
@@ -251,6 +253,7 @@ export function projectViewOnlySession(realSession, { viewThreadId, viewOnlyThre
     sandbox: settings.sandbox || "",
     available_models: viewOnlyThread.availableModels || [],
     review_locked: Boolean(viewOnlyThread.review),
+    workflow_locked: Boolean(viewOnlyThread.workflowLocked),
     settings_writable: Boolean(viewOnlyThread.settingsWritable),
   };
 }

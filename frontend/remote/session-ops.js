@@ -783,6 +783,7 @@ export function projectRemoteViewedSession(realSession, threadId, currentView) {
     // set collapses to [] on the first re-projection.
     reviewer_threads: threadState.reviewers ?? currentView?.reviewer_threads ?? [],
     review_locked: Boolean(threadState.review_locked),
+    workflow_locked: Boolean(threadState.workflow_locked ?? currentView?.workflow_locked),
     settings_writable: Boolean(threadState.settings_writable),
     pending_approvals: pendingApprovals,
     pending_ask_user_questions: pendingQuestions,
@@ -1608,6 +1609,43 @@ export async function requestRemoteReview({
   }
 }
 
+export async function startRemoteWorkflow({
+  taskPrompt,
+  reviewerProvider,
+  reviewerModel,
+  reviewerInstructions,
+  maxRounds,
+  anchorItemId,
+} = {}) {
+  if (!taskPrompt?.trim()) {
+    renderLog("Enter a task before starting Code Flow.");
+    return false;
+  }
+  if (!reviewerProvider) {
+    renderLog("Pick a reviewer provider before starting Code Flow.");
+    return false;
+  }
+  renderLog(`Starting Code Flow with ${reviewerProvider} reviewer.`);
+  try {
+    await dispatchOrRecover("start_workflow", {
+      input: {
+        workflow_id: "code_flow",
+        task_prompt: taskPrompt.trim(),
+        reviewer_provider: reviewerProvider,
+        reviewer_model: reviewerModel || null,
+        reviewer_instructions: reviewerInstructions || null,
+        max_rounds: maxRounds || 2,
+        anchor_item_id: anchorItemId || null,
+      },
+    });
+    await syncRemoteSnapshot("post-workflow-start", true);
+    return true;
+  } catch (error) {
+    renderLog(`Remote Code Flow start failed: ${error.message}`);
+    throw error;
+  }
+}
+
 // Fetch the reviewer panel's dedicated, UNCOMPACTED data (review cards + reviewer threads
 // + revision) over the broker `fetch_reviews` action — decoupled from the byte-budgeted
 // snapshot so the panel survives live-turn compaction. Read-only; no session claim.
@@ -1624,6 +1662,18 @@ export async function resolveRemoteReview(reviewJobId) {
     return true;
   } catch (error) {
     renderLog(`Remote resolve failed: ${error.message}`);
+    return false;
+  }
+}
+
+export async function resolveRemoteWorkflow(workflowRunId) {
+  renderLog("Stopping the blocked Code Flow…");
+  try {
+    await dispatchOrRecover("resolve_workflow", { workflow_run_id: workflowRunId });
+    await syncRemoteSnapshot("post-workflow-resolve", true);
+    return true;
+  } catch (error) {
+    renderLog(`Remote Code Flow resolve failed: ${error.message}`);
     return false;
   }
 }

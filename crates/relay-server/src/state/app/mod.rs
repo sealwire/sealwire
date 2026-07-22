@@ -77,6 +77,8 @@ fn spawn_push_attention_task(relay: Arc<RwLock<RelayState>>, mut receiver: watch
 /// fully usable.
 pub(crate) const REVIEW_LOCKED_THREAD_MSG: &str =
     "this thread is being reviewed; switch to another thread or wait for the review to finish";
+pub(crate) const WORKFLOW_LOCKED_THREAD_MSG: &str =
+    "a workflow is running in this workspace; wait for it to finish before changing threads or files";
 
 #[derive(Clone)]
 pub struct AppState {
@@ -98,9 +100,8 @@ pub struct AppState {
     /// `Blocked`. Overridable in tests.
     review_drain_max_ms: Arc<std::sync::atomic::AtomicU64>,
     /// Max time (ms) the workflow runner waits for a stopped turn to actually
-    /// settle before giving up and going terminal. Overridable in tests.
-    /// Read only by the workflow runner, which isn't wired to a live path yet.
-    #[allow(dead_code)]
+    /// settle before entering the non-terminal `Blocked` state. Overridable in
+    /// tests.
     workflow_drain_max_ms: Arc<std::sync::atomic::AtomicU64>,
     /// How long a user-initiated Stop waits for the provider's completion event
     /// before falling back to marking the turn idle locally (so a provider that

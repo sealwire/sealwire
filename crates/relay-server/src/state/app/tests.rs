@@ -5116,8 +5116,9 @@ mod path_scope_tests {
 mod review_tests {
     use super::super::*;
     use crate::protocol::{
-        ModelOptionView, RequestReviewInput, StartSessionInput, ThreadSummaryView,
-        TranscriptEntryKind, TranscriptEntryView, UpdateSessionSettingsInput,
+        ModelOptionView, RequestReviewInput, SendMessageInput, StartSessionInput,
+        StartWorkflowInput, StopTurnInput, TakeOverInput, ThreadSummaryView, TranscriptEntryKind,
+        TranscriptEntryView, UpdateSessionSettingsInput, WorkflowActionInput,
     };
     use crate::state::security::SecurityProfile;
     use std::collections::HashMap;
@@ -5160,12 +5161,16 @@ mod review_tests {
         inject_unrelated_approval: Arc<AtomicBool>,
         // When true, a turn parks on an AskUserQuestion instead of replying.
         raise_ask_user: Arc<AtomicBool>,
+        // When true, only a reviewer turn parks on an AskUserQuestion.
+        ask_user_on_reviewer_turn: Arc<AtomicBool>,
         // When true, only the *reviewer* turn parks on an approval (recap completes
         // normally) — exercises the reviewer-handoff cleanup path.
         approval_on_reviewer_turn: Arc<AtomicBool>,
         // Simulate losing/rejecting the reviewer turn-start response after the
         // reviewer thread became active.
         fail_reviewer_start: Arc<AtomicBool>,
+        // Simulate the workflow task panicking after an author turn has started.
+        panic_after_author_start: Arc<AtomicBool>,
         // When true, `archive_thread` errors — exercises the delete path where
         // the reviewer thread can't be archived but the job is still dropped.
         fail_archive: Arc<AtomicBool>,
@@ -5238,8 +5243,10 @@ mod review_tests {
                 interrupts: Arc::new(Mutex::new(Vec::new())),
                 inject_unrelated_approval: Arc::new(AtomicBool::new(false)),
                 raise_ask_user: Arc::new(AtomicBool::new(false)),
+                ask_user_on_reviewer_turn: Arc::new(AtomicBool::new(false)),
                 approval_on_reviewer_turn: Arc::new(AtomicBool::new(false)),
                 fail_reviewer_start: Arc::new(AtomicBool::new(false)),
+                panic_after_author_start: Arc::new(AtomicBool::new(false)),
                 fail_archive: Arc::new(AtomicBool::new(false)),
                 fail_delete: Arc::new(AtomicBool::new(false)),
                 fail_delete_thread_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
@@ -5438,9 +5445,13 @@ mod review_tests {
                 model.to_string(),
                 effort.to_string(),
             ));
-            if text.contains("You are reviewing another agent's work")
-                && self.fail_reviewer_start.load(Ordering::Relaxed)
-            {
+            // A reviewer/re-review turn always carries the relay-collected workspace
+            // diff; recap/other turns do not.
+            let is_reviewer_diff_turn = text.contains("Workspace diff collected by the relay");
+            let is_reviewer_turn = text.contains("You are reviewing another agent's work");
+            // The parent fix turn (driven between rounds) carries this marker.
+            let is_fix_turn = text.contains("Address the findings below");
+            if is_reviewer_turn && self.fail_reviewer_start.load(Ordering::Relaxed) {
                 // Model a response-loss race: the provider has started work and
                 // published liveness, but the start request itself returns an
                 // error to the orchestrator.
@@ -5450,6 +5461,19 @@ mod review_tests {
                 return Err("reviewer turn start response was lost".to_string());
             }
             let turn_id = self.next_token("turn");
+            if !is_reviewer_turn && self.panic_after_author_start.swap(false, Ordering::Relaxed) {
+                let mut relay = self.state.write().await;
+                if relay.active_thread_id.as_deref() == Some(thread_id) {
+                    relay.set_active_turn(Some(turn_id.clone()));
+                    relay.set_thread_status(thread_id, "active".to_string(), Vec::new());
+                } else {
+                    let now = unix_now();
+                    relay.bg_set_active_turn(thread_id, Some(turn_id.clone()), now);
+                    relay.bg_set_thread_status(thread_id, "active".to_string(), Vec::new(), now);
+                }
+                relay.notify();
+                panic!("simulated workflow author panic after turn start");
+            }
             if !self.complete_turns.load(Ordering::Relaxed) {
                 return Ok(Some(turn_id));
             }
@@ -5461,12 +5485,6 @@ mod review_tests {
             let turn = turn_id.clone();
             let user_item = self.next_token("user");
             let assistant_item = self.next_token("assistant");
-            // A reviewer/re-review turn always carries the relay-collected workspace
-            // diff; recap/other turns do not.
-            let is_reviewer_diff_turn = text.contains("Workspace diff collected by the relay");
-            let is_reviewer_turn = text.contains("You are reviewing another agent's work");
-            // The parent fix turn (driven between rounds) carries this marker.
-            let is_fix_turn = text.contains("Address the findings below");
             // Model an author that EDITS code on its fix turn: append the configured
             // marker to the tracked `seed.txt` in this thread's cwd, so the NEXT
             // round's freshly-collected workspace diff reflects the change.
@@ -5509,7 +5527,8 @@ mod review_tests {
             let inject_unrelated = self
                 .inject_unrelated_approval
                 .swap(false, Ordering::Relaxed);
-            let raise_ask_user = self.raise_ask_user.load(Ordering::Relaxed);
+            let raise_ask_user = self.raise_ask_user.load(Ordering::Relaxed)
+                || (is_reviewer_turn && self.ask_user_on_reviewer_turn.load(Ordering::Relaxed));
             let complete_delay_ms = self.complete_delay_ms.load(Ordering::Relaxed);
             let approval_id = self.next_token("approval");
             let ask_id = self.next_token("ask");
@@ -7255,6 +7274,22 @@ mod review_tests {
             .count()
     }
 
+    async fn wait_for_provider_turn(provider: &ReviewTestProvider, marker: &str) {
+        for _ in 0..400 {
+            if provider
+                .turns
+                .lock()
+                .await
+                .iter()
+                .any(|(_, text)| text.contains(marker))
+            {
+                return;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        panic!("provider never received a turn containing `{marker}`");
+    }
+
     // --- Workflow runner (chunk 6) ---------------------------------------------
     // Reuses the review harness: ReviewTestProvider already replies to the runner's
     // reviewer_prompt (the "Workspace diff collected by the relay" marker) with the
@@ -7351,6 +7386,61 @@ mod review_tests {
             count_turns_with(&turns, "Address the findings below"),
             1,
             "one revise, after the round-1 rejection"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_code_workflow_builds_builtin_and_surfaces_snapshot_card() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+        queue_verdicts(providers.get("codex").unwrap(), &["APPROVE"]).await;
+
+        let receipt = app
+            .start_code_workflow(StartWorkflowInput {
+                workflow_id: Some("code_flow".to_string()),
+                task_prompt: "implement the retry fix".to_string(),
+                reviewer_provider: "codex".to_string(),
+                reviewer_model: None,
+                reviewer_instructions: Some("focus on regression coverage".to_string()),
+                max_rounds: Some(2),
+                anchor_item_id: Some("anchor-item".to_string()),
+                device_id: Some("device-1".to_string()),
+            })
+            .await
+            .expect("code flow should start");
+
+        assert_eq!(receipt.parent_thread_id, parent.id);
+        assert_eq!(receipt.status.status, "queued");
+
+        let status =
+            wait_for_workflow_status(&app, &receipt.workflow_run_id, WORKFLOW_TERMINAL).await;
+        assert_eq!(status, "done");
+
+        let snapshot = app.snapshot().await;
+        let view = snapshot
+            .active_workflow_runs
+            .iter()
+            .find(|run| run.id == receipt.workflow_run_id)
+            .expect("workflow run should be in snapshot");
+        assert_eq!(view.workflow_id, "code_flow");
+        assert_eq!(view.parent_thread_id, parent.id);
+        assert_eq!(view.round, 1);
+        assert_eq!(view.last_verdict.as_ref().map(|v| v.approved), Some(true));
+
+        let turns = providers.get("codex").unwrap().turns.lock().await.clone();
+        assert!(
+            turns
+                .iter()
+                .any(|(_, text)| text.contains("implement the retry fix")),
+            "author execute prompt should carry the submitted task"
+        );
+        assert!(
+            turns
+                .iter()
+                .any(|(_, text)| text.contains("focus on regression coverage")),
+            "reviewer prompt should carry the submitted review instructions"
         );
     }
 
@@ -7523,8 +7613,65 @@ settings update: {error}"
         let status = wait_for_workflow_status(&app, &run_id, WORKFLOW_TERMINAL).await;
         assert_eq!(status, "escalated", "budget exhausted without approval");
 
-        let round = app.relay.read().await.workflow_run(&run_id).unwrap().round;
+        let (round, findings) = {
+            let relay = app.relay.read().await;
+            let run = relay.workflow_run(&run_id).unwrap();
+            (
+                run.round,
+                run.last_verdict
+                    .as_ref()
+                    .map(|verdict| verdict.findings.clone())
+                    .unwrap_or_default(),
+            )
+        };
         assert_eq!(round, 2, "ran both rounds");
+        assert!(
+            findings
+                .first()
+                .is_some_and(|text| text.contains("VERDICT: NEEDS_CHANGES")),
+            "final negative review should be retained for the workflow card: {findings:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn workflow_max_rounds_one_surfaces_final_negative_review() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let _parent = start_parent(&app, cwd, "codex").await;
+        queue_verdicts(providers.get("codex").unwrap(), &["NEEDS_CHANGES"]).await;
+
+        let run_id = app
+            .start_workflow(
+                Some("device-1".to_string()),
+                workflow_code_flow("codex", 1),
+                "anchor-item".to_string(),
+            )
+            .await
+            .expect("workflow should start");
+
+        let status = wait_for_workflow_status(&app, &run_id, WORKFLOW_TERMINAL).await;
+        assert_eq!(status, "escalated");
+
+        let snapshot = app.snapshot().await;
+        let view = snapshot
+            .active_workflow_runs
+            .iter()
+            .find(|run| run.id == run_id)
+            .expect("workflow card should remain visible");
+        let verdict = view
+            .last_verdict
+            .as_ref()
+            .expect("verdict should be visible");
+        assert_eq!(verdict.approved, false);
+        assert!(
+            verdict
+                .findings
+                .first()
+                .is_some_and(|text| text.contains("VERDICT: NEEDS_CHANGES")),
+            "final reviewer findings should be exposed in the workflow card: {:?}",
+            verdict.findings
+        );
     }
 
     #[tokio::test]
@@ -7571,6 +7718,420 @@ settings update: {error}"
     }
 
     #[tokio::test]
+    async fn workflow_blocks_when_uncertain_turn_cannot_confirm_stopped() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        app.set_workflow_drain_max_ms(50);
+        let _parent = start_parent(&app, cwd, "codex").await;
+        let provider = providers.get("codex").unwrap();
+        provider.fail_reviewer_start.store(true, Ordering::Relaxed);
+        provider.interrupt_fails.store(true, Ordering::Relaxed);
+
+        let run_id = app
+            .start_workflow(
+                Some("device-1".to_string()),
+                workflow_code_flow("codex", 3),
+                "anchor-item".to_string(),
+            )
+            .await
+            .expect("workflow should start");
+
+        let status = wait_for_workflow_status(&app, &run_id, &["blocked"]).await;
+        assert_eq!(status, "blocked");
+        let relay = app.relay.read().await;
+        let run = relay.workflow_run(&run_id).expect("run exists");
+        assert!(
+            relay.is_thread_workflow_locked(&run.parent_thread_id),
+            "blocked workflow should keep parent thread locked"
+        );
+        assert!(
+            relay.is_cwd_workflow_locked(&run.cwd),
+            "blocked workflow should keep the workspace locked"
+        );
+        assert!(run
+            .error
+            .as_deref()
+            .is_some_and(|error| { error.contains("did not confirm stopping") }));
+    }
+
+    #[tokio::test]
+    async fn workflow_lifeguard_blocks_when_author_panic_cannot_confirm_stopped() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        app.set_workflow_drain_max_ms(50);
+        let _parent = start_parent(&app, cwd, "codex").await;
+        let provider = providers.get("codex").unwrap();
+        provider
+            .panic_after_author_start
+            .store(true, Ordering::Relaxed);
+        provider.interrupt_fails.store(true, Ordering::Relaxed);
+
+        let run_id = app
+            .start_workflow(
+                Some("device-1".to_string()),
+                workflow_code_flow("codex", 3),
+                "anchor-item".to_string(),
+            )
+            .await
+            .expect("workflow should start");
+
+        let status = wait_for_workflow_status(&app, &run_id, &["blocked"]).await;
+        assert_eq!(status, "blocked");
+        let relay = app.relay.read().await;
+        let run = relay.workflow_run(&run_id).expect("run exists");
+        assert!(
+            relay.is_thread_workflow_locked(&run.parent_thread_id),
+            "lifeguard-blocked workflow should keep parent thread locked"
+        );
+        assert!(
+            relay.is_cwd_workflow_locked(&run.cwd),
+            "lifeguard-blocked workflow should keep workspace locked"
+        );
+        assert!(run.error.as_deref().is_some_and(|error| {
+            error.contains("ended unexpectedly") && error.contains("did not confirm stopping")
+        }));
+    }
+
+    #[tokio::test]
+    async fn resolve_blocked_workflow_unlocks_after_owned_turns_stop() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        app.set_workflow_drain_max_ms(50);
+        let _parent = start_parent(&app, cwd, "codex").await;
+        let provider = providers.get("codex").unwrap();
+        provider.fail_reviewer_start.store(true, Ordering::Relaxed);
+        provider.interrupt_fails.store(true, Ordering::Relaxed);
+
+        let run_id = app
+            .start_workflow(
+                Some("device-1".to_string()),
+                workflow_code_flow("codex", 3),
+                "anchor-item".to_string(),
+            )
+            .await
+            .expect("workflow should start");
+        wait_for_workflow_status(&app, &run_id, &["blocked"]).await;
+
+        provider.interrupt_fails.store(false, Ordering::Relaxed);
+        let receipt = app
+            .resolve_blocked_workflow(WorkflowActionInput {
+                workflow_run_id: Some(run_id.clone()),
+                device_id: Some("device-1".to_string()),
+            })
+            .await
+            .expect("blocked workflow should resolve once owned turns can stop");
+        assert_eq!(receipt.status.status, "failed");
+
+        let relay = app.relay.read().await;
+        let run = relay.workflow_run(&run_id).expect("run exists");
+        assert_eq!(run.status.as_str(), "failed");
+        assert!(
+            !relay.is_cwd_workflow_locked(&run.cwd),
+            "resolved workflow should release workspace lock"
+        );
+        assert!(
+            !relay.is_thread_workflow_locked(&run.parent_thread_id),
+            "resolved workflow should release parent thread lock"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_workflow_recovery_rejects_duplicate_before_draining() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        app.set_workflow_drain_max_ms(200);
+        let parent = start_parent(&app, cwd, "codex").await;
+        let provider = providers.get("codex").unwrap();
+        provider.fail_reviewer_start.store(true, Ordering::Relaxed);
+        provider.interrupt_fails.store(true, Ordering::Relaxed);
+
+        let run_id = app
+            .start_workflow(
+                Some("device-1".to_string()),
+                workflow_code_flow("codex", 3),
+                "anchor-item".to_string(),
+            )
+            .await
+            .expect("workflow should start");
+        wait_for_workflow_status(&app, &run_id, &["blocked"]).await;
+
+        let first_app = app.clone();
+        let first_run_id = run_id.clone();
+        let first = tokio::spawn(async move {
+            first_app
+                .resolve_blocked_workflow(WorkflowActionInput {
+                    workflow_run_id: Some(first_run_id),
+                    device_id: Some("device-1".to_string()),
+                })
+                .await
+        });
+        wait_for_workflow_status(&app, &run_id, &["resolving"]).await;
+
+        let duplicate = app
+            .resolve_blocked_workflow(WorkflowActionInput {
+                workflow_run_id: Some(run_id.clone()),
+                device_id: Some("device-1".to_string()),
+            })
+            .await
+            .expect_err("duplicate recovery must be rejected before it can drain threads");
+        assert!(
+            duplicate.contains("already resolving"),
+            "unexpected duplicate recovery error: {duplicate}"
+        );
+
+        provider.interrupt_fails.store(false, Ordering::Relaxed);
+        let receipt = first
+            .await
+            .expect("recovery task joins")
+            .expect("first recovery should resolve once the provider later confirms stopping");
+        assert_eq!(receipt.status.status, "failed");
+
+        provider.interrupts.lock().await.clear();
+        provider.complete_turns.store(false, Ordering::Relaxed);
+        app.send_message(SendMessageInput {
+            text: "new work after recovery".to_string(),
+            model: None,
+            effort: None,
+            device_id: Some("device-1".to_string()),
+            thread_id: parent.id.clone(),
+        })
+        .await
+        .expect("the resolved workflow should unlock the parent for new work");
+
+        sleep(Duration::from_millis(50)).await;
+        assert!(
+            provider.interrupts.lock().await.is_empty(),
+            "the rejected duplicate recovery must not retain a drain future that can stop new work"
+        );
+    }
+
+    #[tokio::test]
+    async fn aborted_workflow_recovery_restores_blocked_and_can_retry() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        app.set_workflow_drain_max_ms(250);
+        let _parent = start_parent(&app, cwd, "codex").await;
+        let provider = providers.get("codex").unwrap();
+        provider.fail_reviewer_start.store(true, Ordering::Relaxed);
+        provider.interrupt_fails.store(true, Ordering::Relaxed);
+
+        let run_id = app
+            .start_workflow(
+                Some("device-1".to_string()),
+                workflow_code_flow("codex", 3),
+                "anchor-item".to_string(),
+            )
+            .await
+            .expect("workflow should start");
+        wait_for_workflow_status(&app, &run_id, &["blocked"]).await;
+
+        let recovery_app = app.clone();
+        let recovery_run_id = run_id.clone();
+        let recovery = tokio::spawn(async move {
+            recovery_app
+                .resolve_blocked_workflow(WorkflowActionInput {
+                    workflow_run_id: Some(recovery_run_id),
+                    device_id: Some("device-1".to_string()),
+                })
+                .await
+        });
+        wait_for_workflow_status(&app, &run_id, &["resolving"]).await;
+        recovery.abort();
+        let _ = recovery.await;
+
+        wait_for_workflow_status(&app, &run_id, &["blocked"]).await;
+        {
+            let relay = app.relay.read().await;
+            let run = relay.workflow_run(&run_id).expect("run exists");
+            assert!(
+                relay.is_cwd_workflow_locked(&run.cwd),
+                "aborted recovery must restore a non-terminal lock"
+            );
+        }
+
+        provider.interrupt_fails.store(false, Ordering::Relaxed);
+        let receipt = app
+            .resolve_blocked_workflow(WorkflowActionInput {
+                workflow_run_id: Some(run_id.clone()),
+                device_id: Some("device-1".to_string()),
+            })
+            .await
+            .expect("restored blocked workflow should be recoverable");
+        assert_eq!(receipt.status.status, "failed");
+    }
+
+    #[tokio::test]
+    async fn workflow_author_approval_cleanup_clears_interactions() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+        let provider = providers.get("codex").unwrap();
+        provider.raise_approval.store(true, Ordering::Relaxed);
+
+        let run_id = app
+            .start_workflow(
+                Some("device-1".to_string()),
+                workflow_code_flow("codex", 3),
+                "anchor-item".to_string(),
+            )
+            .await
+            .expect("workflow should start");
+
+        let status = wait_for_workflow_status(&app, &run_id, WORKFLOW_TERMINAL).await;
+        assert_eq!(status, "failed");
+        assert!(
+            app.relay.read().await.pending_approvals.is_empty(),
+            "workflow cleanup should clear author approvals"
+        );
+        assert!(
+            provider.interrupts.lock().await.contains(&parent.id),
+            "workflow cleanup should stop the parked author turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn workflow_reviewer_ask_user_cleanup_clears_interactions() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let _parent = start_parent(&app, cwd, "codex").await;
+        let provider = providers.get("codex").unwrap();
+        provider
+            .ask_user_on_reviewer_turn
+            .store(true, Ordering::Relaxed);
+
+        let run_id = app
+            .start_workflow(
+                Some("device-1".to_string()),
+                workflow_code_flow("codex", 3),
+                "anchor-item".to_string(),
+            )
+            .await
+            .expect("workflow should start");
+
+        let status = wait_for_workflow_status(&app, &run_id, WORKFLOW_TERMINAL).await;
+        assert_eq!(status, "failed");
+        assert!(
+            app.relay.read().await.pending_ask_user_questions.is_empty(),
+            "workflow cleanup should clear reviewer AskUser questions"
+        );
+    }
+
+    #[tokio::test]
+    async fn workflow_locks_parent_and_same_cwd_threads_during_reviewer_step() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+        let sibling = start_parent(&app, cwd, "codex").await;
+        app.take_over_control(TakeOverInput {
+            device_id: Some("device-1".to_string()),
+            thread_id: parent.id.clone(),
+        })
+        .await
+        .expect("return control to parent before workflow");
+
+        let provider = providers.get("codex").unwrap();
+        provider.complete_delay_ms.store(250, Ordering::Relaxed);
+        queue_verdicts(provider, &["APPROVE"]).await;
+        let run_id = app
+            .start_workflow(
+                Some("device-1".to_string()),
+                workflow_code_flow("codex", 1),
+                "anchor-item".to_string(),
+            )
+            .await
+            .expect("workflow should start");
+
+        wait_for_provider_turn(provider, "Workspace diff collected by the relay").await;
+
+        let send_err = app
+            .send_message(SendMessageInput {
+                text: "please write during review".to_string(),
+                model: None,
+                effort: None,
+                device_id: Some("device-1".to_string()),
+                thread_id: parent.id.clone(),
+            })
+            .await
+            .expect_err("parent send must be locked while workflow reviewer runs");
+        assert!(send_err.contains("workflow"), "{send_err}");
+
+        let sibling_send_err = app
+            .send_message(SendMessageInput {
+                text: "same cwd sibling write".to_string(),
+                model: None,
+                effort: None,
+                device_id: Some("device-1".to_string()),
+                thread_id: sibling.id.clone(),
+            })
+            .await
+            .expect_err("same-cwd sibling send must be locked while workflow runs");
+        assert!(sibling_send_err.contains("workflow"), "{sibling_send_err}");
+
+        let settings_err = app
+            .update_session_settings(UpdateSessionSettingsInput {
+                approval_policy: Some("bypass".to_string()),
+                sandbox: None,
+                effort: None,
+                model: None,
+                device_id: Some("device-1".to_string()),
+                thread_id: parent.id.clone(),
+            })
+            .await
+            .expect_err("settings mutation must be locked while workflow runs");
+        assert!(settings_err.contains("workflow"), "{settings_err}");
+
+        let stop_err = app
+            .stop_active_turn(StopTurnInput {
+                device_id: Some("device-1".to_string()),
+                thread_id: parent.id.clone(),
+            })
+            .await
+            .expect_err("user stop must be locked while workflow owns the thread");
+        assert!(stop_err.contains("workflow"), "{stop_err}");
+
+        let takeover_err = app
+            .take_over_control(TakeOverInput {
+                device_id: Some("device-1".to_string()),
+                thread_id: sibling.id.clone(),
+            })
+            .await
+            .expect_err("same-cwd takeover must be locked while workflow runs");
+        assert!(takeover_err.contains("workflow"), "{takeover_err}");
+
+        let delete_err = app
+            .delete_thread_permanently(&parent.id, None)
+            .await
+            .expect_err("delete must be locked while workflow runs");
+        assert!(delete_err.contains("workflow"), "{delete_err}");
+
+        let start_err = app
+            .start_session(StartSessionInput {
+                device_id: Some("device-1".to_string()),
+                cwd: Some(cwd.to_string()),
+                model: None,
+                effort: None,
+                approval_policy: None,
+                sandbox: None,
+                provider: Some("codex".to_string()),
+                initial_prompt: None,
+            })
+            .await
+            .expect_err("new same-cwd session must be locked while workflow runs");
+        assert!(start_err.contains("workflow"), "{start_err}");
+
+        let status = wait_for_workflow_status(&app, &run_id, WORKFLOW_TERMINAL).await;
+        assert_eq!(status, "done");
+    }
+
+    #[tokio::test]
     async fn workflow_reviewer_thread_is_hidden_from_navigation() {
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();
@@ -7601,13 +8162,11 @@ settings update: {error}"
             relay.reviewer_thread_ids().contains(&reviewer),
             "workflow reviewer thread should be hidden from nav"
         );
-        // ...but NOT in the review-owned map, so review's per-parent FIFO eviction
-        // can never delete a workflow reviewer's transcript.
         assert!(
-            !relay
+            relay
                 .reviewer_threads_of_parent(&parent.id)
                 .contains(&reviewer),
-            "workflow reviewer must not be in the review-owned reviewer_threads map"
+            "workflow reviewer should be durably hidden through the reviewer_threads map"
         );
     }
 

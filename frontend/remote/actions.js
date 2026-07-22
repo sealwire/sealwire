@@ -854,7 +854,9 @@ function requiresSessionClaim(actionType) {
   return actionType === "send_message"
     || actionType === "apply_file_change"
     || actionType === "request_review"
+    || actionType === "start_workflow"
     || actionType === "resolve_review"
+    || actionType === "resolve_workflow"
     || actionType === "delete_review";
 }
 

@@ -8,6 +8,7 @@ import {
   selectThreadsRenderModel,
 } from "../view-model.js";
 import { isReviewInProgressForThread } from "../../shared/review-state.js";
+import { isWorkflowInProgressForThread } from "../../shared/workflow-state.js";
 
 test("selectSessionRenderModel allows direct send to an idle thread held by another device", () => {
   const model = selectSessionRenderModel({
@@ -101,6 +102,47 @@ test("selectSessionRenderModel freezes the composer only when the active thread 
   assert.equal(frozen.canCompose, false);
   assert.equal(frozen.canWrite, false);
   assert.match(frozen.messagePlaceholder, /being reviewed/i);
+});
+
+test("selectSessionRenderModel freezes the composer only when the active thread is in Code Flow", () => {
+  const base = {
+    active_thread_id: "thread-1",
+    current_cwd: "/tmp",
+    current_status: "idle",
+    pending_approvals: [],
+    transcript: [],
+  };
+
+  const usable = selectSessionRenderModel({
+    session: {
+      ...base,
+      active_workflow_runs: [
+        { id: "wf1", status: "running", parent_thread_id: "other-thread" },
+      ],
+    },
+    previousSession: null,
+    hasControllerLease: true,
+  });
+  assert.equal(usable.composerDisabled, false);
+  assert.equal(usable.canCompose, true);
+  assert.equal(usable.canWrite, true);
+
+  const frozen = selectSessionRenderModel({
+    session: {
+      ...base,
+      active_workflow_runs: [
+        { id: "wf1", status: "running", parent_thread_id: "thread-1" },
+      ],
+    },
+    previousSession: null,
+    hasControllerLease: true,
+  });
+  assert.equal(frozen.activeThreadFrozen, true);
+  assert.equal(frozen.activeThreadUnderWorkflow, true);
+  assert.equal(frozen.composerDisabled, true);
+  assert.equal(frozen.canCompose, false);
+  assert.equal(frozen.canWrite, false);
+  assert.match(frozen.messagePlaceholder, /Code Flow/i);
 });
 
 test("selectSessionRenderModel keeps a general view-only thread writable by targeted send", () => {
@@ -217,6 +259,56 @@ test("isReviewInProgressForThread identifies review-locked threads for remote na
     false,
     "terminal review does not lock the thread"
   );
+});
+
+test("isWorkflowInProgressForThread identifies workflow-locked parent and same-cwd threads", () => {
+  const session = {
+    active_workflow_runs: [
+      {
+        id: "wf1",
+        status: "resolving",
+        parent_thread_id: "parent-1",
+        locked_thread_ids: ["parent-1", "same-cwd-thread"],
+      },
+    ],
+  };
+  assert.equal(isWorkflowInProgressForThread(session, "parent-1"), true);
+  assert.equal(isWorkflowInProgressForThread(session, "same-cwd-thread"), true);
+  assert.equal(isWorkflowInProgressForThread(session, "other-thread"), false);
+  assert.equal(
+    isWorkflowInProgressForThread(
+      { active_workflow_runs: [{ id: "wf2", status: "failed", parent_thread_id: "parent-1" }] },
+      "parent-1"
+    ),
+    false
+  );
+});
+
+test("selectSessionRenderModel freezes remote composer for workflow-locked same-cwd views", () => {
+  const model = selectSessionRenderModel({
+    session: {
+      active_thread_id: "same-cwd-thread",
+      current_cwd: "/repo",
+      current_status: "idle",
+      provider: "codex",
+      active_workflow_runs: [
+        {
+          id: "wf1",
+          status: "running",
+          parent_thread_id: "parent-thread",
+          locked_thread_ids: ["parent-thread", "same-cwd-thread"],
+        },
+      ],
+      pending_approvals: [],
+      transcript: [],
+    },
+    previousSession: null,
+    hasControllerLease: false,
+  });
+
+  assert.equal(model.canCompose, false);
+  assert.equal(model.activeThreadUnderWorkflow, true);
+  assert.match(model.messagePlaceholder, /Code Flow/i);
 });
 
 test("selectThreadsRenderModel returns empty copy for unauthenticated state", () => {

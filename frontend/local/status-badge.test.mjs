@@ -56,6 +56,15 @@ test("a blocked review outranks the task subject", () => {
   assert.equal(badge.tone, REVIEW_BLOCKED_BADGE.tone);
 });
 
+test("a blocked workflow gets a Code Flow badge", () => {
+  const badge = selectStatusBadge({
+    session: { provider_connected: true, active_thread_id: "t1" },
+    workflowBlocked: true,
+  });
+  assert.equal(badge.text, "Code Flow blocked — action needed");
+  assert.equal(badge.tone, "alert");
+});
+
 test("a stalled turn outranks the task subject", () => {
   const badge = selectStatusBadge({
     session: { provider_connected: true, active_thread_id: "t1" },
@@ -72,4 +81,14 @@ test("a frozen (under-review) active thread shows the in-progress badge", () => 
   });
   assert.equal(badge.text, REVIEW_IN_PROGRESS_BADGE.label);
   assert.equal(badge.tone, REVIEW_IN_PROGRESS_BADGE.tone);
+});
+
+test("a workflow-frozen active thread gets a Code Flow in-progress badge", () => {
+  const badge = selectStatusBadge({
+    session: { provider_connected: true, active_thread_id: "t1" },
+    activeThreadFrozen: true,
+    activeThreadWorkflowFrozen: true,
+  });
+  assert.equal(badge.text, "Code Flow in progress");
+  assert.equal(badge.tone, "alert");
 });

@@ -86,6 +86,13 @@ import {
   reviewStatusLabel,
   selectReviewLaunchModel,
 } from "../shared/review-state.js";
+import {
+  canStartWorkflow,
+  isWorkflowBlocked,
+  isWorkflowInProgressForThread,
+  selectWorkflowLaunchModel,
+  workflowRunsForThread,
+} from "../shared/workflow-state.js";
 import { projectViewOnlySession } from "./view-only-thread.js";
 import { canComposeThread, composerButtonState } from "../shared/thread-compose.js";
 import { saveLastEffort } from "../shared/last-used-settings.js";
@@ -206,6 +213,7 @@ export function createSessionRenderer({
   syncComposerModel,
   updateSessionSettings,
   requestReview,
+  startWorkflow,
   setReviewSlice,
   fetchReviews,
   viewThread,
@@ -256,6 +264,14 @@ export function createSessionRenderer({
     });
   }
 
+  function workflowLaunchModel(session) {
+    return selectWorkflowLaunchModel({
+      providers: state.providers || [],
+      providerModels: state.providerModels || {},
+      session,
+    });
+  }
+
   function renderSession(session) {
     state.session = session;
     if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
@@ -280,10 +296,16 @@ export function createSessionRenderer({
     const turnRunning = Boolean(session.active_turn_id);
     const threadWorking = sessionIsWorking(session);
     const reviewBlocked = isReviewBlocked(session);
-    // The composer is frozen ONLY when the thread you're looking at is itself
-    // being reviewed. A review running in the background on another thread leaves
-    // the active conversation fully usable.
-    const activeThreadFrozen = isReviewInProgressForThread(session, session.active_thread_id);
+    const workflowBlocked = isWorkflowBlocked(session);
+    // The composer is frozen only when the thread you're looking at is itself
+    // owned by a review/workflow. Background work on another thread leaves the
+    // active conversation usable.
+    const activeThreadUnderReview = isReviewInProgressForThread(session, session.active_thread_id);
+    const activeThreadUnderWorkflow = isWorkflowInProgressForThread(
+      session,
+      session.active_thread_id
+    );
+    const activeThreadFrozen = activeThreadUnderReview || activeThreadUnderWorkflow;
     // In a read-only view, the workspace is the saved thread's own cwd (or blank
     // when unknown) — never the user's currently-selected cwd, which would
     // misrepresent the saved thread.
@@ -340,8 +362,10 @@ export function createSessionRenderer({
       approval,
       pendingPairingCount: pendingPairings.length,
       reviewBlocked,
+      workflowBlocked,
       stalled: isProgressStalled(session),
       activeThreadFrozen,
+      activeThreadWorkflowFrozen: activeThreadUnderWorkflow,
     });
     statusBadge.textContent = statusBadgeModel.text;
     statusBadge.className = `status-badge status-badge-${statusBadgeModel.tone}`;
@@ -446,7 +470,9 @@ export function createSessionRenderer({
       activeThreadFrozen ||
       submitInFlight;
     messageInput.placeholder = activeThreadFrozen
-      ? "This session is being reviewed…"
+      ? activeThreadUnderWorkflow
+        ? "This session is locked by Code Flow…"
+        : "This session is being reviewed…"
       : !hasActiveSession
       ? "Start or open a session first."
       : !viewingConversation
@@ -490,7 +516,15 @@ export function createSessionRenderer({
     // Clear the independently-mounted Reviewer tab so it does not retain job
     // metadata or already-fetched review text after the user signs out.
     if (typeof setReviewSlice === "function") {
-      setReviewSlice({ reviewJobs: [], reviewModel: {}, canRequest: false, blocked: false });
+      setReviewSlice({
+        reviewJobs: [],
+        workflowRuns: [],
+        reviewModel: {},
+        workflowModel: {},
+        canRequest: false,
+        canStartWorkflow: false,
+        blocked: false,
+      });
     }
     openSessionDetailsButton.disabled = true;
     renderOverviewState(null, message);
@@ -919,11 +953,18 @@ export function createSessionRenderer({
       : {
           review_jobs: session?.active_review_jobs || [],
           reviewer_threads: session?.reviewer_threads || [],
-        };
+    };
     const threadReviewJobs = reviewCardsForViewedThread(reviewsData, viewedThreadId);
+    const threadWorkflowRuns = workflowRunsForThread(session, viewedThreadId);
+    const viewingWritableAuthor =
+      typeof startWorkflow === "function" &&
+      isViewingConversation(session) &&
+      canCurrentDeviceWrite(session);
     setReviewSlice({
       reviewJobs: threadReviewJobs,
+      workflowRuns: threadWorkflowRuns,
       reviewModel: reviewLaunchModel(session),
+      workflowModel: workflowLaunchModel(session),
       // Existing reviewer threads of the VIEWED thread (same scope as the review job
       // cards above), offered for reuse. Provider filtering happens in the panel (it
       // reacts to the chosen provider).
@@ -939,11 +980,12 @@ export function createSessionRenderer({
       canRequest:
         typeof requestReview === "function" &&
         canRequestReview(session, state.deviceId, viewedThreadId),
+      canStartWorkflow: viewingWritableAuthor && canStartWorkflow(session),
       blocked: isReviewBlocked({
         active_review_jobs: (session?.active_review_jobs || []).filter(
           (job) => job.parent_thread_id === viewedThreadId
         ),
-      }),
+      }) || threadWorkflowRuns.some((run) => run?.status === "blocked"),
     });
   }
 
@@ -1000,8 +1042,10 @@ export function createSessionRenderer({
 
   function renderControlBanner(session) {
     const activeUnderReview = isReviewInProgressForThread(session, session.active_thread_id);
+    const activeUnderWorkflow = isWorkflowInProgressForThread(session, session.active_thread_id);
+    const activeLockedByAgent = activeUnderReview || activeUnderWorkflow;
     const sessionWorking = sessionIsWorking(session);
-    if (session.view_only && sessionWorking && !activeUnderReview) {
+    if (session.view_only && sessionWorking && !activeLockedByAgent) {
       controlBanner.hidden = false;
       renderReactContent(
         controlBanner,
@@ -1018,24 +1062,24 @@ export function createSessionRenderer({
       || !isViewingConversation(session)
       || !session.active_controller_device_id
       || isCurrentDeviceActiveController(session)
-      || (!sessionWorking && !activeUnderReview)
+      || (!sessionWorking && !activeLockedByAgent)
     ) {
       controlBanner.hidden = true;
       return;
     }
 
     controlBanner.hidden = false;
-    // Only the thread actually being reviewed is off-limits for take-over; a
-    // background review elsewhere doesn't lock this thread's controls.
+    // Only the thread actually owned by review/workflow is off-limits for take-over.
     renderReactContent(
       controlBanner,
       h(ControlBannerContent, {
-        hint: activeUnderReview
-          ? "This session is being reviewed; it unlocks when the review finishes."
+        hint: activeLockedByAgent
+          ? activeUnderWorkflow
+            ? "This session is locked by Code Flow; it unlocks when the workflow finishes."
+            : "This session is being reviewed; it unlocks when the review finishes."
           : "You can still approve from this device. Take over when you want to type or continue the session.",
-        // The review owns the reviewed thread's turn sequence — don't let a
-        // take-over reassign its controller mid-review.
-        showTakeOver: !activeUnderReview,
+        // Review/workflow owns this turn sequence while non-terminal.
+        showTakeOver: !activeLockedByAgent,
         summary: `Another device has control (${controllerLabel(session.active_controller_device_id)})`,
       })
     );
@@ -1144,17 +1188,22 @@ export function createSessionRenderer({
         resolveActiveThread(state.viewThreadId) ||
         state.threads.find((thread) => thread.id === state.viewThreadId);
 
-      // A review briefly hands the active thread to the (hidden) reviewer. If the
-      // user is sitting on the thread being reviewed, keep the page calm instead
-      // of flashing the "attached to a different session" message — the reviewer
-      // lives in the Reviewer panel and the review posts back here when it's done.
-      if (isReviewInProgressForThread(session, state.viewThreadId)) {
+      // Review/Code Flow briefly hands the active thread to hidden owned work. If
+      // the user is sitting on the owned parent, keep the page calm instead of
+      // flashing the "attached to a different session" message.
+      if (
+        isReviewInProgressForThread(session, state.viewThreadId) ||
+        isWorkflowInProgressForThread(session, state.viewThreadId)
+      ) {
+        const workflowLocked = isWorkflowInProgressForThread(session, state.viewThreadId);
         renderConversationContent(
           h(ConversationEmptyState, {
-            badge: "Review",
+            badge: workflowLocked ? "Code Flow" : "Review",
             className: "thread-empty-ready",
-            copy: "Another agent is reviewing this conversation. Its progress and result show up in the Reviewer panel, and the review is posted back here when it finishes.",
-            title: "Review in progress",
+            copy: workflowLocked
+              ? "Code Flow owns this conversation. Its progress and result show up in the Reviewer panel."
+              : "Another agent is reviewing this conversation. Its progress and result show up in the Reviewer panel, and the review is posted back here when it finishes.",
+            title: workflowLocked ? "Code Flow in progress" : "Review in progress",
           })
         );
         return;
@@ -1315,7 +1364,9 @@ export function createSessionRenderer({
           activeTurnId: session.active_turn_id,
           hasActiveSession: Boolean(session.active_thread_id),
           hasControllerLease: canCurrentDeviceWrite(session),
-          reviewLocked: isReviewInProgressForThread(session, session.active_thread_id),
+          reviewLocked:
+            isReviewInProgressForThread(session, session.active_thread_id) ||
+            isWorkflowInProgressForThread(session, session.active_thread_id),
         }),
         entries,
         hydrationLoading: shouldShowTranscriptLoading(session, state),
@@ -1328,7 +1379,8 @@ export function createSessionRenderer({
           // and while the active thread is itself under review.
           enableFileChangeActions:
             !session.view_only &&
-            !isReviewInProgressForThread(session, session.active_thread_id),
+            !isReviewInProgressForThread(session, session.active_thread_id) &&
+            !isWorkflowInProgressForThread(session, session.active_thread_id),
           expandedKeys: localUi.transcriptExpandedItemIds,
           loadingItemIds: localUi.transcriptLoadingItemIds,
           // Enables the per-message "Fork from here" affordance on turn-final
@@ -1339,12 +1391,12 @@ export function createSessionRenderer({
           onEnsureFileChangeDetail: (itemId) => {
             void state.controller?.ensureFileChangeDetail?.(itemId);
           },
-          // Suppress the answer entry while the active thread is under review (the
-          // orchestrator dismisses the reviewer's own questions; v1 is non-interactive).
+          // Suppress the answer entry while the active thread is owned by
+          // review/workflow; these orchestrators are non-interactive.
           pendingAskUserQuestions: isReviewInProgressForThread(
             session,
             session.active_thread_id
-          )
+          ) || isWorkflowInProgressForThread(session, session.active_thread_id)
             ? []
             : session?.pending_ask_user_questions || [],
           onSubmitAskUserAnswers: (requestId, answers) => {

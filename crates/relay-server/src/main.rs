@@ -40,10 +40,11 @@ use protocol::{
     PairingDecisionReceipt, PairingStartInput, PairingTicketView, ReadThreadEntryDetailInput,
     ReadThreadTranscriptInput, RequestReviewInput, RequestReviewReceipt, ResumeSessionInput,
     ReviewActionInput, ReviewDeleteReceipt, ReviewsResponse, RevokeDeviceReceipt, SendMessageInput,
-    SessionSnapshot, SessionSnapshotCompactProfile, StartSessionInput, StopTurnInput,
-    SubmitAskUserAnswerInput, TakeOverInput, ThreadArchiveReceipt, ThreadDeleteReceipt,
-    ThreadEntryDetailResponse, ThreadTranscriptResponse, ThreadsQuery, ThreadsResponse,
-    UpdateSessionSettingsInput, WorkspaceDiffResponse,
+    SessionSnapshot, SessionSnapshotCompactProfile, StartSessionInput, StartWorkflowInput,
+    StartWorkflowReceipt, StopTurnInput, SubmitAskUserAnswerInput, TakeOverInput,
+    ThreadArchiveReceipt, ThreadDeleteReceipt, ThreadEntryDetailResponse, ThreadTranscriptResponse,
+    ThreadsQuery, ThreadsResponse, UpdateSessionSettingsInput, WorkflowActionInput,
+    WorkflowActionReceipt, WorkspaceDiffResponse,
 };
 use relay_http::{
     apply_standard_security_headers, header_origin, parse_optional_string_env, request_origin,
@@ -190,7 +191,9 @@ fn build_router(context: AppContext, web_assets: WebAssets) -> Router {
         .route("/api/session/message", post(send_message))
         .route("/api/session/stop", post(stop_active_turn))
         .route("/api/session/review", post(request_review))
+        .route("/api/session/workflow", post(start_workflow))
         .route("/api/session/review/resolve", post(resolve_review))
+        .route("/api/session/workflow/resolve", post(resolve_workflow))
         .route("/api/session/reviews", get(list_reviews))
         .route(
             "/api/session/reviews/:review_id/delete",
@@ -719,6 +722,21 @@ async fn request_review(
         .map_err(bad_request)
 }
 
+async fn start_workflow(
+    State(context): State<AppContext>,
+    headers: HeaderMap,
+    uri: Uri,
+    Json(input): Json<StartWorkflowInput>,
+) -> Result<Json<ApiEnvelope<StartWorkflowReceipt>>, (StatusCode, Json<ApiError>)> {
+    authorize_api(&context, &headers, &uri)?;
+    context
+        .app
+        .start_code_workflow(input)
+        .await
+        .map(|receipt| Json(ApiEnvelope::ok(receipt)))
+        .map_err(bad_request)
+}
+
 async fn resolve_review(
     State(context): State<AppContext>,
     headers: HeaderMap,
@@ -731,6 +749,21 @@ async fn resolve_review(
     context
         .app
         .cancel_review(input.review_job_id, input.device_id)
+        .await
+        .map(|receipt| Json(ApiEnvelope::ok(receipt)))
+        .map_err(bad_request)
+}
+
+async fn resolve_workflow(
+    State(context): State<AppContext>,
+    headers: HeaderMap,
+    uri: Uri,
+    Json(input): Json<WorkflowActionInput>,
+) -> Result<Json<ApiEnvelope<WorkflowActionReceipt>>, (StatusCode, Json<ApiError>)> {
+    authorize_api(&context, &headers, &uri)?;
+    context
+        .app
+        .resolve_blocked_workflow(input)
         .await
         .map(|receipt| Json(ApiEnvelope::ok(receipt)))
         .map_err(bad_request)

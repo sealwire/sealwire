@@ -1,7 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { deleteReview, getReviews, requestReview, resolveReview, submitAskUserAnswer } from "./api.js";
+import {
+  deleteReview,
+  getReviews,
+  requestReview,
+  resolveReview,
+  resolveWorkflow,
+  startWorkflow,
+  submitAskUserAnswer,
+} from "./api.js";
 
 function makeFetchStub(response) {
   const calls = [];
@@ -85,6 +93,52 @@ test("requestReview surfaces the server error message when the envelope says !ok
   );
 });
 
+test("startWorkflow POSTs the Code Flow config plus device_id and returns the receipt", async () => {
+  const receipt = { workflow_run_id: "workflow-1", status: { status: "queued" } };
+  const { apiFetch, calls } = makeFetchStub(jsonResponse({ ok: true, data: receipt }));
+
+  const result = await startWorkflow(
+    apiFetch,
+    {
+      workflow_id: "code_flow",
+      task_prompt: "implement the retry fix",
+      reviewer_provider: "codex",
+      reviewer_model: null,
+      reviewer_instructions: "focus on tests",
+      max_rounds: 2,
+    },
+    "device-a"
+  );
+
+  assert.deepEqual(result, receipt);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].input, "/api/session/workflow");
+  assert.equal(calls[0].init.method, "POST");
+  const body = JSON.parse(calls[0].init.body);
+  assert.deepEqual(body, {
+    workflow_id: "code_flow",
+    task_prompt: "implement the retry fix",
+    reviewer_provider: "codex",
+    reviewer_model: null,
+    reviewer_instructions: "focus on tests",
+    max_rounds: 2,
+    device_id: "device-a",
+  });
+});
+
+test("startWorkflow surfaces the server error message when the envelope says !ok", async () => {
+  const { apiFetch } = makeFetchStub(
+    jsonResponse(
+      { ok: false, error: { message: "a workflow is already running" } },
+      { status: 400 }
+    )
+  );
+  await assert.rejects(
+    () => startWorkflow(apiFetch, { task_prompt: "x", reviewer_provider: "codex" }, "device-a"),
+    /already running/i
+  );
+});
+
 test("resolveReview POSTs the review and device ids to the resolve endpoint", async () => {
   const receipt = { review_job_id: "review-1", status: { status: "failed" } };
   const { apiFetch, calls } = makeFetchStub(jsonResponse({ ok: true, data: receipt }));
@@ -95,6 +149,20 @@ test("resolveReview POSTs the review and device ids to the resolve endpoint", as
   assert.equal(calls[0].init.method, "POST");
   assert.deepEqual(JSON.parse(calls[0].init.body), {
     review_job_id: "review-1",
+    device_id: "device-a",
+  });
+});
+
+test("resolveWorkflow POSTs the workflow and device ids to the resolve endpoint", async () => {
+  const receipt = { workflow_run_id: "workflow-1", status: { status: "failed" } };
+  const { apiFetch, calls } = makeFetchStub(jsonResponse({ ok: true, data: receipt }));
+
+  const result = await resolveWorkflow(apiFetch, "workflow-1", "device-a");
+  assert.deepEqual(result, receipt);
+  assert.equal(calls[0].input, "/api/session/workflow/resolve");
+  assert.equal(calls[0].init.method, "POST");
+  assert.deepEqual(JSON.parse(calls[0].init.body), {
+    workflow_run_id: "workflow-1",
     device_id: "device-a",
   });
 });

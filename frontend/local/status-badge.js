@@ -17,8 +17,10 @@ import { REVIEW_BLOCKED_BADGE, REVIEW_IN_PROGRESS_BADGE } from "../shared/review
  *   approval?: object|null,
  *   pendingPairingCount?: number,
  *   reviewBlocked?: boolean,
+ *   workflowBlocked?: boolean,
  *   stalled?: boolean,
  *   activeThreadFrozen?: boolean,
+ *   activeThreadWorkflowFrozen?: boolean,
  * }} input
  * @returns {{ text: string, tone: "alert"|"offline"|"ready" }}
  */
@@ -27,8 +29,10 @@ export function selectStatusBadge({
   approval = null,
   pendingPairingCount = 0,
   reviewBlocked = false,
+  workflowBlocked = false,
   stalled = false,
   activeThreadFrozen = false,
+  activeThreadWorkflowFrozen = false,
 } = {}) {
   const status = describeSessionStatus(session, { approval });
 
@@ -49,6 +53,9 @@ export function selectStatusBadge({
     // seam. The old inline chain hardcoded a bare "Offline" and never reached it.
     return { text: status.primaryLabel, tone: "offline" };
   }
+  if (workflowBlocked) {
+    return { text: "Code Flow blocked — action needed", tone: "alert" };
+  }
   if (reviewBlocked) {
     return { text: REVIEW_BLOCKED_BADGE.label, tone: REVIEW_BLOCKED_BADGE.tone };
   }
@@ -56,6 +63,9 @@ export function selectStatusBadge({
     return { text: "Stalled?", tone: "alert" };
   }
   if (activeThreadFrozen) {
+    if (activeThreadWorkflowFrozen) {
+      return { text: "Code Flow in progress", tone: "alert" };
+    }
     return { text: REVIEW_IN_PROGRESS_BADGE.label, tone: REVIEW_IN_PROGRESS_BADGE.tone };
   }
   return { text: status.primaryLabel, tone: "ready" };

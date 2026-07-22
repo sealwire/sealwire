@@ -282,6 +282,22 @@ test("remote status badge surfaces 'Review blocked' regardless of which thread i
   assert.equal(model.statusBadge.tone, "alert");
 });
 
+test("remote status badge surfaces blocked Code Flow regardless of which thread is active", () => {
+  const state = { remoteAuth: { deviceId: "device-1" }, socketConnected: true };
+  const session = {
+    active_thread_id: "thread-2",
+    active_workflow_runs: [
+      { id: "workflow-1", status: "blocked", parent_thread_id: "thread-1" },
+    ],
+    pending_approvals: [],
+    provider_connected: true,
+  };
+
+  const model = selectSessionChromeRenderModel(state, session);
+  assert.equal(model.statusBadge.label, "Code Flow blocked — action needed");
+  assert.equal(model.statusBadge.tone, "alert");
+});
+
 test("remote status badge shows the active thread's own task (Idle), not a review label, when a review runs on a non-active thread", () => {
   const state = { remoteAuth: { deviceId: "device-1" }, socketConnected: true };
   const session = {
@@ -332,6 +348,30 @@ test("remote control banner allows take over when the review is on another threa
 
   assert.equal(model.controlBanner.hidden, false);
   assert.equal(model.controlBanner.takeOverHidden, false);
+});
+
+test("remote control banner hides take over while the active thread is owned by Code Flow", () => {
+  const state = {
+    remoteAuth: { deviceId: "device-1" },
+    socketConnected: true,
+  };
+  const session = {
+    active_thread_id: "thread-1",
+    active_controller_device_id: "device-2",
+    active_workflow_runs: [
+      { id: "workflow-1", status: "running", parent_thread_id: "thread-1" },
+    ],
+    current_status: "idle",
+    pending_approvals: [],
+    provider_connected: true,
+  };
+
+  const model = selectSessionChromeRenderModel(state, session);
+
+  assert.equal(model.statusBadge.label, "Code Flow in progress");
+  assert.equal(model.controlBanner.hidden, false);
+  assert.equal(model.controlBanner.takeOverHidden, true);
+  assert.match(model.controlBanner.hint, /Code Flow/);
 });
 
 test("remote view-only stale working status exposes targeted take over", () => {

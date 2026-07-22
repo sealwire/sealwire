@@ -14,7 +14,9 @@ import {
 } from "../dom.js";
 import {
   requestReview as requestReviewApi,
+  startWorkflow as startWorkflowApi,
   resolveReview as resolveReviewApi,
+  resolveWorkflow as resolveWorkflowApi,
   deleteReview as deleteReviewApi,
 } from "../api.js";
 import { loadLastEffort, saveLastApprovalPolicy } from "../../shared/last-used-settings.js";
@@ -528,6 +530,48 @@ export function createLifecycleController(ctx) {
     }
   }
 
+  async function startWorkflow({
+    taskPrompt,
+    reviewerProvider,
+    reviewerModel,
+    reviewerInstructions,
+    maxRounds,
+    anchorItemId,
+  } = {}) {
+    if (!taskPrompt?.trim()) {
+      logLine("Enter a task before starting Code Flow.");
+      return null;
+    }
+    if (!reviewerProvider) {
+      logLine("Pick a reviewer provider before starting Code Flow.");
+      return null;
+    }
+
+    logLine(`Starting Code Flow with ${reviewerProvider} reviewer`);
+
+    try {
+      const receipt = await startWorkflowApi(
+        apiFetch,
+        {
+          workflow_id: "code_flow",
+          task_prompt: taskPrompt.trim(),
+          reviewer_provider: reviewerProvider,
+          reviewer_model: reviewerModel || null,
+          reviewer_instructions: reviewerInstructions || null,
+          max_rounds: maxRounds || 2,
+          anchor_item_id: anchorItemId || null,
+        },
+        state.deviceId
+      );
+      logLine(receipt?.message || "Code Flow started.");
+      await loadSession("post-workflow-start");
+      return receipt;
+    } catch (error) {
+      logLine(`Code Flow start failed: ${error.message}`);
+      throw error;
+    }
+  }
+
   async function resolveReview(reviewJobId) {
     logLine("Stopping the blocked reviewer…");
     try {
@@ -537,6 +581,19 @@ export function createLifecycleController(ctx) {
       return receipt;
     } catch (error) {
       logLine(`Resolve failed: ${error.message}`);
+      return null;
+    }
+  }
+
+  async function resolveWorkflow(workflowRunId) {
+    logLine("Stopping the blocked Code Flow…");
+    try {
+      const receipt = await resolveWorkflowApi(apiFetch, workflowRunId, state.deviceId);
+      logLine(receipt?.message || "Code Flow stopped; workspace unlocked.");
+      await loadSession("post-workflow-resolve");
+      return receipt;
+    } catch (error) {
+      logLine(`Code Flow resolve failed: ${error.message}`);
       return null;
     }
   }
@@ -675,7 +732,9 @@ export function createLifecycleController(ctx) {
     resumeLatestSession,
     sendMessage,
     requestReview,
+    startWorkflow,
     resolveReview,
+    resolveWorkflow,
     deleteReview,
     stopActiveTurn,
     applySessionSnapshot,
