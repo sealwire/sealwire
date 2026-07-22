@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   applyStatusUpdate,
+  brokerStatusMeta,
   captureFormDraft,
   openSurfaceDisabled,
   parsePort,
@@ -107,6 +108,17 @@ function surfaceCopy(relay) {
   return relay.brokerLabel || "Local relay";
 }
 
+function renderBrokerStatus(relay) {
+  const status = relay?.brokerStatus || "disabled";
+  const meta = brokerStatusMeta(status);
+  return el("div", { className: "field broker-status" }, [
+    el("span", { className: `broker-dot ${meta.dotClass}` }),
+    el("span", { className: "broker-status-label" }, [
+      `${meta.label}${relay.brokerLabel ? ` (${relay.brokerLabel})` : ""}`,
+    ]),
+  ]);
+}
+
 function renderControls(config, relay) {
   return el("aside", { className: "control-pane" }, [
     state.error ? el("div", { className: "error-banner" }, [state.error]) : null,
@@ -159,6 +171,7 @@ function renderControls(config, relay) {
           value: config.customBrokerUrl || "",
         }),
       ]),
+      renderBrokerStatus(relay),
     ]),
     el("section", { className: "section" }, [
       el("div", { className: "button-row" }, [

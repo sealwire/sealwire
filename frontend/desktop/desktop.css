@@ -310,3 +310,42 @@
   font-size: var(--text-ui);
   font-weight: var(--weight-strong);
 }
+
+.desktop-shell .broker-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  font-size: var(--text-ui);
+  color: var(--text-2);
+}
+
+.desktop-shell .broker-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.broker-dot-disabled {
+  background-color: var(--text-faint);
+}
+
+.broker-dot-connecting {
+  background-color: var(--accent);
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+.broker-dot-connected {
+  background-color: var(--ok-fg);
+}
+
+.broker-dot-offline {
+  background-color: var(--err-fg);
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
