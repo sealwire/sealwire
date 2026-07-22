@@ -1,5 +1,4 @@
 mod auth;
-mod config_watcher;
 mod credentials;
 mod crypto;
 mod protocol;
@@ -71,7 +70,7 @@ pub struct BrokerConfig {
     auth: BrokerAuthConfig,
 }
 
-pub(crate) enum BrokerConfigResolution {
+enum BrokerConfigResolution {
     Disabled,
     Ready(BrokerConfig),
     PendingPublicEnrollment(PendingPublicEnrollment),
@@ -82,7 +81,7 @@ pub(crate) enum BrokerConfigResolution {
 const RELAY_LICENSE_CODE_ENV: &str = "RELAY_LICENSE_CODE";
 
 #[derive(Clone, Debug)]
-pub(crate) struct PendingPublicEnrollment {
+struct PendingPublicEnrollment {
     control_url: Url,
     registration_path: PathBuf,
     identity_path: PathBuf,
@@ -219,39 +218,6 @@ impl BrokerConfig {
             std::env::var("RELAY_BROKER_CHANNEL_ID").ok(),
             std::env::var("RELAY_BROKER_PEER_ID").ok(),
             std::env::var(BROKER_AUTH_MODE_ENV).ok(),
-            std::env::var(relay_broker::join_ticket::JOIN_TICKET_SECRET_ENV).ok(),
-            std::env::var(RELAY_BROKER_RELAY_ID_ENV).ok(),
-            std::env::var(RELAY_BROKER_RELAY_REFRESH_TOKEN_ENV).ok(),
-            std::env::var(RELAY_BROKER_IDENTITY_PATH_ENV).ok(),
-            std::env::var(RELAY_BROKER_REGISTRATION_PATH_ENV).ok(),
-            std::env::var(self::auth::RELAY_BROKER_DEVICE_JOIN_TTL_SECS_ENV).ok(),
-            std::env::var(RELAY_LICENSE_CODE_ENV).ok(),
-        )
-        .await
-    }
-
-    /// Build a broker resolution from already-resolved endpoints (runtime hot
-    /// switching), reusing the same stable env params — peer id, channel id,
-    /// identity/registration paths, license — as the startup env path. Only the
-    /// URLs differ per mode. `None` endpoints → Disabled (local-only). Auth mode
-    /// defaults to "public" (what the desktop uses for every broker), overridable
-    /// via RELAY_BROKER_AUTH_MODE for a self-hosted shared-secret broker.
-    #[allow(dead_code)] // consumed by apply_broker_mode / the broker control API (next brick)
-    pub(crate) async fn from_endpoints_resolution(
-        endpoints: Option<config_watcher::BrokerEndpoints>,
-    ) -> Result<BrokerConfigResolution, String> {
-        let Some(endpoints) = endpoints else {
-            return Ok(BrokerConfigResolution::Disabled);
-        };
-        Self::from_parts_resolution(
-            Some(endpoints.ws_url.clone()),
-            Some(endpoints.ws_url),
-            Some(endpoints.control_url),
-            std::env::var("RELAY_BROKER_CHANNEL_ID").ok(),
-            std::env::var("RELAY_BROKER_PEER_ID").ok(),
-            std::env::var(BROKER_AUTH_MODE_ENV)
-                .ok()
-                .or_else(|| Some("public".to_string())),
             std::env::var(relay_broker::join_ticket::JOIN_TICKET_SECRET_ENV).ok(),
             std::env::var(RELAY_BROKER_RELAY_ID_ENV).ok(),
             std::env::var(RELAY_BROKER_RELAY_REFRESH_TOKEN_ENV).ok(),
@@ -514,34 +480,11 @@ pub async fn spawn_broker_task(state: AppState) -> Result<(), String> {
 }
 
 /// Apply a broker mode at runtime (hot switch) without restarting the relay core:
-/// resolve the endpoints + full config FIRST (so an invalid mode/URL returns an
-/// error and leaves the current broker untouched), then tear the old broker down
-/// and launch the new one. `hosted_url` is the stable hosted broker URL, consulted
-/// only for the "hosted" mode. Local-only mode stops the broker entirely.
-#[allow(dead_code)] // consumed by the broker control HTTP API (next brick)
-pub(crate) async fn apply_broker_mode(
-    state: &AppState,
-    mode: &str,
-    custom_url: &str,
-    hosted_url: Option<&str>,
-) -> Result<(), String> {
-    // Validate everything before touching the running broker.
-    let endpoints = config_watcher::resolve_broker_endpoints(mode, custom_url, hosted_url)?;
-    let resolution = BrokerConfig::from_endpoints_resolution(endpoints).await?;
-
-    // Stop the old broker (abort + clear presence/target) BEFORE spawning the new
-    // one so two reconnect loops never overlap and no stale write from the old loop
-    // survives the switch (the reviewer's no-overlap constraint).
-    state.stop_broker().await;
-    launch_broker(state.clone(), resolution).await;
-    Ok(())
-}
-
 /// Spawn the broker task for an already-resolved config and store its handle so it
 /// can be cancelled/replaced later (hot broker switching). `Disabled` spawns
-/// nothing. Shared by startup (`spawn_broker_task`) and runtime broker switching so
+/// nothing. Shared by startup (`spawn_broker_task`) and runtime enable/disable so
 /// both drive the exact same publish/enrollment path.
-pub(crate) async fn launch_broker(state: AppState, resolution: BrokerConfigResolution) {
+async fn launch_broker(state: AppState, resolution: BrokerConfigResolution) {
     let (config, pending_public_enrollment) = match resolution {
         BrokerConfigResolution::Disabled => return,
         BrokerConfigResolution::Ready(config) => (Some(config), None),
