@@ -209,6 +209,11 @@ pub struct RelayState {
     pub provider_name: String,
     pub provider_connections: HashMap<String, bool>,
     pub broker_connected: bool,
+    /// Whether a broker is configured for this relay lifetime (set once at startup;
+    /// broker on/off is a restart, so this never changes at runtime). Transcript
+    /// deltas are only ever drained by the broker publisher, so when this is false
+    /// (local-only) they are dropped at enqueue instead of accumulating unbounded.
+    pub broker_configured: bool,
     pub broker_channel_id: Option<String>,
     pub broker_peer_id: Option<String>,
     pub active_thread_id: Option<String>,
@@ -334,6 +339,7 @@ impl RelayState {
             provider_name: String::new(),
             provider_connections: HashMap::new(),
             broker_connected: false,
+            broker_configured: false,
             broker_channel_id: None,
             broker_peer_id: None,
             active_thread_id: None,
@@ -2421,6 +2427,45 @@ impl RelayState {
             .insert(peer_id.to_string(), device_id.to_string());
     }
 
+    /// Queue a message for the broker publisher to drain. Transcript deltas are only
+    /// ever consumed by that publisher, so when no broker is configured (local-only)
+    /// they are dropped at the door instead of growing an unconsumed queue forever;
+    /// when a broker IS configured the delta backlog is capped (dropped deltas are
+    /// recoverable — the broker republishes an authoritative snapshot on reconnect).
+    /// Pairing results have their own retention semantics and are always kept.
+    pub fn queue_broker_message(&mut self, message: BrokerPendingMessage) {
+        if matches!(message, BrokerPendingMessage::TranscriptDelta(_)) && !self.broker_configured {
+            return;
+        }
+        self.pending_broker_messages.push(message);
+        self.bound_pending_transcript_deltas();
+    }
+
+    /// Cap the number of queued transcript deltas, dropping the oldest beyond the
+    /// bound. Pairing results are never dropped.
+    fn bound_pending_transcript_deltas(&mut self) {
+        const MAX_PENDING_DELTAS: usize = 4096;
+        let delta_count = self
+            .pending_broker_messages
+            .iter()
+            .filter(|m| matches!(m, BrokerPendingMessage::TranscriptDelta(_)))
+            .count();
+        let Some(mut to_drop) = delta_count.checked_sub(MAX_PENDING_DELTAS) else {
+            return;
+        };
+        if to_drop == 0 {
+            return;
+        }
+        self.pending_broker_messages.retain(|m| {
+            if to_drop > 0 && matches!(m, BrokerPendingMessage::TranscriptDelta(_)) {
+                to_drop -= 1;
+                false
+            } else {
+                true
+            }
+        });
+    }
+
     pub fn drain_pending_broker_messages(&mut self) -> Vec<BrokerPendingMessage> {
         std::mem::take(&mut self.pending_broker_messages)
     }
@@ -2868,7 +2913,10 @@ fn remote_action_cache_key(device_id: &str, action_id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{PersistedRelayState, RelayState, SecurityProfile, WorkflowRun, MAX_WORKFLOW_RUNS};
+    use super::{
+        BrokerPendingMessage, PendingPairingResult, PendingTranscriptDelta, PersistedRelayState,
+        RelayState, SecurityProfile, TranscriptDeltaKind, WorkflowRun, MAX_WORKFLOW_RUNS,
+    };
     use crate::state::RunStatus;
     use std::collections::HashMap;
     use tokio::sync::watch;
@@ -2876,6 +2924,88 @@ mod tests {
     fn test_relay() -> RelayState {
         let (tx, _rx) = watch::channel(0_u64);
         RelayState::new("/tmp/project".to_string(), tx, SecurityProfile::private())
+    }
+
+    fn dummy_delta() -> BrokerPendingMessage {
+        BrokerPendingMessage::TranscriptDelta(PendingTranscriptDelta {
+            thread_id: "t1".to_string(),
+            base_revision: 0,
+            revision: 1,
+            entry_seq: 0,
+            server_time: 0,
+            item_id: "i1".to_string(),
+            turn_id: None,
+            delta: "x".to_string(),
+            kind: TranscriptDeltaKind::AgentText,
+            text_offset: None,
+        })
+    }
+
+    fn dummy_pairing() -> BrokerPendingMessage {
+        BrokerPendingMessage::PairingResult(PendingPairingResult {
+            pairing_id: "p1".to_string(),
+            target_peer_id: "peer".to_string(),
+            pairing_secret: "s".to_string(),
+            device: None,
+            payload_secret: None,
+            relay_id: None,
+            relay_label: None,
+            client_id: None,
+            client_refresh_token: None,
+            device_refresh_token: None,
+            device_join_ticket: None,
+            device_join_ticket_expires_at: None,
+            error: None,
+        })
+    }
+
+    // A local-only relay (no broker) must not accumulate transcript deltas: nothing
+    // ever drains them, so they are dropped at enqueue instead of leaking memory.
+    #[test]
+    fn local_only_relay_drops_transcript_deltas() {
+        let mut relay = test_relay();
+        assert!(
+            !relay.broker_configured,
+            "test relay defaults to local-only"
+        );
+        for _ in 0..1000 {
+            relay.queue_broker_message(dummy_delta());
+        }
+        assert_eq!(
+            relay.pending_broker_messages.len(),
+            0,
+            "no broker configured → transcript deltas must not accumulate"
+        );
+    }
+
+    // With a broker configured, deltas are retained for the publisher, but the
+    // backlog is capped so a long broker outage can't grow memory without bound.
+    #[test]
+    fn configured_relay_retains_but_bounds_transcript_deltas() {
+        let mut relay = test_relay();
+        relay.broker_configured = true;
+        for _ in 0..5000 {
+            relay.queue_broker_message(dummy_delta());
+        }
+        assert_eq!(
+            relay.pending_broker_messages.len(),
+            4096,
+            "a configured broker retains deltas but caps the backlog"
+        );
+    }
+
+    // Pairing results have their own retention semantics and are never dropped,
+    // even with no broker configured.
+    #[test]
+    fn pairing_results_are_never_dropped() {
+        let mut relay = test_relay();
+        assert!(!relay.broker_configured);
+        relay.queue_broker_message(dummy_pairing());
+        assert_eq!(
+            relay.pending_broker_messages.len(),
+            1,
+            "pairing results are kept regardless of broker configuration"
+        );
     }
 
     #[test]

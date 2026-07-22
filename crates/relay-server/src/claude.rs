@@ -1136,22 +1136,20 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                         relay.touch_progress(Some("streaming"), None);
                         let mutation = relay.append_agent_delta(&item_id, &text, &turn_id);
                         let thread_id = relay.active_thread_id.clone().unwrap_or_default();
-                        relay
-                            .pending_broker_messages
-                            .push(BrokerPendingMessage::TranscriptDelta(
-                                PendingTranscriptDelta {
-                                    thread_id,
-                                    base_revision: mutation.base_revision,
-                                    revision: mutation.revision,
-                                    entry_seq: mutation.entry_seq,
-                                    server_time: mutation.server_time,
-                                    item_id,
-                                    turn_id: Some(turn_id),
-                                    delta: text.clone(),
-                                    kind: TranscriptDeltaKind::AgentText,
-                                    text_offset: mutation.text_offset,
-                                },
-                            ));
+                        relay.queue_broker_message(BrokerPendingMessage::TranscriptDelta(
+                            PendingTranscriptDelta {
+                                thread_id,
+                                base_revision: mutation.base_revision,
+                                revision: mutation.revision,
+                                entry_seq: mutation.entry_seq,
+                                server_time: mutation.server_time,
+                                item_id,
+                                turn_id: Some(turn_id),
+                                delta: text.clone(),
+                                kind: TranscriptDeltaKind::AgentText,
+                                text_offset: mutation.text_offset,
+                            },
+                        ));
                     }
                 }
                 relay.push_log("agent", text);

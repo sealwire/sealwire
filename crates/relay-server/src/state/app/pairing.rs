@@ -260,9 +260,7 @@ impl AppState {
                 "Pairing request rejected on the local relay.".to_string()
             }
         };
-        relay
-            .pending_broker_messages
-            .push(super::BrokerPendingMessage::PairingResult(result));
+        relay.queue_broker_message(super::BrokerPendingMessage::PairingResult(result));
         relay.notify();
         Ok(PairingDecisionReceipt {
             pairing_id: pairing_id.to_string(),

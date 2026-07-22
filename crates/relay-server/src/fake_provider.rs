@@ -719,13 +719,13 @@ impl ProviderBridge for FakeProviderBridge {
                         kind: TranscriptDeltaKind::AgentText,
                         text_offset: mutation.text_offset,
                     };
-                    relay
-                        .pending_broker_messages
-                        .push(BrokerPendingMessage::TranscriptDelta(pending.clone()));
+                    relay.queue_broker_message(BrokerPendingMessage::TranscriptDelta(
+                        pending.clone(),
+                    ));
                     if duplicate_chunk_indices.contains(&index) {
-                        relay
-                            .pending_broker_messages
-                            .push(BrokerPendingMessage::TranscriptDelta(pending.clone()));
+                        relay.queue_broker_message(BrokerPendingMessage::TranscriptDelta(
+                            pending.clone(),
+                        ));
                     }
                     last_delta = Some(pending);
                 } else {
@@ -901,9 +901,7 @@ impl ProviderBridge for FakeProviderBridge {
                 if let Some(mut pending) = last_delta.clone() {
                     pending.delta = late_chunk.clone();
                     let mut relay = state.write().await;
-                    relay
-                        .pending_broker_messages
-                        .push(BrokerPendingMessage::TranscriptDelta(pending));
+                    relay.queue_broker_message(BrokerPendingMessage::TranscriptDelta(pending));
                     relay.notify();
                 }
                 record_scenario_event(
@@ -1444,6 +1442,9 @@ mod tests {
             )]),
         );
         let (bridge, state) = bridge_with_scenarios("bypass", harness.clone()).await;
+        // This test asserts transcript deltas are queued for the broker, so a broker
+        // must be configured — otherwise deltas are dropped at enqueue (local-only).
+        state.write().await.broker_configured = true;
 
         bridge
             .start_turn(ACTIVE_THREAD, "scripted", "fake-echo", "medium")

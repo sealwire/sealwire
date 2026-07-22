@@ -489,6 +489,10 @@ async fn launch_broker(state: AppState, resolution: BrokerConfigResolution) {
         BrokerConfigResolution::PendingPublicEnrollment(pending) => (None, Some(pending)),
     };
 
+    // A broker is configured for this relay lifetime — retain transcript deltas for
+    // the publisher (they are dropped at enqueue only when no broker is configured).
+    state.mark_broker_configured().await;
+
     if let Some(pending) = pending_public_enrollment {
         info!(
             broker_auth_mode = BrokerAuthMode::PublicControlPlane.as_str(),

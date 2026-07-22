@@ -1,6 +1,14 @@
 use super::*;
 
 impl AppState {
+    /// Mark that a broker is configured for this relay lifetime. Called once at
+    /// startup when the resolved broker config is not Disabled, so transcript deltas
+    /// are retained for the publisher; with no broker they are dropped at enqueue.
+    pub(crate) async fn mark_broker_configured(&self) {
+        let mut relay = self.relay.write().await;
+        relay.broker_configured = true;
+    }
+
     pub(crate) async fn set_broker_channel(
         &self,
         channel_id: Option<String>,
