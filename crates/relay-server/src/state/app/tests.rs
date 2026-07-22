@@ -276,6 +276,88 @@ mod path_scope_tests {
         )
     }
 
+    // A spawned task that runs until aborted, flipping `dropped` to true when its
+    // future is torn down — lets a test observe that abort actually happened. The
+    // guard is constructed OUTSIDE the async block and captured, so it is dropped
+    // when the future is dropped even if the task was aborted before its first poll
+    // (which happens on the current-thread test runtime).
+    fn never_ending_task(dropped: Arc<AtomicBool>) -> tokio::task::JoinHandle<()> {
+        struct DropFlag(Arc<AtomicBool>);
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let guard = DropFlag(dropped);
+        tokio::spawn(async move {
+            let _guard = guard;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            }
+        })
+    }
+
+    async fn wait_until(flag: &Arc<AtomicBool>) -> bool {
+        for _ in 0..100 {
+            if flag.load(Ordering::SeqCst) {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        flag.load(Ordering::SeqCst)
+    }
+
+    #[tokio::test]
+    async fn stop_broker_aborts_the_task_and_is_idempotent() {
+        let (app, _project, _outside) = build_app("/tmp/broker-supervisor-stop").await;
+
+        // No broker installed yet → nothing to stop.
+        assert!(
+            !app.stop_broker().await,
+            "stop_broker with no broker must report false"
+        );
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        app.set_broker_task(never_ending_task(dropped.clone()))
+            .await;
+
+        assert!(
+            app.stop_broker().await,
+            "stop_broker must report it stopped the installed task"
+        );
+        assert!(
+            wait_until(&dropped).await,
+            "aborting the broker task must drop its future (tear the loop down)"
+        );
+        // Idempotent: the slot is now empty.
+        assert!(!app.stop_broker().await);
+    }
+
+    #[tokio::test]
+    async fn set_broker_task_aborts_the_previous_task() {
+        let (app, _project, _outside) = build_app("/tmp/broker-supervisor-replace").await;
+
+        let first_dropped = Arc::new(AtomicBool::new(false));
+        app.set_broker_task(never_ending_task(first_dropped.clone()))
+            .await;
+
+        // Installing a second task must abort the first (no two broker loops at once).
+        let second_dropped = Arc::new(AtomicBool::new(false));
+        app.set_broker_task(never_ending_task(second_dropped.clone()))
+            .await;
+
+        assert!(
+            wait_until(&first_dropped).await,
+            "replacing the broker task must abort the previous one"
+        );
+        assert!(
+            !second_dropped.load(Ordering::SeqCst),
+            "the newly installed task must still be running"
+        );
+
+        app.stop_broker().await;
+    }
+
     async fn build_status_app(cwd: &str, read_status: &str) -> (AppState, TempDir, TempDir) {
         let project = TempDir::new().expect("project tempdir");
         let outside = TempDir::new().expect("outside tempdir");

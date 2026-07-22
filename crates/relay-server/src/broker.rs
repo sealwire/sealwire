@@ -489,9 +489,10 @@ pub async fn spawn_broker_task(state: AppState) -> Result<(), String> {
             "relay-server is waiting for public broker enrollment"
         );
         let broker_state = state.clone();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             run_public_broker_enrollment_loop(broker_state, pending).await;
         });
+        state.set_broker_task(handle).await;
         return Ok(());
     }
 
@@ -514,7 +515,7 @@ pub async fn spawn_broker_task(state: AppState) -> Result<(), String> {
 
     let change_rx = state.subscribe();
     let broker_state = state.clone();
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         broker_state
             .set_broker_channel(
                 Some(config.broker_room_id().to_string()),
@@ -545,6 +546,7 @@ pub async fn spawn_broker_task(state: AppState) -> Result<(), String> {
         }
         run_broker_loop(broker_state, change_rx, config).await;
     });
+    state.set_broker_task(handle).await;
 
     Ok(())
 }

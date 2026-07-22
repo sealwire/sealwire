@@ -1,6 +1,35 @@
 use super::*;
 
 impl AppState {
+    /// Store the handle to the running broker task, aborting any previous one so
+    /// two broker loops never run concurrently after a hot restart.
+    pub(crate) async fn set_broker_task(&self, handle: tokio::task::JoinHandle<()>) {
+        let mut slot = self.broker_task.lock().await;
+        if let Some(previous) = slot.replace(handle) {
+            previous.abort();
+        }
+    }
+
+    /// Stop the running broker task (if any) and clear broker presence/target so
+    /// status reflects "no broker". Returns whether a broker task was stopped.
+    /// Hot broker switching calls this to tear the old broker down before starting
+    /// a new one, or when switching to local-only.
+    #[allow(dead_code)] // consumed by the config-watcher wiring (next Phase 2 step)
+    pub(crate) async fn stop_broker(&self) -> bool {
+        let handle = self.broker_task.lock().await.take();
+        let had_broker = handle.is_some();
+        if let Some(handle) = handle {
+            handle.abort();
+        }
+        if had_broker {
+            self.set_broker_connection(false).await;
+            self.set_broker_channel(None, None).await;
+            self.push_runtime_log("info", "Broker publishing stopped.".to_string())
+                .await;
+        }
+        had_broker
+    }
+
     pub(crate) async fn set_broker_channel(
         &self,
         channel_id: Option<String>,
