@@ -476,8 +476,17 @@ impl BrokerConfig {
 
 pub async fn spawn_broker_task(state: AppState) -> Result<(), String> {
     let resolution = BrokerConfig::from_env_resolution().await?;
+    launch_broker(state, resolution).await;
+    Ok(())
+}
+
+/// Spawn the broker task for an already-resolved config and store its handle so it
+/// can be cancelled/replaced later (hot broker switching). `Disabled` spawns
+/// nothing. Shared by startup (`spawn_broker_task`) and runtime broker switching so
+/// both drive the exact same publish/enrollment path.
+pub(crate) async fn launch_broker(state: AppState, resolution: BrokerConfigResolution) {
     let (config, pending_public_enrollment) = match resolution {
-        BrokerConfigResolution::Disabled => return Ok(()),
+        BrokerConfigResolution::Disabled => return,
         BrokerConfigResolution::Ready(config) => (Some(config), None),
         BrokerConfigResolution::PendingPublicEnrollment(pending) => (None, Some(pending)),
     };
@@ -493,7 +502,7 @@ pub async fn spawn_broker_task(state: AppState) -> Result<(), String> {
             run_public_broker_enrollment_loop(broker_state, pending).await;
         });
         state.set_broker_task(handle).await;
-        return Ok(());
+        return;
     }
 
     let config = config.expect("ready broker config should be present");
@@ -547,8 +556,6 @@ pub async fn spawn_broker_task(state: AppState) -> Result<(), String> {
         run_broker_loop(broker_state, change_rx, config).await;
     });
     state.set_broker_task(handle).await;
-
-    Ok(())
 }
 
 async fn run_broker_loop(
