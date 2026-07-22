@@ -1,4 +1,5 @@
 mod auth;
+mod config_watcher;
 mod credentials;
 mod crypto;
 mod protocol;
