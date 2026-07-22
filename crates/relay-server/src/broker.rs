@@ -82,7 +82,7 @@ pub(crate) enum BrokerConfigResolution {
 const RELAY_LICENSE_CODE_ENV: &str = "RELAY_LICENSE_CODE";
 
 #[derive(Clone, Debug)]
-struct PendingPublicEnrollment {
+pub(crate) struct PendingPublicEnrollment {
     control_url: Url,
     registration_path: PathBuf,
     identity_path: PathBuf,

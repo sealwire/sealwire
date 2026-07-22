@@ -1,26 +1,27 @@
 use super::*;
 
 impl AppState {
-    /// Store the handle to the running broker task, aborting any previous one so
-    /// two broker loops never run concurrently after a hot restart.
+    /// Store the handle to the running broker task, aborting AND awaiting any
+    /// previous one so two broker loops never run concurrently after a hot restart
+    /// and the old loop can't write broker state after the new one is installed.
     pub(crate) async fn set_broker_task(&self, handle: tokio::task::JoinHandle<()>) {
-        let mut slot = self.broker_task.lock().await;
-        if let Some(previous) = slot.replace(handle) {
-            previous.abort();
-        }
+        let previous = self.broker_task.lock().await.replace(handle);
+        abort_and_join(previous).await;
     }
 
     /// Stop the running broker task (if any) and clear broker presence/target so
     /// status reflects "no broker". Returns whether a broker task was stopped.
     /// Hot broker switching calls this to tear the old broker down before starting
     /// a new one, or when switching to local-only.
-    #[allow(dead_code)] // consumed by the config-watcher wiring (next Phase 2 step)
+    #[allow(dead_code)] // consumed by the broker control HTTP API (next Phase 2 step)
     pub(crate) async fn stop_broker(&self) -> bool {
         let handle = self.broker_task.lock().await.take();
         let had_broker = handle.is_some();
-        if let Some(handle) = handle {
-            handle.abort();
-        }
+        // Await the aborted task so its future is fully dropped before we clear and
+        // return — the old reconnect loop cannot write broker status/channel after
+        // this point, so a switch never leaves stale state (no generation guard
+        // needed). Safe from deadlock: never called from within the broker task.
+        abort_and_join(handle).await;
         if had_broker {
             self.set_broker_connection(false).await;
             self.set_broker_channel(None, None).await;
@@ -113,5 +114,15 @@ impl AppState {
     ) {
         let mut relay = self.relay.write().await;
         relay.store_remote_action_result(device_id, action_id, result, unix_now());
+    }
+}
+
+/// Abort a broker task and await its teardown so its future is fully dropped
+/// before the caller proceeds. `None` is a no-op. The `JoinError` from a
+/// cancelled task is expected and ignored.
+async fn abort_and_join(handle: Option<tokio::task::JoinHandle<()>>) {
+    if let Some(handle) = handle {
+        handle.abort();
+        let _ = handle.await;
     }
 }

@@ -325,9 +325,12 @@ mod path_scope_tests {
             app.stop_broker().await,
             "stop_broker must report it stopped the installed task"
         );
+        // stop_broker awaits the aborted task, so its future is ALREADY dropped by
+        // the time stop_broker returns — no waiting needed. This is the guarantee
+        // that no stale broker-loop write can survive a hot switch.
         assert!(
-            wait_until(&dropped).await,
-            "aborting the broker task must drop its future (tear the loop down)"
+            dropped.load(Ordering::SeqCst),
+            "stop_broker must await the aborted task's teardown before returning"
         );
         // Idempotent: the slot is now empty.
         assert!(!app.stop_broker().await);
