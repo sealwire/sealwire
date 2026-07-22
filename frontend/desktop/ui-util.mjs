@@ -144,6 +144,7 @@ export function restoreFormDraft(doc, draft) {
 
 // Broker status meta: "disabled" | "connecting" | "connected" | "offline".
 // Follows the same tone/dotClass/label pattern as providers for visual consistency.
+// Unknown or null status defaults to "disabled" (inactive), not "connecting" (active).
 export function brokerStatusMeta(status) {
   const meta = {
     disabled: {
@@ -167,5 +168,5 @@ export function brokerStatusMeta(status) {
       dotClass: "broker-dot-offline",
     },
   };
-  return meta[status] || meta.connecting; // Default to neutral "connecting"
+  return meta[status] || meta.disabled; // Default to inactive "disabled", not "connecting"
 }

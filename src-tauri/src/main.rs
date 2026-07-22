@@ -322,7 +322,7 @@ impl RelayStatus {
             remote_url: None,
             broker_url: None,
             broker_label: "Stopped".to_string(),
-            broker_status: None,
+            broker_status: Some("disabled".to_string()),
             workspace_dir: None,
             started_at_ms: None,
         }
