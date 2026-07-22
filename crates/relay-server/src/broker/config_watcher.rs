@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, warn};
+use url::Url;
 
 /// Desktop config structure, deserialized from desktop-config.json.
 /// We only care about broker fields for Phase 2.
@@ -39,6 +40,78 @@ impl BrokerConfigPart {
             custom_url: config.custom_broker_url.clone(),
         }
     }
+}
+
+/// The resolved broker endpoints for a given mode: the ws(s) URL the relay dials
+/// and the http(s) control-plane URL. `None` means "no broker" (local-only).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrokerEndpoints {
+    pub ws_url: String,
+    pub control_url: String,
+}
+
+fn strip_trailing_slash(value: &str) -> String {
+    value.strip_suffix('/').unwrap_or(value).to_string()
+}
+
+/// Resolve a broker mode into the ws + control endpoints, mirroring the desktop
+/// launcher's `broker_runtime_config` normalization so a hot switch lands on the
+/// exact same URLs a restart would. `hosted_url` is the (stable) hosted broker URL
+/// handed to the relay at startup; it is only consulted for the "hosted" mode.
+///
+/// Returns `Ok(None)` for local-only, `Ok(Some(_))` for an enabled broker, and
+/// `Err` for an unknown mode or an unusable URL (so a bad edit keeps the current
+/// broker rather than tearing it down — the caller decides that policy).
+pub fn resolve_broker_endpoints(
+    mode: &str,
+    custom_url: &str,
+    hosted_url: Option<&str>,
+) -> Result<Option<BrokerEndpoints>, String> {
+    let value = match mode {
+        "localOnly" => return Ok(None),
+        "hosted" => hosted_url
+            .ok_or_else(|| "hosted broker URL is not available to the relay".to_string())?
+            .trim(),
+        "custom" => custom_url.trim(),
+        other => return Err(format!("unknown broker mode: {other}")),
+    };
+    if value.is_empty() {
+        return Err("broker URL is required".to_string());
+    }
+
+    let mut parsed = Url::parse(value).map_err(|error| format!("invalid broker URL: {error}"))?;
+    parsed.set_path("");
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+
+    let scheme = parsed.scheme().to_ascii_lowercase();
+    if !matches!(scheme.as_str(), "http" | "https" | "ws" | "wss") {
+        return Err("broker URL must start with http://, https://, ws://, or wss://".to_string());
+    }
+
+    let mut control = parsed.clone();
+    let control_scheme = match scheme.as_str() {
+        "ws" => "http",
+        "wss" => "https",
+        other => other,
+    };
+    control
+        .set_scheme(control_scheme)
+        .map_err(|_| "failed to normalize broker control URL".to_string())?;
+
+    let ws_scheme = match scheme.as_str() {
+        "http" => "ws",
+        "https" => "wss",
+        other => other,
+    };
+    parsed
+        .set_scheme(ws_scheme)
+        .map_err(|_| "failed to normalize broker websocket URL".to_string())?;
+
+    Ok(Some(BrokerEndpoints {
+        ws_url: strip_trailing_slash(parsed.as_str()),
+        control_url: strip_trailing_slash(control.as_str()),
+    }))
 }
 
 /// Read and parse the desktop config file at the given path.
@@ -298,6 +371,72 @@ mod tests {
         let changes = drain(&mut rx, Duration::from_millis(200)).await;
         assert_eq!(changes.last().map(|c| c.mode.as_str()), Some("hosted"));
         let _ = std::fs::remove_file(&path);
+    }
+
+    const HOSTED: &str = "wss://agent-relay.up.railway.app";
+
+    #[test]
+    fn local_only_resolves_to_no_broker() {
+        assert_eq!(
+            resolve_broker_endpoints("localOnly", "", Some(HOSTED)),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn hosted_maps_to_wss_and_https() {
+        let ep = resolve_broker_endpoints("hosted", "", Some(HOSTED))
+            .unwrap()
+            .unwrap();
+        assert_eq!(ep.ws_url, "wss://agent-relay.up.railway.app");
+        assert_eq!(ep.control_url, "https://agent-relay.up.railway.app");
+    }
+
+    #[test]
+    fn hosted_without_a_hosted_url_errors() {
+        assert!(resolve_broker_endpoints("hosted", "", None).is_err());
+    }
+
+    #[test]
+    fn custom_ws_maps_to_http_control() {
+        let ep = resolve_broker_endpoints("custom", "ws://127.0.0.1:9000", None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(ep.ws_url, "ws://127.0.0.1:9000");
+        assert_eq!(ep.control_url, "http://127.0.0.1:9000");
+    }
+
+    #[test]
+    fn custom_https_maps_to_wss_and_https() {
+        let ep = resolve_broker_endpoints("custom", "https://broker.example.com", None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(ep.ws_url, "wss://broker.example.com");
+        assert_eq!(ep.control_url, "https://broker.example.com");
+    }
+
+    #[test]
+    fn custom_strips_path_query_and_fragment() {
+        let ep = resolve_broker_endpoints("custom", "wss://h.example.com/foo?x=1#y", None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(ep.ws_url, "wss://h.example.com");
+        assert_eq!(ep.control_url, "https://h.example.com");
+    }
+
+    #[test]
+    fn empty_custom_url_errors() {
+        assert!(resolve_broker_endpoints("custom", "   ", None).is_err());
+    }
+
+    #[test]
+    fn unknown_scheme_errors() {
+        assert!(resolve_broker_endpoints("custom", "ftp://nope", None).is_err());
+    }
+
+    #[test]
+    fn unknown_mode_errors() {
+        assert!(resolve_broker_endpoints("banana", "", Some(HOSTED)).is_err());
     }
 
     #[tokio::test]
