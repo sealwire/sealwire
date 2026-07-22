@@ -24,6 +24,7 @@ const HOSTED_BROKER_URL: &str = "wss://agent-relay.up.railway.app";
 const LOG_LIMIT: usize = 400;
 const TRAY_ID: &str = "sealwire-tray";
 const TRAY_OPEN_LOCAL_ID: &str = "open-local";
+const TRAY_OPEN_REMOTE_ID: &str = "open-remote";
 const TRAY_OPEN_LAUNCHER_ID: &str = "open-launcher";
 const TRAY_QUIT_ID: &str = "quit";
 // Window labels. Windows in IPC_WINDOW_LABELS load the Tauri UI (desktop.html) and
@@ -355,22 +356,56 @@ async fn desktop_stop_relay(
     Ok(supervisor.status())
 }
 
+/// Resolve the (window label, title, url) for a product surface. Shared by the
+/// IPC command and the tray so the two can never route "remote" to different
+/// windows. These surfaces load an External http URL and talk to the relay
+/// directly, so their windows need no Tauri capability (see IPC_WINDOW_LABELS).
+fn surface_target(
+    surface: &str,
+    port: u16,
+) -> Result<(&'static str, &'static str, String), String> {
+    match surface {
+        "local" => Ok(("sealwire-local", "Sealwire Local", local_url(port))),
+        "remote" => Ok(("sealwire-remote", "Sealwire Remote", remote_url(port))),
+        _ => Err(format!("unknown surface: {surface}")),
+    }
+}
+
+/// The port a product surface may open on, or an error explaining why not. A
+/// surface must not open until the relay is `ready` — `port` is `Some` as soon
+/// as the process is spawned, but during the ready-poll it is not yet accepting
+/// connections, so opening then lands the webview on a connection-error page.
+/// The launcher UI already gates its Open buttons on `ready`; the tray "Open
+/// Remote" item has no such gate, so the invariant lives here for both callers.
+fn surface_ready_port(relay: &RelayStatus) -> Result<u16, String> {
+    if !relay.running {
+        return Err("relay is not running".to_string());
+    }
+    if !relay.ready {
+        return Err("relay is still starting".to_string());
+    }
+    relay.port.ok_or_else(|| "relay is not running".to_string())
+}
+
+/// Open (or focus) a product surface window for the running relay. Errors if the
+/// relay is not ready yet or the surface name is unknown.
+fn open_surface(
+    app: &AppHandle,
+    supervisor: &RelaySupervisor,
+    surface: &str,
+) -> Result<(), String> {
+    let port = surface_ready_port(&supervisor.status().relay)?;
+    let (label, title, url) = surface_target(surface, port)?;
+    open_surface_window(app, label, title, &url)
+}
+
 #[tauri::command]
 async fn desktop_open_surface(
     app: AppHandle,
     supervisor: State<'_, Arc<RelaySupervisor>>,
     surface: String,
 ) -> Result<(), String> {
-    let status = supervisor.status().relay;
-    let port = status
-        .port
-        .ok_or_else(|| "relay is not running".to_string())?;
-    let (label, title, url) = match surface.as_str() {
-        "local" => ("sealwire-local", "Sealwire Local", local_url(port)),
-        "remote" => ("sealwire-remote", "Sealwire Remote", remote_url(port)),
-        _ => return Err(format!("unknown surface: {surface}")),
-    };
-    open_surface_window(&app, label, title, &url)
+    open_surface(&app, &supervisor, &surface)
 }
 
 async fn start_relay(
@@ -625,6 +660,8 @@ fn show_launcher_window(app: &AppHandle) -> Result<(), String> {
 fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     let open_local =
         MenuItem::with_id(app, TRAY_OPEN_LOCAL_ID, "Open Sealwire", true, None::<&str>)?;
+    let open_remote =
+        MenuItem::with_id(app, TRAY_OPEN_REMOTE_ID, "Open Remote", true, None::<&str>)?;
     let open_launcher = MenuItem::with_id(
         app,
         TRAY_OPEN_LAUNCHER_ID,
@@ -634,7 +671,10 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     )?;
     let separator = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, TRAY_QUIT_ID, "Quit Sealwire", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open_local, &open_launcher, &separator, &quit])?;
+    let menu = Menu::with_items(
+        app,
+        &[&open_local, &open_remote, &open_launcher, &separator, &quit],
+    )?;
 
     let mut tray = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
@@ -645,6 +685,17 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     }
     tray.on_menu_event(|app, event| match event.id().as_ref() {
         TRAY_OPEN_LOCAL_ID => bring_app_to_front(app),
+        TRAY_OPEN_REMOTE_ID => {
+            if let Some(supervisor) = app.try_state::<Arc<RelaySupervisor>>() {
+                if let Err(error) = open_surface(app, &supervisor, "remote") {
+                    supervisor.push_log(
+                        Some(app),
+                        "desktop",
+                        format!("open remote failed: {error}"),
+                    );
+                }
+            }
+        }
         TRAY_OPEN_LAUNCHER_ID => {
             if let Err(error) = show_launcher_window(app) {
                 if let Some(supervisor) = app.try_state::<Arc<RelaySupervisor>>() {
@@ -1272,6 +1323,53 @@ mod tests {
                  (status/start/stop/dialog) is dead"
             );
         }
+    }
+
+    // The tray "Open Remote" item and the desktop_open_surface IPC command both
+    // route through surface_target, so this pins the labels/URLs they share: a
+    // typo that pointed "remote" at the local URL (or vice versa) would regress
+    // both entry points at once.
+    #[test]
+    fn surface_target_routes_local_and_remote() {
+        let (local_label, _, local) = surface_target("local", 8811).unwrap();
+        assert_eq!(local_label, "sealwire-local");
+        assert_eq!(local, "http://127.0.0.1:8811/");
+
+        let (remote_label, _, remote) = surface_target("remote", 8811).unwrap();
+        assert_eq!(remote_label, "sealwire-remote");
+        assert_eq!(remote, "http://127.0.0.1:8811/static/remote.html");
+
+        assert_ne!(local_label, remote_label);
+        assert!(surface_target("bogus", 8811).is_err());
+    }
+
+    // A product surface must not open until the relay is `ready`: `port` is
+    // `Some` the instant the process spawns, but during the ready-poll it is not
+    // yet accepting connections. The launcher UI disables its Open buttons until
+    // ready; the tray "Open Remote" item relies on this gate instead. Opening a
+    // surface at a not-yet-listening port dumps the user on a browser error page.
+    #[test]
+    fn surface_wont_open_until_relay_is_ready() {
+        let ready = RelayStatus {
+            running: true,
+            ready: true,
+            port: Some(8811),
+            ..RelayStatus::stopped()
+        };
+        assert_eq!(surface_ready_port(&ready).unwrap(), 8811);
+
+        let starting = RelayStatus {
+            running: true,
+            ready: false,
+            port: Some(8811),
+            ..RelayStatus::stopped()
+        };
+        assert!(
+            surface_ready_port(&starting).is_err(),
+            "a starting (port bound but not ready) relay must not open a surface"
+        );
+
+        assert!(surface_ready_port(&RelayStatus::stopped()).is_err());
     }
 
     // F8 documentation: RELAY_BROKER_PUBLIC_URL must stay a ws/wss URL (relay-server
