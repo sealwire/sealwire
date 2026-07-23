@@ -29,7 +29,8 @@ use crate::{
         UpdateSessionSettingsInput, WorkspaceDiffResponse,
     },
     provider::{
-        spawn_providers, ProviderBridge, ProviderForkRequest, StartThreadResult, ThreadSyncData,
+        spawn_providers, ProviderBridge, ProviderForkRequest, ProviderImage, StartThreadResult,
+        ThreadSyncData,
     },
 };
 

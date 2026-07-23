@@ -41,6 +41,7 @@ export function buildModelOptions(models = [], currentModelValue = "") {
 
 export function ConversationComposer({
   actionsBeforeSend = null,
+  attachmentArea = null,
   composerDisabled = false,
   currentDraft,
   currentModelValue,
@@ -92,6 +93,7 @@ export function ConversationComposer({
   return h(
     "div",
     { className: "composer-inner" },
+    attachmentArea,
     h("textarea", textareaProps),
     h(
       "div",

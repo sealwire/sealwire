@@ -419,6 +419,31 @@ test("mapSessionMessages emits transcript kinds using relay JSON names", () => {
   );
 });
 
+test("mapSessionMessages keeps an image-only user turn visible after history reload", () => {
+  const entries = mapSessionMessages([
+    {
+      type: "user",
+      uuid: "image-user",
+      message: {
+        content: [
+          {
+            type: "image",
+            source: {
+              type: "base64",
+              media_type: "image/png",
+              data: "iVBORw0KGgo=",
+            },
+          },
+        ],
+      },
+    },
+  ]);
+
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].kind, "user_text");
+  assert.equal(entries[0].text, "[Attached image]");
+});
+
 // The LIVE request path must not ship an input-derived diff. At tool_call_requested
 // time the edit hasn't landed, so the real on-disk diff is unknown; the worker's
 // file-diff tracker recomputes the authoritative diff on tool_call_result. Shipping

@@ -22,7 +22,7 @@ use crate::{
         ApprovalDecision, ApprovalDecisionInput, ModelOptionView, ThreadSummaryView,
         TranscriptEntryKind, TranscriptEntryView,
     },
-    provider::{ProviderBridge, StartThreadResult, ThreadSyncData},
+    provider::{ProviderBridge, ProviderImage, StartThreadResult, ThreadSyncData},
     state::{
         ApprovalKind, BrokerPendingMessage, PendingApproval, PendingTranscriptDelta, RelayState,
         TranscriptDeltaKind,
@@ -447,6 +447,7 @@ impl ProviderBridge for FakeProviderBridge {
         text: &str,
         _model: &str,
         _effort: &str,
+        _images: &[ProviderImage],
     ) -> Result<Option<String>, String> {
         if !self.threads.lock().await.contains_key(thread_id) {
             return Err(format!("fake thread '{thread_id}' was not found"));
@@ -1283,6 +1284,7 @@ mod tests {
                 "Reply with exactly: after restart",
                 "fake-echo",
                 "medium",
+                &[],
             )
             .await
             .expect("restored fake thread should accept a new turn");
@@ -1392,6 +1394,7 @@ mod tests {
                 "Reply with exactly: reviewed",
                 "fake-echo",
                 "medium",
+                &[],
             )
             .await
             .expect("background thread should accept a turn");
@@ -1545,7 +1548,7 @@ mod tests {
         state.write().await.broker_configured = true;
 
         bridge
-            .start_turn(ACTIVE_THREAD, "scripted", "fake-echo", "medium")
+            .start_turn(ACTIVE_THREAD, "scripted", "fake-echo", "medium", &[])
             .await
             .expect("turn");
         assert!(
@@ -1583,7 +1586,7 @@ mod tests {
         let (bridge, state) = bridge_with_scenarios("bypass", harness.clone()).await;
 
         bridge
-            .start_turn(ACTIVE_THREAD, "fail", "fake-echo", "medium")
+            .start_turn(ACTIVE_THREAD, "fail", "fake-echo", "medium", &[])
             .await
             .expect("turn");
         assert!(wait_for_scenario_event(&harness, "terminal_error").await);
@@ -1613,7 +1616,7 @@ mod tests {
         let (bridge, state) = bridge_with_scenarios("bypass", harness.clone()).await;
 
         bridge
-            .start_turn(ACTIVE_THREAD, "disconnect", "fake-echo", "medium")
+            .start_turn(ACTIVE_THREAD, "disconnect", "fake-echo", "medium", &[])
             .await
             .expect("turn");
         assert!(wait_for_scenario_event(&harness, "provider_disconnected").await);
@@ -1640,7 +1643,13 @@ mod tests {
         );
         let (bridge, state) = bridge_with_scenarios("bypass", harness.clone()).await;
         let turn_id = bridge
-            .start_turn(ACTIVE_THREAD, "missing-terminal", "fake-echo", "medium")
+            .start_turn(
+                ACTIVE_THREAD,
+                "missing-terminal",
+                "fake-echo",
+                "medium",
+                &[],
+            )
             .await
             .expect("turn")
             .expect("turn id");
@@ -1675,7 +1684,7 @@ mod tests {
         let (bridge, state) = bridge_with_scenarios("bypass", harness.clone()).await;
 
         bridge
-            .start_turn(ACTIVE_THREAD, "approval", "fake-echo", "medium")
+            .start_turn(ACTIVE_THREAD, "approval", "fake-echo", "medium", &[])
             .await
             .expect("turn");
         let pending = wait_for_pending_approval(&state)
@@ -1727,7 +1736,7 @@ mod tests {
         let (bridge, state) = bridge_with_scenarios("bypass", harness.clone()).await;
 
         let reject_turn = bridge
-            .start_turn(ACTIVE_THREAD, "reject-stop", "fake-echo", "medium")
+            .start_turn(ACTIVE_THREAD, "reject-stop", "fake-echo", "medium", &[])
             .await
             .expect("turn")
             .expect("turn id");
@@ -1739,7 +1748,7 @@ mod tests {
         assert!(wait_for_thread_text(&bridge, ACTIVE_THREAD, "reply").await);
 
         let ignore_turn = bridge
-            .start_turn(ACTIVE_THREAD, "ignore-stop", "fake-echo", "medium")
+            .start_turn(ACTIVE_THREAD, "ignore-stop", "fake-echo", "medium", &[])
             .await
             .expect("turn")
             .expect("turn id");
@@ -1752,7 +1761,7 @@ mod tests {
         assert_eq!(state.read().await.snapshot().active_turn_id, None);
 
         let accept_turn = bridge
-            .start_turn(ACTIVE_THREAD, "accept-stop", "fake-echo", "medium")
+            .start_turn(ACTIVE_THREAD, "accept-stop", "fake-echo", "medium", &[])
             .await
             .expect("turn")
             .expect("turn id");
@@ -1837,6 +1846,7 @@ mod tests {
                 "Reply with exactly: pong",
                 "fake-echo",
                 "medium",
+                &[],
             )
             .await
             .expect("turn");
@@ -1865,6 +1875,7 @@ mod tests {
                 "Reply with exactly: pong",
                 "fake-echo",
                 "medium",
+                &[],
             )
             .await
             .expect("turn");
@@ -1906,6 +1917,7 @@ mod tests {
                 "Reply with exactly: pong",
                 "fake-echo",
                 "medium",
+                &[],
             )
             .await
             .expect("turn");

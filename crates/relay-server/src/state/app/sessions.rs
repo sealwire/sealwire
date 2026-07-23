@@ -392,18 +392,37 @@ impl AppState {
 
     pub async fn send_message(&self, input: SendMessageInput) -> Result<SessionSnapshot, String> {
         let _slot = self.acquire_session_slot()?;
-        self.send_message_inner(input).await
+        self.send_message_inner_with_images(input, &[]).await
+    }
+
+    pub async fn send_message_with_images(
+        &self,
+        input: SendMessageInput,
+        images: Vec<ProviderImage>,
+    ) -> Result<SessionSnapshot, String> {
+        let _slot = self.acquire_session_slot()?;
+        self.send_message_inner_with_images(input, &images).await
     }
 
     pub(super) async fn send_message_inner(
         &self,
         input: SendMessageInput,
     ) -> Result<SessionSnapshot, String> {
+        self.send_message_inner_with_images(input, &[]).await
+    }
+
+    async fn send_message_inner_with_images(
+        &self,
+        input: SendMessageInput,
+        images: &[ProviderImage],
+    ) -> Result<SessionSnapshot, String> {
         let device_id = require_device_id(input.device_id)?;
         self.expire_stale_controller_if_needed().await;
         let defaults = self.defaults().await;
-        let text = non_empty(Some(input.text))
-            .ok_or_else(|| "message text cannot be empty".to_string())?;
+        let text = input.text.trim().to_string();
+        if text.is_empty() && images.is_empty() {
+            return Err("message text or an image attachment is required".to_string());
+        }
         let requested_model = non_empty(input.model);
         let requested_effort = non_empty(input.effort);
         let target_thread =
@@ -545,7 +564,7 @@ impl AppState {
             relay.thread_turn_revision(&target_thread)
         };
         let turn_id = bridge
-            .start_turn(&target_thread, &text, &model, &effort)
+            .start_turn(&target_thread, &text, &model, &effort, images)
             .await?;
         let effective_thread_id = bridge.resolve_started_thread_id(&target_thread).await;
         {

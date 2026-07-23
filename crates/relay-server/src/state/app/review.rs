@@ -1099,7 +1099,9 @@ last message (no recap turn)."
             .or_else(|| default_effort_for_model(&provider_models, &model))
             .unwrap_or(defaults.reasoning_effort);
 
-        let turn_id = bridge.start_turn(thread_id, text, &model, &effort).await?;
+        let turn_id = bridge
+            .start_turn(thread_id, text, &model, &effort, &[])
+            .await?;
 
         {
             let mut relay = self.relay.write().await;

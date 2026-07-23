@@ -21,6 +21,13 @@ function textFromContent(content) {
     .join("\n");
 }
 
+export function userMessageTranscriptText(text, imageCount) {
+  if (text) return text;
+  if (imageCount === 1) return "[Attached image]";
+  if (imageCount > 1) return `[Attached ${imageCount} images]`;
+  return "";
+}
+
 function previewJson(value, max = 1000) {
   let text;
   try {
@@ -537,7 +544,10 @@ export function mapSessionMessages(messages) {
             .filter((block) => block?.type === "text")
             .map((block) => block.text || "")
             .join("\n")
-        : textFromContent(message.content);
+        : userMessageTranscriptText(
+            textFromContent(message.content),
+            blocks.filter((block) => block?.type === "image").length,
+          );
       if (text) {
         entries.push({
           item_id: `user:${itemId}`,

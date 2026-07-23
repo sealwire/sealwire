@@ -16,6 +16,7 @@ import {
   closeLaunchSettingsModalButton,
   closeSecurityModalBtn,
   closeSessionDetailsModalButton,
+  composerAttachments,
   connectionForm,
   controlBanner,
   copyPairingLinkButton,
@@ -189,6 +190,12 @@ import {
   countReviewerThreadsForParent,
   reviewerChoiceRequestInit,
 } from "./shared/reviewer-threads.js";
+import {
+  formatAttachmentBytes,
+  imageFileToDataUrl,
+  pastedImageFiles,
+  validateImageAttachments,
+} from "./local/image-attachments.js";
 
 const DEVICE_STORAGE_KEY = "agent-relay.device-id";
 const API_TOKEN_STORAGE_KEY = "agent-relay.api-token";
@@ -223,6 +230,8 @@ const state = {
   // Freezes the composer and rejects re-entry so a draft edit / navigation /
   // double-submit during the async request can't change or duplicate the send.
   composerSubmitInFlight: false,
+  composerImageAttachments: [],
+  nextComposerImageAttachmentId: 1,
   sessionStream: null,
   streamConnected: false,
   transcriptEntryDetailCache: new Map(),
@@ -1153,6 +1162,79 @@ controlBanner?.addEventListener("click", (event) => {
   void takeOverControl();
 });
 
+function renderComposerImageAttachments() {
+  if (!composerAttachments) return;
+  composerAttachments.replaceChildren();
+  composerAttachments.hidden = state.composerImageAttachments.length === 0;
+
+  for (const attachment of state.composerImageAttachments) {
+    const chip = document.createElement("span");
+    chip.className = "composer-attachment";
+
+    const name = document.createElement("span");
+    name.className = "composer-attachment-name";
+    name.textContent = `${attachment.file.name || "Pasted image"} · ${formatAttachmentBytes(attachment.file.size)}`;
+    chip.append(name);
+
+    const remove = document.createElement("button");
+    remove.className = "composer-attachment-remove";
+    remove.dataset.removeImageAttachment = attachment.id;
+    remove.disabled = state.composerSubmitInFlight;
+    remove.type = "button";
+    remove.title = "Remove image";
+    remove.setAttribute("aria-label", `Remove ${attachment.file.name || "pasted image"}`);
+    remove.textContent = "×";
+    chip.append(remove);
+
+    composerAttachments.append(chip);
+  }
+}
+
+function clearComposerImageAttachments() {
+  if (state.composerImageAttachments.length === 0) return;
+  state.composerImageAttachments = [];
+  renderComposerImageAttachments();
+}
+
+messageInput?.addEventListener("paste", (event) => {
+  const files = pastedImageFiles(event.clipboardData);
+  if (files.length === 0) return;
+  event.preventDefault();
+
+  const { accepted, errors } = validateImageAttachments(
+    state.composerImageAttachments,
+    files
+  );
+  for (const file of accepted) {
+    state.composerImageAttachments.push({
+      file,
+      id: `image-${state.nextComposerImageAttachmentId++}`,
+    });
+  }
+  for (const error of errors) {
+    logLine(`Image attachment rejected: ${error}`);
+  }
+  if (accepted.length > 0) {
+    logLine(
+      `Attached ${accepted.length} pasted image${accepted.length === 1 ? "" : "s"}.`
+    );
+    renderComposerImageAttachments();
+  }
+});
+
+composerAttachments?.addEventListener("click", (event) => {
+  const button =
+    event.target instanceof Element
+      ? event.target.closest("[data-remove-image-attachment]")
+      : null;
+  if (!button || state.composerSubmitInFlight) return;
+  state.composerImageAttachments = state.composerImageAttachments.filter(
+    (attachment) => attachment.id !== button.dataset.removeImageAttachment
+  );
+  renderComposerImageAttachments();
+  messageInput.focus();
+});
+
 // Drive a composer submit. The draft text and the target thread are captured
 // synchronously at submit time and the composer is frozen, so a draft edit /
 // navigation / second submit during the async send can't change or duplicate it.
@@ -1160,26 +1242,42 @@ controlBanner?.addEventListener("click", (event) => {
 // that thread and moves control after success.
 async function runComposerSubmit() {
   const text = messageInput.value;
+  const imageAttachments = state.composerImageAttachments.slice();
   const pin = state.viewOnlyThread;
   if (pin?.review) {
     // A thread mid-review can't be sent to (the relay rejects resume/send for it).
-    if (text.trim()) {
+    if (text.trim() || imageAttachments.length > 0) {
       logLine("This session is being reviewed — you can’t send to it right now.");
     }
     return;
   }
-  if (!text.trim()) {
+  if (!text.trim() && imageAttachments.length === 0) {
     void sendMessage(text); // empty → sendMessage logs the parity message
     return;
   }
   // The thread the user is looking at (the read-only pin's thread, else active).
   const targetThreadId = pin?.threadId || state.session?.active_thread_id || null;
   state.composerSubmitInFlight = true;
+  renderComposerImageAttachments();
   if (state.session) renderer.renderSession(state.session); // freeze the composer
   try {
-    await sendMessage(text, targetThreadId);
+    const images = await Promise.all(
+      imageAttachments.map(async (attachment) => ({
+        data_url: await imageFileToDataUrl(attachment.file),
+      }))
+    );
+    const sent = await sendMessage(text, targetThreadId, images);
+    if (sent) {
+      const sentIds = new Set(imageAttachments.map((attachment) => attachment.id));
+      state.composerImageAttachments = state.composerImageAttachments.filter(
+        (attachment) => !sentIds.has(attachment.id)
+      );
+    }
+  } catch (error) {
+    logLine(`Image attachment failed: ${error.message}`);
   } finally {
     state.composerSubmitInFlight = false;
+    renderComposerImageAttachments();
     if (state.session) renderer.renderSession(state.session); // unfreeze
   }
 }
@@ -2479,6 +2577,8 @@ function readThreadIdFromUrl() {
 }
 
 function setThreadRoute(threadId, options = {}) {
+  const nextThreadId = threadId || null;
+  const threadChanged = state.viewThreadId !== nextThreadId;
   const url = new URL(window.location.href);
   if (threadId) {
     url.searchParams.set("thread", threadId);
@@ -2492,7 +2592,10 @@ function setThreadRoute(threadId, options = {}) {
   } else {
     window.history.pushState({}, "", next);
   }
-  state.viewThreadId = threadId || null;
+  state.viewThreadId = nextThreadId;
+  if (threadChanged) {
+    clearComposerImageAttachments();
+  }
 }
 
 function clearThreadRoute(options = {}) {

@@ -58,6 +58,7 @@ import {
   mapSdkMessage,
   mapSessionInfo,
   mapSessionMessages,
+  userMessageTranscriptText,
 } from "./sdk-mapping.mjs";
 import { buildSessionOptionsBase } from "./session-options.mjs";
 import { createProgressTracker } from "./progress-tracker.mjs";
@@ -342,7 +343,10 @@ function createWorkerSession(sdk, options, resume) {
   };
 }
 
-function createUserTurn(prompt, { itemId = null, turnId = null, messageUuid = null } = {}) {
+function createUserTurn(
+  prompt,
+  { images = [], itemId = null, turnId = null, messageUuid = null } = {},
+) {
   // The uuid we hand the SDK becomes the message's identity in the persisted
   // transcript, so a later getSessionMessages()/mapSessionMessages() reproduces
   // `user:${uuid}`. The relay derives `itemId` from this same uuid (passed as
@@ -352,19 +356,32 @@ function createUserTurn(prompt, { itemId = null, turnId = null, messageUuid = nu
   // we mint one and derive the item id from it so the two paths still agree.
   const uuid = messageUuid || randomUUID();
   const eventTurnId = turnId || uuid;
+  const hasImages = images.length > 0;
+  const transcriptText = userMessageTranscriptText(prompt, images.length);
+  const content = images.map((image) => ({
+    type: "image",
+    source: {
+      type: "base64",
+      media_type: image.media_type,
+      data: image.data,
+    },
+  }));
+  if (prompt) {
+    content.push({ type: "text", text: prompt });
+  }
   return {
     event: {
       type: "user_message",
       item_id: itemId || `user:${uuid}`,
       turn_id: eventTurnId,
-      text: prompt,
+      text: transcriptText,
     },
     sdkMessage: {
       type: "user",
       uuid,
       message: {
         role: "user",
-        content: prompt,
+        content: hasImages ? content : prompt,
       },
       parent_tool_use_id: null,
     },
@@ -1058,8 +1075,9 @@ async function main() {
         try {
           entry.session = createWorkerSession(sdk, entry.options);
 
-          if (cmd.prompt) {
+          if (cmd.prompt || cmd.images?.length) {
             const userTurn = createUserTurn(cmd.prompt, {
+              images: cmd.images || [],
               itemId: cmd.user_item_id || null,
               turnId: cmd.turn_id || null,
               messageUuid: cmd.user_message_uuid || null,
@@ -1122,8 +1140,9 @@ async function main() {
             thread: await readThreadInfoOrFallback(sdk, cmd.provider_session_id, cmd),
           });
 
-          if (cmd.prompt) {
+          if (cmd.prompt || cmd.images?.length) {
             const userTurn = createUserTurn(cmd.prompt, {
+              images: cmd.images || [],
               itemId: cmd.user_item_id || null,
               turnId: cmd.turn_id || null,
               messageUuid: cmd.user_message_uuid || null,
@@ -1161,8 +1180,8 @@ async function main() {
           });
           sessions.set(entry.key, entry);
         }
-        if (!cmd.prompt) {
-          emit({ type: "error", message: "send requires prompt" });
+        if (!cmd.prompt && !cmd.images?.length) {
+          emit({ type: "error", message: "send requires prompt or images" });
           break;
         }
 
@@ -1188,6 +1207,7 @@ async function main() {
           );
           entry.progressTracker.start();
           const userTurn = createUserTurn(cmd.prompt, {
+            images: cmd.images || [],
             itemId: cmd.user_item_id || null,
             turnId: cmd.turn_id || null,
             messageUuid: cmd.user_message_uuid || null,
@@ -1197,7 +1217,7 @@ async function main() {
           entry.running = true;
           touchSessionEntry(entry);
           emit(userTurn.event, entry.progressTracker);
-            await entry.session.send(userTurn.sdkMessage);
+          await entry.session.send(userTurn.sdkMessage);
           log("streaming response");
           log("send complete");
         } catch (err) {
@@ -1409,6 +1429,7 @@ export {
   closeAndRemoveSession,
   closeSessionEntry,
   createSessionEntry,
+  createUserTurn,
   createWorkerSession,
   ensureLiveSession,
   evictSessionsIfNeeded,

@@ -21,8 +21,8 @@ use crate::{
         ThreadSummaryView, ToolCallView, TranscriptEntryKind, TranscriptEntryView,
     },
     provider::{
-        ProviderBridge, ProviderForkCapability, ProviderForkRequest, StartThreadResult,
-        ThreadSyncData,
+        user_message_transcript_text, ProviderBridge, ProviderForkCapability, ProviderForkRequest,
+        ProviderImage, StartThreadResult, ThreadSyncData,
     },
     state::{ApprovalKind, PendingApproval, RelayState},
 };
@@ -151,8 +151,14 @@ impl ProviderBridge for CodexBridge {
         text: &str,
         model: &str,
         effort: &str,
+        images: &[ProviderImage],
     ) -> Result<Option<String>, String> {
-        self.start_turn(thread_id, text, model, effort).await
+        if images.is_empty() {
+            CodexBridge::start_turn(self, thread_id, text, model, effort).await
+        } else {
+            self.start_turn_with_images(thread_id, text, model, effort, images)
+                .await
+        }
     }
 
     async fn request_turn_stop(
@@ -470,6 +476,18 @@ impl CodexBridge {
         model: &str,
         effort: &str,
     ) -> Result<Option<String>, String> {
+        self.start_turn_with_images(thread_id, text, model, effort, &[])
+            .await
+    }
+
+    pub async fn start_turn_with_images(
+        &self,
+        thread_id: &str,
+        text: &str,
+        model: &str,
+        effort: &str,
+        images: &[ProviderImage],
+    ) -> Result<Option<String>, String> {
         // Re-read the thread's CURRENT settings so every turn re-asserts its
         // approval policy + sandbox (see `codex_turn_start_params`). Fall back to
         // no override only when the relay has no record — codex then keeps
@@ -480,15 +498,14 @@ impl CodexBridge {
                 .remembered_thread_settings(thread_id)
                 .map(|settings| (settings.approval_policy, settings.sandbox))
         };
-        let params = codex_turn_start_params(
-            thread_id,
-            text,
-            model,
-            effort,
-            policy
-                .as_ref()
-                .map(|(approval, sandbox)| (approval.as_str(), sandbox.as_str())),
-        );
+        let policy = policy
+            .as_ref()
+            .map(|(approval, sandbox)| (approval.as_str(), sandbox.as_str()));
+        let params = if images.is_empty() {
+            codex_turn_start_params(thread_id, text, model, effort, policy)
+        } else {
+            codex_turn_start_params_with_images(thread_id, text, model, effort, images, policy)
+        };
         let result = match self.send_request("turn/start", params.clone()).await {
             Ok(result) => result,
             // The thread exists on disk but was never materialized in the
@@ -599,16 +616,38 @@ fn codex_turn_start_params(
     effort: &str,
     policy: Option<(&str, &str)>,
 ) -> Value {
+    codex_turn_start_params_with_images(thread_id, text, model, effort, &[], policy)
+}
+
+fn codex_turn_start_params_with_images(
+    thread_id: &str,
+    text: &str,
+    model: &str,
+    effort: &str,
+    images: &[ProviderImage],
+    policy: Option<(&str, &str)>,
+) -> Value {
+    let mut input = images
+        .iter()
+        .map(|image| {
+            json!({
+                "type": "image",
+                "url": image.data_url(),
+            })
+        })
+        .collect::<Vec<_>>();
+    if !text.is_empty() {
+        input.push(json!({
+            "type": "text",
+            "text": text,
+        }));
+    }
+
     let mut params = json!({
         "threadId": thread_id,
         "model": model,
         "effort": effort,
-        "input": [
-            {
-                "type": "text",
-                "text": text
-            }
-        ]
+        "input": input
     });
 
     if let Some((approval_policy, sandbox)) = policy {
@@ -1720,9 +1759,18 @@ fn parse_user_text(item: Option<&Value>) -> Option<String> {
         .iter()
         .filter_map(|entry| string_at(entry, &["text"]))
         .collect::<Vec<_>>();
+    let image_count = content
+        .iter()
+        .filter(|entry| {
+            matches!(
+                string_at(entry, &["type"]).as_deref(),
+                Some("image" | "localImage")
+            )
+        })
+        .count();
 
     if parts.is_empty() {
-        None
+        user_message_transcript_text("", image_count)
     } else {
         Some(parts.join("\n"))
     }

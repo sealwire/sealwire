@@ -39,3 +39,15 @@ test("ConversationComposer renders the model select without a visible label", ()
   assert.match(markup, /<select[^>]*id="remote-message-model"[^>]*class="composer-model-chip"/);
   assert.doesNotMatch(markup, /<span[^>]*>Model<\/span>/);
 });
+
+test("ConversationComposer can render a local-only attachment area above the input", () => {
+  const markup = renderToStaticMarkup(
+    h(ConversationComposer, {
+      attachmentArea: h("div", { id: "composer-attachments" }, "Screenshot"),
+      messageId: "message-input",
+      sendButtonId: "send-button",
+    })
+  );
+
+  assert.ok(markup.indexOf('id="composer-attachments"') < markup.indexOf('id="message-input"'));
+});

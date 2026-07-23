@@ -25,8 +25,8 @@ use crate::{
         TranscriptEntryKind, TranscriptEntryView,
     },
     provider::{
-        ProviderBridge, ProviderForkCapability, ProviderForkRequest, StartThreadResult,
-        ThreadSyncData, ThreadTranscriptPageData,
+        user_message_transcript_text, ProviderBridge, ProviderForkCapability, ProviderForkRequest,
+        ProviderImage, StartThreadResult, ThreadSyncData, ThreadTranscriptPageData,
     },
     state::{
         BrokerPendingMessage, PendingApproval, PendingTranscriptDelta, RelayState,
@@ -641,7 +641,18 @@ impl ProviderBridge for ClaudeCodeBridge {
         text: &str,
         _model: &str,
         _effort: &str,
+        images: &[ProviderImage],
     ) -> Result<Option<String>, String> {
+        let transcript_text = user_message_transcript_text(text, images.len()).unwrap_or_default();
+        let image_payloads = images
+            .iter()
+            .map(|image| {
+                json!({
+                    "media_type": image.media_type,
+                    "data": image.data,
+                })
+            })
+            .collect::<Vec<_>>();
         // Promote a pending (deferred-start) thread to a real Claude session on
         // the first turn. The worker `start` command both spins up the SDK
         // session and sends the first message; the returned thread carries the
@@ -674,6 +685,7 @@ impl ProviderBridge for ClaudeCodeBridge {
                 "permissionMode": config.permission_mode,
                 "pending_thread_id": thread_id,
                 "prompt": text,
+                "images": image_payloads.clone(),
                 "turn_id": turn_id,
                 "user_item_id": user_item_id,
                 "user_message_uuid": user_message_uuid,
@@ -708,7 +720,7 @@ impl ProviderBridge for ClaudeCodeBridge {
             self.record_local_user_message(
                 &real_session_id,
                 user_item_id,
-                text.to_string(),
+                transcript_text,
                 turn_id.clone(),
             )
             .await;
@@ -746,6 +758,7 @@ impl ProviderBridge for ClaudeCodeBridge {
             "type": "send",
             "provider_session_id": thread_id,
             "prompt": text,
+            "images": image_payloads,
             "turn_id": turn_id,
             "user_item_id": user_item_id,
             "user_message_uuid": user_message_uuid,
@@ -758,7 +771,7 @@ impl ProviderBridge for ClaudeCodeBridge {
             }
         }
         self.send_command(cmd).await?;
-        self.record_local_user_message(thread_id, user_item_id, text.to_string(), turn_id.clone())
+        self.record_local_user_message(thread_id, user_item_id, transcript_text, turn_id.clone())
             .await;
         Ok(Some(turn_id))
     }
@@ -2031,7 +2044,7 @@ mod tests {
         }
 
         bridge
-            .start_turn("sess-1", "hello", "claude-sonnet-4-6", "high")
+            .start_turn("sess-1", "hello", "claude-sonnet-4-6", "high", &[])
             .await
             .expect("start_turn should send");
         assert!(
@@ -2052,7 +2065,7 @@ mod tests {
             );
         }
         bridge
-            .start_turn("sess-1", "again", "claude-sonnet-4-6", "high")
+            .start_turn("sess-1", "again", "claude-sonnet-4-6", "high", &[])
             .await
             .expect("second start_turn should send");
         assert!(
@@ -2081,7 +2094,7 @@ mod tests {
         }
 
         let turn_id = bridge
-            .start_turn("sess-1", &prompt, "claude-sonnet-4-6", "high")
+            .start_turn("sess-1", &prompt, "claude-sonnet-4-6", "high", &[])
             .await
             .expect("start_turn should send")
             .expect("claude turn id");
@@ -2097,6 +2110,46 @@ mod tests {
             .expect("the user's message should be visible before worker replay events");
         assert_eq!(user_entry.text.as_deref(), Some(prompt.as_str()));
         assert_eq!(user_entry.status, "completed");
+    }
+
+    #[tokio::test]
+    async fn start_turn_forwards_local_image_payloads_to_the_worker() {
+        let Some((bridge, state)) = spawn_fake_bridge().await else {
+            return;
+        };
+        {
+            let mut relay = state.write().await;
+            relay.activate_thread(
+                test_thread("sess-image", "/tmp/x"),
+                "/tmp/x",
+                "claude-sonnet-4-6",
+                "default",
+                "workspace-write",
+                "high",
+                "device-1",
+            );
+        }
+        let images = vec![ProviderImage {
+            media_type: "image/png".to_string(),
+            data: "iVBORw0KGgo=".to_string(),
+        }];
+
+        bridge
+            .start_turn("sess-image", "", "claude-sonnet-4-6", "high", &images)
+            .await
+            .expect("image turn should reach the worker");
+
+        assert!(
+            wait_for_log(&state, "type=send permissionMode=default", 5).await
+                && wait_for_log(&state, "images=1", 5).await,
+            "the bridge command should carry one image without logging its data",
+        );
+        let transcript = state.read().await.snapshot().transcript;
+        let user_entry = transcript
+            .iter()
+            .find(|entry| entry.kind == TranscriptEntryKind::UserText)
+            .expect("image-only turn should have a visible user entry");
+        assert_eq!(user_entry.text.as_deref(), Some("[Attached image]"));
     }
 
     #[tokio::test]
@@ -2149,7 +2202,13 @@ mod tests {
         );
 
         bridge
-            .start_turn(&pending_id, "first message", "claude-sonnet-4-6", "high")
+            .start_turn(
+                &pending_id,
+                "first message",
+                "claude-sonnet-4-6",
+                "high",
+                &[],
+            )
             .await
             .expect("first turn promotes the thread");
         assert!(

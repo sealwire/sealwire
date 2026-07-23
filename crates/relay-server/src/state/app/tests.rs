@@ -830,6 +830,7 @@ mod path_scope_tests {
         ask_request_ids: Arc<Mutex<Vec<String>>>,
         turn_thread_ids: Arc<Mutex<Vec<String>>>,
         turn_efforts: Arc<Mutex<Vec<String>>>,
+        turn_images: Arc<Mutex<Vec<Vec<ProviderImage>>>>,
         interrupt_thread_ids: Arc<Mutex<Vec<String>>>,
         resume_thread_ids: Arc<Mutex<Vec<String>>>,
         // Thread ids that are resumable/readable but deliberately omitted from
@@ -858,6 +859,7 @@ mod path_scope_tests {
                 ask_request_ids: Arc::new(Mutex::new(Vec::new())),
                 turn_thread_ids: Arc::new(Mutex::new(Vec::new())),
                 turn_efforts: Arc::new(Mutex::new(Vec::new())),
+                turn_images: Arc::new(Mutex::new(Vec::new())),
                 interrupt_thread_ids: Arc::new(Mutex::new(Vec::new())),
                 resume_thread_ids: Arc::new(Mutex::new(Vec::new())),
                 hidden_from_list: Arc::new(Mutex::new(std::collections::HashSet::new())),
@@ -1024,12 +1026,14 @@ mod path_scope_tests {
             _text: &str,
             _model: &str,
             effort: &str,
+            images: &[ProviderImage],
         ) -> Result<Option<String>, String> {
             self.turn_thread_ids
                 .lock()
                 .await
                 .push(thread_id.to_string());
             self.turn_efforts.lock().await.push(effort.to_string());
+            self.turn_images.lock().await.push(images.to_vec());
             let turn_id = format!("turn:{thread_id}");
             if self
                 .mark_active_status_before_return
@@ -1283,6 +1287,70 @@ mod path_scope_tests {
             codex.resume_thread_ids.lock().await.is_empty(),
             "targeted send must not resume the provider session first"
         );
+    }
+
+    #[tokio::test]
+    async fn image_only_message_is_accepted_and_forwarded_to_the_provider() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, codex, _claude) = build_recording_provider_app(cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let thread = codex.thread_summary("codex-image-thread", cwd);
+        codex
+            .threads
+            .lock()
+            .await
+            .insert(thread.id.clone(), thread.clone());
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("codex".to_string());
+            relay.active_thread_id = Some(thread.id.clone());
+            relay.threads = vec![thread.clone()];
+        }
+        let image = ProviderImage {
+            media_type: "image/png".to_string(),
+            data: "iVBORw0KGgo=".to_string(),
+        };
+
+        app.send_message_with_images(
+            SendMessageInput {
+                text: String::new(),
+                model: None,
+                effort: None,
+                device_id: Some("device-1".to_string()),
+                thread_id: thread.id,
+            },
+            vec![image.clone()],
+        )
+        .await
+        .expect("an image-only message should start a provider turn");
+
+        assert_eq!(*codex.turn_images.lock().await, vec![vec![image]]);
+    }
+
+    #[tokio::test]
+    async fn send_message_rejects_empty_text_without_images() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, _codex, _claude) = build_recording_provider_app(cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let error = app
+            .send_message_with_images(
+                SendMessageInput {
+                    text: "  ".to_string(),
+                    model: None,
+                    effort: None,
+                    device_id: Some("device-1".to_string()),
+                    thread_id: "unused".to_string(),
+                },
+                Vec::new(),
+            )
+            .await
+            .expect_err("a message with no text or images must be rejected");
+
+        assert_eq!(error, "message text or an image attachment is required");
     }
 
     #[tokio::test]
@@ -2958,6 +3026,7 @@ mod path_scope_tests {
             _text: &str,
             _model: &str,
             _effort: &str,
+            _images: &[ProviderImage],
         ) -> Result<Option<String>, String> {
             Ok(Some(format!("{thread_id}-turn")))
         }
@@ -3209,6 +3278,7 @@ mod path_scope_tests {
             _text: &str,
             _model: &str,
             _effort: &str,
+            _images: &[ProviderImage],
         ) -> Result<Option<String>, String> {
             Err("consumed-initial provider does not support follow-up turns".to_string())
         }
@@ -4979,6 +5049,7 @@ mod path_scope_tests {
             _text: &str,
             model: &str,
             _e: &str,
+            _images: &[ProviderImage],
         ) -> Result<Option<String>, String> {
             self.seen_models.lock().await.push(model.to_string());
             if let Some(err) = self.reject(model) {
@@ -5427,6 +5498,7 @@ mod review_tests {
             text: &str,
             model: &str,
             effort: &str,
+            _images: &[ProviderImage],
         ) -> Result<Option<String>, String> {
             // A thread evicted by a simulated restart can't run a turn until it has
             // been re-loaded via resume_thread (mirrors Codex needing thread/resume).

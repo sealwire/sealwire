@@ -397,6 +397,76 @@ fn web_root_override_is_trimmed_and_blank_override_falls_through() {
     assert!(matches!(blank, WebAssets::Embedded));
 }
 
+#[test]
+fn local_message_images_are_validated_and_canonicalized() {
+    let png = BASE64_STANDARD.encode(b"\x89PNG\r\n\x1a\n");
+    let images = parse_local_message_images(vec![LocalImageInput {
+        data_url: format!("data:image/png;base64,{png}"),
+    }])
+    .expect("valid PNG data URL should be accepted");
+
+    assert_eq!(
+        images,
+        vec![ProviderImage {
+            media_type: "image/png".to_string(),
+            data: png,
+        }]
+    );
+}
+
+#[test]
+fn local_message_images_reject_spoofed_content_and_unsupported_types() {
+    let spoofed = BASE64_STANDARD.encode(b"not a png");
+    let error = parse_local_message_images(vec![LocalImageInput {
+        data_url: format!("data:image/png;base64,{spoofed}"),
+    }])
+    .expect_err("MIME spoofing must be rejected");
+    assert!(error.contains("do not match"), "{error}");
+
+    let svg = BASE64_STANDARD.encode(b"<svg/>");
+    let error = parse_local_message_images(vec![LocalImageInput {
+        data_url: format!("data:image/svg+xml;base64,{svg}"),
+    }])
+    .expect_err("SVG must stay outside the provider image allow-list");
+    assert!(error.contains("unsupported"), "{error}");
+}
+
+#[test]
+fn local_message_images_accept_webp_magic_bytes() {
+    let webp = BASE64_STANDARD.encode(b"RIFF\x04\0\0\0WEBP");
+    let images = parse_local_message_images(vec![LocalImageInput {
+        data_url: format!("data:image/webp;base64,{webp}"),
+    }])
+    .expect("valid WebP data URL should be accepted");
+
+    assert_eq!(images[0].media_type, "image/webp");
+    assert_eq!(images[0].data, webp);
+}
+
+#[test]
+fn local_message_images_enforce_the_decoded_total_size_limit() {
+    fn png_data_url(size: usize) -> String {
+        let mut bytes = vec![0; size];
+        bytes[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        format!("data:image/png;base64,{}", BASE64_STANDARD.encode(bytes))
+    }
+
+    let error = parse_local_message_images(vec![
+        LocalImageInput {
+            data_url: png_data_url(MAX_LOCAL_MESSAGE_IMAGE_BYTES),
+        },
+        LocalImageInput {
+            data_url: png_data_url(MAX_LOCAL_MESSAGE_IMAGE_BYTES),
+        },
+        LocalImageInput {
+            data_url: png_data_url(8),
+        },
+    ])
+    .expect_err("decoded image bytes over the total limit must be rejected");
+
+    assert!(error.contains("in total"), "{error}");
+}
+
 // Session endpoints mapped every non-path-policy failure to 502
 // `provider_bridge_error`, so a malformed request and a state conflict both
 // read as "the upstream agent broke". 502 invites a retry, which is wrong for

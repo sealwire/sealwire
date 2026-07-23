@@ -498,15 +498,20 @@ function ComposerShell() {
       "form",
       { className: "composer-shell", hidden: true, id: "message-form" },
       h(ConversationComposer, {
-      actionsBeforeSend: h("span", { id: "composer-settings-mount" }),
-      messageId: "message-input",
-      messagePlaceholder: "Start or open a session first.",
-      modelId: "message-model",
-      models: [{ display_name: "gpt-5.4", model: "gpt-5.4" }],
-      sendButtonId: "send-button",
-      stopButtonId: "stop-button",
-    })
-  )
+        actionsBeforeSend: h("span", { id: "composer-settings-mount" }),
+        attachmentArea: h("div", {
+          className: "composer-attachments",
+          hidden: true,
+          id: "composer-attachments",
+        }),
+        messageId: "message-input",
+        messagePlaceholder: "Start or open a session first.",
+        modelId: "message-model",
+        models: [{ display_name: "gpt-5.4", model: "gpt-5.4" }],
+        sendButtonId: "send-button",
+        stopButtonId: "stop-button",
+      })
+    )
   );
 }
 

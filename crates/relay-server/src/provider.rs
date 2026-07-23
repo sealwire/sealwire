@@ -37,6 +37,30 @@ pub struct StartThreadResult {
     pub started_turn_id: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProviderImage {
+    pub media_type: String,
+    /// Canonical base64 without a data-URL prefix.
+    pub data: String,
+}
+
+impl ProviderImage {
+    pub fn data_url(&self) -> String {
+        format!("data:{};base64,{}", self.media_type, self.data)
+    }
+}
+
+pub fn user_message_transcript_text(text: &str, image_count: usize) -> Option<String> {
+    if !text.is_empty() {
+        return Some(text.to_string());
+    }
+    match image_count {
+        0 => None,
+        1 => Some("[Attached image]".to_string()),
+        count => Some(format!("[Attached {count} images]")),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderForkCapability {
     pub native_fork: bool,
@@ -127,6 +151,7 @@ pub trait ProviderBridge: Send + Sync {
         text: &str,
         model: &str,
         effort: &str,
+        images: &[ProviderImage],
     ) -> Result<Option<String>, String>;
     /// Resolve the public thread id after `start_turn`. Providers whose first
     /// turn promotes a placeholder id (Claude deferred start) override this.

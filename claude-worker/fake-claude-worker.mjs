@@ -114,7 +114,8 @@ for await (const line of rl) {
       `model=${cmd.model ?? "-"} session=${sessionId} ` +
       `prompt=${cmd.prompt ? "yes" : "no"} cwd=${cmd.cwd ?? "-"} ` +
       `upTo=${cmd.up_to_message_id ?? "-"} ` +
-      `upToKey=${Object.prototype.hasOwnProperty.call(cmd, "up_to_message_id") ? "yes" : "no"}`,
+      `upToKey=${Object.prototype.hasOwnProperty.call(cmd, "up_to_message_id") ? "yes" : "no"} ` +
+      `images=${cmd.images?.length ?? 0}`,
   );
 
   if (cmd.type === "shutdown") {

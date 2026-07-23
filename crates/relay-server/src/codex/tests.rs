@@ -51,6 +51,28 @@ fn parse_transcript_preserves_tool_and_reasoning_items() {
 }
 
 #[test]
+fn parse_transcript_keeps_an_image_only_user_turn_visible() {
+    let thread = json!({
+        "turns": [{
+            "id": "turn-image",
+            "items": [{
+                "id": "item-image",
+                "type": "userMessage",
+                "content": [{
+                    "type": "image",
+                    "url": "data:image/png;base64,iVBORw0KGgo="
+                }]
+            }]
+        }]
+    });
+
+    let transcript = parse_transcript(&thread);
+    assert_eq!(transcript.len(), 1);
+    assert_eq!(transcript[0].kind, TranscriptEntryKind::UserText);
+    assert_eq!(transcript[0].text.as_deref(), Some("[Attached image]"));
+}
+
+#[test]
 fn parse_transcript_truncates_large_tool_payloads() {
     let huge_result = "A".repeat(MAX_TOOL_JSON_CHARS * 4);
     let thread = json!({
@@ -1483,6 +1505,40 @@ fn codex_turn_start_omits_overrides_when_settings_are_unknown() {
 
     assert!(params.get("approvalPolicy").is_none(), "{params}");
     assert!(params.get("sandboxPolicy").is_none(), "{params}");
+}
+
+#[test]
+fn codex_turn_start_sends_inline_images_before_optional_text() {
+    let images = vec![ProviderImage {
+        media_type: "image/png".to_string(),
+        data: "iVBORw0KGgo=".to_string(),
+    }];
+    let params = codex_turn_start_params_with_images(
+        "thread-1",
+        "Inspect this screenshot",
+        "gpt-5-codex",
+        "medium",
+        &images,
+        None,
+    );
+
+    assert_eq!(
+        params["input"],
+        json!([
+            {
+                "type": "image",
+                "url": "data:image/png;base64,iVBORw0KGgo="
+            },
+            {
+                "type": "text",
+                "text": "Inspect this screenshot"
+            }
+        ])
+    );
+
+    let image_only =
+        codex_turn_start_params_with_images("thread-1", "", "gpt-5-codex", "medium", &images, None);
+    assert_eq!(image_only["input"].as_array().map(Vec::len), Some(1));
 }
 
 #[test]

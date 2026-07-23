@@ -415,19 +415,19 @@ export function createLifecycleController(ctx) {
     });
   }
 
-  async function sendMessage(textOverride, threadId) {
+  async function sendMessage(textOverride, threadId, images = []) {
     // Accept an explicit, already-captured message (the composer captures the draft
     // at submit time so a later edit can't change what is sent). Fall back to the
     // live input value for the normal path.
     const text = (typeof textOverride === "string" ? textOverride : messageInput.value).trim();
 
-    if (!text) {
+    if (!text && images.length === 0) {
       logLine("Message is empty.");
-      return;
+      return false;
     }
     if (!threadId) {
       logLine("No session is selected.");
-      return;
+      return false;
     }
 
     sendButton.disabled = true;
@@ -457,6 +457,7 @@ export function createLifecycleController(ctx) {
           // Target the thread captured at submit time. The relay starts the turn
           // directly there, so a concurrent navigation cannot redirect the message.
           thread_id: threadId,
+          images,
         }),
       });
       const payload = await response.json();
@@ -468,8 +469,10 @@ export function createLifecycleController(ctx) {
       messageInput.value = "";
       applySessionSnapshot(payload.data);
       logLine("Prompt accepted by relay");
+      return true;
     } catch (error) {
       logLine(`Prompt failed: ${error.message}`);
+      return false;
     } finally {
       sendButton.disabled = false;
     }

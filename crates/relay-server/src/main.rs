@@ -20,7 +20,7 @@ use std::{
 use auth::AuthConfig;
 use axum::{
     body::Body,
-    extract::{Path, Query, Request, State},
+    extract::{DefaultBodyLimit, Path, Query, Request, State},
     http::header::HeaderName,
     http::{header, HeaderMap, Method, StatusCode, Uri},
     middleware::{self, Next},
@@ -31,6 +31,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use futures_util::stream::{self, StreamExt};
 use protocol::{
     AllowedRootsInput, AllowedRootsReceipt, ApiEnvelope, ApiError, ApplyFileChangeInput,
@@ -46,6 +47,7 @@ use protocol::{
     ThreadsQuery, ThreadsResponse, UpdateSessionSettingsInput, WorkflowActionInput,
     WorkflowActionReceipt, WorkspaceDiffResponse,
 };
+use provider::ProviderImage;
 use relay_http::{
     apply_standard_security_headers, header_origin, parse_optional_string_env, request_origin,
     request_uses_https, SecurityHeadersConfig,
@@ -67,6 +69,10 @@ const HSTS_VALUE_ENV: &str = "RELAY_HSTS_VALUE";
 const WEB_ROOT_ENV: &str = "RELAY_WEB_ROOT";
 const CSRF_HEADER_NAME: &str = "x-agent-relay-csrf";
 const CSRF_HEADER_VALUE: &str = "1";
+const MAX_LOCAL_MESSAGE_BODY_BYTES: usize = 24 * 1024 * 1024;
+const MAX_LOCAL_MESSAGE_IMAGES: usize = 4;
+const MAX_LOCAL_MESSAGE_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_LOCAL_MESSAGE_IMAGE_TOTAL_BYTES: usize = 16 * 1024 * 1024;
 
 struct EmbeddedWebAsset {
     path: &'static str,
@@ -98,6 +104,19 @@ struct ThreadTranscriptQuery {
 struct ThreadEntryDetailQuery {
     field: Option<String>,
     cursor: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LocalSendMessageInput {
+    #[serde(flatten)]
+    message: SendMessageInput,
+    #[serde(default)]
+    images: Vec<LocalImageInput>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LocalImageInput {
+    data_url: String,
 }
 
 #[tokio::main]
@@ -188,7 +207,10 @@ fn build_router(context: AppContext, web_assets: WebAssets) -> Router {
         .route("/api/session/settings", post(update_session_settings))
         .route("/api/session/heartbeat", post(session_heartbeat))
         .route("/api/session/take-over", post(take_over_session))
-        .route("/api/session/message", post(send_message))
+        .route(
+            "/api/session/message",
+            post(send_message).layer(DefaultBodyLimit::max(MAX_LOCAL_MESSAGE_BODY_BYTES)),
+        )
         .route("/api/session/stop", post(stop_active_turn))
         .route("/api/session/review", post(request_review))
         .route("/api/session/workflow", post(start_workflow))
@@ -681,15 +703,88 @@ async fn send_message(
     State(context): State<AppContext>,
     headers: HeaderMap,
     uri: Uri,
-    Json(input): Json<SendMessageInput>,
+    Json(input): Json<LocalSendMessageInput>,
 ) -> Result<Json<ApiEnvelope<SessionSnapshot>>, (StatusCode, Json<ApiError>)> {
     authorize_api(&context, &headers, &uri)?;
+    let images = parse_local_message_images(input.images).map_err(bad_request)?;
     context
         .app
-        .send_message(input)
+        .send_message_with_images(input.message, images)
         .await
         .map(|snapshot| Json(ApiEnvelope::ok(compact_local_snapshot(snapshot))))
         .map_err(bad_request)
+}
+
+fn parse_local_message_images(inputs: Vec<LocalImageInput>) -> Result<Vec<ProviderImage>, String> {
+    if inputs.len() > MAX_LOCAL_MESSAGE_IMAGES {
+        return Err(format!(
+            "a message may include at most {MAX_LOCAL_MESSAGE_IMAGES} images"
+        ));
+    }
+
+    let mut total_bytes = 0usize;
+    let mut images = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        let payload = input
+            .data_url
+            .strip_prefix("data:")
+            .ok_or_else(|| "image attachment must be a data URL".to_string())?;
+        let (metadata, encoded) = payload
+            .split_once(',')
+            .ok_or_else(|| "image attachment data URL is malformed".to_string())?;
+        let (media_type, encoding) = metadata
+            .split_once(';')
+            .ok_or_else(|| "image attachment data URL is malformed".to_string())?;
+        if encoding != "base64" {
+            return Err("image attachment must use base64 encoding".to_string());
+        }
+        if !matches!(
+            media_type,
+            "image/gif" | "image/jpeg" | "image/png" | "image/webp"
+        ) {
+            return Err(format!("unsupported image attachment type `{media_type}`"));
+        }
+
+        let bytes = BASE64_STANDARD
+            .decode(encoded)
+            .map_err(|_| "image attachment contains invalid base64".to_string())?;
+        if bytes.len() > MAX_LOCAL_MESSAGE_IMAGE_BYTES {
+            return Err(format!(
+                "each image attachment must be at most {} MB",
+                MAX_LOCAL_MESSAGE_IMAGE_BYTES / (1024 * 1024)
+            ));
+        }
+        total_bytes = total_bytes
+            .checked_add(bytes.len())
+            .ok_or_else(|| "image attachment size overflow".to_string())?;
+        if total_bytes > MAX_LOCAL_MESSAGE_IMAGE_TOTAL_BYTES {
+            return Err(format!(
+                "image attachments must be at most {} MB in total",
+                MAX_LOCAL_MESSAGE_IMAGE_TOTAL_BYTES / (1024 * 1024)
+            ));
+        }
+        if !image_bytes_match_media_type(media_type, &bytes) {
+            return Err(format!(
+                "image attachment bytes do not match `{media_type}`"
+            ));
+        }
+
+        images.push(ProviderImage {
+            media_type: media_type.to_string(),
+            data: BASE64_STANDARD.encode(bytes),
+        });
+    }
+    Ok(images)
+}
+
+fn image_bytes_match_media_type(media_type: &str, bytes: &[u8]) -> bool {
+    match media_type {
+        "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "image/jpeg" => bytes.starts_with(&[0xff, 0xd8, 0xff]),
+        "image/gif" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
+        "image/webp" => bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP",
+        _ => false,
+    }
 }
 
 async fn stop_active_turn(
