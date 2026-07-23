@@ -11,9 +11,24 @@ import {
   workflowStatusLabel,
 } from "./workflow-state.js";
 import { canRequestReview } from "./review-state.js";
-import { WorkflowRunCard } from "./workflow-panel.js";
+import { WorkflowRunCard, workflowSubmitPayload } from "./workflow-panel.js";
 
 const h = React.createElement;
+
+test("workflowSubmitPayload carries parentThreadId (the viewed thread) to the submit", () => {
+  // The shared submit builder (local + remote) must forward the viewed thread so the
+  // backend authors on it, mirroring how Request review targets its parent.
+  const payload = workflowSubmitPayload({
+    taskPrompt: "  do the thing  ",
+    reviewerProvider: "codex",
+    maxRounds: 3,
+    parentThreadId: "thread-viewed",
+  });
+  assert.equal(payload.parentThreadId, "thread-viewed");
+  assert.equal(payload.taskPrompt, "do the thing");
+  // Absent → null, so the server falls back to the active thread.
+  assert.equal(workflowSubmitPayload({ taskPrompt: "x" }).parentThreadId, null);
+});
 
 test("canStartWorkflow gates on the VIEWED thread, like Request review", () => {
   // The active thread is a busy chat, but the user is VIEWING a different, idle

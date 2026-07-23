@@ -106,6 +106,9 @@ test("startWorkflow POSTs the Code Flow config plus device_id and returns the re
       reviewer_model: null,
       reviewer_instructions: "focus on tests",
       max_rounds: 2,
+      // The viewed thread the Code Flow authors on — must reach the wire as
+      // snake_case `parent_thread_id` (parity with Request review's parent).
+      parent_thread_id: "thread-viewed",
     },
     "device-a"
   );
@@ -122,6 +125,7 @@ test("startWorkflow POSTs the Code Flow config plus device_id and returns the re
     reviewer_model: null,
     reviewer_instructions: "focus on tests",
     max_rounds: 2,
+    parent_thread_id: "thread-viewed",
     device_id: "device-a",
   });
 });

@@ -7470,9 +7470,13 @@ mod review_tests {
                 device_id: Some("device-1".to_string()),
             })
             .await;
+        // Rejected at the `thread_cwd` gate — BEFORE `find_thread_provider` could
+        // enumerate providers (the security fix: no cheap-DoS / existence oracle for a
+        // bogus id). The specific message pins that ordering, not just "some error".
+        let bogus_err = bogus.expect_err("a nonexistent parent thread must be rejected");
         assert!(
-            bogus.is_err(),
-            "a nonexistent parent thread must be rejected, proving the id is consulted"
+            bogus_err.contains("cannot resolve the thread"),
+            "bogus parent must be rejected by the local thread lookup (pre-probe), got: {bogus_err}"
         );
 
         // Explicitly naming the real (here active) author thread is honored and runs.
@@ -7495,6 +7499,66 @@ mod review_tests {
         let status =
             wait_for_workflow_status(&app, &receipt.workflow_run_id, WORKFLOW_TERMINAL).await;
         assert_eq!(status, "done");
+    }
+
+    #[tokio::test]
+    async fn start_code_workflow_refused_when_another_thread_writes_the_same_workspace() {
+        // Code Flow's author WRITES the tree, so it must refuse while ANOTHER thread is
+        // working the same workspace — even though the frontend now enables the button on
+        // an idle viewed thread. This is the intentional "enable then error" the review
+        // flagged: two writers on one tree corrupt the diff, so we reject at start.
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, _providers) = build_review_app(cwd, &["codex"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+
+        // A different background thread is mid-turn in the SAME workspace. Use the
+        // PARENT's resolved cwd (start_session may canonicalize the path, e.g. macOS
+        // /tmp -> /private/...) so it matches the cwd the guard checks.
+        let workspace = parent.cwd.clone();
+        {
+            let mut relay = app.relay.write().await;
+            relay.register_background_thread(
+                ThreadSummaryView {
+                    id: "codex-busy".to_string(),
+                    name: None,
+                    preview: String::new(),
+                    cwd: workspace.clone(),
+                    updated_at: unix_now(),
+                    source: "codex".to_string(),
+                    status: "active".to_string(),
+                    model_provider: "codex".to_string(),
+                    provider: "codex".to_string(),
+                    forked_from: None,
+                },
+                &workspace,
+                "gpt-5.5",
+                "never",
+                "workspace-write",
+                "medium",
+            );
+            relay.bg_set_active_turn("codex-busy", Some("turn-x".to_string()), unix_now());
+            relay.bg_set_thread_status("codex-busy", "active".to_string(), Vec::new(), unix_now());
+        }
+
+        let err = app
+            .start_code_workflow(StartWorkflowInput {
+                workflow_id: Some("code_flow".to_string()),
+                task_prompt: "do it".to_string(),
+                reviewer_provider: "codex".to_string(),
+                reviewer_model: None,
+                reviewer_instructions: None,
+                max_rounds: Some(1),
+                anchor_item_id: None,
+                parent_thread_id: Some(parent.id.clone()),
+                device_id: Some("device-1".to_string()),
+            })
+            .await
+            .expect_err("must refuse while another thread writes the same workspace");
+        assert!(
+            err.contains("another thread is running in this workspace"),
+            "got: {err}"
+        );
     }
 
     // Sibling of the review-gate bug, SAME root cause: start_workflow's status gate is

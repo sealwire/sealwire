@@ -139,18 +139,21 @@ impl AppState {
         let reviewer_provider = non_empty(Some(input.reviewer_provider.clone()))
             .ok_or_else(|| "reviewer_provider is required".to_string())?;
         let max_rounds = input.max_rounds.unwrap_or(2).clamp(1, MAX_CODE_FLOW_ROUNDS);
-        // The author steps run on the parent (viewed-or-active) thread, so the author
-        // provider must be THAT thread's own provider — not the active session's.
-        let author_provider = {
-            let named = {
-                let relay = self.relay.read().await;
-                non_empty(input.parent_thread_id.clone()).or_else(|| relay.active_thread_id.clone())
-            };
-            match named {
-                Some(thread_id) => self.find_thread_provider(&thread_id).await?.0.to_string(),
-                None => self.relay.read().await.provider_name.clone(),
-            }
-        };
+        let device_id = require_device_id(input.device_id)?;
+        self.expire_stale_controller_if_needed().await;
+        // The reviewer provider is user input, so validate its availability up front.
+        // The author provider is the parent thread's OWN provider, resolved (once,
+        // after authorization) below.
+        self.resolve_provider(Some(&reviewer_provider))?;
+
+        // Hold the session slot so authorize + resolve + record are atomic against a
+        // concurrent start. `authorize_and_resolve_workflow_parent` runs device/path
+        // authorization and rejects an unknown thread BEFORE any provider probing.
+        let _slot = self.acquire_session_slot()?;
+        let (parent_thread_id, author_provider, cwd) = self
+            .authorize_and_resolve_workflow_parent(&device_id, input.parent_thread_id)
+            .await?;
+
         let workflow = code_flow_workflow(
             &author_provider,
             &task_prompt,
@@ -159,16 +162,15 @@ impl AppState {
             input.reviewer_instructions.clone(),
             max_rounds,
         );
+        // The built-in shape is always valid; keep the guard so a future template
+        // tweak can't silently ship a shape the runner can't honor.
+        validate_workflow_shape(&workflow, &author_provider)?;
+
         let mut anchor_item_id = input.anchor_item_id.unwrap_or_default();
         truncate_utf8_bytes_with_ellipsis(&mut anchor_item_id, WORKFLOW_ANCHOR_STORED_BYTES);
         let run_id = self
-            .start_workflow(
-                input.device_id,
-                workflow,
-                anchor_item_id,
-                input.parent_thread_id,
-            )
-            .await?;
+            .record_and_spawn_workflow(workflow, parent_thread_id, cwd, anchor_item_id, device_id)
+            .await;
         let (parent_thread_id, status) = {
             let relay = self.relay.read().await;
             let run = relay
@@ -207,32 +209,46 @@ and the author will revise until approved or the round budget runs out."
             self.resolve_provider(Some(&step.agent))?;
         }
 
-        // Briefly hold the session slot so validate + record is atomic against a
+        // Hold the session slot so authorize + resolve + record are atomic against a
         // concurrent start (the run itself executes in the background).
         let _slot = self.acquire_session_slot()?;
+        let (parent_thread_id, parent_provider, cwd) = self
+            .authorize_and_resolve_workflow_parent(&device_id, parent_thread_id)
+            .await?;
 
-        // Run on the NAMED author thread (the viewed thread), falling back to the
-        // active thread — exactly like `request_review`. All liveness/lock/path-scope
-        // gating below targets THAT thread, so Code Flow can be launched on an idle
-        // background thread while the active session is busy elsewhere.
-        let parent_thread_id = {
+        // Reject any workflow shape the phase-1 runner does not actually honor,
+        // rather than silently mishandling it.
+        validate_workflow_shape(&workflow, &parent_provider)?;
+
+        Ok(self
+            .record_and_spawn_workflow(workflow, parent_thread_id, cwd, anchor_item_id, device_id)
+            .await)
+    }
+
+    /// Authorize the caller and resolve the workflow's author thread + provider + cwd
+    /// ONCE. Ordering is load-bearing: device authorization
+    /// (`ensure_device_can_send_message`), path-scope, and the unknown-thread
+    /// rejection (`thread_cwd` returns `None`) all run BEFORE `find_thread_provider`,
+    /// so a bogus or unauthorized request can never reach its cross-provider
+    /// `list_threads` enumeration — which would otherwise be a cheap-DoS and a
+    /// thread-existence oracle. Resolution + gating happen under ONE read lock, so the
+    /// default active thread can't switch between reads. The caller must hold the
+    /// session slot so this + the record that follows are atomic. Runs on the NAMED
+    /// author thread (falling back to the active thread), mirroring `request_review`,
+    /// so Code Flow can launch on an idle background thread while the active session is
+    /// busy elsewhere.
+    async fn authorize_and_resolve_workflow_parent(
+        &self,
+        device_id: &str,
+        parent_thread_id: Option<String>,
+    ) -> Result<(String, String, String), String> {
+        let (parent_thread_id, cwd) = {
             let relay = self.relay.read().await;
-            non_empty(parent_thread_id)
+            let parent_thread_id = non_empty(parent_thread_id)
                 .or_else(|| relay.active_thread_id.clone())
-                .ok_or_else(|| "there is no thread to run a workflow on".to_string())?
-        };
-        // The author provider is the parent thread's OWN provider (resolved outside the
-        // read lock because it may probe the bridge).
-        let parent_provider = self
-            .find_thread_provider(&parent_thread_id)
-            .await?
-            .0
-            .to_string();
-
-        let cwd = {
-            let relay = self.relay.read().await;
-            // One workflow at a time (checked under the slot, so check + insert is
-            // atomic against another start).
+                .ok_or_else(|| "there is no thread to run a workflow on".to_string())?;
+            // One workflow at a time; a review and a workflow both drive turns on this
+            // parent/cwd, so guard the pair explicitly.
             if relay.has_active_workflow() {
                 return Err(
                     "a workflow is already running; wait for it to finish before \
@@ -240,9 +256,6 @@ starting another"
                         .to_string(),
                 );
             }
-            // A review and a workflow would both drive turns on this parent/cwd; the
-            // review's background reviewer is excluded from the workspace-working
-            // check, so guard the pair explicitly.
             if relay.has_active_review() {
                 return Err(
                     "a review is running on this workspace; wait for it to finish before \
@@ -250,13 +263,14 @@ starting a workflow"
                         .to_string(),
                 );
             }
-            relay.ensure_device_can_send_message(&device_id)?;
-            // The named thread must resolve to a workspace (a live runtime or a cached
-            // thread row); otherwise there is nothing to author against.
+            // AUTHORIZE before touching the thread's provider.
+            relay.ensure_device_can_send_message(device_id)?;
+            // An unknown thread is rejected HERE (cheap local lookup) — before the
+            // provider probe below.
             let parent_cwd = relay
                 .thread_cwd(&parent_thread_id)
                 .ok_or_else(|| "cannot resolve the thread to run a workflow on".to_string())?;
-            // Liveness/approvals are checked on the NAMED parent, not the active thread.
+            // Liveness/approvals target the NAMED parent, not the active thread.
             if relay
                 .runtime_for_thread(&parent_thread_id)
                 .map(|runtime| runtime.has_live_turn())
@@ -294,15 +308,31 @@ finish before starting a workflow"
             }
             // The device must be allowed to act in the parent thread's workspace — the
             // run launches file-mutating turns there.
-            let device_scope = relay.device_path_scope(&device_id);
+            let device_scope = relay.device_path_scope(device_id);
             ensure_path_within_device_scope(&parent_cwd, &device_scope, &relay.allowed_roots)?;
-            parent_cwd
+            (parent_thread_id, parent_cwd)
         };
+        // Authorized + KNOWN thread only: resolve the provider once. Because the thread
+        // was just confirmed to exist locally (`thread_cwd`), this hits the local
+        // runtime/thread row and does not enumerate providers.
+        let parent_provider = self
+            .find_thread_provider(&parent_thread_id)
+            .await?
+            .0
+            .to_string();
+        Ok((parent_thread_id, parent_provider, cwd))
+    }
 
-        // Reject any workflow shape the phase-1 runner does not actually honor,
-        // rather than silently mishandling it.
-        validate_workflow_shape(&workflow, &parent_provider)?;
-
+    /// Record the `WorkflowRun` and spawn its orchestrator (with a crash lifeguard).
+    /// The caller must have authorized + validated the workflow under the session slot.
+    async fn record_and_spawn_workflow(
+        &self,
+        workflow: Workflow,
+        parent_thread_id: String,
+        cwd: String,
+        anchor_item_id: String,
+        device_id: String,
+    ) -> String {
         let run_id = format!("workflow-{}-{}", unix_now(), random_suffix());
         let run = WorkflowRun::new(
             run_id.clone(),
@@ -337,7 +367,7 @@ finish before starting a workflow"
             lifeguard.disarm();
         });
 
-        Ok(run_id)
+        run_id
     }
 
     pub async fn resolve_blocked_workflow(
