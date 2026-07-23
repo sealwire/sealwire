@@ -5,9 +5,12 @@ import {
   STICK_REJOIN_THRESHOLD_PX,
   createStickState,
   distanceFromBottom,
+  isEditableEventTarget,
   isInteractiveEventTarget,
+  keydownScrollIntent,
   stickFollowTarget,
   stickStateAfterScroll,
+  stickStateAfterUpwardGesture,
   stickStateAfterUserGesture,
   stickStateForAction,
 } from "./shared/stick-to-bottom-core.js";
@@ -88,6 +91,62 @@ test("escape: ANY upward user scroll releases stickiness, even inside the rejoin
   const next = stickStateAfterScroll(state, metrics({ scrollTop: 1500 }));
   assert.equal(next.sticky, false);
   assert.equal(next.lastScrollTop, 1500);
+});
+
+// --- upward INPUT releases immediately (beats the follow() race) -------------
+
+test("stickStateAfterUpwardGesture: releases the follow but preserves the rejoin hold", () => {
+  // Releasing on upward INPUT (not delayed geometry) is what beats the race
+  // below: it flips sticky the instant the gesture arrives, before follow() can
+  // run and snap the reader back down.
+  const released = stickStateAfterUpwardGesture({
+    sticky: true,
+    lastScrollTop: 1600,
+    holdRejoin: false,
+  });
+  assert.equal(released.sticky, false);
+  assert.equal(released.lastScrollTop, 1600); // position untouched
+
+  // Going UP is not the downward intent that clears the send-anchor hold.
+  const held = stickStateAfterUpwardGesture({
+    sticky: true,
+    lastScrollTop: 1600,
+    holdRejoin: true,
+  });
+  assert.equal(held.sticky, false);
+  assert.equal(held.holdRejoin, true);
+
+  // Already released -> idempotent no-op (hold preserved).
+  assert.deepEqual(
+    stickStateAfterUpwardGesture({ sticky: false, lastScrollTop: 800, holdRejoin: true }),
+    { sticky: false, lastScrollTop: 800, holdRejoin: true }
+  );
+});
+
+test("live follow: an upward gesture wins the race against an interleaved follow() write", () => {
+  // Repro of the "can't scroll up while streaming" bug. Following at the
+  // bottom, the reader wheels UP — but the scroll EVENT is delayed (async /
+  // compositor) while a streaming ResizeObserver tick calls follow() first.
+  // With only the geometry path, follow() reads sticky=true, snaps scrollTop
+  // back to the grown bottom and records lastScrollTop there, so the delayed
+  // scroll event sees "no movement" and the escape is erased -> the reader is
+  // stuck. The fix: the wheel gesture releases the follow synchronously, so the
+  // interleaved follow() is already a no-op and can't snap them back.
+  let state = { sticky: true, lastScrollTop: 1600, holdRejoin: false };
+
+  // 1) Real upward wheel input, processed the instant the gesture fires.
+  state = stickStateAfterUpwardGesture(state);
+
+  // 2) A streaming follow() now interleaves: it MUST be a no-op, or it snaps
+  //    the reader back to the bottom and erases their escape.
+  assert.equal(
+    stickFollowTarget(state, metrics({ scrollTop: 1500, scrollHeight: 2400 })),
+    null
+  );
+
+  // 3) The delayed scroll event confirms the release survives.
+  state = stickStateAfterScroll(state, metrics({ scrollTop: 1500, scrollHeight: 2400 }));
+  assert.equal(state.sticky, false);
 });
 
 test("browser clamp keeps stickiness: scrollTop dropped but we are still AT the bottom", () => {
@@ -351,4 +410,67 @@ test("plain transcript content is not interactive: keys there still count as scr
     false
   );
   assert.equal(isInteractiveEventTarget(null), false);
+});
+
+test("isEditableEventTarget: text fields swallow scroll keys, buttons/links do NOT", () => {
+  // Editable => arrows/Page/Home move a caret, so upward keys there are NOT
+  // scroll intent (the follower filters them).
+  assert.equal(isEditableEventTarget({ tagName: "TEXTAREA", closest: () => null }), true);
+  assert.equal(isEditableEventTarget({ tagName: "INPUT", closest: () => null }), true);
+  assert.equal(isEditableEventTarget({ tagName: "SELECT", closest: () => null }), true);
+  assert.equal(
+    isEditableEventTarget({ tagName: "DIV", isContentEditable: true, closest: () => null }),
+    true
+  );
+  assert.equal(
+    // A span inside a contenteditable region: detected via closest().
+    isEditableEventTarget({
+      tagName: "SPAN",
+      closest: (sel) => (sel.includes("contenteditable") ? {} : null),
+    }),
+    true
+  );
+
+  // A button/link is interactive but NOT editable: PageUp/Home/ArrowUp from a
+  // focused button (e.g. after activating scroll-to-latest) is still scroll-up
+  // intent and must NOT be filtered — this is the P2 the reviewer caught.
+  const button = { tagName: "BUTTON", closest: () => null };
+  assert.equal(isEditableEventTarget(button), false);
+  assert.equal(isInteractiveEventTarget(button), true); // still interactive (Space activates)
+  assert.equal(
+    isEditableEventTarget({ tagName: "A", closest: (sel) => (sel.includes("button") ? {} : null) }),
+    false
+  );
+  assert.equal(isEditableEventTarget(null), false);
+});
+
+test("keydownScrollIntent: upward keys are scroll intent from a button, but not a textarea", () => {
+  const button = { tagName: "BUTTON", closest: () => null };
+  const textarea = { tagName: "TEXTAREA", closest: () => null };
+  const plain = { tagName: "DIV", closest: () => null };
+
+  // The P2 repro: PageUp/Home/ArrowUp from a focused button must release the
+  // follow (they scroll; they do not activate the button).
+  for (const key of ["ArrowUp", "PageUp", "Home"]) {
+    assert.equal(keydownScrollIntent({ key }, button), "upward", `${key} on button`);
+    assert.equal(keydownScrollIntent({ key }, plain), "upward", `${key} on content`);
+    // ...but inside a text field they move the caret — not scroll intent.
+    assert.equal(keydownScrollIntent({ key }, textarea), null, `${key} in textarea`);
+  }
+
+  // Downward keeps the stricter guard: Space activates a focused button and
+  // ArrowDown/End out of any interactive control must not clear the rejoin hold.
+  assert.equal(keydownScrollIntent({ key: "ArrowDown" }, button), null);
+  assert.equal(keydownScrollIntent({ key: "End" }, button), null);
+  assert.equal(keydownScrollIntent({ key: " " }, button), null); // Space clicks the button
+  assert.equal(keydownScrollIntent({ key: "ArrowDown" }, plain), "downward");
+  assert.equal(keydownScrollIntent({ key: "End" }, plain), "downward");
+  assert.equal(keydownScrollIntent({ key: " " }, plain), "downward"); // plain Space = page down
+  assert.equal(keydownScrollIntent({ key: "a" }, plain), null); // ordinary typing
+
+  // Shift+Space is the standard page-UP input: upward from content or a button
+  // (it doesn't activate the button), but caret movement inside a text field.
+  assert.equal(keydownScrollIntent({ key: " ", shiftKey: true }, plain), "upward");
+  assert.equal(keydownScrollIntent({ key: " ", shiftKey: true }, button), "upward");
+  assert.equal(keydownScrollIntent({ key: " ", shiftKey: true }, textarea), null);
 });

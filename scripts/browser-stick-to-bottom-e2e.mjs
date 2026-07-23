@@ -102,17 +102,34 @@ function scrollActiveToBottomInPage() {
   }
 }
 
-function scrollActiveUpInPage(px) {
-  const t = document.querySelector(".chat-thread");
-  const overflows = t && t.scrollHeight > t.clientHeight + 1;
-  // An UPWARD wheel must not release the rejoin hold (only downward-intent
-  // gestures do) — dispatch it so phase C also guards that gating.
-  t?.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: -240 }));
-  if (overflows) {
-    t.scrollTop = Math.max(0, t.scrollTop - px);
-  } else {
-    window.scrollTo(0, Math.max(0, window.scrollY - px));
-  }
+// A REAL upward wheel over the active scroller. Unlike a synthetic WheelEvent +
+// direct `scrollTop = …` write (which applies synchronously, leaving no window
+// for a streaming follow() to interleave), this drives Chromium's real input
+// path: the scroll is delivered asynchronously and can race the ResizeObserver
+// follow() — which is exactly the "can't scroll up while streaming" bug phase C
+// guards. Positioned at the viewport centre so the wheel lands on the transcript
+// for both scrollers (`.chat-thread` on desktop, the window on phone; the wheel
+// event bubbles through `.chat-thread` either way, where the follower listens).
+async function realWheelUp(page, deltaPx, { fromTop = false } = {}) {
+  const target = await page.evaluate((wantOutside) => {
+    const x = Math.round(window.innerWidth / 2);
+    if (wantOutside) {
+      // Aim OUTSIDE `.chat-thread` (header band above it, else composer band
+      // below it): on the window-scroller layout the gesture scrolls the page
+      // but never bubbles through `.chat-thread`, so it exercises the window
+      // listeners rather than the transcript's.
+      const r = document.querySelector(".chat-thread")?.getBoundingClientRect();
+      if (r && r.top > 12) return { x, y: Math.max(2, Math.round(r.top / 2)), outside: true };
+      if (r && r.bottom < window.innerHeight - 12) {
+        return { x, y: Math.round((r.bottom + window.innerHeight) / 2), outside: true };
+      }
+      return { x, y: Math.round(window.innerHeight / 2), outside: false };
+    }
+    return { x, y: Math.round(window.innerHeight / 2), outside: false };
+  }, fromTop);
+  await page.mouse.move(target.x, target.y);
+  await page.mouse.wheel(0, -deltaPx);
+  return target;
 }
 
 // Length of the streaming reply's DOM text. Grows for every chunk even when
@@ -141,7 +158,7 @@ function spread(samples, key) {
   return Math.max(...values) - Math.min(...values);
 }
 
-async function exercise(page, label, { anchorSpreadTolerance = 2 } = {}) {
+async function exercise(page, label, { anchorSpreadTolerance = 2, wheelFromTop = false } = {}) {
   // Wait for the seeded conversation + settled first turn.
   await page.waitForFunction(
     () => document.querySelectorAll(".chat-thread .chat-message").length > 0,
@@ -232,20 +249,56 @@ async function exercise(page, label, { anchorSpreadTolerance = 2 } = {}) {
     `${label} B: the viewport should have moved down with the stream`
   );
 
-  // ---- Phase C: scroll up mid-stream -> follow releases immediately.
-  await page.evaluate(scrollActiveUpInPage, 500);
-  await delay(150);
+  // ---- Phase C: a REAL upward wheel mid-stream -> follow releases at once.
+  // wheelFromTop exercises the window-scroller path: the gesture starts on the
+  // header/composer OUTSIDE `.chat-thread`, so it only reaches the window-level
+  // listeners (the P2 the reviewer caught).
+  const beforeWheelTop = (await page.evaluate(readMetricsInPage)).scrollTop;
+  const wheelTarget = await realWheelUp(page, 800, { fromTop: wheelFromTop });
+  if (wheelFromTop) {
+    assert.ok(
+      wheelTarget.outside,
+      `${label} C: expected an out-of-transcript wheel origin (header/composer) `
+      + `to exercise the window-scroller path, got ${JSON.stringify(wheelTarget)}`
+    );
+  }
+  await delay(400); // let the async scroll settle before sampling
+  // Assert REAL upward displacement, independent of stream growth: with the bug,
+  // follow() snaps scrollTop back to the bottom, so it ends up ~unchanged. (A
+  // distance-only check could pass from later growth alone, so pin the actual
+  // scroll position here, before any growth sampling.)
+  const afterWheelTop = (await page.evaluate(readMetricsInPage)).scrollTop;
+  assert.ok(
+    afterWheelTop < beforeWheelTop - 40,
+    `${label} C: a real wheel-up must move the viewport UP (before ${beforeWheelTop}, `
+    + `after ${afterWheelTop}); the stream must not snap it back to the bottom`
+  );
   const phaseC = await sample(page, 8, 150);
-  console.log(`[${label}] C scrollTop spread ${spread(phaseC, "scrollTop")};`,
+  console.log(`[${label}] C distances: ${phaseC.map((s) => Math.round(s.distance)).join(", ")};`,
+    `scrollTop spread ${spread(phaseC, "scrollTop")};`,
     `text growth ${phaseC.at(-1).streamTextLen - phaseC[0].streamTextLen}`);
   assert.ok(
     phaseC.at(-1).streamTextLen - phaseC[0].streamTextLen > 80,
     `${label} C: stream should still be growing`
   );
+  // Two independent tells, each of which the bug fails. The bug pins the
+  // viewport to the growing bottom, so (1) the distance from the bottom collapses
+  // toward 0 and (2) scrollTop climbs to chase it. Released, the reader stays
+  // put off the bottom: distance holds clearly positive and scrollTop is steady.
+  // The escape magnitude is leg-dependent (window vs `.chat-thread` scroller —
+  // phone escapes far less than desktop), so we assert "clearly off the bottom",
+  // not a specific pixel count.
+  const minDistanceC = Math.min(...phaseC.map((s) => s.distance));
+  assert.ok(
+    minDistanceC > 40,
+    `${label} C: a real wheel-up must escape and STAY escaped — the stream must `
+    + `not snap the reader back to the bottom `
+    + `(distances: ${phaseC.map((s) => Math.round(s.distance)).join(", ")})`
+  );
   assert.ok(
     spread(phaseC, "scrollTop") <= anchorSpreadTolerance,
-    `${label} C: scrolling up must release the follow — the stream must not `
-    + `drag the reader (scrollTop samples: ${phaseC.map((s) => s.scrollTop).join(", ")})`
+    `${label} C: after escaping, the stream must not drag the viewport `
+    + `(scrollTop samples: ${phaseC.map((s) => s.scrollTop).join(", ")})`
   );
 
   // ---- Phase D: re-join, then let the turn end (spacer collapse + clamp).
@@ -497,7 +550,9 @@ async function main() {
       null,
       { timeout: TIMEOUT_MS }
     );
-    results.phone = await exercise(phone, "phone");
+    // Phone is the window-scroller: drive phase C from OUTSIDE the transcript so
+    // the wheel only reaches the window listeners (reviewer P2, finding 1).
+    results.phone = await exercise(phone, "phone", { wheelFromTop: true });
     await phone.close();
     phone = null;
 

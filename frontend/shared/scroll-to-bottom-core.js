@@ -26,7 +26,11 @@ export function findScrollContainer(node) {
   return node?.ownerDocument?.defaultView || container || null;
 }
 
-function isWindowLike(scrollEl) {
+// True for the window / defaultView (as opposed to a scrollable element like
+// `.chat-thread`). Exported so the follower can tell whether the transcript's
+// active scroller is the window before treating window-level gestures as
+// transcript scroll intent.
+export function isWindowLike(scrollEl) {
   return Boolean(
     scrollEl
       && (scrollEl === scrollEl.window

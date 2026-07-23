@@ -2,13 +2,15 @@ import React from "react";
 
 import {
   findScrollContainer,
+  isWindowLike,
   readScrollMetrics,
 } from "./scroll-to-bottom-core.js";
 import {
   createStickState,
-  isInteractiveEventTarget,
+  keydownScrollIntent,
   stickFollowTarget,
   stickStateAfterScroll,
+  stickStateAfterUpwardGesture,
   stickStateAfterUserGesture,
   stickStateForAction,
 } from "./stick-to-bottom-core.js";
@@ -99,45 +101,63 @@ export function StickToBottomFollower() {
       state = { ...state, lastScrollTop: target };
     };
 
-    // Only gestures that express DOWNWARD intent release the send-anchor's
-    // rejoin hold — an upward wheel, an unrelated click or a random keypress
-    // must not, or the virtualizer's programmatic corrections regain the power
-    // to re-stick the reader right after (the race the hold exists to stop).
-    // The scroll-to-latest button is NOT covered here: its click handler
-    // broadcasts an explicit "rejoin-bottom" action instead, which also covers
-    // keyboard and assistive-tech activation.
+    // Two intents, two effects. DOWNWARD input (wheel down, finger up, PageDown…)
+    // releases the send-anchor's rejoin hold — from there, scrolling back to the
+    // bottom re-joins the follow. UPWARD input (wheel up, finger down, PageUp…)
+    // leaves the live follow *immediately*: without it, release waits for the
+    // delayed scroll event's geometry, which a streaming follow() write can
+    // erase first (the "can't scroll up while streaming" bug — see
+    // stickStateAfterUpwardGesture). An upward gesture must NOT release the hold
+    // (only downward intent does) or the virtualizer's programmatic corrections
+    // regain the power to re-stick the reader right after. The scroll-to-latest
+    // button is NOT covered here: its click handler broadcasts an explicit
+    // "rejoin-bottom" action, which also covers keyboard and assistive tech.
     const onWheel = (event) => {
-      if ((event?.deltaY || 0) > 0) {
+      // Ctrl+wheel and trackpad pinch are zoom, not scroll — never a follow exit.
+      if (event?.ctrlKey) {
+        return;
+      }
+      const deltaY = event?.deltaY || 0;
+      if (deltaY > 0) {
         state = stickStateAfterUserGesture(state);
+      } else if (deltaY < 0) {
+        state = stickStateAfterUpwardGesture(state);
       }
     };
     const onTouchStart = (event) => {
-      touchStartY = event?.touches?.[0]?.clientY ?? null;
+      // Multi-touch is a pinch-zoom, not a scroll — don't track it as intent.
+      if ((event?.touches?.length || 0) !== 1) {
+        touchStartY = null;
+        return;
+      }
+      touchStartY = event.touches[0]?.clientY ?? null;
     };
     const onTouchMove = (event) => {
+      if ((event?.touches?.length || 0) !== 1) {
+        return; // pinch-zoom in progress
+      }
       const y = event?.touches?.[0]?.clientY;
-      if (
-        touchStartY != null
-        && typeof y === "number"
-        && y < touchStartY - 8 // finger travels up => content scrolls down
-      ) {
+      if (touchStartY == null || typeof y !== "number") {
+        return;
+      }
+      if (y < touchStartY - 8) {
+        // Finger travels UP => content scrolls DOWN: downward intent.
         state = stickStateAfterUserGesture(state);
+      } else if (y > touchStartY + 8) {
+        // Finger travels DOWN => content scrolls UP: leave the follow.
+        state = stickStateAfterUpwardGesture(state);
       }
     };
     const onTouchEnd = () => {
       touchStartY = null;
     };
-    const DOWNWARD_KEYS = new Set(["ArrowDown", "PageDown", "End"]);
+    // Intent mapping (incl. the button-vs-textarea filtering) is the pure,
+    // unit-tested keydownScrollIntent; this only applies the resulting effect.
     const onKeyDown = (event) => {
-      // Keys bubbling out of interactive controls (AskUser textarea, approval
-      // buttons…) edit or activate — they are not scroll intent.
-      if (isInteractiveEventTarget(event?.target)) {
-        return;
-      }
-      if (
-        DOWNWARD_KEYS.has(event?.key)
-        || (event?.key === " " && !event.shiftKey)
-      ) {
+      const intent = keydownScrollIntent(event, event?.target);
+      if (intent === "upward") {
+        state = stickStateAfterUpwardGesture(state);
+      } else if (intent === "downward") {
         state = stickStateAfterUserGesture(state);
       }
     };
@@ -148,6 +168,54 @@ export function StickToBottomFollower() {
       pointerHeld = false;
     };
     const ownerDocument = anchor?.ownerDocument || null;
+
+    // Does this window-level gesture actually scroll the TRANSCRIPT? Only if
+    // (a) the transcript's active scroller is the window — on the desktop/remote
+    // layout it is `.chat-thread`, so a sidebar/right-rail wheel that bubbles to
+    // the window must NOT touch the transcript's follow — and (b) the gesture
+    // isn't consumed by an independent inner scroll region (sidebar, drawer,
+    // code block with its own overflow), which scrolls itself, not the page.
+    const targetInsideInnerScroller = (target) => {
+      const body = ownerDocument?.body || null;
+      const root = ownerDocument?.scrollingElement
+        || ownerDocument?.documentElement
+        || null;
+      let el = target && target.nodeType === 1 ? target : null;
+      while (el && el !== body && el !== root) {
+        const overflowY = view?.getComputedStyle?.(el)?.overflowY;
+        if (
+          (overflowY === "auto" || overflowY === "scroll")
+          && (el.scrollHeight || 0) > (el.clientHeight || 0) + 1
+        ) {
+          return true;
+        }
+        el = el.parentElement;
+      }
+      return false;
+    };
+    const windowGestureIsTranscript = (event) =>
+      isWindowLike(findScrollContainer(anchor))
+      && !targetInsideInnerScroller(event?.target);
+
+    // Window-level wrappers: the narrow layout scrolls the WINDOW with the
+    // header/composer as SIBLINGS of `.chat-thread`, so a gesture there scrolls
+    // the page but never bubbles through `.chat-thread` — the element listeners
+    // miss it and only the racy geometry path releases the follow. Re-run the
+    // same handlers from the window, but gated so they fire only for genuine
+    // transcript scrolls (handlers are idempotent, so the double-fire from a
+    // gesture inside `.chat-thread` is harmless).
+    const onWindowWheel = (event) => {
+      if (windowGestureIsTranscript(event)) onWheel(event);
+    };
+    const onWindowTouchStart = (event) => {
+      if (windowGestureIsTranscript(event)) onTouchStart(event);
+    };
+    const onWindowTouchMove = (event) => {
+      if (windowGestureIsTranscript(event)) onTouchMove(event);
+    };
+    const onWindowKeyDown = (event) => {
+      if (windowGestureIsTranscript(event)) onKeyDown(event);
+    };
 
     // Listen on both candidates: desktop scrolls `.chat-thread`, phone scrolls
     // the window. Whichever fires, the state update reads the active one.
@@ -167,6 +235,18 @@ export function StickToBottomFollower() {
     view?.addEventListener?.("scroll", onScroll, { passive: true });
     // A viewport resize moves the bottom out from under a pinned reader.
     view?.addEventListener?.("resize", follow);
+    // Window-level gesture listeners for the window-scroller (narrow) layout,
+    // gated by windowGestureIsTranscript so sidebar/drawer scrolls on other
+    // layouts don't touch the transcript. keydown is included here (gated) so
+    // PageUp/Home/Shift+Space from body/header outside `.chat-thread` also
+    // release synchronously; the gate keeps it from firing for unrelated
+    // controls on the desktop/remote layout (where the scroller isn't window).
+    view?.addEventListener?.("wheel", onWindowWheel, { passive: true });
+    view?.addEventListener?.("touchstart", onWindowTouchStart, { passive: true });
+    view?.addEventListener?.("touchmove", onWindowTouchMove, { passive: true });
+    view?.addEventListener?.("touchend", onTouchEnd, { passive: true });
+    view?.addEventListener?.("touchcancel", onTouchEnd, { passive: true });
+    view?.addEventListener?.("keydown", onWindowKeyDown);
 
     let resizeObserver = null;
     if (typeof ResizeObserver !== "undefined" && chatThread) {
@@ -192,6 +272,12 @@ export function StickToBottomFollower() {
       ownerDocument?.removeEventListener?.("pointercancel", onPointerUp);
       view?.removeEventListener?.("scroll", onScroll);
       view?.removeEventListener?.("resize", follow);
+      view?.removeEventListener?.("wheel", onWindowWheel);
+      view?.removeEventListener?.("touchstart", onWindowTouchStart);
+      view?.removeEventListener?.("touchmove", onWindowTouchMove);
+      view?.removeEventListener?.("touchend", onTouchEnd);
+      view?.removeEventListener?.("touchcancel", onTouchEnd);
+      view?.removeEventListener?.("keydown", onWindowKeyDown);
       resizeObserver?.disconnect();
     };
   }, []);

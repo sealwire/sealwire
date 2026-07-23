@@ -6,6 +6,7 @@ import {
   computeScrollToBottomVisible,
   findScrollContainer,
   isScrolledToBottom,
+  isWindowLike,
   maxScrollTop,
   nextSettleScrollTop,
   readScrollMetrics,
@@ -14,6 +15,18 @@ import {
 function metrics({ scrollTop = 0, clientHeight = 400, scrollHeight = 2000 } = {}) {
   return { scrollTop, clientHeight, scrollHeight };
 }
+
+test("isWindowLike: the window/defaultView is window-like, a scroll element is not", () => {
+  // The follower uses this to gate window-level gesture listeners: only when the
+  // transcript's active scroller IS the window do sidebar/header wheels count.
+  const fakeWindow = {};
+  fakeWindow.window = fakeWindow; // self-reference, like a real Window
+  assert.equal(isWindowLike(fakeWindow), true);
+  assert.equal(isWindowLike({ scrollY: 0, document: {} }), true); // duck-typed window
+  // A scrollable element (e.g. `.chat-thread`) is NOT window-like.
+  assert.equal(isWindowLike({ scrollTop: 0, scrollHeight: 2000, clientHeight: 400 }), false);
+  assert.equal(isWindowLike(null), false);
+});
 
 test("maxScrollTop is scrollHeight minus clientHeight, floored at 0", () => {
   assert.equal(maxScrollTop(metrics({ scrollHeight: 2000, clientHeight: 400 })), 1600);

@@ -163,6 +163,63 @@ export function isInteractiveEventTarget(target) {
   return false;
 }
 
+const EDITABLE_TARGET_SELECTOR = [
+  "input",
+  "textarea",
+  "select",
+  "[contenteditable='']",
+  "[contenteditable='true']",
+  "[role='textbox']",
+].join(", ");
+
+// Narrower than isInteractiveEventTarget: targets where arrow / Page / Home /
+// End move a caret or selection (so scroll KEYS there are text editing, not
+// scroll intent). A button or link is interactive — Space activates it — but is
+// NOT editable, so PageUp / Home / ArrowUp from a focused button is still a
+// scroll-up intent. Used only for the UPWARD keys, which never clear the rejoin
+// hold, so honoring them on buttons cannot re-expose the virtualizer race that
+// the (still stricter) downward guard protects. Duck-typed for unit testing.
+export function isEditableEventTarget(target) {
+  if (!target) return false;
+  if (target.isContentEditable) return true;
+  const tag = String(target.tagName || "").toLowerCase();
+  if (tag === "input" || tag === "textarea" || tag === "select") {
+    return true;
+  }
+  if (typeof target.closest === "function") {
+    return Boolean(target.closest(EDITABLE_TARGET_SELECTOR));
+  }
+  return false;
+}
+
+const UPWARD_SCROLL_KEYS = new Set(["ArrowUp", "PageUp", "Home"]);
+const DOWNWARD_SCROLL_KEYS = new Set(["ArrowDown", "PageDown", "End"]);
+
+// Map a keydown to its follow effect: "upward" | "downward" | null. Pure +
+// exported so the reviewer's P2 — PageUp/Home/ArrowUp from a focused button is
+// scroll intent, but the same key inside a textarea is caret movement — is
+// unit-tested without a browser. Asymmetric on purpose: upward keys filter only
+// EDITABLE targets (a button doesn't swallow them and they never clear the
+// rejoin hold), while downward keys keep the stricter interactive filter (Space
+// activates a button; ArrowDown/End near a fresh send must not clear the hold).
+export function keydownScrollIntent(event, target) {
+  const key = event?.key;
+  const shiftKey = Boolean(event?.shiftKey);
+  // Shift+Space is the standard page-UP input; plain Space is page-DOWN. Neither
+  // activates a control the way plain Space clicks a focused button, so upward
+  // filters only editable targets.
+  if ((UPWARD_SCROLL_KEYS.has(key) || (key === " " && shiftKey)) && !isEditableEventTarget(target)) {
+    return "upward";
+  }
+  if (isInteractiveEventTarget(target)) {
+    return null;
+  }
+  if (DOWNWARD_SCROLL_KEYS.has(key) || (key === " " && !shiftKey)) {
+    return "downward";
+  }
+  return null;
+}
+
 // A genuine user input gesture (wheel / touch / pointer / key) releases the
 // send-anchor's rejoin hold: from here on, scrolling down to the bottom means
 // the reader chose to follow again.
@@ -171,6 +228,24 @@ export function stickStateAfterUserGesture(state) {
     return state;
   }
   return { ...state, holdRejoin: false };
+}
+
+// An UPWARD input gesture (wheel up / finger down / ArrowUp…) is authoritative
+// intent to leave the live follow — release it *synchronously*, without waiting
+// for the delayed scroll event's geometry. That wait is the "can't scroll up
+// while streaming" bug: a streaming ResizeObserver tick calls follow() before
+// the scroll event is delivered, snaps scrollTop back to the grown bottom and
+// records lastScrollTop there, so the geometry path then reads "no movement"
+// and never sees the escape. Flipping sticky on the input itself makes the
+// interleaved follow() a no-op, so it can't snap the reader back.
+//
+// The rejoin hold is deliberately preserved: going up is not the DOWNWARD
+// intent that clears the send-anchor hold (that is stickStateAfterUserGesture).
+export function stickStateAfterUpwardGesture(state) {
+  if (!state?.sticky) {
+    return state;
+  }
+  return { ...state, sticky: false };
 }
 
 // Where to scroll to keep following, or null to stay put. Only ever moves
