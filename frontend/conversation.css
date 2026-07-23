@@ -106,34 +106,13 @@
   }
 }
 
-/* Phone / narrow layout (≤960px), LOCAL surface only.
- *
- * The local chat shell is height:auto here, so the page (window) scrolls — not
- * `.chat-thread`. `position: sticky` would then pin to the non-scrolling
- * `.chat-thread` container and ride off-screen with the content, so switch the
- * anchor to `position: fixed` against the viewport. The local composer lives
- * in-flow at the end of the page, so it is off-screen whenever the button is
- * shown (i.e. when not near the bottom) — no overlap.
- *
- * The REMOTE surface keeps its shell pinned to 100dvh with `.chat-thread`
- * scrolling internally even on phone (see styles.css
- * `.remote-chat-shell[data-view="conversation"]`), and its composer is always
- * docked at the viewport bottom. There the default sticky anchor already floats
- * the button just above the composer, so it must NOT become fixed — hence the
- * `:not(.remote-chat-shell)` scoping. */
-@media (max-width: 960px) {
-  .chat-shell:not(.remote-chat-shell) .scroll-to-bottom {
-    position: fixed;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    z-index: 6;
-  }
-
-  .chat-shell:not(.remote-chat-shell) .scroll-to-bottom-button {
-    bottom: calc(20px + env(safe-area-inset-bottom, 0px));
-  }
-}
+/* Narrow layout (≤960px): the local conversation used to window-scroll (shell at
+ * height:auto), which forced the scroll-to-latest strip to `position: fixed`
+ * against the viewport. It is now a 100dvh ELEMENT scroller with the composer
+ * docked at the bottom — exactly like the remote surface (see styles.css) — so
+ * the DEFAULT sticky strip already floats the button just above the composer on
+ * every surface. The old fixed override is removed: pinned to the viewport
+ * bottom it overlapped the docked composer and blocked the input. */
 
 /* Phone: a comfortable tap target. */
 @media (max-width: 640px) {
@@ -168,17 +147,6 @@
   position: absolute;
   top: 0;
   width: 100%;
-}
-
-/* Bottom spacer: guarantees a freshly sent user message can be scrolled all
- * the way up to the top of the viewport while the assistant streams below
- * it. Only attached while the latest turn is in flight (`data-bottom-spacer`
- * is set by TranscriptContent) — once the turn is complete it would just
- * show as awkward whitespace under finished conversations. */
-.thread-content[data-bottom-spacer="true"]::after {
-  content: "";
-  display: block;
-  min-height: 60vh;
 }
 
 .chat-message {

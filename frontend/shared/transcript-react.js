@@ -10,9 +10,6 @@ import {
   measureElement,
   observeElementOffset,
   observeElementRect,
-  observeWindowOffset,
-  observeWindowRect,
-  windowScroll,
 } from "@tanstack/virtual-core";
 import { CHECK_SVG, COPY_SVG, FORK_SVG, SPARKLES_SVG } from "../svg.js";
 import { computeForkableItemIds, isForkableEntry } from "./transcript-fork.js";
@@ -24,10 +21,7 @@ import {
   parseUnifiedDiffRows,
 } from "./file-change-diff.js";
 import { renderMarkdown } from "./markdown.js";
-import {
-  didPrependOlderTranscript,
-  dispatchTranscriptScrollActionEvent,
-} from "./transcript-scroll.js";
+import { didPrependOlderTranscript } from "./transcript-scroll.js";
 
 const h = React.createElement;
 
@@ -2074,59 +2068,15 @@ export function TranscriptContent({
     nodes.push(h(ApprovalCard, { approval, key: "approval", options: effectiveOptions }));
   }
 
-  // The trailing bottom spacer (CSS `.thread-content[data-bottom-spacer]::after`)
-  // exists so a freshly sent user message can be scroll-anchored at the top of
-  // the viewport while the assistant streams below it. Once the turn settles
-  // (last entry is a completed agent message), the spacer is no longer needed
-  // and would just show as awkward whitespace under finished conversations.
-  const needsBottomSpacer = (() => {
-    if (approval) return true;
-    if (!entries.length) return false;
-    const last = entries[entries.length - 1];
-    if (!last) return false;
-    if (last.kind === "user_text") return true;
-    const status = String(last.status || "").toLowerCase();
-    return status !== "" && status !== "completed";
-  })();
-
+  // Bottom-follow: no top-anchor, so there is no bottom spacer and no
+  // scroll-the-sent-message-to-top effect. A new user message locks the
+  // transcript to the bottom (decideTranscriptScrollAction -> jump-bottom) and
+  // the stick-to-bottom follower keeps us pinned as the reply streams in.
   const sentinel = nodes.shift();
-  const latestUserNodeIndex = findTranscriptEntryNodeIndex(nodes, latestUserEntryId);
   const virtualized = shouldVirtualizeTranscript(nodes.length);
   const virtualizer = useTranscriptVirtualizer(nodes, virtualized);
-  const previousVirtualLatestUserIdRef = useRef("");
-  useLayoutEffect(() => {
-    const previousLatestUserId = previousVirtualLatestUserIdRef.current;
-    previousVirtualLatestUserIdRef.current = latestUserEntryId;
-    if (
-      !virtualized
-      || !previousLatestUserId
-      || !latestUserEntryId
-      || previousLatestUserId === latestUserEntryId
-    ) {
-      return;
-    }
-    if (latestUserNodeIndex >= 0) {
-      virtualizer.scrollToIndex(latestUserNodeIndex, {
-        align: "start",
-      });
-      // This anchor bypasses applyTranscriptScrollAction, so broadcast the
-      // intent here too — the stick-to-bottom follower must release its live
-      // follow or the next streamed token would drag the reader away from the
-      // message we just pinned.
-      dispatchTranscriptScrollActionEvent(
-        virtualizer.scrollTargetRef?.current,
-        "anchor-user"
-      );
-    }
-  }, [
-    latestUserEntryId,
-    latestUserNodeIndex,
-    virtualized,
-    virtualizer,
-  ]);
   const contentProps = {
     className: `thread-content${virtualized ? " thread-content-virtualized" : ""}`,
-    ...(needsBottomSpacer ? { "data-bottom-spacer": "true" } : {}),
     ref: virtualizer.scrollTargetRef,
   };
 
@@ -2188,11 +2138,11 @@ function useTranscriptVirtualizer(rows, enabled) {
       enabled,
       estimateSize: estimateTranscriptRowSize,
       getScrollElement: () => findTranscriptScrollElement(scrollTargetRef.current),
-      observeElementOffset: observeTranscriptOffset,
-      observeElementRect: observeTranscriptRect,
+      observeElementOffset,
+      observeElementRect,
       overscan: TRANSCRIPT_VIRTUAL_OVERSCAN,
       scrollMargin,
-      scrollToFn: transcriptScroll,
+      scrollToFn: elementScroll,
       onChange: () => forceUpdate(),
     });
   }
@@ -2208,11 +2158,11 @@ function useTranscriptVirtualizer(rows, enabled) {
     getItemKey,
     getScrollElement: () => findTranscriptScrollElement(scrollTargetRef.current),
     measureElement,
-    observeElementOffset: observeTranscriptOffset,
-    observeElementRect: observeTranscriptRect,
+    observeElementOffset,
+    observeElementRect,
     overscan: TRANSCRIPT_VIRTUAL_OVERSCAN,
     scrollMargin,
-    scrollToFn: transcriptScroll,
+    scrollToFn: elementScroll,
     onChange: () => forceUpdate(),
   });
 
@@ -2242,13 +2192,10 @@ function estimateTranscriptRowSize(index) {
   return index % 5 === 0 ? 180 : 140;
 }
 
+// The transcript is an element scroller (`.chat-thread`) on every surface now,
+// so the virtualizer always drives the element (never the window).
 export function findTranscriptScrollElement(node) {
-  const container = node?.closest?.(".chat-thread") || node?.parentElement || null;
-  if (!container) return null;
-  if (container.scrollHeight > container.clientHeight + 1) {
-    return container;
-  }
-  return container.ownerDocument?.defaultView || container;
+  return node?.closest?.(".chat-thread") || node?.parentElement || null;
 }
 
 function measureTranscriptScrollMargin(node, scrollElement) {
@@ -2256,31 +2203,6 @@ function measureTranscriptScrollMargin(node, scrollElement) {
     return 0;
   }
   const nodeRect = node.getBoundingClientRect();
-  if (isWindowScrollElement(scrollElement)) {
-    return nodeRect.top + scrollElement.scrollY;
-  }
   const scrollRect = scrollElement.getBoundingClientRect();
   return nodeRect.top - scrollRect.top + scrollElement.scrollTop;
-}
-
-function observeTranscriptRect(instance, callback) {
-  return isWindowScrollElement(instance.scrollElement)
-    ? observeWindowRect(instance, callback)
-    : observeElementRect(instance, callback);
-}
-
-function observeTranscriptOffset(instance, callback) {
-  return isWindowScrollElement(instance.scrollElement)
-    ? observeWindowOffset(instance, callback)
-    : observeElementOffset(instance, callback);
-}
-
-function transcriptScroll(offset, options, instance) {
-  return isWindowScrollElement(instance.scrollElement)
-    ? windowScroll(offset, options, instance)
-    : elementScroll(offset, options, instance);
-}
-
-function isWindowScrollElement(element) {
-  return Boolean(element && element.window === element);
 }

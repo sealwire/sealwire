@@ -45,32 +45,18 @@ test("virtual transcript locates an entry by rendered node index after expanded 
   assert.equal(findTranscriptEntryNodeIndex(nodes, "missing"), -1);
 });
 
-test("virtual transcript uses window scrolling when the chat container grows with content", () => {
-  const windowStub = { window: null };
-  windowStub.window = windowStub;
-  const documentStub = { defaultView: windowStub };
-  const growingContainer = {
-    clientHeight: 6_000,
-    ownerDocument: documentStub,
-    scrollHeight: 6_000,
-  };
-  const fixedContainer = {
-    clientHeight: 800,
-    ownerDocument: documentStub,
-    scrollHeight: 6_000,
-  };
+test("virtual transcript scrolls the .chat-thread element on every surface", () => {
+  // The transcript is an element scroller everywhere now (desktop, remote, and
+  // the narrow local conversation view), so the virtualizer always drives the
+  // enclosing `.chat-thread` — regardless of whether it currently overflows.
+  const container = { clientHeight: 800, scrollHeight: 6_000 };
+  assert.equal(findTranscriptScrollElement({ closest: () => container }), container);
 
+  // Falls back to the parent element when there is no `.chat-thread` ancestor.
+  const parent = { clientHeight: 800, scrollHeight: 6_000 };
   assert.equal(
-    findTranscriptScrollElement({
-      closest: () => growingContainer,
-    }),
-    windowStub
-  );
-  assert.equal(
-    findTranscriptScrollElement({
-      closest: () => fixedContainer,
-    }),
-    fixedContainer
+    findTranscriptScrollElement({ closest: () => null, parentElement: parent }),
+    parent
   );
 });
 import { TranscriptPane } from "./shared/transcript-pane.js";
@@ -94,6 +80,21 @@ function renderTranscriptContentMarkup(entries = [], approval = null, options = 
 function renderTranscriptPaneMarkup(props) {
   return renderToStaticMarkup(h(TranscriptPane, props));
 }
+
+test("TranscriptContent does not reserve a viewport-fraction bottom spacer mid-turn (bottom-follow)", () => {
+  // Bottom-follow never top-anchors a sent message, so the `data-bottom-spacer`
+  // hook for the 60vh CSS reserve must not be emitted — even when the latest
+  // entry is a still-running turn (the state that used to flash a 60vh blank
+  // during streaming and collapse it at turn end).
+  const running = renderTranscriptContentMarkup([
+    { item_id: "u1", kind: "user_text", text: "hi" },
+    { item_id: "a1", kind: "agent_message", text: "wor", status: "in_progress" },
+  ]);
+  assert.ok(!running.includes("data-bottom-spacer"), "running turn must not reserve a spacer");
+
+  const justSent = renderTranscriptContentMarkup([{ item_id: "u1", kind: "user_text", text: "hi" }]);
+  assert.ok(!justSent.includes("data-bottom-spacer"), "a just-sent user message must not reserve a spacer");
+});
 
 test("renderEntryMarkup renders typed session items safely", () => {
   const userMarkup = renderEntryMarkup({

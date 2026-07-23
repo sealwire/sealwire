@@ -6,7 +6,6 @@ import {
   computeScrollToBottomVisible,
   findScrollContainer,
   isScrolledToBottom,
-  isWindowLike,
   maxScrollTop,
   nextSettleScrollTop,
   readScrollMetrics,
@@ -15,18 +14,6 @@ import {
 function metrics({ scrollTop = 0, clientHeight = 400, scrollHeight = 2000 } = {}) {
   return { scrollTop, clientHeight, scrollHeight };
 }
-
-test("isWindowLike: the window/defaultView is window-like, a scroll element is not", () => {
-  // The follower uses this to gate window-level gesture listeners: only when the
-  // transcript's active scroller IS the window do sidebar/header wheels count.
-  const fakeWindow = {};
-  fakeWindow.window = fakeWindow; // self-reference, like a real Window
-  assert.equal(isWindowLike(fakeWindow), true);
-  assert.equal(isWindowLike({ scrollY: 0, document: {} }), true); // duck-typed window
-  // A scrollable element (e.g. `.chat-thread`) is NOT window-like.
-  assert.equal(isWindowLike({ scrollTop: 0, scrollHeight: 2000, clientHeight: 400 }), false);
-  assert.equal(isWindowLike(null), false);
-});
 
 test("maxScrollTop is scrollHeight minus clientHeight, floored at 0", () => {
   assert.equal(maxScrollTop(metrics({ scrollHeight: 2000, clientHeight: 400 })), 1600);
@@ -115,57 +102,23 @@ test("readScrollMetrics: reads geometry from a scrollable element", () => {
   });
 });
 
-test("readScrollMetrics: reads geometry from a window-like scroller", () => {
-  const win = {
-    scrollY: 240,
-    innerHeight: 700,
-    document: { scrollingElement: { scrollHeight: 5000 } },
-  };
-  win.window = win;
-  assert.deepEqual(readScrollMetrics(win), {
-    scrollTop: 240,
-    clientHeight: 700,
-    scrollHeight: 5000,
-  });
-});
-
 test("readScrollMetrics: null for a missing scroller", () => {
   assert.equal(readScrollMetrics(null), null);
 });
 
-test("findScrollContainer: uses .chat-thread when it overflows (desktop)", () => {
+test("findScrollContainer: resolves the nearest .chat-thread element scroller", () => {
+  // The transcript is an element scroller on every surface, so this is simply
+  // the enclosing `.chat-thread` — regardless of whether it currently overflows.
   const chatThread = { id: "chat-thread", scrollHeight: 2000, clientHeight: 400 };
   const node = {
     closest(selector) {
       return selector === ".chat-thread" ? chatThread : null;
     },
-    ownerDocument: { defaultView: { name: "window" } },
   };
   assert.equal(findScrollContainer(node), chatThread);
 });
 
-test("findScrollContainer: falls back to the window when .chat-thread does not overflow (phone)", () => {
-  // On phone the chat shell is height:auto and the page/window scrolls, so the
-  // `.chat-thread` box is exactly as tall as its content (no overflow). The
-  // button must then track the window, not the non-scrolling container.
-  const view = { name: "window" };
-  const chatThread = { id: "chat-thread", scrollHeight: 2719, clientHeight: 2719 };
-  const node = {
-    closest(selector) {
-      return selector === ".chat-thread" ? chatThread : null;
-    },
-    ownerDocument: { defaultView: view },
-  };
-  assert.equal(findScrollContainer(node), view);
-});
-
-test("findScrollContainer: falls back to the document window with no container", () => {
-  const view = { name: "window" };
-  const node = {
-    closest() {
-      return null;
-    },
-    ownerDocument: { defaultView: view },
-  };
-  assert.equal(findScrollContainer(node), view);
+test("findScrollContainer: null when there is no enclosing .chat-thread", () => {
+  const node = { closest: () => null };
+  assert.equal(findScrollContainer(node), null);
 });

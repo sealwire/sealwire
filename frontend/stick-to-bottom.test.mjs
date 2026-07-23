@@ -2,310 +2,70 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  STICK_REJOIN_THRESHOLD_PX,
-  createStickState,
-  distanceFromBottom,
-  isEditableEventTarget,
-  isInteractiveEventTarget,
-  keydownScrollIntent,
-  stickFollowTarget,
-  stickStateAfterScroll,
-  stickStateAfterUpwardGesture,
-  stickStateAfterUserGesture,
-  stickStateForAction,
-} from "./shared/stick-to-bottom-core.js";
-import {
   TRANSCRIPT_SCROLL_ACTION_EVENT,
   applyTranscriptScrollAction,
 } from "./shared/transcript-scroll.js";
+import { RESTICK_AT_BOTTOM_PX, classifyScrollIntent } from "./shared/stick-to-bottom.js";
 
-// Geometry used throughout: 400px viewport over 2000px of content, so the
-// bottom sits at scrollTop 1600.
-function metrics({ scrollTop = 1600, clientHeight = 400, scrollHeight = 2000 } = {}) {
-  return { scrollTop, clientHeight, scrollHeight };
-}
+// The live stick-to-bottom follower (frontend/shared/stick-to-bottom.js) is a
+// small hand-rolled ResizeObserver-driven engine (we dropped the
+// `use-stick-to-bottom` library — see that file's header for why). Its DOM wiring
+// is exercised end-to-end by scripts/browser-stick-to-bottom-e2e.mjs. Two
+// unit-testable cores remain: (1) the intent CONTRACT it consumes from
+// transcript-scroll.js (jump-bottom / rejoin-bottom -> stick, restore-thread ->
+// follow only if near the bottom); (2) its pure scroll-gesture policy
+// `classifyScrollIntent`. This is plain bottom-follow: no top-anchor, no hold, so
+// anchor-user is retired. These tests pin those.
 
-// --- distanceFromBottom ------------------------------------------------------
+// --- classifyScrollIntent: the pure scroll-gesture policy ------------------
 
-test("distanceFromBottom: 0 at the bottom, gap when above, floored on overscroll", () => {
-  assert.equal(distanceFromBottom(metrics({ scrollTop: 1600 })), 0);
-  assert.equal(distanceFromBottom(metrics({ scrollTop: 1000 })), 600);
-  // iOS rubber-band can report scrollTop past the max; never negative.
-  assert.equal(distanceFromBottom(metrics({ scrollTop: 1700 })), 0);
-  assert.equal(distanceFromBottom(null), 0);
+test("interacting + any upward move escapes — even a tiny slow-drag step", () => {
+  // Regression: a slow touch/scrollbar drag emits many sub-6px upward moves. The
+  // escape must NOT require a big single-event delta — while a pointer is DOWN,
+  // ANY upward scroll un-sticks. (Prior bug: only a >viewport jump escaped.)
+  for (const distance of [1, 5, 30, 300, 5000]) {
+    assert.equal(
+      classifyScrollIntent({ scrolledUp: true, distance, interacting: true, stuck: true }),
+      "unstick",
+      `interacting upward move at distance ${distance} must escape`
+    );
+  }
 });
 
-// --- createStickState --------------------------------------------------------
-
-test("createStickState: sticky at (or near) the bottom, not when far above", () => {
-  assert.equal(createStickState(metrics({ scrollTop: 1600 })).sticky, true);
+test("interacting + reaching the bottom re-sticks; holding off-bottom does nothing", () => {
   assert.equal(
-    createStickState(metrics({ scrollTop: 1600 - STICK_REJOIN_THRESHOLD_PX })).sticky,
-    true
+    classifyScrollIntent({ scrolledUp: false, distance: RESTICK_AT_BOTTOM_PX, interacting: true, stuck: false }),
+    "stick"
   );
-  assert.equal(createStickState(metrics({ scrollTop: 0 })).sticky, false);
-});
-
-test("createStickState: non-overflowing content counts as at-bottom (fresh thread)", () => {
-  const state = createStickState(metrics({ scrollTop: 0, scrollHeight: 300 }));
-  assert.equal(state.sticky, true);
-});
-
-// --- following (the actual live-follow invariant) ---------------------------
-
-test("sticky + content growth -> follow target is the new bottom", () => {
-  const state = createStickState(metrics({ scrollTop: 1600 }));
-  // A streaming chunk grew the transcript by 400px; reader hasn't moved.
-  const grown = metrics({ scrollTop: 1600, scrollHeight: 2400 });
-  assert.equal(stickFollowTarget(state, grown), 2000);
-});
-
-test("not sticky -> growth never moves the reader (top-anchored reading stays put)", () => {
-  const state = { sticky: false, lastScrollTop: 200 };
-  const grown = metrics({ scrollTop: 200, scrollHeight: 2400 });
-  assert.equal(stickFollowTarget(state, grown), null);
-});
-
-test("follow only ever moves DOWNWARD: shrink (content-visibility flip) is a no-op", () => {
-  // scrollHeight momentarily shrank below us; scrolling up to the new max
-  // would be the "violent shaking" bug. Must not move.
-  const state = { sticky: true, lastScrollTop: 1600 };
-  const shrunk = metrics({ scrollTop: 1600, scrollHeight: 1300 });
-  assert.equal(stickFollowTarget(state, shrunk), null);
-});
-
-test("follow target: null when already at the bottom or metrics missing", () => {
-  const state = { sticky: true, lastScrollTop: 1600 };
-  assert.equal(stickFollowTarget(state, metrics({ scrollTop: 1600 })), null);
-  assert.equal(stickFollowTarget(state, null), null);
-  assert.equal(stickFollowTarget(null, metrics()), null);
-});
-
-// --- scroll-driven stickiness updates ---------------------------------------
-
-test("escape: ANY upward user scroll releases stickiness, even inside the rejoin threshold", () => {
-  // One wheel notch up (~100px) must immediately release the follow — a
-  // threshold-only implementation would keep sticky=true here and snap the
-  // reader back down on the next streamed token ("fights the user").
-  const state = { sticky: true, lastScrollTop: 1600 };
-  const next = stickStateAfterScroll(state, metrics({ scrollTop: 1500 }));
-  assert.equal(next.sticky, false);
-  assert.equal(next.lastScrollTop, 1500);
-});
-
-// --- upward INPUT releases immediately (beats the follow() race) -------------
-
-test("stickStateAfterUpwardGesture: releases the follow but preserves the rejoin hold", () => {
-  // Releasing on upward INPUT (not delayed geometry) is what beats the race
-  // below: it flips sticky the instant the gesture arrives, before follow() can
-  // run and snap the reader back down.
-  const released = stickStateAfterUpwardGesture({
-    sticky: true,
-    lastScrollTop: 1600,
-    holdRejoin: false,
-  });
-  assert.equal(released.sticky, false);
-  assert.equal(released.lastScrollTop, 1600); // position untouched
-
-  // Going UP is not the downward intent that clears the send-anchor hold.
-  const held = stickStateAfterUpwardGesture({
-    sticky: true,
-    lastScrollTop: 1600,
-    holdRejoin: true,
-  });
-  assert.equal(held.sticky, false);
-  assert.equal(held.holdRejoin, true);
-
-  // Already released -> idempotent no-op (hold preserved).
-  assert.deepEqual(
-    stickStateAfterUpwardGesture({ sticky: false, lastScrollTop: 800, holdRejoin: true }),
-    { sticky: false, lastScrollTop: 800, holdRejoin: true }
-  );
-});
-
-test("live follow: an upward gesture wins the race against an interleaved follow() write", () => {
-  // Repro of the "can't scroll up while streaming" bug. Following at the
-  // bottom, the reader wheels UP — but the scroll EVENT is delayed (async /
-  // compositor) while a streaming ResizeObserver tick calls follow() first.
-  // With only the geometry path, follow() reads sticky=true, snaps scrollTop
-  // back to the grown bottom and records lastScrollTop there, so the delayed
-  // scroll event sees "no movement" and the escape is erased -> the reader is
-  // stuck. The fix: the wheel gesture releases the follow synchronously, so the
-  // interleaved follow() is already a no-op and can't snap them back.
-  let state = { sticky: true, lastScrollTop: 1600, holdRejoin: false };
-
-  // 1) Real upward wheel input, processed the instant the gesture fires.
-  state = stickStateAfterUpwardGesture(state);
-
-  // 2) A streaming follow() now interleaves: it MUST be a no-op, or it snaps
-  //    the reader back to the bottom and erases their escape.
   assert.equal(
-    stickFollowTarget(state, metrics({ scrollTop: 1500, scrollHeight: 2400 })),
-    null
+    classifyScrollIntent({ scrolledUp: false, distance: 400, interacting: true, stuck: false }),
+    "none"
   );
-
-  // 3) The delayed scroll event confirms the release survives.
-  state = stickStateAfterScroll(state, metrics({ scrollTop: 1500, scrollHeight: 2400 }));
-  assert.equal(state.sticky, false);
 });
 
-test("browser clamp keeps stickiness: scrollTop dropped but we are still AT the bottom", () => {
-  // Turn-end spacer collapse (or a content-visibility re-measure) shrinks
-  // scrollHeight; the browser clamps scrollTop down to the new max. That is
-  // not the reader scrolling up — live following must survive it.
-  const state = { sticky: true, lastScrollTop: 1600 };
-  const clamped = stickStateAfterScroll(state, {
-    scrollTop: 1120,
-    clientHeight: 400,
-    scrollHeight: 1520, // new max is exactly 1120 -> distance 0
-  });
-  assert.equal(clamped.sticky, true);
-});
-
-test("no positional re-stick: sitting at the bottom without moving does NOT re-stick", () => {
-  // The hybrid send-anchor can end up clamped at maxScrollTop (short message +
-  // tall viewport: the 60vh spacer cannot push it all the way up). The scroll
-  // event that follows reports "at bottom, unmoved" — re-sticking here would
-  // yank the reader off their freshly anchored message on the next token.
-  const state = { sticky: false, lastScrollTop: 1600 };
-  const next = stickStateAfterScroll(state, metrics({ scrollTop: 1600 }));
-  assert.equal(next.sticky, false);
-});
-
-test("rejoin: deliberately scrolling DOWN into the threshold re-sticks", () => {
-  const state = { sticky: false, lastScrollTop: 1000 };
-  const next = stickStateAfterScroll(
-    state,
-    metrics({ scrollTop: 1600 - (STICK_REJOIN_THRESHOLD_PX - 10) })
-  );
-  assert.equal(next.sticky, true);
-});
-
-test("scrolling down while still far from the bottom stays released", () => {
-  const state = { sticky: false, lastScrollTop: 200 };
-  const next = stickStateAfterScroll(state, metrics({ scrollTop: 800 }));
-  assert.equal(next.sticky, false);
-});
-
-test("our own settle write (downward to the new bottom) keeps following", () => {
-  const state = { sticky: true, lastScrollTop: 1600 };
-  const next = stickStateAfterScroll(
-    state,
-    metrics({ scrollTop: 2000, scrollHeight: 2400 })
-  );
-  assert.equal(next.sticky, true);
-  assert.equal(next.lastScrollTop, 2000);
-});
-
-test("stickStateAfterScroll: missing metrics leaves state untouched", () => {
-  const state = { sticky: true, lastScrollTop: 1600 };
-  assert.deepEqual(stickStateAfterScroll(state, null), state);
-});
-
-// --- action-driven intent (the transcript-scroll layer tells us what it did) --
-
-test("anchor-user action releases stickiness even when clamped at the very bottom", () => {
-  // The heart of the hybrid mode: after "pin the user's message to the top",
-  // streaming below must NOT drag the viewport away — regardless of where the
-  // clamp left scrollTop.
-  const state = createStickState(metrics({ scrollTop: 1600 }));
-  assert.equal(state.sticky, true);
-  const anchored = stickStateForAction(state, "anchor-user", metrics({ scrollTop: 1600 }));
-  assert.equal(anchored.sticky, false);
-  // ...and the async scroll event from that same programmatic anchor (same
-  // position, no movement) must not undo the release.
-  const afterEvent = stickStateAfterScroll(anchored, metrics({ scrollTop: 1600 }));
-  assert.equal(afterEvent.sticky, false);
-});
-
-test("jump-bottom action (thread entry) derives sticky from the landing position", () => {
-  const state = { sticky: false, lastScrollTop: 40 };
-  const landed = stickStateForAction(state, "jump-bottom", metrics({ scrollTop: 1600 }));
-  assert.equal(landed.sticky, true);
-});
-
-test("restore-thread action derives stickiness from the restored offset", () => {
-  const midway = stickStateForAction(null, "restore-thread", metrics({ scrollTop: 700 }));
-  assert.equal(midway.sticky, false);
-  const nearBottom = stickStateForAction(null, "restore-thread", metrics({ scrollTop: 1590 }));
-  assert.equal(nearBottom.sticky, true);
-});
-
-test("unrelated action kinds leave the state untouched", () => {
-  const state = { sticky: true, lastScrollTop: 1600 };
-  assert.equal(stickStateForAction(state, "preserve", metrics()), state);
-  assert.equal(stickStateForAction(state, "anchor-prepend", metrics()), state);
-  assert.equal(stickStateForAction(state, "noop", metrics()), state);
-});
-
-// --- rejoin hold: anchor-user vs third-party programmatic scrolls ------------
-
-test("anchor-user arms a rejoin hold: programmatic downward drift must NOT re-stick", () => {
-  // After the send-anchor, TanStack's virtualizer issues multi-frame
-  // measurement corrections that can move scrollTop DOWN while the stream
-  // grows. Movement+distance alone cannot tell that apart from a user
-  // scrolling back — so anchor-user must arm a hold that only a real user
-  // gesture releases.
-  let state = createStickState(metrics({ scrollTop: 1600 }));
-  state = stickStateForAction(state, "anchor-user", metrics({ scrollTop: 1600 }));
-  // Correction: +40px down, distance 60 (inside the rejoin threshold).
-  state = stickStateAfterScroll(state, metrics({ scrollTop: 1640, scrollHeight: 2100 }));
-  assert.equal(state.sticky, false);
-  // And the follow must stay off through further growth.
+test("NOT interacting + stuck: an unattributed scroll is layout churn -> re-glue", () => {
+  // Snapshot re-render / virtualizer re-measure can nudge scrollTop upward; that
+  // is not the reader escaping, so we re-pin rather than un-stick.
   assert.equal(
-    stickFollowTarget(state, metrics({ scrollTop: 1640, scrollHeight: 2400 })),
-    null
+    classifyScrollIntent({ scrolledUp: true, distance: 40, interacting: false, stuck: true }),
+    "pin"
+  );
+  assert.equal(
+    classifyScrollIntent({ scrolledUp: false, distance: 40, interacting: false, stuck: true }),
+    "pin"
   );
 });
 
-test("a user gesture disarms the hold; the next downward scroll re-joins", () => {
-  let state = stickStateForAction(
-    createStickState(metrics({ scrollTop: 1600 })),
-    "anchor-user",
-    metrics({ scrollTop: 1600 })
+test("NOT interacting + not stuck: only re-stick once settled AT the bottom", () => {
+  assert.equal(
+    classifyScrollIntent({ scrolledUp: false, distance: RESTICK_AT_BOTTOM_PX, interacting: false, stuck: false }),
+    "stick"
   );
-  state = stickStateAfterUserGesture(state);
-  // The reader wheels down to the (grown) bottom: rejoin.
-  state = stickStateAfterScroll(state, metrics({ scrollTop: 1900, scrollHeight: 2400 }));
-  assert.equal(state.sticky, true);
-});
-
-test("the hold survives arbitrary scrolls: escape up then a downward correction stays released", () => {
-  // Reviewer scenario: upward movement (wheel up / drag up) must not be what
-  // releases the hold — otherwise a later virtualizer correction downward and
-  // into the threshold would re-stick. Only stickStateAfterUserGesture (a
-  // deliberate downward-intent gesture) releases it.
-  let state = stickStateForAction(
-    createStickState(metrics({ scrollTop: 1600 })),
-    "anchor-user",
-    metrics({ scrollTop: 1600 })
+  assert.equal(
+    classifyScrollIntent({ scrolledUp: false, distance: 200, interacting: false, stuck: false }),
+    "none"
   );
-  state = stickStateAfterScroll(state, metrics({ scrollTop: 1500 })); // moved up
-  state = stickStateAfterScroll(state, metrics({ scrollTop: 1540 })); // correction down, distance 60
-  assert.equal(state.sticky, false);
 });
-
-test("rejoin-bottom action (scroll-to-latest button, incl. AT activation) re-joins and clears the hold", () => {
-  // The button's click handler broadcasts explicit intent: works for mouse,
-  // keyboard and assistive tech alike, regardless of gesture heuristics.
-  let state = stickStateForAction(null, "anchor-user", metrics({ scrollTop: 1600 }));
-  state = stickStateForAction(state, "rejoin-bottom", metrics({ scrollTop: 1600 }));
-  assert.equal(state.sticky, true);
-  assert.equal(state.holdRejoin, false);
-});
-
-test("jump-bottom and restore-thread clear any armed hold", () => {
-  let state = stickStateForAction(null, "anchor-user", metrics({ scrollTop: 1600 }));
-  state = stickStateForAction(state, "jump-bottom", metrics({ scrollTop: 1600 }));
-  assert.equal(state.sticky, true);
-  // Escape and rejoin afterwards need no gesture — the hold is send-scoped.
-  state = stickStateAfterScroll(state, metrics({ scrollTop: 1000 }));
-  assert.equal(state.sticky, false);
-  state = stickStateAfterScroll(state, metrics({ scrollTop: 1500 }));
-  assert.equal(state.sticky, true);
-});
-
-// --- the transcript-scroll layer broadcasts its intent ------------------------
 
 test("event name contract stays stable (follower listens by this literal)", () => {
   assert.equal(TRANSCRIPT_SCROLL_ACTION_EVENT, "transcript-scroll-action");
@@ -351,18 +111,10 @@ test("applyTranscriptScrollAction dispatches intent for restore-thread", () => {
   ]);
 });
 
-test("applyTranscriptScrollAction dispatches intent after anchoring the user message", () => {
+test("anchor-user is retired (bottom-follow): apply neither scrolls nor dispatches", () => {
   const { element, events, target } = makeDispatchingScrollElement({ withTarget: true });
   applyTranscriptScrollAction({ kind: "anchor-user", userEntryId: "u9" }, element);
-  assert.equal(target.scrolled.length, 1);
-  assert.deepEqual(events, [
-    { type: "transcript-scroll-action", kind: "anchor-user" },
-  ]);
-});
-
-test("anchor-user with no rendered target does not dispatch (virtualized path owns it)", () => {
-  const { element, events } = makeDispatchingScrollElement({ withTarget: false });
-  applyTranscriptScrollAction({ kind: "anchor-user", userEntryId: "u9" }, element);
+  assert.equal(target.scrolled.length, 0);
   assert.deepEqual(events, []);
 });
 
@@ -377,100 +129,4 @@ test("apply still works against scroll elements without dispatchEvent (pure fake
   const element = { clientHeight: 400, scrollHeight: 2000, scrollTop: 0 };
   applyTranscriptScrollAction({ kind: "jump-bottom", scrollTop: 1600 }, element);
   assert.equal(element.scrollTop, 1600);
-});
-
-// --- interactive-target filtering for the keyboard gesture -------------------
-
-test("keys inside transcript controls are editing, not scrolling: textarea/button/editable are interactive", () => {
-  // Space/End/ArrowDown bubbling out of the AskUser textarea (or any button)
-  // edit text or activate the control — treating them as downward-scroll
-  // intent would release the rejoin hold and re-expose the virtualizer race.
-  assert.equal(
-    isInteractiveEventTarget({ tagName: "TEXTAREA", closest: () => null }),
-    true
-  );
-  assert.equal(
-    isInteractiveEventTarget({ tagName: "INPUT", closest: () => null }),
-    true
-  );
-  assert.equal(
-    // A span inside a button: detected via closest().
-    isInteractiveEventTarget({ tagName: "SPAN", closest: (sel) => (sel.includes("button") ? {} : null) }),
-    true
-  );
-  assert.equal(
-    isInteractiveEventTarget({ tagName: "DIV", isContentEditable: true, closest: () => null }),
-    true
-  );
-});
-
-test("plain transcript content is not interactive: keys there still count as scroll intent", () => {
-  assert.equal(
-    isInteractiveEventTarget({ tagName: "DIV", closest: () => null }),
-    false
-  );
-  assert.equal(isInteractiveEventTarget(null), false);
-});
-
-test("isEditableEventTarget: text fields swallow scroll keys, buttons/links do NOT", () => {
-  // Editable => arrows/Page/Home move a caret, so upward keys there are NOT
-  // scroll intent (the follower filters them).
-  assert.equal(isEditableEventTarget({ tagName: "TEXTAREA", closest: () => null }), true);
-  assert.equal(isEditableEventTarget({ tagName: "INPUT", closest: () => null }), true);
-  assert.equal(isEditableEventTarget({ tagName: "SELECT", closest: () => null }), true);
-  assert.equal(
-    isEditableEventTarget({ tagName: "DIV", isContentEditable: true, closest: () => null }),
-    true
-  );
-  assert.equal(
-    // A span inside a contenteditable region: detected via closest().
-    isEditableEventTarget({
-      tagName: "SPAN",
-      closest: (sel) => (sel.includes("contenteditable") ? {} : null),
-    }),
-    true
-  );
-
-  // A button/link is interactive but NOT editable: PageUp/Home/ArrowUp from a
-  // focused button (e.g. after activating scroll-to-latest) is still scroll-up
-  // intent and must NOT be filtered — this is the P2 the reviewer caught.
-  const button = { tagName: "BUTTON", closest: () => null };
-  assert.equal(isEditableEventTarget(button), false);
-  assert.equal(isInteractiveEventTarget(button), true); // still interactive (Space activates)
-  assert.equal(
-    isEditableEventTarget({ tagName: "A", closest: (sel) => (sel.includes("button") ? {} : null) }),
-    false
-  );
-  assert.equal(isEditableEventTarget(null), false);
-});
-
-test("keydownScrollIntent: upward keys are scroll intent from a button, but not a textarea", () => {
-  const button = { tagName: "BUTTON", closest: () => null };
-  const textarea = { tagName: "TEXTAREA", closest: () => null };
-  const plain = { tagName: "DIV", closest: () => null };
-
-  // The P2 repro: PageUp/Home/ArrowUp from a focused button must release the
-  // follow (they scroll; they do not activate the button).
-  for (const key of ["ArrowUp", "PageUp", "Home"]) {
-    assert.equal(keydownScrollIntent({ key }, button), "upward", `${key} on button`);
-    assert.equal(keydownScrollIntent({ key }, plain), "upward", `${key} on content`);
-    // ...but inside a text field they move the caret — not scroll intent.
-    assert.equal(keydownScrollIntent({ key }, textarea), null, `${key} in textarea`);
-  }
-
-  // Downward keeps the stricter guard: Space activates a focused button and
-  // ArrowDown/End out of any interactive control must not clear the rejoin hold.
-  assert.equal(keydownScrollIntent({ key: "ArrowDown" }, button), null);
-  assert.equal(keydownScrollIntent({ key: "End" }, button), null);
-  assert.equal(keydownScrollIntent({ key: " " }, button), null); // Space clicks the button
-  assert.equal(keydownScrollIntent({ key: "ArrowDown" }, plain), "downward");
-  assert.equal(keydownScrollIntent({ key: "End" }, plain), "downward");
-  assert.equal(keydownScrollIntent({ key: " " }, plain), "downward"); // plain Space = page down
-  assert.equal(keydownScrollIntent({ key: "a" }, plain), null); // ordinary typing
-
-  // Shift+Space is the standard page-UP input: upward from content or a button
-  // (it doesn't activate the button), but caret movement inside a text field.
-  assert.equal(keydownScrollIntent({ key: " ", shiftKey: true }, plain), "upward");
-  assert.equal(keydownScrollIntent({ key: " ", shiftKey: true }, button), "upward");
-  assert.equal(keydownScrollIntent({ key: " ", shiftKey: true }, textarea), null);
 });

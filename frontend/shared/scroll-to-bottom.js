@@ -26,9 +26,8 @@ export function ScrollToBottomButton({ entries = [], label = "Scroll to latest" 
   const settleRafRef = React.useRef(null);
   const [visible, setVisible] = React.useState(false);
 
-  // The active scroller (`.chat-thread` on desktop, the window on phone) is
-  // resolved fresh every read so the button works on both layouts and adapts as
-  // the transcript grows past the viewport.
+  // The transcript is an element scroller (`.chat-thread`) on every surface;
+  // resolve it fresh every read so the button adapts as the transcript grows.
   const update = React.useCallback(() => {
     setVisible(
       computeScrollToBottomVisible(readScrollMetrics(findScrollContainer(anchorRef.current)))
@@ -41,10 +40,9 @@ export function ScrollToBottomButton({ entries = [], label = "Scroll to latest" 
     const view = anchor?.ownerDocument?.defaultView
       || (typeof window !== "undefined" ? window : null);
 
-    // Listen on both candidates: desktop scrolls `.chat-thread`, phone scrolls
-    // the window. Whichever fires, update() reads the currently-active one.
+    // The `.chat-thread` element scrolls; a viewport resize can still move the
+    // bottom out from under a pinned reader, so watch that too.
     chatThread?.addEventListener?.("scroll", update, { passive: true });
-    view?.addEventListener?.("scroll", update, { passive: true });
     view?.addEventListener?.("resize", update);
 
     // Content height changes (streaming tokens, expanding tool cards, the
@@ -64,7 +62,6 @@ export function ScrollToBottomButton({ entries = [], label = "Scroll to latest" 
 
     return () => {
       chatThread?.removeEventListener?.("scroll", update);
-      view?.removeEventListener?.("scroll", update);
       view?.removeEventListener?.("resize", update);
       resizeObserver?.disconnect();
     };

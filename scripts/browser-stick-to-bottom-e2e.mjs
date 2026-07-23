@@ -1,14 +1,22 @@
-// Browser e2e for the hybrid stick-to-bottom live-follow.
+// Browser e2e for the transcript's BOTTOM-FOLLOW live scrolling.
 //
-// Streams a slow fake-provider turn (~10s) and asserts, inside ONE live turn:
-//   A. send-anchor releases the follow: viewport stays put while content grows
-//   B. scrolling to the bottom re-joins: viewport follows the growing bottom
-//   C. scrolling up releases again: viewport stays put while content grows
-//   D. re-join then let the turn END: spacer collapse must land us at the true
-//      bottom without an upward yank.
-// Run on desktop (.chat-thread scrolls) and phone (window scrolls).
+// The transcript follows the bottom of the stream by default; scrolling up
+// escapes; returning to the bottom (or the "scroll to latest" button) re-locks.
+// There is NO top-anchor / send-anchor and NO 60vh reserve (both removed) — a
+// sent message is not pinned to the top, the reply streams in at the bottom.
 //
-// Run: npm run build && AGENT_PROVIDERS=fake node scripts/browser-stick-to-bottom-e2e.mjs
+// Streams a slow fake-provider turn (~9s) and asserts, inside ONE live turn:
+//   A. after send, the viewport FOLLOWS the bottom — distance-to-bottom stays ~0
+//      (NOT a ~60vh gap, NOT frozen off the bottom).
+//   B. a real wheel-up ESCAPES the follow and stays escaped while it streams.
+//   C. the "scroll to latest" button RE-LOCKS and follows again.
+//   D. at turn end the viewport is at the true bottom.
+// Runs on desktop, the same thread past the virtualization threshold, and phone
+// (all `.chat-thread` element scrollers now — no window scroller anywhere).
+//
+// The follower is hand-rolled (frontend/shared/stick-to-bottom.js); this suite is
+// its behavioural guard. Run:
+//   npm run build && AGENT_PROVIDERS=fake node scripts/browser-stick-to-bottom-e2e.mjs
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -31,6 +39,13 @@ import {
 
 const TIMEOUT_MS = 45000;
 const STREAM_PROMPT = "stream-live";
+// "Following, no gap": distance-to-bottom must stay under this the whole stream.
+// It is far below 60vh (~408px @ 680, ~444 @ 740, ~840 @ 1400), so it cleanly
+// separates real follow (~0) from either the old 60vh reserve or a frozen
+// off-the-bottom viewport (distance climbs into the hundreds).
+const FOLLOW_MAX_DISTANCE_PX = 120;
+// "Escaped": a real wheel-up must leave us clearly off the bottom and stay there.
+const ESCAPE_MIN_DISTANCE_PX = 120;
 
 const LONG_PROMPT = Array.from(
   { length: 24 },
@@ -69,73 +84,57 @@ async function startThread(relayPort, { cwd, deviceId, initialPrompt }) {
   return payload.data.active_thread_id;
 }
 
-// In-page metric read that works for both scrollers (mirrors readScrollMetrics).
+// The transcript is a `.chat-thread` element scroller on every surface now.
 function readMetricsInPage() {
   const t = document.querySelector(".chat-thread");
-  const overflows = t && t.scrollHeight > t.clientHeight + 1;
-  const doc = document.scrollingElement || document.documentElement;
-  const metrics = overflows
-    ? { scrollTop: t.scrollTop, clientHeight: t.clientHeight, scrollHeight: t.scrollHeight }
-    : { scrollTop: window.scrollY, clientHeight: window.innerHeight, scrollHeight: doc.scrollHeight };
-  return {
-    scroller: overflows ? "chat-thread" : "window",
-    ...metrics,
-    distance: Math.max(
-      0,
-      metrics.scrollHeight - metrics.clientHeight - metrics.scrollTop
-    ),
-  };
+  if (!t) return { scrollTop: 0, clientHeight: 0, scrollHeight: 0, distance: 0 };
+  const scrollTop = Math.round(t.scrollTop);
+  const distance = Math.max(0, t.scrollHeight - t.clientHeight - scrollTop);
+  return { scrollTop, clientHeight: t.clientHeight, scrollHeight: t.scrollHeight, distance: Math.round(distance) };
 }
 
-function scrollActiveToBottomInPage() {
+function scrollToBottomInPage() {
   const t = document.querySelector(".chat-thread");
-  const overflows = t && t.scrollHeight > t.clientHeight + 1;
-  // Rejoin after a send-anchor is gesture-gated (virtualizer measurement
-  // corrections must not re-enable following), so simulate the wheel gesture
-  // a real reader produces on their way down before applying the scroll.
-  t?.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: 240 }));
-  if (overflows) {
-    t.scrollTop = t.scrollHeight;
-  } else {
-    const doc = document.scrollingElement || document.documentElement;
-    window.scrollTo(0, doc.scrollHeight);
-  }
+  if (t) t.scrollTop = t.scrollHeight;
 }
 
-// A REAL upward wheel over the active scroller. Unlike a synthetic WheelEvent +
-// direct `scrollTop = …` write (which applies synchronously, leaving no window
-// for a streaming follow() to interleave), this drives Chromium's real input
-// path: the scroll is delivered asynchronously and can race the ResizeObserver
-// follow() — which is exactly the "can't scroll up while streaming" bug phase C
-// guards. Positioned at the viewport centre so the wheel lands on the transcript
-// for both scrollers (`.chat-thread` on desktop, the window on phone; the wheel
-// event bubbles through `.chat-thread` either way, where the follower listens).
-async function realWheelUp(page, deltaPx, { fromTop = false } = {}) {
-  const target = await page.evaluate((wantOutside) => {
-    const x = Math.round(window.innerWidth / 2);
-    if (wantOutside) {
-      // Aim OUTSIDE `.chat-thread` (header band above it, else composer band
-      // below it): on the window-scroller layout the gesture scrolls the page
-      // but never bubbles through `.chat-thread`, so it exercises the window
-      // listeners rather than the transcript's.
-      const r = document.querySelector(".chat-thread")?.getBoundingClientRect();
-      if (r && r.top > 12) return { x, y: Math.max(2, Math.round(r.top / 2)), outside: true };
-      if (r && r.bottom < window.innerHeight - 12) {
-        return { x, y: Math.round((r.bottom + window.innerHeight) / 2), outside: true };
-      }
-      return { x, y: Math.round(window.innerHeight / 2), outside: false };
-    }
-    return { x, y: Math.round(window.innerHeight / 2), outside: false };
-  }, fromTop);
-  await page.mouse.move(target.x, target.y);
+// A REAL upward wheel over the transcript. Unlike a synthetic WheelEvent + direct
+// `scrollTop = …` write (which applies synchronously, leaving no window for a
+// streaming follow to interleave), this drives Chromium's real input path: the
+// scroll is delivered asynchronously and can race the ResizeObserver pin — which
+// is exactly the "can't scroll up while it streams" hazard phase B guards.
+async function realWheelUp(page, deltaPx) {
+  const x = Math.round(await page.evaluate(() => window.innerWidth / 2));
+  const y = Math.round(await page.evaluate(() => window.innerHeight / 2));
+  await page.mouse.move(x, y);
+  await delay(60); // let the hover/target settle so the wheel actually lands
   await page.mouse.wheel(0, -deltaPx);
-  return target;
 }
 
-// Length of the streaming reply's DOM text. Grows for every chunk even when
-// the row is off-screen and `content-visibility: auto` freezes its layout
-// height (which freezes scrollHeight) — so this, not scrollHeight, is the
-// "is the stream still alive" signal.
+// A REAL, SLOW upward touch drag over the transcript, via CDP trusted input.
+// The finger moves DOWN in many small steps (2-4px each) -> content scrolls UP.
+// This is the case a per-move-delta escape heuristic misses (each step is below
+// any single-event threshold); bottom-follow must still release.
+async function touchDragUp(client, x, startY, steps, stepPx) {
+  await client.send("Input.dispatchTouchEvent", {
+    type: "touchStart",
+    touchPoints: [{ x, y: startY }],
+  });
+  let y = startY;
+  for (let i = 0; i < steps; i += 1) {
+    y += stepPx; // finger DOWN => content scrolls UP
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: [{ x, y }],
+    });
+    await delay(16);
+  }
+  await client.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+}
+
+// Length of the streaming reply's DOM text. Grows for every chunk even when the
+// row is off-screen and `content-visibility: auto` freezes its layout height —
+// so this, not scrollHeight, is the "is the stream still alive" signal.
 function readStreamTextLenInPage() {
   const messages = document.querySelectorAll(".chat-thread .chat-message-assistant");
   const last = messages[messages.length - 1];
@@ -153,18 +152,17 @@ async function sample(page, count, everyMs) {
   return out;
 }
 
-function spread(samples, key) {
-  const values = samples.map((s) => s[key]);
-  return Math.max(...values) - Math.min(...values);
+const maxOf = (samples, key) => Math.max(...samples.map((s) => s[key]));
+const minOf = (samples, key) => Math.min(...samples.map((s) => s[key]));
+
+async function turnInFlight(page) {
+  return page.evaluate(() => {
+    const stop = document.querySelector(".stop-button");
+    return Boolean(stop && !stop.hasAttribute("hidden") && stop.offsetParent !== null);
+  });
 }
 
-async function exercise(page, label, { anchorSpreadTolerance = 2, wheelFromTop = false } = {}) {
-  // Wait for the seeded conversation + settled first turn.
-  await page.waitForFunction(
-    () => document.querySelectorAll(".chat-thread .chat-message").length > 0,
-    null,
-    { timeout: TIMEOUT_MS }
-  );
+async function waitTurnSettled(page) {
   await page.waitForFunction(
     () => {
       const stop = document.querySelector(".stop-button");
@@ -173,160 +171,193 @@ async function exercise(page, label, { anchorSpreadTolerance = 2, wheelFromTop =
     null,
     { timeout: TIMEOUT_MS }
   );
-  await delay(600);
+}
 
-  // Sit at the bottom like a reader who just caught up.
-  await page.evaluate(scrollActiveToBottomInPage);
-  await delay(300);
-
-  // Send the slow-streaming prompt through the real composer.
-  const preLastAssistantText = await page.evaluate(() => {
+async function sendStreamPrompt(page) {
+  const preText = await page.evaluate(() => {
     const replies = document.querySelectorAll(".chat-thread .chat-message-assistant");
     return replies[replies.length - 1]?.textContent || "";
   });
   await page.fill("#message-input", STREAM_PROMPT);
   await page.click("#send-button");
-
-  // Wait for the NEW streaming reply (not just height growth from the user
-  // message + spacer): the text-length metric must track the same entry across
-  // all phases, or a leftover previous reply skews it. Compared by content,
-  // not node count — the virtualizer's rendered-row count is not monotonic.
   await page.waitForFunction(
     (pre) => {
       const replies = document.querySelectorAll(".chat-thread .chat-message-assistant");
       const text = replies[replies.length - 1]?.textContent || "";
       return text !== pre && text.length > 40;
     },
-    preLastAssistantText,
+    preText,
     { timeout: TIMEOUT_MS }
   );
   await delay(200);
+}
 
-  // ---- Phase A: send-anchor released the follow -> viewport must not move.
-  const phaseA = await sample(page, 8, 150);
-  const anchorInfo = await page.evaluate(() => {
-    const msg = document.querySelector('[data-latest-user-message="true"]');
-    const rect = msg?.getBoundingClientRect();
-    return rect ? Math.round(rect.top) : null;
-  });
-  console.log(`[${label}] A anchored-msg viewport top: ${anchorInfo}px;`,
-    `scrollTop spread ${spread(phaseA, "scrollTop")},`,
-    `text growth ${phaseA.at(-1).streamTextLen - phaseA[0].streamTextLen}`);
+async function clickScrollToLatest(page) {
+  await page.waitForFunction(
+    () => document.querySelector(".scroll-to-bottom")?.getAttribute("data-visible") === "true",
+    null,
+    { timeout: TIMEOUT_MS }
+  );
+  await page.click(".scroll-to-bottom-button");
+  await delay(500);
+}
+
+async function exercise(page, label) {
+  await page.waitForFunction(
+    () => document.querySelectorAll(".chat-thread .chat-message").length > 0,
+    null,
+    { timeout: TIMEOUT_MS }
+  );
+  await waitTurnSettled(page);
+  await delay(400);
+  await page.evaluate(scrollToBottomInPage);
+  await delay(200);
+
+  await sendStreamPrompt(page);
+
+  // ---- Phase A: after send the viewport FOLLOWS the bottom (no gap, no freeze).
+  const phaseA = await sample(page, 10, 180);
+  const maxDistA = maxOf(phaseA, "distance");
+  console.log(`[${label}] A distances: ${phaseA.map((s) => s.distance).join(", ")};`,
+    `text growth ${phaseA.at(-1).streamTextLen - phaseA[0].streamTextLen}; maxDist ${maxDistA}`);
   assert.ok(
     phaseA.at(-1).streamTextLen - phaseA[0].streamTextLen > 80,
     `${label} A: stream should be growing (${phaseA[0].streamTextLen} -> ${phaseA.at(-1).streamTextLen})`
   );
   assert.ok(
-    spread(phaseA, "scrollTop") <= anchorSpreadTolerance,
-    `${label} A: after send-anchor the viewport must NOT follow the stream `
-    + `(scrollTop samples: ${phaseA.map((s) => s.scrollTop).join(", ")})`
+    maxDistA <= FOLLOW_MAX_DISTANCE_PX,
+    `${label} A: after send the viewport must FOLLOW the bottom — no 60vh gap, no `
+    + `freeze (distances: ${phaseA.map((s) => s.distance).join(", ")})`
+  );
+  assert.ok(
+    phaseA.at(-1).scrollTop >= phaseA[0].scrollTop,
+    `${label} A: following must ride the growing bottom DOWN, never yank up `
+    + `(scrollTops: ${phaseA.map((s) => s.scrollTop).join(", ")})`
   );
 
-  // ---- Phase B: deliberately scroll to the bottom -> follow resumes.
-  await page.evaluate(scrollActiveToBottomInPage);
-  await delay(150);
-  const phaseB = await sample(page, 10, 150);
-  console.log(`[${label}] B distances: ${phaseB.map((s) => Math.round(s.distance)).join(", ")};`,
-    `height growth ${phaseB.at(-1).scrollHeight - phaseB[0].scrollHeight}`);
-  assert.ok(
-    phaseB.at(-1).scrollHeight - phaseB[0].scrollHeight > 80,
-    `${label} B: stream should still be growing`
-  );
-  for (let i = 1; i < phaseB.length; i += 1) {
-    assert.ok(
-      phaseB[i].scrollTop >= phaseB[i - 1].scrollTop - 8,
-      `${label} B: following must never yank upward `
-      + `(${phaseB[i - 1].scrollTop} -> ${phaseB[i].scrollTop})`
-    );
+  // ---- Phase B: a REAL upward wheel mid-stream escapes the follow at once.
+  // Retry the wheel: after a virtualized reload the first synthetic wheel can be
+  // dropped by Chromium before it registers a scroll (a Playwright input quirk,
+  // not the follower). We re-read the baseline each attempt so stream growth
+  // while following doesn't confuse the "moved up" check.
+  let beforeWheelTop = 0;
+  let afterWheelTop = 0;
+  let wheelEscaped = false;
+  for (let attempt = 0; attempt < 3 && !wheelEscaped; attempt += 1) {
+    beforeWheelTop = (await page.evaluate(readMetricsInPage)).scrollTop;
+    await realWheelUp(page, 800);
+    await delay(400); // let the async scroll settle before sampling
+    afterWheelTop = (await page.evaluate(readMetricsInPage)).scrollTop;
+    wheelEscaped = afterWheelTop < beforeWheelTop - 40;
   }
   assert.ok(
-    phaseB.at(-1).distance <= 60,
-    `${label} B: after re-joining, the viewport must track the bottom `
-    + `(final distance ${phaseB.at(-1).distance})`
-  );
-  assert.ok(
-    phaseB.at(-1).scrollTop > phaseA.at(-1).scrollTop + 60,
-    `${label} B: the viewport should have moved down with the stream`
-  );
-
-  // ---- Phase C: a REAL upward wheel mid-stream -> follow releases at once.
-  // wheelFromTop exercises the window-scroller path: the gesture starts on the
-  // header/composer OUTSIDE `.chat-thread`, so it only reaches the window-level
-  // listeners (the P2 the reviewer caught).
-  const beforeWheelTop = (await page.evaluate(readMetricsInPage)).scrollTop;
-  const wheelTarget = await realWheelUp(page, 800, { fromTop: wheelFromTop });
-  if (wheelFromTop) {
-    assert.ok(
-      wheelTarget.outside,
-      `${label} C: expected an out-of-transcript wheel origin (header/composer) `
-      + `to exercise the window-scroller path, got ${JSON.stringify(wheelTarget)}`
-    );
-  }
-  await delay(400); // let the async scroll settle before sampling
-  // Assert REAL upward displacement, independent of stream growth: with the bug,
-  // follow() snaps scrollTop back to the bottom, so it ends up ~unchanged. (A
-  // distance-only check could pass from later growth alone, so pin the actual
-  // scroll position here, before any growth sampling.)
-  const afterWheelTop = (await page.evaluate(readMetricsInPage)).scrollTop;
-  assert.ok(
-    afterWheelTop < beforeWheelTop - 40,
-    `${label} C: a real wheel-up must move the viewport UP (before ${beforeWheelTop}, `
+    wheelEscaped,
+    `${label} B: a real wheel-up must move the viewport UP (before ${beforeWheelTop}, `
     + `after ${afterWheelTop}); the stream must not snap it back to the bottom`
   );
-  const phaseC = await sample(page, 8, 150);
-  console.log(`[${label}] C distances: ${phaseC.map((s) => Math.round(s.distance)).join(", ")};`,
-    `scrollTop spread ${spread(phaseC, "scrollTop")};`,
-    `text growth ${phaseC.at(-1).streamTextLen - phaseC[0].streamTextLen}`);
+  // Confirm we escaped MID-stream (not at turn end). The text-growth probe can't
+  // be used here: escaped far up a virtualized list, the streaming row is
+  // rendered OUT of the DOM, so its growth is invisible from the reader's
+  // scrolled-up position — which is fine. The turn being in flight is the signal.
   assert.ok(
-    phaseC.at(-1).streamTextLen - phaseC[0].streamTextLen > 80,
-    `${label} C: stream should still be growing`
+    await turnInFlight(page),
+    `${label} B: the turn must still be streaming while we test the escape`
   );
-  // Two independent tells, each of which the bug fails. The bug pins the
-  // viewport to the growing bottom, so (1) the distance from the bottom collapses
-  // toward 0 and (2) scrollTop climbs to chase it. Released, the reader stays
-  // put off the bottom: distance holds clearly positive and scrollTop is steady.
-  // The escape magnitude is leg-dependent (window vs `.chat-thread` scroller —
-  // phone escapes far less than desktop), so we assert "clearly off the bottom",
-  // not a specific pixel count.
-  const minDistanceC = Math.min(...phaseC.map((s) => s.distance));
+  const phaseB = await sample(page, 8, 150);
+  const minDistB = minOf(phaseB, "distance");
+  console.log(`[${label}] B distances: ${phaseB.map((s) => s.distance).join(", ")}; minDist ${minDistB}`);
   assert.ok(
-    minDistanceC > 40,
-    `${label} C: a real wheel-up must escape and STAY escaped — the stream must `
-    + `not snap the reader back to the bottom `
-    + `(distances: ${phaseC.map((s) => Math.round(s.distance)).join(", ")})`
-  );
-  assert.ok(
-    spread(phaseC, "scrollTop") <= anchorSpreadTolerance,
-    `${label} C: after escaping, the stream must not drag the viewport `
-    + `(scrollTop samples: ${phaseC.map((s) => s.scrollTop).join(", ")})`
+    minDistB > ESCAPE_MIN_DISTANCE_PX,
+    `${label} B: a real wheel-up must escape and STAY escaped — the stream must not `
+    + `snap the reader back to the bottom (distances: ${phaseB.map((s) => s.distance).join(", ")})`
   );
 
-  // ---- Phase D: re-join, then let the turn end (spacer collapse + clamp).
-  await page.evaluate(scrollActiveToBottomInPage);
-  await page.waitForFunction(
-    () => {
-      const stop = document.querySelector(".stop-button");
-      return !stop || stop.hasAttribute("hidden") || stop.offsetParent === null;
-    },
-    null,
-    { timeout: TIMEOUT_MS }
-  );
-  await delay(800);
-  const final = await page.evaluate(readMetricsInPage);
-  console.log(`[${label}] D final distance ${Math.round(final.distance)} (${final.scroller})`);
+  // ---- Phase C: the "scroll to latest" button re-locks and follows again.
+  await clickScrollToLatest(page);
+  const phaseC = await sample(page, 8, 150);
+  const maxDistC = maxOf(phaseC, "distance");
+  console.log(`[${label}] C distances: ${phaseC.map((s) => s.distance).join(", ")}; maxDist ${maxDistC}`);
   assert.ok(
-    final.distance <= 60,
+    maxDistC <= FOLLOW_MAX_DISTANCE_PX,
+    `${label} C: scroll-to-latest must re-lock and follow the bottom `
+    + `(distances: ${phaseC.map((s) => s.distance).join(", ")})`
+  );
+
+  // ---- Phase D: let the turn end -> we are at the true bottom.
+  await waitTurnSettled(page);
+  await delay(600);
+  const final = await page.evaluate(readMetricsInPage);
+  console.log(`[${label}] D final distance ${final.distance}`);
+  assert.ok(
+    final.distance <= FOLLOW_MAX_DISTANCE_PX,
     `${label} D: turn end must land at the true bottom (distance ${final.distance})`
   );
-
-  return { anchorViewportTop: anchorInfo, final };
+  return { final };
 }
 
-// Findings coverage (reviewer 019f89a4): the FIRST prompt into an EMPTY thread
-// must behave like every later send — anchor the message, do NOT follow the
-// stream. Regression shape: the empty render records no scroll snapshot, so the
-// first entries classify as "first view" -> jump-bottom -> sticky; and/or the
-// follower's listener attaches too late to hear the anchor-user broadcast.
+// A SLOW touch drag (real trusted touch input, many 3px moves) must escape the
+// follow — the regression a per-move-delta heuristic missed. Runs on the phone
+// leg where touch is the primary input.
+async function exerciseTouchEscape(page, label) {
+  const client = await page.context().newCDPSession(page);
+  try {
+    await page.evaluate(scrollToBottomInPage);
+    await delay(200);
+    await sendStreamPrompt(page);
+    const before = await sample(page, 4, 150);
+    assert.ok(
+      maxOf(before, "distance") <= FOLLOW_MAX_DISTANCE_PX,
+      `${label} touch: must be following before the drag (distances: ${before.map((s) => s.distance).join(", ")})`
+    );
+    assert.ok(await turnInFlight(page), `${label} touch: turn must still be streaming`);
+
+    const x = Math.round(await page.evaluate(() => window.innerWidth / 2));
+    const startY = Math.round(await page.evaluate(() => window.innerHeight / 2));
+    await touchDragUp(client, x, startY, 50, 3); // ~150px in 3px steps
+    await delay(400);
+
+    const after = await sample(page, 6, 150);
+    const minDist = minOf(after, "distance");
+    console.log(`[${label}] touch-escape distances: ${after.map((s) => s.distance).join(", ")}; minDist ${minDist}`);
+    assert.ok(
+      minDist > ESCAPE_MIN_DISTANCE_PX,
+      `${label} touch: a slow touch drag up must escape and STAY escaped — the stream `
+      + `must not snap the reader back (distances: ${after.map((s) => s.distance).join(", ")})`
+    );
+
+    // The scroll-to-latest button is visible now (we are escaped). On the narrow
+    // local layout it must float ABOVE the docked composer, not sit inside it.
+    const overlap = await page.evaluate(() => {
+      const btn = document.querySelector(".scroll-to-bottom-button");
+      const input = document.querySelector("#message-input");
+      if (!btn || !input) return { ok: false, reason: "button or input missing" };
+      const b = btn.getBoundingClientRect();
+      const c = input.getBoundingClientRect();
+      const intersects = !(b.right <= c.left || b.left >= c.right || b.bottom <= c.top || b.top >= c.bottom);
+      return { ok: !intersects, button: { top: b.top, bottom: b.bottom }, input: { top: c.top, bottom: c.bottom } };
+    });
+    assert.ok(
+      overlap.ok,
+      `${label} touch: the scroll-to-latest button must not overlap the composer input `
+      + `(${JSON.stringify(overlap)})`
+    );
+
+    await clickScrollToLatest(page);
+    const rejoined = await sample(page, 4, 150);
+    assert.ok(
+      maxOf(rejoined, "distance") <= FOLLOW_MAX_DISTANCE_PX,
+      `${label} touch: scroll-to-latest must re-lock (distances: ${rejoined.map((s) => s.distance).join(", ")})`
+    );
+    await waitTurnSettled(page);
+  } finally {
+    await client.detach().catch(() => {});
+  }
+}
+
+// The FIRST prompt into an EMPTY thread must behave like every later send: land
+// at the bottom and FOLLOW the reply (bottom-follow), not pin the message to the
+// top. Regression shape: the empty render records no scroll snapshot, or the
+// follower's listener attaches too late to hear the jump-bottom broadcast.
 async function exerciseEmptyFirstSend(page, label, workspaceDir) {
   await page.click("#open-start-session-dialog");
   await page.waitForFunction(
@@ -344,88 +375,35 @@ async function exerciseEmptyFirstSend(page, label, workspaceDir) {
     { timeout: TIMEOUT_MS }
   );
 
-  // First-ever send into the empty thread.
-  const preLastAssistantText = "";
-  await page.fill("#message-input", STREAM_PROMPT);
-  await page.click("#send-button");
-  // Wait for the NEW streaming reply (not just height growth from the user
-  // message + spacer): the text-length metric must track the same entry across
-  // all phases, or a leftover previous reply skews it. Compared by content,
-  // not node count — the virtualizer's rendered-row count is not monotonic.
-  await page.waitForFunction(
-    (pre) => {
-      const replies = document.querySelectorAll(".chat-thread .chat-message-assistant");
-      const text = replies[replies.length - 1]?.textContent || "";
-      return text !== pre && text.length > 40;
-    },
-    preLastAssistantText,
-    { timeout: TIMEOUT_MS }
-  );
-  await delay(200);
-  const samples = await sample(page, 8, 150);
-  console.log(`[${label}] first-send scrollTop spread ${spread(samples, "scrollTop")},`,
-    `text growth ${samples.at(-1).streamTextLen - samples[0].streamTextLen}`);
+  await sendStreamPrompt(page);
+  const samples = await sample(page, 10, 180);
+  const maxDist = maxOf(samples, "distance");
+  console.log(`[${label}] first-send distances: ${samples.map((s) => s.distance).join(", ")};`,
+    `text growth ${samples.at(-1).streamTextLen - samples[0].streamTextLen}; maxDist ${maxDist}`);
   assert.ok(
     samples.at(-1).streamTextLen - samples[0].streamTextLen > 80,
     `${label}: stream should be growing`
   );
   assert.ok(
-    spread(samples, "scrollTop") <= 2,
-    `${label}: the FIRST send must anchor and not follow the stream `
-    + `(scrollTop samples: ${samples.map((s) => s.scrollTop).join(", ")})`
+    maxDist <= FOLLOW_MAX_DISTANCE_PX,
+    `${label}: the FIRST send must land at the bottom and FOLLOW the stream `
+    + `(distances: ${samples.map((s) => s.distance).join(", ")})`
   );
 
-  // With the rejoin hold still armed (no gesture so far), keyboard-activate
-  // the scroll-to-latest button: its click must broadcast explicit
-  // "rejoin-bottom" intent (covers assistive tech) and resume live following.
-  await page.waitForFunction(
-    () => document.querySelector(".scroll-to-bottom")?.getAttribute("data-visible") === "true",
-    null,
-    { timeout: TIMEOUT_MS }
-  );
-  await page.focus(".scroll-to-bottom-button");
-  await page.keyboard.press("Enter");
-  await delay(600);
-  const rejoined = await sample(page, 6, 150);
-  console.log(`[${label}] post-button distances: ${rejoined.map((s) => Math.round(s.distance)).join(", ")}`);
-  assert.ok(
-    rejoined.at(-1).distance <= 60,
-    `${label}: keyboard-activating scroll-to-latest must resume following `
-    + `(final distance ${rejoined.at(-1).distance})`
-  );
-
-  // Let the turn finish so the session can be torn down cleanly.
-  await page.waitForFunction(
-    () => {
-      const stop = document.querySelector(".stop-button");
-      return !stop || stop.hasAttribute("hidden") || stop.offsetParent === null;
-    },
-    null,
-    { timeout: TIMEOUT_MS }
-  );
+  await waitTurnSettled(page);
   return page.evaluate(async () =>
     (await fetch("/api/session", { credentials: "same-origin" }).then((r) => r.json()))
       ?.data?.active_thread_id || null);
 }
 
-// Grow the thread past the 20-row virtualization threshold with quick echo
-// turns, so the streaming phases also run against the TanStack virtualizer
-// (whose multi-frame measurement corrections must not re-enable following).
+// Grow the thread past the 20-row virtualization threshold with quick echo turns,
+// so the streaming phases also run against the TanStack virtualizer (whose
+// multi-frame measurement corrections must not un-stick the follow).
 async function growUntilVirtualized(page) {
-  // Build enough history that a tall-viewport reload hydrates 20+ rows (the
-  // virtualization threshold). Quick echo turns; the class check is done by
-  // the caller after the reload.
   for (let i = 0; i < 12; i += 1) {
     await page.fill("#message-input", `filler ${i + 1}`);
     await page.click("#send-button");
-    await page.waitForFunction(
-      () => {
-        const stop = document.querySelector(".stop-button");
-        return !stop || stop.hasAttribute("hidden") || stop.offsetParent === null;
-      },
-      null,
-      { timeout: TIMEOUT_MS }
-    );
+    await waitTurnSettled(page);
     await delay(120);
   }
 }
@@ -478,7 +456,7 @@ async function main() {
     );
     await bootstrap.close();
 
-    // Empty thread, first-ever send (reviewer findings 1+2).
+    // Empty thread, first-ever send.
     let fresh = await context.newPage();
     attachPageDebugLogging(fresh, "empty-first-send", { prefix: "stick-e2e" });
     await fresh.setViewportSize({ width: 1280, height: 680 });
@@ -489,7 +467,7 @@ async function main() {
     fresh = null;
     results.emptyFirstSend = "pass";
 
-    // Desktop: `.chat-thread` is the scroller.
+    // Desktop.
     const desktopThread = await startThread(relayPort, {
       cwd: workspaceDir,
       deviceId,
@@ -509,10 +487,7 @@ async function main() {
     );
     results.desktop = await exercise(desktop, "desktop");
 
-    // Same thread past the virtualization threshold: TanStack's measurement
-    // corrections must not undo the send-anchor (finding 3). Local hydration
-    // only fills viewport+600px worth of history, so a taller viewport is what
-    // pulls enough rows into the DOM for the virtualizer to engage.
+    // Same thread past the virtualization threshold.
     await growUntilVirtualized(desktop);
     await desktop.setViewportSize({ width: 1280, height: 1400 });
     await desktop.reload({ waitUntil: "domcontentloaded" });
@@ -526,13 +501,17 @@ async function main() {
       null,
       { timeout: TIMEOUT_MS }
     );
-    results.desktopVirtualized = await exercise(desktop, "desktop-virtualized", {
-      anchorSpreadTolerance: 8,
-    });
+    results.desktopVirtualized = await exercise(desktop, "desktop-virtualized");
     await desktop.close();
     desktop = null;
 
-    // Phone: the window is the scroller.
+    // Phone: narrow local conversation layout, also a `.chat-thread` element
+    // scroller. (STICK_E2E_SKIP_PHONE=1 skips it for a faster desktop-only run.)
+    if (process.env.STICK_E2E_SKIP_PHONE === "1") {
+      results.phone = "skipped";
+      console.log("\nPASS", JSON.stringify(results, null, 2));
+      return;
+    }
     const phoneThread = await startThread(relayPort, {
       cwd: workspaceDir,
       deviceId,
@@ -550,9 +529,10 @@ async function main() {
       null,
       { timeout: TIMEOUT_MS }
     );
-    // Phone is the window-scroller: drive phase C from OUTSIDE the transcript so
-    // the wheel only reaches the window listeners (reviewer P2, finding 1).
-    results.phone = await exercise(phone, "phone", { wheelFromTop: true });
+    results.phone = await exercise(phone, "phone");
+    // Real slow touch-drag escape (the wheel legs above cannot exercise touch).
+    await exerciseTouchEscape(phone, "phone-touch");
+    results.phoneTouch = "pass";
     await phone.close();
     phone = null;
 

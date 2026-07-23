@@ -224,20 +224,27 @@ export function decideTranscriptScrollAction({
     };
   }
 
-  // New user message just landed: pin it to the top of the viewport so the
-  // assistant's reply has room to stream below without the user message
-  // sliding away. The CSS spacer guarantees we can actually scroll it up.
+  // New user message just landed: lock the transcript to the bottom so the
+  // reply streams in below (bottom-follow). This is deliberately NOT a
+  // top-anchor — the sent message is not pinned to the top and there is no
+  // viewport-fraction reserve; the stick-to-bottom follower keeps us pinned
+  // while the reader stays at the bottom.
   //
-  // The check uses an "already anchored" Set rather than the previous
-  // snapshot's latestUserEntryId because intermediate renders can momentarily
-  // show a subset of entries (e.g. mid-hydration), causing the snapshot's
-  // latestUserEntryId to regress. The Set is monotonic per thread so we only
-  // anchor a given user message once.
+  // Fire the jump-bottom ONCE per new user message: the set guards re-firing so
+  // a reader who scrolls up mid-stream is not yanked back down on every render.
+  // The check uses an "already handled" Set rather than the previous snapshot's
+  // latestUserEntryId because intermediate renders can momentarily show a subset
+  // of entries (e.g. mid-hydration), causing the snapshot's latestUserEntryId to
+  // regress. The Set is monotonic per thread so we only fire once.
   if (
     nextLatestUserId
     && !(alreadyAnchoredUserIds && alreadyAnchoredUserIds.has(nextLatestUserId))
   ) {
-    return { kind: "anchor-user", userEntryId: nextLatestUserId };
+    return {
+      kind: "jump-bottom",
+      scrollTop: Math.max(0, liveScrollHeight - clientHeight),
+      userEntryId: nextLatestUserId,
+    };
   }
 
   return { kind: "preserve" };
@@ -245,11 +252,11 @@ export function decideTranscriptScrollAction({
 
 // Broadcast an applied scroll action to the stick-to-bottom follower. Fired
 // AFTER the scroll is applied so listeners read post-scroll geometry. Only
-// actions that carry stickiness intent are broadcast: jump-bottom /
-// restore-thread (where did we land?) and anchor-user (release the follow).
-// `anchor-prepend` keeps the reader's place and "preserve"/"noop" do nothing,
-// so neither says anything about following. Guarded so pure-object fakes in
-// tests (no dispatchEvent) and exotic embeds (no CustomEvent) stay valid.
+// actions that carry stickiness intent are broadcast: jump-bottom and
+// restore-thread (where did we land? — should we follow?). `anchor-prepend`
+// keeps the reader's place and "preserve"/"noop" do nothing, so neither says
+// anything about following. Guarded so pure-object fakes in tests (no
+// dispatchEvent) and exotic embeds (no CustomEvent) stay valid.
 export function dispatchTranscriptScrollActionEvent(element, kind) {
   const target = element?.closest?.(".chat-thread") || element;
   if (
@@ -272,6 +279,11 @@ export function applyTranscriptScrollAction(action, scrollElement) {
     || action.kind === "anchor-prepend"
     || action.kind === "restore-thread"
   ) {
+    // Position the scroller, then broadcast the intent. For jump-bottom the write
+    // lands us at the bottom immediately (a safety net if the follower's listener
+    // attaches a tick late) AND the follower sticks — our hand-rolled follower is
+    // robust to this write (it sees distance≈0 and sticks, and tags its own pins
+    // so it never mistakes them for a reader scroll).
     if (typeof action.scrollTop === "number") {
       scrollElement.scrollTop = action.scrollTop;
       if (action.kind !== "anchor-prepend") {
@@ -280,25 +292,7 @@ export function applyTranscriptScrollAction(action, scrollElement) {
     }
     return;
   }
-
-  if (action.kind === "anchor-user") {
-    const target = scrollElement.querySelector?.(
-      `[${LATEST_USER_MESSAGE_ATTR}="true"]`
-    );
-    // Without a rendered target nothing scrolled, so there is no intent to
-    // broadcast — in virtualized transcripts the scrollToIndex path (see
-    // transcript-react.js) performs the anchor and broadcasts instead.
-    if (!target) return;
-    if (typeof target.scrollIntoView === "function") {
-      target.scrollIntoView({ block: "start", behavior: "auto" });
-    } else {
-      // Test/JSDOM fallback: position via offsetTop relative to the scroller.
-      const offsetTop = typeof target.offsetTop === "number" ? target.offsetTop : 0;
-      scrollElement.scrollTop = Math.max(0, offsetTop);
-    }
-    dispatchTranscriptScrollActionEvent(scrollElement, "anchor-user");
-  }
-  // "preserve" / "noop": intentionally do nothing.
+  // "anchor-user" is gone (bottom-follow); "preserve" / "noop": do nothing.
 }
 
 export function restoreTranscriptScrollPosition({
