@@ -3,9 +3,10 @@
 // Boots a local relay with the fake provider, opens a thread whose transcript
 // overflows the viewport, then exercises the button at both a desktop and a
 // phone viewport: scroll up -> button shows, click -> scrolls toward the bottom
-// -> button hides. This guards the desktop-vs-phone scroller difference
-// (`.chat-thread` scrolls on desktop; the window scrolls on phone) that the
-// component has to handle. Requires a built `web/` bundle (run `vite build`).
+// -> button hides. The transcript is a `.chat-thread` element scroller on every
+// surface now (desktop and phone alike — there is no window scroller), so both
+// legs escape the bottom-follow with a real wheel-up over that element.
+// Requires a built `web/` bundle (run `vite build`).
 //
 // Run: npm run build && node scripts/browser-scroll-to-bottom-e2e.mjs
 // Screenshots are written under the OS temp dir (path printed at the end).
@@ -59,18 +60,23 @@ async function startThread(relayPort, { cwd, deviceId, initialPrompt }) {
   return payload.data.active_thread_id;
 }
 
-// In-page: scroll the active scroller (the `.chat-thread` box on desktop, the
-// window on phone) to the top so the button should appear.
-function scrollActiveScrollerToTop() {
-  const t = document.querySelector(".chat-thread");
-  const overflows = t && t.scrollHeight > t.clientHeight + 1;
-  if (overflows) {
-    t.scrollTop = 0;
-    t.dispatchEvent(new Event("scroll"));
-  } else {
-    window.scrollTo(0, 0);
-    window.dispatchEvent(new Event("scroll"));
-  }
+// A REAL upward wheel over the `.chat-thread` scroller, via Chromium's input
+// path. The hand-rolled bottom-follow (frontend/shared/stick-to-bottom.js)
+// un-sticks ONLY on a real reader gesture — a programmatic `scrollTop = 0` +
+// synthetic `scroll` event reads as layout churn and is re-glued straight back
+// to the bottom, so it never reveals the button. Mirrors the escape gesture in
+// browser-stick-to-bottom-e2e.mjs.
+async function realWheelUp(page, deltaPx) {
+  const point = await page.evaluate(() => {
+    const t = document.querySelector(".chat-thread");
+    if (!t) return null;
+    const r = t.getBoundingClientRect();
+    return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+  });
+  if (!point) return;
+  await page.mouse.move(point.x, point.y);
+  await delay(60); // let the hover/target settle so the wheel actually lands
+  await page.mouse.wheel(0, -deltaPx);
 }
 
 async function readButtonState(page) {
@@ -114,34 +120,48 @@ async function exercise(page, surfaceLabel) {
     .catch(() => {});
   await delay(800);
 
-  await page.evaluate(scrollActiveScrollerToTop);
-  await delay(300);
+  // The transcript loads pinned to the bottom, so the button starts hidden.
+  // Asserting this first means "button now visible" can only be the wheel's doing
+  // — not a load-time regression that left us already scrolled up.
+  const initialState = await readButtonState(page);
+  console.log(`[${surfaceLabel}] initial metrics`, initialState);
+  assert.equal(
+    initialState.visible,
+    "false",
+    `${surfaceLabel}: button should start hidden with the transcript pinned to the bottom`
+  );
+
+  // 1) Scroll UP with a real wheel-up -> the button should appear. The follower
+  // ignores programmatic scrolls (they'd be re-glued to the bottom), so we drive
+  // Chromium's real input path. `content-visibility: auto` re-measures rows as
+  // they enter the viewport, so wheel up in a retry loop until the anchor reports
+  // visible (a single big wheel usually suffices).
+  let buttonShown = false;
+  for (let attempt = 0; attempt < 10 && !buttonShown; attempt += 1) {
+    await realWheelUp(page, 2000);
+    await delay(250);
+    buttonShown = await page.evaluate(
+      () => document.querySelector(".scroll-to-bottom")?.getAttribute("data-visible") === "true"
+    );
+  }
+  const scrolledUpState = await readButtonState(page);
   const buttonViewportGap = await page.evaluate(() => {
     const btn = document.querySelector(".scroll-to-bottom-button");
     const r = btn?.getBoundingClientRect();
     return r ? Math.round(window.innerHeight - r.bottom) : null;
   });
-  console.log(`[${surfaceLabel}] pre-scroll metrics`, await readButtonState(page));
+  console.log(`[${surfaceLabel}] scrolled-up metrics`, scrolledUpState);
   console.log(`[${surfaceLabel}] button gap above viewport bottom (px):`, buttonViewportGap);
-
-  // 1) Scroll to the top -> the button should appear. content-visibility:auto
-  // collapses off-screen messages, so nudge scroll until the scroller reports
-  // its true (overflowing) height and the button shows.
-  await page.waitForFunction(
-    () => {
-      const t = document.querySelector(".chat-thread");
-      const overflows = t && t.scrollHeight > t.clientHeight + 1;
-      if (overflows) {
-        t.scrollTop = 0;
-        t.dispatchEvent(new Event("scroll"));
-      } else {
-        window.scrollTo(0, 0);
-        window.dispatchEvent(new Event("scroll"));
-      }
-      return document.querySelector(".scroll-to-bottom")?.getAttribute("data-visible") === "true";
-    },
-    null,
-    { timeout: TIMEOUT_MS, polling: 250 }
+  assert.ok(
+    buttonShown,
+    `${surfaceLabel}: a real wheel-up must escape the bottom-follow and reveal the button`
+  );
+  // Prove the wheel actually moved the viewport UP (not that we merely started
+  // scrolled up): the button appearing must be caused by this gesture.
+  assert.ok(
+    scrolledUpState.scrollTop < initialState.scrollTop - 400,
+    `${surfaceLabel}: the real wheel-up must scroll the transcript UP `
+    + `(from ${initialState.scrollTop} to ${scrolledUpState.scrollTop})`
   );
   // Let the fade-in transition settle before reading opacity / screenshotting.
   await delay(300);
