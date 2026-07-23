@@ -226,10 +226,41 @@ function orNull(value) {
   return text ? text : null;
 }
 
+// A Codex agent message carries its raw response-item id (`msg_<hex>`) in the
+// LIVE stream, but `thread/read` — which the relay validates fork points against
+// (read_thread) — renumbers the same items positionally (`item-13`) and never
+// emits that `msg_` id. So a live-stream Codex anchor can NEVER be resolved
+// server-side and is rejected as "not part of the source thread transcript".
+//
+// This shape is unambiguous: Claude entries are always prefixed
+// (`assistant:`/`user:`/`tool:`) and a persisted (past-turn) Codex read is
+// `item-N`, so a bare `msg_` anchor is exclusively a Codex live agent message.
+// (Reasoning `rs_` diverges the same way but is never forkable — only the last
+// agent_text of a block is, see transcript-fork.js.)
+function isUnresolvableCodexLiveForkPoint(upToItemId) {
+  return /^msg_/.test(String(upToItemId ?? ""));
+}
+
 export function forkFieldsToPayload(fields) {
+  const upToItemId = orNull(fields?.upToItemId);
   return {
     source_thread_id: fields?.sourceThreadId || "",
-    up_to_item_id: orNull(fields?.upToItemId),
+    // A fork point at the transcript tip drops nothing, so it names the same
+    // branch as forking the whole thread. We only drop the anchor when it is a
+    // Codex live id that the relay cannot resolve (above): sending it would fail,
+    // whereas a whole-thread fork takes the exact path the working thread-list
+    // fork does. Every RESOLVABLE anchor is left intact on purpose — the relay
+    // re-checks it against the fresh provider read and preserves it when the
+    // source has since advanced (normalize_fork_point only collapses an id that
+    // is STILL the final entry). Dropping those blindly would be a stale-snapshot
+    // race: forkPointIsTip is captured when the dialog opens, so if another
+    // device completes a turn before submission, a null anchor would silently
+    // fork content AFTER the message the user picked — and hand it to another
+    // provider on a cross-provider replay.
+    up_to_item_id:
+      fields?.forkPointIsTip && isUnresolvableCodexLiveForkPoint(fields?.upToItemId)
+        ? null
+        : upToItemId,
     cwd: orNull(fields?.cwd),
     initial_prompt: orNull(fields?.initialPrompt),
     model: orNull(fields?.model),

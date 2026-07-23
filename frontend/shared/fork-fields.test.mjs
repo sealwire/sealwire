@@ -96,6 +96,90 @@ test("the fork point rides along with the payload", () => {
   assert.equal(payload.up_to_item_id, "assistant:abc");
 });
 
+test("a Codex live-id tip fork is sent as a whole-thread fork", () => {
+  // Codex's live stream tags an agent message with its response id (`msg_...`)
+  // while `thread/read` renumbers the same item positionally (`item-13`). The
+  // live id can never be resolved server-side, so forking the just-streamed last
+  // message with it is rejected as "not part of the source thread transcript".
+  // At the tip a fork drops nothing, so drop the unresolvable anchor and take the
+  // whole-thread path the working thread-list fork takes.
+  const fields = {
+    ...defaultForkFields({ thread: { provider: "codex" }, models: [] }),
+    sourceThreadId: "thread-1",
+    upToItemId: "msg_02a31f0f067cc13f016a6131a81104819188054b86ab3fded2",
+    forkPointIsTip: true,
+  };
+
+  assert.equal(
+    forkFieldsToPayload(fields).up_to_item_id,
+    null,
+    "a Codex live-id tip fork must go out as a whole-thread fork",
+  );
+});
+
+test("a resolvable tip anchor is preserved, not collapsed (stale-snapshot race)", () => {
+  // forkPointIsTip is captured when the dialog opens and never recomputed. For a
+  // RESOLVABLE id (Claude `assistant:<uuid>`, past-turn Codex `item-N`) the relay
+  // re-checks it against the fresh read and keeps it anchored when the source has
+  // since advanced. Blindly nulling every tip would instead fork content AFTER
+  // the picked message if another device completed a turn mid-dialog. So only the
+  // unresolvable Codex live id is dropped; every stable anchor rides through.
+  const claudeTip = {
+    ...defaultForkFields({ thread: { provider: "claude_code" }, models: [] }),
+    sourceThreadId: "thread-1",
+    upToItemId: "assistant:11111111-2222-4333-8444-555555555555",
+    forkPointIsTip: true,
+  };
+  assert.equal(
+    forkFieldsToPayload(claudeTip).up_to_item_id,
+    "assistant:11111111-2222-4333-8444-555555555555",
+    "a Claude tip anchor must be preserved so the relay can re-anchor it",
+  );
+
+  const codexPastTurnTip = {
+    ...defaultForkFields({ thread: { provider: "codex" }, models: [] }),
+    sourceThreadId: "thread-1",
+    upToItemId: "item-14",
+    forkPointIsTip: true,
+  };
+  assert.equal(
+    forkFieldsToPayload(codexPastTurnTip).up_to_item_id,
+    "item-14",
+    "a persisted Codex `item-N` anchor resolves server-side and must be preserved",
+  );
+});
+
+test("tip collapse is driven by the real forkPointIsTranscriptTip lifecycle", () => {
+  // The unit tests above supply forkPointIsTip directly; this exercises the path
+  // the surfaces actually take — derive it from the on-screen entries, then build
+  // the payload. A Codex live tip collapses; a Claude live tip is preserved.
+  const codexEntries = [
+    { kind: "user_text", item_id: "msg_user_live" },
+    { kind: "agent_text", item_id: "msg_02a31f0f067cc13f016a6131a81104819188054b86ab3fded2" },
+  ];
+  const codexTipId = codexEntries.at(-1).item_id;
+  const codexFields = {
+    ...defaultForkFields({ thread: { provider: "codex" }, models: [] }),
+    sourceThreadId: "thread-1",
+    upToItemId: codexTipId,
+    forkPointIsTip: forkPointIsTranscriptTip(codexEntries, codexTipId),
+  };
+  assert.equal(forkFieldsToPayload(codexFields).up_to_item_id, null);
+
+  const claudeEntries = [
+    { kind: "user_text", item_id: "user:aaaa" },
+    { kind: "agent_text", item_id: "assistant:bbbb" },
+  ];
+  const claudeTipId = claudeEntries.at(-1).item_id;
+  const claudeFields = {
+    ...defaultForkFields({ thread: { provider: "claude_code" }, models: [] }),
+    sourceThreadId: "thread-1",
+    upToItemId: claudeTipId,
+    forkPointIsTip: forkPointIsTranscriptTip(claudeEntries, claudeTipId),
+  };
+  assert.equal(forkFieldsToPayload(claudeFields).up_to_item_id, "assistant:bbbb");
+});
+
 test("a blank fork prompt is sent as null so a native fork stays idle", () => {
   const fields = {
     ...defaultForkFields({ thread: { provider: "codex" }, models: [] }),
