@@ -14,6 +14,7 @@
       "local-transcript-load",
       "local-thread-settings",
       "local-thread-groups",
+      "local-rail-toggle-align",
       "local-permission-modes"
     ],
     "local-full": [
@@ -30,6 +31,7 @@
       "local-transcript-load",
       "local-thread-settings",
       "local-thread-groups",
+      "local-rail-toggle-align",
       "local-delete",
       "local-permission-modes"
     ],
@@ -220,6 +222,17 @@
       "transport": "local",
       "coverage": [
         "thread-groups"
+      ]
+    },
+    "local-rail-toggle-align": {
+      "script": "browser-rail-toggle-align-e2e.mjs",
+      "tier": "core",
+      "provider": "fake",
+      "transport": "local",
+      "coverage": [
+        "rail-toggle-align",
+        "reviewer-panel",
+        "desktop-layout"
       ]
     },
     "local-delete": {

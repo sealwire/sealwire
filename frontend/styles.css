@@ -3246,8 +3246,13 @@ body.sidebar-collapsed .sidebar-top-toggle {
  * still bring the rail back. */
 .rail-top-toggle {
   position: absolute;
-  top: 12px;
+  /* Center in the header band — its height is measured live from the chat-header by
+     header-band-sync.js — so the toggle lines up with the Changes/Reviewer tabs. A
+     fixed `top` was calibrated for the older, shorter header and rode up above the
+     pill's center once the band grew to --header-band-height. */
+  top: calc(var(--header-band-height, 67px) / 2);
   right: 12px;
+  transform: translateY(-50%);
   z-index: 3;
 }
 body.rail-collapsed .rail-top-toggle {
@@ -3518,6 +3523,13 @@ body.is-resizing-panel {
      header-band-sync.js; the segmented control stays vertically centered in the band. */
   min-height: var(--header-band-height, 67px);
   box-sizing: border-box;
+}
+/* In the rail (only), reserve room on the right for the absolutely-positioned
+   .rail-top-toggle so the Changes/Reviewer pill sits BESIDE it, not underneath it.
+   The mobile sheet reuses this header but has no toggle, so it keeps the symmetric
+   padding above. (Toggle is ~30px wide at right:12px; leave a small gap.) */
+.right-rail .right-panel-tabs-header {
+  padding-right: 50px;
 }
 .right-panel-tabs-header .settings-segmented {
   width: 100%;
