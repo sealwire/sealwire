@@ -122,6 +122,7 @@ mod pairing;
 mod providers;
 mod review;
 mod sessions;
+mod task_list;
 #[cfg(test)]
 mod tests;
 mod threads;

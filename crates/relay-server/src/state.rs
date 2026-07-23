@@ -3,6 +3,7 @@ mod persistence;
 mod relay;
 mod review;
 mod security;
+mod task_list;
 #[cfg(test)]
 mod tests;
 mod workflow;
@@ -40,6 +41,10 @@ pub(crate) use self::review::{
 #[allow(unused_imports)]
 pub(crate) use self::review::Verdict;
 pub(crate) use self::security::SecurityProfile;
+#[allow(unused_imports)]
+pub(crate) use self::task_list::{
+    CheckpointMode, EscalatePolicy, TaskItem, TaskListRun, TaskStatus,
+};
 #[allow(unused_imports)]
 pub(crate) use self::workflow::{
     ArtifactKind, FindingSet, LoopSpec, RunStatus, StepRole, StopCondition, Workflow, WorkflowRun,

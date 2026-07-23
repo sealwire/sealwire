@@ -141,36 +141,27 @@ impl AppState {
         let max_rounds = input.max_rounds.unwrap_or(2).clamp(1, MAX_CODE_FLOW_ROUNDS);
         let device_id = require_device_id(input.device_id)?;
         self.expire_stale_controller_if_needed().await;
-        // The reviewer provider is user input, so validate its availability up front.
-        // The author provider is the parent thread's OWN provider, resolved (once,
-        // after authorization) below.
-        self.resolve_provider(Some(&reviewer_provider))?;
-
-        // Hold the session slot so authorize + resolve + record are atomic against a
-        // concurrent start. `authorize_and_resolve_workflow_parent` runs device/path
-        // authorization and rejects an unknown thread BEFORE any provider probing.
-        let _slot = self.acquire_session_slot()?;
-        let (parent_thread_id, author_provider, cwd) = self
-            .authorize_and_resolve_workflow_parent(&device_id, input.parent_thread_id)
-            .await?;
-
-        let workflow = code_flow_workflow(
-            &author_provider,
-            &task_prompt,
-            &reviewer_provider,
-            input.reviewer_model.clone(),
-            input.reviewer_instructions.clone(),
-            max_rounds,
-        );
-        // The built-in shape is always valid; keep the guard so a future template
-        // tweak can't silently ship a shape the runner can't honor.
-        validate_workflow_shape(&workflow, &author_provider)?;
-
-        let mut anchor_item_id = input.anchor_item_id.unwrap_or_default();
-        truncate_utf8_bytes_with_ellipsis(&mut anchor_item_id, WORKFLOW_ANCHOR_STORED_BYTES);
+        // A running task list owns the workspace and drives its own child workflows;
+        // refuse a user-initiated ad-hoc Code Flow under it.
+        if self.relay.read().await.has_active_task_list() {
+            return Err(
+                "a task list is running on this workspace; wait for it to finish before \
+starting a workflow"
+                    .to_string(),
+            );
+        }
         let run_id = self
-            .record_and_spawn_workflow(workflow, parent_thread_id, cwd, anchor_item_id, device_id)
-            .await;
+            .start_code_flow_internal(
+                &device_id,
+                &task_prompt,
+                &reviewer_provider,
+                input.reviewer_model,
+                input.reviewer_instructions,
+                max_rounds,
+                input.parent_thread_id,
+                input.anchor_item_id.unwrap_or_default(),
+            )
+            .await?;
         let (parent_thread_id, status) = {
             let relay = self.relay.read().await;
             let run = relay
@@ -189,6 +180,53 @@ impl AppState {
 and the author will revise until approved or the round budget runs out."
                 .to_string(),
         })
+    }
+
+    /// Build the built-in Code Flow for one task and start it. Shared by the
+    /// user-facing `start_code_workflow` (which adds the task-list guard first) and
+    /// the task-list driver (which calls this per task — the list is itself the
+    /// reason a user's ad-hoc workflow is refused, so the driver must NOT re-check
+    /// that guard). Authorization + single provider resolution happen in
+    /// `authorize_and_resolve_workflow_parent`.
+    pub(super) async fn start_code_flow_internal(
+        &self,
+        device_id: &str,
+        task_prompt: &str,
+        reviewer_provider: &str,
+        reviewer_model: Option<String>,
+        reviewer_instructions: Option<String>,
+        max_rounds: u32,
+        parent_thread_id: Option<String>,
+        anchor_item_id: String,
+    ) -> Result<String, String> {
+        let max_rounds = max_rounds.clamp(1, MAX_CODE_FLOW_ROUNDS);
+        self.resolve_provider(Some(reviewer_provider))?;
+        let _slot = self.acquire_session_slot()?;
+        let (parent_thread_id, author_provider, cwd) = self
+            .authorize_and_resolve_workflow_parent(device_id, parent_thread_id)
+            .await?;
+        let workflow = code_flow_workflow(
+            &author_provider,
+            task_prompt,
+            reviewer_provider,
+            reviewer_model,
+            reviewer_instructions,
+            max_rounds,
+        );
+        // The built-in shape is always valid; keep the guard so a future template
+        // tweak can't silently ship a shape the runner can't honor.
+        validate_workflow_shape(&workflow, &author_provider)?;
+        let mut anchor = anchor_item_id;
+        truncate_utf8_bytes_with_ellipsis(&mut anchor, WORKFLOW_ANCHOR_STORED_BYTES);
+        Ok(self
+            .record_and_spawn_workflow(
+                workflow,
+                parent_thread_id,
+                cwd,
+                anchor,
+                device_id.to_string(),
+            )
+            .await)
     }
 
     /// Validate, record a `WorkflowRun`, and spawn the orchestrator. Returns the
@@ -237,7 +275,7 @@ and the author will revise until approved or the round budget runs out."
     /// author thread (falling back to the active thread), mirroring `request_review`,
     /// so Code Flow can launch on an idle background thread while the active session is
     /// busy elsewhere.
-    async fn authorize_and_resolve_workflow_parent(
+    pub(super) async fn authorize_and_resolve_workflow_parent(
         &self,
         device_id: &str,
         parent_thread_id: Option<String>,

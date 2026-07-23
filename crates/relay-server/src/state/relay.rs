@@ -22,8 +22,9 @@ use crate::{
 
 use super::{
     ensure_path_within_device_scope, persistence::PersistedRelayState, unix_now, ReviewJob,
-    RunStatus, SecurityProfile, WorkflowRun, CONTROLLER_LEASE_SECS, DEFAULT_APPROVAL_POLICY,
-    DEFAULT_EFFORT, DEFAULT_MODEL, DEFAULT_SANDBOX, STALE_TURN_PROGRESS_TIMEOUT_SECS,
+    RunStatus, SecurityProfile, TaskListRun, WorkflowRun, CONTROLLER_LEASE_SECS,
+    DEFAULT_APPROVAL_POLICY, DEFAULT_EFFORT, DEFAULT_MODEL, DEFAULT_SANDBOX,
+    STALE_TURN_PROGRESS_TIMEOUT_SECS,
 };
 
 pub use self::approval::{ApprovalKind, PendingApproval};
@@ -313,6 +314,12 @@ pub struct RelayState {
     /// reconciles any non-terminal run to the terminal `Interrupted` state (no
     /// orchestrator survives a restart). `pub(super)` so the persistence writer reads it.
     pub(super) workflow_jobs: HashMap<String, WorkflowRun>,
+    /// Relay-owned task-list runs, keyed by run id. A `TaskListRun` drives a
+    /// sequence of child Code Flow `WorkflowRun`s (one per task). Like
+    /// `workflow_jobs`, NON-terminal runs persist so a restart can reconcile a
+    /// stranded list to `Interrupted` and offer re-run from the last completed task.
+    /// `pub(super)` so the persistence writer reads it.
+    pub(super) task_list_jobs: HashMap<String, TaskListRun>,
     /// Web Push subscriptions for remote devices, keyed by `device_id` (a device
     /// can have several browser subscriptions; deduped by endpoint). Persisted so
     /// a closed/locked phone keeps receiving pushes across a relay restart.
@@ -392,6 +399,7 @@ impl RelayState {
             reviewer_threads: HashMap::new(),
             reviewer_thread_seq: 0,
             workflow_jobs: HashMap::new(),
+            task_list_jobs: HashMap::new(),
             push_subscriptions: HashMap::new(),
             push_tx: None,
             push_vapid_public_key: None,
@@ -1247,6 +1255,59 @@ impl RelayState {
         self.workflow_jobs
             .values()
             .any(|run| !run.status.is_terminal())
+    }
+
+    pub(crate) fn insert_task_list_run(&mut self, run: TaskListRun) {
+        self.prune_task_list_runs();
+        self.task_list_jobs.insert(run.id.clone(), run);
+    }
+
+    pub(crate) fn task_list_run(&self, id: &str) -> Option<&TaskListRun> {
+        self.task_list_jobs.get(id)
+    }
+
+    pub(crate) fn update_task_list_run<F: FnOnce(&mut TaskListRun)>(
+        &mut self,
+        id: &str,
+        update: F,
+    ) -> bool {
+        match self.task_list_jobs.get_mut(id) {
+            Some(run) => {
+                update(run);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Whether any task-list run is still non-terminal. One list at a time (mirrors
+    /// `has_active_workflow`); checked under the session slot so check + insert is
+    /// atomic against a concurrent start.
+    pub(crate) fn has_active_task_list(&self) -> bool {
+        self.task_list_jobs
+            .values()
+            .any(|run| !run.status.is_terminal())
+    }
+
+    /// Hard-cap retained task-list runs, evicting the oldest TERMINAL runs first
+    /// (mirrors `prune_workflow_runs`). Non-terminal runs are never auto-evicted.
+    fn prune_task_list_runs(&mut self) {
+        if self.task_list_jobs.len() < MAX_WORKFLOW_RUNS {
+            return;
+        }
+        let mut terminal: Vec<(String, u64)> = self
+            .task_list_jobs
+            .iter()
+            .filter(|(_, run)| run.status.is_terminal())
+            .map(|(id, run)| (id.clone(), run.updated_at))
+            .collect();
+        terminal.sort_by_key(|(_, updated_at)| *updated_at);
+        for (id, _) in terminal {
+            if self.task_list_jobs.len() < MAX_WORKFLOW_RUNS {
+                break;
+            }
+            self.task_list_jobs.remove(&id);
+        }
     }
 
     /// Hard-cap retained workflow runs, evicting the oldest TERMINAL runs first

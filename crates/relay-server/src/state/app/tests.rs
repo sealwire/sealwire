@@ -7343,6 +7343,117 @@ mod review_tests {
 
     const WORKFLOW_TERMINAL: &[&str] = &["done", "escalated", "failed", "interrupted", "cancelled"];
 
+    async fn wait_for_task_list_status(app: &AppState, run_id: &str, statuses: &[&str]) -> String {
+        for _ in 0..800 {
+            if let Some(status) = app
+                .relay
+                .read()
+                .await
+                .task_list_run(run_id)
+                .map(|run| run.status.as_str().to_string())
+            {
+                if statuses.contains(&status.as_str()) {
+                    return status;
+                }
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        panic!("task list {run_id} never reached {statuses:?}");
+    }
+
+    #[tokio::test]
+    async fn task_list_runs_two_tasks_serially_to_done() {
+        use crate::state::{CheckpointMode, EscalatePolicy, TaskItem};
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let _parent = start_parent(&app, cwd, "codex").await;
+        // Each task's Code Flow is execute -> review APPROVE -> Done, so two tasks
+        // consume two reviewer verdicts. If the driver ran them concurrently (or
+        // skipped one) the counts below would be wrong.
+        queue_verdicts(providers.get("codex").unwrap(), &["APPROVE", "APPROVE"]).await;
+
+        let tasks = vec![
+            TaskItem::new("t0", "do task 0", "codex", None, None, 1),
+            TaskItem::new("t1", "do task 1", "codex", None, None, 1),
+        ];
+        let run_id = app
+            .start_task_list(
+                Some("device-1".to_string()),
+                "Nightly".to_string(),
+                tasks,
+                None,
+                EscalatePolicy::Halt,
+                CheckpointMode::None,
+                String::new(),
+            )
+            .await
+            .expect("task list should start");
+
+        let status =
+            wait_for_task_list_status(&app, &run_id, &["done", "escalated", "failed"]).await;
+        assert_eq!(status, "done", "both tasks approved -> list Done");
+
+        let relay = app.relay.read().await;
+        let run = relay.task_list_run(&run_id).expect("run exists");
+        assert_eq!(run.done_count(), 2, "both tasks reached Done");
+        assert_eq!(run.current_index, 2, "cursor advanced past both tasks");
+        assert!(
+            run.tasks.iter().all(|task| task.child_run_id.is_some()),
+            "each task recorded the child workflow that ran it"
+        );
+    }
+
+    #[tokio::test]
+    async fn task_list_halts_and_skips_remaining_on_escalation() {
+        use crate::state::{CheckpointMode, EscalatePolicy, TaskItem, TaskStatus};
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let _parent = start_parent(&app, cwd, "codex").await;
+        // Task 0's single review round is NEEDS_CHANGES -> escalates (max_rounds=1).
+        // Only ONE verdict is queued: task 1 must never run, so it never consumes one.
+        queue_verdicts(providers.get("codex").unwrap(), &["NEEDS_CHANGES"]).await;
+
+        let tasks = vec![
+            TaskItem::new("t0", "do task 0", "codex", None, None, 1),
+            TaskItem::new("t1", "do task 1", "codex", None, None, 1),
+        ];
+        let run_id = app
+            .start_task_list(
+                Some("device-1".to_string()),
+                "Halt list".to_string(),
+                tasks,
+                None,
+                EscalatePolicy::Halt,
+                CheckpointMode::None,
+                String::new(),
+            )
+            .await
+            .expect("task list should start");
+
+        let status =
+            wait_for_task_list_status(&app, &run_id, &["done", "escalated", "failed"]).await;
+        assert_eq!(
+            status, "escalated",
+            "escalation under Halt -> list Escalated"
+        );
+
+        let relay = app.relay.read().await;
+        let run = relay.task_list_run(&run_id).expect("run exists");
+        assert_eq!(run.tasks[0].status, TaskStatus::Escalated);
+        assert_eq!(
+            run.tasks[1].status,
+            TaskStatus::Skipped,
+            "the later task is skipped by the halt"
+        );
+        assert!(
+            run.tasks[1].child_run_id.is_none(),
+            "a skipped task never started a workflow"
+        );
+        assert_eq!(run.done_count(), 0);
+    }
+
     #[tokio::test]
     async fn workflow_completes_after_revise_then_approve() {
         let dir = TempDir::new().expect("tmpdir");
