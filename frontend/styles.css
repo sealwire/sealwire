@@ -2909,6 +2909,33 @@ input:focus, textarea:focus, select:focus {
     height: 100dvh;
     overflow: hidden;
   }
+  /* Local narrow: mirror the remote surface so the transcript is an ELEMENT
+   * scroller here too (no window scroll). Historically the local narrow layout
+   * left `.app-shell` at height:auto, so the whole page scrolled — which forced
+   * the stick-to-bottom follower to listen on `window` and gate transcript
+   * gestures apart from sidebar/drawer ones. Pinning the conversation to one
+   * viewport makes `.chat-thread` the scroller everywhere, so that window layer
+   * is gone. The `.chat-shell` fills the viewport with `.chat-thread` scrolling
+   * internally and the composer docked at the bottom; the sidebar (thread nav)
+   * and the workspace-changes rail are hidden in this narrow conversation view —
+   * the reader navigates threads from the console view — matching how the remote
+   * surface drawers its sidebar away while a conversation is open. */
+  .app-shell[data-view="conversation"]:not(.remote-app-shell) {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    height: 100dvh;
+    overflow: hidden;
+  }
+  .app-shell[data-view="conversation"]:not(.remote-app-shell) > .sidebar {
+    display: none;
+  }
+  .app-shell[data-view="conversation"]:not(.remote-app-shell) > .chat-shell {
+    flex: 1 1 0;
+    min-height: 0;
+    height: auto;
+    overflow: hidden;
+  }
   .chat-header {
     grid-template-columns: minmax(0, 1fr) auto;
     padding: 14px 16px 12px;

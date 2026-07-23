@@ -2352,7 +2352,11 @@ function RemoteTranscriptPanel({
       restoredScrollTop,
       scrollElement: transcript,
     });
-    if (action?.kind === "anchor-user" && action.userEntryId) {
+    // A new-user-message jump-bottom carries userEntryId: record it so we only
+    // jump to the bottom once per sent message (a reader who scrolls up
+    // mid-stream is not yanked back down). Thread-switch jump-bottom carries no
+    // userEntryId and is one-shot on its own.
+    if (action?.userEntryId) {
       anchorsForThread.add(action.userEntryId);
       anchoredUserIdsRef.current.set(remoteScrollKey, anchorsForThread);
     }

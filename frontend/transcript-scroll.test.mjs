@@ -119,7 +119,10 @@ test("per-thread scroll positions use bounded LRU retention", () => {
 
 // --- new user message ------------------------------------------------------
 
-test("a new user message anchors the message to the top of the viewport", () => {
+test("a new user message follows to the bottom (bottom-follow, no top-anchor)", () => {
+  // Bottom-follow: a freshly sent message locks the transcript to the bottom and
+  // the reply streams below the fold — it is NOT pinned to the top of the
+  // viewport (that top-anchor mode, plus its 60vh reserve, is gone).
   const { target } = makeScrollElement({ scrollHeight: 3000, clientHeight: 400 });
   const action = decideTranscriptScrollAction({
     nextEntries: [userEntry("u1"), agentEntry("a1"), userEntry("u2")],
@@ -133,8 +136,8 @@ test("a new user message anchors the message to the top of the viewport", () => 
     },
     scrollElement: target,
   });
-  assert.equal(action.kind, "anchor-user");
-  assert.equal(action.userEntryId, "u2");
+  assert.equal(action.kind, "jump-bottom");
+  assert.equal(action.scrollTop, 2600);
 });
 
 test("alreadyAnchoredUserIds suppresses re-anchoring a user message we've already pinned", () => {
@@ -257,30 +260,12 @@ test("applyTranscriptScrollAction restore-thread assigns the retained scrollTop"
   assert.equal(target.scrollTop, 437);
 });
 
-test("applyTranscriptScrollAction anchor-user scrolls the marked element to top", () => {
-  const { target } = makeScrollElement({ scrollTop: 0 });
-  let intoViewArgs = null;
-  target._queryResult = {
-    offsetTop: 700,
-    scrollIntoView(arg) {
-      intoViewArgs = arg;
-    },
-  };
-  applyTranscriptScrollAction(
-    { kind: "anchor-user", userEntryId: "u2" },
-    target
-  );
-  assert.deepEqual(intoViewArgs, { block: "start", behavior: "auto" });
-});
-
-test("applyTranscriptScrollAction anchor-user falls back to offsetTop if no scrollIntoView", () => {
-  const { target } = makeScrollElement({ scrollTop: 0 });
-  target._queryResult = { offsetTop: 700 };
-  applyTranscriptScrollAction(
-    { kind: "anchor-user", userEntryId: "u2" },
-    target
-  );
-  assert.equal(target.scrollTop, 700);
+test("anchor-user is retired (bottom-follow): apply ignores it, no scroll", () => {
+  const { calls, target } = makeScrollElement({ scrollTop: 0 });
+  target._queryResult = { offsetTop: 700, scrollIntoView() {} };
+  applyTranscriptScrollAction({ kind: "anchor-user", userEntryId: "u2" }, target);
+  assert.equal(target.scrollTop, 0);
+  assert.equal(calls.filter((c) => c.kind === "scrollTop").length, 0);
 });
 
 test("applyTranscriptScrollAction preserve leaves the DOM untouched", () => {
@@ -412,11 +397,12 @@ test("retargetTranscriptScrollThread is a safe no-op for unrelated or missing st
   assert.equal(retargetTranscriptScrollThread(state, "a", "a"), false);
 });
 
-test("first send after pending->real promotion still anchors (not jump-bottom)", () => {
+test("first send after pending->real promotion classifies as a new user message (jump-bottom + userEntryId)", () => {
   // A deferred Claude session records its empty snapshot under the synthetic
   // `claude-pending-*` id; the first send promotes the thread to its real id.
   // After retargeting, the first entries must classify as a new user message
-  // (anchor-user) — NOT as a thread switch (jump-bottom + brief sticky).
+  // — a bottom-follow jump-bottom carrying userEntryId (fire-once) — NOT as a
+  // plain thread switch, whose jump-bottom carries no userEntryId.
   const { target } = makeScrollElement();
   const state = {
     localTranscriptScrollSnapshot: captureTranscriptScrollSnapshot({
@@ -432,7 +418,8 @@ test("first send after pending->real promotion still anchors (not jump-bottom)",
     previousSnapshot: state.localTranscriptScrollSnapshot,
     scrollElement: target,
   });
-  assert.equal(action.kind, "anchor-user");
+  assert.equal(action.kind, "jump-bottom");
+  assert.equal(action.userEntryId, "u1");
 });
 
 test("retargetRemoteTranscriptScroll rekeys pane refs across a pending promotion", () => {
@@ -462,7 +449,7 @@ test("retargetRemoteTranscriptScroll rekeys pane refs across a pending promotion
   assert.ok(anchoredUserIds.get("relay-1:real-3").has("u1"));
 });
 
-test("remote promotion rekey keeps the first send classified as anchor-user", () => {
+test("remote promotion rekey keeps the first send classified as a new user message", () => {
   const { target } = makeScrollElement();
   const snapshot = {
     ...captureTranscriptScrollSnapshot({
@@ -487,7 +474,8 @@ test("remote promotion rekey keeps the first send classified as anchor-user", ()
     previousSnapshot: snapshot,
     scrollElement: target,
   });
-  assert.equal(action.kind, "anchor-user");
+  assert.equal(action.kind, "jump-bottom");
+  assert.equal(action.userEntryId, "u1");
 });
 
 test("retargetRemoteTranscriptScroll is a safe no-op when nothing matches", () => {

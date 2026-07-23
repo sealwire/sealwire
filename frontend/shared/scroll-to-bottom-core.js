@@ -10,48 +10,19 @@
 // flickering on when the reader is effectively pinned to the latest content.
 export const SCROLL_TO_BOTTOM_THRESHOLD_PX = 160;
 
-// Resolve the scrollable ancestor that owns the transcript. On desktop the
-// `.chat-thread` box scrolls (the chat shell is a fixed-height, overflow:hidden
-// box; `.chat-thread` is the overflow:auto child). On phone the shell is
-// height:auto and the page/window scrolls instead, so `.chat-thread` is exactly
-// as tall as its content and never overflows — in that case the window is the
-// real scroller. Mirrors findTranscriptScrollElement in transcript-react.js.
-// Resolved fresh on each read so it adapts as the transcript grows past the
-// viewport.
+// Resolve the scrollable ancestor that owns the transcript. The transcript is an
+// ELEMENT scroller on every surface now (desktop, remote, and the narrow local
+// conversation view are all pinned to one viewport with `.chat-thread` — the
+// overflow:auto child of a fixed-height, overflow:hidden shell — doing the
+// scrolling), so this is simply the nearest `.chat-thread`. Mirrors
+// findTranscriptScrollElement in transcript-react.js.
 export function findScrollContainer(node) {
-  const container = node?.closest?.(".chat-thread") || null;
-  if (container && (container.scrollHeight || 0) > (container.clientHeight || 0) + 1) {
-    return container;
-  }
-  return node?.ownerDocument?.defaultView || container || null;
+  return node?.closest?.(".chat-thread") || null;
 }
 
-// True for the window / defaultView (as opposed to a scrollable element like
-// `.chat-thread`). Exported so the follower can tell whether the transcript's
-// active scroller is the window before treating window-level gestures as
-// transcript scroll intent.
-export function isWindowLike(scrollEl) {
-  return Boolean(
-    scrollEl
-      && (scrollEl === scrollEl.window
-        || (typeof scrollEl.scrollY === "number" && scrollEl.document))
-  );
-}
-
-// Normalize scroll geometry for either a scrollable element or the window so the
-// rest of the helpers don't have to branch.
+// Read scroll geometry from the `.chat-thread` element scroller.
 export function readScrollMetrics(scrollEl) {
   if (!scrollEl) return null;
-  if (isWindowLike(scrollEl)) {
-    const doc = scrollEl.document?.scrollingElement
-      || scrollEl.document?.documentElement
-      || null;
-    return {
-      scrollTop: scrollEl.scrollY || 0,
-      clientHeight: scrollEl.innerHeight || doc?.clientHeight || 0,
-      scrollHeight: doc?.scrollHeight || 0,
-    };
-  }
   return {
     scrollTop: scrollEl.scrollTop || 0,
     clientHeight: scrollEl.clientHeight || 0,
