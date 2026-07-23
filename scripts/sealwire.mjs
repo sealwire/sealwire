@@ -16,6 +16,7 @@ const require = createRequire(import.meta.url);
 const DEFAULT_PUBLIC_BROKER_ORIGIN = "";
 const defaultPort = "8787";
 const defaultHost = "127.0.0.1";
+const KNOWN_COMMANDS = new Set(["local"]);
 
 const args = parseArgs(process.argv.slice(2));
 
@@ -79,6 +80,22 @@ if (brokerConfig) {
   env.RELAY_BROKER_CONTROL_URL =
     process.env.RELAY_BROKER_CONTROL_URL || brokerConfig.controlUrl;
   env.RELAY_BROKER_AUTH_MODE = process.env.RELAY_BROKER_AUTH_MODE || "public";
+} else if (args.noBroker) {
+  // Explicit local intent (`sealwire local` / `--no-broker`): the relay-server
+  // connects to a broker whenever RELAY_BROKER_URL is present in its environment
+  // (crates/relay-server/src/broker.rs), so a stray value forwarded from the
+  // caller's shell would silently defeat local mode. Strip EVERY RELAY_BROKER_*
+  // variable, matched case-insensitively:
+  //   - case-insensitive because Windows environment names are case-insensitive,
+  //     so an ambient `relay_broker_url` would otherwise survive and reappear to
+  //     the child as RELAY_BROKER_URL (Windows is a supported target);
+  //   - the whole prefix (not a hand-picked list) because this env is inherited
+  //     by spawned provider processes too, so broker identity, ticket secrets,
+  //     and registration/identity paths should not linger either.
+  stripBrokerEnv(env);
+  console.log(
+    "sealwire: local mode — no public broker; remote pairing disabled."
+  );
 } else {
   console.warn(
     "sealwire: no public broker configured; starting localhost-only relay. " +
@@ -126,6 +143,7 @@ child.on("exit", (code, signal) => {
 function parseArgs(argv) {
   const parsed = {
     broker: null,
+    command: null,
     help: false,
     host: null,
     noBroker: false,
@@ -139,6 +157,18 @@ function parseArgs(argv) {
       parsed.help = true;
     } else if (arg === "--no-broker") {
       parsed.noBroker = true;
+    } else if (
+      parsed.command === null &&
+      !arg.startsWith("-") &&
+      KNOWN_COMMANDS.has(arg)
+    ) {
+      // The only positional we accept is a leading subcommand. `local` is a
+      // friendly alias for `--no-broker`: run a localhost-only relay and never
+      // reach for a public broker, even if one is configured.
+      parsed.command = arg;
+      if (arg === "local") {
+        parsed.noBroker = true;
+      }
     } else if (arg === "--broker") {
       parsed.broker = requireValue(argv, (index += 1), arg);
     } else if (arg.startsWith("--broker=")) {
@@ -157,6 +187,18 @@ function parseArgs(argv) {
   }
 
   return parsed;
+}
+
+function stripBrokerEnv(env) {
+  // Delete every key whose name — uppercased — begins with RELAY_BROKER_. The
+  // uppercasing makes this correct on Windows, where `relay_broker_url` and
+  // `RELAY_BROKER_URL` name the same variable and the relay-server would read
+  // either as the broker URL.
+  for (const key of Object.keys(env)) {
+    if (key.toUpperCase().startsWith("RELAY_BROKER_")) {
+      delete env[key];
+    }
+  }
 }
 
 function requireValue(argv, index, flag) {
@@ -304,7 +346,14 @@ function printHelp() {
 Run a local relay-server from the npm package.
 
 Usage:
-  sealwire [--broker <url>] [--port <port>] [--host <ip>] [--no-broker]
+  sealwire [local] [--broker <url>] [--port <port>] [--host <ip>] [--no-broker]
+
+Commands:
+  local         Run with no public broker; remote pairing is disabled (alias for
+                --no-broker). Ignores any configured broker origin and strips
+                every RELAY_BROKER_* variable (case-insensitively) so the relay
+                never dials out. Does not change the bind host — pass --host to
+                control network exposure.
 
 Defaults:
   --host        127.0.0.1
@@ -318,6 +367,7 @@ Binary resolution:
 
 Examples:
   sealwire
+  sealwire local
   sealwire --broker https://broker.example.com
   AGENT_RELAY_PUBLIC_BROKER_URL=https://broker.example.com npx sealwire
   sealwire --no-broker

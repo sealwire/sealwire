@@ -52,6 +52,13 @@ broker:
 npx sealwire --broker wss://agent-relay.up.railway.app
 ```
 
+For a guaranteed no-broker run — even if a broker origin is configured in your
+environment — use the `local` command:
+
+```bash
+npx sealwire local
+```
+
 You still need agent auth for whichever provider you use:
 
 - **Codex** — the [`codex`](https://github.com/openai/codex) CLI installed and
@@ -333,17 +340,24 @@ platforms `npx sealwire` still runs, but it falls back to building
 `relay-server` from source via Cargo.
 
 By default `npx sealwire` starts a **localhost-only** relay; it does not attach
-to a broker unless you tell it to. Flags:
+to a broker unless you tell it to. Commands and flags:
 
 ```bash
 # pair remote devices through the hosted public broker
 sealwire --broker wss://agent-relay.up.railway.app
 
-sealwire --no-broker                    # explicit localhost-only
+sealwire local                          # no public broker (alias for --no-broker)
+sealwire --no-broker                    # same: run without a broker
 sealwire --host 127.0.0.1 --port 8787   # bind address / port
 ```
 
 You can also set `AGENT_RELAY_PUBLIC_BROKER_URL` instead of passing `--broker`.
+
+The `local` command (and `--no-broker`) is an explicit "stay offline" request:
+it ignores any configured broker origin **and** strips every `RELAY_BROKER_*`
+variable from the environment — case-insensitively, so a stray `relay_broker_url`
+on Windows can't sneak back in — before starting the relay. It does not change
+the bind host; pass `--host` if you need to control network exposure.
 
 ### Minimal env vars (public broker)
 
