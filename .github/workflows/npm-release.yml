@@ -18,7 +18,7 @@ jobs:
       matrix:
         include:
           - target: darwin-arm64
-            runner: macos-14
+            runner: macos-15
             cargo_target: aarch64-apple-darwin
             executable: relay-server
           # Cross-compile the Intel binary on an Apple Silicon runner. macos-13
@@ -27,7 +27,7 @@ jobs:
           # cc-built C deps (e.g. rusqlite bundled) pick up `-arch x86_64`
           # automatically from the target triple.
           - target: darwin-x64
-            runner: macos-14
+            runner: macos-15
             cargo_target: x86_64-apple-darwin
             executable: relay-server
           # Temporarily Mac-only: Linux and Windows targets are commented out
