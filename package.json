@@ -1,6 +1,6 @@
 {
   "name": "sealwire",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Local-first, privacy-first control plane for coding agents (Codex & Claude Code) with optional public broker pairing.",
   "license": "Elastic-2.0",
   "author": "Yikai Lan <sealwire.dev@gmail.com>",
