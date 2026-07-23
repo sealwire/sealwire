@@ -13,6 +13,8 @@ on:
       - package-lock.json
       - package.json
       - railway.toml
+      - scripts/railway-deploy.mjs
+      - scripts/railway-deploy.test.mjs
       - vite.config.js
       - .github/workflows/railway-broker-deploy.yml
 
@@ -75,6 +77,7 @@ jobs:
     name: deploy-public-broker
     needs: gate
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       RAILWAY_SERVICE_ID: ${{ vars.RAILWAY_SERVICE_ID }}
       RAILWAY_PROJECT_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
@@ -109,35 +112,20 @@ jobs:
 
       - name: Install Railway CLI
         if: steps.railway_inputs.outputs.ready == 'true'
-        run: npm install -g @railway/cli
+        run: |
+          npm install -g @railway/cli@5.28.0
+          railway --version
 
       - name: Deploy to Railway
         if: steps.railway_inputs.outputs.ready == 'true'
         shell: bash
         run: |
-          status=1
-          for attempt in 1 2 3; do
-            if [ -n "${RAILWAY_ACCOUNT_TOKEN:-}" ]; then
-              export RAILWAY_API_TOKEN="$RAILWAY_ACCOUNT_TOKEN"
-              unset RAILWAY_TOKEN
-            else
-              export RAILWAY_TOKEN="$RAILWAY_PROJECT_TOKEN"
-              unset RAILWAY_API_TOKEN
-            fi
+          if [ -n "${RAILWAY_ACCOUNT_TOKEN:-}" ]; then
+            export RAILWAY_API_TOKEN="$RAILWAY_ACCOUNT_TOKEN"
+            unset RAILWAY_TOKEN
+          else
+            export RAILWAY_TOKEN="$RAILWAY_PROJECT_TOKEN"
+            unset RAILWAY_API_TOKEN
+          fi
 
-            if railway up --ci --service "$RAILWAY_SERVICE_ID"; then
-              exit 0
-            else
-              # Capture railway's real exit code here: `$?` read as the first
-              # command of the else branch is the failed condition's status.
-              # (After `fi`, `$?` would be the if-statement's status — 0 when no
-              # branch ran — which previously masked failures as success.)
-              status=$?
-            fi
-            echo "::warning::railway up failed on attempt ${attempt} with exit code ${status}."
-            if [ "$attempt" -lt 3 ]; then
-              sleep $((attempt * 20))
-            fi
-          done
-          echo "::error::railway up failed after 3 attempts (exit ${status})."
-          exit "$status"
+          node scripts/railway-deploy.mjs
