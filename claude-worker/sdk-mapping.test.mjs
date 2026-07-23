@@ -444,6 +444,31 @@ test("mapSessionMessages keeps an image-only user turn visible after history rel
   assert.equal(entries[0].text, "[Attached image]");
 });
 
+test("mapSessionMessages marks images attached to a text user turn", () => {
+  const entries = mapSessionMessages([
+    {
+      type: "user",
+      uuid: "mixed-user",
+      message: {
+        content: [
+          {
+            type: "image",
+            source: {
+              type: "base64",
+              media_type: "image/png",
+              data: "iVBORw0KGgo=",
+            },
+          },
+          { type: "text", text: "Inspect this screenshot" },
+        ],
+      },
+    },
+  ]);
+
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].text, "Inspect this screenshot\n\n[Attached image]");
+});
+
 // The LIVE request path must not ship an input-derived diff. At tool_call_requested
 // time the edit hasn't landed, so the real on-disk diff is unknown; the worker's
 // file-diff tracker recomputes the authoritative diff on tool_call_result. Shipping

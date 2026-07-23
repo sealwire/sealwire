@@ -73,6 +73,36 @@ fn parse_transcript_keeps_an_image_only_user_turn_visible() {
 }
 
 #[test]
+fn parse_transcript_marks_images_attached_to_a_text_user_turn() {
+    let thread = json!({
+        "turns": [{
+            "id": "turn-mixed",
+            "items": [{
+                "id": "item-mixed",
+                "type": "userMessage",
+                "content": [
+                    {
+                        "type": "image",
+                        "url": "data:image/png;base64,iVBORw0KGgo="
+                    },
+                    {
+                        "type": "text",
+                        "text": "Inspect this screenshot"
+                    }
+                ]
+            }]
+        }]
+    });
+
+    let transcript = parse_transcript(&thread);
+    assert_eq!(transcript.len(), 1);
+    assert_eq!(
+        transcript[0].text.as_deref(),
+        Some("Inspect this screenshot\n\n[Attached image]")
+    );
+}
+
+#[test]
 fn parse_transcript_truncates_large_tool_payloads() {
     let huge_result = "A".repeat(MAX_TOOL_JSON_CHARS * 4);
     let thread = json!({

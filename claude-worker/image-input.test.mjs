@@ -27,7 +27,7 @@ test("createUserTurn sends Claude image blocks before prompt text", () => {
     },
     { type: "text", text: "Inspect this screenshot" },
   ]);
-  assert.equal(turn.event.text, "Inspect this screenshot");
+  assert.equal(turn.event.text, "Inspect this screenshot\n\n[Attached image]");
 });
 
 test("createUserTurn preserves the string content shape for text-only turns", () => {

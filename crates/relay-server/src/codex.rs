@@ -1769,11 +1769,7 @@ fn parse_user_text(item: Option<&Value>) -> Option<String> {
         })
         .count();
 
-    if parts.is_empty() {
-        user_message_transcript_text("", image_count)
-    } else {
-        Some(parts.join("\n"))
-    }
+    user_message_transcript_text(&parts.join("\n"), image_count)
 }
 
 fn non_empty_string(value: Option<String>) -> Option<String> {

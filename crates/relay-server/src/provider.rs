@@ -51,13 +51,15 @@ impl ProviderImage {
 }
 
 pub fn user_message_transcript_text(text: &str, image_count: usize) -> Option<String> {
-    if !text.is_empty() {
-        return Some(text.to_string());
-    }
-    match image_count {
-        0 => None,
-        1 => Some("[Attached image]".to_string()),
-        count => Some(format!("[Attached {count} images]")),
+    let image_label = match image_count {
+        0 => return (!text.is_empty()).then(|| text.to_string()),
+        1 => "[Attached image]".to_string(),
+        count => format!("[Attached {count} images]"),
+    };
+    if text.is_empty() {
+        Some(image_label)
+    } else {
+        Some(format!("{text}\n\n{image_label}"))
     }
 }
 

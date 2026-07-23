@@ -22,10 +22,14 @@ function textFromContent(content) {
 }
 
 export function userMessageTranscriptText(text, imageCount) {
-  if (text) return text;
-  if (imageCount === 1) return "[Attached image]";
-  if (imageCount > 1) return `[Attached ${imageCount} images]`;
-  return "";
+  const imageLabel =
+    imageCount === 1
+      ? "[Attached image]"
+      : imageCount > 1
+        ? `[Attached ${imageCount} images]`
+        : "";
+  if (!imageLabel) return text || "";
+  return text ? `${text}\n\n${imageLabel}` : imageLabel;
 }
 
 function previewJson(value, max = 1000) {
