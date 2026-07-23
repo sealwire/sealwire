@@ -366,3 +366,43 @@ jobs:
           path: artifacts/e2e
           if-no-files-found: ignore
           retention-days: 7
+
+  # Desktop (Tauri) compile guard — DISABLED for now. The src-tauri crate is
+  # excluded from the root cargo workspace (Cargo.toml `exclude = ["src-tauri"]`),
+  # so `cargo check --workspace` never compiles it and nothing here guards the
+  # desktop build. Re-enable (uncomment) when we start shipping the desktop app /
+  # dmg — at that point decide the trigger (e.g. release tags or workflow_dispatch
+  # rather than every push). Notes for whoever re-enables it:
+  #   - Must run on macOS: scripts/tauri-prepare-sidecar.mjs downloads the bundled
+  #     macOS Node runtime and hard-fails on other platforms. Use macos-15
+  #     (macos-14 is deprecated, removal ~2026-11-02).
+  #   - `npm run desktop:check` runs the real beforeBuild pipeline (vite build +
+  #     sidecar staging of relay-server + bundled node + claude-worker) then
+  #     `cargo check` on src-tauri. No dmg is produced or signed.
+  #   - The desktop crate builds into its own src-tauri/target, so the Rust cache
+  #     must cover both `. -> target` and `src-tauri -> target`.
+  #
+  # desktop-check:
+  #   name: desktop-check
+  #   runs-on: macos-15
+  #   timeout-minutes: 30
+  #   steps:
+  #     - name: Checkout
+  #       uses: actions/checkout@v5
+  #     - name: Setup Node
+  #       uses: actions/setup-node@v5
+  #       with:
+  #         node-version: 22
+  #         cache: npm
+  #     - name: Install Rust
+  #       uses: dtolnay/rust-toolchain@stable
+  #     - name: Cache Rust build
+  #       uses: Swatinem/rust-cache@v2
+  #       with:
+  #         workspaces: |
+  #           . -> target
+  #           src-tauri -> target
+  #     - name: npm ci
+  #       run: npm ci
+  #     - name: Desktop build check
+  #       run: npm run desktop:check
