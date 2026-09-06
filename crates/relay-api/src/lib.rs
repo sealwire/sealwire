@@ -37,6 +37,7 @@ use serde::{Deserialize, Serialize};
 pub mod orchestration;
 pub mod review;
 pub mod team;
+pub mod team_command;
 
 pub use review::{
     AnchorStatus, CommentSide, FileReviewTickStatus, FileReviewTickView, LineAnchor,
@@ -408,14 +409,6 @@ impl std::fmt::Debug for Orchestrators {
     }
 }
 
-/// An atomic mutation of one public team record.
-///
-/// The record remains public in the first 80/20 split because persistence and
-/// the current UI consume it directly. The closure lets the private workflow
-/// advance that record under the relay's existing write lock without exposing
-/// `AppState` or permitting a stale read-modify-write replacement.
-pub type TeamRunMutation = Box<dyn FnOnce(&mut team::TeamRun) + Send + 'static>;
-
 /// A mechanism failure returned across the task-team seam.
 ///
 /// The public side classifies the failure but does not settle or log the run;
@@ -437,7 +430,14 @@ pub enum TeamPortError {
 #[async_trait::async_trait]
 pub trait TeamPort: Send + Sync {
     async fn run_snapshot(&self, run_id: &str) -> Option<team::TeamRun>;
-    async fn update_run(&self, run_id: &str, mutation: TeamRunMutation) -> bool;
+    /// Validate and apply one local state command (T4) — see `team_command`
+    /// and `.sealwire/DESIGN.md`. `None` means `run_id` names no run; every
+    /// other outcome, including every rejection, is a `Some` receipt.
+    async fn submit_command(
+        &self,
+        run_id: &str,
+        envelope: team_command::TeamCommandEnvelope,
+    ) -> Option<team_command::TeamCommandReceipt>;
 
     async fn update_status(&self, run_id: &str, status: team::TeamRunStatus);
     async fn fail_run(&self, run_id: &str, error: String);
@@ -529,4 +529,35 @@ pub trait TeamDriver: Send + Sync {
     /// the run after this future returns or unwinds, so an implementation cannot
     /// leave a permanently `Running` record by forgetting private cleanup.
     async fn drive(&self, port: std::sync::Arc<dyn TeamPort>, run_id: String);
+}
+
+#[cfg(test)]
+mod team_port_error_tests {
+    use super::TeamPortError;
+    use serde::Serialize;
+
+    /// `TeamPortError`'s `String` payloads are local diagnostic prose (see its
+    /// doc comment). Having no `Serialize` impl is what keeps that prose out of
+    /// the journal and the Cloud wire format; pin it so a future
+    /// `#[derive(Serialize)]` fails a build instead of silently widening the
+    /// seam.
+    #[test]
+    fn team_port_error_has_no_serialize_impl() {
+        struct Probe<T>(std::marker::PhantomData<T>);
+        trait NotSerializable {
+            fn holds() -> bool {
+                true
+            }
+        }
+        impl<T> NotSerializable for Probe<T> {}
+        #[allow(dead_code)]
+        trait IsSerializable {
+            fn holds() -> bool {
+                false
+            }
+        }
+        impl<T: Serialize> IsSerializable for Probe<T> {}
+
+        assert!(Probe::<TeamPortError>::holds());
+    }
 }

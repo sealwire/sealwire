@@ -2626,17 +2626,13 @@ it a turn ago"
         .await
         .expect("rerun_sub_tasks");
 
-        relay_api::TeamPort::update_run(
-            &app,
-            &run_id,
-            Box::new(|run| {
-                run.mr_rounds_used += 1;
-                run.mr_verdict = Some(relay_api::WorkflowVerdict::approved());
-                run.unresolved
-                    .push("the gate ran out of rounds".to_string());
-                run.phase = relay_api::team::TeamPhase::Wrapping;
-            }),
-        )
+        app.test_update_team_run(&run_id, |run| {
+            run.mr_rounds_used += 1;
+            run.mr_verdict = Some(relay_api::WorkflowVerdict::approved());
+            run.unresolved
+                .push("the gate ran out of rounds".to_string());
+            run.phase = relay_api::team::TeamPhase::Wrapping;
+        })
         .await;
 
         let run = app.team_run_snapshot(&run_id).await.expect("run");
@@ -2684,14 +2680,10 @@ it a turn ago"
         .await
         .expect("rerun_sub_tasks");
 
-        relay_api::TeamPort::update_run(
-            &app,
-            &run_id,
-            Box::new(|run| {
-                run.head_commit = Some("deadbee".to_string());
-                run.phase = relay_api::team::TeamPhase::Finished;
-            }),
-        )
+        app.test_update_team_run(&run_id, |run| {
+            run.head_commit = Some("deadbee".to_string());
+            run.phase = relay_api::team::TeamPhase::Finished;
+        })
         .await;
 
         let run = app.team_run_snapshot(&run_id).await.expect("run");

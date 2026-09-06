@@ -768,6 +768,34 @@ over on resume"
             .store(ms, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Fixture-only lock-scoped mutation, bypassing `TeamPort` entirely.
+    ///
+    /// AC-1 permits relay-internal closures under the write lock; what it
+    /// forbids is growing the driver-facing command vocabulary to serve test
+    /// setup. Plenty of fixtures need states no driver command can produce —
+    /// `run.request_stop(...)` is a USER action — so this goes straight to
+    /// `RelayState::update_team_run` instead. Reproduces the deleted
+    /// `TeamPort::update_run`'s exact contract, including the
+    /// `hold_phase_for_waiting_sub_tasks()` call: a fixture simulating a turn
+    /// landing (not just initial setup) can depend on that the same way a
+    /// real command does.
+    #[cfg(test)]
+    pub(crate) async fn test_update_team_run(
+        &self,
+        run_id: &str,
+        mutate: impl FnOnce(&mut TeamRun) + Send + 'static,
+    ) -> bool {
+        let mut relay = self.relay.write().await;
+        let updated = relay.update_team_run(run_id, |run| {
+            mutate(run);
+            run.hold_phase_for_waiting_sub_tasks();
+        });
+        if updated {
+            relay.notify();
+        }
+        updated
+    }
+
     fn release_team_drive(&self, run_id: &str) {
         if let Ok(mut driving) = self.driving_team_runs.lock() {
             driving.remove(run_id);
@@ -2964,7 +2992,7 @@ request and did not confirm stopping: {why}"
             // Repeated under the gate: a stop/pause mutation can land in the
             // awaits between the early check above and here. User Stop reaches
             // `request_stop` through this same gate, but driver-side
-            // `TeamPort::update_run` callers can mutate the same flags under
+            // `TeamPort::submit_command` callers can mutate the same flags under
             // only the relay write lock. `team_turn_preflight` below does NOT
             // catch a graceful/draining stop by itself because it leaves the run
             // `PausePending`, which is neither terminal nor
@@ -3889,38 +3917,43 @@ impl relay_api::TeamPort for AppState {
         self.team_run_snapshot(run_id).await
     }
 
-    async fn update_run(&self, run_id: &str, mutation: relay_api::TeamRunMutation) -> bool {
-        let rejected_existing_run = {
-            let mut relay = self.relay.write().await;
-            let existed = relay.team_run(run_id).is_some();
-            let updated = relay.update_team_run(run_id, |run| {
-                mutation(run);
-                // The driver chose this phase before the turn it is recording. A rerun
-                // accepted meanwhile is younger than that choice and outranks it.
-                run.hold_phase_for_waiting_sub_tasks();
-            });
-            if updated {
-                relay.notify();
-                return true;
-            }
-            if existed {
-                // `update_team_run` restores the immutable backend but preserves
-                // every other field the mutation changed. A settled run refuses
-                // the failure below, so this notification is the only way that
-                // partial write reaches persistence and clients.
-                relay.notify();
-            }
-            existed
+    async fn submit_command(
+        &self,
+        run_id: &str,
+        envelope: relay_api::team_command::TeamCommandEnvelope,
+    ) -> Option<relay_api::team_command::TeamCommandReceipt> {
+        let mut relay = self.relay.write().await;
+        let (revision_before, journal_len_before) = {
+            let run = relay.team_run(run_id)?;
+            (
+                run.driver_progress.state_revision,
+                run.command_journal.len(),
+            )
         };
 
-        if rejected_existing_run {
-            self.fail_team_run(
-                run_id,
-                "team driver attempted to change the orchestration backend after execution began",
-            )
-            .await;
+        let mut receipt_slot = None;
+        relay.update_team_run(run_id, |run| {
+            receipt_slot = Some(super::team_command_reducer::apply_team_command(
+                run, run_id, envelope,
+            ));
+        });
+        let receipt =
+            receipt_slot.expect("the run was confirmed present under the same write lock");
+
+        // The reducer structurally never touches `orchestration_backend`, so
+        // `update_team_run`'s own backend-immutability guard never rejects
+        // this closure — whether anything else changed is what decides
+        // whether to notify.
+        let run = relay
+            .team_run(run_id)
+            .expect("the reducer never removes a run");
+        let wrote = run.driver_progress.state_revision != revision_before
+            || run.command_journal.len() != journal_len_before;
+        if wrote {
+            relay.notify();
         }
-        false
+
+        Some(receipt)
     }
 
     async fn update_status(&self, run_id: &str, status: TeamRunStatus) {

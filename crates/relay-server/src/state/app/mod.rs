@@ -290,6 +290,7 @@ mod review_comments;
 mod review_ticks;
 mod sessions;
 pub(crate) mod team;
+mod team_command_reducer;
 mod team_diff;
 #[cfg(test)]
 pub(crate) mod tests;

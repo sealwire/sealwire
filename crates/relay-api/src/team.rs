@@ -35,7 +35,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{
-    orchestration::{DriverProgress, OrchestrationBackendRef},
+    orchestration::{
+        CommandFingerprint, DriverProgress, OrchestrationBackendRef, TeamCommandJournal,
+        TeamCommandKind, TeamCommandOutcome, TeamCommandRecord,
+    },
     unix_now, WorkflowVerdict,
 };
 
@@ -597,6 +600,15 @@ pub struct SubTask {
     pub cycle: u32,
 }
 
+/// Replay payload for one `TakeUserNotes` command. See the field doc on
+/// `TeamRun::last_drained_notes`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LastDrainedNotes {
+    pub command_id: String,
+    pub notes: Vec<String>,
+}
+
 /// One TL session in the succession chain.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -709,6 +721,23 @@ pub struct TeamRun {
     /// bookkeeping yet.
     #[serde(default)]
     pub driver_progress: DriverProgress,
+    /// Bounded, content-blind record of local commands applied or rejected
+    /// against this run — see `orchestration::TeamCommandRecord` and
+    /// `.sealwire/DESIGN.md` D2/D9. Deliberately NOT inside `driver_progress`:
+    /// that type's hand-written `Deserialize` marks the whole thing malformed
+    /// on any unrecognized field, which would make adding this key a one-way
+    /// downgrade trap for an older build. Excluded from `team_run_view`, so a
+    /// journal-only write does not churn `teams_revision()`.
+    #[serde(default)]
+    pub command_journal: TeamCommandJournal,
+    /// Replay payload for `TeamStateCommand::TakeUserNotes`, kept off the
+    /// (content-blind) journal because notes are prose. Overwritten by each
+    /// drain; see `.sealwire/DESIGN.md` D8. Plain `String`/`Vec<String>`
+    /// rather than the bounded `CommandId` type so a corrupt value decodes
+    /// leniently like the rest of this struct instead of failing the whole
+    /// record.
+    #[serde(default)]
+    pub last_drained_notes: Option<LastDrainedNotes>,
 
     /// Named team this run belongs to. Written into the token ledger at spend
     /// time. `None` only for runs started before team identity existed.
@@ -912,6 +941,7 @@ impl TeamRun {
             || self.driver_progress.last_event_seq != 0
             || self.driver_progress.in_flight_command_id.is_some()
             || self.driver_progress.is_malformed()
+            || !self.command_journal.is_empty()
             || self.complex.is_some()
             || self.design_verdict.is_some()
             || self.mr_verdict.is_some()
@@ -959,6 +989,37 @@ impl TeamRun {
     /// interrupted; unsupported backend records that were otherwise active fail
     /// closed while preserving their backend pin and prior diagnostics.
     pub fn reconcile_after_restore(&mut self) -> bool {
+        let in_flight_recovered = self.recover_stranded_in_flight_command();
+        self.reconcile_lifecycle_after_restore() || in_flight_recovered
+    }
+
+    /// D10: a run loaded with `driver_progress.in_flight_command_id` set gets
+    /// a terminal `Interrupted` journal record for that id before anything
+    /// else runs, and the field cleared. T4's own reducer never leaves one in
+    /// flight, so this recovers state left by a future async executor, not
+    /// anything this build produces. The fingerprint is a sentinel that can
+    /// never equal a real command's digest, so any later redelivery of that
+    /// id fails closed as `DuplicateCommand` rather than being evaluated as a
+    /// fresh command against today's counters — the double-application this
+    /// exists to prevent.
+    fn recover_stranded_in_flight_command(&mut self) -> bool {
+        let Some(command_id) = self.driver_progress.in_flight_command_id.take() else {
+            return false;
+        };
+        self.command_journal.push(TeamCommandRecord {
+            command_id,
+            sequence: self.driver_progress.last_command_seq,
+            kind: TeamCommandKind::Unknown,
+            fingerprint: CommandFingerprint::from_digest([0u8; 32]),
+            expected_revision: self.driver_progress.state_revision,
+            state_revision: self.driver_progress.state_revision,
+            last_event_seq: self.driver_progress.last_event_seq,
+            outcome: TeamCommandOutcome::Interrupted,
+        });
+        true
+    }
+
+    fn reconcile_lifecycle_after_restore(&mut self) -> bool {
         if self.status.is_terminal() {
             return false;
         }
@@ -1911,6 +1972,54 @@ mod tests {
         };
         assert!(run.set_orchestration_backend(sidecar).is_err());
         assert_eq!(run.orchestration_backend, cloud);
+    }
+
+    #[test]
+    fn restart_recovers_a_stranded_in_flight_command_without_a_false_running_status() {
+        // T4's own reducer never leaves a command in flight (D10) — this run
+        // simulates state a future async executor left behind, so the
+        // recovery path is reachable and pinned rather than met as a
+        // surprise later.
+        let mut run = run_with(TeamPhase::SubTasks, Vec::new());
+        run.driver_progress.in_flight_command_id =
+            Some(crate::orchestration::CommandId::new("cmd-9").unwrap());
+        run.driver_progress.last_command_seq = 3;
+        run.driver_progress.state_revision = 3;
+
+        assert!(run.reconcile_after_restore());
+
+        assert_ne!(
+            run.status,
+            TeamRunStatus::Running,
+            "a restart must never leave a run looking Running with no driver"
+        );
+        assert_eq!(run.status, TeamRunStatus::Interrupted);
+        assert!(run.driver_progress.in_flight_command_id.is_none());
+
+        let records: Vec<_> = run.command_journal.iter().collect();
+        assert_eq!(records.len(), 1);
+        let record = records[0];
+        assert_eq!(record.command_id.as_str(), "cmd-9");
+        assert_eq!(record.kind, TeamCommandKind::Unknown);
+        assert_eq!(record.outcome, TeamCommandOutcome::Interrupted);
+        // A real command's fingerprint is a SHA-256 digest and so is
+        // vanishingly unlikely to ever equal this all-zero sentinel — any
+        // genuine redelivery of "cmd-9" therefore always mismatches and fails
+        // closed as `DuplicateCommand` rather than being evaluated fresh.
+        assert_eq!(
+            record.fingerprint,
+            CommandFingerprint::from_digest([0u8; 32])
+        );
+    }
+
+    #[test]
+    fn restart_with_no_in_flight_command_journals_nothing() {
+        let mut run = run_with(TeamPhase::SubTasks, Vec::new());
+        assert!(run.driver_progress.in_flight_command_id.is_none());
+
+        run.reconcile_after_restore();
+
+        assert!(run.command_journal.is_empty());
     }
 
     #[test]
