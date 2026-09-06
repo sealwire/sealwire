@@ -3,9 +3,10 @@
 // tests (B-layer). It is spawned in place of the real binary by passing its path
 // as CodexBridge::spawn's `binary_name` (the trailing `app-server` argv is
 // ignored), speaks the same JSON-RPC-over-NDJSON protocol, and models exactly
-// one thing the real app-server does that the relay kept getting wrong:
+// two things the real app-server does that the relay kept getting wrong:
 //
 //   **a thread only becomes turn-startable once it is LOADED in this process.**
+//   **thread/list returns at most 100 rows per page, even for a larger limit.**
 //
 // The real app-server serves `thread/read` off disk — any rollout file works,
 // including ones written by the Codex VSCode extension or CLI, or left behind by
@@ -32,6 +33,8 @@ import { createInterface } from "node:readline";
 // fake. Everything else (thread/read, thread/resume) is served unconditionally,
 // standing in for "the rollout file is on disk".
 const loaded = new Set();
+const listableThreadCount = 205;
+const threadListPageLimit = 100;
 
 let counter = 0;
 
@@ -95,6 +98,27 @@ function handle(payload) {
     // Reads come off disk: they work whether or not the thread is loaded.
     case "thread/read":
       return ok(id, { thread: { ...threadSummary(threadId), turns: [] } });
+
+    case "thread/list": {
+      const requestedLimit = Math.max(0, Number(params?.limit) || 0);
+      const start = Math.max(0, Number(params?.cursor) || 0);
+      const end = Math.min(
+        listableThreadCount,
+        start + Math.min(requestedLimit, threadListPageLimit)
+      );
+      const data = Array.from({ length: end - start }, (_, offset) => {
+        const index = start + offset;
+        return {
+          ...threadSummary(`listed-thread-${String(index).padStart(3, "0")}`),
+          preview: `Listed session ${index}`,
+          updatedAt: listableThreadCount - index,
+        };
+      });
+      return ok(id, {
+        data,
+        nextCursor: end < listableThreadCount ? String(end) : null,
+      });
+    }
 
     case "turn/start": {
       if (!loaded.has(threadId)) {

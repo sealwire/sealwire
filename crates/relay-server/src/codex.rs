@@ -370,14 +370,45 @@ impl CodexBridge {
     }
 
     pub async fn list_threads(&self, limit: usize) -> Result<Vec<ThreadSummaryView>, String> {
-        let result = self
-            .send_request("thread/list", json!({ "limit": limit, "archived": false }))
-            .await?;
-        let threads = value_at(&result, &["data"])
-            .and_then(Value::as_array)
-            .ok_or_else(|| "thread/list did not return a thread array".to_string())?;
+        // `limit` is the number the relay wants to SCAN, not Codex's page size. The
+        // app-server caps one response at 100 rows and returns `nextCursor` even when a
+        // larger limit was requested, so a single request silently loses older sessions.
+        let mut threads = Vec::new();
+        let mut cursor: Option<String> = None;
 
-        threads.iter().map(parse_thread_summary).collect()
+        while threads.len() < limit {
+            let remaining = limit - threads.len();
+            let result = self
+                .send_request(
+                    "thread/list",
+                    json!({
+                        "cursor": cursor,
+                        "limit": remaining,
+                        "archived": false
+                    }),
+                )
+                .await?;
+            let page = value_at(&result, &["data"])
+                .and_then(Value::as_array)
+                .ok_or_else(|| "thread/list did not return a thread array".to_string())?;
+
+            for thread in page {
+                threads.push(parse_thread_summary(thread)?);
+                if threads.len() == limit {
+                    break;
+                }
+            }
+
+            let next_cursor = value_at(&result, &["nextCursor"])
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+            if page.is_empty() || next_cursor.is_none() || next_cursor == cursor {
+                break;
+            }
+            cursor = next_cursor;
+        }
+
+        Ok(threads)
     }
 
     pub async fn list_models(&self) -> Result<Vec<ModelOptionView>, String> {

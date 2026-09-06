@@ -3665,6 +3665,45 @@ async fn codex_recv_methods(state: &std::sync::Arc<RwLock<RelayState>>) -> Vec<S
 }
 
 #[tokio::test]
+async fn list_threads_follows_the_cursor_past_codexs_100_row_page_cap() {
+    // The real app-server silently caps one thread/list response at 100 rows even when
+    // the caller asks for more. A session just five rows into page two therefore used to
+    // vanish from Sealwire's sidebar (and lose its tab title) because the bridge treated
+    // `limit` as the scan size and ignored nextCursor.
+    let (bridge, state) = spawn_fake_codex_bridge().await;
+
+    let threads = bridge
+        .list_threads(105)
+        .await
+        .expect("the bridge must collect enough pages to satisfy the requested scan");
+
+    assert_eq!(threads.len(), 105);
+    assert_eq!(threads[0].id, "listed-thread-000");
+    assert_eq!(
+        threads[104].id, "listed-thread-104",
+        "the fifth session on page two must remain discoverable"
+    );
+
+    let requests = codex_recv_payloads(&state)
+        .await
+        .into_iter()
+        .filter(|payload| payload.get("method").and_then(Value::as_str) == Some("thread/list"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        requests.len(),
+        2,
+        "105 rows should require exactly two pages"
+    );
+    assert_eq!(requests[0]["params"]["cursor"], Value::Null);
+    assert_eq!(requests[0]["params"]["limit"], 105);
+    assert_eq!(requests[1]["params"]["cursor"], "100");
+    assert_eq!(
+        requests[1]["params"]["limit"], 5,
+        "the second request should fetch only the missing rows"
+    );
+}
+
+#[tokio::test]
 async fn start_turn_resumes_a_thread_the_app_server_has_not_loaded() {
     // Regression for "codex 没法发消息" — POST /api/session/message -> 400
     // `thread not found: <id>` on a thread whose transcript renders fine.
