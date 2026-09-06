@@ -1222,107 +1222,88 @@ async fn the_public_host_preserves_a_deliberately_blocked_driver_return() {
     assert_eq!(still_blocked.error, run.error);
 }
 
+// `team_port_update_run_records_rejected_backend_retargets` tested a method
+// (`TeamPort::update_run`) that no longer exists. Its backend-immutability
+// claim is now structural — see
+// `relay_api::team_command::tests::no_team_state_command_variant_can_name_an_orchestration_backend`
+// — and the surviving `RelayState::update_team_run` guard tests live at
+// `relay.rs:6430`/`:6461`. This test replaces
+// `rejected_backend_retarget_notifies_for_settled_runs_but_not_missing_ids`,
+// which tested the same doomed method's notify side effect; the notify
+// behavior itself carries over unchanged onto `TeamPort::submit_command`.
 #[tokio::test]
-async fn team_port_update_run_records_rejected_backend_retargets() {
-    let (_repo, root) = init_team_repo().await;
-    let (app, _) = build_review_app(&root, &["codex"]).await;
-    {
-        let mut run = crate::state::TeamRun::new(
-            "team-retarget".to_string(),
-            crate::state::TaskSpec::default(),
-            root,
-            "device-1".to_string(),
-        );
-        run.status = crate::state::TeamRunStatus::Running;
-        app.relay.write().await.insert_team_run(run);
-    }
-
-    let before_revision = app.snapshot().await.revision;
-    let cloud = cloud_backend();
-
-    let updated = relay_api::TeamPort::update_run(
-        &app,
-        "team-retarget",
-        Box::new(move |run| {
-            run.orchestration_backend = cloud;
-            run.phase = crate::state::TeamPhase::MrGate;
-        }),
-    )
-    .await;
-
-    assert!(!updated, "the TeamPort wrapper must surface the rejection");
-    assert_ne!(
-        app.snapshot().await.revision,
-        before_revision,
-        "rejected updates must notify surfaces because a failure was recorded"
-    );
-    let run = app
-        .relay
-        .read()
-        .await
-        .team_run("team-retarget")
-        .cloned()
-        .unwrap();
-    assert_eq!(
-        run.orchestration_backend,
-        relay_api::orchestration::OrchestrationBackendRef::LegacyEmbedded
-    );
-    assert_eq!(run.phase, crate::state::TeamPhase::MrGate);
-    assert_eq!(run.status, crate::state::TeamRunStatus::Failed);
-    assert!(
-        run.error
-            .as_deref()
-            .is_some_and(|error| error.contains("orchestration backend after execution began")),
-        "the immutable-backend rejection should be recorded explicitly: {:?}",
-        run.error
-    );
-}
-
-#[tokio::test]
-async fn rejected_backend_retarget_notifies_for_settled_runs_but_not_missing_ids() {
+async fn submit_command_notifies_for_a_rejected_existing_run_but_not_for_a_missing_id() {
     let (_repo, root) = init_team_repo().await;
     let (app, _) = build_review_app(&root, &["codex"]).await;
     let mut run = crate::state::TeamRun::new(
-        "team-paused-retarget".to_string(),
+        "team-paused-command".to_string(),
         crate::state::TaskSpec::default(),
         root,
         "device-1".to_string(),
     );
-    run.status = crate::state::TeamRunStatus::Paused;
+    run.status = crate::state::TeamRunStatus::Cancelled;
+    run.error = Some("user cancelled".to_string());
     app.relay.write().await.insert_team_run(run);
 
     let before_revision = app.snapshot().await.revision;
-    let updated = relay_api::TeamPort::update_run(
+    let receipt = relay_api::TeamPort::submit_command(
         &app,
-        "team-paused-retarget",
-        Box::new(|run| {
-            run.orchestration_backend = cloud_backend();
-            run.phase = crate::state::TeamPhase::MrGate;
-        }),
+        "team-paused-command",
+        relay_api::team_command::TeamCommandEnvelope {
+            protocol_version: relay_api::team_command::TEAM_COMMAND_PROTOCOL_VERSION,
+            command_id: relay_api::orchestration::CommandId::new("cmd-1").unwrap(),
+            sequence: 1,
+            expected_revision: 0,
+            command: relay_api::team_command::TeamStateCommand::SetPhase {
+                phase: crate::state::TeamPhase::MrGate,
+            },
+        },
     )
-    .await;
-    assert!(!updated);
-    assert_ne!(app.snapshot().await.revision, before_revision);
+    .await
+    .expect("the run exists");
 
+    assert_eq!(
+        receipt.status,
+        relay_api::team_command::TeamCommandStatus::Rejected(
+            relay_api::orchestration::CommandRejection::InvalidState
+        ),
+        "a terminal run has no driver entitled to move it"
+    );
+    assert_ne!(
+        app.snapshot().await.revision,
+        before_revision,
+        "a rejected-but-journaled command must still notify surfaces"
+    );
     let run = app
         .relay
         .read()
         .await
-        .team_run("team-paused-retarget")
+        .team_run("team-paused-command")
         .cloned()
         .unwrap();
-    assert_eq!(run.status, crate::state::TeamRunStatus::Paused);
-    assert_eq!(run.phase, crate::state::TeamPhase::MrGate);
-    assert!(run.orchestration_backend.is_legacy_embedded());
+    assert_eq!(
+        run.phase,
+        crate::state::TeamPhase::Intake,
+        "the rejected command must not have moved the run"
+    );
+    assert_eq!(run.command_journal.len(), 1);
 
     let before_missing = app.snapshot().await.revision;
-    let updated = relay_api::TeamPort::update_run(
+    let missing = relay_api::TeamPort::submit_command(
         &app,
         "team-does-not-exist",
-        Box::new(|run| run.phase = crate::state::TeamPhase::Finished),
+        relay_api::team_command::TeamCommandEnvelope {
+            protocol_version: relay_api::team_command::TEAM_COMMAND_PROTOCOL_VERSION,
+            command_id: relay_api::orchestration::CommandId::new("cmd-2").unwrap(),
+            sequence: 1,
+            expected_revision: 0,
+            command: relay_api::team_command::TeamStateCommand::SetPhase {
+                phase: crate::state::TeamPhase::Finished,
+            },
+        },
     )
     .await;
-    assert!(!updated);
+    assert!(missing.is_none());
     assert_eq!(
         app.snapshot().await.revision,
         before_missing,
@@ -2489,6 +2470,10 @@ chatted with: {turn_models:?}"
 /// every round) to prove the new gate does not interfere with a review loop
 /// that legitimately reaches `Escalated`.
 struct DevThenReviewDriver {
+    /// Fixture setup goes straight to the relay under the write lock rather
+    /// than through `TeamPort`, which no longer has a generic mutation seam —
+    /// see `AppState::test_update_team_run`.
+    app: AppState,
     /// Set right after the dev turn, before the first reviewer attempt — models
     /// a stop landing in exactly the window the driver would otherwise use to
     /// start reviewing, ahead of its own next boundary check.
@@ -2515,17 +2500,15 @@ impl relay_api::TeamDriver for DevThenReviewDriver {
             .start_thread(&run_id, relay_api::team::TeamRole::Dev)
             .await
             .expect("dev seat thread");
-        port.update_run(
-            &run_id,
-            Box::new(move |run| {
+        self.app
+            .test_update_team_run(&run_id, move |run| {
                 run.sub_tasks.push(crate::state::SubTask {
                     id: "st-1".to_string(),
                     dev_thread_id: Some(dev_thread),
                     ..Default::default()
                 });
-            }),
-        )
-        .await;
+            })
+            .await;
         if self.write_work_before_dev {
             let cwd = port.run_snapshot(&run_id).await.expect("run exists").cwd;
             std::fs::write(
@@ -2549,7 +2532,8 @@ impl relay_api::TeamDriver for DevThenReviewDriver {
             if self.request_stop_before_review {
                 // The flags a user's stop sets, without the full drain — the
                 // `PausePending` race window the reviewer gate exists for.
-                port.update_run(&run_id, Box::new(|run| run.request_stop("device-stop")))
+                self.app
+                    .test_update_team_run(&run_id, |run| run.request_stop("device-stop"))
                     .await;
             }
 
@@ -2557,15 +2541,13 @@ impl relay_api::TeamDriver for DevThenReviewDriver {
                 .start_thread(&run_id, relay_api::team::TeamRole::Reviewer)
                 .await
                 .expect("reviewer seat thread");
-            port.update_run(
-                &run_id,
-                Box::new(move |run| {
+            self.app
+                .test_update_team_run(&run_id, move |run| {
                     if let Some(task) = run.sub_tasks.get_mut(0) {
                         task.reviewer_thread_id = Some(reviewer_thread);
                     }
-                }),
-            )
-            .await;
+                })
+                .await;
 
             for _ in 0..self.reviewer_rounds {
                 let outcome = port
@@ -2598,18 +2580,16 @@ impl relay_api::TeamDriver for DevThenReviewDriver {
                 }
                 // A NEEDS_CHANGES verdict every round, exactly the shape that
                 // reaches `Escalated` once the round budget runs out.
-                port.update_run(
-                    &run_id,
-                    Box::new(|run| {
+                self.app
+                    .test_update_team_run(&run_id, |run| {
                         if let Some(task) = run.sub_tasks.get_mut(0) {
                             task.rounds_used += 1;
                             if task.rounds_used >= relay_api::team::MAX_SUBTASK_REVIEW_ROUNDS {
                                 task.status = relay_api::team::SubTaskStatus::Escalated;
                             }
                         }
-                    }),
-                )
-                .await;
+                    })
+                    .await;
             }
         }
 
@@ -2623,6 +2603,7 @@ impl relay_api::TeamDriver for DevThenReviewDriver {
 /// worktree before the dev turn so the same-session commit retry can be
 /// exercised without a usage figure.
 struct UncommittedWorkThenReviewDriver {
+    app: AppState,
     dev_outcome: std::sync::Arc<Mutex<Option<relay_api::team::TeamTurnOutcome>>>,
     reviewer_outcomes: std::sync::Arc<Mutex<Vec<relay_api::team::TeamTurnOutcome>>>,
 }
@@ -2645,18 +2626,16 @@ impl relay_api::TeamDriver for UncommittedWorkThenReviewDriver {
             .await
             .expect("checkpoint")
             .expect("the task worktree has a HEAD");
-        port.update_run(
-            &run_id,
-            Box::new(move |run| {
+        self.app
+            .test_update_team_run(&run_id, move |run| {
                 run.sub_tasks.push(crate::state::SubTask {
                     id: "st-1".to_string(),
                     base_commit: checkpoint,
                     dev_thread_id: Some(dev_thread),
                     ..Default::default()
                 });
-            }),
-        )
-        .await;
+            })
+            .await;
         let cwd = port.run_snapshot(&run_id).await.expect("run exists").cwd;
         std::fs::write(
             std::path::Path::new(&cwd).join("parser.rs"),
@@ -2678,15 +2657,13 @@ impl relay_api::TeamDriver for UncommittedWorkThenReviewDriver {
             .start_thread(&run_id, relay_api::team::TeamRole::Reviewer)
             .await
             .expect("reviewer seat thread");
-        port.update_run(
-            &run_id,
-            Box::new(move |run| {
+        self.app
+            .test_update_team_run(&run_id, move |run| {
                 if let Some(task) = run.sub_tasks.get_mut(0) {
                     task.reviewer_thread_id = Some(reviewer_thread);
                 }
-            }),
-        )
-        .await;
+            })
+            .await;
         let outcome = port
             .turn(
                 &run_id,
@@ -2704,6 +2681,7 @@ impl relay_api::TeamDriver for UncommittedWorkThenReviewDriver {
 /// no new tree change — the shape that wrongly lands if the gate falls back to
 /// `run.base_commit`.
 struct PriorRunWorkEmptyCheckpointDriver {
+    app: AppState,
     reviewer_outcomes: std::sync::Arc<Mutex<Vec<relay_api::team::TeamTurnOutcome>>>,
 }
 
@@ -2733,9 +2711,8 @@ impl relay_api::TeamDriver for PriorRunWorkEmptyCheckpointDriver {
             .start_thread(&run_id, relay_api::team::TeamRole::Dev)
             .await
             .expect("dev seat thread");
-        port.update_run(
-            &run_id,
-            Box::new(move |run| {
+        self.app
+            .test_update_team_run(&run_id, move |run| {
                 run.sub_tasks.push(crate::state::SubTask {
                     id: "st-1".to_string(),
                     // Deliberately empty — the bug under test.
@@ -2743,9 +2720,8 @@ impl relay_api::TeamDriver for PriorRunWorkEmptyCheckpointDriver {
                     dev_thread_id: Some(dev_thread),
                     ..Default::default()
                 });
-            }),
-        )
-        .await;
+            })
+            .await;
 
         let _ = port
             .turn(
@@ -2760,15 +2736,13 @@ impl relay_api::TeamDriver for PriorRunWorkEmptyCheckpointDriver {
             .start_thread(&run_id, relay_api::team::TeamRole::Reviewer)
             .await
             .expect("reviewer seat thread");
-        port.update_run(
-            &run_id,
-            Box::new(move |run| {
+        self.app
+            .test_update_team_run(&run_id, move |run| {
                 if let Some(task) = run.sub_tasks.get_mut(0) {
                     task.reviewer_thread_id = Some(reviewer_thread);
                 }
-            }),
-        )
-        .await;
+            })
+            .await;
         let outcome = port
             .turn(
                 &run_id,
@@ -2799,7 +2773,9 @@ async fn a_dev_turn_that_hits_a_usage_limit_halts_the_run_before_any_review() {
 
     let dev_outcome = std::sync::Arc::new(Mutex::new(None));
     let reviewer_outcomes = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let app_for_driver = app.clone();
     let app = app.with_team_driver(std::sync::Arc::new(DevThenReviewDriver {
+        app: app_for_driver.clone(),
         request_stop_before_review: false,
         reviewer_rounds: 0,
         write_work_before_dev: false,
@@ -2864,7 +2840,9 @@ async fn an_unrecognised_failure_kind_fails_the_turn_without_pausing_the_run() {
 
     let dev_outcome = std::sync::Arc::new(Mutex::new(None));
     let reviewer_outcomes = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let app_for_driver = app.clone();
     let app = app.with_team_driver(std::sync::Arc::new(DevThenReviewDriver {
+        app: app_for_driver.clone(),
         request_stop_before_review: false,
         reviewer_rounds: 0,
         write_work_before_dev: false,
@@ -2925,7 +2903,9 @@ async fn a_dev_turn_that_exhausts_the_session_budget_halts_the_run_before_any_re
 
     let dev_outcome = std::sync::Arc::new(Mutex::new(None));
     let reviewer_outcomes = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let app_for_driver = app.clone();
     let app = app.with_team_driver(std::sync::Arc::new(DevThenReviewDriver {
+        app: app_for_driver.clone(),
         request_stop_before_review: false,
         reviewer_rounds: 0,
         write_work_before_dev: false,
@@ -3003,7 +2983,9 @@ async fn a_dev_turn_that_hits_session_capacity_halts_the_run_before_any_review()
 
     let dev_outcome = std::sync::Arc::new(Mutex::new(None));
     let reviewer_outcomes = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let app_for_driver = app.clone();
     let app = app.with_team_driver(std::sync::Arc::new(DevThenReviewDriver {
+        app: app_for_driver.clone(),
         request_stop_before_review: false,
         reviewer_rounds: 0,
         write_work_before_dev: false,
@@ -3041,15 +3023,11 @@ async fn a_dev_turn_that_hits_session_capacity_halts_the_run_before_any_review()
             .await
             .expect("a paused run still keeps its reviewer seat");
     let reviewer_thread_for_run = reviewer_thread.clone();
-    relay_api::TeamPort::update_run(
-        &app,
-        &run_id,
-        Box::new(move |run| {
-            if let Some(task) = run.sub_tasks.get_mut(0) {
-                task.reviewer_thread_id = Some(reviewer_thread_for_run.clone());
-            }
-        }),
-    )
+    app.test_update_team_run(&run_id, move |run| {
+        if let Some(task) = run.sub_tasks.get_mut(0) {
+            task.reviewer_thread_id = Some(reviewer_thread_for_run.clone());
+        }
+    })
     .await;
     let reviewer_outcome = relay_api::TeamPort::turn(
         &app,
@@ -3105,7 +3083,9 @@ async fn a_dev_turn_that_replies_but_bills_nothing_leaves_the_gate_shut() {
 
     let dev_outcome = std::sync::Arc::new(Mutex::new(None));
     let reviewer_outcomes = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let app_for_driver = app.clone();
     let app = app.with_team_driver(std::sync::Arc::new(DevThenReviewDriver {
+        app: app_for_driver.clone(),
         request_stop_before_review: false,
         reviewer_rounds: 1,
         write_work_before_dev: false,
@@ -3164,7 +3144,9 @@ async fn a_dev_turn_that_bills_tokens_and_commits_opens_the_reviewer_gate() {
 
     let dev_outcome = std::sync::Arc::new(Mutex::new(None));
     let reviewer_outcomes = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let app_for_driver = app.clone();
     let app = app.with_team_driver(std::sync::Arc::new(DevThenReviewDriver {
+        app: app_for_driver.clone(),
         request_stop_before_review: false,
         reviewer_rounds: 1,
         write_work_before_dev: true,
@@ -3201,7 +3183,9 @@ async fn a_dev_turn_with_no_usage_figure_at_all_leaves_the_gate_shut() {
     // Deliberately NOT setting `report_turn_usage`: nothing is reported.
     let dev_outcome = std::sync::Arc::new(Mutex::new(None));
     let reviewer_outcomes = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let app_for_driver = app.clone();
     let app = app.with_team_driver(std::sync::Arc::new(DevThenReviewDriver {
+        app: app_for_driver.clone(),
         request_stop_before_review: false,
         reviewer_rounds: 1,
         write_work_before_dev: false,
@@ -3249,7 +3233,9 @@ async fn a_spend_figure_from_another_turn_is_empty_output() {
 
     let dev_outcome = std::sync::Arc::new(Mutex::new(None));
     let reviewer_outcomes = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let app_for_driver = app.clone();
     let app = app.with_team_driver(std::sync::Arc::new(DevThenReviewDriver {
+        app: app_for_driver.clone(),
         request_stop_before_review: false,
         reviewer_rounds: 1,
         write_work_before_dev: false,
@@ -3290,7 +3276,9 @@ async fn a_dev_turn_with_an_uncommitted_diff_commits_before_review() {
 
     let dev_outcome = std::sync::Arc::new(Mutex::new(None));
     let reviewer_outcomes = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let app_for_driver = app.clone();
     let app = app.with_team_driver(std::sync::Arc::new(UncommittedWorkThenReviewDriver {
+        app: app_for_driver.clone(),
         dev_outcome: dev_outcome.clone(),
         reviewer_outcomes: reviewer_outcomes.clone(),
     }));
@@ -3601,7 +3589,9 @@ async fn a_dev_turn_with_billed_but_failed_usage_leaves_the_gate_shut() {
 
     let dev_outcome = std::sync::Arc::new(Mutex::new(None));
     let reviewer_outcomes = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let app_for_driver = app.clone();
     let app = app.with_team_driver(std::sync::Arc::new(DevThenReviewDriver {
+        app: app_for_driver.clone(),
         request_stop_before_review: false,
         reviewer_rounds: 1,
         write_work_before_dev: false,
@@ -3649,7 +3639,9 @@ async fn prior_run_work_does_not_land_a_sub_task_without_its_own_checkpoint() {
     let _ = &providers;
 
     let reviewer_outcomes = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let app_for_driver = app.clone();
     let app = app.with_team_driver(std::sync::Arc::new(PriorRunWorkEmptyCheckpointDriver {
+        app: app_for_driver.clone(),
         reviewer_outcomes: reviewer_outcomes.clone(),
     }));
 
@@ -3700,7 +3692,9 @@ async fn a_reviewer_turn_is_refused_without_a_landed_dev_turn() {
 
     let dev_outcome = std::sync::Arc::new(Mutex::new(None));
     let reviewer_outcomes = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let app_for_driver = app.clone();
     let app = app.with_team_driver(std::sync::Arc::new(DevThenReviewDriver {
+        app: app_for_driver.clone(),
         request_stop_before_review: false,
         reviewer_rounds: 1,
         write_work_before_dev: false,
@@ -3753,7 +3747,9 @@ async fn a_stop_mid_run_refuses_the_next_reviewer_turn() {
 
     let dev_outcome = std::sync::Arc::new(Mutex::new(None));
     let reviewer_outcomes = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let app_for_driver = app.clone();
     let app = app.with_team_driver(std::sync::Arc::new(DevThenReviewDriver {
+        app: app_for_driver.clone(),
         request_stop_before_review: true,
         reviewer_rounds: 1,
         write_work_before_dev: true,
@@ -3829,6 +3825,7 @@ it refused the turn with"
 /// turn starts, so it can arrange a stop to land in the specific window
 /// between the reviewer gate's early check and the drive gate.
 struct RaceWindowDriver {
+    app: AppState,
     dev_outcome: std::sync::Arc<Mutex<Option<relay_api::team::TeamTurnOutcome>>>,
     reviewer_outcome: std::sync::Arc<Mutex<Option<relay_api::team::TeamTurnOutcome>>>,
     dev_landed: std::sync::Arc<tokio::sync::Notify>,
@@ -3846,17 +3843,15 @@ impl relay_api::TeamDriver for RaceWindowDriver {
             .start_thread(&run_id, relay_api::team::TeamRole::Dev)
             .await
             .expect("dev seat thread");
-        port.update_run(
-            &run_id,
-            Box::new(move |run| {
+        self.app
+            .test_update_team_run(&run_id, move |run| {
                 run.sub_tasks.push(crate::state::SubTask {
                     id: "st-1".to_string(),
                     dev_thread_id: Some(dev_thread),
                     ..Default::default()
                 });
-            }),
-        )
-        .await;
+            })
+            .await;
         let cwd = port.run_snapshot(&run_id).await.expect("run exists").cwd;
         std::fs::write(
             std::path::Path::new(&cwd).join("parser.rs"),
@@ -3882,15 +3877,13 @@ impl relay_api::TeamDriver for RaceWindowDriver {
             .start_thread(&run_id, relay_api::team::TeamRole::Reviewer)
             .await
             .expect("reviewer seat thread");
-        port.update_run(
-            &run_id,
-            Box::new(move |run| {
+        self.app
+            .test_update_team_run(&run_id, move |run| {
                 if let Some(task) = run.sub_tasks.get_mut(0) {
                     task.reviewer_thread_id = Some(reviewer_thread);
                 }
-            }),
-        )
-        .await;
+            })
+            .await;
         let reviewer_outcome = port
             .turn(
                 &run_id,
@@ -3930,8 +3923,8 @@ impl relay_api::TeamDriver for RaceWindowDriver {
 /// NOT sufficient by itself: `team_turn` still has to resolve the thread and
 /// reach `team_drive_gate` before it can dispatch. A user Stop reaches
 /// `request_stop` through that same drive gate, but a driver-side
-/// `TeamPort::update_run` can set the same flags while holding only the relay
-/// write lock, so it can land in exactly that window. This pins that the
+/// `TeamPort::submit_command` can set the same flags while holding only the
+/// relay write lock, so it can land in exactly that window. This pins that the
 /// refusal is REPEATED once `team_drive_gate` is held, using the pre-side-effect
 /// latch (`hold_team_turn_barrier`) to land the stop deterministically rather
 /// than racing real wall-clock timing.
@@ -3952,7 +3945,9 @@ async fn a_stop_landing_between_the_reviewer_gates_early_check_and_the_drive_gat
     let reviewer_outcome = std::sync::Arc::new(Mutex::new(None));
     let dev_landed = std::sync::Arc::new(tokio::sync::Notify::new());
     let proceed_to_reviewer = std::sync::Arc::new(tokio::sync::Notify::new());
+    let app_for_driver = app.clone();
     let app = app.with_team_driver(std::sync::Arc::new(RaceWindowDriver {
+        app: app_for_driver.clone(),
         dev_outcome: dev_outcome.clone(),
         reviewer_outcome: reviewer_outcome.clone(),
         dev_landed: dev_landed.clone(),
@@ -4056,7 +4051,9 @@ async fn a_stop_settling_after_reviewer_early_check_must_not_probe_or_stamp() {
     let reviewer_outcome = std::sync::Arc::new(Mutex::new(None));
     let dev_landed = std::sync::Arc::new(tokio::sync::Notify::new());
     let proceed_to_reviewer = std::sync::Arc::new(tokio::sync::Notify::new());
+    let app_for_driver = app.clone();
     let app = app.with_team_driver(std::sync::Arc::new(RaceWindowDriver {
+        app: app_for_driver.clone(),
         dev_outcome: dev_outcome.clone(),
         reviewer_outcome: reviewer_outcome.clone(),
         dev_landed: dev_landed.clone(),
@@ -4152,7 +4149,9 @@ async fn a_stop_settling_during_reviewer_baseline_read_must_not_stamp_phase() {
     let reviewer_outcome = std::sync::Arc::new(Mutex::new(None));
     let dev_landed = std::sync::Arc::new(tokio::sync::Notify::new());
     let proceed_to_reviewer = std::sync::Arc::new(tokio::sync::Notify::new());
+    let app_for_driver = app.clone();
     let app = app.with_team_driver(std::sync::Arc::new(RaceWindowDriver {
+        app: app_for_driver.clone(),
         dev_outcome: dev_outcome.clone(),
         reviewer_outcome: reviewer_outcome.clone(),
         dev_landed: dev_landed.clone(),
@@ -4237,7 +4236,9 @@ async fn a_stop_settling_after_phase_stamp_before_drive_gate_must_not_dispatch()
     let reviewer_outcome = std::sync::Arc::new(Mutex::new(None));
     let dev_landed = std::sync::Arc::new(tokio::sync::Notify::new());
     let proceed_to_reviewer = std::sync::Arc::new(tokio::sync::Notify::new());
+    let app_for_driver = app.clone();
     let app = app.with_team_driver(std::sync::Arc::new(RaceWindowDriver {
+        app: app_for_driver.clone(),
         dev_outcome: dev_outcome.clone(),
         reviewer_outcome: reviewer_outcome.clone(),
         dev_landed: dev_landed.clone(),
@@ -4312,7 +4313,7 @@ async fn a_stop_settling_after_phase_stamp_before_drive_gate_must_not_dispatch()
 /// The fix folds decide-and-commit into ONE write-lock hold, so nothing can
 /// land between them. This proves it directly: park the refusal on a latch
 /// AFTER it has decided but BEFORE it commits — still holding the write lock a
-/// driver-side `TeamPort::update_run` needs to call `request_stop` — and show
+/// driver-side stop needs to call `request_stop` — and show
 /// that update cannot even start until the refusal releases it, so it can only
 /// ever observe an already-consistent outcome, never corrupt one mid-flight.
 #[tokio::test]
@@ -4330,7 +4331,9 @@ async fn a_stop_racing_the_atomic_refusal_cannot_land_between_its_decision_and_i
 
     let dev_outcome = std::sync::Arc::new(Mutex::new(None));
     let reviewer_outcomes = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let app_for_driver = app.clone();
     let app = app.with_team_driver(std::sync::Arc::new(DevThenReviewDriver {
+        app: app_for_driver.clone(),
         request_stop_before_review: false,
         reviewer_rounds: 1,
         write_work_before_dev: false,
@@ -4361,12 +4364,8 @@ async fn a_stop_racing_the_atomic_refusal_cannot_land_between_its_decision_and_i
         let app = app.clone();
         let run_id = run_id.clone();
         tokio::spawn(async move {
-            relay_api::TeamPort::update_run(
-                &app,
-                &run_id,
-                Box::new(|run| run.request_stop("driver-stop")),
-            )
-            .await
+            app.test_update_team_run(&run_id, |run| run.request_stop("driver-stop"))
+                .await
         })
     };
     // Give the spawned stop every chance to run if it somehow could; it must
@@ -4424,6 +4423,7 @@ stop was racing to apply right after"
 /// attempting the reviewer turn. Gives a test a deterministic window to
 /// settle the run for real before that late reviewer attempt runs.
 struct SettledBeforeReviewDriver {
+    app: AppState,
     dev_outcome: std::sync::Arc<Mutex<Option<relay_api::team::TeamTurnOutcome>>>,
     reviewer_outcome: std::sync::Arc<Mutex<Option<relay_api::team::TeamTurnOutcome>>>,
     dev_landed: std::sync::Arc<tokio::sync::Notify>,
@@ -4445,18 +4445,16 @@ impl relay_api::TeamDriver for SettledBeforeReviewDriver {
             .start_thread(&run_id, relay_api::team::TeamRole::Reviewer)
             .await
             .expect("reviewer seat thread");
-        port.update_run(
-            &run_id,
-            Box::new(move |run| {
+        self.app
+            .test_update_team_run(&run_id, move |run| {
                 run.sub_tasks.push(crate::state::SubTask {
                     id: "st-1".to_string(),
                     dev_thread_id: Some(dev_thread),
                     reviewer_thread_id: Some(reviewer_thread),
                     ..Default::default()
                 });
-            }),
-        )
-        .await;
+            })
+            .await;
 
         let dev_outcome = port
             .turn(
@@ -4470,15 +4468,13 @@ impl relay_api::TeamDriver for SettledBeforeReviewDriver {
         // Mirrors the private driver's action table: any non-terminal dev
         // outcome moves the sub-task on, even a Silent one — the reviewer
         // gate is what actually catches "nothing landed", not this step.
-        port.update_run(
-            &run_id,
-            Box::new(|run| {
+        self.app
+            .test_update_team_run(&run_id, |run| {
                 if let Some(task) = run.sub_tasks.get_mut(0) {
                     task.status = relay_api::team::SubTaskStatus::Implementing;
                 }
-            }),
-        )
-        .await;
+            })
+            .await;
         self.dev_landed.notify_one();
         self.proceed_to_reviewer.notified().await;
 
@@ -4517,7 +4513,9 @@ async fn a_reviewer_turn_after_the_run_already_settled_must_not_touch_it() {
     let reviewer_outcome = std::sync::Arc::new(Mutex::new(None));
     let dev_landed = std::sync::Arc::new(tokio::sync::Notify::new());
     let proceed_to_reviewer = std::sync::Arc::new(tokio::sync::Notify::new());
+    let app_for_driver = app.clone();
     let app = app.with_team_driver(std::sync::Arc::new(SettledBeforeReviewDriver {
+        app: app_for_driver.clone(),
         dev_outcome: dev_outcome.clone(),
         reviewer_outcome: reviewer_outcome.clone(),
         dev_landed: dev_landed.clone(),
@@ -4635,7 +4633,9 @@ async fn a_refused_reviewer_turn_that_settles_the_run_releases_its_seats() {
 
     let dev_outcome = std::sync::Arc::new(Mutex::new(None));
     let reviewer_outcomes = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let app_for_driver = app.clone();
     let app = app.with_team_driver(std::sync::Arc::new(DevThenReviewDriver {
+        app: app_for_driver.clone(),
         request_stop_before_review: false,
         reviewer_rounds: 1,
         write_work_before_dev: false,
@@ -4685,7 +4685,9 @@ async fn a_landed_dev_turn_and_two_reviewer_rejections_still_escalate() {
 
     let dev_outcome = std::sync::Arc::new(Mutex::new(None));
     let reviewer_outcomes = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let app_for_driver = app.clone();
     let app = app.with_team_driver(std::sync::Arc::new(DevThenReviewDriver {
+        app: app_for_driver.clone(),
         request_stop_before_review: false,
         reviewer_rounds: crate::state::MAX_SUBTASK_REVIEW_ROUNDS,
         write_work_before_dev: true,
@@ -4877,6 +4879,7 @@ async fn reopen_rollback_does_not_clobber_a_concurrent_mark() {
 /// `Implementing` a reviewer turn. It never special-cases "this is a resume";
 /// the whole point of F1 is that the record alone must steer it correctly.
 struct ActionTableDriver {
+    app: AppState,
     dev_outcomes: std::sync::Arc<Mutex<Vec<relay_api::team::TeamTurnOutcome>>>,
     reviewer_outcomes: std::sync::Arc<Mutex<Vec<relay_api::team::TeamTurnOutcome>>>,
 }
@@ -4898,18 +4901,16 @@ impl relay_api::TeamDriver for ActionTableDriver {
                 .start_thread(&run_id, relay_api::team::TeamRole::Reviewer)
                 .await
                 .expect("reviewer seat thread");
-            port.update_run(
-                &run_id,
-                Box::new(move |run| {
+            self.app
+                .test_update_team_run(&run_id, move |run| {
                     run.sub_tasks.push(crate::state::SubTask {
                         id: "st-1".to_string(),
                         dev_thread_id: Some(dev_thread),
                         reviewer_thread_id: Some(reviewer_thread),
                         ..Default::default()
                     });
-                }),
-            )
-            .await;
+                })
+                .await;
         }
 
         loop {
@@ -4946,15 +4947,13 @@ impl relay_api::TeamDriver for ActionTableDriver {
                         port.fail_run(&run_id, "dev turn failed".to_string()).await;
                         return;
                     }
-                    port.update_run(
-                        &run_id,
-                        Box::new(|run| {
+                    self.app
+                        .test_update_team_run(&run_id, |run| {
                             if let Some(task) = run.sub_tasks.get_mut(0) {
                                 task.status = crate::state::SubTaskStatus::Implementing;
                             }
-                        }),
-                    )
-                    .await;
+                        })
+                        .await;
                 }
                 crate::state::SubTaskStatus::Implementing => {
                     let outcome = port
@@ -5005,7 +5004,9 @@ async fn a_refused_review_resets_the_sub_task_so_a_resume_drives_dev_not_review(
 
     let dev_outcomes = std::sync::Arc::new(Mutex::new(Vec::new()));
     let reviewer_outcomes = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let app_for_driver = app.clone();
     let app = app.with_team_driver(std::sync::Arc::new(ActionTableDriver {
+        app: app_for_driver.clone(),
         dev_outcomes: dev_outcomes.clone(),
         reviewer_outcomes: reviewer_outcomes.clone(),
     }));
@@ -5082,7 +5083,9 @@ async fn a_graceful_pause_that_refuses_a_reviewer_turn_settles_paused_not_failed
     let reviewer_outcome = std::sync::Arc::new(Mutex::new(None));
     let dev_landed = std::sync::Arc::new(tokio::sync::Notify::new());
     let proceed_to_reviewer = std::sync::Arc::new(tokio::sync::Notify::new());
+    let app_for_driver = app.clone();
     let app = app.with_team_driver(std::sync::Arc::new(RaceWindowDriver {
+        app: app_for_driver.clone(),
         dev_outcome: dev_outcome.clone(),
         reviewer_outcome: reviewer_outcome.clone(),
         dev_landed: dev_landed.clone(),

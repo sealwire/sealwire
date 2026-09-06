@@ -1532,6 +1532,200 @@ impl<'de> Deserialize<'de> for DriverProgress {
     }
 }
 
+/// Cap on `TeamRun.command_journal`. See `.sealwire/DESIGN.md` D9: eviction
+/// only ever drops a record whose `sequence` is strictly below
+/// `last_command_seq`, so a redelivery of an evicted command still fails the
+/// monotonic-sequence check rather than being treated as unseen.
+pub const MAX_TEAM_COMMAND_JOURNAL: usize = 64;
+
+/// Closed discriminant naming one `team_command::TeamStateCommand` variant.
+/// Content-blind: journaled records may carry this, never the command itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TeamCommandKind {
+    RecordIntake,
+    SetPhase,
+    RecordDesignReviewRound,
+    ReplanSubTasks,
+    AttachSubTaskThread,
+    SetSubTaskStatus,
+    RecordReviewRound,
+    MarkSubTaskDigested,
+    RecordMrRound,
+    SetMrVerdict,
+    RecordMrDevThread,
+    FinishRun,
+    TakeUserNotes,
+    /// A restart recovered `DriverProgress.in_flight_command_id` with no
+    /// record of what kind the command actually was. T4's own reducer never
+    /// leaves one in flight (`.sealwire/DESIGN.md` D10), so this is reachable
+    /// only via `TeamRun::reconcile_after_restore` recovering state written
+    /// by a future async executor.
+    Unknown,
+}
+
+/// What became of one journaled command. Content-blind, unlike the receipt
+/// the reducer hands back to the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "outcome")]
+pub enum TeamCommandOutcome {
+    Applied,
+    Rejected {
+        reason: CommandRejection,
+    },
+    /// Recovered from a restart that found `in_flight_command_id` set. T4's
+    /// own reducer is synchronous and never sets that field, so this arm is
+    /// reachable only via `TeamRun::reconcile_after_restore` today — it exists
+    /// for a future async executor, per `.sealwire/DESIGN.md` D10.
+    Interrupted,
+}
+
+/// Fixed-width digest over one command envelope's full canonical
+/// serialization, salted with the run id — the idempotency key alongside
+/// `command_id`. Computed in `relay-server`, which already depends on `sha2`;
+/// this crate holds only the closed shape. See `.sealwire/DESIGN.md` D3.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CommandFingerprint([u8; 32]);
+
+impl CommandFingerprint {
+    pub fn from_digest(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for CommandFingerprint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("CommandFingerprint").field(&"..").finish()
+    }
+}
+
+/// Content-blind projection of one submitted command, durable on
+/// `TeamRun.command_journal`. Never carries `team_command::TeamStateCommand`'s
+/// own prose.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamCommandRecord {
+    pub command_id: CommandId,
+    pub sequence: u64,
+    pub kind: TeamCommandKind,
+    pub fingerprint: CommandFingerprint,
+    pub expected_revision: u64,
+    /// `state_revision` / `last_event_seq` as they stood immediately after
+    /// this record was written. Unchanged from before it for every outcome
+    /// but `Applied` — see `.sealwire/DESIGN.md` D7.
+    pub state_revision: u64,
+    pub last_event_seq: u64,
+    pub outcome: TeamCommandOutcome,
+}
+
+/// `TeamRun.command_journal`'s wire type.
+///
+/// A bare `Vec<TeamCommandRecord>` would let one corrupt or unrecognized
+/// element (an unknown `TeamCommandKind`, an invalid `CommandId`) hard-fail
+/// deserializing the WHOLE `TeamRun` the way a plain derive does — which is
+/// what forces `DriverProgress` above to hand-write its own lenient decode.
+/// This wrapper absorbs that failure into `is_malformed()` instead: an empty
+/// journal reads as "never seen this command", which is exactly the false
+/// negative the journal exists to prevent (`.sealwire/DESIGN.md` D9), so a
+/// decode failure must never masquerade as an empty one.
+///
+/// `malformed` is itself persisted (like `DriverProgress::malformed`) rather
+/// than reset on every load: once a journal is flagged, a save/reload cycle
+/// must not quietly heal it back to an empty-and-trustworthy one.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct TeamCommandJournal {
+    records: Vec<TeamCommandRecord>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    malformed: bool,
+}
+
+impl TeamCommandJournal {
+    pub fn is_malformed(&self) -> bool {
+        self.malformed
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &TeamCommandRecord> {
+        self.records.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.records.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+
+    pub fn find(&self, command_id: &CommandId) -> Option<&TeamCommandRecord> {
+        self.records
+            .iter()
+            .find(|record| &record.command_id == command_id)
+    }
+
+    pub fn push(&mut self, record: TeamCommandRecord) {
+        self.records.push(record);
+    }
+
+    /// Remove the first (oldest) record matching `predicate`. The caller
+    /// decides what is safe to drop; this type only offers the mechanism.
+    pub fn remove_first(&mut self, mut predicate: impl FnMut(&TeamCommandRecord) -> bool) -> bool {
+        if let Some(pos) = self.records.iter().position(|record| predicate(record)) {
+            self.records.remove(pos);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn malformed() -> Self {
+        Self {
+            records: Vec::new(),
+            malformed: true,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for TeamCommandJournal {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // Route through `serde_json::Value` first (format-agnostic: this just
+        // captures serde's data model) so a bad element degrades this journal
+        // to `malformed` rather than failing the caller's whole decode.
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let serde_json::Value::Object(mut map) = value else {
+            return Ok(Self::malformed());
+        };
+        // A previously-persisted `malformed: true` stays malformed regardless
+        // of whatever is in `records` — the flag must survive a save/reload,
+        // never heal itself back to a trusted empty journal.
+        if matches!(map.get("malformed"), Some(serde_json::Value::Bool(true))) {
+            return Ok(Self::malformed());
+        }
+        let Some(records_value) = map.remove("records") else {
+            return Ok(Self::malformed());
+        };
+        let serde_json::Value::Array(items) = records_value else {
+            return Ok(Self::malformed());
+        };
+        let mut records = Vec::with_capacity(items.len());
+        for item in items {
+            match serde_json::from_value::<TeamCommandRecord>(item) {
+                Ok(record) => records.push(record),
+                Err(_) => return Ok(Self::malformed()),
+            }
+        }
+        Ok(Self {
+            records,
+            malformed: false,
+        })
+    }
+}
+
 /// Backend kind safe for a driver cursor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -2985,6 +3179,7 @@ mod tests {
             "event",
             "event_id",
             "expected_revision",
+            "fingerprint",
             "in_flight_command_id",
             "kind",
             "last_command_seq",
@@ -3220,6 +3415,124 @@ mod tests {
                 (TurnOutcomeKind::Blocked, r#""blocked""#),
             ]
         );
+    }
+
+    /// T4's local command journal. Additive, per this test's exhaustive-match
+    /// enforcement: a new `TeamCommandKind` variant fails the crate to build
+    /// here until it is pinned, same as every other closed enum in this file.
+    #[test]
+    fn protocol_v1_team_command_journal_literals_are_pinned() {
+        assert_json_string_literals!(
+            TeamCommandKind,
+            [
+                (TeamCommandKind::RecordIntake, r#""record_intake""#),
+                (TeamCommandKind::SetPhase, r#""set_phase""#),
+                (
+                    TeamCommandKind::RecordDesignReviewRound,
+                    r#""record_design_review_round""#
+                ),
+                (TeamCommandKind::ReplanSubTasks, r#""replan_sub_tasks""#),
+                (
+                    TeamCommandKind::AttachSubTaskThread,
+                    r#""attach_sub_task_thread""#
+                ),
+                (
+                    TeamCommandKind::SetSubTaskStatus,
+                    r#""set_sub_task_status""#
+                ),
+                (
+                    TeamCommandKind::RecordReviewRound,
+                    r#""record_review_round""#
+                ),
+                (
+                    TeamCommandKind::MarkSubTaskDigested,
+                    r#""mark_sub_task_digested""#
+                ),
+                (TeamCommandKind::RecordMrRound, r#""record_mr_round""#),
+                (TeamCommandKind::SetMrVerdict, r#""set_mr_verdict""#),
+                (
+                    TeamCommandKind::RecordMrDevThread,
+                    r#""record_mr_dev_thread""#
+                ),
+                (TeamCommandKind::FinishRun, r#""finish_run""#),
+                (TeamCommandKind::TakeUserNotes, r#""take_user_notes""#),
+                (TeamCommandKind::Unknown, r#""unknown""#),
+            ]
+        );
+
+        let outcomes = vec![
+            (TeamCommandOutcome::Applied, r#"{"outcome":"applied"}"#),
+            (
+                TeamCommandOutcome::Rejected {
+                    reason: CommandRejection::StaleCommand,
+                },
+                r#"{"outcome":"rejected","reason":"stale_command"}"#,
+            ),
+            (
+                TeamCommandOutcome::Interrupted,
+                r#"{"outcome":"interrupted"}"#,
+            ),
+        ];
+        for (value, literal) in outcomes {
+            let encoded = serde_json::to_string(&value).expect("serialize team command outcome");
+            assert_eq!(encoded, literal);
+            let decoded: TeamCommandOutcome =
+                serde_json::from_str(literal).expect("decode team command outcome");
+            assert_eq!(decoded, value);
+        }
+    }
+
+    /// D9: a journal element that will not decode must fail this journal
+    /// CLOSED, never collapse to an empty (falsely "never seen this command")
+    /// one.
+    #[test]
+    fn team_command_journal_decode_failure_fails_closed_not_empty() {
+        let fingerprint = serde_json::to_value(CommandFingerprint::from_digest([0u8; 32])).unwrap();
+        let corrupt = serde_json::json!({"records": [{
+            "command_id": "../escape",
+            "sequence": 1,
+            "kind": "record_intake",
+            "fingerprint": fingerprint,
+            "expected_revision": 0,
+            "state_revision": 0,
+            "last_event_seq": 0,
+            "outcome": {"outcome": "applied"},
+        }]});
+        let journal: TeamCommandJournal = serde_json::from_value(corrupt).unwrap();
+        assert!(
+            journal.is_malformed(),
+            "an invalid command_id must fail the journal closed, not decode to empty"
+        );
+        assert!(journal.is_empty());
+
+        let not_an_object: TeamCommandJournal =
+            serde_json::from_value(serde_json::json!("oops")).unwrap();
+        assert!(not_an_object.is_malformed());
+
+        // An explicit `null` is an unexpected shape (nothing this crate ever
+        // writes), not a synonym for "absent key" — that already decodes to a
+        // trusted empty default via `TeamRun`'s `#[serde(default)]` and never
+        // reaches this impl at all. Same call `DriverProgress` makes for the
+        // same reason.
+        let explicit_null: TeamCommandJournal =
+            serde_json::from_value(serde_json::Value::Null).unwrap();
+        assert!(explicit_null.is_malformed());
+
+        // The one shape this impl treats as a trustworthy empty journal.
+        let clean: TeamCommandJournal =
+            serde_json::from_value(serde_json::json!({"records": []})).unwrap();
+        assert!(!clean.is_malformed());
+        assert!(clean.is_empty());
+
+        // `malformed` must survive a save/reload cycle rather than healing
+        // itself back to an empty-and-trusted journal.
+        let persisted = serde_json::to_value(journal.clone()).unwrap();
+        assert_eq!(
+            persisted,
+            serde_json::json!({"records": [], "malformed": true})
+        );
+        let reloaded: TeamCommandJournal = serde_json::from_value(persisted).unwrap();
+        assert!(reloaded.is_malformed());
     }
 
     #[test]
@@ -4075,6 +4388,31 @@ mod tests {
         .enumerate()
         {
             samples.push(serde_json::to_value(event_envelope(event, index as u64 + 1)).unwrap());
+        }
+
+        for (index, outcome) in [
+            TeamCommandOutcome::Applied,
+            TeamCommandOutcome::Rejected {
+                reason: CommandRejection::StaleCommand,
+            },
+            TeamCommandOutcome::Interrupted,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            samples.push(
+                serde_json::to_value(TeamCommandRecord {
+                    command_id: CommandId::new(format!("team-cmd-{index}")).unwrap(),
+                    sequence: index as u64 + 1,
+                    kind: TeamCommandKind::RecordIntake,
+                    fingerprint: CommandFingerprint::from_digest([index as u8; 32]),
+                    expected_revision: 0,
+                    state_revision: index as u64,
+                    last_event_seq: index as u64,
+                    outcome,
+                })
+                .unwrap(),
+            );
         }
 
         for value in samples {
