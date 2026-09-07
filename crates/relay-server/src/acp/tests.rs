@@ -1705,7 +1705,7 @@ async fn a_plan_on_a_semantic_reviewer_thread_is_rejected_with_the_verdict_proto
     // `cursor/create_plan` is not a review verdict. Accepting it lets the turn end
     // without the final marker the private driver needs; parking it creates an
     // approval nobody can answer. The bridge rejects only semantic reviewer
-    // threads and tells Cursor to finish in final assistant text instead.
+    // threads and tells Cursor to finish in final agent_text instead.
     let state = relay_state();
     {
         let job = crate::state::ReviewJob {
@@ -1760,6 +1760,18 @@ async fn a_plan_on_a_semantic_reviewer_thread_is_rejected_with_the_verdict_proto
     assert!(
         state.read().await.pending_approvals.is_empty(),
         "a plan must not park on a thread whose approvals fail the run that owns it"
+    );
+    assert!(
+        state
+            .read()
+            .await
+            .logs_for_test()
+            .iter()
+            .any(|entry| entry.kind == "warn"
+                && entry.message.contains("Rejected a Cursor plan")
+                && entry.message.contains("semantic reviewer thread")
+                && entry.message.contains("final agent_text VERDICT marker")),
+        "a relay-side rejection has to leave an auditable trace"
     );
 }
 

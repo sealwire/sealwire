@@ -1257,21 +1257,30 @@ async fn handle_create_plan(
             provider_key,
         )
         .await;
+        let mut relay = state.write().await;
+        relay.push_log(
+            "warn",
+            format!(
+                "Rejected a Cursor plan from semantic reviewer thread `{session_id}`; \
+                 reviewers must finish with a final agent_text VERDICT marker."
+            ),
+        );
+        relay.notify();
         return;
     }
 
-    // Nobody to ask, for either of two reasons.
+    // Nobody to ask, for either of two remaining reasons. Semantic reviewers
+    // were handled above because their plan artifact is not the thing the review
+    // waiter parses; this branch is only for ordinary unattended/no-user plan
+    // handling.
     //
     // A no-prompt policy is the same contract `session/request_permission`
     // already honours. Unlike `allow_always`, accepting a plan grants nothing
     // that outlives the turn, so there is no permission to leak by doing so.
     //
-    // A reviewer/workflow/team thread is stronger than that: it runs in `plan`
-    // mode *by construction* (`review_read_only` is what the bridge maps onto
-    // it), so writing a plan is its normal path — but its approvals cannot be
-    // decided by a user, and the review waiter counts a parked approval as a
-    // failed review. Parking here would fail the run for doing the one thing
-    // plan mode exists to do.
+    // Some background workflow/team threads also cannot route a plan to a user.
+    // For non-reviewer seats, accepting preserves the existing unattended plan
+    // contract and still leaves an explicit relay log below.
     let can_ask = state.read().await.approval_can_reach_a_user(&session_id);
     if !can_ask || protocol::auto_approves(&approval_policy) {
         answer_plan(&request_id, ApprovalDecision::Approve, stdin, provider_key).await;
