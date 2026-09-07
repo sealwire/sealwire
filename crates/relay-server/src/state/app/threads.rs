@@ -187,7 +187,29 @@ impl AppState {
         }
         // `self.providers` is a HashMap, so its iteration order is not stable.
         unavailable_providers.sort();
+        let unavailable_provider_names = unavailable_providers
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::HashSet<_>>();
         let mut relay = self.relay.write().await;
+        // A transient provider-list failure must not turn the next resting poll into
+        // an authoritative empty list for that provider. Keep its last known rows in
+        // both the response and the routing cache, while `unavailable_providers` tells
+        // callers that they are stale/incomplete. This is especially important now
+        // that Codex pagination gives one scan several opportunities to fail.
+        if !unavailable_providers.is_empty() {
+            let mut known_ids = all_threads
+                .iter()
+                .map(|thread| thread.id.clone())
+                .collect::<std::collections::HashSet<_>>();
+            for cached in &relay.threads {
+                if unavailable_provider_names.contains(cached.provider.as_str())
+                    && known_ids.insert(cached.id.clone())
+                {
+                    all_threads.push(cached.clone());
+                }
+            }
+        }
         let allowed_roots = relay.allowed_roots.clone();
         let device_scope = device_id
             .as_deref()
@@ -303,7 +325,9 @@ impl AppState {
             // Preserve only rows not already returned. A task reviewer may now be in
             // BOTH sets (nav-visible response and semantic reviewer set); blindly
             // appending every cached reviewer would add another duplicate on every
-            // periodic refresh. Building the id set also collapses any duplicates a
+            // periodic refresh. Rows from an unavailable provider also survive even if
+            // the merged visible page was filled by another provider before they made
+            // the final truncation. Building the id set also collapses any duplicates a
             // previous build left in the routing cache.
             let mut cached_threads = response_threads.clone();
             let mut cached_ids: std::collections::HashSet<String> = cached_threads
@@ -311,7 +335,11 @@ impl AppState {
                 .map(|thread| thread.id.clone())
                 .collect();
             for cached in &relay.threads {
-                if reviewer_ids.contains(&cached.id) && cached_ids.insert(cached.id.clone()) {
+                let provider_unavailable =
+                    unavailable_provider_names.contains(cached.provider.as_str());
+                if (reviewer_ids.contains(&cached.id) || provider_unavailable)
+                    && cached_ids.insert(cached.id.clone())
+                {
                     cached_threads.push(cached.clone());
                 }
             }
