@@ -53,7 +53,8 @@ const MAX_APPROVAL_CONTEXT_CHARS: usize = 1_200;
 // bounding the whole scan to that same budget instead of multiplying it by pages.
 const CODEX_THREAD_LIST_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
 // A second backstop for a server that keeps advancing the cursor without ever
-// producing new rows. Matches the equivalent ACP session-list guard.
+// producing new rows. It uses ACP's 50-page ceiling, but returns unavailable
+// instead of partial success because an incomplete id probe can look like deletion.
 const MAX_CODEX_THREAD_LIST_PAGES: usize = 50;
 
 fn thread_list_timeout_error(timeout: Duration) -> String {
