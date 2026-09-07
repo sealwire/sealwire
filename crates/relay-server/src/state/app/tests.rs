@@ -15502,6 +15502,52 @@ resurrected into a turn that never completes: {:?}",
     }
 
     #[tokio::test]
+    async fn committed_candidate_is_reviewed_with_dirty_and_untracked_leftovers_excluded() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        init_git_seed(cwd);
+        let base = git_head(cwd);
+        std::fs::write(std::path::Path::new(cwd).join("seed.txt"), "committed\n").unwrap();
+        let candidate = git_commit_all(cwd, "candidate");
+        std::fs::write(
+            std::path::Path::new(cwd).join("seed.txt"),
+            "dirty leftover\n",
+        )
+        .unwrap();
+        std::fs::write(
+            std::path::Path::new(cwd).join("untracked.txt"),
+            "untracked leftover\n",
+        )
+        .unwrap();
+
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let provider = providers.get("codex").unwrap();
+        queue_verdicts(provider, &["APPROVE"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
+        assert_eq!(job.base_sha.as_deref(), Some(base.as_str()));
+        assert_eq!(job.candidate_sha.as_deref(), Some(candidate.as_str()));
+
+        let turns = provider.turns.lock().await.clone();
+        assert!(turns.iter().all(|(thread, text)| {
+            thread != &parent.id || !text.contains("needs a committed candidate")
+        }));
+        let prompt = turns
+            .iter()
+            .find(|(_, text)| text.contains("Committed review target"))
+            .map(|(_, text)| text)
+            .expect("reviewer prompt");
+        assert!(prompt.contains(&format!("Range: {base}..{candidate}")));
+        assert!(!prompt.contains("dirty leftover"));
+        assert!(!prompt.contains("untracked.txt"));
+    }
+
+    #[tokio::test]
     async fn dirty_git_review_requires_the_parent_session_to_commit_before_reviewing() {
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();
@@ -15644,7 +15690,8 @@ resurrected into a turn that never completes: {:?}",
         assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
         assert_eq!(
             job.candidate_sha.as_deref(),
-            Some(prompted_candidate.as_str())
+            Some(later_head.as_str()),
+            "the stale target must be rebound for a fresh review"
         );
         assert_eq!(
             job.verdict.as_deref(),

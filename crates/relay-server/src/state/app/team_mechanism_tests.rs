@@ -337,8 +337,7 @@ async fn resume_team_run_allows_malformed_progress_on_legacy_backend() {
         .expect("legacy embedded runs may continue without consuming driver progress");
 
     assert_eq!(status, crate::state::TeamRunStatus::Running);
-    let run =
-        wait_for_team_status(&app, &run_id, crate::state::TeamRunStatus::Interrupted).await;
+    let run = wait_for_team_status(&app, &run_id, crate::state::TeamRunStatus::Interrupted).await;
     assert!(
         run.driver_progress.is_malformed(),
         "resuming the legacy driver must not clear a future progress marker"
@@ -568,12 +567,15 @@ async fn stop_revalidates_after_a_queued_resume_wins_the_drive_gate() {
         codex.turns.lock().await.is_empty(),
         "the resumed driver must never dispatch a provider turn after Stop settles"
     );
-    wait_until_condition("the resumed driver's drive ticket should release after the refused turn", || {
-        !app.driving_team_runs
-            .lock()
-            .expect("drive set")
-            .contains(&run_id)
-    })
+    wait_until_condition(
+        "the resumed driver's drive ticket should release after the refused turn",
+        || {
+            !app.driving_team_runs
+                .lock()
+                .expect("drive set")
+                .contains(&run_id)
+        },
+    )
     .await;
 }
 
@@ -815,27 +817,17 @@ async fn mark_cancelled_archives_inert_blocked_run_and_releases_provider_seats()
         app.relay.write().await.insert_team_run(run);
     }
 
-    let tl_thread = relay_api::TeamPort::start_thread(
-        &app,
-        &run_id,
-        relay_api::team::TeamRole::Tl,
-    )
-    .await
-    .expect("tl provider-backed thread");
-    let dev_thread = relay_api::TeamPort::start_thread(
-        &app,
-        &run_id,
-        relay_api::team::TeamRole::Dev,
-    )
-    .await
-    .expect("dev provider-backed thread");
-    let reviewer_thread = relay_api::TeamPort::start_thread(
-        &app,
-        &run_id,
-        relay_api::team::TeamRole::Reviewer,
-    )
-    .await
-    .expect("reviewer provider-backed thread");
+    let tl_thread = relay_api::TeamPort::start_thread(&app, &run_id, relay_api::team::TeamRole::Tl)
+        .await
+        .expect("tl provider-backed thread");
+    let dev_thread =
+        relay_api::TeamPort::start_thread(&app, &run_id, relay_api::team::TeamRole::Dev)
+            .await
+            .expect("dev provider-backed thread");
+    let reviewer_thread =
+        relay_api::TeamPort::start_thread(&app, &run_id, relay_api::team::TeamRole::Reviewer)
+            .await
+            .expect("reviewer provider-backed thread");
     {
         let mut relay = app.relay.write().await;
         relay.update_team_run(&run_id, |run| {
@@ -957,28 +949,22 @@ async fn mark_cancelled_drains_malformed_legacy_run_and_releases_provider_seats(
     assert!(run.driver_progress.is_malformed());
     app.relay.write().await.insert_team_run(run);
 
-    let tl_thread = relay_api::TeamPort::start_thread(
-        &app,
-        &run_id,
-        relay_api::team::TeamRole::Tl,
-    )
-    .await
-    .expect("tl provider-backed thread");
-    let dev_thread = relay_api::TeamPort::start_thread(
-        &app,
-        &run_id,
-        relay_api::team::TeamRole::Dev,
-    )
-    .await
-    .expect("dev provider-backed thread");
-    let reviewer_thread = relay_api::TeamPort::start_thread(
-        &app,
-        &run_id,
-        relay_api::team::TeamRole::Reviewer,
-    )
-    .await
-    .expect("reviewer provider-backed thread");
-    let owned = vec![tl_thread.clone(), dev_thread.clone(), reviewer_thread.clone()];
+    let tl_thread = relay_api::TeamPort::start_thread(&app, &run_id, relay_api::team::TeamRole::Tl)
+        .await
+        .expect("tl provider-backed thread");
+    let dev_thread =
+        relay_api::TeamPort::start_thread(&app, &run_id, relay_api::team::TeamRole::Dev)
+            .await
+            .expect("dev provider-backed thread");
+    let reviewer_thread =
+        relay_api::TeamPort::start_thread(&app, &run_id, relay_api::team::TeamRole::Reviewer)
+            .await
+            .expect("reviewer provider-backed thread");
+    let owned = vec![
+        tl_thread.clone(),
+        dev_thread.clone(),
+        reviewer_thread.clone(),
+    ];
     {
         let mut relay = app.relay.write().await;
         relay.update_team_run(&run_id, |run| {
@@ -4378,6 +4364,9 @@ async fn a_refused_reviewer_turn_that_settles_the_run_releases_its_seats() {
     // Silent, so the reviewer gate's own no-landed branch is what settles the
     // run — not some other path already wired to `release_seats_when_settled`.
     codex.emit_assistant.store(false, Ordering::Relaxed);
+    codex
+        .auto_commit_author_changes
+        .store(false, Ordering::Relaxed);
 
     let dev_outcome = std::sync::Arc::new(Mutex::new(None));
     let reviewer_outcomes = std::sync::Arc::new(Mutex::new(Vec::new()));
@@ -4745,6 +4734,9 @@ async fn a_refused_review_resets_the_sub_task_so_a_resume_drives_dev_not_review(
     // the shape `dev_turns_landed` must not count — so the reviewer gate
     // refuses it.
     codex.emit_assistant.store(false, Ordering::Relaxed);
+    codex
+        .auto_commit_author_changes
+        .store(false, Ordering::Relaxed);
 
     let dev_outcomes = std::sync::Arc::new(Mutex::new(Vec::new()));
     let reviewer_outcomes = std::sync::Arc::new(Mutex::new(Vec::new()));
@@ -4768,6 +4760,9 @@ sends straight back into another refused review on resume"
 
     // The resumed dev turn actually lands this time: it replies AND bills.
     codex.emit_assistant.store(true, Ordering::Relaxed);
+    codex
+        .auto_commit_author_changes
+        .store(true, Ordering::Relaxed);
     codex
         .report_turn_usage
         .lock()
