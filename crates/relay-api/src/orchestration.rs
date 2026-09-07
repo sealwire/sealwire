@@ -1556,6 +1556,14 @@ pub enum TeamCommandKind {
     RecordMrDevThread,
     FinishRun,
     TakeUserNotes,
+    /// The lifecycle family (`.sealwire/DESIGN.md` D14). These carry the run's
+    /// own status transitions rather than workflow state, so they are the one
+    /// family exempt from the reducer's lifecycle gate — they ARE the
+    /// transition the gate would otherwise refuse.
+    SetRunStatus,
+    FailRun,
+    BlockRun,
+    SettleRun,
     /// A restart recovered `DriverProgress.in_flight_command_id` with no
     /// record of what kind the command actually was. T4's own reducer never
     /// leaves one in flight (`.sealwire/DESIGN.md` D10), so this is reachable
@@ -1625,6 +1633,49 @@ pub struct TeamCommandRecord {
     pub state_revision: u64,
     pub last_event_seq: u64,
     pub outcome: TeamCommandOutcome,
+}
+
+/// A command handed to an executor but not yet known to have settled.
+///
+/// Content-blind, and durable so a restart can settle it honestly. The id
+/// alone is not enough: recovery has to write a journal record a later
+/// redelivery can be matched against, and matching on the id alone cannot
+/// tell a genuine retry of the SAME envelope (replay `Interrupted`) from a
+/// DIFFERENT command that reused the id (`DuplicateCommand`). Carrying the
+/// digest and the counters the receipt needs is what makes both answerable
+/// — see `.sealwire/DESIGN.md` D10.
+///
+/// T4's own reducer is synchronous under one lock and never leaves a command
+/// in flight, so nothing in this build writes this; it exists so the recovery
+/// contract is defined and tested before an async executor needs it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InFlightCommand {
+    pub command_id: CommandId,
+    pub fingerprint: CommandFingerprint,
+    pub kind: TeamCommandKind,
+    pub sequence: u64,
+    pub expected_revision: u64,
+    /// The run's counters as they stood when the command was handed over, so
+    /// the recovered `Interrupted` receipt reports the same values the
+    /// original delivery would have.
+    pub state_revision: u64,
+    pub last_event_seq: u64,
+}
+
+impl InFlightCommand {
+    /// The terminal journal record this becomes on restore.
+    pub fn into_interrupted_record(self) -> TeamCommandRecord {
+        TeamCommandRecord {
+            command_id: self.command_id,
+            sequence: self.sequence,
+            kind: self.kind,
+            fingerprint: Some(self.fingerprint),
+            expected_revision: self.expected_revision,
+            state_revision: self.state_revision,
+            last_event_seq: self.last_event_seq,
+            outcome: TeamCommandOutcome::Interrupted,
+        }
+    }
 }
 
 /// `TeamRun.command_journal`'s wire type.
@@ -1710,9 +1761,12 @@ impl<'de> Deserialize<'de> for TeamCommandJournal {
         };
         // A previously-persisted `malformed: true` stays malformed regardless
         // of whatever is in `records` — the flag must survive a save/reload,
-        // never heal itself back to a trusted empty journal.
-        if matches!(map.get("malformed"), Some(serde_json::Value::Bool(true))) {
-            return Ok(Self::malformed());
+        // never heal itself back to a trusted empty journal. Anything that is
+        // not literally `false` is a shape this crate never writes, so it is
+        // read as untrustworthy rather than as a truthiness question.
+        match map.get("malformed") {
+            None | Some(serde_json::Value::Bool(false)) => {}
+            _ => return Ok(Self::malformed()),
         }
         let Some(records_value) = map.remove("records") else {
             return Ok(Self::malformed());
@@ -1720,9 +1774,25 @@ impl<'de> Deserialize<'de> for TeamCommandJournal {
         let serde_json::Value::Array(items) = records_value else {
             return Ok(Self::malformed());
         };
-        let mut records = Vec::with_capacity(items.len());
+        // The cap is a durable invariant, not just something live append
+        // respects: restoring 65 records would leave this build permanently
+        // over budget with no path back under it.
+        if items.len() > MAX_TEAM_COMMAND_JOURNAL {
+            return Ok(Self::malformed());
+        }
+        let mut records: Vec<TeamCommandRecord> = Vec::with_capacity(items.len());
         for item in items {
             match serde_json::from_value::<TeamCommandRecord>(item) {
+                // Two records under one id make `find` order-dependent, so the
+                // same redelivery could replay either one's outcome. There is
+                // no safe tie-break; refuse the journal instead.
+                Ok(record)
+                    if records
+                        .iter()
+                        .any(|seen| seen.command_id == record.command_id) =>
+                {
+                    return Ok(Self::malformed())
+                }
                 Ok(record) => records.push(record),
                 Err(_) => return Ok(Self::malformed()),
             }
@@ -3464,6 +3534,10 @@ mod tests {
                 ),
                 (TeamCommandKind::FinishRun, r#""finish_run""#),
                 (TeamCommandKind::TakeUserNotes, r#""take_user_notes""#),
+                (TeamCommandKind::SetRunStatus, r#""set_run_status""#),
+                (TeamCommandKind::FailRun, r#""fail_run""#),
+                (TeamCommandKind::BlockRun, r#""block_run""#),
+                (TeamCommandKind::SettleRun, r#""settle_run""#),
                 (TeamCommandKind::Unknown, r#""unknown""#),
             ]
         );
@@ -3488,6 +3562,102 @@ mod tests {
                 serde_json::from_str(literal).expect("decode team command outcome");
             assert_eq!(decoded, value);
         }
+    }
+
+    fn journal_record_json(command_id: &str, sequence: u64) -> serde_json::Value {
+        let fingerprint = serde_json::to_value(CommandFingerprint::from_digest([7u8; 32])).unwrap();
+        serde_json::json!({
+            "command_id": command_id,
+            "sequence": sequence,
+            "kind": "record_intake",
+            "fingerprint": fingerprint,
+            "expected_revision": 0,
+            "state_revision": sequence,
+            "last_event_seq": sequence,
+            "outcome": {"outcome": "applied"},
+        })
+    }
+
+    /// The cap is a durable invariant, not merely something live append
+    /// happens to respect. A hand-edited or downgraded-then-upgraded state
+    /// file carrying 65 records must fail closed rather than restore a
+    /// journal this build then treats as trustworthy and over budget forever.
+    #[test]
+    fn a_restored_journal_over_the_cap_fails_closed() {
+        let at_cap: Vec<_> = (0..MAX_TEAM_COMMAND_JOURNAL)
+            .map(|i| journal_record_json(&format!("cmd-{i}"), i as u64 + 1))
+            .collect();
+        let journal: TeamCommandJournal =
+            serde_json::from_value(serde_json::json!({"records": at_cap})).unwrap();
+        assert!(
+            !journal.is_malformed(),
+            "exactly at the cap is the largest legal journal"
+        );
+        assert_eq!(journal.len(), MAX_TEAM_COMMAND_JOURNAL);
+
+        let over_cap: Vec<_> = (0..=MAX_TEAM_COMMAND_JOURNAL)
+            .map(|i| journal_record_json(&format!("cmd-{i}"), i as u64 + 1))
+            .collect();
+        let journal: TeamCommandJournal =
+            serde_json::from_value(serde_json::json!({"records": over_cap})).unwrap();
+        assert!(
+            journal.is_malformed(),
+            "one record over the cap must fail closed, never restore 65"
+        );
+        assert!(journal.is_empty());
+    }
+
+    /// `find` returns the FIRST match, so two records under one id make
+    /// replay depend on their order in the file — the same delivery could
+    /// replay `Applied` or `Rejected` depending on which was written first.
+    /// There is no safe way to pick, so refuse the journal.
+    #[test]
+    fn a_restored_journal_with_duplicate_command_ids_fails_closed() {
+        let records = vec![
+            journal_record_json("cmd-1", 1),
+            journal_record_json("cmd-2", 2),
+            journal_record_json("cmd-1", 3),
+        ];
+        let journal: TeamCommandJournal =
+            serde_json::from_value(serde_json::json!({"records": records})).unwrap();
+        assert!(
+            journal.is_malformed(),
+            "a duplicated command id makes replay ambiguous and must fail closed"
+        );
+        assert!(journal.is_empty());
+    }
+
+    /// `malformed` is a durable safety flag. Anything in that field other
+    /// than a literal `false` is a shape this crate never wrote, so it cannot
+    /// be read as "trustworthy" — including the truthy-looking values a
+    /// hand-edit or a foreign writer would produce.
+    #[test]
+    fn a_restored_journal_with_a_non_bool_malformed_field_fails_closed() {
+        for weird in [
+            serde_json::json!("true"),
+            serde_json::json!("false"),
+            serde_json::json!(1),
+            serde_json::json!(0),
+            serde_json::json!(null),
+            serde_json::json!({}),
+            serde_json::json!([]),
+        ] {
+            let journal: TeamCommandJournal = serde_json::from_value(
+                serde_json::json!({"records": [], "malformed": weird.clone()}),
+            )
+            .unwrap();
+            assert!(
+                journal.is_malformed(),
+                "a non-bool `malformed` must fail closed, got {weird}"
+            );
+        }
+
+        let honest: TeamCommandJournal =
+            serde_json::from_value(serde_json::json!({"records": [], "malformed": false})).unwrap();
+        assert!(
+            !honest.is_malformed(),
+            "an explicit `false` is what this crate writes and stays trusted"
+        );
     }
 
     /// D9: a journal element that will not decode must fail this journal
@@ -4422,6 +4592,20 @@ mod tests {
                 .unwrap(),
             );
         }
+        // The typed in-flight marker is durable and Cloud-visible too, so it
+        // walks the same allowlist as the record it becomes on restore.
+        samples.push(
+            serde_json::to_value(InFlightCommand {
+                command_id: CommandId::new("team-cmd-in-flight").unwrap(),
+                fingerprint: CommandFingerprint::from_digest([3u8; 32]),
+                kind: TeamCommandKind::SetPhase,
+                sequence: 7,
+                expected_revision: 6,
+                state_revision: 6,
+                last_event_seq: 5,
+            })
+            .unwrap(),
+        );
         // The recovery-record shape: `fingerprint: None` (D10) serializes as a
         // bare `null`, which the walk already allows unconditionally.
         samples.push(

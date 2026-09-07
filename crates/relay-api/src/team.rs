@@ -36,8 +36,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{
     orchestration::{
-        DriverProgress, OrchestrationBackendRef, TeamCommandJournal, TeamCommandKind,
-        TeamCommandOutcome, TeamCommandRecord,
+        DriverProgress, InFlightCommand, OrchestrationBackendRef, TeamCommandJournal,
+        TeamCommandKind, TeamCommandOutcome, TeamCommandRecord, MAX_TEAM_COMMAND_JOURNAL,
     },
     unix_now, WorkflowVerdict,
 };
@@ -730,6 +730,18 @@ pub struct TeamRun {
     /// journal-only write does not churn `teams_revision()`.
     #[serde(default)]
     pub command_journal: TeamCommandJournal,
+    /// A command handed to an executor whose outcome this relay never saw.
+    ///
+    /// Always `None` in this build: T4's reducer settles every command
+    /// synchronously under the run lock, so there is no window in which one
+    /// is outstanding. It is persisted (and recovered on restore) so the
+    /// contract an async executor will need is defined and tested now rather
+    /// than invented later — see `.sealwire/DESIGN.md` D10. A sibling of
+    /// `driver_progress` rather than a field inside it, because that struct
+    /// marks itself malformed on any unknown key and an older build reading a
+    /// newer file would then flag every run.
+    #[serde(default)]
+    pub in_flight_command: Option<InFlightCommand>,
     /// Replay payload for `TeamStateCommand::TakeUserNotes`, kept off the
     /// (content-blind) journal because notes are prose — see
     /// `.sealwire/DESIGN.md` D8. One entry per *applied* drain, appended (not
@@ -945,6 +957,7 @@ impl TeamRun {
             || self.driver_progress.last_command_seq != 0
             || self.driver_progress.last_event_seq != 0
             || self.driver_progress.in_flight_command_id.is_some()
+            || self.in_flight_command.is_some()
             || self.driver_progress.is_malformed()
             || !self.command_journal.is_empty()
             || self.complex.is_some()
@@ -998,29 +1011,59 @@ impl TeamRun {
         self.reconcile_lifecycle_after_restore() || in_flight_recovered
     }
 
-    /// D10: a run loaded with `driver_progress.in_flight_command_id` set gets
-    /// a terminal `Interrupted` journal record for that id before anything
-    /// else runs, and the field cleared. T4's own reducer never leaves one in
-    /// flight, so this recovers state left by a future async executor, not
-    /// anything this build produces. `fingerprint: None` (D10-corrected) means
-    /// "match any digest": the original envelope was never durably recorded,
-    /// so there is no real fingerprint to compare against, and inventing a
-    /// sentinel value would make a genuine redelivery mismatch it and read as
-    /// `DuplicateCommand` instead of replaying this `Interrupted` receipt.
+    /// D10: a run loaded with a command still in flight gets a terminal
+    /// `Interrupted` journal record for it before anything else runs, and the
+    /// marker cleared. T4's own reducer never leaves one in flight, so this
+    /// recovers state left by a future async executor, not anything this
+    /// build produces.
+    ///
+    /// Two markers, because two eras of state file can carry one:
+    ///
+    /// - [`TeamRun::in_flight_command`] is the typed record. It carries the
+    ///   real digest, so a redelivery of the SAME envelope replays this
+    ///   `Interrupted` receipt while a DIFFERENT command reusing the id is
+    ///   still caught as `DuplicateCommand`.
+    /// - `driver_progress.in_flight_command_id` is the legacy id-only marker.
+    ///   There is no digest to compare against, so its record carries
+    ///   `fingerprint: None` — "match on the id alone". That is strictly
+    ///   weaker (a reused id replays `Interrupted` instead of being reported
+    ///   as a collision) but it still fails closed, because `Interrupted` is
+    ///   a refusal rather than an application.
     fn recover_stranded_in_flight_command(&mut self) -> bool {
-        let Some(command_id) = self.driver_progress.in_flight_command_id.take() else {
-            return false;
+        let record = match self.in_flight_command.take() {
+            Some(in_flight) => in_flight.into_interrupted_record(),
+            None => {
+                let Some(command_id) = self.driver_progress.in_flight_command_id.take() else {
+                    return false;
+                };
+                TeamCommandRecord {
+                    command_id,
+                    sequence: self.driver_progress.last_command_seq,
+                    kind: TeamCommandKind::Unknown,
+                    fingerprint: None,
+                    expected_revision: self.driver_progress.state_revision,
+                    state_revision: self.driver_progress.state_revision,
+                    last_event_seq: self.driver_progress.last_event_seq,
+                    outcome: TeamCommandOutcome::Interrupted,
+                }
+            }
         };
-        self.command_journal.push(TeamCommandRecord {
-            command_id,
-            sequence: self.driver_progress.last_command_seq,
-            kind: TeamCommandKind::Unknown,
-            fingerprint: None,
-            expected_revision: self.driver_progress.state_revision,
-            state_revision: self.driver_progress.state_revision,
-            last_event_seq: self.driver_progress.last_event_seq,
-            outcome: TeamCommandOutcome::Interrupted,
-        });
+        // Both markers are consumed either way: leaving the legacy id set
+        // beside a typed record would recover the same command twice.
+        self.driver_progress.in_flight_command_id = None;
+        // Make room rather than overflow. A journal restored one record over
+        // the cap fails closed on the NEXT load, which would turn a
+        // successful recovery into a permanently malformed run.
+        while self.command_journal.len() >= MAX_TEAM_COMMAND_JOURNAL {
+            if self
+                .command_journal
+                .remove_first(|candidate| candidate.command_id != record.command_id)
+                .is_none()
+            {
+                break;
+            }
+        }
+        self.command_journal.push(record);
         true
     }
 
@@ -1099,6 +1142,22 @@ impl TeamRun {
         }
     }
 
+    /// Mark every driver decision taken before this moment as stale.
+    ///
+    /// A user or orchestrator action that changes what the driver should do
+    /// next has to be visible to the reducer's `expected_revision` check, or
+    /// a command decided from the pre-action snapshot still looks current and
+    /// overwrites it. The lifecycle gate alone is not enough: a resume clears
+    /// the pause flags and puts the run back to `Running`, so only the
+    /// revision still separates before from after.
+    ///
+    /// Saturating rather than wrapping: at the ceiling every envelope is
+    /// stale, which is the safe direction. `apply_team_command` refuses to
+    /// apply anything there anyway.
+    fn invalidate_driver_decisions(&mut self) {
+        self.driver_progress.state_revision = self.driver_progress.state_revision.saturating_add(1);
+    }
+
     /// Advance the status. Terminal is final, and a state the user settled is
     /// off-limits, so a decision that won a race can never be clobbered by the
     /// driver's next between-step write. Same guard `WorkflowRun` uses, widened by
@@ -1153,6 +1212,7 @@ impl TeamRun {
         self.pause_requested = true;
         self.pause_requested_by = device_id.into();
         self.set_status(TeamRunStatus::PausePending);
+        self.invalidate_driver_decisions();
     }
 
     /// Record a stop that is about to drain this run's turns.
@@ -1165,6 +1225,7 @@ impl TeamRun {
         }
         self.request_pause(device_id);
         self.stopping = true;
+        self.invalidate_driver_decisions();
         self.updated_at = unix_now();
     }
 
@@ -1173,6 +1234,7 @@ impl TeamRun {
         if self.status.is_terminal() || self.status.is_settled_without_driver() {
             return false;
         }
+        self.invalidate_driver_decisions();
         self.pause_requested = false;
         self.stopping = false;
         self.pause_reason = Some(reason.into());
@@ -1248,6 +1310,7 @@ impl TeamRun {
         if !self.status.is_resumable() {
             return false;
         }
+        self.invalidate_driver_decisions();
         self.pause_requested = false;
         self.stopping = false;
         self.pause_requested_by = String::new();
@@ -1270,6 +1333,7 @@ impl TeamRun {
         if self.status.is_terminal() {
             return false;
         }
+        self.invalidate_driver_decisions();
         self.error = Some(reason.into());
         self.pause_requested = false;
         self.stopping = false;
@@ -1464,6 +1528,9 @@ impl TeamRun {
         if !revived {
             return false;
         }
+        // A revive changes what the driver should work on next, so anything
+        // it decided from the pre-revive plan is stale.
+        self.invalidate_driver_decisions();
         self.design_review_rounds = 0;
         self.mr_rounds_used = 0;
         self.mr_round_base_sha.clear();
@@ -1977,6 +2044,99 @@ mod tests {
         };
         assert!(run.set_orchestration_backend(sidecar).is_err());
         assert_eq!(run.orchestration_backend, cloud);
+    }
+
+    /// The typed in-flight record is what makes recovery both replayable and
+    /// collision-detecting: a genuine redelivery matches the recorded digest
+    /// and replays `Interrupted`, while a DIFFERENT command reusing that id
+    /// still mismatches and is caught. The id-only wildcard could only ever
+    /// do the first.
+    #[test]
+    fn a_typed_in_flight_record_recovers_with_its_real_fingerprint() {
+        let mut run = run_with(TeamPhase::SubTasks, Vec::new());
+        let digest = crate::orchestration::CommandFingerprint::from_digest([9u8; 32]);
+        run.in_flight_command = Some(crate::orchestration::InFlightCommand {
+            command_id: crate::orchestration::CommandId::new("cmd-9").unwrap(),
+            fingerprint: digest,
+            kind: TeamCommandKind::SetPhase,
+            sequence: 4,
+            expected_revision: 3,
+            state_revision: 3,
+            last_event_seq: 2,
+        });
+        run.driver_progress.last_command_seq = 3;
+        run.driver_progress.state_revision = 3;
+
+        assert!(run.reconcile_after_restore());
+        assert!(
+            run.in_flight_command.is_none(),
+            "recovery consumes the in-flight marker"
+        );
+
+        let records: Vec<_> = run.command_journal.iter().collect();
+        assert_eq!(records.len(), 1);
+        let record = records[0];
+        assert_eq!(record.command_id.as_str(), "cmd-9");
+        assert_eq!(record.outcome, TeamCommandOutcome::Interrupted);
+        assert_eq!(
+            record.fingerprint,
+            Some(digest),
+            "the recorded digest is what lets a redelivery be told apart from a collision"
+        );
+        assert_eq!(
+            record.kind,
+            TeamCommandKind::SetPhase,
+            "the kind was durably known, so recovery must not downgrade it to Unknown"
+        );
+        assert_eq!(record.sequence, 4);
+        assert_eq!(record.expected_revision, 3);
+        assert_eq!(record.last_event_seq, 2);
+    }
+
+    /// Recovery appends a record. At the cap that would restore a journal one
+    /// over budget — the exact state the restore path refuses to decode.
+    #[test]
+    fn in_flight_recovery_stays_within_the_journal_cap() {
+        let mut run = run_with(TeamPhase::SubTasks, Vec::new());
+        for index in 0..crate::orchestration::MAX_TEAM_COMMAND_JOURNAL {
+            run.command_journal.push(TeamCommandRecord {
+                command_id: crate::orchestration::CommandId::new(format!("cmd-{index}")).unwrap(),
+                sequence: index as u64 + 1,
+                kind: TeamCommandKind::SetPhase,
+                fingerprint: Some(crate::orchestration::CommandFingerprint::from_digest(
+                    [1u8; 32],
+                )),
+                expected_revision: 0,
+                state_revision: index as u64,
+                last_event_seq: index as u64,
+                outcome: TeamCommandOutcome::Applied,
+            });
+        }
+        run.driver_progress.in_flight_command_id =
+            Some(crate::orchestration::CommandId::new("cmd-stranded").unwrap());
+
+        assert!(run.reconcile_after_restore());
+
+        assert!(
+            run.command_journal.len() <= crate::orchestration::MAX_TEAM_COMMAND_JOURNAL,
+            "recovery must evict to make room, never exceed the cap: {}",
+            run.command_journal.len()
+        );
+        assert!(
+            run.command_journal
+                .find(&crate::orchestration::CommandId::new("cmd-stranded").unwrap())
+                .is_some(),
+            "the recovery record is the one thing that must survive"
+        );
+
+        // And the result must still be restorable, which the over-cap guard
+        // would otherwise refuse.
+        let round_tripped: TeamCommandJournal =
+            serde_json::from_value(serde_json::to_value(&run.command_journal).unwrap()).unwrap();
+        assert!(
+            !round_tripped.is_malformed(),
+            "a recovered journal must survive its own save/reload"
+        );
     }
 
     #[test]

@@ -427,6 +427,13 @@ pub enum TeamPortError {
 /// Product order, phase transitions, prompts, parsing, and retry decisions do
 /// not belong here. This surface is intentionally limited to durable-record
 /// access and auditable thread/worktree operations implemented by the relay.
+/// A seat the executor started or resumed, already registered as run-owned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TeamSeat {
+    pub thread_id: String,
+    pub slot: team::TeamThreadSlot,
+}
+
 #[async_trait::async_trait]
 pub trait TeamPort: Send + Sync {
     async fn run_snapshot(&self, run_id: &str) -> Option<team::TeamRun>;
@@ -439,11 +446,10 @@ pub trait TeamPort: Send + Sync {
         envelope: team_command::TeamCommandEnvelope,
     ) -> Option<team_command::TeamCommandReceipt>;
 
-    async fn update_status(&self, run_id: &str, status: team::TeamRunStatus);
-    async fn fail_run(&self, run_id: &str, error: String);
-    async fn block_run(&self, run_id: &str, error: String);
+    /// Whether a user action or settlement means this run may no longer be
+    /// driven. A read: the driver enacts the answer by submitting a
+    /// `SettleRun` command, which is the only way state changes.
     async fn boundary_status(&self, run_id: &str) -> Option<team::TeamRunStatus>;
-    async fn settle_run(&self, run_id: &str, status: team::TeamRunStatus, reason: &str);
 
     async fn tl_reseed_reason(&self, run_id: &str) -> Option<String>;
     async fn reseed_tl(
@@ -455,11 +461,18 @@ pub trait TeamPort: Send + Sync {
     async fn tl_turn(&self, run_id: &str, prompt: String) -> team::TeamTurnOutcome;
 
     async fn require_workspace(&self, run_id: &str) -> Result<(), TeamPortError>;
+    /// Start a seat and register it as run-owned, returning both its id and
+    /// the slot it now occupies.
+    ///
+    /// Registration is an executor mechanism, not a driver decision, so it
+    /// stays on this side of the seam and is done here rather than left for
+    /// the driver to request separately — a seat that exists but is not owned
+    /// is a leak the driver should not be able to create.
     async fn start_thread(
         &self,
         run_id: &str,
         role: team::TeamRole,
-    ) -> Result<String, TeamPortError>;
+    ) -> Result<TeamSeat, TeamPortError>;
     /// The first of `candidates` that can still take a turn, else a new seat.
     ///
     /// Ordered, so a dead first choice falls through to a live second. "Take a
@@ -469,8 +482,7 @@ pub trait TeamPort: Send + Sync {
         run_id: &str,
         role: team::TeamRole,
         candidates: &[String],
-    ) -> Result<String, TeamPortError>;
-    async fn record_run_thread(&self, run_id: &str, thread_id: &str) -> team::TeamThreadSlot;
+    ) -> Result<TeamSeat, TeamPortError>;
     async fn turn(
         &self,
         run_id: &str,

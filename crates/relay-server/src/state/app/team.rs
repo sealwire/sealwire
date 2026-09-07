@@ -3256,6 +3256,32 @@ request and did not confirm stopping: {why}"
     }
 
     /// Record a run-owned thread and return the slot that now names it.
+    /// Register a seat as run-owned and hand back the slot it occupies.
+    ///
+    /// Executor-owned thread registration is a local mechanism, not a state
+    /// decision, so it stays here rather than becoming a command: the driver
+    /// receives the resolved seat from `start_thread`/`resume_or_start_thread`
+    /// and never registers ownership itself.
+    /// The slot a thread already occupies on this run, without registering it.
+    async fn resolve_existing_seat_slot(&self, run_id: &str, thread_id: &str) -> TeamThreadSlot {
+        self.relay
+            .read()
+            .await
+            .team_run(run_id)
+            .and_then(|run| {
+                run.run_owned_thread_ids
+                    .iter()
+                    .position(|id| id == thread_id)
+            })
+            .map(TeamThreadSlot::RunOwned)
+            .unwrap_or(TeamThreadSlot::MrDev)
+    }
+
+    async fn own_team_seat(&self, run_id: &str, thread_id: String) -> relay_api::TeamSeat {
+        let slot = self.record_run_thread(run_id, &thread_id).await;
+        relay_api::TeamSeat { thread_id, slot }
+    }
+
     async fn record_run_thread(&self, run_id: &str, thread_id: &str) -> TeamThreadSlot {
         let mut relay = self.relay.write().await;
         relay.update_team_run(run_id, |run| run.record_run_thread(thread_id.to_string()));
@@ -3922,6 +3948,60 @@ impl relay_api::TeamPort for AppState {
         run_id: &str,
         envelope: relay_api::team_command::TeamCommandEnvelope,
     ) -> Option<relay_api::team_command::TeamCommandReceipt> {
+        use relay_api::team_command::{TeamCommandStatus, TeamStateCommand};
+
+        // Two host mechanisms bracket the reducer for the lifecycle family.
+        // Neither is a decision — the driver already decided — and neither can
+        // live inside the reducer, which is synchronous and holds the run
+        // lock. See `.sealwire/DESIGN.md` D14.
+
+        // BEFORE: a settlement that hands the workspace back may not be
+        // written while a turn is still mutating the tree. A run that cannot
+        // prove quiescence is Blocked instead, keeping its locks — exactly
+        // what `settle_team_run` did before this moved behind the reducer.
+        let envelope = match &envelope.command {
+            TeamStateCommand::SettleRun { status, .. }
+                if matches!(
+                    status,
+                    TeamRunStatus::Paused | TeamRunStatus::Cancelled | TeamRunStatus::Done
+                ) =>
+            {
+                let working = self.working_team_threads(run_id).await;
+                if working.is_empty() {
+                    envelope
+                } else {
+                    let status = *status;
+                    relay_api::team_command::TeamCommandEnvelope {
+                        command: TeamStateCommand::BlockRun {
+                            error: format!(
+                                "cannot settle this task as {}: {} still has a turn in flight",
+                                status.as_str(),
+                                working.join(", ")
+                            ),
+                        },
+                        ..envelope
+                    }
+                }
+            }
+            _ => envelope,
+        };
+
+        let settled_status = match &envelope.command {
+            TeamStateCommand::SetRunStatus { status } => Some(*status),
+            TeamStateCommand::FailRun { .. } => Some(TeamRunStatus::Failed),
+            TeamStateCommand::SettleRun { status, .. } => Some(*status),
+            _ => None,
+        };
+        let log_line = match &envelope.command {
+            TeamStateCommand::FailRun { error } => {
+                Some(("warn", format!("Task {run_id} failed: {error}")))
+            }
+            TeamStateCommand::BlockRun { error } => {
+                Some(("warn", format!("Task {run_id} blocked: {error}")))
+            }
+            _ => None,
+        };
+
         let mut relay = self.relay.write().await;
         if relay.team_run(run_id).is_none() {
             return None;
@@ -3935,6 +4015,7 @@ impl relay_api::TeamPort for AppState {
         });
         let (receipt, wrote) =
             outcome.expect("the run was confirmed present under the same write lock");
+        let applied = matches!(receipt.status, TeamCommandStatus::Applied(_));
 
         // The reducer's own return value says whether it wrote anything —
         // not a before/after comparison of revision and journal length, which
@@ -3943,36 +4024,29 @@ impl relay_api::TeamPort for AppState {
         // touches `orchestration_backend`, so `update_team_run`'s own
         // backend-immutability guard never rejects this closure either way.
         if wrote {
+            if applied {
+                if let Some((level, message)) = log_line {
+                    relay.push_log(level, message);
+                }
+            }
             relay.notify();
+        }
+        drop(relay);
+
+        // AFTER: hand back the provider seats of a run that just settled.
+        // Fire-and-forget and idempotent, and gated on the command actually
+        // applying so a rejected or replayed delivery never releases twice.
+        if applied {
+            if let Some(status) = settled_status {
+                self.release_seats_when_settled(run_id, status);
+            }
         }
 
         Some(receipt)
     }
 
-    async fn update_status(&self, run_id: &str, status: TeamRunStatus) {
-        self.update_team_status(run_id, status).await;
-    }
-
-    async fn fail_run(&self, run_id: &str, error: String) {
-        self.fail_team_run(run_id, error).await;
-    }
-
-    async fn block_run(&self, run_id: &str, error: String) {
-        self.block_team_run(run_id, error).await;
-    }
-
     async fn boundary_status(&self, run_id: &str) -> Option<TeamRunStatus> {
         self.team_boundary_check(run_id).await
-    }
-
-    async fn settle_run(&self, run_id: &str, status: TeamRunStatus, reason: &str) {
-        // Reached only through this generic seam: the driver's own per-step
-        // boundary check, never a direct synchronous user action (those settle
-        // via `stop_team_run`/`resolve_blocked_team_run` with `TeamPauseKind::User`
-        // instead) and never a provider failure (`team_turn` settles those itself
-        // with `TeamPauseKind::Provider`).
-        self.settle_team_run(run_id, status, reason, TeamPauseKind::Boundary)
-            .await;
     }
 
     async fn tl_reseed_reason(&self, run_id: &str) -> Option<String> {
@@ -3996,11 +4070,17 @@ impl relay_api::TeamPort for AppState {
         self.require_team_workspace(run_id).await.map(|_| ())
     }
 
-    async fn start_thread(&self, run_id: &str, role: TeamRole) -> Result<String, TeamPortError> {
+    async fn start_thread(
+        &self,
+        run_id: &str,
+        role: TeamRole,
+    ) -> Result<relay_api::TeamSeat, TeamPortError> {
         let workspace = self.require_team_workspace(run_id).await?;
-        self.start_team_thread(run_id, role, &workspace.as_dir())
+        let thread_id = self
+            .start_team_thread(run_id, role, &workspace.as_dir())
             .await
-            .map_err(|error| TeamPortError::Failed(error.to_string()))
+            .map_err(|error| TeamPortError::Failed(error.to_string()))?;
+        Ok(self.own_team_seat(run_id, thread_id).await)
     }
 
     async fn resume_or_start_thread(
@@ -4008,7 +4088,7 @@ impl relay_api::TeamPort for AppState {
         run_id: &str,
         role: TeamRole,
         candidates: &[String],
-    ) -> Result<String, TeamPortError> {
+    ) -> Result<relay_api::TeamSeat, TeamPortError> {
         for candidate in candidates.iter().filter(|id| !id.is_empty()) {
             // Routing is not enough: the relay's thread cache outlives the
             // session, so an archived one still resolves. Only the provider knows.
@@ -4017,7 +4097,13 @@ impl relay_api::TeamPort for AppState {
                 Err(_) => false,
             };
             if usable {
-                return Ok(candidate.clone());
+                // Borrowed, not opened: a reused candidate is already owned
+                // where it came from (a sub-task seat), and registering it as
+                // run-owned too would double-count it for drain and release.
+                return Ok(relay_api::TeamSeat {
+                    slot: self.resolve_existing_seat_slot(run_id, candidate).await,
+                    thread_id: candidate.clone(),
+                });
             }
             self.relay.write().await.push_log(
                 "info",
@@ -4029,10 +4115,6 @@ trying the next seat",
             );
         }
         relay_api::TeamPort::start_thread(self, run_id, role).await
-    }
-
-    async fn record_run_thread(&self, run_id: &str, thread_id: &str) -> TeamThreadSlot {
-        self.record_run_thread(run_id, thread_id).await
     }
 
     async fn turn(

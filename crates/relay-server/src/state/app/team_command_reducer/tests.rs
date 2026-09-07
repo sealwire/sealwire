@@ -582,7 +582,13 @@ fn a_resolving_run_refuses_a_command() {
 fn resuming_does_not_revive_a_stale_paused_rejection() {
     let mut run = fresh_run();
     run.settle_paused("settled by the user", TeamPauseKind::User);
-    let rejected = apply(&mut run, "cmd-1", 1, set_phase(TeamPhase::Planning));
+    // Captured so the redelivery below is a byte-identical envelope rather
+    // than a differently-addressed one, which would be a content mismatch
+    // instead of the replay this pins.
+    let decided_from = run.driver_progress.state_revision;
+    let doomed = || envelope("cmd-1", 1, decided_from, set_phase(TeamPhase::Planning));
+
+    let rejected = apply_raw(&mut run, doomed());
     assert_eq!(
         rejected.status,
         TeamCommandStatus::Rejected(CommandRejection::InvalidState)
@@ -593,10 +599,7 @@ fn resuming_does_not_revive_a_stale_paused_rejection() {
 
     // The SAME old envelope, redelivered after resume, must still refuse —
     // replayed from the journal, not re-evaluated fresh (D5 step 9's prose).
-    let redelivered = apply_raw(
-        &mut run,
-        envelope("cmd-1", 1, 0, set_phase(TeamPhase::Planning)),
-    );
+    let redelivered = apply_raw(&mut run, doomed());
     assert_eq!(
         redelivered, rejected,
         "the stale refusal must replay verbatim"
@@ -1046,9 +1049,21 @@ fn rejections_that_never_reach_the_sequence_check_are_still_evicted() {
             run.command_journal.len()
         );
     }
+    // The CHECK never advances the cursor for these — but eviction does, and
+    // must: a dropped record's sequence has to stay spent or a different
+    // command could reuse its id and apply. So the cursor tracks exactly the
+    // highest sequence compacted away, and nothing beyond it.
+    let evicted_high = relay_api::orchestration::MAX_TEAM_COMMAND_JOURNAL as u64 + 20
+        - MAX_TEAM_COMMAND_JOURNAL as u64;
     assert_eq!(
-        run.driver_progress.last_command_seq, 0,
-        "a payload-bounds rejection never clears the ordering check, so it never advances this"
+        run.driver_progress.last_command_seq, evicted_high,
+        "the watermark must cover every compacted record and no retained one"
+    );
+    assert!(
+        run.command_journal
+            .iter()
+            .all(|record| record.sequence > evicted_high),
+        "everything still retained sits above the watermark, so it still replays"
     );
 }
 
@@ -1336,5 +1351,512 @@ fn a_recovered_in_flight_command_survives_a_restart_round_trip_and_replays_inter
         restored.phase,
         TeamPhase::Intake,
         "a recovered in-flight command must never apply, before or after a restart round trip"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Closure round: ordering coherence, counter headroom, payload size, and
+// the eviction watermark. See `.sealwire/DESIGN.md` D5/D6/D9.
+// ---------------------------------------------------------------------
+
+/// An unsupported protocol version reaches the reducer BEFORE the backend
+/// check in the naive ordering, so it would journal a rejection onto a run
+/// this build must leave completely alone.
+#[test]
+fn an_unsupported_protocol_never_mutates_an_inert_backend() {
+    let mut run = fresh_run();
+    run.orchestration_backend =
+        relay_api::orchestration::OrchestrationBackendRef::unknown_non_executing();
+    let before = serde_json::to_value(&run).unwrap();
+
+    let receipt = apply_raw(
+        &mut run,
+        TeamCommandEnvelope {
+            protocol_version: TEAM_COMMAND_PROTOCOL_VERSION + 1,
+            command_id: CommandId::new("cmd-1").unwrap(),
+            sequence: 1,
+            expected_revision: 0,
+            command: set_phase(TeamPhase::Planning),
+        },
+    );
+
+    assert_eq!(
+        receipt.status,
+        TeamCommandStatus::Rejected(CommandRejection::BackendMismatch),
+        "an inert backend is refused for being inert, not for its protocol version"
+    );
+    assert_eq!(
+        serde_json::to_value(&run).unwrap(),
+        before,
+        "an inert run must be byte-identical afterwards, journal included"
+    );
+}
+
+/// Two identical deliveries of an unsupported-protocol envelope must journal
+/// ONE record. Journaling per delivery puts two records under one command id,
+/// which is the ambiguous-duplicate state the journal exists to prevent.
+#[test]
+fn identical_unsupported_protocol_retries_journal_exactly_one_record() {
+    let mut run = fresh_run();
+    let stale_protocol = || TeamCommandEnvelope {
+        protocol_version: TEAM_COMMAND_PROTOCOL_VERSION + 1,
+        command_id: CommandId::new("cmd-1").unwrap(),
+        sequence: 1,
+        expected_revision: 0,
+        command: set_phase(TeamPhase::Planning),
+    };
+
+    let first = apply_raw(&mut run, stale_protocol());
+    assert_eq!(
+        first.status,
+        TeamCommandStatus::Rejected(CommandRejection::UnsupportedProtocol)
+    );
+    assert_eq!(run.command_journal.len(), 1);
+
+    let second = apply_raw(&mut run, stale_protocol());
+    assert_eq!(
+        second, first,
+        "an identical retry replays the recorded receipt (AC-4)"
+    );
+    assert_eq!(
+        run.command_journal.len(),
+        1,
+        "a replay must not append a second record under the same id"
+    );
+    assert_eq!(
+        run.command_journal
+            .iter()
+            .filter(|record| record.command_id.as_str() == "cmd-1")
+            .count(),
+        1,
+        "one command id, at most one journal record"
+    );
+}
+
+/// A malformed run must refuse without writing anything: its journal is
+/// already untrustworthy, so appending to it neither stabilizes a receipt nor
+/// tells a later reader anything it can rely on.
+#[test]
+fn a_malformed_run_refuses_without_mutating() {
+    let mut run = fresh_run();
+    run.driver_progress =
+        serde_json::from_value(serde_json::json!({"state_revision": "not-a-number"})).unwrap();
+    let before = serde_json::to_value(&run).unwrap();
+
+    let receipt = apply(&mut run, "cmd-1", 1, set_phase(TeamPhase::Planning));
+
+    assert_eq!(
+        receipt.status,
+        TeamCommandStatus::Rejected(CommandRejection::InvalidState)
+    );
+    assert_eq!(
+        serde_json::to_value(&run).unwrap(),
+        before,
+        "a malformed run fails closed with no mutation at all"
+    );
+}
+
+/// Redelivering the same doomed envelope at a malformed run must answer the
+/// same way every time, without the journal to remember it by.
+#[test]
+fn a_malformed_refusal_is_idempotent_across_redeliveries() {
+    let mut run = fresh_run();
+    run.driver_progress =
+        serde_json::from_value(serde_json::json!({"state_revision": "not-a-number"})).unwrap();
+
+    let first = apply(&mut run, "cmd-1", 1, set_phase(TeamPhase::Planning));
+    let second = apply(&mut run, "cmd-1", 1, set_phase(TeamPhase::Planning));
+    assert_eq!(first, second);
+    assert!(run.command_journal.is_empty());
+}
+
+/// An inert backend must answer identically however many times it is asked.
+#[test]
+fn an_inert_backend_refusal_is_idempotent_across_redeliveries() {
+    let mut run = fresh_run();
+    run.orchestration_backend =
+        relay_api::orchestration::OrchestrationBackendRef::unknown_non_executing();
+
+    let first = apply(&mut run, "cmd-1", 1, set_phase(TeamPhase::Planning));
+    let second = apply(&mut run, "cmd-1", 1, set_phase(TeamPhase::Planning));
+    assert_eq!(first, second);
+    assert!(run.command_journal.is_empty());
+}
+
+/// A run whose counters have no headroom must refuse with a closed code and
+/// leave every business field alone — never wrap, never panic.
+#[test]
+fn an_exhausted_state_revision_refuses_without_touching_business_fields() {
+    let mut run = fresh_run();
+    run.driver_progress.state_revision = u64::MAX;
+
+    let receipt = apply_raw(
+        &mut run,
+        envelope("cmd-1", 1, u64::MAX, set_phase(TeamPhase::Planning)),
+    );
+
+    assert_eq!(
+        receipt.status,
+        TeamCommandStatus::Rejected(CommandRejection::InvalidState)
+    );
+    assert_eq!(
+        run.phase,
+        TeamPhase::Intake,
+        "an exhausted counter must not let the effect through"
+    );
+    assert_eq!(
+        run.driver_progress.state_revision,
+        u64::MAX,
+        "and must not wrap"
+    );
+}
+
+#[test]
+fn an_exhausted_event_sequence_refuses_without_touching_business_fields() {
+    let mut run = fresh_run();
+    run.driver_progress.last_event_seq = u64::MAX;
+
+    let receipt = apply(&mut run, "cmd-1", 1, set_phase(TeamPhase::Planning));
+
+    assert_eq!(
+        receipt.status,
+        TeamCommandStatus::Rejected(CommandRejection::InvalidState)
+    );
+    assert_eq!(run.phase, TeamPhase::Intake);
+    assert_eq!(run.driver_progress.last_event_seq, u64::MAX);
+}
+
+/// `u64::MAX` is a legal sequence to receive; what it must not do is let the
+/// reducer apply and then have nowhere to go next.
+#[test]
+fn a_max_sequence_refuses_rather_than_stranding_the_counter() {
+    let mut run = fresh_run();
+
+    let receipt = apply(&mut run, "cmd-1", u64::MAX, set_phase(TeamPhase::Planning));
+
+    assert_eq!(
+        receipt.status,
+        TeamCommandStatus::Rejected(CommandRejection::InvalidState)
+    );
+    assert_eq!(run.phase, TeamPhase::Intake);
+}
+
+/// Collection counts alone let one enormous scalar through. The aggregate
+/// serialized bound is what actually caps a command's cost.
+#[test]
+fn an_oversized_scalar_payload_is_refused_before_mutation() {
+    let mut run = fresh_run();
+    run.sub_tasks.push(sub_task("st-1"));
+
+    let receipt = apply(
+        &mut run,
+        "cmd-1",
+        1,
+        TeamStateCommand::RecordReviewRound {
+            index: 0,
+            verdict: WorkflowVerdict {
+                approved: true,
+                summary: Some("x".repeat(MAX_TEAM_COMMAND_PAYLOAD_BYTES + 1)),
+                findings: Vec::new(),
+            },
+            status: SubTaskStatus::Done,
+            result_summary: None,
+            escalated: None,
+        },
+    );
+
+    assert_eq!(
+        receipt.status,
+        TeamCommandStatus::Rejected(CommandRejection::InvalidState),
+        "a single huge scalar must be refused, not merely counted"
+    );
+    assert_eq!(
+        run.sub_tasks[0].status,
+        SubTaskStatus::default(),
+        "a refused payload never reaches the effect"
+    );
+}
+
+/// The bound has to sit well above anything a real run produces, or it is a
+/// behaviour regression rather than a safety win (D6).
+#[test]
+fn an_ordinary_command_is_nowhere_near_the_payload_bound() {
+    let mut run = fresh_run();
+    run.sub_tasks.push(sub_task("st-1"));
+
+    let receipt = apply(
+        &mut run,
+        "cmd-1",
+        1,
+        TeamStateCommand::RecordReviewRound {
+            index: 0,
+            verdict: WorkflowVerdict {
+                approved: false,
+                summary: Some("A fairly wordy review summary. ".repeat(200)),
+                findings: (0..32).map(|i| format!("finding {i}: ...")).collect(),
+            },
+            status: SubTaskStatus::Escalated,
+            result_summary: Some("still unresolved".to_string()),
+            escalated: Some("left over".to_string()),
+        },
+    );
+
+    assert!(
+        matches!(receipt.status, TeamCommandStatus::Applied(_)),
+        "a realistic review round must not trip the payload bound: {:?}",
+        receipt.status
+    );
+}
+
+/// The hole a watermark closes. A rejection journaled BEFORE the sequence
+/// check (payload bounds, here) never advances `last_command_seq`, so once
+/// its record is evicted nothing remembers that sequence was ever used — and
+/// a DIFFERENT command reusing that id sails through the ordering check and
+/// applies. Compaction must not be able to turn a refusal into an apply.
+#[test]
+fn compacting_a_pre_sequence_rejection_still_refuses_a_reused_id() {
+    let mut run = fresh_run();
+    let far = 10_000u64;
+
+    // Refused at the payload bound, i.e. before the ordering check.
+    let refused = apply_raw(
+        &mut run,
+        envelope(
+            "cmd-reused",
+            far,
+            0,
+            TeamStateCommand::ReplanSubTasks {
+                sub_tasks: (0..MAX_TEAM_COMMAND_SUB_TASKS + 1)
+                    .map(|i| sub_task(&format!("st-{i}")))
+                    .collect(),
+                phase: TeamPhase::SubTasks,
+            },
+        ),
+    );
+    assert_eq!(
+        refused.status,
+        TeamCommandStatus::Rejected(CommandRejection::InvalidState)
+    );
+
+    // Push it out of the journal. Same rejection class, so eviction works
+    // oldest-first through them and reaches `cmd-reused` first of all.
+    for index in 1..=(MAX_TEAM_COMMAND_JOURNAL as u64 + 4) {
+        apply(
+            &mut run,
+            &format!("cmd-filler-{index}"),
+            index,
+            TeamStateCommand::ReplanSubTasks {
+                sub_tasks: (0..MAX_TEAM_COMMAND_SUB_TASKS + 1)
+                    .map(|i| sub_task(&format!("st-{i}")))
+                    .collect(),
+                phase: TeamPhase::SubTasks,
+            },
+        );
+    }
+    assert!(
+        run.command_journal
+            .find(&CommandId::new("cmd-reused").unwrap())
+            .is_none(),
+        "the refused record must have been compacted for this test to mean anything"
+    );
+
+    let phase_before = run.phase;
+    let revision_before = run.driver_progress.state_revision;
+    let replayed = apply_raw(
+        &mut run,
+        envelope(
+            "cmd-reused",
+            far,
+            revision_before,
+            set_phase(TeamPhase::Wrapping),
+        ),
+    );
+    assert_eq!(
+        replayed.status,
+        TeamCommandStatus::Rejected(CommandRejection::StaleCommand),
+        "a compacted sequence must stay spent, not become reusable"
+    );
+    assert_eq!(
+        run.phase, phase_before,
+        "compaction must never turn a refusal into an apply"
+    );
+}
+
+/// The whole point of the watermark: whatever eviction drops, redelivering it
+/// is refused deterministically and can never apply a second time.
+#[test]
+fn every_evicted_record_is_at_or_below_the_sequence_watermark() {
+    let mut run = fresh_run();
+    // Fill past the cap so eviction is forced repeatedly.
+    for index in 1..=(MAX_TEAM_COMMAND_JOURNAL as u64 + 8) {
+        let receipt = apply(
+            &mut run,
+            &format!("cmd-{index}"),
+            index,
+            set_phase(TeamPhase::Planning),
+        );
+        assert!(matches!(receipt.status, TeamCommandStatus::Applied(_)));
+    }
+    assert_eq!(run.command_journal.len(), MAX_TEAM_COMMAND_JOURNAL);
+
+    // Everything still retained sits above the watermark; everything dropped
+    // sits at or below it, so its redelivery fails the ordering check.
+    let watermark = run.driver_progress.last_command_seq;
+    for index in 1..=8u64 {
+        let phase_before = run.phase;
+        let revision_before = run.driver_progress.state_revision;
+        let receipt = apply_raw(
+            &mut run,
+            envelope(
+                &format!("cmd-{index}"),
+                index,
+                revision_before,
+                set_phase(TeamPhase::Wrapping),
+            ),
+        );
+        assert!(
+            index <= watermark,
+            "an evicted record's sequence must not exceed the watermark"
+        );
+        assert_eq!(
+            receipt.status,
+            TeamCommandStatus::Rejected(CommandRejection::StaleCommand),
+            "a compacted command must reject deterministically, never apply"
+        );
+        assert_eq!(
+            run.phase, phase_before,
+            "and must never apply a second time"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------
+// Competing local/user/orchestrator mutations must invalidate a driver
+// decision taken before them. Deterministic by ordering, not by timing:
+// snapshot the revision, apply the user action, then deliver the envelope
+// the driver decided from that snapshot.
+// ---------------------------------------------------------------------
+
+/// Every one of these is a state change a user or the orchestrator can make
+/// while the driver is inside a turn. A driver decision taken before it is
+/// stale by definition, and the ONLY thing that makes the reducer say so is
+/// `state_revision` having moved.
+#[test]
+fn user_and_orchestrator_mutations_all_invalidate_an_older_driver_decision() {
+    struct Case {
+        name: &'static str,
+        prepare: fn(&mut TeamRun),
+        act: fn(&mut TeamRun),
+    }
+
+    let cases = [
+        Case {
+            name: "pause requested",
+            prepare: |_| {},
+            act: |run| run.request_pause("device-1"),
+        },
+        Case {
+            name: "stop requested",
+            prepare: |_| {},
+            act: |run| run.request_stop("device-1"),
+        },
+        Case {
+            name: "pause settled",
+            prepare: |run| run.request_pause("device-1"),
+            act: |run| {
+                run.settle_paused("settled", TeamPauseKind::User);
+            },
+        },
+        Case {
+            name: "resumed",
+            prepare: |run| {
+                run.request_pause("device-1");
+                run.settle_paused("settled", TeamPauseKind::User);
+            },
+            act: |run| {
+                run.resume();
+            },
+        },
+        Case {
+            name: "escalated sub-tasks revived",
+            prepare: |run| {
+                let mut task = sub_task("st-1");
+                task.status = SubTaskStatus::Escalated;
+                run.sub_tasks.push(task);
+            },
+            act: |run| {
+                run.revive_escalated_sub_tasks();
+            },
+        },
+        Case {
+            name: "cancelled",
+            prepare: |_| {},
+            act: |run| {
+                run.cancel("cancelled by the user");
+            },
+        },
+    ];
+
+    for case in cases {
+        let mut run = fresh_run();
+        (case.prepare)(&mut run);
+
+        // What the driver read before it went off to take its turn.
+        let decided_from = run.driver_progress.state_revision;
+
+        (case.act)(&mut run);
+
+        assert!(
+            run.driver_progress.state_revision > decided_from,
+            "{}: a competing mutation must advance state_revision, or a driver \
+decision taken before it still looks current",
+            case.name
+        );
+
+        let receipt = apply_raw(
+            &mut run,
+            envelope("cmd-1", 1, decided_from, set_phase(TeamPhase::Wrapping)),
+        );
+        assert_eq!(
+            receipt.status,
+            TeamCommandStatus::Rejected(CommandRejection::StaleCommand),
+            "{}: the older envelope must be refused as stale",
+            case.name
+        );
+        assert_ne!(
+            run.phase,
+            TeamPhase::Wrapping,
+            "{}: and must not have applied",
+            case.name
+        );
+    }
+}
+
+/// A resume is the case that would otherwise slip through: it clears
+/// `pause_requested` and puts the run back to `Running`, so the lifecycle
+/// gate stops refusing. Only the revision bump still separates a decision
+/// made before the pause from one made after the resume.
+#[test]
+fn a_resume_does_not_make_a_pre_pause_decision_current_again() {
+    let mut run = fresh_run();
+    let decided_from = run.driver_progress.state_revision;
+
+    run.request_pause("device-1");
+    run.settle_paused("settled", TeamPauseKind::User);
+    assert!(run.resume());
+    assert_eq!(run.status, TeamRunStatus::Running);
+    assert!(
+        !run.pause_requested,
+        "the lifecycle gate would now permit it"
+    );
+
+    let receipt = apply_raw(
+        &mut run,
+        envelope("cmd-1", 1, decided_from, set_phase(TeamPhase::Wrapping)),
+    );
+    assert_eq!(
+        receipt.status,
+        TeamCommandStatus::Rejected(CommandRejection::StaleCommand),
+        "a resumed run must still refuse the decision the pause invalidated"
     );
 }

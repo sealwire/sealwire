@@ -18,7 +18,7 @@
 use serde::Serialize;
 
 use crate::orchestration::{CommandId, CommandRejection, TeamCommandKind};
-use crate::team::{SubTask, SubTaskStatus, TeamPhase};
+use crate::team::{SubTask, SubTaskStatus, TeamPauseKind, TeamPhase, TeamRunStatus};
 use crate::WorkflowVerdict;
 
 /// Local command protocol version. Independent of
@@ -40,6 +40,15 @@ pub const MAX_TEAM_COMMAND_FINDINGS: usize = 64;
 /// `TakeUserNotes` command drains it. Bounds refuse rather than truncate: a
 /// truncated drain would silently drop a user's note.
 pub const MAX_TEAM_COMMAND_NOTES: usize = 64;
+
+/// Hard ceiling on one command's total serialized size.
+///
+/// The collection counts above bound how MANY items a command carries; this
+/// bounds how big it is, which nothing else does — a single findings entry or
+/// result summary can be arbitrarily long on its own. Deliberately far above
+/// any real turn's output (a whole review reply is a few KiB) so it only ever
+/// catches a runaway, never a genuine run — see `.sealwire/DESIGN.md` D6.
+pub const MAX_TEAM_COMMAND_PAYLOAD_BYTES: usize = 1 << 20;
 
 /// A sub-task seat a command may attach a thread to. Never `Tl` — the TL
 /// thread's identity moves through `RecordIntake`'s succession mechanics, not
@@ -152,9 +161,62 @@ pub enum TeamStateCommand {
     /// carries content, and why replay reads `TeamRun.drained_notes` rather
     /// than the (content-blind) journal.
     TakeUserNotes {},
+
+    // -----------------------------------------------------------------
+    // The lifecycle family (`.sealwire/DESIGN.md` D14). Everything above
+    // records workflow progress; these four move the run's own status. They
+    // exist so the driver has exactly ONE mutation seam — before T4 closed
+    // it, these were four separate `TeamPort` methods that wrote state
+    // outside the reducer entirely, unjournaled and unversioned.
+    //
+    // They are the one family exempt from the reducer's lifecycle gate,
+    // because they ARE the transition it would refuse. Their own guards live
+    // where they always did, on the `TeamRun` methods below.
+    // -----------------------------------------------------------------
+    /// Advance the run's status. `TeamRun::set_status`' guards still apply:
+    /// terminal is final and a user-settled state is off-limits.
+    SetRunStatus {
+        status: TeamRunStatus,
+    },
+    /// Record a driver-observed failure. A DRAINING stop outranks it — see
+    /// `TeamRun::fail`.
+    FailRun {
+        // T5: → ArtifactRef
+        error: String,
+    },
+    /// Park the run for an explicit recovery, keeping its locks.
+    BlockRun {
+        // T5: → ArtifactRef
+        error: String,
+    },
+    /// Write a settlement the driver reached at a step boundary. The
+    /// quiescence pre-check that guards `Paused`/`Cancelled`/`Done` is a host
+    /// mechanism and runs before this command is ever built.
+    SettleRun {
+        status: TeamRunStatus,
+        // T5: → ArtifactRef
+        reason: String,
+        /// Named `pause_kind`, not `kind`: the envelope is serialized with an
+        /// internally-tagged `kind` discriminant for the fingerprint, and a
+        /// field of that name would collide with it.
+        pause_kind: TeamPauseKind,
+    },
 }
 
 impl TeamStateCommand {
+    /// Whether this command carries the run's own lifecycle transition, and
+    /// so must not be refused by the gate that protects workflow state from a
+    /// stale driver decision. See the family's doc above.
+    pub fn is_lifecycle_transition(&self) -> bool {
+        matches!(
+            self,
+            Self::SetRunStatus { .. }
+                | Self::FailRun { .. }
+                | Self::BlockRun { .. }
+                | Self::SettleRun { .. }
+        )
+    }
+
     /// The content-blind discriminant journaled for this command.
     pub fn kind(&self) -> TeamCommandKind {
         match self {
@@ -171,6 +233,10 @@ impl TeamStateCommand {
             Self::RecordMrDevThread { .. } => TeamCommandKind::RecordMrDevThread,
             Self::FinishRun { .. } => TeamCommandKind::FinishRun,
             Self::TakeUserNotes {} => TeamCommandKind::TakeUserNotes,
+            Self::SetRunStatus { .. } => TeamCommandKind::SetRunStatus,
+            Self::FailRun { .. } => TeamCommandKind::FailRun,
+            Self::BlockRun { .. } => TeamCommandKind::BlockRun,
+            Self::SettleRun { .. } => TeamCommandKind::SettleRun,
         }
     }
 }
@@ -219,7 +285,7 @@ pub struct TeamCommandReceipt {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::team::{SubTask, SubTaskStatus, TeamPhase};
+    use crate::team::{SubTask, SubTaskStatus, TeamPauseKind, TeamPhase, TeamRunStatus};
     use crate::WorkflowVerdict;
 
     fn one_of_every_variant() -> Vec<TeamStateCommand> {
