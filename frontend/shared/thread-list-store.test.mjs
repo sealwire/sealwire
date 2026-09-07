@@ -6,6 +6,7 @@ import {
   readActiveProjectId,
   readSearchUi,
   readThreadFilter,
+  readThreadSelection,
 } from "./thread-list-store.js";
 
 // `activeProjectId` lives as a SIBLING of `threadList`, and the remote surface snapshots
@@ -300,4 +301,44 @@ test("editing the draft leaves focusSignal alone", () => {
   store.getState().setSearchDraft("par");
 
   assert.equal(readSearchUi(store).focusSignal, afterOpen);
+});
+
+// Escape, plain clicks and every list refresh clear the selection unconditionally.
+// A setter that handed back a fresh object each time would re-render the whole
+// sidebar on keystrokes that changed nothing.
+test("clearing an already-empty selection does not change its identity", () => {
+  const store = createThreadListStore();
+  const before = readThreadSelection(store);
+
+  let notified = 0;
+  store.subscribe(() => {
+    notified += 1;
+  });
+
+  store.getState().clearThreadSelection();
+  assert.equal(readThreadSelection(store), before, "identity is preserved");
+  assert.equal(notified, 0, "no subscriber was woken");
+});
+
+test("clearing a real selection empties it and notifies", () => {
+  const store = createThreadListStore();
+  store.getState().setThreadSelection({ ids: new Set(["a", "b"]), anchorId: "a" });
+  assert.equal(readThreadSelection(store).ids.size, 2);
+
+  let notified = 0;
+  store.subscribe(() => {
+    notified += 1;
+  });
+
+  store.getState().clearThreadSelection();
+  assert.equal(readThreadSelection(store).ids.size, 0);
+  assert.equal(readThreadSelection(store).anchorId, null);
+  assert.ok(notified >= 1);
+});
+
+test("a malformed selection normalizes to an empty one rather than poisoning the store", () => {
+  const store = createThreadListStore();
+  store.getState().setThreadSelection({ ids: ["a", "b"] });
+  assert.ok(readThreadSelection(store).ids instanceof Set);
+  assert.equal(readThreadSelection(store).ids.size, 0);
 });

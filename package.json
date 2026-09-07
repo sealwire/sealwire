@@ -91,6 +91,7 @@
     "test:browser:pairing": "node scripts/e2e/run-browser-suite.mjs --suite self-hosted",
     "test:browser:pairing:fake": "node scripts/e2e/run-browser-suite.mjs --suite self-hosted --fake",
     "test:browser:local-delete": "npm run build && node scripts/browser-local-delete-e2e.mjs",
+    "test:browser:bulk-delete": "npm run build && AGENT_PROVIDERS=fake node scripts/browser-local-bulk-delete-e2e.mjs",
     "test:browser:local-session": "npm run build && node scripts/browser-local-session-e2e.mjs",
     "test:browser:local-workspace-repair": "npm run build && AGENT_PROVIDERS=fake node scripts/browser-local-workspace-repair-e2e.mjs",
     "test:browser:workflow-code-flow": "npm run build && AGENT_PROVIDERS=fake node scripts/workflow-code-flow-e2e.mjs",

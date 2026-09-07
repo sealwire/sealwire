@@ -1430,6 +1430,19 @@ input:focus, textarea:focus, select:focus {
   transition: background 100ms ease, color 100ms ease;
 }
 
+/* Shift+click is a range gesture on a selectable row, and the browser's own
+   shift-extend would otherwise drag a text highlight across every row it crossed.
+   In CSS rather than JS because that selection starts on mousedown, too early for a
+   preventDefault on the click to stop it.
+   Scoped to `[aria-selected]`, which only the surface that wired up multi-select
+   emits: `.conversation-item` is shared with remote's session rows AND its relay
+   directory, and blanket-disabling text selection there would take away copying a
+   row's title from surfaces that never gained the gesture. */
+.conversation-item[aria-selected] {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
 /* The row's leading slot — the agent's mark. Sized here rather than on the mark
    itself so the slot keeps its width even when a provider ships no mark and the
    span comes back empty. */
@@ -1491,6 +1504,25 @@ input:focus, textarea:focus, select:focus {
 .conversation-item.is-context-target {
   background: var(--surface-2);
   border-color: var(--border-faint);
+}
+
+/* Shift/Cmd multi-select. Deliberately LOUDER than .is-active: the open session is
+   a fact the user can confirm by looking at the transcript, but a selection is only
+   visible here, and it is the input to a permanent delete. The tinted fill plus a
+   drawn border reads at a glance across a run of rows, which a background shift
+   alone does not — the resting row and .is-active already share --surface-2. */
+.conversation-item.is-multi-selected {
+  background: var(--accent-soft-bg);
+  border-color: var(--accent);
+}
+.conversation-item.is-multi-selected .conversation-title {
+  color: var(--text-1);
+  font-weight: var(--weight-medium);
+}
+/* Hover must not read as "unselected": without this the hover fill above replaces
+   the tint, and dragging the pointer over a selection makes rows blink out of it. */
+.conversation-item.is-multi-selected:hover {
+  background: var(--accent-soft-bg);
 }
 
 /* Row + its actions button share a relative wrapper so the button can overlay the

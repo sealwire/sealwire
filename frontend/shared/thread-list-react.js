@@ -13,7 +13,7 @@ import {
   observeElementRect,
 } from "@tanstack/virtual-core";
 import { canonicalizeWorkspace, isUnknownWorkspace } from "./thread-groups.js";
-import { createThreadListRows } from "./thread-list-state.js";
+import { createThreadListRows, visibleThreadIds } from "./thread-list-state.js";
 import { providerLabel } from "./provider-labels.js";
 // The row's agent mark. A provider we ship no mark for leaves the slot EMPTY
 // rather than borrowing another vendor's logo, which would mislabel the session
@@ -129,12 +129,14 @@ export function ThreadGroupList({
   onRenameProject = null,
   onSelectProject = null,
   onResumeThread = null,
+  onSelectThread = null,
   onSelectWorkspace = null,
   onThreadActions = null,
   onToggleExpandedGroup = null,
   onToggleGroup = null,
   previewFallback = "No preview yet.",
   selectedCwd = "",
+  selectedThreadIds = null,
   threadActivity = null,
   threadAttention = null,
   threadReviewing = null,
@@ -160,6 +162,21 @@ export function ThreadGroupList({
   );
   const virtualizer = useThreadListVirtualizer(rows);
   const virtualRows = virtualizer.getVirtualItems();
+  // The row hands up `(threadId, event)`; the ORDER a shift+click ranges over is
+  // knowable only here, where the rows are built — the list is virtualized, so the
+  // shell cannot read it back off the DOM. Hence the third argument.
+  const handleSelectThread = useCallback(
+    (threadId, event) => onSelectThread?.(threadId, event, visibleThreadIds(rows)),
+    [onSelectThread, rows]
+  );
+  // Same reason, for the same reader: a right-click inside a multi-selection acts on
+  // the batch, and ordering it needs the row order. Appended, so the surfaces that
+  // take three arguments are unaffected.
+  const handleContextThread = useCallback(
+    (threadId, clientX, clientY) =>
+      onContextThread?.(threadId, clientX, clientY, visibleThreadIds(rows)),
+    [onContextThread, rows]
+  );
 
   if (!groups.length) {
     return h("p", { className: "sidebar-empty" }, emptyMessage);
@@ -200,19 +217,21 @@ export function ThreadGroupList({
             formatThreadMeta,
             includePreview,
             normalizedSelectedCwd,
-            onContextThread,
+            onContextThread: onContextThread ? handleContextThread : null,
             onDeleteProject,
             activeProjectId,
             onContextProject,
             onRenameProject,
             onSelectProject,
             onResumeThread,
+            onSelectThread: onSelectThread ? handleSelectThread : null,
             onSelectWorkspace,
             onThreadActions,
             onToggleExpandedGroup,
             onToggleGroup,
             previewFallback,
             row,
+            selectedThreadIds,
             threadActivity,
             threadAttention,
             threadReviewing,
@@ -236,12 +255,14 @@ function ThreadListRow({
   onRenameProject,
   onSelectProject,
   onResumeThread,
+  onSelectThread,
   onSelectWorkspace,
   onThreadActions,
   onToggleExpandedGroup,
   onToggleGroup,
   previewFallback,
   row,
+  selectedThreadIds,
   threadActivity,
   threadAttention,
   threadReviewing,
@@ -282,8 +303,10 @@ function ThreadListRow({
       includePreview,
       onContextThread,
       onResumeThread,
+      onSelectThread,
       onThreadActions,
       previewFallback,
+      selected: selectedThreadIds?.has?.(row.thread.id) || false,
       thread: row.thread,
     });
   }
@@ -663,8 +686,10 @@ export function ThreadGroupItem({
   includePreview,
   onContextThread,
   onResumeThread,
+  onSelectThread = null,
   onThreadActions = null,
   previewFallback,
+  selected = false,
   thread,
 }) {
   const title = thread.name || thread.preview || shortId(thread.id);
@@ -684,7 +709,10 @@ export function ThreadGroupItem({
   const rowButton = h(
     "button",
     {
-      className: `conversation-item${active ? " is-active" : ""}${isContextTarget ? " is-context-target" : ""}`,
+      className: `conversation-item${active ? " is-active" : ""}${isContextTarget ? " is-context-target" : ""}${selected ? " is-multi-selected" : ""}`,
+      // Only meaningful where rows are selectable; a surface without the handler
+      // would otherwise announce every row as "not selected" for no reason.
+      "aria-selected": onSelectThread ? String(Boolean(selected)) : undefined,
       "data-thread-cwd": group.cwd,
       "data-thread-id": thread.id,
       "data-thread-provider": thread.provider || "",
@@ -699,7 +727,23 @@ export function ThreadGroupItem({
       // upgrades that same tab. Nothing is opened twice — `preview` only ever
       // decides how a NEW tab is flagged, and the surface with no tab strip
       // (remote) simply ignores the option.
-      onClick: () => onResumeThread?.(thread.id, { preview: true }),
+      //
+      // EVERY click first goes to the selection layer, which returns true when it has
+      // claimed the gesture (cmd/shift, or a Mac ctrl+click that is really a
+      // right-click) and false for a plain one. A plain click is not a no-op there —
+      // it is what sets the ANCHOR a later shift+click ranges from — so it cannot be
+      // filtered out here, only by the caller, which is the side that knows the
+      // platform. See threadSelectionIntent.
+      //
+      // The text-selection half of shift+click is suppressed in CSS (user-select on
+      // .conversation-item): it begins on mousedown, too early for this to stop.
+      onClick: (event) => {
+        if (onSelectThread?.(thread.id, event)) {
+          event.preventDefault();
+          return;
+        }
+        onResumeThread?.(thread.id, { preview: true });
+      },
       onDoubleClick: () => onResumeThread?.(thread.id, { preview: false }),
       onContextMenu: onContextThread
         ? (event) => {

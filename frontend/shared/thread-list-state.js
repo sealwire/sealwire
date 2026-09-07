@@ -99,6 +99,17 @@ export function shouldRenderThreadListLoadingPlaceholder(threadList, groups = []
   return Boolean(threadList?.loading && !groups?.length && !threads?.length);
 }
 
+/**
+ * The ids of the session rows the list actually renders, in render order.
+ *
+ * Derived from the rows rather than the DOM because the list is virtualized: a
+ * shift+click range has to span sessions that are scrolled out of view and so are
+ * not in the document at all.
+ */
+export function visibleThreadIds(rows) {
+  return (rows || []).filter((row) => row.type === "thread").map((row) => row.thread.id);
+}
+
 export function createThreadListRows({
   collapsedGroupCwds = new Set(),
   collapsible = false,
