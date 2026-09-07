@@ -3677,6 +3677,28 @@ async fn codex_recv_methods(state: &std::sync::Arc<RwLock<RelayState>>) -> Vec<S
         .collect()
 }
 
+async fn wait_for_codex_method_count(
+    state: &std::sync::Arc<RwLock<RelayState>>,
+    method: &str,
+    expected: usize,
+) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let count = codex_recv_methods(state)
+                .await
+                .into_iter()
+                .filter(|received| received == method)
+                .count();
+            if count >= expected {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for {expected} `{method}` requests"));
+}
+
 #[tokio::test]
 async fn list_threads_follows_the_cursor_past_codexs_100_row_page_cap() {
     // The real app-server silently caps one thread/list response at 100 rows even when
@@ -3717,6 +3739,34 @@ async fn list_threads_follows_the_cursor_past_codexs_100_row_page_cap() {
 }
 
 #[tokio::test]
+async fn list_threads_reports_a_second_page_failure_instead_of_claiming_completeness() {
+    let (bridge, state) = spawn_fake_codex_bridge().await;
+    configure_fake_codex(&bridge, "fail-page-two", 0).await;
+
+    let error = bridge
+        .list_threads(105)
+        .await
+        .expect_err("a failed later page must make the provider listing unavailable");
+
+    assert_eq!(error, "fake thread/list page two failure");
+    wait_for_codex_method_count(&state, "thread/list", 2).await;
+}
+
+#[tokio::test]
+async fn list_threads_reports_a_malformed_later_page_instead_of_claiming_completeness() {
+    let (bridge, state) = spawn_fake_codex_bridge().await;
+    configure_fake_codex(&bridge, "malformed-page-two", 0).await;
+
+    let error = bridge
+        .list_threads(105)
+        .await
+        .expect_err("a malformed later page must make the provider listing unavailable");
+
+    assert_eq!(error, "thread id is missing");
+    wait_for_codex_method_count(&state, "thread/list", 2).await;
+}
+
+#[tokio::test]
 async fn list_threads_stops_when_codex_exhausts_the_cursor() {
     let (bridge, state) = spawn_fake_codex_bridge().await;
 
@@ -3751,22 +3801,23 @@ async fn list_threads_at_the_page_cap_makes_only_one_request() {
 }
 
 #[tokio::test]
-async fn list_threads_stops_on_an_empty_page() {
+async fn list_threads_follows_an_advancing_cursor_past_an_empty_page() {
     let (bridge, state) = spawn_fake_codex_bridge().await;
     configure_fake_codex(&bridge, "empty-page", 0).await;
 
     let threads = bridge
         .list_threads(150)
         .await
-        .expect("an empty page should end pagination");
+        .expect("an advancing cursor should continue past a filtered empty page");
 
-    assert_eq!(threads.len(), 100);
+    assert_eq!(threads.len(), 105);
+    assert_eq!(threads.last().unwrap().id, "listed-thread-204");
     let request_count = codex_recv_payloads(&state)
         .await
         .into_iter()
         .filter(|payload| payload.get("method").and_then(Value::as_str) == Some("thread/list"))
         .count();
-    assert_eq!(request_count, 2);
+    assert_eq!(request_count, 3);
 }
 
 #[tokio::test]
@@ -3817,6 +3868,23 @@ async fn list_threads_deduplicates_ids_across_page_boundaries() {
 }
 
 #[tokio::test]
+async fn list_threads_stops_at_the_page_backstop_when_only_duplicates_arrive() {
+    let (bridge, state) = spawn_fake_codex_bridge().await;
+    configure_fake_codex(&bridge, "advancing-duplicates", 0).await;
+
+    let error = bridge
+        .list_threads_with_limits(101, Duration::from_secs(5), 3)
+        .await
+        .expect_err("advancing cursors with no new rows must hit the page backstop");
+
+    assert_eq!(
+        error,
+        "Codex thread/list pagination exceeded its 3-page limit"
+    );
+    wait_for_codex_method_count(&state, "thread/list", 3).await;
+}
+
+#[tokio::test]
 async fn list_threads_applies_one_timeout_budget_to_the_whole_scan() {
     let (bridge, state) = spawn_fake_codex_bridge().await;
     configure_fake_codex(&bridge, "slow", 250).await;
@@ -3830,6 +3898,7 @@ async fn list_threads_applies_one_timeout_budget_to_the_whole_scan() {
         error.contains("thread/list pagination exceeded its 400 ms total timeout"),
         "unexpected error: {error}"
     );
+    wait_for_codex_method_count(&state, "thread/list", 2).await;
     let request_count = codex_recv_payloads(&state)
         .await
         .into_iter()

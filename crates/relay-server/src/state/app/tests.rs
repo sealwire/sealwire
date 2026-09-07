@@ -11419,6 +11419,34 @@ tree; got {}",
         );
     }
 
+    #[tokio::test]
+    async fn codex_thread_search_scans_every_realistically_capped_page() {
+        let app = build_fake_codex_app("/tmp/project").await;
+
+        let found = app
+            .list_threads_matching(20, None, Some("Listed session 204"), None)
+            .await
+            .expect("search all fake Codex pages");
+
+        assert_eq!(
+            found
+                .threads
+                .iter()
+                .map(|thread| thread.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["listed-thread-204"]
+        );
+        let request_count = codex_recv_methods(&app)
+            .await
+            .into_iter()
+            .filter(|method| method == "thread/list")
+            .count();
+        assert_eq!(
+            request_count, 3,
+            "the 1000-row search scan must follow the fake server's 100-row cap"
+        );
+    }
+
     /// Search must match what the row SHOWS. After a rename that is the user's title,
     /// and the provider's old auto-title must stop being findable — otherwise renaming
     /// a session leaves a second, invisible name that still answers to search.
@@ -11689,6 +11717,69 @@ tree; got {}",
             vec![real],
             "duplicates must collapse before the cap is applied"
         );
+    }
+
+    /// A provider failure is not an authoritative empty page. The 12-second resting
+    /// refresh must keep its last successful rows instead of blanking the sidebar and
+    /// the routing cache until the next successful poll.
+    #[tokio::test]
+    async fn a_provider_list_failure_keeps_its_cached_sidebar_and_routing_rows() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, codex, claude) = build_recording_provider_app(&cwd).await;
+
+        let cached_id = seed_listable_threads(&codex, &cwd, 3, "Cached Codex session").await;
+        let warm = app.list_threads(20, None).await.expect("warm the cache");
+        assert!(warm.threads.iter().any(|thread| thread.id == cached_id));
+
+        codex
+            .list_threads_should_fail
+            .store(true, Ordering::Relaxed);
+        let stale = app
+            .list_threads(20, None)
+            .await
+            .expect("a provider failure must not fail the merged list");
+
+        assert_eq!(stale.unavailable_providers, vec!["codex".to_string()]);
+        assert!(
+            stale.threads.iter().any(|thread| thread.id == cached_id),
+            "the last known Codex row must remain visible while marked unavailable"
+        );
+
+        // Even when another provider fills the visible page, truncation must not evict
+        // the unavailable provider's older routing rows.
+        {
+            let mut threads = claude.threads.lock().await;
+            for index in 0..25 {
+                let id = format!("busy-claude-thread-{index}");
+                let mut summary = claude.thread_summary(&id, &cwd);
+                summary.updated_at = 10_000 - index;
+                threads.insert(id, summary);
+            }
+        }
+        let crowded = app
+            .list_threads(20, None)
+            .await
+            .expect("crowded stale list");
+        assert_eq!(crowded.threads.len(), 20);
+        assert!(crowded
+            .threads
+            .iter()
+            .all(|thread| thread.provider == "claude_code"));
+        assert!(
+            app.relay
+                .read()
+                .await
+                .threads
+                .iter()
+                .any(|thread| thread.id == cached_id),
+            "the failed refresh must not evict the Codex routing row"
+        );
+        let (provider, _bridge) = app
+            .find_thread_provider(&cached_id)
+            .await
+            .expect("the cached Codex session must remain routable");
+        assert_eq!(provider, "codex");
     }
 
     /// "No results" is a positive claim that nothing matches. A provider that failed to

@@ -113,6 +113,15 @@ function handle(payload) {
     case "thread/list": {
       const requestedLimit = Math.max(0, Number(params?.limit) || 0);
       const start = Math.max(0, Number(params?.cursor) || 0);
+      if (threadListMode === "fail-page-two" && start === threadListPageLimit) {
+        return fail(id, "fake thread/list page two failure");
+      }
+      if (threadListMode === "malformed-page-two" && start === threadListPageLimit) {
+        return ok(id, {
+          data: [{ preview: "missing the required id" }],
+          nextCursor: null,
+        });
+      }
       if (threadListMode === "empty-page" && start === threadListPageLimit) {
         return ok(id, { data: [], nextCursor: String(start + threadListPageLimit) });
       }
@@ -120,6 +129,12 @@ function handle(payload) {
         return ok(id, {
           data: [threadSummary(`listed-thread-${String(start).padStart(3, "0")}`)],
           nextCursor: String(start),
+        });
+      }
+      if (threadListMode === "advancing-duplicates" && start >= threadListPageLimit) {
+        return ok(id, {
+          data: [threadSummary("listed-thread-000")],
+          nextCursor: String(start + 1),
         });
       }
 

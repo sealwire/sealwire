@@ -49,7 +49,12 @@ const MAX_TOOL_JSON_CHARS: usize = 512;
 const MAX_TOOL_ENTRY_CHARS: usize = 1_400;
 const MAX_APPROVAL_SUMMARY_CHARS: usize = 120;
 const MAX_APPROVAL_CONTEXT_CHARS: usize = 1_200;
-const CODEX_THREAD_LIST_TOTAL_TIMEOUT: Duration = Duration::from_secs(10);
+// Preserve the 30 seconds one thread/list request had before pagination while
+// bounding the whole scan to that same budget instead of multiplying it by pages.
+const CODEX_THREAD_LIST_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
+// A second backstop for a server that keeps advancing the cursor without ever
+// producing new rows. Matches the equivalent ACP session-list guard.
+const MAX_CODEX_THREAD_LIST_PAGES: usize = 50;
 
 fn thread_list_timeout_error(timeout: Duration) -> String {
     format!(
@@ -378,14 +383,29 @@ impl CodexBridge {
     }
 
     pub async fn list_threads(&self, limit: usize) -> Result<Vec<ThreadSummaryView>, String> {
-        self.list_threads_with_timeout(limit, CODEX_THREAD_LIST_TOTAL_TIMEOUT)
-            .await
+        self.list_threads_with_limits(
+            limit,
+            CODEX_THREAD_LIST_TOTAL_TIMEOUT,
+            MAX_CODEX_THREAD_LIST_PAGES,
+        )
+        .await
     }
 
+    #[cfg(test)]
     async fn list_threads_with_timeout(
         &self,
         limit: usize,
         total_timeout: Duration,
+    ) -> Result<Vec<ThreadSummaryView>, String> {
+        self.list_threads_with_limits(limit, total_timeout, MAX_CODEX_THREAD_LIST_PAGES)
+            .await
+    }
+
+    async fn list_threads_with_limits(
+        &self,
+        limit: usize,
+        total_timeout: Duration,
+        max_pages: usize,
     ) -> Result<Vec<ThreadSummaryView>, String> {
         // `limit` is the number the relay wants to SCAN, not Codex's page size. The
         // app-server caps one response at 100 rows and returns `nextCursor` even when a
@@ -393,9 +413,16 @@ impl CodexBridge {
         let mut threads = Vec::new();
         let mut seen_thread_ids = HashSet::new();
         let mut cursor: Option<String> = None;
+        let mut pages = 0;
         let deadline = tokio::time::Instant::now() + total_timeout;
 
         while threads.len() < limit {
+            if pages >= max_pages {
+                return Err(format!(
+                    "Codex thread/list pagination exceeded its {max_pages}-page limit"
+                ));
+            }
+            pages += 1;
             let remaining = limit - threads.len();
             let request_timeout = deadline.saturating_duration_since(tokio::time::Instant::now());
             if request_timeout.is_zero() {
@@ -413,7 +440,9 @@ impl CodexBridge {
                 )
                 .await
                 .map_err(|error| {
-                    if tokio::time::Instant::now() >= deadline {
+                    if error == "Codex app-server timed out waiting for `thread/list`"
+                        && tokio::time::Instant::now() >= deadline
+                    {
                         thread_list_timeout_error(total_timeout)
                     } else {
                         error
@@ -437,7 +466,10 @@ impl CodexBridge {
             let next_cursor = value_at(&result, &["nextCursor"])
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned);
-            if page.is_empty() || next_cursor.is_none() || next_cursor == cursor {
+            // An empty page may still be an intermediate filtered page. Keep going
+            // whenever the opaque cursor advances; the page/deadline guards above
+            // bound a broken server that produces empty pages forever.
+            if next_cursor.is_none() || next_cursor == cursor {
                 break;
             }
             cursor = next_cursor;
