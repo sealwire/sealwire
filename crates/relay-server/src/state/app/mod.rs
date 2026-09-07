@@ -832,6 +832,27 @@ in thread {thread_id}."
                         app.await_stop_or_mark_idle(thread_id, turn_id).await;
                     });
                 }
+                Err(error) if sessions::provider_reports_turn_already_gone(&error) => {
+                    // Same ghost as an explicit Stop: provider already dropped the
+                    // turn. Clearing here is what lets the watchdog actually unwedge
+                    // a session whose interrupt is rejected as "no active turn".
+                    if relay
+                        .runtime_for_thread(&thread_id)
+                        .and_then(|runtime| runtime.active_turn_id.as_deref())
+                        == Some(turn_id.as_str())
+                    {
+                        relay.bg_set_active_turn(&thread_id, None, unix_now());
+                        relay.set_thread_status(&thread_id, "idle".to_string(), Vec::new());
+                    }
+                    relay.push_log(
+                        "warn",
+                        format!(
+                            "Stale turn {turn_id} on thread {thread_id} was already gone \
+at the provider ({error}); cleared local working state."
+                        ),
+                    );
+                    relay.notify();
+                }
                 Err(error) => {
                     relay.push_log(
                         "warn",
