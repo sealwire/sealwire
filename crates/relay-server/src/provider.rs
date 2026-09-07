@@ -235,6 +235,16 @@ pub trait ProviderBridge: Send + Sync {
         &self,
         thread_id: &str,
     ) -> Result<LocalThreadDeleteSummary, String>;
+    /// Delete a thread whose ownership by this provider was recorded when the
+    /// task seat was created. `None` means it was already absent, which makes a
+    /// crash-retried task delete idempotent without weakening ordinary Session
+    /// deletion or guessing across providers.
+    async fn delete_owned_thread_permanently(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<LocalThreadDeleteSummary>, String> {
+        self.delete_thread_permanently(thread_id).await.map(Some)
+    }
     async fn start_turn(
         &self,
         thread_id: &str,

@@ -829,6 +829,19 @@ async fn mark_cancelled_archives_inert_blocked_run_and_releases_provider_seats()
             .await
             .expect("reviewer provider-backed thread");
     {
+        let relay = app.relay.read().await;
+        let run = relay.team_run(&run_id).expect("run");
+        for thread_id in [&tl_thread, &dev_thread, &reviewer_thread] {
+            assert_eq!(
+                run.owned_thread_providers
+                    .get(thread_id)
+                    .map(String::as_str),
+                Some("codex"),
+                "TeamPort::start_thread must persist the exact seat provider"
+            );
+        }
+    }
+    {
         let mut relay = app.relay.write().await;
         relay.update_team_run(&run_id, |run| {
             run.tl_thread_id = tl_thread.clone();
@@ -5115,4 +5128,881 @@ async fn a_graceful_pause_that_refuses_a_reviewer_turn_settles_paused_not_failed
     sleep(Duration::from_millis(50)).await;
     let still = app.relay.read().await.team_run(&run_id).cloned().unwrap();
     assert_eq!(still.status, crate::state::TeamRunStatus::Paused);
+}
+
+async fn insert_finished_run_with_seats(
+    app: &AppState,
+    cwd: &str,
+    run_id: &str,
+    status: crate::state::TeamRunStatus,
+) -> (String, String, String) {
+    let tl = start_parent(app, cwd, "codex").await;
+    let dev = start_parent(app, cwd, "codex").await;
+    let reviewer = start_parent(app, cwd, "codex").await;
+    {
+        let mut relay = app.relay.write().await;
+        let mut run = crate::state::TeamRun::new(
+            run_id.to_string(),
+            crate::state::TaskSpec::default(),
+            cwd.to_string(),
+            "device-1".to_string(),
+        );
+        run.status = status;
+        run.phase = relay_api::team::TeamPhase::Finished;
+        run.tl_thread_id = tl.id.clone();
+        run.tl_provider = "codex".to_string();
+        run.dev_provider = "codex".to_string();
+        run.reviewer_provider = "codex".to_string();
+        run.sub_tasks.push(crate::state::SubTask {
+            id: format!("st-{run_id}"),
+            title: "Work".to_string(),
+            status: crate::state::SubTaskStatus::Done,
+            dev_thread_id: Some(dev.id.clone()),
+            reviewer_thread_id: Some(reviewer.id.clone()),
+            owned_thread_ids: vec![dev.id.clone(), reviewer.id.clone()],
+            ..Default::default()
+        });
+        for thread_id in [&tl.id, &dev.id, &reviewer.id] {
+            run.record_owned_thread_provider(thread_id, "codex");
+        }
+        relay.insert_team_run(run);
+        relay.notify();
+    }
+    (tl.id, dev.id, reviewer.id)
+}
+
+fn thread_ids_present(listed: &crate::protocol::ThreadsResponse, ids: &[&str]) -> bool {
+    ids.iter()
+        .all(|id| listed.threads.iter().any(|thread| thread.id == *id))
+}
+
+fn thread_ids_absent(listed: &crate::protocol::ThreadsResponse, ids: &[&str]) -> bool {
+    ids.iter()
+        .all(|id| listed.threads.iter().all(|thread| thread.id != *id))
+}
+
+async fn delete_task(
+    app: &AppState,
+    run_id: &str,
+) -> Result<crate::protocol::TeamActionReceipt, String> {
+    app.delete_team(crate::protocol::TeamActionInput {
+        team_run_id: Some(run_id.to_string()),
+        device_id: Some("device-1".to_string()),
+    })
+    .await
+}
+
+#[tokio::test]
+async fn delete_task_drops_a_finished_run_and_its_seat_threads() {
+    let (_repo, root) = init_team_repo().await;
+    let (app, providers) = build_review_app(&root, &["codex"]).await;
+    let (tl_a, dev_a, rev_a) = insert_finished_run_with_seats(
+        &app,
+        &root,
+        "team-done-a",
+        crate::state::TeamRunStatus::Done,
+    )
+    .await;
+    let before = app.list_threads(50, None).await.expect("list before");
+    assert!(
+        thread_ids_present(&before, &[&tl_a, &dev_a, &rev_a]),
+        "the run's seats must be navigable before delete"
+    );
+
+    let receipt = delete_task(&app, "team-done-a")
+        .await
+        .expect("delete finished task");
+    assert_eq!(receipt.team_run_id, "team-done-a");
+    assert_eq!(receipt.status, "deleted");
+
+    assert!(
+        app.relay.read().await.team_run("team-done-a").is_none(),
+        "first finished card must leave the task list"
+    );
+    let after = app.list_threads(50, None).await.expect("list after");
+    assert!(
+        thread_ids_absent(&after, &[&tl_a, &dev_a, &rev_a]),
+        "seat threads must leave the Sessions list with their cards"
+    );
+    let stored = providers.get("codex").unwrap().threads.lock().await;
+    for id in [&tl_a, &dev_a, &rev_a] {
+        assert!(
+            !stored.contains_key(id),
+            "provider storage must drop seat {id}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn delete_task_refuses_a_live_run_without_touching_finished_neighbors() {
+    let (_repo, root) = init_team_repo().await;
+    let (app, _) = build_review_app(&root, &["codex"]).await;
+    let (tl_done, dev_done, rev_done) =
+        insert_finished_run_with_seats(&app, &root, "team-done", crate::state::TeamRunStatus::Done)
+            .await;
+    let (tl_live, _, _) = insert_finished_run_with_seats(
+        &app,
+        &root,
+        "team-live",
+        crate::state::TeamRunStatus::Running,
+    )
+    .await;
+
+    let error = delete_task(&app, "team-live")
+        .await
+        .expect_err("a live task cannot be deleted");
+    assert!(
+        error.contains("finished"),
+        "live refusal must say the run is not finished: {}",
+        error
+    );
+
+    assert!(app.relay.read().await.team_run("team-done").is_some());
+    assert!(app.relay.read().await.team_run("team-live").is_some());
+
+    let after = app
+        .list_threads(50, None)
+        .await
+        .expect("list after refusal");
+    assert!(thread_ids_present(
+        &after,
+        &[&tl_done, &dev_done, &rev_done]
+    ));
+    assert!(thread_ids_present(&after, &[&tl_live]));
+}
+
+#[tokio::test]
+async fn delete_task_preflights_every_seat_before_deleting_any_of_them() {
+    let (_repo, root) = init_team_repo().await;
+    let (app, providers) = build_review_app(&root, &["codex"]).await;
+    let (tl, dev, reviewer) = insert_finished_run_with_seats(
+        &app,
+        &root,
+        "team-locked-seat",
+        crate::state::TeamRunStatus::Done,
+    )
+    .await;
+    {
+        let mut relay = app.relay.write().await;
+        let job = crate::state::ReviewJob::new(
+            "job-lock-third-seat".to_string(),
+            reviewer.clone(),
+            "codex".to_string(),
+            "codex".to_string(),
+            None,
+            crate::state::ReviewMode::CleanThread,
+            root.clone(),
+            "device-1".to_string(),
+            None,
+            1,
+        );
+        relay.insert_review_job(job);
+        relay.notify();
+    }
+
+    let error = delete_task(&app, "team-locked-seat")
+        .await
+        .expect_err("a locked seat must refuse the complete delete");
+    assert_eq!(error, super::REVIEW_LOCKED_THREAD_MSG);
+    assert!(app
+        .relay
+        .read()
+        .await
+        .team_run("team-locked-seat")
+        .is_some());
+    let stored = providers.get("codex").unwrap().threads.lock().await;
+    for thread_id in [&tl, &dev, &reviewer] {
+        assert!(
+            stored.contains_key(thread_id),
+            "preflight refusal must preserve earlier seat {thread_id}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn delete_task_reports_an_unknown_id_without_panicking() {
+    let (_repo, root) = init_team_repo().await;
+    let (app, _) = build_review_app(&root, &["codex"]).await;
+
+    let error = delete_task(&app, "team-missing")
+        .await
+        .expect_err("unknown id must fail");
+    assert!(error.contains("no task"), "{error}");
+}
+
+#[tokio::test]
+async fn ordinary_session_delete_does_not_claim_success_when_provider_storage_is_missing() {
+    let (_repo, root) = init_team_repo().await;
+    let (app, providers) = build_review_app(&root, &["codex"]).await;
+    let thread = start_parent(&app, &root, "codex").await;
+    providers
+        .get("codex")
+        .unwrap()
+        .threads
+        .lock()
+        .await
+        .remove(&thread.id);
+
+    let error = app
+        .delete_thread_permanently(&thread.id, Some(false))
+        .await
+        .expect_err("ordinary Session delete must preserve its strict not-found semantics");
+    assert!(error.contains("was not found"), "{error}");
+    let relay = app.relay.read().await;
+    assert!(
+        relay.threads.iter().any(|row| row.id == thread.id),
+        "a failed provider delete must not tombstone the local Session row"
+    );
+    assert!(!relay.thread_is_locally_deleted(&thread.id));
+}
+
+#[tokio::test]
+async fn delete_task_refuses_an_ambiguous_legacy_seat() {
+    // An old untagged seat without a recorded provider cannot be deleted safely:
+    // guessing across provider stores risks reporting success on the wrong one.
+    let (_repo, root) = init_team_repo().await;
+    let (app, _) = build_review_app(&root, &["codex"]).await;
+    {
+        let mut relay = app.relay.write().await;
+        let mut run = crate::state::TeamRun::new(
+            "team-orphan-seat".to_string(),
+            crate::state::TaskSpec::default(),
+            root.clone(),
+            "device-1".to_string(),
+        );
+        run.status = crate::state::TeamRunStatus::Done;
+        run.phase = relay_api::team::TeamPhase::Finished;
+        run.tl_thread_id = "missing-tl".to_string();
+        relay.insert_team_run(run);
+        relay.notify();
+    }
+
+    let error = delete_task(&app, "team-orphan-seat")
+        .await
+        .expect_err("ambiguous ownership must fail closed");
+    assert!(error.contains("no recorded provider"), "{error}");
+    assert!(
+        app.relay
+            .read()
+            .await
+            .team_run("team-orphan-seat")
+            .is_some(),
+        "the task card must stay available after a safe refusal"
+    );
+}
+
+#[tokio::test]
+async fn delete_task_skips_seats_already_tombstoned_locally() {
+    let (_repo, root) = init_team_repo().await;
+    let (app, _) = build_review_app(&root, &["codex"]).await;
+    let (tl, dev, rev) = insert_finished_run_with_seats(
+        &app,
+        &root,
+        "team-partially-gone",
+        crate::state::TeamRunStatus::Done,
+    )
+    .await;
+    app.delete_thread_permanently(&dev, Some(false))
+        .await
+        .expect("pre-delete one seat");
+
+    let receipt = delete_task(&app, "team-partially-gone")
+        .await
+        .expect("remaining seats still delete");
+    assert_eq!(receipt.team_run_id, "team-partially-gone");
+    assert!(app
+        .relay
+        .read()
+        .await
+        .team_run("team-partially-gone")
+        .is_none());
+    let after = app.list_threads(50, None).await.expect("list after");
+    assert!(thread_ids_absent(&after, &[&tl, &dev, &rev]));
+}
+
+#[tokio::test]
+async fn delete_task_rechecks_terminal_status_after_winning_the_drive_gate() {
+    // Reopen flips a finished run live under the drive gate. Delete must take
+    // that same gate before reading status, or it can destroy seats of a run
+    // that has already been put back to work.
+    let (_repo, root) = init_team_repo().await;
+    let (app, _) = build_review_app(&root, &["codex"]).await;
+    let (tl, dev, rev) = insert_finished_run_with_seats(
+        &app,
+        &root,
+        "team-reopen-race",
+        crate::state::TeamRunStatus::Done,
+    )
+    .await;
+
+    let gate = app.team_drive_gate.lock().await;
+    let app_clone = app.clone();
+    let delete = tokio::spawn(async move {
+        app_clone
+            .delete_team(crate::protocol::TeamActionInput {
+                team_run_id: Some("team-reopen-race".to_string()),
+                device_id: Some("device-1".to_string()),
+            })
+            .await
+    });
+    // Let the spawned delete reach the gate wait.
+    sleep(Duration::from_millis(50)).await;
+    app.relay
+        .write()
+        .await
+        .update_team_run("team-reopen-race", |run| {
+            run.status = crate::state::TeamRunStatus::Paused;
+            run.phase = relay_api::team::TeamPhase::Intake;
+        });
+    drop(gate);
+
+    let error = delete
+        .await
+        .expect("join")
+        .expect_err("reopened task must not delete");
+    assert!(error.contains("finished"), "{error}");
+    assert!(
+        app.relay
+            .read()
+            .await
+            .team_run("team-reopen-race")
+            .is_some(),
+        "a reopened run must keep its card"
+    );
+    let after = app.list_threads(50, None).await.expect("list after");
+    assert!(
+        thread_ids_present(&after, &[&tl, &dev, &rev]),
+        "reopened seats must survive the refused delete"
+    );
+}
+
+#[tokio::test]
+async fn delete_task_unhides_session_bound_reviewers_of_a_seat() {
+    // `delete_thread_inner` alone would strand a completed Session reviewer's
+    // nav-hidden row. The keep-reviewers path must still run.
+    let (_repo, root) = init_team_repo().await;
+    let (app, _) = build_review_app(&root, &["codex"]).await;
+    let (tl, _dev, _rev) = insert_finished_run_with_seats(
+        &app,
+        &root,
+        "team-keep-reviewer",
+        crate::state::TeamRunStatus::Done,
+    )
+    .await;
+    let bound = start_parent(&app, &root, "codex").await;
+    {
+        let mut relay = app.relay.write().await;
+        relay.register_reviewer_thread(bound.id.clone(), tl.clone());
+        relay.notify();
+    }
+    let before = app.list_threads(50, None).await.expect("list before");
+    assert!(
+        before.threads.iter().all(|thread| thread.id != bound.id),
+        "session-bound reviewers stay nav-hidden before delete"
+    );
+
+    let receipt = delete_task(&app, "team-keep-reviewer")
+        .await
+        .expect("delete");
+    assert_eq!(receipt.team_run_id, "team-keep-reviewer");
+
+    assert!(
+        !app.relay
+            .read()
+            .await
+            .reviewer_thread_ids()
+            .contains(&bound.id),
+        "the kept reviewer must leave the hidden-reviewer set"
+    );
+    let after = app.list_threads(50, None).await.expect("list after");
+    assert!(
+        after.threads.iter().any(|thread| thread.id == bound.id),
+        "the kept reviewer must become a normal Session row"
+    );
+}
+
+#[tokio::test]
+async fn delete_task_progress_survives_a_partial_failure_and_restart() {
+    // Seat A deletes, seat B fails. Persist + restore clears tombstones; the
+    // provider already dropped A, so retry must treat A's "was not found" as
+    // progress (and the run must have forgotten A when release landed).
+    let (_repo, root) = init_team_repo().await;
+    let (app, providers) = build_review_app(&root, &["codex"]).await;
+    let (tl, dev, rev) = insert_finished_run_with_seats(
+        &app,
+        &root,
+        "team-partial",
+        crate::state::TeamRunStatus::Done,
+    )
+    .await;
+    providers
+        .get("codex")
+        .unwrap()
+        .fail_delete_thread_ids
+        .lock()
+        .await
+        .insert(rev.clone());
+
+    let error = delete_task(&app, "team-partial")
+        .await
+        .expect_err("failed seat must refuse the delete");
+    assert!(error.contains("delete failed (simulated)"), "{error}");
+
+    let owned = app
+        .relay
+        .read()
+        .await
+        .team_run("team-partial")
+        .expect("card kept")
+        .owned_thread_ids();
+    assert!(
+        !owned.iter().any(|id| id == &tl || id == &dev),
+        "successfully deleted seats must leave the durable owned set: {owned:?}"
+    );
+    assert!(
+        owned.iter().any(|id| id == &rev),
+        "the failed seat must remain for retry: {owned:?}"
+    );
+
+    // Simulate a process restart: durable TeamRun survives, in-memory tombstones
+    // do not. Provider storage still lacks tl/dev (already deleted).
+    {
+        let persisted = {
+            let relay = app.relay.read().await;
+            crate::state::persistence::PersistedRelayState::from_relay(&relay)
+        };
+        let mut relay = app.relay.write().await;
+        relay.apply_persisted(&persisted);
+        assert!(
+            !relay.thread_is_locally_deleted(&tl),
+            "restore must clear local delete tombstones"
+        );
+    }
+
+    providers
+        .get("codex")
+        .unwrap()
+        .fail_delete_thread_ids
+        .lock()
+        .await
+        .clear();
+
+    let receipt = delete_task(&app, "team-partial")
+        .await
+        .expect("retry finishes the remaining seat");
+    assert_eq!(receipt.team_run_id, "team-partial");
+    assert!(app.relay.read().await.team_run("team-partial").is_none());
+}
+
+#[tokio::test]
+async fn delete_task_treats_provider_not_found_as_progress_after_a_crash_window() {
+    // Crash between provider delete and release: restore re-lists the seat, the
+    // authoritative bridge says "was not found", and retry must still finish.
+    let (_repo, root) = init_team_repo().await;
+    let (app, providers) = build_review_app(&root, &["codex"]).await;
+    let (tl, dev, rev) = insert_finished_run_with_seats(
+        &app,
+        &root,
+        "team-crash-window",
+        crate::state::TeamRunStatus::Done,
+    )
+    .await;
+
+    // Provider already deleted every seat; durable run still names them all.
+    {
+        let mut stored = providers.get("codex").unwrap().threads.lock().await;
+        stored.remove(&tl);
+        stored.remove(&dev);
+        stored.remove(&rev);
+    }
+    {
+        let persisted = {
+            let relay = app.relay.read().await;
+            crate::state::persistence::PersistedRelayState::from_relay(&relay)
+        };
+        let mut relay = app.relay.write().await;
+        relay.apply_persisted(&persisted);
+    }
+
+    let receipt = delete_task(&app, "team-crash-window")
+        .await
+        .expect("authoritative not-found is progress");
+    assert_eq!(receipt.team_run_id, "team-crash-window");
+    assert!(app
+        .relay
+        .read()
+        .await
+        .team_run("team-crash-window")
+        .is_none());
+}
+
+#[tokio::test]
+async fn delete_task_routes_mixed_providers_from_recorded_ownership() {
+    let (_repo, root) = init_team_repo().await;
+    let (app, providers) = build_review_app(&root, &["codex", "claude_code"]).await;
+    let tl = start_parent(&app, &root, "codex").await;
+    let dev = start_parent(&app, &root, "claude_code").await;
+    let rev = start_parent(&app, &root, "codex").await;
+    let historic_rev = start_parent(&app, &root, "codex").await;
+    let untagged_run_owned = start_parent(&app, &root, "claude_code").await;
+    {
+        let mut relay = app.relay.write().await;
+        let mut run = crate::state::TeamRun::new(
+            "team-mixed".to_string(),
+            crate::state::TaskSpec::default(),
+            root.clone(),
+            "device-1".to_string(),
+        );
+        run.status = crate::state::TeamRunStatus::Done;
+        run.phase = relay_api::team::TeamPhase::Finished;
+        run.tl_thread_id = tl.id.clone();
+        run.tl_provider = "codex".to_string();
+        run.dev_provider = "claude_code".to_string();
+        run.reviewer_provider = "codex".to_string();
+        run.run_owned_thread_ids = vec![untagged_run_owned.id.clone()];
+        // These two seats have no confident legacy role, so their exact bridge
+        // must come from the per-seat ownership recorded at creation.
+        run.sub_tasks.push(crate::state::SubTask {
+            id: "st-mixed".to_string(),
+            title: "Work".to_string(),
+            status: crate::state::SubTaskStatus::Done,
+            dev_thread_id: Some(dev.id.clone()),
+            reviewer_thread_id: Some(rev.id.clone()),
+            owned_thread_ids: vec![dev.id.clone(), rev.id.clone(), historic_rev.id.clone()],
+            ..Default::default()
+        });
+        run.record_owned_thread_provider(&historic_rev.id, "codex");
+        run.record_owned_thread_provider(&untagged_run_owned.id, "claude_code");
+        relay.insert_team_run(run);
+        relay.notify();
+    }
+
+    let receipt = delete_task(&app, "team-mixed")
+        .await
+        .expect("mixed providers delete");
+    assert_eq!(receipt.team_run_id, "team-mixed");
+
+    assert!(
+        !providers
+            .get("codex")
+            .unwrap()
+            .threads
+            .lock()
+            .await
+            .contains_key(&tl.id),
+        "tl must leave the codex bridge"
+    );
+    assert!(
+        !providers
+            .get("claude_code")
+            .unwrap()
+            .threads
+            .lock()
+            .await
+            .contains_key(&dev.id),
+        "dev must leave the claude bridge"
+    );
+    assert!(
+        !providers
+            .get("codex")
+            .unwrap()
+            .threads
+            .lock()
+            .await
+            .contains_key(&rev.id),
+        "current reviewer must leave codex"
+    );
+    assert!(
+        !providers
+            .get("codex")
+            .unwrap()
+            .threads
+            .lock()
+            .await
+            .contains_key(&historic_rev.id),
+        "historical owned reviewer must use its recorded bridge"
+    );
+    assert!(
+        !providers
+            .get("claude_code")
+            .unwrap()
+            .threads
+            .lock()
+            .await
+            .contains_key(&untagged_run_owned.id),
+        "untagged run-owned must use its recorded bridge"
+    );
+}
+
+#[tokio::test]
+async fn delete_task_uses_the_run_recorded_provider_when_routing_misses() {
+    // Prefer the seat provider on the run over the newest-200 scan: after a
+    // restart the seat can still live on the provider while being absent from
+    // both the relay cache and a bounded list_threads page.
+    let (_repo, root) = init_team_repo().await;
+    let (app, providers) = build_review_app(&root, &["codex"]).await;
+    let (tl, dev, rev) = insert_finished_run_with_seats(
+        &app,
+        &root,
+        "team-old-seat",
+        crate::state::TeamRunStatus::Done,
+    )
+    .await;
+    {
+        let mut relay = app.relay.write().await;
+        relay
+            .threads
+            .retain(|thread| thread.id != tl && thread.id != dev && thread.id != rev);
+    }
+    // Evict from the provider map so a list_threads scan cannot rediscover them.
+    // Preferred-provider delete then reports not-found; that is progress for a
+    // confidently attributed seat.
+    {
+        let mut stored = providers.get("codex").unwrap().threads.lock().await;
+        stored.remove(&tl);
+        stored.remove(&dev);
+        stored.remove(&rev);
+    }
+
+    let receipt = delete_task(&app, "team-old-seat")
+        .await
+        .expect("recorded provider bypasses the scan");
+    assert_eq!(receipt.team_run_id, "team-old-seat");
+    assert!(app.relay.read().await.team_run("team-old-seat").is_none());
+}
+
+#[tokio::test]
+async fn delete_task_not_found_clears_local_thread_metadata() {
+    let (_repo, root) = init_team_repo().await;
+    let (app, providers) = build_review_app(&root, &["codex"]).await;
+    let (tl, _dev, _rev) = insert_finished_run_with_seats(
+        &app,
+        &root,
+        "team-not-found-meta",
+        crate::state::TeamRunStatus::Done,
+    )
+    .await;
+    {
+        let mut relay = app.relay.write().await;
+        relay.active_thread_id = Some(tl.clone());
+        relay.remember_thread_settings(
+            &tl,
+            "on-request",
+            "workspace-write",
+            "medium",
+            "codex-model",
+        );
+        relay.set_thread_workspace(&tl, Some(&root));
+        relay.projects.insert(
+            "proj-meta".to_string(),
+            crate::protocol::ProjectView {
+                id: "proj-meta".to_string(),
+                name: "Meta".to_string(),
+                instructions: None,
+            },
+        );
+        relay
+            .assign_thread_to_project(&tl, "proj-meta")
+            .expect("assign");
+        relay.register_task_reviewer_thread(tl.clone(), "other-parent".to_string());
+        relay.notify();
+    }
+    {
+        let mut stored = providers.get("codex").unwrap().threads.lock().await;
+        stored.remove(&tl);
+    }
+
+    let receipt = delete_task(&app, "team-not-found-meta")
+        .await
+        .expect("authoritative not-found still deletes the card");
+    assert_eq!(receipt.team_run_id, "team-not-found-meta");
+
+    let relay = app.relay.read().await;
+    assert!(relay.thread_settings(&tl).is_none(), "settings must drop");
+    assert!(
+        relay.thread_workspace(&tl).pinned.is_none(),
+        "workspace pin must drop"
+    );
+    assert!(
+        relay.thread_project_id.get(&tl).is_none(),
+        "project membership must drop"
+    );
+    assert_ne!(
+        relay.active_thread_id.as_deref(),
+        Some(tl.as_str()),
+        "active session must clear"
+    );
+    assert!(
+        !relay.reviewer_thread_ids().contains(&tl),
+        "the deleted seat must leave the reviewer map"
+    );
+}
+
+#[tokio::test]
+async fn delete_task_does_not_trust_an_idempotent_foreign_provider() {
+    // Provider A reports a strong delete success for a missing id (fake/Claude).
+    // The seat lives only on B, while restored active routing incorrectly points
+    // at A. The persisted seat owner must win without touching A.
+    let (_repo, root) = init_team_repo().await;
+    let (app, providers) = build_review_app(&root, &["codex", "claude_code"]).await;
+    providers
+        .get("codex")
+        .unwrap()
+        .delete_missing_succeeds
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let tl = start_parent(&app, &root, "codex").await;
+    let untagged = start_parent(&app, &root, "claude_code").await;
+    {
+        let mut relay = app.relay.write().await;
+        let mut run = crate::state::TeamRun::new(
+            "team-idempotent-liar".to_string(),
+            crate::state::TaskSpec::default(),
+            root.clone(),
+            "device-1".to_string(),
+        );
+        run.status = crate::state::TeamRunStatus::Done;
+        run.phase = relay_api::team::TeamPhase::Finished;
+        run.tl_thread_id = tl.id.clone();
+        run.tl_provider = "codex".to_string();
+        run.dev_provider = "claude_code".to_string();
+        run.reviewer_provider = "codex".to_string();
+        run.run_owned_thread_ids = vec![untagged.id.clone()];
+        run.record_owned_thread_provider(&untagged.id, "claude_code");
+        relay.insert_team_run(run);
+        relay.notify();
+    }
+    {
+        let persisted = {
+            let relay = app.relay.read().await;
+            crate::state::persistence::PersistedRelayState::from_relay(&relay)
+        };
+        let mut relay = app.relay.write().await;
+        relay.apply_persisted(&persisted);
+        relay.threads.clear();
+        relay.active_thread_id = Some(untagged.id.clone());
+        relay.provider_name = "codex".to_string();
+        relay.forget_search_routing_hint(&untagged.id);
+        relay.forget_search_routing_hint(&tl.id);
+    }
+
+    let receipt = delete_task(&app, "team-idempotent-liar")
+        .await
+        .expect("delete the recorded owner");
+    assert_eq!(receipt.team_run_id, "team-idempotent-liar");
+    assert!(
+        !providers
+            .get("claude_code")
+            .unwrap()
+            .threads
+            .lock()
+            .await
+            .contains_key(&untagged.id),
+        "the owning bridge must actually lose the seat"
+    );
+}
+
+#[tokio::test]
+async fn delete_task_unhides_reviewers_when_retrying_a_tombstoned_seat() {
+    // Local tombstone landed, durable release did not: the fast path must still
+    // unhide session-bound children before forgetting the parent.
+    let (_repo, root) = init_team_repo().await;
+    let (app, _) = build_review_app(&root, &["codex"]).await;
+    let (tl, _dev, _rev) = insert_finished_run_with_seats(
+        &app,
+        &root,
+        "team-tombstone-reviewer",
+        crate::state::TeamRunStatus::Done,
+    )
+    .await;
+    let bound = start_parent(&app, &root, "codex").await;
+    {
+        let mut relay = app.relay.write().await;
+        relay.register_reviewer_thread(bound.id.clone(), tl.clone());
+        relay.mark_thread_deleted(&tl);
+        relay.notify();
+        assert!(
+            relay
+                .team_run("team-tombstone-reviewer")
+                .unwrap()
+                .owned_thread_ids()
+                .iter()
+                .any(|id| id == &tl),
+            "precondition: the parent is still on the run"
+        );
+        assert!(
+            relay.reviewer_thread_ids().contains(&bound.id),
+            "precondition: the child is still hidden"
+        );
+    }
+
+    let receipt = delete_task(&app, "team-tombstone-reviewer")
+        .await
+        .expect("tombstone retry");
+    assert_eq!(receipt.team_run_id, "team-tombstone-reviewer");
+    assert!(
+        !app.relay
+            .read()
+            .await
+            .reviewer_thread_ids()
+            .contains(&bound.id),
+        "retrying a tombstoned parent must still unhide its reviewer"
+    );
+    let after = app.list_threads(50, None).await.expect("list after");
+    assert!(
+        after.threads.iter().any(|thread| thread.id == bound.id),
+        "the kept reviewer must become a normal Session row"
+    );
+}
+
+#[tokio::test]
+async fn delete_task_drops_persisted_review_cards_with_the_seat() {
+    let (_repo, root) = init_team_repo().await;
+    let (app, _) = build_review_app(&root, &["codex"]).await;
+    let (tl, _dev, _rev) = insert_finished_run_with_seats(
+        &app,
+        &root,
+        "team-review-card",
+        crate::state::TeamRunStatus::Done,
+    )
+    .await;
+    let bound = start_parent(&app, &root, "codex").await;
+    {
+        let mut relay = app.relay.write().await;
+        relay.register_reviewer_thread(bound.id.clone(), tl.clone());
+        let mut job = crate::state::ReviewJob::new(
+            "job-bound".to_string(),
+            tl.clone(),
+            "codex".to_string(),
+            "codex".to_string(),
+            None,
+            crate::state::ReviewMode::CleanThread,
+            root.clone(),
+            "device-1".to_string(),
+            None,
+            1,
+        );
+        job.reviewer_thread_id = Some(bound.id.clone());
+        job.set_status(crate::state::ReviewJobStatus::Complete);
+        relay.insert_review_job(job);
+        relay.notify();
+    }
+
+    let receipt = delete_task(&app, "team-review-card").await.expect("delete");
+    assert_eq!(receipt.team_run_id, "team-review-card");
+    assert!(
+        app.relay.read().await.review_job("job-bound").is_none(),
+        "the terminal review card must drop in the same write as the seat"
+    );
+    {
+        let persisted = {
+            let relay = app.relay.read().await;
+            crate::state::persistence::PersistedRelayState::from_relay(&relay)
+        };
+        let mut relay = app.relay.write().await;
+        relay.apply_persisted(&persisted);
+        assert!(
+            relay.review_job("job-bound").is_none(),
+            "restore must not resurrect the card"
+        );
+    }
 }

@@ -70,6 +70,11 @@ pub(super) const TL_MAX_TRANSCRIPT_BYTES: usize = 400 * 1024;
 /// unanswered question cannot hold the run's locks forever.
 const TEAM_ASK_USER_MAX_SECS: u64 = 24 * 60 * 60;
 
+/// Task deletion holds the session and team gates to exclude reopen/turn races.
+/// Bound each provider call so one wedged bridge cannot freeze every session op
+/// indefinitely.
+const TASK_SEAT_DELETE_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Ceiling on a rendered review diff.
 ///
 /// The per-file caps upstream do not bound the TOTAL: tracked output is capped
@@ -923,6 +928,221 @@ over on resume"
             status: status.as_str().to_string(),
             message,
         })
+    }
+
+    /// Permanently delete one finished task card and every seat thread it owns.
+    /// A seat that is already gone is not a failure — the card still drops.
+    pub async fn delete_team(&self, input: TeamActionInput) -> Result<TeamActionReceipt, String> {
+        if !self.beta_features_enabled().await {
+            return Err(TASKS_LOCKED_MESSAGE.to_string());
+        }
+        let device_id = require_device_id(input.device_id)?;
+        let run_id = input
+            .team_run_id
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| "task id is required".to_string())?;
+        self.delete_one_finished_team_run(&run_id, &device_id)
+            .await?;
+        Ok(TeamActionReceipt {
+            team_run_id: run_id,
+            status: "deleted".to_string(),
+            message: "Task and its sessions permanently deleted.".to_string(),
+        })
+    }
+
+    async fn delete_one_finished_team_run(
+        &self,
+        run_id: &str,
+        device_id: &str,
+    ) -> Result<(), String> {
+        // Same lock order as `reopen_team_run`: session slot, then drive gate.
+        // Holding both for the whole delete keeps a reopen from flipping the run
+        // live between seat deletes and the final `remove_team_run`.
+        let _slot = self.acquire_session_slot()?;
+        let _gate = self.team_drive_gate.lock().await;
+
+        let (owned, cwd, status, path_scope, allowed_roots) = {
+            let relay = self.relay.read().await;
+            let Some(run) = relay.team_run(run_id) else {
+                return Err("there is no task with that id".to_string());
+            };
+            (
+                run.owned_thread_ids(),
+                run.cwd.clone(),
+                run.status,
+                relay.device_path_scope(device_id),
+                relay.allowed_roots.clone(),
+            )
+        };
+        ensure_path_within_device_scope(&cwd, &path_scope, &allowed_roots)?;
+        if !status.is_terminal() {
+            return Err(format!(
+                "only a finished task can be deleted (this one is {})",
+                status.as_str()
+            ));
+        }
+
+        // Validate the complete delete before touching provider storage. A lock
+        // or ambiguous legacy seat near the end must not leave the task half
+        // destroyed while reporting a refusal.
+        let plans = {
+            let relay = self.relay.read().await;
+            let run = relay
+                .team_run(run_id)
+                .ok_or_else(|| "there is no task with that id".to_string())?;
+            let mut plans = Vec::with_capacity(owned.len());
+            for thread_id in owned {
+                let deleted_active_thread = relay.can_delete_thread(&thread_id)?;
+                if relay.is_thread_review_locked(&thread_id) {
+                    return Err(REVIEW_LOCKED_THREAD_MSG.to_string());
+                }
+                if relay.is_thread_or_cwd_workflow_locked(&thread_id) {
+                    return Err(WORKFLOW_LOCKED_THREAD_MSG.to_string());
+                }
+                let locally_deleted = relay.thread_is_locally_deleted(&thread_id);
+                let provider_name = if locally_deleted {
+                    None
+                } else {
+                    Some(
+                        run.provider_for_owned_thread(&thread_id)
+                            .ok_or_else(|| {
+                                format!(
+                                    "task seat '{thread_id}' has no recorded provider; refusing to guess where to delete it"
+                                )
+                            })?
+                            .to_string(),
+                    )
+                };
+                plans.push((
+                    thread_id.clone(),
+                    provider_name,
+                    relay.reviewer_threads_of_parent(&thread_id),
+                    locally_deleted,
+                    deleted_active_thread,
+                ));
+            }
+            plans
+        };
+        for (_, provider_name, _, locally_deleted, _) in &plans {
+            if !locally_deleted {
+                let name = provider_name.as_deref().expect("provider preflight");
+                if !self.providers.contains_key(name) {
+                    return Err(format!(
+                        "provider '{name}' is not available to delete task seats"
+                    ));
+                }
+            }
+        }
+
+        for (thread_id, provider_name, reviewers, locally_deleted, deleted_active_thread) in plans {
+            self.delete_owned_team_seat(
+                run_id,
+                &thread_id,
+                provider_name.as_deref(),
+                &reviewers,
+                locally_deleted,
+                deleted_active_thread,
+            )
+            .await?;
+        }
+        {
+            let mut relay = self.relay.write().await;
+            relay.remove_team_run(run_id);
+            relay.push_log("info", format!("Deleted finished task {run_id}."));
+            relay.notify();
+        }
+        // Provider refresh is not part of the transaction. Release the global
+        // gates first so a slow list cannot stall unrelated session actions.
+        drop(_gate);
+        drop(_slot);
+        let _ = self.list_threads(20, None).await;
+        Ok(())
+    }
+
+    /// Permanently delete one owned seat while the session slot is already held.
+    ///
+    /// Mirrors `delete_thread_permanently(..., Some(false))`: session-bound
+    /// reviewers of the seat are un-hidden, not stranded. Progress is durable on
+    /// the run record via `release_owned_thread`, because the in-memory
+    /// tombstone set does not survive restore.
+    async fn delete_owned_team_seat(
+        &self,
+        run_id: &str,
+        thread_id: &str,
+        provider_name: Option<&str>,
+        reviewer_threads: &[String],
+        locally_deleted: bool,
+        deleted_active_thread: bool,
+    ) -> Result<(), String> {
+        if locally_deleted {
+            self.commit_released_team_seat(run_id, thread_id, reviewer_threads)
+                .await;
+            return Ok(());
+        }
+
+        let provider_name = provider_name.expect("provider preflight");
+        let bridge = self
+            .providers
+            .get(provider_name)
+            .expect("provider availability preflight");
+        let delete_summary = tokio::time::timeout(
+            TASK_SEAT_DELETE_TIMEOUT,
+            bridge.delete_owned_thread_permanently(thread_id),
+        )
+        .await
+        .map_err(|_| {
+            format!("provider '{provider_name}' timed out while deleting task seat '{thread_id}'")
+        })??;
+        {
+            let mut relay = self.relay.write().await;
+            if deleted_active_thread {
+                relay.clear_active_session();
+            }
+            relay.mark_thread_deleted(thread_id);
+            relay.forget_reviewer_thread(thread_id);
+            match delete_summary {
+                Some(summary) => relay.push_log(
+                    "info",
+                    format!(
+                        "Permanently deleted task seat {thread_id} from provider '{provider_name}' ({} rollout file{} removed, provider row removed: {}).",
+                        summary.deleted_paths.len(),
+                        if summary.deleted_paths.len() == 1 { "" } else { "s" },
+                        summary.deleted_thread_row
+                    ),
+                ),
+                None => relay.push_log(
+                    "info",
+                    format!(
+                        "Task seat {thread_id} was already absent from provider '{provider_name}'."
+                    ),
+                ),
+            }
+            relay.notify();
+        }
+        // Forget reviewers, drop their persisted cards, and release the seat
+        // in one write so a crash cannot leave hidden children or stale jobs.
+        self.commit_released_team_seat(run_id, thread_id, &reviewer_threads)
+            .await;
+        Ok(())
+    }
+
+    async fn commit_released_team_seat(
+        &self,
+        run_id: &str,
+        thread_id: &str,
+        reviewer_threads: &[String],
+    ) {
+        let mut relay = self.relay.write().await;
+        for reviewer_id in reviewer_threads {
+            relay.forget_reviewer_thread(reviewer_id);
+            relay.drop_review_jobs_for_reviewer(reviewer_id);
+            relay.drop_workflow_runs_for_reviewer(reviewer_id);
+        }
+        if relay.update_team_run(run_id, |run| {
+            run.release_owned_thread(thread_id);
+        }) {
+            relay.notify();
+        }
     }
 
     /// Every recorded task, newest first.
@@ -1974,6 +2194,7 @@ over on resume"
             // run-owned thread without one, and the report cannot recover it.
             relay.update_team_run(run_id, |run| {
                 run.record_run_thread_role(&thread_id, role);
+                run.record_owned_thread_provider(&thread_id, &provider_name);
             });
             // Record only the reviewer in the semantic reviewer set, and atomically
             // mark this task-owned reviewer as a first-class Session. The same set

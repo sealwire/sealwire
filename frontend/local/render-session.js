@@ -368,6 +368,7 @@ export function createSessionRenderer({
   onBackToTasks,
   onTeamAction,
   onStartTask,
+  onDeleteTask,
 }) {
   // Look a thread up across everything the user can currently see — the authoritative
   // list plus any search result from beyond it. Lookups only; see `findVisibleThread`.
@@ -2182,6 +2183,7 @@ export function createSessionRenderer({
           });
         },
         onAction: (action) => onTeamAction?.(action, context.teamRunId || null),
+        onDelete: (teamRunId) => onDeleteTask?.(teamRunId),
         onStartTask: () => onStartTask?.(),
         orchestrator: locked
           ? null

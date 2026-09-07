@@ -255,6 +255,26 @@ export async function markTeam(apiFetch, status, { teamRunId, deviceId } = {}) {
   return payload.data;
 }
 
+/** Permanently delete one finished task card and the seat threads it owns. */
+export async function deleteTeam(apiFetch, { teamRunId, deviceId } = {}) {
+  if (!teamRunId) {
+    throw new Error("Task id is required");
+  }
+  const response = await apiFetch("/api/session/team/delete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      team_run_id: teamRunId,
+      device_id: deviceId || null,
+    }),
+  });
+  const payload = await response.json();
+  if (!response.ok || !payload?.ok) {
+    throw new Error(payload?.error?.message || "Failed to delete the task");
+  }
+  return payload.data;
+}
+
 export async function getDevices(apiFetch) {
   const response = await apiFetch("/api/devices", { method: "GET" });
   const payload = await response.json();

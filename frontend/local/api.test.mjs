@@ -13,6 +13,7 @@ import {
   startTeam,
   teamAction,
   markTeam,
+  deleteTeam,
   TEAM_ACTIONS,
 } from "./api.js";
 
@@ -275,6 +276,34 @@ test("markTeam POSTs the mark route with status in the body", async () => {
 test("an unknown mark status never reaches the network", async () => {
   const { apiFetch, calls } = makeFetchStub(jsonResponse({ ok: true, data: {} }));
   await assert.rejects(() => markTeam(apiFetch, "merged", { teamRunId: "team-1" }), /Unknown task mark status/);
+  assert.equal(calls.length, 0);
+});
+
+test("deleteTeam POSTs one task id to the delete route", async () => {
+  const receipt = {
+    team_run_id: "team-1",
+    status: "deleted",
+    message: "Task and its sessions permanently deleted.",
+  };
+  const { apiFetch, calls } = makeFetchStub(jsonResponse({ ok: true, data: receipt }));
+
+  const result = await deleteTeam(apiFetch, {
+    teamRunId: "team-1",
+    deviceId: "device-a",
+  });
+  assert.deepEqual(result, receipt);
+  assert.equal(calls[0].input, "/api/session/team/delete");
+  assert.equal(calls[0].init.method, "POST");
+  assert.equal(calls[0].init.headers?.["Content-Type"], "application/json");
+  assert.deepEqual(JSON.parse(calls[0].init.body), {
+    team_run_id: "team-1",
+    device_id: "device-a",
+  });
+});
+
+test("deleteTeam never reaches the network without a task id", async () => {
+  const { apiFetch, calls } = makeFetchStub(jsonResponse({ ok: true, data: {} }));
+  await assert.rejects(() => deleteTeam(apiFetch, {}), /Task id is required/);
   assert.equal(calls.length, 0);
 });
 

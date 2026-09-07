@@ -137,17 +137,36 @@ pub fn delete_thread_permanently(
     delete_session_dir(&sessions_dir, thread_id)
 }
 
+pub fn delete_thread_permanently_if_present(
+    provider_key: &str,
+    display_name: &str,
+    thread_id: &str,
+) -> Result<Option<LocalThreadDeleteSummary>, String> {
+    let Some(sessions_dir) = sessions_dir_for(provider_key)? else {
+        return Err(format!(
+            "{display_name} does not support deleting sessions over ACP"
+        ));
+    };
+    delete_session_dir_if_present(&sessions_dir, thread_id)
+}
+
 /// Pure core, with the store root passed in so it is testable against a temp
 /// directory rather than the developer's real Cursor sessions.
 fn delete_session_dir(
     sessions_dir: &Path,
     thread_id: &str,
 ) -> Result<LocalThreadDeleteSummary, String> {
+    delete_session_dir_if_present(sessions_dir, thread_id)?
+        .ok_or_else(|| format!("session {thread_id} was not found in local Cursor storage"))
+}
+
+fn delete_session_dir_if_present(
+    sessions_dir: &Path,
+    thread_id: &str,
+) -> Result<Option<LocalThreadDeleteSummary>, String> {
     let session_dir = sessions_dir.join(session_dir_name(thread_id)?);
     if !session_dir.is_dir() {
-        return Err(format!(
-            "session {thread_id} was not found in local Cursor storage"
-        ));
+        return Ok(None);
     }
 
     fs::remove_dir_all(&session_dir).map_err(|error| {
@@ -157,12 +176,12 @@ fn delete_session_dir(
         )
     })?;
 
-    Ok(LocalThreadDeleteSummary {
+    Ok(Some(LocalThreadDeleteSummary {
         deleted_paths: vec![session_dir],
         // The "row" for an ACP session IS its directory: `session/list` reads
         // the directories, there is no separate index to prune.
         deleted_thread_row: true,
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -209,6 +228,12 @@ mod tests {
         assert!(
             error.contains("was not found"),
             "the message should say it was not there, got: {error}"
+        );
+        assert!(
+            delete_session_dir_if_present(&root, "33333333-3333-4333-8333-333333333333")
+                .expect("idempotent task delete")
+                .is_none(),
+            "the task-only delete contract must distinguish an already-absent seat"
         );
     }
 

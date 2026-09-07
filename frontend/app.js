@@ -108,6 +108,7 @@ import {
   getTeams,
   startTeam,
   teamAction,
+  deleteTeam,
   getUsage,
   getTeamCatalog,
   ensureOrchestrator,
@@ -1215,6 +1216,7 @@ const renderer = createSessionRenderer({
     void openReviewDestination(sessionViewController, teamRunId);
   },
   onTeamAction: runTeamAction,
+  onDeleteTask: deleteTask,
   onStartTask: openStartTaskDialog,
   // Hoisted module-level declarations below. `viewThread` is shared rather than a
   // method here because several call sites (sidebar rows, tab strip) need the one
@@ -2236,6 +2238,50 @@ async function runTeamAction(action, teamRunId) {
   } finally {
     state.teamActionPending = null;
     renderer.renderSession(state.session);
+  }
+}
+
+async function deleteTask(teamRunId) {
+  if (!teamRunId || state.teamActionPending) {
+    return false;
+  }
+  if (
+    !window.confirm(
+      "Delete this finished task and its sessions? This cannot be undone."
+    )
+  ) {
+    return false;
+  }
+  state.teamActionPending = "delete";
+  state.teamActionError = null;
+  renderer.renderSession(state.session);
+  try {
+    const receipt = await deleteTeam(apiFetch, {
+      teamRunId,
+      deviceId: state.deviceId,
+    });
+    logLine(`Task ${teamRunId}: ${receipt.message}`);
+    const context = sessionViewStore.getState().location.context || {};
+    if (context.teamRunId === teamRunId) {
+      void sessionViewController.showOverview({ kind: "tasks", teamRunId: null });
+    }
+    return true;
+  } catch (error) {
+    state.teamActionError = error?.message || String(error);
+    return false;
+  } finally {
+    // A provider failure can happen after an earlier seat was deleted. Always
+    // discard both caches so the UI reflects durable progress before a retry.
+    teamsCache.invalidate();
+    try {
+      await loadThreads("post-task-delete refresh", { fresh: true });
+    } catch (refreshError) {
+      logLine(`Task delete refresh failed: ${refreshError?.message || refreshError}`);
+    }
+    state.teamActionPending = null;
+    if (state.session) {
+      renderer.renderSession(state.session);
+    }
   }
 }
 

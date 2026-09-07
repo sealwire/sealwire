@@ -23,6 +23,7 @@ import {
   canTalkToTeamLead,
   currentSubTask,
   groupTeamRuns,
+  isTeamRunDeletable,
   isTerminalSubTaskStatus,
   isTerminalTeamStatus,
   teamAttention,
@@ -1176,9 +1177,10 @@ function SubTaskRow({ task, isCurrent }) {
   );
 }
 
-function TaskActions({ run, onAction, pending, error }) {
+function TaskActions({ run, onAction, onDelete, pending, error }) {
   const actions = availableTeamActions(run.status);
-  if (!actions.length) {
+  const canDelete = isTeamRunDeletable(run.status) && typeof onDelete === "function";
+  if (!actions.length && !canDelete) {
     return error ? h("p", { className: "task-action-error" }, String(error)) : null;
   }
   return h(
@@ -1198,6 +1200,19 @@ function TaskActions({ run, onAction, pending, error }) {
         pending === action ? "…" : TEAM_ACTION_LABELS[action]
       )
     ),
+    canDelete
+      ? h(
+          "button",
+          {
+            type: "button",
+            className: "task-action is-delete",
+            disabled: Boolean(pending),
+            title: "Permanently delete this task and all of its sessions",
+            onClick: () => onDelete(run.team_run_id),
+          },
+          pending === "delete" ? "…" : "Delete task"
+        )
+      : null,
     error ? h("p", { className: "task-action-error" }, String(error)) : null
   );
 }
@@ -1207,6 +1222,7 @@ export function TaskDetail({
   onBack,
   onOpenThread,
   onAction,
+  onDelete,
   actionPending,
   actionError,
   changesPanel = null,
@@ -1327,6 +1343,7 @@ export function TaskDetail({
     h(TaskActions, {
       run,
       onAction,
+      onDelete,
       pending: actionPending,
       error: actionError,
     }),
@@ -1423,6 +1440,7 @@ export function TaskTeamScreen({
   onBack,
   onOpenThread,
   onAction,
+  onDelete,
   actionPending = null,
   actionError = null,
   onStartTask,
@@ -1468,6 +1486,7 @@ export function TaskTeamScreen({
             onBack,
             onOpenThread,
             onAction,
+            onDelete,
             actionPending,
             actionError,
             changesPanel,

@@ -225,5 +225,12 @@ fn local_delete_reports_missing_thread() {
         .expect_err("missing thread should fail");
 
     assert!(error.contains("was not found"));
+    assert!(
+        store
+            .delete_thread_permanently_if_present("thread-missing")
+            .expect("idempotent task delete")
+            .is_none(),
+        "the task-only delete contract must distinguish an already-absent seat"
+    );
     fs::remove_dir_all(root).expect("temp store should be removable");
 }

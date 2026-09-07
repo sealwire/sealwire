@@ -773,6 +773,58 @@ test("a spontaneous turn whose only message is its terminal is still announced",
 
 const isResponse = (id) => (event) => event.type === "response" && event.id === id;
 
+test("task delete treats only the SDK's documented missing-session error as idempotent", async () => {
+  const sessionId = "11111111-2222-4333-8444-555555555555";
+  const worker = spawnWorker({ CLAUDE_FAKE_DELETE_MISSING_SESSION_ID: sessionId });
+  try {
+    worker.send({
+      type: "delete_session",
+      id: "delete-strict",
+      provider_session_id: sessionId,
+      cwd: "/tmp",
+    });
+    const strict = await worker.waitFor(isResponse("delete-strict"), {
+      label: "strict delete response",
+    });
+    assert.equal(strict.ok, false, "ordinary Session deletion must keep strict not-found semantics");
+
+    worker.send({
+      type: "delete_session",
+      id: "delete-idempotent",
+      provider_session_id: sessionId,
+      cwd: "/tmp",
+      allow_missing: true,
+    });
+    const idempotent = await worker.waitFor(isResponse("delete-idempotent"), {
+      label: "idempotent task delete response",
+    });
+    assert.equal(idempotent.ok, true);
+    assert.equal(idempotent.result?.deleted, false);
+  } finally {
+    await worker.close();
+  }
+});
+
+test("task delete does not hide unrelated SDK deletion errors", async () => {
+  const sessionId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  const worker = spawnWorker({ CLAUDE_FAKE_DELETE_ERROR_SESSION_ID: sessionId });
+  try {
+    worker.send({
+      type: "delete_session",
+      id: "delete-error",
+      provider_session_id: sessionId,
+      allow_missing: true,
+    });
+    const response = await worker.waitFor(isResponse("delete-error"), {
+      label: "failed task delete response",
+    });
+    assert.equal(response.ok, false);
+    assert.match(String(response.error?.message), /permission denied/);
+  } finally {
+    await worker.close();
+  }
+});
+
 test("fork_session returns a new provider_session_id distinct from the source", async () => {
   const worker = spawnWorker();
   try {

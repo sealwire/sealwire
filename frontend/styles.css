@@ -2766,7 +2766,8 @@ body.sidebar-collapsed .app-shell[data-view="tasks"] #tasks-sidebar-toggle {
   color: var(--accent-on);
 }
 .task-action.is-cancel,
-.task-action.is-stop {
+.task-action.is-stop,
+.task-action.is-delete {
   color: var(--err-fg);
 }
 .task-action-error {
