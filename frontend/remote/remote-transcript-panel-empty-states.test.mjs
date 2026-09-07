@@ -1,49 +1,23 @@
 // P1 regression: RemoteTranscriptPanel is deliberately rendered with
 // sessionView === null for the no-session and relay-home empty states (see
-// react-app.js:614, `sessionView = session ? ... : null`). Hoisting
+// react-app.js's RemoteApp, `sessionView = session ? ... : null`). Hoisting
 // transcriptOptions construction out of the active-session branch (for
 // stableTranscriptOptions, the React memo/identity sub-task) made it read
 // `sessionView.canWrite` unconditionally, on every render — including these
 // null-sessionView renders — so the empty states crash instead of drawing.
 //
-// react-app.js cannot be imported as a plain ES module under `node --test`:
-// it transitively pulls in shared/build-badge.js, which reads
-// import.meta.env.BASE_URL — a Vite-only global Node's loader never
-// populates. Confirmed no other test in this repo imports it directly for
-// exactly that reason (see transcript-options-identity.test.mjs). Rather
-// than duplicate/stub the whole component's dependency graph the way that
-// file's `new Function` extraction does for two pure helpers, this file
-// registers a minimal module loader that redirects build-badge.js to an
-// inert stub — letting the REAL react-app.js load with every other real
-// dependency intact, so RemoteTranscriptPanel itself (exported for exactly
-// this purpose) can be mounted and actually rendered under jsdom.
+// RemoteTranscriptPanel now lives in its own module
+// (remote-transcript-panel.js) specifically so it can be imported here
+// without pulling in react-app.js's own dependency graph — that graph
+// transitively reaches shared/build-badge.js, which reads
+// import.meta.env.BASE_URL, a Vite-only global Node's loader never
+// populates. JSDOM globals still need installing before the dynamic import
+// below: several modules in the panel's dependency closure touch `document`
+// at import time.
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { register } from "node:module";
 import { JSDOM } from "jsdom";
-
-register(
-  `data:text/javascript,
-    export async function resolve(specifier, context, nextResolve) {
-      if (specifier.endsWith("/shared/build-badge.js")) {
-        return { url: "build-badge-stub:main", shortCircuit: true };
-      }
-      return nextResolve(specifier, context);
-    }
-    export async function load(url, context, nextLoad) {
-      if (url === "build-badge-stub:main") {
-        return {
-          format: "module",
-          shortCircuit: true,
-          source: "export async function fetchBuildInfo() { return { label: '', title: '' }; }\\nexport async function mountBuildBadge() {}",
-        };
-      }
-      return nextLoad(url, context);
-    }
-  `,
-  import.meta.url
-);
 
 const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost/" });
 global.window = dom.window;
@@ -56,7 +30,7 @@ global.IS_REACT_ACT_ENVIRONMENT = true;
 const React = (await import("react")).default;
 const { act } = await import("react");
 const { createRoot } = await import("react-dom/client");
-const { RemoteTranscriptPanel } = await import("./react-app.js");
+const { RemoteTranscriptPanel } = await import("./remote-transcript-panel.js");
 
 const h = React.createElement;
 

@@ -1,15 +1,12 @@
-// react-app.js cannot be imported as a plain ES module under `node --test`:
-// it transitively pulls in shared/build-badge.js, which reads
-// import.meta.env.BASE_URL — a Vite-only global Node's loader never
-// populates. This follows the same fix as
-// remote-transcript-panel-empty-states.test.mjs: a module loader stub
-// redirects build-badge.js to an inert stub so the REAL react-app.js loads
-// with everything else intact. It additionally wraps
-// ../shared/transcript-options-identity.js with a spy that records every
-// `next` object handed to stableTranscriptOptions, forwarding to the real
-// implementation — so the tests below assert on the ACTUAL handler
-// references RemoteTranscriptPanel produces across real re-renders, instead
-// of grepping source text for `useCallback`.
+// RemoteTranscriptPanel lives in its own module (remote-transcript-panel.js)
+// specifically so it can be imported here without react-app.js's own
+// dependency graph, which transitively reaches shared/build-badge.js and
+// its Vite-only import.meta.env.BASE_URL read — unavailable under
+// `node --test`. This wraps ../shared/transcript-options-identity.js with a
+// spy that records every `next` object handed to stableTranscriptOptions,
+// forwarding to the real implementation — so the tests below assert on the
+// ACTUAL handler references RemoteTranscriptPanel produces across real
+// re-renders, instead of grepping source text for `useCallback`.
 //
 // P1 regression this guards: stableTranscriptOptions only reuses the
 // previous transcriptOptions object when every field is equal, which
@@ -40,22 +37,12 @@ const spySource = [
 register(
   `data:text/javascript,
     export async function resolve(specifier, context, nextResolve) {
-      if (specifier.endsWith("/shared/build-badge.js")) {
-        return { url: "build-badge-stub:main", shortCircuit: true };
-      }
       if (specifier.endsWith("/shared/transcript-options-identity.js") && !specifier.startsWith("file:")) {
         return { url: "transcript-options-identity-spy:main", shortCircuit: true };
       }
       return nextResolve(specifier, context);
     }
     export async function load(url, context, nextLoad) {
-      if (url === "build-badge-stub:main") {
-        return {
-          format: "module",
-          shortCircuit: true,
-          source: "export async function fetchBuildInfo() { return { label: '', title: '' }; }\\nexport async function mountBuildBadge() {}",
-        };
-      }
       if (url === "transcript-options-identity-spy:main") {
         return {
           format: "module",
@@ -80,7 +67,7 @@ global.IS_REACT_ACT_ENVIRONMENT = true;
 const React = (await import("react")).default;
 const { act } = await import("react");
 const { createRoot } = await import("react-dom/client");
-const { RemoteTranscriptPanel } = await import("./react-app.js");
+const { RemoteTranscriptPanel } = await import("./remote-transcript-panel.js");
 const { stableTranscriptOptionsCalls } = await import("../shared/transcript-options-identity.js");
 
 const h = React.createElement;
