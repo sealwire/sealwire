@@ -3637,6 +3637,19 @@ async fn spawn_fake_codex_bridge() -> (CodexBridge, std::sync::Arc<RwLock<RelayS
     (bridge, state)
 }
 
+async fn configure_fake_codex(bridge: &CodexBridge, mode: &str, delay_ms: u64) {
+    bridge
+        .send_request(
+            "fake/configure",
+            json!({
+                "threadListMode": mode,
+                "threadListDelayMs": delay_ms,
+            }),
+        )
+        .await
+        .expect("configure fake Codex app-server");
+}
+
 /// The JSON-RPC methods the fake app-server actually received, oldest first.
 ///
 /// The fake echoes every received message to stderr, which the bridge's stderr
@@ -3700,6 +3713,131 @@ async fn list_threads_follows_the_cursor_past_codexs_100_row_page_cap() {
     assert_eq!(
         requests[1]["params"]["limit"], 5,
         "the second request should fetch only the missing rows"
+    );
+}
+
+#[tokio::test]
+async fn list_threads_stops_when_codex_exhausts_the_cursor() {
+    let (bridge, state) = spawn_fake_codex_bridge().await;
+
+    let threads = bridge
+        .list_threads(300)
+        .await
+        .expect("an exhausted cursor should return every available row");
+
+    assert_eq!(threads.len(), 205);
+    assert_eq!(threads.last().unwrap().id, "listed-thread-204");
+    let request_count = codex_recv_payloads(&state)
+        .await
+        .into_iter()
+        .filter(|payload| payload.get("method").and_then(Value::as_str) == Some("thread/list"))
+        .count();
+    assert_eq!(request_count, 3, "nextCursor: null must stop pagination");
+}
+
+#[tokio::test]
+async fn list_threads_at_the_page_cap_makes_only_one_request() {
+    let (bridge, state) = spawn_fake_codex_bridge().await;
+
+    let threads = bridge.list_threads(100).await.expect("list one full page");
+
+    assert_eq!(threads.len(), 100);
+    let request_count = codex_recv_payloads(&state)
+        .await
+        .into_iter()
+        .filter(|payload| payload.get("method").and_then(Value::as_str) == Some("thread/list"))
+        .count();
+    assert_eq!(request_count, 1);
+}
+
+#[tokio::test]
+async fn list_threads_stops_on_an_empty_page() {
+    let (bridge, state) = spawn_fake_codex_bridge().await;
+    configure_fake_codex(&bridge, "empty-page", 0).await;
+
+    let threads = bridge
+        .list_threads(150)
+        .await
+        .expect("an empty page should end pagination");
+
+    assert_eq!(threads.len(), 100);
+    let request_count = codex_recv_payloads(&state)
+        .await
+        .into_iter()
+        .filter(|payload| payload.get("method").and_then(Value::as_str) == Some("thread/list"))
+        .count();
+    assert_eq!(request_count, 2);
+}
+
+#[tokio::test]
+async fn list_threads_stops_when_codex_repeats_a_cursor() {
+    let (bridge, state) = spawn_fake_codex_bridge().await;
+    configure_fake_codex(&bridge, "repeat-cursor", 0).await;
+
+    let threads = bridge
+        .list_threads(150)
+        .await
+        .expect("a repeated cursor should end pagination");
+
+    assert_eq!(threads.len(), 101);
+    let request_count = codex_recv_payloads(&state)
+        .await
+        .into_iter()
+        .filter(|payload| payload.get("method").and_then(Value::as_str) == Some("thread/list"))
+        .count();
+    assert_eq!(request_count, 2);
+}
+
+#[tokio::test]
+async fn list_threads_deduplicates_ids_across_page_boundaries() {
+    let (bridge, state) = spawn_fake_codex_bridge().await;
+    configure_fake_codex(&bridge, "duplicate-boundary", 0).await;
+
+    let threads = bridge
+        .list_threads(105)
+        .await
+        .expect("duplicates should not consume the requested unique-row limit");
+
+    assert_eq!(threads.len(), 105);
+    assert_eq!(threads.last().unwrap().id, "listed-thread-104");
+    assert_eq!(
+        threads
+            .iter()
+            .map(|thread| thread.id.as_str())
+            .collect::<HashSet<_>>()
+            .len(),
+        threads.len()
+    );
+    let request_count = codex_recv_payloads(&state)
+        .await
+        .into_iter()
+        .filter(|payload| payload.get("method").and_then(Value::as_str) == Some("thread/list"))
+        .count();
+    assert_eq!(request_count, 3, "the duplicate must not consume a slot");
+}
+
+#[tokio::test]
+async fn list_threads_applies_one_timeout_budget_to_the_whole_scan() {
+    let (bridge, state) = spawn_fake_codex_bridge().await;
+    configure_fake_codex(&bridge, "slow", 250).await;
+
+    let error = bridge
+        .list_threads_with_timeout(105, Duration::from_millis(400))
+        .await
+        .expect_err("the total pagination budget should expire");
+
+    assert!(
+        error.contains("thread/list pagination exceeded its 400 ms total timeout"),
+        "unexpected error: {error}"
+    );
+    let request_count = codex_recv_payloads(&state)
+        .await
+        .into_iter()
+        .filter(|payload| payload.get("method").and_then(Value::as_str) == Some("thread/list"))
+        .count();
+    assert_eq!(
+        request_count, 2,
+        "the first page must finish before the remaining total budget expires"
     );
 }
 

@@ -35,6 +35,20 @@ impl CodexBridge {
     }
 
     pub(super) async fn send_request(&self, method: &str, params: Value) -> Result<Value, String> {
+        self.send_request_with_timeout(
+            method,
+            params,
+            Duration::from_secs(CODEX_REQUEST_TIMEOUT_SECS),
+        )
+        .await
+    }
+
+    pub(super) async fn send_request_with_timeout(
+        &self,
+        method: &str,
+        params: Value,
+        request_timeout: Duration,
+    ) -> Result<Value, String> {
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         let request_id_key = request_id.to_string();
         let (sender, receiver) = oneshot::channel();
@@ -56,7 +70,7 @@ impl CodexBridge {
             return Err(error);
         }
 
-        match timeout(Duration::from_secs(CODEX_REQUEST_TIMEOUT_SECS), receiver).await {
+        match timeout(request_timeout, receiver).await {
             Ok(result) => result.map_err(|_| {
                 format!("Codex app-server dropped the response channel for `{method}`")
             })?,

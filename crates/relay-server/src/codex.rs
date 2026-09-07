@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     process::Stdio,
     sync::{atomic::AtomicU64, Arc},
     time::Duration,
@@ -49,6 +49,14 @@ const MAX_TOOL_JSON_CHARS: usize = 512;
 const MAX_TOOL_ENTRY_CHARS: usize = 1_400;
 const MAX_APPROVAL_SUMMARY_CHARS: usize = 120;
 const MAX_APPROVAL_CONTEXT_CHARS: usize = 1_200;
+const CODEX_THREAD_LIST_TOTAL_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn thread_list_timeout_error(timeout: Duration) -> String {
+    format!(
+        "Codex thread/list pagination exceeded its {} ms total timeout",
+        timeout.as_millis()
+    )
+}
 
 pub struct CodexBridge {
     _child: Arc<Mutex<Child>>,
@@ -370,30 +378,57 @@ impl CodexBridge {
     }
 
     pub async fn list_threads(&self, limit: usize) -> Result<Vec<ThreadSummaryView>, String> {
+        self.list_threads_with_timeout(limit, CODEX_THREAD_LIST_TOTAL_TIMEOUT)
+            .await
+    }
+
+    async fn list_threads_with_timeout(
+        &self,
+        limit: usize,
+        total_timeout: Duration,
+    ) -> Result<Vec<ThreadSummaryView>, String> {
         // `limit` is the number the relay wants to SCAN, not Codex's page size. The
         // app-server caps one response at 100 rows and returns `nextCursor` even when a
         // larger limit was requested, so a single request silently loses older sessions.
         let mut threads = Vec::new();
+        let mut seen_thread_ids = HashSet::new();
         let mut cursor: Option<String> = None;
+        let deadline = tokio::time::Instant::now() + total_timeout;
 
         while threads.len() < limit {
             let remaining = limit - threads.len();
+            let request_timeout = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if request_timeout.is_zero() {
+                return Err(thread_list_timeout_error(total_timeout));
+            }
             let result = self
-                .send_request(
+                .send_request_with_timeout(
                     "thread/list",
                     json!({
                         "cursor": cursor,
                         "limit": remaining,
                         "archived": false
                     }),
+                    request_timeout,
                 )
-                .await?;
+                .await
+                .map_err(|error| {
+                    if tokio::time::Instant::now() >= deadline {
+                        thread_list_timeout_error(total_timeout)
+                    } else {
+                        error
+                    }
+                })?;
             let page = value_at(&result, &["data"])
                 .and_then(Value::as_array)
                 .ok_or_else(|| "thread/list did not return a thread array".to_string())?;
 
             for thread in page {
-                threads.push(parse_thread_summary(thread)?);
+                let thread = parse_thread_summary(thread)?;
+                if !seen_thread_ids.insert(thread.id.clone()) {
+                    continue;
+                }
+                threads.push(thread);
                 if threads.len() == limit {
                     break;
                 }
