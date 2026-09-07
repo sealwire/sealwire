@@ -31,6 +31,31 @@ test("renderSession clears the pending transcript flush itself, so every direct 
   );
 });
 
+test("renderConversationContent publishes through the LocalShell transcript slot without owning a nested root", () => {
+  const source = readFileSync(new URL("./render-session.js", import.meta.url), "utf8");
+  const start = source.indexOf("function renderConversationContent(content) {");
+  assert.ok(start >= 0, "render-session.js should still define renderConversationContent(content)");
+  const end = source.indexOf("\n}\n\nexport function createSessionRenderer", start);
+  assert.ok(end > start, "renderConversationContent should stay above createSessionRenderer");
+  const body = source.slice(start, end);
+
+  assert.doesNotMatch(
+    source,
+    /createRoot\s*\(\s*transcript\s*\)/,
+    "render-session.js must not create a React root on #transcript"
+  );
+  assert.doesNotMatch(
+    source,
+    /\btranscriptRoot(?:Element)?\b/,
+    "render-session.js must not retain transcript-specific root handles"
+  );
+  assert.match(
+    body,
+    /flushSync\s*\(\s*\(\)\s*=>\s*\{[\s\S]*publishLocalTranscriptSlotContent\s*\(\s*content\s*\)/,
+    "renderConversationContent must publish the transcript slot inside flushSync"
+  );
+});
+
 test("shouldShowTranscriptLoading requires a matching loading hydration state", () => {
   assert.equal(
     shouldShowTranscriptLoading(

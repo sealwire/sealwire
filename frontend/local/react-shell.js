@@ -13,8 +13,20 @@ import {
   CHEVRON_RIGHT_SVG,
   SETTINGS_SVG,
 } from "../svg.js";
+import {
+  getLocalTranscriptSlotSnapshot,
+  subscribeLocalTranscriptSlot,
+} from "./transcript-slot.js";
 
 const h = React.createElement;
+
+function LocalTranscriptSlot() {
+  return React.useSyncExternalStore(
+    subscribeLocalTranscriptSlot,
+    getLocalTranscriptSlotSnapshot,
+    getLocalTranscriptSlotSnapshot
+  );
+}
 
 // Far-left 64px icon rail: brand logo (top), the same two destinations SidebarNav
 // offers, and a Settings gear (bottom). The rail lives OUTSIDE the .app-shell grid
@@ -458,12 +470,7 @@ function ThreadPanel() {
       h(
         "div",
         { className: "chat-thread", id: "transcript" },
-        h(
-          "div",
-          { className: "thread-empty" },
-          h("h2", null, "Relay standing by"),
-          h("p", null, "Load a workspace, then use this console to watch the live session, control state, and trusted devices.")
-        )
+        h(LocalTranscriptSlot)
       )
     )
   );
@@ -875,8 +882,9 @@ function PairingApprovalModal() {
   );
 }
 
-// The shell renders once, at boot, and never again. Anything data-driven lives
-// in its own sub-root (see the mount points below) rather than taking props here.
+// The shell owns stable layout nodes and mount points. Most data-driven regions
+// still live in their own sub-root; the Local transcript is the narrow exception
+// and subscribes above so #transcript itself stays shell-owned.
 export function LocalShell() {
   return h(
     React.Fragment,
