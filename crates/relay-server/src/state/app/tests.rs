@@ -134,8 +134,9 @@ fn require_live_test_cwd(
 #[cfg(test)]
 mod workspace_diff_tests {
     use super::super::{
-        apply_unified_diff, collect_workspace_diff, collect_workspace_diff_against,
-        merge_base_with, synthesize_untracked_diff, truncate_to_char_boundary, TrustedWorkspace,
+        apply_unified_diff, collect_git_review_target, collect_workspace_diff,
+        collect_workspace_diff_against, merge_base_with, synthesize_untracked_diff,
+        truncate_to_char_boundary, TrustedWorkspace,
     };
     use crate::protocol::FileChangeApplyDirection;
     use tempfile::TempDir;
@@ -237,6 +238,21 @@ mod workspace_diff_tests {
         dir
     }
 
+    async fn git_stdout(root: &std::path::Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .await
+            .expect("git command should run");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
     #[tokio::test]
     async fn the_mr_diff_uses_the_merge_base_so_target_only_commits_are_excluded() {
         let dir = init_repo().await;
@@ -309,6 +325,78 @@ mod workspace_diff_tests {
             "a commit that landed on the target AFTER the fork is not this task's change, got {paths:?}"
         );
         assert_eq!(diff.base_commit.as_deref(), Some(base.as_str()));
+    }
+
+    #[tokio::test]
+    async fn committed_review_target_uses_only_the_named_git_objects() {
+        let dir = init_repo().await;
+        let root = dir.path().canonicalize().expect("canonicalize");
+        std::fs::write(root.join("delete-me.txt"), "old tracked file\n").unwrap();
+        run(Command::new("git")
+            .args(["add", "delete-me.txt"])
+            .current_dir(&root))
+        .await;
+        run(Command::new("git")
+            .args(["commit", "-q", "-m", "add deletable"])
+            .current_dir(&root))
+        .await;
+        let base = git_stdout(&root, &["rev-parse", "HEAD"]).await;
+
+        run(Command::new("git")
+            .args(["mv", "seed.txt", "renamed.txt"])
+            .current_dir(&root))
+        .await;
+        std::fs::write(root.join("renamed.txt"), "line1\nline2\ncandidate\n").unwrap();
+        std::fs::write(root.join("added.txt"), "committed addition\n").unwrap();
+        run(Command::new("git")
+            .args(["rm", "-q", "delete-me.txt"])
+            .current_dir(&root))
+        .await;
+        run(Command::new("git")
+            .args(["add", "renamed.txt", "added.txt"])
+            .current_dir(&root))
+        .await;
+        run(Command::new("git")
+            .args(["commit", "-q", "-m", "candidate"])
+            .current_dir(&root))
+        .await;
+        let candidate = git_stdout(&root, &["rev-parse", "HEAD"]).await;
+
+        std::fs::write(root.join("renamed.txt"), "DIRTY WORKTREE CONTENT\n").unwrap();
+        std::fs::write(root.join("untracked.txt"), "UNTRACKED WORKTREE CONTENT\n").unwrap();
+
+        let workspace =
+            TrustedWorkspace::granted_for_test(root.to_str().unwrap()).expect("workspace");
+        let target = collect_git_review_target(&workspace, &base, &candidate)
+            .await
+            .expect("review target");
+
+        assert_eq!(target.base_sha, base);
+        assert_eq!(target.candidate_sha, candidate);
+        assert!(
+            target.manifest.contains("A\tadded.txt"),
+            "committed additions must be present: {}",
+            target.manifest
+        );
+        assert!(
+            target.manifest.contains("D\tdelete-me.txt"),
+            "committed deletions must be present: {}",
+            target.manifest
+        );
+        assert!(
+            target.manifest.lines().any(|line| line.starts_with('R')
+                && line.contains("seed.txt")
+                && line.contains("renamed.txt")),
+            "committed renames must be present: {}",
+            target.manifest
+        );
+        assert!(
+            !target.manifest.contains("untracked.txt")
+                && !target.stat.contains("untracked.txt")
+                && !target.manifest.contains("DIRTY WORKTREE CONTENT")
+                && !target.stat.contains("DIRTY WORKTREE CONTENT"),
+            "dirty and untracked working-tree material must be excluded: {target:?}"
+        );
     }
 
     #[tokio::test]
@@ -12677,6 +12765,9 @@ mod review_tests {
         // Models a lead that can always be briefed but always dies on real work,
         // which is what drives the succession chain to its cap.
         fail_work_turns_with: Arc<Mutex<Option<String>>>,
+        // When true, author turns that are explicitly asked to commit (or to
+        // address review findings) commit any dirty work in the test repository.
+        auto_commit_author_changes: Arc<AtomicBool>,
         // AskUserQuestion request ids that were actually ANSWERED through the
         // bridge. A parked turn watches this rather than the pending map, because
         // cleanup also empties that map — and a turn that was drained must not
@@ -12810,6 +12901,7 @@ mod review_tests {
                 fail_next_turn_live: Arc::new(AtomicBool::new(false)),
                 fail_next_turn_live_delay_ms: Arc::new(AtomicU64::new(0)),
                 fail_work_turns_with: Arc::new(Mutex::new(None)),
+                auto_commit_author_changes: Arc::new(AtomicBool::new(true)),
                 answered_asks: Arc::new(Mutex::new(std::collections::HashSet::new())),
                 reviewer_verdicts: Arc::new(Mutex::new(std::collections::VecDeque::new())),
                 raise_approval_on_fix_turn: Arc::new(AtomicBool::new(false)),
@@ -12875,6 +12967,96 @@ mod review_tests {
                 .await
                 .insert(pending_id.to_string(), real_id.clone());
             real_id
+        }
+
+        async fn cwd_for_thread(&self, thread_id: &str) -> Option<String> {
+            let from_transcript = {
+                let relay = self.state.read().await;
+                relay.runtime_for_thread(thread_id).and_then(|runtime| {
+                    runtime.transcript.iter().rev().find_map(|entry| {
+                        let tool = entry.tool.as_ref()?;
+                        tool.file_changes
+                            .iter()
+                            .rev()
+                            .find_map(|change| Self::git_root_for_path(change.path.as_str()))
+                    })
+                })
+            };
+            if from_transcript.is_some() {
+                return from_transcript;
+            }
+            self.start_thread_cwds
+                .lock()
+                .await
+                .iter()
+                .find(|(id, _)| id == thread_id)
+                .map(|(_, cwd)| cwd.clone())
+        }
+
+        fn git_root_for_path(path: &str) -> Option<String> {
+            let path = std::path::Path::new(path);
+            let cwd = if path.is_dir() { path } else { path.parent()? };
+            let output = std::process::Command::new("git")
+                .args(["rev-parse", "--show-toplevel"])
+                .current_dir(cwd)
+                .output()
+                .ok()?;
+            output
+                .status
+                .success()
+                .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        }
+
+        fn commit_all_if_dirty(cwd: &str, message: &str) {
+            let status = std::process::Command::new("git")
+                .args(["status", "--porcelain=v1", "-uall"])
+                .current_dir(cwd)
+                .output();
+            let Ok(status) = status else {
+                return;
+            };
+            if !status.status.success() || status.stdout.is_empty() {
+                return;
+            }
+            let add = std::process::Command::new("git")
+                .args(["add", "-A"])
+                .current_dir(cwd)
+                .output()
+                .expect("git add should run");
+            assert!(
+                add.status.success(),
+                "git add failed: {}",
+                String::from_utf8_lossy(&add.stderr)
+            );
+            let staged = std::process::Command::new("git")
+                .args(["diff", "--cached", "--quiet"])
+                .current_dir(cwd)
+                .status()
+                .expect("git diff should run");
+            if staged.success() {
+                return;
+            }
+            let commit = std::process::Command::new("git")
+                .args(["commit", "-q", "-m", message])
+                .current_dir(cwd)
+                .output()
+                .expect("git commit should run");
+            assert!(
+                commit.status.success(),
+                "git commit failed: {}",
+                String::from_utf8_lossy(&commit.stderr)
+            );
+        }
+
+        fn append_team_candidate_change(cwd: &str) {
+            let path = std::path::Path::new(cwd).join("sealwire_test_candidate.rs");
+            let mut contents = std::fs::read_to_string(&path).unwrap_or_default();
+            if !contents.is_empty() && !contents.ends_with('\n') {
+                contents.push('\n');
+            }
+            let suffix = contents.lines().count();
+            contents.push_str(&format!("pub fn generated_candidate_{suffix}() {{}}\n"));
+            std::fs::write(&path, contents).expect("team dev turn should edit candidate file");
         }
 
         fn next_token(&self, prefix: &str) -> String {
@@ -13198,12 +13380,18 @@ mod review_tests {
                 model.to_string(),
                 effort.to_string(),
             ));
-            // A reviewer/re-review turn always carries the relay-collected workspace
-            // diff; recap/other turns do not.
-            let is_reviewer_diff_turn = text.contains("Workspace diff collected by the relay");
+            // A reviewer/re-review turn always carries relay-collected evidence;
+            // committed Git-object targets replaced raw workspace diffs for git reviews.
+            let is_reviewer_diff_turn = text.contains("Workspace diff collected by the relay")
+                || text.contains("Committed review target");
             let is_reviewer_turn = text.contains("You are reviewing another agent's work");
+            let is_team_dev_turn = text.contains("You are the developer on one sub-task")
+                || text.contains("Next sub-task in the same group")
+                || text
+                    .contains("The final review of this task's whole diff asked for these changes");
             // The parent fix turn (driven between rounds) carries this marker.
             let is_fix_turn = text.contains("Address the findings below");
+            let is_commit_required_turn = text.contains("needs a committed candidate");
             if is_reviewer_turn && self.fail_reviewer_start.load(Ordering::Relaxed) {
                 // Model a response-loss race: the provider has started work and
                 // published liveness, but the start request itself returns an
@@ -13308,6 +13496,18 @@ mod review_tests {
                     }
                 }
             }
+            if (is_fix_turn || is_commit_required_turn)
+                && self.auto_commit_author_changes.load(Ordering::Relaxed)
+            {
+                if let Some(cwd) = self.cwd_for_thread(&thread_id).await {
+                    Self::commit_all_if_dirty(&cwd, "review candidate");
+                }
+            }
+            if is_team_dev_turn && self.auto_commit_author_changes.load(Ordering::Relaxed) {
+                if let Some(cwd) = self.cwd_for_thread(&thread_id).await {
+                    Self::append_team_candidate_change(&cwd);
+                }
+            }
             let emit_assistant = self.emit_assistant.load(Ordering::Relaxed)
                 && !(is_reviewer_diff_turn && self.suppress_reviewer_reply.load(Ordering::Relaxed))
                 && !(is_fix_turn && self.suppress_fix_reply.load(Ordering::Relaxed));
@@ -13316,7 +13516,11 @@ mod review_tests {
             let fail_completed_turn = self.fail_completed_turn_with.lock().await.take();
             let report_usage = self.report_turn_usage.lock().await.take();
             // A reviewer turn ends with the verdict the test queued (default needs-changes).
-            let scripted = self.scripted_replies.lock().await.pop_front();
+            let scripted = if is_commit_required_turn {
+                None
+            } else {
+                self.scripted_replies.lock().await.pop_front()
+            };
             let reply_text = if let Some(scripted) = scripted {
                 scripted
             } else if is_reviewer_diff_turn {
@@ -15233,6 +15437,383 @@ resurrected into a turn that never completes: {:?}",
             cwds.iter()
                 .any(|(tid, c)| tid == &reviewer_thread && c == &parent_cwd),
             "reviewer thread cwd mismatch: {cwds:?} (parent cwd {parent_cwd})"
+        );
+    }
+
+    #[tokio::test]
+    async fn review_prompt_names_the_committed_candidate_without_raw_diff_content() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        init_git_seed(cwd);
+        let base = git_head(cwd);
+        std::fs::write(
+            std::path::Path::new(cwd).join("seed.txt"),
+            "line1\nline2\nRAW_DIFF_PAYLOAD_SHOULD_NOT_APPEAR\n",
+        )
+        .unwrap();
+        let candidate = git_commit_all(cwd, "candidate");
+
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let provider = providers.get("codex").unwrap();
+        queue_verdicts(provider, &["APPROVE"]).await;
+        start_parent(&app, cwd, "codex").await;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
+        assert_eq!(job.base_sha.as_deref(), Some(base.as_str()));
+        assert_eq!(job.candidate_sha.as_deref(), Some(candidate.as_str()));
+        assert_eq!(
+            job.verdict_candidate_sha.as_deref(),
+            Some(candidate.as_str()),
+            "an approval must be bound to the candidate it reviewed"
+        );
+
+        let turns = provider.turns.lock().await.clone();
+        let reviewer_thread = job.reviewer_thread_id.clone().expect("reviewer thread");
+        let reviewer_prompt = turns
+            .iter()
+            .find(|(thread, text)| {
+                thread == &reviewer_thread && text.contains("Committed review target")
+            })
+            .map(|(_, text)| text)
+            .expect("committed reviewer prompt");
+        assert!(
+            reviewer_prompt.contains(&format!("Base commit: {base}"))
+                && reviewer_prompt.contains(&format!("Candidate commit: {candidate}"))
+                && reviewer_prompt.contains(&format!("Range: {base}..{candidate}")),
+            "prompt must name the immutable review range: {reviewer_prompt}"
+        );
+        assert!(
+            reviewer_prompt.contains("Changed-file manifest")
+                && reviewer_prompt.contains("Diff stat")
+                && reviewer_prompt.contains("git diff --find-renames")
+                && reviewer_prompt.contains("git show"),
+            "prompt must give inspection instructions instead of raw patch text: {reviewer_prompt}"
+        );
+        assert!(
+            !reviewer_prompt.contains("RAW_DIFF_PAYLOAD_SHOULD_NOT_APPEAR")
+                && !reviewer_prompt.contains("@@"),
+            "committed prompts must not inline raw diff hunks: {reviewer_prompt}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dirty_git_review_requires_the_parent_session_to_commit_before_reviewing() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        init_git_seed(cwd);
+        let base = git_head(cwd);
+        std::fs::write(
+            std::path::Path::new(cwd).join("seed.txt"),
+            "line1\nline2\nDIRTY_CANDIDATE_NOT_COMMITTED\n",
+        )
+        .unwrap();
+
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let provider = providers.get("codex").unwrap();
+        provider
+            .auto_commit_author_changes
+            .store(false, Ordering::Relaxed);
+        let parent = start_parent(&app, cwd, "codex").await;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "failed");
+        assert_eq!(job.base_sha.as_deref(), Some(base.as_str()));
+        assert!(
+            job.candidate_sha.is_none(),
+            "no candidate can be persisted until HEAD advances"
+        );
+        assert!(
+            job.error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("did not create a commit"),
+            "failure should explain the invariant: {:?}",
+            job.error
+        );
+
+        let turns = provider.turns.lock().await.clone();
+        assert!(
+            turns.iter().any(|(thread, text)| {
+                thread == &parent.id && text.contains("needs a committed candidate")
+            }),
+            "the same parent session must be asked to commit: {turns:?}"
+        );
+        assert!(
+            turns
+                .iter()
+                .all(|(_, text)| !text.contains("Committed review target")),
+            "the reviewer must not run before a candidate commit exists: {turns:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dirty_git_review_persists_the_parent_commit_as_the_candidate() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        init_git_seed(cwd);
+        let base = git_head(cwd);
+        std::fs::write(
+            std::path::Path::new(cwd).join("seed.txt"),
+            "line1\nline2\nDIRTY_CANDIDATE_PAYLOAD\n",
+        )
+        .unwrap();
+
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let provider = providers.get("codex").unwrap();
+        queue_verdicts(provider, &["APPROVE"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
+        let head = git_head(cwd);
+        assert_ne!(head, base, "the author commit should advance HEAD");
+        assert_eq!(job.base_sha.as_deref(), Some(base.as_str()));
+        assert_eq!(job.candidate_sha.as_deref(), Some(head.as_str()));
+        assert_eq!(job.verdict_candidate_sha.as_deref(), Some(head.as_str()));
+
+        let turns = provider.turns.lock().await.clone();
+        assert!(
+            turns.iter().any(|(thread, text)| {
+                thread == &parent.id && text.contains("needs a committed candidate")
+            }),
+            "a dirty workspace must be sent back to the parent for a commit: {turns:?}"
+        );
+        let reviewer_thread = job.reviewer_thread_id.clone().expect("reviewer thread");
+        let reviewer_prompt = turns
+            .iter()
+            .find(|(thread, text)| {
+                thread == &reviewer_thread && text.contains("Committed review target")
+            })
+            .map(|(_, text)| text)
+            .expect("reviewer prompt");
+        assert!(
+            reviewer_prompt.contains(&format!("Base commit: {base}"))
+                && reviewer_prompt.contains(&format!("Candidate commit: {head}")),
+            "reviewer prompt must bind to the commit the parent created: {reviewer_prompt}"
+        );
+        assert!(
+            !reviewer_prompt.contains("DIRTY_CANDIDATE_PAYLOAD"),
+            "the committed prompt names objects and manifest/stat only, not raw patch content"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_approval_is_invalidated_when_head_moves_after_the_prompt() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        init_git_seed(cwd);
+        std::fs::write(
+            std::path::Path::new(cwd).join("seed.txt"),
+            "line1\nline2\ncandidate one\n",
+        )
+        .unwrap();
+        let prompted_candidate = git_commit_all(cwd, "candidate one");
+
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let provider = providers.get("codex").unwrap();
+        provider.complete_delay_ms.store(250, Ordering::Relaxed);
+        queue_verdicts(provider, &["APPROVE"]).await;
+        start_parent(&app, cwd, "codex").await;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        wait_for_provider_turn(provider, "Candidate commit:").await;
+        std::fs::write(
+            std::path::Path::new(cwd).join("late.txt"),
+            "landed after the reviewer prompt\n",
+        )
+        .unwrap();
+        let later_head = git_commit_all(cwd, "later head");
+
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
+        assert_eq!(
+            job.candidate_sha.as_deref(),
+            Some(prompted_candidate.as_str())
+        );
+        assert_eq!(
+            job.verdict.as_deref(),
+            Some("needs_changes"),
+            "an approval for an older HEAD must not remain approved"
+        );
+        assert!(
+            job.verdict_candidate_sha.is_none(),
+            "stale approvals must not be bound to the old candidate"
+        );
+
+        let stored_review = app
+            .relay
+            .read()
+            .await
+            .review_job(&receipt.review_job_id)
+            .and_then(|job| job.review_text.clone())
+            .expect("stored review text");
+        assert!(
+            stored_review.contains("approval is stale")
+                && stored_review.contains(&prompted_candidate)
+                && stored_review.contains(&later_head),
+            "the persisted review must explain why the approval was invalidated: {stored_review}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_approval_re_reviews_new_head_without_an_author_fix_turn() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        init_git_seed(cwd);
+        std::fs::write(
+            std::path::Path::new(cwd).join("seed.txt"),
+            "line1\nline2\ncandidate one\n",
+        )
+        .unwrap();
+        let first_candidate = git_commit_all(cwd, "candidate one");
+
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let provider = providers.get("codex").unwrap();
+        provider.complete_delay_ms.store(250, Ordering::Relaxed);
+        queue_verdicts(provider, &["APPROVE", "APPROVE"]).await;
+        start_parent(&app, cwd, "codex").await;
+
+        let mut input = review_input("codex");
+        input.max_rounds = Some(2);
+        let receipt = app.request_review(input).await.expect("review accepted");
+        wait_for_provider_turn(provider, "Candidate commit:").await;
+        std::fs::write(
+            std::path::Path::new(cwd).join("late.txt"),
+            "landed after the first reviewer prompt\n",
+        )
+        .unwrap();
+        let second_candidate = git_commit_all(cwd, "later head");
+
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
+        assert_eq!(job.round, 2, "the new HEAD should be reviewed in round 2");
+        assert_eq!(
+            job.candidate_sha.as_deref(),
+            Some(second_candidate.as_str())
+        );
+        assert_eq!(
+            job.verdict_candidate_sha.as_deref(),
+            Some(second_candidate.as_str()),
+            "the final approval must bind to the second candidate"
+        );
+
+        let turns = provider.turns.lock().await.clone();
+        assert_eq!(
+            count_turns_with(&turns, "Committed review target"),
+            2,
+            "the stale first approval should cause a fresh review round"
+        );
+        assert_eq!(
+            count_turns_with(&turns, "Address the findings below"),
+            0,
+            "a stale approval is not an author finding and should not drive a fix turn"
+        );
+        let second_prompt = turns
+            .iter()
+            .rev()
+            .map(|(_, prompt)| prompt.as_str())
+            .find(|prompt| prompt.contains("Committed review target"))
+            .expect("second reviewer prompt");
+        assert!(
+            second_prompt.contains(&format!("Candidate commit: {second_candidate}"))
+                && !second_prompt.contains(&format!("Candidate commit: {first_candidate}")),
+            "round 2 must inspect the new HEAD: {second_prompt}"
+        );
+    }
+
+    #[tokio::test]
+    async fn committed_corrections_are_re_reviewed_with_prior_finding_context() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        init_git_seed(cwd);
+        let base = git_head(cwd);
+        std::fs::write(
+            std::path::Path::new(cwd).join("seed.txt"),
+            "line1\nline2\ncandidate one\n",
+        )
+        .unwrap();
+        git_commit_all(cwd, "candidate one");
+
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let provider = providers.get("codex").unwrap();
+        provider
+            .mutate_cwd_on_fix_turn
+            .lock()
+            .await
+            .replace("ROUND_TWO_CORRECTION_SHOULD_NOT_BE_RAW".to_string());
+        provider
+            .reviewer_notes
+            .lock()
+            .await
+            .push_back("ROUND_ONE_FINDING_CONTEXT".to_string());
+        queue_verdicts(provider, &["NEEDS_CHANGES", "APPROVE"]).await;
+        start_parent(&app, cwd, "codex").await;
+
+        let mut input = review_input("codex");
+        input.max_rounds = Some(2);
+        let receipt = app.request_review(input).await.expect("review accepted");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
+        assert_eq!(job.round, 2);
+        let head = git_head(cwd);
+        assert_eq!(job.base_sha.as_deref(), Some(base.as_str()));
+        assert_eq!(job.candidate_sha.as_deref(), Some(head.as_str()));
+        assert_eq!(job.verdict_candidate_sha.as_deref(), Some(head.as_str()));
+
+        let turns = provider.turns.lock().await.clone();
+        assert_eq!(
+            count_turns_with(&turns, "Committed review target"),
+            2,
+            "both review rounds must inspect committed Git objects: {turns:?}"
+        );
+        let reviewer_thread = job.reviewer_thread_id.clone().expect("reviewer thread");
+        let reviewer_turns: Vec<&String> = turns
+            .iter()
+            .filter(|(thread, text)| {
+                thread == &reviewer_thread && text.contains("Committed review target")
+            })
+            .map(|(_, text)| text)
+            .collect();
+        assert_eq!(reviewer_turns.len(), 2);
+        assert!(
+            reviewer_turns[1].contains("whether earlier findings were addressed"),
+            "the correction review must direct the reviewer to carry prior findings forward: {}",
+            reviewer_turns[1]
+        );
+        assert!(
+            !reviewer_turns[1].contains("ROUND_TWO_CORRECTION_SHOULD_NOT_BE_RAW"),
+            "committed correction reviews must still omit raw patch content: {}",
+            reviewer_turns[1]
+        );
+        let reviewer_transcript = provider
+            .transcripts
+            .lock()
+            .await
+            .get(&reviewer_thread)
+            .cloned()
+            .expect("reviewer transcript");
+        assert!(
+            reviewer_transcript.iter().any(|entry| entry
+                .text
+                .as_deref()
+                .is_some_and(|text| text.contains("ROUND_ONE_FINDING_CONTEXT"))),
+            "the reused reviewer thread must retain the prior finding while judging the correction"
         );
     }
 
@@ -17200,6 +17781,48 @@ settings update: {error}"
         git(&["commit", "-q", "-m", "seed"]);
     }
 
+    fn git_stdout(cwd: &str, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("git runs");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn git_head(cwd: &str) -> String {
+        git_stdout(cwd, &["rev-parse", "HEAD"])
+    }
+
+    fn git_commit_all(cwd: &str, message: &str) -> String {
+        let add = std::process::Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(cwd)
+            .output()
+            .expect("git add runs");
+        assert!(
+            add.status.success(),
+            "git add failed: stderr={}",
+            String::from_utf8_lossy(&add.stderr)
+        );
+        let commit = std::process::Command::new("git")
+            .args(["commit", "-q", "-m", message])
+            .current_dir(cwd)
+            .output()
+            .expect("git commit runs");
+        assert!(
+            commit.status.success(),
+            "git commit failed: stderr={}",
+            String::from_utf8_lossy(&commit.stderr)
+        );
+        git_head(cwd)
+    }
+
     /// `git worktree add` a fresh branch at `path`, from the repo at `repo`.
     fn add_worktree(repo: &str, path: &str, branch: &str) {
         let ok = std::process::Command::new("git")
@@ -17256,6 +17879,7 @@ settings update: {error}"
             "line1\nline2\nFALLBACK_WORKSPACE_EDIT\n",
         )
         .unwrap();
+        let fallback_candidate = git_commit_all(&main_cwd, "fallback workspace edit");
 
         let receipt = app
             .request_review(review_input("codex"))
@@ -17277,11 +17901,21 @@ settings update: {error}"
             "the reviewer must be started in the fallback workspace ({main_cwd}): {cwds:?}"
         );
         let turns = provider.turns.lock().await.clone();
+        let reviewer_prompt = turns
+            .iter()
+            .map(|(_, prompt)| prompt.as_str())
+            .find(|prompt| prompt.contains("Committed review target"))
+            .expect("reviewer prompt");
         assert!(
-            turns
-                .iter()
-                .any(|(_, prompt)| prompt.contains("FALLBACK_WORKSPACE_EDIT")),
-            "the reviewer must receive the fallback workspace's real diff"
+            reviewer_prompt.contains("Working tree:")
+                && reviewer_prompt.contains("mainwt")
+                && reviewer_prompt.contains(&format!("Candidate commit: {fallback_candidate}"))
+                && reviewer_prompt.contains("M\tseed.txt"),
+            "the reviewer must receive the fallback workspace's committed target: {reviewer_prompt}"
+        );
+        assert!(
+            !reviewer_prompt.contains("FALLBACK_WORKSPACE_EDIT"),
+            "fallback review prompts must not inline dirty/raw file contents"
         );
     }
 
@@ -17512,12 +18146,15 @@ settings update: {error}"
             .to_string();
 
         assert!(
-            reviewer_prompt.contains("WORKTREE_EDIT"),
-            "the review must diff the worktree the thread is writing in"
+            reviewer_prompt.contains("Working tree:")
+                && reviewer_prompt.contains("linkedwt")
+                && reviewer_prompt.contains("M\tseed.txt"),
+            "the review must target the worktree the thread is writing in: {reviewer_prompt}"
         );
         assert!(
-            !reviewer_prompt.contains("MAIN_TREE_EDIT"),
-            "it must NOT hand over the main tree's unrelated changes"
+            !reviewer_prompt.contains("WORKTREE_EDIT")
+                && !reviewer_prompt.contains("MAIN_TREE_EDIT"),
+            "the committed prompt must not inline raw file contents from either tree"
         );
         // The prompt has to SAY which tree this is: a reviewer that thinks it is looking
         // at `main` reasons about the wrong branch.
@@ -17560,6 +18197,7 @@ settings update: {error}"
         )
         .unwrap();
         std::fs::write(main_dir.join("seed.txt"), "line1\nline2\nMAIN_TREE_EDIT\n").unwrap();
+        let main_candidate = git_commit_all(&main_cwd, "main tree edit");
 
         let (app, providers) = build_review_app(&nested_cwd, &["codex"]).await;
         // Granted on its own standing: this review falls back to the MAIN tree once the
@@ -17595,12 +18233,16 @@ settings update: {error}"
             .collect();
         assert_eq!(review_prompts.len(), 2, "two review rounds");
         assert!(
-            review_prompts[0].contains("WORKTREE_EDIT"),
-            "round 1 reviews the thread's own worktree"
+            review_prompts[0].contains("Working tree:")
+                && review_prompts[0].contains("wt-doomed")
+                && review_prompts[0].contains("M\tseed.txt"),
+            "round 1 reviews the thread's own committed worktree target"
         );
         assert!(
-            review_prompts[1].contains("MAIN_TREE_EDIT"),
-            "round 2 must fall back to the repo that owned the deleted worktree"
+            review_prompts[1].contains("Working tree:")
+                && review_prompts[1].contains("mainwt")
+                && review_prompts[1].contains(&format!("Candidate commit: {main_candidate}")),
+            "round 2 must fall back to the committed target in the repo that owned the deleted worktree"
         );
         assert!(
             review_prompts[1].contains("no longer exists"),
@@ -17650,13 +18292,21 @@ settings update: {error}"
             .collect();
         assert_eq!(review_prompts.len(), 2, "two review rounds");
         assert!(
-            review_prompts[0].contains("MAIN_TREE_EDIT"),
-            "round 1 reviews the tree the author was in"
+            review_prompts[0].contains("Working tree:")
+                && review_prompts[0].contains("mainwt")
+                && review_prompts[0].contains("M\tseed.txt"),
+            "round 1 reviews the committed tree the author was in"
         );
         assert!(
-            review_prompts[1].contains("FIX_LANDED_IN_THE_WORKTREE"),
-            "round 2 must review the tree the author's fix actually landed in: {}",
+            review_prompts[1].contains("Working tree:")
+                && review_prompts[1].contains("linkedwt")
+                && review_prompts[1].contains("M\tseed.txt"),
+            "round 2 must review the committed tree the author's fix actually landed in: {}",
             review_prompts[1]
+        );
+        assert!(
+            !review_prompts[1].contains("FIX_LANDED_IN_THE_WORKTREE"),
+            "round 2 must not inline raw fix contents"
         );
         assert!(
             review_prompts[1].contains(&linked_cwd) || review_prompts[1].contains("linkedwt"),
@@ -17867,6 +18517,7 @@ settings update: {error}"
             "line1\nline2\nFALLBACK_WORKSPACE_EDIT\n",
         )
         .unwrap();
+        let fallback_candidate = git_commit_all(&main_cwd, "fallback workspace edit");
 
         let (app, providers) = build_review_app(&nested_cwd, &["codex"]).await;
         // Granted on its own standing: this review falls back to the MAIN tree once the
@@ -17894,11 +18545,17 @@ settings update: {error}"
             job.error
         );
         let turns = providers.get("codex").unwrap().turns.lock().await.clone();
+        let reviewer_prompt = turns
+            .iter()
+            .map(|(_, prompt)| prompt.as_str())
+            .find(|prompt| prompt.contains("Committed review target"))
+            .expect("reviewer prompt");
         assert!(
-            turns
-                .iter()
-                .any(|(_, prompt)| prompt.contains("FALLBACK_WORKSPACE_EDIT")),
-            "the reviewer must still review the surviving tree"
+            reviewer_prompt.contains("Working tree:")
+                && reviewer_prompt.contains("mainwt")
+                && reviewer_prompt.contains(&format!("Candidate commit: {fallback_candidate}"))
+                && reviewer_prompt.contains("M\tseed.txt"),
+            "the reviewer must still review the surviving committed tree: {reviewer_prompt}"
         );
         let _ = parent;
     }
@@ -17978,6 +18635,7 @@ settings update: {error}"
             "line1\nline2\nFALLBACK_WORKSPACE_EDIT\n",
         )
         .unwrap();
+        let fallback_candidate = git_commit_all(&main_cwd, "fallback workspace edit");
 
         let (app, providers) = build_review_app(&nested_cwd, &["codex"]).await;
         // Granted on its own standing: this review falls back to the MAIN tree once the
@@ -18009,11 +18667,15 @@ settings update: {error}"
             job.error
         );
         let turns = providers.get("codex").unwrap().turns.lock().await.clone();
+        let reviewer_prompt = turns
+            .iter()
+            .map(|(_, prompt)| prompt.as_str())
+            .find(|prompt| prompt.contains("Committed review target") && prompt.contains("mainwt"))
+            .expect("fallback reviewer prompt");
         assert!(
-            turns
-                .iter()
-                .any(|(_, prompt)| prompt.contains("FALLBACK_WORKSPACE_EDIT")),
-            "the retry must review the surviving tree: {turns:?}"
+            reviewer_prompt.contains(&format!("Candidate commit: {fallback_candidate}"))
+                && reviewer_prompt.contains("M\tseed.txt"),
+            "the retry must review the surviving committed tree: {reviewer_prompt}"
         );
     }
 
@@ -18046,6 +18708,7 @@ settings update: {error}"
             "line1\nline2\nFALLBACK_WORKSPACE_EDIT\n",
         )
         .unwrap();
+        let fallback_candidate = git_commit_all(&main_cwd, "fallback workspace edit");
 
         // Ask for the recap-turn flow AND multiple rounds explicitly: both of those drive
         // the parent, and both must be skipped rather than attempted.
@@ -18069,11 +18732,17 @@ settings update: {error}"
             "no turn may be driven on a thread whose workspace is gone: {turns:?}"
         );
         // The reviewer still ran, against the fallback tree...
+        let reviewer_prompt = turns
+            .iter()
+            .map(|(_, prompt)| prompt.as_str())
+            .find(|prompt| prompt.contains("Committed review target"))
+            .expect("reviewer prompt");
         assert!(
-            turns
-                .iter()
-                .any(|(_, prompt)| prompt.contains("FALLBACK_WORKSPACE_EDIT")),
-            "the reviewer must still have reviewed the surviving tree"
+            reviewer_prompt.contains("Working tree:")
+                && reviewer_prompt.contains("mainwt")
+                && reviewer_prompt.contains(&format!("Candidate commit: {fallback_candidate}"))
+                && reviewer_prompt.contains("M\tseed.txt"),
+            "the reviewer must still review the surviving committed tree: {reviewer_prompt}"
         );
         // ...and its findings are not lost just because they can't be posted back.
         let stored = {
@@ -18241,9 +18910,15 @@ back to the tree it was born in: {second_cwd}"
             .expect("a reviewer turn carrying the workspace diff")
             .to_string();
         assert!(
-            last_review_prompt.contains("WORKTREE_EDIT")
+            last_review_prompt.contains("Working tree:")
+                && last_review_prompt.contains("linkedwt")
+                && last_review_prompt.contains("M\tseed.txt"),
+            "the reviewer must still be handed the worktree's committed target: {last_review_prompt}"
+        );
+        assert!(
+            !last_review_prompt.contains("WORKTREE_EDIT")
                 && !last_review_prompt.contains("MAIN_TREE_EDIT"),
-            "the reviewer must still be handed the worktree's diff: {last_review_prompt}"
+            "the committed prompt must not inline raw file contents"
         );
     }
 
@@ -18323,9 +18998,15 @@ back to the tree it was born in: {second_cwd}"
             .expect("a reviewer turn carrying the workspace diff")
             .to_string();
         assert!(
-            last_review_prompt.contains("WORKTREE_EDIT")
+            last_review_prompt.contains("Working tree:")
+                && last_review_prompt.contains("linkedwt")
+                && last_review_prompt.contains("M\tseed.txt"),
+            "the reviewer must still be handed the worktree's committed target: {last_review_prompt}"
+        );
+        assert!(
+            !last_review_prompt.contains("WORKTREE_EDIT")
                 && !last_review_prompt.contains("MAIN_TREE_EDIT"),
-            "the reviewer must still be handed the worktree's diff: {last_review_prompt}"
+            "the committed prompt must not inline raw file contents"
         );
     }
 
@@ -18372,12 +19053,15 @@ back to the tree it was born in: {second_cwd}"
             .to_string();
 
         assert!(
-            reviewer_prompt.contains("MAIN_TREE_EDIT"),
-            "the review must diff the main tree the thread moved back to"
+            reviewer_prompt.contains("Working tree:")
+                && reviewer_prompt.contains("mainwt")
+                && reviewer_prompt.contains("M\tseed.txt"),
+            "the review must target the committed main tree the thread moved back to"
         );
         assert!(
-            !reviewer_prompt.contains("WORKTREE_EDIT"),
-            "it must NOT hand over the stale worktree's changes"
+            !reviewer_prompt.contains("MAIN_TREE_EDIT")
+                && !reviewer_prompt.contains("WORKTREE_EDIT"),
+            "the committed prompt must not inline raw file contents from either tree"
         );
         assert!(
             reviewer_prompt.contains(&main_cwd) || reviewer_prompt.contains("mainwt"),
@@ -18446,12 +19130,14 @@ back to the tree it was born in: {second_cwd}"
             .collect();
         assert_eq!(review_turns.len(), 2, "an initial review and one re-review");
         assert!(
-            !review_turns[0].1.contains("AUTHOR_FIX_MARKER"),
-            "the initial review saw the clean tree (no marker yet)"
+            !review_turns[0].1.contains("AUTHOR_FIX_MARKER")
+                && !review_turns[0].1.contains("M\tseed.txt"),
+            "the initial review saw the clean committed tree"
         );
         assert!(
-            review_turns[1].1.contains("AUTHOR_FIX_MARKER"),
-            "the re-review must see the author's refreshed workspace diff"
+            review_turns[1].1.contains("M\tseed.txt")
+                && !review_turns[1].1.contains("AUTHOR_FIX_MARKER"),
+            "the re-review must inspect the author's refreshed committed target"
         );
     }
 
