@@ -1006,7 +1006,7 @@ export function createLifecycleController(ctx) {
       && !!previousThreadId
       && snapshot?.active_thread_id === previousThreadId
     ) {
-      snapshot = withRenderedTranscriptEntriesKept(snapshot);
+      snapshot = withPendingRequestsKept(withRenderedTranscriptEntriesKept(snapshot));
     }
     if (snapshot?.active_thread_id !== state.transcriptHydrationThreadId) {
       // Settle BEFORE switching the window away: settleTranscriptProjection
@@ -1155,6 +1155,42 @@ export function createLifecycleController(ctx) {
       return snapshot;
     }
     return { ...snapshot, transcript: [...(snapshot.transcript || []), ...rescued] };
+  }
+
+  /// The same staleness, the other fields: a turn can park on an approval or an
+  /// AskUserQuestion before the send's pre-append response lands, and that
+  /// response carries the pending lists as they were BEFORE the request existed.
+  /// Dropping one un-pins the card and downgrades it to the read-only look whose
+  /// options do nothing — and the wizard, whose picks live in component state,
+  /// comes back having forgotten what the reader already clicked.
+  ///
+  /// Additive like the transcript rescue, and for the same reason: this response
+  /// is stale by construction, so it may add a request but never retire one. A
+  /// request the reader really did answer is retired by the answer's own refresh.
+  function withPendingRequestsKept(snapshot) {
+    return {
+      ...snapshot,
+      pending_approvals: keptPendingRequests(
+        state.session?.pending_approvals,
+        snapshot?.pending_approvals
+      ),
+      pending_ask_user_questions: keptPendingRequests(
+        state.session?.pending_ask_user_questions,
+        snapshot?.pending_ask_user_questions
+      ),
+    };
+  }
+
+  function keptPendingRequests(rendered, incoming) {
+    const carried = Array.isArray(incoming) ? incoming : [];
+    if (!Array.isArray(rendered) || !rendered.length) {
+      return carried;
+    }
+    const carriedIds = new Set(carried.map((item) => item?.request_id).filter(Boolean));
+    const rescued = rendered.filter(
+      (item) => item?.request_id && !carriedIds.has(item.request_id)
+    );
+    return rescued.length ? [...carried, ...rescued] : carried;
   }
 
   /**

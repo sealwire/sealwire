@@ -115,6 +115,7 @@
     "test:browser:local-file-diff-cards": "npm run build && AGENT_PROVIDERS=fake node scripts/browser-local-file-diff-cards-e2e.mjs",
     "test:browser:local-file-diff-path": "npm run build && node scripts/browser-local-file-diff-path-e2e.mjs",
     "test:browser:local-command-group": "npm run build && AGENT_PROVIDERS=fake node scripts/browser-local-command-group-e2e.mjs",
+    "test:browser:ask-user-click": "npm run build && AGENT_PROVIDERS=fake node scripts/browser-local-ask-user-click-e2e.mjs",
     "test:browser:local-auth": "npm run build && node scripts/browser-local-auth-e2e.mjs",
     "test:browser:local-core:fake": "node scripts/e2e/run-browser-suite.mjs --suite local-core --fake",
     "test:browser:local-full:fake": "node scripts/e2e/run-browser-suite.mjs --suite local-full --fake",

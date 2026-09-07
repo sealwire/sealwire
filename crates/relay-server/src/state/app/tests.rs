@@ -8302,6 +8302,86 @@ tree; got {}",
         );
     }
 
+    // A turn parked on an AskUserQuestion makes no provider progress by design —
+    // it is waiting for a person. Stopping it as "stalled" deletes the pending
+    // request, so the card the reader is looking at silently stops answering.
+    #[tokio::test]
+    async fn stale_turn_watchdog_leaves_a_turn_waiting_on_the_user_answerable() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, _codex, claude) = build_recording_provider_app(cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+        app.set_stop_fallback_ms(80);
+
+        let thread = claude.thread_summary("claude-parked-on-question", cwd);
+        claude
+            .threads
+            .lock()
+            .await
+            .insert(thread.id.clone(), thread.clone());
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("claude_code".to_string());
+            relay.active_thread_id = Some(thread.id.clone());
+            relay.threads = vec![thread.clone()];
+            relay.ensure_runtime_for_thread(&thread.id).summary = Some(thread.clone());
+            relay.ensure_runtime_for_thread(&thread.id).current_cwd = cwd.to_string();
+            relay.bg_set_active_turn(&thread.id, Some("turn-parked".to_string()), 100);
+            relay.bg_set_thread_status(
+                &thread.id,
+                "active".to_string(),
+                vec!["waitingOnAskUser".to_string()],
+                100,
+            );
+            relay.add_pending_ask_user_question(PendingAskUserQuestion {
+                request_id: "ask:parked".to_string(),
+                tool_use_id: "toolu-parked".to_string(),
+                thread_id: thread.id.clone(),
+                requested_at: 100,
+                questions: vec![AskUserQuestionView {
+                    question: "Which approach?".to_string(),
+                    header: "Approach".to_string(),
+                    multi_select: false,
+                    options: vec![AskUserOptionView {
+                        label: "A".to_string(),
+                        description: String::new(),
+                    }],
+                }],
+            });
+            relay.set_active_controller("device-1");
+        }
+
+        app.run_stale_turn_watchdog_once(100 + crate::state::STALE_TURN_PROGRESS_TIMEOUT_SECS)
+            .await;
+
+        assert!(
+            claude.interrupt_thread_ids.lock().await.is_empty(),
+            "a turn waiting on the user's answer is not stalled and must not be stopped"
+        );
+
+        // The stop's idle fallback is what deletes the request, so wait past it
+        // before checking that the question is still answerable.
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let snapshot = app.snapshot().await;
+        assert_eq!(
+            snapshot.pending_ask_user_questions.len(),
+            1,
+            "the unanswered question must survive: the reader is still looking at its options"
+        );
+        app.submit_ask_user_answer(
+            "ask:parked",
+            SubmitAskUserAnswerInput {
+                answers: serde_json::Map::from_iter([(
+                    "Which approach?".to_string(),
+                    serde_json::Value::String("A".to_string()),
+                )]),
+                device_id: Some("device-1".to_string()),
+            },
+        )
+        .await
+        .expect("a question still on screen must still take the reader's answer");
+    }
+
     #[tokio::test]
     async fn stop_falls_back_to_idle_when_provider_never_confirms() {
         let project = TempDir::new().expect("project tempdir");

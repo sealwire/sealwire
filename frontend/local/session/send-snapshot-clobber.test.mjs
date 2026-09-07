@@ -353,3 +353,55 @@ test("a send that promotes the thread still applies its response in full", async
     "a response for a different thread stays authoritative for its transcript"
   );
 });
+
+test("the send's own response does not erase a question that arrived while it was in flight", async () => {
+  // Same staleness, the other field. A turn can park on an AskUserQuestion
+  // before the send's pre-append response lands, and that response carries the
+  // pending list as it was BEFORE the question existed. Applying it wholesale
+  // drops the request for a beat, which un-pins the card, downgrades it to the
+  // read-only look whose options do nothing, and — because the wizard keeps the
+  // reader's picks in component state — forgets what they had already clicked.
+  const question = {
+    request_id: "ask-1",
+    tool_use_id: "toolu-ask-1",
+    thread_id: THREAD,
+    requested_at: 1,
+    question_count: 1,
+    questions_inline_complete: true,
+    questions: [
+      {
+        question: "Which approach?",
+        header: "Approach",
+        multi_select: false,
+        options: [{ label: "Option A", description: "" }],
+      },
+    ],
+  };
+  const asked = snapshot({
+    revision: 49,
+    transcript: [entry("user-1", "user_text", USER_TEXT)],
+  });
+  asked.pending_ask_user_questions = [question];
+  // An approval parks a turn the same way and is dropped by the same apply.
+  asked.pending_approvals = [
+    { request_id: "approve-1", thread_id: THREAD, kind: "exec", command: "ls" },
+  ];
+
+  const { controller, rendered } = buildController({
+    response: snapshot({ revision: 48, transcript: [] }),
+    streamFrame: asked,
+  });
+
+  assert.equal(await controller.sendMessage(USER_TEXT, THREAD), true);
+
+  assert.deepEqual(
+    (rendered.at(-1)?.pending_ask_user_questions || []).map((item) => item.request_id),
+    ["ask-1"],
+    "a snapshot built before the question must not un-ask it"
+  );
+  assert.deepEqual(
+    (rendered.at(-1)?.pending_approvals || []).map((item) => item.request_id),
+    ["approve-1"],
+    "nor withdraw an approval the same turn is parked on"
+  );
+});

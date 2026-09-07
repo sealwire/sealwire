@@ -92,6 +92,12 @@ struct FakeAskUser {
     header: String,
     #[serde(default)]
     options: Vec<String>,
+    #[serde(default)]
+    multi_select: bool,
+    /// Questions after the first. One question is the one-tap quick path; two or
+    /// more is the wizard (pick, Continue, Send), which is a different UI.
+    #[serde(default)]
+    more: Vec<FakeAskUser>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -2072,14 +2078,21 @@ fn fake_ask_user_questions(detail: Option<&FakeAskUser>) -> Vec<AskUserQuestionV
             ],
         }];
     };
-    vec![AskUserQuestionView {
+    std::iter::once(detail)
+        .chain(detail.more.iter())
+        .map(fake_ask_user_question)
+        .collect()
+}
+
+fn fake_ask_user_question(detail: &FakeAskUser) -> AskUserQuestionView {
+    AskUserQuestionView {
         question: detail.question.clone(),
         header: if detail.header.is_empty() {
             "Question".to_string()
         } else {
             detail.header.clone()
         },
-        multi_select: false,
+        multi_select: detail.multi_select,
         options: detail
             .options
             .iter()
@@ -2088,7 +2101,7 @@ fn fake_ask_user_questions(detail: Option<&FakeAskUser>) -> Vec<AskUserQuestionV
                 description: String::new(),
             })
             .collect(),
-    }]
+    }
 }
 
 fn fake_ask_user_input_preview(detail: Option<&FakeAskUser>) -> String {
