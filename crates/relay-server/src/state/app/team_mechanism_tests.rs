@@ -1518,6 +1518,9 @@ async fn team_collect_diff_renders_only_the_committed_candidate_range() {
     );
     run.status = crate::state::TeamRunStatus::Running;
     run.phase = relay_api::team::TeamPhase::SubTasks;
+    run.tl_provider = "codex".to_string();
+    run.dev_provider = "codex".to_string();
+    run.reviewer_provider = "codex".to_string();
     run.sub_tasks.push(crate::state::SubTask {
         id: "st-1".to_string(),
         base_commit: base.clone(),
@@ -3316,6 +3319,255 @@ async fn a_dev_turn_with_an_uncommitted_diff_commits_before_review() {
             thread == dev_thread && text.contains("needs a committed candidate")
         }),
         "the same developer session must be asked to commit before review: {turns:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_later_sub_task_correction_with_no_commit_keeps_the_reviewer_gate_shut() {
+    let (_repo, root) = init_team_repo().await;
+    let prior_candidate = team_git_stdout(&root, &["rev-parse", "HEAD"]);
+    let (app, providers) = build_review_app(&root, &["codex"]).await;
+    let codex = providers.get("codex").unwrap();
+    codex
+        .auto_commit_author_changes
+        .store(false, Ordering::Relaxed);
+
+    let run_id = "team-subtask-correction-no-commit".to_string();
+    let mut run = crate::state::TeamRun::new(
+        run_id.clone(),
+        crate::state::TaskSpec::default(),
+        root.clone(),
+        "device-1".to_string(),
+    );
+    run.status = crate::state::TeamRunStatus::Running;
+    run.phase = relay_api::team::TeamPhase::SubTasks;
+    run.tl_provider = "codex".to_string();
+    run.dev_provider = "codex".to_string();
+    run.reviewer_provider = "codex".to_string();
+    run.sub_tasks.push(crate::state::SubTask {
+        id: "st-1".to_string(),
+        title: "Parser".to_string(),
+        brief: "write the parser".to_string(),
+        status: crate::state::SubTaskStatus::Pending,
+        base_commit: "previous-base".to_string(),
+        round_base_sha: "previous-round-base".to_string(),
+        candidate_sha: prior_candidate.clone(),
+        dev_turns_landed: 1,
+        rounds_used: 1,
+        ..Default::default()
+    });
+    app.relay.write().await.insert_team_run(run);
+    let dev_thread =
+        relay_api::TeamPort::start_thread(&app, &run_id, relay_api::team::TeamRole::Dev)
+            .await
+            .expect("dev thread");
+    relay_api::TeamPort::update_run(
+        &app,
+        &run_id,
+        Box::new({
+            let dev_thread = dev_thread.clone();
+            move |run| {
+                run.sub_tasks[0].dev_thread_id = Some(dev_thread.clone());
+            }
+        }),
+    )
+    .await;
+    std::fs::write(
+        std::path::Path::new(&root).join("dirty-only.rs"),
+        "pub fn dirty_only() {}\n",
+    )
+    .expect("dirty-only correction");
+
+    let dev_outcome = relay_api::TeamPort::turn(
+        &app,
+        &run_id,
+        relay_api::team::TeamThreadSlot::SubTaskDev(0),
+        relay_api::team::TeamRole::Dev,
+        "address the review finding",
+    )
+    .await;
+    match dev_outcome {
+        relay_api::team::TeamTurnOutcome::Blocked(reason) => assert!(
+            reason.contains("did not create a commit"),
+            "blocked reason should ask for a commit: {reason}"
+        ),
+        other => panic!("dirty-only correction must not look successful: {other:?}"),
+    }
+
+    let reviewer_thread =
+        relay_api::TeamPort::start_thread(&app, &run_id, relay_api::team::TeamRole::Reviewer)
+            .await
+            .expect("reviewer thread");
+    relay_api::TeamPort::update_run(
+        &app,
+        &run_id,
+        Box::new({
+            let reviewer_thread = reviewer_thread.clone();
+            move |run| {
+                run.sub_tasks[0].reviewer_thread_id = Some(reviewer_thread.clone());
+            }
+        }),
+    )
+    .await;
+    let reviewer_outcome = relay_api::TeamPort::turn(
+        &app,
+        &run_id,
+        relay_api::team::TeamThreadSlot::SubTaskReviewer(0),
+        relay_api::team::TeamRole::Reviewer,
+        "review the correction",
+    )
+    .await;
+    match reviewer_outcome {
+        relay_api::team::TeamTurnOutcome::Failed(reason) => assert!(
+            reason.contains("current developer correction round has no new committed candidate"),
+            "reviewer refusal should be round-local: {reason}"
+        ),
+        other => panic!("reviewer must be refused before provider dispatch: {other:?}"),
+    }
+
+    let run = app
+        .relay
+        .read()
+        .await
+        .team_run(&run_id)
+        .cloned()
+        .expect("run");
+    assert_eq!(run.sub_tasks[0].round_base_sha, prior_candidate);
+    assert!(
+        run.sub_tasks[0].candidate_sha.is_empty(),
+        "the stale prior candidate must be cleared for the correction round"
+    );
+    assert_eq!(run.sub_tasks[0].rounds_used, 1);
+    let turns = codex.turns.lock().await.clone();
+    assert!(
+        turns.iter().any(|(thread, text)| {
+            thread == &dev_thread && text.contains("needs a committed candidate")
+        }),
+        "the same dev must be asked to commit: {turns:?}"
+    );
+    assert!(
+        turns
+            .iter()
+            .all(|(_, text)| text != "review the correction"),
+        "a refused reviewer turn must not reach the provider: {turns:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_later_mr_correction_with_no_commit_keeps_the_reviewer_gate_shut() {
+    let (_repo, root) = init_team_repo().await;
+    let prior_candidate = team_git_stdout(&root, &["rev-parse", "HEAD"]);
+    let (app, providers) = build_review_app(&root, &["codex"]).await;
+    let codex = providers.get("codex").unwrap();
+    codex
+        .auto_commit_author_changes
+        .store(false, Ordering::Relaxed);
+
+    let run_id = "team-mr-correction-no-commit".to_string();
+    let mut run = crate::state::TeamRun::new(
+        run_id.clone(),
+        crate::state::TaskSpec::default(),
+        root.clone(),
+        "device-1".to_string(),
+    );
+    run.status = crate::state::TeamRunStatus::Running;
+    run.phase = relay_api::team::TeamPhase::MrGate;
+    run.tl_provider = "codex".to_string();
+    run.dev_provider = "codex".to_string();
+    run.reviewer_provider = "codex".to_string();
+    run.mr_rounds_used = 1;
+    run.mr_round_base_sha = "previous-mr-round-base".to_string();
+    run.mr_candidate_sha = prior_candidate.clone();
+    run.mr_verdict = Some(crate::state::WorkflowVerdict {
+        approved: false,
+        summary: None,
+        findings: vec!["fix the final review issue".to_string()],
+    });
+    app.relay.write().await.insert_team_run(run);
+    let dev_thread =
+        relay_api::TeamPort::start_thread(&app, &run_id, relay_api::team::TeamRole::Dev)
+            .await
+            .expect("dev thread");
+    relay_api::TeamPort::update_run(
+        &app,
+        &run_id,
+        Box::new({
+            let dev_thread = dev_thread.clone();
+            move |run| {
+                run.mr_dev_thread_id = Some(dev_thread.clone());
+            }
+        }),
+    )
+    .await;
+    std::fs::write(
+        std::path::Path::new(&root).join("dirty-mr-only.rs"),
+        "pub fn dirty_mr_only() {}\n",
+    )
+    .expect("dirty-only MR correction");
+
+    let dev_outcome = relay_api::TeamPort::turn(
+        &app,
+        &run_id,
+        relay_api::team::TeamThreadSlot::MrDev,
+        relay_api::team::TeamRole::Dev,
+        "address final review findings",
+    )
+    .await;
+    match dev_outcome {
+        relay_api::team::TeamTurnOutcome::Blocked(reason) => assert!(
+            reason.contains("did not create a commit"),
+            "blocked reason should ask for a commit: {reason}"
+        ),
+        other => panic!("dirty-only MR correction must not look successful: {other:?}"),
+    }
+
+    let reviewer_thread =
+        relay_api::TeamPort::start_thread(&app, &run_id, relay_api::team::TeamRole::Reviewer)
+            .await
+            .expect("reviewer thread");
+    let reviewer_slot =
+        relay_api::TeamPort::record_run_thread(&app, &run_id, &reviewer_thread).await;
+    let reviewer_outcome = relay_api::TeamPort::turn(
+        &app,
+        &run_id,
+        reviewer_slot,
+        relay_api::team::TeamRole::Reviewer,
+        "review final candidate",
+    )
+    .await;
+    match reviewer_outcome {
+        relay_api::team::TeamTurnOutcome::Failed(reason) => assert!(
+            reason.contains("current developer correction round has no new committed candidate"),
+            "reviewer refusal should be round-local: {reason}"
+        ),
+        other => panic!("MR reviewer must be refused before provider dispatch: {other:?}"),
+    }
+
+    let run = app
+        .relay
+        .read()
+        .await
+        .team_run(&run_id)
+        .cloned()
+        .expect("run");
+    assert_eq!(run.mr_round_base_sha, prior_candidate);
+    assert!(
+        run.mr_candidate_sha.is_empty(),
+        "the stale prior MR candidate must be cleared for the correction round"
+    );
+    assert_eq!(run.mr_rounds_used, 1);
+    let turns = codex.turns.lock().await.clone();
+    assert!(
+        turns.iter().any(|(thread, text)| {
+            thread == &dev_thread && text.contains("needs a committed candidate")
+        }),
+        "the same MR dev must be asked to commit: {turns:?}"
+    );
+    assert!(
+        turns
+            .iter()
+            .all(|(_, text)| text != "review final candidate"),
+        "a refused MR reviewer turn must not reach the provider: {turns:?}"
     );
 }
 

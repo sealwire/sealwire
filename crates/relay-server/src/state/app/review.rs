@@ -423,10 +423,28 @@ reviewer thread"
             match grants.admit(&cwd).await.trusted().cloned() {
                 Some(workspace) if is_git_work_tree(&workspace).await? => {
                     let candidate = current_head_sha(&workspace).await?;
-                    let base = first_parent_sha(&workspace, &candidate)
-                        .await?
-                        .unwrap_or_else(|| candidate.clone());
-                    Some((base, candidate))
+                    let turn_base = {
+                        self.relay
+                            .read()
+                            .await
+                            .thread_last_turn_base_sha(&parent_thread_id)
+                    };
+                    if let Some(base) = turn_base {
+                        if candidate == base {
+                            Some((base, None))
+                        } else {
+                            Some((base, Some(candidate)))
+                        }
+                    } else if has_uncommitted_changes(&workspace).await?
+                        && initial_fallback_from.is_none()
+                    {
+                        Some((candidate, None))
+                    } else {
+                        let base = first_parent_sha(&workspace, &candidate)
+                            .await?
+                            .unwrap_or_else(|| candidate.clone());
+                        Some((base, Some(candidate)))
+                    }
                 }
                 _ => None,
             }
@@ -508,7 +526,8 @@ reviewer thread"
         job.recap_source = ReviewRecapSource::from_request(input.recap_source.as_deref());
         if let Some((base, candidate)) = requested_git_target {
             job.base_sha = Some(base);
-            job.candidate_sha = Some(candidate);
+            job.round_base_sha = job.base_sha.clone();
+            job.candidate_sha = candidate;
         }
         let status_view = job.status_view();
 
@@ -1731,14 +1750,55 @@ started ({error}); finishing with round {round}'s findings."
         let current_head = current_head_sha(&trusted).await?;
         let dirty = has_uncommitted_changes(&trusted).await?;
         let mut target_workspace = trusted.clone();
-        let pinned_target = existing_base
-            .clone()
-            .zip(existing_candidate.clone())
-            .filter(|(base, candidate)| {
-                base != candidate || !dirty || workspace.fallback_from.is_some()
-            });
-        let (base_sha, candidate_sha) = if let Some(target) = pinned_target {
-            target
+        let (base_sha, candidate_sha) = if let Some(base_sha) = existing_base.clone() {
+            if let Some(candidate_sha) = existing_candidate.clone() {
+                (base_sha, candidate_sha)
+            } else if current_head != base_sha {
+                (base_sha, current_head)
+            } else if workspace.fallback_from.is_none() {
+                let round_base = base_sha;
+                self.update_job(job_id, |job| {
+                    job.base_sha = Some(round_base.clone());
+                    job.round_base_sha = Some(round_base.clone());
+                    job.candidate_sha = None;
+                })
+                .await;
+                match self
+                    .drive_parent_commit_prompt(job_id, parent_thread_id, &round_base)
+                    .await
+                {
+                    AuthorTurnOutcome::Completed(promoted) => {
+                        *parent_thread_id = promoted;
+                    }
+                    AuthorTurnOutcome::WorkspaceGone => {}
+                    AuthorTurnOutcome::Aborted => {
+                        return Err("the author commit turn aborted".into());
+                    }
+                }
+                let refreshed = self
+                    .resolve_review_workspace(parent_thread_id, device_id)
+                    .await?;
+                let Some(refreshed_trusted) = grants.admit(&refreshed.cwd).await.trusted().cloned()
+                else {
+                    return Err(format!(
+                        "{} is not a granted workspace, so it cannot be reviewed",
+                        refreshed.cwd
+                    ));
+                };
+                if !is_git_work_tree(&refreshed_trusted).await? {
+                    return Ok(None);
+                }
+                let candidate = current_head_sha(&refreshed_trusted).await?;
+                if candidate == round_base {
+                    return Err(format!(
+                        "the author did not create a commit after `{round_base}`; review requires a committed candidate"
+                    ));
+                }
+                target_workspace = refreshed_trusted;
+                (round_base, candidate)
+            } else {
+                (base_sha, current_head)
+            }
         } else if dirty && workspace.fallback_from.is_none() {
             let round_base = current_head;
             self.update_job(job_id, |job| {

@@ -323,6 +323,10 @@ pub struct RelayState {
     pub(super) thread_promoted_from: HashMap<String, String>,
     /// Per-thread pin/proven paths. Absent = birth cwd.
     pub(super) thread_workspace: HashMap<String, ThreadWorkspace>,
+    /// Git `HEAD` observed immediately before the last ordinary author turn for a
+    /// thread. Session review uses this durable baseline instead of guessing from
+    /// dirty state or blindly treating `HEAD^..HEAD` as new work.
+    pub(super) thread_last_turn_base_sha: HashMap<String, String>,
     /// Static per relay process, seeded from the spawned bridges. Rides the
     /// snapshot so both surfaces learn fork capability through the channel they
     /// already consume, instead of inferring it from provider names.
@@ -585,6 +589,7 @@ impl RelayState {
             thread_forked_from: HashMap::new(),
             thread_promoted_from: HashMap::new(),
             thread_workspace: HashMap::new(),
+            thread_last_turn_base_sha: HashMap::new(),
             provider_fork_capabilities: Vec::new(),
             provider_archive_capabilities: Vec::new(),
             beta_features_enabled: false,
@@ -1054,6 +1059,18 @@ impl RelayState {
             .get(thread_id)
             .cloned()
             .unwrap_or_default()
+    }
+
+    pub(crate) fn thread_last_turn_base_sha(&self, thread_id: &str) -> Option<String> {
+        self.thread_last_turn_base_sha.get(thread_id).cloned()
+    }
+
+    pub(crate) fn record_thread_last_turn_base_sha(&mut self, thread_id: &str, sha: String) {
+        if thread_id.is_empty() || sha.is_empty() {
+            return;
+        }
+        self.thread_last_turn_base_sha
+            .insert(thread_id.to_string(), sha);
     }
 
     /// Pin (`Some`) or drop the pin (`None`). Caller validates roots + device scope.
@@ -1972,6 +1989,11 @@ impl RelayState {
             self.thread_workspace
                 .entry(real_id.to_string())
                 .or_insert(pending_workspace);
+        }
+        if let Some(base_sha) = self.thread_last_turn_base_sha.remove(pending_id) {
+            self.thread_last_turn_base_sha
+                .entry(real_id.to_string())
+                .or_insert(base_sha);
         }
         // Drop the stale pending row; the real row is upserted by the caller.
         self.threads.retain(|thread| thread.id != pending_id);
@@ -3957,6 +3979,7 @@ impl RelayState {
         self.thread_forked_from = persisted.thread_forked_from.clone();
         self.thread_promoted_from = persisted.thread_promoted_from.clone();
         self.thread_workspace = persisted.thread_workspace.clone();
+        self.thread_last_turn_base_sha = persisted.thread_last_turn_base_sha.clone();
         self.projects = persisted.projects.clone();
         self.thread_project_id = persisted.thread_project_id.clone();
         self.thread_custom_name = persisted.thread_custom_name.clone();
@@ -5072,6 +5095,7 @@ impl RelayState {
         self.thread_forked_from = persisted.thread_forked_from.clone();
         self.thread_promoted_from = persisted.thread_promoted_from.clone();
         self.thread_workspace = persisted.thread_workspace.clone();
+        self.thread_last_turn_base_sha = persisted.thread_last_turn_base_sha.clone();
         self.projects = persisted.projects.clone();
         self.thread_project_id = persisted.thread_project_id.clone();
         self.thread_custom_name = persisted.thread_custom_name.clone();
