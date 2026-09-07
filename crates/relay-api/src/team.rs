@@ -1390,6 +1390,10 @@ impl TeamRun {
         }
         self.design_review_rounds = 0;
         self.mr_rounds_used = 0;
+        self.mr_round_base_sha.clear();
+        self.mr_candidate_sha.clear();
+        self.mr_verdict_candidate_sha.clear();
+        self.mr_stale_review_retries = 0;
         self.unresolved.clear();
         self.mr_verdict = None;
         self.design_verdict = None;
@@ -2510,6 +2514,10 @@ mod tests {
         run.sub_tasks[1].dev_turns_landed = 1;
         run.sub_tasks[1].round_base_sha = "base-2".to_string();
         run.sub_tasks[1].candidate_sha = "candidate-2".to_string();
+        run.mr_round_base_sha = "mr-base".to_string();
+        run.mr_candidate_sha = "mr-candidate".to_string();
+        run.mr_verdict_candidate_sha = "mr-candidate".to_string();
+        run.mr_stale_review_retries = 2;
 
         assert!(run.revive_sub_tasks(Some(&["st-1".to_string()])));
 
@@ -2527,6 +2535,13 @@ mod tests {
         );
         assert_eq!(run.sub_tasks[1].round_base_sha, "base-2");
         assert_eq!(run.sub_tasks[1].candidate_sha, "candidate-2");
+        assert_eq!(run.mr_round_base_sha, "");
+        assert_eq!(run.mr_candidate_sha, "");
+        assert_eq!(run.mr_verdict_candidate_sha, "");
+        assert_eq!(
+            run.mr_stale_review_retries, 0,
+            "a reopened run must not inherit the previous MR stale budget"
+        );
     }
 
     fn planned_sub_task(id: &str) -> SubTask {
