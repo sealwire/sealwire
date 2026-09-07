@@ -13,6 +13,7 @@ import {
 import { createTranscriptScrollAdjuster } from "./transcript-scroll-adjust.js";
 import { CHECK_SVG, COPY_SVG, FORK_SVG, SPARKLES_SVG } from "../svg.js";
 import { approvalKindLabel } from "./approval-labels.js";
+import { readAskUserDraft, writeAskUserDraft } from "./ask-user-draft-store.js";
 import { providerIconSvg } from "./provider-icons.js";
 import { computeForkableItemIds, isForkableEntry } from "./transcript-fork.js";
 import {
@@ -1080,9 +1081,15 @@ function AskUserWizard({
   submitAnswers,
   askUserError,
 }) {
-  const [currentIndex, setCurrentIndex] = React.useState(0);
+  // Seeded from the draft store rather than from nothing: this component is
+  // rebuilt on every blink of the pending list, and a fresh start there is the
+  // reader's answer being forgotten mid-sentence.
+  const draft = readAskUserDraft(requestId);
+  const [currentIndex, setCurrentIndex] = React.useState(() => draft?.currentIndex || 0);
   // Map<questionText, {labels: Set<string>, notes: string}>
-  const [perQuestion, setPerQuestion] = React.useState(makeEmptyPerQuestionState);
+  const [perQuestion, setPerQuestion] = React.useState(
+    () => draft?.perQuestion || makeEmptyPerQuestionState()
+  );
 
   // Quick path: a SINGLE single-select question with NO notes typed yet
   // collapses to one-tap submission. Skips the wizard chrome entirely
@@ -1098,34 +1105,42 @@ function AskUserWizard({
   const isLastQuestion = safeIndex === questions.length - 1;
   const isFirstQuestion = safeIndex === 0;
 
+  // Both halves of every edit: the state React renders from, and the draft that
+  // outlives this mount.
+  function commitPerQuestion(next) {
+    setPerQuestion(next);
+    writeAskUserDraft(requestId, { perQuestion: next, currentIndex });
+  }
+
+  function commitCurrentIndex(next) {
+    setCurrentIndex(next);
+    writeAskUserDraft(requestId, { perQuestion, currentIndex: next });
+  }
+
   function updateNotes(questionText, value) {
-    setPerQuestion((prev) => {
-      const next = new Map(prev);
-      const existing = getQuestionState(prev, questionText);
-      next.set(questionText, {
-        labels: new Set(existing.labels),
-        notes: value,
-      });
-      return next;
+    const next = new Map(perQuestion);
+    const existing = getQuestionState(perQuestion, questionText);
+    next.set(questionText, {
+      labels: new Set(existing.labels),
+      notes: value,
     });
+    commitPerQuestion(next);
   }
 
   function toggleOption(questionText, optionLabel, isMulti) {
-    setPerQuestion((prev) => {
-      const next = new Map(prev);
-      const existing = getQuestionState(prev, questionText);
-      const labels = new Set(isMulti ? existing.labels : []);
-      if (labels.has(optionLabel)) {
-        labels.delete(optionLabel);
-      } else {
-        labels.add(optionLabel);
-      }
-      next.set(questionText, {
-        labels,
-        notes: existing.notes,
-      });
-      return next;
+    const next = new Map(perQuestion);
+    const existing = getQuestionState(perQuestion, questionText);
+    const labels = new Set(isMulti ? existing.labels : []);
+    if (labels.has(optionLabel)) {
+      labels.delete(optionLabel);
+    } else {
+      labels.add(optionLabel);
+    }
+    next.set(questionText, {
+      labels,
+      notes: existing.notes,
     });
+    commitPerQuestion(next);
   }
 
   function clickOption(question, optionLabel) {
@@ -1140,12 +1155,12 @@ function AskUserWizard({
 
   function goPrev() {
     if (isFirstQuestion || isSubmitting) return;
-    setCurrentIndex((i) => Math.max(0, i - 1));
+    commitCurrentIndex(Math.max(0, safeIndex - 1));
   }
 
   function goNext() {
     if (isLastQuestion || isSubmitting) return;
-    setCurrentIndex((i) => Math.min(questions.length - 1, i + 1));
+    commitCurrentIndex(Math.min(questions.length - 1, safeIndex + 1));
   }
 
   function sendAll() {

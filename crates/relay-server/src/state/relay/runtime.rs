@@ -335,6 +335,11 @@ impl ThreadRuntime {
         if self.liveness_timed_out || self.active_turn_id.is_none() {
             return false;
         }
+        // Parked on a person, not stalled: stopping the turn here would delete the
+        // pending request out from under a reader still looking at its options.
+        if !self.pending_approvals.is_empty() || !self.pending_ask_user_questions.is_empty() {
+            return false;
+        }
         let Some(last_progress_at) = self.last_progress_at.filter(|value| *value > 0) else {
             return false;
         };

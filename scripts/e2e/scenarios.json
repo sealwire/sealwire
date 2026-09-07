@@ -12,6 +12,7 @@
       "local-file-diff-cards",
       "local-file-diff-path",
       "local-command-group",
+      "local-ask-user-click",
       "local-history-scroll",
       "local-drawer-scroll",
       "local-transcript-load",
@@ -41,6 +42,7 @@
       "local-file-diff-cards",
       "local-file-diff-path",
       "local-command-group",
+      "local-ask-user-click",
       "local-history-scroll",
       "local-drawer-scroll",
       "local-transcript-load",
@@ -635,6 +637,16 @@
         "dialog-menu-anchoring",
         "real-mobile-browser",
         "touch-input"
+      ]
+    },
+    "local-ask-user-click": {
+      "script": "browser-local-ask-user-click-e2e.mjs",
+      "tier": "core",
+      "provider": "fake-compatible",
+      "transport": "local",
+      "coverage": [
+        "ask-user-question",
+        "ask-user-click"
       ]
     }
   }
