@@ -36,8 +36,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{
     orchestration::{
-        CommandFingerprint, DriverProgress, OrchestrationBackendRef, TeamCommandJournal,
-        TeamCommandKind, TeamCommandOutcome, TeamCommandRecord,
+        DriverProgress, OrchestrationBackendRef, TeamCommandJournal, TeamCommandKind,
+        TeamCommandOutcome, TeamCommandRecord,
     },
     unix_now, WorkflowVerdict,
 };
@@ -601,7 +601,7 @@ pub struct SubTask {
 }
 
 /// Replay payload for one `TakeUserNotes` command. See the field doc on
-/// `TeamRun::last_drained_notes`.
+/// `TeamRun::drained_notes`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LastDrainedNotes {
@@ -731,13 +731,18 @@ pub struct TeamRun {
     #[serde(default)]
     pub command_journal: TeamCommandJournal,
     /// Replay payload for `TeamStateCommand::TakeUserNotes`, kept off the
-    /// (content-blind) journal because notes are prose. Overwritten by each
-    /// drain; see `.sealwire/DESIGN.md` D8. Plain `String`/`Vec<String>`
-    /// rather than the bounded `CommandId` type so a corrupt value decodes
-    /// leniently like the rest of this struct instead of failing the whole
-    /// record.
+    /// (content-blind) journal because notes are prose — see
+    /// `.sealwire/DESIGN.md` D8. One entry per *applied* drain, appended (not
+    /// overwritten): AC-4 requires an identical redelivery to replay the same
+    /// receipt even after a LATER, different drain has landed, which a single
+    /// overwritten slot cannot do. Evicted in lockstep with `command_journal`
+    /// — when a `TakeUserNotes` journal record is dropped, its matching entry
+    /// here is dropped too — so this never outgrows the journal's own bound.
+    /// Plain `String`/`Vec<String>` rather than the bounded `CommandId` type
+    /// so a corrupt value decodes leniently like the rest of this struct
+    /// instead of failing the whole record.
     #[serde(default)]
-    pub last_drained_notes: Option<LastDrainedNotes>,
+    pub drained_notes: Vec<LastDrainedNotes>,
 
     /// Named team this run belongs to. Written into the token ledger at spend
     /// time. `None` only for runs started before team identity existed.
@@ -997,11 +1002,11 @@ impl TeamRun {
     /// a terminal `Interrupted` journal record for that id before anything
     /// else runs, and the field cleared. T4's own reducer never leaves one in
     /// flight, so this recovers state left by a future async executor, not
-    /// anything this build produces. The fingerprint is a sentinel that can
-    /// never equal a real command's digest, so any later redelivery of that
-    /// id fails closed as `DuplicateCommand` rather than being evaluated as a
-    /// fresh command against today's counters — the double-application this
-    /// exists to prevent.
+    /// anything this build produces. `fingerprint: None` (D10-corrected) means
+    /// "match any digest": the original envelope was never durably recorded,
+    /// so there is no real fingerprint to compare against, and inventing a
+    /// sentinel value would make a genuine redelivery mismatch it and read as
+    /// `DuplicateCommand` instead of replaying this `Interrupted` receipt.
     fn recover_stranded_in_flight_command(&mut self) -> bool {
         let Some(command_id) = self.driver_progress.in_flight_command_id.take() else {
             return false;
@@ -1010,7 +1015,7 @@ impl TeamRun {
             command_id,
             sequence: self.driver_progress.last_command_seq,
             kind: TeamCommandKind::Unknown,
-            fingerprint: CommandFingerprint::from_digest([0u8; 32]),
+            fingerprint: None,
             expected_revision: self.driver_progress.state_revision,
             state_revision: self.driver_progress.state_revision,
             last_event_seq: self.driver_progress.last_event_seq,
@@ -2002,14 +2007,11 @@ mod tests {
         assert_eq!(record.command_id.as_str(), "cmd-9");
         assert_eq!(record.kind, TeamCommandKind::Unknown);
         assert_eq!(record.outcome, TeamCommandOutcome::Interrupted);
-        // A real command's fingerprint is a SHA-256 digest and so is
-        // vanishingly unlikely to ever equal this all-zero sentinel — any
-        // genuine redelivery of "cmd-9" therefore always mismatches and fails
-        // closed as `DuplicateCommand` rather than being evaluated fresh.
-        assert_eq!(
-            record.fingerprint,
-            CommandFingerprint::from_digest([0u8; 32])
-        );
+        // `None`, not a sentinel: the original envelope's digest was never
+        // recorded, so this matches ANY fingerprint a genuine redelivery of
+        // "cmd-9" computes — the reducer replays this `Interrupted` receipt
+        // instead of misreading the redelivery as a content mismatch.
+        assert_eq!(record.fingerprint, None);
     }
 
     #[test]

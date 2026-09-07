@@ -1611,7 +1611,13 @@ pub struct TeamCommandRecord {
     pub command_id: CommandId,
     pub sequence: u64,
     pub kind: TeamCommandKind,
-    pub fingerprint: CommandFingerprint,
+    /// `None` means "matches any fingerprint" — written only by restart
+    /// recovery for a stranded `in_flight_command_id`, whose original
+    /// envelope (and thus its digest) was never durably recorded. Treating an
+    /// absent digest as a wildcard, rather than inventing a sentinel value, is
+    /// what lets a genuine redelivery of that id replay `Interrupted` instead
+    /// of being misread as a content mismatch. See `.sealwire/DESIGN.md` D10.
+    pub fingerprint: Option<CommandFingerprint>,
     pub expected_revision: u64,
     /// `state_revision` / `last_event_seq` as they stood immediately after
     /// this record was written. Unchanged from before it for every outcome
@@ -1669,15 +1675,17 @@ impl TeamCommandJournal {
         self.records.push(record);
     }
 
-    /// Remove the first (oldest) record matching `predicate`. The caller
-    /// decides what is safe to drop; this type only offers the mechanism.
-    pub fn remove_first(&mut self, mut predicate: impl FnMut(&TeamCommandRecord) -> bool) -> bool {
-        if let Some(pos) = self.records.iter().position(|record| predicate(record)) {
-            self.records.remove(pos);
-            true
-        } else {
-            false
-        }
+    /// Remove and return the first (oldest) record matching `predicate`. The
+    /// caller decides what is safe to drop; this type only offers the
+    /// mechanism. Returning the removed record (not just whether one was
+    /// found) lets the caller clean up anything keyed off its `command_id` —
+    /// `TeamRun.drained_notes`, for a `TakeUserNotes` record.
+    pub fn remove_first(
+        &mut self,
+        mut predicate: impl FnMut(&TeamCommandRecord) -> bool,
+    ) -> Option<TeamCommandRecord> {
+        let pos = self.records.iter().position(|record| predicate(record))?;
+        Some(self.records.remove(pos))
     }
 
     fn malformed() -> Self {
@@ -4405,7 +4413,7 @@ mod tests {
                     command_id: CommandId::new(format!("team-cmd-{index}")).unwrap(),
                     sequence: index as u64 + 1,
                     kind: TeamCommandKind::RecordIntake,
-                    fingerprint: CommandFingerprint::from_digest([index as u8; 32]),
+                    fingerprint: Some(CommandFingerprint::from_digest([index as u8; 32])),
                     expected_revision: 0,
                     state_revision: index as u64,
                     last_event_seq: index as u64,
@@ -4414,6 +4422,21 @@ mod tests {
                 .unwrap(),
             );
         }
+        // The recovery-record shape: `fingerprint: None` (D10) serializes as a
+        // bare `null`, which the walk already allows unconditionally.
+        samples.push(
+            serde_json::to_value(TeamCommandRecord {
+                command_id: CommandId::new("team-cmd-recovered").unwrap(),
+                sequence: 1,
+                kind: TeamCommandKind::Unknown,
+                fingerprint: None,
+                expected_revision: 0,
+                state_revision: 0,
+                last_event_seq: 0,
+                outcome: TeamCommandOutcome::Interrupted,
+            })
+            .unwrap(),
+        );
 
         for value in samples {
             assert_cloud_visible_json_is_allowlisted(&value);
