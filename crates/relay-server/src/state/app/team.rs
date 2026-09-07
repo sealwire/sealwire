@@ -3955,11 +3955,27 @@ impl relay_api::TeamPort for AppState {
         // live inside the reducer, which is synchronous and holds the run
         // lock. See `.sealwire/DESIGN.md` D14.
 
+        // Identity is based on the original submitted envelope and must win
+        // before the asynchronous quiescence check below. Otherwise the same
+        // SettleRun can become BlockRun on its first delivery and SettleRun on
+        // replay as runtime liveness changes, manufacturing a fingerprint
+        // collision. The reducer repeats this read-only prefix under the write
+        // lock before applying, so a concurrent submission cannot race it.
+        {
+            let relay = self.relay.read().await;
+            let run = relay.team_run(run_id)?;
+            if let Some(receipt) =
+                super::team_command_reducer::preflight_team_command_identity(run, run_id, &envelope)
+            {
+                return Some(receipt);
+            }
+        }
+
         // BEFORE: a settlement that hands the workspace back may not be
         // written while a turn is still mutating the tree. A run that cannot
         // prove quiescence is Blocked instead, keeping its locks — exactly
         // what `settle_team_run` did before this moved behind the reducer.
-        let envelope = match &envelope.command {
+        let effective_command = match &envelope.command {
             TeamStateCommand::SettleRun { status, .. }
                 if matches!(
                     status,
@@ -3968,31 +3984,28 @@ impl relay_api::TeamPort for AppState {
             {
                 let working = self.working_team_threads(run_id).await;
                 if working.is_empty() {
-                    envelope
+                    envelope.command.clone()
                 } else {
                     let status = *status;
-                    relay_api::team_command::TeamCommandEnvelope {
-                        command: TeamStateCommand::BlockRun {
-                            error: format!(
-                                "cannot settle this task as {}: {} still has a turn in flight",
-                                status.as_str(),
-                                working.join(", ")
-                            ),
-                        },
-                        ..envelope
+                    TeamStateCommand::BlockRun {
+                        error: format!(
+                            "cannot settle this task as {}: {} still has a turn in flight",
+                            status.as_str(),
+                            working.join(", ")
+                        ),
                     }
                 }
             }
-            _ => envelope,
+            _ => envelope.command.clone(),
         };
 
-        let settled_status = match &envelope.command {
+        let settled_status = match &effective_command {
             TeamStateCommand::SetRunStatus { status } => Some(*status),
             TeamStateCommand::FailRun { .. } => Some(TeamRunStatus::Failed),
             TeamStateCommand::SettleRun { status, .. } => Some(*status),
             _ => None,
         };
-        let log_line = match &envelope.command {
+        let log_line = match &effective_command {
             TeamStateCommand::FailRun { error } => {
                 Some(("warn", format!("Task {run_id} failed: {error}")))
             }
@@ -4008,14 +4021,43 @@ impl relay_api::TeamPort for AppState {
         }
 
         let mut outcome = None;
+        let mut lifecycle_states = None;
         relay.update_team_run(run_id, |run| {
-            outcome = Some(super::team_command_reducer::apply_team_command(
-                run, run_id, envelope,
-            ));
+            let before = (
+                run.status,
+                run.error.clone(),
+                run.pause_reason.clone(),
+                run.pause_kind,
+            );
+            outcome = Some(
+                super::team_command_reducer::apply_team_command_with_effective(
+                    run,
+                    run_id,
+                    envelope,
+                    effective_command,
+                ),
+            );
+            let after = (
+                run.status,
+                run.error.clone(),
+                run.pause_reason.clone(),
+                run.pause_kind,
+            );
+            lifecycle_states = Some((before, after));
         });
         let (receipt, wrote) =
             outcome.expect("the run was confirmed present under the same write lock");
-        let applied = matches!(receipt.status, TeamCommandStatus::Applied(_));
+        let (before, after) =
+            lifecycle_states.expect("the run was confirmed present under the same write lock");
+        let newly_applied = wrote && matches!(receipt.status, TeamCommandStatus::Applied(_));
+        let lifecycle_changed = before != after;
+        let logged_transition_applied = match settled_status {
+            Some(TeamRunStatus::Failed) => {
+                newly_applied && lifecycle_changed && after.0 == TeamRunStatus::Failed
+            }
+            None => newly_applied && lifecycle_changed && after.0 == TeamRunStatus::Blocked,
+            Some(_) => false,
+        };
 
         // The reducer's own return value says whether it wrote anything —
         // not a before/after comparison of revision and journal length, which
@@ -4024,7 +4066,7 @@ impl relay_api::TeamPort for AppState {
         // touches `orchestration_backend`, so `update_team_run`'s own
         // backend-immutability guard never rejects this closure either way.
         if wrote {
-            if applied {
+            if logged_transition_applied {
                 if let Some((level, message)) = log_line {
                     relay.push_log(level, message);
                 }
@@ -4036,8 +4078,8 @@ impl relay_api::TeamPort for AppState {
         // AFTER: hand back the provider seats of a run that just settled.
         // Fire-and-forget and idempotent, and gated on the command actually
         // applying so a rejected or replayed delivery never releases twice.
-        if applied {
-            if let Some(status) = settled_status {
+        if newly_applied && before.0 != after.0 {
+            if let Some(status) = settled_status.filter(|status| *status == after.0) {
                 self.release_seats_when_settled(run_id, status);
             }
         }

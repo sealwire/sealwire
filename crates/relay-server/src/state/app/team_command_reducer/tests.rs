@@ -1354,6 +1354,65 @@ fn a_recovered_in_flight_command_survives_a_restart_round_trip_and_replays_inter
     );
 }
 
+/// A typed in-flight command at sequence N consumes N during recovery. Even if
+/// later host mechanics make the run drivable again, another id cannot reuse N
+/// either immediately or after JSON restore. The original id still uses its
+/// typed fingerprint: the same envelope replays Interrupted and changed content
+/// is a real DuplicateCommand collision.
+#[test]
+fn typed_recovery_spends_the_sequence_and_preserves_fingerprint_identity() {
+    let original = envelope("cmd-in-flight", 4, 0, set_phase(TeamPhase::Design));
+    let mut recovered = fresh_run();
+    recovered.driver_progress.last_command_seq = 3;
+    recovered.in_flight_command = Some(relay_api::orchestration::InFlightCommand {
+        command_id: original.command_id.clone(),
+        fingerprint: compute_fingerprint(RUN_ID, &original),
+        kind: TeamCommandKind::SetPhase,
+        sequence: original.sequence,
+        expected_revision: original.expected_revision,
+        state_revision: 0,
+        last_event_seq: 0,
+    });
+
+    assert!(recovered.reconcile_after_restore());
+    assert_eq!(recovered.driver_progress.last_command_seq, 4);
+    let same = apply_raw(&mut recovered.clone(), original.clone());
+    assert_eq!(same.status, TeamCommandStatus::Interrupted);
+    let collision = apply_raw(
+        &mut recovered.clone(),
+        envelope("cmd-in-flight", 4, 0, set_phase(TeamPhase::Planning)),
+    );
+    assert_eq!(
+        collision.status,
+        TeamCommandStatus::Rejected(CommandRejection::DuplicateCommand)
+    );
+
+    let mut immediate = recovered.clone();
+    immediate.status = TeamRunStatus::Running;
+    let immediate_receipt = apply_raw(
+        &mut immediate,
+        envelope("cmd-other-immediate", 4, 0, set_phase(TeamPhase::Planning)),
+    );
+    assert_eq!(
+        immediate_receipt.status,
+        TeamCommandStatus::Rejected(CommandRejection::StaleCommand)
+    );
+    assert_eq!(immediate.phase, TeamPhase::Intake);
+
+    let mut restored: TeamRun =
+        serde_json::from_value(serde_json::to_value(&recovered).unwrap()).unwrap();
+    restored.status = TeamRunStatus::Running;
+    let restored_receipt = apply_raw(
+        &mut restored,
+        envelope("cmd-other-restored", 4, 0, set_phase(TeamPhase::Planning)),
+    );
+    assert_eq!(
+        restored_receipt.status,
+        TeamCommandStatus::Rejected(CommandRejection::StaleCommand)
+    );
+    assert_eq!(restored.phase, TeamPhase::Intake);
+}
+
 // ---------------------------------------------------------------------
 // Closure round: ordering coherence, counter headroom, payload size, and
 // the eviction watermark. See `.sealwire/DESIGN.md` D5/D6/D9.

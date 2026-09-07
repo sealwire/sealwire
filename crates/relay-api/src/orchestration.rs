@@ -1726,6 +1726,14 @@ impl TeamCommandJournal {
         self.records.push(record);
     }
 
+    /// Persist that this journal can no longer provide an unambiguous replay
+    /// answer. Kept crate-local: live reducer callers may append/evict only;
+    /// restore reconciliation is the one place that can discover contradictory
+    /// durable sources for the same command id.
+    pub(crate) fn mark_malformed(&mut self) {
+        self.malformed = true;
+    }
+
     /// Remove and return the first (oldest) record matching `predicate`. The
     /// caller decides what is safe to drop; this type only offers the
     /// mechanism. Returning the removed record (not just whether one was
