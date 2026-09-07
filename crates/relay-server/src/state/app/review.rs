@@ -415,6 +415,22 @@ reviewer thread"
             .await?;
         let cwd = review_workspace.cwd.clone();
         let initial_fallback_from = review_workspace.fallback_from.clone();
+        // Pin the committed target when the request is accepted. Dirt may remain in
+        // the tree, and HEAD may move before the asynchronous reviewer starts; neither
+        // may change what this review was asked to inspect.
+        let requested_git_target = {
+            let grants = { self.relay.read().await.trust_grants() };
+            match grants.admit(&cwd).await.trusted().cloned() {
+                Some(workspace) if is_git_work_tree(&workspace).await? => {
+                    let candidate = current_head_sha(&workspace).await?;
+                    let base = first_parent_sha(&workspace, &candidate)
+                        .await?
+                        .unwrap_or_else(|| candidate.clone());
+                    Some((base, candidate))
+                }
+                _ => None,
+            }
+        };
 
         // Reviewer must live in the tree we are about to review; a provider thread cannot relocate.
         if let Some(reviewer_id) = &reuse_thread_id {
@@ -490,6 +506,10 @@ reviewer thread"
         job.reviewer_effort = non_empty(input.reviewer_effort.clone());
         // How to brief the reviewer (default: the parent's last message, no recap turn).
         job.recap_source = ReviewRecapSource::from_request(input.recap_source.as_deref());
+        if let Some((base, candidate)) = requested_git_target {
+            job.base_sha = Some(base);
+            job.candidate_sha = Some(candidate);
+        }
         let status_view = job.status_view();
 
         {
@@ -1144,6 +1164,11 @@ complete this review; the new `HEAD` must be reviewed as a fresh committed candi
                             );
                             stale_approval = true;
                             verdict = crate::state::Verdict::NeedsChanges;
+                            self.update_job(&job_id, |job| {
+                                job.candidate_sha = Some(head);
+                                job.verdict_candidate_sha = None;
+                            })
+                            .await;
                         }
                         Ok(_) => {}
                         Err(error) => {
@@ -1697,15 +1722,29 @@ started ({error}); finishing with round {round}'s findings."
             .await
             .review_job(job_id)
             .and_then(|job| job.base_sha.clone());
+        let existing_candidate = self
+            .relay
+            .read()
+            .await
+            .review_job(job_id)
+            .and_then(|job| job.candidate_sha.clone());
         let current_head = current_head_sha(&trusted).await?;
+        let dirty = has_uncommitted_changes(&trusted).await?;
         let mut target_workspace = trusted.clone();
-        let (base_sha, candidate_sha) = if let Some(base_sha) = existing_base {
-            (base_sha, current_head)
-        } else if has_uncommitted_changes(&trusted).await? && workspace.fallback_from.is_none() {
+        let pinned_target = existing_base
+            .clone()
+            .zip(existing_candidate.clone())
+            .filter(|(base, candidate)| {
+                base != candidate || !dirty || workspace.fallback_from.is_some()
+            });
+        let (base_sha, candidate_sha) = if let Some(target) = pinned_target {
+            target
+        } else if dirty && workspace.fallback_from.is_none() {
             let round_base = current_head;
             self.update_job(job_id, |job| {
                 job.base_sha = Some(round_base.clone());
                 job.round_base_sha = Some(round_base.clone());
+                job.candidate_sha = None;
             })
             .await;
             match self

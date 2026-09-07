@@ -2021,10 +2021,6 @@ over on resume"
     /// under `team_drive_gate` — because a stop can land in the awaits between
     /// those two CALLS (not within either one); see the second call site.
     async fn reviewer_turn_refusal(&self, run_id: &str, slot: TeamThreadSlot) -> Option<String> {
-        let TeamThreadSlot::SubTaskReviewer(index) = slot else {
-            return None;
-        };
-
         let mut relay = self.relay.write().await;
         let run = relay.team_run(run_id)?;
 
@@ -2062,19 +2058,38 @@ over on resume"
                 false,
             )
         } else {
-            let landed = run
-                .sub_tasks
-                .get(index)
-                .map(|task| task.dev_turns_landed)
-                .unwrap_or(0);
-            if landed != 0 {
+            let (candidate_is_current, correction_round) = match slot {
+                TeamThreadSlot::SubTaskReviewer(index) => run
+                    .sub_tasks
+                    .get(index)
+                    .map(|task| {
+                        (
+                            !task.candidate_sha.is_empty()
+                                && task.candidate_sha != task.round_base_sha,
+                            task.rounds_used > 0,
+                        )
+                    })
+                    .unwrap_or((false, false)),
+                TeamThreadSlot::RunOwned(_) if run.phase == relay_api::team::TeamPhase::MrGate => (
+                    !run.mr_candidate_sha.is_empty()
+                        && run.mr_candidate_sha != run.mr_round_base_sha,
+                    run.mr_rounds_used > 0,
+                ),
+                _ => return None,
+            };
+            if candidate_is_current {
                 return None;
             }
             (
-                "This step hasn't produced any work yet. You can resume to run it again."
-                    .to_string(),
+                if correction_round {
+                    "The current developer correction round has no new committed candidate. Resume the same developer session and commit its completed work before review."
+                        .to_string()
+                } else {
+                    "This step hasn't produced any work yet. You can resume to run it again."
+                        .to_string()
+                },
                 TeamPauseKind::Boundary,
-                true,
+                matches!(slot, TeamThreadSlot::SubTaskReviewer(_)),
             )
         };
 
@@ -2105,8 +2120,10 @@ over on resume"
             // preserve where the work had got to, not send it back to square
             // one.
             if reset_sub_task {
-                if let Some(task) = run.sub_tasks.get_mut(index) {
-                    task.status = SubTaskStatus::Pending;
+                if let TeamThreadSlot::SubTaskReviewer(index) = slot {
+                    if let Some(task) = run.sub_tasks.get_mut(index) {
+                        task.status = SubTaskStatus::Pending;
+                    }
                 }
             }
             if working.is_empty() {
@@ -2210,7 +2227,25 @@ over on resume"
             .await
         {
             Ok(Some(candidate)) => candidate,
-            Ok(None) => return Ok(false),
+            Ok(None) => {
+                let correction_round = {
+                    let relay = self.relay.read().await;
+                    relay.team_run(run_id).is_some_and(|run| match slot {
+                        TeamThreadSlot::SubTaskDev(index) => run
+                            .sub_tasks
+                            .get(index)
+                            .is_some_and(|task| task.rounds_used > 0),
+                        TeamThreadSlot::MrDev => run.mr_rounds_used > 0,
+                        _ => false,
+                    })
+                };
+                if correction_round {
+                    return Err(TeamTurnOutcome::Blocked(format!(
+                        "the developer did not create a commit after `{round_base_sha}`; resume the same developer session and commit before review"
+                    )));
+                }
+                return Ok(false);
+            }
             Err(outcome) => return Err(outcome),
         };
         let updated = self
@@ -2473,19 +2508,38 @@ request and did not confirm stopping: {why}"
                 .map_err(TeamTurnOutcome::Failed)?;
             if head != candidate {
                 self.set_team_verdict_candidate(run_id, slot, None).await;
-                let review = format!(
-                    "The reviewer approved committed candidate `{candidate}`, but the task \
-worktree is now at `{head}`. That approval is stale and cannot complete this \
-review; the new `HEAD` must be reviewed as a fresh committed candidate.\n\n\
-{review}\n\nVERDICT: NEEDS_CHANGES"
-                );
-                return Ok(Some(review));
+                self.set_team_candidate(run_id, slot, head.clone()).await;
+                return Ok(Some(format!(
+                    "REVIEW_STALE: approval for `{candidate}` was invalidated because `HEAD` is now `{head}`; review the rebound candidate directly."
+                )));
             }
         }
 
         self.set_team_verdict_candidate(run_id, slot, Some(candidate))
             .await;
         Ok(None)
+    }
+
+    async fn set_team_candidate(
+        &self,
+        run_id: &str,
+        slot: TeamThreadSlot,
+        candidate: String,
+    ) -> bool {
+        self.mutate_team_run(run_id, move |run| match slot {
+            TeamThreadSlot::SubTaskReviewer(index) => {
+                if let Some(task) = run.sub_tasks.get_mut(index) {
+                    task.candidate_sha = candidate;
+                    task.verdict_candidate_sha.clear();
+                }
+            }
+            TeamThreadSlot::RunOwned(_) if run.phase == relay_api::team::TeamPhase::MrGate => {
+                run.mr_candidate_sha = candidate;
+                run.mr_verdict_candidate_sha.clear();
+            }
+            _ => {}
+        })
+        .await
     }
 
     async fn set_team_verdict_candidate(
