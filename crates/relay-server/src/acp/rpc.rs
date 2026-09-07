@@ -1126,13 +1126,28 @@ async fn answer_plan(
     stdin: &super::Outbound,
     provider_key: &'static str,
 ) {
+    answer_plan_with_outcome(
+        request_id,
+        protocol::plan_outcome(decision),
+        stdin,
+        provider_key,
+    )
+    .await;
+}
+
+async fn answer_plan_with_outcome(
+    request_id: &Value,
+    outcome: Value,
+    stdin: &super::Outbound,
+    provider_key: &'static str,
+) {
     let mut stdin = stdin.lock().await;
     let _ = write_line(
         &mut **stdin,
         &json!({
             "jsonrpc": "2.0",
             "id": request_id,
-            "result": { "outcome": protocol::plan_outcome(decision) },
+            "result": { "outcome": outcome },
         }),
         provider_key,
     )
@@ -1233,6 +1248,17 @@ async fn handle_create_plan(
         relay.notify();
         return;
     };
+
+    if state.read().await.is_semantic_reviewer_thread(&session_id) {
+        answer_plan_with_outcome(
+            &request_id,
+            protocol::reviewer_plan_rejected_outcome(),
+            stdin,
+            provider_key,
+        )
+        .await;
+        return;
+    }
 
     // Nobody to ask, for either of two reasons.
     //

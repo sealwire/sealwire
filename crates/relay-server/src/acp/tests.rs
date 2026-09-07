@@ -1700,26 +1700,22 @@ async fn a_no_prompt_thread_accepts_the_plan_without_parking_it() {
 }
 
 #[tokio::test]
-async fn a_plan_on_a_reviewer_thread_is_accepted_rather_than_failing_the_review() {
-    // A reviewer runs in `plan` mode by construction — `review_read_only` is
-    // exactly what `acp_mode_for_policy` maps onto it — so "the agent wrote a
-    // plan" is the NORMAL path for a Cursor review, not an exception.
-    //
-    // But a review-locked thread has no user behind it: the review waiter treats
-    // any pending approval on its thread as an outright failure
-    // (`WaitOutcome::FailedApproval`), and `decide_approval` refuses a decision
-    // on that thread anyway. Parking a plan card there would fail the review for
-    // doing the one thing plan mode exists to do — a regression that only shows
-    // up once a Cursor reviewer is actually run.
+async fn a_plan_on_a_semantic_reviewer_thread_is_rejected_with_the_verdict_protocol() {
+    // A Cursor reviewer runs in `plan` mode for read-only containment, but
+    // `cursor/create_plan` is not a review verdict. Accepting it lets the turn end
+    // without the final marker the private driver needs; parking it creates an
+    // approval nobody can answer. The bridge rejects only semantic reviewer
+    // threads and tells Cursor to finish in final assistant text instead.
     let state = relay_state();
     {
-        let mut relay = state.write().await;
-        relay.insert_review_job(crate::state::ReviewJob {
+        let job = crate::state::ReviewJob {
             id: "review-1".to_string(),
-            parent_thread_id: "t1".to_string(),
+            parent_thread_id: "parent-1".to_string(),
+            reviewer_thread_id: Some("t1".to_string()),
             status: crate::state::ReviewJobStatus::WaitingForReviewer,
             ..Default::default()
-        });
+        };
+        state.write().await.insert_review_job(job);
     }
 
     let (outbound, mut outbound_peer) = tokio::io::duplex(8192);
@@ -1751,10 +1747,69 @@ async fn a_plan_on_a_reviewer_thread_is_accepted_rather_than_failing_the_review(
 
     let sent = next_wire_line(&mut outbound_peer).await;
     assert_eq!(sent["id"], json!(13));
-    assert_eq!(sent["result"]["outcome"], json!({"outcome":"accepted"}));
+    assert_eq!(sent["result"]["outcome"]["outcome"], json!("rejected"));
+    assert!(
+        sent["result"]["outcome"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("VERDICT: APPROVED")
+                && reason.contains("VERDICT: NEEDS_CHANGES")
+                && reason.contains("do not create or wait on a plan")),
+        "the provider-facing rejection must steer Cursor to the final-text verdict protocol: {sent}"
+    );
     assert!(
         state.read().await.pending_approvals.is_empty(),
         "a plan must not park on a thread whose approvals fail the run that owns it"
+    );
+}
+
+#[tokio::test]
+async fn a_plan_on_a_locked_non_reviewer_thread_keeps_the_unattended_accept_behavior() {
+    let state = relay_state();
+    {
+        state
+            .write()
+            .await
+            .insert_review_job(crate::state::ReviewJob {
+                id: "review-1".to_string(),
+                parent_thread_id: "t1".to_string(),
+                status: crate::state::ReviewJobStatus::WaitingForReviewer,
+                ..Default::default()
+            });
+    }
+
+    let (outbound, mut outbound_peer) = tokio::io::duplex(8192);
+    let (inbound_writer, inbound) = tokio::io::duplex(8192);
+    let bridge = AcpBridge::for_test(state.clone(), outbound, inbound, "cursor");
+    bridge
+        .seed_session_with_policy_for_test("t1", "/tmp/project", "review_read_only")
+        .await;
+    bridge
+        .set_session_turn_for_test("t1", Some("acp-turn-1"))
+        .await;
+
+    let mut writer = inbound_writer;
+    let announce = json!({
+        "jsonrpc":"2.0","method":"session/update",
+        "params":{"sessionId":"t1","update":{
+            "sessionUpdate":"tool_call","toolCallId":PLAN_TOOL_CALL_ID,
+            "title":"Create Plan","kind":"other","status":"pending"}}
+    });
+    tokio::io::AsyncWriteExt::write_all(&mut writer, format!("{announce}\n").as_bytes())
+        .await
+        .expect("write");
+    tokio::io::AsyncWriteExt::write_all(
+        &mut writer,
+        format!("{}\n", create_plan_request(14, PLAN_TOOL_CALL_ID)).as_bytes(),
+    )
+    .await
+    .expect("write");
+
+    let sent = next_wire_line(&mut outbound_peer).await;
+    assert_eq!(sent["id"], json!(14));
+    assert_eq!(sent["result"]["outcome"], json!({"outcome":"accepted"}));
+    assert!(
+        state.read().await.pending_approvals.is_empty(),
+        "a locked but non-reviewer thread still has nobody who can answer a plan card"
     );
 }
 
