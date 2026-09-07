@@ -23,6 +23,8 @@
 // the bridge's stderr reader funnels into relay logs — so a Rust test can assert
 // *exactly which requests the bridge sent, and in what order*.
 //
+// The fake uses numeric cursors to keep assertions readable; the real server's
+// cursor is timestamp-shaped, but the bridge deliberately treats it as opaque.
 // It performs no model work — it models the protocol seam, which is where the
 // Rust-side lifecycle bugs live.
 
@@ -37,6 +39,8 @@ const listableThreadCount = 205;
 const threadListPageLimit = 100;
 
 let counter = 0;
+let threadListMode = "normal";
+let threadListDelayMs = 0;
 
 function send(obj) {
   process.stdout.write(`${JSON.stringify(obj)}\n`);
@@ -77,6 +81,13 @@ function handle(payload) {
     case "initialized":
       return;
 
+    // Test-only controls for malformed pagination behavior. These are not part
+    // of the production app-server protocol.
+    case "fake/configure":
+      threadListMode = params?.threadListMode ?? "normal";
+      threadListDelayMs = Math.max(0, Number(params?.threadListDelayMs) || 0);
+      return ok(id, {});
+
     case "thread/start": {
       const started = `thread-${++counter}`;
       loaded.add(started);
@@ -102,6 +113,35 @@ function handle(payload) {
     case "thread/list": {
       const requestedLimit = Math.max(0, Number(params?.limit) || 0);
       const start = Math.max(0, Number(params?.cursor) || 0);
+      if (threadListMode === "empty-page" && start === threadListPageLimit) {
+        return ok(id, { data: [], nextCursor: String(start + threadListPageLimit) });
+      }
+      if (threadListMode === "repeat-cursor" && start === threadListPageLimit) {
+        return ok(id, {
+          data: [threadSummary(`listed-thread-${String(start).padStart(3, "0")}`)],
+          nextCursor: String(start),
+        });
+      }
+
+      if (threadListMode === "duplicate-boundary" && start === threadListPageLimit) {
+        const pageSize = Math.min(requestedLimit, threadListPageLimit);
+        const newRowCount = Math.max(0, pageSize - 1);
+        const end = Math.min(listableThreadCount, start + newRowCount);
+        const indices = [start - 1];
+        for (let index = start; index < end; index += 1) {
+          indices.push(index);
+        }
+        const data = indices.map((index) => ({
+          ...threadSummary(`listed-thread-${String(index).padStart(3, "0")}`),
+          preview: `Listed session ${index}`,
+          updatedAt: listableThreadCount - index,
+        }));
+        return ok(id, {
+          data,
+          nextCursor: end < listableThreadCount ? String(end) : null,
+        });
+      }
+
       const end = Math.min(
         listableThreadCount,
         start + Math.min(requestedLimit, threadListPageLimit)
@@ -114,10 +154,15 @@ function handle(payload) {
           updatedAt: listableThreadCount - index,
         };
       });
-      return ok(id, {
+      const result = {
         data,
         nextCursor: end < listableThreadCount ? String(end) : null,
-      });
+      };
+      if (threadListMode === "slow" && threadListDelayMs > 0) {
+        setTimeout(() => ok(id, result), threadListDelayMs);
+        return;
+      }
+      return ok(id, result);
     }
 
     case "turn/start": {
