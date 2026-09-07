@@ -64,6 +64,11 @@ pub(super) struct PersistedRelayState {
     #[serde(default)]
     pub(super) thread_workspace:
         std::collections::HashMap<String, crate::state::relay::ThreadWorkspace>,
+    /// Git `HEAD` observed immediately before each thread's last ordinary author
+    /// turn. Session review uses this to distinguish a new committed candidate
+    /// from an older `HEAD` plus dirty leftovers.
+    #[serde(default)]
+    pub(super) thread_last_turn_base_sha: std::collections::HashMap<String, String>,
     /// Honest per-thread last-activity timestamps (unix secs) used as the
     /// thread-list sort key instead of the resume-polluted provider mtime.
     /// `#[serde(default)]` keeps old state files loadable (empty map).
@@ -235,6 +240,12 @@ impl PersistedRelayState {
                 .iter()
                 .filter(|(thread_id, _)| !thread_id.starts_with("claude-pending-"))
                 .map(|(thread_id, workspace)| (thread_id.clone(), workspace.clone()))
+                .collect(),
+            thread_last_turn_base_sha: relay
+                .thread_last_turn_base_sha
+                .iter()
+                .filter(|(thread_id, _)| !thread_id.starts_with("claude-pending-"))
+                .map(|(thread_id, sha)| (thread_id.clone(), sha.clone()))
                 .collect(),
             thread_last_activity_at: relay.thread_last_activity_at.clone(),
             allowed_roots: relay.allowed_roots.clone(),

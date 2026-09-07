@@ -62,6 +62,11 @@ impl AppState {
         } else {
             None
         };
+        let initial_turn_base_sha = if provider_initial_prompt.is_some() {
+            self.session_turn_base_sha(&cwd).await
+        } else {
+            None
+        };
         let start_result = bridge
             .start_thread(
                 StartThreadRequest::new(&cwd, &model, &approval_policy, &sandbox)
@@ -127,6 +132,9 @@ impl AppState {
                 &effort,
                 &device_id,
             );
+            if let Some(base_sha) = initial_turn_base_sha {
+                relay.record_thread_last_turn_base_sha(&started_thread_id, base_sha);
+            }
             // Claude consumes the first prompt before this relay activates the
             // new thread. Provider events that win that race are preserved by
             // activate_started_thread; upsert the response-backed user entry as
@@ -848,6 +856,7 @@ impl AppState {
             return Err(reason);
         }
 
+        let turn_base_sha = self.session_turn_base_sha(&target_cwd).await;
         let turn_id = bridge
             .start_turn(&target_thread, &text, &model, &effort, images)
             .await?;
@@ -869,6 +878,9 @@ impl AppState {
             relay.model = model.clone();
             relay.reasoning_effort = effort.clone();
             relay.remember_active_thread_settings();
+            if let Some(base_sha) = turn_base_sha {
+                relay.record_thread_last_turn_base_sha(&effective_thread_id, base_sha);
+            }
             relay.push_log(
                 "info",
                 format!(
@@ -880,6 +892,15 @@ impl AppState {
         }
 
         Ok(self.snapshot().await)
+    }
+
+    async fn session_turn_base_sha(&self, cwd: &str) -> Option<String> {
+        let grants = { self.relay.read().await.trust_grants() };
+        let workspace = grants.admit(cwd).await.trusted().cloned()?;
+        match is_git_work_tree(&workspace).await {
+            Ok(true) => current_head_sha(&workspace).await.ok(),
+            _ => None,
+        }
     }
 
     /// Make a thread current when its provider cannot describe it, because its workspace

@@ -15507,6 +15507,19 @@ resurrected into a turn that never completes: {:?}",
         let cwd = dir.path().to_str().unwrap();
         init_git_seed(cwd);
         let base = git_head(cwd);
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let provider = providers.get("codex").unwrap();
+        queue_verdicts(provider, &["APPROVE"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+        app.send_message(crate::protocol::SendMessageInput {
+            text: "implement the candidate".to_string(),
+            model: None,
+            effort: None,
+            device_id: Some("device-1".to_string()),
+            thread_id: parent.id.clone(),
+        })
+        .await
+        .expect("author turn should start");
         std::fs::write(std::path::Path::new(cwd).join("seed.txt"), "committed\n").unwrap();
         let candidate = git_commit_all(cwd, "candidate");
         std::fs::write(
@@ -15519,11 +15532,8 @@ resurrected into a turn that never completes: {:?}",
             "untracked leftover\n",
         )
         .unwrap();
+        wait_for_active_turn_idle(&app).await;
 
-        let (app, providers) = build_review_app(cwd, &["codex"]).await;
-        let provider = providers.get("codex").unwrap();
-        queue_verdicts(provider, &["APPROVE"]).await;
-        let parent = start_parent(&app, cwd, "codex").await;
         let receipt = app
             .request_review(review_input("codex"))
             .await
@@ -15545,6 +15555,80 @@ resurrected into a turn that never completes: {:?}",
         assert!(prompt.contains(&format!("Range: {base}..{candidate}")));
         assert!(!prompt.contains("dirty leftover"));
         assert!(!prompt.contains("untracked.txt"));
+    }
+
+    #[tokio::test]
+    async fn dirty_only_after_author_turn_does_not_review_historical_head() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        init_git_seed(cwd);
+        std::fs::write(std::path::Path::new(cwd).join("seed.txt"), "historical\n").unwrap();
+        let round_base = git_commit_all(cwd, "historical head");
+        let historical_base = first_parent_sha_for_test(cwd, &round_base).expect("parent commit");
+
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let provider = providers.get("codex").unwrap();
+        provider
+            .auto_commit_author_changes
+            .store(false, Ordering::Relaxed);
+        let parent = start_parent(&app, cwd, "codex").await;
+        app.send_message(crate::protocol::SendMessageInput {
+            text: "try to fix it".to_string(),
+            model: None,
+            effort: None,
+            device_id: Some("device-1".to_string()),
+            thread_id: parent.id.clone(),
+        })
+        .await
+        .expect("author turn should start");
+        std::fs::write(
+            std::path::Path::new(cwd).join("seed.txt"),
+            "dirty-only work\n",
+        )
+        .unwrap();
+        std::fs::write(
+            std::path::Path::new(cwd).join("scratch.txt"),
+            "untracked dirty-only work\n",
+        )
+        .unwrap();
+        wait_for_active_turn_idle(&app).await;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "failed");
+        assert_eq!(job.base_sha.as_deref(), Some(round_base.as_str()));
+        assert!(job.candidate_sha.is_none());
+        assert!(
+            job.error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("did not create a commit"),
+            "failure should explain the missing committed candidate: {:?}",
+            job.error
+        );
+
+        let turns = provider.turns.lock().await.clone();
+        assert!(
+            turns.iter().any(|(thread, text)| {
+                thread == &parent.id && text.contains("needs a committed candidate")
+            }),
+            "the same parent session must be asked to commit dirty-only work: {turns:?}"
+        );
+        assert!(
+            turns
+                .iter()
+                .all(|(_, text)| !text.contains("Committed review target")),
+            "reviewer must not inspect an unrelated historical HEAD: {turns:?}"
+        );
+        assert!(
+            turns.iter().all(|(_, text)| {
+                !text.contains(&format!("Range: {historical_base}..{round_base}"))
+            }),
+            "the historical HEAD^..HEAD range must not be reviewed: {turns:?}"
+        );
     }
 
     #[tokio::test]
@@ -17844,6 +17928,19 @@ settings update: {error}"
 
     fn git_head(cwd: &str) -> String {
         git_stdout(cwd, &["rev-parse", "HEAD"])
+    }
+
+    fn first_parent_sha_for_test(cwd: &str, commit: &str) -> Option<String> {
+        let spec = format!("{commit}^");
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "--verify", "--quiet", &spec])
+            .current_dir(cwd)
+            .output()
+            .expect("git runs");
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
     fn git_commit_all(cwd: &str, message: &str) -> String {

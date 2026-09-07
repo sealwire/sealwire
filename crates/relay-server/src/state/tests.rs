@@ -86,6 +86,7 @@ fn test_persisted_state() -> PersistedRelayState {
         provider_name: "codex".to_string(),
         thread_settings,
         thread_last_activity_at: std::collections::HashMap::new(),
+        thread_last_turn_base_sha: std::collections::HashMap::new(),
         allowed_roots: vec!["/tmp/project".to_string()],
         device_records,
         paired_devices,
