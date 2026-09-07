@@ -1999,14 +1999,12 @@ over on resume"
         Ok(thread_id)
     }
 
-    /// Refuse the reviewer turn on `slot` right now, if it must be — deciding
-    /// AND acting under ONE write-lock hold. `None` for any non-reviewer slot,
-    /// or a reviewer slot that may proceed.
+    /// Refuse the turn on `slot` right now, if it must be — deciding AND acting
+    /// under ONE write-lock hold. `None` for any slot that may proceed.
     ///
-    /// Refuses if the run is pausing/stopping, or the sub-task's dev work has
-    /// not landed. Landing is decided when the Dev turn finishes (matching
-    /// successful usage, or a nonempty tree vs the checkpoint); this gate only
-    /// reads that counter.
+    /// Refuses if the run is pausing/stopping, or the current review slot has no
+    /// committed candidate for this round. The current candidate is authoritative:
+    /// `candidate_sha` must be nonempty and differ from `round_base_sha`.
     ///
     /// Deciding and acting used to be two steps — a read here, then a separate
     /// reset/settle after. That gap is exactly what a concurrent `request_stop`/
@@ -2193,6 +2191,7 @@ over on resume"
                         task.round_base_sha = round_base_for_update;
                         task.candidate_sha.clear();
                         task.verdict_candidate_sha.clear();
+                        task.stale_review_retries = 0;
                     }
                 }
                 TeamThreadSlot::MrDev => {
@@ -2203,6 +2202,7 @@ over on resume"
                     run.mr_round_base_sha = round_base_for_update;
                     run.mr_candidate_sha.clear();
                     run.mr_verdict_candidate_sha.clear();
+                    run.mr_stale_review_retries = 0;
                 }
                 _ => {}
             })
@@ -2466,7 +2466,7 @@ request and did not confirm stopping: {why}"
         run_id: &str,
         slot: TeamThreadSlot,
         review: &str,
-    ) -> Result<Option<String>, TeamTurnOutcome> {
+    ) -> Result<Option<TeamTurnOutcome>, TeamTurnOutcome> {
         let candidate = {
             let relay = self.relay.read().await;
             let Some(run) = relay.team_run(run_id) else {
@@ -2509,9 +2509,9 @@ request and did not confirm stopping: {why}"
             if head != candidate {
                 self.set_team_verdict_candidate(run_id, slot, None).await;
                 self.set_team_candidate(run_id, slot, head.clone()).await;
-                return Ok(Some(format!(
+                return Ok(Some(TeamTurnOutcome::ReviewStale(format!(
                     "REVIEW_STALE: approval for `{candidate}` was invalidated because `HEAD` is now `{head}`; review the rebound candidate directly."
-                )));
+                ))));
             }
         }
 
@@ -2602,6 +2602,7 @@ request and did not confirm stopping: {why}"
                 if run.phase == relay_api::team::TeamPhase::MrGate {
                     run.mr_candidate_sha = candidate.clone();
                     run.mr_verdict_candidate_sha.clear();
+                    run.mr_stale_review_retries = 0;
                     return;
                 }
                 let task_index = run
@@ -2620,6 +2621,7 @@ request and did not confirm stopping: {why}"
                     let task = &mut run.sub_tasks[index];
                     task.candidate_sha = candidate;
                     task.verdict_candidate_sha.clear();
+                    task.stale_review_retries = 0;
                 }
             })
             .await;
@@ -2900,7 +2902,7 @@ request and did not confirm stopping: {why}"
         if role == TeamRole::Reviewer {
             if let TeamTurnOutcome::Replied(review) = &outcome {
                 match self.bind_team_reviewer_verdict(run_id, slot, review).await {
-                    Ok(Some(rewritten)) => outcome = TeamTurnOutcome::Replied(rewritten),
+                    Ok(Some(rewritten)) => outcome = rewritten,
                     Ok(None) => {}
                     Err(error) => return error,
                 }
@@ -3562,7 +3564,10 @@ its turn cannot continue",
             TeamTurnOutcome::Failed(error) => Err(TeamPortError::Failed(format!(
                 "could not brief a new team lead: {error}"
             ))),
-            _ => {
+            TeamTurnOutcome::ReviewStale(error) => Err(TeamPortError::Failed(format!(
+                "could not brief a new team lead: unexpected stale review signal: {error}"
+            ))),
+            TeamTurnOutcome::Replied(_) | TeamTurnOutcome::Silent => {
                 let mut relay = self.relay.write().await;
                 relay.update_team_run(run_id, |run| run.tl_turns_this_generation += 1);
                 relay.notify();

@@ -69,6 +69,9 @@ pub(super) struct PersistedRelayState {
     /// from an older `HEAD` plus dirty leftovers.
     #[serde(default)]
     pub(super) thread_last_turn_base_sha: std::collections::HashMap<String, String>,
+    /// Workspace cwd where `thread_last_turn_base_sha` was observed.
+    #[serde(default)]
+    pub(super) thread_last_turn_base_cwd: std::collections::HashMap<String, String>,
     /// Honest per-thread last-activity timestamps (unix secs) used as the
     /// thread-list sort key instead of the resume-polluted provider mtime.
     /// `#[serde(default)]` keeps old state files loadable (empty map).
@@ -246,6 +249,12 @@ impl PersistedRelayState {
                 .iter()
                 .filter(|(thread_id, _)| !thread_id.starts_with("claude-pending-"))
                 .map(|(thread_id, sha)| (thread_id.clone(), sha.clone()))
+                .collect(),
+            thread_last_turn_base_cwd: relay
+                .thread_last_turn_base_cwd
+                .iter()
+                .filter(|(thread_id, _)| !thread_id.starts_with("claude-pending-"))
+                .map(|(thread_id, cwd)| (thread_id.clone(), cwd.clone()))
                 .collect(),
             thread_last_activity_at: relay.thread_last_activity_at.clone(),
             allowed_roots: relay.allowed_roots.clone(),

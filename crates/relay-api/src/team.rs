@@ -568,6 +568,9 @@ pub struct SubTask {
     /// Candidate commit that the latest approving verdict reviewed.
     #[serde(default)]
     pub verdict_candidate_sha: String,
+    /// Stale approving reviews already rebound for this candidate cycle.
+    #[serde(default)]
+    pub stale_review_retries: u32,
     pub dev_thread_id: Option<String>,
     pub reviewer_thread_id: Option<String>,
     /// Every thread this sub-task has ever owned — the set the lifeguard drains
@@ -581,9 +584,9 @@ pub struct SubTask {
     /// crash between them must not lose the report.
     pub digested: bool,
     pub error: Option<String>,
-    /// How many Dev-role turns on this sub-task produced matching successful
-    /// usage or nonempty work vs the checkpoint. The public reviewer gate
-    /// (`state/app/team.rs`) refuses to start a reviewer turn while this is zero.
+    /// Legacy landed-work counter kept for existing persisted state and
+    /// diagnostics. The current reviewer gate is the committed candidate pair:
+    /// `candidate_sha` must be nonempty and differ from `round_base_sha`.
     #[serde(default)]
     pub dev_turns_landed: u32,
     /// Which reopen cycle is WORKING this sub-task, from `reopened_count`.
@@ -666,6 +669,10 @@ pub enum TeamTurnOutcome {
     Silent,
     Failed(String),
     Blocked(String),
+    /// An approving reviewer inspected a candidate that no longer equals HEAD.
+    /// The public relay has rebound the candidate; the private driver should
+    /// re-review it directly without interpreting the stale approval as findings.
+    ReviewStale(String),
 }
 
 /// Identity of the fixed three-seat pipeline that ships today (TL / Dev /
@@ -810,6 +817,9 @@ pub struct TeamRun {
     /// Candidate commit that the latest approving MR verdict reviewed.
     #[serde(default)]
     pub mr_verdict_candidate_sha: String,
+    /// Stale approving MR reviews already rebound for this candidate cycle.
+    #[serde(default)]
+    pub mr_stale_review_retries: u32,
     /// Prior final-gate findings carried to replacement/fresh reviewers after a
     /// committed correction. The latest `mr_verdict` is cleared between rounds,
     /// so this durable context keeps the negotiation from restarting.
@@ -1360,8 +1370,12 @@ impl TeamRun {
                 task.status = SubTaskStatus::Pending;
                 task.rounds_used = 0;
                 task.digested = false;
-                // The reviewer gate reads this. Left standing, the rerun's
-                // reviewer runs on the previous attempt's landed turn.
+                // A revived attempt needs a fresh committed candidate; otherwise
+                // the next reviewer could inherit the previous attempt's target.
+                task.round_base_sha.clear();
+                task.candidate_sha.clear();
+                task.verdict_candidate_sha.clear();
+                task.stale_review_retries = 0;
                 task.dev_turns_landed = 0;
                 // The session holds the attempt being rejected. Dropped from the
                 // slot but left in `owned_thread_ids`: it still has to be drained.
@@ -2477,10 +2491,10 @@ mod tests {
 
     /// The reviewer gate refuses to start a reviewer turn while this is zero —
     /// there is nothing to review until a dev turn lands. A rerun starts over on
-    /// an unchanged branch, so inheriting the last attempt's count opens that
-    /// gate before the rerun's dev has done anything.
+    /// an unchanged branch, so inheriting the last attempt's review target opens
+    /// that gate before the rerun's dev has done anything.
     #[test]
-    fn a_revived_sub_task_has_no_landed_dev_turn() {
+    fn a_revived_sub_task_has_fresh_candidate_gate_state() {
         let mut run = run_with(
             TeamPhase::SubTasks,
             vec![
@@ -2489,7 +2503,13 @@ mod tests {
             ],
         );
         run.sub_tasks[0].dev_turns_landed = 2;
+        run.sub_tasks[0].round_base_sha = "base-1".to_string();
+        run.sub_tasks[0].candidate_sha = "candidate-1".to_string();
+        run.sub_tasks[0].verdict_candidate_sha = "candidate-1".to_string();
+        run.sub_tasks[0].stale_review_retries = 1;
         run.sub_tasks[1].dev_turns_landed = 1;
+        run.sub_tasks[1].round_base_sha = "base-2".to_string();
+        run.sub_tasks[1].candidate_sha = "candidate-2".to_string();
 
         assert!(run.revive_sub_tasks(Some(&["st-1".to_string()])));
 
@@ -2497,10 +2517,16 @@ mod tests {
             run.sub_tasks[0].dev_turns_landed, 0,
             "the rerun's reviewer must wait on the rerun's own dev turn"
         );
+        assert_eq!(run.sub_tasks[0].round_base_sha, "");
+        assert_eq!(run.sub_tasks[0].candidate_sha, "");
+        assert_eq!(run.sub_tasks[0].verdict_candidate_sha, "");
+        assert_eq!(run.sub_tasks[0].stale_review_retries, 0);
         assert_eq!(
             run.sub_tasks[1].dev_turns_landed, 1,
             "a sub-task this revive did not take keeps its landed count"
         );
+        assert_eq!(run.sub_tasks[1].round_base_sha, "base-2");
+        assert_eq!(run.sub_tasks[1].candidate_sha, "candidate-2");
     }
 
     fn planned_sub_task(id: &str) -> SubTask {

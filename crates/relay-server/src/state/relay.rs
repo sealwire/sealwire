@@ -327,6 +327,8 @@ pub struct RelayState {
     /// thread. Session review uses this durable baseline instead of guessing from
     /// dirty state or blindly treating `HEAD^..HEAD` as new work.
     pub(super) thread_last_turn_base_sha: HashMap<String, String>,
+    /// Workspace cwd where `thread_last_turn_base_sha` was observed.
+    pub(super) thread_last_turn_base_cwd: HashMap<String, String>,
     /// Static per relay process, seeded from the spawned bridges. Rides the
     /// snapshot so both surfaces learn fork capability through the channel they
     /// already consume, instead of inferring it from provider names.
@@ -590,6 +592,7 @@ impl RelayState {
             thread_promoted_from: HashMap::new(),
             thread_workspace: HashMap::new(),
             thread_last_turn_base_sha: HashMap::new(),
+            thread_last_turn_base_cwd: HashMap::new(),
             provider_fork_capabilities: Vec::new(),
             provider_archive_capabilities: Vec::new(),
             beta_features_enabled: false,
@@ -1061,16 +1064,25 @@ impl RelayState {
             .unwrap_or_default()
     }
 
-    pub(crate) fn thread_last_turn_base_sha(&self, thread_id: &str) -> Option<String> {
-        self.thread_last_turn_base_sha.get(thread_id).cloned()
+    pub(crate) fn thread_last_turn_base(&self, thread_id: &str) -> Option<(String, String)> {
+        let sha = self.thread_last_turn_base_sha.get(thread_id)?.clone();
+        let cwd = self.thread_last_turn_base_cwd.get(thread_id)?.clone();
+        Some((cwd, sha))
     }
 
-    pub(crate) fn record_thread_last_turn_base_sha(&mut self, thread_id: &str, sha: String) {
-        if thread_id.is_empty() || sha.is_empty() {
+    pub(crate) fn record_thread_last_turn_base(
+        &mut self,
+        thread_id: &str,
+        cwd: String,
+        sha: String,
+    ) {
+        if thread_id.is_empty() || cwd.is_empty() || sha.is_empty() {
             return;
         }
         self.thread_last_turn_base_sha
             .insert(thread_id.to_string(), sha);
+        self.thread_last_turn_base_cwd
+            .insert(thread_id.to_string(), cwd);
     }
 
     /// Pin (`Some`) or drop the pin (`None`). Caller validates roots + device scope.
@@ -1994,6 +2006,11 @@ impl RelayState {
             self.thread_last_turn_base_sha
                 .entry(real_id.to_string())
                 .or_insert(base_sha);
+        }
+        if let Some(base_cwd) = self.thread_last_turn_base_cwd.remove(pending_id) {
+            self.thread_last_turn_base_cwd
+                .entry(real_id.to_string())
+                .or_insert(base_cwd);
         }
         // Drop the stale pending row; the real row is upserted by the caller.
         self.threads.retain(|thread| thread.id != pending_id);
@@ -3980,6 +3997,7 @@ impl RelayState {
         self.thread_promoted_from = persisted.thread_promoted_from.clone();
         self.thread_workspace = persisted.thread_workspace.clone();
         self.thread_last_turn_base_sha = persisted.thread_last_turn_base_sha.clone();
+        self.thread_last_turn_base_cwd = persisted.thread_last_turn_base_cwd.clone();
         self.projects = persisted.projects.clone();
         self.thread_project_id = persisted.thread_project_id.clone();
         self.thread_custom_name = persisted.thread_custom_name.clone();
@@ -4378,6 +4396,10 @@ impl RelayState {
         // wait to be inherited by a reused id — pointing a future review at a tree that
         // thread was never in.
         self.thread_workspace.remove(thread_id);
+        // Same reasoning for the last-turn review baseline: a deleted session
+        // must not leave a base SHA for a future thread with the same id.
+        self.thread_last_turn_base_sha.remove(thread_id);
+        self.thread_last_turn_base_cwd.remove(thread_id);
         // Same reasoning: a hint left behind would keep an archived/deleted session
         // routable from a stale search result the client still has on screen.
         self.forget_search_routing_hint(thread_id);
@@ -5096,6 +5118,7 @@ impl RelayState {
         self.thread_promoted_from = persisted.thread_promoted_from.clone();
         self.thread_workspace = persisted.thread_workspace.clone();
         self.thread_last_turn_base_sha = persisted.thread_last_turn_base_sha.clone();
+        self.thread_last_turn_base_cwd = persisted.thread_last_turn_base_cwd.clone();
         self.projects = persisted.projects.clone();
         self.thread_project_id = persisted.thread_project_id.clone();
         self.thread_custom_name = persisted.thread_custom_name.clone();

@@ -418,35 +418,23 @@ reviewer thread"
         // Pin the committed target when the request is accepted. Dirt may remain in
         // the tree, and HEAD may move before the asynchronous reviewer starts; neither
         // may change what this review was asked to inspect.
-        let requested_git_target = {
-            let grants = { self.relay.read().await.trust_grants() };
-            match grants.admit(&cwd).await.trusted().cloned() {
-                Some(workspace) if is_git_work_tree(&workspace).await? => {
-                    let candidate = current_head_sha(&workspace).await?;
-                    let turn_base = {
-                        self.relay
-                            .read()
-                            .await
-                            .thread_last_turn_base_sha(&parent_thread_id)
-                    };
-                    if let Some(base) = turn_base {
-                        if candidate == base {
-                            Some((base, None))
-                        } else {
-                            Some((base, Some(candidate)))
-                        }
-                    } else if has_uncommitted_changes(&workspace).await?
-                        && initial_fallback_from.is_none()
-                    {
-                        Some((candidate, None))
-                    } else {
-                        let base = first_parent_sha(&workspace, &candidate)
-                            .await?
-                            .unwrap_or_else(|| candidate.clone());
-                        Some((base, Some(candidate)))
-                    }
-                }
-                _ => None,
+        let requested_git_target = match self
+            .requested_git_target_for_review(
+                &parent_thread_id,
+                &cwd,
+                initial_fallback_from.as_deref(),
+            )
+            .await
+        {
+            Ok(target) => target,
+            Err(error) => {
+                self.relay.write().await.push_log(
+                    "warn",
+                    format!(
+                        "Could not pin a committed review target for thread {parent_thread_id}: {error}"
+                    ),
+                );
+                None
             }
         };
 
@@ -572,6 +560,47 @@ exists, so this review runs read-only — no recap, fix or post-back turns will 
 to this thread."
                 .to_string(),
         })
+    }
+
+    async fn requested_git_target_for_review(
+        &self,
+        parent_thread_id: &str,
+        cwd: &str,
+        initial_fallback_from: Option<&str>,
+    ) -> Result<Option<(String, Option<String>)>, String> {
+        let grants = { self.relay.read().await.trust_grants() };
+        let Some(workspace) = grants.admit(cwd).await.trusted().cloned() else {
+            return Ok(None);
+        };
+        if !is_git_work_tree(&workspace).await? {
+            return Ok(None);
+        }
+
+        let candidate = current_head_sha(&workspace).await?;
+        let turn_base = self
+            .relay
+            .read()
+            .await
+            .thread_last_turn_base(parent_thread_id);
+        if let Some((base_cwd, base_sha)) = turn_base {
+            if paths_equivalent(&base_cwd, cwd) {
+                if let Ok(base_sha) = verify_commit(&workspace, &base_sha).await {
+                    if candidate == base_sha {
+                        return Ok(Some((base_sha, None)));
+                    }
+                    return Ok(Some((base_sha, Some(candidate))));
+                }
+            }
+        }
+
+        if has_uncommitted_changes(&workspace).await? && initial_fallback_from.is_none() {
+            return Ok(Some((candidate, None)));
+        }
+
+        let base = first_parent_sha(&workspace, &candidate)
+            .await?
+            .unwrap_or_else(|| candidate.clone());
+        Ok(Some((base, Some(candidate))))
     }
 
     #[cfg(test)]
@@ -1756,46 +1785,54 @@ started ({error}); finishing with round {round}'s findings."
             } else if current_head != base_sha {
                 (base_sha, current_head)
             } else if workspace.fallback_from.is_none() {
-                let round_base = base_sha;
-                self.update_job(job_id, |job| {
-                    job.base_sha = Some(round_base.clone());
-                    job.round_base_sha = Some(round_base.clone());
-                    job.candidate_sha = None;
-                })
-                .await;
-                match self
-                    .drive_parent_commit_prompt(job_id, parent_thread_id, &round_base)
-                    .await
-                {
-                    AuthorTurnOutcome::Completed(promoted) => {
-                        *parent_thread_id = promoted;
+                if dirty {
+                    let round_base = base_sha;
+                    self.update_job(job_id, |job| {
+                        job.base_sha = Some(round_base.clone());
+                        job.round_base_sha = Some(round_base.clone());
+                        job.candidate_sha = None;
+                    })
+                    .await;
+                    match self
+                        .drive_parent_commit_prompt(job_id, parent_thread_id, &round_base)
+                        .await
+                    {
+                        AuthorTurnOutcome::Completed(promoted) => {
+                            *parent_thread_id = promoted;
+                        }
+                        AuthorTurnOutcome::WorkspaceGone => {}
+                        AuthorTurnOutcome::Aborted => {
+                            return Err("the author commit turn aborted".into());
+                        }
                     }
-                    AuthorTurnOutcome::WorkspaceGone => {}
-                    AuthorTurnOutcome::Aborted => {
-                        return Err("the author commit turn aborted".into());
+                    let refreshed = self
+                        .resolve_review_workspace(parent_thread_id, device_id)
+                        .await?;
+                    let Some(refreshed_trusted) =
+                        grants.admit(&refreshed.cwd).await.trusted().cloned()
+                    else {
+                        return Err(format!(
+                            "{} is not a granted workspace, so it cannot be reviewed",
+                            refreshed.cwd
+                        ));
+                    };
+                    if !is_git_work_tree(&refreshed_trusted).await? {
+                        return Ok(None);
                     }
+                    let candidate = current_head_sha(&refreshed_trusted).await?;
+                    if candidate == round_base {
+                        return Err(format!(
+                            "the author did not create a commit after `{round_base}`; review requires a committed candidate"
+                        ));
+                    }
+                    target_workspace = refreshed_trusted;
+                    (round_base, candidate)
+                } else {
+                    let base = first_parent_sha(&trusted, &current_head)
+                        .await?
+                        .unwrap_or_else(|| current_head.clone());
+                    (base, current_head)
                 }
-                let refreshed = self
-                    .resolve_review_workspace(parent_thread_id, device_id)
-                    .await?;
-                let Some(refreshed_trusted) = grants.admit(&refreshed.cwd).await.trusted().cloned()
-                else {
-                    return Err(format!(
-                        "{} is not a granted workspace, so it cannot be reviewed",
-                        refreshed.cwd
-                    ));
-                };
-                if !is_git_work_tree(&refreshed_trusted).await? {
-                    return Ok(None);
-                }
-                let candidate = current_head_sha(&refreshed_trusted).await?;
-                if candidate == round_base {
-                    return Err(format!(
-                        "the author did not create a commit after `{round_base}`; review requires a committed candidate"
-                    ));
-                }
-                target_workspace = refreshed_trusted;
-                (round_base, candidate)
             } else {
                 (base_sha, current_head)
             }
@@ -1848,9 +1885,7 @@ started ({error}); finishing with round {round}'s findings."
         let target =
             collect_git_review_target(&target_workspace, &base_sha, &candidate_sha).await?;
         self.update_job(job_id, |job| {
-            if job.base_sha.is_none() {
-                job.base_sha = Some(base_sha.clone());
-            }
+            job.base_sha = Some(base_sha.clone());
             job.candidate_sha = Some(candidate_sha.clone());
         })
         .await;
