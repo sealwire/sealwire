@@ -77,10 +77,10 @@ function baseProps(overrides = {}) {
     activeThreadId: null,
     activeThreadLabel: "",
     approval: null,
+    buildTranscriptOptions: () => ({}),
     entries: [],
     entriesCanWrite: true,
     getStandbyEmptyContent: () => h("div", { className: "standby-empty-marker" }, "Standby"),
-    getTranscriptOptions: () => ({}),
     hydrationLoading: false,
     onLoadOlderTranscript: () => {},
     promotion: null,
@@ -249,13 +249,13 @@ test("branch 5: empty + no approval renders the standby thunk only when there is
   }
 });
 
-test("branch 6: entries render through TranscriptPane and call the transcript-options thunk", () => {
+test("branch 6: entries render through TranscriptPane and call the transcript-options builder", () => {
   const view = mount();
   let optionsCalls = 0;
   try {
     view.render({
       entries: entriesFor(2),
-      getTranscriptOptions: () => {
+      buildTranscriptOptions: () => {
         optionsCalls += 1;
         return {};
       },
@@ -267,6 +267,54 @@ test("branch 6: entries render through TranscriptPane and call the transcript-op
       view.host.querySelector("[data-transcript-history-sentinel]"),
       "the entries branch renders the real history sentinel"
     );
+  } finally {
+    view.unmount();
+  }
+});
+
+test("buildTranscriptOptions runs exactly once in the entries branch, never in the other five, and receives activeThreadId/entries/session", () => {
+  const view = mount();
+  const calls = [];
+  const buildTranscriptOptions = (input) => {
+    calls.push(input);
+    return {};
+  };
+  const session = { active_thread_id: null, marker: "the-session" };
+  try {
+    view.render({
+      viewingConversation: false,
+      viewedThreadLocked: true,
+      buildTranscriptOptions,
+      session,
+    });
+    assert.equal(calls.length, 0, "branch 1 must not call the builder");
+
+    view.render({
+      viewingConversation: false,
+      viewingDifferentThread: true,
+      buildTranscriptOptions,
+      session,
+    });
+    assert.equal(calls.length, 0, "branch 2 must not call the builder");
+
+    view.render({
+      viewingConversation: false,
+      activeThreadId: "thread-live",
+      buildTranscriptOptions,
+      session,
+    });
+    assert.equal(calls.length, 0, "branch 3 must not call the builder");
+
+    view.render({ entries: [], viewOnly: true, buildTranscriptOptions, session });
+    assert.equal(calls.length, 0, "branch 4 must not call the builder");
+
+    view.render({ entries: [], approval: null, activeThreadId: null, buildTranscriptOptions, session });
+    assert.equal(calls.length, 0, "branch 5 must not call the builder");
+
+    const entries = entriesFor(2);
+    view.render({ entries, activeThreadId: "thread-a", buildTranscriptOptions, session });
+    assert.equal(calls.length, 1, "the entries branch calls the builder exactly once");
+    assert.deepEqual(calls[0], { activeThreadId: "thread-a", entries, session });
   } finally {
     view.unmount();
   }

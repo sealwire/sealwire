@@ -3,6 +3,7 @@ import React, { useLayoutEffect, useRef } from "react";
 import { ConversationEmptyState } from "../shared/conversation.js";
 import { TranscriptPane } from "../shared/transcript-pane.js";
 import { attachTranscriptHistoryLoader } from "../shared/transcript-history-loader.js";
+import { stableTranscriptOptions } from "../shared/transcript-options-identity.js";
 import { useLocalTranscriptScrollBookkeeping } from "./use-local-transcript-scroll-bookkeeping.js";
 
 const h = React.createElement;
@@ -14,10 +15,10 @@ export function LocalTranscriptPanel({
   activeThreadId,
   activeThreadLabel,
   approval,
+  buildTranscriptOptions,
   entries,
   entriesCanWrite,
   getStandbyEmptyContent,
-  getTranscriptOptions,
   hydrationLoading,
   onLoadOlderTranscript,
   promotion,
@@ -40,6 +41,10 @@ export function LocalTranscriptPanel({
   // attach effect (deps: [scrollElement]) to re-run and re-attach.
   const onLoadOlderTranscriptRef = useRef(onLoadOlderTranscript);
   onLoadOlderTranscriptRef.current = onLoadOlderTranscript;
+  // Written only inside the entries branch below — building/caching
+  // transcriptOptions must stay lazy, unlike RemoteTranscriptPanel's
+  // unconditional build (see .sealwire/PLAN.md).
+  const transcriptOptionsRef = useRef(null);
 
   // Effect 1 (attach): bound to scrollElement's lifetime, not the render
   // cycle — the sentinel it watches comes and goes with the branch below.
@@ -129,12 +134,16 @@ export function LocalTranscriptPanel({
         : null,
     });
   } else if (content === null) {
+    transcriptOptionsRef.current = stableTranscriptOptions(
+      transcriptOptionsRef.current,
+      buildTranscriptOptions({ activeThreadId, entries, session })
+    );
     content = h(TranscriptPane, {
       approval,
       canWrite: entriesCanWrite,
       entries,
       hydrationLoading,
-      transcriptOptions: getTranscriptOptions(),
+      transcriptOptions: transcriptOptionsRef.current,
     });
   }
 

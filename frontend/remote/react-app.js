@@ -30,7 +30,6 @@ import {
 import {
   defaultModelForProvider,
   defaultProvider,
-  normalizeProviderList,
   providerOptions,
   providerSettings,
 } from "../shared/provider-settings.js";
@@ -119,6 +118,7 @@ import {
 import {
   ensureModelPickerCatalogs,
   ensureProviderModels,
+  ensureProviders,
   fetchModelsWithRetry,
 } from "./provider-model-fetch.js";
 import { useRemoteSessionRuntime } from "./use-remote-session-runtime.js";
@@ -467,46 +467,53 @@ function RemoteApp() {
     [handlers]
   );
 
+  // Keyed on the socket too: the payload secret is a local IndexedDB read, so this
+  // fires while the broker socket is still connecting and every dispatch throws.
+  // Nothing is stored on failure, so the connect re-runs it and it heals itself.
   useEffect(() => {
-    if (!currentState.remoteAuth?.payloadSecret) return;
+    if (!currentState.remoteAuth?.payloadSecret) return undefined;
+    if (remoteUiStore.getState().providers.length) return undefined;
     let cancelled = false;
-    handlers.onFetchProviders?.()
-      .then((providers) => {
-        if (cancelled) return;
-        const normalized = normalizeProviderList(providers);
-        remoteUiStore.getState().setProviders(normalized);
-        const draftProvider = remoteUiStore.getState().sessionDraft.provider;
-        if (!draftProvider || !normalized.includes(draftProvider)) {
-          // The MODEL must move with the provider: `provider` alone left a
-          // `codex/gpt-5.5` draft as `claude_code/gpt-5.5` on a Claude-only relay.
-          remoteUiStore
-            .getState()
-            .patchSessionDraft(
-              providerDraftPatch(remoteUiStore.getState(), defaultProvider(normalized))
-            );
-        }
-        // Pre-fetch models for all providers so the dropdown is populated
-        // immediately. Worker-backed providers (Claude) can be cold right after
-        // a restart, so retry with backoff and record the status instead of
-        // silently falling back to a single default.
-        for (const provider of normalized) {
-          remoteUiStore.getState().setProviderModelsStatus(provider, "loading");
-          fetchModelsWithRetry((p) => handlers.onFetchProviderModels?.(p), provider)
-            .then((models) => {
-              if (cancelled) return;
-              remoteUiStore.getState().setProviderModels(provider, models || []);
-              remoteUiStore.getState().setProviderModelsStatus(provider, "ready");
-            })
-            .catch(() => {
-              if (!cancelled) remoteUiStore.getState().setProviderModelsStatus(provider, "error");
-            });
-        }
-      })
-      .catch(() => {});
+    void (async () => {
+      const normalized = await ensureProviders(remoteUiStore, () =>
+        handlers.onFetchProviders?.()
+      );
+      if (cancelled || !normalized.length) return;
+      const draftProvider = remoteUiStore.getState().sessionDraft.provider;
+      if (!draftProvider || !normalized.includes(draftProvider)) {
+        // The MODEL must move with the provider: `provider` alone left a
+        // `codex/gpt-5.5` draft as `claude_code/gpt-5.5` on a Claude-only relay.
+        remoteUiStore
+          .getState()
+          .patchSessionDraft(
+            providerDraftPatch(remoteUiStore.getState(), defaultProvider(normalized))
+          );
+      }
+      // Pre-fetch models for all providers so the dropdown is populated
+      // immediately. Worker-backed providers (Claude) can be cold right after
+      // a restart, so retry with backoff and record the status instead of
+      // silently falling back to a single default.
+      for (const provider of normalized) {
+        remoteUiStore.getState().setProviderModelsStatus(provider, "loading");
+        fetchModelsWithRetry((p) => handlers.onFetchProviderModels?.(p), provider)
+          .then((models) => {
+            if (cancelled) return;
+            remoteUiStore.getState().setProviderModels(provider, models || []);
+            remoteUiStore.getState().setProviderModelsStatus(provider, "ready");
+          })
+          .catch(() => {
+            if (!cancelled) remoteUiStore.getState().setProviderModelsStatus(provider, "error");
+          });
+      }
+    })();
     return () => {
       cancelled = true;
     };
-  }, [currentState.remoteAuth?.relayId, currentState.remoteAuth?.payloadSecret]);
+  }, [
+    currentState.remoteAuth?.relayId,
+    currentState.remoteAuth?.payloadSecret,
+    currentState.socketConnected,
+  ]);
 
   // Debounced and generation-guarded: the field is free text, so a probe per
   // keystroke would spawn a git subprocess per character on the HOST.
@@ -916,7 +923,8 @@ function RemoteApp() {
     onOpenModelPicker() {
       void ensureModelPickerCatalogs(
         remoteUiStore,
-        (provider) => handlers.onFetchProviderModels?.(provider)
+        (provider) => handlers.onFetchProviderModels?.(provider),
+        { fetchProviders: () => handlers.onFetchProviders?.() }
       );
     },
     startPending: remoteUi.sessionStartPending,

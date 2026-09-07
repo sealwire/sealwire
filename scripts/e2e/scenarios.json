@@ -62,6 +62,7 @@
       "public-thread-interleaving",
       "remote-mobile-header",
       "remote-mobile-session-actions",
+      "remote-new-session-menus",
       "remote-mobile-bell",
       "remote-desktop-tabs",
       "public-session-rename",
@@ -80,6 +81,7 @@
       "public-thread-interleaving",
       "remote-mobile-header",
       "remote-mobile-session-actions",
+      "remote-new-session-menus",
       "remote-mobile-bell",
       "remote-desktop-tabs",
       "public-session-rename",
@@ -190,6 +192,18 @@
       "coverage": [
         "mobile-header",
         "cjk-project-name"
+      ]
+    },
+    "remote-new-session-menus": {
+      "script": "browser-remote-new-session-menus-e2e.mjs",
+      "tier": "core",
+      "provider": "stub",
+      "transport": "static-remote",
+      "coverage": [
+        "model-picker",
+        "dialog-menu-anchoring",
+        "touch-input",
+        "mobile-layout"
       ]
     },
     "remote-mobile-bell": {

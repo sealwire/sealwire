@@ -10,6 +10,7 @@ import React, {
   useState,
 } from "react";
 
+import { hasFinePrimaryPointer } from "./pointer-class.js";
 import {
   abbreviateHomePath,
   gitContextLabel,
@@ -191,12 +192,18 @@ export function WorkspacePicker({
       const at = rowsRef.current.findIndex((row) => row.isSelected);
       return at >= 0 ? at : 0;
     });
-    // The search field is portalled out of the scrolling dialog body. Android
-    // Chrome otherwise scrolls that body to "reveal" an input which is already
-    // visible in the fixed panel: the trigger moves with the body while the
-    // panel stays put, leaving the two hundreds of pixels apart. The visual
-    // viewport resize from the keyboard is still handled by useAnchoredMenu.
-    inputRef.current?.focus({ preventScroll: true });
+    // Only where typing is the cheap move. On a phone the caret drags the software
+    // keyboard up with it, over the very rows the user opened this to read — and
+    // tapping a row is the common case there, while filtering is the rare one.
+    //
+    // `preventScroll` still matters for the tablets and touch laptops that keep a
+    // fine pointer: the field is portalled out of the scrolling dialog body, and
+    // Android Chrome otherwise scrolls that body to "reveal" an input already
+    // visible in the fixed panel, leaving trigger and panel hundreds of pixels
+    // apart. The keyboard's own viewport resize is handled by useAnchoredMenu.
+    if (hasFinePrimaryPointer()) {
+      inputRef.current?.focus({ preventScroll: true });
+    }
     // Identifies WHICH picker: rail, sheet and review panel share one store.
     onOpenRef.current?.(panelId);
     // Also fires on unmount: a thread switch never runs a close handler.

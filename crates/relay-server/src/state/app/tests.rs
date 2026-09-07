@@ -5784,6 +5784,13 @@ tree; got {}",
         // runtime WHILE the relay is awaiting this provider's page read, so the
         // page the relay gets back is already stale by the time it is served.
         advance_runtime_during_page_read: Arc<AtomicBool>,
+        // When set, `request_turn_stop` returns this error instead of Ok — models a
+        // provider that has already dropped the turn the relay still tracks.
+        interrupt_error: Arc<Mutex<Option<String>>>,
+        // When set alongside `interrupt_error`, replace the thread's active turn
+        // with this id BEFORE returning the error — models a newer turn that
+        // started while stop was in flight.
+        interrupt_replace_turn: Arc<Mutex<Option<String>>>,
     }
 
     impl RecordingProvider {
@@ -5813,6 +5820,8 @@ tree; got {}",
                 start_turn_should_fail: Arc::new(AtomicBool::new(false)),
                 list_threads_should_fail: Arc::new(AtomicBool::new(false)),
                 advance_runtime_during_page_read: Arc::new(AtomicBool::new(false)),
+                interrupt_error: Arc::new(Mutex::new(None)),
+                interrupt_replace_turn: Arc::new(Mutex::new(None)),
             }
         }
 
@@ -6084,6 +6093,13 @@ tree; got {}",
                 .lock()
                 .await
                 .push(thread_id.to_string());
+            if let Some(error) = self.interrupt_error.lock().await.clone() {
+                if let Some(replacement) = self.interrupt_replace_turn.lock().await.clone() {
+                    let mut relay = self.state.write().await;
+                    relay.bg_set_active_turn(thread_id, Some(replacement), unix_now());
+                }
+                return Err(error);
+            }
             Ok(())
         }
 
@@ -8115,6 +8131,175 @@ tree; got {}",
         assert_eq!(snapshot.current_status, "idle");
         assert!(snapshot.active_turn_id.is_none());
         assert!(codex.interrupt_thread_ids.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stop_clears_ghost_turn_when_provider_says_nothing_to_interrupt() {
+        // Codex (and peers) can drop a turn while the relay still holds
+        // `active_turn_id`. Stop then gets "no active turn to interrupt" and used
+        // to leave the ghost wedged — badge stuck on "working", archive/send
+        // refused. An already-gone turn is the terminal signal; clear locally.
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, codex, _claude) = build_recording_provider_app(cwd).await;
+        pair_device(&app, "device-a", Vec::new()).await;
+
+        let thread = codex.thread_summary("codex-ghost", cwd);
+        codex
+            .threads
+            .lock()
+            .await
+            .insert(thread.id.clone(), thread.clone());
+        *codex.interrupt_error.lock().await = Some("no active turn to interrupt".to_string());
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("codex".to_string());
+            relay.active_thread_id = Some(thread.id.clone());
+            relay.active_turn_id = Some("stale-turn".to_string());
+            relay.current_status = "idle".to_string();
+            relay.threads = vec![thread.clone()];
+            relay.ensure_runtime_for_thread(&thread.id).summary = Some(thread.clone());
+            relay.bg_set_active_turn(&thread.id, Some("stale-turn".to_string()), unix_now());
+            relay.set_active_controller("device-a");
+        }
+
+        let snapshot = app
+            .stop_active_turn(StopTurnInput {
+                device_id: Some("device-a".to_string()),
+                thread_id: "codex-ghost".to_string(),
+            })
+            .await
+            .expect("stop must clear a provider-gone ghost turn, not leave it wedged");
+
+        assert!(
+            snapshot.active_turn_id.is_none(),
+            "ghost active_turn_id must be cleared"
+        );
+        assert_eq!(snapshot.current_status, "idle");
+        assert_eq!(
+            *codex.interrupt_thread_ids.lock().await,
+            vec!["codex-ghost".to_string()],
+            "the provider must still be asked once"
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_clears_claude_ghost_when_session_was_not_found() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, _codex, claude) = build_recording_provider_app(cwd).await;
+        pair_device(&app, "device-a", Vec::new()).await;
+
+        let thread = claude.thread_summary("claude-ghost", cwd);
+        claude
+            .threads
+            .lock()
+            .await
+            .insert(thread.id.clone(), thread.clone());
+        *claude.interrupt_error.lock().await =
+            Some("Claude session sess-gone was not found".to_string());
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("claude_code".to_string());
+            relay.active_thread_id = Some(thread.id.clone());
+            relay.threads = vec![thread.clone()];
+            relay.ensure_runtime_for_thread(&thread.id).summary = Some(thread.clone());
+            relay.bg_set_active_turn(&thread.id, Some("stale-turn".to_string()), unix_now());
+            relay.set_active_controller("device-a");
+        }
+
+        let snapshot = app
+            .stop_active_turn(StopTurnInput {
+                device_id: Some("device-a".to_string()),
+                thread_id: "claude-ghost".to_string(),
+            })
+            .await
+            .expect("Claude session-not-found must clear the ghost");
+
+        assert!(snapshot.active_turn_id.is_none());
+        assert_eq!(snapshot.current_status, "idle");
+    }
+
+    #[tokio::test]
+    async fn stop_already_gone_does_not_clear_a_replacement_turn() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, codex, _claude) = build_recording_provider_app(cwd).await;
+        pair_device(&app, "device-a", Vec::new()).await;
+
+        let thread = codex.thread_summary("codex-race", cwd);
+        codex
+            .threads
+            .lock()
+            .await
+            .insert(thread.id.clone(), thread.clone());
+        *codex.interrupt_error.lock().await = Some("no active turn to interrupt".to_string());
+        *codex.interrupt_replace_turn.lock().await = Some("new-turn".to_string());
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("codex".to_string());
+            relay.active_thread_id = Some(thread.id.clone());
+            relay.threads = vec![thread.clone()];
+            relay.ensure_runtime_for_thread(&thread.id).summary = Some(thread.clone());
+            relay.bg_set_active_turn(&thread.id, Some("stale-turn".to_string()), unix_now());
+            relay.set_active_controller("device-a");
+        }
+
+        let snapshot = app
+            .stop_active_turn(StopTurnInput {
+                device_id: Some("device-a".to_string()),
+                thread_id: "codex-race".to_string(),
+            })
+            .await
+            .expect("already-gone for a stale turn must succeed without wedging");
+
+        assert_eq!(
+            snapshot.active_turn_id.as_deref(),
+            Some("new-turn"),
+            "a newer turn that started mid-stop must not be cleared"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_turn_watchdog_clears_ghost_when_provider_says_already_gone() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_str().unwrap();
+        let (app, _codex, claude) = build_recording_provider_app(cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+
+        let thread = claude.thread_summary("claude-watchdog-ghost", cwd);
+        claude
+            .threads
+            .lock()
+            .await
+            .insert(thread.id.clone(), thread.clone());
+        *claude.interrupt_error.lock().await =
+            Some("Claude session sess-gone was not found".to_string());
+        {
+            let mut relay = app.relay.write().await;
+            relay.set_provider_name("claude_code".to_string());
+            relay.active_thread_id = Some(thread.id.clone());
+            relay.threads = vec![thread.clone()];
+            relay.ensure_runtime_for_thread(&thread.id).summary = Some(thread.clone());
+            relay.ensure_runtime_for_thread(&thread.id).current_cwd = cwd.to_string();
+            relay.bg_set_active_turn(&thread.id, Some("turn-stale".to_string()), 100);
+            relay.bg_set_thread_status(&thread.id, "active".to_string(), Vec::new(), 100);
+            relay.set_active_controller("device-1");
+        }
+
+        app.run_stale_turn_watchdog_once(100 + crate::state::STALE_TURN_PROGRESS_TIMEOUT_SECS)
+            .await;
+
+        let snapshot = app.snapshot().await;
+        assert!(
+            snapshot.active_turn_id.is_none(),
+            "watchdog must clear a provider-gone ghost, not leave it wedged"
+        );
+        assert_eq!(snapshot.current_status, "idle");
+        assert_eq!(
+            *claude.interrupt_thread_ids.lock().await,
+            vec![thread.id.clone()]
+        );
     }
 
     #[tokio::test]
