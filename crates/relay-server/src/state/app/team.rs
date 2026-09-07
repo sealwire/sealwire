@@ -3923,32 +3923,25 @@ impl relay_api::TeamPort for AppState {
         envelope: relay_api::team_command::TeamCommandEnvelope,
     ) -> Option<relay_api::team_command::TeamCommandReceipt> {
         let mut relay = self.relay.write().await;
-        let (revision_before, journal_len_before) = {
-            let run = relay.team_run(run_id)?;
-            (
-                run.driver_progress.state_revision,
-                run.command_journal.len(),
-            )
-        };
+        if relay.team_run(run_id).is_none() {
+            return None;
+        }
 
-        let mut receipt_slot = None;
+        let mut outcome = None;
         relay.update_team_run(run_id, |run| {
-            receipt_slot = Some(super::team_command_reducer::apply_team_command(
+            outcome = Some(super::team_command_reducer::apply_team_command(
                 run, run_id, envelope,
             ));
         });
-        let receipt =
-            receipt_slot.expect("the run was confirmed present under the same write lock");
+        let (receipt, wrote) =
+            outcome.expect("the run was confirmed present under the same write lock");
 
-        // The reducer structurally never touches `orchestration_backend`, so
-        // `update_team_run`'s own backend-immutability guard never rejects
-        // this closure — whether anything else changed is what decides
-        // whether to notify.
-        let run = relay
-            .team_run(run_id)
-            .expect("the reducer never removes a run");
-        let wrote = run.driver_progress.state_revision != revision_before
-            || run.command_journal.len() != journal_len_before;
+        // The reducer's own return value says whether it wrote anything —
+        // not a before/after comparison of revision and journal length, which
+        // an eviction-driven replacement (same length, same revision, a
+        // different record) can slip past. The reducer structurally never
+        // touches `orchestration_backend`, so `update_team_run`'s own
+        // backend-immutability guard never rejects this closure either way.
         if wrote {
             relay.notify();
         }

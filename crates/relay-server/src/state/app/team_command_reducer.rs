@@ -4,15 +4,13 @@
 //! implements, and D3 for the fingerprint this module computes (the one piece
 //! `relay-api` cannot own, since it needs `sha2`).
 //!
-//! The journal lookup runs FIRST, ahead of every other check, rather than at
-//! the position D5 lists it. That is an implementation choice, not a
-//! deviation: `command_id` identifies at most one journal record, so any
-//! rejection path that might journal has to know before it writes whether a
-//! record already exists — otherwise two deliveries of the same doomed
-//! envelope would each try to journal their own record under one id. Checking
-//! first is equivalent for every already-considered case and is what makes
-//! EVERY rejection category replay-stable, not just the ones D5 calls out by
-//! name.
+//! The checks run in D5's literal order, including the journal lookup's
+//! position AFTER protocol/backend/malformed validation (not before, as an
+//! earlier version of this file had it): a restored run that is currently
+//! inert or malformed must refuse every command uniformly, including one
+//! that happens to match an old journal entry. Replaying a stale `Applied`
+//! receipt for a run that is no longer trustworthy would contradict "inert
+//! stays inert" and "malformed refuses everything."
 
 use relay_api::orchestration::{
     CommandFingerprint, CommandId, CommandRejection, TeamCommandKind, TeamCommandOutcome,
@@ -24,18 +22,23 @@ use relay_api::team_command::{
     TeamStateCommand, TeamSubTaskRole, MAX_TEAM_COMMAND_FINDINGS, MAX_TEAM_COMMAND_NOTES,
     MAX_TEAM_COMMAND_SUB_TASKS, TEAM_COMMAND_PROTOCOL_VERSION,
 };
+use relay_api::WorkflowVerdict;
 use sha2::{Digest, Sha256};
 
 /// Validate and apply `envelope` against `run`. Pure and synchronous — no
-/// `.await`, one pass, one lock hold at the caller. Every path returns a
-/// receipt; atomicity comes from every mutating branch (steps 7 onward)
-/// writing the journal AND the state counters together or not at all — there
-/// is no path that writes one without the other.
+/// `.await`, one pass, one lock hold at the caller.
+///
+/// Returns the receipt AND whether the run's persisted state actually
+/// changed. The caller uses the latter to decide whether to `notify()`,
+/// rather than re-deriving it from a before/after comparison of revision and
+/// journal length — those two alone miss an eviction-driven replacement (a
+/// rejection that evicts one record and pushes another: same length, same
+/// revision, different content).
 pub(crate) fn apply_team_command(
     run: &mut TeamRun,
     run_id: &str,
     envelope: TeamCommandEnvelope,
-) -> TeamCommandReceipt {
+) -> (TeamCommandReceipt, bool) {
     let fingerprint = compute_fingerprint(run_id, &envelope);
     let TeamCommandEnvelope {
         protocol_version,
@@ -45,21 +48,6 @@ pub(crate) fn apply_team_command(
         command,
     } = envelope;
     let kind = command.kind();
-
-    // Journal lookup: replay or reject a content-mismatched duplicate before
-    // any other check runs. See the module doc for why this comes first.
-    if let Some(existing) = run.command_journal.find(&command_id).cloned() {
-        return if existing.fingerprint == fingerprint {
-            replay_receipt(run, &command_id, sequence, &existing)
-        } else {
-            snapshot_receipt(
-                run,
-                command_id,
-                sequence,
-                TeamCommandStatus::Rejected(CommandRejection::DuplicateCommand),
-            )
-        };
-    }
 
     if protocol_version != TEAM_COMMAND_PROTOCOL_VERSION {
         return reject_and_journal(
@@ -76,11 +64,14 @@ pub(crate) fn apply_team_command(
     // Inert backend: leave the run completely untouched, not even the
     // journal — an unsupported/future backend must never look active.
     if !run.is_executable_by_current_build() {
-        return snapshot_receipt(
-            run,
-            command_id,
-            sequence,
-            TeamCommandStatus::Rejected(CommandRejection::BackendMismatch),
+        return (
+            snapshot_receipt(
+                run,
+                command_id,
+                sequence,
+                TeamCommandStatus::Rejected(CommandRejection::BackendMismatch),
+            ),
+            false,
         );
     }
 
@@ -94,6 +85,30 @@ pub(crate) fn apply_team_command(
             expected_revision,
             CommandRejection::InvalidState,
         );
+    }
+
+    // Journal lookup: replay or reject a content-mismatched duplicate. A
+    // recovery record's `fingerprint: None` (D10) matches any digest — that
+    // is the fail-closed "replay `Interrupted`" behaviour restart recovery
+    // needs, since the original envelope's digest was never recorded.
+    if let Some(existing) = run.command_journal.find(&command_id).cloned() {
+        let matches = existing
+            .fingerprint
+            .map(|recorded| recorded == fingerprint)
+            .unwrap_or(true);
+        return if matches {
+            (replay_receipt(run, &command_id, sequence, &existing), false)
+        } else {
+            (
+                snapshot_receipt(
+                    run,
+                    command_id,
+                    sequence,
+                    TeamCommandStatus::Rejected(CommandRejection::DuplicateCommand),
+                ),
+                false,
+            )
+        };
     }
 
     if let Err(reason) = validate_payload(run, &command) {
@@ -120,6 +135,17 @@ pub(crate) fn apply_team_command(
         );
     }
 
+    // `last_command_seq` means "the highest sequence the driver has issued"
+    // (D4), not "highest applied" — so it advances here, the moment a
+    // sequence clears the ordering check, regardless of whether the revision
+    // or lifecycle checks below still reject it. Two things depend on that:
+    // a later, LOWER sequence must not be able to slip in just because this
+    // one was rejected (monotonic ordering must hold across rejections too),
+    // and a lifecycle-rejected record becomes safe to evict unconditionally
+    // (D9) — a redelivery of it fails right here, at this same check, without
+    // the journal needing to remember it.
+    run.driver_progress.last_command_seq = sequence;
+
     if expected_revision != run.driver_progress.state_revision {
         return reject_and_journal(
             run,
@@ -132,15 +158,12 @@ pub(crate) fn apply_team_command(
         );
     }
 
-    // Terminal settlement wins over anything still in flight: once a run is
-    // Done/Escalated/Failed/Interrupted/Cancelled its threads and worktree
-    // are released, so a late command must never resurrect it. A Pause or a
-    // pending Stop is deliberately NOT checked here — an in-flight turn's own
-    // result must still land even after the run settles Paused underneath
-    // it, or that turn's real (already-spent) work vanishes. What stops the
-    // driver from acting on a settled run is `hold_phase_for_waiting_sub_tasks`
-    // plus the outer loop re-checking its boundary before dispatching the
-    // NEXT action, not a refusal of THIS one.
+    // Terminal / Paused / PausePending / Blocked / Resolving /
+    // `pause_requested` / `stopping` all refuse (D5 step 9, AC-5): a user
+    // action or a settlement that landed after the driver's snapshot wins
+    // over an older driver command. The refusal is stable across a resume
+    // because it is journaled below, and `last_command_seq` already moved
+    // past this sequence regardless of the outcome.
     if !command_is_permitted_by_lifecycle(run) {
         return reject_and_journal(
             run,
@@ -159,14 +182,13 @@ pub(crate) fn apply_team_command(
     // `TeamPort::update_run` made on every mutation.
     run.hold_phase_for_waiting_sub_tasks();
     run.driver_progress.state_revision += 1;
-    run.driver_progress.last_command_seq = sequence;
     run.driver_progress.last_event_seq += 1;
 
     let record = TeamCommandRecord {
         command_id: command_id.clone(),
         sequence,
         kind,
-        fingerprint,
+        fingerprint: Some(fingerprint),
         expected_revision,
         state_revision: run.driver_progress.state_revision,
         last_event_seq: run.driver_progress.last_event_seq,
@@ -174,13 +196,16 @@ pub(crate) fn apply_team_command(
     };
     push_with_eviction(run, record);
 
-    TeamCommandReceipt {
-        command_id,
-        sequence,
-        state_revision: run.driver_progress.state_revision,
-        last_event_seq: run.driver_progress.last_event_seq,
-        status: TeamCommandStatus::Applied(output),
-    }
+    (
+        TeamCommandReceipt {
+            command_id,
+            sequence,
+            state_revision: run.driver_progress.state_revision,
+            last_event_seq: run.driver_progress.last_event_seq,
+            status: TeamCommandStatus::Applied(output),
+        },
+        true,
+    )
 }
 
 fn snapshot_receipt(
@@ -211,16 +236,19 @@ fn replay_receipt(
     let status = match &record.outcome {
         TeamCommandOutcome::Applied if record.kind == TeamCommandKind::TakeUserNotes => {
             // The journal is content-blind, so TakeUserNotes's replay payload
-            // lives in `last_drained_notes` instead — see D8. A later drain
-            // overwrites that slot, which means THIS id is no longer
-            // replayable; that is reachable only if the driver skipped a
-            // receipt it had already consumed, since a later drain implies
-            // the earlier one landed.
-            match &run.last_drained_notes {
-                Some(slot) if slot.command_id == command_id.as_str() => {
-                    TeamCommandStatus::Applied(TeamCommandOutput::DrainedNotes(slot.notes.clone()))
+            // lives in `TeamRun.drained_notes` instead — see D8. An entry is
+            // dropped from there only when its matching journal record is
+            // evicted (in lockstep), so as long as the record above was found
+            // (not evicted), the notes are still here too.
+            match run
+                .drained_notes
+                .iter()
+                .find(|entry| entry.command_id == command_id.as_str())
+            {
+                Some(entry) => {
+                    TeamCommandStatus::Applied(TeamCommandOutput::DrainedNotes(entry.notes.clone()))
                 }
-                _ => TeamCommandStatus::Rejected(CommandRejection::StaleCommand),
+                None => TeamCommandStatus::Rejected(CommandRejection::StaleCommand),
             }
         }
         TeamCommandOutcome::Applied => TeamCommandStatus::Applied(TeamCommandOutput::Ack),
@@ -244,52 +272,93 @@ fn reject_and_journal(
     fingerprint: CommandFingerprint,
     expected_revision: u64,
     reason: CommandRejection,
-) -> TeamCommandReceipt {
+) -> (TeamCommandReceipt, bool) {
     let state_revision = run.driver_progress.state_revision;
     let last_event_seq = run.driver_progress.last_event_seq;
     let record = TeamCommandRecord {
         command_id: command_id.clone(),
         sequence,
         kind,
-        fingerprint,
+        fingerprint: Some(fingerprint),
         expected_revision,
         state_revision,
         last_event_seq,
         outcome: TeamCommandOutcome::Rejected { reason },
     };
     push_with_eviction(run, record);
-    TeamCommandReceipt {
-        command_id,
-        sequence,
-        state_revision,
-        last_event_seq,
-        status: TeamCommandStatus::Rejected(reason),
-    }
+    (
+        TeamCommandReceipt {
+            command_id,
+            sequence,
+            state_revision,
+            last_event_seq,
+            status: TeamCommandStatus::Rejected(reason),
+        },
+        true,
+    )
 }
 
-/// Append `record`, then evict the oldest record that is safely droppable —
-/// see `.sealwire/DESIGN.md` D9. A record is droppable only once its
-/// `sequence` is strictly below `last_command_seq`: redelivering it then
-/// fails the monotonic-sequence check with no mutation, so eviction can never
-/// turn a replay into an apply. If nothing qualifies yet, the journal is
-/// left over the cap rather than breaking that invariant.
+/// Append `record`, then evict per `.sealwire/DESIGN.md` D9's two classes so
+/// the cap holds UNCONDITIONALLY:
+/// - an `Applied` record is droppable once `sequence < last_command_seq` (a
+///   redelivery then fails the monotonic-sequence check, never the in-flight
+///   one);
+/// - a `Rejected`/`Interrupted` record is droppable with NO sequence
+///   condition — it can never later apply: its revision is already stale
+///   (revision is monotonic), its lifecycle refusal's sequence is already
+///   covered by `last_command_seq` (see the apply-order comment above), or
+///   its protocol version is unsupported.
+///
+/// If both classes are exhausted the cap still must hold: evict the oldest
+/// record of any class (never the in-flight one). D9: "a 64-deep journal that
+/// has nothing droppable cannot arise from a driver that makes progress."
 fn push_with_eviction(run: &mut TeamRun, record: TeamCommandRecord) {
     run.command_journal.push(record);
     while run.command_journal.len() > MAX_TEAM_COMMAND_JOURNAL {
-        let last_command_seq = run.driver_progress.last_command_seq;
-        let in_flight = run.driver_progress.in_flight_command_id.clone();
-        let evicted = run.command_journal.remove_first(|candidate| {
-            candidate.sequence < last_command_seq
-                && Some(&candidate.command_id) != in_flight.as_ref()
-        });
-        if !evicted {
+        let Some(evicted) = evict_one(run) else {
             break;
+        };
+        if evicted.kind == TeamCommandKind::TakeUserNotes {
+            drop_drained_notes(run, &evicted.command_id);
         }
     }
 }
 
+fn evict_one(run: &mut TeamRun) -> Option<TeamCommandRecord> {
+    let last_command_seq = run.driver_progress.last_command_seq;
+    let in_flight = run.driver_progress.in_flight_command_id.clone();
+    let not_in_flight =
+        |candidate: &TeamCommandRecord| Some(&candidate.command_id) != in_flight.as_ref();
+
+    if let Some(record) = run.command_journal.remove_first(|candidate| {
+        not_in_flight(candidate)
+            && matches!(candidate.outcome, TeamCommandOutcome::Applied)
+            && candidate.sequence < last_command_seq
+    }) {
+        return Some(record);
+    }
+    if let Some(record) = run.command_journal.remove_first(|candidate| {
+        not_in_flight(candidate) && !matches!(candidate.outcome, TeamCommandOutcome::Applied)
+    }) {
+        return Some(record);
+    }
+    run.command_journal
+        .remove_first(|candidate| not_in_flight(candidate))
+}
+
+/// Drop the drained-notes entry for an evicted `TakeUserNotes` journal
+/// record, keeping the two bounded together (see the field doc on
+/// `TeamRun::drained_notes`).
+fn drop_drained_notes(run: &mut TeamRun, command_id: &CommandId) {
+    run.drained_notes
+        .retain(|entry| entry.command_id != command_id.as_str());
+}
+
 fn command_is_permitted_by_lifecycle(run: &TeamRun) -> bool {
-    !run.status.is_terminal()
+    !(run.status.is_terminal()
+        || run.status.is_settled_without_driver()
+        || run.pause_requested
+        || run.stopping)
 }
 
 fn require_sub_task_index(run: &TeamRun, index: usize) -> Result<(), CommandRejection> {
@@ -302,13 +371,21 @@ fn require_sub_task_index(run: &TeamRun, index: usize) -> Result<(), CommandReje
 
 /// Bound the command's own content per `.sealwire/DESIGN.md` D6: collection
 /// COUNTS only, never the prose byte length, and refuse rather than truncate.
+/// `WorkflowVerdict.findings` is checked through one shared helper wherever a
+/// verdict travels (`RecordDesignReviewRound`, `RecordReviewRound`,
+/// `RecordMrRound`, `SetMrVerdict`), so a future command carrying a verdict
+/// cannot reopen the hole by skipping it.
 fn validate_payload(run: &TeamRun, command: &TeamStateCommand) -> Result<(), CommandRejection> {
     match command {
         TeamStateCommand::RecordIntake { .. } | TeamStateCommand::SetPhase { .. } => Ok(()),
         TeamStateCommand::RecordDesignReviewRound {
+            verdict,
             unresolved_additions,
             ..
-        } => bound(unresolved_additions.len(), MAX_TEAM_COMMAND_FINDINGS),
+        } => {
+            bound_verdict(verdict)?;
+            bound(unresolved_additions.len(), MAX_TEAM_COMMAND_FINDINGS)
+        }
         TeamStateCommand::ReplanSubTasks { sub_tasks, .. } => {
             bound(sub_tasks.len(), MAX_TEAM_COMMAND_SUB_TASKS)
         }
@@ -316,20 +393,30 @@ fn validate_payload(run: &TeamRun, command: &TeamStateCommand) -> Result<(), Com
         TeamStateCommand::SetSubTaskStatus { index, .. } => require_sub_task_index(run, *index),
         TeamStateCommand::RecordReviewRound { index, verdict, .. } => {
             require_sub_task_index(run, *index)?;
-            bound(verdict.findings.len(), MAX_TEAM_COMMAND_FINDINGS)
+            bound_verdict(verdict)
         }
         TeamStateCommand::MarkSubTaskDigested { index, .. } => require_sub_task_index(run, *index),
         TeamStateCommand::RecordMrRound {
+            verdict,
             unresolved_additions,
             ..
-        } => bound(unresolved_additions.len(), MAX_TEAM_COMMAND_FINDINGS),
-        TeamStateCommand::SetMrVerdict { .. }
-        | TeamStateCommand::RecordMrDevThread { .. }
-        | TeamStateCommand::FinishRun { .. } => Ok(()),
+        } => {
+            bound_verdict(verdict)?;
+            bound(unresolved_additions.len(), MAX_TEAM_COMMAND_FINDINGS)
+        }
+        TeamStateCommand::SetMrVerdict { verdict } => match verdict {
+            Some(verdict) => bound_verdict(verdict),
+            None => Ok(()),
+        },
+        TeamStateCommand::RecordMrDevThread { .. } | TeamStateCommand::FinishRun { .. } => Ok(()),
         TeamStateCommand::TakeUserNotes {} => {
             bound(run.pending_user_notes.len(), MAX_TEAM_COMMAND_NOTES)
         }
     }
+}
+
+fn bound_verdict(verdict: &WorkflowVerdict) -> Result<(), CommandRejection> {
+    bound(verdict.findings.len(), MAX_TEAM_COMMAND_FINDINGS)
 }
 
 fn bound(len: usize, max: usize) -> Result<(), CommandRejection> {
@@ -443,7 +530,7 @@ fn apply_effects(
         }
         TeamStateCommand::TakeUserNotes {} => {
             let notes = std::mem::take(&mut run.pending_user_notes);
-            run.last_drained_notes = Some(LastDrainedNotes {
+            run.drained_notes.push(LastDrainedNotes {
                 command_id: command_id.as_str().to_string(),
                 notes: notes.clone(),
             });

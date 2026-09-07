@@ -149,8 +149,8 @@ pub enum TeamStateCommand {
     },
     /// Drain `TeamRun.pending_user_notes` atomically. See
     /// `.sealwire/DESIGN.md` D8 for why this is the one command whose receipt
-    /// carries content, and why replay reads `TeamRun.last_drained_notes`
-    /// rather than the (content-blind) journal.
+    /// carries content, and why replay reads `TeamRun.drained_notes` rather
+    /// than the (content-blind) journal.
     TakeUserNotes {},
 }
 
