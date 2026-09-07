@@ -223,7 +223,7 @@ pub(crate) fn plan_outcome(decision: ApprovalDecision) -> Value {
 pub(crate) fn reviewer_plan_rejected_outcome() -> Value {
     json!({
         "outcome": "rejected",
-        "reason": "Cursor reviewer protocol: do not create or wait on a plan. Continue the review and finish with final assistant text containing `VERDICT: APPROVED` or `VERDICT: NEEDS_CHANGES` followed by one finding per line."
+        "reason": "Cursor reviewer protocol: do not create or wait on a plan. Continue the review and finish with final agent_text containing `VERDICT: APPROVED` or `VERDICT: NEEDS_CHANGES` followed by one finding per line."
     })
 }
 
