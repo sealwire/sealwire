@@ -81,7 +81,9 @@ import {
   readThreadFilter,
   readThreadListContextMenu,
   readThreadListUi,
+  readThreadSelection,
 } from "../shared/thread-list-store.js";
+import { pruneThreadSelection } from "../shared/thread-multi-select.js";
 import { ProjectOverview, ProjectSidebarList } from "../shared/project-overview-react.js";
 import {
   attachProjectSummaries,
@@ -259,6 +261,7 @@ export function createSessionRenderer({
   resumeSession,
   openThreadContextMenu,
   closeThreadContextMenu,
+  onSelectThread,
   onRenameProject,
   onDeleteProject,
   scheduleControllerHeartbeat,
@@ -1682,6 +1685,29 @@ export function createSessionRenderer({
       threadReviewing: threadReviewingSet,
     });
 
+    // Reconcile the multi-selection and the open menu against the rows that are
+    // ACTUALLY about to be drawn. Search, the bell and a collapsed group all swap this
+    // projection without touching `state.threads`, which is what `findVisible` above
+    // consults — so without this a batch delete could fire on rows the user can no
+    // longer see, and a hidden row's highlight would reappear when the filter cleared.
+    // Safe to write mid-render for the same reason `setThreadFilterRetained` above is:
+    // nothing on local subscribes to this store.
+    const renderedThreadIds = groups.flatMap((group) => group.threads || []).map((t) => t.id);
+    const selection = readThreadSelection(state.threadListStore);
+    const prunedSelection = pruneThreadSelection(selection, renderedThreadIds);
+    if (prunedSelection !== selection) {
+      state.threadListStore.getState().setThreadSelection(prunedSelection);
+    }
+    // The menu goes if the row it was opened on left the screen OR if the selection
+    // under it changed shape. Checking only the anchor is not enough: the menu holds a
+    // SNAPSHOT of the whole batch, so a different member disappearing leaves it able to
+    // delete a session that is no longer listed, let alone highlighted.
+    if (openCtxThreadId
+        && (prunedSelection !== selection || !renderedThreadIds.includes(openCtxThreadId))) {
+      closeThreadContextMenu({ rerender: false });
+      openCtxThreadId = null;
+    }
+
     // Both controls can have something to say about this list; composeListChrome keeps
     // the count describing what is actually rendered while the search's warning survives.
     const { countLabel, emptyMessage } = composeListChrome(listView, filterView);
@@ -1710,9 +1736,16 @@ export function createSessionRenderer({
           return formatRelativeTime(thread.updated_at);
         },
         groups,
-        onContextThread(threadId, clientX, clientY) {
-          openThreadContextMenu(threadId, clientX, clientY);
+        // The fourth argument is the visible row order, which the menu needs to aim a
+        // multi-selection's batch delete — dropping it silently downgrades every
+        // batch to a single delete.
+        onContextThread(threadId, clientX, clientY, orderedThreadIds) {
+          openThreadContextMenu(threadId, clientX, clientY, orderedThreadIds);
         },
+        // Shift/Cmd multi-select, local only: it exists to feed the right-click
+        // menu a batch, and remote has no right-click to feed.
+        onSelectThread,
+        selectedThreadIds: readThreadSelection(state.threadListStore).ids,
         // Rename/delete render only for a group carrying a projectId, which since the
         // switcher means exactly one group: the pinned one. That is now the surviving
         // home for both actions — they used to be reachable only inside the retired

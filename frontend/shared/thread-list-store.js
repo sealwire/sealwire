@@ -1,5 +1,6 @@
 import { createStore } from "zustand/vanilla";
 import { EMPTY_THREAD_FILTER, createThreadFilter } from "./thread-filter.js";
+import { EMPTY_THREAD_SELECTION, createThreadSelection } from "./thread-multi-select.js";
 
 import {
   clearThreadListError,
@@ -166,6 +167,28 @@ export function createThreadListStore(initialThreadList = {}) {
         threadList: toggleThreadListExpandedGroup(state.threadList, cwd),
       }));
     },
+    // Shift/Cmd multi-select over the session rows. Held here beside `contextMenu`
+    // because the right-click menu reads it: a right-click inside a selection acts
+    // on the whole batch. The rules are in shared/thread-multi-select.js.
+    threadSelection: createThreadSelection(),
+    setThreadSelection(selection) {
+      set({
+        threadSelection:
+          selection && selection.ids instanceof Set ? selection : createThreadSelection(),
+      });
+    },
+    // Idempotent on identity: Escape, plain clicks and every list refresh call this
+    // unconditionally, and handing back a fresh object each time would re-render the
+    // whole list on keystrokes that changed nothing.
+    clearThreadSelection() {
+      set((state) => {
+        const current = state.threadSelection;
+        if (!current.ids.size && !current.anchorId) {
+          return state;
+        }
+        return { threadSelection: createThreadSelection() };
+      });
+    },
     closeContextMenu() {
       set({
         contextMenu: {
@@ -220,6 +243,13 @@ export function readThreadFilter(store) {
  */
 export function readSearchUi(store) {
   return store?.getState?.().searchUi || EMPTY_SEARCH_UI;
+}
+
+/**
+ * The multi-selection, as a STABLE identity — same contract as `readThreadFilter`.
+ */
+export function readThreadSelection(store) {
+  return store?.getState?.().threadSelection || EMPTY_THREAD_SELECTION;
 }
 
 export function readActiveProjectId(store) {

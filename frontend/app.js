@@ -174,7 +174,16 @@ import {
   readThreadFilter,
   readThreadListContextMenu,
   readThreadListUi,
+  readThreadSelection,
 } from "./shared/thread-list-store.js";
+import {
+  applyThreadSelectionClick,
+  describeBulkDelete,
+  pruneThreadSelection,
+  resolveContextMenuTargets,
+  threadSelectionIntent,
+} from "./shared/thread-multi-select.js";
+import { matchesApplePlatform } from "./shared/composer-keys.js";
 import { createProjectsStore } from "./shared/projects-store.js";
 import { createDevicesCache } from "./shared/devices-cache.js";
 import { createReviewsCache } from "./shared/reviews-cache.js";
@@ -475,6 +484,10 @@ const state = {
   // would false-negative a live-but-old session. Restored from storage because the
   // stale history entries survive a reload too.
   removedThreadIds: new Set(loadRemovedThreadIds()),
+  // The sessions the OPEN right-click menu acts on — one row, or the whole
+  // multi-selection it was opened inside. Snapshotted at open time so the action
+  // cannot be re-derived against a selection that has since been torn down.
+  contextMenuThreadIds: [],
   threadListStore: createThreadListStore(),
   sessionViewStore: null,
   sessionViewController: null,
@@ -992,6 +1005,7 @@ const renderer = createSessionRenderer({
   },
   openThreadContextMenu,
   closeThreadContextMenu,
+  onSelectThread: selectThreadFromClick,
   onRenameProject: renameProjectFromHeader,
   onDeleteProject: deleteProjectFromHeader,
   openProjectContextMenu,
@@ -2384,8 +2398,16 @@ window.addEventListener("keydown", (event) => {
       closeThreadProjectSubmenu({ focusTrigger: true });
       return;
     }
+    // Third level of the same peel: a menu still open takes this Escape, and only a
+    // press with nothing above it drops the selection. Otherwise dismissing the menu
+    // would also discard the batch the user built to feed it.
+    const menuWasOpen = readThreadListContextMenu(state.threadListStore).threadId != null;
     closeThreadContextMenu();
     closeProjectContextMenu();
+    if (!menuWasOpen && readThreadSelection(state.threadListStore).ids.size) {
+      state.threadListStore.getState().clearThreadSelection();
+      renderThreads();
+    }
   }
 });
 
@@ -3821,10 +3843,67 @@ async function submitForkDialog(submittedFields = null) {
   renderForkSessionDialog();
 }
 
-function openThreadContextMenu(threadId, clientX, clientY) {
+// A modified click on a session row: Cmd/Ctrl toggles one, Shift extends a range
+// from the anchor. The rows only reach the delete this selection feeds through the
+// right-click menu, so nothing here starts an action on its own.
+// Every click on a session row lands here first. Returns true when the click WAS the
+// gesture (and so must not also open the session), false to let the row open it.
+function selectThreadFromClick(threadId, event, orderedThreadIds = []) {
+  const intent = threadSelectionIntent(event, {
+    applePlatform: matchesApplePlatform(
+      window.navigator?.platform || "",
+      window.navigator?.userAgent || ""
+    ),
+  });
+  // ctrl+click on a Mac is the right-click: its `contextmenu` has already opened the
+  // menu over this row, so the click is spent. Claim it without touching the
+  // selection, which is the batch that menu was just built for.
+  if (intent === "open" && (event?.ctrlKey || event?.metaKey || event?.shiftKey)) {
+    return true;
+  }
+
+  const before = readThreadSelection(state.threadListStore);
+  const { selection } = applyThreadSelectionClick({
+    selection: before,
+    threadId,
+    orderedThreadIds,
+    intent,
+  });
+  state.threadListStore.getState().setThreadSelection(selection);
+
+  if (intent === "open") {
+    // A plain click is here only to drop the old selection and leave the anchor on
+    // this row. Re-render just for the highlight that went away — the open itself
+    // renders anyway — and let the row proceed.
+    if (before.ids.size) {
+      renderThreads();
+    }
+    return false;
+  }
+
+  // Growing a selection is not browsing: the open session stays put. Any menu still
+  // up was built for a batch that no longer matches, so it goes.
+  closeThreadContextMenu({ rerender: false });
+  renderThreads();
+  return true;
+}
+
+function openThreadContextMenu(threadId, clientX, clientY, orderedThreadIds = []) {
   if (!threadContextMenu || !archiveThreadButton || !deleteThreadButton || !threadId) {
     return;
   }
+
+  // Right-clicking inside a multi-selection aims the menu at the whole batch;
+  // right-clicking outside it drops the selection first, so the menu can never act
+  // on rows the user cannot see highlighted.
+  const targets = resolveContextMenuTargets({
+    selection: readThreadSelection(state.threadListStore),
+    threadId,
+    orderedThreadIds,
+  });
+  state.threadListStore.getState().setThreadSelection(targets.selection);
+  state.contextMenuThreadIds = targets.threadIds;
+  const batchSize = targets.threadIds.length;
 
   state.threadListStore.getState().openContextMenu(threadId, clientX, clientY);
   const isActive = state.session?.active_thread_id === threadId;
@@ -3863,10 +3942,44 @@ function openThreadContextMenu(threadId, clientX, clientY) {
   archiveThreadButton.textContent = isRunningActiveSession
     ? "Running session cannot be archived"
     : "Archive session";
-  deleteThreadButton.disabled = isRunningActiveSession;
-  deleteThreadButton.textContent = isRunningActiveSession
-    ? "Running session cannot be deleted"
-    : "Delete permanently";
+  // Delete is the ONLY action that takes a batch. Archive, fork and rename each
+  // need one session to aim at, so a batch disables them rather than silently
+  // applying to whichever row happened to be right-clicked.
+  const isBatch = batchSize > 1;
+  if (isBatch) {
+    if (forkThreadButton) {
+      forkThreadButton.disabled = true;
+      forkThreadButton.textContent = "Fork session";
+    }
+    archiveThreadButton.disabled = true;
+    archiveThreadButton.textContent = "Archive session";
+  }
+  // Assigned on EVERY open, not just batch ones: a right-click straight onto another
+  // row opens the menu again without the document click handler that resets it (a
+  // right-click fires no `click`), so a one-way disable here stays stuck. The Projects
+  // flyout is in the same boat — it files ONE session, and firing it with three rows
+  // highlighted would move only the row under the cursor.
+  if (renameThreadButton) {
+    renameThreadButton.disabled = isBatch;
+  }
+  if (threadProjectSubmenuTrigger) {
+    threadProjectSubmenuTrigger.disabled = isBatch;
+  }
+  // The running check has to cover EVERY target, not just the row under the cursor:
+  // the relay rejects a running session, and finding that out halfway through a batch
+  // means a partial delete the user never agreed to.
+  const busyTargets = isBatch
+    ? targets.threadIds.filter((id) => threadIsBusy(resolveActiveThread(id))).length
+    : 0;
+  const deleteBlocked = isBatch ? busyTargets > 0 : isRunningActiveSession;
+  deleteThreadButton.disabled = deleteBlocked;
+  deleteThreadButton.textContent = !deleteBlocked
+    ? isBatch
+      ? `Delete ${batchSize} sessions permanently`
+      : "Delete permanently"
+    : isBatch
+      ? `${busyTargets} of ${batchSize} are running and cannot be deleted`
+      : "Running session cannot be deleted";
   // Per-session Project assignment — rebuilt from the current Projects payload each
   // open so the marked "current" project and the list stay fresh. Populate and place
   // go through the same entry point the projects-store subscriber uses, so an open
@@ -3899,6 +4012,9 @@ function closeThreadContextMenu({ rerender = true } = {}) {
   // one of those when there's no highlight to clear.
   const wasOpen = readThreadListContextMenu(state.threadListStore).threadId != null;
   state.threadListStore.getState().closeContextMenu();
+  // The batch belongs to the menu that is going away. Leaving it behind lets a later
+  // action read targets that were resolved against a selection nobody can see.
+  state.contextMenuThreadIds = [];
   if (threadContextMenu) {
     threadContextMenu.hidden = true;
   }
@@ -3914,6 +4030,14 @@ function closeThreadContextMenu({ rerender = true } = {}) {
   if (deleteThreadButton) {
     deleteThreadButton.disabled = false;
     deleteThreadButton.textContent = "Delete permanently";
+  }
+  // Both are only ever disabled for a batch (see openThreadContextMenu), and a menu
+  // that closed while disabled would reopen on a single row still greyed out.
+  if (renameThreadButton) {
+    renameThreadButton.disabled = false;
+  }
+  if (threadProjectSubmenuTrigger) {
+    threadProjectSubmenuTrigger.disabled = false;
   }
   if (rerender && wasOpen) {
     renderThreads();
@@ -4096,11 +4220,134 @@ async function archiveThreadFromContextMenu() {
   }
 }
 
+function threadTitle(threadId) {
+  const thread = resolveActiveThread(threadId);
+  return thread?.name || thread?.preview || shortId(threadId);
+}
+
+// Delete several sessions in one confirmed action. The relay deletes one session per
+// request, so this is a loop — run SEQUENTIALLY because each delete mutates the same
+// session state on the far side, and because a failure halfway has to name which
+// sessions actually went.
+async function deleteThreadBatch(threadIds) {
+  const confirmed = window.confirm(describeBulkDelete({ titles: threadIds.map(threadTitle) }));
+  if (!confirmed) {
+    return;
+  }
+
+  // Asked ONCE for the whole batch rather than once per session: a per-session prompt
+  // would be a dialog storm, and the answer is a policy ("keep my reviewer sessions"),
+  // not a per-row judgement.
+  const reviewerThreads = await reviewerThreadsForDestructiveAction();
+  const reviewerCount = threadIds.reduce(
+    (total, id) => total + countReviewerThreadsForParent(reviewerThreads, id),
+    0
+  );
+  let deleteReviewers;
+  if (reviewerCount > 0) {
+    deleteReviewers = window.confirm(
+      `These sessions have ${reviewerCount} reviewer session${reviewerCount === 1 ? "" : "s"} between them.\n\n` +
+        "OK: delete the reviewer session(s) too.\n" +
+        "Cancel: keep them as normal sessions (they'll appear in your session list)."
+    );
+  }
+
+  const viewedThreadId = state.viewThreadId;
+  const fallbackThreadId = threadIds.includes(viewedThreadId)
+    ? state.threads.find((entry) => !threadIds.includes(entry.id))?.id || null
+    : null;
+  const deleted = [];
+  const failures = [];
+  const notes = [];
+  // Whether `removeThread` already moved the view somewhere real. Only the viewed
+  // session's own removal can, so this is the one whose answer is worth keeping.
+  let viewedRemoval = null;
+
+  for (const threadId of threadIds) {
+    try {
+      const response = await apiFetch(`/api/threads/${encodeURIComponent(threadId)}/delete`, {
+        method: "POST",
+        ...reviewerChoiceRequestInit(deleteReviewers),
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload?.error?.message || "Failed to permanently delete session");
+      }
+      deleted.push(threadId);
+      // The relay can succeed and still have something to say — a reviewer session it
+      // could not delete comes back on an `ok` receipt, and dropping it leaves the user
+      // watching sessions reappear with no reason given.
+      if (payload.data?.message?.includes("reviewer")) {
+        notes.push(payload.data.message);
+      }
+      state.threads = state.threads.filter((entry) => entry.id !== threadId);
+      dropThreadFromSearchResults(threadId);
+      state.removedThreadIds.add(threadId);
+      rememberRemovedThreadId(threadId);
+      const removal = await sessionViewController.removeThread(threadId);
+      if (threadId === viewedThreadId) {
+        viewedRemoval = removal;
+      }
+    } catch (error) {
+      failures.push({ threadId, error });
+    }
+  }
+
+  state.threadListStore.getState().clearThreadSelection();
+
+  // Move the view only if the session being viewed was ACTUALLY deleted — a failed
+  // delete leaves it on screen, and navigating away from it would look like the
+  // delete worked. And only if `removeThread` did not already land on a real tab,
+  // which is the check the single-delete path makes for the same reason.
+  if (
+    viewedRemoval
+    && !viewedRemoval.next.location.threadId
+    && fallbackThreadId
+    && state.threads.some((entry) => entry.id === fallbackThreadId)
+  ) {
+    await sessionViewController.openThread(fallbackThreadId, { replace: true });
+  }
+
+  // One refresh for the whole batch, not one per session — the single-delete path
+  // refreshes because it is the end of the action, and here that is only true now.
+  state.threadGroups = buildNavigationThreadGroups(state.threads);
+  renderThreads();
+  await loadThreads("post-bulk-delete refresh");
+  await loadSession("post-bulk-delete refresh");
+
+  if (deleted.length) {
+    logLine(`Deleted ${deleted.length} local session${deleted.length === 1 ? "" : "s"} permanently.`);
+  }
+  for (const note of notes) {
+    logLine(note);
+  }
+  // Reported per failure, naming the session: "3 of 5 failed" tells the user something
+  // went wrong but not what to retry, and the sessions that survived are still listed.
+  for (const failure of failures) {
+    reportDestructiveActionFailure({
+      action: "delete",
+      title: threadTitle(failure.threadId),
+      error: failure.error,
+      log: logLine,
+      notify: (message) => window.alert(message),
+    });
+  }
+}
+
 async function deleteThreadFromContextMenu() {
   const threadId = readThreadListContextMenu(state.threadListStore).threadId;
+  // Resolved when the menu OPENED, over the selection as it stood then. Re-deriving
+  // it here would read a selection the close below has already torn down.
+  const batch = state.contextMenuThreadIds || [];
   closeThreadContextMenu();
 
   if (!threadId) {
+    return;
+  }
+  // The batch must still contain the row the menu was opened on, or it belongs to an
+  // earlier menu and this is a plain single delete.
+  if (batch.length > 1 && batch.includes(threadId)) {
+    await deleteThreadBatch(batch);
     return;
   }
 
@@ -4144,6 +4391,16 @@ async function deleteThreadFromContextMenu() {
     }
 
     state.threads = state.threads.filter((entry) => entry.id !== threadId);
+    // A single delete can still land on a row the user had selected — drop the dead
+    // id, or the next right-click builds its batch around a session that is gone.
+    state.threadListStore
+      .getState()
+      .setThreadSelection(
+        pruneThreadSelection(
+          readThreadSelection(state.threadListStore),
+          state.threads.map((entry) => entry.id)
+        )
+      );
     // ...and from the search results, which are a separate slice. Leaving it there
     // keeps a dead session on screen as a clickable row until the query changes.
     dropThreadFromSearchResults(threadId);

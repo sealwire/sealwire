@@ -18,6 +18,7 @@ import {
   startThreadListRefresh,
   toggleThreadListCollapsedGroup,
   toggleThreadListExpandedGroup,
+  visibleThreadIds,
 } from "./shared/thread-list-state.js";
 import {
   createThreadListStore,
@@ -391,4 +392,62 @@ test("a headerless pinned group past the visible limit still offers show-more", 
   const more = rows.find((row) => row.type === "show-more");
   assert.ok(more, "and the overflow row survives");
   assert.equal(more.hiddenCount, 2);
+});
+
+// Shift+click ranges over the rows the user can actually SEE, and the list is
+// virtualized — the off-screen rows are not in the DOM to be read back. So the
+// range order has to be derived from the same rows the list renders, which is
+// what this function is for.
+test("visibleThreadIds follows the rendered row order across groups", () => {
+  const groups = buildThreadGroups(
+    [
+      { id: "t1", cwd: "/x", updated_at: 3 },
+      { id: "t2", cwd: "/x", updated_at: 2 },
+      { id: "t3", cwd: "/y", updated_at: 1 },
+    ],
+    {}
+  );
+  const rows = createThreadListRows({ groups, collapsible: true });
+  assert.deepEqual(visibleThreadIds(rows), ["t1", "t2", "t3"]);
+});
+
+test("visibleThreadIds skips a collapsed group's sessions", () => {
+  const groups = buildThreadGroups(
+    [
+      { id: "t1", cwd: "/x", updated_at: 2 },
+      { id: "t2", cwd: "/y", updated_at: 1 },
+    ],
+    {}
+  );
+  const rows = createThreadListRows({
+    groups,
+    collapsible: true,
+    collapsedGroupCwds: new Set([canonicalizeWorkspace("/x")]),
+  });
+  assert.deepEqual(visibleThreadIds(rows), ["t2"]);
+});
+
+test("visibleThreadIds stops at the per-group limit until the group is expanded", () => {
+  const threads = Array.from({ length: 4 }, (_, index) => ({
+    id: `t${index + 1}`,
+    cwd: "/x",
+    updated_at: 100 - index,
+  }));
+  const groups = buildThreadGroups(threads, {});
+
+  assert.deepEqual(
+    visibleThreadIds(createThreadListRows({ groups, visibleThreadLimit: 2 })),
+    ["t1", "t2"],
+    "a session hidden behind Show more cannot be in a range"
+  );
+  assert.deepEqual(
+    visibleThreadIds(
+      createThreadListRows({
+        groups,
+        visibleThreadLimit: 2,
+        expandedGroupCwds: new Set([canonicalizeWorkspace("/x")]),
+      })
+    ),
+    ["t1", "t2", "t3", "t4"]
+  );
 });
