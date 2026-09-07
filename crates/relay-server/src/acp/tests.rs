@@ -1753,6 +1753,7 @@ async fn a_plan_on_a_semantic_reviewer_thread_is_rejected_with_the_verdict_proto
             .as_str()
             .is_some_and(|reason| reason.contains("VERDICT: APPROVED")
                 && reason.contains("VERDICT: NEEDS_CHANGES")
+                && reason.contains("final agent_text")
                 && reason.contains("do not create or wait on a plan")),
         "the provider-facing rejection must steer Cursor to the final-text verdict protocol: {sent}"
     );
