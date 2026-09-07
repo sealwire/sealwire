@@ -34,6 +34,44 @@ async fn init_team_repo() -> (TempDir, String) {
     (dir, display)
 }
 
+fn team_git_stdout(cwd: &str, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("git should run");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+fn team_git_commit_all(cwd: &str, message: &str) -> String {
+    let add = std::process::Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(cwd)
+        .output()
+        .expect("git add should run");
+    assert!(
+        add.status.success(),
+        "git add failed: {}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+    let commit = std::process::Command::new("git")
+        .args(["commit", "-q", "-m", message])
+        .current_dir(cwd)
+        .output()
+        .expect("git commit should run");
+    assert!(
+        commit.status.success(),
+        "git commit failed: {}",
+        String::from_utf8_lossy(&commit.stderr)
+    );
+    team_git_stdout(cwd, &["rev-parse", "HEAD"])
+}
+
 fn team_input(cwd: &str) -> crate::state::app::team::TeamStartRequest {
     crate::state::app::team::TeamStartRequest {
         spec: crate::state::TaskSpec {
@@ -1466,6 +1504,93 @@ async fn committing_never_executes_repository_hooks() {
 }
 
 #[tokio::test]
+async fn team_collect_diff_renders_only_the_committed_candidate_range() {
+    let (_repo, root) = init_team_repo().await;
+    let (app, _providers) = build_review_app(&root, &["codex"]).await;
+    let path = std::path::Path::new(&root);
+    std::fs::write(path.join("old-name.txt"), "rename me\n").unwrap();
+    std::fs::write(path.join("deleted.txt"), "delete me\n").unwrap();
+    let base = team_git_commit_all(&root, "base for review");
+
+    std::fs::rename(path.join("old-name.txt"), path.join("new-name.txt")).unwrap();
+    std::fs::remove_file(path.join("deleted.txt")).unwrap();
+    std::fs::write(
+        path.join("added.txt"),
+        "RAW_COMMITTED_PATCH_CONTENT_SHOULD_NOT_APPEAR\n",
+    )
+    .unwrap();
+    let candidate = team_git_commit_all(&root, "candidate for review");
+    std::fs::write(path.join("new-name.txt"), "DIRTY_WORKTREE_CONTENT\n").unwrap();
+    std::fs::write(path.join("untracked.txt"), "UNTRACKED_WORKTREE_CONTENT\n").unwrap();
+
+    let run_id = "team-review-target".to_string();
+    let mut run = crate::state::TeamRun::new(
+        run_id.clone(),
+        crate::state::TaskSpec::default(),
+        root.clone(),
+        "device-1".to_string(),
+    );
+    run.status = crate::state::TeamRunStatus::Running;
+    run.phase = relay_api::team::TeamPhase::SubTasks;
+    run.sub_tasks.push(crate::state::SubTask {
+        id: "st-1".to_string(),
+        base_commit: base.clone(),
+        last_verdict: Some(relay_api::WorkflowVerdict {
+            approved: false,
+            summary: None,
+            findings: vec!["previous reviewer finding".to_string()],
+        }),
+        ..Default::default()
+    });
+    app.relay.write().await.insert_team_run(run);
+
+    let rendered = relay_api::TeamPort::collect_diff(&app, &run_id, Some(&base))
+        .await
+        .expect("collect committed review target");
+    assert!(
+        rendered.contains("Committed review target")
+            && rendered.contains(&format!("Base commit: {base}"))
+            && rendered.contains(&format!("Candidate commit: {candidate}"))
+            && rendered.contains(&format!("Range: {base}..{candidate}")),
+        "the private seam must identify the immutable Git range: {rendered}"
+    );
+    assert!(
+        rendered.contains("A\tadded.txt")
+            && rendered.contains("D\tdeleted.txt")
+            && rendered.contains("old-name.txt")
+            && rendered.contains("new-name.txt"),
+        "committed additions, deletions, and renames must be represented in the manifest: {rendered}"
+    );
+    assert!(
+        rendered.contains("previous reviewer finding"),
+        "prior findings must survive into the next committed review: {rendered}"
+    );
+    assert!(
+        rendered.contains("git diff --find-renames")
+            && rendered.contains("git show")
+            && !rendered.contains("@@")
+            && !rendered.contains("RAW_COMMITTED_PATCH_CONTENT_SHOULD_NOT_APPEAR")
+            && !rendered.contains("DIRTY_WORKTREE_CONTENT")
+            && !rendered.contains("UNTRACKED_WORKTREE_CONTENT")
+            && !rendered.contains("untracked.txt"),
+        "the prompt body must instruct object inspection without inlining raw or dirty content: {rendered}"
+    );
+
+    let run = app
+        .relay
+        .read()
+        .await
+        .team_run(&run_id)
+        .cloned()
+        .expect("run recorded");
+    assert_eq!(run.sub_tasks[0].candidate_sha, candidate);
+    assert!(
+        run.sub_tasks[0].verdict_candidate_sha.is_empty(),
+        "collecting a new target must invalidate any previous approval binding"
+    );
+}
+
+#[tokio::test]
 async fn a_task_cannot_fork_from_a_worktree_outside_the_allowed_roots() {
     // Guarding only the DESTINATION is not enough. Provisioning reads and
     // MUTATES the origin's repository — it writes info/exclude in the common
@@ -2370,6 +2495,9 @@ struct DevThenReviewDriver {
     /// the reviewer thread) entirely — the sane thing a real driver does after
     /// a dev turn that did not land.
     reviewer_rounds: u32,
+    /// Test fixture for review-open paths: create work the port can ask the
+    /// same developer session to commit before review.
+    write_work_before_dev: bool,
     dev_outcome: std::sync::Arc<Mutex<Option<relay_api::team::TeamTurnOutcome>>>,
     reviewer_outcomes: std::sync::Arc<Mutex<Vec<relay_api::team::TeamTurnOutcome>>>,
 }
@@ -2396,6 +2524,14 @@ impl relay_api::TeamDriver for DevThenReviewDriver {
             }),
         )
         .await;
+        if self.write_work_before_dev {
+            let cwd = port.run_snapshot(&run_id).await.expect("run exists").cwd;
+            std::fs::write(
+                std::path::Path::new(&cwd).join("parser.rs"),
+                "pub fn parse() {}\n",
+            )
+            .expect("candidate work for the dev turn");
+        }
 
         let dev_outcome = port
             .turn(
@@ -2482,8 +2618,8 @@ impl relay_api::TeamDriver for DevThenReviewDriver {
 }
 
 /// Same as [`DevThenReviewDriver`], but writes an uncommitted file in the task
-/// worktree before the dev turn so the checkpoint-diff path can be exercised
-/// without a usage figure.
+/// worktree before the dev turn so the same-session commit retry can be
+/// exercised without a usage figure.
 struct UncommittedWorkThenReviewDriver {
     dev_outcome: std::sync::Arc<Mutex<Option<relay_api::team::TeamTurnOutcome>>>,
     reviewer_outcomes: std::sync::Arc<Mutex<Vec<relay_api::team::TeamTurnOutcome>>>,
@@ -2664,6 +2800,7 @@ async fn a_dev_turn_that_hits_a_usage_limit_halts_the_run_before_any_review() {
     let app = app.with_team_driver(std::sync::Arc::new(DevThenReviewDriver {
         request_stop_before_review: false,
         reviewer_rounds: 0,
+        write_work_before_dev: false,
         dev_outcome: dev_outcome.clone(),
         reviewer_outcomes: reviewer_outcomes.clone(),
     }));
@@ -2728,6 +2865,7 @@ async fn an_unrecognised_failure_kind_fails_the_turn_without_pausing_the_run() {
     let app = app.with_team_driver(std::sync::Arc::new(DevThenReviewDriver {
         request_stop_before_review: false,
         reviewer_rounds: 0,
+        write_work_before_dev: false,
         dev_outcome: dev_outcome.clone(),
         reviewer_outcomes: reviewer_outcomes.clone(),
     }));
@@ -2788,6 +2926,7 @@ async fn a_dev_turn_that_exhausts_the_session_budget_halts_the_run_before_any_re
     let app = app.with_team_driver(std::sync::Arc::new(DevThenReviewDriver {
         request_stop_before_review: false,
         reviewer_rounds: 0,
+        write_work_before_dev: false,
         dev_outcome: dev_outcome.clone(),
         reviewer_outcomes: reviewer_outcomes.clone(),
     }));
@@ -2865,6 +3004,7 @@ async fn a_dev_turn_that_hits_session_capacity_halts_the_run_before_any_review()
     let app = app.with_team_driver(std::sync::Arc::new(DevThenReviewDriver {
         request_stop_before_review: false,
         reviewer_rounds: 0,
+        write_work_before_dev: false,
         dev_outcome: dev_outcome.clone(),
         reviewer_outcomes: reviewer_outcomes.clone(),
     }));
@@ -2966,6 +3106,7 @@ async fn a_dev_turn_that_replies_but_bills_nothing_leaves_the_gate_shut() {
     let app = app.with_team_driver(std::sync::Arc::new(DevThenReviewDriver {
         request_stop_before_review: false,
         reviewer_rounds: 1,
+        write_work_before_dev: false,
         dev_outcome: dev_outcome.clone(),
         reviewer_outcomes: reviewer_outcomes.clone(),
     }));
@@ -3005,9 +3146,10 @@ async fn a_dev_turn_that_replies_but_bills_nothing_leaves_the_gate_shut() {
     );
 }
 
-/// The other half: real spend opens the gate, so ordinary work still reviews.
+/// The other half: real spend plus a committed candidate opens the gate, so
+/// ordinary work still reviews.
 #[tokio::test]
-async fn a_dev_turn_that_bills_tokens_opens_the_reviewer_gate() {
+async fn a_dev_turn_that_bills_tokens_and_commits_opens_the_reviewer_gate() {
     let (_repo, root) = init_team_repo().await;
     let (app, providers) = build_review_app(&root, &["codex"]).await;
     providers
@@ -3023,6 +3165,7 @@ async fn a_dev_turn_that_bills_tokens_opens_the_reviewer_gate() {
     let app = app.with_team_driver(std::sync::Arc::new(DevThenReviewDriver {
         request_stop_before_review: false,
         reviewer_rounds: 1,
+        write_work_before_dev: true,
         dev_outcome: dev_outcome.clone(),
         reviewer_outcomes: reviewer_outcomes.clone(),
     }));
@@ -3034,7 +3177,7 @@ async fn a_dev_turn_that_bills_tokens_opens_the_reviewer_gate() {
 
     assert_eq!(
         run.sub_tasks[0].dev_turns_landed, 1,
-        "matching usage with billed tokens > 0 has landed"
+        "matching usage with billed tokens > 0 and a committed candidate has landed"
     );
     assert!(
         !matches!(
@@ -3042,7 +3185,7 @@ async fn a_dev_turn_that_bills_tokens_opens_the_reviewer_gate() {
             Some(relay_api::team::TeamTurnOutcome::Failed(reason))
                 if reason == "This step hasn't produced any work yet. You can resume to run it again."
         ),
-        "the gate must not refuse a dev turn that really spent"
+        "the gate must not refuse a dev turn that really spent and committed"
     );
 }
 
@@ -3059,6 +3202,7 @@ async fn a_dev_turn_with_no_usage_figure_at_all_leaves_the_gate_shut() {
     let app = app.with_team_driver(std::sync::Arc::new(DevThenReviewDriver {
         request_stop_before_review: false,
         reviewer_rounds: 1,
+        write_work_before_dev: false,
         dev_outcome: dev_outcome.clone(),
         reviewer_outcomes: reviewer_outcomes.clone(),
     }));
@@ -3106,6 +3250,7 @@ async fn a_spend_figure_from_another_turn_is_empty_output() {
     let app = app.with_team_driver(std::sync::Arc::new(DevThenReviewDriver {
         request_stop_before_review: false,
         reviewer_rounds: 1,
+        write_work_before_dev: false,
         dev_outcome: dev_outcome.clone(),
         reviewer_outcomes: reviewer_outcomes.clone(),
     }));
@@ -3133,10 +3278,10 @@ async fn a_spend_figure_from_another_turn_is_empty_output() {
     );
 }
 
-/// Uncommitted work relative to the checkpoint is real output. The gate must
-/// not demand a commit, and must not demand a usage figure once the tree moved.
+/// Uncommitted work relative to the checkpoint can land only after the relay
+/// sends the same developer session back to commit it.
 #[tokio::test]
-async fn a_dev_turn_with_an_uncommitted_diff_opens_the_reviewer_gate() {
+async fn a_dev_turn_with_an_uncommitted_diff_commits_before_review() {
     let (_repo, root) = init_team_repo().await;
     let (app, providers) = build_review_app(&root, &["codex"]).await;
     let _ = &providers;
@@ -3155,7 +3300,13 @@ async fn a_dev_turn_with_an_uncommitted_diff_opens_the_reviewer_gate() {
 
     assert_eq!(
         run.sub_tasks[0].dev_turns_landed, 1,
-        "an uncommitted nonempty diff relative to the checkpoint has landed"
+        "a nonempty diff relative to the checkpoint lands only as a committed candidate"
+    );
+    assert!(
+        !run.sub_tasks[0].round_base_sha.is_empty()
+            && !run.sub_tasks[0].candidate_sha.is_empty()
+            && run.sub_tasks[0].candidate_sha != run.sub_tasks[0].round_base_sha,
+        "the dev round must record both its base and the committed candidate"
     );
     assert!(
         !run.sub_tasks[0].base_commit.is_empty(),
@@ -3167,7 +3318,18 @@ async fn a_dev_turn_with_an_uncommitted_diff_opens_the_reviewer_gate() {
             Some(relay_api::team::TeamTurnOutcome::Failed(reason))
                 if reason == "This step hasn't produced any work yet. You can resume to run it again."
         ),
-        "the gate must not refuse work that is sitting uncommitted in the tree"
+        "the gate must not refuse the committed candidate made from dirty work"
+    );
+    let dev_thread = run.sub_tasks[0]
+        .dev_thread_id
+        .as_deref()
+        .expect("dev thread");
+    let turns = providers.get("codex").unwrap().turns.lock().await.clone();
+    assert!(
+        turns.iter().any(|(thread, text)| {
+            thread == dev_thread && text.contains("needs a committed candidate")
+        }),
+        "the same developer session must be asked to commit before review: {turns:?}"
     );
 }
 
@@ -3191,6 +3353,7 @@ async fn a_dev_turn_with_billed_but_failed_usage_leaves_the_gate_shut() {
     let app = app.with_team_driver(std::sync::Arc::new(DevThenReviewDriver {
         request_stop_before_review: false,
         reviewer_rounds: 1,
+        write_work_before_dev: false,
         dev_outcome: dev_outcome.clone(),
         reviewer_outcomes: reviewer_outcomes.clone(),
     }));
@@ -3289,6 +3452,7 @@ async fn a_reviewer_turn_is_refused_without_a_landed_dev_turn() {
     let app = app.with_team_driver(std::sync::Arc::new(DevThenReviewDriver {
         request_stop_before_review: false,
         reviewer_rounds: 1,
+        write_work_before_dev: false,
         dev_outcome: dev_outcome.clone(),
         reviewer_outcomes: reviewer_outcomes.clone(),
     }));
@@ -3341,6 +3505,7 @@ async fn a_stop_mid_run_refuses_the_next_reviewer_turn() {
     let app = app.with_team_driver(std::sync::Arc::new(DevThenReviewDriver {
         request_stop_before_review: true,
         reviewer_rounds: 1,
+        write_work_before_dev: true,
         dev_outcome: dev_outcome.clone(),
         reviewer_outcomes: reviewer_outcomes.clone(),
     }));
@@ -3441,6 +3606,12 @@ impl relay_api::TeamDriver for RaceWindowDriver {
             }),
         )
         .await;
+        let cwd = port.run_snapshot(&run_id).await.expect("run exists").cwd;
+        std::fs::write(
+            std::path::Path::new(&cwd).join("parser.rs"),
+            "pub fn parse() {}\n",
+        )
+        .expect("candidate work for the dev turn");
         let dev_outcome = port
             .turn(
                 &run_id,
@@ -3911,6 +4082,7 @@ async fn a_stop_racing_the_atomic_refusal_cannot_land_between_its_decision_and_i
     let app = app.with_team_driver(std::sync::Arc::new(DevThenReviewDriver {
         request_stop_before_review: false,
         reviewer_rounds: 1,
+        write_work_before_dev: false,
         dev_outcome: dev_outcome.clone(),
         reviewer_outcomes: reviewer_outcomes.clone(),
     }));
@@ -4212,6 +4384,7 @@ async fn a_refused_reviewer_turn_that_settles_the_run_releases_its_seats() {
     let app = app.with_team_driver(std::sync::Arc::new(DevThenReviewDriver {
         request_stop_before_review: false,
         reviewer_rounds: 1,
+        write_work_before_dev: false,
         dev_outcome: dev_outcome.clone(),
         reviewer_outcomes: reviewer_outcomes.clone(),
     }));
@@ -4261,6 +4434,7 @@ async fn a_landed_dev_turn_and_two_reviewer_rejections_still_escalate() {
     let app = app.with_team_driver(std::sync::Arc::new(DevThenReviewDriver {
         request_stop_before_review: false,
         reviewer_rounds: crate::state::MAX_SUBTASK_REVIEW_ROUNDS,
+        write_work_before_dev: true,
         dev_outcome: dev_outcome.clone(),
         reviewer_outcomes: reviewer_outcomes.clone(),
     }));
@@ -4494,6 +4668,12 @@ impl relay_api::TeamDriver for ActionTableDriver {
             let run = port.run_snapshot(&run_id).await.expect("run exists");
             match run.sub_tasks[0].status {
                 crate::state::SubTaskStatus::Pending => {
+                    let dev_attempt = self.dev_outcomes.lock().await.len();
+                    std::fs::write(
+                        std::path::Path::new(&run.cwd).join(format!("parser-{dev_attempt}.rs")),
+                        format!("pub fn parse_{dev_attempt}() {{}}\n"),
+                    )
+                    .expect("candidate work for the dev turn");
                     let outcome = port
                         .turn(
                             &run_id,

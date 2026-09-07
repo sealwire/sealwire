@@ -3342,6 +3342,9 @@ pub struct ReviewJobView {
     pub round: u32,
     pub max_rounds: u32,
     pub verdict: Option<String>,
+    pub base_sha: Option<String>,
+    pub candidate_sha: Option<String>,
+    pub verdict_candidate_sha: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, Hash)]

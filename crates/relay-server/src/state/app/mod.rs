@@ -2095,6 +2095,118 @@ pub(crate) async fn merge_base_with(workspace: &TrustedWorkspace, target: &str) 
     (!base.is_empty()).then_some(base)
 }
 
+pub(crate) async fn current_head_sha(workspace: &TrustedWorkspace) -> Result<String, String> {
+    verify_commit(workspace, "HEAD").await
+}
+
+pub(crate) async fn is_git_work_tree(workspace: &TrustedWorkspace) -> Result<bool, String> {
+    let output = run_git_capture(workspace, &["rev-parse", "--is-inside-work-tree"]).await?;
+    Ok(output.status.success())
+}
+
+pub(crate) async fn first_parent_sha(
+    workspace: &TrustedWorkspace,
+    commit: &str,
+) -> Result<Option<String>, String> {
+    let spec = format!("{commit}^");
+    let output = run_git_capture(workspace, &["rev-parse", "--verify", "--quiet", &spec]).await?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let parent = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok((!parent.is_empty()).then_some(parent))
+}
+
+pub(crate) async fn has_uncommitted_changes(workspace: &TrustedWorkspace) -> Result<bool, String> {
+    let output = run_git_capture(workspace, &["status", "--porcelain=v1", "-uall"]).await?;
+    if !output.status.success() {
+        return Err(git_failure("git status --porcelain=v1 -uall", &output));
+    }
+    Ok(!output.stdout.is_empty())
+}
+
+pub(crate) async fn collect_git_review_target(
+    workspace: &TrustedWorkspace,
+    base_sha: &str,
+    candidate_sha: &str,
+) -> Result<relay_api::GitReviewTarget, String> {
+    let base_sha = verify_commit(workspace, base_sha).await?;
+    let candidate_sha = verify_commit(workspace, candidate_sha).await?;
+    let generated_at = unix_now();
+
+    let manifest = run_git_capture(
+        workspace,
+        &[
+            "diff",
+            "--no-color",
+            "--name-status",
+            "--find-renames",
+            &base_sha,
+            &candidate_sha,
+            "--",
+        ],
+    )
+    .await?;
+    if !manifest.status.success() {
+        return Err(git_failure("git diff --name-status", &manifest));
+    }
+
+    let stat = run_git_capture(
+        workspace,
+        &[
+            "diff",
+            "--no-color",
+            "--stat",
+            "--summary",
+            "--find-renames",
+            &base_sha,
+            &candidate_sha,
+            "--",
+        ],
+    )
+    .await?;
+    if !stat.status.success() {
+        return Err(git_failure("git diff --stat --summary", &stat));
+    }
+
+    Ok(relay_api::GitReviewTarget {
+        cwd: workspace.as_str().to_string(),
+        base_sha,
+        candidate_sha,
+        generated_at,
+        manifest: String::from_utf8_lossy(&manifest.stdout).trim().to_string(),
+        stat: String::from_utf8_lossy(&stat.stdout).trim().to_string(),
+    })
+}
+
+async fn verify_commit(workspace: &TrustedWorkspace, rev: &str) -> Result<String, String> {
+    let spec = format!("{rev}^{{commit}}");
+    let output = run_git_capture(workspace, &["rev-parse", "--verify", "--quiet", &spec]).await?;
+    if !output.status.success() {
+        return Err(git_failure(
+            &format!("git rev-parse --verify {spec}"),
+            &output,
+        ));
+    }
+    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if sha.is_empty() {
+        Err(format!("git rev-parse --verify {spec} returned no commit"))
+    } else {
+        Ok(sha)
+    }
+}
+
+fn git_failure(command: &str, output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if stderr.is_empty() { stdout } else { stderr };
+    if detail.is_empty() {
+        format!("{command} failed")
+    } else {
+        format!("{command} failed: {detail}")
+    }
+}
+
 /// Collect a diff for `workspace` against `base`, defaulting to `HEAD`.
 ///
 /// The `base` parameter is what makes an MR view possible without a second diff

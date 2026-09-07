@@ -84,6 +84,22 @@ impl WorkflowVerdict {
     }
 }
 
+/// Committed Git object pair a reviewer must inspect.
+///
+/// The relay builds this from `base_sha..candidate_sha`; reviewers may inspect
+/// the full objects themselves, but prompts should not inline the full raw diff.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitReviewTarget {
+    pub cwd: String,
+    pub base_sha: String,
+    pub candidate_sha: String,
+    pub generated_at: u64,
+    /// Output of `git diff --name-status --find-renames base candidate --`.
+    pub manifest: String,
+    /// Output of `git diff --stat --summary --find-renames base candidate --`.
+    pub stat: String,
+}
+
 /// Lifecycle of a single run — a workflow, or one task's child Code Flow.
 ///
 /// Shared vocabulary: the public workflow runner owns it, and a private
@@ -464,6 +480,24 @@ pub trait TeamPort: Send + Sync {
     ) -> team::TeamTurnOutcome;
 
     async fn checkpoint_commit(&self, run_id: &str) -> Result<Option<String>, TeamPortError>;
+    async fn current_head_sha(&self, run_id: &str) -> Result<String, TeamPortError> {
+        let _ = run_id;
+        Err(TeamPortError::Failed(
+            "current HEAD collection is unavailable".to_string(),
+        ))
+    }
+
+    async fn collect_review_target(
+        &self,
+        run_id: &str,
+        base_sha: &str,
+        candidate_sha: &str,
+    ) -> Result<GitReviewTarget, TeamPortError> {
+        let _ = (run_id, base_sha, candidate_sha);
+        Err(TeamPortError::Failed(
+            "committed review target collection is unavailable".to_string(),
+        ))
+    }
     async fn collect_diff(&self, run_id: &str, base: Option<&str>)
         -> Result<String, TeamPortError>;
     async fn merge_base(

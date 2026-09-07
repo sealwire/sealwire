@@ -557,6 +557,17 @@ pub struct SubTask {
     /// Checkpoint commit taken when this sub-task started; scopes its review diff
     /// to its OWN changes rather than everything since the run began.
     pub base_commit: String,
+    /// HEAD when this sub-task's current developer round started. A reviewer may
+    /// only run after HEAD advances past this value, proving the developer
+    /// produced a committed candidate for the round.
+    #[serde(default)]
+    pub round_base_sha: String,
+    /// HEAD chosen as this sub-task's latest committed review candidate.
+    #[serde(default)]
+    pub candidate_sha: String,
+    /// Candidate commit that the latest approving verdict reviewed.
+    #[serde(default)]
+    pub verdict_candidate_sha: String,
     pub dev_thread_id: Option<String>,
     pub reviewer_thread_id: Option<String>,
     /// Every thread this sub-task has ever owned — the set the lifeguard drains
@@ -790,6 +801,20 @@ pub struct TeamRun {
     pub max_mr_rounds: u32,
     pub design_review_rounds: u32,
     pub mr_rounds_used: u32,
+    /// HEAD when the current MR-correction developer round started.
+    #[serde(default)]
+    pub mr_round_base_sha: String,
+    /// HEAD chosen as the latest committed MR-review candidate.
+    #[serde(default)]
+    pub mr_candidate_sha: String,
+    /// Candidate commit that the latest approving MR verdict reviewed.
+    #[serde(default)]
+    pub mr_verdict_candidate_sha: String,
+    /// Prior final-gate findings carried to replacement/fresh reviewers after a
+    /// committed correction. The latest `mr_verdict` is cleared between rounds,
+    /// so this durable context keeps the negotiation from restarting.
+    #[serde(default)]
+    pub mr_review_context: Vec<String>,
 
     /// The thread a turn is being started on RIGHT NOW, set before the provider
     /// call and cleared once the turn resolves.

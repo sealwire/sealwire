@@ -190,6 +190,9 @@ fn review_job_view(
         } else {
             "no blocking findings".to_string()
         }),
+        base_sha: None,
+        candidate_sha: None,
+        verdict_candidate_sha: None,
     }
 }
 
@@ -792,6 +795,9 @@ fn local_web_control_plane_metadata_does_not_shell_normal_live_transcript() {
             round: 1,
             max_rounds: 3,
             verdict: Some("review completed with no blocking findings".to_string()),
+            base_sha: None,
+            candidate_sha: None,
+            verdict_candidate_sha: None,
         })
         .collect();
     snapshot.reviewer_threads = (0..17)
@@ -1456,6 +1462,9 @@ fn control_plane_flood_keeps_both_surfaces_bounded_without_shelling_live_text() 
                 round: 1,
                 max_rounds: 3,
                 verdict: Some("no blocking findings in this review round".to_string()),
+                base_sha: None,
+                candidate_sha: None,
+                verdict_candidate_sha: None,
             })
             .collect();
         snapshot.reviewer_threads = (0..120)

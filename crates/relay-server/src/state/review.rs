@@ -10,6 +10,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::{ReviewJobStatusView, ReviewJobView, WorkspaceDiffResponse};
+use relay_api::GitReviewTarget;
 
 use super::unix_now;
 
@@ -160,6 +161,10 @@ pub(crate) struct ReviewJob {
     pub(crate) recap_text: Option<String>,
     pub(crate) workspace_diff_generated_at: Option<u64>,
     pub(crate) workspace_diff_truncated: bool,
+    pub(crate) base_sha: Option<String>,
+    pub(crate) round_base_sha: Option<String>,
+    pub(crate) candidate_sha: Option<String>,
+    pub(crate) verdict_candidate_sha: Option<String>,
     pub(crate) review_text: Option<String>,
     pub(crate) posted_back_turn_id: Option<String>,
     pub(crate) error: Option<String>,
@@ -205,6 +210,10 @@ impl ReviewJob {
             recap_text: None,
             workspace_diff_generated_at: None,
             workspace_diff_truncated: false,
+            base_sha: None,
+            round_base_sha: None,
+            candidate_sha: None,
+            verdict_candidate_sha: None,
             review_text: None,
             posted_back_turn_id: None,
             error: None,
@@ -258,6 +267,9 @@ impl ReviewJob {
             round: self.round,
             max_rounds: self.max_rounds,
             verdict: self.verdict.clone(),
+            base_sha: self.base_sha.clone(),
+            candidate_sha: self.candidate_sha.clone(),
+            verdict_candidate_sha: self.verdict_candidate_sha.clone(),
         }
     }
 }
@@ -309,6 +321,22 @@ pub(crate) fn reviewer_prompt(
     )
 }
 
+pub(crate) fn reviewer_prompt_for_target(
+    recap: &str,
+    target: &GitReviewTarget,
+    instructions: Option<&str>,
+    workspace: &str,
+) -> String {
+    build_committed_review_prompt(
+        "You are reviewing another agent's work in this repository.",
+        recap,
+        target,
+        instructions,
+        workspace,
+        None,
+    )
+}
+
 /// Prompt handed to a REUSED reviewer thread (Phase 3). The thread already holds
 /// its prior review in its transcript, so this frames a delta review of the
 /// current state. The relay is still authoritative on the fresh recap + diff, so
@@ -327,6 +355,24 @@ review and whether earlier findings were addressed.",
         diff,
         instructions,
         workspace,
+    )
+}
+
+pub(crate) fn re_review_prompt_for_target(
+    recap: &str,
+    target: &GitReviewTarget,
+    instructions: Option<&str>,
+    workspace: &str,
+) -> String {
+    build_committed_review_prompt(
+        "You previously reviewed this repository. Here is an updated recap and a fresh \
+committed candidate — re-review the CURRENT candidate, focusing on what changed since \
+your last review and whether earlier findings were addressed.",
+        recap,
+        target,
+        instructions,
+        workspace,
+        None,
     )
 }
 
@@ -354,6 +400,105 @@ Findings from the previous reviewer:\n{}",
         previous_review.trim()
     );
     build_review_prompt(&intro, recap, diff, instructions, workspace)
+}
+
+pub(crate) fn handoff_review_prompt_for_target(
+    recap: &str,
+    target: &GitReviewTarget,
+    instructions: Option<&str>,
+    workspace: &str,
+    previous_review: &str,
+) -> String {
+    let prior = format!(
+        "Findings from the previous reviewer:\n{}",
+        previous_review.trim()
+    );
+    let intro = "You are taking over a code review from another reviewer. Re-review the \
+CURRENT committed candidate: for each earlier finding say whether it is addressed, and \
+add anything new you see.";
+    build_committed_review_prompt(intro, recap, target, instructions, workspace, Some(&prior))
+}
+
+fn build_committed_review_prompt(
+    intro: &str,
+    recap: &str,
+    target: &GitReviewTarget,
+    instructions: Option<&str>,
+    workspace: &str,
+    prior_context: Option<&str>,
+) -> String {
+    let recap = if recap.trim().is_empty() {
+        "(the parent agent did not provide a recap)"
+    } else {
+        recap.trim()
+    };
+    let instructions = instructions
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("(none)");
+    let manifest = if target.manifest.trim().is_empty() {
+        "(no committed file changes in this range)"
+    } else {
+        target.manifest.trim()
+    };
+    let stat = if target.stat.trim().is_empty() {
+        "(no diff stat for this range)"
+    } else {
+        target.stat.trim()
+    };
+    let workspace = workspace.trim();
+    let workspace_line = if workspace.is_empty() {
+        String::new()
+    } else {
+        format!("{workspace}\n\n")
+    };
+    let prior_context = prior_context
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("\n\nPrior review context:\n{value}"))
+        .unwrap_or_default();
+
+    format!(
+        "{intro}\n\n\
+{workspace_line}\
+Do not modify files. Review only the committed Git objects named below; ignore \
+uncommitted, unstaged, and untracked files in the working tree because they are \
+outside this candidate.\n\
+Prioritize bugs, regressions, security risks, race conditions, data loss,\n\
+incorrect assumptions, and missing tests. Keep style nits out unless they hide a\n\
+real bug.\n\n\
+Parent agent recap:\n{recap}{prior_context}\n\n\
+Workspace diff collected by the relay at {generated_at}:\n\
+Committed review target, not a live worktree snapshot.\n\
+Working tree: {cwd}\n\
+Base commit: {base}\n\
+Candidate commit: {candidate}\n\
+Range: {base}..{candidate}\n\n\
+Changed-file manifest (`git diff --name-status --find-renames {base} {candidate} --`):\n\
+{manifest}\n\n\
+Diff stat (`git diff --stat --summary --find-renames {base} {candidate} --`):\n\
+{stat}\n\n\
+Inspect the exact objects yourself. Use `git diff --find-renames {base} {candidate} --` \
+for the full patch, `git show {candidate}:<path>` for candidate contents, and \
+`git show {base}:<path>` for old-side contents. For deleted files, inspect the \
+old side with `git show {base}:<path>`; for renames, compare the old and new paths \
+reported in the manifest.\n\n\
+Additional user instructions:\n{instructions}\n\n\
+Return:\n\
+1. Findings, highest severity first, with file/line references where possible.\n\
+2. Open questions or assumptions.\n\
+3. Test gaps or checks you recommend.\n\
+4. A short verdict.\n\n\
+End your reply with exactly one line, on its own, one of:\n\
+VERDICT: APPROVE\n\
+VERDICT: NEEDS_CHANGES\n\
+VERDICT: UNSURE\n\
+Use APPROVE only if the committed candidate is good to merge as-is.",
+        generated_at = target.generated_at,
+        cwd = target.cwd,
+        base = target.base_sha,
+        candidate = target.candidate_sha,
+    )
 }
 
 /// Shared body for the reviewer / re-review prompts. Only the opening `intro`
@@ -517,9 +662,20 @@ pub(crate) fn parent_fix_prompt(
         "Cross-agent code review — round {round} of {max_rounds}. The {provider} reviewer \
 looked at your changes and did NOT approve them yet. Address the findings below: make \
 the code changes you agree with, and briefly note anything you disagree with and why. \
-After this turn the reviewer will look again.\n\n{review}",
+Commit the completed correction before replying. After this turn the reviewer will look \
+again at the new committed candidate.\n\n{review}",
         provider = provider_label(reviewer_provider),
         review = review.trim(),
+    )
+}
+
+pub(crate) fn parent_commit_prompt(round_base_sha: &str) -> String {
+    format!(
+        "Cross-agent code review needs a committed candidate. Your last turn did not \
+advance `HEAD` past `{round_base_sha}`, and the reviewer is not allowed to review a \
+live dirty worktree.\n\nCommit the completed work for this review now in this same \
+repository. Do not make unrelated changes. After committing, reply briefly with the \
+new commit SHA. If there is truly nothing to commit, say that plainly."
     )
 }
 

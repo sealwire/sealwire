@@ -2139,6 +2139,444 @@ over on resume"
         Some(reason)
     }
 
+    async fn mutate_team_run<F>(&self, run_id: &str, mutation: F) -> bool
+    where
+        F: FnOnce(&mut TeamRun),
+    {
+        let mut relay = self.relay.write().await;
+        let updated = relay.update_team_run(run_id, mutation);
+        if updated {
+            relay.notify();
+        }
+        updated
+    }
+
+    async fn record_team_dev_round_base(
+        &self,
+        run_id: &str,
+        slot: TeamThreadSlot,
+    ) -> Result<Option<String>, String> {
+        if !matches!(slot, TeamThreadSlot::SubTaskDev(_) | TeamThreadSlot::MrDev) {
+            return Ok(None);
+        }
+        let workspace = self
+            .require_team_workspace(run_id)
+            .await
+            .map_err(team_port_error_message)?;
+        if !is_git_work_tree(&workspace).await? {
+            return Ok(None);
+        }
+        let round_base = current_head_sha(&workspace).await?;
+        let recorded = round_base.clone();
+        let round_base_for_update = round_base.clone();
+        let updated = self
+            .mutate_team_run(run_id, move |run| match slot {
+                TeamThreadSlot::SubTaskDev(index) => {
+                    if let Some(task) = run.sub_tasks.get_mut(index) {
+                        task.round_base_sha = round_base_for_update;
+                        task.candidate_sha.clear();
+                        task.verdict_candidate_sha.clear();
+                    }
+                }
+                TeamThreadSlot::MrDev => {
+                    if let Some(verdict) = &run.mr_verdict {
+                        run.mr_review_context
+                            .extend(verdict.findings.iter().cloned());
+                    }
+                    run.mr_round_base_sha = round_base_for_update;
+                    run.mr_candidate_sha.clear();
+                    run.mr_verdict_candidate_sha.clear();
+                }
+                _ => {}
+            })
+            .await;
+        if !updated {
+            return Err(format!(
+                "task run {run_id} vanished before the dev round started"
+            ));
+        }
+        Ok(Some(recorded))
+    }
+
+    async fn ensure_team_dev_candidate_committed(
+        &self,
+        run_id: &str,
+        slot: TeamThreadSlot,
+        thread_id: &mut String,
+        round_base_sha: &str,
+    ) -> Result<bool, TeamTurnOutcome> {
+        let candidate = match self
+            .team_head_after_optional_commit_prompt(run_id, slot, thread_id, round_base_sha)
+            .await
+        {
+            Ok(Some(candidate)) => candidate,
+            Ok(None) => return Ok(false),
+            Err(outcome) => return Err(outcome),
+        };
+        let updated = self
+            .mutate_team_run(run_id, move |run| match slot {
+                TeamThreadSlot::SubTaskDev(index) => {
+                    if let Some(task) = run.sub_tasks.get_mut(index) {
+                        task.candidate_sha = candidate;
+                        task.verdict_candidate_sha.clear();
+                    }
+                }
+                TeamThreadSlot::MrDev => {
+                    run.mr_candidate_sha = candidate;
+                    run.mr_verdict_candidate_sha.clear();
+                }
+                _ => {}
+            })
+            .await;
+        if !updated {
+            return Err(TeamTurnOutcome::Failed(format!(
+                "task run {run_id} vanished before the committed candidate could be recorded"
+            )));
+        }
+        Ok(true)
+    }
+
+    async fn team_head_after_optional_commit_prompt(
+        &self,
+        run_id: &str,
+        slot: TeamThreadSlot,
+        thread_id: &mut String,
+        round_base_sha: &str,
+    ) -> Result<Option<String>, TeamTurnOutcome> {
+        let workspace = self
+            .require_team_workspace(run_id)
+            .await
+            .map_err(|error| TeamTurnOutcome::Failed(team_port_error_message(error)))?;
+        if !is_git_work_tree(&workspace)
+            .await
+            .map_err(TeamTurnOutcome::Failed)?
+        {
+            return Ok(None);
+        }
+        let mut head = current_head_sha(&workspace)
+            .await
+            .map_err(TeamTurnOutcome::Failed)?;
+        if head == round_base_sha {
+            self.push_runtime_log(
+                "info",
+                format!(
+                    "Task {run_id}: dev round did not advance HEAD past {round_base_sha}; \
+asking the same developer session to commit before review."
+                ),
+            )
+            .await;
+            self.drive_team_commit_turn(run_id, slot, thread_id, round_base_sha)
+                .await?;
+            let workspace = self
+                .require_team_workspace(run_id)
+                .await
+                .map_err(|error| TeamTurnOutcome::Failed(team_port_error_message(error)))?;
+            if !is_git_work_tree(&workspace)
+                .await
+                .map_err(TeamTurnOutcome::Failed)?
+            {
+                return Ok(None);
+            }
+            head = current_head_sha(&workspace)
+                .await
+                .map_err(TeamTurnOutcome::Failed)?;
+        }
+        if head == round_base_sha {
+            self.push_runtime_log(
+                "warn",
+                format!(
+                    "Task {run_id}: developer session still did not create a commit after \
+{round_base_sha}; review remains closed until a committed candidate exists."
+                ),
+            )
+            .await;
+            return Ok(None);
+        }
+        Ok(Some(head))
+    }
+
+    async fn drive_team_commit_turn(
+        &self,
+        run_id: &str,
+        slot: TeamThreadSlot,
+        thread_id: &mut String,
+        round_base_sha: &str,
+    ) -> Result<(), TeamTurnOutcome> {
+        if let Some(reason) = self.settled_team_turn_refusal(run_id).await {
+            return Err(TeamTurnOutcome::Failed(reason));
+        }
+        let Some(mut current_thread_id) = self.resolve_team_slot(run_id, slot).await else {
+            return Err(TeamTurnOutcome::Failed(format!(
+                "task run {run_id} has no developer thread in {slot:?}"
+            )));
+        };
+        *thread_id = current_thread_id.clone();
+        let baseline = self
+            .latest_assistant_entry(&current_thread_id)
+            .await
+            .map(|(id, _)| id);
+        let prompt = team_candidate_commit_prompt(round_base_sha);
+        let sent_turn_id: Option<String>;
+        {
+            let _gate = self.team_drive_gate.lock().await;
+            if let Err(error) = self.team_turn_preflight(run_id, &current_thread_id).await {
+                return Err(TeamTurnOutcome::Failed(error));
+            }
+            self.set_in_flight_thread(run_id, Some(current_thread_id.clone()))
+                .await;
+            let (model, effort) = {
+                let relay = self.relay.read().await;
+                match relay.runtime_for_thread(&current_thread_id) {
+                    Some(runtime) => (
+                        Some(runtime.model.clone()),
+                        Some(runtime.reasoning_effort.clone()),
+                    ),
+                    None => (None, None),
+                }
+            };
+
+            let outcome = self
+                .send_message_to_thread(
+                    &current_thread_id,
+                    &prompt,
+                    model.as_deref(),
+                    effort.as_deref(),
+                )
+                .await;
+            match &outcome {
+                Ok(dispatched) if dispatched.turn_id.is_some() => {
+                    current_thread_id = dispatched.thread_id.clone();
+                    sent_turn_id = dispatched.turn_id.clone();
+                }
+                Ok(_) | Err(_) => {
+                    let why = match &outcome {
+                        Err(error) => error.to_string(),
+                        Ok(_) => "the provider returned no turn id".to_string(),
+                    };
+                    if let Ok(dispatched) = &outcome {
+                        current_thread_id = dispatched.thread_id.clone();
+                    }
+                    current_thread_id = self.dispatched_thread_id(&current_thread_id).await;
+                    if self.observe_turn_liveness(&current_thread_id).await
+                        && !self.stop_and_drain(&current_thread_id).await
+                    {
+                        return Err(TeamTurnOutcome::Blocked(format!(
+                            "thread {current_thread_id}'s commit turn started despite a failed \
+request and did not confirm stopping: {why}"
+                        )));
+                    }
+                    self.set_in_flight_thread(run_id, None).await;
+                    return Err(TeamTurnOutcome::Failed(format!(
+                        "could not start a commit turn on thread {current_thread_id}: {why}"
+                    )));
+                }
+            }
+        }
+        if let Some(promoted) = self.resolve_team_slot(run_id, slot).await {
+            current_thread_id = promoted;
+        }
+        *thread_id = current_thread_id.clone();
+
+        if let Some(error) = self
+            .wait_for_team_step(run_id, &current_thread_id, TeamRole::Dev)
+            .await
+        {
+            if !self.stop_and_drain(&current_thread_id).await {
+                return Err(TeamTurnOutcome::Blocked(format!(
+                    "{error}; and thread {current_thread_id} did not confirm stopping"
+                )));
+            }
+            self.set_in_flight_thread(run_id, None).await;
+            return Err(TeamTurnOutcome::Failed(error));
+        }
+        self.set_in_flight_thread(run_id, None).await;
+
+        if let Some(turn_id) = sent_turn_id.as_deref() {
+            let matched_failure = {
+                let relay = self.relay.read().await;
+                relay
+                    .last_turn_failure(&current_thread_id)
+                    .and_then(|failure| {
+                        (failure.turn_id == turn_id).then(|| {
+                            (
+                                failure.reason.clone(),
+                                failure.kind.is_some_and(TurnFailureKind::halts_the_run),
+                            )
+                        })
+                    })
+            };
+            if let Some((reason, halts_the_run)) = matched_failure {
+                if halts_the_run {
+                    self.settle_team_run(
+                        run_id,
+                        TeamRunStatus::Paused,
+                        &reason,
+                        TeamPauseKind::Provider,
+                    )
+                    .await;
+                }
+                return Err(TeamTurnOutcome::Failed(reason));
+            }
+        }
+
+        let _ = self
+            .latest_assistant_entry(&current_thread_id)
+            .await
+            .filter(|(id, _)| baseline.as_deref() != Some(id.as_str()));
+        Ok(())
+    }
+
+    async fn bind_team_reviewer_verdict(
+        &self,
+        run_id: &str,
+        slot: TeamThreadSlot,
+        review: &str,
+    ) -> Result<Option<String>, TeamTurnOutcome> {
+        let candidate = {
+            let relay = self.relay.read().await;
+            let Some(run) = relay.team_run(run_id) else {
+                return Err(TeamTurnOutcome::Failed(format!(
+                    "task run {run_id} vanished before the reviewer verdict could be bound"
+                )));
+            };
+            match slot {
+                TeamThreadSlot::SubTaskReviewer(index) => run
+                    .sub_tasks
+                    .get(index)
+                    .map(|task| task.candidate_sha.clone())
+                    .unwrap_or_default(),
+                TeamThreadSlot::RunOwned(_) if run.phase == relay_api::team::TeamPhase::MrGate => {
+                    run.mr_candidate_sha.clone()
+                }
+                _ => String::new(),
+            }
+        };
+        if candidate.is_empty() {
+            return Ok(None);
+        }
+
+        if !team_review_text_approves(review) {
+            self.set_team_verdict_candidate(run_id, slot, None).await;
+            return Ok(None);
+        }
+
+        let workspace = self
+            .require_team_workspace(run_id)
+            .await
+            .map_err(|error| TeamTurnOutcome::Failed(team_port_error_message(error)))?;
+        if is_git_work_tree(&workspace)
+            .await
+            .map_err(TeamTurnOutcome::Failed)?
+        {
+            let head = current_head_sha(&workspace)
+                .await
+                .map_err(TeamTurnOutcome::Failed)?;
+            if head != candidate {
+                self.set_team_verdict_candidate(run_id, slot, None).await;
+                let review = format!(
+                    "The reviewer approved committed candidate `{candidate}`, but the task \
+worktree is now at `{head}`. That approval is stale and cannot complete this \
+review; the new `HEAD` must be reviewed as a fresh committed candidate.\n\n\
+{review}\n\nVERDICT: NEEDS_CHANGES"
+                );
+                return Ok(Some(review));
+            }
+        }
+
+        self.set_team_verdict_candidate(run_id, slot, Some(candidate))
+            .await;
+        Ok(None)
+    }
+
+    async fn set_team_verdict_candidate(
+        &self,
+        run_id: &str,
+        slot: TeamThreadSlot,
+        candidate: Option<String>,
+    ) -> bool {
+        let candidate = candidate.unwrap_or_default();
+        self.mutate_team_run(run_id, move |run| match slot {
+            TeamThreadSlot::SubTaskReviewer(index) => {
+                if let Some(task) = run.sub_tasks.get_mut(index) {
+                    task.verdict_candidate_sha = candidate;
+                }
+            }
+            TeamThreadSlot::RunOwned(_) if run.phase == relay_api::team::TeamPhase::MrGate => {
+                run.mr_verdict_candidate_sha = candidate;
+            }
+            _ => {}
+        })
+        .await
+    }
+
+    async fn record_team_review_target(
+        &self,
+        run_id: &str,
+        base_sha: &str,
+        candidate_sha: &str,
+    ) -> Result<Vec<String>, String> {
+        let context = {
+            let relay = self.relay.read().await;
+            let run = relay
+                .team_run(run_id)
+                .ok_or_else(|| format!("task run {run_id} vanished before review"))?;
+            if run.phase == relay_api::team::TeamPhase::MrGate {
+                team_mr_review_context(run)
+            } else {
+                run.sub_tasks
+                    .iter()
+                    .find(|task| {
+                        task.base_commit == base_sha
+                            && task.status == relay_api::team::SubTaskStatus::Implementing
+                    })
+                    .or_else(|| {
+                        run.sub_tasks
+                            .iter()
+                            .find(|task| task.base_commit == base_sha)
+                    })
+                    .map(team_sub_task_review_context)
+                    .unwrap_or_default()
+            }
+        };
+        if base_sha == candidate_sha {
+            return Ok(context);
+        }
+        let base = base_sha.to_string();
+        let candidate = candidate_sha.to_string();
+        let updated = self
+            .mutate_team_run(run_id, move |run| {
+                if run.phase == relay_api::team::TeamPhase::MrGate {
+                    run.mr_candidate_sha = candidate.clone();
+                    run.mr_verdict_candidate_sha.clear();
+                    return;
+                }
+                let task_index = run
+                    .sub_tasks
+                    .iter()
+                    .position(|task| {
+                        task.base_commit == base
+                            && task.status == relay_api::team::SubTaskStatus::Implementing
+                    })
+                    .or_else(|| {
+                        run.sub_tasks
+                            .iter()
+                            .position(|task| task.base_commit == base)
+                    });
+                if let Some(index) = task_index {
+                    let task = &mut run.sub_tasks[index];
+                    task.candidate_sha = candidate;
+                    task.verdict_candidate_sha.clear();
+                }
+            })
+            .await;
+        if !updated {
+            return Err(format!(
+                "task run {run_id} vanished before the committed review target could be recorded"
+            ));
+        }
+        Ok(context)
+    }
+
     /// Run one turn on a team thread and return its fresh reply.
     ///
     /// `thread_ref` names where the run records this thread's id, because the id
@@ -2190,6 +2628,14 @@ over on resume"
         if let Some(reason) = self.settled_team_turn_refusal(run_id).await {
             return TeamTurnOutcome::Failed(reason);
         }
+        let round_base_sha = if role == TeamRole::Dev {
+            match self.record_team_dev_round_base(run_id, slot).await {
+                Ok(value) => value,
+                Err(error) => return TeamTurnOutcome::Failed(error),
+            }
+        } else {
+            None
+        };
         let baseline = self
             .latest_assistant_entry(&thread_id)
             .await
@@ -2391,17 +2837,50 @@ over on resume"
             }
         }
 
-        let outcome = match self.latest_assistant_entry(&thread_id).await {
+        let mut outcome = match self.latest_assistant_entry(&thread_id).await {
             Some((id, text)) if baseline.as_deref() != Some(id.as_str()) => {
                 TeamTurnOutcome::Replied(text)
             }
             _ => TeamTurnOutcome::Silent,
         };
-        // The independent review gate's other half: count a Dev turn as "landed"
-        // only when it produced matching successful usage or nonempty work vs
-        // the checkpoint. `Silent` with a dirty tree still counts (tool-only
-        // edits); a reply with neither spend nor a diff does not.
+        if role == TeamRole::Reviewer {
+            if let TeamTurnOutcome::Replied(review) = &outcome {
+                match self.bind_team_reviewer_verdict(run_id, slot, review).await {
+                    Ok(Some(rewritten)) => outcome = TeamTurnOutcome::Replied(rewritten),
+                    Ok(None) => {}
+                    Err(error) => return error,
+                }
+            }
+        }
+        let mut committed_candidate = true;
         if role == TeamRole::Dev
+            && matches!(
+                outcome,
+                TeamTurnOutcome::Replied(_) | TeamTurnOutcome::Silent
+            )
+        {
+            if let Some(round_base_sha) = round_base_sha {
+                match self
+                    .ensure_team_dev_candidate_committed(
+                        run_id,
+                        slot,
+                        &mut thread_id,
+                        &round_base_sha,
+                    )
+                    .await
+                {
+                    Ok(value) => committed_candidate = value,
+                    Err(failure) => return failure,
+                }
+            }
+        }
+        // The independent review gate's other half: count a Dev turn as "landed"
+        // only when it produced a committed candidate and matching successful
+        // usage or nonempty work vs the checkpoint. `Silent` with committed dirty
+        // work still counts (tool-only edits); a reply with neither spend nor a
+        // candidate diff does not.
+        if role == TeamRole::Dev
+            && committed_candidate
             && matches!(
                 outcome,
                 TeamTurnOutcome::Replied(_) | TeamTurnOutcome::Silent
@@ -3265,12 +3744,49 @@ trying the next seat",
         Ok(self.checkpoint_commit(&workspace).await)
     }
 
+    async fn current_head_sha(&self, run_id: &str) -> Result<String, TeamPortError> {
+        let workspace = self.require_team_workspace(run_id).await?;
+        current_head_sha(&workspace)
+            .await
+            .map_err(TeamPortError::Failed)
+    }
+
+    async fn collect_review_target(
+        &self,
+        run_id: &str,
+        base_sha: &str,
+        candidate_sha: &str,
+    ) -> Result<relay_api::GitReviewTarget, TeamPortError> {
+        let workspace = self.require_team_workspace(run_id).await?;
+        collect_git_review_target(&workspace, base_sha, candidate_sha)
+            .await
+            .map_err(TeamPortError::Failed)
+    }
+
     async fn collect_diff(
         &self,
         run_id: &str,
         base: Option<&str>,
     ) -> Result<String, TeamPortError> {
         let workspace = self.require_team_workspace(run_id).await?;
+        if let Some(base_sha) = base.map(str::trim).filter(|value| !value.is_empty()) {
+            if is_git_work_tree(&workspace)
+                .await
+                .map_err(TeamPortError::Failed)?
+            {
+                let candidate_sha = current_head_sha(&workspace)
+                    .await
+                    .map_err(TeamPortError::Failed)?;
+                let target = collect_git_review_target(&workspace, base_sha, &candidate_sha)
+                    .await
+                    .map_err(TeamPortError::Failed)?;
+                let prior_context = self
+                    .record_team_review_target(run_id, base_sha, &candidate_sha)
+                    .await
+                    .map_err(TeamPortError::Failed)?;
+                return Ok(render_team_review_target(&target, &prior_context));
+            }
+        }
         collect_workspace_diff_against(&workspace, base)
             .await
             .map(|response| render_review_diff(&response))
@@ -3433,6 +3949,106 @@ Treat anything you were not shown as unreviewed.]\n",
         ));
     }
     rendered
+}
+
+fn render_team_review_target(
+    target: &relay_api::GitReviewTarget,
+    prior_context: &[String],
+) -> String {
+    let manifest = if target.manifest.trim().is_empty() {
+        "(no committed file changes in this range)"
+    } else {
+        target.manifest.trim()
+    };
+    let stat = if target.stat.trim().is_empty() {
+        "(no diff stat for this range)"
+    } else {
+        target.stat.trim()
+    };
+    let prior_context = if prior_context.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\nPrior review context to verify against this candidate:\n{}",
+            prior_context
+                .iter()
+                .map(|item| format!("- {item}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    };
+
+    format!(
+        "Committed review target, not a live worktree snapshot.\n\
+Do not review dirty, unstaged, or untracked files in the working tree; they are outside \
+this candidate.\n\
+Working tree: {cwd}\n\
+Base commit: {base}\n\
+Candidate commit: {candidate}\n\
+Range: {base}..{candidate}\n\n\
+Changed-file manifest (`git diff --name-status --find-renames {base} {candidate} --`):\n\
+{manifest}\n\n\
+Diff stat (`git diff --stat --summary --find-renames {base} {candidate} --`):\n\
+{stat}\n\n\
+Inspect the exact objects yourself. Use `git diff --find-renames {base} {candidate} --` \
+for the full patch, `git show {candidate}:<path>` for candidate contents, and \
+`git show {base}:<path>` for old-side contents. For deleted files, inspect the old side \
+with `git show {base}:<path>`; for renames, compare the old and new paths reported in \
+the manifest.{prior_context}",
+        cwd = target.cwd,
+        base = target.base_sha,
+        candidate = target.candidate_sha,
+    )
+}
+
+fn team_sub_task_review_context(task: &relay_api::team::SubTask) -> Vec<String> {
+    task.last_verdict
+        .as_ref()
+        .map(|verdict| verdict.findings.clone())
+        .unwrap_or_default()
+}
+
+fn team_mr_review_context(run: &TeamRun) -> Vec<String> {
+    let mut context = run.mr_review_context.clone();
+    if let Some(verdict) = &run.mr_verdict {
+        context.extend(verdict.findings.iter().cloned());
+    }
+    context
+}
+
+fn team_candidate_commit_prompt(round_base_sha: &str) -> String {
+    format!(
+        "Task Team review needs a committed candidate. Your last developer turn did not \
+advance `HEAD` past `{round_base_sha}`, and the reviewer is not allowed to review a live \
+dirty worktree.\n\n\
+Commit the completed work for this review now in this same repository. Do not make \
+unrelated changes. After committing, reply briefly with the new commit SHA. If there is \
+truly nothing to commit, say that plainly."
+    )
+}
+
+fn team_review_text_approves(review: &str) -> bool {
+    let Some(rest) = review.lines().rev().find_map(|line| {
+        line.trim()
+            .to_ascii_lowercase()
+            .strip_prefix("verdict:")
+            .map(|rest| rest.trim().to_string())
+    }) else {
+        return false;
+    };
+    let token: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphabetic() || *c == '_')
+        .collect();
+    let hedged = rest[token.len()..].trim_start().starts_with('?');
+    matches!(token.as_str(), "approve" | "approved") && !hedged
+}
+
+fn team_port_error_message(error: TeamPortError) -> String {
+    match error {
+        TeamPortError::Blocked(message) | TeamPortError::Failed(message) => message,
+        TeamPortError::Settled => "task run settled before the operation could start".to_string(),
+    }
 }
 
 fn parse_team_mark_status(raw: &str) -> Result<TeamRunStatus, String> {

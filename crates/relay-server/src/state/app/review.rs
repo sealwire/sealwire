@@ -22,10 +22,11 @@ use crate::protocol::{
     TranscriptEntryView,
 };
 use crate::state::{
-    handoff_review_prompt, parent_fix_prompt, parent_recap_prompt, parse_verdict,
-    post_back_message, re_review_prompt, review_approved_message, review_escalated_message,
-    reviewer_prompt, ReviewJob, ReviewJobStatus, ReviewMode, ReviewRecapSource,
-    MAX_REVIEWERS_PER_PARENT,
+    handoff_review_prompt, handoff_review_prompt_for_target, parent_commit_prompt,
+    parent_fix_prompt, parent_recap_prompt, parse_verdict, post_back_message, re_review_prompt,
+    re_review_prompt_for_target, review_approved_message, review_escalated_message,
+    reviewer_prompt, reviewer_prompt_for_target, ReviewJob, ReviewJobStatus, ReviewMode,
+    ReviewRecapSource, MAX_REVIEWERS_PER_PARENT,
 };
 
 use super::*;
@@ -106,6 +107,40 @@ enum RecapOutcome {
     WorkspaceGone,
     /// The job has already been failed or blocked; the orchestrator must stop.
     Aborted,
+}
+
+enum AuthorTurnOutcome {
+    Completed(String),
+    WorkspaceGone,
+    Aborted,
+}
+
+enum RoundEvidence {
+    Committed(relay_api::GitReviewTarget),
+    WorkspaceDiff(crate::protocol::WorkspaceDiffResponse),
+}
+
+impl RoundEvidence {
+    fn generated_at(&self) -> u64 {
+        match self {
+            Self::Committed(target) => target.generated_at,
+            Self::WorkspaceDiff(diff) => diff.generated_at,
+        }
+    }
+
+    fn truncated(&self) -> bool {
+        match self {
+            Self::Committed(_) => false,
+            Self::WorkspaceDiff(diff) => diff.truncated,
+        }
+    }
+
+    fn candidate_sha(&self) -> Option<&str> {
+        match self {
+            Self::Committed(target) => Some(target.candidate_sha.as_str()),
+            Self::WorkspaceDiff(_) => None,
+        }
+    }
 }
 
 /// Failure to drive a provider thread, separated by whether the thread's immutable
@@ -735,24 +770,25 @@ last message (no recap turn)."
             };
             // Resilient: resolving the tree and reading it are two steps, and the cleanup
             // that removes these worktrees can land in between — losing that race must not
-            // resurface the raw ENOENT.
-            let (diff, workspace, round_cwd) = match self
-                .collect_round_diff(workspace, &parent_thread_id, &device_id)
+            // resurface the raw ENOENT. Git workspaces produce committed review targets;
+            // non-git workspaces keep the legacy read-only working-tree briefing.
+            let (evidence, workspace, round_cwd) = match self
+                .collect_round_evidence(&job_id, workspace, &mut parent_thread_id, &device_id)
                 .await
             {
                 Ok(collected) => collected,
                 Err(error) => {
                     self.fail_job(
                         &job_id,
-                        format!("failed to collect the workspace diff: {error}"),
+                        format!("failed to collect the review target: {error}"),
                     )
                     .await;
                     return;
                 }
             };
             {
-                let generated_at = diff.generated_at;
-                let truncated = diff.truncated;
+                let generated_at = evidence.generated_at();
+                let truncated = evidence.truncated();
                 self.update_job(&job_id, |job| {
                     job.workspace_diff_generated_at = Some(generated_at);
                     job.workspace_diff_truncated = truncated;
@@ -959,23 +995,47 @@ reviewer ({error}); re-resolving the workspace and retrying the round."
             // reviewer thread itself sits in a different tree (a reused reviewer cannot be
             // moved). Built here, after the reviewer id is known.
             let workspace_line = self.describe_review_workspace(&workspace);
-            let prompt = match (reuse_existing, previous_review.as_deref()) {
+            let prompt = match (&evidence, reuse_existing, previous_review.as_deref()) {
                 // Same thread: its own transcript holds the prior review.
-                (true, _) => {
-                    re_review_prompt(&recap, &diff, instructions.as_deref(), &workspace_line)
-                }
-                // A REPLACEMENT reviewer has none of that history, so hand the findings over.
-                (false, Some(previous)) => handoff_review_prompt(
+                (RoundEvidence::Committed(target), true, _) => re_review_prompt_for_target(
                     &recap,
-                    &diff,
+                    target,
                     instructions.as_deref(),
                     &workspace_line,
-                    previous,
                 ),
-                (false, None) => {
-                    reviewer_prompt(&recap, &diff, instructions.as_deref(), &workspace_line)
+                // A REPLACEMENT reviewer has none of that history, so hand the findings over.
+                (RoundEvidence::Committed(target), false, Some(previous)) => {
+                    handoff_review_prompt_for_target(
+                        &recap,
+                        target,
+                        instructions.as_deref(),
+                        &workspace_line,
+                        previous,
+                    )
+                }
+                (RoundEvidence::Committed(target), false, None) => reviewer_prompt_for_target(
+                    &recap,
+                    target,
+                    instructions.as_deref(),
+                    &workspace_line,
+                ),
+                (RoundEvidence::WorkspaceDiff(diff), true, _) => {
+                    re_review_prompt(&recap, diff, instructions.as_deref(), &workspace_line)
+                }
+                (RoundEvidence::WorkspaceDiff(diff), false, Some(previous)) => {
+                    handoff_review_prompt(
+                        &recap,
+                        diff,
+                        instructions.as_deref(),
+                        &workspace_line,
+                        previous,
+                    )
+                }
+                (RoundEvidence::WorkspaceDiff(diff), false, None) => {
+                    reviewer_prompt(&recap, diff, instructions.as_deref(), &workspace_line)
                 }
             };
+            let prompt_candidate_sha = evidence.candidate_sha().map(str::to_string);
             let reviewer_baseline = self
                 .latest_assistant_entry(&this_reviewer_id)
                 .await
@@ -1060,7 +1120,7 @@ started ({error}); re-resolving the workspace and retrying the round."
                 .await
                 .unwrap_or(current_id);
             reviewer_thread_id = Some(current_id.clone());
-            let review = match self.latest_assistant_entry(&current_id).await {
+            let mut review = match self.latest_assistant_entry(&current_id).await {
                 Some((item_id, text)) if reviewer_baseline.as_deref() != Some(item_id.as_str()) => {
                     text
                 }
@@ -1070,17 +1130,49 @@ started ({error}); re-resolving the workspace and retrying the round."
                     return;
                 }
             };
-            let verdict = parse_verdict(&review);
+            let mut verdict = parse_verdict(&review);
+            let mut stale_approval = false;
+            if verdict.is_approved() {
+                if let Some(candidate_sha) = prompt_candidate_sha.as_deref() {
+                    match self.current_head_for_review_cwd(&round_cwd).await {
+                        Ok(Some(head)) if head != candidate_sha => {
+                            review = format!(
+                                "The reviewer approved committed candidate `{candidate_sha}`, \
+but the reviewed workspace is now at `{head}`. That approval is stale and cannot \
+complete this review; the new `HEAD` must be reviewed as a fresh committed candidate.\n\n\
+{review}"
+                            );
+                            stale_approval = true;
+                            verdict = crate::state::Verdict::NeedsChanges;
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            self.fail_job(
+                                &job_id,
+                                format!("failed to verify the approved candidate: {error}"),
+                            )
+                            .await;
+                            return;
+                        }
+                    }
+                }
+            }
             // Remembered for a possible REPLACEMENT reviewer next round: a fresh thread has
             // none of this in its transcript.
             previous_review = Some(review.clone());
             {
                 let review = review.clone();
                 let verdict_str = verdict.as_str().to_string();
+                let verdict_candidate_sha = if verdict.is_approved() {
+                    prompt_candidate_sha.clone()
+                } else {
+                    None
+                };
                 self.update_job(&job_id, |job| {
                     job.review_text = Some(review);
                     job.round = round;
                     job.verdict = Some(verdict_str);
+                    job.verdict_candidate_sha = verdict_candidate_sha;
                 })
                 .await;
             }
@@ -1131,10 +1223,31 @@ started ({error}); re-resolving the workspace and retrying the round."
                 .await;
                 return;
             }
+            if stale_approval {
+                self.push_runtime_log(
+                    "info",
+                    format!(
+                        "Review {job_id}: approval was stale because HEAD moved after the \
+reviewer prompt; starting another review round for the current committed candidate."
+                    ),
+                )
+                .await;
+                continue;
+            }
 
             // --- not approved, rounds remain: drive the parent to address findings ---
             self.set_job_status(&job_id, ReviewJobStatus::AddressingFindings)
                 .await;
+            let round_base_sha = match self
+                .record_review_round_base(&job_id, &parent_thread_id, &device_id)
+                .await
+            {
+                Ok(value) => value,
+                Err(error) => {
+                    self.fail_job(&job_id, error).await;
+                    return;
+                }
+            };
             let fix_prompt = parent_fix_prompt(&reviewer_provider, &review, round, max_rounds);
             // The verdict/post-back decision ran outside a wait checkpoint; re-check so a
             // cancel can't trigger an orphaned author fix turn (which would edit code).
@@ -1230,6 +1343,24 @@ started ({error}); finishing with round {round}'s findings."
             // "Codex reviews Claude never gets a round 2" bug). The workspace diff we
             // collect at the top of the next round is the authoritative signal of
             // what actually changed.
+            if let Some(round_base_sha) = round_base_sha {
+                match self
+                    .ensure_review_candidate_advanced(
+                        &job_id,
+                        &mut parent_thread_id,
+                        &device_id,
+                        &round_base_sha,
+                    )
+                    .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => return,
+                    Err(error) => {
+                        self.fail_job(&job_id, error).await;
+                        return;
+                    }
+                }
+            }
         }
     }
 
@@ -1453,6 +1584,17 @@ started ({error}); finishing with round {round}'s findings."
         relay.notify();
     }
 
+    async fn current_head_for_review_cwd(&self, cwd: &str) -> Result<Option<String>, String> {
+        let grants = { self.relay.read().await.trust_grants() };
+        let Some(workspace) = grants.admit(cwd).await.trusted().cloned() else {
+            return Err(format!("{cwd} is not a granted workspace"));
+        };
+        if !is_git_work_tree(&workspace).await? {
+            return Ok(None);
+        }
+        current_head_sha(&workspace).await.map(Some)
+    }
+
     /// Per-round so a vanished/moved worktree does not strand the loop. Delegates to `resolve_thread_workspace`.
     pub(super) async fn resolve_review_workspace(
         &self,
@@ -1486,9 +1628,281 @@ started ({error}); finishing with round {round}'s findings."
         })
     }
 
-    /// Read this round's diff, re-resolving once if the tree disappeared between the resolve
-    /// that chose it and the git spawn that reads it (the cleanup task that removes these
-    /// worktrees races the review loop). Returns the diff with the workspace actually used.
+    /// Read this round's review target, re-resolving once if the tree disappeared between
+    /// the resolve that chose it and the git spawn that reads it. Git workspaces return
+    /// committed `base..candidate` evidence; non-git workspaces return the legacy diff.
+    async fn collect_round_evidence(
+        &self,
+        job_id: &str,
+        workspace: ReviewWorkspace,
+        parent_thread_id: &mut String,
+        device_id: &str,
+    ) -> Result<(RoundEvidence, ReviewWorkspace, String), String> {
+        let cwd = workspace.cwd.clone();
+        match self
+            .collect_committed_round_evidence(job_id, &workspace, parent_thread_id, device_id)
+            .await
+        {
+            Ok(Some(target)) => Ok((RoundEvidence::Committed(target), workspace, cwd)),
+            Ok(None) => self
+                .collect_round_diff(workspace, parent_thread_id, device_id)
+                .await
+                .map(|(diff, workspace, cwd)| (RoundEvidence::WorkspaceDiff(diff), workspace, cwd)),
+            Err(error) if !dir_exists(&cwd) => {
+                let retried = self
+                    .resolve_review_workspace(parent_thread_id, device_id)
+                    .await?;
+                let cwd = retried.cwd.clone();
+                match self
+                    .collect_committed_round_evidence(job_id, &retried, parent_thread_id, device_id)
+                    .await
+                {
+                    Ok(Some(target)) => Ok((RoundEvidence::Committed(target), retried, cwd)),
+                    Ok(None) => self
+                        .collect_round_diff(retried, parent_thread_id, device_id)
+                        .await
+                        .map(|(diff, workspace, cwd)| {
+                            (RoundEvidence::WorkspaceDiff(diff), workspace, cwd)
+                        }),
+                    Err(retry_error) => Err(format!(
+                        "{error}; retrying in {cwd} also failed: {retry_error}"
+                    )),
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn collect_committed_round_evidence(
+        &self,
+        job_id: &str,
+        workspace: &ReviewWorkspace,
+        parent_thread_id: &mut String,
+        device_id: &str,
+    ) -> Result<Option<relay_api::GitReviewTarget>, String> {
+        let grants = { self.relay.read().await.trust_grants() };
+        let Some(trusted) = grants.admit(&workspace.cwd).await.trusted().cloned() else {
+            return Err(format!(
+                "{} is not a granted workspace, so it cannot be reviewed",
+                workspace.cwd
+            ));
+        };
+        if !is_git_work_tree(&trusted).await? {
+            return Ok(None);
+        }
+
+        let existing_base = self
+            .relay
+            .read()
+            .await
+            .review_job(job_id)
+            .and_then(|job| job.base_sha.clone());
+        let current_head = current_head_sha(&trusted).await?;
+        let mut target_workspace = trusted.clone();
+        let (base_sha, candidate_sha) = if let Some(base_sha) = existing_base {
+            (base_sha, current_head)
+        } else if has_uncommitted_changes(&trusted).await? && workspace.fallback_from.is_none() {
+            let round_base = current_head;
+            self.update_job(job_id, |job| {
+                job.base_sha = Some(round_base.clone());
+                job.round_base_sha = Some(round_base.clone());
+            })
+            .await;
+            match self
+                .drive_parent_commit_prompt(job_id, parent_thread_id, &round_base)
+                .await
+            {
+                AuthorTurnOutcome::Completed(promoted) => {
+                    *parent_thread_id = promoted;
+                }
+                AuthorTurnOutcome::WorkspaceGone => {}
+                AuthorTurnOutcome::Aborted => return Err("the author commit turn aborted".into()),
+            }
+            let refreshed = self
+                .resolve_review_workspace(parent_thread_id, device_id)
+                .await?;
+            let Some(refreshed_trusted) = grants.admit(&refreshed.cwd).await.trusted().cloned()
+            else {
+                return Err(format!(
+                    "{} is not a granted workspace, so it cannot be reviewed",
+                    refreshed.cwd
+                ));
+            };
+            if !is_git_work_tree(&refreshed_trusted).await? {
+                return Ok(None);
+            }
+            let candidate = current_head_sha(&refreshed_trusted).await?;
+            if candidate == round_base {
+                return Err(format!(
+                    "the author did not create a commit after `{round_base}`; review requires a committed candidate"
+                ));
+            }
+            target_workspace = refreshed_trusted;
+            (round_base, candidate)
+        } else {
+            let base = first_parent_sha(&trusted, &current_head)
+                .await?
+                .unwrap_or_else(|| current_head.clone());
+            (base, current_head)
+        };
+
+        let target =
+            collect_git_review_target(&target_workspace, &base_sha, &candidate_sha).await?;
+        self.update_job(job_id, |job| {
+            if job.base_sha.is_none() {
+                job.base_sha = Some(base_sha.clone());
+            }
+            job.candidate_sha = Some(candidate_sha.clone());
+        })
+        .await;
+        Ok(Some(target))
+    }
+
+    async fn record_review_round_base(
+        &self,
+        job_id: &str,
+        parent_thread_id: &str,
+        device_id: &str,
+    ) -> Result<Option<String>, String> {
+        let workspace = self
+            .resolve_review_workspace(parent_thread_id, device_id)
+            .await?;
+        let grants = { self.relay.read().await.trust_grants() };
+        let Some(trusted) = grants.admit(&workspace.cwd).await.trusted().cloned() else {
+            return Err(format!(
+                "{} is not a granted workspace, so it cannot be reviewed",
+                workspace.cwd
+            ));
+        };
+        if !is_git_work_tree(&trusted).await? {
+            return Ok(None);
+        }
+        let round_base = current_head_sha(&trusted).await?;
+        self.update_job(job_id, |job| {
+            job.round_base_sha = Some(round_base.clone());
+            job.verdict_candidate_sha = None;
+        })
+        .await;
+        Ok(Some(round_base))
+    }
+
+    async fn ensure_review_candidate_advanced(
+        &self,
+        job_id: &str,
+        parent_thread_id: &mut String,
+        device_id: &str,
+        round_base_sha: &str,
+    ) -> Result<bool, String> {
+        let mut head = self
+            .current_review_head(parent_thread_id, device_id)
+            .await?;
+        if head.as_deref() == Some(round_base_sha) {
+            match self
+                .drive_parent_commit_prompt(job_id, parent_thread_id, round_base_sha)
+                .await
+            {
+                AuthorTurnOutcome::Completed(promoted) => {
+                    *parent_thread_id = promoted;
+                }
+                AuthorTurnOutcome::WorkspaceGone => return Ok(true),
+                AuthorTurnOutcome::Aborted => return Ok(false),
+            }
+            head = self
+                .current_review_head(parent_thread_id, device_id)
+                .await?;
+        }
+        let Some(candidate) = head else {
+            return Ok(true);
+        };
+        if candidate == round_base_sha {
+            return Err(format!(
+                "the author did not create a commit after `{round_base_sha}`; review requires a committed candidate"
+            ));
+        }
+        self.update_job(job_id, |job| {
+            job.candidate_sha = Some(candidate);
+        })
+        .await;
+        Ok(true)
+    }
+
+    async fn current_review_head(
+        &self,
+        parent_thread_id: &str,
+        device_id: &str,
+    ) -> Result<Option<String>, String> {
+        let workspace = self
+            .resolve_review_workspace(parent_thread_id, device_id)
+            .await?;
+        let grants = { self.relay.read().await.trust_grants() };
+        let Some(trusted) = grants.admit(&workspace.cwd).await.trusted().cloned() else {
+            return Err(format!(
+                "{} is not a granted workspace, so it cannot be reviewed",
+                workspace.cwd
+            ));
+        };
+        if !is_git_work_tree(&trusted).await? {
+            return Ok(None);
+        }
+        current_head_sha(&trusted).await.map(Some)
+    }
+
+    async fn drive_parent_commit_prompt(
+        &self,
+        job_id: &str,
+        parent_thread_id: &str,
+        round_base_sha: &str,
+    ) -> AuthorTurnOutcome {
+        let prompt = parent_commit_prompt(round_base_sha);
+        let dispatched = match self
+            .send_message_to_thread(parent_thread_id, &prompt, None, None)
+            .await
+        {
+            Ok(dispatched) if dispatched.turn_id.is_some() => dispatched,
+            Ok(dispatched) => {
+                self.fail_after_uncertain_turn_start(
+                    job_id,
+                    &dispatched.thread_id,
+                    "the author did not return a turn id for the commit",
+                )
+                .await;
+                return AuthorTurnOutcome::Aborted;
+            }
+            Err(error) if error.is_workspace_gone() => return AuthorTurnOutcome::WorkspaceGone,
+            Err(error) => {
+                self.fail_after_uncertain_turn_start(
+                    job_id,
+                    &self.dispatched_thread_id(parent_thread_id).await,
+                    format!("failed to ask the author to commit the candidate: {error}"),
+                )
+                .await;
+                return AuthorTurnOutcome::Aborted;
+            }
+        };
+        match self
+            .wait_for_thread_idle_outcome(job_id, &dispatched.thread_id)
+            .await
+        {
+            WaitOutcome::Completed => AuthorTurnOutcome::Completed(dispatched.thread_id),
+            WaitOutcome::Cancelled => AuthorTurnOutcome::Aborted,
+            WaitOutcome::FailedApproval | WaitOutcome::FailedAskUser | WaitOutcome::TimedOut => {
+                if self
+                    .stop_thread_or_block(job_id, &dispatched.thread_id)
+                    .await
+                {
+                    self.fail_job(
+                        job_id,
+                        "the author could not commit the review candidate automatically",
+                    )
+                    .await;
+                }
+                AuthorTurnOutcome::Aborted
+            }
+        }
+    }
+
+    /// Read this round's legacy working-tree diff, re-resolving once if the tree disappeared
+    /// between the resolve that chose it and the git spawn that reads it.
     async fn collect_round_diff(
         &self,
         workspace: ReviewWorkspace,
@@ -2579,7 +2993,7 @@ unlocked."
 /// read_only_enforced)`.
 pub(super) fn reviewer_thread_settings(
     provider: &str,
-    parent_approval: &str,
+    _parent_approval: &str,
     parent_sandbox: &str,
 ) -> (String, String, bool) {
     match provider {
