@@ -46,77 +46,40 @@ use sha2::{Digest, Sha256};
 /// journal length — those two alone miss an eviction-driven replacement (a
 /// rejection that evicts one record and pushes another: same length, same
 /// revision, different content).
+#[cfg(test)]
 pub(crate) fn apply_team_command(
     run: &mut TeamRun,
     run_id: &str,
     envelope: TeamCommandEnvelope,
 ) -> (TeamCommandReceipt, bool) {
+    let effective_command = envelope.command.clone();
+    apply_team_command_with_effective(run, run_id, envelope, effective_command)
+}
+
+/// Apply an envelope whose host-side asynchronous guard selected a different
+/// effective lifecycle transition. Identity, ordering, bounds and the durable
+/// record all belong to the ORIGINAL submitted envelope; only `apply_effects`
+/// receives `effective_command`. This keeps the reducer the sole mutation seam
+/// while allowing quiescence checks to stay outside its synchronous lock hold.
+pub(crate) fn apply_team_command_with_effective(
+    run: &mut TeamRun,
+    run_id: &str,
+    envelope: TeamCommandEnvelope,
+    effective_command: TeamStateCommand,
+) -> (TeamCommandReceipt, bool) {
+    if let Some(receipt) = preflight_team_command_identity(run, run_id, &envelope) {
+        return (receipt, false);
+    }
+
     let fingerprint = compute_fingerprint(run_id, &envelope);
     let TeamCommandEnvelope {
         protocol_version,
         command_id,
         sequence,
         expected_revision,
-        command,
+        command: original_command,
     } = envelope;
-    let kind = command.kind();
-
-    // Inert backend: leave the run completely untouched, not even the
-    // journal — an unsupported/future backend must never look active. First,
-    // so not even an unsupported protocol version can write to it.
-    if !run.is_executable_by_current_build() {
-        return (
-            snapshot_receipt(
-                run,
-                command_id,
-                sequence,
-                TeamCommandStatus::Rejected(CommandRejection::BackendMismatch),
-            ),
-            false,
-        );
-    }
-
-    // Malformed durable state: refuse with no write of any kind. Journaling
-    // here would append to the very structure that is already untrustworthy,
-    // which stabilizes nothing; writing nothing makes redelivery re-derive
-    // the identical receipt instead.
-    if run.driver_progress.is_malformed() || run.command_journal.is_malformed() {
-        return (
-            snapshot_receipt(
-                run,
-                command_id,
-                sequence,
-                TeamCommandStatus::Rejected(CommandRejection::InvalidState),
-            ),
-            false,
-        );
-    }
-
-    // Journal lookup: replay or reject a content-mismatched duplicate. Ahead
-    // of every journaling check below, so redelivering one doomed envelope
-    // can never accumulate records under a single id. A recovery record's
-    // `fingerprint: None` (D10) matches any digest — the fail-closed "replay
-    // `Interrupted`" behaviour restart recovery needs when the original
-    // envelope's digest was never durably recorded.
-    if let Some(existing) = run.command_journal.find(&command_id).cloned() {
-        let matches = existing
-            .fingerprint
-            .map(|recorded| recorded == fingerprint)
-            .unwrap_or(true);
-        return if matches {
-            (replay_receipt(run, &command_id, sequence, &existing), false)
-        } else {
-            (
-                snapshot_receipt(
-                    run,
-                    command_id,
-                    sequence,
-                    TeamCommandStatus::Rejected(CommandRejection::DuplicateCommand),
-                ),
-                false,
-            )
-        };
-    }
+    let kind = original_command.kind();
 
     if protocol_version != TEAM_COMMAND_PROTOCOL_VERSION {
         return reject_and_journal(
@@ -130,7 +93,20 @@ pub(crate) fn apply_team_command(
         );
     }
 
-    if let Err(reason) = validate_payload(run, &command) {
+    // Bounds are part of the original envelope contract and cannot disappear
+    // merely because an asynchronous host guard selected another transition.
+    if let Err(reason) = validate_payload(run, &original_command) {
+        return reject_and_journal(
+            run,
+            command_id,
+            sequence,
+            kind,
+            fingerprint,
+            expected_revision,
+            reason,
+        );
+    }
+    if let Err(reason) = validate_payload(run, &effective_command) {
         return reject_and_journal(
             run,
             command_id,
@@ -206,7 +182,7 @@ pub(crate) fn apply_team_command(
     // unsettleable. They keep their own guards on the `TeamRun` methods
     // below — `set_status`/`fail` refuse a terminal or user-settled run,
     // `settle_paused` returns false rather than overwriting one.
-    if !command.is_lifecycle_transition() && !command_is_permitted_by_lifecycle(run) {
+    if !original_command.is_lifecycle_transition() && !command_is_permitted_by_lifecycle(run) {
         return reject_and_journal(
             run,
             command_id,
@@ -218,7 +194,7 @@ pub(crate) fn apply_team_command(
         );
     }
 
-    let output = apply_effects(run, &command_id, command);
+    let output = apply_effects(run, &command_id, effective_command);
     // The driver chose its next phase before this turn; a rerun accepted
     // meanwhile is younger than that choice and outranks it. Same call
     // `TeamPort::update_run` made on every mutation.
@@ -248,6 +224,67 @@ pub(crate) fn apply_team_command(
         },
         true,
     )
+}
+
+/// Read-only ordered prefix of the reducer. AppState uses it before awaiting
+/// the settlement quiescence check, so a retained replay or identity collision
+/// wins without consulting transient runtime state. The full reducer repeats
+/// this prefix under its write lock, closing the race with another submission.
+pub(crate) fn preflight_team_command_identity(
+    run: &TeamRun,
+    run_id: &str,
+    envelope: &TeamCommandEnvelope,
+) -> Option<TeamCommandReceipt> {
+    let fingerprint = compute_fingerprint(run_id, envelope);
+    let command_id = envelope.command_id.clone();
+    let sequence = envelope.sequence;
+
+    // Inert backend: leave the run completely untouched, not even the
+    // journal — an unsupported/future backend must never look active. First,
+    // so not even an unsupported protocol version can write to it.
+    if !run.is_executable_by_current_build() {
+        return Some(snapshot_receipt(
+            run,
+            command_id,
+            sequence,
+            TeamCommandStatus::Rejected(CommandRejection::BackendMismatch),
+        ));
+    }
+
+    // Malformed durable state: refuse with no write of any kind. Journaling
+    // here would append to the very structure that is already untrustworthy,
+    // which stabilizes nothing; writing nothing makes redelivery re-derive
+    // the identical receipt instead.
+    if run.driver_progress.is_malformed() || run.command_journal.is_malformed() {
+        return Some(snapshot_receipt(
+            run,
+            command_id,
+            sequence,
+            TeamCommandStatus::Rejected(CommandRejection::InvalidState),
+        ));
+    }
+
+    // Journal lookup: replay or reject a content-mismatched duplicate. Ahead
+    // of every journaling check below, so redelivering one doomed envelope
+    // can never accumulate records under a single id. A recovery record's
+    // `fingerprint: None` (D10) matches any digest — the fail-closed "replay
+    // `Interrupted`" behaviour restart recovery needs when the original
+    // envelope's digest was never durably recorded.
+    let existing = run.command_journal.find(&command_id)?.clone();
+    let matches = existing
+        .fingerprint
+        .map(|recorded| recorded == fingerprint)
+        .unwrap_or(true);
+    Some(if matches {
+        replay_receipt(run, &command_id, sequence, &existing)
+    } else {
+        snapshot_receipt(
+            run,
+            command_id,
+            sequence,
+            TeamCommandStatus::Rejected(CommandRejection::DuplicateCommand),
+        )
+    })
 }
 
 fn snapshot_receipt(

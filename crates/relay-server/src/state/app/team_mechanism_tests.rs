@@ -83,6 +83,58 @@ async fn test_settle_run(
     .await;
 }
 
+fn exact_team_envelope(
+    command_id: &str,
+    sequence: u64,
+    expected_revision: u64,
+    command: relay_api::team_command::TeamStateCommand,
+) -> relay_api::team_command::TeamCommandEnvelope {
+    relay_api::team_command::TeamCommandEnvelope {
+        protocol_version: relay_api::team_command::TEAM_COMMAND_PROTOCOL_VERSION,
+        command_id: relay_api::orchestration::CommandId::new(command_id).unwrap(),
+        sequence,
+        expected_revision,
+        command,
+    }
+}
+
+async fn insert_command_test_run(
+    app: &AppState,
+    provider: &ReviewTestProvider,
+    root: &str,
+    run_id: &str,
+    status: crate::state::TeamRunStatus,
+    thread_status: &str,
+) -> String {
+    let thread_id = format!("codex-owned-{run_id}");
+    let summary = provider.summary(&thread_id, root);
+    provider
+        .threads
+        .lock()
+        .await
+        .insert(thread_id.clone(), summary.clone());
+    let mut run = crate::state::TeamRun::new(
+        run_id.to_string(),
+        crate::state::TaskSpec::default(),
+        root.to_string(),
+        "device-1".to_string(),
+    );
+    run.status = status;
+    run.record_run_thread(thread_id.clone());
+    let mut relay = app.relay.write().await;
+    relay.register_background_thread(
+        summary,
+        root,
+        "codex-model",
+        "on-request",
+        "workspace-write",
+        "medium",
+    );
+    relay.set_thread_status(&thread_id, thread_status.to_string(), Vec::new());
+    relay.insert_team_run(run);
+    thread_id
+}
+
 async fn init_team_repo() -> (TempDir, String) {
     let dir = TempDir::new().expect("tmpdir");
     let path = dir.path().canonicalize().expect("canonicalize");
@@ -1392,6 +1444,281 @@ async fn submit_command_notifies_for_a_rejected_existing_run_but_not_for_a_missi
         app.snapshot().await.revision,
         before_missing,
         "an unknown run id must not fabricate a state change"
+    );
+}
+
+#[tokio::test]
+async fn blocked_settlement_replays_from_its_original_envelope_after_quiescence_changes() {
+    let (_repo, root) = init_team_repo().await;
+    let (app, providers) = build_review_app(&root, &["codex"]).await;
+    let codex = providers.get("codex").unwrap();
+    let run_id = "team-settle-blocked-replay";
+    let thread_id = insert_command_test_run(
+        &app,
+        codex,
+        &root,
+        run_id,
+        crate::state::TeamRunStatus::Running,
+        "active",
+    )
+    .await;
+    let original = exact_team_envelope(
+        "cmd-settle-blocked",
+        1,
+        0,
+        relay_api::team_command::TeamStateCommand::SettleRun {
+            status: crate::state::TeamRunStatus::Paused,
+            reason: "boundary reached".to_string(),
+            pause_kind: relay_api::team::TeamPauseKind::Boundary,
+        },
+    );
+    let logs_before = app.relay.read().await.logs.len();
+
+    let first = relay_api::TeamPort::submit_command(&app, run_id, original.clone())
+        .await
+        .expect("run exists");
+    assert!(matches!(
+        first.status,
+        relay_api::team_command::TeamCommandStatus::Applied(_)
+    ));
+    let blocked = app.relay.read().await.team_run(run_id).cloned().unwrap();
+    assert_eq!(blocked.status, crate::state::TeamRunStatus::Blocked);
+    assert_eq!(blocked.command_journal.len(), 1);
+    assert_eq!(app.relay.read().await.logs.len(), logs_before + 1);
+    assert!(codex.released_threads().await.is_empty());
+    let blocked_json = serde_json::to_value(&blocked).unwrap();
+
+    app.relay
+        .write()
+        .await
+        .set_thread_status(&thread_id, "idle".to_string(), Vec::new());
+    let replay = relay_api::TeamPort::submit_command(&app, run_id, original)
+        .await
+        .expect("run exists");
+
+    assert_eq!(replay, first, "the original delivery's receipt must replay");
+    assert_eq!(
+        serde_json::to_value(app.relay.read().await.team_run(run_id).unwrap()).unwrap(),
+        blocked_json,
+        "replay must not mutate the run or append another journal record"
+    );
+    assert_eq!(app.relay.read().await.logs.len(), logs_before + 1);
+    tokio::task::yield_now().await;
+    assert!(
+        codex.released_threads().await.is_empty(),
+        "a blocked transition and its replay keep the seat locked"
+    );
+}
+
+#[tokio::test]
+async fn applied_settlement_replays_before_later_runtime_liveness_can_change_it() {
+    let (_repo, root) = init_team_repo().await;
+    let (app, providers) = build_review_app(&root, &["codex"]).await;
+    let codex = providers.get("codex").unwrap();
+    let run_id = "team-settle-applied-replay";
+    let thread_id = insert_command_test_run(
+        &app,
+        codex,
+        &root,
+        run_id,
+        crate::state::TeamRunStatus::Running,
+        "idle",
+    )
+    .await;
+    let original = exact_team_envelope(
+        "cmd-settle-applied",
+        1,
+        0,
+        relay_api::team_command::TeamStateCommand::SettleRun {
+            status: crate::state::TeamRunStatus::Paused,
+            reason: "boundary reached".to_string(),
+            pause_kind: relay_api::team::TeamPauseKind::Boundary,
+        },
+    );
+
+    let first = relay_api::TeamPort::submit_command(&app, run_id, original.clone())
+        .await
+        .expect("run exists");
+    let released = wait_for_released_threads(codex, std::slice::from_ref(&thread_id)).await;
+    assert_eq!(released, vec![thread_id.clone()]);
+    let settled = app.relay.read().await.team_run(run_id).cloned().unwrap();
+    assert_eq!(settled.status, crate::state::TeamRunStatus::Paused);
+    let settled_json = serde_json::to_value(&settled).unwrap();
+    let logs_before_replay = app.relay.read().await.logs.len();
+
+    app.relay
+        .write()
+        .await
+        .set_thread_status(&thread_id, "active".to_string(), Vec::new());
+    let replay = relay_api::TeamPort::submit_command(&app, run_id, original)
+        .await
+        .expect("run exists");
+
+    assert_eq!(replay, first);
+    assert_eq!(
+        serde_json::to_value(app.relay.read().await.team_run(run_id).unwrap()).unwrap(),
+        settled_json
+    );
+    assert_eq!(app.relay.read().await.logs.len(), logs_before_replay);
+    sleep(Duration::from_millis(25)).await;
+    assert_eq!(
+        codex.released_threads().await,
+        vec![thread_id],
+        "a replay must not release an already-settled seat a second time"
+    );
+}
+
+#[tokio::test]
+async fn changed_original_settlement_content_is_a_duplicate_even_when_guard_rewrite_matches() {
+    let (_repo, root) = init_team_repo().await;
+    let (app, providers) = build_review_app(&root, &["codex"]).await;
+    let codex = providers.get("codex").unwrap();
+    let run_id = "team-settle-original-collision";
+    insert_command_test_run(
+        &app,
+        codex,
+        &root,
+        run_id,
+        crate::state::TeamRunStatus::Running,
+        "active",
+    )
+    .await;
+    let first_envelope = exact_team_envelope(
+        "cmd-settle-collision",
+        1,
+        0,
+        relay_api::team_command::TeamStateCommand::SettleRun {
+            status: crate::state::TeamRunStatus::Paused,
+            reason: "first reason".to_string(),
+            pause_kind: relay_api::team::TeamPauseKind::Boundary,
+        },
+    );
+    relay_api::TeamPort::submit_command(&app, run_id, first_envelope)
+        .await
+        .unwrap();
+    let blocked = app.relay.read().await.team_run(run_id).cloned().unwrap();
+    let blocked_json = serde_json::to_value(&blocked).unwrap();
+    let logs_after_first = app.relay.read().await.logs.len();
+
+    let collision = relay_api::TeamPort::submit_command(
+        &app,
+        run_id,
+        exact_team_envelope(
+            "cmd-settle-collision",
+            1,
+            0,
+            relay_api::team_command::TeamStateCommand::SettleRun {
+                status: crate::state::TeamRunStatus::Paused,
+                reason: "genuinely different original content".to_string(),
+                pause_kind: relay_api::team::TeamPauseKind::Boundary,
+            },
+        ),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        collision.status,
+        relay_api::team_command::TeamCommandStatus::Rejected(
+            relay_api::orchestration::CommandRejection::DuplicateCommand
+        )
+    );
+    assert_eq!(
+        serde_json::to_value(app.relay.read().await.team_run(run_id).unwrap()).unwrap(),
+        blocked_json
+    );
+    assert_eq!(app.relay.read().await.logs.len(), logs_after_first);
+    assert!(codex.released_threads().await.is_empty());
+}
+
+#[tokio::test]
+async fn lifecycle_guarded_noops_do_not_log_or_release_seats() {
+    let (_repo, root) = init_team_repo().await;
+    let (app, providers) = build_review_app(&root, &["codex"]).await;
+    let codex = providers.get("codex").unwrap();
+    let run_id = "team-lifecycle-guarded-noop";
+    insert_command_test_run(
+        &app,
+        codex,
+        &root,
+        run_id,
+        crate::state::TeamRunStatus::Cancelled,
+        "idle",
+    )
+    .await;
+    let logs_before = app.relay.read().await.logs.len();
+
+    let receipt = relay_api::TeamPort::submit_command(
+        &app,
+        run_id,
+        exact_team_envelope(
+            "cmd-fail-terminal",
+            1,
+            0,
+            relay_api::team_command::TeamStateCommand::FailRun {
+                error: "must not replace cancellation".to_string(),
+            },
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        receipt.status,
+        relay_api::team_command::TeamCommandStatus::Applied(_)
+    ));
+    assert_eq!(
+        app.relay.read().await.team_run(run_id).unwrap().status,
+        crate::state::TeamRunStatus::Cancelled
+    );
+    assert_eq!(
+        app.relay.read().await.logs.len(),
+        logs_before,
+        "a guarded fail no-op must not claim the task failed"
+    );
+    sleep(Duration::from_millis(25)).await;
+    assert!(
+        codex.released_threads().await.is_empty(),
+        "a guarded no-op must not release for a status it never reached"
+    );
+}
+
+#[tokio::test]
+async fn an_already_paused_settle_command_does_not_release_again() {
+    let (_repo, root) = init_team_repo().await;
+    let (app, providers) = build_review_app(&root, &["codex"]).await;
+    let codex = providers.get("codex").unwrap();
+    let run_id = "team-settle-paused-noop";
+    insert_command_test_run(
+        &app,
+        codex,
+        &root,
+        run_id,
+        crate::state::TeamRunStatus::Paused,
+        "idle",
+    )
+    .await;
+
+    relay_api::TeamPort::submit_command(
+        &app,
+        run_id,
+        exact_team_envelope(
+            "cmd-settle-paused-noop",
+            1,
+            0,
+            relay_api::team_command::TeamStateCommand::SettleRun {
+                status: crate::state::TeamRunStatus::Paused,
+                reason: "already paused".to_string(),
+                pause_kind: relay_api::team::TeamPauseKind::Boundary,
+            },
+        ),
+    )
+    .await
+    .unwrap();
+
+    sleep(Duration::from_millis(25)).await;
+    assert!(
+        codex.released_threads().await.is_empty(),
+        "settle_paused returned false, so no release post-action may fire"
     );
 }
 

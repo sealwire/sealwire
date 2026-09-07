@@ -1030,37 +1030,92 @@ impl TeamRun {
     ///   as a collision) but it still fails closed, because `Interrupted` is
     ///   a refusal rather than an application.
     fn recover_stranded_in_flight_command(&mut self) -> bool {
-        let record = match self.in_flight_command.take() {
-            Some(in_flight) => in_flight.into_interrupted_record(),
+        // Consume both eras up front. A typed marker is authoritative because
+        // it carries the original identity; a legacy marker beside it is only
+        // compatible when it names that same command.
+        let typed = self.in_flight_command.take();
+        let legacy_id = self.driver_progress.in_flight_command_id.take();
+        let (record, has_typed_identity) = match typed {
+            Some(in_flight) => {
+                let record = in_flight.into_interrupted_record();
+                if legacy_id
+                    .as_ref()
+                    .is_some_and(|legacy| legacy != &record.command_id)
+                {
+                    self.driver_progress.last_command_seq =
+                        self.driver_progress.last_command_seq.max(record.sequence);
+                    self.command_journal.mark_malformed();
+                    return true;
+                }
+                (record, true)
+            }
             None => {
-                let Some(command_id) = self.driver_progress.in_flight_command_id.take() else {
+                let Some(command_id) = legacy_id else {
                     return false;
                 };
-                TeamCommandRecord {
-                    command_id,
-                    sequence: self.driver_progress.last_command_seq,
-                    kind: TeamCommandKind::Unknown,
-                    fingerprint: None,
-                    expected_revision: self.driver_progress.state_revision,
-                    state_revision: self.driver_progress.state_revision,
-                    last_event_seq: self.driver_progress.last_event_seq,
-                    outcome: TeamCommandOutcome::Interrupted,
-                }
+                (
+                    TeamCommandRecord {
+                        command_id,
+                        sequence: self.driver_progress.last_command_seq,
+                        kind: TeamCommandKind::Unknown,
+                        fingerprint: None,
+                        expected_revision: self.driver_progress.state_revision,
+                        state_revision: self.driver_progress.state_revision,
+                        last_event_seq: self.driver_progress.last_event_seq,
+                        outcome: TeamCommandOutcome::Interrupted,
+                    },
+                    false,
+                )
             }
         };
-        // Both markers are consumed either way: leaving the legacy id set
-        // beside a typed record would recover the same command twice.
-        self.driver_progress.in_flight_command_id = None;
+
+        // An interrupted sequence is spent even though its effect is unknown.
+        // `max` needs no successor arithmetic, so a recovered MAX watermark is
+        // a stable exhausted state rather than a wrap to zero.
+        self.driver_progress.last_command_seq =
+            self.driver_progress.last_command_seq.max(record.sequence);
+
+        // A malformed journal has no trustworthy identity lookup or eviction
+        // order. Consume the marker but do not add plausible-looking data to it.
+        if self.command_journal.is_malformed() {
+            return true;
+        }
+
+        if let Some(existing) = self.command_journal.find(&record.command_id) {
+            // The common case is a crash after writing the terminal record but
+            // before clearing the marker. For typed state, retain it only when
+            // the original command identity agrees. Receipt counters/outcome
+            // may legitimately differ: the existing record is the completed
+            // write and therefore authoritative. A legacy id has no identity
+            // beyond the id, so retaining the existing fail-closed record is
+            // the only deterministic choice.
+            let compatible = !has_typed_identity
+                || (existing.fingerprint == record.fingerprint
+                    && existing.sequence == record.sequence
+                    && existing.kind == record.kind
+                    && existing.expected_revision == record.expected_revision);
+            if !compatible {
+                self.command_journal.mark_malformed();
+            }
+            return true;
+        }
+
         // Make room rather than overflow. A journal restored one record over
         // the cap fails closed on the NEXT load, which would turn a
         // successful recovery into a permanently malformed run.
         while self.command_journal.len() >= MAX_TEAM_COMMAND_JOURNAL {
-            if self
+            let Some(evicted) = self
                 .command_journal
                 .remove_first(|candidate| candidate.command_id != record.command_id)
-                .is_none()
-            {
-                break;
+            else {
+                self.command_journal.mark_malformed();
+                return true;
+            };
+            self.driver_progress.last_command_seq =
+                self.driver_progress.last_command_seq.max(evicted.sequence);
+            if evicted.kind == TeamCommandKind::TakeUserNotes {
+                self.drained_notes
+                    .retain(|entry| entry.command_id != evicted.command_id.as_str());
             }
         }
         self.command_journal.push(record);
@@ -2137,6 +2192,199 @@ mod tests {
             !round_tripped.is_malformed(),
             "a recovered journal must survive its own save/reload"
         );
+    }
+
+    /// A terminal record can already be durable while its in-flight marker is
+    /// still present (the process died between those two writes). Recovery must
+    /// consume the marker and retain that one authoritative record, never append
+    /// a second record under the same id. The rule is identical below and at the
+    /// cap, and applies to both the typed and legacy marker eras.
+    #[test]
+    fn recovery_reuses_a_matching_existing_record_without_manufacturing_a_duplicate() {
+        for typed in [false, true] {
+            for at_cap in [false, true] {
+                let mut run = run_with(TeamPhase::SubTasks, Vec::new());
+                let command_id = crate::orchestration::CommandId::new("cmd-recovered").unwrap();
+                let fingerprint = crate::orchestration::CommandFingerprint::from_digest([7u8; 32]);
+                let sequence = 7;
+                run.driver_progress.last_command_seq = if typed { sequence - 1 } else { sequence };
+                if at_cap {
+                    for index in 0..crate::orchestration::MAX_TEAM_COMMAND_JOURNAL - 1 {
+                        run.command_journal.push(TeamCommandRecord {
+                            command_id: crate::orchestration::CommandId::new(format!(
+                                "cmd-filler-{index}"
+                            ))
+                            .unwrap(),
+                            sequence: index as u64 + 10,
+                            kind: TeamCommandKind::SetPhase,
+                            fingerprint: Some(
+                                crate::orchestration::CommandFingerprint::from_digest([1u8; 32]),
+                            ),
+                            expected_revision: 0,
+                            state_revision: 0,
+                            last_event_seq: 0,
+                            outcome: TeamCommandOutcome::Applied,
+                        });
+                    }
+                }
+                run.command_journal.push(TeamCommandRecord {
+                    command_id: command_id.clone(),
+                    sequence,
+                    kind: TeamCommandKind::SetPhase,
+                    fingerprint: Some(fingerprint),
+                    expected_revision: 3,
+                    state_revision: 4,
+                    last_event_seq: 4,
+                    outcome: TeamCommandOutcome::Applied,
+                });
+                let before_len = run.command_journal.len();
+                if typed {
+                    run.in_flight_command = Some(crate::orchestration::InFlightCommand {
+                        command_id: command_id.clone(),
+                        fingerprint,
+                        kind: TeamCommandKind::SetPhase,
+                        sequence,
+                        expected_revision: 3,
+                        state_revision: 3,
+                        last_event_seq: 3,
+                    });
+                } else {
+                    run.driver_progress.in_flight_command_id = Some(command_id.clone());
+                }
+
+                assert!(run.reconcile_after_restore());
+                assert!(run.in_flight_command.is_none());
+                assert!(run.driver_progress.in_flight_command_id.is_none());
+                assert_eq!(run.command_journal.len(), before_len);
+                assert_eq!(
+                    run.command_journal
+                        .iter()
+                        .filter(|record| record.command_id == command_id)
+                        .count(),
+                    1,
+                    "typed={typed}, at_cap={at_cap}"
+                );
+                assert!(!run.command_journal.is_malformed());
+
+                let restored: TeamRun =
+                    serde_json::from_value(serde_json::to_value(&run).unwrap()).unwrap();
+                assert!(
+                    !restored.command_journal.is_malformed(),
+                    "a resolved duplicate marker must remain valid after reload"
+                );
+                assert_eq!(
+                    restored
+                        .command_journal
+                        .iter()
+                        .filter(|record| record.command_id == command_id)
+                        .count(),
+                    1
+                );
+            }
+        }
+    }
+
+    /// A typed marker gives recovery enough identity to detect contradiction.
+    /// If an existing terminal record under the id describes another original
+    /// command, choosing either would make replay order-dependent; fail the
+    /// journal closed and persist that fact, below or at the cap.
+    #[test]
+    fn contradictory_typed_recovery_marks_the_journal_malformed_durably() {
+        for at_cap in [false, true] {
+            let mut run = run_with(TeamPhase::SubTasks, Vec::new());
+            let command_id = crate::orchestration::CommandId::new("cmd-contradiction").unwrap();
+            if at_cap {
+                for index in 0..crate::orchestration::MAX_TEAM_COMMAND_JOURNAL - 1 {
+                    run.command_journal.push(TeamCommandRecord {
+                        command_id: crate::orchestration::CommandId::new(format!(
+                            "cmd-other-{index}"
+                        ))
+                        .unwrap(),
+                        sequence: index as u64 + 20,
+                        kind: TeamCommandKind::SetPhase,
+                        fingerprint: Some(crate::orchestration::CommandFingerprint::from_digest(
+                            [3u8; 32],
+                        )),
+                        expected_revision: 0,
+                        state_revision: 0,
+                        last_event_seq: 0,
+                        outcome: TeamCommandOutcome::Applied,
+                    });
+                }
+            }
+            run.command_journal.push(TeamCommandRecord {
+                command_id: command_id.clone(),
+                sequence: 9,
+                kind: TeamCommandKind::SetPhase,
+                fingerprint: Some(crate::orchestration::CommandFingerprint::from_digest(
+                    [4u8; 32],
+                )),
+                expected_revision: 2,
+                state_revision: 3,
+                last_event_seq: 3,
+                outcome: TeamCommandOutcome::Applied,
+            });
+            run.in_flight_command = Some(crate::orchestration::InFlightCommand {
+                command_id: command_id.clone(),
+                fingerprint: crate::orchestration::CommandFingerprint::from_digest([5u8; 32]),
+                kind: TeamCommandKind::SetPhase,
+                sequence: 9,
+                expected_revision: 2,
+                state_revision: 2,
+                last_event_seq: 2,
+            });
+
+            assert!(run.reconcile_after_restore());
+            assert!(run.command_journal.is_malformed(), "at_cap={at_cap}");
+            assert!(run.in_flight_command.is_none());
+            assert_eq!(
+                run.command_journal
+                    .iter()
+                    .filter(|record| record.command_id == command_id)
+                    .count(),
+                1,
+                "even contradictory input must not manufacture a duplicate id"
+            );
+
+            let restored: TeamRun =
+                serde_json::from_value(serde_json::to_value(&run).unwrap()).unwrap();
+            assert!(
+                restored.command_journal.is_malformed(),
+                "the fail-closed verdict must survive save/reload"
+            );
+        }
+    }
+
+    /// The in-flight sequence is already spent even though its command never
+    /// completed. Retain that watermark without arithmetic (including MAX), so
+    /// another id can never reuse the interrupted sequence.
+    #[test]
+    fn typed_recovery_consumes_its_sequence_with_a_closed_max_boundary() {
+        for sequence in [7, u64::MAX] {
+            let mut run = run_with(TeamPhase::SubTasks, Vec::new());
+            run.driver_progress.last_command_seq = sequence - 1;
+            run.in_flight_command = Some(crate::orchestration::InFlightCommand {
+                command_id: crate::orchestration::CommandId::new(format!(
+                    "cmd-watermark-{sequence}"
+                ))
+                .unwrap(),
+                fingerprint: crate::orchestration::CommandFingerprint::from_digest([8u8; 32]),
+                kind: TeamCommandKind::SetPhase,
+                sequence,
+                expected_revision: 0,
+                state_revision: 0,
+                last_event_seq: 0,
+            });
+
+            assert!(run.reconcile_after_restore());
+            assert_eq!(run.driver_progress.last_command_seq, sequence);
+            assert!(!run.command_journal.is_malformed());
+
+            let restored: TeamRun =
+                serde_json::from_value(serde_json::to_value(&run).unwrap()).unwrap();
+            assert_eq!(restored.driver_progress.last_command_seq, sequence);
+            assert!(!restored.command_journal.is_malformed());
+        }
     }
 
     #[test]
