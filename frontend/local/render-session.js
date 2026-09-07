@@ -215,11 +215,10 @@ import {
   isDocumentForeground,
 } from "../shared/thread-notify.js";
 import { LocalTranscriptPanel } from "./local-transcript-panel.js";
+import { publishLocalTranscriptSlotContent } from "./transcript-slot.js";
 
 const h = React.createElement;
 const reactRoots = new WeakMap();
-let transcriptRoot = null;
-let transcriptRootElement = null;
 let attentionFocusListenerAttached = false;
 
 function renderReactContent(element, content) {
@@ -243,14 +242,8 @@ function renderConversationContent(content) {
     return;
   }
 
-  if (transcriptRootElement !== transcript) {
-    transcriptRoot?.unmount();
-    transcriptRoot = createRoot(transcript);
-    transcriptRootElement = transcript;
-  }
-
   flushSync(() => {
-    transcriptRoot.render(content);
+    publishLocalTranscriptSlotContent(content);
   });
 }
 
