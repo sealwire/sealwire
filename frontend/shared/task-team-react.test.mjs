@@ -156,6 +156,17 @@ test("the sidebar footer opens the Teams library", () => {
   assert.match(html, /1 team/);
 });
 
+test("a finished task offers one destructive delete action in its detail", () => {
+  const finished = renderToStaticMarkup(
+    h(TaskDetail, { run: run({ status: "done" }), onDelete: () => {} })
+  );
+  assert.match(finished, /Delete task/);
+  assert.match(finished, /task-action is-delete/);
+
+  const live = renderToStaticMarkup(h(TaskDetail, { run: run(), onDelete: () => {} }));
+  assert.doesNotMatch(live, /Delete task/);
+});
+
 test("embedded detail uses the vertical role flow, not the three-up seats", () => {
   const html = renderToStaticMarkup(
     h(TaskDetail, {

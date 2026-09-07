@@ -7,6 +7,7 @@ import {
   currentSubTask,
   groupTeamRuns,
   isTerminalTeamStatus,
+  isTeamRunDeletable,
   needsYou,
   selectTeamRun,
   sortTeamRuns,
@@ -63,7 +64,9 @@ test("a terminal task offers no actions at all", () => {
   for (const status of ["done", "escalated", "failed", "interrupted", "cancelled"]) {
     assert.deepEqual(availableTeamActions(status), [], status);
     assert.equal(isTerminalTeamStatus(status), true, status);
+    assert.equal(isTeamRunDeletable(status), true, status);
   }
+  assert.equal(isTeamRunDeletable("running"), false);
 });
 
 test("a blocked task offers only Unblock", () => {

@@ -339,6 +339,47 @@ impl ClaudeCodeBridge {
             .map(|thread| thread.cwd.clone())
     }
 
+    async fn delete_thread_via_worker(
+        &self,
+        thread_id: &str,
+        allow_missing: bool,
+    ) -> Result<bool, String> {
+        // Pending threads never reached Anthropic. A repeated task delete can
+        // therefore settle an already-removed placeholder without asking the
+        // SDK to parse a synthetic (non-UUID) session id.
+        if self
+            .pending_threads
+            .lock()
+            .await
+            .remove(thread_id)
+            .is_some()
+        {
+            return Ok(true);
+        }
+        if allow_missing && thread_id.starts_with("claude-pending-") {
+            return Ok(false);
+        }
+
+        let real_session_id = self
+            .resolve_real_session_id(thread_id)
+            .unwrap_or_else(|| thread_id.to_string());
+        let cwd = self.cwd_for_thread(thread_id).await;
+        let mut cmd = json!({
+            "provider_session_id": real_session_id,
+            "allow_missing": allow_missing,
+        });
+        if let Some(cwd) = cwd {
+            if let Some(object) = cmd.as_object_mut() {
+                object.insert("cwd".to_string(), Value::String(cwd));
+            }
+        }
+        let reply = self.send_request("delete_session", cmd).await?;
+        Ok(reply
+            .get("deleted")
+            .and_then(Value::as_bool)
+            .unwrap_or(true))
+    }
+
     /// Resolve a public thread id to the SDK's real session id. For
     /// `claude-pending-…` placeholders (no SDK session yet, or a stale id left
     /// over from a restart) returns `None` — callers treat that as a no-op.
@@ -779,36 +820,22 @@ impl ProviderBridge for ClaudeCodeBridge {
         &self,
         thread_id: &str,
     ) -> Result<LocalThreadDeleteSummary, String> {
-        // Pending thread never reached Anthropic — just drop our local state.
-        if self
-            .pending_threads
-            .lock()
-            .await
-            .remove(thread_id)
-            .is_some()
-        {
-            return Ok(LocalThreadDeleteSummary {
-                deleted_paths: Vec::new(),
-                deleted_thread_row: true,
-            });
-        }
-        let real_session_id = self
-            .resolve_real_session_id(thread_id)
-            .unwrap_or_else(|| thread_id.to_string());
-        let cwd = self.cwd_for_thread(thread_id).await;
-        let mut cmd = json!({
-            "provider_session_id": real_session_id,
-        });
-        if let Some(cwd) = cwd {
-            if let Some(object) = cmd.as_object_mut() {
-                object.insert("cwd".to_string(), Value::String(cwd));
-            }
-        }
-        self.send_request("delete_session", cmd).await?;
+        self.delete_thread_via_worker(thread_id, false).await?;
         Ok(LocalThreadDeleteSummary {
             deleted_paths: Vec::new(),
             deleted_thread_row: true,
         })
+    }
+
+    async fn delete_owned_thread_permanently(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<LocalThreadDeleteSummary>, String> {
+        let deleted = self.delete_thread_via_worker(thread_id, true).await?;
+        Ok(deleted.then_some(LocalThreadDeleteSummary {
+            deleted_paths: Vec::new(),
+            deleted_thread_row: true,
+        }))
     }
 
     async fn start_turn(

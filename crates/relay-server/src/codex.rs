@@ -15,7 +15,9 @@ use async_trait::async_trait;
 
 use crate::{
     codex_local::{
-        delete_thread_permanently as delete_thread_permanently_local, LocalThreadDeleteSummary,
+        delete_thread_permanently as delete_thread_permanently_local,
+        delete_thread_permanently_if_present as delete_thread_permanently_if_present_local,
+        LocalThreadDeleteSummary,
     },
     protocol::{
         truncate_with_ellipsis, ApprovalDecisionInput, FileChangeDiffView, ModelOptionView,
@@ -168,6 +170,16 @@ impl ProviderBridge for CodexBridge {
         thread_id: &str,
     ) -> Result<LocalThreadDeleteSummary, String> {
         self.delete_thread_permanently(thread_id).await
+    }
+
+    async fn delete_owned_thread_permanently(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<LocalThreadDeleteSummary>, String> {
+        let thread_id = thread_id.to_string();
+        tokio::task::spawn_blocking(move || delete_thread_permanently_if_present_local(&thread_id))
+            .await
+            .map_err(|error| format!("failed to join local Codex delete task: {error}"))?
     }
 
     async fn start_turn(

@@ -14,10 +14,40 @@ import {
   evictSessionsIfNeeded,
   findSessionEntry,
   flushEvents,
+  isDeleteSessionNotFoundError,
   sessionOptionsChanged,
   SESSION_LIMIT,
   trackBackgroundTasks,
 } from "./worker.mjs";
+
+test("delete-session missing detection accepts only the pinned SDK's exact messages", () => {
+  const sessionId = "11111111-2222-4333-8444-555555555555";
+  assert.equal(
+    isDeleteSessionNotFoundError(
+      new Error(`Session ${sessionId} not found in any project directory`),
+      sessionId,
+    ),
+    true,
+  );
+  assert.equal(
+    isDeleteSessionNotFoundError(
+      new Error(`Session ${sessionId} not found in project directory for /tmp/project`),
+      sessionId,
+    ),
+    true,
+  );
+  assert.equal(
+    isDeleteSessionNotFoundError(new Error(`permission denied for ${sessionId}`), sessionId),
+    false,
+  );
+  assert.equal(
+    isDeleteSessionNotFoundError(
+      new Error("Session aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee not found in any project directory"),
+      sessionId,
+    ),
+    false,
+  );
+});
 
 test("buildSdkMsgProbe keeps diagnostics content-free (no prompts/output/errors/paths)", () => {
   // The relay forwards worker stderr into global, client-visible logs, so the

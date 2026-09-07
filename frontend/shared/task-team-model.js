@@ -95,6 +95,11 @@ export function isTerminalTeamStatus(status) {
   return TERMINAL_STATUSES.has(status);
 }
 
+/** Finished task cards may be permanently deleted. Mirrors the backend terminal set. */
+export function isTeamRunDeletable(status) {
+  return isTerminalTeamStatus(status);
+}
+
 export function teamStatusLabel(status) {
   return STATUS_LABELS[status] || status || "Unknown";
 }

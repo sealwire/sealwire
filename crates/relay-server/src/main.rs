@@ -443,6 +443,7 @@ fn build_router(context: AppContext, web_assets: WebAssets) -> Router {
         .route("/api/session/team/stop", post(stop_team))
         .route("/api/session/team/cancel", post(cancel_team))
         .route("/api/session/team/mark", post(mark_team))
+        .route("/api/session/team/delete", post(delete_team))
         .route("/api/session/team/resume", post(resume_team))
         .route("/api/session/team/resolve", post(resolve_team))
         .route("/api/session/teams", get(list_teams))
@@ -1716,6 +1717,17 @@ async fn mark_team(
 ) -> Result<Json<ApiEnvelope<TeamActionReceipt>>, (StatusCode, Json<ApiError>)> {
     authorize_api(&context, &headers, &uri)?;
     let receipt = context.app.mark_team(input).await.map_err(bad_request)?;
+    Ok(Json(ApiEnvelope::ok(receipt)))
+}
+
+async fn delete_team(
+    State(context): State<AppContext>,
+    headers: HeaderMap,
+    uri: Uri,
+    Json(input): Json<TeamActionInput>,
+) -> Result<Json<ApiEnvelope<TeamActionReceipt>>, (StatusCode, Json<ApiError>)> {
+    authorize_api(&context, &headers, &uri)?;
+    let receipt = context.app.delete_team(input).await.map_err(bad_request)?;
     Ok(Json(ApiEnvelope::ok(receipt)))
 }
 

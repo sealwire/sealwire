@@ -1505,6 +1505,27 @@ impl ProviderBridge for AcpBridge {
         result
     }
 
+    async fn delete_owned_thread_permanently(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<LocalThreadDeleteSummary>, String> {
+        let provider_name = self.provider_name;
+        let display_name = self.display_name;
+        let thread_id = thread_id.to_string();
+        let forget_key = thread_id.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            crate::acp_local::delete_thread_permanently_if_present(
+                provider_name,
+                display_name,
+                &thread_id,
+            )
+        })
+        .await
+        .map_err(|error| format!("local ACP session delete task failed: {error}"))?;
+        settle_delete(&self.sessions, &forget_key, &result).await;
+        result
+    }
+
     async fn start_turn(
         &self,
         thread_id: &str,

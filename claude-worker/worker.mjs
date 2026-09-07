@@ -701,6 +701,17 @@ function releaseSession(sessions, providerSessionId, context) {
   return { released: true };
 }
 
+// The pinned SDK documents missing local sessions as an Error and currently
+// exposes no typed error code. Match only its two exact local-store messages;
+// unrelated filesystem/provider failures must remain hard errors.
+function isDeleteSessionNotFoundError(error, sessionId) {
+  const message = error instanceof Error ? error.message : String(error).replace(/^Error:\s*/, "");
+  return (
+    message === `Session ${sessionId} not found in any project directory` ||
+    message.startsWith(`Session ${sessionId} not found in project directory for `)
+  );
+}
+
 function evictSessionsIfNeeded(sessions, context) {
   while (sessions.size > SESSION_LIMIT) {
     const candidates = [...sessions.values()]
@@ -1560,8 +1571,17 @@ async function main() {
           if (entry) {
             closeAndRemoveSession(sessions, entry, sessionContext);
           }
-          await sdk.deleteSession(sessionId, { dir: cmd.cwd || undefined });
-          emitResponse(cmd.id, { provider_session_id: sessionId });
+          let deleted = true;
+          try {
+            await sdk.deleteSession(sessionId, { dir: cmd.cwd || undefined });
+          } catch (err) {
+            if (cmd.allow_missing === true && isDeleteSessionNotFoundError(err, sessionId)) {
+              deleted = false;
+            } else {
+              throw err;
+            }
+          }
+          emitResponse(cmd.id, { provider_session_id: sessionId, deleted });
         } catch (err) {
           emitErrorResponse(cmd.id, String(err));
         }
@@ -1618,6 +1638,7 @@ export {
   findSessionEntry,
   flushEvents,
   handleSessionEvent,
+  isDeleteSessionNotFoundError,
   promoteSessionEntry,
   releaseSession,
   SESSION_LIMIT,

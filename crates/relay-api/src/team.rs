@@ -757,6 +757,15 @@ pub struct TeamRun {
     /// any provider. Cleared by the re-seed that acts on it.
     pub tl_reseed_reason: Option<String>,
 
+    /// Authoritative provider ownership captured when each seat is created.
+    ///
+    /// Role-level provider fields describe current team configuration; they are
+    /// not enough for historical seats after reassignment. Older persisted runs
+    /// decode with an empty map; deletion may use only confident legacy role
+    /// mappings and otherwise fails closed.
+    #[serde(default)]
+    pub owned_thread_providers: BTreeMap<String, String>,
+
     /// Threads owned by the RUN rather than by a sub-task: the design reviewer,
     /// each MR-gate reviewer, and the dev thread that addresses MR findings.
     ///
@@ -895,6 +904,7 @@ impl TeamRun {
             || !self.tl_thread_id.is_empty()
             || !self.tl_succession.is_empty()
             || !self.run_owned_thread_ids.is_empty()
+            || !self.owned_thread_providers.is_empty()
             || self.mr_dev_thread_id.is_some()
             || !self.sub_tasks.is_empty()
             || self.driver_progress.state_revision != 0
@@ -1508,6 +1518,11 @@ impl TeamRun {
                 .insert(real_id.to_string(), role);
             changed = true;
         }
+        if let Some(provider) = self.owned_thread_providers.remove(pending_id) {
+            self.owned_thread_providers
+                .insert(real_id.to_string(), provider);
+            changed = true;
+        }
         if let Some(in_flight) = self.in_flight_thread.as_mut() {
             if in_flight == pending_id {
                 *in_flight = real_id.to_string();
@@ -1565,6 +1580,23 @@ impl TeamRun {
         self.updated_at = unix_now();
     }
 
+    /// Capture the bridge that actually created a seat. This stays attached to
+    /// the thread id even if the run's role-level provider selection later
+    /// changes.
+    pub fn record_owned_thread_provider(
+        &mut self,
+        thread_id: impl Into<String>,
+        provider: impl Into<String>,
+    ) {
+        let thread_id = thread_id.into();
+        let provider = provider.into();
+        if thread_id.is_empty() || provider.is_empty() {
+            return;
+        }
+        self.owned_thread_providers.insert(thread_id, provider);
+        self.updated_at = unix_now();
+    }
+
     /// Every thread this run owns right now, deduplicated and in a stable order.
     ///
     /// Retired TL generations stay in the set: they should already be idle, but a
@@ -1596,6 +1628,113 @@ impl TeamRun {
             }
         }
         ids
+    }
+
+    /// Which provider bridge owns this seat, from the run record — not from the
+    /// ephemeral thread list. Task deletion uses this so a seat older than the
+    /// newest-200 scan is still reachable after a restart.
+    ///
+    /// Returns `None` when the record has neither an explicit seat → provider
+    /// entry nor a confident legacy role mapping. Destructive callers must fail
+    /// closed rather than guess: older runs can keep mixed-role ids in
+    /// `run_owned_thread_ids` / `owned_thread_ids` while
+    /// `run_owned_thread_roles` defaults empty.
+    pub fn provider_for_owned_thread(&self, thread_id: &str) -> Option<&str> {
+        if thread_id.is_empty() {
+            return None;
+        }
+        fn named(provider: &str) -> Option<&str> {
+            (!provider.is_empty()).then_some(provider)
+        }
+        if let Some(provider) = self.owned_thread_providers.get(thread_id) {
+            return named(provider);
+        }
+        if self.tl_thread_id == thread_id
+            || self
+                .tl_succession
+                .iter()
+                .any(|generation| generation.thread_id == thread_id)
+        {
+            return named(&self.tl_provider);
+        }
+        if self.mr_dev_thread_id.as_deref() == Some(thread_id) {
+            return named(&self.dev_provider);
+        }
+        if let Some(role) = self.run_owned_thread_roles.get(thread_id) {
+            return match role.as_str() {
+                "reviewer" => named(&self.reviewer_provider),
+                // `TeamRole::Tl` persists as "tl"; accept legacy "lead" spellings.
+                "tl" | "lead" => named(&self.tl_provider),
+                "dev" => named(&self.dev_provider),
+                _ => None,
+            };
+        }
+        // Untagged run-owned seats (design/MR reviewers, etc.): role unknown.
+        if self.run_owned_thread_ids.iter().any(|id| id == thread_id) {
+            return None;
+        }
+        for task in &self.sub_tasks {
+            if task.reviewer_thread_id.as_deref() == Some(thread_id) {
+                return named(&self.reviewer_provider);
+            }
+            if task.dev_thread_id.as_deref() == Some(thread_id) {
+                return named(&self.dev_provider);
+            }
+            // Historical `owned_thread_ids` can mix prior reviewers and devs.
+            if task.owned_thread_ids.iter().any(|id| id == thread_id) {
+                return None;
+            }
+        }
+        None
+    }
+
+    /// Drop every reference to a seat that has already been permanently deleted.
+    ///
+    /// A partial task delete must leave durable progress on the run itself: the
+    /// in-memory tombstone set is cleared on restore, so a retry that still named
+    /// a deleted seat would hit a routing miss and stall forever.
+    pub fn release_owned_thread(&mut self, thread_id: &str) {
+        if thread_id.is_empty() {
+            return;
+        }
+        let mut changed = false;
+        if self.tl_thread_id == thread_id {
+            self.tl_thread_id.clear();
+            changed = true;
+        }
+        let before = self.tl_succession.len();
+        self.tl_succession
+            .retain(|generation| generation.thread_id != thread_id);
+        changed |= self.tl_succession.len() != before;
+        let before = self.run_owned_thread_ids.len();
+        self.run_owned_thread_ids.retain(|id| id != thread_id);
+        changed |= self.run_owned_thread_ids.len() != before;
+        if self.run_owned_thread_roles.remove(thread_id).is_some() {
+            changed = true;
+        }
+        if self.owned_thread_providers.remove(thread_id).is_some() {
+            changed = true;
+        }
+        if self.mr_dev_thread_id.as_deref() == Some(thread_id) {
+            self.mr_dev_thread_id = None;
+            changed = true;
+        }
+        for task in &mut self.sub_tasks {
+            if task.dev_thread_id.as_deref() == Some(thread_id) {
+                task.dev_thread_id = None;
+                changed = true;
+            }
+            if task.reviewer_thread_id.as_deref() == Some(thread_id) {
+                task.reviewer_thread_id = None;
+                changed = true;
+            }
+            let before = task.owned_thread_ids.len();
+            task.owned_thread_ids.retain(|id| id != thread_id);
+            changed |= task.owned_thread_ids.len() != before;
+        }
+        if changed {
+            self.updated_at = unix_now();
+        }
     }
 }
 
@@ -2429,6 +2568,73 @@ mod tests {
         assert!(owned.contains(&"dev-1".to_string()));
         assert!(owned.contains(&"rev-1".to_string()));
         assert_eq!(owned.len(), 3, "no duplicates: {owned:?}");
+    }
+
+    #[test]
+    fn provider_for_owned_thread_only_returns_confident_role_mappings() {
+        let mut run = run_with(
+            TeamPhase::Finished,
+            vec![sub_task(SubTaskStatus::Done, true)],
+        );
+        run.tl_thread_id = "tl-1".to_string();
+        run.tl_provider = "codex".to_string();
+        run.dev_provider = "claude_code".to_string();
+        run.reviewer_provider = "codex".to_string();
+        run.mr_dev_thread_id = Some("mr-dev".to_string());
+        run.run_owned_thread_ids = vec![
+            "design-rev".to_string(),
+            "tagged-tl".to_string(),
+            "tagged-dev".to_string(),
+        ];
+        run.run_owned_thread_roles
+            .insert("tagged-tl".to_string(), "tl".to_string());
+        run.run_owned_thread_roles
+            .insert("tagged-dev".to_string(), "dev".to_string());
+        run.sub_tasks[0].dev_thread_id = Some("dev-slot".to_string());
+        run.sub_tasks[0].reviewer_thread_id = Some("rev-slot".to_string());
+        run.sub_tasks[0].owned_thread_ids = vec![
+            "dev-slot".to_string(),
+            "rev-slot".to_string(),
+            "old-mixed".to_string(),
+        ];
+
+        assert_eq!(run.provider_for_owned_thread("tl-1"), Some("codex"));
+        assert_eq!(run.provider_for_owned_thread("mr-dev"), Some("claude_code"));
+        assert_eq!(run.provider_for_owned_thread("tagged-tl"), Some("codex"));
+        assert_eq!(
+            run.provider_for_owned_thread("tagged-dev"),
+            Some("claude_code")
+        );
+        assert_eq!(
+            run.provider_for_owned_thread("dev-slot"),
+            Some("claude_code")
+        );
+        assert_eq!(run.provider_for_owned_thread("rev-slot"), Some("codex"));
+        assert_eq!(
+            run.provider_for_owned_thread("design-rev"),
+            None,
+            "untagged run-owned seats must not guess reviewer"
+        );
+        assert_eq!(
+            run.provider_for_owned_thread("old-mixed"),
+            None,
+            "historical owned_thread_ids without a dedicated slot must not guess"
+        );
+
+        run.record_owned_thread_provider("old-mixed", "cursor");
+        assert_eq!(
+            run.provider_for_owned_thread("old-mixed"),
+            Some("cursor"),
+            "the provider captured at seat creation beats role-level inference"
+        );
+        assert!(run.rekey_thread("old-mixed", "real-mixed"));
+        assert_eq!(
+            run.provider_for_owned_thread("real-mixed"),
+            Some("cursor"),
+            "pending-session promotion must carry provider ownership"
+        );
+        run.release_owned_thread("real-mixed");
+        assert!(!run.owned_thread_providers.contains_key("real-mixed"));
     }
 
     fn spent_sub_task(id: &str, status: SubTaskStatus) -> SubTask {

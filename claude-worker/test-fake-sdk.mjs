@@ -289,6 +289,12 @@ export async function listSessions(_options) {
 }
 
 export async function deleteSession(_sessionId, _options) {
+  if (process.env.CLAUDE_FAKE_DELETE_MISSING_SESSION_ID === _sessionId) {
+    throw new Error(`Session ${_sessionId} not found in any project directory`);
+  }
+  if (process.env.CLAUDE_FAKE_DELETE_ERROR_SESSION_ID === _sessionId) {
+    throw new Error(`permission denied while deleting ${_sessionId}`);
+  }
   return true;
 }
 

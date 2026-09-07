@@ -12717,6 +12717,9 @@ mod review_tests {
         // other thread deletes fine. Lets a test fail ONLY a reviewer delete while
         // the parent delete still succeeds (the F1 un-hide-on-failure path).
         fail_delete_thread_ids: Arc<Mutex<std::collections::HashSet<String>>>,
+        // When true, a missing id still returns `deleted_thread_row: true` —
+        // models Claude/fake's idempotent delete for a recorded task seat.
+        delete_missing_succeeds: Arc<AtomicBool>,
         // Thread ids whose provider-backed hydration probe should fail. Used to
         // prove a transient `read_thread` error is surfaced as a provider failure,
         // never misdiagnosed as a cross-worktree reviewer mismatch.
@@ -12889,6 +12892,7 @@ mod review_tests {
                 fail_archive: Arc::new(AtomicBool::new(false)),
                 fail_delete: Arc::new(AtomicBool::new(false)),
                 fail_delete_thread_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
+                delete_missing_succeeds: Arc::new(AtomicBool::new(false)),
                 fail_read_thread_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
                 read_thread_calls: Arc::new(Mutex::new(Vec::new())),
                 read_thread_barrier: Arc::new(Mutex::new(())),
@@ -13286,11 +13290,43 @@ mod review_tests {
             {
                 return Err("delete failed (simulated)".to_string());
             }
-            self.threads.lock().await.remove(thread_id);
+            let mut threads = self.threads.lock().await;
+            // Match Codex/ACP: ordinary Session deletion reports a missing id
+            // instead of claiming it removed provider storage.
+            if !threads.contains_key(thread_id) {
+                if self.delete_missing_succeeds.load(Ordering::Relaxed) {
+                    return Ok(crate::codex_local::LocalThreadDeleteSummary {
+                        deleted_paths: Vec::new(),
+                        deleted_thread_row: true,
+                    });
+                }
+                return Err(format!("{} thread '{thread_id}' was not found", self.name));
+            }
+            threads.remove(thread_id);
             Ok(crate::codex_local::LocalThreadDeleteSummary {
                 deleted_paths: Vec::new(),
                 deleted_thread_row: true,
             })
+        }
+
+        async fn delete_owned_thread_permanently(
+            &self,
+            thread_id: &str,
+        ) -> Result<Option<crate::codex_local::LocalThreadDeleteSummary>, String> {
+            if self.fail_delete.load(Ordering::Relaxed)
+                || self.fail_delete_thread_ids.lock().await.contains(thread_id)
+            {
+                return Err("delete failed (simulated)".to_string());
+            }
+            let existed = self.threads.lock().await.remove(thread_id).is_some();
+            if existed || self.delete_missing_succeeds.load(Ordering::Relaxed) {
+                Ok(Some(crate::codex_local::LocalThreadDeleteSummary {
+                    deleted_paths: Vec::new(),
+                    deleted_thread_row: true,
+                }))
+            } else {
+                Ok(None)
+            }
         }
 
         async fn start_turn(

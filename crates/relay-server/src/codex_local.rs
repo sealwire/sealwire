@@ -44,10 +44,10 @@ impl LocalCodexStore {
         })
     }
 
-    fn delete_thread_permanently(
+    fn delete_thread_permanently_if_present(
         &self,
         thread_id: &str,
-    ) -> Result<LocalThreadDeleteSummary, String> {
+    ) -> Result<Option<LocalThreadDeleteSummary>, String> {
         let rollout_path = self.lookup_rollout_path(thread_id)?;
         let deleted_thread_row = self.purge_state_sqlite(thread_id)?;
         self.purge_logs_sqlite(thread_id)?;
@@ -64,15 +64,21 @@ impl LocalCodexStore {
         }
 
         if !deleted_thread_row && deleted_paths.is_empty() {
-            return Err(format!(
-                "thread {thread_id} was not found in local Codex storage"
-            ));
+            return Ok(None);
         }
 
-        Ok(LocalThreadDeleteSummary {
+        Ok(Some(LocalThreadDeleteSummary {
             deleted_paths,
             deleted_thread_row,
-        })
+        }))
+    }
+
+    fn delete_thread_permanently(
+        &self,
+        thread_id: &str,
+    ) -> Result<LocalThreadDeleteSummary, String> {
+        self.delete_thread_permanently_if_present(thread_id)?
+            .ok_or_else(|| format!("thread {thread_id} was not found in local Codex storage"))
     }
 
     fn lookup_rollout_path(&self, thread_id: &str) -> Result<Option<PathBuf>, String> {
@@ -237,6 +243,12 @@ impl LocalCodexStore {
 
 pub fn delete_thread_permanently(thread_id: &str) -> Result<LocalThreadDeleteSummary, String> {
     LocalCodexStore::resolve()?.delete_thread_permanently(thread_id)
+}
+
+pub fn delete_thread_permanently_if_present(
+    thread_id: &str,
+) -> Result<Option<LocalThreadDeleteSummary>, String> {
+    LocalCodexStore::resolve()?.delete_thread_permanently_if_present(thread_id)
 }
 
 fn resolve_codex_home() -> Result<PathBuf, String> {
