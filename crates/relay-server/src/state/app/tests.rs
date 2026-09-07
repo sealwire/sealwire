@@ -15558,6 +15558,148 @@ resurrected into a turn that never completes: {:?}",
     }
 
     #[tokio::test]
+    async fn clean_turn_baseline_equal_to_head_reviews_the_last_commit() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        init_git_seed(cwd);
+        let base = git_head(cwd);
+        std::fs::write(
+            std::path::Path::new(cwd).join("seed.txt"),
+            "line1\nline2\ncommitted before conversation\n",
+        )
+        .unwrap();
+        let candidate = git_commit_all(cwd, "candidate");
+
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let provider = providers.get("codex").unwrap();
+        queue_verdicts(provider, &["APPROVE"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+        app.send_message(crate::protocol::SendMessageInput {
+            text: "what did you change?".to_string(),
+            model: None,
+            effort: None,
+            device_id: Some("device-1".to_string()),
+            thread_id: parent.id.clone(),
+        })
+        .await
+        .expect("conversation turn should start");
+        wait_for_active_turn_idle(&app).await;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
+        assert_eq!(job.base_sha.as_deref(), Some(base.as_str()));
+        assert_eq!(job.candidate_sha.as_deref(), Some(candidate.as_str()));
+
+        let turns = provider.turns.lock().await.clone();
+        assert!(
+            turns.iter().all(|(thread, text)| {
+                thread != &parent.id || !text.contains("needs a committed candidate")
+            }),
+            "a clean conversational turn must not burn an author commit turn: {turns:?}"
+        );
+        let prompt = turns
+            .iter()
+            .find(|(_, text)| text.contains("Committed review target"))
+            .map(|(_, text)| text)
+            .expect("reviewer prompt");
+        assert!(prompt.contains(&format!("Range: {base}..{candidate}")));
+    }
+
+    #[tokio::test]
+    async fn recorded_turn_baseline_from_another_workspace_is_ignored() {
+        let dir = TempDir::new().expect("tmpdir");
+        let repo_a = dir.path().join("repo-a");
+        let repo_b = dir.path().join("repo-b");
+        std::fs::create_dir_all(&repo_a).unwrap();
+        std::fs::create_dir_all(&repo_b).unwrap();
+        let repo_a_cwd = repo_a.to_str().unwrap().to_string();
+        let repo_b_cwd = repo_b.to_str().unwrap().to_string();
+        init_git_seed(&repo_a_cwd);
+        init_git_seed(&repo_b_cwd);
+        std::fs::write(
+            repo_a.join("seed.txt"),
+            "line1\nline2\nrepo a distinct commit\n",
+        )
+        .unwrap();
+        let foreign_base = git_commit_all(&repo_a_cwd, "repo a distinct candidate");
+        let expected_base = git_head(&repo_b_cwd);
+        assert_ne!(
+            foreign_base, expected_base,
+            "the fixture needs an actually foreign commit"
+        );
+        std::fs::write(repo_b.join("seed.txt"), "line1\nline2\nrepo b candidate\n").unwrap();
+        let candidate = git_commit_all(&repo_b_cwd, "repo b candidate");
+
+        let (app, providers) = build_review_app(&repo_b_cwd, &["codex"]).await;
+        let provider = providers.get("codex").unwrap();
+        queue_verdicts(provider, &["APPROVE"]).await;
+        let parent = start_parent(&app, &repo_b_cwd, "codex").await;
+        app.relay.write().await.record_thread_last_turn_base(
+            &parent.id,
+            repo_a_cwd.clone(),
+            foreign_base.clone(),
+        );
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
+        assert_eq!(job.base_sha.as_deref(), Some(expected_base.as_str()));
+        assert_eq!(job.candidate_sha.as_deref(), Some(candidate.as_str()));
+
+        let turns = provider.turns.lock().await.clone();
+        let prompt = turns
+            .iter()
+            .find(|(_, text)| text.contains("Committed review target"))
+            .map(|(_, text)| text)
+            .expect("reviewer prompt");
+        assert!(
+            !prompt.contains(&foreign_base) && prompt.contains(&candidate),
+            "a baseline from another repo must not be used: {prompt}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unborn_git_head_review_request_creates_a_failing_job() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(cwd)
+            .output()
+            .expect("git init runs");
+        assert!(
+            init.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+
+        let (app, _providers) = build_review_app(cwd, &["codex"]).await;
+        start_parent(&app, cwd, "codex").await;
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("request should create a review job even with unborn HEAD");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+
+        assert_eq!(job.status, "failed");
+        assert!(
+            job.error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("rev-parse"),
+            "the job, not the request, should carry the git failure: {:?}",
+            job.error
+        );
+    }
+
+    #[tokio::test]
     async fn dirty_only_after_author_turn_does_not_review_historical_head() {
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();

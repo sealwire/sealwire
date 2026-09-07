@@ -132,8 +132,8 @@ impl AppState {
                 &effort,
                 &device_id,
             );
-            if let Some(base_sha) = initial_turn_base_sha {
-                relay.record_thread_last_turn_base_sha(&started_thread_id, base_sha);
+            if let Some((base_cwd, base_sha)) = initial_turn_base_sha {
+                relay.record_thread_last_turn_base(&started_thread_id, base_cwd, base_sha);
             }
             // Claude consumes the first prompt before this relay activates the
             // new thread. Provider events that win that race are preserved by
@@ -878,8 +878,8 @@ impl AppState {
             relay.model = model.clone();
             relay.reasoning_effort = effort.clone();
             relay.remember_active_thread_settings();
-            if let Some(base_sha) = turn_base_sha {
-                relay.record_thread_last_turn_base_sha(&effective_thread_id, base_sha);
+            if let Some((base_cwd, base_sha)) = turn_base_sha {
+                relay.record_thread_last_turn_base(&effective_thread_id, base_cwd, base_sha);
             }
             relay.push_log(
                 "info",
@@ -894,11 +894,14 @@ impl AppState {
         Ok(self.snapshot().await)
     }
 
-    async fn session_turn_base_sha(&self, cwd: &str) -> Option<String> {
+    async fn session_turn_base_sha(&self, cwd: &str) -> Option<(String, String)> {
         let grants = { self.relay.read().await.trust_grants() };
         let workspace = grants.admit(cwd).await.trusted().cloned()?;
         match is_git_work_tree(&workspace).await {
-            Ok(true) => current_head_sha(&workspace).await.ok(),
+            Ok(true) => current_head_sha(&workspace)
+                .await
+                .ok()
+                .map(|sha| (workspace.as_str().to_string(), sha)),
             _ => None,
         }
     }

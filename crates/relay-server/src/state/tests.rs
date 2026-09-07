@@ -87,6 +87,7 @@ fn test_persisted_state() -> PersistedRelayState {
         thread_settings,
         thread_last_activity_at: std::collections::HashMap::new(),
         thread_last_turn_base_sha: std::collections::HashMap::new(),
+        thread_last_turn_base_cwd: std::collections::HashMap::new(),
         allowed_roots: vec!["/tmp/project".to_string()],
         device_records,
         paired_devices,
@@ -3407,6 +3408,24 @@ fn remove_thread_removes_non_active_thread_from_local_history() {
     assert_eq!(relay.threads[0].id, "thread-1");
     assert_eq!(relay.active_thread_id.as_deref(), Some("thread-1"));
     assert!(relay.thread_settings("thread-2").is_none());
+}
+
+#[test]
+fn remove_thread_clears_last_turn_review_baseline() {
+    let mut relay = test_state();
+    relay.threads = vec![test_thread("thread-1", "/tmp/project")];
+    relay.record_thread_last_turn_base(
+        "thread-1",
+        "/tmp/project".to_string(),
+        "abc123".to_string(),
+    );
+
+    let removed = relay.remove_thread("thread-1");
+
+    assert!(removed);
+    assert!(relay.thread_last_turn_base("thread-1").is_none());
+    assert!(!relay.thread_last_turn_base_sha.contains_key("thread-1"));
+    assert!(!relay.thread_last_turn_base_cwd.contains_key("thread-1"));
 }
 
 #[test]
