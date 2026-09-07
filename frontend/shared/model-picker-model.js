@@ -21,7 +21,14 @@ export function buildModelPickerGroups({
   selectedModel = "",
   selectedProvider = "",
 } = {}) {
-  return (providers || []).map((provider) => {
+  // The provider list is its own round trip and can be missing while a catalogue
+  // is not. Zero groups is the one state with no row to click: it paints as a bare
+  // strip under the pill. Offer the provider the draft is already on instead.
+  const sections = providers?.length
+    ? providers
+    : [selectedProvider].filter(Boolean);
+
+  return sections.map((provider) => {
     const models = catalogFor(providerModels, provider);
     const isSelectedProvider = provider === selectedProvider;
     // Only the SELECTED provider's group: passing it to every group would surface

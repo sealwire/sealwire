@@ -215,7 +215,6 @@ import {
   isDocumentForeground,
 } from "../shared/thread-notify.js";
 import { LocalTranscriptPanel } from "./local-transcript-panel.js";
-import { stableTranscriptOptions } from "../shared/transcript-options-identity.js";
 
 const h = React.createElement;
 const reactRoots = new WeakMap();
@@ -1456,16 +1455,50 @@ export function createSessionRenderer({
   }
 
   // Hoisted once per renderer instance for the same reason as
-  // handleEnsureFileChangeDetail above: LocalTranscriptPanel only calls this
-  // on the entries branch, so its own identity must stay stable there.
-  // renderTranscript refreshes the pending input right before that branch's
-  // render, so the call still returns THIS render's data.
-  let pendingTranscriptOptionsInput = null;
-  function getTranscriptOptions() {
-    return (state.localTranscriptOptionsCache = stableTranscriptOptions(
-      state.localTranscriptOptionsCache || null,
-      pendingTranscriptOptionsInput
-    ));
+  // handleEnsureFileChangeDetail above: LocalTranscriptPanel calls this only
+  // in its entries branch and owns the stableTranscriptOptions cache itself,
+  // so this closure's identity must stay stable across renders too.
+  function buildTranscriptOptions({ activeThreadId, entries, session }) {
+    const localUi = readLocalUiState(state.localUiStore);
+    return {
+      currentCwd: session?.current_cwd || state.selectedCwd || "",
+      detailEntries: buildExpandedTranscriptDetailEntries(state, {
+        expandedItemIds: localUi.transcriptExpandedItemIds,
+        threadId: activeThreadId,
+        autoDetailItemIds: collectFileChangeDetailItemIds(entries),
+      }),
+      // Hide rollback/reapply on a read-only view-only thread (the apply
+      // endpoint resolves the item against the relay's REAL active thread, so
+      // acting from a saved-thread view would mutate the wrong/live thread),
+      // and while the active thread is itself under review.
+      enableFileChangeActions:
+        !session.view_only &&
+        !isReviewInProgressForThread(session, session.active_thread_id) &&
+        !isWorkflowInProgressForThread(session, session.active_thread_id),
+      expandedKeys: localUi.transcriptExpandedItemIds,
+      loadingItemIds: localUi.transcriptLoadingItemIds,
+      // Enables the per-message "Fork from here" affordance on turn-final
+      // agent messages. Saved/view-only threads included: forking reads a
+      // thread's history into a NEW session, it never writes to the thread
+      // you are looking at.
+      canFork: canForkInSession(session),
+      // Stamps each agent message with the mark of whoever wrote it. Read off
+      // the session being VIEWED (a read-only projection carries its own
+      // provider), so a saved codex thread never renders under Claude's logo.
+      provider: session?.provider || "",
+      onEnsureFileChangeDetail: handleEnsureFileChangeDetail,
+      // Suppress the answer entry while the active thread is owned by
+      // review/workflow; these orchestrators are non-interactive.
+      pendingAskUserQuestions: isReviewInProgressForThread(
+        session,
+        session.active_thread_id
+      ) || isWorkflowInProgressForThread(session, session.active_thread_id)
+        ? []
+        : session?.pending_ask_user_questions || [],
+      onSubmitAskUserAnswers: handleSubmitAskUserAnswers,
+      askUserSubmittingRequestId: localUi.askUserSubmittingRequestId || "",
+      askUserErrors: localUi.askUserErrors instanceof Map ? localUi.askUserErrors : new Map(),
+    };
   }
 
   function renderTranscript(session, approval) {
@@ -1500,64 +1533,12 @@ export function createSessionRenderer({
         activeThread?.name || activeThread?.preview || shortId(session.active_thread_id);
     }
 
-    // Mirrors LocalTranscriptPanel's six-branch dispatch (see there) just far
-    // enough to know whether pendingTranscriptOptionsInput below applies.
-    const exitsViaOverviewBranches =
-      !viewingConversation &&
-      (viewedThreadLocked || viewingDifferentThread || Boolean(activeThreadId));
-    const viewOnlyEmpty = !exitsViaOverviewBranches && !entries.length && Boolean(session.view_only);
-    const viewOnlyReviewView = viewOnlyEmpty ? Boolean(state.viewOnlyThread?.review) : false;
-    const emptyReady = !exitsViaOverviewBranches && !viewOnlyEmpty && !entries.length && !approval;
-    const showsEntries = !exitsViaOverviewBranches && !viewOnlyEmpty && !emptyReady;
-
-    if (showsEntries) {
-      const localUi = readLocalUiState(state.localUiStore);
-      pendingTranscriptOptionsInput = {
-        currentCwd: session?.current_cwd || state.selectedCwd || "",
-        detailEntries: buildExpandedTranscriptDetailEntries(state, {
-          expandedItemIds: localUi.transcriptExpandedItemIds,
-          threadId: activeThreadId,
-          autoDetailItemIds: collectFileChangeDetailItemIds(entries),
-        }),
-        // Hide rollback/reapply on a read-only view-only thread (the apply
-        // endpoint resolves the item against the relay's REAL active thread, so
-        // acting from a saved-thread view would mutate the wrong/live thread),
-        // and while the active thread is itself under review.
-        enableFileChangeActions:
-          !session.view_only &&
-          !isReviewInProgressForThread(session, session.active_thread_id) &&
-          !isWorkflowInProgressForThread(session, session.active_thread_id),
-        expandedKeys: localUi.transcriptExpandedItemIds,
-        loadingItemIds: localUi.transcriptLoadingItemIds,
-        // Enables the per-message "Fork from here" affordance on turn-final
-        // agent messages. Saved/view-only threads included: forking reads a
-        // thread's history into a NEW session, it never writes to the thread
-        // you are looking at.
-        canFork: canForkInSession(session),
-        // Stamps each agent message with the mark of whoever wrote it. Read off
-        // the session being VIEWED (a read-only projection carries its own
-        // provider), so a saved codex thread never renders under Claude's logo.
-        provider: session?.provider || "",
-        onEnsureFileChangeDetail: handleEnsureFileChangeDetail,
-        // Suppress the answer entry while the active thread is owned by
-        // review/workflow; these orchestrators are non-interactive.
-        pendingAskUserQuestions: isReviewInProgressForThread(
-          session,
-          session.active_thread_id
-        ) || isWorkflowInProgressForThread(session, session.active_thread_id)
-          ? []
-          : session?.pending_ask_user_questions || [],
-        onSubmitAskUserAnswers: handleSubmitAskUserAnswers,
-        askUserSubmittingRequestId: localUi.askUserSubmittingRequestId || "",
-        askUserErrors: localUi.askUserErrors instanceof Map ? localUi.askUserErrors : new Map(),
-      };
-    }
-
     renderConversationContent(
       h(LocalTranscriptPanel, {
         activeThreadId,
         activeThreadLabel,
         approval,
+        buildTranscriptOptions,
         entries,
         entriesCanWrite: canComposeThread({
           activeTurnId: session.active_turn_id,
@@ -1568,7 +1549,6 @@ export function createSessionRenderer({
             isWorkflowInProgressForThread(session, session.active_thread_id),
         }),
         getStandbyEmptyContent: buildStandbyEmptyContent,
-        getTranscriptOptions,
         hydrationLoading: shouldShowTranscriptLoading(session, state),
         onLoadOlderTranscript: loadOlderTranscript,
         promotion: state.localTranscriptScrollPromotion,
@@ -1580,7 +1560,7 @@ export function createSessionRenderer({
         shortId,
         standbyCanWrite: canCurrentDeviceWrite(session),
         viewOnly: Boolean(session.view_only),
-        viewOnlyReviewView,
+        viewOnlyReviewView: Boolean(state.viewOnlyThread?.review),
         viewedThreadLocked,
         viewedThreadWorkflowLocked,
         viewingConversation,

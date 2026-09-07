@@ -83,27 +83,65 @@ const open = (host) => click(host.querySelector(".workspace-picker-trigger"));
 const rows = (host) => [...host.querySelectorAll(".workspace-picker-row")];
 const rowText = (host) => rows(host).map((row) => row.textContent);
 
-test("opening focuses the portalled search without scrolling its dialog", () => {
+// jsdom answers every feature query with `matches: false`, which would read as a
+// touch device and quietly disarm the desktop half of these two tests.
+function setPrimaryPointer(kind) {
+  dom.window.matchMedia = (query) => ({
+    addEventListener() {},
+    addListener() {},
+    matches: query.includes("pointer: fine") && kind === "fine",
+    media: query,
+    removeEventListener() {},
+    removeListener() {},
+  });
+}
+
+function recordingFocus(run) {
   const focus = dom.window.HTMLInputElement.prototype.focus;
-  let focusOptions = null;
+  const calls = [];
   dom.window.HTMLInputElement.prototype.focus = function recordFocus(options) {
-    focusOptions = options;
+    calls.push(options ?? null);
     return focus.call(this, options);
   };
-
   try {
+    return run(calls);
+  } finally {
+    dom.window.HTMLInputElement.prototype.focus = focus;
+    delete dom.window.matchMedia;
+  }
+}
+
+test("opening focuses the portalled search without scrolling its dialog", () => {
+  setPrimaryPointer("fine");
+  recordingFocus((calls) => {
     const view = mount(WorkspacePicker, { suggestions: [], value: SESSION_CWD });
     open(view.host);
 
     assert.deepEqual(
-      focusOptions,
-      { preventScroll: true },
+      calls,
+      [{ preventScroll: true }],
       "a mobile browser must not move the trigger away from its fixed menu while focusing"
     );
     view.cleanup();
-  } finally {
-    dom.window.HTMLInputElement.prototype.focus = focus;
-  }
+  });
+});
+
+test("a touch device opens the panel without summoning the keyboard", () => {
+  // On a phone the focus opened the software keyboard at the same moment as the
+  // panel: half the rows went behind it, and the list moved as it animated in.
+  // The field is still there to tap — it just no longer takes the caret uninvited.
+  setPrimaryPointer("coarse");
+  recordingFocus((calls) => {
+    const view = mount(WorkspacePicker, { roots: ROOTS, value: SESSION_CWD });
+    open(view.host);
+
+    const input = view.host.querySelector(".workspace-picker-input");
+    assert.ok(input, "the search field is still offered");
+    assert.deepEqual(calls, [], "opening must not focus the field on a touch device");
+    assert.notEqual(document.activeElement, input);
+    assert.ok(rows(view.host).length > 0, "the rows are what the user came for");
+    view.cleanup();
+  });
 });
 
 test("the panel groups worktrees under the repo, branch first", () => {

@@ -127,6 +127,30 @@ test("a selected model missing from its catalog is still listed, so the choice i
   );
 });
 
+test("an unknown provider list still offers the provider the draft is on", () => {
+  // Zero sections renders as an empty 14px strip under the pill — the remote menu
+  // bug. The provider list is one broker round trip that can be lost, so it must
+  // never be the only thing standing between the user and their own catalogue.
+  const groups = buildModelPickerGroups({
+    providerModels: CATALOGS,
+    providers: [],
+    selectedModel: "gpt-5.5",
+    selectedProvider: "codex",
+  });
+
+  assert.deepEqual(
+    groups.map((group) => group.provider),
+    ["codex"]
+  );
+  assert.deepEqual(
+    groups[0].options.map((option) => [option.value, option.selected]),
+    [
+      ["gpt-5.5", true],
+      ["gpt-5-codex", false],
+    ]
+  );
+});
+
 test("a provider with no catalog yet is still CHOOSABLE, not just visible", () => {
   // A cold catalogue must not strand the user on their current provider: the relay
   // can start it on its own default, and an empty model id asks for exactly that.

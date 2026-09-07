@@ -126,6 +126,7 @@
     "test:browser:public-revoke": "npm run build && node scripts/browser-public-revoke-e2e.mjs",
     "test:browser:public-long-transcript": "npm run build && node scripts/browser-public-long-transcript-e2e.mjs",
     "test:browser:remote-mobile-header": "npm run build && node scripts/browser-remote-mobile-header-e2e.mjs",
+    "test:browser:remote-new-session-menus": "npm run build && node scripts/browser-remote-new-session-menus-e2e.mjs",
     "test:browser:cjk-project-name": "npm run build && node scripts/browser-remote-cjk-project-name-e2e.mjs",
     "test:browser:rail-toggle-align": "npm run build && AGENT_PROVIDERS=fake node scripts/browser-rail-toggle-align-e2e.mjs",
     "test:browser:public-transcript-delta": "npm run build && node scripts/browser-public-transcript-delta-e2e.mjs",

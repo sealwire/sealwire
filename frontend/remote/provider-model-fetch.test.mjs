@@ -27,7 +27,7 @@ function installBrowserStubs() {
 installBrowserStubs();
 
 const { createRemoteUiStore } = await import("./remote-ui-store.js");
-const { ensureModelPickerCatalogs, ensureProviderModels } = await import("./provider-model-fetch.js");
+const { ensureModelPickerCatalogs, ensureProviderModels, ensureProviders } = await import("./provider-model-fetch.js");
 
 const NO_SLEEP = { baseDelayMs: 0, sleep: () => Promise.resolve() };
 const CATALOG = [{ model: "gpt-5.5", display_name: "GPT-5.5" }];
@@ -120,4 +120,58 @@ test("opening the model picker keeps ready catalogs and dedupes a boot fetch", a
   }, NO_SLEEP);
 
   assert.equal(calls, 0, "ready catalogs stay cached and the in-flight boot pull is not duplicated");
+});
+
+test("ensureProviders retries a list the boot fetch lost, and keeps one it has", async () => {
+  // The boot pull can fire before the broker socket is open, and a swallowed
+  // failure left `providers` empty for the life of the page — which renders the
+  // model menu as an empty strip with no rows in it at all.
+  const store = createRemoteUiStore({ providers: [] });
+  let calls = 0;
+
+  const first = await ensureProviders(store, async () => {
+    calls += 1;
+    return calls === 1 ? [] : ["codex", "claude_code"];
+  }, NO_SLEEP);
+
+  assert.deepEqual(first, ["codex", "claude_code"]);
+  assert.deepEqual(store.getState().providers, ["codex", "claude_code"]);
+
+  await ensureProviders(store, async () => {
+    calls += 1;
+    return ["fake"];
+  }, NO_SLEEP);
+  assert.equal(calls, 2, "a provider list already in the store is not refetched");
+});
+
+test("a provider list that cannot be fetched leaves the store retryable", async () => {
+  const store = createRemoteUiStore({ providers: [] });
+
+  const providers = await ensureProviders(store, async () => {
+    throw new Error("broker socket is not connected");
+  }, NO_SLEEP);
+
+  assert.deepEqual(providers, [], "a failure resolves empty rather than rejecting into a void catch");
+  assert.deepEqual(store.getState().providers, [], "nothing is stored, so the next edge retries");
+});
+
+test("opening the model picker fills a provider list the boot fetch never got", async () => {
+  const store = createRemoteUiStore({ providers: [] });
+  const catalogs = [];
+
+  await ensureModelPickerCatalogs(
+    store,
+    async (provider) => {
+      catalogs.push(provider);
+      return CATALOG;
+    },
+    { ...NO_SLEEP, fetchProviders: async () => ["codex", "claude_code"] }
+  );
+
+  assert.deepEqual(store.getState().providers, ["codex", "claude_code"]);
+  assert.deepEqual(
+    catalogs.sort(),
+    ["claude_code", "codex"],
+    "every provider the relay published gets its catalogue"
+  );
 });

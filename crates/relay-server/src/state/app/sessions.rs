@@ -1015,11 +1015,40 @@ from {}; no provider turn was active.",
             return Ok(relay.snapshot());
         };
 
-        self.find_thread_provider(&thread_id)
+        match self
+            .find_thread_provider(&thread_id)
             .await?
             .1
             .request_turn_stop(&thread_id, Some(&turn_id))
-            .await?;
+            .await
+        {
+            Ok(()) => {}
+            // Provider already dropped the turn (Codex: "no active turn to interrupt").
+            // That is the terminal signal — clear the local ghost instead of leaving
+            // Stop/archive/send wedged until restart.
+            Err(error) if provider_reports_turn_already_gone(&error) => {
+                let mut relay = self.relay.write().await;
+                if relay
+                    .runtime_for_thread(&thread_id)
+                    .and_then(|runtime| runtime.active_turn_id.as_deref())
+                    == Some(turn_id.as_str())
+                {
+                    relay.bg_set_active_turn(&thread_id, None, unix_now());
+                    relay.set_thread_status(&thread_id, "idle".to_string(), Vec::new());
+                }
+                relay.push_log(
+                    "warn",
+                    format!(
+                        "Provider reports turn {turn_id} on thread {thread_id} is already gone \
+({error}); cleared local working state after stop from {}.",
+                        short_device_id(&device_id)
+                    ),
+                );
+                relay.notify();
+                return Ok(relay.snapshot());
+            }
+            Err(error) => return Err(error),
+        }
 
         {
             let mut relay = self.relay.write().await;
@@ -1217,5 +1246,52 @@ marking idle locally."
         relay.notify();
 
         Ok(relay.snapshot())
+    }
+}
+
+/// True when a provider interrupt/stop failure means the turn/session is already
+/// gone. Codex: "no active turn to interrupt". Claude worker cancel:
+/// "Claude session <id> was not found". That is a terminal signal — the relay
+/// must clear its local `active_turn_id` or Stop/archive/send stay wedged until
+/// restart. Transient failures (timeouts, IPC errors) must NOT match.
+pub(super) fn provider_reports_turn_already_gone(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("no active turn")
+        || lower.contains("no running turn")
+        || lower.contains("nothing to interrupt")
+        || lower.contains("turn not found")
+        // Claude cancel when the worker has no live session for that id
+        // (`worker.mjs`: "Claude session … was not found").
+        || (lower.contains("session") && lower.contains("was not found"))
+}
+
+#[cfg(test)]
+mod already_gone_tests {
+    use super::provider_reports_turn_already_gone;
+
+    #[test]
+    fn matches_codex_and_claude_terminal_gone_errors() {
+        assert!(provider_reports_turn_already_gone(
+            "no active turn to interrupt"
+        ));
+        assert!(provider_reports_turn_already_gone("turn not found: abc"));
+        assert!(provider_reports_turn_already_gone(
+            "Claude session sess-1 was not found"
+        ));
+        assert!(provider_reports_turn_already_gone(
+            "Claude session (all) was not found"
+        ));
+    }
+
+    #[test]
+    fn rejects_transient_and_unrelated_failures() {
+        assert!(!provider_reports_turn_already_gone(
+            "timed out waiting for interrupt"
+        ));
+        assert!(!provider_reports_turn_already_gone("IPC pipe broken"));
+        assert!(!provider_reports_turn_already_gone("permission denied"));
+        assert!(!provider_reports_turn_already_gone(
+            "file was not found on disk"
+        ));
     }
 }

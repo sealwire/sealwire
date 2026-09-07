@@ -7,25 +7,27 @@
 // Retrying a few times with backoff lets the pull succeed once the worker
 // warms up; if every attempt fails the caller learns about it (throws) instead
 // of silently degrading.
-//
+
+import { normalizeProviderList } from "../shared/provider-settings.js";
+
 // `sleep` is injectable so tests can run without real timers.
 const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-export async function fetchModelsWithRetry(
+async function fetchListWithRetry(
   fetchFn,
-  provider,
+  what,
   { attempts = 3, baseDelayMs = 600, sleep = defaultSleep } = {}
 ) {
-  let lastError = new Error("model fetch failed");
+  let lastError = new Error(`${what} fetch failed`);
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
-      const models = await fetchFn(provider);
-      if (Array.isArray(models) && models.length > 0) {
-        return models;
+      const list = await fetchFn();
+      if (Array.isArray(list) && list.length > 0) {
+        return list;
       }
-      // An empty catalog is treated as a soft failure worth retrying: a healthy
-      // provider always returns at least one model, so empty means "not ready".
-      lastError = new Error(`empty model catalog for ${provider}`);
+      // An empty answer is a soft failure worth retrying: a healthy relay always
+      // has at least one, so empty means "not ready", not "none exist".
+      lastError = new Error(`empty ${what}`);
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
     }
@@ -34,6 +36,10 @@ export async function fetchModelsWithRetry(
     }
   }
   throw lastError;
+}
+
+export function fetchModelsWithRetry(fetchFn, provider, options) {
+  return fetchListWithRetry(() => fetchFn(provider), `model catalog for ${provider}`, options);
 }
 
 // Load one provider's catalog into the remote UI store, with the status
@@ -57,12 +63,34 @@ export async function ensureProviderModels(store, provider, fetchFn, options) {
   }
 }
 
+// The provider list every model group is keyed by, so an empty one is not a cold
+// catalogue the picker can degrade around — it is a menu with no sections at all.
+// Hence: store nothing on failure, and leave any later edge free to retry.
+export async function ensureProviders(store, fetchProviders, options) {
+  const known = store.getState().providers;
+  if (known?.length) {
+    return known;
+  }
+  try {
+    const providers = normalizeProviderList(
+      await fetchListWithRetry(() => fetchProviders(), "provider list", options)
+    );
+    store.getState().setProviders(providers);
+    return providers;
+  } catch {
+    return [];
+  }
+}
+
 // The boot pre-fetch is deliberately bounded. If it exhausts its retries, the
 // New Session picker used to stay on its synthetic current-model row forever:
 // opening the picker was not another fetch edge. Retry missing/error catalogs
 // when the user asks to see them. A still-running boot fetch remains deduped by
 // ensureProviderModels's "loading" guard.
-export async function ensureModelPickerCatalogs(store, fetchFn, options) {
+export async function ensureModelPickerCatalogs(store, fetchFn, options = {}) {
+  if (options.fetchProviders) {
+    await ensureProviders(store, options.fetchProviders, options);
+  }
   const ui = store.getState();
   const providers = ui.providers?.length
     ? ui.providers

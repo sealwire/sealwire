@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -55,6 +55,66 @@ test("the hook installer keeps stdout clean for `npm pack --json`", async () => 
     run.stdout,
     "",
     `the installer must report on stderr; stdout would corrupt \`npm pack --json\`. Got: ${run.stdout}`
+  );
+});
+
+// `core.hooksPath` lives in the shared `.git/config` (the common dir), not
+// per-worktree. Reproduces the real incident: an agent ran `npm ci` inside a
+// scratch worktree under a CI tmp dir, which reset the MAIN checkout's hooks to
+// point at the scratch worktree's own `.githooks` — and once that worktree was
+// cleaned up, every checkout's hooks silently stopped firing, with no error at
+// commit time to say so.
+test("running the installer from a linked worktree does not repoint the main checkout's hooks", async () => {
+  const main = await mkdtemp(path.join(os.tmpdir(), "sealwire-hook-worktree-main-"));
+  const scratchParent = await mkdtemp(path.join(os.tmpdir(), "sealwire-hook-worktree-scratch-"));
+  tempDirs.push(main, scratchParent);
+  const scratch = path.join(scratchParent, "browser");
+
+  await mkdir(path.join(main, "scripts"), { recursive: true });
+  await mkdir(path.join(main, ".githooks"), { recursive: true });
+  await copyFile(
+    path.join(repoRoot, "scripts/install-git-hooks.mjs"),
+    path.join(main, "scripts/install-git-hooks.mjs")
+  );
+  await writeFile(path.join(main, ".githooks/pre-commit"), "#!/bin/sh\nexit 0\n");
+  await chmod(path.join(main, ".githooks/pre-commit"), 0o755);
+
+  assert.equal(git(main, "init", "-q", "-b", "main").status, 0);
+  assert.equal(git(main, "config", "user.email", "test@example.com").status, 0);
+  assert.equal(git(main, "config", "user.name", "Test").status, 0);
+  assert.equal(git(main, "add", "-A").status, 0);
+  assert.equal(git(main, "commit", "-q", "-m", "base").status, 0);
+
+  // The scratch checkout is a linked worktree of the SAME repo — sharing
+  // `.git/config` is exactly what makes it dangerous, and exactly what a
+  // throwaway CI verification worktree looks like.
+  assert.equal(git(main, "worktree", "add", "-q", scratch, "-b", "scratch").status, 0);
+
+  const installed = spawnSync(
+    process.execPath,
+    [path.join(scratch, "scripts/install-git-hooks.mjs")],
+    { cwd: scratch, encoding: "utf8" }
+  );
+  assert.equal(installed.status, 0, installed.stderr);
+
+  const configured = git(main, "config", "core.hooksPath").stdout.trim();
+  // `git rev-parse --path-format=absolute` resolves through macOS's /tmp ->
+  // /private/tmp symlink; `main` (from mkdtemp) does not. Resolve both sides
+  // so the comparison is about WHICH worktree won, not that symlink.
+  assert.equal(
+    await realpath(configured),
+    await realpath(path.join(main, ".githooks")),
+    `hooksPath must stay pinned to the main checkout, not the scratch worktree that happened to run npm ci; got ${configured}`
+  );
+
+  // The real failure mode: delete the scratch worktree the way a CI cleanup
+  // step would, then confirm the MAIN checkout's hooks still resolve.
+  await rm(scratch, { recursive: true, force: true });
+  assert.equal(git(main, "worktree", "prune").status, 0);
+  assert.equal(
+    git(main, "commit", "--allow-empty", "-q", "-m", "still hooked").status,
+    0,
+    "a dangling hooksPath must not silently disable every checkout's hooks"
   );
 });
 
