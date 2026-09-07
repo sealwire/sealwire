@@ -4,23 +4,35 @@
 //! implements, and D3 for the fingerprint this module computes (the one piece
 //! `relay-api` cannot own, since it needs `sha2`).
 //!
-//! The checks run in D5's literal order, including the journal lookup's
-//! position AFTER protocol/backend/malformed validation (not before, as an
-//! earlier version of this file had it): a restored run that is currently
-//! inert or malformed must refuse every command uniformly, including one
-//! that happens to match an old journal entry. Replaying a stale `Applied`
-//! receipt for a run that is no longer trustworthy would contradict "inert
-//! stays inert" and "malformed refuses everything."
+//! Three constraints fix the check order between them, and only one order
+//! satisfies all three (D5):
+//!
+//! - **Backend and malformed come before replay.** A restored run that is
+//!   inert or malformed must refuse every command uniformly, including one
+//!   that matches an old journal entry — replaying a stale `Applied` receipt
+//!   for a run that is no longer trustworthy would contradict "inert stays
+//!   inert" and "malformed refuses everything".
+//! - **Replay comes before protocol.** Both are journaling rejections, and a
+//!   journaling check placed above the identity lookup appends a second
+//!   record under an id that already has one every time the same doomed
+//!   envelope is redelivered. One command id, at most one record.
+//! - **Backend comes before protocol.** An unsupported protocol version is
+//!   still a command aimed at a run this build must not touch at all, so the
+//!   inert refusal has to win.
+//!
+//! Both no-mutation refusals (inert, malformed) are idempotent by
+//! construction rather than by journal lookup: they write nothing, so
+//! redelivery re-derives the identical receipt.
 
 use relay_api::orchestration::{
     CommandFingerprint, CommandId, CommandRejection, TeamCommandKind, TeamCommandOutcome,
     TeamCommandRecord, MAX_TEAM_COMMAND_JOURNAL,
 };
-use relay_api::team::{LastDrainedNotes, TeamRun};
+use relay_api::team::{LastDrainedNotes, TeamRun, TeamRunStatus};
 use relay_api::team_command::{
     TeamCommandEnvelope, TeamCommandOutput, TeamCommandReceipt, TeamCommandStatus,
     TeamStateCommand, TeamSubTaskRole, MAX_TEAM_COMMAND_FINDINGS, MAX_TEAM_COMMAND_NOTES,
-    MAX_TEAM_COMMAND_SUB_TASKS, TEAM_COMMAND_PROTOCOL_VERSION,
+    MAX_TEAM_COMMAND_PAYLOAD_BYTES, MAX_TEAM_COMMAND_SUB_TASKS, TEAM_COMMAND_PROTOCOL_VERSION,
 };
 use relay_api::WorkflowVerdict;
 use sha2::{Digest, Sha256};
@@ -49,20 +61,9 @@ pub(crate) fn apply_team_command(
     } = envelope;
     let kind = command.kind();
 
-    if protocol_version != TEAM_COMMAND_PROTOCOL_VERSION {
-        return reject_and_journal(
-            run,
-            command_id,
-            sequence,
-            kind,
-            fingerprint,
-            expected_revision,
-            CommandRejection::UnsupportedProtocol,
-        );
-    }
-
     // Inert backend: leave the run completely untouched, not even the
-    // journal — an unsupported/future backend must never look active.
+    // journal — an unsupported/future backend must never look active. First,
+    // so not even an unsupported protocol version can write to it.
     if !run.is_executable_by_current_build() {
         return (
             snapshot_receipt(
@@ -75,22 +76,28 @@ pub(crate) fn apply_team_command(
         );
     }
 
+    // Malformed durable state: refuse with no write of any kind. Journaling
+    // here would append to the very structure that is already untrustworthy,
+    // which stabilizes nothing; writing nothing makes redelivery re-derive
+    // the identical receipt instead.
     if run.driver_progress.is_malformed() || run.command_journal.is_malformed() {
-        return reject_and_journal(
-            run,
-            command_id,
-            sequence,
-            kind,
-            fingerprint,
-            expected_revision,
-            CommandRejection::InvalidState,
+        return (
+            snapshot_receipt(
+                run,
+                command_id,
+                sequence,
+                TeamCommandStatus::Rejected(CommandRejection::InvalidState),
+            ),
+            false,
         );
     }
 
-    // Journal lookup: replay or reject a content-mismatched duplicate. A
-    // recovery record's `fingerprint: None` (D10) matches any digest — that
-    // is the fail-closed "replay `Interrupted`" behaviour restart recovery
-    // needs, since the original envelope's digest was never recorded.
+    // Journal lookup: replay or reject a content-mismatched duplicate. Ahead
+    // of every journaling check below, so redelivering one doomed envelope
+    // can never accumulate records under a single id. A recovery record's
+    // `fingerprint: None` (D10) matches any digest — the fail-closed "replay
+    // `Interrupted`" behaviour restart recovery needs when the original
+    // envelope's digest was never durably recorded.
     if let Some(existing) = run.command_journal.find(&command_id).cloned() {
         let matches = existing
             .fingerprint
@@ -111,6 +118,18 @@ pub(crate) fn apply_team_command(
         };
     }
 
+    if protocol_version != TEAM_COMMAND_PROTOCOL_VERSION {
+        return reject_and_journal(
+            run,
+            command_id,
+            sequence,
+            kind,
+            fingerprint,
+            expected_revision,
+            CommandRejection::UnsupportedProtocol,
+        );
+    }
+
     if let Err(reason) = validate_payload(run, &command) {
         return reject_and_journal(
             run,
@@ -120,6 +139,23 @@ pub(crate) fn apply_team_command(
             fingerprint,
             expected_revision,
             reason,
+        );
+    }
+
+    // Counter headroom, checked BEFORE anything is mutated. An `Applied`
+    // command has to bump two counters and leave room for the next sequence;
+    // discovering that at mutation time would mean either a wrap (silent
+    // corruption of the ordering guarantee) or a panic inside the run lock.
+    // Refusing here costs a journal record and nothing else.
+    if !has_counter_headroom(run, sequence) {
+        return reject_and_journal(
+            run,
+            command_id,
+            sequence,
+            kind,
+            fingerprint,
+            expected_revision,
+            CommandRejection::InvalidState,
         );
     }
 
@@ -164,7 +200,13 @@ pub(crate) fn apply_team_command(
     // over an older driver command. The refusal is stable across a resume
     // because it is journaled below, and `last_command_seq` already moved
     // past this sequence regardless of the outcome.
-    if !command_is_permitted_by_lifecycle(run) {
+    //
+    // The lifecycle family is exempt: those commands ARE the transition this
+    // gate exists to protect, so gating them would make a boundary pause
+    // unsettleable. They keep their own guards on the `TeamRun` methods
+    // below — `set_status`/`fail` refuse a terminal or user-settled run,
+    // `settle_paused` returns false rather than overwriting one.
+    if !command.is_lifecycle_transition() && !command_is_permitted_by_lifecycle(run) {
         return reject_and_journal(
             run,
             command_id,
@@ -318,6 +360,16 @@ fn push_with_eviction(run: &mut TeamRun, record: TeamCommandRecord) {
         let Some(evicted) = evict_one(run) else {
             break;
         };
+        // The retained-replay horizon (D9). Dropping a record loses the
+        // receipt it would have replayed, so the sequence it consumed has to
+        // stay spent some other way — otherwise a DIFFERENT command reusing
+        // that id sails through the ordering check and applies, turning
+        // compaction into a second application. Rejections journaled before
+        // the ordering check (protocol, payload bounds) never advanced
+        // `last_command_seq` themselves, so this is where their sequence is
+        // accounted for.
+        run.driver_progress.last_command_seq =
+            run.driver_progress.last_command_seq.max(evicted.sequence);
         if evicted.kind == TeamCommandKind::TakeUserNotes {
             drop_drained_notes(run, &evicted.command_id);
         }
@@ -354,6 +406,17 @@ fn drop_drained_notes(run: &mut TeamRun, command_id: &CommandId) {
         .retain(|entry| entry.command_id != command_id.as_str());
 }
 
+/// Whether an `Applied` outcome still fits in the run's counters.
+///
+/// `sequence` must leave room for a successor too: a driver that cannot mint
+/// `sequence + 1` can never issue another command, so accepting this one
+/// would strand the run rather than serve it.
+fn has_counter_headroom(run: &TeamRun, sequence: u64) -> bool {
+    run.driver_progress.state_revision.checked_add(1).is_some()
+        && run.driver_progress.last_event_seq.checked_add(1).is_some()
+        && sequence.checked_add(1).is_some()
+}
+
 fn command_is_permitted_by_lifecycle(run: &TeamRun) -> bool {
     !(run.status.is_terminal()
         || run.status.is_settled_without_driver()
@@ -376,6 +439,17 @@ fn require_sub_task_index(run: &TeamRun, index: usize) -> Result<(), CommandReje
 /// `RecordMrRound`, `SetMrVerdict`), so a future command carrying a verdict
 /// cannot reopen the hole by skipping it.
 fn validate_payload(run: &TeamRun, command: &TeamStateCommand) -> Result<(), CommandRejection> {
+    // Aggregate size first. The per-collection counts below bound how many
+    // items a command carries but say nothing about how big any one of them
+    // is, so a single runaway summary or finding would otherwise pass every
+    // check. Measuring the serialized form covers every scalar and every
+    // collection in one place, including any field added later.
+    let serialized = serde_json::to_vec(command).map(|bytes| bytes.len());
+    match serialized {
+        Ok(len) if len <= MAX_TEAM_COMMAND_PAYLOAD_BYTES => {}
+        _ => return Err(CommandRejection::InvalidState),
+    }
+
     match command {
         TeamStateCommand::RecordIntake { .. } | TeamStateCommand::SetPhase { .. } => Ok(()),
         TeamStateCommand::RecordDesignReviewRound {
@@ -408,7 +482,12 @@ fn validate_payload(run: &TeamRun, command: &TeamStateCommand) -> Result<(), Com
             Some(verdict) => bound_verdict(verdict),
             None => Ok(()),
         },
-        TeamStateCommand::RecordMrDevThread { .. } | TeamStateCommand::FinishRun { .. } => Ok(()),
+        TeamStateCommand::RecordMrDevThread { .. }
+        | TeamStateCommand::FinishRun { .. }
+        | TeamStateCommand::SetRunStatus { .. }
+        | TeamStateCommand::FailRun { .. }
+        | TeamStateCommand::BlockRun { .. }
+        | TeamStateCommand::SettleRun { .. } => Ok(()),
         TeamStateCommand::TakeUserNotes {} => {
             bound(run.pending_user_notes.len(), MAX_TEAM_COMMAND_NOTES)
         }
@@ -528,6 +607,35 @@ fn apply_effects(
             run.head_commit = head_commit;
             run.phase = phase;
         }
+        // The lifecycle family. Each is exactly the call the deleted
+        // `TeamPort` method made, so behaviour is unchanged (AC-8); what
+        // changed is that it is now journaled, revision-checked and
+        // idempotent like every other command.
+        TeamStateCommand::SetRunStatus { status } => {
+            run.set_status(status);
+        }
+        TeamStateCommand::FailRun { error } => {
+            run.fail(error);
+        }
+        TeamStateCommand::BlockRun { error } => {
+            run.block(error);
+        }
+        TeamStateCommand::SettleRun {
+            status,
+            reason,
+            pause_kind,
+        } => match status {
+            TeamRunStatus::Paused => {
+                run.settle_paused(reason, pause_kind);
+            }
+            TeamRunStatus::Cancelled => {
+                run.cancel(reason);
+            }
+            TeamRunStatus::Done => {
+                run.force_mark_status(TeamRunStatus::Done);
+            }
+            other => run.set_status(other),
+        },
         TeamStateCommand::TakeUserNotes {} => {
             let notes = std::mem::take(&mut run.pending_user_notes);
             run.drained_notes.push(LastDrainedNotes {

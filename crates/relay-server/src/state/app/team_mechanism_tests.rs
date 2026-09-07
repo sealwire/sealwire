@@ -4,6 +4,85 @@
 // workspace/path isolation, public views, and lifecycle authorization. The
 // workflow scenarios and prompt-shaped assertions live in the private crate.
 
+/// Submit one lifecycle command the way the driver does, so a test that used
+/// to call a `TeamPort` lifecycle method reads the same. The four of them are
+/// commands now (`.sealwire/DESIGN.md` D14); this builds a current envelope
+/// for one. Takes the port rather than the app so the fake drivers below,
+/// which only ever hold a port, can use it too.
+async fn submit_lifecycle(
+    port: &dyn relay_api::TeamPort,
+    run_id: &str,
+    command: relay_api::team_command::TeamStateCommand,
+) -> Option<relay_api::team_command::TeamCommandReceipt> {
+    let run = port.run_snapshot(run_id).await?;
+    let sequence = run.driver_progress.last_command_seq + 1;
+    port.submit_command(
+        run_id,
+        relay_api::team_command::TeamCommandEnvelope {
+            protocol_version: relay_api::team_command::TEAM_COMMAND_PROTOCOL_VERSION,
+            command_id: relay_api::orchestration::CommandId::new(format!("test-cmd-{sequence}"))
+                .unwrap(),
+            sequence,
+            expected_revision: run.driver_progress.state_revision,
+            command,
+        },
+    )
+    .await
+}
+
+async fn test_fail_run(port: &dyn relay_api::TeamPort, run_id: &str, error: &str) {
+    submit_lifecycle(
+        port,
+        run_id,
+        relay_api::team_command::TeamStateCommand::FailRun {
+            error: error.to_string(),
+        },
+    )
+    .await;
+}
+
+async fn test_block_run(port: &dyn relay_api::TeamPort, run_id: &str, error: &str) {
+    submit_lifecycle(
+        port,
+        run_id,
+        relay_api::team_command::TeamStateCommand::BlockRun {
+            error: error.to_string(),
+        },
+    )
+    .await;
+}
+
+async fn test_update_status(
+    port: &dyn relay_api::TeamPort,
+    run_id: &str,
+    status: relay_api::team::TeamRunStatus,
+) {
+    submit_lifecycle(
+        port,
+        run_id,
+        relay_api::team_command::TeamStateCommand::SetRunStatus { status },
+    )
+    .await;
+}
+
+async fn test_settle_run(
+    port: &dyn relay_api::TeamPort,
+    run_id: &str,
+    status: relay_api::team::TeamRunStatus,
+    reason: &str,
+) {
+    submit_lifecycle(
+        port,
+        run_id,
+        relay_api::team_command::TeamStateCommand::SettleRun {
+            status,
+            reason: reason.to_string(),
+            pause_kind: relay_api::team::TeamPauseKind::Boundary,
+        },
+    )
+    .await;
+}
+
 async fn init_team_repo() -> (TempDir, String) {
     let dir = TempDir::new().expect("tmpdir");
     let path = dir.path().canonicalize().expect("canonicalize");
@@ -149,8 +228,7 @@ impl relay_api::TeamDriver for BlockingTeamDriver {
     }
 
     async fn drive(&self, port: std::sync::Arc<dyn relay_api::TeamPort>, run_id: String) {
-        port.block_run(&run_id, "intentional test block".to_string())
-            .await;
+        test_block_run(port.as_ref(), &run_id, "intentional test block").await;
     }
 }
 
@@ -819,15 +897,18 @@ async fn mark_cancelled_archives_inert_blocked_run_and_releases_provider_seats()
 
     let tl_thread = relay_api::TeamPort::start_thread(&app, &run_id, relay_api::team::TeamRole::Tl)
         .await
-        .expect("tl provider-backed thread");
+        .expect("tl provider-backed thread")
+        .thread_id;
     let dev_thread =
         relay_api::TeamPort::start_thread(&app, &run_id, relay_api::team::TeamRole::Dev)
             .await
-            .expect("dev provider-backed thread");
+            .expect("dev provider-backed thread")
+            .thread_id;
     let reviewer_thread =
         relay_api::TeamPort::start_thread(&app, &run_id, relay_api::team::TeamRole::Reviewer)
             .await
-            .expect("reviewer provider-backed thread");
+            .expect("reviewer provider-backed thread")
+            .thread_id;
     {
         let relay = app.relay.read().await;
         let run = relay.team_run(&run_id).expect("run");
@@ -964,15 +1045,18 @@ async fn mark_cancelled_drains_malformed_legacy_run_and_releases_provider_seats(
 
     let tl_thread = relay_api::TeamPort::start_thread(&app, &run_id, relay_api::team::TeamRole::Tl)
         .await
-        .expect("tl provider-backed thread");
+        .expect("tl provider-backed thread")
+        .thread_id;
     let dev_thread =
         relay_api::TeamPort::start_thread(&app, &run_id, relay_api::team::TeamRole::Dev)
             .await
-            .expect("dev provider-backed thread");
+            .expect("dev provider-backed thread")
+            .thread_id;
     let reviewer_thread =
         relay_api::TeamPort::start_thread(&app, &run_id, relay_api::team::TeamRole::Reviewer)
             .await
-            .expect("reviewer provider-backed thread");
+            .expect("reviewer provider-backed thread")
+            .thread_id;
     let owned = vec![
         tl_thread.clone(),
         dev_thread.clone(),
@@ -1907,11 +1991,11 @@ impl relay_api::TeamDriver for OneDevTurnDriver {
     }
 
     async fn drive(&self, port: std::sync::Arc<dyn relay_api::TeamPort>, run_id: String) {
-        let thread = port
+        let seat = port
             .start_thread(&run_id, relay_api::team::TeamRole::Dev)
             .await
             .expect("dev seat thread");
-        let slot = port.record_run_thread(&run_id, &thread).await;
+        let (thread, slot) = (seat.thread_id, seat.slot);
         let outcome = port
             .turn(
                 &run_id,
@@ -1921,7 +2005,8 @@ impl relay_api::TeamDriver for OneDevTurnDriver {
             )
             .await;
         *self.observed.lock().await = Some((thread, outcome));
-        port.settle_run(
+        test_settle_run(
+            port.as_ref(),
             &run_id,
             crate::state::TeamRunStatus::Failed,
             "test driver done",
@@ -2226,12 +2311,14 @@ async fn a_recorded_seat_is_reused_when_reachable_and_replaced_when_not() {
     let started = app
         .resume_or_start_thread(&run_id, relay_api::team::TeamRole::Dev, &[])
         .await
-        .expect("a seat starts when nothing is offered");
+        .expect("a seat starts when nothing is offered")
+        .thread_id;
 
     assert_eq!(
         app.resume_or_start_thread(&run_id, relay_api::team::TeamRole::Dev, &[started.clone()])
             .await
-            .expect("the offered seat is still reachable"),
+            .expect("the offered seat is still reachable")
+            .thread_id,
         started,
         "a routable session must be handed straight back, not duplicated"
     );
@@ -2243,7 +2330,8 @@ async fn a_recorded_seat_is_reused_when_reachable_and_replaced_when_not() {
             &["sess-that-never-existed".to_string(), started.clone()]
         )
         .await
-        .expect("the list is walked in order"),
+        .expect("the list is walked in order")
+        .thread_id,
         started,
         "a dead first choice must fall through to a live second, not past it"
     );
@@ -2255,7 +2343,8 @@ async fn a_recorded_seat_is_reused_when_reachable_and_replaced_when_not() {
             &["sess-that-never-existed".to_string()],
         )
         .await
-        .expect("an unroutable seat is replaced rather than fatal");
+        .expect("an unroutable seat is replaced rather than fatal")
+        .thread_id;
     assert_ne!(
         replaced, "sess-that-never-existed",
         "a session the relay cannot route to must not be sent a turn"
@@ -2279,7 +2368,8 @@ async fn a_seat_whose_session_is_gone_is_not_reused_just_because_it_still_routes
     let seat = app
         .resume_or_start_thread(&run_id, relay_api::team::TeamRole::Dev, &[])
         .await
-        .expect("a seat starts");
+        .expect("a seat starts")
+        .thread_id;
 
     // Take the session out from under it, leaving the relay's cache untouched.
     providers
@@ -2297,7 +2387,8 @@ async fn a_seat_whose_session_is_gone_is_not_reused_just_because_it_still_routes
     let replacement = app
         .resume_or_start_thread(&run_id, relay_api::team::TeamRole::Dev, &[seat.clone()])
         .await
-        .expect("a seat is still produced");
+        .expect("a seat is still produced")
+        .thread_id;
     assert_ne!(
         replacement, seat,
         "the session is gone, so reusing it would fail the run on its first turn"
@@ -2387,11 +2478,11 @@ impl relay_api::TeamDriver for RestartedTlTurnDriver {
     }
 
     async fn drive(&self, port: std::sync::Arc<dyn relay_api::TeamPort>, run_id: String) {
-        let thread = port
+        let seat = port
             .start_thread(&run_id, relay_api::team::TeamRole::Tl)
             .await
             .expect("tl seat thread");
-        let slot = port.record_run_thread(&run_id, &thread).await;
+        let (thread, slot) = (seat.thread_id, seat.slot);
         {
             let mut relay = self.relay.write().await;
             // Runtimes are process-local; the remembered settings are persisted. So a
@@ -2413,7 +2504,8 @@ impl relay_api::TeamDriver for RestartedTlTurnDriver {
             )
             .await;
         *self.thread.lock().await = Some(thread);
-        port.settle_run(
+        test_settle_run(
+            port.as_ref(),
             &run_id,
             crate::state::TeamRunStatus::Failed,
             "test driver done",
@@ -2499,7 +2591,8 @@ impl relay_api::TeamDriver for DevThenReviewDriver {
         let dev_thread = port
             .start_thread(&run_id, relay_api::team::TeamRole::Dev)
             .await
-            .expect("dev seat thread");
+            .expect("dev seat thread")
+            .thread_id;
         self.app
             .test_update_team_run(&run_id, move |run| {
                 run.sub_tasks.push(crate::state::SubTask {
@@ -2540,7 +2633,8 @@ impl relay_api::TeamDriver for DevThenReviewDriver {
             let reviewer_thread = port
                 .start_thread(&run_id, relay_api::team::TeamRole::Reviewer)
                 .await
-                .expect("reviewer seat thread");
+                .expect("reviewer seat thread")
+                .thread_id;
             self.app
                 .test_update_team_run(&run_id, move |run| {
                     if let Some(task) = run.sub_tasks.get_mut(0) {
@@ -2595,7 +2689,7 @@ impl relay_api::TeamDriver for DevThenReviewDriver {
 
         // `fail_run`, not `settle_run`: `TeamRun::fail` no-ops while `stopping`,
         // so a refusal raced by a real stop's own settle cannot clobber it.
-        port.fail_run(&run_id, "test driver done".to_string()).await;
+        test_fail_run(port.as_ref(), &run_id, "test driver done").await;
     }
 }
 
@@ -2618,7 +2712,8 @@ impl relay_api::TeamDriver for UncommittedWorkThenReviewDriver {
         let dev_thread = port
             .start_thread(&run_id, relay_api::team::TeamRole::Dev)
             .await
-            .expect("dev seat thread");
+            .expect("dev seat thread")
+            .thread_id;
         // The private driver checkpoints the sub-task at start. Without this,
         // falling back to the run base would let prior run work open the gate.
         let checkpoint = port
@@ -2656,7 +2751,8 @@ impl relay_api::TeamDriver for UncommittedWorkThenReviewDriver {
         let reviewer_thread = port
             .start_thread(&run_id, relay_api::team::TeamRole::Reviewer)
             .await
-            .expect("reviewer seat thread");
+            .expect("reviewer seat thread")
+            .thread_id;
         self.app
             .test_update_team_run(&run_id, move |run| {
                 if let Some(task) = run.sub_tasks.get_mut(0) {
@@ -2673,7 +2769,7 @@ impl relay_api::TeamDriver for UncommittedWorkThenReviewDriver {
             )
             .await;
         self.reviewer_outcomes.lock().await.push(outcome);
-        port.fail_run(&run_id, "test driver done".to_string()).await;
+        test_fail_run(port.as_ref(), &run_id, "test driver done").await;
     }
 }
 
@@ -2710,7 +2806,8 @@ impl relay_api::TeamDriver for PriorRunWorkEmptyCheckpointDriver {
         let dev_thread = port
             .start_thread(&run_id, relay_api::team::TeamRole::Dev)
             .await
-            .expect("dev seat thread");
+            .expect("dev seat thread")
+            .thread_id;
         self.app
             .test_update_team_run(&run_id, move |run| {
                 run.sub_tasks.push(crate::state::SubTask {
@@ -2735,7 +2832,8 @@ impl relay_api::TeamDriver for PriorRunWorkEmptyCheckpointDriver {
         let reviewer_thread = port
             .start_thread(&run_id, relay_api::team::TeamRole::Reviewer)
             .await
-            .expect("reviewer seat thread");
+            .expect("reviewer seat thread")
+            .thread_id;
         self.app
             .test_update_team_run(&run_id, move |run| {
                 if let Some(task) = run.sub_tasks.get_mut(0) {
@@ -2752,7 +2850,7 @@ impl relay_api::TeamDriver for PriorRunWorkEmptyCheckpointDriver {
             )
             .await;
         self.reviewer_outcomes.lock().await.push(outcome);
-        port.fail_run(&run_id, "test driver done".to_string()).await;
+        test_fail_run(port.as_ref(), &run_id, "test driver done").await;
     }
 }
 
@@ -3021,7 +3119,8 @@ async fn a_dev_turn_that_hits_session_capacity_halts_the_run_before_any_review()
     let reviewer_thread =
         relay_api::TeamPort::start_thread(&app, &run_id, relay_api::team::TeamRole::Reviewer)
             .await
-            .expect("a paused run still keeps its reviewer seat");
+            .expect("a paused run still keeps its reviewer seat")
+            .thread_id;
     let reviewer_thread_for_run = reviewer_thread.clone();
     app.test_update_team_run(&run_id, move |run| {
         if let Some(task) = run.sub_tasks.get_mut(0) {
@@ -3842,7 +3941,8 @@ impl relay_api::TeamDriver for RaceWindowDriver {
         let dev_thread = port
             .start_thread(&run_id, relay_api::team::TeamRole::Dev)
             .await
-            .expect("dev seat thread");
+            .expect("dev seat thread")
+            .thread_id;
         self.app
             .test_update_team_run(&run_id, move |run| {
                 run.sub_tasks.push(crate::state::SubTask {
@@ -3876,7 +3976,8 @@ impl relay_api::TeamDriver for RaceWindowDriver {
         let reviewer_thread = port
             .start_thread(&run_id, relay_api::team::TeamRole::Reviewer)
             .await
-            .expect("reviewer seat thread");
+            .expect("reviewer seat thread")
+            .thread_id;
         self.app
             .test_update_team_run(&run_id, move |run| {
                 if let Some(task) = run.sub_tasks.get_mut(0) {
@@ -3915,7 +4016,7 @@ impl relay_api::TeamDriver for RaceWindowDriver {
         }
         // `fail_run`, not `settle_run`: `TeamRun::fail` no-ops while `stopping`,
         // so a refusal raced by a real stop's own settle cannot clobber it.
-        port.fail_run(&run_id, "test driver done".to_string()).await;
+        test_fail_run(port.as_ref(), &run_id, "test driver done").await;
     }
 }
 
@@ -4440,11 +4541,13 @@ impl relay_api::TeamDriver for SettledBeforeReviewDriver {
         let dev_thread = port
             .start_thread(&run_id, relay_api::team::TeamRole::Dev)
             .await
-            .expect("dev seat thread");
+            .expect("dev seat thread")
+            .thread_id;
         let reviewer_thread = port
             .start_thread(&run_id, relay_api::team::TeamRole::Reviewer)
             .await
-            .expect("reviewer seat thread");
+            .expect("reviewer seat thread")
+            .thread_id;
         self.app
             .test_update_team_run(&run_id, move |run| {
                 run.sub_tasks.push(crate::state::SubTask {
@@ -4896,11 +4999,13 @@ impl relay_api::TeamDriver for ActionTableDriver {
             let dev_thread = port
                 .start_thread(&run_id, relay_api::team::TeamRole::Dev)
                 .await
-                .expect("dev seat thread");
+                .expect("dev seat thread")
+                .thread_id;
             let reviewer_thread = port
                 .start_thread(&run_id, relay_api::team::TeamRole::Reviewer)
                 .await
-                .expect("reviewer seat thread");
+                .expect("reviewer seat thread")
+                .thread_id;
             self.app
                 .test_update_team_run(&run_id, move |run| {
                     run.sub_tasks.push(crate::state::SubTask {
@@ -4944,7 +5049,7 @@ impl relay_api::TeamDriver for ActionTableDriver {
                     );
                     self.dev_outcomes.lock().await.push(outcome);
                     if !progressed {
-                        port.fail_run(&run_id, "dev turn failed".to_string()).await;
+                        test_fail_run(port.as_ref(), &run_id, "dev turn failed").await;
                         return;
                     }
                     self.app
@@ -4967,7 +5072,8 @@ impl relay_api::TeamDriver for ActionTableDriver {
                     let refused = matches!(outcome, relay_api::team::TeamTurnOutcome::Failed(_));
                     self.reviewer_outcomes.lock().await.push(outcome);
                     if !refused {
-                        port.settle_run(
+                        test_settle_run(
+                            port.as_ref(),
                             &run_id,
                             crate::state::TeamRunStatus::Done,
                             "test driver done",
