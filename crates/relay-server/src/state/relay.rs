@@ -1551,6 +1551,10 @@ impl RelayState {
         self.collect_reviewer_thread_ids()
     }
 
+    pub(crate) fn is_semantic_reviewer_thread(&self, thread_id: &str) -> bool {
+        self.collect_reviewer_thread_ids().contains(thread_id)
+    }
+
     /// Reviewer sessions that are implementation details of a foreground Session and
     /// therefore stay out of navigation. A task-team reviewer is different: it is a
     /// first-class seat in the task worktree, alongside the visible TL and Dev seats,
