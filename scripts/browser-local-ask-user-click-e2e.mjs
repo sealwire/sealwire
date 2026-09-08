@@ -222,6 +222,12 @@ async function main() {
       "with a pick made, Continue must be live"
     );
 
+    // The dock is a layout claim, so leave a way to actually look at it.
+    if (process.env.ASK_USER_E2E_SHOT) {
+      await page.screenshot({ path: process.env.ASK_USER_E2E_SHOT });
+      console.log(`[ask-user-dock] screenshot ${process.env.ASK_USER_E2E_SHOT}`);
+    }
+
     assert.deepEqual(pageErrors, [], "answering a question must not raise browser errors");
 
     console.log(JSON.stringify({ ok: true, relayPort, workspaceDir }, null, 2));
@@ -268,6 +274,32 @@ async function clickTheInstantItAppears(page) {
     document.addEventListener("mouseup", record("up"), true);
     document.addEventListener("click", record("click"), true);
   });
+  if (process.env.ASK_USER_E2E_SHOT) {
+    console.log(
+      `[ask-user-geometry] ${JSON.stringify(
+        await page.evaluate(() => {
+          const rect = (selector) => {
+            const el = document.querySelector(selector);
+            if (!el) return null;
+            const r = el.getBoundingClientRect();
+            return { top: Math.round(r.top), bottom: Math.round(r.bottom), h: Math.round(r.height) };
+          };
+          return {
+            viewport: window.innerHeight,
+            pageScrollTop: document.scrollingElement?.scrollTop ?? null,
+            shellView: document.querySelector(".chat-shell")?.dataset?.view || null,
+            shell: rect(".chat-shell"),
+            scroller: rect(".chat-thread"),
+            stack: rect(".composer-dock-stack"),
+            dock: rect(".ask-user-dock"),
+            option: rect(".ask-user-dock .ask-user-option-button"),
+            composer: rect("#message-form"),
+          };
+        })
+      )}`
+    );
+    await page.screenshot({ path: process.env.ASK_USER_E2E_SHOT });
+  }
   const box = await page
     .locator(".chat-message-ask-user-interactive .ask-user-option-button")
     .first()

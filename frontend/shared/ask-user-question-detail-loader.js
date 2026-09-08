@@ -119,6 +119,20 @@ export function createAskUserQuestionDetailLoader({ fetchDetail, onChange } = {}
     }
   }
 
+  // A failed detail has nothing left to trigger it: `sync` only starts loads for
+  // requests it is NOT already tracking, and the surface re-syncs on the same
+  // pending list, so the card would sit on "Question detail failed" until a
+  // reload. This is the reader's way out.
+  function retry(requestId) {
+    if (disposed || !requestId || loading.has(requestId)) {
+      return;
+    }
+    errors.delete(requestId);
+    details.delete(requestId);
+    startLoad(requestId);
+    emit();
+  }
+
   // Clear all tracked state (and stale-guard any in-flight fetches) without
   // disposing — e.g. on thread switch. `sync` already prunes by request id, so
   // this is belt-and-suspenders.
@@ -145,5 +159,23 @@ export function createAskUserQuestionDetailLoader({ fetchDetail, onChange } = {}
     errors.clear();
   }
 
-  return { sync, reset, dispose, snapshot };
+  return { sync, retry, reset, dispose, snapshot };
+}
+
+/// What "the pending detail work changed" means, in one place so the surface
+/// cannot forget a field. The THREAD is part of it: request ids restart per
+/// provider session, so two threads can present byte-identical rows and a
+/// signature without the thread never re-syncs for the second one.
+export function askUserDetailSignature(pendingRequests) {
+  return (Array.isArray(pendingRequests) ? pendingRequests : [])
+    .map((request) =>
+      [
+        request?.thread_id || "",
+        request?.request_id || "",
+        request?.content_hash || "",
+        request?.questions_inline_complete === false ? "0" : "1",
+        Array.isArray(request?.questions) ? request.questions.length : 0,
+      ].join(":")
+    )
+    .join("|");
 }

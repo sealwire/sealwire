@@ -1041,6 +1041,69 @@
   background: var(--surface-1);
 }
 
+/* THE DOCK
+ *
+ * The card for a question the turn is parked on is mounted here, beside the
+ * composer, instead of as a transcript row — a row is moved, rebuilt and
+ * unmounted by the list it lives in, and each of those loses a half-finished
+ * answer. Same 800px column as the composer so the two read as one surface, and
+ * capped in height so a multi-question card can never push the input off a
+ * phone screen. */
+/* The composer and anything docked above it are one block, pinned together to
+ * the bottom of the conversation (see react-shell.js). */
+.composer-dock-stack {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  background: var(--surface-1);
+  /* Keeps its height in the conversation's flex column: the transcript is the
+     part that gives way (it has min-height: 0), not the question you are being
+     asked to answer — squashed, its card just overflows onto the composer. */
+  flex: 0 0 auto;
+}
+
+.composer-dock-stack .composer-shell {
+  position: static;
+}
+
+.ask-user-dock {
+  flex: 0 0 auto;
+  width: 100%;
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 0 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 55vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* The Tasks pane is a narrower column with its own padding scale, and its
+ * viewport share has to leave the run list and the composer usable. */
+.task-orch .ask-user-dock {
+  padding: 0 12px;
+  max-height: 40vh;
+}
+
+.ask-user-dock .chat-message {
+  margin: 0;
+}
+
+/* The record left in the conversation where the question was actually asked.
+ * Quiet on purpose: the live copy is the one below, and two cards competing for
+ * the same click is the confusion this whole change removes. */
+.chat-message-ask-user-awaiting .message-card-ask-user {
+  opacity: 0.75;
+}
+
+.ask-user-awaiting-hint {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+
 .ask-user-meta {
   display: flex;
   align-items: baseline;
@@ -1259,6 +1322,12 @@
  * everything full-width. The card already lives inside the transcript
  * column so we mostly need to enforce ≥44pt tap targets here. */
 @media (max-width: 640px) {
+  .ask-user-dock {
+    padding: 0 12px;
+    /* Less room to give away: keep the composer and a line of the conversation
+       visible above a long question. */
+    max-height: 45vh;
+  }
   .message-card-ask-user {
     gap: 14px;
     padding: 12px;

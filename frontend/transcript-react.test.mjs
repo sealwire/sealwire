@@ -2482,7 +2482,7 @@ test("renderEntryMarkup disables AskUserQuestion buttons while a submission is i
     pendingAskUserQuestions: [
       { request_id: "ask:1", tool_use_id: "toolu_abc", thread_id: "t" },
     ],
-    askUserSubmittingRequestId: "ask:1",
+    askUserSubmittingRequestIds: new Set(["ask:1"]),
   });
   assert.match(markup, /ask-user-status[^>]*>Sending answer…</);
   // Buttons render the disabled attribute (React serializes disabled as `disabled=""`)

@@ -1625,6 +1625,8 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
             let questions = crate::state::parse_ask_user_questions(payload.get("questions"));
             let pending = crate::state::PendingAskUserQuestion {
                 request_id: request_id.clone(),
+                // Stamped on insert, where the relay knows the arrival order.
+                arrival_seq: 0,
                 tool_use_id,
                 thread_id: thread_id.clone(),
                 requested_at: crate::state::unix_now(),

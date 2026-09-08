@@ -36,13 +36,13 @@ test("local UI store tracks in-flight AskUserQuestion submissions and per-reques
   const store = createLocalUiStore();
   store.getState().startAskUserSubmission("ask:42");
   let state = readLocalUiState(store);
-  assert.equal(state.askUserSubmittingRequestId, "ask:42");
+  assert.ok(state.askUserSubmittingRequestIds.has("ask:42"));
 
   // finishing a *different* request_id must NOT clear the marker — guards
   // against late callbacks from a previously-superseded submission.
   store.getState().finishAskUserSubmission("ask:other");
   state = readLocalUiState(store);
-  assert.equal(state.askUserSubmittingRequestId, "ask:42");
+  assert.ok(state.askUserSubmittingRequestIds.has("ask:42"));
 
   store.getState().setAskUserError("ask:42", "Network failed");
   state = readLocalUiState(store);
@@ -50,7 +50,7 @@ test("local UI store tracks in-flight AskUserQuestion submissions and per-reques
 
   store.getState().finishAskUserSubmission("ask:42");
   state = readLocalUiState(store);
-  assert.equal(state.askUserSubmittingRequestId, "");
+  assert.equal(state.askUserSubmittingRequestIds.size, 0);
 
   // Errors persist after finish until explicitly cleared, so users can see
   // what went wrong even after the submission button re-enables.

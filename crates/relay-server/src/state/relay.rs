@@ -466,6 +466,9 @@ pub struct RelayState {
     locally_deleted_thread_ids: HashSet<String>,
     pub pending_approvals: HashMap<String, PendingApproval>,
     pub pending_ask_user_questions: HashMap<String, PendingAskUserQuestion>,
+    /// Stamped onto each pending question so same-second cards keep the order
+    /// they were asked in; see `add_pending_ask_user_question`.
+    next_ask_user_arrival_seq: u64,
     pub(super) runtimes: HashMap<String, ThreadRuntime>,
     pub(super) transcript: Vec<TranscriptRecord>,
     pub(super) logs: Vec<LogEntryView>,
@@ -636,6 +639,7 @@ impl RelayState {
             locally_deleted_thread_ids: HashSet::new(),
             pending_approvals: HashMap::new(),
             pending_ask_user_questions: HashMap::new(),
+            next_ask_user_arrival_seq: 0,
             runtimes: HashMap::new(),
             transcript: Vec::new(),
             logs: Vec::new(),
@@ -3618,20 +3622,23 @@ impl RelayState {
                 .map(|approval| approval.to_view())
                 .collect(),
             pending_ask_user_questions: {
-                let mut views = self
+                let mut pending = self
                     .pending_ask_user_questions
                     .values()
                     .cloned()
-                    .map(|pending| pending.to_view())
                     .collect::<Vec<_>>();
                 // Stable ordering keeps the UI from reshuffling cards as
                 // unrelated state updates trigger snapshot recomputations.
-                views.sort_by(|a, b| {
+                pending.sort_by(|a, b| {
                     a.requested_at
                         .cmp(&b.requested_at)
+                        .then_with(|| a.arrival_seq.cmp(&b.arrival_seq))
                         .then_with(|| a.request_id.cmp(&b.request_id))
                 });
-                views
+                pending
+                    .into_iter()
+                    .map(|question| question.to_view())
+                    .collect::<Vec<_>>()
             },
             transcript_truncated: false,
             transcript,
@@ -4460,7 +4467,9 @@ impl RelayState {
         Some(pending)
     }
 
-    pub fn add_pending_ask_user_question(&mut self, pending: PendingAskUserQuestion) {
+    pub fn add_pending_ask_user_question(&mut self, mut pending: PendingAskUserQuestion) {
+        self.next_ask_user_arrival_seq = self.next_ask_user_arrival_seq.saturating_add(1);
+        pending.arrival_seq = self.next_ask_user_arrival_seq;
         if !pending.thread_id.is_empty() {
             self.ensure_runtime_for_thread(&pending.thread_id)
                 .pending_ask_user_questions

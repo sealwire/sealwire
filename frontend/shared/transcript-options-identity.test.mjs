@@ -91,7 +91,7 @@ test("stableTranscriptOptions: reuses the previous object when collection fields
       onEnsureFileChangeDetail,
       pendingAskUserQuestions: [],
       onSubmitAskUserAnswers,
-      askUserSubmittingRequestId: "",
+      askUserSubmittingRequestIds: new Set(),
       askUserErrors: new Map(),
       askUserDetailErrors: new Map(),
       askUserDetailLoadingRequestIds: new Set(),

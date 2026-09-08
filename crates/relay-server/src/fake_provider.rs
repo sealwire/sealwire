@@ -1185,6 +1185,7 @@ impl ProviderBridge for FakeProviderBridge {
                         );
                         relay.add_pending_ask_user_question(PendingAskUserQuestion {
                             request_id: ask_user_request_id.clone(),
+                            arrival_seq: 0,
                             tool_use_id: ask_user_tool_use_id.clone(),
                             thread_id: thread_id.clone(),
                             requested_at: unix_now(),

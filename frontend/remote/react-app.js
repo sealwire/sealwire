@@ -14,7 +14,10 @@ import { fetchBuildInfo } from "../shared/build-badge.js";
 import { StartSessionSplitButton } from "../shared/start-session-split-button.js";
 import { ConversationHeader } from "../shared/conversation-header.js";
 import { ClientLog } from "../shared/client-log.js";
-import { createAskUserQuestionDetailLoader } from "../shared/ask-user-question-detail-loader.js";
+import {
+  askUserDetailSignature,
+  createAskUserQuestionDetailLoader,
+} from "../shared/ask-user-question-detail-loader.js";
 import {
   loadLastApprovalPolicy,
   loadLastEffort,
@@ -71,6 +74,8 @@ import {
 } from "./state.js";
 import { useRelayNicknames } from "./use-relay-nicknames.js";
 import { RemoteTranscriptPanel } from "./remote-transcript-panel.js";
+import { AskUserDock } from "../shared/ask-user-dock.js";
+import { retainAskUserDraftsForPending } from "../shared/ask-user-draft-store.js";
 import {
   selectEmptyStateRenderModel,
   selectRelayDirectoryRenderModel,
@@ -353,6 +358,10 @@ function RemoteApp() {
     undefined,
     createInitialRemoteTranscriptUiState
   );
+  // Read by the submit callback, which must not re-fire for a request already in
+  // flight and must not be re-created (and re-memoised) on every state change.
+  const transcriptUiRef = useRef(transcriptUiState);
+  transcriptUiRef.current = transcriptUiState;
   const [askUserQuestionDetails, setAskUserQuestionDetails] = useState(() => new Map());
   const [askUserQuestionDetailLoading, setAskUserQuestionDetailLoading] = useState(() => new Set());
   const [askUserQuestionDetailErrors, setAskUserQuestionDetailErrors] = useState(() => new Map());
@@ -931,14 +940,13 @@ function RemoteApp() {
     autoDetailItemIds: collectFileChangeDetailItemIds(session?.transcript),
   });
   const pendingAskUserQuestions = session?.pending_ask_user_questions || [];
-  const pendingAskUserSignature = pendingAskUserQuestions
-    .map((request) => [
-      request?.request_id || "",
-      request?.content_hash || "",
-      request?.questions_inline_complete === false ? "0" : "1",
-      Array.isArray(request?.questions) ? request.questions.length : 0,
-    ].join(":"))
-    .join("|");
+  const pendingAskUserSignature = askUserDetailSignature(pendingAskUserQuestions);
+  // The projection above is filtered to the thread on screen, so it cannot tell
+  // us that a question on ANOTHER thread was answered — which is exactly what
+  // retires that thread's draft and its failure.
+  const realPendingAskUserQuestions = currentState.realSession?.pending_ask_user_questions
+    || pendingAskUserQuestions;
+  const realPendingAskUserSignature = askUserDetailSignature(realPendingAskUserQuestions);
   const mergedPendingAskUserQuestions = mergeAskUserQuestionDetails(
     pendingAskUserQuestions,
     askUserQuestionDetails
@@ -993,6 +1001,16 @@ function RemoteApp() {
       .map((request) => request.request_id);
     askUserDetailLoaderRef.current?.sync(requestIds);
   }, [pendingAskUserSignature]);
+
+  // Its own effect, on the RELAY's signature: retention has to run when any
+  // thread's question is answered, not only when the visible one changes.
+  useEffect(() => {
+    retainAskUserDraftsForPending(realPendingAskUserQuestions);
+    dispatchTranscriptUi({
+      type: "askUser/retainErrors",
+      requestIds: realPendingAskUserQuestions.map((request) => request?.request_id),
+    });
+  }, [realPendingAskUserSignature]);
 
   useEffect(() => () => askUserDetailLoaderRef.current?.dispose(), []);
 
@@ -2104,8 +2122,29 @@ function RemoteApp() {
   // (createRemoteAppHandlers() above), so reading the latest through a ref
   // inside a permanently-stable callback is what keeps this out of
   // transcriptOptions's way instead of merely moving the instability here.
-  const handleSubmitAskUserAnswers = useCallback((requestId, answers) => {
-    void handlersRef.current.onSubmitAskUserAnswers?.(requestId, answers);
+  // Awaited, not fired and forgotten: the card has to be able to say "sending"
+  // and, when the broker is down, that the answer did not get there. The reject
+  // was previously an unhandled promise and the card stayed tappable.
+  const handleRetryAskUserDetail = useCallback((requestId) => {
+    askUserDetailLoaderRef.current?.retry(requestId);
+  }, []);
+
+  const handleSubmitAskUserAnswers = useCallback(async (requestId, answers) => {
+    // Same reason as the local controller: one question, one answer in flight.
+    if (transcriptUiRef.current?.askUserSubmittingRequestIds?.has?.(requestId)) {
+      return;
+    }
+    dispatchTranscriptUi({ type: "askUser/submitStart", requestId });
+    try {
+      await handlersRef.current.onSubmitAskUserAnswers?.(requestId, answers);
+      dispatchTranscriptUi({ type: "askUser/submitFinish", requestId });
+    } catch (error) {
+      dispatchTranscriptUi({
+        type: "askUser/submitError",
+        requestId,
+        message: error?.message || "Could not send your answer.",
+      });
+    }
   }, []);
 
   function handleExpandableBlockToggle(expandKey) {
@@ -2354,6 +2393,7 @@ function RemoteApp() {
             void handlers.onSubmitDecision(decision, scope);
           },
           onSubmitAskUserAnswers: handleSubmitAskUserAnswers,
+          onRetryAskUserDetail: handleRetryAskUserDetail,
           onApplyFileChange(itemId, direction) {
             void handlers.onApplyFileChange?.(itemId, direction);
           },
@@ -3106,6 +3146,7 @@ function RemoteThreadPanel({
   onEnsureFileChangeDetail,
   onSubmitDecision,
   onSubmitAskUserAnswers,
+  onRetryAskUserDetail,
   onRepairWorkspace,
   onTakeOver,
   onUpdateSessionSettings,
@@ -3118,6 +3159,14 @@ function RemoteThreadPanel({
   askUserDetailLoadingRequestIds,
   uiState,
 }) {
+  // Computed once and handed to BOTH the transcript and the dock: a review or
+  // Code Flow owning the thread hides the question, and a question belonging to
+  // another thread was never this conversation's to answer. Two copies of that
+  // rule drift, and the drift shows up as a card you can tap but not submit.
+  const visibleAskUserQuestions = visiblePendingAskUserQuestions(
+    sessionView,
+    pendingAskUserQuestions
+  );
   return h(
     "section",
     { className: "remote-thread-panel" },
@@ -3135,10 +3184,7 @@ function RemoteThreadPanel({
         onEnsureFileChangeDetail,
         onSubmitDecision,
         onSubmitAskUserAnswers,
-        pendingAskUserQuestions: visiblePendingAskUserQuestions(
-          sessionView,
-          pendingAskUserQuestions
-        ),
+        pendingAskUserQuestions: visibleAskUserQuestions,
         session,
         transcriptDetailEntries,
         askUserDetailErrors,
@@ -3179,6 +3225,27 @@ function RemoteThreadPanel({
         })
       )
     ),
+    // Above the composer, outside the scroller: the card the turn is parked on
+    // must not be something the reader can scroll away from, and must not be
+    // rebuilt by the transcript it used to live in.
+    h(AskUserDock, {
+      pendingAskUserQuestions: visibleAskUserQuestions,
+      threadId: session?.active_thread_id || null,
+      options: {
+        onSubmitAskUserAnswers,
+        onRetryAskUserDetail,
+        askUserSubmittingRequestIds:
+          uiState.askUserSubmittingRequestIds instanceof Set
+            ? uiState.askUserSubmittingRequestIds
+            : new Set(),
+        askUserErrors: uiState.askUserErrors instanceof Map ? uiState.askUserErrors : new Map(),
+        askUserDetailErrors: askUserDetailErrors instanceof Map ? askUserDetailErrors : new Map(),
+        askUserDetailLoadingRequestIds:
+          askUserDetailLoadingRequestIds instanceof Set
+            ? askUserDetailLoadingRequestIds
+            : new Set(),
+      },
+    }),
     h(
       "section",
       {

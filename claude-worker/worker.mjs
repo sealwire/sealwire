@@ -53,6 +53,7 @@ import {
   emitResponse,
   log,
 } from "./protocol.mjs";
+import { createRequestIdMinter } from "./request-ids.mjs";
 import {
   lastMessageActivitySeconds,
   mapModelInfos,
@@ -1137,8 +1138,10 @@ async function ensureLiveSession(
 
 async function main() {
   const sdk = await findSdk();
-  let nextApproval = 1;
-  let nextAskUserRequest = 1;
+  // Not a counter: it restarted at 1 with the process, while the surfaces cache
+  // against these ids and outlive it. See request-ids.mjs.
+  const nextApproval = createRequestIdMinter();
+  const nextAskUserRequest = createRequestIdMinter();
   const sessions = new Map();
   const pendingApprovals = new Map();
   const pendingAskUserQuestions = new Map();
@@ -1245,9 +1248,9 @@ async function main() {
           entry,
           cmd,
           pendingApprovals,
-          () => nextApproval++,
+          nextApproval,
           pendingAskUserQuestions,
-          () => nextAskUserRequest++,
+          nextAskUserRequest,
         );
         entry.fileDiffTracker = createFileDiffTracker(entry.options.cwd);
         sessions.set(entry.key, entry);
@@ -1301,9 +1304,9 @@ async function main() {
           entry,
           cmd,
           pendingApprovals,
-          () => nextApproval++,
+          nextApproval,
           pendingAskUserQuestions,
-          () => nextAskUserRequest++,
+          nextAskUserRequest,
         );
         if (!entry.options) entry.options = desiredOptions;
 
@@ -1369,9 +1372,9 @@ async function main() {
           entry,
           cmd,
           pendingApprovals,
-          () => nextApproval++,
+          nextApproval,
           pendingAskUserQuestions,
-          () => nextAskUserRequest++,
+          nextAskUserRequest,
         );
         if (!entry.options) entry.options = desiredOptions;
 

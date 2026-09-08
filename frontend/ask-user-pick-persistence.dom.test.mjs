@@ -86,7 +86,7 @@ function options(pending) {
     loadingItemIds: new Set(),
     pendingAskUserQuestions: pending,
     onSubmitAskUserAnswers: () => {},
-    askUserSubmittingRequestId: "",
+    askUserSubmittingRequestIds: new Set(),
     askUserErrors: new Map(),
   };
 }
