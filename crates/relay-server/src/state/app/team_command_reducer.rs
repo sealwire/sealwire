@@ -28,7 +28,7 @@ use relay_api::orchestration::{
     CommandFingerprint, CommandId, CommandRejection, TeamCommandKind, TeamCommandOutcome,
     TeamCommandRecord, MAX_TEAM_COMMAND_JOURNAL,
 };
-use relay_api::team::{LastDrainedNotes, TeamRun, TeamRunStatus};
+use relay_api::team::{LastDrainedNotes, SubTaskStatus, TeamRun, TeamRunStatus};
 use relay_api::team_command::{
     TeamCommandEnvelope, TeamCommandOutput, TeamCommandReceipt, TeamCommandStatus,
     TeamStateCommand, TeamSubTaskRole, MAX_TEAM_COMMAND_FINDINGS, MAX_TEAM_COMMAND_NOTES,
@@ -502,6 +502,10 @@ fn validate_payload(run: &TeamRun, command: &TeamStateCommand) -> Result<(), Com
         }
         TeamStateCommand::AttachSubTaskThread { index, .. } => require_sub_task_index(run, *index),
         TeamStateCommand::SetSubTaskStatus { index, .. } => require_sub_task_index(run, *index),
+        TeamStateCommand::PauseSubTaskWithoutCandidate { index }
+        | TeamStateCommand::RecordSubTaskStaleReview { index } => {
+            require_sub_task_index(run, *index)
+        }
         TeamStateCommand::RecordReviewRound { index, verdict, .. } => {
             require_sub_task_index(run, *index)?;
             bound_verdict(verdict)
@@ -519,7 +523,10 @@ fn validate_payload(run: &TeamRun, command: &TeamStateCommand) -> Result<(), Com
             Some(verdict) => bound_verdict(verdict),
             None => Ok(()),
         },
-        TeamStateCommand::RecordMrDevThread { .. }
+        TeamStateCommand::PauseMrWithoutCandidate { verdict } => bound_verdict(verdict),
+        TeamStateCommand::PrepareMrReview { .. }
+        | TeamStateCommand::RecordMrStaleReview {}
+        | TeamStateCommand::RecordMrDevThread { .. }
         | TeamStateCommand::FinishRun { .. }
         | TeamStateCommand::SetRunStatus { .. }
         | TeamStateCommand::FailRun { .. }
@@ -597,6 +604,18 @@ fn apply_effects(
                 task.status = status;
             }
         }
+        TeamStateCommand::PauseSubTaskWithoutCandidate { index } => {
+            if let Some(task) = run.sub_tasks.get_mut(index) {
+                task.status = SubTaskStatus::Pending;
+                task.candidate_sha.clear();
+                task.verdict_candidate_sha.clear();
+            }
+        }
+        TeamStateCommand::RecordSubTaskStaleReview { index } => {
+            if let Some(task) = run.sub_tasks.get_mut(index) {
+                task.stale_review_retries = task.stale_review_retries.saturating_add(1);
+            }
+        }
         TeamStateCommand::RecordReviewRound {
             index,
             verdict,
@@ -609,6 +628,7 @@ fn apply_effects(
                 task.status = status;
                 task.result_summary = result_summary;
                 task.last_verdict = Some(verdict);
+                task.stale_review_retries = 0;
             }
             if let Some(leftover) = escalated {
                 run.unresolved.push(leftover);
@@ -633,9 +653,29 @@ fn apply_effects(
                 run.phase = phase;
             }
             run.mr_verdict = Some(verdict);
+            run.mr_stale_review_retries = 0;
         }
         TeamStateCommand::SetMrVerdict { verdict } => {
             run.mr_verdict = verdict;
+        }
+        TeamStateCommand::PrepareMrReview {
+            round_base_sha,
+            candidate_sha,
+        } => {
+            if run.mr_round_base_sha.is_empty() {
+                run.mr_round_base_sha = round_base_sha;
+            }
+            run.mr_candidate_sha = candidate_sha;
+            run.mr_verdict_candidate_sha.clear();
+        }
+        TeamStateCommand::PauseMrWithoutCandidate { verdict } => {
+            run.mr_candidate_sha.clear();
+            run.mr_verdict_candidate_sha.clear();
+            run.mr_stale_review_retries = 0;
+            run.mr_verdict = Some(verdict);
+        }
+        TeamStateCommand::RecordMrStaleReview {} => {
+            run.mr_stale_review_retries = run.mr_stale_review_retries.saturating_add(1);
         }
         TeamStateCommand::RecordMrDevThread { thread_id } => {
             run.mr_dev_thread_id = Some(thread_id);

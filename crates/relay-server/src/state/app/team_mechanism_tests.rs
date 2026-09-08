@@ -3784,20 +3784,16 @@ async fn a_later_sub_task_correction_with_no_commit_keeps_the_reviewer_gate_shut
         ..Default::default()
     });
     app.relay.write().await.insert_team_run(run);
-    let dev_thread =
-        relay_api::TeamPort::start_thread(&app, &run_id, relay_api::team::TeamRole::Dev)
-            .await
-            .expect("dev thread");
-    relay_api::TeamPort::update_run(
-        &app,
-        &run_id,
-        Box::new({
-            let dev_thread = dev_thread.clone();
-            move |run| {
-                run.sub_tasks[0].dev_thread_id = Some(dev_thread.clone());
-            }
-        }),
-    )
+    let dev_seat = relay_api::TeamPort::start_thread(&app, &run_id, relay_api::team::TeamRole::Dev)
+        .await
+        .expect("dev thread");
+    let dev_thread = dev_seat.thread_id;
+    app.test_update_team_run(&run_id, {
+        let dev_thread = dev_thread.clone();
+        move |run| {
+            run.sub_tasks[0].dev_thread_id = Some(dev_thread);
+        }
+    })
     .await;
     std::fs::write(
         std::path::Path::new(&root).join("dirty-only.rs"),
@@ -3821,20 +3817,16 @@ async fn a_later_sub_task_correction_with_no_commit_keeps_the_reviewer_gate_shut
         other => panic!("dirty-only correction must not look successful: {other:?}"),
     }
 
-    let reviewer_thread =
+    let reviewer_seat =
         relay_api::TeamPort::start_thread(&app, &run_id, relay_api::team::TeamRole::Reviewer)
             .await
             .expect("reviewer thread");
-    relay_api::TeamPort::update_run(
-        &app,
-        &run_id,
-        Box::new({
-            let reviewer_thread = reviewer_thread.clone();
-            move |run| {
-                run.sub_tasks[0].reviewer_thread_id = Some(reviewer_thread.clone());
-            }
-        }),
-    )
+    app.test_update_team_run(&run_id, {
+        let reviewer_thread = reviewer_seat.thread_id.clone();
+        move |run| {
+            run.sub_tasks[0].reviewer_thread_id = Some(reviewer_thread);
+        }
+    })
     .await;
     let reviewer_outcome = relay_api::TeamPort::turn(
         &app,
@@ -3911,20 +3903,16 @@ async fn a_later_mr_correction_with_no_commit_keeps_the_reviewer_gate_shut() {
         findings: vec!["fix the final review issue".to_string()],
     });
     app.relay.write().await.insert_team_run(run);
-    let dev_thread =
-        relay_api::TeamPort::start_thread(&app, &run_id, relay_api::team::TeamRole::Dev)
-            .await
-            .expect("dev thread");
-    relay_api::TeamPort::update_run(
-        &app,
-        &run_id,
-        Box::new({
-            let dev_thread = dev_thread.clone();
-            move |run| {
-                run.mr_dev_thread_id = Some(dev_thread.clone());
-            }
-        }),
-    )
+    let dev_seat = relay_api::TeamPort::start_thread(&app, &run_id, relay_api::team::TeamRole::Dev)
+        .await
+        .expect("dev thread");
+    let dev_thread = dev_seat.thread_id;
+    app.test_update_team_run(&run_id, {
+        let dev_thread = dev_thread.clone();
+        move |run| {
+            run.mr_dev_thread_id = Some(dev_thread);
+        }
+    })
     .await;
     std::fs::write(
         std::path::Path::new(&root).join("dirty-mr-only.rs"),
@@ -3948,16 +3936,14 @@ async fn a_later_mr_correction_with_no_commit_keeps_the_reviewer_gate_shut() {
         other => panic!("dirty-only MR correction must not look successful: {other:?}"),
     }
 
-    let reviewer_thread =
+    let reviewer_seat =
         relay_api::TeamPort::start_thread(&app, &run_id, relay_api::team::TeamRole::Reviewer)
             .await
             .expect("reviewer thread");
-    let reviewer_slot =
-        relay_api::TeamPort::record_run_thread(&app, &run_id, &reviewer_thread).await;
     let reviewer_outcome = relay_api::TeamPort::turn(
         &app,
         &run_id,
-        reviewer_slot,
+        reviewer_seat.slot,
         relay_api::team::TeamRole::Reviewer,
         "review final candidate",
     )

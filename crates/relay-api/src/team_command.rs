@@ -117,6 +117,16 @@ pub enum TeamStateCommand {
         index: usize,
         status: SubTaskStatus,
     },
+    /// Park a developer round that produced no committed candidate without
+    /// leaving stale candidate identity attached to the pending sub-task.
+    PauseSubTaskWithoutCandidate {
+        index: usize,
+    },
+    /// Count a review whose committed candidate changed before its verdict
+    /// could be applied, so repeated rebound attempts remain bounded.
+    RecordSubTaskStaleReview {
+        index: usize,
+    },
     RecordReviewRound {
         index: usize,
         // T5: → ArtifactRef
@@ -147,6 +157,20 @@ pub enum TeamStateCommand {
         // T5: → ArtifactRef
         verdict: Option<WorkflowVerdict>,
     },
+    /// Pin the committed candidate reviewed by the next MR gate.
+    PrepareMrReview {
+        // T5: → ArtifactRef
+        round_base_sha: String,
+        // T5: → ArtifactRef
+        candidate_sha: String,
+    },
+    /// Park an MR correction round that produced no committed candidate.
+    PauseMrWithoutCandidate {
+        // T5: → ArtifactRef
+        verdict: WorkflowVerdict,
+    },
+    /// Count a stale MR verdict rebound attempt.
+    RecordMrStaleReview {},
     RecordMrDevThread {
         // T5: → ArtifactRef
         thread_id: String,
@@ -226,10 +250,17 @@ impl TeamStateCommand {
             Self::ReplanSubTasks { .. } => TeamCommandKind::ReplanSubTasks,
             Self::AttachSubTaskThread { .. } => TeamCommandKind::AttachSubTaskThread,
             Self::SetSubTaskStatus { .. } => TeamCommandKind::SetSubTaskStatus,
+            Self::PauseSubTaskWithoutCandidate { .. } => {
+                TeamCommandKind::PauseSubTaskWithoutCandidate
+            }
+            Self::RecordSubTaskStaleReview { .. } => TeamCommandKind::RecordSubTaskStaleReview,
             Self::RecordReviewRound { .. } => TeamCommandKind::RecordReviewRound,
             Self::MarkSubTaskDigested { .. } => TeamCommandKind::MarkSubTaskDigested,
             Self::RecordMrRound { .. } => TeamCommandKind::RecordMrRound,
             Self::SetMrVerdict { .. } => TeamCommandKind::SetMrVerdict,
+            Self::PrepareMrReview { .. } => TeamCommandKind::PrepareMrReview,
+            Self::PauseMrWithoutCandidate { .. } => TeamCommandKind::PauseMrWithoutCandidate,
+            Self::RecordMrStaleReview {} => TeamCommandKind::RecordMrStaleReview,
             Self::RecordMrDevThread { .. } => TeamCommandKind::RecordMrDevThread,
             Self::FinishRun { .. } => TeamCommandKind::FinishRun,
             Self::TakeUserNotes {} => TeamCommandKind::TakeUserNotes,
@@ -316,6 +347,8 @@ mod tests {
                 index: 0,
                 status: SubTaskStatus::Implementing,
             },
+            TeamStateCommand::PauseSubTaskWithoutCandidate { index: 0 },
+            TeamStateCommand::RecordSubTaskStaleReview { index: 0 },
             TeamStateCommand::RecordReviewRound {
                 index: 0,
                 verdict: WorkflowVerdict::approved(),
@@ -335,6 +368,14 @@ mod tests {
             TeamStateCommand::SetMrVerdict {
                 verdict: Some(WorkflowVerdict::approved()),
             },
+            TeamStateCommand::PrepareMrReview {
+                round_base_sha: "base".to_string(),
+                candidate_sha: "candidate".to_string(),
+            },
+            TeamStateCommand::PauseMrWithoutCandidate {
+                verdict: WorkflowVerdict::needs_changes(vec!["commit first".to_string()]),
+            },
+            TeamStateCommand::RecordMrStaleReview {},
             TeamStateCommand::RecordMrDevThread {
                 thread_id: "mr-dev".to_string(),
             },
@@ -397,10 +438,15 @@ mod tests {
             TeamCommandKind::ReplanSubTasks,
             TeamCommandKind::AttachSubTaskThread,
             TeamCommandKind::SetSubTaskStatus,
+            TeamCommandKind::PauseSubTaskWithoutCandidate,
+            TeamCommandKind::RecordSubTaskStaleReview,
             TeamCommandKind::RecordReviewRound,
             TeamCommandKind::MarkSubTaskDigested,
             TeamCommandKind::RecordMrRound,
             TeamCommandKind::SetMrVerdict,
+            TeamCommandKind::PrepareMrReview,
+            TeamCommandKind::PauseMrWithoutCandidate,
+            TeamCommandKind::RecordMrStaleReview,
             TeamCommandKind::RecordMrDevThread,
             TeamCommandKind::FinishRun,
             TeamCommandKind::TakeUserNotes,
