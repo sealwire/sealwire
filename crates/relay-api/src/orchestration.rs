@@ -1536,25 +1536,26 @@ impl<'de> Deserialize<'de> for DriverProgress {
 /// (`.sealwire/DESIGN.md` D7), settled and not to be reopened:
 ///
 /// - **Bounded retention.** The journal never holds more than this many
-///   records. Eviction picks, in order: an `Applied` record strictly below
-///   `driver_progress.last_command_seq`; failing that, ANY `Rejected` or
-///   `Interrupted` record regardless of its own sequence (it can never later
-///   apply, so its sequence needs no protecting); failing that too, the
-///   oldest record of any class, to guarantee the cap holds even when
-///   nothing else is droppable. See
-///   `team_command_reducer::{push_with_eviction, evict_one}` for the exact
-///   three-tier policy and why each tier is safe.
-/// - **Every eviction stays safe regardless of tier**, because D1 makes
-///   `sequence <= driver_progress.last_command_seq` hold for every record the
-///   moment it is written, and the reducer's ordering check itself rejects
-///   on `<=`, not just `<`: redelivering ANY evicted id's exact sequence
-///   fails that check deterministically, never falls through as "unseen".
+///   records. Eviction is the single D7 rule: droppable if and only if a
+///   record's own `sequence` is strictly below `driver_progress.last_command_seq` —
+///   no outcome-dependent class, no "oldest of any class" fallback, and never
+///   a record sitting AT the watermark. See
+///   `team_command_reducer::{push_with_eviction, evict_one}`.
+/// - **The rule needs no fallback.** D1 makes every journaled record advance
+///   the watermark the instant it is written, so the record just written is
+///   the only one ever sitting AT it; everything else already sits strictly
+///   below and is therefore always evictable — the cap holds without ever
+///   needing a second eviction class.
 /// - **Exact replay while retained.** As long as an id's record is still
 ///   here, redelivering it replays the exact receipt this journal recorded —
 ///   never a re-derived approximation.
 /// - **Fail closed once evicted.** Past that horizon, redelivery of the same
 ///   id is rejected `StaleCommand` — deterministic, and never mistaken for
 ///   "never seen".
+/// - **Stale probes do not become receipts.** A sequence already at or below
+///   the watermark is rejected from that watermark without appending a new
+///   record, so probing outside the retained horizon cannot evict unrelated
+///   retained receipts or grow the journal.
 ///
 /// `TakeUserNotes` adds one more rule on top: its replay payload lives in
 /// `TeamRun.drained_notes`, a run-local slot outside this content-blind

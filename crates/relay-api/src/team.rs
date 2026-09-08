@@ -1008,7 +1008,31 @@ impl TeamRun {
     /// closed while preserving their backend pin and prior diagnostics.
     pub fn reconcile_after_restore(&mut self) -> bool {
         let in_flight_recovered = self.recover_stranded_in_flight_command();
-        self.reconcile_lifecycle_after_restore() || in_flight_recovered
+        let watermark_repaired = self.repair_command_journal_watermark();
+        self.reconcile_lifecycle_after_restore() || in_flight_recovered || watermark_repaired
+    }
+
+    /// Older reducer drafts could journal a rejected command without moving
+    /// `last_command_seq`. The journal record is durable evidence that the
+    /// sequence was spent, so a restored run must raise the watermark to cover
+    /// every retained record before a replacement driver seeds from it.
+    fn repair_command_journal_watermark(&mut self) -> bool {
+        if self.command_journal.is_malformed() {
+            return false;
+        }
+        let Some(max_record_sequence) = self
+            .command_journal
+            .iter()
+            .map(|record| record.sequence)
+            .max()
+        else {
+            return false;
+        };
+        if max_record_sequence <= self.driver_progress.last_command_seq {
+            return false;
+        }
+        self.driver_progress.last_command_seq = max_record_sequence;
+        true
     }
 
     /// D10: a run loaded with a command still in flight gets a terminal
@@ -2146,6 +2170,42 @@ mod tests {
         assert_eq!(record.sequence, 4);
         assert_eq!(record.expected_revision, 3);
         assert_eq!(record.last_event_seq, 2);
+    }
+
+    #[test]
+    fn restore_advances_the_watermark_to_retained_journal_records() {
+        let mut run = run_with(TeamPhase::SubTasks, Vec::new());
+        run.driver_progress.last_command_seq = 6;
+        run.command_journal.push(TeamCommandRecord {
+            command_id: crate::orchestration::CommandId::new("cmd-7").unwrap(),
+            sequence: 7,
+            kind: TeamCommandKind::SetPhase,
+            fingerprint: Some(crate::orchestration::CommandFingerprint::from_digest(
+                [7u8; 32],
+            )),
+            expected_revision: 3,
+            state_revision: 3,
+            last_event_seq: 3,
+            outcome: TeamCommandOutcome::Rejected {
+                reason: crate::orchestration::CommandRejection::InvalidState,
+            },
+        });
+
+        assert!(
+            run.reconcile_after_restore(),
+            "restore should repair the durable command watermark"
+        );
+        assert_eq!(
+            run.driver_progress.last_command_seq, 7,
+            "a replacement driver must seed after the retained rejected record"
+        );
+        let restored: TeamRun =
+            serde_json::from_value(serde_json::to_value(&run).unwrap()).unwrap();
+        assert_eq!(restored.driver_progress.last_command_seq, 7);
+        assert!(
+            !restored.command_journal.is_malformed(),
+            "repairing the watermark must not fabricate or discard journal records"
+        );
     }
 
     /// Recovery appends a record. At the cap that would restore a journal one

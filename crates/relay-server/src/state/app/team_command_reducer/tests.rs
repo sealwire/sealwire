@@ -366,7 +366,9 @@ fn same_command_id_different_content_is_rejected_as_duplicate() {
 
 // ---------------------------------------------------------------------
 // AC-3 / AC-5: stale revision, out-of-order sequence, and lifecycle refusal
-// all fail closed with NO state transition — only the journal may grow.
+// all fail closed with NO state transition. Fresh rejections that pass the
+// ordering check are journaled; already-spent sequence probes are answered
+// from the watermark without consuming journal space again.
 // ---------------------------------------------------------------------
 
 #[test]
@@ -427,7 +429,11 @@ fn out_of_order_sequence_fails_closed() {
         run.driver_progress.last_command_seq,
         run_before.driver_progress.last_command_seq
     );
-    assert_eq!(run.command_journal.len(), 2);
+    assert_eq!(
+        run.command_journal.len(),
+        1,
+        "a stale sequence that missed the retained journal is not cached again"
+    );
 }
 
 #[test]
@@ -457,7 +463,8 @@ fn last_command_seq_advances_on_a_rejection_that_passes_the_ordering_check() {
 
     // A LOWER sequence (6) must now fail ordering too, even though it was
     // never itself delivered before — this is what "advancing on rejection"
-    // is for.
+    // is for. It is not journaled: the watermark already carries the only
+    // durable identity needed for a sequence behind the retained horizon.
     let lower = apply_raw(
         &mut run,
         envelope("cmd-3", 6, 1, set_phase(TeamPhase::Planning)),
@@ -999,6 +1006,64 @@ fn journal_eviction_never_converts_an_applied_replay_into_a_second_apply() {
 }
 
 #[test]
+fn retained_horizon_stale_commands_do_not_grow_or_replace_the_journal() {
+    let mut run = fresh_run();
+
+    for sequence in 1..=(relay_api::orchestration::MAX_TEAM_COMMAND_JOURNAL as u64 + 2) {
+        apply(
+            &mut run,
+            &format!("cmd-{sequence}"),
+            sequence,
+            set_phase(TeamPhase::Design),
+        );
+    }
+    assert_eq!(
+        run.command_journal.len(),
+        relay_api::orchestration::MAX_TEAM_COMMAND_JOURNAL
+    );
+    assert!(
+        run.command_journal
+            .find(&CommandId::new("cmd-1").unwrap())
+            .is_none(),
+        "the stale sequence below must be outside the retained horizon"
+    );
+    let journal_before = serde_json::to_value(&run.command_journal).unwrap();
+    let revision_before = run.driver_progress.state_revision;
+    let event_before = run.driver_progress.last_event_seq;
+    let watermark = run.driver_progress.last_command_seq;
+
+    for (index, sequence) in [1, watermark].into_iter().enumerate() {
+        let (receipt, wrote) = apply_team_command(
+            &mut run,
+            RUN_ID,
+            envelope(
+                &format!("cmd-stale-probe-{index}"),
+                sequence,
+                revision_before,
+                set_phase(TeamPhase::Wrapping),
+            ),
+        );
+        assert_eq!(
+            receipt.status,
+            TeamCommandStatus::Rejected(CommandRejection::StaleCommand)
+        );
+        assert!(
+            !wrote,
+            "a sequence already at or below the watermark must not consume a journal slot"
+        );
+    }
+
+    assert_eq!(run.driver_progress.state_revision, revision_before);
+    assert_eq!(run.driver_progress.last_event_seq, event_before);
+    assert_eq!(run.driver_progress.last_command_seq, watermark);
+    assert_eq!(
+        serde_json::to_value(&run.command_journal).unwrap(),
+        journal_before,
+        "horizon-stale probes must not evict retained receipts or fabricate new ones"
+    );
+}
+
+#[test]
 fn journal_eviction_never_drops_the_in_flight_record() {
     let mut run = fresh_run();
     let in_flight_id = CommandId::new("cmd-1").unwrap();
@@ -1020,12 +1085,66 @@ fn journal_eviction_never_drops_the_in_flight_record() {
     );
 }
 
-/// D9-corrected: rejected/interrupted records are evictable with NO sequence
-/// condition, so the cap holds UNCONDITIONALLY — even under a stream of
-/// fresh, never-applied rejections. This is safe because `last_command_seq`
-/// now advances on every rejection that clears the ordering check (see
-/// `last_command_seq_advances_on_a_rejection_that_passes_the_ordering_check`
-/// above): a redelivery of an evicted rejection fails there, not by
+/// D7's single eviction rule, pinned directly against `evict_one`: a record
+/// is droppable if and only if its own `sequence` is strictly below the
+/// watermark — no outcome-dependent tier, and no "oldest of any class"
+/// fallback that would reach a record sitting AT the watermark.
+#[test]
+fn eviction_never_drops_a_record_sitting_at_the_watermark() {
+    let mut run = fresh_run();
+    run.driver_progress.last_command_seq = 5;
+
+    // Every filler sits AT the watermark (never below it), so the D7 rule
+    // (`sequence < last_command_seq`) finds nothing among them. Mix outcomes
+    // on purpose: the rule is sequence-only, not outcome-dependent.
+    for i in 0..relay_api::orchestration::MAX_TEAM_COMMAND_JOURNAL {
+        let outcome = if i == 0 {
+            TeamCommandOutcome::Rejected {
+                reason: CommandRejection::InvalidState,
+            }
+        } else {
+            TeamCommandOutcome::Applied
+        };
+        run.command_journal.push(TeamCommandRecord {
+            command_id: CommandId::new(format!("cmd-filler-{i}")).unwrap(),
+            sequence: 5,
+            kind: TeamCommandKind::SetPhase,
+            fingerprint: Some(compute_fingerprint(
+                RUN_ID,
+                &envelope(
+                    &format!("cmd-filler-{i}"),
+                    5,
+                    0,
+                    set_phase(TeamPhase::Design),
+                ),
+            )),
+            expected_revision: 0,
+            state_revision: 0,
+            last_event_seq: 0,
+            outcome,
+        });
+    }
+
+    let before = run.command_journal.len();
+    let evicted = evict_one(&mut run);
+    assert!(
+        evicted.is_none(),
+        "a record sitting AT last_command_seq must never be evicted"
+    );
+    assert_eq!(run.command_journal.len(), before);
+
+    run.driver_progress.last_command_seq = 6;
+    let evicted = evict_one(&mut run).expect("records below the watermark are droppable");
+    assert_eq!(evicted.sequence, 5);
+    assert_eq!(run.command_journal.len(), before - 1);
+}
+
+/// D7: the single eviction rule (`sequence < last_command_seq`) is
+/// outcome-blind, so a stream of fresh, never-applied rejections is just as
+/// evictable as applied commands — each one advances the watermark past the
+/// last (`last_command_seq_advances_on_a_rejection_that_passes_the_ordering_check`
+/// above), so the cap still holds even though nothing here ever applies. A
+/// redelivery of an evicted rejection fails the ordering check, not by
 /// consulting the (gone) journal record.
 #[test]
 fn rejected_records_are_evicted_unconditionally_and_the_cap_always_holds() {
@@ -1076,13 +1195,12 @@ fn rejected_records_are_evicted_unconditionally_and_the_cap_always_holds() {
     assert_ne!(run.phase, TeamPhase::Planning);
 }
 
-/// D1: a rejection that never reaches the sequence check (step 6's payload
-/// bounds, here) now advances `last_command_seq` to its OWN sequence the
-/// instant it is journaled — not only later, whenever eviction happens to
-/// catch up to it. That is the fix for the "sharper half" of the old bug:
-/// before D1, nothing moved the cursor for this class until eviction forced
-/// it to, so a redelivery of a still-retained (but never-ordered) rejection
-/// could reuse its sequence.
+/// D1: a fresh rejection that passes the sequence check and then fails payload
+/// bounds now advances `last_command_seq` to its OWN sequence the instant it
+/// is journaled — not only later, whenever eviction happens to catch up to
+/// it. That is the fix for the "sharper half" of the old bug: before D1,
+/// nothing moved the cursor for this class until eviction forced it to, so a
+/// redelivery of a still-retained rejection could reuse its sequence.
 #[test]
 fn rejections_that_never_reach_the_sequence_check_still_advance_the_watermark_immediately() {
     let mut run = fresh_run();
@@ -1298,6 +1416,39 @@ fn an_inert_backend_is_left_completely_untouched() {
     assert!(
         run.command_journal.is_empty(),
         "an inert run must stay completely untouched, including its journal"
+    );
+}
+
+/// D2's check-order pin, the pairwise case a prior review round found
+/// missing: backend must be checked before malformed state too, not just
+/// before protocol. `malformed_state_wins_over_an_unsupported_protocol` pins
+/// malformed-before-protocol and `protocol_check_runs_before_the_journal_lookup_so_a_stale_receipt_can_never_surface`
+/// pins protocol-before-replay, but neither exercises a run that is BOTH an
+/// inert backend AND malformed at once — so swapping the backend and
+/// malformed checks (the one pairing D2's stated order actually requires:
+/// "Backend stays first so an unsupported build never writes anything at
+/// all") would leave the rest of the suite green.
+#[test]
+fn an_inert_backend_wins_over_malformed_state() {
+    let mut run = fresh_run();
+    run.orchestration_backend = relay_api::orchestration::OrchestrationBackendRef::Cloud {
+        protocol_version: relay_api::orchestration::SupportedProtocolVersion::current(),
+        driver_version: relay_api::orchestration::DriverVersion::new("driver.1").unwrap(),
+        cloud_run_id: relay_api::orchestration::DriverRunId::new("cloud-run-1").unwrap(),
+    };
+    run.driver_progress =
+        serde_json::from_value(serde_json::json!({"state_revision": "not-a-number"})).unwrap();
+
+    let rejected = apply(&mut run, "cmd-1", 1, set_phase(TeamPhase::Design));
+
+    assert_eq!(
+        rejected.status,
+        TeamCommandStatus::Rejected(CommandRejection::BackendMismatch),
+        "an inert backend must be checked before malformed state, per the pinned order"
+    );
+    assert!(
+        run.command_journal.is_empty(),
+        "backend is a write-nothing refusal even when the state underneath is also malformed"
     );
 }
 
@@ -2103,14 +2254,14 @@ fn an_ordinary_command_is_nowhere_near_the_payload_bound() {
 #[test]
 fn compacting_a_pre_sequence_rejection_still_refuses_a_reused_id() {
     let mut run = fresh_run();
-    let far = 10_000u64;
+    let consumed_sequence = 1u64;
 
-    // Refused at the payload bound, i.e. before the ordering check.
+    // Refused at the payload bound.
     let refused = apply_raw(
         &mut run,
         envelope(
             "cmd-reused",
-            far,
+            consumed_sequence,
             0,
             TeamStateCommand::ReplanSubTasks {
                 sub_tasks: (0..MAX_TEAM_COMMAND_SUB_TASKS + 1)
@@ -2125,13 +2276,16 @@ fn compacting_a_pre_sequence_rejection_still_refuses_a_reused_id() {
         TeamCommandStatus::Rejected(CommandRejection::InvalidState)
     );
 
-    // Push it out of the journal. Same rejection class, so eviction works
-    // oldest-first through them and reaches `cmd-reused` first of all.
-    for index in 1..=(MAX_TEAM_COMMAND_JOURNAL as u64 + 4) {
+    // Push it out of the journal with fresh, HIGHER-sequenced rejections.
+    // D7 evicts only strictly below the watermark, so this only works
+    // because each filler raises the watermark past `cmd-reused`'s spent
+    // sequence — the same reason it can never be evicted while it is still
+    // the most recent thing the run has seen.
+    for sequence in 2..=(MAX_TEAM_COMMAND_JOURNAL as u64 + 5) {
         apply(
             &mut run,
-            &format!("cmd-filler-{index}"),
-            index,
+            &format!("cmd-filler-{sequence}"),
+            sequence,
             TeamStateCommand::ReplanSubTasks {
                 sub_tasks: (0..MAX_TEAM_COMMAND_SUB_TASKS + 1)
                     .map(|i| sub_task(&format!("st-{i}")))
@@ -2153,7 +2307,7 @@ fn compacting_a_pre_sequence_rejection_still_refuses_a_reused_id() {
         &mut run,
         envelope(
             "cmd-reused",
-            far,
+            consumed_sequence,
             revision_before,
             set_phase(TeamPhase::Wrapping),
         ),
@@ -2240,8 +2394,8 @@ fn every_evicted_record_is_at_or_below_the_sequence_watermark() {
     }
     assert_eq!(run.command_journal.len(), MAX_TEAM_COMMAND_JOURNAL);
 
-    // Everything still retained sits above the watermark; everything dropped
-    // sits at or below it, so its redelivery fails the ordering check.
+    // Everything dropped sits at or below the watermark, so its redelivery
+    // fails the ordering check instead of applying again.
     let watermark = run.driver_progress.last_command_seq;
     for index in 1..=8u64 {
         let phase_before = run.phase;
@@ -2306,8 +2460,8 @@ fn property_every_journal_record_sequence_is_at_or_below_the_watermark() {
 
         let command = match rng.gen_range(0..3) {
             // Oversized on purpose sometimes: the payload-bounds rejection
-            // path journals BEFORE the ordering check even runs, which is
-            // exactly D1's original bug surface.
+            // path must still advance the watermark once the fresh sequence
+            // has cleared ordering.
             0 => TeamStateCommand::ReplanSubTasks {
                 sub_tasks: (0..MAX_TEAM_COMMAND_SUB_TASKS + 1)
                     .map(|i| sub_task(&format!("st-{i}")))

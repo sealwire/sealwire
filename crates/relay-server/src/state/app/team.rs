@@ -23,7 +23,7 @@
 //!    one of them can be a Claude `claude-pending-*` id that gets re-keyed by
 //!    `promote_background_thread` the moment its first turn starts.
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use tokio::time::Instant;
 
@@ -36,6 +36,7 @@ use crate::protocol::{
     StartTeamInput, StartTeamReceipt, TeamActionInput, TeamActionReceipt, TeamAwaitingView,
     TeamMarkInput, TeamRunView, TeamSubTaskView, TeamsResponse,
 };
+use crate::provider::ProviderBridge;
 use crate::state::{
     TaskSpec, TeamPauseKind, TeamRun, TeamRunStatus, TeamThreadSlot, TurnFailureKind,
 };
@@ -89,6 +90,20 @@ const REVIEW_DIFF_MAX_BYTES: usize = 256 * 1024;
 const PLAN_REL_PATH: &str = ".sealwire/PLAN.md";
 const DESIGN_REL_PATH: &str = ".sealwire/DESIGN.md";
 const REPORT_REL_PATH: &str = ".sealwire/REPORT.md";
+
+struct StartedTeamThread {
+    thread_id: String,
+    release_immediately: bool,
+}
+
+struct OwnedTeamSeat {
+    seat: relay_api::TeamSeat,
+    release_immediately: bool,
+}
+
+fn settled_team_seat_needs_release(status: TeamRunStatus) -> bool {
+    status.is_terminal() || status.is_settled_without_driver()
+}
 
 /// What a user-driven stop leaves behind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1900,6 +1915,21 @@ over on resume"
         }
     }
 
+    async fn release_team_thread_on_bridge(
+        &self,
+        bridge: &Arc<dyn ProviderBridge>,
+        thread_id: &str,
+    ) {
+        if let Err(error) = bridge.release_thread(thread_id).await {
+            let mut relay = self.relay.write().await;
+            relay.push_log(
+                "warn",
+                format!("Could not release task thread {thread_id}: {error}"),
+            );
+            relay.notify();
+        }
+    }
+
     /// Hold the drive gate across a git mutation of the task worktree.
     ///
     /// Stop and Cancel promise the workspace is quiescent when they return, and
@@ -2172,7 +2202,7 @@ over on resume"
         run_id: &str,
         role: TeamRole,
         workspace: &LiveDir,
-    ) -> Result<String, ThreadDriveError> {
+    ) -> Result<StartedTeamThread, ThreadDriveError> {
         let (provider, model_override, effort_override) = {
             let relay = self.relay.read().await;
             let run = relay
@@ -2253,8 +2283,18 @@ over on resume"
             drop(self.team_seat_creation_barrier.lock().await);
         }
 
-        let settled_status = {
+        let release_immediately = {
             let mut relay = self.relay.write().await;
+            let Some(status) = relay.team_run(run_id).map(|run| run.status) else {
+                drop(relay);
+                self.release_team_thread_on_bridge(&bridge, &thread_id)
+                    .await;
+                return Err(ThreadDriveError::Provider(format!(
+                    "task run {run_id} is gone before its {} seat could be registered",
+                    role.as_str()
+                )));
+            };
+            let release_immediately = settled_team_seat_needs_release(status);
             relay.register_background_thread(
                 thread,
                 workspace.as_str(),
@@ -2266,60 +2306,43 @@ over on resume"
             // Seats never leave the run worktree; pin so they share the same resolver.
             relay.set_thread_workspace(&thread_id, Some(workspace.as_str()));
             // D5: registration and settlement's status write both take this
-            // same write lock, so there are exactly two interleavings —
-            // registration first (the seat is in the map before settlement's
-            // later snapshot, which then releases it), or settlement first
-            // (observed here, refused, and the caller below releases the
-            // thread this function already created). No third case, because
-            // both go through this one lock.
-            //
-            // The only place the seat is still known: the driver records a
-            // run-owned thread without one, and the report cannot recover it.
-            let mut settled_status = None;
+            // same write lock, so there are exactly two interleavings. When
+            // registration wins, settlement's later release sweep sees the
+            // seat. When settlement wins, we still record the existing run's
+            // ownership and release the provider runtime immediately after
+            // durable ownership is complete. A turn is still refused by the
+            // ordinary settled-turn gates.
             relay.update_team_run(run_id, |run| {
-                if run.status.is_terminal() || run.status.is_settled_without_driver() {
-                    settled_status = Some(run.status);
-                    return;
-                }
                 run.record_run_thread_role(&thread_id, role);
                 run.record_owned_thread_provider(&thread_id, &provider_name);
             });
-            if settled_status.is_none() {
-                // Record only the reviewer in the semantic reviewer set, and atomically
-                // mark this task-owned reviewer as a first-class Session. The same set
-                // still powers read-only and workspace-concurrency guards. The Dev writes,
-                // so it must never enter that set.
-                if role == TeamRole::Reviewer {
-                    let tl = relay
-                        .team_run(run_id)
-                        .map(|run| run.tl_thread_id.clone())
-                        .unwrap_or_default();
-                    relay.register_task_reviewer_thread(thread_id.clone(), tl);
-                }
-                relay.push_log(
-                    "info",
-                    format!(
-                        "Task {run_id}: started a {provider_name} {} thread in {}",
-                        role.as_str(),
-                        workspace.as_str()
-                    ),
-                );
-                relay.notify();
+            // Record only the reviewer in the semantic reviewer set, and atomically
+            // mark this task-owned reviewer as a first-class Session. The same set
+            // still powers read-only and workspace-concurrency guards. The Dev writes,
+            // so it must never enter that set.
+            if role == TeamRole::Reviewer {
+                let tl = relay
+                    .team_run(run_id)
+                    .map(|run| run.tl_thread_id.clone())
+                    .unwrap_or_default();
+                relay.register_task_reviewer_thread(thread_id.clone(), tl);
             }
-            settled_status
+            relay.push_log(
+                "info",
+                format!(
+                    "Task {run_id}: started a {provider_name} {} thread in {}",
+                    role.as_str(),
+                    workspace.as_str()
+                ),
+            );
+            relay.notify();
+            release_immediately
         };
 
-        if let Some(status) = settled_status {
-            // Created, then refused: not a provider failure, but the same
-            // shape from here on — the caller must release rather than leak.
-            self.release_team_thread_by_id(&thread_id).await;
-            return Err(ThreadDriveError::Provider(format!(
-                "task run {run_id} settled as {} before its {} seat could be registered",
-                status.as_str(),
-                role.as_str()
-            )));
-        }
-        Ok(thread_id)
+        Ok(StartedTeamThread {
+            thread_id,
+            release_immediately,
+        })
     }
 
     /// Refuse the turn on `slot` right now, if it must be — deciding AND acting
@@ -3351,31 +3374,25 @@ request and did not confirm stopping: {why}"
             .unwrap_or(TeamThreadSlot::MrDev)
     }
 
-    /// `Err` carries the settled status that caused the refusal (D5, path 2)
-    /// — the caller (`TeamPort::start_thread`) turns it into a release of the
-    /// thread `record_run_thread` just declined to own, plus the error it
-    /// hands back to the driver.
-    async fn own_team_seat(
-        &self,
-        run_id: &str,
-        thread_id: String,
-    ) -> Result<relay_api::TeamSeat, TeamRunStatus> {
-        let slot = self.record_run_thread(run_id, &thread_id).await?;
-        Ok(relay_api::TeamSeat { thread_id, slot })
+    async fn own_team_seat(&self, run_id: &str, thread_id: String) -> Result<OwnedTeamSeat, ()> {
+        let (slot, release_immediately) = self.record_run_thread(run_id, &thread_id).await?;
+        Ok(OwnedTeamSeat {
+            seat: relay_api::TeamSeat { thread_id, slot },
+            release_immediately,
+        })
     }
 
     /// D5, path 2: a SEPARATE write-lock hold from path 1's
     /// (`start_team_thread`'s own registration) — `TeamPort::start_thread`
     /// calls both, back to back, so the run can settle in the gap between
-    /// them too. Checked inside this lock for the same reason path 1 checks
-    /// inside its own: registration and settlement's status write take the
-    /// same lock, so there is no interleaving where this observes a
-    /// not-yet-settled run that becomes settled before it commits.
+    /// them too. A settled-but-existing run still records ownership and gets
+    /// a successful `TeamSeat`; the caller releases the provider runtime
+    /// immediately after this durable record lands.
     async fn record_run_thread(
         &self,
         run_id: &str,
         thread_id: &str,
-    ) -> Result<TeamThreadSlot, TeamRunStatus> {
+    ) -> Result<(TeamThreadSlot, bool), ()> {
         // Test-only latch, held before this write lock — never while holding
         // it, same reasoning as path 1's checkpoint.
         #[cfg(test)]
@@ -3385,17 +3402,13 @@ request and did not confirm stopping: {why}"
             drop(self.team_seat_ownership_barrier.lock().await);
         }
         let mut relay = self.relay.write().await;
-        let mut settled_status = None;
+        let Some(status) = relay.team_run(run_id).map(|run| run.status) else {
+            return Err(());
+        };
+        let release_immediately = settled_team_seat_needs_release(status);
         relay.update_team_run(run_id, |run| {
-            if run.status.is_terminal() || run.status.is_settled_without_driver() {
-                settled_status = Some(run.status);
-                return;
-            }
             run.record_run_thread(thread_id.to_string());
         });
-        if let Some(status) = settled_status {
-            return Err(status);
-        }
         let index = relay
             .team_run(run_id)
             .and_then(|run| {
@@ -3405,7 +3418,7 @@ request and did not confirm stopping: {why}"
             })
             .unwrap_or(0);
         relay.notify();
-        Ok(TeamThreadSlot::RunOwned(index))
+        Ok((TeamThreadSlot::RunOwned(index), release_immediately))
     }
 
     /// The live id in a seat. Re-read rather than remembered, because
@@ -3825,10 +3838,24 @@ its turn cannot continue",
             .start_team_thread(run_id, TeamRole::Tl, &workspace.as_dir())
             .await
         {
-            Ok(thread_id) => {
+            Ok(started) => {
+                let thread_id = started.thread_id;
+                let mut release_immediately = started.release_immediately;
                 let mut relay = self.relay.write().await;
+                let Some(status) = relay.team_run(run_id).map(|run| run.status) else {
+                    drop(relay);
+                    self.release_team_thread_by_id(&thread_id).await;
+                    return Err(TeamPortError::Failed(format!(
+                        "task run {run_id} is gone before its tl seat could be registered"
+                    )));
+                };
+                release_immediately |= settled_team_seat_needs_release(status);
                 relay.update_team_run(run_id, |run| run.tl_thread_id = thread_id.clone());
                 relay.notify();
+                drop(relay);
+                if release_immediately {
+                    self.release_team_thread_by_id(&thread_id).await;
+                }
                 Ok(thread_id)
             }
             Err(error) => Err(TeamPortError::Failed(format!(
@@ -4252,21 +4279,21 @@ impl relay_api::TeamPort for AppState {
         role: TeamRole,
     ) -> Result<relay_api::TeamSeat, TeamPortError> {
         let workspace = self.require_team_workspace(run_id).await?;
-        let thread_id = self
+        let started = self
             .start_team_thread(run_id, role, &workspace.as_dir())
             .await
             .map_err(|error| TeamPortError::Failed(error.to_string()))?;
-        match self.own_team_seat(run_id, thread_id.clone()).await {
-            Ok(seat) => Ok(seat),
-            Err(status) => {
-                // D5, path 2: `start_team_thread` already refused this same
-                // way for the same reason (path 1); this is the identical
-                // "created, then refused" shape one write lock later, and
-                // gets the identical treatment — release, do not leak.
-                self.release_team_thread_by_id(&thread_id).await;
+        match self.own_team_seat(run_id, started.thread_id.clone()).await {
+            Ok(owned) => {
+                if started.release_immediately || owned.release_immediately {
+                    self.release_team_thread_by_id(&owned.seat.thread_id).await;
+                }
+                Ok(owned.seat)
+            }
+            Err(()) => {
+                self.release_team_thread_by_id(&started.thread_id).await;
                 Err(TeamPortError::Failed(format!(
-                    "task run {run_id} settled as {} before its {} seat could be registered",
-                    status.as_str(),
+                    "task run {run_id} is gone before its {} seat could be registered",
                     role.as_str()
                 )))
             }
