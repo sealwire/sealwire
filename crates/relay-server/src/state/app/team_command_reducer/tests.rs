@@ -469,6 +469,67 @@ fn last_command_seq_advances_on_a_rejection_that_passes_the_ordering_check() {
     assert_eq!(run.phase, TeamPhase::Design);
 }
 
+/// D1's actual bug, end to end. `reject_and_journal` used to write a record
+/// without moving the watermark, so a rejection BEFORE the ordering check
+/// (payload bounds, here — it never reaches the `sequence <=
+/// last_command_seq` test at all) left `last_command_seq` one behind the id
+/// it had just spent. A replaced or reopened driver reseeds its next
+/// sequence from that watermark, so it minted the SAME sequence again — and
+/// because a real driver derives its command id from the sequence too, the
+/// SAME id, now carrying different content, which is `DuplicateCommand`
+/// forever. The run could never be reopened.
+#[test]
+fn reject_then_reopen_reseeds_past_the_consumed_sequence_so_it_never_collides() {
+    let mut run = fresh_run();
+    // A real driver's identity scheme: the command id is derived from its
+    // own sequence number. This is what turns a stuck watermark into a
+    // permanent collision instead of a transient one.
+    let mint = |sequence: u64| format!("cmd-{sequence}");
+
+    let too_many = (0..MAX_TEAM_COMMAND_SUB_TASKS + 1)
+        .map(|i| sub_task(&format!("st-{i}")))
+        .collect();
+    let consumed_sequence = 7;
+    let rejected = apply(
+        &mut run,
+        &mint(consumed_sequence),
+        consumed_sequence,
+        TeamStateCommand::ReplanSubTasks {
+            sub_tasks: too_many,
+            phase: TeamPhase::SubTasks,
+        },
+    );
+    assert_eq!(
+        rejected.status,
+        TeamCommandStatus::Rejected(CommandRejection::InvalidState)
+    );
+
+    // The crux of D1: the watermark must already cover the sequence this
+    // rejection just spent, not lag one behind it.
+    assert_eq!(
+        run.driver_progress.last_command_seq, consumed_sequence,
+        "a rejection that writes a journal record must advance the watermark to the id it spent"
+    );
+
+    // The driver is replaced (or the same one reopens): it reads the
+    // (now-truthful) watermark and mints its next command from it.
+    let reseeded_sequence = run.driver_progress.last_command_seq + 1;
+    let first_lifecycle = apply(
+        &mut run,
+        &mint(reseeded_sequence),
+        reseeded_sequence,
+        TeamStateCommand::SetRunStatus {
+            status: TeamRunStatus::Running,
+        },
+    );
+    assert!(
+        matches!(first_lifecycle.status, TeamCommandStatus::Applied(_)),
+        "the first command after reopening must apply cleanly, not collide \
+with the rejected one: {:?}",
+        first_lifecycle.status
+    );
+}
+
 // AC-5's "user action wins" turns out to have a narrower blast radius than
 // "any pending pause/stop refuses everything": a real turn already in flight
 // when a Pause/Stop lands has already spent its side effect (a provider
@@ -1015,21 +1076,22 @@ fn rejected_records_are_evicted_unconditionally_and_the_cap_always_holds() {
     assert_ne!(run.phase, TeamPhase::Planning);
 }
 
-/// The sharper half of D9-corrected: a rejection that never reaches the
-/// sequence check (step 6's payload bounds, here) never advances
-/// `last_command_seq` at all — unlike a lifecycle rejection, which passes
-/// step 7 first. If eviction still required `sequence < last_command_seq`
-/// for these, a stream of them would be permanently un-evictable (D9's
-/// original bug) since nothing ever moves that cursor. The unconditional
-/// class must not be gated on sequence at all.
+/// D1: a rejection that never reaches the sequence check (step 6's payload
+/// bounds, here) now advances `last_command_seq` to its OWN sequence the
+/// instant it is journaled — not only later, whenever eviction happens to
+/// catch up to it. That is the fix for the "sharper half" of the old bug:
+/// before D1, nothing moved the cursor for this class until eviction forced
+/// it to, so a redelivery of a still-retained (but never-ordered) rejection
+/// could reuse its sequence.
 #[test]
-fn rejections_that_never_reach_the_sequence_check_are_still_evicted() {
+fn rejections_that_never_reach_the_sequence_check_still_advance_the_watermark_immediately() {
     let mut run = fresh_run();
     let too_many = (0..(relay_api::team_command::MAX_TEAM_COMMAND_SUB_TASKS + 1))
         .map(|i| sub_task(&format!("st-{i}")))
         .collect::<Vec<_>>();
 
-    for sequence in 1..=(relay_api::orchestration::MAX_TEAM_COMMAND_JOURNAL as u64 + 20) {
+    let last_sequence = relay_api::orchestration::MAX_TEAM_COMMAND_JOURNAL as u64 + 20;
+    for sequence in 1..=last_sequence {
         let receipt = apply(
             &mut run,
             &format!("cmd-{sequence}"),
@@ -1043,27 +1105,24 @@ fn rejections_that_never_reach_the_sequence_check_are_still_evicted() {
             receipt.status,
             TeamCommandStatus::Rejected(CommandRejection::InvalidState)
         );
+        // The watermark must already cover THIS sequence, every round — not
+        // just once eviction later happens to notice it.
+        assert_eq!(
+            run.driver_progress.last_command_seq, sequence,
+            "a write-time rejection must advance the watermark to its own sequence immediately"
+        );
         assert!(
             run.command_journal.len() <= relay_api::orchestration::MAX_TEAM_COMMAND_JOURNAL,
-            "the cap must hold even though none of these ever advance last_command_seq: {}",
+            "the cap must hold: {}",
             run.command_journal.len()
         );
     }
-    // The CHECK never advances the cursor for these — but eviction does, and
-    // must: a dropped record's sequence has to stay spent or a different
-    // command could reuse its id and apply. So the cursor tracks exactly the
-    // highest sequence compacted away, and nothing beyond it.
-    let evicted_high = relay_api::orchestration::MAX_TEAM_COMMAND_JOURNAL as u64 + 20
-        - MAX_TEAM_COMMAND_JOURNAL as u64;
-    assert_eq!(
-        run.driver_progress.last_command_seq, evicted_high,
-        "the watermark must cover every compacted record and no retained one"
-    );
+
     assert!(
         run.command_journal
             .iter()
-            .all(|record| record.sequence > evicted_high),
-        "everything still retained sits above the watermark, so it still replays"
+            .all(|record| record.sequence <= run.driver_progress.last_command_seq),
+        "everything retained sits at or below the watermark"
     );
 }
 
@@ -1264,6 +1323,158 @@ fn unsupported_protocol_version_is_rejected() {
         TeamCommandStatus::Rejected(CommandRejection::UnsupportedProtocol)
     );
     assert_eq!(run.phase, TeamPhase::Intake);
+    assert!(
+        run.command_journal.is_empty(),
+        "D2: protocol is a write-nothing refusal, just like backend and malformed"
+    );
+}
+
+/// D2's check-order pin, half one: malformed durable state must win over a
+/// protocol mismatch. If the order were reversed, a malformed run's
+/// untrustworthy state could still answer authoritatively for a protocol it
+/// has no business speaking about.
+#[test]
+fn malformed_state_wins_over_an_unsupported_protocol() {
+    let mut run = fresh_run();
+    run.driver_progress =
+        serde_json::from_value(serde_json::json!({"state_revision": "not-a-number"})).unwrap();
+
+    let rejected = apply_raw(
+        &mut run,
+        TeamCommandEnvelope {
+            protocol_version: TEAM_COMMAND_PROTOCOL_VERSION + 1,
+            command_id: CommandId::new("cmd-1").unwrap(),
+            sequence: 1,
+            expected_revision: 0,
+            command: set_phase(TeamPhase::Design),
+        },
+    );
+    assert_eq!(
+        rejected.status,
+        TeamCommandStatus::Rejected(CommandRejection::InvalidState),
+        "malformed state must be checked before protocol, per the pinned order"
+    );
+}
+
+/// D2's check-order pin, half two — the one the defect was actually about:
+/// protocol must be checked before the journal is ever consulted. A journal
+/// record sitting under this command id (here, a fixture standing in for one
+/// written before this build's protocol requirement existed) must never be
+/// handed back as a receipt for an envelope this build cannot execute.
+#[test]
+fn protocol_check_runs_before_the_journal_lookup_so_a_stale_receipt_can_never_surface() {
+    let mut run = fresh_run();
+    let doomed = TeamCommandEnvelope {
+        protocol_version: TEAM_COMMAND_PROTOCOL_VERSION + 1,
+        command_id: CommandId::new("cmd-1").unwrap(),
+        sequence: 1,
+        expected_revision: 0,
+        command: set_phase(TeamPhase::Design),
+    };
+    // Test-only fixture: a record that would satisfy the journal's identity
+    // lookup for this exact envelope, standing in for one written before
+    // this build's protocol version regressed underneath it. No production
+    // path writes a record for a protocol-mismatched envelope any more
+    // (that is the whole point of D2) — this is what "before" looked like.
+    run.command_journal.push(TeamCommandRecord {
+        command_id: doomed.command_id.clone(),
+        sequence: doomed.sequence,
+        kind: doomed.command.kind(),
+        fingerprint: Some(compute_fingerprint(RUN_ID, &doomed)),
+        expected_revision: doomed.expected_revision,
+        state_revision: 5,
+        last_event_seq: 5,
+        outcome: TeamCommandOutcome::Applied,
+    });
+
+    let receipt = apply_raw(&mut run, doomed);
+    assert_eq!(
+        receipt.status,
+        TeamCommandStatus::Rejected(CommandRejection::UnsupportedProtocol),
+        "protocol must win over a matching journal record, not replay it"
+    );
+}
+
+/// The write-nothing class in full: backend, malformed and protocol
+/// refusals must never write a journal record, on the first delivery or any
+/// repeat, and must leave the run byte-identical throughout.
+#[test]
+fn backend_malformed_and_protocol_rejections_write_nothing_across_repeated_delivery() {
+    struct Case {
+        name: &'static str,
+        prepare: fn(&mut TeamRun),
+        envelope: fn() -> TeamCommandEnvelope,
+        expect: CommandRejection,
+    }
+
+    let cases = [
+        Case {
+            name: "inert backend",
+            prepare: |run| {
+                run.orchestration_backend =
+                    relay_api::orchestration::OrchestrationBackendRef::Cloud {
+                        protocol_version:
+                            relay_api::orchestration::SupportedProtocolVersion::current(),
+                        driver_version: relay_api::orchestration::DriverVersion::new("driver.1")
+                            .unwrap(),
+                        cloud_run_id: relay_api::orchestration::DriverRunId::new("cloud-run-1")
+                            .unwrap(),
+                    };
+            },
+            envelope: || envelope("cmd-1", 1, 0, set_phase(TeamPhase::Design)),
+            expect: CommandRejection::BackendMismatch,
+        },
+        Case {
+            name: "malformed driver progress",
+            prepare: |run| {
+                run.driver_progress =
+                    serde_json::from_value(serde_json::json!({"state_revision": "not-a-number"}))
+                        .unwrap();
+            },
+            envelope: || envelope("cmd-1", 1, 0, set_phase(TeamPhase::Design)),
+            expect: CommandRejection::InvalidState,
+        },
+        Case {
+            name: "unsupported protocol",
+            prepare: |_| {},
+            envelope: || TeamCommandEnvelope {
+                protocol_version: TEAM_COMMAND_PROTOCOL_VERSION + 1,
+                command_id: CommandId::new("cmd-1").unwrap(),
+                sequence: 1,
+                expected_revision: 0,
+                command: set_phase(TeamPhase::Design),
+            },
+            expect: CommandRejection::UnsupportedProtocol,
+        },
+    ];
+
+    for case in cases {
+        let mut run = fresh_run();
+        (case.prepare)(&mut run);
+        let before = serde_json::to_value(&run).unwrap();
+
+        for attempt in 0..3 {
+            let receipt = apply_raw(&mut run, (case.envelope)());
+            assert_eq!(
+                receipt.status,
+                TeamCommandStatus::Rejected(case.expect),
+                "{}: attempt {attempt}",
+                case.name
+            );
+        }
+
+        assert!(
+            run.command_journal.is_empty(),
+            "{}: must never write a journal record",
+            case.name
+        );
+        assert_eq!(
+            serde_json::to_value(&run).unwrap(),
+            before,
+            "{}: the run must be byte-identical after repeated delivery",
+            case.name
+        );
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -1414,6 +1625,184 @@ fn typed_recovery_spends_the_sequence_and_preserves_fingerprint_identity() {
 }
 
 // ---------------------------------------------------------------------
+// D3: the fingerprint wildcard is scoped to exactly the legacy in-flight
+// recovery shape (outcome `Interrupted`, kind `Unknown`) and nowhere else.
+// These fixtures inject a journal record directly — a test-only stand-in for
+// state a restart's recovery path would have written — to pin the boundary
+// without going through the whole recovery flow each time.
+// ---------------------------------------------------------------------
+
+#[test]
+fn fingerprint_less_applied_record_fails_closed_as_duplicate() {
+    let mut run = fresh_run();
+    run.command_journal.push(TeamCommandRecord {
+        command_id: CommandId::new("cmd-1").unwrap(),
+        sequence: 1,
+        kind: TeamCommandKind::SetPhase,
+        fingerprint: None,
+        expected_revision: 0,
+        state_revision: 0,
+        last_event_seq: 0,
+        outcome: TeamCommandOutcome::Applied,
+    });
+
+    let receipt = apply_raw(
+        &mut run,
+        envelope("cmd-1", 1, 0, set_phase(TeamPhase::Design)),
+    );
+    assert_eq!(
+        receipt.status,
+        TeamCommandStatus::Rejected(CommandRejection::DuplicateCommand),
+        "an Applied record without a fingerprint must fail closed, not replay"
+    );
+}
+
+#[test]
+fn fingerprint_less_rejected_record_fails_closed_as_duplicate() {
+    let mut run = fresh_run();
+    run.command_journal.push(TeamCommandRecord {
+        command_id: CommandId::new("cmd-1").unwrap(),
+        sequence: 1,
+        kind: TeamCommandKind::SetPhase,
+        fingerprint: None,
+        expected_revision: 0,
+        state_revision: 0,
+        last_event_seq: 0,
+        outcome: TeamCommandOutcome::Rejected {
+            reason: CommandRejection::InvalidState,
+        },
+    });
+
+    let receipt = apply_raw(
+        &mut run,
+        envelope("cmd-1", 1, 0, set_phase(TeamPhase::Design)),
+    );
+    assert_eq!(
+        receipt.status,
+        TeamCommandStatus::Rejected(CommandRejection::DuplicateCommand),
+        "a rejected record without a fingerprint must fail closed, not replay"
+    );
+}
+
+#[test]
+fn fingerprint_less_interrupted_unknown_record_replays() {
+    let mut run = fresh_run();
+    run.command_journal.push(TeamCommandRecord {
+        command_id: CommandId::new("cmd-1").unwrap(),
+        sequence: 1,
+        kind: TeamCommandKind::Unknown,
+        fingerprint: None,
+        expected_revision: 0,
+        state_revision: 3,
+        last_event_seq: 3,
+        outcome: TeamCommandOutcome::Interrupted,
+    });
+
+    let receipt = apply_raw(
+        &mut run,
+        envelope("cmd-1", 1, 0, set_phase(TeamPhase::Design)),
+    );
+    assert_eq!(
+        receipt.status,
+        TeamCommandStatus::Interrupted,
+        "the legacy recovery shape (Interrupted + Unknown) is the one case \
+that replays without a fingerprint"
+    );
+}
+
+/// Both conditions of the wildcard's shape are required, not just one:
+/// `Interrupted` with a KNOWN kind (i.e. not a recovery record) must still
+/// fail closed.
+#[test]
+fn fingerprint_less_interrupted_with_a_known_kind_fails_closed() {
+    let mut run = fresh_run();
+    run.command_journal.push(TeamCommandRecord {
+        command_id: CommandId::new("cmd-1").unwrap(),
+        sequence: 1,
+        kind: TeamCommandKind::SetPhase,
+        fingerprint: None,
+        expected_revision: 0,
+        state_revision: 3,
+        last_event_seq: 3,
+        outcome: TeamCommandOutcome::Interrupted,
+    });
+
+    let receipt = apply_raw(
+        &mut run,
+        envelope("cmd-1", 1, 0, set_phase(TeamPhase::Design)),
+    );
+    assert_eq!(
+        receipt.status,
+        TeamCommandStatus::Rejected(CommandRejection::DuplicateCommand),
+        "the wildcard is scoped to kind Unknown too, not just outcome Interrupted"
+    );
+}
+
+/// The other half: `Unknown` kind with a different outcome (not a stranded
+/// in-flight recovery) must also fail closed.
+#[test]
+fn fingerprint_less_unknown_kind_applied_fails_closed() {
+    let mut run = fresh_run();
+    run.command_journal.push(TeamCommandRecord {
+        command_id: CommandId::new("cmd-1").unwrap(),
+        sequence: 1,
+        kind: TeamCommandKind::Unknown,
+        fingerprint: None,
+        expected_revision: 0,
+        state_revision: 3,
+        last_event_seq: 3,
+        outcome: TeamCommandOutcome::Applied,
+    });
+
+    let receipt = apply_raw(
+        &mut run,
+        envelope("cmd-1", 1, 0, set_phase(TeamPhase::Design)),
+    );
+    assert_eq!(
+        receipt.status,
+        TeamCommandStatus::Rejected(CommandRejection::DuplicateCommand),
+        "the wildcard is scoped to outcome Interrupted too, not just kind Unknown"
+    );
+}
+
+// ---------------------------------------------------------------------
+// D7: TakeUserNotes's extra retention rule. Its replay payload lives in a
+// single run-local slot outside the content-blind journal, so retention has
+// to keep both in lockstep — and fail closed, not replay an empty drain, if
+// they are ever found out of step.
+// ---------------------------------------------------------------------
+
+#[test]
+fn take_user_notes_rejects_as_stale_when_retained_but_its_slot_is_vacated() {
+    let mut run = fresh_run();
+    run.pending_user_notes = vec!["only note".to_string()];
+    apply(&mut run, "cmd-1", 1, TeamStateCommand::TakeUserNotes {});
+    assert!(
+        run.command_journal
+            .find(&CommandId::new("cmd-1").unwrap())
+            .is_some(),
+        "the record must still be retained for this test to mean anything"
+    );
+
+    // The record and its slot are supposed to evict in lockstep (see
+    // `push_with_eviction`'s `drop_drained_notes` call); this fixture breaks
+    // that pairing directly to prove the guard rather than the pairing
+    // mechanism.
+    run.drained_notes
+        .retain(|entry| entry.command_id != "cmd-1");
+
+    let replay = apply_raw(
+        &mut run,
+        envelope("cmd-1", 1, 0, TeamStateCommand::TakeUserNotes {}),
+    );
+    assert_eq!(
+        replay.status,
+        TeamCommandStatus::Rejected(CommandRejection::StaleCommand),
+        "a retained record whose slot is gone must fail closed, never replay an empty drain"
+    );
+}
+
+// ---------------------------------------------------------------------
 // Closure round: ordering coherence, counter headroom, payload size, and
 // the eviction watermark. See `.sealwire/DESIGN.md` D5/D6/D9.
 // ---------------------------------------------------------------------
@@ -1451,11 +1840,13 @@ fn an_unsupported_protocol_never_mutates_an_inert_backend() {
     );
 }
 
-/// Two identical deliveries of an unsupported-protocol envelope must journal
-/// ONE record. Journaling per delivery puts two records under one command id,
-/// which is the ambiguous-duplicate state the journal exists to prevent.
+/// D2: protocol joined the write-nothing class, so two identical deliveries
+/// of an unsupported-protocol envelope must journal NOTHING at all — not one
+/// record and not two. Each delivery re-derives the same answer straight
+/// from the envelope; there is no receipt to have drifted, because there was
+/// never anything to look up.
 #[test]
-fn identical_unsupported_protocol_retries_journal_exactly_one_record() {
+fn identical_unsupported_protocol_retries_never_touch_the_journal() {
     let mut run = fresh_run();
     let stale_protocol = || TeamCommandEnvelope {
         protocol_version: TEAM_COMMAND_PROTOCOL_VERSION + 1,
@@ -1470,25 +1861,19 @@ fn identical_unsupported_protocol_retries_journal_exactly_one_record() {
         first.status,
         TeamCommandStatus::Rejected(CommandRejection::UnsupportedProtocol)
     );
-    assert_eq!(run.command_journal.len(), 1);
+    assert!(
+        run.command_journal.is_empty(),
+        "a non-journaling rejection must not write on its first delivery either"
+    );
 
     let second = apply_raw(&mut run, stale_protocol());
     assert_eq!(
         second, first,
-        "an identical retry replays the recorded receipt (AC-4)"
+        "a retry re-derives the identical receipt, not a looked-up one"
     );
-    assert_eq!(
-        run.command_journal.len(),
-        1,
-        "a replay must not append a second record under the same id"
-    );
-    assert_eq!(
-        run.command_journal
-            .iter()
-            .filter(|record| record.command_id.as_str() == "cmd-1")
-            .count(),
-        1,
-        "one command id, at most one journal record"
+    assert!(
+        run.command_journal.is_empty(),
+        "a retry must not write anything the first delivery did not"
     );
 }
 
@@ -1786,6 +2171,71 @@ fn every_evicted_record_is_at_or_below_the_sequence_watermark() {
             run.phase, phase_before,
             "and must never apply a second time"
         );
+    }
+}
+
+/// D1's invariant, stated once and then exercised over a long, varied,
+/// deterministically-seeded run rather than one hand-picked scenario: every
+/// record ever left in the journal has `sequence <= last_command_seq`. A
+/// fixed-seed generator is more honest here than another hand-picked case —
+/// the failure mode this guards against is a call site added later that
+/// journals without going through `push_with_eviction`, and that kind of
+/// gap is exactly what a wide, varied sweep is likely to trip over.
+#[test]
+fn property_every_journal_record_sequence_is_at_or_below_the_watermark() {
+    use rand::{rngs::StdRng, Rng, SeedableRng};
+
+    let mut rng = StdRng::seed_from_u64(0x5EED_CAFE);
+    let mut run = fresh_run();
+    run.sub_tasks = vec![sub_task("st-1")];
+
+    for round in 0..2000u64 {
+        let command_id = format!("cmd-{round}");
+        let watermark = run.driver_progress.last_command_seq;
+
+        // Mostly fresh, in-order sequences; sometimes replay/stale-shaped
+        // (at or below the watermark) to exercise the ordering rejection
+        // path too.
+        let sequence = if rng.gen_bool(0.8) {
+            watermark + 1 + rng.gen_range(0..3)
+        } else {
+            rng.gen_range(0..=watermark.max(1))
+        };
+        let expected_revision = if rng.gen_bool(0.8) {
+            run.driver_progress.state_revision
+        } else {
+            run.driver_progress.state_revision + rng.gen_range(1..3)
+        };
+
+        let command = match rng.gen_range(0..3) {
+            // Oversized on purpose sometimes: the payload-bounds rejection
+            // path journals BEFORE the ordering check even runs, which is
+            // exactly D1's original bug surface.
+            0 => TeamStateCommand::ReplanSubTasks {
+                sub_tasks: (0..MAX_TEAM_COMMAND_SUB_TASKS + 1)
+                    .map(|i| sub_task(&format!("st-{i}")))
+                    .collect(),
+                phase: TeamPhase::SubTasks,
+            },
+            1 => TeamStateCommand::SetSubTaskStatus {
+                index: 0,
+                status: SubTaskStatus::Implementing,
+            },
+            _ => set_phase(TeamPhase::Design),
+        };
+
+        apply_raw(
+            &mut run,
+            envelope(&command_id, sequence, expected_revision, command),
+        );
+
+        for record in run.command_journal.iter() {
+            assert!(
+                record.sequence <= run.driver_progress.last_command_seq,
+                "round {round}: record {record:?} exceeds watermark {}",
+                run.driver_progress.last_command_seq
+            );
+        }
     }
 }
 
