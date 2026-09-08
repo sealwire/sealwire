@@ -1532,10 +1532,29 @@ impl<'de> Deserialize<'de> for DriverProgress {
     }
 }
 
-/// Cap on `TeamRun.command_journal`. See `.sealwire/DESIGN.md` D9: eviction
-/// only ever drops a record whose `sequence` is strictly below
-/// `last_command_seq`, so a redelivery of an evicted command still fails the
-/// monotonic-sequence check rather than being treated as unseen.
+/// Hard cap on `TeamRun.command_journal`. The retention contract
+/// (`.sealwire/DESIGN.md` D7), settled and not to be reopened:
+///
+/// - **Bounded retention.** The journal never holds more than this many
+///   records; eviction only ever drops one whose `sequence` is strictly
+///   below `driver_progress.last_command_seq`, so a redelivery of an evicted
+///   command still fails the monotonic-sequence check rather than being
+///   treated as unseen (see `team_command_reducer::push_with_eviction`,
+///   which is also where D1 makes that condition hold for every record,
+///   applied or rejected).
+/// - **Exact replay while retained.** As long as an id's record is still
+///   here, redelivering it replays the exact receipt this journal recorded —
+///   never a re-derived approximation.
+/// - **Fail closed once evicted.** Past that horizon, redelivery of the same
+///   id is rejected `StaleCommand` — deterministic, and never mistaken for
+///   "never seen".
+///
+/// `TakeUserNotes` adds one more rule on top: its replay payload lives in
+/// `TeamRun.drained_notes`, a run-local slot outside this content-blind
+/// journal, evicted in lockstep with its record. If the record is retained
+/// but the slot no longer holds that `command_id`, delivery rejects as stale
+/// rather than replaying an empty drain — an empty drain would silently lose
+/// a user's note, exactly what the atomic drain exists to prevent.
 pub const MAX_TEAM_COMMAND_JOURNAL: usize = 64;
 
 /// Closed discriminant naming one `team_command::TeamStateCommand` variant.
@@ -1624,12 +1643,16 @@ pub struct TeamCommandRecord {
     pub command_id: CommandId,
     pub sequence: u64,
     pub kind: TeamCommandKind,
-    /// `None` means "matches any fingerprint" — written only by restart
-    /// recovery for a stranded `in_flight_command_id`, whose original
-    /// envelope (and thus its digest) was never durably recorded. Treating an
-    /// absent digest as a wildcard, rather than inventing a sentinel value, is
-    /// what lets a genuine redelivery of that id replay `Interrupted` instead
-    /// of being misread as a content mismatch. See `.sealwire/DESIGN.md` D10.
+    /// `None` is written only by restart recovery for a stranded
+    /// `in_flight_command_id`, whose original envelope (and thus its digest)
+    /// was never durably recorded — always with `outcome: Interrupted` and
+    /// `kind: Unknown`. Treating an absent digest as a wildcard there, rather
+    /// than inventing a sentinel value, is what lets a genuine redelivery of
+    /// that id replay `Interrupted` instead of being misread as a content
+    /// mismatch. The reducer enforces that this wildcard applies to exactly
+    /// that shape and no other: an absent fingerprint on any other outcome
+    /// (`Applied`, or a rejection) fails closed as `DuplicateCommand` rather
+    /// than matching anything (`.sealwire/DESIGN.md` D3).
     pub fingerprint: Option<CommandFingerprint>,
     pub expected_revision: u64,
     /// `state_revision` / `last_event_seq` as they stood immediately after

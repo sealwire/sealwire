@@ -1,28 +1,30 @@
 //! T4's local command reducer: validates and applies one
 //! `team_command::TeamCommandEnvelope` against a `TeamRun` already held under
-//! `relay.write()`. See `.sealwire/DESIGN.md` D5 for the ordered checks this
+//! `relay.write()`. See `.sealwire/DESIGN.md` D2 for the ordered checks this
 //! implements, and D3 for the fingerprint this module computes (the one piece
 //! `relay-api` cannot own, since it needs `sha2`).
 //!
-//! Three constraints fix the check order between them, and only one order
-//! satisfies all three (D5):
+//! Four constraints fix the check order between them, and only one order
+//! satisfies all four (D2):
 //!
-//! - **Backend and malformed come before replay.** A restored run that is
-//!   inert or malformed must refuse every command uniformly, including one
-//!   that matches an old journal entry — replaying a stale `Applied` receipt
-//!   for a run that is no longer trustworthy would contradict "inert stays
-//!   inert" and "malformed refuses everything".
-//! - **Replay comes before protocol.** Both are journaling rejections, and a
-//!   journaling check placed above the identity lookup appends a second
-//!   record under an id that already has one every time the same doomed
-//!   envelope is redelivered. One command id, at most one record.
-//! - **Backend comes before protocol.** An unsupported protocol version is
-//!   still a command aimed at a run this build must not touch at all, so the
-//!   inert refusal has to win.
+//! - **Backend comes first.** An unsupported/future backend must never look
+//!   active — not even long enough to notice its own protocol is wrong or
+//!   that a redelivered id already has a receipt.
+//! - **Malformed comes before protocol and before replay.** A restored run
+//!   that is malformed must refuse every command uniformly; replaying a
+//!   stale `Applied` receipt — or even deriving a protocol refusal — for a
+//!   run that is no longer trustworthy would contradict "malformed refuses
+//!   everything".
+//! - **Protocol comes before replay.** An envelope from an unsupported
+//!   protocol must never be handed a receipt that happens to be sitting
+//!   under the same command id, no matter how that receipt got there.
+//! - **Journal lookup is last.** Everything above it refuses (or not) from
+//!   the envelope alone; only a replay or a fingerprint mismatch needs
+//!   durable state at all.
 //!
-//! Both no-mutation refusals (inert, malformed) are idempotent by
-//! construction rather than by journal lookup: they write nothing, so
-//! redelivery re-derives the identical receipt.
+//! Backend, malformed and protocol refusals are idempotent by construction
+//! rather than by journal lookup: they write nothing, so redelivery
+//! re-derives the identical receipt every time.
 
 use relay_api::orchestration::{
     CommandFingerprint, CommandId, CommandRejection, TeamCommandKind, TeamCommandOutcome,
@@ -73,25 +75,16 @@ pub(crate) fn apply_team_command_with_effective(
 
     let fingerprint = compute_fingerprint(run_id, &envelope);
     let TeamCommandEnvelope {
-        protocol_version,
+        // Already checked by the `preflight_team_command_identity` call
+        // above, which now runs before every journaling check (D2) — a
+        // mismatch returns there and never reaches this point.
+        protocol_version: _,
         command_id,
         sequence,
         expected_revision,
         command: original_command,
     } = envelope;
     let kind = original_command.kind();
-
-    if protocol_version != TEAM_COMMAND_PROTOCOL_VERSION {
-        return reject_and_journal(
-            run,
-            command_id,
-            sequence,
-            kind,
-            fingerprint,
-            expected_revision,
-            CommandRejection::UnsupportedProtocol,
-        );
-    }
 
     // Bounds are part of the original envelope contract and cannot disappear
     // merely because an asynchronous host guard selected another transition.
@@ -147,16 +140,16 @@ pub(crate) fn apply_team_command_with_effective(
         );
     }
 
-    // `last_command_seq` means "the highest sequence the driver has issued"
-    // (D4), not "highest applied" — so it advances here, the moment a
-    // sequence clears the ordering check, regardless of whether the revision
-    // or lifecycle checks below still reject it. Two things depend on that:
-    // a later, LOWER sequence must not be able to slip in just because this
-    // one was rejected (monotonic ordering must hold across rejections too),
-    // and a lifecycle-rejected record becomes safe to evict unconditionally
-    // (D9) — a redelivery of it fails right here, at this same check, without
-    // the journal needing to remember it.
-    run.driver_progress.last_command_seq = sequence;
+    // `last_command_seq` advances exactly when a journal record is written
+    // (D1), which happens uniformly inside `push_with_eviction` below —
+    // whether this call ends up there via `reject_and_journal` (revision or
+    // lifecycle rejection) or via the `Applied` path further down. That
+    // single choke point, not a set here plus another inside
+    // `reject_and_journal`, is what makes "every journal record's sequence
+    // is <= last_command_seq" hold with no per-call-site judgement: a
+    // rejection that clears the ordering check above but fails a later one
+    // still spends `sequence`, so a subsequent LOWER sequence cannot slip in
+    // just because this one was refused.
 
     if expected_revision != run.driver_progress.state_revision {
         return reject_and_journal(
@@ -264,17 +257,37 @@ pub(crate) fn preflight_team_command_identity(
         ));
     }
 
+    // Protocol: derivable from the envelope alone, so — like backend and
+    // malformed above — this writes nothing and redelivery re-derives the
+    // identical receipt (D2). Ahead of the journal lookup below so an
+    // envelope this build cannot execute can never be handed a receipt that
+    // happens to be sitting under the same command id.
+    if envelope.protocol_version != TEAM_COMMAND_PROTOCOL_VERSION {
+        return Some(snapshot_receipt(
+            run,
+            command_id,
+            sequence,
+            TeamCommandStatus::Rejected(CommandRejection::UnsupportedProtocol),
+        ));
+    }
+
     // Journal lookup: replay or reject a content-mismatched duplicate. Ahead
-    // of every journaling check below, so redelivering one doomed envelope
-    // can never accumulate records under a single id. A recovery record's
-    // `fingerprint: None` (D10) matches any digest — the fail-closed "replay
-    // `Interrupted`" behaviour restart recovery needs when the original
-    // envelope's digest was never durably recorded.
+    // of no journaling check now (every one above it writes nothing), so
+    // redelivering one doomed envelope can never accumulate records under a
+    // single id. A `fingerprint: None` record matches any digest ONLY for
+    // the legacy in-flight recovery shape (outcome `Interrupted`, kind
+    // `Unknown`) — the fail-closed "replay `Interrupted`" behaviour restart
+    // recovery needs when the original envelope's digest was never durably
+    // recorded (D3). Any other fingerprint-less record — an `Applied` or a
+    // rejected one — fails closed instead of matching anything.
     let existing = run.command_journal.find(&command_id)?.clone();
-    let matches = existing
-        .fingerprint
-        .map(|recorded| recorded == fingerprint)
-        .unwrap_or(true);
+    let matches = match existing.fingerprint {
+        Some(recorded) => recorded == fingerprint,
+        None => {
+            existing.outcome == TeamCommandOutcome::Interrupted
+                && existing.kind == TeamCommandKind::Unknown
+        }
+    };
     Some(if matches {
         replay_receipt(run, &command_id, sequence, &existing)
     } else {
@@ -377,8 +390,8 @@ fn reject_and_journal(
     )
 }
 
-/// Append `record`, then evict per `.sealwire/DESIGN.md` D9's two classes so
-/// the cap holds UNCONDITIONALLY:
+/// Write `record` to the journal, then evict per `.sealwire/DESIGN.md` D7's
+/// two classes so the cap holds UNCONDITIONALLY:
 /// - an `Applied` record is droppable once `sequence < last_command_seq` (a
 ///   redelivery then fails the monotonic-sequence check, never the in-flight
 ///   one);
@@ -389,22 +402,30 @@ fn reject_and_journal(
 ///   its protocol version is unsupported.
 ///
 /// If both classes are exhausted the cap still must hold: evict the oldest
-/// record of any class (never the in-flight one). D9: "a 64-deep journal that
+/// record of any class (never the in-flight one). D7: "a 64-deep journal that
 /// has nothing droppable cannot arise from a driver that makes progress."
+///
+/// This is the ONE place a journal record is ever appended, live or evicted,
+/// which is what makes it the right place to hold D1's invariant: the
+/// watermark advances exactly when a record is written, no exceptions and no
+/// per-call-site judgement. That is what makes every record's `sequence`
+/// evictable without losing track of it — a redelivery of a dropped id still
+/// fails the ordering check above, rather than sailing through because
+/// nothing remembered its sequence was ever spent.
 fn push_with_eviction(run: &mut TeamRun, record: TeamCommandRecord) {
+    run.driver_progress.last_command_seq =
+        run.driver_progress.last_command_seq.max(record.sequence);
     run.command_journal.push(record);
     while run.command_journal.len() > MAX_TEAM_COMMAND_JOURNAL {
         let Some(evicted) = evict_one(run) else {
             break;
         };
-        // The retained-replay horizon (D9). Dropping a record loses the
-        // receipt it would have replayed, so the sequence it consumed has to
-        // stay spent some other way — otherwise a DIFFERENT command reusing
-        // that id sails through the ordering check and applies, turning
-        // compaction into a second application. Rejections journaled before
-        // the ordering check (protocol, payload bounds) never advanced
-        // `last_command_seq` themselves, so this is where their sequence is
-        // accounted for.
+        // Belt-and-braces, not the primary mechanism: the push above already
+        // covers every record's own sequence, so this only matters if an
+        // older retained record's sequence exceeds the one just written
+        // (payload/headroom rejections can carry any sequence value, not
+        // necessarily an increasing one). Never lower the watermark either
+        // way.
         run.driver_progress.last_command_seq =
             run.driver_progress.last_command_seq.max(evicted.sequence);
         if evicted.kind == TeamCommandKind::TakeUserNotes {
