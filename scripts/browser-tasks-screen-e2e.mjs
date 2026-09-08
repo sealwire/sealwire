@@ -24,6 +24,7 @@ import path from "node:path";
 import process from "node:process";
 
 import { writeFailureArtifacts } from "./e2e/harness/artifacts.mjs";
+import { createFakeProviderScenarioHarness } from "./e2e/harness/fake-provider.mjs";
 import { launchBrowser } from "./e2e/harness/browser.mjs";
 import { startLocalRelay } from "./e2e/harness/local-relay.mjs";
 import { startLocalSession } from "./e2e/harness/local-session.mjs";
@@ -31,6 +32,7 @@ import { getFreePort } from "./e2e/harness/ports.mjs";
 import { dumpProcessLogs, stopManagedProcess, waitForHealth } from "./e2e/harness/process.mjs";
 
 const TIMEOUT_MS = Number(process.env.BROWSER_E2E_TIMEOUT_MS || 45000);
+const ORCH_ASK_PROMPT = "ask me how to staff this";
 
 async function main() {
   const relayPort = await getFreePort();
@@ -38,10 +40,27 @@ async function main() {
   const workspace = path.join(stateDir, "workspace");
   await fs.mkdir(workspace, { recursive: true });
 
+  // One scenario prompt, so the Orchestrator can be made to park on a question.
+  const fakeHarness = await createFakeProviderScenarioHarness(stateDir, {
+    prompts: {
+      [ORCH_ASK_PROMPT]: {
+        reply: "staffed",
+        chunks: ["staffed"],
+        chunk_delay_ms: 0,
+        ask_user: {
+          question: "How many developers?",
+          header: "Staffing",
+          options: ["One dev", "Two devs"],
+        },
+        ask_user_delay_ms: 200,
+      },
+    },
+  });
+
   const relay = startLocalRelay({
     relayPort,
     relayStatePath: path.join(stateDir, "session.json"),
-    extraEnv: { AGENT_PROVIDERS: "fake", SEALWIRE_BETA: "1" },
+    extraEnv: { AGENT_PROVIDERS: "fake", SEALWIRE_BETA: "1", ...fakeHarness.env },
   });
 
   let browser = null;
@@ -100,6 +119,84 @@ async function main() {
         ),
       null,
       { timeout: TIMEOUT_MS }
+    );
+
+    // ---- A question the Orchestrator is parked on is DOCKED, not left in its
+    // transcript. ----
+    //
+    // The pane has its own scroller and its own composer, so this is the only
+    // place the docked card's geometry can actually be checked on this surface:
+    // every other test of it mounts the component with props by hand.
+    await page.fill("#task-orch-input", ORCH_ASK_PROMPT);
+    await page.click("#task-orch-send");
+    await page.waitForSelector(".ask-user-dock .ask-user-option-button", { timeout: TIMEOUT_MS });
+
+    const docked = await page.evaluate(() => {
+      const rect = (el) => {
+        if (!el) return null;
+        const r = el.getBoundingClientRect();
+        return { top: Math.round(r.top), bottom: Math.round(r.bottom), h: Math.round(r.height) };
+      };
+      const scroller = document.querySelector(".task-orch-transcript");
+      const live = document.querySelector(".chat-message-ask-user-interactive");
+      const composer = document.querySelector("#task-orch-input");
+      return {
+        viewport: window.innerHeight,
+        liveCards: document.querySelectorAll(".chat-message-ask-user-interactive").length,
+        liveInScroller: Boolean(scroller && live && scroller.contains(live)),
+        liveInDock: Boolean(live?.closest(".ask-user-dock")),
+        optionsInScroller: scroller
+          ? scroller.querySelectorAll(".ask-user-option-button").length
+          : -1,
+        recordInScroller: scroller
+          ? scroller.querySelectorAll(".chat-message-ask-user").length
+          : -1,
+        scroller: rect(scroller),
+        option: rect(document.querySelector(".ask-user-dock .ask-user-option-button")),
+        composer: rect(composer),
+        composerFollowsCard: Boolean(
+          live && composer
+            && live.compareDocumentPosition(composer) & Node.DOCUMENT_POSITION_FOLLOWING
+        ),
+      };
+    });
+    console.log(`[tasks-orch-dock] ${JSON.stringify(docked)}`);
+
+    assert.equal(docked.liveCards, 1, "the question must be live in exactly one place");
+    assert.equal(
+      docked.liveInScroller,
+      false,
+      "inside the pane's scroller the card can be scrolled away from and rebuilt with the list"
+    );
+    assert.ok(docked.liveInDock, "the live card belongs to the dock");
+    assert.equal(
+      docked.optionsInScroller,
+      0,
+      "the record in the conversation must not show options that do nothing"
+    );
+    assert.equal(docked.recordInScroller, 1, "the record of the ask stays in the conversation");
+    assert.ok(docked.composerFollowsCard, "the card sits above the box you would otherwise type in");
+    assert.ok(
+      docked.option.top >= 0 && docked.option.bottom <= docked.viewport,
+      `the option must be on screen without scrolling `
+      + `(option ${docked.option.top}-${docked.option.bottom}, viewport ${docked.viewport})`
+    );
+    assert.ok(
+      docked.scroller.h > 120,
+      `the conversation must keep usable height beside the card (got ${docked.scroller.h})`
+    );
+
+    // Answering it clears the dock and leaves the record behind.
+    await page.click(".ask-user-dock .ask-user-option-button");
+    await page.waitForFunction(
+      () => !document.querySelector(".ask-user-dock .chat-message-ask-user-interactive"),
+      null,
+      { timeout: TIMEOUT_MS }
+    );
+    assert.equal(
+      await page.locator(".task-orch-transcript .chat-message-ask-user").count(),
+      1,
+      "the answered question stays in the Orchestrator conversation as a record"
     );
 
     // The pre-existing path stays working: with a conversation open, the pane
