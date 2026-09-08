@@ -226,6 +226,23 @@ pub struct AppState {
     reviewer_refusal_barrier: Arc<tokio::sync::Mutex<()>>,
     #[cfg(test)]
     reviewer_refusal_arrivals: Arc<std::sync::atomic::AtomicU64>,
+    /// D5 seat-ownership fence, path 1 (`start_team_thread`): held after the
+    /// provider hands back a fresh thread and before the write lock that
+    /// registers it as owned. A test holds this, settles the run, and
+    /// releases — the only way to make "settlement lands after creation but
+    /// before registration" a deterministic interleaving rather than a hope.
+    #[cfg(test)]
+    team_seat_creation_barrier: Arc<tokio::sync::Mutex<()>>,
+    #[cfg(test)]
+    team_seat_creation_arrivals: Arc<std::sync::atomic::AtomicU64>,
+    /// D5 seat-ownership fence, path 2 (`record_run_thread`): held before the
+    /// SEPARATE write lock that records a thread as run-owned (distinct from
+    /// path 1's role/provider registration — `TeamPort::start_thread` calls
+    /// both, back to back). Same interleaving this proves, one lock later.
+    #[cfg(test)]
+    team_seat_ownership_barrier: Arc<tokio::sync::Mutex<()>>,
+    #[cfg(test)]
+    team_seat_ownership_arrivals: Arc<std::sync::atomic::AtomicU64>,
     /// Test-only latch after git listing and before workspace write-back, so a cwd
     /// observation can land in that window deterministically.
     #[cfg(test)]
@@ -433,6 +450,14 @@ impl AppState {
             #[cfg(test)]
             reviewer_refusal_arrivals: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             #[cfg(test)]
+            team_seat_creation_barrier: Arc::new(tokio::sync::Mutex::new(())),
+            #[cfg(test)]
+            team_seat_creation_arrivals: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            #[cfg(test)]
+            team_seat_ownership_barrier: Arc::new(tokio::sync::Mutex::new(())),
+            #[cfg(test)]
+            team_seat_ownership_arrivals: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            #[cfg(test)]
             workspace_resolve_barrier: Arc::new(tokio::sync::Mutex::new(())),
             #[cfg(test)]
             workspace_resolve_arrivals: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -609,6 +634,14 @@ impl AppState {
             reviewer_refusal_barrier: Arc::new(tokio::sync::Mutex::new(())),
             #[cfg(test)]
             reviewer_refusal_arrivals: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            #[cfg(test)]
+            team_seat_creation_barrier: Arc::new(tokio::sync::Mutex::new(())),
+            #[cfg(test)]
+            team_seat_creation_arrivals: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            #[cfg(test)]
+            team_seat_ownership_barrier: Arc::new(tokio::sync::Mutex::new(())),
+            #[cfg(test)]
+            team_seat_ownership_arrivals: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             #[cfg(test)]
             workspace_resolve_barrier: Arc::new(tokio::sync::Mutex::new(())),
             #[cfg(test)]

@@ -1874,21 +1874,29 @@ over on resume"
     /// Release every seat of a settled run, one failure never stopping the rest.
     async fn release_team_threads(&self, run_id: &str) {
         for thread_id in self.team_owned_threads(run_id).await {
-            let Ok((_, bridge)) = self.find_thread_provider(&thread_id).await else {
-                continue;
-            };
-            if let Err(error) = bridge.release_thread(&thread_id).await {
-                // Never load-bearing: a session we failed to hand back is still
-                // evictable at the cap, so this is a log line, not a failure.
-                let mut relay = self.relay.write().await;
-                relay.push_log(
-                    "warn",
-                    format!("Could not release task thread {thread_id}: {error}"),
-                );
-                // Without this the only diagnostic for a refused release waits
-                // for some unrelated state change before a client ever sees it.
-                relay.notify();
-            }
+            self.release_team_thread_by_id(&thread_id).await;
+        }
+    }
+
+    /// Hand one provider thread back, tolerating failure — never load-bearing:
+    /// a session we failed to release is still evictable at the cap, so this
+    /// is a log line, not a failure. `find_thread_provider` resolves it from
+    /// the relay's general thread registry, not from any run's ownership
+    /// bookkeeping, so this works even for a thread whose D5 registration was
+    /// just refused and therefore never made it into that bookkeeping at all.
+    async fn release_team_thread_by_id(&self, thread_id: &str) {
+        let Ok((_, bridge)) = self.find_thread_provider(thread_id).await else {
+            return;
+        };
+        if let Err(error) = bridge.release_thread(thread_id).await {
+            let mut relay = self.relay.write().await;
+            relay.push_log(
+                "warn",
+                format!("Could not release task thread {thread_id}: {error}"),
+            );
+            // Without this the only diagnostic for a refused release waits
+            // for some unrelated state change before a client ever sees it.
+            relay.notify();
         }
     }
 
@@ -1940,6 +1948,34 @@ over on resume"
     #[cfg(test)]
     pub(crate) fn reviewer_refusal_arrivals(&self) -> u64 {
         self.reviewer_refusal_arrivals
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// D5, path 1: hold after `start_team_thread` gets a fresh provider
+    /// thread back and before the write lock that registers it.
+    #[cfg(test)]
+    pub(crate) async fn hold_team_seat_creation_barrier(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.team_seat_creation_barrier.clone().lock_owned().await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn team_seat_creation_arrivals(&self) -> u64 {
+        self.team_seat_creation_arrivals
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// D5, path 2: hold before `record_run_thread`'s own (separate) write
+    /// lock that records a thread as run-owned.
+    #[cfg(test)]
+    pub(crate) async fn hold_team_seat_ownership_barrier(
+        &self,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        self.team_seat_ownership_barrier.clone().lock_owned().await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn team_seat_ownership_arrivals(&self) -> u64 {
+        self.team_seat_ownership_arrivals
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
@@ -2206,7 +2242,18 @@ over on resume"
         thread.source = provider_name.clone();
         let thread_id = thread.id.clone();
 
+        // D5, path 1: the provider thread now exists but owns nothing yet.
+        // Test-only latch, held before the write lock below — never while
+        // holding it, or a test settling the run through that same lock would
+        // deadlock against itself.
+        #[cfg(test)]
         {
+            self.team_seat_creation_arrivals
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            drop(self.team_seat_creation_barrier.lock().await);
+        }
+
+        let settled_status = {
             let mut relay = self.relay.write().await;
             relay.register_background_thread(
                 thread,
@@ -2218,32 +2265,59 @@ over on resume"
             );
             // Seats never leave the run worktree; pin so they share the same resolver.
             relay.set_thread_workspace(&thread_id, Some(workspace.as_str()));
+            // D5: registration and settlement's status write both take this
+            // same write lock, so there are exactly two interleavings —
+            // registration first (the seat is in the map before settlement's
+            // later snapshot, which then releases it), or settlement first
+            // (observed here, refused, and the caller below releases the
+            // thread this function already created). No third case, because
+            // both go through this one lock.
+            //
             // The only place the seat is still known: the driver records a
             // run-owned thread without one, and the report cannot recover it.
+            let mut settled_status = None;
             relay.update_team_run(run_id, |run| {
+                if run.status.is_terminal() || run.status.is_settled_without_driver() {
+                    settled_status = Some(run.status);
+                    return;
+                }
                 run.record_run_thread_role(&thread_id, role);
                 run.record_owned_thread_provider(&thread_id, &provider_name);
             });
-            // Record only the reviewer in the semantic reviewer set, and atomically
-            // mark this task-owned reviewer as a first-class Session. The same set
-            // still powers read-only and workspace-concurrency guards. The Dev writes,
-            // so it must never enter that set.
-            if role == TeamRole::Reviewer {
-                let tl = relay
-                    .team_run(run_id)
-                    .map(|run| run.tl_thread_id.clone())
-                    .unwrap_or_default();
-                relay.register_task_reviewer_thread(thread_id.clone(), tl);
+            if settled_status.is_none() {
+                // Record only the reviewer in the semantic reviewer set, and atomically
+                // mark this task-owned reviewer as a first-class Session. The same set
+                // still powers read-only and workspace-concurrency guards. The Dev writes,
+                // so it must never enter that set.
+                if role == TeamRole::Reviewer {
+                    let tl = relay
+                        .team_run(run_id)
+                        .map(|run| run.tl_thread_id.clone())
+                        .unwrap_or_default();
+                    relay.register_task_reviewer_thread(thread_id.clone(), tl);
+                }
+                relay.push_log(
+                    "info",
+                    format!(
+                        "Task {run_id}: started a {provider_name} {} thread in {}",
+                        role.as_str(),
+                        workspace.as_str()
+                    ),
+                );
+                relay.notify();
             }
-            relay.push_log(
-                "info",
-                format!(
-                    "Task {run_id}: started a {provider_name} {} thread in {}",
-                    role.as_str(),
-                    workspace.as_str()
-                ),
-            );
-            relay.notify();
+            settled_status
+        };
+
+        if let Some(status) = settled_status {
+            // Created, then refused: not a provider failure, but the same
+            // shape from here on — the caller must release rather than leak.
+            self.release_team_thread_by_id(&thread_id).await;
+            return Err(ThreadDriveError::Provider(format!(
+                "task run {run_id} settled as {} before its {} seat could be registered",
+                status.as_str(),
+                role.as_str()
+            )));
         }
         Ok(thread_id)
     }
@@ -3277,14 +3351,51 @@ request and did not confirm stopping: {why}"
             .unwrap_or(TeamThreadSlot::MrDev)
     }
 
-    async fn own_team_seat(&self, run_id: &str, thread_id: String) -> relay_api::TeamSeat {
-        let slot = self.record_run_thread(run_id, &thread_id).await;
-        relay_api::TeamSeat { thread_id, slot }
+    /// `Err` carries the settled status that caused the refusal (D5, path 2)
+    /// — the caller (`TeamPort::start_thread`) turns it into a release of the
+    /// thread `record_run_thread` just declined to own, plus the error it
+    /// hands back to the driver.
+    async fn own_team_seat(
+        &self,
+        run_id: &str,
+        thread_id: String,
+    ) -> Result<relay_api::TeamSeat, TeamRunStatus> {
+        let slot = self.record_run_thread(run_id, &thread_id).await?;
+        Ok(relay_api::TeamSeat { thread_id, slot })
     }
 
-    async fn record_run_thread(&self, run_id: &str, thread_id: &str) -> TeamThreadSlot {
+    /// D5, path 2: a SEPARATE write-lock hold from path 1's
+    /// (`start_team_thread`'s own registration) — `TeamPort::start_thread`
+    /// calls both, back to back, so the run can settle in the gap between
+    /// them too. Checked inside this lock for the same reason path 1 checks
+    /// inside its own: registration and settlement's status write take the
+    /// same lock, so there is no interleaving where this observes a
+    /// not-yet-settled run that becomes settled before it commits.
+    async fn record_run_thread(
+        &self,
+        run_id: &str,
+        thread_id: &str,
+    ) -> Result<TeamThreadSlot, TeamRunStatus> {
+        // Test-only latch, held before this write lock — never while holding
+        // it, same reasoning as path 1's checkpoint.
+        #[cfg(test)]
+        {
+            self.team_seat_ownership_arrivals
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            drop(self.team_seat_ownership_barrier.lock().await);
+        }
         let mut relay = self.relay.write().await;
-        relay.update_team_run(run_id, |run| run.record_run_thread(thread_id.to_string()));
+        let mut settled_status = None;
+        relay.update_team_run(run_id, |run| {
+            if run.status.is_terminal() || run.status.is_settled_without_driver() {
+                settled_status = Some(run.status);
+                return;
+            }
+            run.record_run_thread(thread_id.to_string());
+        });
+        if let Some(status) = settled_status {
+            return Err(status);
+        }
         let index = relay
             .team_run(run_id)
             .and_then(|run| {
@@ -3294,7 +3405,7 @@ request and did not confirm stopping: {why}"
             })
             .unwrap_or(0);
         relay.notify();
-        TeamThreadSlot::RunOwned(index)
+        Ok(TeamThreadSlot::RunOwned(index))
     }
 
     /// The live id in a seat. Re-read rather than remembered, because
@@ -4015,6 +4126,19 @@ impl relay_api::TeamPort for AppState {
             _ => None,
         };
 
+        // D5, path 3: `AttachSubTaskThread` carries a provider thread the
+        // driver already created before asking to attach it. The reducer's
+        // lifecycle gate already refuses this command for a settled run (it
+        // is not itself a lifecycle transition) — what it cannot do, being a
+        // synchronous pure function, is touch the provider. On ANY refusal
+        // this caller releases the thread named in the ORIGINAL envelope
+        // rather than leaving it to leak; not scoped to settlement alone,
+        // since a duplicate/stale/protocol refusal orphans the same thread.
+        let attach_thread_id = match &envelope.command {
+            TeamStateCommand::AttachSubTaskThread { thread_id, .. } => Some(thread_id.clone()),
+            _ => None,
+        };
+
         let mut relay = self.relay.write().await;
         if relay.team_run(run_id).is_none() {
             return None;
@@ -4084,6 +4208,16 @@ impl relay_api::TeamPort for AppState {
             }
         }
 
+        // D5, path 3: release on a FRESH rejection only (`wrote`) — a pure
+        // replay of an already-rejected `AttachSubTaskThread` means the
+        // release already ran the first time; running it again would be
+        // harmless but redundant, not a second thread to hand back.
+        if wrote && matches!(receipt.status, TeamCommandStatus::Rejected(_)) {
+            if let Some(thread_id) = attach_thread_id {
+                self.release_team_thread_by_id(&thread_id).await;
+            }
+        }
+
         Some(receipt)
     }
 
@@ -4122,7 +4256,21 @@ impl relay_api::TeamPort for AppState {
             .start_team_thread(run_id, role, &workspace.as_dir())
             .await
             .map_err(|error| TeamPortError::Failed(error.to_string()))?;
-        Ok(self.own_team_seat(run_id, thread_id).await)
+        match self.own_team_seat(run_id, thread_id.clone()).await {
+            Ok(seat) => Ok(seat),
+            Err(status) => {
+                // D5, path 2: `start_team_thread` already refused this same
+                // way for the same reason (path 1); this is the identical
+                // "created, then refused" shape one write lock later, and
+                // gets the identical treatment — release, do not leak.
+                self.release_team_thread_by_id(&thread_id).await;
+                Err(TeamPortError::Failed(format!(
+                    "task run {run_id} settled as {} before its {} seat could be registered",
+                    status.as_str(),
+                    role.as_str()
+                )))
+            }
+        }
     }
 
     async fn resume_or_start_thread(
