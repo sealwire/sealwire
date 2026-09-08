@@ -648,7 +648,6 @@ finish before starting a workflow"
             let workspace = ReviewWorkspace {
                 cwd: cwd.clone(),
                 recorded_cwd: cwd.clone(),
-                fallback_from: None,
                 roots: list_worktrees(&cwd, &grants).await,
             };
             let workspace_line = self.describe_review_workspace(&workspace);

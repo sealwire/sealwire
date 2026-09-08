@@ -197,12 +197,9 @@ pub(super) fn classify_workspace_result<T>(
 pub(super) struct ReviewWorkspace {
     /// The tree to diff / point a fresh reviewer at.
     pub(super) cwd: String,
-    /// The reviewed thread's OWN recorded cwd, which may be gone or a different tree.
+    /// The reviewed thread's OWN recorded cwd, which may be a different tree than `cwd`
+    /// once the work has moved.
     pub(super) recorded_cwd: String,
-    /// The recorded cwd when `cwd` is a read-only substitute for a deleted workspace.
-    /// Kept distinct from a live cross-tree suggestion so callers never infer deletion
-    /// merely from two paths being different.
-    pub(super) fallback_from: Option<String>,
     /// Every in-scope working tree of that repo, for naming the branch/kind in the prompt.
     pub(super) roots: Vec<WorkspaceRootView>,
 }
@@ -409,21 +406,17 @@ reviewer thread"
             )
         };
 
-        // Which working tree this review reads. Resolve once so an unresolvable workspace is refused at request time.
+        // Which working tree this review reads. Resolve once so an unresolvable or deleted
+        // workspace is refused at request time.
         let review_workspace = self
             .resolve_review_workspace(&parent_thread_id, &device_id)
             .await?;
         let cwd = review_workspace.cwd.clone();
-        let initial_fallback_from = review_workspace.fallback_from.clone();
         // Pin the committed target when the request is accepted. Dirt may remain in
         // the tree, and HEAD may move before the asynchronous reviewer starts; neither
         // may change what this review was asked to inspect.
         let requested_git_target = match self
-            .requested_git_target_for_review(
-                &parent_thread_id,
-                &cwd,
-                initial_fallback_from.as_deref(),
-            )
+            .requested_git_target_for_review(&parent_thread_id, &cwd)
             .await
         {
             Ok(target) => target,
@@ -526,15 +519,6 @@ reviewer thread"
                 "info",
                 format!("Review {job_id} requested for thread {parent_thread_id}."),
             );
-            if let Some(recorded) = initial_fallback_from {
-                relay.push_log(
-                    "info",
-                    format!(
-                        "Review {job_id}: the reviewed thread's workspace ({recorded}) no longer \
-exists, so this review runs read-only — no recap, fix or post-back turns will be driven on it."
-                    ),
-                );
-            }
             relay.notify();
         }
 
@@ -566,7 +550,6 @@ to this thread."
         &self,
         parent_thread_id: &str,
         cwd: &str,
-        initial_fallback_from: Option<&str>,
     ) -> Result<Option<(String, Option<String>)>, String> {
         let grants = { self.relay.read().await.trust_grants() };
         let Some(workspace) = grants.admit(cwd).await.trusted().cloned() else {
@@ -593,7 +576,7 @@ to this thread."
             }
         }
 
-        if has_uncommitted_changes(&workspace).await? && initial_fallback_from.is_none() {
+        if has_uncommitted_changes(&workspace).await? {
             return Ok(Some((candidate, None)));
         }
 
@@ -1668,7 +1651,12 @@ started ({error}); finishing with round {round}'s findings."
         current_head_sha(&workspace).await.map(Some)
     }
 
-    /// Per-round so a vanished/moved worktree does not strand the loop. Delegates to `resolve_thread_workspace`.
+    /// Per-round so a moved worktree does not strand the loop. Delegates to `resolve_thread_workspace`.
+    ///
+    /// A DELETED tree is refused, not substituted. The only stand-in on offer is the repo the
+    /// worktree was cut from, whose HEAD is whatever else landed there — so a substituted
+    /// review reads commits the reviewed thread never made and can approve them. A tree that
+    /// merely MOVED is still followed (`Proven`): that is the same work, elsewhere.
     pub(super) async fn resolve_review_workspace(
         &self,
         parent_thread_id: &str,
@@ -1678,14 +1666,15 @@ started ({error}); finishing with round {round}'s findings."
             .resolve_thread_workspace(parent_thread_id, Some(device_id))
             .await
             .map_err(ThreadWorkspaceError::into_message)?;
+        if let WorkspaceOrigin::Substituted { gone } = &resolved.origin {
+            return Err(format!(
+                "the workspace this thread ran in ({gone}) no longer exists; reviewing the \
+repository it was cut from would review commits this thread never made"
+            ));
+        }
         Ok(ReviewWorkspace {
             cwd: resolved.cwd,
             recorded_cwd: resolved.birth_cwd,
-            // Only a vanished birth tree is a fallback; a live move is not "deleted".
-            fallback_from: match resolved.origin {
-                WorkspaceOrigin::Substituted { gone } => Some(gone),
-                _ => None,
-            },
             roots: resolved.roots,
         })
     }
@@ -1784,59 +1773,54 @@ started ({error}); finishing with round {round}'s findings."
                 (base_sha, candidate_sha)
             } else if current_head != base_sha {
                 (base_sha, current_head)
-            } else if workspace.fallback_from.is_none() {
-                if dirty {
-                    let round_base = base_sha;
-                    self.update_job(job_id, |job| {
-                        job.base_sha = Some(round_base.clone());
-                        job.round_base_sha = Some(round_base.clone());
-                        job.candidate_sha = None;
-                    })
-                    .await;
-                    match self
-                        .drive_parent_commit_prompt(job_id, parent_thread_id, &round_base)
-                        .await
-                    {
-                        AuthorTurnOutcome::Completed(promoted) => {
-                            *parent_thread_id = promoted;
-                        }
-                        AuthorTurnOutcome::WorkspaceGone => {}
-                        AuthorTurnOutcome::Aborted => {
-                            return Err("the author commit turn aborted".into());
-                        }
+            } else if dirty {
+                let round_base = base_sha;
+                self.update_job(job_id, |job| {
+                    job.base_sha = Some(round_base.clone());
+                    job.round_base_sha = Some(round_base.clone());
+                    job.candidate_sha = None;
+                })
+                .await;
+                match self
+                    .drive_parent_commit_prompt(job_id, parent_thread_id, &round_base)
+                    .await
+                {
+                    AuthorTurnOutcome::Completed(promoted) => {
+                        *parent_thread_id = promoted;
                     }
-                    let refreshed = self
-                        .resolve_review_workspace(parent_thread_id, device_id)
-                        .await?;
-                    let Some(refreshed_trusted) =
-                        grants.admit(&refreshed.cwd).await.trusted().cloned()
-                    else {
-                        return Err(format!(
-                            "{} is not a granted workspace, so it cannot be reviewed",
-                            refreshed.cwd
-                        ));
-                    };
-                    if !is_git_work_tree(&refreshed_trusted).await? {
-                        return Ok(None);
+                    AuthorTurnOutcome::WorkspaceGone => {}
+                    AuthorTurnOutcome::Aborted => {
+                        return Err("the author commit turn aborted".into());
                     }
-                    let candidate = current_head_sha(&refreshed_trusted).await?;
-                    if candidate == round_base {
-                        return Err(format!(
-                            "the author did not create a commit after `{round_base}`; review requires a committed candidate"
-                        ));
-                    }
-                    target_workspace = refreshed_trusted;
-                    (round_base, candidate)
-                } else {
-                    let base = first_parent_sha(&trusted, &current_head)
-                        .await?
-                        .unwrap_or_else(|| current_head.clone());
-                    (base, current_head)
                 }
+                let refreshed = self
+                    .resolve_review_workspace(parent_thread_id, device_id)
+                    .await?;
+                let Some(refreshed_trusted) = grants.admit(&refreshed.cwd).await.trusted().cloned()
+                else {
+                    return Err(format!(
+                        "{} is not a granted workspace, so it cannot be reviewed",
+                        refreshed.cwd
+                    ));
+                };
+                if !is_git_work_tree(&refreshed_trusted).await? {
+                    return Ok(None);
+                }
+                let candidate = current_head_sha(&refreshed_trusted).await?;
+                if candidate == round_base {
+                    return Err(format!(
+                        "the author did not create a commit after `{round_base}`; review requires a committed candidate"
+                    ));
+                }
+                target_workspace = refreshed_trusted;
+                (round_base, candidate)
             } else {
-                (base_sha, current_head)
+                let base = first_parent_sha(&trusted, &current_head)
+                    .await?
+                    .unwrap_or_else(|| current_head.clone());
+                (base, current_head)
             }
-        } else if dirty && workspace.fallback_from.is_none() {
+        } else if dirty {
             let round_base = current_head;
             self.update_job(job_id, |job| {
                 job.base_sha = Some(round_base.clone());
