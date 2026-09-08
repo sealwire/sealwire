@@ -55,7 +55,7 @@ function baseProps(overrides = {}) {
     uiState: {
       transcriptExpandedItemIds: new Set(),
       transcriptLoadingItemIds: new Set(),
-      askUserSubmittingRequestId: "",
+      askUserSubmittingRequestIds: new Set(),
       askUserErrors: new Map(),
     },
     ...overrides,

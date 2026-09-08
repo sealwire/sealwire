@@ -2070,6 +2070,7 @@ it a turn ago"
         relay.pending_ask_user_questions.insert(
             request_id.to_string(),
             crate::state::relay::PendingAskUserQuestion {
+                arrival_seq: 0,
                 request_id: request_id.to_string(),
                 tool_use_id: "tu-1".to_string(),
                 thread_id: "thread-7".to_string(),
@@ -2118,6 +2119,7 @@ it a turn ago"
         relay.pending_ask_user_questions.insert(
             request_id.to_string(),
             crate::state::relay::PendingAskUserQuestion {
+                arrival_seq: 0,
                 request_id: request_id.to_string(),
                 tool_use_id: "tu-future".to_string(),
                 thread_id: "thread-future".to_string(),

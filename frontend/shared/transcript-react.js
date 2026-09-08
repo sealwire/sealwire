@@ -13,7 +13,11 @@ import {
 import { createTranscriptScrollAdjuster } from "./transcript-scroll-adjust.js";
 import { CHECK_SVG, COPY_SVG, FORK_SVG, SPARKLES_SVG } from "../svg.js";
 import { approvalKindLabel } from "./approval-labels.js";
-import { readAskUserDraft, writeAskUserDraft } from "./ask-user-draft-store.js";
+import {
+  askUserDraftKey,
+  readAskUserDraft,
+  writeAskUserDraft,
+} from "./ask-user-draft-store.js";
 import { providerIconSvg } from "./provider-icons.js";
 import { computeForkableItemIds, isForkableEntry } from "./transcript-fork.js";
 import {
@@ -694,7 +698,7 @@ function isAskUserQuestionTool(tool) {
   return Boolean(tool) && tool.name === "AskUserQuestion";
 }
 
-function normalizeAskUserQuestions(rawQuestions) {
+export function normalizeAskUserQuestions(rawQuestions) {
   if (!Array.isArray(rawQuestions) || !rawQuestions.length) {
     return null;
   }
@@ -878,6 +882,11 @@ function AskUserEntry({ entry, isJustPrepended = false, options = null }) {
     requestId && options?.askUserDetailErrors instanceof Map
       ? options.askUserDetailErrors.get(requestId) || ""
       : "";
+  // Docked, the waiting/failed detail is the dock's to report — and the dock is
+  // the only one of the two that can offer a retry.
+  if (!questions && detailIncomplete && options?.askUserDocked) {
+    return h(AskUserAwaitingCard, { entry, isJustPrepended, questions: [] });
+  }
   if (!questions && detailIncomplete) {
     return h(AskUserDetailPendingCard, {
       entry,
@@ -901,14 +910,20 @@ function AskUserEntry({ entry, isJustPrepended = false, options = null }) {
   // read-only card, which makes the options unclickable and mislabels it
   // "Answered" even though the user never picked anything.
   const interactive = Boolean(pendingRequest);
-  const submittingRequestId = options?.askUserSubmittingRequestId || "";
-  const isSubmitting = Boolean(requestId) && submittingRequestId === requestId;
+  const isSubmitting =
+    Boolean(requestId) && Boolean(options?.askUserSubmittingRequestIds?.has?.(requestId));
   const submitAnswers = options?.onSubmitAskUserAnswers || null;
   const askUserError =
     requestId && options?.askUserErrors instanceof Map
       ? options.askUserErrors.get(requestId) || ""
       : "";
 
+  // Docked: the live card is mounted outside the transcript, so in place this is
+  // only the record that the question was asked. It must not show options —
+  // options here would be a second set the reader can see but not use.
+  if (interactive && options?.askUserDocked) {
+    return h(AskUserAwaitingCard, { entry, isJustPrepended, questions });
+  }
   if (!interactive) {
     return h(AskUserReadOnlyCard, {
       entry,
@@ -925,19 +940,21 @@ function AskUserEntry({ entry, isJustPrepended = false, options = null }) {
     itemId,
     questions,
     requestId,
+    threadId: pendingRequest?.thread_id || "",
     isSubmitting,
     submitAnswers,
     askUserError,
   });
 }
 
-function AskUserDetailPendingCard({
+export function AskUserDetailPendingCard({
   entry,
   isJustPrepended,
   itemId,
   questionCount,
   detailLoading,
   detailError,
+  onRetryDetail = null,
 }) {
   const status = detailError
     ? "Question detail failed"
@@ -976,7 +993,56 @@ function AskUserDetailPendingCard({
         ),
         detailError
           ? h("div", { className: "ask-user-error", role: "alert" }, detailError)
+          : null,
+        // Nothing else will ever trigger this fetch again: the surface re-syncs
+        // on the pending list, and a failure does not change the list.
+        detailError && onRetryDetail
+          ? h(
+              "button",
+              {
+                type: "button",
+                className: "ask-user-detail-retry",
+                disabled: detailLoading,
+                onClick: () => onRetryDetail(),
+              },
+              detailLoading ? "Loading…" : "Try again"
+            )
           : null
+      )
+    )
+  );
+}
+
+function AskUserAwaitingCard({ entry, isJustPrepended, questions }) {
+  return h(
+    "article",
+    transcriptEntryDomAttrs(
+      entry,
+      "chat-message chat-message-system chat-message-ask-user chat-message-ask-user-awaiting",
+      null,
+      { justPrepended: isJustPrepended }
+    ),
+    h(
+      "div",
+      { className: "message-card message-card-system message-card-ask-user" },
+      h(
+        "div",
+        { className: "ask-user-meta" },
+        h("span", { className: "ask-user-tag" }, "Claude asked"),
+        h("span", { className: "ask-user-status" }, "Waiting for your answer")
+      ),
+      ...questions.map((q, qIndex) =>
+        h(
+          "section",
+          { className: "ask-user-question", key: `awaiting:q:${qIndex}` },
+          q.header ? h("div", { className: "ask-user-question-header" }, q.header) : null,
+          h("p", { className: "ask-user-question-text" }, q.question || "(no question)")
+        )
+      ),
+      h(
+        "p",
+        { className: "ask-user-awaiting-hint" },
+        "The options are waiting below the conversation."
       )
     )
   );
@@ -1071,12 +1137,13 @@ function getQuestionState(stateMap, questionText) {
   return stateMap.get(questionText) || { labels: new Set(), notes: "" };
 }
 
-function AskUserWizard({
+export function AskUserWizard({
   entry,
   isJustPrepended,
   itemId,
   questions,
   requestId,
+  threadId = "",
   isSubmitting,
   submitAnswers,
   askUserError,
@@ -1084,7 +1151,8 @@ function AskUserWizard({
   // Seeded from the draft store rather than from nothing: this component is
   // rebuilt on every blink of the pending list, and a fresh start there is the
   // reader's answer being forgotten mid-sentence.
-  const draft = readAskUserDraft(requestId);
+  const draftKey = askUserDraftKey(threadId, requestId);
+  const draft = readAskUserDraft(draftKey);
   const [currentIndex, setCurrentIndex] = React.useState(() => draft?.currentIndex || 0);
   // Map<questionText, {labels: Set<string>, notes: string}>
   const [perQuestion, setPerQuestion] = React.useState(
@@ -1105,42 +1173,50 @@ function AskUserWizard({
   const isLastQuestion = safeIndex === questions.length - 1;
   const isFirstQuestion = safeIndex === 0;
 
-  // Both halves of every edit: the state React renders from, and the draft that
-  // outlives this mount.
-  function commitPerQuestion(next) {
-    setPerQuestion(next);
-    writeAskUserDraft(requestId, { perQuestion: next, currentIndex });
+  // Both halves of every edit, and the update has to be FUNCTIONAL: two picks
+  // coalesced into one React batch both read the render's map otherwise, and the
+  // second silently drops the first — in the state and in the draft with it.
+  function commitPerQuestion(build) {
+    setPerQuestion((prev) => {
+      const next = build(prev);
+      writeAskUserDraft(draftKey, { perQuestion: next, currentIndex });
+      return next;
+    });
   }
 
   function commitCurrentIndex(next) {
     setCurrentIndex(next);
-    writeAskUserDraft(requestId, { perQuestion, currentIndex: next });
+    writeAskUserDraft(draftKey, { perQuestion, currentIndex: next });
   }
 
   function updateNotes(questionText, value) {
-    const next = new Map(perQuestion);
-    const existing = getQuestionState(perQuestion, questionText);
-    next.set(questionText, {
-      labels: new Set(existing.labels),
-      notes: value,
+    commitPerQuestion((prev) => {
+      const next = new Map(prev);
+      const existing = getQuestionState(prev, questionText);
+      next.set(questionText, {
+        labels: new Set(existing.labels),
+        notes: value,
+      });
+      return next;
     });
-    commitPerQuestion(next);
   }
 
   function toggleOption(questionText, optionLabel, isMulti) {
-    const next = new Map(perQuestion);
-    const existing = getQuestionState(perQuestion, questionText);
-    const labels = new Set(isMulti ? existing.labels : []);
-    if (labels.has(optionLabel)) {
-      labels.delete(optionLabel);
-    } else {
-      labels.add(optionLabel);
-    }
-    next.set(questionText, {
-      labels,
-      notes: existing.notes,
+    commitPerQuestion((prev) => {
+      const next = new Map(prev);
+      const existing = getQuestionState(prev, questionText);
+      const labels = new Set(isMulti ? existing.labels : []);
+      if (labels.has(optionLabel)) {
+        labels.delete(optionLabel);
+      } else {
+        labels.add(optionLabel);
+      }
+      next.set(questionText, {
+        labels,
+        notes: existing.notes,
+      });
+      return next;
     });
-    commitPerQuestion(next);
   }
 
   function clickOption(question, optionLabel) {
@@ -1205,6 +1281,9 @@ function AskUserWizard({
       ),
       h(AskUserQuestionStep, {
         key: itemId ? `${itemId}:q:${safeIndex}` : `ask-user:q:${safeIndex}`,
+        // Several questions can be pending at once and two of them can be worded
+        // identically, so the notes control is identified by the card it is in.
+        notesId: `ask-user-notes-${draftKey || itemId || "card"}-${safeIndex}`,
         question: currentQuestion,
         currentState,
         isSubmitting,
@@ -1260,6 +1339,7 @@ function AskUserQuestionStep({
   question,
   currentState,
   isSubmitting,
+  notesId,
   onToggleOption,
   onNotesChange,
 }) {
@@ -1313,12 +1393,12 @@ function AskUserQuestionStep({
       { className: "ask-user-notes-row" },
       h(
         "label",
-        { className: "ask-user-notes-label", htmlFor: `ask-user-notes-${q.question}` },
+        { className: "ask-user-notes-label", htmlFor: notesId },
         "Add a note (optional)"
       ),
       h("textarea", {
         className: "ask-user-notes-input",
-        id: `ask-user-notes-${q.question}`,
+        id: notesId,
         rows: 2,
         placeholder: "Optional: type more context, an \"Other\" answer, or specifics about your pick.",
         value: notesValue,
@@ -2376,9 +2456,14 @@ export function TranscriptContent({
   // `isGroupableCompletedTool` excludes them — so the pinned entry is always a
   // plain item in `groupedItems`; if that ever changed, the id simply would not
   // match and it would render in place, which is the safe degradation.)
+  // Docked surfaces do not pin: the live card is mounted outside this list, so
+  // the record stays where the question was actually asked.
   const pinnedAskUserItemIds = React.useMemo(
-    () => findPinnedAskUserItemIds(entries, options?.pendingAskUserQuestions),
-    [entries, options?.pendingAskUserQuestions]
+    () =>
+      options?.askUserDocked
+        ? EMPTY_PINNED_ASK_USER_IDS
+        : findPinnedAskUserItemIds(entries, options?.pendingAskUserQuestions),
+    [entries, options?.askUserDocked, options?.pendingAskUserQuestions]
   );
   const pinnedAskUserNodes = [];
   const nodes = [];

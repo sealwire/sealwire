@@ -268,7 +268,19 @@ export function createPairingController(ctx) {
       logLine("No pending AskUserQuestion to answer.");
       return;
     }
+    // Already going: a second tap (or a click landing before the disabled state
+    // paints) would POST twice, and whichever returned first would clear the one
+    // in-flight marker and re-enable the card under the other.
+    if (state.localUiStore.getState().askUserSubmittingRequestIds?.has?.(requestId)) {
+      return;
+    }
     state.localUiStore.getState().startAskUserSubmission(requestId);
+    // Paint the in-flight state now: the store is not subscribed to, so without
+    // this the card stays enabled and silent for the whole round trip — long
+    // enough to tap a second option and send two answers to one question.
+    if (state.session) {
+      renderSession(state.session);
+    }
     try {
       const response = await apiFetch(
         `/api/ask-user-questions/${encodeURIComponent(requestId)}/answer`,

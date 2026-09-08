@@ -26,6 +26,8 @@ function toggleSetValue(values, value) {
   return next;
 }
 
+const MAX_ASK_USER_ERRORS = 16;
+
 export function createLocalUiStore(initialState = {}) {
   return createStore((set) => ({
     ...initialState,
@@ -42,24 +44,58 @@ export function createLocalUiStore(initialState = {}) {
     },
     transcriptExpandedItemIds: new Set(),
     transcriptLoadingItemIds: new Set(),
-    askUserSubmittingRequestId: "",
+    // A set, not one id: several questions can be parked at once, and with a
+    // scalar the second send re-enables the first while its request is still in
+    // flight — which is how one answer gets sent twice.
+    askUserSubmittingRequestIds: new Set(),
     askUserErrors: new Map(),
     startAskUserSubmission(requestId) {
-      set({ askUserSubmittingRequestId: String(requestId || "") });
+      set((state) => {
+        const next = new Set(state.askUserSubmittingRequestIds || []);
+        next.add(String(requestId || ""));
+        // A retry starts clean rather than under the last attempt's error.
+        const errors = new Map(state.askUserErrors || []);
+        errors.delete(String(requestId || ""));
+        return { askUserSubmittingRequestIds: next, askUserErrors: errors };
+      });
     },
     finishAskUserSubmission(requestId) {
       set((state) => {
-        if (state.askUserSubmittingRequestId === String(requestId || "")) {
-          return { askUserSubmittingRequestId: "" };
+        const next = new Set(state.askUserSubmittingRequestIds || []);
+        if (!next.delete(String(requestId || ""))) {
+          return {};
         }
-        return {};
+        return { askUserSubmittingRequestIds: next };
       });
     },
     setAskUserError(requestId, message) {
       set((state) => {
         const next = new Map(state.askUserErrors || []);
+        next.delete(String(requestId || ""));
         next.set(String(requestId || ""), String(message || ""));
+        // A failure that lands AFTER its question left the pending list has
+        // nothing left to prune it; the cap is a leak stop, not a policy.
+        while (next.size > MAX_ASK_USER_ERRORS) {
+          next.delete(next.keys().next().value);
+        }
         return { askUserErrors: next };
+      });
+    },
+    // Answered from another device, cancelled with the turn: the card is gone and
+    // the failure has nothing left to describe. Left behind it greets a reused
+    // request id as if the new question had already failed.
+    retainAskUserErrors(requestIds) {
+      set((state) => {
+        const live = new Set(requestIds || []);
+        const next = new Map(state.askUserErrors || []);
+        let changed = false;
+        for (const key of [...next.keys()]) {
+          if (!live.has(key)) {
+            next.delete(key);
+            changed = true;
+          }
+        }
+        return changed ? { askUserErrors: next } : {};
       });
     },
     clearAskUserError(requestId) {
@@ -124,7 +160,7 @@ export function readLocalUiState(store) {
     sessionDraft: state.sessionDraft ? { ...state.sessionDraft } : null,
     transcriptExpandedItemIds: copyStringSet(state.transcriptExpandedItemIds),
     transcriptLoadingItemIds: copyStringSet(state.transcriptLoadingItemIds),
-    askUserSubmittingRequestId: String(state.askUserSubmittingRequestId || ""),
+    askUserSubmittingRequestIds: new Set(state.askUserSubmittingRequestIds || []),
     askUserErrors: new Map(state.askUserErrors || []),
   };
 }

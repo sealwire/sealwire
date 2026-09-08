@@ -230,6 +230,7 @@ fn sort_threads_by_recency_orders_threads_across_providers() {
 
 fn test_pending_ask_user_question(thread_id: &str) -> crate::state::PendingAskUserQuestion {
     crate::state::PendingAskUserQuestion {
+        arrival_seq: 0,
         request_id: "ask:1".to_string(),
         tool_use_id: "toolu_x".to_string(),
         thread_id: thread_id.to_string(),
@@ -4940,6 +4941,49 @@ fn consume_pairing_ticket_overwrites_path_scope_on_repair() {
         relay.paired_devices.len(),
         1,
         "still one device after re-pair"
+    );
+}
+
+#[test]
+fn two_questions_asked_in_the_same_second_keep_the_order_they_were_asked() {
+    // `requested_at` is whole seconds, and two questions from one turn land
+    // inside the same one. The tie-break used to be the request id, which was a
+    // counter and roughly agreed with arrival order; ids are random now, so the
+    // cards would appear in whichever order the id happened to sort — and the
+    // dock shows them stacked, so the reader answers them out of order.
+    let mut relay = test_state();
+    relay.activate_thread(
+        test_thread("thread-1", "/tmp/project"),
+        "/tmp/project",
+        DEFAULT_MODEL,
+        DEFAULT_APPROVAL_POLICY,
+        DEFAULT_SANDBOX,
+        DEFAULT_EFFORT,
+        "device-a",
+    );
+
+    let mut asked_first = test_pending_ask_user_question("thread-1");
+    asked_first.request_id = "ask:ffffffff-ffff-ffff-ffff-ffffffffffff".to_string();
+    asked_first.requested_at = 100;
+    let mut asked_second = test_pending_ask_user_question("thread-1");
+    asked_second.request_id = "ask:00000000-0000-0000-0000-000000000000".to_string();
+    asked_second.requested_at = 100;
+    relay.add_pending_ask_user_question(asked_first.clone());
+    relay.add_pending_ask_user_question(asked_second.clone());
+
+    let snapshot = relay.snapshot();
+    let ids: Vec<&str> = snapshot
+        .pending_ask_user_questions
+        .iter()
+        .map(|q| q.request_id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec![
+            asked_first.request_id.as_str(),
+            asked_second.request_id.as_str()
+        ],
+        "the question asked first must be shown first"
     );
 }
 

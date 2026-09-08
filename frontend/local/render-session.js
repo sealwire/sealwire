@@ -217,6 +217,9 @@ import {
   isDocumentForeground,
 } from "../shared/thread-notify.js";
 import { LocalTranscriptPanel } from "./local-transcript-panel.js";
+import { AskUserDock } from "../shared/ask-user-dock.js";
+import { publishLocalAskUserDockContent } from "./ask-user-dock-slot.js";
+import { retainAskUserDraftsForPending } from "../shared/ask-user-draft-store.js";
 import { publishLocalTranscriptSlotContent } from "./transcript-slot.js";
 
 const h = React.createElement;
@@ -434,6 +437,15 @@ export function createSessionRenderer({
     // back in when that's the case.
     session = adoptSettledTranscript(state, session, cancelPendingTranscriptFlush());
     state.session = session;
+    // Here, BEFORE the view-only projection below narrows the snapshot to the
+    // thread on screen: a draft belongs to its question, and pruning against the
+    // projection throws away a half-typed answer for merely looking elsewhere.
+    retainAskUserDraftsForPending(session?.pending_ask_user_questions);
+    state.localUiStore
+      ?.getState?.()
+      ?.retainAskUserErrors?.(
+        (session?.pending_ask_user_questions || []).map((request) => request?.request_id)
+      );
     if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
       window.dispatchEvent(new CustomEvent("agent-relay:session-updated"));
     }
@@ -481,6 +493,12 @@ export function createSessionRenderer({
     );
     const threadListUi = readThreadListUi(state.threadListStore);
     state.currentApprovalId = approval?.request_id || null;
+    // Published from the one place every render passes through, so leaving the
+    // conversation clears it. The card the turn is parked on is mounted beside
+    // the composer, not inside the transcript that scrolls and re-renders.
+    publishLocalAskUserDockContent(
+      buildAskUserDockContent(session, { viewingConversation, activeThreadFrozen })
+    );
 
     const activeProjectId = readActiveProjectId(state.threadListStore);
 
@@ -1451,6 +1469,34 @@ export function createSessionRenderer({
     void state.controller?.submitAskUserQuestionAnswer?.(requestId, answers);
   }
 
+  function buildAskUserDockContent(session, { viewingConversation, activeThreadFrozen }) {
+    // Review/Code Flow own the thread and answer nothing, and off the
+    // conversation there is no composer to dock above.
+    if (!viewingConversation || activeThreadFrozen) {
+      return null;
+    }
+    // Thread-filtered at the source, like the Orchestrator pane: the snapshot
+    // carries every thread's questions and the dock has no transcript entry to
+    // match them against.
+    const pending = pendingAskUserQuestionsForThread(session, session?.active_thread_id || null);
+    if (!pending.length) {
+      return null;
+    }
+    const localUi = readLocalUiState(state.localUiStore);
+    return h(AskUserDock, {
+      pendingAskUserQuestions: pending,
+      threadId: session?.active_thread_id || null,
+      options: {
+        onSubmitAskUserAnswers: handleSubmitAskUserAnswers,
+        askUserSubmittingRequestIds:
+          localUi.askUserSubmittingRequestIds instanceof Set
+            ? localUi.askUserSubmittingRequestIds
+            : new Set(),
+        askUserErrors: localUi.askUserErrors instanceof Map ? localUi.askUserErrors : new Map(),
+      },
+    });
+  }
+
   // Hoisted once per renderer instance for the same reason as
   // handleEnsureFileChangeDetail above: LocalTranscriptPanel calls this only
   // in its entries branch and owns the stableTranscriptOptions cache itself,
@@ -1493,8 +1539,14 @@ export function createSessionRenderer({
         ? []
         : session?.pending_ask_user_questions || [],
       onSubmitAskUserAnswers: handleSubmitAskUserAnswers,
-      askUserSubmittingRequestId: localUi.askUserSubmittingRequestId || "",
+      askUserSubmittingRequestIds:
+        localUi.askUserSubmittingRequestIds instanceof Set
+          ? localUi.askUserSubmittingRequestIds
+          : new Set(),
       askUserErrors: localUi.askUserErrors instanceof Map ? localUi.askUserErrors : new Map(),
+      // The live card is docked beside the composer on this surface, so in the
+      // transcript an unanswered question renders as the record of the ask.
+      askUserDocked: true,
     };
   }
 
@@ -2218,6 +2270,7 @@ export function createSessionRenderer({
               // Orchestrator does not edit files, and the apply endpoint
               // resolves an item against the relay's ACTIVE thread, so acting
               // from this pane could mutate a different one.
+              askUserThreadId: orchId || null,
               transcriptOptions: {
                 currentCwd: session?.current_cwd || state.selectedCwd || "",
                 expandedKeys: localUi.transcriptExpandedItemIds,
@@ -2233,11 +2286,22 @@ export function createSessionRenderer({
                 // showing the session's question here would put an answer box on
                 // the wrong conversation. Unfiltered, this pane would also go
                 // interactive for a question it cannot answer.
-                pendingAskUserQuestions: pendingAskUserQuestionsForThread(session, orchId),
+                // Never unfiltered: with no Orchestrator thread yet the helper
+                // falls back to the ACTIVE session, and that question belongs to
+                // the session's composer, not to this pane.
+                pendingAskUserQuestions: orchId
+                  ? pendingAskUserQuestionsForThread(session, orchId)
+                  : [],
+                // Docked above this pane's composer like every other
+                // conversation, so in its transcript the question is a record.
+                askUserDocked: true,
                 onSubmitAskUserAnswers: (requestId, answers) => {
                   void state.controller?.submitAskUserQuestionAnswer?.(requestId, answers);
                 },
-                askUserSubmittingRequestId: localUi.askUserSubmittingRequestId || "",
+                askUserSubmittingRequestIds:
+          localUi.askUserSubmittingRequestIds instanceof Set
+            ? localUi.askUserSubmittingRequestIds
+            : new Set(),
                 askUserErrors:
                   localUi.askUserErrors instanceof Map ? localUi.askUserErrors : new Map(),
               },

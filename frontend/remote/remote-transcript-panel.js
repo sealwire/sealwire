@@ -79,13 +79,19 @@ export function RemoteTranscriptPanel({
     onEnsureFileChangeDetail,
     pendingAskUserQuestions,
     onSubmitAskUserAnswers: handleSubmitAskUserAnswers,
-    askUserSubmittingRequestId: uiState.askUserSubmittingRequestId || "",
+    askUserSubmittingRequestIds:
+      uiState.askUserSubmittingRequestIds instanceof Set
+        ? uiState.askUserSubmittingRequestIds
+        : new Set(),
     askUserErrors: uiState.askUserErrors instanceof Map ? uiState.askUserErrors : new Map(),
     askUserDetailErrors: askUserDetailErrors instanceof Map ? askUserDetailErrors : new Map(),
     askUserDetailLoadingRequestIds:
       askUserDetailLoadingRequestIds instanceof Set
         ? askUserDetailLoadingRequestIds
         : new Set(),
+    // The live card is docked beside the composer on this surface too, so here
+    // an unanswered question renders as the record of the ask.
+    askUserDocked: true,
   });
   const transcriptOptions = transcriptOptionsRef.current;
 

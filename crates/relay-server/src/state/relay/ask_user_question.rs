@@ -8,6 +8,11 @@ pub struct PendingAskUserQuestion {
     pub tool_use_id: String,
     pub thread_id: String,
     pub requested_at: u64,
+    /// Arrival order, stamped on insert. `requested_at` is whole seconds and a
+    /// turn can ask twice inside one, so without this the tie-break falls to the
+    /// request id — which is random, and the cards would stack in an order the
+    /// reader never saw them asked in.
+    pub arrival_seq: u64,
     pub questions: Vec<AskUserQuestionView>,
 }
 

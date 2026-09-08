@@ -1,7 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { createAskUserQuestionDetailLoader } from "./ask-user-question-detail-loader.js";
+import {
+  askUserDetailSignature,
+  createAskUserQuestionDetailLoader,
+} from "./ask-user-question-detail-loader.js";
 
 const detailFor = (id) => ({ request_id: id, questions: [{ q: `full text of ${id}` }] });
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -153,4 +156,45 @@ test("a missing detail (no request_id) clears loading and allows a later retry",
   await tick();
   assert.equal(fetchCount, 2);
   assert.equal(loader.snapshot().details.has("ask:1"), true);
+});
+
+test("a failed detail load can be retried", async () => {
+  let attempts = 0;
+  const changes = [];
+  const loader = createAskUserQuestionDetailLoader({
+    fetchDetail: async (requestId) => {
+      attempts += 1;
+      if (attempts === 1) {
+        throw new Error("broker hiccup");
+      }
+      return { request_id: requestId, questions: [] };
+    },
+    onChange: (next) => changes.push(next),
+  });
+
+  loader.sync(["ask:1"]);
+  await tick();
+  assert.equal(loader.snapshot().errors.get("ask:1"), "broker hiccup");
+
+  // sync() WOULD recover — it starts a load for any wanted request it is not
+  // already holding — but the surface only calls it when the pending list's
+  // signature changes, and a failure changes nothing about the list. So the card
+  // sits on "Question detail failed" with nothing left to trigger it: retry() is
+  // the reader's way out, and it must work while the loader is otherwise idle.
+  loader.retry("ask:1");
+  await tick();
+  assert.equal(loader.snapshot().errors.has("ask:1"), false, "the retry clears the failure");
+  assert.ok(loader.snapshot().details.get("ask:1"), "and the detail arrives");
+});
+
+test("the detail signature distinguishes two threads asking the same shape", () => {
+  const a = askUserDetailSignature([
+    { request_id: "ask:1", thread_id: "thread-a", questions_inline_complete: false, questions: [] },
+  ]);
+  const b = askUserDetailSignature([
+    { request_id: "ask:1", thread_id: "thread-b", questions_inline_complete: false, questions: [] },
+  ]);
+  // Request ids restart per session, so without the thread the two are identical
+  // and the surface never re-syncs — the second thread's card waits forever.
+  assert.notEqual(a, b);
 });

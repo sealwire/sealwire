@@ -8019,6 +8019,7 @@ tree; got {}",
             relay.pending_ask_user_questions.insert(
                 "ask-claude".to_string(),
                 PendingAskUserQuestion {
+                    arrival_seq: 0,
                     request_id: "ask-claude".to_string(),
                     tool_use_id: "toolu-ask-claude".to_string(),
                     thread_id: "claude-thread".to_string(),
@@ -8422,6 +8423,7 @@ tree; got {}",
                 100,
             );
             relay.add_pending_ask_user_question(PendingAskUserQuestion {
+                arrival_seq: 0,
                 request_id: "ask:parked".to_string(),
                 tool_use_id: "toolu-parked".to_string(),
                 thread_id: thread.id.clone(),
@@ -8662,6 +8664,7 @@ tree; got {}",
             relay.pending_ask_user_questions.insert(
                 "ask:large".to_string(),
                 PendingAskUserQuestion {
+                    arrival_seq: 0,
                     request_id: "ask:large".to_string(),
                     tool_use_id: "toolu_large".to_string(),
                     thread_id: "thread-1".to_string(),
@@ -13655,6 +13658,7 @@ mod review_tests {
                     relay.pending_ask_user_questions.insert(
                         ask_id.clone(),
                         crate::state::PendingAskUserQuestion {
+                            arrival_seq: 0,
                             request_id: ask_id.clone(),
                             tool_use_id: format!("toolu-{ask_id}"),
                             thread_id: thread_id.clone(),
@@ -22902,6 +22906,7 @@ turn) must allow a review: {error:?}"
         app.relay.write().await.pending_ask_user_questions.insert(
             "ask:1".to_string(),
             PendingAskUserQuestion {
+                arrival_seq: 0,
                 request_id: "ask:1".to_string(),
                 tool_use_id: "tool-1".to_string(),
                 thread_id: parent.id.clone(),
