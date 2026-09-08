@@ -2712,6 +2712,14 @@ async fn a_recorded_seat_is_reused_when_reachable_and_replaced_when_not() {
 
     let (_repo, root) = init_team_repo().await;
     let (app, _providers) = build_review_app(&root, &["codex"]).await;
+    // A driverless run fails almost immediately (`spawn_team_driver`'s
+    // no-engine branch) — a race this test does not care about and must not
+    // let land while it drives seat selection directly. Park a driver so the
+    // run stays live for the test's own duration.
+    let app = app.with_team_driver(std::sync::Arc::new(ParkedTeamDriver {
+        entered: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        release: std::sync::Arc::new(tokio::sync::Notify::new()),
+    }));
     let run_id = app
         .start_team_run(team_input(&root))
         .await
@@ -2769,6 +2777,12 @@ async fn a_seat_whose_session_is_gone_is_not_reused_just_because_it_still_routes
 
     let (_repo, root) = init_team_repo().await;
     let (app, providers) = build_review_app(&root, &["codex"]).await;
+    // See the sibling test above: park a driver so the driverless-run failure
+    // race does not land while this test drives seat selection directly.
+    let app = app.with_team_driver(std::sync::Arc::new(ParkedTeamDriver {
+        entered: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        release: std::sync::Arc::new(tokio::sync::Notify::new()),
+    }));
     let run_id = app
         .start_team_run(team_input(&root))
         .await
@@ -3525,11 +3539,66 @@ async fn a_dev_turn_that_hits_session_capacity_halts_the_run_before_any_review()
         run.pause_kind,
         Some(relay_api::team::TeamPauseKind::Provider)
     );
-    let reviewer_thread =
+    // D5: a paused run refuses a NEW seat outright. `release_seats_when_settled`
+    // already ran its one-shot sweep the moment this run paused (releasing the
+    // dev seat, below); a seat created afterward would never be swept again,
+    // recreating exactly the leak D5 closes. The provider thread this call
+    // creates before discovering the refusal must come back too, not leak.
+    let released_before_creation_attempt = providers
+        .get("codex")
+        .unwrap()
+        .released_threads
+        .lock()
+        .await
+        .len();
+    let creation_error =
         relay_api::TeamPort::start_thread(&app, &run_id, relay_api::team::TeamRole::Reviewer)
             .await
-            .expect("a paused run still keeps its reviewer seat")
-            .thread_id;
+            .expect_err("a paused run must refuse a new reviewer seat");
+    match &creation_error {
+        relay_api::TeamPortError::Failed(message) => {
+            assert!(
+                message.contains("settled as paused"),
+                "the refusal should name why: {message}"
+            );
+        }
+        other => panic!("expected a Failed refusal, got {other:?}"),
+    }
+    assert_eq!(
+        providers
+            .get("codex")
+            .unwrap()
+            .released_threads
+            .lock()
+            .await
+            .len(),
+        released_before_creation_attempt + 1,
+        "the seat this call created before refusing must be released, not leaked"
+    );
+
+    // Turn-gate coverage this test carried before D5, kept: a turn on an
+    // ALREADY-existing reviewer seat (opened before the pause — simulated
+    // here by registering one directly, since the creation path above is now
+    // rightly refused) must still be refused once the run is paused.
+    let reviewer_thread = format!("codex-existing-reviewer-{run_id}");
+    let codex = providers.get("codex").unwrap();
+    let summary = codex.summary(&reviewer_thread, &root);
+    codex
+        .threads
+        .lock()
+        .await
+        .insert(reviewer_thread.clone(), summary.clone());
+    {
+        let mut relay = app.relay.write().await;
+        relay.register_background_thread(
+            summary,
+            &root,
+            "codex-model",
+            "on-request",
+            "workspace-write",
+            "medium",
+        );
+    }
     let reviewer_thread_for_run = reviewer_thread.clone();
     app.test_update_team_run(&run_id, move |run| {
         if let Some(task) = run.sub_tasks.get_mut(0) {
@@ -3569,6 +3638,270 @@ async fn a_dev_turn_that_hits_session_capacity_halts_the_run_before_any_review()
     assert_ne!(
         run.sub_tasks[0].status,
         crate::state::SubTaskStatus::Escalated
+    );
+}
+
+// ---------------------------------------------------------------------
+// D5: settlement racing a late seat. Three paths make a run own a provider
+// thread — `start_team_thread` (path 1), `record_run_thread`/`own_team_seat`
+// (path 2), and the reducer's `AttachSubTaskThread` (path 3). Registration
+// and settlement's status write both take `relay.write()`, so there are
+// exactly two interleavings: registration first (the seat is in the map
+// before settlement's later snapshot, which releases it), or settlement
+// first (registration observes it and refuses, and the caller releases the
+// thread it already created). Each test below forces the second interleaving
+// deterministically and proves BOTH halves: the seat never gets registered,
+// and the provider thread that already existed comes back rather than leaks.
+// ---------------------------------------------------------------------
+
+/// Path 1: `start_team_thread` gets a fresh provider thread back, then
+/// (normally) takes the write lock that records its role/provider. Pausing it
+/// there with `team_seat_creation_barrier` and settling first proves the
+/// refuse-and-release half of D5 for the FIRST of the two write-lock windows
+/// `TeamPort::start_thread` goes through.
+#[tokio::test]
+async fn a_settlement_that_lands_during_path_1_seat_creation_is_refused_and_released() {
+    let (_repo, root) = init_team_repo().await;
+    let (app, providers) = build_review_app(&root, &["codex"]).await;
+    let run_id = "team-path1-race".to_string();
+    let mut run = crate::state::TeamRun::new(
+        run_id.clone(),
+        crate::state::TaskSpec::default(),
+        root.clone(),
+        "device-1".to_string(),
+    );
+    run.status = crate::state::TeamRunStatus::Running;
+    run.dev_provider = "codex".to_string();
+    app.relay.write().await.insert_team_run(run);
+
+    let creation_pre_gate = app.hold_team_seat_creation_barrier().await;
+    let arrivals_before = app.team_seat_creation_arrivals();
+
+    let creation_task = {
+        let app = app.clone();
+        let run_id = run_id.clone();
+        tokio::spawn(async move {
+            relay_api::TeamPort::start_thread(&app, &run_id, relay_api::team::TeamRole::Dev).await
+        })
+    };
+    wait_until_condition("path 1 should reach the seat-creation barrier", || {
+        app.team_seat_creation_arrivals() > arrivals_before
+    })
+    .await;
+
+    // Settlement lands FIRST, fully, while creation is held open — the
+    // interleaving that must refuse.
+    app.update_team_status(&run_id, crate::state::TeamRunStatus::Cancelled)
+        .await;
+
+    drop(creation_pre_gate);
+    let result = creation_task.await.expect("task did not panic");
+
+    match result {
+        Err(relay_api::TeamPortError::Failed(message)) => {
+            assert!(
+                message.contains("settled as cancelled"),
+                "the refusal should name why: {message}"
+            );
+        }
+        other => panic!("expected a Failed refusal once settled, got {other:?}"),
+    }
+
+    let run = app.relay.read().await.team_run(&run_id).cloned().unwrap();
+    assert!(
+        run.owned_thread_ids().is_empty(),
+        "a refused path-1 registration must never be recorded as owned: {:?}",
+        run.owned_thread_ids()
+    );
+    let codex = providers.get("codex").unwrap();
+    assert_eq!(
+        codex.released_threads().await.len(),
+        1,
+        "the thread created before the refusal must be released, not leaked"
+    );
+    assert!(
+        codex.turns.lock().await.is_empty(),
+        "no turn may ever be dispatched to a seat whose registration was refused"
+    );
+}
+
+/// Path 2: `TeamPort::start_thread` calls `start_team_thread` (path 1) and
+/// THEN `own_team_seat`/`record_run_thread` (path 2) — a SEPARATE write-lock
+/// window. Letting path 1 succeed (the run is still live) and pausing only at
+/// path 2's own `team_seat_ownership_barrier` proves the fence holds
+/// independently at the SECOND window too, not only the first.
+#[tokio::test]
+async fn a_settlement_that_lands_during_path_2_seat_ownership_is_refused_and_released() {
+    let (_repo, root) = init_team_repo().await;
+    let (app, providers) = build_review_app(&root, &["codex"]).await;
+    let run_id = "team-path2-race".to_string();
+    let mut run = crate::state::TeamRun::new(
+        run_id.clone(),
+        crate::state::TaskSpec::default(),
+        root.clone(),
+        "device-1".to_string(),
+    );
+    run.status = crate::state::TeamRunStatus::Running;
+    run.dev_provider = "codex".to_string();
+    app.relay.write().await.insert_team_run(run);
+
+    let ownership_pre_gate = app.hold_team_seat_ownership_barrier().await;
+    let arrivals_before = app.team_seat_ownership_arrivals();
+
+    let creation_task = {
+        let app = app.clone();
+        let run_id = run_id.clone();
+        tokio::spawn(async move {
+            relay_api::TeamPort::start_thread(&app, &run_id, relay_api::team::TeamRole::Dev).await
+        })
+    };
+    wait_until_condition("path 2 should reach the seat-ownership barrier", || {
+        app.team_seat_ownership_arrivals() > arrivals_before
+    })
+    .await;
+
+    // Path 1 has already committed by the time path 2 is paused here (it
+    // uses a separate, unheld lock window) — settlement lands in the gap
+    // BETWEEN the two, which is exactly what path 2's own check must catch.
+    app.update_team_status(&run_id, crate::state::TeamRunStatus::Cancelled)
+        .await;
+
+    drop(ownership_pre_gate);
+    let result = creation_task.await.expect("task did not panic");
+
+    match result {
+        Err(relay_api::TeamPortError::Failed(message)) => {
+            assert!(
+                message.contains("settled as cancelled"),
+                "the refusal should name why: {message}"
+            );
+        }
+        other => panic!("expected a Failed refusal once settled, got {other:?}"),
+    }
+
+    let run = app.relay.read().await.team_run(&run_id).cloned().unwrap();
+    assert!(
+        run.run_owned_thread_ids.is_empty(),
+        "a refused path-2 registration must never land in run_owned_thread_ids: {:?}",
+        run.run_owned_thread_ids
+    );
+    let codex = providers.get("codex").unwrap();
+    assert_eq!(
+        codex.released_threads().await.len(),
+        1,
+        "the thread created before the refusal must be released, not leaked"
+    );
+    assert!(
+        codex.turns.lock().await.is_empty(),
+        "no turn may ever be dispatched to a seat whose registration was refused"
+    );
+}
+
+/// Path 3: the reducer's `AttachSubTaskThread` gate already refuses a settled
+/// run (it is not a lifecycle command, so the ordinary lifecycle gate
+/// applies) — that part needed no new fence. What it cannot do, being a
+/// synchronous pure function, is touch the provider. This proves the thread
+/// named in the refused envelope is released by `submit_command`'s host
+/// wrapper, the caller — not by the settlement sweep, which never saw this
+/// thread at all, since it was never registered as run-owned (only
+/// `AttachSubTaskThread` would have made it so, and that is exactly what got
+/// refused).
+#[tokio::test]
+async fn a_settlement_before_attach_sub_task_thread_is_refused_and_released() {
+    use relay_api::TeamPort as _;
+
+    let (_repo, root) = init_team_repo().await;
+    let (app, providers) = build_review_app(&root, &["codex"]).await;
+    let run_id = "team-path3-race".to_string();
+    let mut run = crate::state::TeamRun::new(
+        run_id.clone(),
+        crate::state::TaskSpec::default(),
+        root.clone(),
+        "device-1".to_string(),
+    );
+    run.status = crate::state::TeamRunStatus::Running;
+    run.sub_tasks.push(crate::state::SubTask {
+        id: "st-1".to_string(),
+        title: "Parser".to_string(),
+        brief: "write the parser".to_string(),
+        status: crate::state::SubTaskStatus::Pending,
+        ..Default::default()
+    });
+    app.relay.write().await.insert_team_run(run);
+
+    // A raw provider thread, created OUTSIDE `TeamPort::start_thread` so it
+    // is deliberately NOT in `run_owned_thread_ids` — modelling the shape
+    // where only `AttachSubTaskThread` would ever have made it sweep-visible.
+    let codex = providers.get("codex").unwrap();
+    let thread_id = "codex-unattached-dev".to_string();
+    let summary = codex.summary(&thread_id, &root);
+    codex
+        .threads
+        .lock()
+        .await
+        .insert(thread_id.clone(), summary.clone());
+    {
+        let mut relay = app.relay.write().await;
+        relay.register_background_thread(
+            summary,
+            &root,
+            "codex-model",
+            "on-request",
+            "workspace-write",
+            "medium",
+        );
+    }
+
+    // Settlement lands before the attach is ever submitted — sequential, not
+    // raced: the reducer has no `.await` inside it for anything to land in.
+    app.update_team_status(&run_id, crate::state::TeamRunStatus::Cancelled)
+        .await;
+
+    let expected_revision = app
+        .run_snapshot(&run_id)
+        .await
+        .unwrap()
+        .driver_progress
+        .state_revision;
+    let receipt = app
+        .submit_command(
+            &run_id,
+            exact_team_envelope(
+                "cmd-attach-1",
+                1,
+                expected_revision,
+                relay_api::team_command::TeamStateCommand::AttachSubTaskThread {
+                    index: 0,
+                    role: relay_api::team_command::TeamSubTaskRole::Dev,
+                    thread_id: thread_id.clone(),
+                    base_commit: None,
+                },
+            ),
+        )
+        .await
+        .expect("the run still exists");
+    assert!(
+        matches!(
+            receipt.status,
+            relay_api::team_command::TeamCommandStatus::Rejected(_)
+        ),
+        "AttachSubTaskThread on a settled run must be refused: {:?}",
+        receipt.status
+    );
+
+    let run = app.relay.read().await.team_run(&run_id).cloned().unwrap();
+    assert!(
+        run.sub_tasks[0].dev_thread_id.is_none(),
+        "a refused attach must never record the thread against the sub-task"
+    );
+    assert_eq!(
+        codex.released_threads().await,
+        vec![thread_id.clone()],
+        "the thread named in the refused attach must be released, not leaked"
+    );
+    assert!(
+        codex.turns.lock().await.is_empty(),
+        "no turn may ever be dispatched to a seat whose attach was refused"
     );
 }
 
