@@ -18169,14 +18169,11 @@ settings update: {error}"
             }
     }
 
-    // The reported failure: "Review failed — failed to collect the workspace diff: failed
-    // to run git rev-parse --is-inside-work-tree: No such file or directory (os error 2)".
-    // The parent thread was started inside an agent worktree that has since been removed
-    // (its work landed and the worktree was cleaned up), so every git command spawned in
-    // that cwd dies at spawn time. A review must degrade to the repo that worktree lived
-    // in — the reviewer can still review — instead of failing the job outright.
+    // Substituting the owning repo for a deleted worktree reviews commits the reviewed
+    // thread never made: the repo's HEAD is whatever else landed there. Refusing is the
+    // only answer that cannot silently approve the wrong work.
     #[tokio::test]
-    async fn review_falls_back_when_the_parents_worktree_was_removed() {
+    async fn review_refuses_when_the_parents_worktree_was_removed() {
         let dir = TempDir::new().expect("tmpdir");
         let main_dir = dir.path().join("mainwt");
         std::fs::create_dir_all(&main_dir).unwrap();
@@ -18188,60 +18185,39 @@ settings update: {error}"
         let nested_cwd = nested.to_str().unwrap().to_string();
         add_worktree(&main_cwd, &nested_cwd, "worktree-wt-gone");
 
-        // The session lives in the worktree, so the relay's own cwd is that worktree too:
-        // the fallback cannot come from `current_cwd` here, it has to find the repo.
         let (app, providers) = build_review_app(&nested_cwd, &["codex"]).await;
-        // Granted on its own standing: this review falls back to the MAIN tree once the
-        // worktree above is deleted, and a grant on a worktree is not a grant on the
-        // repository it was cut from.
+        // Granted, so the refusal is provably about the deleted worktree and not about
+        // the main tree being off-limits.
         grant_workspace(&app, &main_cwd).await;
         start_parent(&app, &nested_cwd, "codex").await;
 
         // The worktree disappears under the running session.
         std::fs::remove_dir_all(&nested_cwd).unwrap();
-        // A pending change in the repo the review should now be reading.
+        // A commit in the repo a substituting review would have reviewed instead.
         std::fs::write(
             main_dir.join("seed.txt"),
             "line1\nline2\nFALLBACK_WORKSPACE_EDIT\n",
         )
         .unwrap();
-        let fallback_candidate = git_commit_all(&main_cwd, "fallback workspace edit");
+        git_commit_all(&main_cwd, "fallback workspace edit");
 
-        let receipt = app
+        let error = app
             .request_review(review_input("codex"))
             .await
-            .expect("a review must start even when the thread's worktree is gone");
-        let job = wait_for_review(&app, &receipt.review_job_id).await;
-        assert_eq!(
-            job.status, "complete",
-            "the review must not die on a dangling worktree: {:?}",
-            job.error
+            .expect_err("a review of a deleted worktree must be refused");
+        assert!(
+            error.contains(&nested_cwd) && error.contains("no longer exists"),
+            "the refusal must name the tree that is gone: {error}"
         );
 
         let provider = providers.get("codex").unwrap();
-        let cwds = provider.start_thread_cwds.lock().await.clone();
-        let reviewer_thread = job.reviewer_thread_id.clone().expect("reviewer thread");
         assert!(
-            cwds.iter()
-                .any(|(tid, cwd)| tid == &reviewer_thread && same_dir(cwd, &main_cwd)),
-            "the reviewer must be started in the fallback workspace ({main_cwd}): {cwds:?}"
-        );
-        let turns = provider.turns.lock().await.clone();
-        let reviewer_prompt = turns
-            .iter()
-            .map(|(_, prompt)| prompt.as_str())
-            .find(|prompt| prompt.contains("Committed review target"))
-            .expect("reviewer prompt");
-        assert!(
-            reviewer_prompt.contains("Working tree:")
-                && reviewer_prompt.contains("mainwt")
-                && reviewer_prompt.contains(&format!("Candidate commit: {fallback_candidate}"))
-                && reviewer_prompt.contains("M\tseed.txt"),
-            "the reviewer must receive the fallback workspace's committed target: {reviewer_prompt}"
+            provider.turns.lock().await.is_empty(),
+            "a refused review must drive no turn at all"
         );
         assert!(
-            !reviewer_prompt.contains("FALLBACK_WORKSPACE_EDIT"),
-            "fallback review prompts must not inline dirty/raw file contents"
+            app.list_review_jobs().await.is_empty(),
+            "a refused review must not leave a card behind"
         );
     }
 
@@ -18507,7 +18483,7 @@ settings update: {error}"
     // workspace instead of re-diffing a directory that is gone — pinning the tree at job
     // creation would fail the whole review on the same ENOENT this all started with.
     #[tokio::test]
-    async fn review_rounds_re_resolve_when_the_reviewed_worktree_disappears() {
+    async fn review_fails_when_the_reviewed_worktree_disappears_between_rounds() {
         let dir = TempDir::new().expect("tmpdir");
         let main_dir = dir.path().join("mainwt");
         std::fs::create_dir_all(&main_dir).unwrap();
@@ -18526,14 +18502,13 @@ settings update: {error}"
         let main_candidate = git_commit_all(&main_cwd, "main tree edit");
 
         let (app, providers) = build_review_app(&nested_cwd, &["codex"]).await;
-        // Granted on its own standing: this review falls back to the MAIN tree once the
-        // worktree above is deleted, and a grant on a worktree is not a grant on the
-        // repository it was cut from.
+        // Granted, so round 2 stops because the reviewed tree is gone — not because the
+        // main tree was out of reach anyway.
         grant_workspace(&app, &main_cwd).await;
         start_parent(&app, &nested_cwd, "codex").await;
         let provider = providers.get("codex").unwrap();
         // Round 1 rejects → the parent gets a fix turn, during which the worktree is
-        // removed; round 2 must still be able to review, and then approves.
+        // removed. Round 2 has nothing it may legitimately review.
         queue_verdicts(provider, &["NEEDS_CHANGES", "APPROVE"]).await;
         *provider.delete_dir_on_fix_turn.lock().await = Some(nested_cwd.clone());
 
@@ -18545,11 +18520,14 @@ settings update: {error}"
             .expect("review should start");
         let job = wait_for_review(&app, &receipt.review_job_id).await;
         assert_eq!(
-            job.status, "complete",
-            "a worktree removed mid-review must not fail the job: {:?}",
-            job.error
+            job.status, "failed",
+            "a worktree removed mid-review must fail the job, not retarget it"
         );
-        assert_eq!(job.round, 2, "the loop must have run a second round");
+        let error = job.error.clone().expect("a failed job must say why");
+        assert!(
+            error.contains(&nested_cwd) && error.contains("no longer exists"),
+            "the failure must name the tree that is gone: {error}"
+        );
 
         let turns = provider.turns.lock().await.clone();
         let review_prompts: Vec<&String> = turns
@@ -18557,7 +18535,11 @@ settings update: {error}"
             .filter(|(_, prompt)| prompt.contains("Workspace diff collected by the relay"))
             .map(|(_, prompt)| prompt)
             .collect();
-        assert_eq!(review_prompts.len(), 2, "two review rounds");
+        assert_eq!(
+            review_prompts.len(),
+            1,
+            "only round 1 — the round whose tree still existed — may reach a reviewer"
+        );
         assert!(
             review_prompts[0].contains("Working tree:")
                 && review_prompts[0].contains("wt-doomed")
@@ -18565,15 +18547,10 @@ settings update: {error}"
             "round 1 reviews the thread's own committed worktree target"
         );
         assert!(
-            review_prompts[1].contains("Working tree:")
-                && review_prompts[1].contains("mainwt")
-                && review_prompts[1].contains(&format!("Candidate commit: {main_candidate}")),
-            "round 2 must fall back to the committed target in the repo that owned the deleted worktree"
-        );
-        assert!(
-            review_prompts[1].contains("no longer exists"),
-            "round 2 must TELL the reviewer the tree changed under it: {}",
-            review_prompts[1]
+            !turns
+                .iter()
+                .any(|(_, prompt)| prompt.contains(&format!("Candidate commit: {main_candidate}"))),
+            "no reviewer may be handed the owning repo's commits: {turns:?}"
         );
     }
 
@@ -18825,10 +18802,10 @@ settings update: {error}"
     }
 
     // The ENOENT race is not only around `git`: the workspace can also vanish between our
-    // liveness check and the PROVIDER call. Each turn boundary must degrade the same way it
-    // would have if the check had seen the deletion.
+    // liveness check and the PROVIDER call. Losing that race must reach the same refusal
+    // the check would have produced — not a different, more permissive outcome.
     #[tokio::test]
-    async fn a_workspace_deleted_at_the_recap_turn_boundary_degrades_to_read_only() {
+    async fn a_workspace_deleted_at_the_recap_turn_boundary_fails_the_review() {
         let dir = TempDir::new().expect("tmpdir");
         let main_dir = dir.path().join("mainwt");
         std::fs::create_dir_all(&main_dir).unwrap();
@@ -18846,9 +18823,8 @@ settings update: {error}"
         let fallback_candidate = git_commit_all(&main_cwd, "fallback workspace edit");
 
         let (app, providers) = build_review_app(&nested_cwd, &["codex"]).await;
-        // Granted on its own standing: this review falls back to the MAIN tree once the
-        // worktree above is deleted, and a grant on a worktree is not a grant on the
-        // repository it was cut from.
+        // Granted, so the failure is provably about the deleted worktree and not about
+        // the main tree being off-limits.
         grant_workspace(&app, &main_cwd).await;
         let parent = start_parent(&app, &nested_cwd, "codex").await;
         // The workspace exists when the review starts and is deleted exactly when the recap
@@ -18866,22 +18842,21 @@ settings update: {error}"
             .expect("review should start");
         let job = wait_for_review(&app, &receipt.review_job_id).await;
         assert_eq!(
-            job.status, "complete",
-            "losing the race at the recap boundary must degrade, not fail: {:?}",
-            job.error
+            job.status, "failed",
+            "losing the race at the recap boundary must fail, not retarget the review"
+        );
+        let error = job.error.clone().expect("a failed job must say why");
+        assert!(
+            error.contains(&nested_cwd) && error.contains("no longer exists"),
+            "the failure must name the tree that is gone: {error}"
         );
         let turns = providers.get("codex").unwrap().turns.lock().await.clone();
-        let reviewer_prompt = turns
-            .iter()
-            .map(|(_, prompt)| prompt.as_str())
-            .find(|prompt| prompt.contains("Committed review target"))
-            .expect("reviewer prompt");
         assert!(
-            reviewer_prompt.contains("Working tree:")
-                && reviewer_prompt.contains("mainwt")
-                && reviewer_prompt.contains(&format!("Candidate commit: {fallback_candidate}"))
-                && reviewer_prompt.contains("M\tseed.txt"),
-            "the reviewer must still review the surviving committed tree: {reviewer_prompt}"
+            !turns
+                .iter()
+                .any(|(_, prompt)| prompt
+                    .contains(&format!("Candidate commit: {fallback_candidate}"))),
+            "no reviewer may be handed the owning repo's commits: {turns:?}"
         );
         let _ = parent;
     }
@@ -18938,10 +18913,10 @@ settings update: {error}"
     }
 
     // …and at the reviewer's own boundary: its tree vanishes after the diff was collected but
-    // before its turn reaches the provider. The round must be re-resolved and retried in a
-    // surviving tree rather than failing.
+    // before its turn reaches the provider. The retry re-resolves, finds only a substitute,
+    // and must stop there.
     #[tokio::test]
-    async fn a_reviewer_tree_deleted_at_the_turn_boundary_is_retried() {
+    async fn a_reviewer_tree_deleted_at_the_turn_boundary_fails_the_review() {
         let dir = TempDir::new().expect("tmpdir");
         let main_dir = dir.path().join("mainwt");
         std::fs::create_dir_all(&main_dir).unwrap();
@@ -18964,9 +18939,8 @@ settings update: {error}"
         let fallback_candidate = git_commit_all(&main_cwd, "fallback workspace edit");
 
         let (app, providers) = build_review_app(&nested_cwd, &["codex"]).await;
-        // Granted on its own standing: this review falls back to the MAIN tree once the
-        // worktree above is deleted, and a grant on a worktree is not a grant on the
-        // repository it was cut from.
+        // Granted, so the failure is provably about the deleted worktree and not about
+        // the main tree being off-limits.
         grant_workspace(&app, &main_cwd).await;
         start_parent(&app, &nested_cwd, "codex").await;
         let mut input = review_input("codex");
@@ -18988,30 +18962,30 @@ settings update: {error}"
             .expect("review should start");
         let job = wait_for_review(&app, &receipt.review_job_id).await;
         assert_eq!(
-            job.status, "complete",
-            "the round must be retried in a surviving tree: {:?}",
-            job.error
+            job.status, "failed",
+            "the retry must stop rather than review the repo that owned the tree"
+        );
+        let error = job.error.clone().expect("a failed job must say why");
+        assert!(
+            error.contains(&nested_cwd) && error.contains("no longer exists"),
+            "the failure must name the tree that is gone: {error}"
         );
         let turns = providers.get("codex").unwrap().turns.lock().await.clone();
-        let reviewer_prompt = turns
-            .iter()
-            .map(|(_, prompt)| prompt.as_str())
-            .find(|prompt| prompt.contains("Committed review target") && prompt.contains("mainwt"))
-            .expect("fallback reviewer prompt");
         assert!(
-            reviewer_prompt.contains(&format!("Candidate commit: {fallback_candidate}"))
-                && reviewer_prompt.contains("M\tseed.txt"),
-            "the retry must review the surviving committed tree: {reviewer_prompt}"
+            !turns
+                .iter()
+                .any(|(_, prompt)| prompt
+                    .contains(&format!("Candidate commit: {fallback_candidate}"))),
+            "no reviewer may be handed the owning repo's commits: {turns:?}"
         );
     }
 
     // A thread whose workspace was deleted cannot be DRIVEN at all: its provider thread is
-    // bound to that cwd and re-sends it on every turn. So a review of one must run
-    // read-only — no recap turn, no author fix rounds, and no post-back turn — while still
-    // reviewing the code that thread left behind. Anything else either fails the review or
-    // (worse) reports success for turns a real provider refused.
+    // bound to that cwd and re-sends it on every turn. So there is no author to recap, fix
+    // or receive findings — and the only tree left to read is one this thread never wrote.
+    // The request has to be refused outright rather than half-run against a stand-in.
     #[tokio::test]
-    async fn review_of_a_deleted_workspace_drives_no_parent_turns() {
+    async fn review_of_a_deleted_workspace_is_refused_outright() {
         let dir = TempDir::new().expect("tmpdir");
         let main_dir = dir.path().join("mainwt");
         std::fs::create_dir_all(&main_dir).unwrap();
@@ -19023,9 +18997,8 @@ settings update: {error}"
         add_worktree(&main_cwd, &nested_cwd, "worktree-wt-gone");
 
         let (app, providers) = build_review_app(&nested_cwd, &["codex"]).await;
-        // Granted on its own standing: this review falls back to the MAIN tree once the
-        // worktree above is deleted, and a grant on a worktree is not a grant on the
-        // repository it was cut from.
+        // Granted, so the refusal is provably about the deleted worktree and not about
+        // the main tree being off-limits.
         grant_workspace(&app, &main_cwd).await;
         let parent = start_parent(&app, &nested_cwd, "codex").await;
         std::fs::remove_dir_all(&nested_cwd).unwrap();
@@ -19034,21 +19007,19 @@ settings update: {error}"
             "line1\nline2\nFALLBACK_WORKSPACE_EDIT\n",
         )
         .unwrap();
-        let fallback_candidate = git_commit_all(&main_cwd, "fallback workspace edit");
+        git_commit_all(&main_cwd, "fallback workspace edit");
 
         // Ask for the recap-turn flow AND multiple rounds explicitly: both of those drive
-        // the parent, and both must be skipped rather than attempted.
+        // the parent, and neither may be attempted.
         let mut input = review_input("codex");
         input.max_rounds = Some(3);
-        let receipt = app
+        let error = app
             .request_review(input)
             .await
-            .expect("a review must still start");
-        let job = wait_for_review(&app, &receipt.review_job_id).await;
-        assert_eq!(
-            job.status, "complete",
-            "the review must complete read-only: {:?}",
-            job.error
+            .expect_err("a review of a deleted workspace must be refused");
+        assert!(
+            error.contains(&nested_cwd) && error.contains("no longer exists"),
+            "the refusal must name the tree that is gone: {error}"
         );
 
         let provider = providers.get("codex").unwrap();
@@ -19057,51 +19028,15 @@ settings update: {error}"
             !turns.iter().any(|(tid, _)| tid == &parent.id),
             "no turn may be driven on a thread whose workspace is gone: {turns:?}"
         );
-        // The reviewer still ran, against the fallback tree...
-        let reviewer_prompt = turns
-            .iter()
-            .map(|(_, prompt)| prompt.as_str())
-            .find(|prompt| prompt.contains("Committed review target"))
-            .expect("reviewer prompt");
         assert!(
-            reviewer_prompt.contains("Working tree:")
-                && reviewer_prompt.contains("mainwt")
-                && reviewer_prompt.contains(&format!("Candidate commit: {fallback_candidate}"))
-                && reviewer_prompt.contains("M\tseed.txt"),
-            "the reviewer must still review the surviving committed tree: {reviewer_prompt}"
+            !turns
+                .iter()
+                .any(|(_, prompt)| prompt.contains("Committed review target")),
+            "no reviewer may run against a tree the thread never wrote: {turns:?}"
         );
-        // ...and its findings are not lost just because they can't be posted back.
-        let stored = {
-            let relay = app.relay.read().await;
-            relay
-                .review_job(&receipt.review_job_id)
-                .and_then(|job| job.review_text.clone())
-        };
         assert!(
-            stored.is_some_and(|text| text.contains(REVIEW_REPLY)),
-            "the review text must be recorded on the job for the panel to show"
-        );
-        assert_eq!(
-            job.round, 1,
-            "no fix rounds can run without a drivable author"
-        );
-        let read_only_logs = app
-            .relay
-            .read()
-            .await
-            .snapshot()
-            .logs
-            .into_iter()
-            .filter(|entry| {
-                entry.message.contains(&receipt.review_job_id)
-                    && entry.message.contains("runs read-only")
-                    && entry.message.contains("no recap, fix or post-back turns")
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            read_only_logs.len(),
-            1,
-            "the job must emit exactly one read-only mode summary: {read_only_logs:?}"
+            app.list_review_jobs().await.is_empty(),
+            "a refused review must not leave a card behind"
         );
     }
 
