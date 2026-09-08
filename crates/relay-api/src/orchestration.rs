@@ -1536,12 +1536,19 @@ impl<'de> Deserialize<'de> for DriverProgress {
 /// (`.sealwire/DESIGN.md` D7), settled and not to be reopened:
 ///
 /// - **Bounded retention.** The journal never holds more than this many
-///   records; eviction only ever drops one whose `sequence` is strictly
-///   below `driver_progress.last_command_seq`, so a redelivery of an evicted
-///   command still fails the monotonic-sequence check rather than being
-///   treated as unseen (see `team_command_reducer::push_with_eviction`,
-///   which is also where D1 makes that condition hold for every record,
-///   applied or rejected).
+///   records. Eviction picks, in order: an `Applied` record strictly below
+///   `driver_progress.last_command_seq`; failing that, ANY `Rejected` or
+///   `Interrupted` record regardless of its own sequence (it can never later
+///   apply, so its sequence needs no protecting); failing that too, the
+///   oldest record of any class, to guarantee the cap holds even when
+///   nothing else is droppable. See
+///   `team_command_reducer::{push_with_eviction, evict_one}` for the exact
+///   three-tier policy and why each tier is safe.
+/// - **Every eviction stays safe regardless of tier**, because D1 makes
+///   `sequence <= driver_progress.last_command_seq` hold for every record the
+///   moment it is written, and the reducer's ordering check itself rejects
+///   on `<=`, not just `<`: redelivering ANY evicted id's exact sequence
+///   fails that check deterministically, never falls through as "unseen".
 /// - **Exact replay while retained.** As long as an id's record is still
 ///   here, redelivering it replays the exact receipt this journal recorded —
 ///   never a re-derived approximation.

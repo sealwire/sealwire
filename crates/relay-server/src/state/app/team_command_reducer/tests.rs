@@ -1477,6 +1477,49 @@ fn backend_malformed_and_protocol_rejections_write_nothing_across_repeated_deliv
     }
 }
 
+/// P1 review fix: backend and malformed refusals are safe reading LIVE
+/// counters because those runs are permanently frozen — no other command can
+/// ever succeed against them, so nothing ever moves `state_revision`/
+/// `last_event_seq` between retries. Protocol is different: the run is
+/// otherwise healthy, so an unrelated, VALID command can legitimately apply
+/// between two identical redeliveries of the same bad-protocol envelope.
+/// The receipt must still be derivable from the envelope alone (D2) — it
+/// must NOT leak whatever the run's live counters happen to read at the
+/// moment of each redelivery.
+#[test]
+fn unsupported_protocol_receipt_does_not_drift_when_another_command_applies_between_retries() {
+    let mut run = fresh_run();
+    let stale_protocol = || TeamCommandEnvelope {
+        protocol_version: TEAM_COMMAND_PROTOCOL_VERSION + 1,
+        command_id: CommandId::new("cmd-bad-protocol").unwrap(),
+        sequence: 1,
+        expected_revision: 0,
+        command: set_phase(TeamPhase::Planning),
+    };
+
+    let first = apply_raw(&mut run, stale_protocol());
+    assert_eq!(
+        first.status,
+        TeamCommandStatus::Rejected(CommandRejection::UnsupportedProtocol)
+    );
+
+    // A genuinely valid, unrelated command lands in between and advances the
+    // run's live counters.
+    let applied = apply(&mut run, "cmd-valid", 2, set_phase(TeamPhase::Design));
+    assert!(matches!(applied.status, TeamCommandStatus::Applied(_)));
+    assert!(run.driver_progress.state_revision > 0);
+
+    // Redeliver the exact same bad-protocol envelope. It must be
+    // byte-identical to the FIRST rejection, not drifted by the intervening
+    // valid command's counter movement.
+    let second = apply_raw(&mut run, stale_protocol());
+    assert_eq!(
+        second, first,
+        "a non-journaling refusal derivable from the envelope alone must not \
+leak the run's live, moving counters"
+    );
+}
+
 // ---------------------------------------------------------------------
 // Canary: a marker in a command's content never reaches the journal or
 // `DriverProgress`.
@@ -2123,6 +2166,60 @@ fn compacting_a_pre_sequence_rejection_still_refuses_a_reused_id() {
     assert_eq!(
         run.phase, phase_before,
         "compaction must never turn a refusal into an apply"
+    );
+}
+
+/// The sharper case `compacting_a_pre_sequence_rejection_still_refuses_a_reused_id`
+/// does not cover: redelivering the EXACT SAME doomed envelope, not a
+/// different (valid) one under the same id. Payload validation is a pure
+/// function of content, so re-running it on redelivery reaches the identical
+/// `InvalidState` verdict every time — but once the original record is
+/// evicted, that is the WRONG answer: the id's sequence is already spent
+/// (D1), and the review contract for an evicted id is `StaleCommand`,
+/// unconditionally, not "whatever the content check happens to say this
+/// time". Payload/headroom validation must never run before the
+/// sequence-ordering check gets a chance to short-circuit first.
+#[test]
+fn an_evicted_invalid_payload_rejection_redelivers_as_stale_not_reevaluated() {
+    let mut run = fresh_run();
+    let too_many = (0..MAX_TEAM_COMMAND_SUB_TASKS + 1)
+        .map(|i| sub_task(&format!("st-{i}")))
+        .collect::<Vec<_>>();
+    let doomed = || TeamStateCommand::ReplanSubTasks {
+        sub_tasks: too_many.clone(),
+        phase: TeamPhase::SubTasks,
+    };
+
+    let first = apply(&mut run, "cmd-doomed", 1, doomed());
+    assert_eq!(
+        first.status,
+        TeamCommandStatus::Rejected(CommandRejection::InvalidState)
+    );
+
+    // Push it out of the journal with fresh, equally-doomed fillers.
+    for sequence in 2..=(MAX_TEAM_COMMAND_JOURNAL as u64 + 4) {
+        apply(
+            &mut run,
+            &format!("cmd-filler-{sequence}"),
+            sequence,
+            doomed(),
+        );
+    }
+    assert!(
+        run.command_journal
+            .find(&CommandId::new("cmd-doomed").unwrap())
+            .is_none(),
+        "the original rejection must have been compacted for this test to mean anything"
+    );
+
+    // Redeliver the exact same doomed envelope: same id, same sequence, same
+    // (still-invalid) content.
+    let redelivered = apply_raw(&mut run, envelope("cmd-doomed", 1, 0, doomed()));
+    assert_eq!(
+        redelivered.status,
+        TeamCommandStatus::Rejected(CommandRejection::StaleCommand),
+        "an evicted id must fail closed as StaleCommand regardless of whether \
+its own content would separately be judged invalid"
     );
 }
 

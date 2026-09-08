@@ -440,6 +440,88 @@ async fn resume_team_run_refuses_non_embedded_backend_before_status_flip() {
     assert_eq!(run.orchestration_backend, cloud_backend());
 }
 
+/// D1's watermark fix, through the seam a driver replacement or reopen
+/// actually goes through. The reducer's own unit test pins the same
+/// invariant against a bare `TeamRun`, which is the right place to check the
+/// arithmetic cheaply and exhaustively; this one instead drives
+/// `relay_api::TeamPort::submit_command`/`run_snapshot` — the ONLY thing any
+/// driver, real or replaced, ever calls — so a regression in the host path
+/// wrapped around the reducer (the write lock, `update_team_run`, the
+/// present/absent-run check) would fail here even if it left the reducer
+/// itself untouched.
+///
+/// "The driver is replaced" is modeled the way it actually happens: the new
+/// process holds no in-memory state at all, so it learns everything from a
+/// fresh `run_snapshot` — exactly what `submit_lifecycle` above does for
+/// every lifecycle call already in this file.
+#[tokio::test]
+async fn a_driver_that_reopens_after_a_rejection_does_not_collide_with_the_spent_sequence() {
+    let (_repo, root) = init_team_repo().await;
+    let (app, _) = build_review_app(&root, &["codex"]).await;
+    let run_id = "team-reopen-after-reject";
+    let mut run = crate::state::TeamRun::new(
+        run_id.to_string(),
+        crate::state::TaskSpec::default(),
+        root,
+        "device-1".to_string(),
+    );
+    run.status = crate::state::TeamRunStatus::Running;
+    app.relay.write().await.insert_team_run(run);
+
+    // The driver about to be replaced submits a payload-invalid command at
+    // sequence 7 — oversized, so it is refused by the payload bound rather
+    // than ever reaching the sequence-ordering check.
+    let too_many_sub_tasks = (0..relay_api::team_command::MAX_TEAM_COMMAND_SUB_TASKS + 1)
+        .map(|i| relay_api::team::SubTask {
+            id: format!("st-{i}"),
+            ..relay_api::team::SubTask::default()
+        })
+        .collect();
+    let rejected = relay_api::TeamPort::submit_command(
+        &app,
+        run_id,
+        exact_team_envelope(
+            "cmd-7",
+            7,
+            0,
+            relay_api::team_command::TeamStateCommand::ReplanSubTasks {
+                sub_tasks: too_many_sub_tasks,
+                phase: relay_api::team::TeamPhase::SubTasks,
+            },
+        ),
+    )
+    .await
+    .expect("the run was just inserted");
+    assert_eq!(
+        rejected.status,
+        relay_api::team_command::TeamCommandStatus::Rejected(
+            relay_api::orchestration::CommandRejection::InvalidState
+        )
+    );
+
+    // The driver is replaced. `submit_lifecycle` reads a fresh snapshot and
+    // mints `last_command_seq + 1` from it, precisely what a reopened driver
+    // with no memory of sequence 7 would do.
+    let submitted = submit_lifecycle(
+        &app,
+        run_id,
+        relay_api::team_command::TeamStateCommand::SetRunStatus {
+            status: crate::state::TeamRunStatus::Running,
+        },
+    )
+    .await
+    .expect("the run still exists");
+    assert!(
+        matches!(
+            submitted.status,
+            relay_api::team_command::TeamCommandStatus::Applied(_)
+        ),
+        "the reopened driver's first command must not collide with the \
+sequence the earlier rejection already spent: {:?}",
+        submitted.status
+    );
+}
+
 #[tokio::test]
 async fn resume_team_run_allows_malformed_progress_on_legacy_backend() {
     let (_repo, root) = init_team_repo().await;
