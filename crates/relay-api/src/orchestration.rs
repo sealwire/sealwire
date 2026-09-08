@@ -1549,10 +1549,15 @@ pub enum TeamCommandKind {
     ReplanSubTasks,
     AttachSubTaskThread,
     SetSubTaskStatus,
+    PauseSubTaskWithoutCandidate,
+    RecordSubTaskStaleReview,
     RecordReviewRound,
     MarkSubTaskDigested,
     RecordMrRound,
     SetMrVerdict,
+    PrepareMrReview,
+    PauseMrWithoutCandidate,
+    RecordMrStaleReview,
     RecordMrDevThread,
     FinishRun,
     TakeUserNotes,
@@ -3527,6 +3532,14 @@ mod tests {
                     r#""set_sub_task_status""#
                 ),
                 (
+                    TeamCommandKind::PauseSubTaskWithoutCandidate,
+                    r#""pause_sub_task_without_candidate""#
+                ),
+                (
+                    TeamCommandKind::RecordSubTaskStaleReview,
+                    r#""record_sub_task_stale_review""#
+                ),
+                (
                     TeamCommandKind::RecordReviewRound,
                     r#""record_review_round""#
                 ),
@@ -3536,6 +3549,15 @@ mod tests {
                 ),
                 (TeamCommandKind::RecordMrRound, r#""record_mr_round""#),
                 (TeamCommandKind::SetMrVerdict, r#""set_mr_verdict""#),
+                (TeamCommandKind::PrepareMrReview, r#""prepare_mr_review""#),
+                (
+                    TeamCommandKind::PauseMrWithoutCandidate,
+                    r#""pause_mr_without_candidate""#
+                ),
+                (
+                    TeamCommandKind::RecordMrStaleReview,
+                    r#""record_mr_stale_review""#
+                ),
                 (
                     TeamCommandKind::RecordMrDevThread,
                     r#""record_mr_dev_thread""#
