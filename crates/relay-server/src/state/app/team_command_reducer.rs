@@ -25,6 +25,15 @@
 //! Backend, malformed and protocol refusals are idempotent by construction
 //! rather than by journal lookup: they write nothing, so redelivery
 //! re-derives the identical receipt every time.
+//!
+//! Past the preflight, inside the full reducer, one more ordering rule holds
+//! (D1/D7): sequence identity is checked before any content validation
+//! (payload bounds, counter headroom). Content checks are pure functions of
+//! the command, so redelivering a doomed envelope always reaches the same
+//! verdict whether or not its journal record survives — which is wrong once
+//! that record is gone, because the retention contract then requires
+//! `StaleCommand`, not a freshly-recomputed (and re-journaled) echo of the
+//! original reason.
 
 use relay_api::orchestration::{
     CommandFingerprint, CommandId, CommandRejection, TeamCommandKind, TeamCommandOutcome,
@@ -86,6 +95,29 @@ pub(crate) fn apply_team_command_with_effective(
     } = envelope;
     let kind = original_command.kind();
 
+    // Sequence identity/ordering comes before ANY content check (payload
+    // bounds, headroom). This is deliberately ahead of both: they are pure
+    // functions of the command's own content, so re-running them on a
+    // redelivery always reaches the SAME verdict, evicted record or not.
+    // Once this id's record is gone, the contract (D7) is that redelivery
+    // fails closed as `StaleCommand` — unconditionally, not "whatever the
+    // content check happens to say this time". `last_command_seq` already
+    // covers this sequence the moment ANY record for it was ever written
+    // (D1), so checking ordering first is what lets that StaleCommand answer
+    // win before content validation gets a chance to recompute (and
+    // re-journal) its own, different-but-equally-valid rejection reason.
+    if sequence <= run.driver_progress.last_command_seq {
+        return reject_and_journal(
+            run,
+            command_id,
+            sequence,
+            kind,
+            fingerprint,
+            expected_revision,
+            CommandRejection::StaleCommand,
+        );
+    }
+
     // Bounds are part of the original envelope contract and cannot disappear
     // merely because an asynchronous host guard selected another transition.
     if let Err(reason) = validate_payload(run, &original_command) {
@@ -125,18 +157,6 @@ pub(crate) fn apply_team_command_with_effective(
             fingerprint,
             expected_revision,
             CommandRejection::InvalidState,
-        );
-    }
-
-    if sequence <= run.driver_progress.last_command_seq {
-        return reject_and_journal(
-            run,
-            command_id,
-            sequence,
-            kind,
-            fingerprint,
-            expected_revision,
-            CommandRejection::StaleCommand,
         );
     }
 
@@ -262,13 +282,18 @@ pub(crate) fn preflight_team_command_identity(
     // identical receipt (D2). Ahead of the journal lookup below so an
     // envelope this build cannot execute can never be handed a receipt that
     // happens to be sitting under the same command id.
+    //
+    // Deliberately NOT `snapshot_receipt`: backend and malformed both freeze
+    // the run permanently (no command can ever apply against either state
+    // again), so their live counters happen to never move between retries.
+    // Protocol does not have that property — the run is otherwise healthy,
+    // so an unrelated, valid command can legitimately apply between two
+    // identical redeliveries of the same bad-protocol envelope. Reading live
+    // counters here would let that intervening command's progress leak into
+    // this receipt, breaking "derivable from the envelope alone" for the one
+    // refusal that actually needs it.
     if envelope.protocol_version != TEAM_COMMAND_PROTOCOL_VERSION {
-        return Some(snapshot_receipt(
-            run,
-            command_id,
-            sequence,
-            TeamCommandStatus::Rejected(CommandRejection::UnsupportedProtocol),
-        ));
+        return Some(unsupported_protocol_receipt(command_id, sequence));
     }
 
     // Journal lookup: replay or reject a content-mismatched duplicate. Ahead
@@ -312,6 +337,24 @@ fn snapshot_receipt(
         state_revision: run.driver_progress.state_revision,
         last_event_seq: run.driver_progress.last_event_seq,
         status,
+    }
+}
+
+/// Rejection receipt for an unsupported protocol version. Deliberately takes
+/// no `&TeamRun`: this is the one refusal that must be derivable from the
+/// envelope alone with NOTHING pulled from live run state, or an unrelated
+/// command applying between two identical redeliveries of the same
+/// bad-protocol envelope would make their receipts diverge (D2). The
+/// counters are fixed rather than run-derived because there is no envelope
+/// field they could otherwise come from, and this build never interprets
+/// anything else about an envelope whose protocol it does not speak.
+fn unsupported_protocol_receipt(command_id: CommandId, sequence: u64) -> TeamCommandReceipt {
+    TeamCommandReceipt {
+        command_id,
+        sequence,
+        state_revision: 0,
+        last_event_seq: 0,
+        status: TeamCommandStatus::Rejected(CommandRejection::UnsupportedProtocol),
     }
 }
 
