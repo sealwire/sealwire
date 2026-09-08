@@ -104,17 +104,19 @@ pub(crate) fn apply_team_command_with_effective(
     // content check happens to say this time". `last_command_seq` already
     // covers this sequence the moment ANY record for it was ever written
     // (D1), so checking ordering first is what lets that StaleCommand answer
-    // win before content validation gets a chance to recompute (and
-    // re-journal) its own, different-but-equally-valid rejection reason.
+    // win before content validation gets a chance to recompute its own,
+    // different-but-equally-valid rejection reason. Nothing is written here:
+    // the retained journal is a receipt cache, and a sequence already behind
+    // the watermark must not consume one of its 64 slots again.
     if sequence <= run.driver_progress.last_command_seq {
-        return reject_and_journal(
-            run,
-            command_id,
-            sequence,
-            kind,
-            fingerprint,
-            expected_revision,
-            CommandRejection::StaleCommand,
+        return (
+            snapshot_receipt(
+                run,
+                command_id,
+                sequence,
+                TeamCommandStatus::Rejected(CommandRejection::StaleCommand),
+            ),
+            false,
         );
     }
 
@@ -434,27 +436,19 @@ fn reject_and_journal(
 }
 
 /// Write `record` to the journal, then evict per `.sealwire/DESIGN.md` D7's
-/// two classes so the cap holds UNCONDITIONALLY:
-/// - an `Applied` record is droppable once `sequence < last_command_seq` (a
-///   redelivery then fails the monotonic-sequence check, never the in-flight
-///   one);
-/// - a `Rejected`/`Interrupted` record is droppable with NO sequence
-///   condition — it can never later apply: its revision is already stale
-///   (revision is monotonic), its lifecycle refusal's sequence is already
-///   covered by `last_command_seq` (see the apply-order comment above), or
-///   its protocol version is unsupported.
-///
-/// If both classes are exhausted the cap still must hold: evict the oldest
-/// record of any class (never the in-flight one). D7: "a 64-deep journal that
-/// has nothing droppable cannot arise from a driver that makes progress."
+/// single rule so the cap holds: a record is droppable if and only if its own
+/// `sequence` is strictly below `last_command_seq`. No outcome-dependent
+/// class and no "oldest of any class" fallback — D1 makes every journaled
+/// record advance the watermark the moment it is written, so the record just
+/// pushed is the only one ever sitting AT it; everything else already sits
+/// strictly below and is therefore always evictable. A redelivery of an
+/// evicted id fails the ordering check above, never the (gone) journal
+/// record.
 ///
 /// This is the ONE place a journal record is ever appended, live or evicted,
 /// which is what makes it the right place to hold D1's invariant: the
 /// watermark advances exactly when a record is written, no exceptions and no
-/// per-call-site judgement. That is what makes every record's `sequence`
-/// evictable without losing track of it — a redelivery of a dropped id still
-/// fails the ordering check above, rather than sailing through because
-/// nothing remembered its sequence was ever spent.
+/// per-call-site judgement.
 fn push_with_eviction(run: &mut TeamRun, record: TeamCommandRecord) {
     run.driver_progress.last_command_seq =
         run.driver_progress.last_command_seq.max(record.sequence);
@@ -463,40 +457,22 @@ fn push_with_eviction(run: &mut TeamRun, record: TeamCommandRecord) {
         let Some(evicted) = evict_one(run) else {
             break;
         };
-        // Belt-and-braces, not the primary mechanism: the push above already
-        // covers every record's own sequence, so this only matters if an
-        // older retained record's sequence exceeds the one just written
-        // (payload/headroom rejections can carry any sequence value, not
-        // necessarily an increasing one). Never lower the watermark either
-        // way.
-        run.driver_progress.last_command_seq =
-            run.driver_progress.last_command_seq.max(evicted.sequence);
         if evicted.kind == TeamCommandKind::TakeUserNotes {
             drop_drained_notes(run, &evicted.command_id);
         }
     }
 }
 
+/// D7's single eviction rule: droppable iff `sequence < last_command_seq`,
+/// regardless of outcome. Never the in-flight record, and never one sitting
+/// AT the watermark — `evict_one` enforces this itself rather than trusting a
+/// caller to keep the journal within the invariant.
 fn evict_one(run: &mut TeamRun) -> Option<TeamCommandRecord> {
     let last_command_seq = run.driver_progress.last_command_seq;
     let in_flight = run.driver_progress.in_flight_command_id.clone();
-    let not_in_flight =
-        |candidate: &TeamCommandRecord| Some(&candidate.command_id) != in_flight.as_ref();
-
-    if let Some(record) = run.command_journal.remove_first(|candidate| {
-        not_in_flight(candidate)
-            && matches!(candidate.outcome, TeamCommandOutcome::Applied)
-            && candidate.sequence < last_command_seq
-    }) {
-        return Some(record);
-    }
-    if let Some(record) = run.command_journal.remove_first(|candidate| {
-        not_in_flight(candidate) && !matches!(candidate.outcome, TeamCommandOutcome::Applied)
-    }) {
-        return Some(record);
-    }
-    run.command_journal
-        .remove_first(|candidate| not_in_flight(candidate))
+    run.command_journal.remove_first(|candidate| {
+        Some(&candidate.command_id) != in_flight.as_ref() && candidate.sequence < last_command_seq
+    })
 }
 
 /// Drop the drained-notes entry for an evicted `TakeUserNotes` journal

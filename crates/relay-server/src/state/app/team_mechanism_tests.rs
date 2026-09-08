@@ -441,19 +441,36 @@ async fn resume_team_run_refuses_non_embedded_backend_before_status_flip() {
 }
 
 /// D1's watermark fix, through the seam a driver replacement or reopen
-/// actually goes through. The reducer's own unit test pins the same
-/// invariant against a bare `TeamRun`, which is the right place to check the
-/// arithmetic cheaply and exhaustively; this one instead drives
+/// actually goes through. The reducer's own unit test
+/// (`reject_then_reopen_reseeds_past_the_consumed_sequence_so_it_never_collides`)
+/// pins the same invariant against a bare `TeamRun`, which is the right place
+/// to check the arithmetic cheaply and exhaustively; this one instead drives
 /// `relay_api::TeamPort::submit_command`/`run_snapshot` — the ONLY thing any
 /// driver, real or replaced, ever calls — so a regression in the host path
 /// wrapped around the reducer (the write lock, `update_team_run`, the
 /// present/absent-run check) would fail here even if it left the reducer
 /// itself untouched.
 ///
-/// "The driver is replaced" is modeled the way it actually happens: the new
-/// process holds no in-memory state at all, so it learns everything from a
-/// fresh `run_snapshot` — exactly what `submit_lifecycle` above does for
-/// every lifecycle call already in this file.
+/// Two things a prior version of this test got wrong, both required to
+/// reproduce the actual defect rather than pass by construction:
+///
+/// - **Real predecessor state.** The run must already be at `last_command_seq
+///   == 6` — six commands a since-replaced driver already got applied —
+///   before the rejection spends sequence 7. A run starting at watermark 0
+///   cannot exhibit the collision: `submit_lifecycle` would reseed to
+///   sequence 1, nowhere near 7, no matter what the bug does.
+/// - **The same id-minting scheme on both ends.** A real driver derives its
+///   command id from its own sequence number, so a reopened driver reseeding
+///   to the same spent sequence mints the SAME id again. `submit_lifecycle`'s
+///   `test-cmd-{sequence}` naming never collides with a hand-picked `cmd-7`,
+///   which is why the previous version of this test passed even against the
+///   unfixed reducer — it could never reach the collision it was meant to
+///   prove doesn't happen. Both submissions below mint `cmd-{sequence}`
+///   instead, modeling "the driver is replaced" the way it actually happens:
+///   the new process holds no in-memory state, so it learns the sequence to
+///   mint next from a fresh `run_snapshot`, exactly like `submit_lifecycle`
+///   does for every lifecycle call already in this file — just with the
+///   realistic id scheme.
 #[tokio::test]
 async fn a_driver_that_reopens_after_a_rejection_does_not_collide_with_the_spent_sequence() {
     let (_repo, root) = init_team_repo().await;
@@ -466,23 +483,30 @@ async fn a_driver_that_reopens_after_a_rejection_does_not_collide_with_the_spent
         "device-1".to_string(),
     );
     run.status = crate::state::TeamRunStatus::Running;
+    // Real predecessor state: six commands a since-replaced driver already
+    // got applied, so the next one it would have minted is sequence 7 — not
+    // an arbitrary number the test picked.
+    run.driver_progress.last_command_seq = 6;
     app.relay.write().await.insert_team_run(run);
+    let mint = |sequence: u64| format!("cmd-{sequence}");
 
-    // The driver about to be replaced submits a payload-invalid command at
-    // sequence 7 — oversized, so it is refused by the payload bound rather
-    // than ever reaching the sequence-ordering check.
+    // The driver about to be replaced submits its next command — sequence 7,
+    // derived from the predecessor state exactly like a real driver would —
+    // oversized, so it is refused by the payload bound rather than ever
+    // reaching the sequence-ordering check.
     let too_many_sub_tasks = (0..relay_api::team_command::MAX_TEAM_COMMAND_SUB_TASKS + 1)
         .map(|i| relay_api::team::SubTask {
             id: format!("st-{i}"),
             ..relay_api::team::SubTask::default()
         })
         .collect();
+    let consumed_sequence = 7;
     let rejected = relay_api::TeamPort::submit_command(
         &app,
         run_id,
         exact_team_envelope(
-            "cmd-7",
-            7,
+            &mint(consumed_sequence),
+            consumed_sequence,
             0,
             relay_api::team_command::TeamStateCommand::ReplanSubTasks {
                 sub_tasks: too_many_sub_tasks,
@@ -499,15 +523,23 @@ async fn a_driver_that_reopens_after_a_rejection_does_not_collide_with_the_spent
         )
     );
 
-    // The driver is replaced. `submit_lifecycle` reads a fresh snapshot and
-    // mints `last_command_seq + 1` from it, precisely what a reopened driver
-    // with no memory of sequence 7 would do.
-    let submitted = submit_lifecycle(
+    // The driver is replaced. The new process holds no memory of sequence 7
+    // and reads a fresh snapshot to learn what to mint next.
+    let snapshot = relay_api::TeamPort::run_snapshot(&app, run_id)
+        .await
+        .expect("the run still exists");
+    let reseeded_sequence = snapshot.driver_progress.last_command_seq + 1;
+    let submitted = relay_api::TeamPort::submit_command(
         &app,
         run_id,
-        relay_api::team_command::TeamStateCommand::SetRunStatus {
-            status: crate::state::TeamRunStatus::Running,
-        },
+        exact_team_envelope(
+            &mint(reseeded_sequence),
+            reseeded_sequence,
+            snapshot.driver_progress.state_revision,
+            relay_api::team_command::TeamStateCommand::SetRunStatus {
+                status: crate::state::TeamRunStatus::Running,
+            },
+        ),
     )
     .await
     .expect("the run still exists");
@@ -516,8 +548,9 @@ async fn a_driver_that_reopens_after_a_rejection_does_not_collide_with_the_spent
             submitted.status,
             relay_api::team_command::TeamCommandStatus::Applied(_)
         ),
-        "the reopened driver's first command must not collide with the \
-sequence the earlier rejection already spent: {:?}",
+        "the reopened driver's first command (minted the same way the \
+rejected one was) must not collide with the sequence the earlier rejection \
+already spent: {:?}",
         submitted.status
     );
 }
@@ -3539,77 +3572,36 @@ async fn a_dev_turn_that_hits_session_capacity_halts_the_run_before_any_review()
         run.pause_kind,
         Some(relay_api::team::TeamPauseKind::Provider)
     );
-    // D5: a paused run refuses a NEW seat outright. `release_seats_when_settled`
-    // already ran its one-shot sweep the moment this run paused (releasing the
-    // dev seat, below); a seat created afterward would never be swept again,
-    // recreating exactly the leak D5 closes. The provider thread this call
-    // creates before discovering the refusal must come back too, not leak.
-    let released_before_creation_attempt = providers
-        .get("codex")
-        .unwrap()
-        .released_threads
-        .lock()
-        .await
-        .len();
-    let creation_error =
+    // D5: a paused run may still create and durably record a reviewer seat.
+    // The leak fix is compensation, not prohibition: because the release
+    // sweep already ran when the run paused, the provider runtime is released
+    // immediately after ownership is recorded, and any later turn is refused
+    // by the ordinary settled-turn gate.
+    let codex = providers.get("codex").unwrap();
+    let released_before_creation_attempt = codex.released_threads.lock().await.len();
+    let reviewer_seat =
         relay_api::TeamPort::start_thread(&app, &run_id, relay_api::team::TeamRole::Reviewer)
             .await
-            .expect_err("a paused run must refuse a new reviewer seat");
-    match &creation_error {
-        relay_api::TeamPortError::Failed(message) => {
-            assert!(
-                message.contains("settled as paused"),
-                "the refusal should name why: {message}"
-            );
-        }
-        other => panic!("expected a Failed refusal, got {other:?}"),
-    }
+            .expect("a paused run still records a reviewer seat");
+    let reviewer_thread = reviewer_seat.thread_id.clone();
     assert_eq!(
-        providers
-            .get("codex")
-            .unwrap()
-            .released_threads
-            .lock()
-            .await
-            .len(),
+        codex.released_threads.lock().await.len(),
         released_before_creation_attempt + 1,
-        "the seat this call created before refusing must be released, not leaked"
+        "the late seat's provider runtime must be released after durable ownership"
+    );
+    let run_after_seat = app.relay.read().await.team_run(&run_id).cloned().unwrap();
+    assert!(
+        run_after_seat
+            .owned_thread_ids()
+            .iter()
+            .any(|id| id == &reviewer_thread),
+        "the late reviewer must stay durably owned so later cleanup/delete can find it"
     );
 
-    // Turn-gate coverage this test carried before D5, kept: a turn on an
-    // ALREADY-existing reviewer seat (opened before the pause — simulated
-    // here by registering one directly, since the creation path above is now
-    // rightly refused) must still be refused once the run is paused.
-    let reviewer_thread = format!("codex-existing-reviewer-{run_id}");
-    let codex = providers.get("codex").unwrap();
-    let summary = codex.summary(&reviewer_thread, &root);
-    codex
-        .threads
-        .lock()
-        .await
-        .insert(reviewer_thread.clone(), summary.clone());
-    {
-        let mut relay = app.relay.write().await;
-        relay.register_background_thread(
-            summary,
-            &root,
-            "codex-model",
-            "on-request",
-            "workspace-write",
-            "medium",
-        );
-    }
-    let reviewer_thread_for_run = reviewer_thread.clone();
-    app.test_update_team_run(&run_id, move |run| {
-        if let Some(task) = run.sub_tasks.get_mut(0) {
-            task.reviewer_thread_id = Some(reviewer_thread_for_run.clone());
-        }
-    })
-    .await;
     let reviewer_outcome = relay_api::TeamPort::turn(
         &app,
         &run_id,
-        relay_api::team::TeamThreadSlot::SubTaskReviewer(0),
+        reviewer_seat.slot,
         relay_api::team::TeamRole::Reviewer,
         "review it",
     )
@@ -3631,12 +3623,13 @@ async fn a_dev_turn_that_hits_session_capacity_halts_the_run_before_any_review()
             .is_none(),
         "a refused reviewer attempt must not bill tokens"
     );
+    let run_after_reviewer_attempt = app.relay.read().await.team_run(&run_id).cloned().unwrap();
     assert_eq!(
-        run.sub_tasks[0].rounds_used, 0,
+        run_after_reviewer_attempt.sub_tasks[0].rounds_used, 0,
         "a paused run has spent no review budget"
     );
     assert_ne!(
-        run.sub_tasks[0].status,
+        run_after_reviewer_attempt.sub_tasks[0].status,
         crate::state::SubTaskStatus::Escalated
     );
 }
@@ -3648,19 +3641,20 @@ async fn a_dev_turn_that_hits_session_capacity_halts_the_run_before_any_review()
 // and settlement's status write both take `relay.write()`, so there are
 // exactly two interleavings: registration first (the seat is in the map
 // before settlement's later snapshot, which releases it), or settlement
-// first (registration observes it and refuses, and the caller releases the
-// thread it already created). Each test below forces the second interleaving
-// deterministically and proves BOTH halves: the seat never gets registered,
-// and the provider thread that already existed comes back rather than leaks.
+// first (registration still records durable ownership, then compensates by
+// releasing the provider runtime immediately). Each test below forces the
+// second interleaving deterministically and proves both halves: the seat stays
+// recorded, and the provider thread that already existed comes back rather
+// than leaking capacity.
 // ---------------------------------------------------------------------
 
 /// Path 1: `start_team_thread` gets a fresh provider thread back, then
 /// (normally) takes the write lock that records its role/provider. Pausing it
 /// there with `team_seat_creation_barrier` and settling first proves the
-/// refuse-and-release half of D5 for the FIRST of the two write-lock windows
-/// `TeamPort::start_thread` goes through.
+/// record-then-release compensation for the FIRST of the two write-lock
+/// windows `TeamPort::start_thread` goes through.
 #[tokio::test]
-async fn a_settlement_that_lands_during_path_1_seat_creation_is_refused_and_released() {
+async fn a_settlement_that_lands_during_path_1_seat_creation_is_recorded_and_released() {
     let (_repo, root) = init_team_repo().await;
     let (app, providers) = build_review_app(&root, &["codex"]).await;
     let run_id = "team-path1-race".to_string();
@@ -3697,20 +3691,14 @@ async fn a_settlement_that_lands_during_path_1_seat_creation_is_refused_and_rele
     drop(creation_pre_gate);
     let result = creation_task.await.expect("task did not panic");
 
-    match result {
-        Err(relay_api::TeamPortError::Failed(message)) => {
-            assert!(
-                message.contains("settled as cancelled"),
-                "the refusal should name why: {message}"
-            );
-        }
-        other => panic!("expected a Failed refusal once settled, got {other:?}"),
-    }
+    let seat = result.expect("settlement is compensated, not returned as a start failure");
 
     let run = app.relay.read().await.team_run(&run_id).cloned().unwrap();
     assert!(
-        run.owned_thread_ids().is_empty(),
-        "a refused path-1 registration must never be recorded as owned: {:?}",
+        run.owned_thread_ids()
+            .iter()
+            .any(|id| id == &seat.thread_id),
+        "a path-1 late seat must still be recorded as owned: {:?}",
         run.owned_thread_ids()
     );
     let codex = providers.get("codex").unwrap();
@@ -3721,8 +3709,61 @@ async fn a_settlement_that_lands_during_path_1_seat_creation_is_refused_and_rele
     );
     assert!(
         codex.turns.lock().await.is_empty(),
-        "no turn may ever be dispatched to a seat whose registration was refused"
+        "no turn may ever be dispatched to a seat created after settlement"
     );
+}
+
+#[tokio::test]
+async fn a_run_deleted_during_path_1_seat_creation_is_released_and_errors() {
+    let (_repo, root) = init_team_repo().await;
+    let (app, providers) = build_review_app(&root, &["codex"]).await;
+    let run_id = "team-path1-delete".to_string();
+    let mut run = crate::state::TeamRun::new(
+        run_id.clone(),
+        crate::state::TaskSpec::default(),
+        root.clone(),
+        "device-1".to_string(),
+    );
+    run.status = crate::state::TeamRunStatus::Running;
+    run.dev_provider = "codex".to_string();
+    app.relay.write().await.insert_team_run(run);
+
+    let creation_pre_gate = app.hold_team_seat_creation_barrier().await;
+    let arrivals_before = app.team_seat_creation_arrivals();
+
+    let creation_task = {
+        let app = app.clone();
+        let run_id = run_id.clone();
+        tokio::spawn(async move {
+            relay_api::TeamPort::start_thread(&app, &run_id, relay_api::team::TeamRole::Dev).await
+        })
+    };
+    wait_until_condition("path 1 should reach the seat-creation barrier", || {
+        app.team_seat_creation_arrivals() > arrivals_before
+    })
+    .await;
+
+    app.relay.write().await.remove_team_run(&run_id);
+
+    drop(creation_pre_gate);
+    let result = creation_task.await.expect("task did not panic");
+    match result {
+        Err(relay_api::TeamPortError::Failed(message)) => {
+            assert!(
+                message.contains("gone"),
+                "the error should name deletion: {message}"
+            );
+        }
+        other => panic!("expected a missing-run error, got {other:?}"),
+    }
+
+    let codex = providers.get("codex").unwrap();
+    assert_eq!(
+        codex.released_threads().await.len(),
+        1,
+        "the provider thread created before deletion must be released"
+    );
+    assert!(codex.turns.lock().await.is_empty());
 }
 
 /// Path 2: `TeamPort::start_thread` calls `start_team_thread` (path 1) and
@@ -3731,7 +3772,7 @@ async fn a_settlement_that_lands_during_path_1_seat_creation_is_refused_and_rele
 /// path 2's own `team_seat_ownership_barrier` proves the fence holds
 /// independently at the SECOND window too, not only the first.
 #[tokio::test]
-async fn a_settlement_that_lands_during_path_2_seat_ownership_is_refused_and_released() {
+async fn a_settlement_that_lands_during_path_2_seat_ownership_is_recorded_and_released() {
     let (_repo, root) = init_team_repo().await;
     let (app, providers) = build_review_app(&root, &["codex"]).await;
     let run_id = "team-path2-race".to_string();
@@ -3769,20 +3810,14 @@ async fn a_settlement_that_lands_during_path_2_seat_ownership_is_refused_and_rel
     drop(ownership_pre_gate);
     let result = creation_task.await.expect("task did not panic");
 
-    match result {
-        Err(relay_api::TeamPortError::Failed(message)) => {
-            assert!(
-                message.contains("settled as cancelled"),
-                "the refusal should name why: {message}"
-            );
-        }
-        other => panic!("expected a Failed refusal once settled, got {other:?}"),
-    }
+    let seat = result.expect("settlement is compensated, not returned as a start failure");
 
     let run = app.relay.read().await.team_run(&run_id).cloned().unwrap();
     assert!(
-        run.run_owned_thread_ids.is_empty(),
-        "a refused path-2 registration must never land in run_owned_thread_ids: {:?}",
+        run.run_owned_thread_ids
+            .iter()
+            .any(|id| id == &seat.thread_id),
+        "a path-2 late seat must land in run_owned_thread_ids: {:?}",
         run.run_owned_thread_ids
     );
     let codex = providers.get("codex").unwrap();
@@ -3793,8 +3828,61 @@ async fn a_settlement_that_lands_during_path_2_seat_ownership_is_refused_and_rel
     );
     assert!(
         codex.turns.lock().await.is_empty(),
-        "no turn may ever be dispatched to a seat whose registration was refused"
+        "no turn may ever be dispatched to a seat created after settlement"
     );
+}
+
+#[tokio::test]
+async fn a_run_deleted_during_path_2_seat_ownership_is_released_and_errors() {
+    let (_repo, root) = init_team_repo().await;
+    let (app, providers) = build_review_app(&root, &["codex"]).await;
+    let run_id = "team-path2-delete".to_string();
+    let mut run = crate::state::TeamRun::new(
+        run_id.clone(),
+        crate::state::TaskSpec::default(),
+        root.clone(),
+        "device-1".to_string(),
+    );
+    run.status = crate::state::TeamRunStatus::Running;
+    run.dev_provider = "codex".to_string();
+    app.relay.write().await.insert_team_run(run);
+
+    let ownership_pre_gate = app.hold_team_seat_ownership_barrier().await;
+    let arrivals_before = app.team_seat_ownership_arrivals();
+
+    let creation_task = {
+        let app = app.clone();
+        let run_id = run_id.clone();
+        tokio::spawn(async move {
+            relay_api::TeamPort::start_thread(&app, &run_id, relay_api::team::TeamRole::Dev).await
+        })
+    };
+    wait_until_condition("path 2 should reach the seat-ownership barrier", || {
+        app.team_seat_ownership_arrivals() > arrivals_before
+    })
+    .await;
+
+    app.relay.write().await.remove_team_run(&run_id);
+
+    drop(ownership_pre_gate);
+    let result = creation_task.await.expect("task did not panic");
+    match result {
+        Err(relay_api::TeamPortError::Failed(message)) => {
+            assert!(
+                message.contains("gone"),
+                "the error should name deletion: {message}"
+            );
+        }
+        other => panic!("expected a missing-run error, got {other:?}"),
+    }
+
+    let codex = providers.get("codex").unwrap();
+    assert_eq!(
+        codex.released_threads().await.len(),
+        1,
+        "the provider thread created before deletion must be released"
+    );
+    assert!(codex.turns.lock().await.is_empty());
 }
 
 /// Path 3: the reducer's `AttachSubTaskThread` gate already refuses a settled
