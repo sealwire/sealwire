@@ -4691,6 +4691,38 @@ impl RelayState {
             // work→idle "completed" the snapshot diff would otherwise emit).
             self.enqueue_error_push(&thread_id, "stopped unexpectedly — the agent exited.");
         }
+        // Release Codex start admission and abandon unbound pending placeholders so
+        // a reconnect cannot leave a stolen pending-bind slot.
+        let codex_threads: Vec<String> = self
+            .runtimes
+            .iter()
+            .filter(|(_, runtime)| {
+                runtime.codex_start_in_flight
+                    && runtime
+                        .summary
+                        .as_ref()
+                        .is_some_and(|summary| summary.provider == provider)
+            })
+            .map(|(thread_id, _)| thread_id.clone())
+            .collect();
+        for thread_id in codex_threads {
+            let pending = self
+                .runtimes
+                .get(&thread_id)
+                .and_then(|runtime| runtime.codex_pending_bind_reservation_id.clone());
+            if let Some(pending) = pending {
+                let unbound = self
+                    .runtimes
+                    .get(&thread_id)
+                    .and_then(|runtime| runtime.codex_user_reservations.get(&pending))
+                    .is_some_and(|reservation| reservation.turn_id.is_none());
+                if unbound {
+                    self.clear_codex_user_reservation(&thread_id, &pending);
+                    continue;
+                }
+            }
+            self.release_codex_start_admission(&thread_id);
+        }
     }
 
     pub fn mark_surface_peer_online(&mut self, peer_id: &str) -> bool {

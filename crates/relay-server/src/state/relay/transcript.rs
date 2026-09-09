@@ -358,6 +358,25 @@ impl RelayState {
         self.upsert_user_message_legacy(item_id, text, turn_id);
     }
 
+    /// Claim per-thread start admission and install the user placeholder.
+    /// Fails if another Codex `start_turn` already holds admission on this thread.
+    pub fn begin_codex_user_turn(&mut self, thread_id: &str, text: &str) -> Result<String, String> {
+        {
+            let runtime = self.ensure_runtime_for_thread(thread_id);
+            if runtime.codex_start_in_flight {
+                return Err("Codex turn already in flight for this thread".to_string());
+            }
+            runtime.codex_start_in_flight = true;
+        }
+        Ok(self.reserve_codex_user_message(thread_id, text))
+    }
+
+    pub fn release_codex_start_admission(&mut self, thread_id: &str) {
+        if let Some(runtime) = self.runtimes.get_mut(thread_id) {
+            runtime.codex_start_in_flight = false;
+        }
+    }
+
     /// Install a Codex user-message placeholder before `turn/start`.
     ///
     /// Returns the local reservation id and marks it as the sole in-flight
@@ -404,14 +423,14 @@ impl RelayState {
         let Some(runtime) = self.runtimes.get_mut(thread_id) else {
             return;
         };
-        if runtime
-            .codex_user_reservations
-            .values()
-            .any(|reservation| reservation.turn_id.as_deref() == Some(turn_id))
+        // Known or already-attached turn ids must not steal a newer pending slot.
+        if runtime.codex_known_turn_ids.contains(turn_id)
+            || runtime
+                .codex_user_reservations
+                .values()
+                .any(|reservation| reservation.turn_id.as_deref() == Some(turn_id))
         {
-            if runtime.codex_pending_bind_reservation_id.as_deref() == Some(reservation_id) {
-                runtime.codex_pending_bind_reservation_id = None;
-            }
+            runtime.codex_known_turn_ids.insert(turn_id.to_string());
             return;
         }
         let Some(reservation) = runtime.codex_user_reservations.get_mut(reservation_id) else {
@@ -425,6 +444,7 @@ impl RelayState {
         {
             entry.turn_id = Some(turn_id.to_string());
         }
+        runtime.codex_known_turn_ids.insert(turn_id.to_string());
         if runtime.codex_pending_bind_reservation_id.as_deref() == Some(reservation_id) {
             runtime.codex_pending_bind_reservation_id = None;
         }
@@ -435,15 +455,27 @@ impl RelayState {
     }
 
     /// Bind only the in-flight pending reservation (from `turn/started`).
-    /// Never attaches to an older unbound leftover.
+    /// Never attaches to an older unbound leftover or a known/stale turn id.
     pub fn bind_pending_codex_user_reservation(&mut self, thread_id: &str, turn_id: &str) {
         let pending_id = self
             .runtimes
             .get(thread_id)
             .and_then(|runtime| runtime.codex_pending_bind_reservation_id.clone());
         let Some(pending_id) = pending_id else {
+            // No pending start: still record known id so a later pending cannot
+            // claim a duplicate turn/started for this turn.
+            if let Some(runtime) = self.runtimes.get_mut(thread_id) {
+                runtime.codex_known_turn_ids.insert(turn_id.to_string());
+            }
             return;
         };
+        if self
+            .runtimes
+            .get(thread_id)
+            .is_some_and(|runtime| runtime.codex_known_turn_ids.contains(turn_id))
+        {
+            return;
+        }
         self.bind_codex_user_reservation(thread_id, &pending_id, turn_id);
     }
 
@@ -453,11 +485,13 @@ impl RelayState {
             return;
         };
         let Some(reservation) = runtime.codex_user_reservations.remove(reservation_id) else {
+            runtime.codex_start_in_flight = false;
             return;
         };
         if runtime.codex_pending_bind_reservation_id.as_deref() == Some(reservation_id) {
             runtime.codex_pending_bind_reservation_id = None;
         }
+        runtime.codex_start_in_flight = false;
         runtime
             .transcript
             .retain(|entry| entry.item_id != reservation.item_id);
@@ -465,6 +499,36 @@ impl RelayState {
         if self.active_thread_id.as_deref() == Some(thread_id) {
             self.sync_selected_runtime_to_fields();
         }
+    }
+
+    /// Definitive start failure: remove placeholder and release admission.
+    pub fn fail_codex_user_turn_definitive(&mut self, thread_id: &str, reservation_id: &str) {
+        self.clear_codex_user_reservation(thread_id, reservation_id);
+    }
+
+    /// Uncertain start failure (timeout / lost response).
+    ///
+    /// If the reservation is already bound (e.g. `turn/started` won the race),
+    /// keep the placeholder so user-before-output survives. If still unbound,
+    /// abandon it so a later start cannot share the pending slot.
+    pub fn fail_codex_user_turn_uncertain(&mut self, thread_id: &str, reservation_id: &str) {
+        let bound = self.runtimes.get(thread_id).and_then(|runtime| {
+            runtime
+                .codex_user_reservations
+                .get(reservation_id)
+                .and_then(|reservation| reservation.turn_id.clone())
+        });
+        if let Some(turn_id) = bound {
+            if let Some(runtime) = self.runtimes.get_mut(thread_id) {
+                runtime.codex_known_turn_ids.insert(turn_id);
+                if runtime.codex_pending_bind_reservation_id.as_deref() == Some(reservation_id) {
+                    runtime.codex_pending_bind_reservation_id = None;
+                }
+                runtime.codex_start_in_flight = false;
+            }
+            return;
+        }
+        self.clear_codex_user_reservation(thread_id, reservation_id);
     }
 
     /// Detach the pending-bind pointer without removing the reservation entry.
@@ -485,6 +549,7 @@ impl RelayState {
         let Some(runtime) = self.runtimes.get_mut(thread_id) else {
             return;
         };
+        runtime.codex_known_turn_ids.insert(turn_id.to_string());
         let retired: Vec<String> = runtime
             .codex_user_reservations
             .iter()
@@ -579,8 +644,9 @@ impl RelayState {
             Some(text)
         };
         entry.status = "completed".to_string();
-        entry.turn_id = Some(turn_id);
+        entry.turn_id = Some(turn_id.clone());
         entry.tool = None;
+        runtime.codex_known_turn_ids.insert(turn_id);
         let _ = self.bump_thread_transcript_revision(thread_id);
         if self.active_thread_id.as_deref() == Some(thread_id) {
             self.sync_selected_runtime_to_fields();

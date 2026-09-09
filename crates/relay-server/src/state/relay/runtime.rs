@@ -164,6 +164,12 @@ pub(crate) struct ThreadRuntime {
     /// is still awaiting a provider turn id. `turn/started` and early echoes
     /// bind/reconcile only this slot — never an older unbound leftover.
     pub(crate) codex_pending_bind_reservation_id: Option<String>,
+    /// Exclusive start admission for this thread's Codex `start_turn`. Held for
+    /// the whole RPC await so a concurrent send cannot overwrite `pending_bind`.
+    pub(crate) codex_start_in_flight: bool,
+    /// Provider turn ids this thread has already bound, settled, or reconciled.
+    /// Stale/duplicate `turn/started` for these ids must not attach to a newer pending.
+    pub(crate) codex_known_turn_ids: HashSet<String>,
 }
 
 impl ThreadRuntime {
@@ -216,6 +222,8 @@ impl ThreadRuntime {
             codex_user_reservations: HashMap::new(),
             codex_user_reservation_seq: 0,
             codex_pending_bind_reservation_id: None,
+            codex_start_in_flight: false,
+            codex_known_turn_ids: HashSet::new(),
         }
     }
 
@@ -259,6 +267,8 @@ impl ThreadRuntime {
             codex_user_reservations: HashMap::new(),
             codex_user_reservation_seq: 0,
             codex_pending_bind_reservation_id: None,
+            codex_start_in_flight: false,
+            codex_known_turn_ids: HashSet::new(),
         }
     }
 
@@ -334,6 +344,8 @@ impl ThreadRuntime {
             codex_user_reservations: HashMap::new(),
             codex_user_reservation_seq: 0,
             codex_pending_bind_reservation_id: None,
+            codex_start_in_flight: false,
+            codex_known_turn_ids: HashSet::new(),
         }
     }
 
