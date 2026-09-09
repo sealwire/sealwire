@@ -360,9 +360,9 @@ impl RelayState {
 
     /// Install a Codex user-message placeholder before `turn/start`.
     ///
-    /// Returns the local reservation id. Prior reservations for other turns on
-    /// this thread are left intact — a missing echo must not be deleted when the
-    /// next send begins. Echoes reconcile only after the provider turn id is bound.
+    /// Returns the local reservation id and marks it as the sole in-flight
+    /// pending-bind slot for this thread. Prior reservations for other turns
+    /// stay in the map until settled; they are never rebound by a later start.
     pub fn reserve_codex_user_message(&mut self, thread_id: &str, text: &str) -> String {
         let seq = {
             let runtime = self.ensure_runtime_for_thread(thread_id);
@@ -387,16 +387,20 @@ impl RelayState {
                     item_id: item_id.clone(),
                     text: text.to_string(),
                     turn_id: None,
-                    seq,
                 },
             );
+            runtime.codex_pending_bind_reservation_id = Some(item_id.clone());
         }
         item_id
     }
 
-    /// Stamp the provider turn id onto the oldest unbound reservation for this
-    /// thread (and its transcript entry). Idempotent if that turn is already bound.
-    pub fn bind_codex_user_reservation(&mut self, thread_id: &str, turn_id: &str) {
+    /// Bind a specific reservation to a provider turn id (the `start_turn` path).
+    pub fn bind_codex_user_reservation(
+        &mut self,
+        thread_id: &str,
+        reservation_id: &str,
+        turn_id: &str,
+    ) {
         let Some(runtime) = self.runtimes.get_mut(thread_id) else {
             return;
         };
@@ -405,31 +409,42 @@ impl RelayState {
             .values()
             .any(|reservation| reservation.turn_id.as_deref() == Some(turn_id))
         {
+            if runtime.codex_pending_bind_reservation_id.as_deref() == Some(reservation_id) {
+                runtime.codex_pending_bind_reservation_id = None;
+            }
             return;
         }
-        let Some(local_id) = runtime
-            .codex_user_reservations
-            .values()
-            .filter(|reservation| reservation.turn_id.is_none())
-            .min_by_key(|reservation| reservation.seq)
-            .map(|reservation| reservation.item_id.clone())
-        else {
+        let Some(reservation) = runtime.codex_user_reservations.get_mut(reservation_id) else {
             return;
         };
-        if let Some(reservation) = runtime.codex_user_reservations.get_mut(&local_id) {
-            reservation.turn_id = Some(turn_id.to_string());
-        }
+        reservation.turn_id = Some(turn_id.to_string());
         if let Some(entry) = runtime
             .transcript
             .iter_mut()
-            .find(|entry| entry.item_id == local_id)
+            .find(|entry| entry.item_id == reservation_id)
         {
             entry.turn_id = Some(turn_id.to_string());
+        }
+        if runtime.codex_pending_bind_reservation_id.as_deref() == Some(reservation_id) {
+            runtime.codex_pending_bind_reservation_id = None;
         }
         let _ = self.bump_thread_transcript_revision(thread_id);
         if self.active_thread_id.as_deref() == Some(thread_id) {
             self.sync_selected_runtime_to_fields();
         }
+    }
+
+    /// Bind only the in-flight pending reservation (from `turn/started`).
+    /// Never attaches to an older unbound leftover.
+    pub fn bind_pending_codex_user_reservation(&mut self, thread_id: &str, turn_id: &str) {
+        let pending_id = self
+            .runtimes
+            .get(thread_id)
+            .and_then(|runtime| runtime.codex_pending_bind_reservation_id.clone());
+        let Some(pending_id) = pending_id else {
+            return;
+        };
+        self.bind_codex_user_reservation(thread_id, &pending_id, turn_id);
     }
 
     /// Drop one reservation and its placeholder (failed / rejected start).
@@ -440,12 +455,59 @@ impl RelayState {
         let Some(reservation) = runtime.codex_user_reservations.remove(reservation_id) else {
             return;
         };
+        if runtime.codex_pending_bind_reservation_id.as_deref() == Some(reservation_id) {
+            runtime.codex_pending_bind_reservation_id = None;
+        }
         runtime
             .transcript
             .retain(|entry| entry.item_id != reservation.item_id);
         let _ = self.bump_thread_transcript_revision(thread_id);
         if self.active_thread_id.as_deref() == Some(thread_id) {
             self.sync_selected_runtime_to_fields();
+        }
+    }
+
+    /// Detach the pending-bind pointer without removing the reservation entry.
+    /// Used by tests to leave a stale unbound leftover on the thread.
+    #[cfg(test)]
+    pub(crate) fn clear_codex_pending_bind_reservation(&mut self, thread_id: &str) {
+        if let Some(runtime) = self.runtimes.get_mut(thread_id) {
+            runtime.codex_pending_bind_reservation_id = None;
+        }
+    }
+
+    /// Retire reservation metadata for a completed turn without removing the
+    /// user transcript entry (terminal-without-echo / lost-echo cleanup).
+    pub fn settle_codex_user_reservation_for_turn(&mut self, thread_id: &str, turn_id: &str) {
+        let Some(runtime) = self.runtimes.get_mut(thread_id) else {
+            return;
+        };
+        // If the in-flight pending slot never got a turn id, this completion is
+        // the provider turn that owned it — stamp then retire.
+        if let Some(pending_id) = runtime.codex_pending_bind_reservation_id.clone() {
+            if let Some(reservation) = runtime.codex_user_reservations.get_mut(&pending_id) {
+                if reservation.turn_id.is_none() {
+                    reservation.turn_id = Some(turn_id.to_string());
+                    if let Some(entry) = runtime
+                        .transcript
+                        .iter_mut()
+                        .find(|entry| entry.item_id == pending_id)
+                    {
+                        entry.turn_id = Some(turn_id.to_string());
+                    }
+                }
+            }
+            runtime.codex_pending_bind_reservation_id = None;
+        }
+        let retired: Vec<String> = runtime
+            .codex_user_reservations
+            .iter()
+            .filter_map(|(id, reservation)| {
+                (reservation.turn_id.as_deref() == Some(turn_id)).then(|| id.clone())
+            })
+            .collect();
+        for id in retired {
+            runtime.codex_user_reservations.remove(&id);
         }
     }
 
@@ -456,34 +518,58 @@ impl RelayState {
         text: String,
         turn_id: String,
     ) -> bool {
-        let local_id = self.runtimes.get(thread_id).and_then(|runtime| {
+        // Prefer an already-bound reservation for this turn.
+        let mut local_id = self.runtimes.get(thread_id).and_then(|runtime| {
             runtime
                 .codex_user_reservations
                 .values()
                 .find(|reservation| reservation.turn_id.as_deref() == Some(turn_id.as_str()))
                 .map(|reservation| reservation.item_id.clone())
         });
+        // Echo arrived before bind: only the in-flight pending slot may claim it.
+        if local_id.is_none() {
+            if let Some(runtime) = self.runtimes.get(thread_id) {
+                if let Some(pending_id) = runtime.codex_pending_bind_reservation_id.as_deref() {
+                    if runtime
+                        .codex_user_reservations
+                        .get(pending_id)
+                        .is_some_and(|reservation| reservation.turn_id.is_none())
+                    {
+                        local_id = Some(pending_id.to_string());
+                    }
+                }
+            }
+        }
         let Some(local_id) = local_id else {
             return false;
         };
+        // Early echo path: bind pending to this turn before merging.
+        if self
+            .runtimes
+            .get(thread_id)
+            .and_then(|runtime| runtime.codex_user_reservations.get(&local_id))
+            .is_some_and(|reservation| reservation.turn_id.is_none())
+        {
+            self.bind_codex_user_reservation(thread_id, &local_id, &turn_id);
+        }
         let Some(runtime) = self.runtimes.get_mut(thread_id) else {
             return false;
         };
         let Some(reservation) = runtime.codex_user_reservations.remove(&local_id) else {
             return false;
         };
+        if runtime.codex_pending_bind_reservation_id.as_deref() == Some(local_id.as_str()) {
+            runtime.codex_pending_bind_reservation_id = None;
+        }
         let Some(entry) = runtime
             .transcript
             .iter_mut()
             .find(|entry| entry.item_id == reservation.item_id)
         else {
-            // Placeholder missing; fall through to a normal append.
             return false;
         };
         entry.item_id = item_id;
         entry.kind = TranscriptEntryKind::UserText;
-        // Prefer the provider echo; fall back to the reserved send text if the
-        // echo somehow arrives empty (image-only turns still keep the prompt).
         entry.text = if text.is_empty() {
             Some(reservation.text)
         } else {

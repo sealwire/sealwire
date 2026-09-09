@@ -397,9 +397,8 @@ async fn handle_notification_for_provider(
                 return;
             }
             if let Some(turn_id) = string_at(&params, &["turn", "id"]) {
-                // Bind the oldest unbound Codex user reservation to this turn id
-                // as soon as the provider announces it — before a late prior-turn
-                // echo or same-turn output can race the RPC response.
+                // Bind only the in-flight pending reservation for this start —
+                // never the oldest unbound leftover on the thread.
                 let bind_thread_id = match &route {
                     ThreadRoute::Background(bg_thread_id) => Some(bg_thread_id.clone()),
                     ThreadRoute::Active => notification_thread_id
@@ -408,7 +407,7 @@ async fn handle_notification_for_provider(
                     ThreadRoute::Drop => None,
                 };
                 if let Some(bind_thread_id) = bind_thread_id {
-                    relay.bind_codex_user_reservation(&bind_thread_id, &turn_id);
+                    relay.bind_pending_codex_user_reservation(&bind_thread_id, &turn_id);
                 }
                 if let ThreadRoute::Background(bg_thread_id) = route {
                     relay.bg_set_active_turn(
@@ -507,6 +506,9 @@ async fn handle_notification_for_provider(
                         "completed",
                         now,
                     );
+                    // Retire reservation metadata; keep any user placeholder in
+                    // the transcript (terminal-without-echo must not linger).
+                    relay.settle_codex_user_reservation_for_turn(&bg_thread_id, turn_id);
                 }
                 changed = true;
             } else {
@@ -588,6 +590,13 @@ async fn handle_notification_for_provider(
                 if let Some(turn_id) = completed_turn.as_deref() {
                     changed |= relay
                         .set_transcript_item_status(&format!("turn-diff:{turn_id}"), "completed");
+                    let settle_thread = notification_thread_id
+                        .clone()
+                        .or_else(|| relay.active_thread_id.clone());
+                    if let Some(settle_thread) = settle_thread {
+                        relay.settle_codex_user_reservation_for_turn(&settle_thread, turn_id);
+                        changed = true;
+                    }
                 }
             }
         }

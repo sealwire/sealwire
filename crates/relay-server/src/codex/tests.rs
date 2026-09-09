@@ -3044,6 +3044,381 @@ async fn late_prior_turn_echo_does_not_consume_next_turn_reservation() {
 }
 
 #[tokio::test]
+async fn echo_before_bind_reconciles_into_pending_reservation() {
+    let state = codex_test_state_with_thread("thread-early-echo").await;
+    let reservation_id = {
+        let mut relay = state.write().await;
+        relay.reserve_codex_user_message("thread-early-echo", "early echo prompt")
+    };
+
+    // Provider echo arrives before turn/started or turn/start response binds.
+    handle_notification(
+        user_message_completed(
+            "thread-early-echo",
+            "turn-early",
+            "item-user-early",
+            "early echo prompt",
+        ),
+        &state,
+    )
+    .await;
+
+    let relay = state.read().await;
+    let runtime = relay
+        .runtime_for_thread("thread-early-echo")
+        .expect("runtime");
+    let users: Vec<_> = runtime
+        .transcript
+        .iter()
+        .filter(|entry| entry.kind == TranscriptEntryKind::UserText)
+        .collect();
+    assert_eq!(
+        users.len(),
+        1,
+        "early echo must not duplicate the placeholder"
+    );
+    assert_eq!(users[0].item_id, "item-user-early");
+    assert_eq!(users[0].turn_id.as_deref(), Some("turn-early"));
+    assert!(
+        !runtime
+            .codex_user_reservations
+            .contains_key(&reservation_id),
+        "reconcile must retire the pending reservation"
+    );
+    assert!(runtime.codex_pending_bind_reservation_id.is_none());
+}
+
+#[tokio::test]
+async fn turn_started_binds_pending_reservation_not_oldest_unbound() {
+    let state = codex_test_state_with_thread("thread-bind").await;
+    let stale_id = {
+        let mut relay = state.write().await;
+        let stale = relay.reserve_codex_user_message("thread-bind", "stale");
+        relay.clear_codex_pending_bind_reservation("thread-bind");
+        stale
+    };
+    let pending_id = {
+        let mut relay = state.write().await;
+        relay.reserve_codex_user_message("thread-bind", "current prompt")
+    };
+
+    handle_notification(turn_started("thread-bind", "turn-current"), &state).await;
+
+    let relay = state.read().await;
+    let runtime = relay.runtime_for_thread("thread-bind").expect("runtime");
+    let stale = runtime
+        .codex_user_reservations
+        .get(&stale_id)
+        .expect("stale reservation must remain");
+    assert!(
+        stale.turn_id.is_none(),
+        "turn/started must not attach to an older unbound leftover"
+    );
+    let pending = runtime
+        .codex_user_reservations
+        .get(&pending_id)
+        .expect("pending reservation");
+    assert_eq!(pending.turn_id.as_deref(), Some("turn-current"));
+}
+
+#[tokio::test]
+async fn notification_before_response_keeps_user_then_reasoning_order() {
+    let state = codex_test_state_with_thread("thread-notif-first").await;
+    let reservation_id = {
+        let mut relay = state.write().await;
+        relay.reserve_codex_user_message("thread-notif-first", "notif-first prompt")
+    };
+
+    handle_notification(turn_started("thread-notif-first", "turn-nf"), &state).await;
+    handle_notification(
+        reasoning_started(
+            "thread-notif-first",
+            "turn-nf",
+            "item-reasoning-nf",
+            "reasoning before RPC returns",
+        ),
+        &state,
+    )
+    .await;
+    handle_notification(
+        user_message_completed(
+            "thread-notif-first",
+            "turn-nf",
+            "item-user-nf",
+            "notif-first prompt",
+        ),
+        &state,
+    )
+    .await;
+    // Late RPC bind is idempotent.
+    {
+        let mut relay = state.write().await;
+        relay.bind_codex_user_reservation("thread-notif-first", &reservation_id, "turn-nf");
+    }
+
+    assert_user_then_reasoning_projections(&state, "thread-notif-first", "turn-nf").await;
+}
+
+#[tokio::test]
+async fn response_before_notification_keeps_user_then_reasoning_order() {
+    let state = codex_test_state_with_thread("thread-resp-first").await;
+    let reservation_id = {
+        let mut relay = state.write().await;
+        relay.reserve_codex_user_message("thread-resp-first", "resp-first prompt")
+    };
+    {
+        let mut relay = state.write().await;
+        relay.bind_codex_user_reservation("thread-resp-first", &reservation_id, "turn-rf");
+    }
+
+    handle_notification(turn_started("thread-resp-first", "turn-rf"), &state).await;
+    handle_notification(
+        reasoning_started(
+            "thread-resp-first",
+            "turn-rf",
+            "item-reasoning-rf",
+            "reasoning after bind",
+        ),
+        &state,
+    )
+    .await;
+    handle_notification(
+        user_message_completed(
+            "thread-resp-first",
+            "turn-rf",
+            "item-user-rf",
+            "resp-first prompt",
+        ),
+        &state,
+    )
+    .await;
+
+    assert_user_then_reasoning_projections(&state, "thread-resp-first", "turn-rf").await;
+}
+
+#[tokio::test]
+async fn explicit_start_rejection_clears_reservation_placeholder() {
+    let (bridge, state) = spawn_fake_codex_bridge().await;
+    let thread = bridge
+        .start_thread(
+            "/tmp/project",
+            "gpt-5.6-sol",
+            "on-request",
+            "workspace-write",
+        )
+        .await
+        .expect("thread starts");
+    activate_started_codex_thread(&state, &thread).await;
+    configure_fake_codex_reject_turn_start(&bridge).await;
+
+    let err = bridge
+        .start_turn(&thread.id, "will be rejected", "gpt-5.6-sol", "low")
+        .await
+        .expect_err("turn/start must fail under reject policy");
+    assert!(
+        err.contains("turn rejected by test policy"),
+        "unexpected error: {err}"
+    );
+
+    let relay = state.read().await;
+    let runtime = relay.runtime_for_thread(&thread.id).expect("runtime");
+    assert!(
+        runtime.codex_user_reservations.is_empty(),
+        "rejected start must clear reservation state"
+    );
+    assert!(runtime.codex_pending_bind_reservation_id.is_none());
+    assert!(
+        !runtime
+            .transcript
+            .iter()
+            .any(|entry| entry.kind == TranscriptEntryKind::UserText),
+        "rejected start must remove the user placeholder"
+    );
+}
+
+#[tokio::test]
+async fn terminal_without_echo_settles_reservation_and_does_not_contaminate_next() {
+    let (bridge, state) = spawn_fake_codex_bridge().await;
+    let thread = bridge
+        .start_thread(
+            "/tmp/project",
+            "gpt-5.6-sol",
+            "on-request",
+            "workspace-write",
+        )
+        .await
+        .expect("thread starts");
+    activate_started_codex_thread(&state, &thread).await;
+
+    const FIRST: &str = "first without echo";
+    let first_turn = bridge
+        .start_turn(&thread.id, FIRST, "gpt-5.6-sol", "low")
+        .await
+        .expect("first send")
+        .expect("turn id");
+    handle_notification(turn_completed(&thread.id, &first_turn), &state).await;
+
+    {
+        let relay = state.read().await;
+        let runtime = relay.runtime_for_thread(&thread.id).expect("runtime");
+        assert!(
+            runtime.codex_user_reservations.is_empty(),
+            "terminal-without-echo must retire reservation metadata"
+        );
+        assert!(runtime.codex_pending_bind_reservation_id.is_none());
+        let users: Vec<_> = runtime
+            .transcript
+            .iter()
+            .filter(|entry| entry.kind == TranscriptEntryKind::UserText)
+            .collect();
+        assert_eq!(users.len(), 1, "placeholder user entry must remain visible");
+        assert_eq!(users[0].text.as_deref(), Some(FIRST));
+    }
+
+    const SECOND: &str = "second turn prompt";
+    let second_turn = bridge
+        .start_turn(&thread.id, SECOND, "gpt-5.6-sol", "low")
+        .await
+        .expect("second send")
+        .expect("turn id");
+    // Late echo for the settled first turn must not steal the second reservation.
+    handle_notification(
+        user_message_completed(&thread.id, &first_turn, "item-user-late-first", FIRST),
+        &state,
+    )
+    .await;
+    handle_notification(
+        reasoning_started(
+            &thread.id,
+            &second_turn,
+            "item-reasoning-second",
+            "second reasoning",
+        ),
+        &state,
+    )
+    .await;
+    handle_notification(
+        user_message_completed(&thread.id, &second_turn, "item-user-second", SECOND),
+        &state,
+    )
+    .await;
+
+    assert_user_then_reasoning_projections(&state, &thread.id, &second_turn).await;
+}
+
+#[tokio::test]
+async fn background_thread_reservation_survives_active_focus_elsewhere() {
+    let (bridge, state) = spawn_fake_codex_bridge().await;
+    let bg = bridge
+        .start_thread(
+            "/tmp/project",
+            "gpt-5.6-sol",
+            "on-request",
+            "workspace-write",
+        )
+        .await
+        .expect("bg thread");
+    let active = bridge
+        .start_thread(
+            "/tmp/project",
+            "gpt-5.6-sol",
+            "on-request",
+            "workspace-write",
+        )
+        .await
+        .expect("active thread");
+    {
+        let mut relay = state.write().await;
+        relay.upsert_thread(bg.clone());
+        relay.upsert_thread(active.clone());
+        relay.active_thread_id = Some(active.id.clone());
+        relay.remember_thread_settings(
+            &bg.id,
+            "on-request",
+            "workspace-write",
+            "low",
+            "gpt-5.6-sol",
+        );
+        relay.remember_thread_settings(
+            &active.id,
+            "on-request",
+            "workspace-write",
+            "low",
+            "gpt-5.6-sol",
+        );
+    }
+
+    const TEXT: &str = "background prompt";
+    let turn_id = bridge
+        .start_turn(&bg.id, TEXT, "gpt-5.6-sol", "low")
+        .await
+        .expect("bg send")
+        .expect("turn id");
+    handle_notification(
+        reasoning_started(&bg.id, &turn_id, "item-reasoning-bg", "bg reasoning"),
+        &state,
+    )
+    .await;
+    handle_notification(
+        user_message_completed(&bg.id, &turn_id, "item-user-bg", TEXT),
+        &state,
+    )
+    .await;
+
+    let relay = state.read().await;
+    let runtime = relay.runtime_for_thread(&bg.id).expect("bg runtime");
+    let turn_entries: Vec<_> = runtime
+        .transcript
+        .iter()
+        .filter(|entry| entry.turn_id.as_deref() == Some(turn_id.as_str()))
+        .collect();
+    assert_eq!(turn_entries.len(), 2);
+    assert_eq!(turn_entries[0].kind, TranscriptEntryKind::UserText);
+    assert_eq!(turn_entries[1].kind, TranscriptEntryKind::Reasoning);
+}
+
+#[tokio::test]
+async fn unloaded_thread_retry_binds_reservation_after_heal() {
+    let (bridge, state) = spawn_fake_codex_bridge().await;
+    {
+        let mut relay = state.write().await;
+        relay.remember_thread_settings(
+            "thread-cold-lifecycle",
+            "on-request",
+            "workspace-write",
+            "low",
+            "gpt-5.6-sol",
+        );
+        relay.active_thread_id = Some("thread-cold-lifecycle".to_string());
+    }
+
+    const TEXT: &str = "healed send";
+    let turn_id = bridge
+        .start_turn("thread-cold-lifecycle", TEXT, "gpt-5.6-sol", "low")
+        .await
+        .expect("heal must succeed")
+        .expect("turn id");
+
+    handle_notification(
+        reasoning_started(
+            "thread-cold-lifecycle",
+            &turn_id,
+            "item-reasoning-heal",
+            "after heal",
+        ),
+        &state,
+    )
+    .await;
+    handle_notification(
+        user_message_completed("thread-cold-lifecycle", &turn_id, "item-user-heal", TEXT),
+        &state,
+    )
+    .await;
+
+    assert_user_then_reasoning_projections(&state, "thread-cold-lifecycle", &turn_id).await;
+}
+
+#[tokio::test]
 async fn replay_harness_prevents_stuck_state_after_background_completion() {
     let harness = CodexReplayHarness::new("thread-A").await;
 
@@ -3950,6 +4325,18 @@ async fn configure_fake_codex(bridge: &CodexBridge, mode: &str, delay_ms: u64) {
         )
         .await
         .expect("configure fake Codex app-server");
+}
+
+async fn configure_fake_codex_reject_turn_start(bridge: &CodexBridge) {
+    bridge
+        .send_request(
+            "fake/configure",
+            json!({
+                "rejectTurnStart": true,
+            }),
+        )
+        .await
+        .expect("configure fake Codex to reject turn/start");
 }
 
 /// The JSON-RPC methods the fake app-server actually received, oldest first.

@@ -852,7 +852,7 @@ read-only with approvals required. Change File access if this turn needs to writ
         {
             let mut relay = self.state.write().await;
             if let Some(turn_id) = turn_id.as_deref() {
-                relay.bind_codex_user_reservation(thread_id, turn_id);
+                relay.bind_codex_user_reservation(thread_id, &reservation_id, turn_id);
             } else {
                 relay.clear_codex_user_reservation(thread_id, &reservation_id);
             }
