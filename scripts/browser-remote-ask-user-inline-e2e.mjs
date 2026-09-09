@@ -20,7 +20,7 @@ const ROOT = process.cwd();
 const WEB_ROOT = path.join(ROOT, "web");
 const TIMEOUT_MS = Number(process.env.BROWSER_E2E_TIMEOUT_MS || 30000);
 const RELAY_ID = "relay-ask-user-e2e";
-const THREAD_ID = "thread-ask-user-dock-e2e";
+const THREAD_ID = "thread-ask-user-inline-e2e";
 const TRAILING_TEXT = "Meanwhile, here is some context.";
 const MOBILE_VIEWPORT = { width: 390, height: 844 };
 
@@ -44,7 +44,7 @@ async function main() {
       contextOptions: { viewport: MOBILE_VIEWPORT, hasTouch: true, isMobile: true },
     }));
     page = await context.newPage();
-    attachPageDebugLogging(page, "remote", { prefix: "remote-ask-user-dock-e2e" });
+    attachPageDebugLogging(page, "remote", { prefix: "remote-ask-user-inline-e2e" });
 
     await page.addInitScript(
       ({ relayId, threadId, trailingText }) => {
@@ -90,7 +90,7 @@ async function main() {
           id: threadId,
           name: "Ask User Dock E2E",
           preview: "a question is pending",
-          cwd: "/tmp/e2e-ask-user-dock",
+          cwd: "/tmp/e2e-ask-user-inline",
           updated_at: 1,
           source: "claude_code",
           status: "active",
@@ -115,7 +115,7 @@ async function main() {
           active_turn_id: "turn-e2e",
           current_status: "active",
           active_flags: ["waitingOnAskUser"],
-          current_cwd: "/tmp/e2e-ask-user-dock",
+          current_cwd: "/tmp/e2e-ask-user-inline",
           projects_revision: 1,
           model: "claude-sonnet-4-6",
           available_models: [],
@@ -338,7 +338,9 @@ async function main() {
       timeout: TIMEOUT_MS,
     });
     await page.reload({ waitUntil: "domcontentloaded" });
-    await page.waitForSelector(".ask-user-dock .ask-user-option-button", { timeout: TIMEOUT_MS });
+    await page.waitForSelector(".transcript-ask-user-pinned .ask-user-option-button", {
+      timeout: TIMEOUT_MS,
+    });
 
     const layout = await page.evaluate(() => {
       const rect = (el) => {
@@ -349,56 +351,79 @@ async function main() {
       const scroller = document.querySelector("#remote-transcript");
       const live = document.querySelector(".chat-message-ask-user-interactive");
       const composer = document.querySelector("#remote-message-form");
-      const option = document.querySelector(".ask-user-dock .ask-user-option-button");
+      const option = document.querySelector(".transcript-ask-user-pinned .ask-user-option-button");
+      // Content-independent form of "no second scroller": the card's nearest
+      // scrollable ancestor must BE the conversation. Counting elements that
+      // currently overflow depends on how much text the fixture happens to have.
+      const scrollParentOf = (el) => {
+        for (let p = el?.parentElement; p; p = p.parentElement) {
+          if (/(auto|scroll)/.test(getComputedStyle(p).overflowY)) return p;
+        }
+        return null;
+      };
+
       return {
         viewport: window.innerHeight,
         liveCards: document.querySelectorAll(".chat-message-ask-user-interactive").length,
         liveInScroller: Boolean(scroller && live && scroller.contains(live)),
-        liveInDock: Boolean(live?.closest(".ask-user-dock")),
+        liveInPinned: Boolean(live?.closest(".transcript-ask-user-pinned")),
+        liveVirtualized: Boolean(live?.closest(".transcript-virtual-spacer")),
         optionsInScroller: scroller
           ? scroller.querySelectorAll(".ask-user-option-button").length
           : -1,
-        recordInScroller: scroller
+        cardsInScroller: scroller
           ? scroller.querySelectorAll(".chat-message-ask-user").length
           : -1,
+        // A 45vh strip above the composer was the phone's whole conversation.
+        cardScrollParentIsTranscript: Boolean(live) && scrollParentOf(live) === scroller,
         scroller: rect(scroller),
-        dock: rect(document.querySelector(".ask-user-dock")),
         option: rect(option),
         composer: rect(composer),
       };
     });
-    console.log(`[remote-ask-user-dock] ${JSON.stringify(layout)}`);
+    console.log(`[remote-ask-user-inline] ${JSON.stringify(layout)}`);
 
     assert.equal(layout.liveCards, 1, "the question must be live in exactly one place");
-    assert.equal(layout.liveInScroller, false, "the live card must be outside the transcript");
-    assert.ok(layout.liveInDock, "the live card belongs to the dock");
+    assert.ok(layout.liveInScroller, "the question is answered in the conversation itself");
+    assert.ok(layout.liveInPinned, "and it is the pinned card at the end of it");
     assert.equal(
-      layout.optionsInScroller,
-      0,
-      "the conversation must not show options that cannot be tapped"
+      layout.liveVirtualized,
+      false,
+      "inside the virtualized range a scroll unmounts a half-finished answer"
     );
-    assert.equal(layout.recordInScroller, 1, "the record of the ask stays in the conversation");
+    assert.ok(
+      layout.optionsInScroller > 0,
+      "the options must be tappable in the conversation itself"
+    );
+    assert.equal(layout.cardsInScroller, 1, "one card, not a record and a live copy");
+    assert.ok(
+      layout.cardScrollParentIsTranscript,
+      "the card must scroll with the conversation — its own scroller is what left "
+      + "nothing of the conversation readable on a phone"
+    );
     assert.ok(
       layout.option.top >= 0 && layout.option.bottom <= layout.viewport,
       `the first option must be on screen without scrolling `
       + `(option ${layout.option.top}-${layout.option.bottom}, viewport ${layout.viewport})`
     );
     assert.ok(
-      layout.composer.bottom <= layout.viewport + 1 && layout.composer.top >= layout.dock.bottom - 1,
-      `the composer must stay below the dock and on screen `
-      + `(dock ends ${layout.dock.bottom}, composer ${layout.composer.top}-${layout.composer.bottom})`
+      layout.composer.bottom <= layout.viewport + 1
+        && layout.composer.top >= layout.scroller.bottom - 1,
+      `the composer must stay below the conversation and on screen `
+      + `(conversation ends ${layout.scroller.bottom}, `
+      + `composer ${layout.composer.top}-${layout.composer.bottom})`
     );
     assert.ok(
       layout.scroller.h > 120,
-      `the conversation must keep usable height beside the card (got ${layout.scroller.h})`
+      `the conversation must keep usable height while the question is parked (got ${layout.scroller.h})`
     );
 
     // A real tap, not a synthetic click: this is the gesture that was being lost.
-    await page.tap(".ask-user-dock .ask-user-option-button");
+    await page.tap(".transcript-ask-user-pinned .ask-user-option-button");
     await page.waitForFunction(
       () =>
         document
-          .querySelector(".ask-user-dock .ask-user-option-button")
+          .querySelector(".transcript-ask-user-pinned .ask-user-option-button")
           ?.getAttribute("aria-pressed") === "true",
       null,
       { timeout: TIMEOUT_MS }
@@ -406,19 +431,19 @@ async function main() {
 
     // Finish the wizard: without this the test would pass with the submit path
     // deleted, which is most of what a reader needs the card for.
-    await page.tap(".ask-user-dock .ask-user-wizard-next");
+    await page.tap(".transcript-ask-user-pinned .ask-user-wizard-next");
     await page.waitForFunction(
-      () => document.querySelector(".ask-user-dock")?.textContent?.includes("Which surface?"),
+      () => document.querySelector(".transcript-ask-user-pinned")?.textContent?.includes("Which surface?"),
       null,
       { timeout: TIMEOUT_MS }
     );
-    await page.tap(".ask-user-dock .ask-user-option-button");
-    await page.tap(".ask-user-dock .ask-user-submit-button");
+    await page.tap(".transcript-ask-user-pinned .ask-user-option-button");
+    await page.tap(".transcript-ask-user-pinned .ask-user-submit-button");
     await page.waitForFunction(() => window.__askUserSubmissions.length > 0, null, {
       timeout: TIMEOUT_MS,
     });
     const submissions = await page.evaluate(() => window.__askUserSubmissions);
-    console.log(`[remote-ask-user-dock] submitted ${JSON.stringify(submissions)}`);
+    console.log(`[remote-ask-user-inline] submitted ${JSON.stringify(submissions)}`);
     assert.equal(submissions.length, 1, "one answer, sent once");
     assert.equal(submissions[0].request_id, "ask-dock-e2e");
     assert.deepEqual(
@@ -427,10 +452,10 @@ async function main() {
       "both questions must be answered with what was tapped"
     );
 
-    // Answered means gone: the card must leave the dock, and the conversation
-    // must keep the record of the ask.
+    // Answered means the pin is released and the card settles back into the
+    // conversation as the record of the ask.
     await page.waitForFunction(
-      () => !document.querySelector(".ask-user-dock .chat-message-ask-user-interactive"),
+      () => !document.querySelector(".chat-message-ask-user-interactive"),
       null,
       { timeout: TIMEOUT_MS }
     );
@@ -442,13 +467,13 @@ async function main() {
 
     if (process.env.REMOTE_ASK_USER_E2E_SHOT) {
       await page.screenshot({ path: process.env.REMOTE_ASK_USER_E2E_SHOT });
-      console.log(`[remote-ask-user-dock] screenshot ${process.env.REMOTE_ASK_USER_E2E_SHOT}`);
+      console.log(`[remote-ask-user-inline] screenshot ${process.env.REMOTE_ASK_USER_E2E_SHOT}`);
     }
 
     console.log(JSON.stringify({ ok: true, viewport: MOBILE_VIEWPORT }, null, 2));
   } catch (error) {
     await writeFailureArtifacts({
-      scenario: "remote-ask-user-dock",
+      scenario: "remote-ask-user-inline",
       remotePage: page,
       metadata: { origin },
     }).catch(() => {});

@@ -29,8 +29,27 @@ function createActiveSessionThread(session) {
 // its AskUser prompts are not the human's to answer — hide them. `sessionView`
 // is null until a session exists (fresh remote.html load) and the transcript
 // panel renders before then, so this must never assume a model is there.
-export function visiblePendingAskUserQuestions(sessionView, pendingAskUserQuestions) {
-  return sessionView?.activeThreadFrozen ? [] : pendingAskUserQuestions;
+//
+// The thread filter is the other half of the same rule, and it has to be enforced
+// here rather than left to the transcript: a question whose row has not loaded is
+// rendered from the REQUEST, so there is no entry to imply which conversation it
+// belongs to. `activeThreadId` is optional only so the frozen check stays usable
+// before a session exists.
+export function visiblePendingAskUserQuestions(
+  sessionView,
+  pendingAskUserQuestions,
+  activeThreadId = null
+) {
+  if (sessionView?.activeThreadFrozen) {
+    return [];
+  }
+  const requests = Array.isArray(pendingAskUserQuestions) ? pendingAskUserQuestions : [];
+  if (!activeThreadId) {
+    return pendingAskUserQuestions;
+  }
+  return requests.filter(
+    (request) => (request?.thread_id || activeThreadId) === activeThreadId
+  );
 }
 
 export function selectSessionRenderModel({ session, previousSession, hasControllerLease }) {

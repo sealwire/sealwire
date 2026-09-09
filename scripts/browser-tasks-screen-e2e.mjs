@@ -121,17 +121,19 @@ async function main() {
       { timeout: TIMEOUT_MS }
     );
 
-    // ---- A question the Orchestrator is parked on is DOCKED, not left in its
-    // transcript. ----
+    // ---- A question the Orchestrator is parked on is answered IN its
+    // transcript, pinned last. ----
     //
     // The pane has its own scroller and its own composer, so this is the only
-    // place the docked card's geometry can actually be checked on this surface:
-    // every other test of it mounts the component with props by hand.
+    // place the card's geometry can actually be checked on this surface: every
+    // other test of it mounts the component with props by hand.
     await page.fill("#task-orch-input", ORCH_ASK_PROMPT);
     await page.click("#task-orch-send");
-    await page.waitForSelector(".ask-user-dock .ask-user-option-button", { timeout: TIMEOUT_MS });
+    await page.waitForSelector(".transcript-ask-user-pinned .ask-user-option-button", {
+      timeout: TIMEOUT_MS,
+    });
 
-    const docked = await page.evaluate(() => {
+    const parked = await page.evaluate(() => {
       const rect = (el) => {
         if (!el) return null;
         const r = el.getBoundingClientRect();
@@ -140,19 +142,32 @@ async function main() {
       const scroller = document.querySelector(".task-orch-transcript");
       const live = document.querySelector(".chat-message-ask-user-interactive");
       const composer = document.querySelector("#task-orch-input");
+      // Content-independent form of "no second scroller": the card's nearest
+      // scrollable ancestor must BE the conversation. Counting elements that
+      // currently overflow depends on how much text the fixture happens to have.
+      const scrollParentOf = (el) => {
+        for (let p = el?.parentElement; p; p = p.parentElement) {
+          if (/(auto|scroll)/.test(getComputedStyle(p).overflowY)) return p;
+        }
+        return null;
+      };
+
       return {
         viewport: window.innerHeight,
         liveCards: document.querySelectorAll(".chat-message-ask-user-interactive").length,
         liveInScroller: Boolean(scroller && live && scroller.contains(live)),
-        liveInDock: Boolean(live?.closest(".ask-user-dock")),
+        liveInPinned: Boolean(live?.closest(".transcript-ask-user-pinned")),
         optionsInScroller: scroller
           ? scroller.querySelectorAll(".ask-user-option-button").length
           : -1,
-        recordInScroller: scroller
+        cardsInScroller: scroller
           ? scroller.querySelectorAll(".chat-message-ask-user").length
           : -1,
+        // A second scroller here meant 40vh of a narrow column, leaving neither the
+        // run list nor the composer usable.
+        cardScrollParentIsTranscript: Boolean(live) && scrollParentOf(live) === scroller,
         scroller: rect(scroller),
-        option: rect(document.querySelector(".ask-user-dock .ask-user-option-button")),
+        option: rect(document.querySelector(".transcript-ask-user-pinned .ask-user-option-button")),
         composer: rect(composer),
         composerFollowsCard: Boolean(
           live && composer
@@ -160,36 +175,38 @@ async function main() {
         ),
       };
     });
-    console.log(`[tasks-orch-dock] ${JSON.stringify(docked)}`);
+    console.log(`[tasks-orch-ask-user] ${JSON.stringify(parked)}`);
 
-    assert.equal(docked.liveCards, 1, "the question must be live in exactly one place");
-    assert.equal(
-      docked.liveInScroller,
-      false,
-      "inside the pane's scroller the card can be scrolled away from and rebuilt with the list"
-    );
-    assert.ok(docked.liveInDock, "the live card belongs to the dock");
-    assert.equal(
-      docked.optionsInScroller,
-      0,
-      "the record in the conversation must not show options that do nothing"
-    );
-    assert.equal(docked.recordInScroller, 1, "the record of the ask stays in the conversation");
-    assert.ok(docked.composerFollowsCard, "the card sits above the box you would otherwise type in");
+    assert.equal(parked.liveCards, 1, "the question must be live in exactly one place");
     assert.ok(
-      docked.option.top >= 0 && docked.option.bottom <= docked.viewport,
+      parked.liveInScroller,
+      "the question is answered in the pane's conversation, not in a strip above it"
+    );
+    assert.ok(parked.liveInPinned, "and it is the pinned card at the end of it");
+    assert.ok(
+      parked.optionsInScroller > 0,
+      "the options must be tappable in the conversation itself"
+    );
+    assert.equal(parked.cardsInScroller, 1, "one card, not a record and a live copy");
+    assert.ok(
+      parked.cardScrollParentIsTranscript,
+      "the card must scroll with the pane's conversation, not in a strip of its own"
+    );
+    assert.ok(parked.composerFollowsCard, "the card sits above the box you would otherwise type in");
+    assert.ok(
+      parked.option.top >= 0 && parked.option.bottom <= parked.viewport,
       `the option must be on screen without scrolling `
-      + `(option ${docked.option.top}-${docked.option.bottom}, viewport ${docked.viewport})`
+      + `(option ${parked.option.top}-${parked.option.bottom}, viewport ${parked.viewport})`
     );
     assert.ok(
-      docked.scroller.h > 120,
-      `the conversation must keep usable height beside the card (got ${docked.scroller.h})`
+      parked.scroller.h > 120,
+      `the conversation must keep usable height (got ${parked.scroller.h})`
     );
 
-    // Answering it clears the dock and leaves the record behind.
-    await page.click(".ask-user-dock .ask-user-option-button");
+    // Answering it releases the pin and leaves the card behind as the record.
+    await page.click(".transcript-ask-user-pinned .ask-user-option-button");
     await page.waitForFunction(
-      () => !document.querySelector(".ask-user-dock .chat-message-ask-user-interactive"),
+      () => !document.querySelector(".chat-message-ask-user-interactive"),
       null,
       { timeout: TIMEOUT_MS }
     );

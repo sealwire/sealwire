@@ -130,6 +130,49 @@ test("the transcript never renders a live question the reader cannot answer", as
   container.remove();
 });
 
+// A pending question is answerable even when its tool call is not in the
+// transcript at all.
+//
+// The relay drops transcript entries from the HEAD under snapshot pressure
+// (`split_off` / `remove(0)` in protocol.rs) and a switched-to thread hydrates its
+// history in pages, so "there is a pending request" and "its row is loaded" are
+// separate facts. Keyed only off the row, the turn parks on a question the reader
+// is never shown and cannot answer.
+test("a pending question with no transcript row of its own is still answerable", async () => {
+  const { container, root } = mount();
+
+  await paint(
+    root,
+    [{ item_id: "msg-1", kind: "agent_text", text: "Working on it.", status: "completed" }],
+    options()
+  );
+
+  assert.deepEqual(
+    [...container.querySelectorAll(".ask-user-option-button")].map((b) => b.textContent),
+    ["Option A", "Option B"],
+    "the question the turn is parked on must be answerable with or without its row"
+  );
+
+  // And when the row arrives, the reader must not end up with two live copies of
+  // the same question competing for the tap.
+  await paint(
+    root,
+    [
+      { item_id: "msg-1", kind: "agent_text", text: "Working on it.", status: "completed" },
+      askEntry(),
+    ],
+    options()
+  );
+  assert.equal(
+    container.querySelectorAll(".chat-message-ask-user-interactive").length,
+    1,
+    "the arriving row replaces the standalone card rather than doubling it"
+  );
+
+  await act(async () => root.unmount());
+  container.remove();
+});
+
 // The hazard the dock was built to dodge: virtualization owns every row, so the
 // card holding a half-finished answer is unmounted the moment the reader scrolls
 // up to re-read what they are answering about.
