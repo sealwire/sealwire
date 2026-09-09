@@ -345,6 +345,8 @@ test("history arriving behind the question does not remount the form", async () 
   const before = notes();
   before.focus();
   await act(async () => typeInto(before, "mid-word"));
+  // Cursor parked mid-string, the way it is when you go back to fix a word.
+  before.setSelectionRange(3, 3);
   assert.ok(document.activeElement === before, "precondition: the reader is typing in it");
 
   // One unrelated row pages in above the question.
@@ -353,6 +355,10 @@ test("history arriving behind the question does not remount the form", async () 
   assert.ok(notes() === before, "an unrelated row must not replace the notes field");
   assert.ok(document.activeElement === before, "and must not steal focus from it");
   assert.equal(notes().value, "mid-word", "with what was typed still in it");
+  // Where the cursor sits is part of not being interrupted: restoring the text
+  // but dropping the caret to the end still loses the reader's place mid-edit.
+  assert.equal(notes().selectionStart, 3, "and the cursor must not move");
+  assert.equal(notes().selectionEnd, 3, "nor the selection collapse elsewhere");
 
   await act(async () => root.unmount());
   container.remove();
