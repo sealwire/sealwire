@@ -14,23 +14,11 @@ import {
   SETTINGS_SVG,
 } from "../svg.js";
 import {
-  getLocalAskUserDockSnapshot,
-  subscribeLocalAskUserDockSlot,
-} from "./ask-user-dock-slot.js";
-import {
   getLocalTranscriptSlotSnapshot,
   subscribeLocalTranscriptSlot,
 } from "./transcript-slot.js";
 
 const h = React.createElement;
-
-function LocalAskUserDockSlot() {
-  return React.useSyncExternalStore(
-    subscribeLocalAskUserDockSlot,
-    getLocalAskUserDockSnapshot,
-    getLocalAskUserDockSnapshot
-  );
-}
 
 function LocalTranscriptSlot() {
   return React.useSyncExternalStore(
@@ -490,18 +478,12 @@ function ThreadPanel() {
 }
 
 function ComposerShell() {
-  // One sticky block, not four siblings. The shell's console layout is a grid
+  // One sticky block, not three siblings: the shell's console layout is a grid
   // that grows past the viewport, and only `.composer-shell` was pinned to the
-  // bottom of it — so a docked question rendered as its own item landed BELOW
-  // the fold, where the reader's click hits the composer instead.
+  // bottom of it, so anything rendered beside it landed below the fold.
   return h(
     "div",
     { className: "composer-dock-stack" },
-    // Always a grid item, empty or not: .chat-shell is a grid, so a host that
-    // appears and disappears re-assigns every row below it — the whole column
-    // jumps at the exact moment the question arrives, and the first click at the
-    // options lands wherever they used to be.
-    h("div", { className: "ask-user-dock-host" }, h(LocalAskUserDockSlot)),
     h(
       "div",
       { className: "workspace-diff-chip-host" },

@@ -21,7 +21,7 @@ global.IS_REACT_ACT_ENVIRONMENT = true;
 const React = (await import("react")).default;
 const { act } = await import("react");
 const { createRoot } = await import("react-dom/client");
-const { AskUserDock } = await import("./shared/ask-user-dock.js");
+const { TranscriptContent } = await import("./shared/transcript-react.js");
 const { createLocalUiStore } = await import("./local/ui-store.js");
 const {
   createInitialRemoteTranscriptUiState,
@@ -99,13 +99,25 @@ test("only the question being sent is disabled, and its failure is shown on it",
   document.body.appendChild(container);
   const root = createRoot(container);
   const pending = [request("ask:1"), request("ask:2")];
+  const entries = pending.map((req) => ({
+    item_id: `tool:${req.tool_use_id}`,
+    kind: "tool_call",
+    status: "running",
+    tool: {
+      name: "AskUserQuestion",
+      input_preview: JSON.stringify({ questions: req.questions }),
+    },
+  }));
 
   await act(async () => {
     root.render(
-      h(AskUserDock, {
-        pendingAskUserQuestions: pending,
-        threadId: "thread-1",
+      h(TranscriptContent, {
+        entries,
         options: {
+          detailEntries: new Map(),
+          expandedKeys: new Set(),
+          loadingItemIds: new Set(),
+          pendingAskUserQuestions: pending,
           onSubmitAskUserAnswers: () => {},
           askUserSubmittingRequestIds: new Set(["ask:1"]),
           askUserErrors: new Map([["ask:2", "The relay is offline."]]),
@@ -115,7 +127,7 @@ test("only the question being sent is disabled, and its failure is shown on it",
   });
 
   const cards = [...container.querySelectorAll(".chat-message-ask-user-interactive")];
-  assert.equal(cards.length, 2, "both parked questions are docked");
+  assert.equal(cards.length, 2, "both parked questions are on screen");
   assert.equal(
     cards[0].querySelector(".ask-user-option-button").disabled,
     true,

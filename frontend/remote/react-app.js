@@ -74,7 +74,6 @@ import {
 } from "./state.js";
 import { useRelayNicknames } from "./use-relay-nicknames.js";
 import { RemoteTranscriptPanel } from "./remote-transcript-panel.js";
-import { AskUserDock } from "../shared/ask-user-dock.js";
 import { retainAskUserDraftsForPending } from "../shared/ask-user-draft-store.js";
 import {
   selectEmptyStateRenderModel,
@@ -3192,6 +3191,7 @@ function RemoteThreadPanel({
         onEnsureFileChangeDetail,
         onSubmitDecision,
         onSubmitAskUserAnswers,
+        onRetryAskUserDetail,
         pendingAskUserQuestions: visibleAskUserQuestions,
         session,
         transcriptDetailEntries,
@@ -3233,27 +3233,6 @@ function RemoteThreadPanel({
         })
       )
     ),
-    // Above the composer, outside the scroller: the card the turn is parked on
-    // must not be something the reader can scroll away from, and must not be
-    // rebuilt by the transcript it used to live in.
-    h(AskUserDock, {
-      pendingAskUserQuestions: visibleAskUserQuestions,
-      threadId: session?.active_thread_id || null,
-      options: {
-        onSubmitAskUserAnswers,
-        onRetryAskUserDetail,
-        askUserSubmittingRequestIds:
-          uiState.askUserSubmittingRequestIds instanceof Set
-            ? uiState.askUserSubmittingRequestIds
-            : new Set(),
-        askUserErrors: uiState.askUserErrors instanceof Map ? uiState.askUserErrors : new Map(),
-        askUserDetailErrors: askUserDetailErrors instanceof Map ? askUserDetailErrors : new Map(),
-        askUserDetailLoadingRequestIds:
-          askUserDetailLoadingRequestIds instanceof Set
-            ? askUserDetailLoadingRequestIds
-            : new Set(),
-      },
-    }),
     h(
       "section",
       {
