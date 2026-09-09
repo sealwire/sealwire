@@ -3499,6 +3499,112 @@ async fn stale_completion_does_not_retire_next_turn_pending_reservation() {
     );
 }
 
+/// Settle A without echo, reserve B unbound, then deliver A's late echo before
+/// any B bind. A's echo must merge into A's settled placeholder and must not
+/// claim B's pending reservation.
+#[tokio::test]
+async fn late_echo_for_settled_turn_does_not_claim_unbound_next_pending() {
+    let state = codex_test_state_with_thread("thread-late-a-vs-b").await;
+    const A_TEXT: &str = "turn A prompt";
+    const B_TEXT: &str = "turn B prompt";
+
+    let a_reserve_id = {
+        let mut relay = state.write().await;
+        let id = relay.reserve_codex_user_message("thread-late-a-vs-b", A_TEXT);
+        relay.bind_codex_user_reservation("thread-late-a-vs-b", &id, "turn-a");
+        relay.set_active_turn(Some("turn-a".to_string()));
+        id
+    };
+    handle_notification(turn_completed("thread-late-a-vs-b", "turn-a"), &state).await;
+
+    let b_reserve_id = {
+        let mut relay = state.write().await;
+        relay.set_active_turn(None);
+        // B is reserved locally but still unbound: no turn/started and no
+        // turn/start response yet.
+        relay.reserve_codex_user_message("thread-late-a-vs-b", B_TEXT)
+    };
+
+    handle_notification(
+        user_message_completed("thread-late-a-vs-b", "turn-a", "item-user-a", A_TEXT),
+        &state,
+    )
+    .await;
+
+    {
+        let relay = state.read().await;
+        let runtime = relay
+            .runtime_for_thread("thread-late-a-vs-b")
+            .expect("runtime");
+        let a_users: Vec<_> = runtime
+            .transcript
+            .iter()
+            .filter(|entry| {
+                entry.kind == TranscriptEntryKind::UserText
+                    && entry.turn_id.as_deref() == Some("turn-a")
+            })
+            .collect();
+        assert_eq!(a_users.len(), 1, "A's late echo must reconcile once");
+        assert_eq!(a_users[0].item_id, "item-user-a");
+        assert_eq!(a_users[0].text.as_deref(), Some(A_TEXT));
+        assert!(
+            !runtime
+                .transcript
+                .iter()
+                .any(|entry| entry.item_id == a_reserve_id),
+            "A's reserve placeholder identity must be replaced by the provider id"
+        );
+
+        let b = runtime
+            .codex_user_reservations
+            .get(&b_reserve_id)
+            .expect("B pending must survive A's late echo");
+        assert!(b.turn_id.is_none(), "B must remain unbound");
+        assert_eq!(b.text, B_TEXT);
+        assert_eq!(
+            runtime.codex_pending_bind_reservation_id.as_deref(),
+            Some(b_reserve_id.as_str()),
+            "B must remain the in-flight pending-bind slot"
+        );
+        let b_entry = runtime
+            .transcript
+            .iter()
+            .find(|entry| entry.item_id == b_reserve_id)
+            .expect("B placeholder must be unchanged");
+        assert_eq!(b_entry.text.as_deref(), Some(B_TEXT));
+        assert!(b_entry.turn_id.is_none());
+    }
+
+    {
+        let mut relay = state.write().await;
+        relay.bind_codex_user_reservation("thread-late-a-vs-b", &b_reserve_id, "turn-b");
+    }
+    handle_notification(
+        user_message_completed("thread-late-a-vs-b", "turn-b", "item-user-b", B_TEXT),
+        &state,
+    )
+    .await;
+
+    let relay = state.read().await;
+    let runtime = relay
+        .runtime_for_thread("thread-late-a-vs-b")
+        .expect("runtime");
+    let users: Vec<_> = runtime
+        .transcript
+        .iter()
+        .filter(|entry| entry.kind == TranscriptEntryKind::UserText)
+        .collect();
+    assert_eq!(users.len(), 2, "exactly one user entry per turn");
+    assert_eq!(users[0].turn_id.as_deref(), Some("turn-a"));
+    assert_eq!(users[0].item_id, "item-user-a");
+    assert_eq!(users[0].text.as_deref(), Some(A_TEXT));
+    assert_eq!(users[1].turn_id.as_deref(), Some("turn-b"));
+    assert_eq!(users[1].item_id, "item-user-b");
+    assert_eq!(users[1].text.as_deref(), Some(B_TEXT));
+    assert!(runtime.codex_user_reservations.is_empty());
+    assert!(runtime.codex_pending_bind_reservation_id.is_none());
+}
+
 #[tokio::test]
 async fn late_echo_after_terminal_settlement_merges_placeholder_without_duplicate() {
     let state = codex_test_state_with_thread("thread-late-echo-settle").await;

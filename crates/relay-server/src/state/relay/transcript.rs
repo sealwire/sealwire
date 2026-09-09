@@ -515,7 +515,20 @@ impl RelayState {
                 .find(|reservation| reservation.turn_id.as_deref() == Some(turn_id.as_str()))
                 .map(|reservation| reservation.item_id.clone())
         });
-        // Echo arrived before bind: only the in-flight pending slot may claim it.
+        // Settled leftover after terminal-without-echo: merge into that turn's
+        // placeholder before any unbound pending for a newer start can claim it.
+        if local_id.is_none() {
+            if let Some(runtime) = self.runtimes.get(thread_id) {
+                local_id = runtime.transcript.iter().find_map(|entry| {
+                    (entry.kind == TranscriptEntryKind::UserText
+                        && entry.turn_id.as_deref() == Some(turn_id.as_str())
+                        && entry.item_id.starts_with("codex:user-reserve:"))
+                    .then(|| entry.item_id.clone())
+                });
+            }
+        }
+        // Echo arrived before bind: only the in-flight pending slot may claim it,
+        // and only when no turn-matched settled placeholder exists above.
         if local_id.is_none() {
             if let Some(runtime) = self.runtimes.get(thread_id) {
                 if let Some(pending_id) = runtime.codex_pending_bind_reservation_id.as_deref() {
@@ -527,18 +540,6 @@ impl RelayState {
                         local_id = Some(pending_id.to_string());
                     }
                 }
-            }
-        }
-        // Reservation metadata already settled after terminal-without-echo: merge
-        // into the leftover placeholder for this turn instead of appending.
-        if local_id.is_none() {
-            if let Some(runtime) = self.runtimes.get(thread_id) {
-                local_id = runtime.transcript.iter().find_map(|entry| {
-                    (entry.kind == TranscriptEntryKind::UserText
-                        && entry.turn_id.as_deref() == Some(turn_id.as_str())
-                        && entry.item_id.starts_with("codex:user-reserve:"))
-                    .then(|| entry.item_id.clone())
-                });
             }
         }
         let Some(local_id) = local_id else {
