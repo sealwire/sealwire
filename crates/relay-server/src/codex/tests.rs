@@ -1,8 +1,5 @@
 use super::*;
-use crate::{
-    protocol::{SessionSnapshot, SessionSnapshotCompactProfile},
-    state::SecurityProfile,
-};
+use crate::{protocol::SessionSnapshot, state::SecurityProfile};
 use tokio::sync::{watch, RwLock};
 
 #[test]
@@ -2752,26 +2749,6 @@ fn agent_completed(thread_id: &str, turn_id: &str, item_id: &str, text: &str) ->
     })
 }
 
-fn reasoning_started(
-    thread_id: &str,
-    turn_id: &str,
-    item_id: &str,
-    text: &str,
-) -> serde_json::Value {
-    json!({
-        "method": "item/started",
-        "params": {
-            "threadId": thread_id,
-            "turnId": turn_id,
-            "item": {
-                "id": item_id,
-                "type": "reasoning",
-                "text": text
-            }
-        }
-    })
-}
-
 fn user_message_completed(
     thread_id: &str,
     turn_id: &str,
@@ -2786,849 +2763,116 @@ fn user_message_completed(
             "item": {
                 "id": item_id,
                 "type": "userMessage",
-                "content": [{ "text": text }]
+                "content": [{ "type": "inputText", "text": text }]
             }
         }
     })
 }
 
-fn assert_turn_order_is_user_then_reasoning(entries: &[TranscriptEntryView], turn_id: &str) {
-    let turn_entries: Vec<&TranscriptEntryView> = entries
-        .iter()
-        .filter(|entry| entry.turn_id.as_deref() == Some(turn_id))
-        .collect();
-    assert_eq!(
-        turn_entries.len(),
-        2,
-        "expected exactly user+reasoning entries for {turn_id}, got {turn_entries:?}"
-    );
-    assert_eq!(
-        turn_entries[0].kind,
-        TranscriptEntryKind::UserText,
-        "the first visible entry for {turn_id} must be the user message"
-    );
-    assert_eq!(
-        turn_entries[1].kind,
-        TranscriptEntryKind::Reasoning,
-        "reasoning should remain after the user entry for {turn_id}"
-    );
-}
-
-async fn activate_started_codex_thread(
+async fn activate_fake_codex_thread(
+    bridge: &CodexBridge,
     state: &std::sync::Arc<RwLock<RelayState>>,
-    thread: &ThreadSummaryView,
-) {
+) -> String {
+    let thread = bridge
+        .start_thread(
+            "/tmp/project",
+            "gpt-5-codex",
+            "on-request",
+            "workspace-write",
+        )
+        .await
+        .expect("start fake Codex thread");
+    let thread_id = thread.id.clone();
     let mut relay = state.write().await;
     relay.upsert_thread(thread.clone());
-    relay.active_thread_id = Some(thread.id.clone());
-    relay.remember_thread_settings(
-        &thread.id,
-        "on-request",
-        "workspace-write",
-        "low",
-        "gpt-5.6-sol",
-    );
+    relay.active_thread_id = Some(thread_id.clone());
+    relay.ensure_runtime_for_thread(&thread_id).summary = Some(thread);
+    thread_id
 }
 
-async fn assert_user_then_reasoning_projections(
-    state: &std::sync::Arc<RwLock<RelayState>>,
-    thread_id: &str,
-    turn_id: &str,
-) {
-    let relay = state.read().await;
-    let runtime = relay
-        .runtime_for_thread(thread_id)
-        .expect("thread runtime should exist after the send + late echo");
-    let runtime_views: Vec<TranscriptEntryView> = runtime
-        .transcript
-        .iter()
-        .map(|record| record.to_view())
-        .collect();
-    assert_turn_order_is_user_then_reasoning(&runtime_views, turn_id);
-
-    let snapshot = relay.snapshot();
-    assert_turn_order_is_user_then_reasoning(&snapshot.transcript, turn_id);
-
-    let display_snapshot = snapshot.compact_for(SessionSnapshotCompactProfile::LocalWeb);
-    assert_turn_order_is_user_then_reasoning(&display_snapshot.transcript, turn_id);
-}
-
-// Codex's first prompt never rides `consumed_initial_prompt`; start_session
-// creates the thread then calls start_turn. Reproduce that send boundary here
-// so a reservation installed before turn/start has a real placeholder to use.
 #[tokio::test]
-async fn first_turn_orders_user_before_reasoning_when_echo_arrives_late() {
+async fn codex_reservation_keeps_late_user_echo_before_output() {
     let (bridge, state) = spawn_fake_codex_bridge().await;
-    let thread = bridge
-        .start_thread(
-            "/tmp/project",
-            "gpt-5.6-sol",
-            "on-request",
-            "workspace-write",
-        )
-        .await
-        .expect("brand-new Codex session must start a thread");
-    activate_started_codex_thread(&state, &thread).await;
-
-    const USER_TEXT: &str = "hello from first turn";
+    let thread_id = activate_fake_codex_thread(&bridge, &state).await;
     let turn_id = bridge
-        .start_turn(&thread.id, USER_TEXT, "gpt-5.6-sol", "low")
+        .start_turn(&thread_id, "first question", "gpt-5-codex", "medium")
         .await
-        .expect("first send must reach turn/start")
-        .expect("turn/start must return a turn id");
-
-    // Same-turn provider output arrives before the userMessage echo.
-    handle_notification(
-        reasoning_started(
-            &thread.id,
-            &turn_id,
-            "item-reasoning-first",
-            "Thinking before the echo arrives",
-        ),
-        &state,
-    )
-    .await;
-    handle_notification(
-        user_message_completed(&thread.id, &turn_id, "item-user-first", USER_TEXT),
-        &state,
-    )
-    .await;
-
-    assert_user_then_reasoning_projections(&state, &thread.id, &turn_id).await;
-}
-
-#[tokio::test]
-async fn existing_thread_next_turn_orders_user_before_reasoning_when_echo_arrives_late() {
-    let (bridge, state) = spawn_fake_codex_bridge().await;
-    let thread = bridge
-        .start_thread(
-            "/tmp/project",
-            "gpt-5.6-sol",
-            "on-request",
-            "workspace-write",
-        )
+        .expect("start turn")
+        .expect("turn id");
+    let overlap = bridge
+        .start_turn(&thread_id, "overlap", "gpt-5-codex", "medium")
         .await
-        .expect("existing-thread case still starts from a real Codex thread");
-    activate_started_codex_thread(&state, &thread).await;
+        .expect_err("the response-to-app handoff must remain an admission fence");
+    assert!(overlap.contains("still unresolved"), "{overlap}");
+    state.write().await.set_active_turn(Some(turn_id.clone()));
 
-    const PREV_TEXT: &str = "previous turn user prompt";
-    let prev_turn_id = bridge
-        .start_turn(&thread.id, PREV_TEXT, "gpt-5.6-sol", "low")
-        .await
-        .expect("prior send must reach turn/start")
-        .expect("prior turn/start must return a turn id");
+    handle_notification(agent_started(&thread_id, &turn_id, "agent-1"), &state).await;
     handle_notification(
-        user_message_completed(&thread.id, &prev_turn_id, "item-user-prev", PREV_TEXT),
-        &state,
-    )
-    .await;
-    handle_notification(turn_completed(&thread.id, &prev_turn_id), &state).await;
-
-    const USER_TEXT: &str = "current turn user prompt";
-    let turn_id = bridge
-        .start_turn(&thread.id, USER_TEXT, "gpt-5.6-sol", "low")
-        .await
-        .expect("next send must reach turn/start")
-        .expect("next turn/start must return a turn id");
-
-    handle_notification(
-        reasoning_started(
-            &thread.id,
-            &turn_id,
-            "item-reasoning-next",
-            "Reasoning starts before user echo",
-        ),
+        agent_delta(&thread_id, &turn_id, "agent-1", "working"),
         &state,
     )
     .await;
     handle_notification(
-        user_message_completed(&thread.id, &turn_id, "item-user-next", USER_TEXT),
-        &state,
-    )
-    .await;
-
-    assert_user_then_reasoning_projections(&state, &thread.id, &turn_id).await;
-}
-
-#[tokio::test]
-async fn late_prior_turn_echo_does_not_consume_next_turn_reservation() {
-    let (bridge, state) = spawn_fake_codex_bridge().await;
-    let thread = bridge
-        .start_thread(
-            "/tmp/project",
-            "gpt-5.6-sol",
-            "on-request",
-            "workspace-write",
-        )
-        .await
-        .expect("thread must start");
-    activate_started_codex_thread(&state, &thread).await;
-
-    const PREV_TEXT: &str = "previous turn without echo yet";
-    let prev_turn_id = bridge
-        .start_turn(&thread.id, PREV_TEXT, "gpt-5.6-sol", "low")
-        .await
-        .expect("prior send must reach turn/start")
-        .expect("prior turn id");
-
-    const NEXT_TEXT: &str = "next turn prompt";
-    let next_turn_id = bridge
-        .start_turn(&thread.id, NEXT_TEXT, "gpt-5.6-sol", "low")
-        .await
-        .expect("next send must reach turn/start")
-        .expect("next turn id");
-
-    {
-        let relay = state.read().await;
-        let runtime = relay
-            .runtime_for_thread(&thread.id)
-            .expect("runtime exists");
-        assert_eq!(
-            runtime.codex_user_reservations.len(),
-            2,
-            "starting the next turn must keep the prior turn's reservation"
-        );
-        let user_entries: Vec<_> = runtime
-            .transcript
-            .iter()
-            .filter(|entry| entry.kind == TranscriptEntryKind::UserText)
-            .collect();
-        assert_eq!(user_entries.len(), 2, "both placeholders must remain");
-    }
-
-    // Late echo for the PREVIOUS turn must not steal the unbound-or-next slot.
-    handle_notification(
-        user_message_completed(&thread.id, &prev_turn_id, "item-user-prev", PREV_TEXT),
-        &state,
-    )
-    .await;
-
-    {
-        let relay = state.read().await;
-        let runtime = relay
-            .runtime_for_thread(&thread.id)
-            .expect("runtime exists");
-        assert!(
-            runtime
-                .codex_user_reservations
-                .values()
-                .any(|reservation| reservation.turn_id.as_deref() == Some(next_turn_id.as_str())),
-            "next-turn reservation must survive a late prior-turn echo"
-        );
-        let next_user = runtime
-            .transcript
-            .iter()
-            .find(|entry| entry.turn_id.as_deref() == Some(next_turn_id.as_str()))
-            .expect("next-turn placeholder must still be present");
-        assert_eq!(next_user.kind, TranscriptEntryKind::UserText);
-        assert_eq!(next_user.text.as_deref(), Some(NEXT_TEXT));
-    }
-
-    handle_notification(
-        reasoning_started(
-            &thread.id,
-            &next_turn_id,
-            "item-reasoning-next",
-            "reasoning after surviving late echo",
-        ),
-        &state,
-    )
-    .await;
-    handle_notification(
-        user_message_completed(&thread.id, &next_turn_id, "item-user-next", NEXT_TEXT),
-        &state,
-    )
-    .await;
-
-    assert_user_then_reasoning_projections(&state, &thread.id, &next_turn_id).await;
-}
-
-#[tokio::test]
-async fn echo_before_bind_reconciles_into_pending_reservation() {
-    let state = codex_test_state_with_thread("thread-early-echo").await;
-    let reservation_id = {
-        let mut relay = state.write().await;
-        relay.reserve_codex_user_message("thread-early-echo", "early echo prompt")
-    };
-
-    // Provider echo arrives before turn/started or turn/start response binds.
-    handle_notification(
-        user_message_completed(
-            "thread-early-echo",
-            "turn-early",
-            "item-user-early",
-            "early echo prompt",
-        ),
+        user_message_completed(&thread_id, &turn_id, "provider-user-1", "first question"),
         &state,
     )
     .await;
 
     let relay = state.read().await;
     let runtime = relay
-        .runtime_for_thread("thread-early-echo")
-        .expect("runtime");
-    let users: Vec<_> = runtime
-        .transcript
-        .iter()
-        .filter(|entry| entry.kind == TranscriptEntryKind::UserText)
-        .collect();
-    assert_eq!(
-        users.len(),
-        1,
-        "early echo must not duplicate the placeholder"
-    );
-    assert_eq!(users[0].item_id, "item-user-early");
-    assert_eq!(users[0].turn_id.as_deref(), Some("turn-early"));
-    assert!(
-        !runtime
-            .codex_user_reservations
-            .contains_key(&reservation_id),
-        "reconcile must retire the pending reservation"
-    );
-    assert!(runtime.codex_pending_bind_reservation_id.is_none());
-}
-
-#[tokio::test]
-async fn turn_started_binds_pending_reservation_not_oldest_unbound() {
-    let state = codex_test_state_with_thread("thread-bind").await;
-    let stale_id = {
-        let mut relay = state.write().await;
-        let stale = relay.reserve_codex_user_message("thread-bind", "stale");
-        relay.clear_codex_pending_bind_reservation("thread-bind");
-        stale
-    };
-    let pending_id = {
-        let mut relay = state.write().await;
-        relay.reserve_codex_user_message("thread-bind", "current prompt")
-    };
-
-    handle_notification(turn_started("thread-bind", "turn-current"), &state).await;
-
-    let relay = state.read().await;
-    let runtime = relay.runtime_for_thread("thread-bind").expect("runtime");
-    let stale = runtime
-        .codex_user_reservations
-        .get(&stale_id)
-        .expect("stale reservation must remain");
-    assert!(
-        stale.turn_id.is_none(),
-        "turn/started must not attach to an older unbound leftover"
-    );
-    let pending = runtime
-        .codex_user_reservations
-        .get(&pending_id)
-        .expect("pending reservation");
-    assert_eq!(pending.turn_id.as_deref(), Some("turn-current"));
-}
-
-#[tokio::test]
-async fn notification_before_response_keeps_user_then_reasoning_order() {
-    let state = codex_test_state_with_thread("thread-notif-first").await;
-    let reservation_id = {
-        let mut relay = state.write().await;
-        relay.reserve_codex_user_message("thread-notif-first", "notif-first prompt")
-    };
-
-    handle_notification(turn_started("thread-notif-first", "turn-nf"), &state).await;
-    handle_notification(
-        reasoning_started(
-            "thread-notif-first",
-            "turn-nf",
-            "item-reasoning-nf",
-            "reasoning before RPC returns",
-        ),
-        &state,
-    )
-    .await;
-    handle_notification(
-        user_message_completed(
-            "thread-notif-first",
-            "turn-nf",
-            "item-user-nf",
-            "notif-first prompt",
-        ),
-        &state,
-    )
-    .await;
-    // Late RPC bind is idempotent.
-    {
-        let mut relay = state.write().await;
-        relay.bind_codex_user_reservation("thread-notif-first", &reservation_id, "turn-nf");
-    }
-
-    assert_user_then_reasoning_projections(&state, "thread-notif-first", "turn-nf").await;
-}
-
-#[tokio::test]
-async fn response_before_notification_keeps_user_then_reasoning_order() {
-    let state = codex_test_state_with_thread("thread-resp-first").await;
-    let reservation_id = {
-        let mut relay = state.write().await;
-        relay.reserve_codex_user_message("thread-resp-first", "resp-first prompt")
-    };
-    {
-        let mut relay = state.write().await;
-        relay.bind_codex_user_reservation("thread-resp-first", &reservation_id, "turn-rf");
-    }
-
-    handle_notification(turn_started("thread-resp-first", "turn-rf"), &state).await;
-    handle_notification(
-        reasoning_started(
-            "thread-resp-first",
-            "turn-rf",
-            "item-reasoning-rf",
-            "reasoning after bind",
-        ),
-        &state,
-    )
-    .await;
-    handle_notification(
-        user_message_completed(
-            "thread-resp-first",
-            "turn-rf",
-            "item-user-rf",
-            "resp-first prompt",
-        ),
-        &state,
-    )
-    .await;
-
-    assert_user_then_reasoning_projections(&state, "thread-resp-first", "turn-rf").await;
-}
-
-#[tokio::test]
-async fn explicit_start_rejection_clears_reservation_placeholder() {
-    let (bridge, state) = spawn_fake_codex_bridge().await;
-    let thread = bridge
-        .start_thread(
-            "/tmp/project",
-            "gpt-5.6-sol",
-            "on-request",
-            "workspace-write",
-        )
-        .await
-        .expect("thread starts");
-    activate_started_codex_thread(&state, &thread).await;
-    configure_fake_codex_reject_turn_start(&bridge).await;
-
-    let err = bridge
-        .start_turn(&thread.id, "will be rejected", "gpt-5.6-sol", "low")
-        .await
-        .expect_err("turn/start must fail under reject policy");
-    assert!(
-        err.contains("turn rejected by test policy"),
-        "unexpected error: {err}"
-    );
-
-    let relay = state.read().await;
-    let runtime = relay.runtime_for_thread(&thread.id).expect("runtime");
-    assert!(
-        runtime.codex_user_reservations.is_empty(),
-        "rejected start must clear reservation state"
-    );
-    assert!(runtime.codex_pending_bind_reservation_id.is_none());
-    assert!(
-        !runtime
-            .transcript
-            .iter()
-            .any(|entry| entry.kind == TranscriptEntryKind::UserText),
-        "rejected start must remove the user placeholder"
-    );
-}
-
-#[tokio::test]
-async fn terminal_without_echo_settles_reservation_and_does_not_contaminate_next() {
-    let (bridge, state) = spawn_fake_codex_bridge().await;
-    let thread = bridge
-        .start_thread(
-            "/tmp/project",
-            "gpt-5.6-sol",
-            "on-request",
-            "workspace-write",
-        )
-        .await
-        .expect("thread starts");
-    activate_started_codex_thread(&state, &thread).await;
-
-    const FIRST: &str = "first without echo";
-    let first_turn = bridge
-        .start_turn(&thread.id, FIRST, "gpt-5.6-sol", "low")
-        .await
-        .expect("first send")
-        .expect("turn id");
-    handle_notification(turn_completed(&thread.id, &first_turn), &state).await;
-
-    {
-        let relay = state.read().await;
-        let runtime = relay.runtime_for_thread(&thread.id).expect("runtime");
-        assert!(
-            runtime.codex_user_reservations.is_empty(),
-            "terminal-without-echo must retire reservation metadata"
-        );
-        assert!(runtime.codex_pending_bind_reservation_id.is_none());
-        let users: Vec<_> = runtime
-            .transcript
-            .iter()
-            .filter(|entry| entry.kind == TranscriptEntryKind::UserText)
-            .collect();
-        assert_eq!(users.len(), 1, "placeholder user entry must remain visible");
-        assert_eq!(users[0].text.as_deref(), Some(FIRST));
-        assert!(
-            users[0].item_id.starts_with("codex:user-reserve:"),
-            "settled placeholder must keep reserve id until a late echo merges"
-        );
-        assert_eq!(users[0].turn_id.as_deref(), Some(first_turn.as_str()));
-    }
-
-    const SECOND: &str = "second turn prompt";
-    let second_turn = bridge
-        .start_turn(&thread.id, SECOND, "gpt-5.6-sol", "low")
-        .await
-        .expect("second send")
-        .expect("turn id");
-    // Late echo for the settled first turn must merge in place, not append, and
-    // must not steal the second reservation.
-    handle_notification(
-        user_message_completed(&thread.id, &first_turn, "item-user-late-first", FIRST),
-        &state,
-    )
-    .await;
-    {
-        let relay = state.read().await;
-        let runtime = relay.runtime_for_thread(&thread.id).expect("runtime");
-        let first_users: Vec<_> = runtime
-            .transcript
-            .iter()
-            .filter(|entry| {
-                entry.kind == TranscriptEntryKind::UserText
-                    && entry.turn_id.as_deref() == Some(first_turn.as_str())
-            })
-            .collect();
-        assert_eq!(
-            first_users.len(),
-            1,
-            "late echo after settle must not duplicate the first user entry"
-        );
-        assert_eq!(first_users[0].item_id, "item-user-late-first");
-        assert!(
-            runtime
-                .codex_user_reservations
-                .values()
-                .any(
-                    |reservation| reservation.turn_id.as_deref() == Some(second_turn.as_str())
-                        || (reservation.turn_id.is_none()
-                            && runtime.codex_pending_bind_reservation_id.is_some())
-                ),
-            "second-turn reservation must survive late first-turn echo"
-        );
-    }
-    handle_notification(
-        reasoning_started(
-            &thread.id,
-            &second_turn,
-            "item-reasoning-second",
-            "second reasoning",
-        ),
-        &state,
-    )
-    .await;
-    handle_notification(
-        user_message_completed(&thread.id, &second_turn, "item-user-second", SECOND),
-        &state,
-    )
-    .await;
-
-    assert_user_then_reasoning_projections(&state, &thread.id, &second_turn).await;
-}
-
-#[tokio::test]
-async fn background_thread_reservation_survives_active_focus_elsewhere() {
-    let (bridge, state) = spawn_fake_codex_bridge().await;
-    let bg = bridge
-        .start_thread(
-            "/tmp/project",
-            "gpt-5.6-sol",
-            "on-request",
-            "workspace-write",
-        )
-        .await
-        .expect("bg thread");
-    let active = bridge
-        .start_thread(
-            "/tmp/project",
-            "gpt-5.6-sol",
-            "on-request",
-            "workspace-write",
-        )
-        .await
-        .expect("active thread");
-    {
-        let mut relay = state.write().await;
-        relay.upsert_thread(bg.clone());
-        relay.upsert_thread(active.clone());
-        relay.active_thread_id = Some(active.id.clone());
-        relay.remember_thread_settings(
-            &bg.id,
-            "on-request",
-            "workspace-write",
-            "low",
-            "gpt-5.6-sol",
-        );
-        relay.remember_thread_settings(
-            &active.id,
-            "on-request",
-            "workspace-write",
-            "low",
-            "gpt-5.6-sol",
-        );
-    }
-
-    const TEXT: &str = "background prompt";
-    let turn_id = bridge
-        .start_turn(&bg.id, TEXT, "gpt-5.6-sol", "low")
-        .await
-        .expect("bg send")
-        .expect("turn id");
-    handle_notification(
-        reasoning_started(&bg.id, &turn_id, "item-reasoning-bg", "bg reasoning"),
-        &state,
-    )
-    .await;
-    handle_notification(
-        user_message_completed(&bg.id, &turn_id, "item-user-bg", TEXT),
-        &state,
-    )
-    .await;
-
-    let relay = state.read().await;
-    let runtime = relay.runtime_for_thread(&bg.id).expect("bg runtime");
-    let turn_entries: Vec<_> = runtime
+        .runtime_for_thread(&thread_id)
+        .expect("thread runtime");
+    let turn_entries = runtime
         .transcript
         .iter()
         .filter(|entry| entry.turn_id.as_deref() == Some(turn_id.as_str()))
-        .collect();
+        .collect::<Vec<_>>();
     assert_eq!(turn_entries.len(), 2);
     assert_eq!(turn_entries[0].kind, TranscriptEntryKind::UserText);
-    assert_eq!(turn_entries[1].kind, TranscriptEntryKind::Reasoning);
+    assert_eq!(turn_entries[0].item_id, "provider-user-1");
+    assert_eq!(turn_entries[1].kind, TranscriptEntryKind::AgentText);
 }
 
 #[tokio::test]
-async fn unloaded_thread_retry_binds_reservation_after_heal() {
+async fn uncertain_codex_start_blocks_retry_until_late_turn_is_identified() {
     let (bridge, state) = spawn_fake_codex_bridge().await;
-    {
-        let mut relay = state.write().await;
-        relay.remember_thread_settings(
-            "thread-cold-lifecycle",
-            "on-request",
-            "workspace-write",
-            "low",
-            "gpt-5.6-sol",
-        );
-        relay.active_thread_id = Some("thread-cold-lifecycle".to_string());
-    }
+    let thread_id = activate_fake_codex_thread(&bridge, &state).await;
+    configure_fake_codex_drop_turn_start(&bridge).await;
+    bridge.set_test_request_timeout_ms(100);
+    let bridge = std::sync::Arc::new(bridge);
 
-    const TEXT: &str = "healed send";
-    let turn_id = bridge
-        .start_turn("thread-cold-lifecycle", TEXT, "gpt-5.6-sol", "low")
+    let first = {
+        let bridge = bridge.clone();
+        let thread_id = thread_id.clone();
+        tokio::spawn(async move {
+            bridge
+                .start_turn(&thread_id, "prompt A", "gpt-5-codex", "medium")
+                .await
+        })
+    };
+    wait_for_codex_method_count(&state, "turn/start", 1).await;
+
+    let retry_error = bridge
+        .start_turn(&thread_id, "prompt B", "gpt-5-codex", "medium")
         .await
-        .expect("heal must succeed")
-        .expect("turn id");
-
-    handle_notification(
-        reasoning_started(
-            "thread-cold-lifecycle",
-            &turn_id,
-            "item-reasoning-heal",
-            "after heal",
-        ),
-        &state,
-    )
-    .await;
-    handle_notification(
-        user_message_completed("thread-cold-lifecycle", &turn_id, "item-user-heal", TEXT),
-        &state,
-    )
-    .await;
-
-    assert_user_then_reasoning_projections(&state, "thread-cold-lifecycle", &turn_id).await;
-}
-
-#[tokio::test]
-async fn stale_completion_does_not_retire_next_turn_pending_reservation() {
-    let state = codex_test_state_with_thread("thread-stale-complete").await;
-    let first_id = {
-        let mut relay = state.write().await;
-        let id = relay.reserve_codex_user_message("thread-stale-complete", "first");
-        relay.bind_codex_user_reservation("thread-stale-complete", &id, "turn-first");
-        relay.set_active_turn(Some("turn-first".to_string()));
-        id
-    };
-    let next_id = {
-        let mut relay = state.write().await;
-        // Simulate the next send's unbound pending after the prior turn idled.
-        relay.set_active_turn(None);
-        relay.reserve_codex_user_message("thread-stale-complete", "next prompt")
-    };
-
-    // Late/duplicate completion for the prior turn while active_turn_id is None.
-    handle_notification(
-        turn_completed("thread-stale-complete", "turn-first"),
-        &state,
-    )
-    .await;
-
-    let relay = state.read().await;
-    let runtime = relay
-        .runtime_for_thread("thread-stale-complete")
-        .expect("runtime");
-    assert!(
-        !runtime.codex_user_reservations.contains_key(&first_id),
-        "prior turn's bound reservation must settle"
-    );
-    let next = runtime
-        .codex_user_reservations
-        .get(&next_id)
-        .expect("next pending reservation must survive stale completion");
-    assert!(
-        next.turn_id.is_none(),
-        "stale completion must not stamp the next unbound pending"
-    );
-    assert_eq!(
-        runtime.codex_pending_bind_reservation_id.as_deref(),
-        Some(next_id.as_str())
-    );
-}
-
-/// Settle A without echo, reserve B unbound, then deliver A's late echo before
-/// any B bind. A's echo must merge into A's settled placeholder and must not
-/// claim B's pending reservation.
-#[tokio::test]
-async fn late_echo_for_settled_turn_does_not_claim_unbound_next_pending() {
-    let state = codex_test_state_with_thread("thread-late-a-vs-b").await;
-    const A_TEXT: &str = "turn A prompt";
-    const B_TEXT: &str = "turn B prompt";
-
-    let a_reserve_id = {
-        let mut relay = state.write().await;
-        let id = relay.reserve_codex_user_message("thread-late-a-vs-b", A_TEXT);
-        relay.bind_codex_user_reservation("thread-late-a-vs-b", &id, "turn-a");
-        relay.set_active_turn(Some("turn-a".to_string()));
-        id
-    };
-    handle_notification(turn_completed("thread-late-a-vs-b", "turn-a"), &state).await;
-
-    let b_reserve_id = {
-        let mut relay = state.write().await;
-        relay.set_active_turn(None);
-        // B is reserved locally but still unbound: no turn/started and no
-        // turn/start response yet.
-        relay.reserve_codex_user_message("thread-late-a-vs-b", B_TEXT)
-    };
-
-    handle_notification(
-        user_message_completed("thread-late-a-vs-b", "turn-a", "item-user-a", A_TEXT),
-        &state,
-    )
-    .await;
+        .expect_err("a concurrent retry must not replace A's reservation");
+    assert!(retry_error.contains("still unresolved"), "{retry_error}");
+    let timeout_error = first
+        .await
+        .expect("join first start")
+        .expect_err("the fake drops A's response");
+    assert!(timeout_error.contains("timed out"), "{timeout_error}");
 
     {
         let relay = state.read().await;
         let runtime = relay
-            .runtime_for_thread("thread-late-a-vs-b")
-            .expect("runtime");
-        let a_users: Vec<_> = runtime
-            .transcript
-            .iter()
-            .filter(|entry| {
-                entry.kind == TranscriptEntryKind::UserText
-                    && entry.turn_id.as_deref() == Some("turn-a")
-            })
-            .collect();
-        assert_eq!(a_users.len(), 1, "A's late echo must reconcile once");
-        assert_eq!(a_users[0].item_id, "item-user-a");
-        assert_eq!(a_users[0].text.as_deref(), Some(A_TEXT));
-        assert!(
-            !runtime
-                .transcript
-                .iter()
-                .any(|entry| entry.item_id == a_reserve_id),
-            "A's reserve placeholder identity must be replaced by the provider id"
-        );
-
-        let b = runtime
-            .codex_user_reservations
-            .get(&b_reserve_id)
-            .expect("B pending must survive A's late echo");
-        assert!(b.turn_id.is_none(), "B must remain unbound");
-        assert_eq!(b.text, B_TEXT);
-        assert_eq!(
-            runtime.codex_pending_bind_reservation_id.as_deref(),
-            Some(b_reserve_id.as_str()),
-            "B must remain the in-flight pending-bind slot"
-        );
-        let b_entry = runtime
-            .transcript
-            .iter()
-            .find(|entry| entry.item_id == b_reserve_id)
-            .expect("B placeholder must be unchanged");
-        assert_eq!(b_entry.text.as_deref(), Some(B_TEXT));
-        assert!(b_entry.turn_id.is_none());
-    }
-
-    {
-        let mut relay = state.write().await;
-        relay.bind_codex_user_reservation("thread-late-a-vs-b", &b_reserve_id, "turn-b");
-    }
-    handle_notification(
-        user_message_completed("thread-late-a-vs-b", "turn-b", "item-user-b", B_TEXT),
-        &state,
-    )
-    .await;
-
-    let relay = state.read().await;
-    let runtime = relay
-        .runtime_for_thread("thread-late-a-vs-b")
-        .expect("runtime");
-    let users: Vec<_> = runtime
-        .transcript
-        .iter()
-        .filter(|entry| entry.kind == TranscriptEntryKind::UserText)
-        .collect();
-    assert_eq!(users.len(), 2, "exactly one user entry per turn");
-    assert_eq!(users[0].turn_id.as_deref(), Some("turn-a"));
-    assert_eq!(users[0].item_id, "item-user-a");
-    assert_eq!(users[0].text.as_deref(), Some(A_TEXT));
-    assert_eq!(users[1].turn_id.as_deref(), Some("turn-b"));
-    assert_eq!(users[1].item_id, "item-user-b");
-    assert_eq!(users[1].text.as_deref(), Some(B_TEXT));
-    assert!(runtime.codex_user_reservations.is_empty());
-    assert!(runtime.codex_pending_bind_reservation_id.is_none());
-}
-
-#[tokio::test]
-async fn late_echo_after_terminal_settlement_merges_placeholder_without_duplicate() {
-    let state = codex_test_state_with_thread("thread-late-echo-settle").await;
-    let reservation_id = {
-        let mut relay = state.write().await;
-        let id = relay.reserve_codex_user_message("thread-late-echo-settle", "settled prompt");
-        relay.bind_codex_user_reservation("thread-late-echo-settle", &id, "turn-settled");
-        relay.set_active_turn(Some("turn-settled".to_string()));
-        id
-    };
-
-    handle_notification(
-        turn_completed("thread-late-echo-settle", "turn-settled"),
-        &state,
-    )
-    .await;
-    {
-        let relay = state.read().await;
-        let runtime = relay
-            .runtime_for_thread("thread-late-echo-settle")
-            .expect("runtime");
-        assert!(!runtime
-            .codex_user_reservations
-            .contains_key(&reservation_id));
+            .runtime_for_thread(&thread_id)
+            .expect("thread runtime");
+        let reservation = runtime
+            .codex_start_reservation
+            .as_ref()
+            .expect("uncertain A must retain its admission fence");
+        assert!(reservation.turn_id.is_none());
         assert_eq!(
             runtime
                 .transcript
@@ -3639,979 +2883,123 @@ async fn late_echo_after_terminal_settlement_merges_placeholder_without_duplicat
         );
     }
 
+    // Codex can expose accepted work before either the response or
+    // `turn/started`. Any item carrying the id must identify A without moving
+    // its placeholder.
     handle_notification(
-        user_message_completed(
-            "thread-late-echo-settle",
-            "turn-settled",
-            "item-user-settled",
-            "settled prompt",
-        ),
+        agent_started(&thread_id, "turn-late-a", "agent-late-a"),
         &state,
     )
     .await;
+    handle_notification(
+        agent_delta(&thread_id, "turn-late-a", "agent-late-a", "late output"),
+        &state,
+    )
+    .await;
+    handle_notification(
+        user_message_completed(&thread_id, "turn-late-a", "provider-user-a", "prompt A"),
+        &state,
+    )
+    .await;
+    handle_notification(turn_completed(&thread_id, "turn-late-a"), &state).await;
 
+    configure_fake_codex(&bridge, "normal", 0).await;
+    let second_turn = bridge
+        .start_turn(&thread_id, "prompt B", "gpt-5-codex", "medium")
+        .await
+        .expect("B may start after A is identified and settled")
+        .expect("B turn id");
+    state
+        .write()
+        .await
+        .set_active_turn(Some(second_turn.clone()));
     let relay = state.read().await;
     let runtime = relay
-        .runtime_for_thread("thread-late-echo-settle")
-        .expect("runtime");
-    let users: Vec<_> = runtime
+        .runtime_for_thread(&thread_id)
+        .expect("thread runtime");
+    assert!(runtime.codex_start_reservation.is_none());
+    assert!(runtime.transcript.iter().any(|entry| {
+        entry.kind == TranscriptEntryKind::UserText
+            && entry.text.as_deref() == Some("prompt A")
+            && entry.turn_id.as_deref() == Some("turn-late-a")
+    }));
+    assert!(runtime.transcript.iter().any(|entry| {
+        entry.kind == TranscriptEntryKind::UserText
+            && entry.text.as_deref() == Some("prompt B")
+            && entry.turn_id.as_deref() == Some(second_turn.as_str())
+    }));
+    let a_entries = runtime
         .transcript
         .iter()
-        .filter(|entry| entry.kind == TranscriptEntryKind::UserText)
-        .collect();
-    assert_eq!(
-        users.len(),
-        1,
-        "late echo must merge into the settled placeholder, not append"
-    );
-    assert_eq!(users[0].item_id, "item-user-settled");
-    assert_eq!(users[0].turn_id.as_deref(), Some("turn-settled"));
-    assert_eq!(users[0].text.as_deref(), Some("settled prompt"));
+        .filter(|entry| entry.turn_id.as_deref() == Some("turn-late-a"))
+        .collect::<Vec<_>>();
+    assert_eq!(a_entries[0].kind, TranscriptEntryKind::UserText);
+    assert_eq!(a_entries[1].kind, TranscriptEntryKind::AgentText);
 }
 
 #[tokio::test]
-async fn lost_turn_start_response_clears_reservation_on_timeout() {
-    let (bridge, state) = spawn_fake_codex_bridge().await;
-    let thread = bridge
-        .start_thread(
-            "/tmp/project",
-            "gpt-5.6-sol",
-            "on-request",
-            "workspace-write",
-        )
-        .await
-        .expect("thread starts");
-    activate_started_codex_thread(&state, &thread).await;
-    configure_fake_codex_drop_turn_start(&bridge).await;
-    bridge.set_test_request_timeout_ms(200);
-
-    let err = bridge
-        .start_turn(&thread.id, "lost response prompt", "gpt-5.6-sol", "low")
-        .await;
-    bridge.set_test_request_timeout_ms(0);
-
-    let err = err.expect_err("dropped turn/start response must time out");
-    assert!(
-        err.to_lowercase().contains("timeout") || err.to_lowercase().contains("timed out"),
-        "unexpected error: {err}"
-    );
-
-    let relay = state.read().await;
-    let runtime = relay.runtime_for_thread(&thread.id).expect("runtime");
-    assert!(
-        runtime.codex_user_reservations.is_empty(),
-        "timeout must clear reservation state"
-    );
-    assert!(runtime.codex_pending_bind_reservation_id.is_none());
-    assert!(!runtime.codex_start_in_flight);
-    assert!(
-        !runtime
-            .transcript
-            .iter()
-            .any(|entry| entry.kind == TranscriptEntryKind::UserText),
-        "timeout must remove the user placeholder so the next turn starts clean"
-    );
-}
-
-/// Provider progress arrives before the hung turn/start response times out:
-/// keep the bound user placeholder ahead of output; late A echo must not claim B.
-#[tokio::test]
-async fn lost_response_after_turn_started_keeps_user_before_output_and_spares_retry() {
-    let (bridge, state) = spawn_fake_codex_bridge().await;
-    let thread = bridge
-        .start_thread(
-            "/tmp/project",
-            "gpt-5.6-sol",
-            "on-request",
-            "workspace-write",
-        )
-        .await
-        .expect("thread starts");
-    activate_started_codex_thread(&state, &thread).await;
-    configure_fake_codex_drop_turn_start(&bridge).await;
-    bridge.set_test_request_timeout_ms(400);
-
-    let thread_id = thread.id.clone();
-    let start = bridge.start_turn(&thread_id, "prompt A", "gpt-5.6-sol", "low");
-    tokio::pin!(start);
-    tokio::select! {
-        _ = &mut start => panic!("turn/start should still be hanging"),
-        _ = tokio::time::sleep(std::time::Duration::from_millis(40)) => {}
-    }
-    handle_notification(turn_started(&thread_id, "turn-lost-a"), &state).await;
-    handle_notification(
-        reasoning_started(&thread_id, "turn-lost-a", "item-r-lost", "thinking"),
-        &state,
-    )
-    .await;
-
-    let err = start.await.expect_err("hung turn/start must time out");
-    bridge.set_test_request_timeout_ms(0);
-    assert!(
-        err.to_lowercase().contains("timeout") || err.to_lowercase().contains("timed out"),
-        "unexpected: {err}"
-    );
-
+async fn stale_codex_turn_started_cannot_claim_the_next_reservation() {
+    let state = codex_test_state_with_thread("thread-stale-start").await;
     {
-        let relay = state.read().await;
-        let runtime = relay.runtime_for_thread(&thread_id).expect("runtime");
-        assert!(!runtime.codex_start_in_flight);
-        let turn_entries: Vec<_> = runtime
-            .transcript
-            .iter()
-            .filter(|entry| entry.turn_id.as_deref() == Some("turn-lost-a"))
-            .collect();
-        assert!(turn_entries.len() >= 2);
-        assert_eq!(turn_entries[0].kind, TranscriptEntryKind::UserText);
-        assert_eq!(turn_entries[1].kind, TranscriptEntryKind::Reasoning);
-        assert!(
-            runtime
-                .codex_user_reservations
-                .values()
-                .any(|reservation| reservation.turn_id.as_deref() == Some("turn-lost-a"))
-                || turn_entries[0].item_id.starts_with("codex:user-reserve:")
-                || turn_entries[0].item_id == "item-user-a",
-            "bound A placeholder must survive uncertain timeout"
-        );
-    }
-
-    // Disable drop so retry B can complete.
-    bridge
-        .send_request("fake/configure", json!({ "dropTurnStart": false }))
-        .await
-        .expect("re-enable turn/start responses");
-    let b_turn = bridge
-        .start_turn(&thread_id, "prompt B", "gpt-5.6-sol", "low")
-        .await
-        .expect("retry B")
-        .expect("turn id");
-
-    handle_notification(
-        user_message_completed(&thread_id, "turn-lost-a", "item-user-a", "prompt A"),
-        &state,
-    )
-    .await;
-    {
-        let relay = state.read().await;
-        let runtime = relay.runtime_for_thread(&thread_id).expect("runtime");
-        let b_pending = runtime
-            .codex_user_reservations
-            .values()
-            .find(|reservation| reservation.turn_id.as_deref() == Some(b_turn.as_str()));
-        assert!(
-            b_pending.is_some()
-                || runtime
-                    .transcript
-                    .iter()
-                    .any(|entry| entry.turn_id.as_deref() == Some(b_turn.as_str())
-                        && entry.kind == TranscriptEntryKind::UserText),
-            "late A echo must not consume B"
-        );
-        let a_users = runtime
-            .transcript
-            .iter()
-            .filter(|entry| {
-                entry.kind == TranscriptEntryKind::UserText
-                    && entry.turn_id.as_deref() == Some("turn-lost-a")
-            })
-            .count();
-        assert_eq!(a_users, 1);
-    }
-
-    handle_notification(
-        user_message_completed(&thread_id, &b_turn, "item-user-b", "prompt B"),
-        &state,
-    )
-    .await;
-    let relay = state.read().await;
-    let runtime = relay.runtime_for_thread(&thread_id).expect("runtime");
-    let users: Vec<_> = runtime
-        .transcript
-        .iter()
-        .filter(|entry| entry.kind == TranscriptEntryKind::UserText)
-        .collect();
-    assert_eq!(users.len(), 2);
-    assert_eq!(users[0].turn_id.as_deref(), Some("turn-lost-a"));
-    assert_eq!(users[1].turn_id.as_deref(), Some(b_turn.as_str()));
-}
-
-#[tokio::test]
-async fn stale_turn_started_for_known_turn_does_not_bind_next_pending() {
-    let state = codex_test_state_with_thread("thread-stale-started").await;
-    {
-        let mut relay = state.write().await;
-        let a = relay.reserve_codex_user_message("thread-stale-started", "A");
-        relay.bind_codex_user_reservation("thread-stale-started", &a, "turn-a");
-        relay.set_active_turn(Some("turn-a".to_string()));
-    }
-    handle_notification(turn_completed("thread-stale-started", "turn-a"), &state).await;
-    let b_id = {
-        let mut relay = state.write().await;
-        relay.set_active_turn(None);
-        relay.reserve_codex_user_message("thread-stale-started", "B")
-    };
-
-    handle_notification(turn_started("thread-stale-started", "turn-a"), &state).await;
-
-    let relay = state.read().await;
-    let runtime = relay
-        .runtime_for_thread("thread-stale-started")
-        .expect("runtime");
-    let b = runtime
-        .codex_user_reservations
-        .get(&b_id)
-        .expect("B pending");
-    assert!(b.turn_id.is_none(), "stale turn/started must not bind B");
-    assert_eq!(
-        runtime.codex_pending_bind_reservation_id.as_deref(),
-        Some(b_id.as_str())
-    );
-    assert!(runtime.codex_known_turn_ids.contains("turn-a"));
-}
-
-/// A times out with no identifying notification, then B is pending: A's late
-/// turn/started must not bind B (unknown id is still not proof of ownership).
-#[tokio::test]
-async fn unbound_uncertain_abandon_blocks_late_turn_started_from_binding_retry() {
-    let state = codex_test_state_with_thread("thread-abandon-a").await;
-    let a_id = {
         let mut relay = state.write().await;
         relay
-            .begin_codex_user_turn("thread-abandon-a", "prompt A")
-            .expect("admit A")
-    };
-    {
-        let mut relay = state.write().await;
-        relay.fail_codex_user_turn_uncertain("thread-abandon-a", &a_id);
+            .begin_codex_user_turn("thread-stale-start", "prompt A")
+            .expect("reserve A");
     }
-    let b_id = {
-        let mut relay = state.write().await;
-        relay
-            .begin_codex_user_turn("thread-abandon-a", "prompt B")
-            .expect("admit B")
+    handle_notification(turn_started("thread-stale-start", "turn-a"), &state).await;
+    handle_notification(turn_completed("thread-stale-start", "turn-a"), &state).await;
+    let b_reservation = {
+        state
+            .write()
+            .await
+            .begin_codex_user_turn("thread-stale-start", "prompt B")
+            .expect("reserve B")
     };
 
-    handle_notification(turn_started("thread-abandon-a", "turn-late-a"), &state).await;
-
+    handle_notification(turn_started("thread-stale-start", "turn-a"), &state).await;
     {
         let relay = state.read().await;
         let runtime = relay
-            .runtime_for_thread("thread-abandon-a")
-            .expect("runtime");
-        let b = runtime
-            .codex_user_reservations
-            .get(&b_id)
-            .expect("B pending must survive late A turn/started");
-        assert!(b.turn_id.is_none());
-        assert_eq!(
-            runtime.codex_pending_bind_reservation_id.as_deref(),
-            Some(b_id.as_str())
-        );
-        assert!(
-            runtime.codex_known_turn_ids.contains("turn-late-a"),
-            "late A turn id must be recorded as known without binding B"
-        );
-        assert!(runtime.codex_block_notification_bind);
-    }
-
-    // B's RPC response may still bind even if turn/started was suppressed.
-    {
-        let mut relay = state.write().await;
-        relay.bind_codex_user_reservation("thread-abandon-a", &b_id, "turn-b");
-        relay.release_codex_start_admission("thread-abandon-a");
-    }
-    let relay = state.read().await;
-    let runtime = relay
-        .runtime_for_thread("thread-abandon-a")
-        .expect("runtime");
-    assert_eq!(
-        runtime
-            .codex_user_reservations
-            .get(&b_id)
-            .and_then(|reservation| reservation.turn_id.as_deref()),
-        Some("turn-b")
-    );
-    assert!(!runtime.codex_block_notification_bind);
-}
-
-/// A times out unbound, then B is pending: an unknown late A userMessage must not
-/// claim B (block flag applies to echo reconcile, not only turn/started).
-#[tokio::test]
-async fn unbound_uncertain_abandon_blocks_late_user_message_from_claiming_retry() {
-    let state = codex_test_state_with_thread("thread-abandon-echo").await;
-    let a_id = {
-        let mut relay = state.write().await;
-        relay
-            .begin_codex_user_turn("thread-abandon-echo", "prompt A")
-            .expect("admit A")
-    };
-    {
-        let mut relay = state.write().await;
-        relay.fail_codex_user_turn_uncertain("thread-abandon-echo", &a_id);
-    }
-    let b_id = {
-        let mut relay = state.write().await;
-        relay
-            .begin_codex_user_turn("thread-abandon-echo", "prompt B")
-            .expect("admit B")
-    };
-
-    handle_notification(
-        user_message_completed(
-            "thread-abandon-echo",
-            "turn-late-a",
-            "item-late-a",
-            "prompt A",
-        ),
-        &state,
-    )
-    .await;
-
-    let relay = state.read().await;
-    let runtime = relay
-        .runtime_for_thread("thread-abandon-echo")
-        .expect("runtime");
-    let b = runtime
-        .codex_user_reservations
-        .get(&b_id)
-        .expect("B pending must survive late A userMessage");
-    assert!(b.turn_id.is_none());
-    assert_eq!(b.text, "prompt B");
-    assert_eq!(
-        runtime.codex_pending_bind_reservation_id.as_deref(),
-        Some(b_id.as_str())
-    );
-    assert!(runtime.codex_block_notification_bind);
-    // Late A may append as its own user row, but must not rewrite B's placeholder.
-    let b_placeholder = runtime
-        .transcript
-        .iter()
-        .find(|entry| {
-            entry.item_id.starts_with("codex:user-reserve:")
-                && entry.text.as_deref() == Some("prompt B")
-        })
-        .expect("B placeholder");
-    assert!(b_placeholder.turn_id.is_none());
-}
-
-/// Suppressed late A turn/started must not become the active turn while B is pending.
-#[tokio::test]
-async fn suppressed_turn_started_does_not_set_active_turn_while_retry_pending() {
-    let state = codex_test_state_with_thread("thread-suppress-active").await;
-    let a_id = {
-        let mut relay = state.write().await;
-        relay
-            .begin_codex_user_turn("thread-suppress-active", "prompt A")
-            .expect("admit A")
-    };
-    {
-        let mut relay = state.write().await;
-        relay.fail_codex_user_turn_uncertain("thread-suppress-active", &a_id);
-    }
-    let _b_id = {
-        let mut relay = state.write().await;
-        relay
-            .begin_codex_user_turn("thread-suppress-active", "prompt B")
-            .expect("admit B")
-    };
-
-    handle_notification(
-        turn_started("thread-suppress-active", "turn-late-a"),
-        &state,
-    )
-    .await;
-
-    let relay = state.read().await;
-    assert_ne!(
-        relay.active_turn_id.as_deref(),
-        Some("turn-late-a"),
-        "suppressed turn/started must not contaminate active turn"
-    );
-    let runtime = relay
-        .runtime_for_thread("thread-suppress-active")
-        .expect("runtime");
-    assert_ne!(
-        runtime.active_turn_id.as_deref(),
-        Some("turn-late-a"),
-        "suppressed turn/started must not contaminate thread active turn"
-    );
-}
-
-/// Cancel/interrupt must release per-thread start admission while turn/start hangs.
-#[tokio::test]
-async fn interrupt_releases_start_admission_while_turn_start_hangs() {
-    let (bridge, state) = spawn_fake_codex_bridge().await;
-    let thread = bridge
-        .start_thread(
-            "/tmp/project",
-            "gpt-5.6-sol",
-            "on-request",
-            "workspace-write",
-        )
-        .await
-        .expect("thread starts");
-    activate_started_codex_thread(&state, &thread).await;
-    configure_fake_codex_drop_turn_start(&bridge).await;
-    bridge.set_test_request_timeout_ms(2_000);
-
-    let thread_id = thread.id.clone();
-    let first = bridge.start_turn(&thread_id, "hanging start", "gpt-5.6-sol", "low");
-    tokio::pin!(first);
-    tokio::select! {
-        _ = &mut first => panic!("start should still be in flight"),
-        _ = tokio::time::sleep(std::time::Duration::from_millis(30)) => {}
-    }
-    assert!(
-        state
-            .read()
-            .await
-            .runtime_for_thread(&thread_id)
-            .expect("runtime")
-            .codex_start_in_flight,
-        "admission held while turn/start hangs"
-    );
-
-    bridge
-        .interrupt_turn(&thread_id, "turn-cancel-while-start")
-        .await
-        .expect("interrupt");
-
-    assert!(
-        !state
-            .read()
-            .await
-            .runtime_for_thread(&thread_id)
-            .expect("runtime")
-            .codex_start_in_flight,
-        "cancel must release admission before hung turn/start times out"
-    );
-
-    let _ = first.await;
-    bridge.set_test_request_timeout_ms(0);
-}
-
-/// After A has reconciled, a duplicate A userMessage must not rewrite B's pending.
-#[tokio::test]
-async fn duplicate_echo_for_reconciled_turn_does_not_claim_unbound_pending() {
-    let state = codex_test_state_with_thread("thread-dup-echo").await;
-    let a_id = {
-        let mut relay = state.write().await;
-        let id = relay.reserve_codex_user_message("thread-dup-echo", "prompt A");
-        relay.bind_codex_user_reservation("thread-dup-echo", &id, "turn-a");
-        id
-    };
-    handle_notification(
-        user_message_completed("thread-dup-echo", "turn-a", "item-user-a", "prompt A"),
-        &state,
-    )
-    .await;
-    let b_id = {
-        let mut relay = state.write().await;
-        relay.reserve_codex_user_message("thread-dup-echo", "prompt B")
-    };
-
-    handle_notification(
-        user_message_completed("thread-dup-echo", "turn-a", "item-user-a-dup", "prompt A"),
-        &state,
-    )
-    .await;
-
-    let relay = state.read().await;
-    let runtime = relay
-        .runtime_for_thread("thread-dup-echo")
-        .expect("runtime");
-    let b = runtime
-        .codex_user_reservations
-        .get(&b_id)
-        .expect("B pending must remain");
-    assert!(b.turn_id.is_none());
-    assert_eq!(b.text, "prompt B");
-    assert_eq!(
-        runtime.codex_pending_bind_reservation_id.as_deref(),
-        Some(b_id.as_str())
-    );
-    let a_users: Vec<_> = runtime
-        .transcript
-        .iter()
-        .filter(|entry| {
-            entry.kind == TranscriptEntryKind::UserText
-                && entry.turn_id.as_deref() == Some("turn-a")
-        })
-        .collect();
-    assert_eq!(a_users.len(), 1);
-    assert_eq!(a_users[0].item_id, "item-user-a-dup");
-    assert!(
-        !runtime.codex_user_reservations.contains_key(&a_id),
-        "A reservation metadata stays retired"
-    );
-}
-
-#[tokio::test]
-async fn concurrent_start_turn_rejects_second_admission() {
-    let (bridge, state) = spawn_fake_codex_bridge().await;
-    let thread = bridge
-        .start_thread(
-            "/tmp/project",
-            "gpt-5.6-sol",
-            "on-request",
-            "workspace-write",
-        )
-        .await
-        .expect("thread starts");
-    activate_started_codex_thread(&state, &thread).await;
-    configure_fake_codex_drop_turn_start(&bridge).await;
-    bridge.set_test_request_timeout_ms(300);
-
-    let thread_id = thread.id.clone();
-    let first = bridge.start_turn(&thread_id, "first", "gpt-5.6-sol", "low");
-    tokio::pin!(first);
-    tokio::select! {
-        _ = &mut first => panic!("first start should still be in flight"),
-        _ = tokio::time::sleep(std::time::Duration::from_millis(30)) => {}
-    }
-
-    let second = bridge
-        .start_turn(&thread_id, "second", "gpt-5.6-sol", "low")
-        .await;
-    assert!(
-        second
+            .runtime_for_thread("thread-stale-start")
+            .expect("thread runtime");
+        assert!(runtime.active_turn_id.is_none());
+        let reservation = runtime
+            .codex_start_reservation
             .as_ref()
-            .err()
-            .is_some_and(|err| err.contains("already in flight")),
-        "second start must fail admission, got {second:?}"
-    );
-
-    let _ = first.await;
-    bridge.set_test_request_timeout_ms(0);
-
-    let relay = state.read().await;
-    let runtime = relay.runtime_for_thread(&thread_id).expect("runtime");
-    assert!(!runtime.codex_start_in_flight);
-    let users = runtime
-        .transcript
-        .iter()
-        .filter(|entry| entry.kind == TranscriptEntryKind::UserText)
-        .count();
-    assert!(
-        users <= 1,
-        "concurrent starts must not leave duplicate user placeholders, got {users}"
-    );
-}
-
-#[tokio::test]
-async fn test_request_timeout_is_per_bridge_not_process_global() {
-    let (slow, state_slow) = spawn_fake_codex_bridge().await;
-    let (fast, state_fast) = spawn_fake_codex_bridge().await;
-    let thread_slow = slow
-        .start_thread(
-            "/tmp/project",
-            "gpt-5.6-sol",
-            "on-request",
-            "workspace-write",
-        )
-        .await
-        .expect("slow thread");
-    let thread_fast = fast
-        .start_thread(
-            "/tmp/project",
-            "gpt-5.6-sol",
-            "on-request",
-            "workspace-write",
-        )
-        .await
-        .expect("fast thread");
-    activate_started_codex_thread(&state_slow, &thread_slow).await;
-    activate_started_codex_thread(&state_fast, &thread_fast).await;
-    configure_fake_codex_drop_turn_start(&slow).await;
-    configure_fake_codex_drop_turn_start(&fast).await;
-    slow.set_test_request_timeout_ms(200);
-    // fast keeps default (30s) — must not inherit slow's 200ms.
-
-    let started = std::time::Instant::now();
-    let slow_err = slow
-        .start_turn(&thread_slow.id, "slow", "gpt-5.6-sol", "low")
-        .await
-        .expect_err("slow bridge times out");
-    assert!(
-        slow_err.to_lowercase().contains("timeout")
-            || slow_err.to_lowercase().contains("timed out")
-    );
-    assert!(
-        started.elapsed() < std::time::Duration::from_secs(2),
-        "short timeout should fire quickly"
-    );
-    slow.set_test_request_timeout_ms(0);
-
-    // Fast bridge with drop would hang 30s — instead prove its override is still 0
-    // by using a tiny override only on fast and ensuring slow's prior setting is gone.
-    fast.set_test_request_timeout_ms(150);
-    let fast_err = fast
-        .start_turn(&thread_fast.id, "fast", "gpt-5.6-sol", "low")
-        .await
-        .expect_err("fast bridge uses its own override");
-    fast.set_test_request_timeout_ms(0);
-    assert!(
-        fast_err.to_lowercase().contains("timeout")
-            || fast_err.to_lowercase().contains("timed out")
-    );
-}
-
-fn history_user_entry(item_id: &str, text: &str, turn_id: &str) -> TranscriptEntryView {
-    TranscriptEntryView {
-        item_id: Some(item_id.to_string()),
-        kind: TranscriptEntryKind::UserText,
-        text: Some(text.to_string()),
-        status: "completed".to_string(),
-        turn_id: Some(turn_id.to_string()),
-        tool: None,
-        content_state: crate::protocol::TranscriptContentState::Full,
-    }
-}
-
-fn history_reasoning_entry(item_id: &str, text: &str, turn_id: &str) -> TranscriptEntryView {
-    TranscriptEntryView {
-        item_id: Some(item_id.to_string()),
-        kind: TranscriptEntryKind::Reasoning,
-        text: Some(text.to_string()),
-        status: "completed".to_string(),
-        turn_id: Some(turn_id.to_string()),
-        tool: None,
-        content_state: crate::protocol::TranscriptContentState::Full,
-    }
-}
-
-fn count_user_text(entries: &[TranscriptEntryView]) -> usize {
-    entries
-        .iter()
-        .filter(|entry| entry.kind == TranscriptEntryKind::UserText)
-        .count()
-}
-
-/// After reservation reconcile, a provider history re-read must keep one user
-/// entry, refuse text rollback, and leave user-before-output order intact.
-#[tokio::test]
-async fn reconciled_reservation_survives_history_reread_without_duplicate_or_rollback() {
-    let state = codex_test_state_with_thread("thread-hydrate-reread").await;
-    const FULL_TEXT: &str = "full hydrated prompt text";
-    {
-        let mut relay = state.write().await;
-        let id = relay.reserve_codex_user_message("thread-hydrate-reread", FULL_TEXT);
-        relay.bind_codex_user_reservation("thread-hydrate-reread", &id, "turn-hydrate");
-    }
-    handle_notification(
-        user_message_completed(
-            "thread-hydrate-reread",
-            "turn-hydrate",
-            "item-user-hydrate",
-            FULL_TEXT,
-        ),
-        &state,
-    )
-    .await;
-    handle_notification(
-        reasoning_started(
-            "thread-hydrate-reread",
-            "turn-hydrate",
-            "item-reasoning-hydrate",
-            "live reasoning body",
-        ),
-        &state,
-    )
-    .await;
-    handle_notification(
-        agent_started(
-            "thread-hydrate-reread",
-            "turn-hydrate",
-            "item-agent-hydrate",
-        ),
-        &state,
-    )
-    .await;
-    handle_notification(
-        agent_delta(
-            "thread-hydrate-reread",
-            "turn-hydrate",
-            "item-agent-hydrate",
-            "Hello from the live stream",
-        ),
-        &state,
-    )
-    .await;
-
-    // Switch away, then re-read history with matching ids but shorter texts —
-    // merge must not duplicate the user or roll live text back.
-    {
-        let mut relay = state.write().await;
-        relay.load_thread_data(
-            ThreadSyncData {
-                thread: test_thread_summary("thread-other-hydrate"),
-                status: "idle".to_string(),
-                active_flags: Vec::new(),
-                transcript: Vec::new(),
-            },
-            "on-request",
-            "workspace-write",
-            "low",
-            "gpt-5.6-sol",
-            "device-a",
-        );
-        relay.load_thread_data(
-            ThreadSyncData {
-                thread: test_thread_summary("thread-hydrate-reread"),
-                status: "idle".to_string(),
-                active_flags: Vec::new(),
-                transcript: vec![
-                    // History order is deliberately agent-first; live order must win.
-                    history_reasoning_entry("item-reasoning-hydrate", "short", "turn-hydrate"),
-                    history_user_entry("item-user-hydrate", "full", "turn-hydrate"),
-                    agent_entry("item-agent-hydrate", "Hello", "completed", "turn-hydrate"),
-                ],
-            },
-            "on-request",
-            "workspace-write",
-            "low",
-            "gpt-5.6-sol",
-            "device-a",
-        );
+            .expect("B reservation must survive stale A");
+        assert_eq!(reservation.item_id, b_reservation);
+        assert!(reservation.turn_id.is_none());
     }
 
+    handle_notification(turn_started("thread-stale-start", "turn-b"), &state).await;
     let relay = state.read().await;
     let runtime = relay
-        .runtime_for_thread("thread-hydrate-reread")
-        .expect("runtime");
-    let users: Vec<_> = runtime
-        .transcript
-        .iter()
-        .filter(|entry| entry.kind == TranscriptEntryKind::UserText)
-        .collect();
-    assert_eq!(
-        users.len(),
-        1,
-        "history re-read must not duplicate the user"
-    );
-    assert_eq!(users[0].item_id, "item-user-hydrate");
-    assert_eq!(
-        users[0].text.as_deref(),
-        Some(FULL_TEXT),
-        "shorter history text must not roll back the live user prompt"
-    );
-    assert!(
-        !users[0].item_id.starts_with("codex:user-reserve:"),
-        "reconciled entry must keep the provider item id across re-read"
-    );
-    assert!(
-        runtime.codex_user_reservations.is_empty(),
-        "reservation metadata must stay retired after reconcile + re-read"
-    );
-
-    let turn_entries: Vec<_> = runtime
-        .transcript
-        .iter()
-        .filter(|entry| entry.turn_id.as_deref() == Some("turn-hydrate"))
-        .collect();
-    assert!(
-        turn_entries.len() >= 2,
-        "expected user + at least one output entry"
-    );
-    assert_eq!(turn_entries[0].kind, TranscriptEntryKind::UserText);
-    assert_eq!(
-        turn_entries[0].text.as_deref(),
-        Some(FULL_TEXT),
-        "append-only merge must not reorder user behind history-first output"
-    );
-    let agent = turn_entries
-        .iter()
-        .find(|entry| entry.item_id == "item-agent-hydrate")
-        .expect("agent entry");
-    assert_eq!(
-        agent.text.as_deref(),
-        Some("Hello from the live stream"),
-        "shorter history agent text must not roll back the live stream"
-    );
-
-    let snapshot = relay.snapshot();
-    assert_eq!(count_user_text(&snapshot.transcript), 1);
-    let local = snapshot
-        .clone()
-        .compact_for(SessionSnapshotCompactProfile::LocalWeb);
-    let remote = snapshot.compact_for(SessionSnapshotCompactProfile::RemoteSurface);
-    assert_eq!(count_user_text(&local.transcript), 1);
-    assert_eq!(count_user_text(&remote.transcript), 1);
-    assert_eq!(
-        local
-            .transcript
-            .iter()
-            .find(|entry| entry.kind == TranscriptEntryKind::UserText)
-            .and_then(|entry| entry.text.as_deref()),
-        Some(FULL_TEXT)
-    );
+        .runtime_for_thread("thread-stale-start")
+        .expect("thread runtime");
+    assert_eq!(runtime.active_turn_id.as_deref(), Some("turn-b"));
+    assert!(runtime.codex_start_reservation.is_none());
 }
 
-/// Unreconciled reserve placeholder + provider history user (different item_id,
-/// same text) must still hydrate as a single user entry.
 #[tokio::test]
-async fn unreconciled_placeholder_dedupes_equivalent_history_user_on_reread() {
-    let state = codex_test_state_with_thread("thread-hydrate-equiv").await;
-    const TEXT: &str = "equivalent prompt";
-    {
-        let mut relay = state.write().await;
-        let id = relay.reserve_codex_user_message("thread-hydrate-equiv", TEXT);
-        relay.bind_codex_user_reservation("thread-hydrate-equiv", &id, "turn-equiv");
-        relay.load_thread_data(
-            ThreadSyncData {
-                thread: test_thread_summary("thread-hydrate-equiv"),
-                status: "idle".to_string(),
-                active_flags: Vec::new(),
-                transcript: vec![history_user_entry(
-                    "provider-user-equiv",
-                    TEXT,
-                    "turn-equiv",
-                )],
-            },
-            "on-request",
-            "workspace-write",
-            "low",
-            "gpt-5.6-sol",
-            "device-a",
-        );
-    }
+async fn rejected_codex_start_removes_its_placeholder() {
+    let (bridge, state) = spawn_fake_codex_bridge().await;
+    let thread_id = activate_fake_codex_thread(&bridge, &state).await;
+    configure_fake_codex_reject_turn_start(&bridge).await;
 
+    let error = bridge
+        .start_turn(&thread_id, "rejected prompt", "gpt-5-codex", "medium")
+        .await
+        .expect_err("fake policy rejects turn/start");
+    assert_eq!(error, "turn rejected by test policy");
     let relay = state.read().await;
     let runtime = relay
-        .runtime_for_thread("thread-hydrate-equiv")
-        .expect("runtime");
-    let users: Vec<_> = runtime
-        .transcript
-        .iter()
-        .filter(|entry| entry.kind == TranscriptEntryKind::UserText)
-        .collect();
-    assert_eq!(
-        users.len(),
-        1,
-        "equivalent history user must not append beside the reserve placeholder"
-    );
-    assert_eq!(users[0].text.as_deref(), Some(TEXT));
-}
-
-/// Cold hydrate installs history once; a second reconnect-shaped hydrate must
-/// not invent a second user entry or corrupt stream order.
-#[test]
-fn hydrate_background_runtime_keeps_single_user_and_append_order() {
-    let (change_tx, _) = watch::channel(0_u64);
-    let mut relay = RelayState::new(
-        "/tmp/project".to_string(),
-        change_tx,
-        SecurityProfile::private(),
-    );
-    let data = ThreadSyncData {
-        thread: test_thread_summary("thread-cold-hydrate"),
-        status: "idle".to_string(),
-        active_flags: Vec::new(),
-        transcript: vec![
-            history_user_entry("item-user-cold", "cold prompt", "turn-cold"),
-            history_reasoning_entry("item-reasoning-cold", "cold reasoning", "turn-cold"),
-            agent_entry("item-agent-cold", "cold agent", "completed", "turn-cold"),
-        ],
-    };
-    relay.hydrate_background_runtime(
-        data.clone(),
-        "on-request",
-        "workspace-write",
-        "low",
-        "gpt-5.6-sol",
-    );
-    // Second call is a no-op when the runtime already exists (reconnect path).
-    relay.hydrate_background_runtime(data, "on-request", "workspace-write", "low", "gpt-5.6-sol");
-
-    let runtime = relay
-        .runtime_for_thread("thread-cold-hydrate")
-        .expect("hydrated runtime");
-    assert_eq!(runtime.transcript.len(), 3);
-    assert_eq!(runtime.transcript[0].kind, TranscriptEntryKind::UserText);
-    assert_eq!(runtime.transcript[1].kind, TranscriptEntryKind::Reasoning);
-    assert_eq!(runtime.transcript[2].kind, TranscriptEntryKind::AgentText);
-    assert_eq!(
-        runtime
-            .transcript
-            .iter()
-            .filter(|entry| entry.kind == TranscriptEntryKind::UserText)
-            .count(),
-        1
-    );
-}
-
-/// Compaction must keep the authoritative tail's single reconciled user entry
-/// for both local and remote snapshot profiles (no stream corruption).
-#[tokio::test]
-async fn compact_profiles_keep_reconciled_user_in_authoritative_tail() {
-    let state = codex_test_state_with_thread("thread-hydrate-tail").await;
-    const TEXT: &str = "tail prompt";
-    {
-        let mut relay = state.write().await;
-        // Pad with older turns so compact may truncate the head.
-        for i in 0..40 {
-            relay.upsert_transcript_item_for_thread(
-                "thread-hydrate-tail",
-                format!("pad-user-{i}"),
-                TranscriptEntryKind::UserText,
-                Some(format!("pad {i}")),
-                "completed".to_string(),
-                Some(format!("turn-pad-{i}")),
-                None,
-            );
-            relay.upsert_transcript_item_for_thread(
-                "thread-hydrate-tail",
-                format!("pad-agent-{i}"),
-                TranscriptEntryKind::AgentText,
-                Some(format!("pad reply {i}")),
-                "completed".to_string(),
-                Some(format!("turn-pad-{i}")),
-                None,
-            );
-        }
-        let id = relay.reserve_codex_user_message("thread-hydrate-tail", TEXT);
-        relay.bind_codex_user_reservation("thread-hydrate-tail", &id, "turn-tail");
-    }
-    handle_notification(
-        user_message_completed("thread-hydrate-tail", "turn-tail", "item-user-tail", TEXT),
-        &state,
-    )
-    .await;
-    handle_notification(
-        reasoning_started(
-            "thread-hydrate-tail",
-            "turn-tail",
-            "item-reasoning-tail",
-            "tail reasoning",
-        ),
-        &state,
-    )
-    .await;
-
-    let relay = state.read().await;
-    let snapshot = relay.snapshot();
-    let local = snapshot
-        .clone()
-        .compact_for(SessionSnapshotCompactProfile::LocalWeb);
-    let remote = snapshot.compact_for(SessionSnapshotCompactProfile::RemoteSurface);
-    for (label, compacted) in [("local", &local), ("remote", &remote)] {
-        let tail_users: Vec<_> = compacted
-            .transcript
-            .iter()
-            .filter(|entry| {
-                entry.kind == TranscriptEntryKind::UserText
-                    && entry.turn_id.as_deref() == Some("turn-tail")
-            })
-            .collect();
-        assert_eq!(
-            tail_users.len(),
-            1,
-            "{label} compact must keep exactly one tail user entry"
-        );
-        assert_eq!(tail_users[0].item_id.as_deref(), Some("item-user-tail"));
-        assert_eq!(tail_users[0].text.as_deref(), Some(TEXT));
-        assert_turn_order_is_user_then_reasoning(&compacted.transcript, "turn-tail");
-    }
+        .runtime_for_thread(&thread_id)
+        .expect("thread runtime");
+    assert!(runtime.codex_start_reservation.is_none());
+    assert!(!runtime.transcript.iter().any(|entry| {
+        entry.kind == TranscriptEntryKind::UserText
+            && entry.text.as_deref() == Some("rejected prompt")
+    }));
 }
 
 #[tokio::test]

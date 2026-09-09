@@ -187,7 +187,7 @@ function handle(payload) {
     case "turn/start": {
       if (dropTurnStart) {
         // Lost/hung response: accept the request but never reply so the bridge
-        // times out and must clear its send-boundary reservation.
+        // must retain its send-boundary reservation after timing out.
         return;
       }
       if (rejectTurnStart) {

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::{
     protocol::{
@@ -100,17 +100,31 @@ impl TurnFailureKind {
     }
 }
 
-/// Relay-owned slot for the user message of one Codex turn.
-///
-/// Installed under the relay lock before `turn/start` so same-turn provider
-/// output cannot append ahead of the user prompt. Each slot has a unique local
-/// `item_id`; the provider `turn_id` is bound only to the in-flight pending
-/// reservation for that start (never "oldest unbound").
+/// The one Codex `turn/start` whose ownership is not yet represented by a live
+/// turn. `turn_id == None` also means an uncertain request must keep blocking a
+/// retry: without provider-side request correlation, its next notification
+/// cannot safely be distinguished from a newer start.
 #[derive(Debug, Clone)]
-pub(crate) struct CodexUserReservation {
+pub(crate) struct CodexStartReservation {
     pub(crate) item_id: String,
-    pub(crate) text: String,
     pub(crate) turn_id: Option<String>,
+}
+
+impl CodexStartReservation {
+    pub(crate) fn can_claim_turn(&self, transcript: &[TranscriptRecord], turn_id: &str) -> bool {
+        if let Some(bound) = self.turn_id.as_deref() {
+            return bound == turn_id;
+        }
+        let reservation_index = transcript
+            .iter()
+            .position(|entry| entry.item_id == self.item_id)
+            .unwrap_or(transcript.len());
+        !transcript.iter().enumerate().any(|(index, entry)| {
+            entry.turn_id.as_deref() == Some(turn_id)
+                && (entry.kind == crate::protocol::TranscriptEntryKind::UserText
+                    || index < reservation_index)
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -156,27 +170,24 @@ pub(crate) struct ThreadRuntime {
     /// Written by `RelayState::record_token_usage` for the turn it is billing;
     /// never cleared — see [`TurnSpend`] on matching `turn_id`.
     pub(crate) last_turn_spend: Option<TurnSpend>,
-    /// Transient Codex send-boundary user reservations, keyed by local
-    /// reservation `item_id`. Never persisted.
-    pub(crate) codex_user_reservations: HashMap<String, CodexUserReservation>,
+    /// Transient Codex send-boundary state. Never persisted.
     pub(crate) codex_user_reservation_seq: u64,
-    /// Local id of the reservation created by the in-flight `start_turn` that
-    /// is still awaiting a provider turn id. `turn/started` and early echoes
-    /// bind/reconcile only this slot — never an older unbound leftover.
-    pub(crate) codex_pending_bind_reservation_id: Option<String>,
-    /// Exclusive start admission for this thread's Codex `start_turn`. Held for
-    /// the whole RPC await so a concurrent send cannot overwrite `pending_bind`.
-    pub(crate) codex_start_in_flight: bool,
-    /// Provider turn ids this thread has already bound, settled, or reconciled.
-    /// Stale/duplicate `turn/started` for these ids must not attach to a newer pending.
-    pub(crate) codex_known_turn_ids: HashSet<String>,
-    /// After an unbound-uncertain abandon, `turn/started` must not bind the next
-    /// start's pending (a late A notification is indistinguishable from B's).
-    /// Cleared when the next start binds via the `turn/start` RPC response.
-    pub(crate) codex_block_notification_bind: bool,
+    pub(crate) codex_start_reservation: Option<CodexStartReservation>,
 }
 
 impl ThreadRuntime {
+    pub(crate) fn clear_codex_reservation_for_active_turn(&mut self, turn_id: Option<&str>) {
+        if let Some(turn_id) = turn_id {
+            if self
+                .codex_start_reservation
+                .as_ref()
+                .is_some_and(|reservation| reservation.turn_id.as_deref() == Some(turn_id))
+            {
+                self.codex_start_reservation = None;
+            }
+        }
+    }
+
     /// `transcript_revision` is a value the caller drew from
     /// `RelayState::next_transcript_revision`, never a literal. Seeding a rebuilt
     /// runtime at 0 is what used to rewind a thread under a live client and make
@@ -223,12 +234,8 @@ impl ThreadRuntime {
             workspace_missing: None,
             last_turn_failure: None,
             last_turn_spend: None,
-            codex_user_reservations: HashMap::new(),
             codex_user_reservation_seq: 0,
-            codex_pending_bind_reservation_id: None,
-            codex_start_in_flight: false,
-            codex_known_turn_ids: HashSet::new(),
-            codex_block_notification_bind: false,
+            codex_start_reservation: None,
         }
     }
 
@@ -269,12 +276,8 @@ impl ThreadRuntime {
             workspace_missing: None,
             last_turn_failure: None,
             last_turn_spend: None,
-            codex_user_reservations: HashMap::new(),
             codex_user_reservation_seq: 0,
-            codex_pending_bind_reservation_id: None,
-            codex_start_in_flight: false,
-            codex_known_turn_ids: HashSet::new(),
-            codex_block_notification_bind: false,
+            codex_start_reservation: None,
         }
     }
 
@@ -347,12 +350,8 @@ impl ThreadRuntime {
             workspace_missing: None,
             last_turn_failure: None,
             last_turn_spend: None,
-            codex_user_reservations: HashMap::new(),
             codex_user_reservation_seq: 0,
-            codex_pending_bind_reservation_id: None,
-            codex_start_in_flight: false,
-            codex_known_turn_ids: HashSet::new(),
-            codex_block_notification_bind: false,
+            codex_start_reservation: None,
         }
     }
 

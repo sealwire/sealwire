@@ -39,7 +39,7 @@ pub(crate) use self::push::{
     PushDispatcher, PushJob, PushKind, PushSubscription, PushSubscriptionInput,
 };
 pub(crate) use self::runtime::{
-    CodexUserReservation, ThreadRuntime, TurnFailure, TurnFailureKind, TurnSpend,
+    CodexStartReservation, ThreadRuntime, TurnFailure, TurnFailureKind, TurnSpend,
 };
 pub(crate) use self::transcript::TranscriptRecord;
 
@@ -4647,6 +4647,7 @@ impl RelayState {
         let now = unix_now();
         if let Some(thread_id) = self.active_thread_id.clone() {
             let runtime = self.ensure_runtime_for_thread(&thread_id);
+            runtime.clear_codex_reservation_for_active_turn(turn_id.as_deref());
             runtime.active_turn_id = turn_id;
             runtime.liveness_timed_out = false;
             runtime.liveness_stop_requested = false;
@@ -4691,37 +4692,25 @@ impl RelayState {
             // work→idle "completed" the snapshot diff would otherwise emit).
             self.enqueue_error_push(&thread_id, "stopped unexpectedly — the agent exited.");
         }
-        // Release Codex start admission and abandon unbound pending placeholders so
-        // a reconnect cannot leave a stolen pending-bind slot.
+        // Once this process is gone, an unresolved Codex start can no longer emit
+        // the notification that owns its placeholder. Release that fail-closed
+        // fence so a replacement provider can accept another turn.
         let codex_threads: Vec<String> = self
             .runtimes
             .iter()
-            .filter(|(_, runtime)| {
-                runtime.codex_start_in_flight
-                    && runtime
+            .filter(|(thread_id, runtime)| {
+                runtime.codex_start_reservation.is_some()
+                    && (runtime
                         .summary
                         .as_ref()
                         .is_some_and(|summary| summary.provider == provider)
+                        || (self.active_thread_id.as_deref() == Some(thread_id.as_str())
+                            && self.provider_name == provider))
             })
             .map(|(thread_id, _)| thread_id.clone())
             .collect();
         for thread_id in codex_threads {
-            let pending = self
-                .runtimes
-                .get(&thread_id)
-                .and_then(|runtime| runtime.codex_pending_bind_reservation_id.clone());
-            if let Some(pending) = pending {
-                let unbound = self
-                    .runtimes
-                    .get(&thread_id)
-                    .and_then(|runtime| runtime.codex_user_reservations.get(&pending))
-                    .is_some_and(|reservation| reservation.turn_id.is_none());
-                if unbound {
-                    self.clear_codex_user_reservation(&thread_id, &pending);
-                    continue;
-                }
-            }
-            self.release_codex_start_admission(&thread_id);
+            self.abandon_codex_start_reservation(&thread_id);
         }
     }
 

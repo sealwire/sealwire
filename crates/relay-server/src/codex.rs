@@ -206,12 +206,6 @@ impl ProviderBridge for CodexBridge {
         thread_id: &str,
         turn_id: Option<&str>,
     ) -> Result<(), String> {
-        // Release start admission even when turn_id is missing: a hung
-        // turn/start must not hold the per-thread guard until timeout.
-        {
-            let mut relay = self.state.write().await;
-            relay.release_codex_start_admission(thread_id);
-        }
         let turn_id =
             turn_id.ok_or_else(|| "Codex requires a turn id to stop a turn".to_string())?;
         self.interrupt_turn(thread_id, turn_id).await
@@ -734,10 +728,12 @@ impl CodexBridge {
             .as_ref()
             .map(|(approval, sandbox)| (approval.as_str(), sandbox.as_str()));
 
-        // Reserve under admission so concurrent starts cannot both own pending_bind.
+        // Reserve under the relay lock so concurrent starts cannot share one user slot.
         let reservation_id = {
+            let transcript_text = user_message_transcript_text(text, images.len())
+                .unwrap_or_else(|| text.to_string());
             let mut relay = self.state.write().await;
-            match relay.begin_codex_user_turn(thread_id, text) {
+            match relay.begin_codex_user_turn(thread_id, &transcript_text) {
                 Ok(reservation_id) => {
                     relay.notify();
                     reservation_id
@@ -869,28 +865,20 @@ read-only with approvals required. Change File access if this turn needs to writ
 
         let turn_id = value_at(&result, &["turn", "id"])
             .and_then(Value::as_str)
-            .map(ToOwned::to_owned);
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| {
+                "Codex app-server returned `turn/start` without a turn id; the start remains unresolved"
+                    .to_string()
+            })?;
         {
             let mut relay = self.state.write().await;
-            if let Some(turn_id) = turn_id.as_deref() {
-                relay.bind_codex_user_reservation(thread_id, &reservation_id, turn_id);
-            } else {
-                relay.fail_codex_user_turn_definitive(thread_id, &reservation_id);
-            }
-            relay.release_codex_start_admission(thread_id);
+            relay.bind_codex_user_reservation(thread_id, &reservation_id, &turn_id);
             relay.notify();
         }
-        Ok(turn_id)
+        Ok(Some(turn_id))
     }
 
     pub async fn interrupt_turn(&self, thread_id: &str, turn_id: &str) -> Result<(), String> {
-        // Cancel must free the start-admission guard immediately so a hung
-        // turn/start response cannot block the next send until timeout.
-        {
-            let mut relay = self.state.write().await;
-            relay.release_codex_start_admission(thread_id);
-            relay.notify();
-        }
         self.send_request(
             "turn/interrupt",
             json!({
@@ -933,6 +921,9 @@ const STRICTEST_SANDBOX: &str = "read-only";
 fn is_uncertain_turn_start_error(error: &str) -> bool {
     error.contains("timed out waiting for `turn/start`")
         || error.contains("dropped the response channel for `turn/start`")
+        || error.contains("failed to write to codex app-server stdin")
+        || error.contains("failed to finalize codex app-server message")
+        || error.contains("failed to flush codex app-server stdin")
 }
 
 fn finish_codex_turn_start_error(
@@ -941,9 +932,7 @@ fn finish_codex_turn_start_error(
     reservation_id: &str,
     error: &str,
 ) {
-    if is_uncertain_turn_start_error(error) {
-        relay.fail_codex_user_turn_uncertain(thread_id, reservation_id);
-    } else {
+    if !is_uncertain_turn_start_error(error) {
         relay.fail_codex_user_turn_definitive(thread_id, reservation_id);
     }
 }
