@@ -2571,6 +2571,12 @@ export function TranscriptContent({
     ? h(
         "div",
         {
+          // Keyed, and the same key in both the virtualized and plain branches.
+          // Unkeyed it is matched by sibling INDEX, and it sits after a
+          // variable-length row list — so one history page arriving behind the
+          // question, or crossing the virtualization threshold, replaces the whole
+          // footer and remounts the form being typed into.
+          key: "transcript-ask-user-pinned",
           className: "transcript-ask-user-pinned",
           role: "region",
           "aria-label": "Question waiting for your answer",
@@ -2594,6 +2600,7 @@ export function TranscriptContent({
     h(
       "div",
       {
+        key: "transcript-virtual-spacer",
         className: "transcript-virtual-spacer",
         style: { height: `${virtualizer.getTotalSize()}px` },
       },
