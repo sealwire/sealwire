@@ -175,6 +175,11 @@ pub enum TeamStateCommand {
         // T5: → ArtifactRef
         thread_id: String,
     },
+    /// Remember the run's shared reviewer seat (design / sub-task / MR).
+    RecordReviewerThread {
+        // T5: → ArtifactRef
+        thread_id: String,
+    },
     FinishRun {
         // T5: → ArtifactRef
         head_commit: Option<String>,
@@ -262,6 +267,7 @@ impl TeamStateCommand {
             Self::PauseMrWithoutCandidate { .. } => TeamCommandKind::PauseMrWithoutCandidate,
             Self::RecordMrStaleReview {} => TeamCommandKind::RecordMrStaleReview,
             Self::RecordMrDevThread { .. } => TeamCommandKind::RecordMrDevThread,
+            Self::RecordReviewerThread { .. } => TeamCommandKind::RecordReviewerThread,
             Self::FinishRun { .. } => TeamCommandKind::FinishRun,
             Self::TakeUserNotes {} => TeamCommandKind::TakeUserNotes,
             Self::SetRunStatus { .. } => TeamCommandKind::SetRunStatus,
@@ -379,6 +385,9 @@ mod tests {
             TeamStateCommand::RecordMrDevThread {
                 thread_id: "mr-dev".to_string(),
             },
+            TeamStateCommand::RecordReviewerThread {
+                thread_id: "reviewer-1".to_string(),
+            },
             TeamStateCommand::FinishRun {
                 head_commit: Some("cafebabe".to_string()),
                 phase: TeamPhase::Finished,
@@ -448,6 +457,7 @@ mod tests {
             TeamCommandKind::PauseMrWithoutCandidate,
             TeamCommandKind::RecordMrStaleReview,
             TeamCommandKind::RecordMrDevThread,
+            TeamCommandKind::RecordReviewerThread,
             TeamCommandKind::FinishRun,
             TeamCommandKind::TakeUserNotes,
         ];

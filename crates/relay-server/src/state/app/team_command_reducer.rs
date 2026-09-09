@@ -567,6 +567,7 @@ fn validate_payload(run: &TeamRun, command: &TeamStateCommand) -> Result<(), Com
         TeamStateCommand::PrepareMrReview { .. }
         | TeamStateCommand::RecordMrStaleReview {}
         | TeamStateCommand::RecordMrDevThread { .. }
+        | TeamStateCommand::RecordReviewerThread { .. }
         | TeamStateCommand::FinishRun { .. }
         | TeamStateCommand::SetRunStatus { .. }
         | TeamStateCommand::FailRun { .. }
@@ -719,6 +720,9 @@ fn apply_effects(
         }
         TeamStateCommand::RecordMrDevThread { thread_id } => {
             run.mr_dev_thread_id = Some(thread_id);
+        }
+        TeamStateCommand::RecordReviewerThread { thread_id } => {
+            run.reviewer_thread_id = Some(thread_id);
         }
         TeamStateCommand::FinishRun { head_commit, phase } => {
             run.head_commit = head_commit;
