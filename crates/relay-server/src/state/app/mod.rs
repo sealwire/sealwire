@@ -2185,16 +2185,22 @@ async fn status_entries(workspace: &TrustedWorkspace) -> Result<Vec<(String, Str
     if !output.status.success() {
         return Err(git_failure("git status --porcelain=v1 -uall -z", &output));
     }
-    Ok(output
-        .stdout
-        .split(|&byte| byte == 0)
+    Ok(parse_status_z(&output.stdout))
+}
+
+/// Parse `-z`-separated `git status` records into `(XY, path)` pairs.
+///
+/// Lossy, not `from_utf8`: a real Unix path can contain bytes that are not valid UTF-8,
+/// and dropping that record instead of degrading it would silently un-dirty a repo that
+/// has real (non-symlink) changes. The status code and its separating space are always
+/// plain ASCII, so byte offsets 2 and 3 stay valid record boundaries even where the path
+/// itself needed lossy repair.
+fn parse_status_z(stdout: &[u8]) -> Vec<(String, String)> {
+    let text = String::from_utf8_lossy(stdout);
+    text.split('\0')
         .filter(|record| record.len() > 3)
-        .filter_map(|record| {
-            let status = std::str::from_utf8(&record[..2]).ok()?;
-            let path = std::str::from_utf8(&record[3..]).ok()?;
-            Some((status.to_string(), path.to_string()))
-        })
-        .collect())
+        .map(|record| (record[..2].to_string(), record[3..].to_string()))
+        .collect()
 }
 
 async fn is_symlink(workspace: &TrustedWorkspace, path: &str) -> bool {

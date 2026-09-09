@@ -15766,6 +15766,20 @@ resurrected into a turn that never completes: {:?}",
         );
     }
 
+    #[test]
+    fn a_non_utf8_path_is_not_dropped_from_status_parsing() {
+        // A real Unix path can be non-UTF-8; `-z` output carries those bytes raw. Silently
+        // dropping the record (rather than degrading it) would make a genuinely dirty repo
+        // (a tracked change here) look clean whenever its path isn't valid UTF-8.
+        let stdout = b" M bad-\xFF-name\0";
+        let entries = parse_status_z(stdout);
+        assert_eq!(
+            entries,
+            vec![(" M".to_string(), "bad-\u{FFFD}-name".to_string())],
+            "a non-UTF-8 path must still be parsed, not dropped"
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn symlinked_node_modules_alone_is_not_treated_as_uncommitted_work() {
