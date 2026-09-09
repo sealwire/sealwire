@@ -2082,6 +2082,122 @@ body.is-resizing-panel .task-workspace-resize {
   padding-top: 8px;
 }
 
+/* ===== Tasks surface: toolbar + list/board modes (mockup 16a) ===== */
+.task-surface {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+/* The workspace is `height: 100%` for the case where it IS the whole area. Under
+   the toolbar it has to share, so it measures from the flex track instead. */
+.task-surface > .task-workspace {
+  height: auto;
+  flex: 1 1 auto;
+}
+.task-surface-toolbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 16px;
+  height: 48px;
+  border-bottom: 1px solid var(--border-faint);
+  background: var(--surface-1);
+}
+.task-surface-title {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: var(--weight-strong);
+  color: var(--text-1);
+}
+.task-surface-toolbar-spacer {
+  flex: 1;
+}
+.task-surface-modes {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--r-sm);
+  background: var(--surface-0);
+}
+.task-surface-mode {
+  border: 0;
+  cursor: pointer;
+  padding: 4px 10px;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-3);
+  font-size: var(--text-sm);
+  font-family: inherit;
+}
+.task-surface-mode:hover {
+  color: var(--text-1);
+}
+.task-surface-mode.is-active {
+  background: var(--surface-2);
+  color: var(--text-1);
+  font-weight: var(--weight-medium);
+}
+.task-surface-stat {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+.task-surface-stat strong {
+  color: var(--text-1);
+  font-weight: var(--weight-medium);
+}
+.task-surface-new {
+  cursor: pointer;
+  padding: 6px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  color: var(--text-1);
+  font-size: var(--text-sm);
+  font-family: inherit;
+}
+.task-surface-new:hover {
+  border-color: var(--accent);
+}
+/* The toolbar's own dot and empty slot. Deliberately not the board's classes:
+   the board's stylesheet ships with the private module, and a public checkout
+   that never loads it would paint this strip wrong. */
+.task-surface-stat-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-pill);
+  background: var(--accent);
+}
+.task-surface-unknown {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--text-faint);
+}
+/* Narrow: the two readouts are the first thing to go. They wrapped out of the
+   fixed-height bar, and both are placeholders until capacity is on the wire —
+   the switch and New task are what the strip is actually for. */
+@media (max-width: 600px) {
+  .task-surface-stat {
+    display: none;
+  }
+  .task-surface-toolbar {
+    gap: 8px;
+    padding: 0 10px;
+  }
+  .task-surface-title,
+  .task-surface-mode,
+  .task-surface-new {
+    white-space: nowrap;
+  }
+}
+
+
 /* Teams library still uses the older centre/right class names. */
 .task-workspace-center {
   min-width: 0;
@@ -2224,6 +2340,26 @@ body.sidebar-collapsed .app-shell[data-view="tasks"] #tasks-sidebar-toggle {
   font-size: var(--text-xs);
   color: var(--text-3);
   line-height: var(--leading-relaxed);
+}
+.task-orch-proposal-agents {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 0 12px;
+  padding: 0;
+  list-style: none;
+}
+.task-orch-proposal-agent {
+  margin: 0;
+  font-size: var(--text-xs);
+  line-height: var(--leading-relaxed);
+  color: var(--text-2);
+}
+.task-orch-proposal-agent-seat {
+  color: var(--text-3);
+}
+.task-orch-proposal-agent-value {
+  color: var(--text-1);
 }
 .task-orch-card-action {
   display: inline-flex;

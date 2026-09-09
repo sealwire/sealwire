@@ -80,6 +80,60 @@ test("the card names the agent each seat will run on", () => {
   assert.match(text, /Reviewer/, "each choice must say which seat it belongs to");
 });
 
+test("a Pair proposal names only the two roles that will run", () => {
+  const host = renderPane([
+    {
+      ...PROPOSAL,
+      team_id: "pair",
+      team_name: "Pair",
+      agents: {
+        tl: { provider: "claude_code", model: "opus[1m]", effort: "xhigh" },
+        dev: { provider: "claude_code", model: "sonnet[1m]", effort: "high" },
+        reviewer: { provider: "codex", model: "gpt-5.5", effort: "high" },
+      },
+      agent_rows: [
+        {
+          role_id: "pair",
+          label: "Pair programmer",
+          agent: { provider: "claude_code", model: "sonnet[1m]", effort: "high" },
+        },
+        {
+          role_id: "reviewer",
+          label: "Reviewer",
+          agent: { provider: "codex", model: "gpt-5.5", effort: "high" },
+        },
+      ],
+    },
+  ]);
+  const rows = [...host.querySelectorAll(".task-orch-proposal-agent")];
+  assert.equal(rows.length, 2);
+  assert.match(rows[0].textContent, /Pair programmer: claude_code/);
+  assert.match(rows[1].textContent, /Reviewer: codex/);
+  assert.doesNotMatch(host.textContent, /Planner/);
+  assert.doesNotMatch(host.textContent, /opus\[1m\]/);
+});
+
+test("an old Pair proposal payload still hides the unused planner slot", () => {
+  const host = renderPane([
+    {
+      ...PROPOSAL,
+      team_id: "pair",
+      team_name: "Pair",
+      agents: {
+        tl: { provider: "claude_code", model: "opus[1m]", effort: "xhigh" },
+        dev: { provider: "claude_code", model: "sonnet[1m]", effort: "high" },
+        reviewer: { provider: "codex", model: "gpt-5.5", effort: "high" },
+      },
+    },
+  ]);
+  const rows = [...host.querySelectorAll(".task-orch-proposal-agent")];
+  assert.equal(rows.length, 2);
+  assert.match(rows[0].textContent, /Pair programmer: claude_code/);
+  assert.match(rows[1].textContent, /Reviewer: codex/);
+  assert.doesNotMatch(host.textContent, /Planner/);
+  assert.doesNotMatch(host.textContent, /opus\[1m\]/);
+});
+
 test("a proposal that pins nothing adds no agent row", () => {
   // Absent must not render as "default": the relay's default can move, and the
   // card would be claiming a guarantee the proposal does not carry.
