@@ -15,7 +15,7 @@ use super::{pricing, TokenUsage};
 
 /// Bumped only by adding a numbered migration below. `user_version` is a plain
 /// integer SQLite keeps in the file header, so this needs no table of its own.
-const LEDGER_SCHEMA_VERSION: i64 = 9;
+const LEDGER_SCHEMA_VERSION: i64 = 10;
 
 /// A single billable observation, ready to be written.
 #[derive(Debug, Clone, Default)]
@@ -475,6 +475,8 @@ impl UsageStore {
                 Ok(roles) => roles,
                 Err(_) => continue,
             };
+            let structure =
+                Self::structure_for_version_locked(&conn, &id, &current_version_id, &roles);
             teams.push(crate::teams::TeamCatalogTeam {
                 id,
                 name,
@@ -483,6 +485,7 @@ impl UsageStore {
                 focus,
                 current_version_id,
                 roles,
+                structure,
                 stats: crate::teams::TeamCatalogStats {
                     tasks_7d: None,
                     avg_tokens: None,
@@ -514,6 +517,56 @@ impl UsageStore {
             })
         })?;
         Ok(rows.flatten().collect())
+    }
+
+    fn structure_for_version_locked(
+        conn: &Connection,
+        team_id: &str,
+        version_id: &str,
+        roles: &[crate::teams::TeamCatalogRole],
+    ) -> relay_api::team::TeamStructure {
+        let mut structure = relay_api::team::TeamStructure {
+            roles: roles
+                .iter()
+                .map(|role| relay_api::team::TeamStructureRole {
+                    id: role.id.clone(),
+                    name: role.name.clone(),
+                    runtime_role: runtime_role_from_catalog_seat(role.seat.as_deref()),
+                    blurb: role.blurb.clone(),
+                })
+                .collect(),
+            bindings: relay_api::team::TeamRoleBindings::default(),
+        };
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT binding, role_id
+             FROM team_binding
+             WHERE version_id = ?1",
+        ) else {
+            return relay_api::team::TeamStructure::for_builtin_team_id(team_id);
+        };
+        let Ok(rows) = stmt.query_map(params![version_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }) else {
+            return relay_api::team::TeamStructure::for_builtin_team_id(team_id);
+        };
+        let mut saw_any = false;
+        for row in rows.flatten() {
+            saw_any = true;
+            let (binding, role_id) = row;
+            match binding.as_str() {
+                "lead" => structure.bindings.lead = role_id,
+                "dev" => structure.bindings.dev = role_id,
+                "reviewer" => structure.bindings.reviewer = role_id,
+                "mr_dev" => structure.bindings.mr_dev = role_id,
+                "reporter" => structure.bindings.reporter = role_id,
+                _ => {}
+            }
+        }
+        if saw_any {
+            structure
+        } else {
+            relay_api::team::TeamStructure::for_builtin_team_id(team_id)
+        }
     }
 
     /// Distinct runs and mean tokens for one team inside a window.
@@ -1474,7 +1527,7 @@ fn migrate(conn: &Connection) -> Result<(), String> {
                  'builtin',
                  'Default',
                  1,
-                 'General coding — the fixed Planner / Implementer / Reviewer pipeline',
+                 'General coding — Planner / Implementer / Reviewer',
                  'builtin-v1'
              );
              INSERT OR IGNORE INTO team_version (id, team_id, created_at)
@@ -1682,7 +1735,103 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         }
     }
 
+    if version < 10 {
+        conn.execute_batch(
+            "BEGIN;
+             CREATE TABLE IF NOT EXISTS team (
+                 id                 TEXT PRIMARY KEY,
+                 name               TEXT NOT NULL,
+                 persistent         INTEGER NOT NULL DEFAULT 1,
+                 focus              TEXT,
+                 current_version_id TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS team_version (
+                 id         TEXT PRIMARY KEY,
+                 team_id    TEXT NOT NULL,
+                 created_at INTEGER NOT NULL,
+                 FOREIGN KEY (team_id) REFERENCES team(id)
+             );
+             CREATE TABLE IF NOT EXISTS team_role (
+                 version_id TEXT    NOT NULL,
+                 idx        INTEGER NOT NULL,
+                 role_id    TEXT    NOT NULL,
+                 name       TEXT    NOT NULL,
+                 seat       TEXT,
+                 blurb      TEXT    NOT NULL DEFAULT '',
+                 prompt     TEXT    NOT NULL DEFAULT '',
+                 PRIMARY KEY (version_id, idx),
+                 FOREIGN KEY (version_id) REFERENCES team_version(id)
+             );
+             CREATE TABLE IF NOT EXISTS team_binding (
+                 version_id TEXT NOT NULL,
+                 binding    TEXT NOT NULL,
+                 role_id    TEXT NOT NULL,
+                 PRIMARY KEY (version_id, binding),
+                 FOREIGN KEY (version_id) REFERENCES team_version(id)
+             );
+             INSERT OR IGNORE INTO team (id, name, persistent, focus, current_version_id)
+             VALUES (
+                 'builtin',
+                 'Default',
+                 1,
+                 'General coding — Planner / Implementer / Reviewer',
+                 'builtin-v1'
+             );
+             INSERT OR IGNORE INTO team_version (id, team_id, created_at)
+             VALUES ('builtin-v1', 'builtin', 0);
+             INSERT OR IGNORE INTO team_role (version_id, idx, role_id, name, seat, blurb, prompt)
+             VALUES
+               ('builtin-v1', 0, 'tl', 'Planner', 'tl',
+                'Reads the brief, sizes the work, splits it into sub-tasks.', ''),
+               ('builtin-v1', 1, 'dev', 'Implementer', 'dev',
+                'Builds one sub-task per fresh session.', ''),
+               ('builtin-v1', 2, 'reviewer', 'Reviewer', 'reviewer',
+                'Checks the work against your scope; read-only sandbox.', '');
+             INSERT OR IGNORE INTO team_binding (version_id, binding, role_id)
+             VALUES
+               ('builtin-v1', 'lead', 'tl'),
+               ('builtin-v1', 'dev', 'dev'),
+               ('builtin-v1', 'reviewer', 'reviewer'),
+               ('builtin-v1', 'mr_dev', 'dev'),
+               ('builtin-v1', 'reporter', 'tl');
+             INSERT OR IGNORE INTO team (id, name, persistent, focus, current_version_id)
+             VALUES (
+                 'pair',
+                 'Pair',
+                 1,
+                 'Pair programming — one writable planning/implementation session plus reviewer.',
+                 'pair-v1'
+             );
+             INSERT OR IGNORE INTO team_version (id, team_id, created_at)
+             VALUES ('pair-v1', 'pair', 0);
+             INSERT OR IGNORE INTO team_role (version_id, idx, role_id, name, seat, blurb, prompt)
+             VALUES
+               ('pair-v1', 0, 'pair', 'Pair programmer', 'dev',
+                'Plans with you and implements in the same writable session.', ''),
+               ('pair-v1', 1, 'reviewer', 'Reviewer', 'reviewer',
+                'Reviews the pair''s work in a read-only session.', '');
+             INSERT OR IGNORE INTO team_binding (version_id, binding, role_id)
+             VALUES
+               ('pair-v1', 'lead', 'pair'),
+               ('pair-v1', 'dev', 'pair'),
+               ('pair-v1', 'reviewer', 'reviewer'),
+               ('pair-v1', 'mr_dev', 'pair'),
+               ('pair-v1', 'reporter', 'pair');
+             PRAGMA user_version = 10;
+             COMMIT;",
+        )
+        .map_err(|error| format!("migrate to 10: {error}"))?;
+    }
+
     Ok(())
+}
+
+fn runtime_role_from_catalog_seat(seat: Option<&str>) -> String {
+    match seat {
+        Some("tl" | "lead") => relay_api::team::TeamRole::Tl.as_str().to_string(),
+        Some("reviewer") => relay_api::team::TeamRole::Reviewer.as_str().to_string(),
+        _ => relay_api::team::TeamRole::Dev.as_str().to_string(),
+    }
 }
 
 #[cfg(test)]

@@ -222,6 +222,10 @@ fn team_input(cwd: &str) -> crate::state::app::team::TeamStartRequest {
         dev_effort: String::new(),
         reviewer_effort: String::new(),
         dev_agents: None,
+        team_id: relay_api::team::BUILTIN_TEAM_ID.to_string(),
+        team_version_id: relay_api::team::BUILTIN_TEAM_VERSION_ID.to_string(),
+        team_name: relay_api::team::BUILTIN_TEAM_NAME.to_string(),
+        team_structure: relay_api::team::TeamStructure::standard(),
         starting_proposal_id: None,
         tl_provider: "codex".to_string(),
         dev_provider: "codex".to_string(),
@@ -394,6 +398,49 @@ async fn start_team_run_records_legacy_backend_before_driver_spawn() {
     assert_eq!(
         run.orchestration_backend,
         relay_api::orchestration::OrchestrationBackendRef::LegacyEmbedded
+    );
+}
+
+#[tokio::test]
+async fn start_team_pins_the_requested_pair_structure() {
+    let (_repo, root) = init_team_repo().await;
+    let (app, _) = build_review_app(&root, &["codex"]).await;
+    let app = app.with_team_driver(std::sync::Arc::new(ReturningTeamDriver));
+
+    let receipt = app
+        .start_team(crate::protocol::StartTeamInput {
+            title: "Pair on the parser".to_string(),
+            cwd: Some(root),
+            team_id: Some(relay_api::team::BUILTIN_PAIR_TEAM_ID.to_string()),
+            device_id: Some("device-1".to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("pair team should start");
+    let run = wait_for_team_status(
+        &app,
+        &receipt.team_run_id,
+        crate::state::TeamRunStatus::Interrupted,
+    )
+    .await;
+
+    assert_eq!(
+        run.team_id.as_deref(),
+        Some(relay_api::team::BUILTIN_PAIR_TEAM_ID)
+    );
+    assert_eq!(
+        run.team_version_id.as_deref(),
+        Some(relay_api::team::BUILTIN_PAIR_TEAM_VERSION_ID)
+    );
+    assert_eq!(run.team_name, relay_api::team::BUILTIN_PAIR_TEAM_NAME);
+    assert_eq!(run.team_structure, relay_api::team::TeamStructure::pair());
+    assert!(run.lead_and_dev_share_thread());
+    assert_eq!(
+        run.role_id_for_turn(
+            relay_api::team::TeamThreadSlot::Tl,
+            relay_api::team::TeamRole::Dev
+        ),
+        "pair"
     );
 }
 
@@ -2902,6 +2949,7 @@ async fn a_team_turn_stamps_the_phase_it_ran_in_not_the_phase_it_ended_in() {
         relay.note_team_turn_phase(
             "design-reviewer-1",
             relay_api::team::TeamPhase::DesignReview,
+            "reviewer",
         );
         // The driver moves on while the reviewer's `done` is still in flight.
         relay.update_team_run(&run_id, |run| {

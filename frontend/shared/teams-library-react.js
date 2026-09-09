@@ -122,7 +122,7 @@ export function TeamsSidebarList({
     h(
       "p",
       { className: "teams-sidebar-foot" },
-      "One team ships today. More arrive when teams become configurable."
+      "Built-in structures are versioned. Running tasks keep the version they started with."
     )
   );
 }
@@ -168,7 +168,7 @@ function TeamsOrchestratorPane({ team }) {
       h(
         "p",
         { className: "task-welcome-lede" },
-        "Mockup 13a: describe a role change, see a prompt diff, apply — only new tasks pick it up. That chat lands here once configurable teams ship. Until then the Default team on the right is the only shape every task uses."
+        "Mockup 13a: describe a role change, see a prompt diff, apply — only new tasks pick it up. That chat lands here once editable team definitions ship."
       )
     ),
     h(

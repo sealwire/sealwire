@@ -7,6 +7,7 @@
 // this form is the only chance to set them.
 
 import React from "react";
+import { BUILTIN_TEAM_ID, listLibraryTeams } from "./teams-library-model.js";
 
 const h = React.createElement;
 
@@ -77,6 +78,51 @@ function Field({ field, value, onChange, idPrefix }) {
   );
 }
 
+function TeamSelector({ teams, value, onChange, idPrefix }) {
+  const selected = value || BUILTIN_TEAM_ID;
+  return h(
+    "fieldset",
+    { className: "start-task-field start-task-team-field" },
+    h("legend", { className: "sidebar-label" }, "Team"),
+    h(
+      "div",
+      { className: "start-task-team-options" },
+      ...(teams || listLibraryTeams()).map((team) => {
+        const optionId = `${idPrefix}-team-${team.id}`;
+        return h(
+          "label",
+          {
+            key: team.id,
+            className: [
+              "start-task-team-option",
+              selected === team.id ? "is-selected" : "",
+            ].filter(Boolean).join(" "),
+            htmlFor: optionId,
+          },
+          h("input", {
+            id: optionId,
+            type: "radio",
+            name: `${idPrefix}-team`,
+            value: team.id,
+            checked: selected === team.id,
+            onChange: (event) => onChange?.("team_id", event.target.value),
+          }),
+          h(
+            "span",
+            { className: "start-task-team-copy" },
+            h("span", { className: "start-task-team-name" }, team.name),
+            h(
+              "span",
+              { className: "start-task-team-meta" },
+              `${team.roleCount ?? team.roles?.length ?? 0} roles`
+            )
+          )
+        );
+      })
+    )
+  );
+}
+
 export function StartTaskDialog({
   id = "start-task-dialog",
   fields = {},
@@ -87,6 +133,7 @@ export function StartTaskDialog({
   error = null,
   workspaceSuggestions = [],
   defaultCwd = "",
+  teams = listLibraryTeams(),
 }) {
   const closeDialog = () => {
     onRequestClose?.();
@@ -123,8 +170,14 @@ export function StartTaskDialog({
       h(
         "p",
         { className: "start-task-intro" },
-        "A team lead splits this into sub-tasks, a developer builds each one and a reviewer checks it — all in a fresh git worktree on its own branch. Nothing touches your working tree."
+        "Pick a team structure for this task. The task still runs in a fresh git worktree on its own branch, so nothing touches your working tree."
       ),
+      h(TeamSelector, {
+        teams,
+        value: fields.team_id,
+        onChange: onFieldChange,
+        idPrefix: id,
+      }),
       ...TASK_FIELDS.map((field) =>
         h(Field, {
           key: field.key,

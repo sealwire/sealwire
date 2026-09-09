@@ -193,6 +193,7 @@ import { createWorkflowsCache } from "./shared/workflows-cache.js";
 import { createTeamsCache } from "./shared/teams-cache.js";
 import { markTaskSeen } from "./local/task-seen-prefs.js";
 import { StartTaskDialog } from "./shared/start-task-dialog.js";
+import { BUILTIN_TEAM_ID, teamsFromCatalog } from "./shared/teams-library-model.js";
 import {
   fetchProjectsPayload,
   createProject,
@@ -2303,12 +2304,14 @@ function renderStartTaskDialog() {
     startTaskRootHandle = createRoot(startTaskDialogMount);
   }
   flushSync(() => {
+    const teams = teamsFromCatalog(state.teamCatalog);
     startTaskRootHandle.render(
       React.createElement(StartTaskDialog, {
         fields: startTaskFields,
         pending: startTaskPending,
         error: startTaskError,
         defaultCwd: state.session?.current_cwd || "",
+        teams,
         onFieldChange(key, value) {
           startTaskFields = { ...startTaskFields, [key]: value };
           renderStartTaskDialog();
@@ -2342,6 +2345,7 @@ async function submitStartTask() {
       acceptance_criteria: startTaskFields.acceptance_criteria || "",
       agreed_scope: startTaskFields.agreed_scope || "",
       quality_rules: startTaskFields.quality_rules || "",
+      team_id: startTaskFields.team_id || BUILTIN_TEAM_ID,
       // Omitted rather than blank: the relay reads absent as "the current
       // workspace" and "the workspace's own branch", and an empty string is a
       // path/ref that resolves to nothing.

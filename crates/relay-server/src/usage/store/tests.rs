@@ -179,7 +179,10 @@ fn migration_nine_removes_cached_input_from_legacy_codex_input() {
         )
         .expect("query claude");
 
-    assert_eq!(version, 9, "data and schema stamp commit together");
+    assert_eq!(
+        version, LEDGER_SCHEMA_VERSION,
+        "data and schema stamp commit together"
+    );
     assert_eq!(codex, (100, 900, 1_100));
     assert_eq!(
         claude,
