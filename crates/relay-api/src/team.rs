@@ -1139,8 +1139,9 @@ impl TeamRun {
             TeamThreadSlot::MrDev => &self.team_structure.bindings.mr_dev,
             TeamThreadSlot::RunOwned(index)
                 if runtime_role == TeamRole::Dev
-                    && self.run_owned_thread_ids.get(index).map(String::as_str)
-                        == self.mr_dev_thread_id.as_deref() =>
+                    && self.mr_dev_thread_id.as_deref().is_some_and(|mr_dev| {
+                        self.run_owned_thread_ids.get(index).map(String::as_str) == Some(mr_dev)
+                    }) =>
             {
                 &self.team_structure.bindings.mr_dev
             }
@@ -2267,6 +2268,18 @@ mod tests {
         assert_eq!(
             run.role_id_for_turn(TeamThreadSlot::RunOwned(0), TeamRole::Dev),
             "fixer"
+        );
+    }
+
+    #[test]
+    fn out_of_bounds_run_owned_dev_does_not_match_absent_mr_dev_thread() {
+        let mut run = run_with(TeamPhase::MrGate, vec![]);
+        run.team_structure.bindings.dev = "implementer".to_string();
+        run.team_structure.bindings.mr_dev = "fixer".to_string();
+
+        assert_eq!(
+            run.role_id_for_turn(TeamThreadSlot::RunOwned(0), TeamRole::Dev),
+            "implementer"
         );
     }
 
