@@ -16017,7 +16017,7 @@ resurrected into a turn that never completes: {:?}",
     }
 
     #[tokio::test]
-    async fn dirty_only_after_author_turn_does_not_review_historical_head() {
+    async fn dirty_only_after_author_turn_is_reviewed_via_checkpoint_not_the_historical_head() {
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();
         init_git_seed(cwd);
@@ -16030,6 +16030,7 @@ resurrected into a turn that never completes: {:?}",
         provider
             .auto_commit_author_changes
             .store(false, Ordering::Relaxed);
+        queue_verdicts(provider, &["APPROVE"]).await;
         let parent = start_parent(&app, cwd, "codex").await;
         app.send_message(crate::protocol::SendMessageInput {
             text: "try to fix it".to_string(),
@@ -16057,41 +16058,51 @@ resurrected into a turn that never completes: {:?}",
             .await
             .expect("review should start");
         let job = wait_for_review(&app, &receipt.review_job_id).await;
-        assert_eq!(job.status, "failed");
+        assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
         assert_eq!(job.base_sha.as_deref(), Some(round_base.as_str()));
-        assert!(job.candidate_sha.is_none());
         assert!(
-            job.error
-                .as_deref()
-                .unwrap_or_default()
-                .contains("did not create a commit"),
-            "failure should explain the missing committed candidate: {:?}",
-            job.error
+            job.candidate_sha.is_some(),
+            "a checkpoint candidate must be recorded even though HEAD never advanced"
         );
 
         let turns = provider.turns.lock().await.clone();
         assert!(
-            turns.iter().any(|(thread, text)| {
-                thread == &parent.id && text.contains("needs a committed candidate")
+            turns.iter().all(|(thread, text)| {
+                thread != &parent.id || !text.contains("needs a committed candidate")
             }),
-            "the same parent session must be asked to commit dirty-only work: {turns:?}"
+            "the parent must never be asked to commit dirty-only work: {turns:?}"
         );
         assert!(
             turns
                 .iter()
                 .all(|(_, text)| !text.contains("Committed review target")),
-            "reviewer must not inspect an unrelated historical HEAD: {turns:?}"
+            "this is a checkpoint, not a real committed candidate: {turns:?}"
         );
+        // THE SURVIVING GUARD (the reason this test exists): dirty-only work must never
+        // fall back to reviewing the unrelated historical HEAD^..HEAD range. That was
+        // the original bug — reviewing a historical commit while the real work sits in
+        // the worktree — and it is worse than the "fails, demands a commit" bug the
+        // checkpoint mechanism replaces. Only the MECHANISM changed here (checkpoint
+        // instead of fail); this invariant did not.
         assert!(
             turns.iter().all(|(_, text)| {
                 !text.contains(&format!("Range: {historical_base}..{round_base}"))
             }),
             "the historical HEAD^..HEAD range must not be reviewed: {turns:?}"
         );
+        let prompt = turns
+            .iter()
+            .find(|(_, text)| text.contains("Uncommitted worktree snapshot"))
+            .map(|(_, text)| text)
+            .expect("reviewer prompt should mark this as an uncommitted snapshot");
+        assert!(
+            prompt.contains(&format!("Range: {round_base}..")),
+            "the checkpoint must be parented on the round base, not the historical one: {prompt}"
+        );
     }
 
     #[tokio::test]
-    async fn dirty_git_review_requires_the_parent_session_to_commit_before_reviewing() {
+    async fn dirty_git_review_without_a_commit_is_reviewed_via_checkpoint() {
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();
         init_git_seed(cwd);
@@ -16104,9 +16115,13 @@ resurrected into a turn that never completes: {:?}",
 
         let (app, providers) = build_review_app(cwd, &["codex"]).await;
         let provider = providers.get("codex").unwrap();
+        // The author never commits, ever — not even if asked. If production code
+        // regresses back to asking, this proves the review still can't fall back on
+        // an obliging author to paper over it.
         provider
             .auto_commit_author_changes
             .store(false, Ordering::Relaxed);
+        queue_verdicts(provider, &["APPROVE"]).await;
         let parent = start_parent(&app, cwd, "codex").await;
 
         let receipt = app
@@ -16114,38 +16129,35 @@ resurrected into a turn that never completes: {:?}",
             .await
             .expect("review should start");
         let job = wait_for_review(&app, &receipt.review_job_id).await;
-        assert_eq!(job.status, "failed");
+        assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
         assert_eq!(job.base_sha.as_deref(), Some(base.as_str()));
         assert!(
-            job.candidate_sha.is_none(),
-            "no candidate can be persisted until HEAD advances"
-        );
-        assert!(
-            job.error
-                .as_deref()
-                .unwrap_or_default()
-                .contains("did not create a commit"),
-            "failure should explain the invariant: {:?}",
-            job.error
+            job.candidate_sha.is_some(),
+            "a checkpoint candidate must be recorded even though HEAD never advanced"
         );
 
         let turns = provider.turns.lock().await.clone();
         assert!(
-            turns.iter().any(|(thread, text)| {
-                thread == &parent.id && text.contains("needs a committed candidate")
+            turns.iter().all(|(thread, text)| {
+                thread != &parent.id || !text.contains("needs a committed candidate")
             }),
-            "the same parent session must be asked to commit: {turns:?}"
+            "an author who will not commit must never be asked to: {turns:?}"
         );
+        let prompt = turns
+            .iter()
+            .find(|(_, text)| text.contains("Uncommitted worktree snapshot"))
+            .map(|(_, text)| text)
+            .expect("reviewer prompt should mark this as an uncommitted snapshot");
+        // Names and manifest/stat only, same as the committed-candidate path — not raw
+        // patch content (see `dirty_git_review_persists_the_parent_commit_as_the_candidate`).
         assert!(
-            turns
-                .iter()
-                .all(|(_, text)| !text.contains("Committed review target")),
-            "the reviewer must not run before a candidate commit exists: {turns:?}"
+            prompt.contains("seed.txt"),
+            "the author's changed file must reach the reviewer via the manifest: {prompt}"
         );
     }
 
     #[tokio::test]
-    async fn dirty_git_review_persists_the_parent_commit_as_the_candidate() {
+    async fn dirty_git_review_via_checkpoint_leaves_no_repo_mutation() {
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();
         init_git_seed(cwd);
@@ -16158,8 +16170,20 @@ resurrected into a turn that never completes: {:?}",
 
         let (app, providers) = build_review_app(cwd, &["codex"]).await;
         let provider = providers.get("codex").unwrap();
+        // No auto-commit either way: the point here is that the repo is untouched
+        // regardless of whether an obliging author would have committed.
+        provider
+            .auto_commit_author_changes
+            .store(false, Ordering::Relaxed);
         queue_verdicts(provider, &["APPROVE"]).await;
         let parent = start_parent(&app, cwd, "codex").await;
+
+        let status_before = git_stdout(cwd, &["status", "--porcelain=v1", "-uall"]);
+        let branches_before = git_stdout(cwd, &["branch", "--list"]);
+        let index_path = real_index_path_for_test(cwd);
+        let index_before = std::fs::read(&index_path).expect("index exists");
+        let seed_path = std::path::Path::new(cwd).join("seed.txt");
+        let seed_before = std::fs::read(&seed_path).expect("seed.txt exists");
 
         let receipt = app
             .request_review(review_input("codex"))
@@ -16167,35 +16191,58 @@ resurrected into a turn that never completes: {:?}",
             .expect("review should start");
         let job = wait_for_review(&app, &receipt.review_job_id).await;
         assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
-        let head = git_head(cwd);
-        assert_ne!(head, base, "the author commit should advance HEAD");
-        assert_eq!(job.base_sha.as_deref(), Some(base.as_str()));
-        assert_eq!(job.candidate_sha.as_deref(), Some(head.as_str()));
-        assert_eq!(job.verdict_candidate_sha.as_deref(), Some(head.as_str()));
+
+        // No repo mutation — asserted directly against `git`, not relay state.
+        assert_eq!(git_head(cwd), base, "checkpoint review must not move HEAD");
+        assert_eq!(
+            git_stdout(cwd, &["branch", "--list"]),
+            branches_before,
+            "checkpoint review must not create/move/delete a branch"
+        );
+        assert_eq!(
+            std::fs::read(&index_path).expect("index still exists"),
+            index_before,
+            "checkpoint review must not touch the user's real index"
+        );
+        assert_eq!(
+            git_stdout(cwd, &["status", "--porcelain=v1", "-uall"]),
+            status_before,
+            "the worktree's observable git status must be unchanged"
+        );
+        assert_eq!(
+            std::fs::read(&seed_path).expect("seed.txt still exists"),
+            seed_before,
+            "the dirty worktree file must be byte-identical after the review"
+        );
 
         let turns = provider.turns.lock().await.clone();
         assert!(
-            turns.iter().any(|(thread, text)| {
-                thread == &parent.id && text.contains("needs a committed candidate")
+            turns.iter().all(|(thread, text)| {
+                thread != &parent.id || !text.contains("needs a committed candidate")
             }),
-            "a dirty workspace must be sent back to the parent for a commit: {turns:?}"
+            "the author must never be asked to commit: {turns:?}"
         );
         let reviewer_thread = job.reviewer_thread_id.clone().expect("reviewer thread");
         let reviewer_prompt = turns
             .iter()
             .find(|(thread, text)| {
-                thread == &reviewer_thread && text.contains("Committed review target")
+                thread == &reviewer_thread && text.contains("Uncommitted worktree snapshot")
             })
             .map(|(_, text)| text)
-            .expect("reviewer prompt");
+            .expect(
+                "reviewer prompt should mark this as an uncommitted snapshot, not a branch commit",
+            );
         assert!(
-            reviewer_prompt.contains(&format!("Base commit: {base}"))
-                && reviewer_prompt.contains(&format!("Candidate commit: {head}")),
-            "reviewer prompt must bind to the commit the parent created: {reviewer_prompt}"
+            reviewer_prompt.contains(&format!("Base commit: {base}")),
+            "reviewer prompt must bind to the checkpoint's base: {reviewer_prompt}"
+        );
+        assert!(
+            !reviewer_prompt.contains("Committed review target"),
+            "an APPROVE here must never be misread as approving committed history: {reviewer_prompt}"
         );
         assert!(
             !reviewer_prompt.contains("DIRTY_CANDIDATE_PAYLOAD"),
-            "the committed prompt names objects and manifest/stat only, not raw patch content"
+            "the checkpoint prompt names objects and manifest/stat only, not raw patch content"
         );
     }
 

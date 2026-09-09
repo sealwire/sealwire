@@ -419,6 +419,62 @@ add anything new you see.";
     build_committed_review_prompt(intro, recap, target, instructions, workspace, Some(&prior))
 }
 
+/// Prompt handed to a fresh reviewer of a CHECKPOINT: a hidden commit the relay built
+/// from a dirty worktree because there was no committed candidate and nobody is asked
+/// to commit one (doc §Reviewer Prompt, checkpoint variant). Read-only, same as
+/// `reviewer_prompt_for_target` — the difference is entirely in what the prompt says
+/// it is looking at, not in what the reviewer may do.
+pub(crate) fn reviewer_prompt_for_checkpoint(
+    recap: &str,
+    target: &GitReviewTarget,
+    instructions: Option<&str>,
+    workspace: &str,
+) -> String {
+    build_checkpoint_review_prompt(
+        "You are reviewing another agent's work in this repository.",
+        recap,
+        target,
+        instructions,
+        workspace,
+        None,
+    )
+}
+
+pub(crate) fn re_review_prompt_for_checkpoint(
+    recap: &str,
+    target: &GitReviewTarget,
+    instructions: Option<&str>,
+    workspace: &str,
+) -> String {
+    build_checkpoint_review_prompt(
+        "You previously reviewed this repository. Here is an updated recap and a fresh \
+uncommitted worktree snapshot — re-review the CURRENT snapshot, focusing on what changed \
+since your last review and whether earlier findings were addressed.",
+        recap,
+        target,
+        instructions,
+        workspace,
+        None,
+    )
+}
+
+pub(crate) fn handoff_review_prompt_for_checkpoint(
+    recap: &str,
+    target: &GitReviewTarget,
+    instructions: Option<&str>,
+    workspace: &str,
+    previous_review: &str,
+) -> String {
+    let prior = format!(
+        "Findings from the previous reviewer:\n{}",
+        previous_review.trim()
+    );
+    let intro = "You are taking over a code review from another reviewer. Re-review the \
+CURRENT uncommitted worktree snapshot: for each earlier finding say whether it is \
+addressed, and add anything new you see.";
+    build_checkpoint_review_prompt(intro, recap, target, instructions, workspace, Some(&prior))
+}
+
 fn build_committed_review_prompt(
     intro: &str,
     recap: &str,
@@ -494,6 +550,93 @@ VERDICT: APPROVE\n\
 VERDICT: NEEDS_CHANGES\n\
 VERDICT: UNSURE\n\
 Use APPROVE only if the committed candidate is good to merge as-is.",
+        generated_at = target.generated_at,
+        cwd = target.cwd,
+        base = target.base_sha,
+        candidate = target.candidate_sha,
+    )
+}
+
+/// Body for the checkpoint-review prompts. Deliberately a SEPARATE function from
+/// `build_committed_review_prompt` rather than a shared one plus a flag: the two must
+/// never say the same thing about what is being reviewed, so keeping the wording apart
+/// means a future edit to one can't silently blur into the other.
+fn build_checkpoint_review_prompt(
+    intro: &str,
+    recap: &str,
+    target: &GitReviewTarget,
+    instructions: Option<&str>,
+    workspace: &str,
+    prior_context: Option<&str>,
+) -> String {
+    let recap = if recap.trim().is_empty() {
+        "(the parent agent did not provide a recap)"
+    } else {
+        recap.trim()
+    };
+    let instructions = instructions
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("(none)");
+    let manifest = if target.manifest.trim().is_empty() {
+        "(no file changes in this snapshot)"
+    } else {
+        target.manifest.trim()
+    };
+    let stat = if target.stat.trim().is_empty() {
+        "(no diff stat for this snapshot)"
+    } else {
+        target.stat.trim()
+    };
+    let workspace = workspace.trim();
+    let workspace_line = if workspace.is_empty() {
+        String::new()
+    } else {
+        format!("{workspace}\n\n")
+    };
+    let prior_context = prior_context
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("\n\nPrior review context:\n{value}"))
+        .unwrap_or_default();
+
+    format!(
+        "{intro}\n\n\
+{workspace_line}\
+Do not modify files. This is an UNCOMMITTED WORKTREE SNAPSHOT, not a commit on any \
+branch: the author has not committed, so the relay captured the current dirty state as \
+a hidden, read-only checkpoint object for you to review instead of asking anyone to \
+commit. Review it as that snapshot.\n\
+Prioritize bugs, regressions, security risks, race conditions, data loss,\n\
+incorrect assumptions, and missing tests. Keep style nits out unless they hide a\n\
+real bug.\n\n\
+Parent agent recap:\n{recap}{prior_context}\n\n\
+Workspace diff collected by the relay at {generated_at}:\n\
+Uncommitted worktree snapshot, not a commit on any branch.\n\
+Working tree: {cwd}\n\
+Base commit: {base}\n\
+Checkpoint commit: {candidate}\n\
+Range: {base}..{candidate}\n\n\
+Changed-file manifest (`git diff --name-status --find-renames {base} {candidate} --`):\n\
+{manifest}\n\n\
+Diff stat (`git diff --stat --summary --find-renames {base} {candidate} --`):\n\
+{stat}\n\n\
+Inspect the exact objects yourself. Use `git diff --find-renames {base} {candidate} --` \
+for the full patch, `git show {candidate}:<path>` for the snapshot's contents, and \
+`git show {base}:<path>` for old-side contents. For deleted files, inspect the \
+old side with `git show {base}:<path>`; for renames, compare the old and new paths \
+reported in the manifest.\n\n\
+Additional user instructions:\n{instructions}\n\n\
+Return:\n\
+1. Findings, highest severity first, with file/line references where possible.\n\
+2. Open questions or assumptions.\n\
+3. Test gaps or checks you recommend.\n\
+4. A short verdict.\n\n\
+End your reply with exactly one line, on its own, one of:\n\
+VERDICT: APPROVE\n\
+VERDICT: NEEDS_CHANGES\n\
+VERDICT: UNSURE\n\
+Use APPROVE only if this uncommitted snapshot is good to merge as-is.",
         generated_at = target.generated_at,
         cwd = target.cwd,
         base = target.base_sha,
