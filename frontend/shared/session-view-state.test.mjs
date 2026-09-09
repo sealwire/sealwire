@@ -1025,10 +1025,37 @@ test("a ticket workspace key survives the persistence allowlist", () => {
   assert.equal(isFullAreaWorkspaceKey(sessionViewContextKey(ticket("t9"))), true);
 });
 
-test("Sessions returns from a ticket rather than staying on it", () => {
-  assert.deepEqual(selectContextAfterProjectDelete
-    ? normalizeSessionViewContext(ticket("t1"))
-    : null, { kind: "ticket", teamRunId: "t1" });
-  // The predicate is what every return site consults.
-  assert.equal(isFullAreaContext(normalizeSessionViewContext(ticket("t1"))), true);
+// Drives the reducer rather than the predicate: asserting `isFullAreaContext`
+// only restates the fix. What broke for a user was RETURN_TO_SESSIONS leaving
+// them on the ticket, and only running it proves that is gone.
+test("Sessions returns from a ticket instead of staying on it", () => {
+  let state = createSessionViewState();
+  state = transition(state, { type: "OPEN_THREAD", threadId: "session-a" });
+  state = transition(state, { type: "SHOW_OVERVIEW", context: ticket("t1") });
+  assert.deepEqual(state.location.context, { kind: "ticket", teamRunId: "t1" });
+
+  state = transition(state, { type: "RETURN_TO_SESSIONS" });
+  assert.equal(state.location.context.kind, "sessions");
+  assert.notEqual(state.location.context.kind, "ticket");
+});
+
+// A ticket is a full-area screen with no tab strip, so a thread opened from it
+// must be filed somewhere reachable — the same floor `review` relies on.
+test("a thread opened from a ticket lands somewhere it can be seen", () => {
+  let state = createSessionViewState();
+  state = transition(state, { type: "SHOW_OVERVIEW", context: ticket("t1") });
+  assert.equal(state.location.threadId, null);
+  state = transition(state, { type: "OPEN_THREAD", threadId: "thread-a" });
+  assert.deepEqual(sessionViewInvariantErrors(state), []);
+  assert.notEqual(sessionViewContextKey(state.location.context), undefined);
+});
+
+// Two runs must not share a workspace — the undefined key made them alias.
+test("two tickets keep separate workspaces through the reducer", () => {
+  let state = createSessionViewState();
+  state = transition(state, { type: "SHOW_OVERVIEW", context: ticket("t1") });
+  state = transition(state, { type: "SHOW_OVERVIEW", context: ticket("t2") });
+  const keys = Object.keys(state.workspaces);
+  assert.equal(keys.includes(undefined), false);
+  assert.equal(keys.includes("undefined"), false);
 });
