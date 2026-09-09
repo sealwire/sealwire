@@ -257,7 +257,7 @@ test("a parked question is the loudest thing on a card", () => {
   );
   assert.equal(attention.kind, "needs_input");
   assert.equal(attention.reason, "question");
-  assert.match(attention.text, /developer/);
+  assert.match(attention.text, /implementer/);
 });
 
 test("a pair programmer question names the pair role", () => {

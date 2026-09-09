@@ -1137,6 +1137,13 @@ impl TeamRun {
             TeamThreadSlot::SubTaskDev(_) => &self.team_structure.bindings.dev,
             TeamThreadSlot::SubTaskReviewer(_) => &self.team_structure.bindings.reviewer,
             TeamThreadSlot::MrDev => &self.team_structure.bindings.mr_dev,
+            TeamThreadSlot::RunOwned(index)
+                if runtime_role == TeamRole::Dev
+                    && self.run_owned_thread_ids.get(index).map(String::as_str)
+                        == self.mr_dev_thread_id.as_deref() =>
+            {
+                &self.team_structure.bindings.mr_dev
+            }
             TeamThreadSlot::RunOwned(_) => match runtime_role {
                 TeamRole::Tl => &self.team_structure.bindings.lead,
                 TeamRole::Reviewer => &self.team_structure.bindings.reviewer,
@@ -2225,6 +2232,41 @@ mod tests {
         assert_eq!(
             run.role_id_for_turn(TeamThreadSlot::SubTaskReviewer(0), TeamRole::Reviewer),
             "reviewer"
+        );
+    }
+
+    #[test]
+    fn run_owned_mr_dev_thread_uses_mr_dev_binding_when_it_differs_from_dev() {
+        let mut run = run_with(TeamPhase::MrGate, vec![]);
+        run.team_structure = TeamStructure {
+            roles: vec![
+                TeamStructureRole {
+                    id: "implementer".to_string(),
+                    name: "Implementer".to_string(),
+                    runtime_role: TeamRole::Dev.as_str().to_string(),
+                    blurb: String::new(),
+                },
+                TeamStructureRole {
+                    id: "fixer".to_string(),
+                    name: "Fixer".to_string(),
+                    runtime_role: TeamRole::Dev.as_str().to_string(),
+                    blurb: String::new(),
+                },
+            ],
+            bindings: TeamRoleBindings {
+                lead: "planner".to_string(),
+                dev: "implementer".to_string(),
+                reviewer: "reviewer".to_string(),
+                mr_dev: "fixer".to_string(),
+                reporter: "planner".to_string(),
+            },
+        };
+        run.run_owned_thread_ids.push("mr-dev-thread".to_string());
+        run.mr_dev_thread_id = Some("mr-dev-thread".to_string());
+
+        assert_eq!(
+            run.role_id_for_turn(TeamThreadSlot::RunOwned(0), TeamRole::Dev),
+            "fixer"
         );
     }
 
