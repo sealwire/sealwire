@@ -2165,6 +2165,9 @@ pub(crate) async fn has_uncommitted_changes(workspace: &TrustedWorkspace) -> Res
 /// into the main checkout), not agent work. A trailing-slash `.gitignore` pattern never
 /// matches a symlink even when it targets an ignored directory, so `git status` reports
 /// these forever; the checkpoint builder excludes this same list from its snapshot.
+///
+/// A non-UTF-8-named symlink is never returned here, so it stays counted as dirt rather
+/// than excluded — the safe direction. Decided out of scope 2026-09-09, see `is_symlink`.
 pub(crate) async fn incidental_untracked_symlinks(
     workspace: &TrustedWorkspace,
 ) -> Result<Vec<String>, String> {
@@ -2204,6 +2207,8 @@ fn parse_status_z(stdout: &[u8]) -> Vec<(String, String)> {
         .collect()
 }
 
+/// A non-UTF-8 name never matches here (`path` already lost its exact bytes upstream).
+/// Decided out of scope 2026-09-09 — a miss counts as dirt, the safe failure direction.
 async fn is_symlink(workspace: &TrustedWorkspace, path: &str) -> bool {
     let full = std::path::Path::new(workspace.as_str()).join(path);
     tokio::fs::symlink_metadata(&full)
