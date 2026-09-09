@@ -6,10 +6,13 @@
 use super::*;
 use crate::protocol::{
     ConfirmOrchestratorProposalInput, DismissOrchestratorProposalInput, OrchestratorProposalView,
-    ProposeOrchestratorTaskInput, ProposeOrchestratorTaskReceipt, ReviseOrchestratorProposalInput,
-    SeatAgentView, StartTeamInput, StartTeamReceipt, TaskSeatAgentsView,
+    ProposalAgentRowView, ProposeOrchestratorTaskInput, ProposeOrchestratorTaskReceipt,
+    ReviseOrchestratorProposalInput, SeatAgentView, StartTeamInput, StartTeamReceipt,
+    TaskSeatAgentsView,
 };
-use relay_api::team::{BUILTIN_TEAM_ID, BUILTIN_TEAM_NAME, BUILTIN_TEAM_VERSION_ID};
+use relay_api::team::{
+    TeamRole, TeamStructure, BUILTIN_TEAM_ID, BUILTIN_TEAM_NAME, BUILTIN_TEAM_VERSION_ID,
+};
 
 pub(crate) const MAX_PENDING_PROPOSALS: usize = 16;
 const MAX_PROPOSAL_TITLE_CHARS: usize = 200;
@@ -44,6 +47,61 @@ fn merge_task_seat_agents(input: &TaskSeatAgentsView) -> TaskSeatAgentsView {
     let mut merged = default_task_seat_agents();
     merged.merge(input);
     merged
+}
+
+fn agent_for_runtime_role(agents: &TaskSeatAgentsView, role: TeamRole) -> SeatAgentView {
+    match role {
+        TeamRole::Tl => agents.tl.clone(),
+        TeamRole::Dev => agents.dev.clone(),
+        TeamRole::Reviewer => agents.reviewer.clone(),
+    }
+}
+
+fn legacy_proposal_agent_rows(agents: &TaskSeatAgentsView) -> Vec<ProposalAgentRowView> {
+    [
+        ("tl", "Planner", &agents.tl),
+        ("dev", "Implementer", &agents.dev),
+        ("reviewer", "Reviewer", &agents.reviewer),
+    ]
+    .into_iter()
+    .filter_map(|(role_id, label, agent)| {
+        (!agent.is_empty()).then(|| ProposalAgentRowView {
+            role_id: role_id.to_string(),
+            label: label.to_string(),
+            agent: agent.clone(),
+        })
+    })
+    .collect()
+}
+
+fn proposal_agent_rows(
+    agents: &TaskSeatAgentsView,
+    structure: &TeamStructure,
+) -> Vec<ProposalAgentRowView> {
+    let rows: Vec<_> = structure
+        .roles
+        .iter()
+        .filter_map(|role| {
+            let agent = agent_for_runtime_role(agents, role.runtime_team_role());
+            if agent.is_empty() {
+                return None;
+            }
+            let role_id =
+                non_empty(Some(role.id.clone())).unwrap_or_else(|| role.runtime_role.clone());
+            let label = non_empty(Some(role.name.clone())).unwrap_or_else(|| role_id.clone());
+            Some(ProposalAgentRowView {
+                role_id,
+                label,
+                agent,
+            })
+        })
+        .collect();
+
+    if rows.is_empty() && !agents.is_empty() {
+        legacy_proposal_agent_rows(agents)
+    } else {
+        rows
+    }
 }
 
 /// Resolve the tool's RELATIVE minutes to an absolute unix second.
@@ -104,8 +162,10 @@ impl AppState {
             .map(|value| truncate_chars(value, MAX_PROPOSAL_FIELD_CHARS));
 
         // Unknown id → Default; confirm cannot invent a team.
-        let (team_id, team_version_id, team_name) =
+        let (team_id, team_version_id, team_name, team_structure) =
             self.resolve_proposal_team(input.team_id.as_deref()).await;
+        let agents = merge_task_seat_agents(&input.agents);
+        let agent_rows = proposal_agent_rows(&agents, &team_structure);
 
         let proposal = OrchestratorProposalView {
             id: format!("orch_prop_{}", crate::state::app::review::random_suffix()),
@@ -122,7 +182,8 @@ impl AppState {
             why,
             // A fresh task IS its definition; only a reopen rewrites one.
             spec_updates: Default::default(),
-            agents: merge_task_seat_agents(&input.agents),
+            agents,
+            agent_rows,
             created_at: unix_now(),
             auto_start: input.auto_start.unwrap_or(false),
             scheduled_start_at,
@@ -167,8 +228,12 @@ impl AppState {
         // Resolve team before the write lock (catalog has its own lock).
         let requested_team: Option<String> =
             input.team_id.clone().and_then(|id| non_empty(Some(id)));
+        let catalog = self.team_catalog().await;
         let team = match requested_team.as_deref() {
-            Some(requested) => Some(self.resolve_proposal_team(Some(requested)).await),
+            Some(requested) => Some(resolve_proposal_team_from_catalog(
+                &catalog,
+                Some(requested),
+            )),
             None => None,
         };
 
@@ -201,11 +266,14 @@ impl AppState {
         // Field-by-field: revising one seat's effort must leave the model that
         // seat was already staged with alone.
         proposal.agents.merge(&input.agents);
-        if let Some((team_id, team_version_id, team_name)) = team {
+        if let Some((team_id, team_version_id, team_name, _)) = team {
             proposal.team_id = team_id;
             proposal.team_version_id = team_version_id;
             proposal.team_name = team_name;
         }
+        let (_, _, _, team_structure) =
+            resolve_proposal_team_from_catalog(&catalog, Some(&proposal.team_id));
+        proposal.agent_rows = proposal_agent_rows(&proposal.agents, &team_structure);
         let updated = proposal.clone();
         relay.notify();
         drop(relay);
@@ -267,7 +335,8 @@ impl AppState {
             team_name: String::new(),
             why: None,
             spec_updates: updates.clone(),
-            agents: merge_task_seat_agents(&Default::default()),
+            agents: Default::default(),
+            agent_rows: Vec::new(),
             created_at: unix_now(),
             // A reopen card carries no schedule; only `propose_task` stages one.
             auto_start: false,
@@ -480,24 +549,36 @@ impl AppState {
         Ok(())
     }
 
-    async fn resolve_proposal_team(&self, requested: Option<&str>) -> (String, String, String) {
-        let requested = requested
-            .and_then(|value| non_empty(Some(value.to_string())))
-            .unwrap_or_else(|| BUILTIN_TEAM_ID.to_string());
+    async fn resolve_proposal_team(
+        &self,
+        requested: Option<&str>,
+    ) -> (String, String, String, TeamStructure) {
         let catalog = self.team_catalog().await;
-        if let Some(team) = catalog.teams.iter().find(|team| team.id == requested) {
-            return (
-                team.id.clone(),
-                team.current_version_id.clone(),
-                team.name.clone(),
-            );
-        }
-        (
-            BUILTIN_TEAM_ID.to_string(),
-            BUILTIN_TEAM_VERSION_ID.to_string(),
-            BUILTIN_TEAM_NAME.to_string(),
-        )
+        resolve_proposal_team_from_catalog(&catalog, requested)
     }
+}
+
+fn resolve_proposal_team_from_catalog(
+    catalog: &crate::teams::TeamCatalogReport,
+    requested: Option<&str>,
+) -> (String, String, String, TeamStructure) {
+    let requested = requested
+        .and_then(|value| non_empty(Some(value.to_string())))
+        .unwrap_or_else(|| BUILTIN_TEAM_ID.to_string());
+    if let Some(team) = catalog.teams.iter().find(|team| team.id == requested) {
+        return (
+            team.id.clone(),
+            team.current_version_id.clone(),
+            team.name.clone(),
+            team.structure.clone(),
+        );
+    }
+    (
+        BUILTIN_TEAM_ID.to_string(),
+        BUILTIN_TEAM_VERSION_ID.to_string(),
+        BUILTIN_TEAM_NAME.to_string(),
+        TeamStructure::standard(),
+    )
 }
 
 fn truncate_chars(value: String, max_chars: usize) -> String {
@@ -511,6 +592,7 @@ fn truncate_chars(value: String, max_chars: usize) -> String {
 mod tests {
     use super::*;
     use crate::state::app::tests::path_scope_tests::{build_app, pair_device};
+    use relay_api::team::BUILTIN_PAIR_TEAM_ID;
     use tempfile::TempDir;
 
     async fn beta_app(cwd: &str) -> AppState {
@@ -572,6 +654,107 @@ mod tests {
         assert!(
             app.snapshot().await.orchestrator_proposals.is_empty(),
             "dismiss must drop the card from the snapshot"
+        );
+    }
+
+    #[tokio::test]
+    async fn pair_proposal_agent_rows_follow_the_two_role_structure() {
+        let project = TempDir::new().expect("project");
+        let cwd = project.path().to_string_lossy().to_string();
+        let app = beta_app(&cwd).await;
+
+        let receipt = app
+            .propose_orchestrator_task(ProposeOrchestratorTaskInput {
+                title: "Fix the relay card".to_string(),
+                team_id: Some(BUILTIN_PAIR_TEAM_ID.to_string()),
+                agents: TaskSeatAgentsView {
+                    dev: SeatAgentView {
+                        provider: Some("claude_code".to_string()),
+                        model: Some("sonnet[1m]".to_string()),
+                        effort: Some("high".to_string()),
+                    },
+                    reviewer: SeatAgentView {
+                        provider: Some("codex".to_string()),
+                        model: Some("gpt-5.5".to_string()),
+                        effort: Some("high".to_string()),
+                    },
+                    ..Default::default()
+                },
+                device_id: Some("device-1".to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("propose");
+
+        assert_eq!(receipt.proposal.team_id, BUILTIN_PAIR_TEAM_ID);
+        assert_eq!(
+            receipt.proposal.agents.tl.model.as_deref(),
+            Some("opus[1m]"),
+            "the legacy pipeline settings may still carry a tl default for confirm"
+        );
+        assert_eq!(
+            receipt
+                .proposal
+                .agent_rows
+                .iter()
+                .map(|row| row.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Pair programmer", "Reviewer"]
+        );
+        assert!(
+            !receipt
+                .proposal
+                .agent_rows
+                .iter()
+                .any(|row| row.role_id == "tl" || row.agent.model.as_deref() == Some("opus[1m]")),
+            "the Pair card must not show a phantom planner"
+        );
+        assert_eq!(
+            receipt.proposal.agent_rows[0].agent.model.as_deref(),
+            Some("sonnet[1m]")
+        );
+    }
+
+    #[tokio::test]
+    async fn revising_a_proposal_to_pair_recomputes_visible_agent_rows() {
+        let project = TempDir::new().expect("project tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        pair_device(&app, "device-1", Vec::new()).await;
+        app.set_beta_features_enabled(true).await;
+
+        let staged = app
+            .propose_orchestrator_task(ProposeOrchestratorTaskInput {
+                title: "Add a parser".to_string(),
+                device_id: Some("device-1".to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("propose")
+            .proposal;
+        assert_eq!(staged.agent_rows.len(), 3);
+
+        let revised = app
+            .revise_orchestrator_proposal(
+                &staged.id,
+                ReviseOrchestratorProposalInput {
+                    team_id: Some(BUILTIN_PAIR_TEAM_ID.to_string()),
+                    device_id: Some("device-1".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("revise")
+            .proposal;
+
+        assert_eq!(revised.team_id, BUILTIN_PAIR_TEAM_ID);
+        assert_eq!(
+            revised
+                .agent_rows
+                .iter()
+                .map(|row| row.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Pair programmer", "Reviewer"]
         );
     }
 
