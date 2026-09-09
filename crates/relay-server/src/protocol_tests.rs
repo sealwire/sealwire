@@ -1945,6 +1945,7 @@ fn threads_response_compact_for_broker_limits_serialized_size() {
                 provider: "codex".to_string(),
                 forked_from: None,
                 renamed: false,
+                flagged: false,
             })
             .collect(),
         unavailable_providers: Vec::new(),
@@ -1989,6 +1990,7 @@ fn threads_response_stays_in_budget_when_every_session_is_renamed() {
                 provider: "claude_code".to_string(),
                 forked_from: None,
                 renamed: true,
+                flagged: false,
             })
             .collect(),
         unavailable_providers: Vec::new(),
@@ -2025,6 +2027,7 @@ fn threads_response_compact_for_local_web_is_less_aggressive() {
                 provider: "codex".to_string(),
                 forked_from: None,
                 renamed: false,
+                flagged: false,
             })
             .collect(),
         unavailable_providers: Vec::new(),
@@ -2059,6 +2062,7 @@ fn threads_response_compact_for_ios_surface_currently_reuses_remote_budget() {
                 provider: "codex".to_string(),
                 forked_from: None,
                 renamed: false,
+                flagged: false,
             })
             .collect(),
         unavailable_providers: Vec::new(),

@@ -14,14 +14,18 @@ import { pickNewProjectId } from "../shared/project-menu.js";
  * @param {Array}  projects  the projects known BEFORE the action (for the create diff)
  * @param {string} currentName the session's CURRENT user-chosen title (its override),
  *                             or null — seeds the rename prompt's "reset" semantics
+ * @param {boolean} currentFlagged whether the session is CURRENTLY flagged — decides
+ *                             which way the flag toggle goes
  * @param {object} deps      { assign, unassign, create, fetchProjects, promptName,
- *                             openFork, refresh, log, rename, promptRename, refreshThreads }
+ *                             openFork, refresh, log, rename, promptRename, refreshThreads,
+ *                             setFlag }
  */
 export async function runThreadSheetAction({
   item,
   threadId,
   projects = [],
   currentName = null,
+  currentFlagged = false,
   deps,
 } = {}) {
   // A refused entry (running session, projects not loaded) is rendered disabled, but
@@ -39,6 +43,7 @@ export async function runThreadSheetAction({
     rename,
     promptRename,
     refreshThreads,
+    setFlag,
   } = deps;
   try {
     if (item.kind === "fork") {
@@ -65,6 +70,20 @@ export async function runThreadSheetAction({
         await refreshThreads?.();
       } catch (error) {
         log(`Renamed, but the session list did not refresh: ${error.message}`);
+      }
+      return;
+    }
+    if (item.kind === "flag") {
+      const next = !currentFlagged;
+      await setFlag(threadId, next);
+      log(next ? "Flagged for follow-up." : "Unflagged.");
+      // Same reasoning as rename above: the flag lives on the thread list, this
+      // surface drops broker write receipts, and the flag has already succeeded by
+      // this point — a refresh failure here must not read as "Session action failed".
+      try {
+        await refreshThreads?.();
+      } catch (error) {
+        log(`Flag updated, but the session list did not refresh: ${error.message}`);
       }
       return;
     }

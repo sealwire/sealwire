@@ -186,6 +186,13 @@ pub(super) struct PersistedRelayState {
     /// `#[serde(default)]` keeps pre-rename state files loadable (empty map).
     #[serde(default)]
     pub(super) thread_custom_name: std::collections::HashMap<String, String>,
+    /// Sessions flagged for follow-up. Absent = not flagged. Persisted for the same
+    /// reason as `thread_custom_name`: the flag exists specifically so it survives a
+    /// restart — an idle flagged session is otherwise invisible to the bell forever.
+    /// `#[serde(default)]` keeps pre-flag state files loadable (empty set); no
+    /// `PERSISTED_STATE_VERSION` bump needed, per the note on `thread_custom_name`.
+    #[serde(default)]
+    pub(super) thread_flagged: std::collections::HashSet<String>,
     /// Persisted Projects cache key. Restored nonzero so a fresh client (which starts
     /// at 0) sees a mismatch and fetches the persisted projects across a restart —
     /// otherwise revision 0 would match and leave existing projects invisible until
@@ -357,6 +364,14 @@ impl PersistedRelayState {
                 .iter()
                 .filter(|(thread_id, _)| !thread_id.starts_with("claude-pending-"))
                 .map(|(thread_id, name)| (thread_id.clone(), name.clone()))
+                .collect(),
+            // Same pending-id drop as `thread_custom_name` above, and for the same
+            // reason: a synthetic id names nothing after a restart.
+            thread_flagged: relay
+                .thread_flagged
+                .iter()
+                .filter(|thread_id| !thread_id.starts_with("claude-pending-"))
+                .cloned()
                 .collect(),
             projects_revision: relay.projects_revision,
             transcript_clock: relay

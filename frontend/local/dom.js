@@ -84,6 +84,7 @@ export const threadContextMenu = document.querySelector("#thread-context-menu");
 export const forkThreadButton = document.querySelector("#fork-thread-button");
 export const archiveThreadButton = document.querySelector("#archive-thread-button");
 export const renameThreadButton = document.querySelector("#rename-thread-button");
+export const flagThreadButton = document.querySelector("#flag-thread-button");
 export const deleteThreadButton = document.querySelector("#delete-thread-button");
 export const projectContextMenu = document.querySelector("#project-context-menu");
 export const renameProjectMenuButton = document.querySelector("#rename-project-button");

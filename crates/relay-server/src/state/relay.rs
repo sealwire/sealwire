@@ -377,6 +377,12 @@ pub struct RelayState {
     ///
     /// Absent = "use whatever the provider called it".
     pub(super) thread_custom_name: HashMap<String, String>,
+    /// Sessions the user flagged for follow-up (the "Follow up" bell bucket, plus a
+    /// persistent mark on the row). Relay-owned and PERSISTED for the same reason
+    /// `thread_custom_name` is: the flag is the point of the feature specifically
+    /// because it survives past the moment it was set — an idle flagged session
+    /// would otherwise be invisible to the bell forever.
+    pub(super) thread_flagged: HashSet<String>,
     /// Monotonic cache key for the thread LIST channel; bumped only when a rename
     /// changes a session's title. Rides the snapshot (tiny); the list itself is fetched
     /// separately. In-memory only — a restart resets it to 0, so clients simply refetch
@@ -604,6 +610,7 @@ impl RelayState {
             projects: HashMap::new(),
             thread_project_id: HashMap::new(),
             thread_custom_name: HashMap::new(),
+            thread_flagged: HashSet::new(),
             threads_revision: 0,
             thread_workspaces_revision: 0,
             projects_revision: 0,
@@ -1286,6 +1293,35 @@ impl RelayState {
         changed
     }
 
+    /// Set or clear a session's follow-up flag. Returns whether anything actually
+    /// changed, so the caller can skip the revision bump / notify on a no-op toggle.
+    ///
+    /// The caller (`AppState::set_thread_flag`) owns validation/scope checks, exactly
+    /// as `AppState::rename_thread` owns bounds for `set_thread_custom_name`.
+    pub(super) fn set_thread_flag(&mut self, thread_id: &str, flagged: bool) -> bool {
+        let changed = if flagged {
+            self.thread_flagged.insert(thread_id.to_string())
+        } else {
+            self.thread_flagged.remove(thread_id)
+        };
+        if changed {
+            self.refresh_thread_flag(thread_id);
+            self.threads_revision = self.threads_revision.wrapping_add(1);
+        }
+        changed
+    }
+
+    /// Whether a session currently carries the follow-up flag.
+    pub(crate) fn thread_flagged(&self, thread_id: &str) -> bool {
+        self.thread_flagged.contains(thread_id)
+    }
+
+    /// How many sessions currently carry the flag (the persisted set's size, for the
+    /// caller's entry-count bound).
+    pub(crate) fn flagged_thread_count(&self) -> usize {
+        self.thread_flagged.len()
+    }
+
     /// Whether this thread was PERMANENTLY deleted while the relay was up.
     ///
     /// Deletion tombstones outlive the thread row, so a stale client can still name a
@@ -1346,6 +1382,13 @@ impl RelayState {
         }
     }
 
+    /// Overlay the follow-up flag onto a provider-supplied summary. Mirrors
+    /// `apply_custom_thread_name`'s role for the flag map — called at every site a
+    /// `ThreadSummaryView` row is (re)built, so a rebuilt row never drops the flag.
+    pub(crate) fn apply_thread_flag(&self, thread: &mut ThreadSummaryView) {
+        thread.flagged = self.thread_flagged.contains(&thread.id);
+    }
+
     /// Remember how to route a thread a search surfaced from beyond the normal page.
     ///
     /// Called only from the search path. See the field's doc for why this is not simply
@@ -1399,6 +1442,28 @@ impl RelayState {
         let overlay = |thread: &mut ThreadSummaryView| {
             thread.renamed = name.is_some();
             thread.name = name.clone();
+        };
+        for thread in self.threads.iter_mut().filter(|row| row.id == thread_id) {
+            overlay(thread);
+        }
+        if let Some(summary) = self
+            .runtimes
+            .get_mut(thread_id)
+            .and_then(|runtime| runtime.summary.as_mut())
+        {
+            overlay(summary);
+        }
+    }
+
+    /// Re-apply the flag across the cached rows (`threads` + per-thread runtime
+    /// summary) for ONE thread, right after it changed — same reasoning as
+    /// `refresh_custom_thread_name`: those rows were built from an older provider
+    /// list and would otherwise keep showing the old flag state until the next
+    /// provider event.
+    fn refresh_thread_flag(&mut self, thread_id: &str) {
+        let flagged = self.thread_flagged.contains(thread_id);
+        let overlay = |thread: &mut ThreadSummaryView| {
+            thread.flagged = flagged;
         };
         for thread in self.threads.iter_mut().filter(|row| row.id == thread_id) {
             overlay(thread);
@@ -1992,6 +2057,11 @@ impl RelayState {
             self.thread_custom_name
                 .entry(real_id.to_string())
                 .or_insert(pending_name);
+        }
+        // Same orphan class for the follow-up flag: a session can be flagged before
+        // its first send, while still under its synthetic `claude-pending-…` id.
+        if self.thread_flagged.remove(pending_id) {
+            self.thread_flagged.insert(real_id.to_string());
         }
         // Same orphan class for fork lineage. A replay fork carrying pasted
         // images must withhold the prompt from `start_thread` (it cannot take
@@ -4012,6 +4082,7 @@ impl RelayState {
         self.projects = persisted.projects.clone();
         self.thread_project_id = persisted.thread_project_id.clone();
         self.thread_custom_name = persisted.thread_custom_name.clone();
+        self.thread_flagged = persisted.thread_flagged.clone();
         self.projects_revision = persisted.projects_revision;
         // Normalize: a state file written before `projects_revision` existed restores
         // it as 0 while carrying projects; a fresh client (also 0) would then never
@@ -4097,6 +4168,7 @@ impl RelayState {
         // without the override here a rename would visibly revert mid-conversation
         // even though the persisted map still held it.
         self.apply_custom_thread_name(&mut thread);
+        self.apply_thread_flag(&mut thread);
         if let Some(existing) = self
             .threads
             .iter()
@@ -4402,6 +4474,10 @@ impl RelayState {
         // forever and wait to be inherited by a reused id. It joins the two persisted
         // per-thread maps this function already clears, rather than being a special case.
         self.thread_custom_name.remove(thread_id);
+        // Same reasoning again for the follow-up flag: the relay has no un-archive, so
+        // a flag left behind here could never be reached again — it would just wait to
+        // be inherited by a reused id.
+        self.thread_flagged.remove(thread_id);
         // Same reasoning again for the thread's working tree: another persisted
         // per-thread map, whose entry could otherwise never be reached again and would
         // wait to be inherited by a reused id — pointing a future review at a tree that
@@ -5135,6 +5211,7 @@ impl RelayState {
         self.projects = persisted.projects.clone();
         self.thread_project_id = persisted.thread_project_id.clone();
         self.thread_custom_name = persisted.thread_custom_name.clone();
+        self.thread_flagged = persisted.thread_flagged.clone();
         self.projects_revision = persisted.projects_revision;
         // Normalize: a state file written before `projects_revision` existed restores
         // it as 0 while carrying projects; a fresh client (also 0) would then never
@@ -5692,6 +5769,7 @@ mod tests {
             provider: "fake".to_string(),
             forked_from: None,
             renamed: false,
+            flagged: false,
         }
     }
 
@@ -6888,6 +6966,7 @@ mod tests {
             provider: "fake".to_string(),
             forked_from: None,
             renamed: false,
+            flagged: false,
         });
 
         relay.set_thread_custom_name("t1", Some("Auth work".to_string()));
@@ -6936,6 +7015,25 @@ mod tests {
         assert!(
             relay.thread_custom_name("t2").is_none(),
             "an archived session's title has no way back, so it must not linger"
+        );
+    }
+
+    /// Same reasoning as the custom-name test above: the relay has no un-archive, so
+    /// a flag left behind here could never be reached again.
+    #[test]
+    fn removing_a_session_clears_its_flag_on_archive_and_on_delete() {
+        let mut relay = test_relay();
+        relay.set_thread_flag("t1", true);
+        relay.set_thread_flag("t2", true);
+
+        relay.mark_thread_deleted("t1");
+        assert!(!relay.thread_flagged("t1"));
+
+        // `remove_thread` is the shared archive path.
+        relay.remove_thread("t2");
+        assert!(
+            !relay.thread_flagged("t2"),
+            "an archived session's flag has no way back, so it must not linger"
         );
     }
 

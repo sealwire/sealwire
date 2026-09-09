@@ -1859,6 +1859,7 @@ async fn handle_notification_drops_unthreaded_codex_events_when_active_thread_is
             provider: "claude_code".to_string(),
             forked_from: None,
             renamed: false,
+            flagged: false,
         });
     }
 
@@ -1911,6 +1912,7 @@ async fn handle_notification_tracks_background_thread_status_activity() {
             provider: "codex".to_string(),
             forked_from: None,
             renamed: false,
+            flagged: false,
         });
     }
 
@@ -1963,6 +1965,7 @@ async fn handle_server_request_for_background_thread_does_not_touch_active_progr
             provider: "codex".to_string(),
             forked_from: None,
             renamed: false,
+            flagged: false,
         });
     }
 
@@ -2015,6 +2018,7 @@ async fn command_execution_cwd_records_proven_without_clobbering_birth_cwd() {
             provider: "codex".to_string(),
             forked_from: None,
             renamed: false,
+            flagged: false,
         });
         relay.active_thread_id = Some("thread-1".to_string());
     }
@@ -2074,6 +2078,7 @@ async fn thread_settings_updated_records_proven_from_thread_settings_cwd() {
             provider: "codex".to_string(),
             forked_from: None,
             renamed: false,
+            flagged: false,
         });
         relay.active_thread_id = Some("thread-1".to_string());
     }
@@ -2128,6 +2133,7 @@ async fn thread_settings_updated_restating_birth_must_not_clobber_proven() {
             provider: "codex".to_string(),
             forked_from: None,
             renamed: false,
+            flagged: false,
         });
         relay.active_thread_id = Some("thread-1".to_string());
         relay.observe_thread_cwd("thread-1", "/tmp/project/.worktrees/feature");
@@ -2179,6 +2185,7 @@ async fn command_approval_cwd_records_proven_without_clobbering_birth_cwd() {
             provider: "codex".to_string(),
             forked_from: None,
             renamed: false,
+            flagged: false,
         });
         relay.active_thread_id = Some("thread-1".to_string());
     }
@@ -2596,6 +2603,7 @@ fn test_thread_summary(id: &str) -> ThreadSummaryView {
         provider: "codex".to_string(),
         forked_from: None,
         renamed: false,
+        flagged: false,
     }
 }
 

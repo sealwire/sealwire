@@ -9,6 +9,7 @@ import {
   applyTokenButton,
   archiveThreadButton,
   renameThreadButton,
+  flagThreadButton,
   approvalPolicyInput,
   auditSummary,
   auditTimeline,
@@ -197,6 +198,7 @@ import {
   createProject,
   renameProject,
   renameThread,
+  setThreadFlag,
   deleteProject,
   assignThreadToProject,
   unassignThread,
@@ -2407,6 +2409,10 @@ renameThreadButton?.addEventListener("click", () => {
   void renameThreadFromContextMenu();
 });
 
+flagThreadButton?.addEventListener("click", () => {
+  void toggleThreadFlagFromContextMenu();
+});
+
 forkThreadButton?.addEventListener("click", () => {
   const threadId = readThreadListContextMenu(state.threadListStore).threadId;
   if (threadId) {
@@ -3988,8 +3994,14 @@ function openThreadContextMenu(threadId, clientX, clientY, orderedThreadIds = []
   archiveThreadButton.textContent = isRunningActiveSession
     ? "Running session cannot be archived"
     : "Archive session";
-  // Delete is the ONLY action that takes a batch. Archive, fork and rename each
-  // need one session to aim at, so a batch disables them rather than silently
+  // Relay-owned metadata, like rename — works mid-turn, so no busy gate. A batch
+  // still disables it below (like rename/fork/archive): it needs one session to
+  // aim at, not whichever row happened to be right-clicked.
+  if (flagThreadButton) {
+    flagThreadButton.textContent = contextThread?.flagged ? "Unflag" : "Flag for follow-up";
+  }
+  // Delete is the ONLY action that takes a batch. Archive, fork, rename, and flag
+  // each need one session to aim at, so a batch disables them rather than silently
   // applying to whichever row happened to be right-clicked.
   const isBatch = batchSize > 1;
   if (isBatch) {
@@ -3999,6 +4011,9 @@ function openThreadContextMenu(threadId, clientX, clientY, orderedThreadIds = []
     }
     archiveThreadButton.disabled = true;
     archiveThreadButton.textContent = "Archive session";
+    if (flagThreadButton) {
+      flagThreadButton.textContent = "Flag for follow-up";
+    }
   }
   // Assigned on EVERY open, not just batch ones: a right-click straight onto another
   // row opens the menu again without the document click handler that resets it (a
@@ -4007,6 +4022,9 @@ function openThreadContextMenu(threadId, clientX, clientY, orderedThreadIds = []
   // highlighted would move only the row under the cursor.
   if (renameThreadButton) {
     renameThreadButton.disabled = isBatch;
+  }
+  if (flagThreadButton) {
+    flagThreadButton.disabled = isBatch;
   }
   if (threadProjectSubmenuTrigger) {
     threadProjectSubmenuTrigger.disabled = isBatch;
@@ -4073,14 +4091,20 @@ function closeThreadContextMenu({ rerender = true } = {}) {
     archiveThreadButton.disabled = false;
     archiveThreadButton.textContent = "Archive session";
   }
+  if (flagThreadButton) {
+    flagThreadButton.textContent = "Flag for follow-up";
+  }
   if (deleteThreadButton) {
     deleteThreadButton.disabled = false;
     deleteThreadButton.textContent = "Delete permanently";
   }
-  // Both are only ever disabled for a batch (see openThreadContextMenu), and a menu
-  // that closed while disabled would reopen on a single row still greyed out.
+  // All three are only ever disabled for a batch (see openThreadContextMenu), and a
+  // menu that closed while disabled would reopen on a single row still greyed out.
   if (renameThreadButton) {
     renameThreadButton.disabled = false;
+  }
+  if (flagThreadButton) {
+    flagThreadButton.disabled = false;
   }
   if (threadProjectSubmenuTrigger) {
     threadProjectSubmenuTrigger.disabled = false;
@@ -4184,6 +4208,49 @@ async function renameThreadFromContextMenu() {
     return;
   }
   await renameThreadById(threadId, answer);
+}
+
+/**
+ * Set or clear a session's follow-up flag. Same optimistic-write-then-reconcile
+ * shape as `renameThreadById`, minus the name-specific normalization a bare bool
+ * has no use for.
+ */
+async function setThreadFlagById(threadId, flagged) {
+  if (!threadId) {
+    return;
+  }
+  const applyFlag = (value) => {
+    const apply = (row) => {
+      if (row) row.flagged = Boolean(value);
+    };
+    // Every copy the user can see, not just the first match — same reasoning as
+    // renameThreadById's applyName: a search result and the resting list can both
+    // hold a row for the same session.
+    apply((state.threads || []).find((entry) => entry.id === threadId));
+    apply(findThreadInSearchResults(state.threadSearch, threadId));
+    state.threadGroups = buildNavigationThreadGroups(state.threads);
+    renderThreads();
+  };
+
+  applyFlag(flagged);
+  try {
+    const receipt = await setThreadFlag(apiFetch, threadId, flagged);
+    applyFlag(receipt?.flagged ?? flagged);
+    logLine(receipt?.message || (flagged ? "Flagged for follow-up." : "Unflagged."));
+  } catch (error) {
+    logLine(`Failed to update flag: ${error.message}`);
+    await loadThreads("post-flag recovery");
+  }
+}
+
+async function toggleThreadFlagFromContextMenu() {
+  const threadId = readThreadListContextMenu(state.threadListStore).threadId;
+  closeThreadContextMenu();
+  if (!threadId) {
+    return;
+  }
+  const thread = resolveActiveThread(threadId);
+  await setThreadFlagById(threadId, !thread?.flagged);
 }
 
 async function archiveThreadFromContextMenu() {

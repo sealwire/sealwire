@@ -107,6 +107,7 @@ fn test_persisted_state() -> PersistedRelayState {
         projects: Default::default(),
         thread_project_id: Default::default(),
         thread_custom_name: Default::default(),
+        thread_flagged: Default::default(),
         projects_revision: 0,
         transcript_clock: 0,
     }
@@ -201,6 +202,7 @@ fn test_thread(id: &str, cwd: &str) -> ThreadSummaryView {
         provider: "codex".to_string(),
         forked_from: None,
         renamed: false,
+        flagged: false,
     }
 }
 
@@ -5189,6 +5191,7 @@ mod paged_history_merge_tests {
                 provider: "claude_code".to_string(),
                 forked_from: None,
                 renamed: false,
+                flagged: false,
             },
             "/repo",
             "sonnet",
@@ -5271,6 +5274,7 @@ mod paged_history_merge_tests {
                 provider: "claude_code".to_string(),
                 forked_from: None,
                 renamed: false,
+                flagged: false,
             },
             "/repo",
             "sonnet",

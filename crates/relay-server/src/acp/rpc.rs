@@ -1477,6 +1477,7 @@ pub(crate) fn sync_data_from_runtime(
             provider: provider_key.to_string(),
             forked_from: None,
             renamed: false,
+            flagged: false,
         });
     // The runtime's live cwd wins over whatever a cached summary carries:
     // `resume_session_inner` and `ensure_thread_runtime_loaded` path-scope-check

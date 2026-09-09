@@ -47,6 +47,13 @@ export const renameRemoteThread = (threadId, name) =>
     input: { name: name ?? null },
   });
 
+/** Set or clear a session's follow-up flag. Ack-only, same shape as rename above. */
+export const setRemoteThreadFlag = (threadId, flagged) =>
+  dispatchOrRecover("set_thread_flag", {
+    thread_id: threadId,
+    input: { flagged: Boolean(flagged) },
+  });
+
 // Not claim-gated: a paired device must see what it is about to launch into
 // without taking control of whatever session is running.
 export async function fetchRemoteWorkspaceGitContext(cwd) {

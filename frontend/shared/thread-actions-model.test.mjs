@@ -20,7 +20,11 @@ const labels = (sections, kind) => items(sections, kind).map((item) => item.labe
 test("an idle session in a fresh projects payload offers both sections", () => {
   const sections = buildThreadSheetSections({ projects, ...READY });
   assert.deepEqual(kinds(sections), ["session", "projects"]);
-  assert.deepEqual(labels(sections, "session"), ["Fork session", "Rename session\u2026"]);
+  assert.deepEqual(labels(sections, "session"), [
+    "Fork session",
+    "Rename session\u2026",
+    "Flag for follow-up",
+  ]);
 });
 
 // Rename passes the transport rule that excludes archive/delete: it HAS a broker action
@@ -40,10 +44,30 @@ test("rename is offered, and stays enabled on a running session", () => {
 // because the agent titles nearly every session.
 test("the reset entry appears only for a session that actually carries an override", () => {
   const withOverride = labels(buildThreadSheetSections({ renamed: true, projects, ...READY }), "session");
-  assert.deepEqual(withOverride, ["Fork session", "Rename session\u2026", "Use the agent's name"]);
+  assert.deepEqual(withOverride, [
+    "Fork session",
+    "Rename session\u2026",
+    "Flag for follow-up",
+    "Use the agent's name",
+  ]);
 
   const withoutOverride = labels(buildThreadSheetSections({ projects, ...READY }), "session");
   assert.ok(!withoutOverride.includes("Use the agent's name"));
+});
+
+// Flag passes the same transport rule rename does (`set_thread_flag` has a real broker
+// action) and is never disabled, for the same reason rename isn't.
+test("flag is offered right after rename, with copy that reflects the current state", () => {
+  const unflagged = items(buildThreadSheetSections({ projects, ...READY }), "session").find(
+    (item) => item.kind === "flag"
+  );
+  assert.equal(unflagged.label, "Flag for follow-up");
+  assert.notEqual(unflagged.disabled, true);
+
+  const flagged = items(buildThreadSheetSections({ flagged: true, projects, ...READY }), "session").find(
+    (item) => item.kind === "flag"
+  );
+  assert.equal(flagged.label, "Unflag");
 });
 
 test("the reset entry is driven by the relay's flag, not the displayed title", () => {

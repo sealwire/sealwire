@@ -17,6 +17,9 @@ use crate::protocol::{ThreadSummaryView, WorkspaceTrustInput, WorkspaceTrustRece
 /// A tab is ~200px wide, so 96 characters is already far more than any surface renders.
 pub(super) const MAX_THREAD_NAME_CHARS: usize = 96;
 const MAX_CUSTOM_THREAD_NAMES: usize = 10_000;
+/// Same reasoning and the same bound as `MAX_CUSTOM_THREAD_NAMES`: a paired device
+/// drives this path too, and the flag set is persisted.
+const MAX_FLAGGED_THREADS: usize = 10_000;
 
 /// How deep a title search scans before giving up.
 ///
@@ -276,6 +279,7 @@ impl AppState {
             // rebuilt from the providers on each call — so the override has to be
             // re-applied here or a rename would last only until the next refresh.
             relay.apply_custom_thread_name(thread);
+            relay.apply_thread_flag(thread);
         }
         // AFTER the rename overlay, so a renamed session is findable under the title it
         // shows and not under the provider's superseded one. BEFORE `truncate`, which is
@@ -802,6 +806,89 @@ impl AppState {
         Ok(ThreadRenameReceipt {
             thread_id: thread_id.to_string(),
             name,
+            message,
+        })
+    }
+
+    /// Set or clear a session's follow-up flag. Mirrors `rename_thread`'s guard
+    /// order (id length, resolve pending id, refuse reviewer/deleted threads, device
+    /// scope), minus the name-specific trimming/length checks a bare bool has no use
+    /// for.
+    pub async fn set_thread_flag(
+        &self,
+        thread_id: &str,
+        input: SetThreadFlagInput,
+    ) -> Result<ThreadFlagReceipt, String> {
+        if thread_id.len() > MAX_THREAD_ID_BYTES {
+            return Err(format!(
+                "thread id must be at most {MAX_THREAD_ID_BYTES} bytes"
+            ));
+        }
+        let actor = input.device_id.as_deref().unwrap_or("local operator");
+        let flagged = input.flagged;
+
+        let mut relay = self.relay.write().await;
+        let thread_id = &relay.resolve_promoted_thread_id(thread_id);
+        if relay
+            .navigation_hidden_reviewer_thread_ids()
+            .contains(thread_id)
+        {
+            return Err(format!(
+                "`{thread_id}` is a reviewer thread and cannot be flagged"
+            ));
+        }
+        if relay.thread_is_locally_deleted(thread_id) {
+            return Err(format!("session `{thread_id}` was deleted"));
+        }
+        let Some(cwd) = relay.thread_cwd(thread_id) else {
+            return Err(format!(
+                "session `{thread_id}` is not available on this relay"
+            ));
+        };
+        let scope = input
+            .device_id
+            .as_deref()
+            .map(|device_id| relay.device_path_scope(device_id))
+            .unwrap_or_default();
+        let allowed_roots = relay.allowed_roots.clone();
+        if !path_within_device_scope(&cwd, &scope, &allowed_roots) {
+            return Err(format!(
+                "session `{thread_id}` is outside this device's allowed paths"
+            ));
+        }
+        // Bound the persisted set: refuse a NEW flag once it is full. Clearing, and
+        // re-flagging an already-flagged session, both stay possible — neither grows it.
+        if flagged
+            && !relay.thread_flagged(thread_id)
+            && relay.flagged_thread_count() >= MAX_FLAGGED_THREADS
+        {
+            return Err(format!(
+                "flagged-session limit reached ({MAX_FLAGGED_THREADS})"
+            ));
+        }
+
+        let changed = relay.set_thread_flag(thread_id, flagged);
+        let message = if flagged {
+            "Flagged for follow-up.".to_string()
+        } else {
+            "Unflagged.".to_string()
+        };
+        if changed {
+            relay.push_log(
+                "info",
+                format!(
+                    "{} session {thread_id} for follow-up [{actor}]",
+                    if flagged { "Flagged" } else { "Unflagged" }
+                ),
+            );
+            // Same reasoning as rename_thread's notify: wakes the SSE/snapshot path
+            // (carrying the bumped threads_revision) and schedules the debounced state
+            // save, so the flag reaches other devices and survives a restart.
+            relay.notify();
+        }
+        Ok(ThreadFlagReceipt {
+            thread_id: thread_id.to_string(),
+            flagged,
             message,
         })
     }

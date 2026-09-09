@@ -742,6 +742,7 @@ mod tests {
                 provider: "codex".to_string(),
                 forked_from: None,
                 renamed: false,
+                flagged: false,
             },
             status: "idle".to_string(),
             active_flags: Vec::new(),

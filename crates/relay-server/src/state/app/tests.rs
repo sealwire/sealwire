@@ -1334,6 +1334,7 @@ pub(crate) mod path_scope_tests {
                 provider: "fake".to_string(),
                 forked_from: None,
                 renamed: false,
+                flagged: false,
             }];
             relay.active_thread_id = Some("thread-trust-stamp".to_string());
         }
@@ -1448,6 +1449,7 @@ pub(crate) mod path_scope_tests {
                     provider: "fake".to_string(),
                     forked_from: None,
                     renamed: false,
+                    flagged: false,
                 }];
                 relay.active_thread_id = Some(thread_id.clone());
             }
@@ -2870,6 +2872,7 @@ is also what keeps the refusal from confirming it exists: {error}"
                         provider: "fake".to_string(),
                         forked_from: None,
                         renamed: false,
+                        flagged: false,
                     },
                     status: "idle".to_string(),
                     active_flags: Vec::new(),
@@ -3724,6 +3727,7 @@ is also what keeps the refusal from confirming it exists: {error}"
             provider: "claude_code".to_string(),
             forked_from: None,
             renamed: false,
+            flagged: false,
         };
         {
             let mut relay = app.relay.write().await;
@@ -4147,6 +4151,7 @@ tree; got {}",
                 provider: "fake".to_string(),
                 forked_from: None,
                 renamed: false,
+                flagged: false,
             });
             let cached = relay
                 .threads
@@ -4571,6 +4576,7 @@ tree; got {}",
                         provider: "fake".to_string(),
                         forked_from: None,
                         renamed: false,
+                        flagged: false,
                     },
                     "/tmp/rename-reviewer",
                     "fake-model",
@@ -5414,6 +5420,7 @@ tree; got {}",
                     provider: "fake".to_string(),
                     forked_from: None,
                     renamed: false,
+                    flagged: false,
                 },
                 &cwd,
                 DEFAULT_MODEL,
@@ -5741,6 +5748,7 @@ tree; got {}",
                     provider: "fake".to_string(),
                     forked_from: None,
                     renamed: false,
+                    flagged: false,
                 },
                 &cwd,
                 DEFAULT_MODEL,
@@ -5927,6 +5935,7 @@ tree; got {}",
                 provider: self.name.to_string(),
                 forked_from: None,
                 renamed: false,
+                flagged: false,
             }
         }
     }
@@ -6801,6 +6810,7 @@ tree; got {}",
                 provider: "codex".to_string(),
                 forked_from: None,
                 renamed: false,
+                flagged: false,
             }];
             // The runtime carries the live cwd too, so the send reads it from here rather
             // than from `thread/read`. The fake app-server answers every read with a
@@ -8653,6 +8663,7 @@ tree; got {}",
                     provider: "fake".to_string(),
                     forked_from: None,
                     renamed: false,
+                    flagged: false,
                 },
                 "/tmp/project",
                 DEFAULT_MODEL,
@@ -8752,6 +8763,7 @@ tree; got {}",
                 provider: self.name.to_string(),
                 forked_from: None,
                 renamed: false,
+                flagged: false,
             }
         }
     }
@@ -8977,6 +8989,7 @@ tree; got {}",
                 provider: "consumed-initial".to_string(),
                 forked_from: None,
                 renamed: false,
+                flagged: false,
             }
         }
     }
@@ -11444,6 +11457,7 @@ tree; got {}",
                 provider: self.name.to_string(),
                 forked_from: None,
                 renamed: false,
+                flagged: false,
             };
             self.threads.lock().await.insert(id, thread.clone());
             Ok(crate::provider::StartThreadResult {
@@ -11680,6 +11694,7 @@ tree; got {}",
                 provider: "codex".to_string(),
                 forked_from: None,
                 renamed: false,
+                flagged: false,
             };
             if is_oldest {
                 summary.name = Some(oldest_name.to_string());
@@ -11891,6 +11906,7 @@ tree; got {}",
                     provider: "codex".to_string(),
                     forked_from: None,
                     renamed: false,
+                    flagged: false,
                 },
             );
             // A titled neighbour, so "found it" cannot be satisfied by returning
@@ -11910,6 +11926,7 @@ tree; got {}",
                     provider: "codex".to_string(),
                     forked_from: None,
                     renamed: false,
+                    flagged: false,
                 },
             );
         }
@@ -12204,6 +12221,7 @@ tree; got {}",
                     provider: "codex".to_string(),
                     forked_from: None,
                     renamed: false,
+                    flagged: false,
                 },
             );
         }
@@ -12261,6 +12279,7 @@ tree; got {}",
                     provider: "codex".to_string(),
                     forked_from: None,
                     renamed: false,
+                    flagged: false,
                 },
             );
         }
@@ -13088,6 +13107,7 @@ mod review_tests {
                 provider: self.name.to_string(),
                 forked_from: None,
                 renamed: false,
+                flagged: false,
             }
         }
 
@@ -14045,6 +14065,7 @@ mod review_tests {
             provider: provider.to_string(),
             forked_from: None,
             renamed: false,
+            flagged: false,
         }
     }
 
@@ -14908,6 +14929,7 @@ resurrected into a turn that never completes: {:?}",
                 provider: String::new(),
                 forked_from: None,
                 renamed: false,
+                flagged: false,
             };
             relay.register_background_thread(thread, cwd, "model", "never", "read-only", "low");
             relay.register_reviewer_thread(reviewer_id.to_string(), "parent-1".to_string());
@@ -14953,6 +14975,7 @@ resurrected into a turn that never completes: {:?}",
                 provider: String::new(),
                 forked_from: None,
                 renamed: false,
+                flagged: false,
             };
             relay.register_background_thread(thread, cwd, "model", "never", "read-only", "low");
             relay.register_reviewer_thread(reviewer_id.to_string(), "parent-1".to_string());
@@ -15075,6 +15098,7 @@ resurrected into a turn that never completes: {:?}",
                 provider: "codex".to_string(),
                 forked_from: None,
                 renamed: false,
+                flagged: false,
             };
             for (parent, reviewer, cwd, job_id) in [
                 ("parent-in", "rev-in", in_cwd, "job-in"),
@@ -15187,6 +15211,7 @@ resurrected into a turn that never completes: {:?}",
                 provider: "codex".to_string(),
                 forked_from: None,
                 renamed: false,
+                flagged: false,
             };
             for (parent, reviewer, cwd, job_id) in [
                 ("parent-in", "rev-in", in_cwd, "job-in"),
@@ -15285,6 +15310,7 @@ resurrected into a turn that never completes: {:?}",
                 provider: "codex".to_string(),
                 forked_from: None,
                 renamed: false,
+                flagged: false,
             };
             relay.register_background_thread(thread, cwd, "model", "never", "read-only", "low");
             // Drop the routing-cache row while the live runtime survives (and the
@@ -15327,6 +15353,7 @@ resurrected into a turn that never completes: {:?}",
                 provider: "codex".to_string(),
                 forked_from: None,
                 renamed: false,
+                flagged: false,
             };
             relay.register_background_thread(
                 thread.clone(),
@@ -17069,6 +17096,7 @@ resurrected into a turn that never completes: {:?}",
                     provider: "codex".to_string(),
                     forked_from: None,
                     renamed: false,
+                    flagged: false,
                 },
                 &workspace,
                 "gpt-5.5",
@@ -20400,6 +20428,7 @@ the provider, not forwarded ({turn_models:?})"
                     provider: "claude_code".to_string(),
                     forked_from: None,
                     renamed: false,
+                    flagged: false,
                 },
                 cwd,
                 "claude-model",
@@ -20428,6 +20457,7 @@ the provider, not forwarded ({turn_models:?})"
                     provider: "claude_code".to_string(),
                     forked_from: None,
                     renamed: false,
+                    flagged: false,
                 },
                 cwd,
                 "claude-model",
@@ -22298,6 +22328,7 @@ turn) must allow a review: {error:?}"
                     provider: "claude_code".to_string(),
                     forked_from: None,
                     renamed: false,
+                    flagged: false,
                 },
                 cwd,
                 "claude-model",
@@ -22769,6 +22800,7 @@ turn) must allow a review: {error:?}"
                 provider: "codex".to_string(),
                 forked_from: None,
                 renamed: false,
+                flagged: false,
             });
             relay.bg_set_active_turn("bg-thread", Some("bg-turn".to_string()), unix_now());
         }
@@ -22817,6 +22849,7 @@ turn) must allow a review: {error:?}"
                 provider: "codex".to_string(),
                 forked_from: None,
                 renamed: false,
+                flagged: false,
             });
             relay.bg_set_active_turn("bg-thread", Some("bg-turn".to_string()), unix_now());
         }
@@ -23375,6 +23408,7 @@ mod late_catalog_tests {
                     provider: name.to_string(),
                     forked_from: None,
                     renamed: false,
+                    flagged: false,
                 },
             );
             Self {
@@ -23448,6 +23482,7 @@ mod late_catalog_tests {
                 provider: self.name.to_string(),
                 forked_from: None,
                 renamed: false,
+                flagged: false,
             };
             self.threads
                 .lock()

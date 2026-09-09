@@ -20,10 +20,11 @@
 // broker / worker process.
 
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 
-import { writeFailureArtifacts } from "./e2e/harness/artifacts.mjs";
+import { createArtifactWriter, writeFailureArtifacts } from "./e2e/harness/artifacts.mjs";
 import { attachPageDebugLogging, launchBrowser } from "./e2e/harness/browser.mjs";
 import { startStaticServer } from "./e2e/harness/static-server.mjs";
 
@@ -161,6 +162,7 @@ async function main() {
         );
 
         window.__projectActions = [];
+        window.__setThreadFlagActions = [];
         window.__agentRelaySecretReady = false;
         const openRequest = indexedDB.open(REMOTE_SECRET_DB_NAME, 1);
         openRequest.onupgradeneeded = () => {
@@ -241,6 +243,22 @@ async function main() {
               // that a button existed.
               window.__projectActions.push(request.input || null);
               this.#respond(actionId, { action: "project_action", ok: true, snapshot });
+              return;
+            }
+            if (request.type === "set_thread_flag") {
+              // Same recording purpose as __projectActions above, for the ack-only
+              // `set_thread_flag` action the flag toggle dispatches.
+              window.__setThreadFlagActions.push({
+                thread_id: request.thread_id,
+                input: request.input || null,
+              });
+              const target = [threadSummary, threadSummary2].find(
+                (t) => t.id === request.thread_id
+              );
+              if (target) {
+                target.flagged = Boolean(request.input?.flagged);
+              }
+              this.#respond(actionId, { action: "set_thread_flag", ok: true, snapshot });
               return;
             }
             if (request.type === "fetch_projects") {
@@ -499,6 +517,14 @@ async function main() {
     // The session lives in Alpha, and the sheet must say so rather than just listing it.
     assert.deepEqual(sheet.current, ["Alpha project"], `expected Alpha marked current, got ${itemText}`);
 
+    // The Session section's fixed order: Fork, Rename, then the flag toggle (unflagged
+    // here, so it reads "Flag for follow-up") — before the Projects section starts.
+    assert.deepEqual(
+      sheet.items.slice(0, 3),
+      ["Fork session", "Rename session…", "Flag for follow-up"],
+      `expected Session section order, got: ${itemText}`
+    );
+
     // The point of the model's allow-list: these have NO broker transport on remote, so
     // showing them would render buttons that cannot fire.
     for (const forbidden of ["Archive", "Delete"]) {
@@ -538,6 +564,49 @@ async function main() {
       timeout: TIMEOUT_MS,
     });
 
+    // --- 7. flag for follow-up: dispatches, marks the row, and flips its own label ---
+    const artifacts = createArtifactWriter("remote-mobile-session-actions-flag-verify");
+    await fs.mkdir(artifacts.dir, { recursive: true });
+
+    await moreButton.tap();
+    await page.waitForSelector("#remote-thread-actions-sheet[open]", { state: "visible", timeout: TIMEOUT_MS });
+    await page.screenshot({ path: path.join(artifacts.dir, "01-sheet-before-flag.png") });
+
+    await page
+      .locator("#remote-thread-actions-sheet .thread-actions-item", { hasText: "Flag for follow-up" })
+      .tap();
+    await page.waitForFunction(() => window.__setThreadFlagActions.length > 0, null, { timeout: TIMEOUT_MS });
+    const [flagFrame] = await page.evaluate(() => window.__setThreadFlagActions);
+    assert.equal(flagFrame.thread_id, THREAD_ID, `expected the flag action on ${THREAD_ID}, got ${JSON.stringify(flagFrame)}`);
+    assert.deepEqual(flagFrame.input, { flagged: true }, `expected {flagged: true}, got ${JSON.stringify(flagFrame)}`);
+
+    // Ack-only: the sheet closes immediately (same as the assign case above)...
+    await page.waitForSelector("#remote-thread-actions-sheet[open]", { state: "hidden", timeout: TIMEOUT_MS });
+    // ...and the row picks up the flag once the post-action refreshThreads() lands.
+    await page.waitForSelector(`${rowSelector} .conversation-flag-mark`, {
+      state: "visible",
+      timeout: TIMEOUT_MS,
+    });
+    await page.screenshot({ path: path.join(artifacts.dir, "02-row-after-flag.png") });
+
+    // Re-opening must show the toggle flipped to "Unflag" — selectThreadSheet reads
+    // `flagged` straight off the refreshed row, not off any state local to the sheet.
+    await moreButton.tap();
+    await page.waitForSelector("#remote-thread-actions-sheet[open]", { state: "visible", timeout: TIMEOUT_MS });
+    const reopenedItems = await page.$$eval("#remote-thread-actions-sheet .thread-actions-item", (els) =>
+      els.map((b) => b.textContent.trim())
+    );
+    assert.deepEqual(
+      reopenedItems.slice(0, 3),
+      ["Fork session", "Rename session…", "Unflag"],
+      `expected the toggle to read "Unflag" after flagging, got: ${reopenedItems.join(" | ")}`
+    );
+    await page.screenshot({ path: path.join(artifacts.dir, "03-sheet-shows-unflag.png") });
+    console.log(`[remote-mobile-session-actions-e2e] flag verification screenshots: ${artifacts.dir}`);
+
+    await page.keyboard.press("Escape");
+    await page.waitForSelector("#remote-thread-actions-sheet[open]", { state: "hidden", timeout: TIMEOUT_MS });
+
     console.log(
       JSON.stringify(
         {
@@ -547,6 +616,8 @@ async function main() {
           hitArea,
           neighbour,
           assignFrame,
+          flagFrame,
+          reopenedItems,
           viewport: MOBILE_VIEWPORT,
           ok: true,
         },

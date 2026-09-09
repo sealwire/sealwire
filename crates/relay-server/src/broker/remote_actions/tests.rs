@@ -101,6 +101,7 @@ fn make_threads() -> ThreadsResponse {
                 provider: "codex".to_string(),
                 forked_from: None,
                 renamed: false,
+                flagged: false,
             })
             .collect(),
         unavailable_providers: Vec::new(),
@@ -1387,6 +1388,45 @@ fn rename_thread_round_trips_the_payload_the_remote_surface_sends() {
     // and must work while that session is mid-turn.
     assert!(!requires_session_claim(RemoteActionKind::RenameThread));
     assert!(!issues_session_claim(RemoteActionKind::RenameThread));
+}
+
+/// Locks the `set_thread_flag` wire contract against the exact payload the phone
+/// sends (`remote/project-actions.js`: `{ thread_id, input: { flagged } }`). Mirrors
+/// `rename_thread_round_trips_the_payload_the_remote_surface_sends` above.
+#[test]
+fn set_thread_flag_round_trips_the_payload_the_remote_surface_sends() {
+    let request: RemoteActionRequest = serde_json::from_value(serde_json::json!({
+        "type": "set_thread_flag",
+        "thread_id": "thread-1",
+        "input": { "flagged": true }
+    }))
+    .expect("set_thread_flag should parse");
+    assert_eq!(request.kind(), RemoteActionKind::SetThreadFlag);
+    assert_eq!(RemoteActionKind::SetThreadFlag.as_str(), "set_thread_flag");
+
+    // bind_device must stamp the actor WITHOUT dropping the selector — the same
+    // rebuild-loses-the-field bug fetch_workspace_diff guards against.
+    match request.bind_device("device-9".to_string()) {
+        RemoteActionRequest::SetThreadFlag { thread_id, input } => {
+            assert_eq!(thread_id, "thread-1");
+            assert!(input.flagged);
+            assert_eq!(
+                input.device_id.as_deref(),
+                Some("device-9"),
+                "the server stamps the actor; a device cannot claim to be another"
+            );
+        }
+        other => panic!("unexpected bound request: {other:?}"),
+    }
+
+    assert!(matches!(
+        remote_action_result_kind(RemoteActionKind::SetThreadFlag),
+        RemoteActionResultKind::RemoteActionAck
+    ));
+    // Flagging a session must not fight the active controller for the relay-wide
+    // lease, and must work while that session is mid-turn.
+    assert!(!requires_session_claim(RemoteActionKind::SetThreadFlag));
+    assert!(!issues_session_claim(RemoteActionKind::SetThreadFlag));
 }
 
 /// The broker's `list_threads` action must carry `q` into the search, not drop it.
