@@ -134,6 +134,7 @@ import {
   teamsRevisionOf,
 } from "../shared/task-team-model.js";
 import { loadSeenTasks } from "./task-seen-prefs.js";
+import { loadTaskViewMode, saveTaskViewMode } from "./task-view-prefs.js";
 import { tasksLocked, usageLocked } from "../shared/beta-gate.js";
 import { TaskSidebarList, TaskTeamScreen } from "../shared/task-team-react.js";
 import { createOrchestratorChatActions } from "../shared/orchestrator-chat.js";
@@ -2240,6 +2241,14 @@ export function createSessionRenderer({
         onAction: (action) => onTeamAction?.(action, context.teamRunId || null),
         onDelete: (teamRunId) => onDeleteTask?.(teamRunId),
         onStartTask: () => onStartTask?.(),
+        // Board vs list is a view preference, not a route: it must survive a
+        // reload, but it is not where you are, so it stays out of the history.
+        viewMode: state.tasksViewMode || (state.tasksViewMode = loadTaskViewMode()),
+        onChangeViewMode: (mode) => {
+          state.tasksViewMode = saveTaskViewMode(mode);
+          renderTaskTeam(state.session);
+        },
+        onOpenReview: onOpenReviewScreen ? (teamRunId) => onOpenReviewScreen(teamRunId) : null,
         orchestrator: locked
           ? null
           : {

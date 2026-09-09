@@ -71,3 +71,4 @@ crates/sealwire-private/frontend/*
 # drop the file, and the broker image then fails on "Could not resolve".
 !crates/sealwire-private/frontend/task-diff-react.js
 !crates/sealwire-private/frontend/task-review-screen.js
+!crates/sealwire-private/frontend/task-board-react.js
