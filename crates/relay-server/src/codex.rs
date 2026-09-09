@@ -726,11 +726,12 @@ impl CodexBridge {
         // Reserve the user slot under the relay lock before any provider input
         // can emit same-turn output. turn/start's response (and interleaved
         // notifications) must not be able to append ahead of this placeholder.
-        {
+        let reservation_id = {
             let mut relay = self.state.write().await;
-            relay.reserve_codex_user_message(thread_id, text);
+            let reservation_id = relay.reserve_codex_user_message(thread_id, text);
             relay.notify();
-        }
+            reservation_id
+        };
 
         let params = if images.is_empty() {
             codex_turn_start_params(thread_id, text, model, effort, policy)
@@ -777,7 +778,7 @@ impl CodexBridge {
                     .await
                 {
                     let mut relay = self.state.write().await;
-                    relay.clear_codex_user_reservation(thread_id);
+                    relay.clear_codex_user_reservation(thread_id, &reservation_id);
                     relay.push_log(
                         "warn",
                         format!(
@@ -831,7 +832,7 @@ read-only with approvals required. Change File access if this turn needs to writ
                     Ok(result) => result,
                     Err(error) => {
                         let mut relay = self.state.write().await;
-                        relay.clear_codex_user_reservation(thread_id);
+                        relay.clear_codex_user_reservation(thread_id, &reservation_id);
                         relay.notify();
                         return Err(error);
                     }
@@ -839,7 +840,7 @@ read-only with approvals required. Change File access if this turn needs to writ
             }
             Err(error) => {
                 let mut relay = self.state.write().await;
-                relay.clear_codex_user_reservation(thread_id);
+                relay.clear_codex_user_reservation(thread_id, &reservation_id);
                 relay.notify();
                 return Err(error);
             }
@@ -853,7 +854,7 @@ read-only with approvals required. Change File access if this turn needs to writ
             if let Some(turn_id) = turn_id.as_deref() {
                 relay.bind_codex_user_reservation(thread_id, turn_id);
             } else {
-                relay.clear_codex_user_reservation(thread_id);
+                relay.clear_codex_user_reservation(thread_id, &reservation_id);
             }
             relay.notify();
         }

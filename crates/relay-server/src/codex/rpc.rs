@@ -397,6 +397,19 @@ async fn handle_notification_for_provider(
                 return;
             }
             if let Some(turn_id) = string_at(&params, &["turn", "id"]) {
+                // Bind the oldest unbound Codex user reservation to this turn id
+                // as soon as the provider announces it — before a late prior-turn
+                // echo or same-turn output can race the RPC response.
+                let bind_thread_id = match &route {
+                    ThreadRoute::Background(bg_thread_id) => Some(bg_thread_id.clone()),
+                    ThreadRoute::Active => notification_thread_id
+                        .clone()
+                        .or_else(|| relay.active_thread_id.clone()),
+                    ThreadRoute::Drop => None,
+                };
+                if let Some(bind_thread_id) = bind_thread_id {
+                    relay.bind_codex_user_reservation(&bind_thread_id, &turn_id);
+                }
                 if let ThreadRoute::Background(bg_thread_id) = route {
                     relay.bg_set_active_turn(
                         &bg_thread_id,

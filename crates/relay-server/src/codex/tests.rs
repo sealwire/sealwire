@@ -2951,6 +2951,99 @@ async fn existing_thread_next_turn_orders_user_before_reasoning_when_echo_arrive
 }
 
 #[tokio::test]
+async fn late_prior_turn_echo_does_not_consume_next_turn_reservation() {
+    let (bridge, state) = spawn_fake_codex_bridge().await;
+    let thread = bridge
+        .start_thread(
+            "/tmp/project",
+            "gpt-5.6-sol",
+            "on-request",
+            "workspace-write",
+        )
+        .await
+        .expect("thread must start");
+    activate_started_codex_thread(&state, &thread).await;
+
+    const PREV_TEXT: &str = "previous turn without echo yet";
+    let prev_turn_id = bridge
+        .start_turn(&thread.id, PREV_TEXT, "gpt-5.6-sol", "low")
+        .await
+        .expect("prior send must reach turn/start")
+        .expect("prior turn id");
+
+    const NEXT_TEXT: &str = "next turn prompt";
+    let next_turn_id = bridge
+        .start_turn(&thread.id, NEXT_TEXT, "gpt-5.6-sol", "low")
+        .await
+        .expect("next send must reach turn/start")
+        .expect("next turn id");
+
+    {
+        let relay = state.read().await;
+        let runtime = relay
+            .runtime_for_thread(&thread.id)
+            .expect("runtime exists");
+        assert_eq!(
+            runtime.codex_user_reservations.len(),
+            2,
+            "starting the next turn must keep the prior turn's reservation"
+        );
+        let user_entries: Vec<_> = runtime
+            .transcript
+            .iter()
+            .filter(|entry| entry.kind == TranscriptEntryKind::UserText)
+            .collect();
+        assert_eq!(user_entries.len(), 2, "both placeholders must remain");
+    }
+
+    // Late echo for the PREVIOUS turn must not steal the unbound-or-next slot.
+    handle_notification(
+        user_message_completed(&thread.id, &prev_turn_id, "item-user-prev", PREV_TEXT),
+        &state,
+    )
+    .await;
+
+    {
+        let relay = state.read().await;
+        let runtime = relay
+            .runtime_for_thread(&thread.id)
+            .expect("runtime exists");
+        assert!(
+            runtime
+                .codex_user_reservations
+                .values()
+                .any(|reservation| reservation.turn_id.as_deref() == Some(next_turn_id.as_str())),
+            "next-turn reservation must survive a late prior-turn echo"
+        );
+        let next_user = runtime
+            .transcript
+            .iter()
+            .find(|entry| entry.turn_id.as_deref() == Some(next_turn_id.as_str()))
+            .expect("next-turn placeholder must still be present");
+        assert_eq!(next_user.kind, TranscriptEntryKind::UserText);
+        assert_eq!(next_user.text.as_deref(), Some(NEXT_TEXT));
+    }
+
+    handle_notification(
+        reasoning_started(
+            &thread.id,
+            &next_turn_id,
+            "item-reasoning-next",
+            "reasoning after surviving late echo",
+        ),
+        &state,
+    )
+    .await;
+    handle_notification(
+        user_message_completed(&thread.id, &next_turn_id, "item-user-next", NEXT_TEXT),
+        &state,
+    )
+    .await;
+
+    assert_user_then_reasoning_projections(&state, &thread.id, &next_turn_id).await;
+}
+
+#[tokio::test]
 async fn replay_harness_prevents_stuck_state_after_background_completion() {
     let harness = CodexReplayHarness::new("thread-A").await;
 
