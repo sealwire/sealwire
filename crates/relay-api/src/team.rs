@@ -949,6 +949,14 @@ pub struct TeamRun {
     /// resolve to the task's own tip and hide every commit from the MR diff.
     pub target_ref: String,
     pub base_commit: String,
+    /// Immutable review anchor for the current reopen cycle.
+    ///
+    /// Unlike a freshly calculated merge-base, this does not drift when the
+    /// target branch moves while the task worktree remains unchanged. A reopen
+    /// replaces it with the worktree's then-current HEAD; individual review
+    /// rounds never do.
+    #[serde(default)]
+    pub cycle_base_sha: String,
     pub repo_main_worktree: String,
     /// The worktree. Every team thread starts here, with this exact string.
     pub cwd: String,

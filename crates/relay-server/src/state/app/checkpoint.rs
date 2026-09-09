@@ -13,8 +13,9 @@
 //! The checkpoint commit is reachable only via `refs/sealwire/reviews/<job_id>` (kept
 //! alive against gc; NOT under `refs/heads/`, so it is not a branch). One ref per job,
 //! overwritten every round, so a long multi-round review can't grow refs unbounded.
-//! Deleting it once the review job settles is the caller's job (see `ReviewJobLifeguard`
-//! in `review.rs`) — this module only ever creates/moves it.
+//! Callers own lifetime: ordinary review jobs delete their ref when they settle;
+//! task-team refs stay alive with the durable task card so candidate SHAs recorded on
+//! that card remain inspectable, and are deleted with the task.
 //!
 //! The commit's author/committer identity is always `sealwire-review
 //! <sealwire-review@localhost>`, set explicitly on every call — never the repository's
@@ -35,6 +36,41 @@ const CHECKPOINT_IDENTITY_EMAIL: &str = "sealwire-review@localhost";
 /// call for the same `job_id`, so a long multi-round review can't grow refs unbounded.
 pub(crate) fn checkpoint_ref_name(job_id: &str) -> String {
     format!("refs/sealwire/reviews/{job_id}")
+}
+
+/// Delete every checkpoint whose job id starts with `job_id_prefix`.
+///
+/// Listing the namespace and filtering exact strings here keeps cleanup coupled to the
+/// producer's prefix instead of duplicating every current/future checkpoint id shape at
+/// each caller. The prefix is treated literally, never as a ref glob.
+pub(crate) async fn delete_review_checkpoints_with_prefix(
+    workspace: &TrustedWorkspace,
+    job_id_prefix: &str,
+) -> Result<(), String> {
+    let ref_prefix = checkpoint_ref_name(job_id_prefix);
+    let listed = run_git_capture(
+        workspace,
+        &[
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/sealwire/reviews/",
+        ],
+    )
+    .await?;
+    if !listed.status.success() {
+        return Err(git_failure("git for-each-ref", &listed));
+    }
+    for reference in String::from_utf8_lossy(&listed.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|reference| reference.starts_with(&ref_prefix))
+    {
+        let deleted = run_git_capture(workspace, &["update-ref", "-d", reference]).await?;
+        if !deleted.status.success() {
+            return Err(git_failure("git update-ref -d", &deleted));
+        }
+    }
+    Ok(())
 }
 
 /// Build (or replace) the checkpoint commit for `job_id`'s current round: a snapshot of
