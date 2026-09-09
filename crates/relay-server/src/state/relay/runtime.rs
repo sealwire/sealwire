@@ -103,17 +103,14 @@ impl TurnFailureKind {
 /// Relay-owned slot for the user message of one Codex turn.
 ///
 /// Installed under the relay lock before `turn/start` so same-turn provider
-/// output cannot append ahead of the user prompt. Keyed by a unique local
-/// `item_id` until the provider `turn_id` is bound; echoes reconcile only by
-/// that turn identity (never by "any unbound slot on the thread").
+/// output cannot append ahead of the user prompt. Each slot has a unique local
+/// `item_id`; the provider `turn_id` is bound only to the in-flight pending
+/// reservation for that start (never "oldest unbound").
 #[derive(Debug, Clone)]
 pub(crate) struct CodexUserReservation {
     pub(crate) item_id: String,
     pub(crate) text: String,
     pub(crate) turn_id: Option<String>,
-    /// Monotonic per-thread order so the oldest unbound reservation is bound
-    /// first when `turn/started` or `turn/start` returns.
-    pub(crate) seq: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -160,10 +157,13 @@ pub(crate) struct ThreadRuntime {
     /// never cleared — see [`TurnSpend`] on matching `turn_id`.
     pub(crate) last_turn_spend: Option<TurnSpend>,
     /// Transient Codex send-boundary user reservations, keyed by local
-    /// reservation `item_id`. Never persisted. Multiple may exist per thread
-    /// when a prior turn has not yet received its user echo.
+    /// reservation `item_id`. Never persisted.
     pub(crate) codex_user_reservations: HashMap<String, CodexUserReservation>,
     pub(crate) codex_user_reservation_seq: u64,
+    /// Local id of the reservation created by the in-flight `start_turn` that
+    /// is still awaiting a provider turn id. `turn/started` and early echoes
+    /// bind/reconcile only this slot — never an older unbound leftover.
+    pub(crate) codex_pending_bind_reservation_id: Option<String>,
 }
 
 impl ThreadRuntime {
@@ -215,6 +215,7 @@ impl ThreadRuntime {
             last_turn_spend: None,
             codex_user_reservations: HashMap::new(),
             codex_user_reservation_seq: 0,
+            codex_pending_bind_reservation_id: None,
         }
     }
 
@@ -257,6 +258,7 @@ impl ThreadRuntime {
             last_turn_spend: None,
             codex_user_reservations: HashMap::new(),
             codex_user_reservation_seq: 0,
+            codex_pending_bind_reservation_id: None,
         }
     }
 
@@ -331,6 +333,7 @@ impl ThreadRuntime {
             last_turn_spend: None,
             codex_user_reservations: HashMap::new(),
             codex_user_reservation_seq: 0,
+            codex_pending_bind_reservation_id: None,
         }
     }
 
