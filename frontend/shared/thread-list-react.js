@@ -784,25 +784,34 @@ export function ThreadGroupItem({
       { className: "conversation-lead", "aria-hidden": "true" },
       providerMark(thread.provider)
     ),
-    // Independent of `dot`/bucket, deliberately: a flagged session that is also
-    // working/needs-input/reviewing/done keeps showing both. This is the row's
-    // half of the flag — the bell's "Follow up" bucket is the other half, for
-    // when nothing else keeps the row visible.
-    thread.flagged
-      ? h(
-          "span",
-          {
-            className: "conversation-flag-mark",
-            role: "img",
-            "aria-label": "Flagged for follow-up",
-            title: "Flagged for follow-up",
-          },
-          flagGlyph()
-        )
-      : null,
     h(
       "span",
       { className: "conversation-title-row" },
+      // Independent of `dot`, deliberately: a flagged session that is also
+      // working/needs-input/reviewing/done keeps showing both. This is the row's
+      // half of the flag — the bell's "Follow up" bucket is the other half, for
+      // when nothing else keeps the row visible.
+      //
+      // Nested inside this flex row, NOT a direct child of `.conversation-item`
+      // above: that element is a 3-column CSS grid (`grid-template-columns: 14px
+      // minmax(0, 1fr) auto`) sized for exactly its three positional children
+      // (lead, title-row, meta). A 4th grid-level sibling here would shift every
+      // later child over by one column — the flag lands in the title's `1fr`
+      // track, the title gets squeezed into the `auto` meta track, and meta
+      // wraps onto an auto-generated second row. Flex children of this row incur
+      // no such shift.
+      thread.flagged
+        ? h(
+            "span",
+            {
+              className: "conversation-flag-mark",
+              role: "img",
+              "aria-label": "Flagged for follow-up",
+              title: "Flagged for follow-up",
+            },
+            flagGlyph()
+          )
+        : null,
       dot
         ? h("span", {
             className: dot.className,
