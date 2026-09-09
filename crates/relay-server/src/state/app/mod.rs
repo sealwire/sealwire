@@ -293,6 +293,7 @@ const MAX_THREAD_ID_BYTES: usize = 256;
 
 mod approvals;
 mod broker;
+mod checkpoint;
 mod fork;
 mod git_context;
 mod orchestrator;

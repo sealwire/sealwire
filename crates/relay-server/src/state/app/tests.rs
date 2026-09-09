@@ -12663,6 +12663,7 @@ tree; got {}",
 
 #[cfg(test)]
 mod review_tests {
+    use super::super::checkpoint::{build_review_checkpoint, checkpoint_ref_name};
     use super::super::*;
     use super::require_live_test_cwd;
     use crate::protocol::{
@@ -15836,6 +15837,171 @@ resurrected into a turn that never completes: {:?}",
             .map(|(_, text)| text)
             .expect("reviewer prompt");
         assert!(prompt.contains(&format!("Range: {base}..{candidate}")));
+    }
+
+    /// Independently re-derives the real index path the way a git user would (`git
+    /// rev-parse --git-path index`), rather than reusing the production helper — the
+    /// "index untouched" assertion needs to check the SAME thing an outside observer
+    /// would, not agree with the implementation about where to look.
+    fn real_index_path_for_test(cwd: &str) -> std::path::PathBuf {
+        let raw = git_stdout(cwd, &["rev-parse", "--git-path", "index"]);
+        let path = std::path::Path::new(&raw);
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::path::Path::new(cwd).join(path)
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn checkpoint_snapshots_dirty_work_without_moving_head_index_or_branches() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        init_git_seed(cwd);
+        std::fs::write(
+            std::path::Path::new(cwd).join(".gitignore"),
+            "node_modules/\n",
+        )
+        .unwrap();
+        git_commit_all(cwd, "add gitignore");
+        let base = git_head(cwd);
+
+        // Genuine dirt: a tracked edit and an untracked file, which the checkpoint must
+        // include, plus an untracked symlink that `.gitignore` fails to match (same
+        // trailing-slash bug as Defect A), which it must exclude.
+        std::fs::write(
+            std::path::Path::new(cwd).join("seed.txt"),
+            "line1\nline2\ndirty edit\n",
+        )
+        .unwrap();
+        std::fs::write(
+            std::path::Path::new(cwd).join("scratch.txt"),
+            "untracked work\n",
+        )
+        .unwrap();
+        let link_target = TempDir::new().expect("link target");
+        std::os::unix::fs::symlink(
+            link_target.path(),
+            std::path::Path::new(cwd).join("node_modules"),
+        )
+        .expect("symlink");
+
+        let workspace = TrustedWorkspace::granted_for_test(cwd).expect("cwd exists");
+        let symlinks = incidental_untracked_symlinks(&workspace)
+            .await
+            .expect("git status should run");
+        assert_eq!(symlinks, vec!["node_modules".to_string()]);
+
+        let status_before = git_stdout(cwd, &["status", "--porcelain=v1", "-uall"]);
+        let branches_before = git_stdout(cwd, &["branch", "--list"]);
+        let index_path = real_index_path_for_test(cwd);
+        let index_before = std::fs::read(&index_path).expect("index exists");
+
+        let checkpoint = build_review_checkpoint(&workspace, &base, "job-checkpoint-1", &symlinks)
+            .await
+            .expect("checkpoint should build");
+
+        // Nothing the user can see moved.
+        assert_eq!(git_head(cwd), base, "checkpoint must not move HEAD");
+        assert_eq!(
+            git_stdout(cwd, &["branch", "--list"]),
+            branches_before,
+            "checkpoint must not create/move/delete a branch"
+        );
+        assert_eq!(
+            std::fs::read(&index_path).expect("index still exists"),
+            index_before,
+            "checkpoint must not touch the user's real index"
+        );
+        assert_eq!(
+            git_stdout(cwd, &["status", "--porcelain=v1", "-uall"]),
+            status_before,
+            "the worktree's observable git status must be unchanged"
+        );
+
+        // The checkpoint itself: reachable via the ref, parented on `base`, contains the
+        // dirty content, excludes the symlink even though `.gitignore` fails to match it.
+        assert_eq!(
+            git_stdout(
+                cwd,
+                &["rev-parse", &checkpoint_ref_name("job-checkpoint-1")]
+            ),
+            checkpoint
+        );
+        assert_eq!(
+            git_stdout(cwd, &["rev-parse", &format!("{checkpoint}^")]),
+            base
+        );
+        let changed = git_stdout(cwd, &["diff", "--name-only", &base, &checkpoint]);
+        assert!(changed.contains("seed.txt"), "changed files: {changed}");
+        assert!(changed.contains("scratch.txt"), "changed files: {changed}");
+        assert!(
+            !changed.contains("node_modules"),
+            "the symlink must be excluded even though .gitignore fails to match it: {changed}"
+        );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_succeeds_with_no_git_identity_configured() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        init_git_seed(cwd);
+        let base = git_head(cwd);
+        // A repo with no identity configured must not hard-fail: `commit-tree` here must
+        // succeed via the EXPLICIT env vars this code sets, never by depending on the
+        // repository's own config (which `init_git_seed` set, and which we now remove).
+        git_stdout(cwd, &["config", "--unset", "user.email"]);
+        git_stdout(cwd, &["config", "--unset", "user.name"]);
+        std::fs::write(
+            std::path::Path::new(cwd).join("seed.txt"),
+            "line1\nline2\ndirty edit\n",
+        )
+        .unwrap();
+
+        let workspace = TrustedWorkspace::granted_for_test(cwd).expect("cwd exists");
+        let checkpoint = build_review_checkpoint(&workspace, &base, "job-checkpoint-2", &[])
+            .await
+            .expect("a repo with no configured identity must not hard-fail the checkpoint");
+
+        let identity = git_stdout(
+            cwd,
+            &["log", "-1", "--format=%an <%ae>%n%cn <%ce>", &checkpoint],
+        );
+        assert_eq!(
+            identity,
+            "sealwire-review <sealwire-review@localhost>\nsealwire-review <sealwire-review@localhost>",
+            "the checkpoint must carry its own fixed identity, never an ambient one: {identity}"
+        );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_ref_is_overwritten_across_rounds_not_accumulated() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        init_git_seed(cwd);
+        let base = git_head(cwd);
+        std::fs::write(std::path::Path::new(cwd).join("seed.txt"), "round one\n").unwrap();
+
+        let workspace = TrustedWorkspace::granted_for_test(cwd).expect("cwd exists");
+        let first = build_review_checkpoint(&workspace, &base, "job-checkpoint-3", &[])
+            .await
+            .expect("round one checkpoint");
+
+        std::fs::write(std::path::Path::new(cwd).join("seed.txt"), "round two\n").unwrap();
+        let second = build_review_checkpoint(&workspace, &base, "job-checkpoint-3", &[])
+            .await
+            .expect("round two checkpoint");
+
+        assert_ne!(first, second, "the two rounds produced different content");
+        assert_eq!(
+            git_stdout(
+                cwd,
+                &["rev-parse", &checkpoint_ref_name("job-checkpoint-3")]
+            ),
+            second,
+            "the SAME job's ref must be overwritten to the latest round, not accumulated"
+        );
     }
 
     #[tokio::test]
