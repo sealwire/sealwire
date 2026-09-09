@@ -3934,6 +3934,162 @@ async fn unbound_uncertain_abandon_blocks_late_turn_started_from_binding_retry()
     assert!(!runtime.codex_block_notification_bind);
 }
 
+/// A times out unbound, then B is pending: an unknown late A userMessage must not
+/// claim B (block flag applies to echo reconcile, not only turn/started).
+#[tokio::test]
+async fn unbound_uncertain_abandon_blocks_late_user_message_from_claiming_retry() {
+    let state = codex_test_state_with_thread("thread-abandon-echo").await;
+    let a_id = {
+        let mut relay = state.write().await;
+        relay
+            .begin_codex_user_turn("thread-abandon-echo", "prompt A")
+            .expect("admit A")
+    };
+    {
+        let mut relay = state.write().await;
+        relay.fail_codex_user_turn_uncertain("thread-abandon-echo", &a_id);
+    }
+    let b_id = {
+        let mut relay = state.write().await;
+        relay
+            .begin_codex_user_turn("thread-abandon-echo", "prompt B")
+            .expect("admit B")
+    };
+
+    handle_notification(
+        user_message_completed(
+            "thread-abandon-echo",
+            "turn-late-a",
+            "item-late-a",
+            "prompt A",
+        ),
+        &state,
+    )
+    .await;
+
+    let relay = state.read().await;
+    let runtime = relay
+        .runtime_for_thread("thread-abandon-echo")
+        .expect("runtime");
+    let b = runtime
+        .codex_user_reservations
+        .get(&b_id)
+        .expect("B pending must survive late A userMessage");
+    assert!(b.turn_id.is_none());
+    assert_eq!(b.text, "prompt B");
+    assert_eq!(
+        runtime.codex_pending_bind_reservation_id.as_deref(),
+        Some(b_id.as_str())
+    );
+    assert!(runtime.codex_block_notification_bind);
+    // Late A may append as its own user row, but must not rewrite B's placeholder.
+    let b_placeholder = runtime
+        .transcript
+        .iter()
+        .find(|entry| {
+            entry.item_id.starts_with("codex:user-reserve:")
+                && entry.text.as_deref() == Some("prompt B")
+        })
+        .expect("B placeholder");
+    assert!(b_placeholder.turn_id.is_none());
+}
+
+/// Suppressed late A turn/started must not become the active turn while B is pending.
+#[tokio::test]
+async fn suppressed_turn_started_does_not_set_active_turn_while_retry_pending() {
+    let state = codex_test_state_with_thread("thread-suppress-active").await;
+    let a_id = {
+        let mut relay = state.write().await;
+        relay
+            .begin_codex_user_turn("thread-suppress-active", "prompt A")
+            .expect("admit A")
+    };
+    {
+        let mut relay = state.write().await;
+        relay.fail_codex_user_turn_uncertain("thread-suppress-active", &a_id);
+    }
+    let _b_id = {
+        let mut relay = state.write().await;
+        relay
+            .begin_codex_user_turn("thread-suppress-active", "prompt B")
+            .expect("admit B")
+    };
+
+    handle_notification(
+        turn_started("thread-suppress-active", "turn-late-a"),
+        &state,
+    )
+    .await;
+
+    let relay = state.read().await;
+    assert_ne!(
+        relay.active_turn_id.as_deref(),
+        Some("turn-late-a"),
+        "suppressed turn/started must not contaminate active turn"
+    );
+    let runtime = relay
+        .runtime_for_thread("thread-suppress-active")
+        .expect("runtime");
+    assert_ne!(
+        runtime.active_turn_id.as_deref(),
+        Some("turn-late-a"),
+        "suppressed turn/started must not contaminate thread active turn"
+    );
+}
+
+/// Cancel/interrupt must release per-thread start admission while turn/start hangs.
+#[tokio::test]
+async fn interrupt_releases_start_admission_while_turn_start_hangs() {
+    let (bridge, state) = spawn_fake_codex_bridge().await;
+    let thread = bridge
+        .start_thread(
+            "/tmp/project",
+            "gpt-5.6-sol",
+            "on-request",
+            "workspace-write",
+        )
+        .await
+        .expect("thread starts");
+    activate_started_codex_thread(&state, &thread).await;
+    configure_fake_codex_drop_turn_start(&bridge).await;
+    bridge.set_test_request_timeout_ms(2_000);
+
+    let thread_id = thread.id.clone();
+    let first = bridge.start_turn(&thread_id, "hanging start", "gpt-5.6-sol", "low");
+    tokio::pin!(first);
+    tokio::select! {
+        _ = &mut first => panic!("start should still be in flight"),
+        _ = tokio::time::sleep(std::time::Duration::from_millis(30)) => {}
+    }
+    assert!(
+        state
+            .read()
+            .await
+            .runtime_for_thread(&thread_id)
+            .expect("runtime")
+            .codex_start_in_flight,
+        "admission held while turn/start hangs"
+    );
+
+    bridge
+        .interrupt_turn(&thread_id, "turn-cancel-while-start")
+        .await
+        .expect("interrupt");
+
+    assert!(
+        !state
+            .read()
+            .await
+            .runtime_for_thread(&thread_id)
+            .expect("runtime")
+            .codex_start_in_flight,
+        "cancel must release admission before hung turn/start times out"
+    );
+
+    let _ = first.await;
+    bridge.set_test_request_timeout_ms(0);
+}
+
 /// After A has reconciled, a duplicate A userMessage must not rewrite B's pending.
 #[tokio::test]
 async fn duplicate_echo_for_reconciled_turn_does_not_claim_unbound_pending() {

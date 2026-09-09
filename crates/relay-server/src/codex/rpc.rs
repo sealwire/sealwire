@@ -421,20 +421,23 @@ async fn handle_notification_for_provider(
                         .or_else(|| relay.active_thread_id.clone()),
                     ThreadRoute::Drop => None,
                 };
-                if let Some(bind_thread_id) = bind_thread_id {
-                    relay.bind_pending_codex_user_reservation(&bind_thread_id, &turn_id);
-                }
-                if let ThreadRoute::Background(bg_thread_id) = route {
-                    relay.bg_set_active_turn(
-                        &bg_thread_id,
-                        Some(turn_id),
-                        crate::state::unix_now(),
-                    );
-                    changed = true;
-                } else {
-                    relay.set_active_turn(Some(turn_id));
-                    relay.touch_progress(Some("thinking"), None);
-                    changed = true;
+                let activate = bind_thread_id
+                    .as_deref()
+                    .map(|id| relay.bind_pending_codex_user_reservation(id, &turn_id))
+                    .unwrap_or(true);
+                if activate {
+                    if let ThreadRoute::Background(bg_thread_id) = route {
+                        relay.bg_set_active_turn(
+                            &bg_thread_id,
+                            Some(turn_id),
+                            crate::state::unix_now(),
+                        );
+                        changed = true;
+                    } else {
+                        relay.set_active_turn(Some(turn_id));
+                        relay.touch_progress(Some("thinking"), None);
+                        changed = true;
+                    }
                 }
             }
         }

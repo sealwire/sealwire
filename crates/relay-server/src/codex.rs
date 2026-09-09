@@ -206,6 +206,12 @@ impl ProviderBridge for CodexBridge {
         thread_id: &str,
         turn_id: Option<&str>,
     ) -> Result<(), String> {
+        // Release start admission even when turn_id is missing: a hung
+        // turn/start must not hold the per-thread guard until timeout.
+        {
+            let mut relay = self.state.write().await;
+            relay.release_codex_start_admission(thread_id);
+        }
         let turn_id =
             turn_id.ok_or_else(|| "Codex requires a turn id to stop a turn".to_string())?;
         self.interrupt_turn(thread_id, turn_id).await
@@ -878,6 +884,13 @@ read-only with approvals required. Change File access if this turn needs to writ
     }
 
     pub async fn interrupt_turn(&self, thread_id: &str, turn_id: &str) -> Result<(), String> {
+        // Cancel must free the start-admission guard immediately so a hung
+        // turn/start response cannot block the next send until timeout.
+        {
+            let mut relay = self.state.write().await;
+            relay.release_codex_start_admission(thread_id);
+            relay.notify();
+        }
         self.send_request(
             "turn/interrupt",
             json!({

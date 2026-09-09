@@ -466,12 +466,27 @@ impl RelayState {
 
     /// Bind only the in-flight pending reservation (from `turn/started`).
     /// Never attaches to an older unbound leftover or a known/stale turn id.
-    pub fn bind_pending_codex_user_reservation(&mut self, thread_id: &str, turn_id: &str) {
+    ///
+    /// Returns `true` when this turn should become the thread's active turn
+    /// (newly bound, already held by this start, or a first observation with
+    /// no pending slot). Returns `false` when the notification is suppressed
+    /// as blocked/stale — callers must not `set_active_turn` in that case.
+    pub fn bind_pending_codex_user_reservation(&mut self, thread_id: &str, turn_id: &str) -> bool {
         let Some(runtime) = self.runtimes.get(thread_id) else {
-            return;
+            // No runtime yet: still allow turn/started to activate (legacy/orphan).
+            return true;
         };
+        let already_held = runtime
+            .codex_user_reservations
+            .values()
+            .any(|reservation| reservation.turn_id.as_deref() == Some(turn_id));
+        if already_held {
+            // RPC already bound this turn — still activate on the notification.
+            return true;
+        }
         if runtime.codex_known_turn_ids.contains(turn_id) {
-            return;
+            // Known but not held: stale/settled/previously suppressed.
+            return false;
         }
         // Unbound-uncertain abandon: late A turn/started must not bind retry B.
         // Record the id as known and wait for B's turn/start RPC to bind.
@@ -479,16 +494,18 @@ impl RelayState {
             if let Some(runtime) = self.runtimes.get_mut(thread_id) {
                 runtime.codex_known_turn_ids.insert(turn_id.to_string());
             }
-            return;
+            return false;
         }
         let pending_id = runtime.codex_pending_bind_reservation_id.clone();
         let Some(pending_id) = pending_id else {
             if let Some(runtime) = self.runtimes.get_mut(thread_id) {
                 runtime.codex_known_turn_ids.insert(turn_id.to_string());
             }
-            return;
+            // No pending start: still allow activating (orphan turn/started).
+            return true;
         };
         self.bind_codex_user_reservation(thread_id, &pending_id, turn_id);
+        true
     }
 
     /// Drop one reservation and its placeholder (failed / rejected start).
@@ -622,10 +639,13 @@ impl RelayState {
             }
         }
         // Echo arrived before bind: only the in-flight pending slot may claim it,
-        // and only when this turn id is not already known/reconciled.
+        // and only when this turn id is not already known/reconciled and
+        // notification binds are not blocked after an unbound-uncertain abandon.
         if local_id.is_none() {
             if let Some(runtime) = self.runtimes.get(thread_id) {
-                if !runtime.codex_known_turn_ids.contains(turn_id.as_str()) {
+                if !runtime.codex_block_notification_bind
+                    && !runtime.codex_known_turn_ids.contains(turn_id.as_str())
+                {
                     if let Some(pending_id) = runtime.codex_pending_bind_reservation_id.as_deref() {
                         if runtime
                             .codex_user_reservations
@@ -635,6 +655,15 @@ impl RelayState {
                             local_id = Some(pending_id.to_string());
                         }
                     }
+                }
+            }
+        }
+        // Blocked unknown echo: record the turn id so a retry cannot later treat
+        // it as a fresh claimable identity, then fall through to a normal append.
+        if local_id.is_none() {
+            if let Some(runtime) = self.runtimes.get_mut(thread_id) {
+                if runtime.codex_block_notification_bind {
+                    runtime.codex_known_turn_ids.insert(turn_id.clone());
                 }
             }
         }
