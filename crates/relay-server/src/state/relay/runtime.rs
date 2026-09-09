@@ -170,6 +170,10 @@ pub(crate) struct ThreadRuntime {
     /// Provider turn ids this thread has already bound, settled, or reconciled.
     /// Stale/duplicate `turn/started` for these ids must not attach to a newer pending.
     pub(crate) codex_known_turn_ids: HashSet<String>,
+    /// After an unbound-uncertain abandon, `turn/started` must not bind the next
+    /// start's pending (a late A notification is indistinguishable from B's).
+    /// Cleared when the next start binds via the `turn/start` RPC response.
+    pub(crate) codex_block_notification_bind: bool,
 }
 
 impl ThreadRuntime {
@@ -224,6 +228,7 @@ impl ThreadRuntime {
             codex_pending_bind_reservation_id: None,
             codex_start_in_flight: false,
             codex_known_turn_ids: HashSet::new(),
+            codex_block_notification_bind: false,
         }
     }
 
@@ -269,6 +274,7 @@ impl ThreadRuntime {
             codex_pending_bind_reservation_id: None,
             codex_start_in_flight: false,
             codex_known_turn_ids: HashSet::new(),
+            codex_block_notification_bind: false,
         }
     }
 
@@ -346,6 +352,7 @@ impl ThreadRuntime {
             codex_pending_bind_reservation_id: None,
             codex_start_in_flight: false,
             codex_known_turn_ids: HashSet::new(),
+            codex_block_notification_bind: false,
         }
     }
 
