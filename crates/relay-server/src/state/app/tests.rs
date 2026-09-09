@@ -15766,6 +15766,64 @@ resurrected into a turn that never completes: {:?}",
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlinked_node_modules_alone_is_not_treated_as_uncommitted_work() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        init_git_seed(cwd);
+        let base = git_head(cwd);
+        // The trailing slash in a `node_modules/` ignore pattern matches directories
+        // only; a worktree that links `node_modules` in as a SYMLINK is never matched
+        // by it, so `git status` reports the symlink untracked forever.
+        std::fs::write(
+            std::path::Path::new(cwd).join(".gitignore"),
+            "node_modules/\n",
+        )
+        .unwrap();
+        let candidate = git_commit_all(cwd, "add gitignore");
+        let link_target = TempDir::new().expect("link target");
+        std::os::unix::fs::symlink(
+            link_target.path(),
+            std::path::Path::new(cwd).join("node_modules"),
+        )
+        .expect("symlink");
+
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let provider = providers.get("codex").unwrap();
+        // If the (buggy) code asks the author to commit anyway, nobody must silently
+        // resolve that by committing the symlink itself — the assertions below need to
+        // see the ask, not a phantom commit papering over it.
+        provider
+            .auto_commit_author_changes
+            .store(false, Ordering::Relaxed);
+        queue_verdicts(provider, &["APPROVE"]).await;
+        start_parent(&app, cwd, "codex").await;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
+        assert_eq!(job.base_sha.as_deref(), Some(base.as_str()));
+        assert_eq!(job.candidate_sha.as_deref(), Some(candidate.as_str()));
+
+        let turns = provider.turns.lock().await.clone();
+        assert!(
+            turns
+                .iter()
+                .all(|(_, text)| !text.contains("needs a committed candidate")),
+            "an untracked symlink alone must never trigger the commit-nudge turn: {turns:?}"
+        );
+        let prompt = turns
+            .iter()
+            .find(|(_, text)| text.contains("Committed review target"))
+            .map(|(_, text)| text)
+            .expect("reviewer prompt");
+        assert!(prompt.contains(&format!("Range: {base}..{candidate}")));
+    }
+
     #[tokio::test]
     async fn dirty_only_after_author_turn_does_not_review_historical_head() {
         let dir = TempDir::new().expect("tmpdir");
