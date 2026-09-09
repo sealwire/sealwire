@@ -40,7 +40,14 @@ test("the immutable fields say so on the form", () => {
 test("the dialog explains that the work happens off the working tree", () => {
   const html = renderToStaticMarkup(h(StartTaskDialog, { fields: {} }));
   assert.match(html, /fresh git worktree/);
-  assert.match(html, /Nothing touches your working tree/);
+  assert.match(html, /nothing touches your working tree/);
+});
+
+test("the dialog offers the builtin team structures", () => {
+  const html = renderToStaticMarkup(h(StartTaskDialog, { fields: {} }));
+  assert.match(html, /Default/);
+  assert.match(html, /Pair/);
+  assert.match(html, /2 roles/);
 });
 
 test("a rejected start shows the relay's reason", () => {
@@ -65,12 +72,16 @@ test("field edits report the backend's own field names", () => {
       return;
     }
     if (!node || typeof node !== "object") return;
-    if (typeof node.type === "function" && node.type.name === "Field") {
+    if (typeof node.type === "function") {
       const rendered = node.type(node.props);
       walk(rendered);
       return;
     }
-    if (node.props?.onChange && (node.type === "textarea" || node.type === "input")) {
+    if (node.props?.onChange && node.type === "input" && node.props.type === "radio") {
+      if (!seen.some(([key]) => key === "team_id")) {
+        node.props.onChange({ target: { value: "pair", checked: true } });
+      }
+    } else if (node.props?.onChange && (node.type === "textarea" || node.type === "input")) {
       node.props.onChange({ target: { value: "v" } });
     }
     walk(node.props?.children);
@@ -79,6 +90,15 @@ test("field edits report the backend's own field names", () => {
 
   assert.deepEqual(
     seen.map(([key]) => key),
-    ["title", "context", "acceptance_criteria", "agreed_scope", "quality_rules", "cwd", "target_branch"]
+    [
+      "team_id",
+      "title",
+      "context",
+      "acceptance_criteria",
+      "agreed_scope",
+      "quality_rules",
+      "cwd",
+      "target_branch",
+    ]
   );
 });

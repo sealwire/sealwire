@@ -811,6 +811,7 @@ mod tests {
             role_count: roles.len(),
             focus: Some("Payments and billing".to_string()),
             current_version_id: "ver_1".to_string(),
+            structure: relay_api::team::TeamStructure::standard(),
             roles,
             stats,
         }

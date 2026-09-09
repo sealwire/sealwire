@@ -1,7 +1,7 @@
 //! Task team runner model.
 //!
-//! A `TeamRun` is one execution of the fixed three-role team — TL, dev, reviewer
-//! — against a user-written `TaskSpec`, inside a dedicated git worktree. It holds
+//! A `TeamRun` is one execution of a pinned team structure against a
+//! user-written `TaskSpec`, inside a dedicated git worktree. It holds
 //! only orchestration metadata: every agent's real output lives in the background
 //! thread it names, and the TL's plan/design/report live as files in the worktree.
 //!
@@ -653,7 +653,7 @@ pub enum TeamThreadSlot {
 /// This is mechanism vocabulary, not a workflow decision: the private engine
 /// decides when and why a seat runs, while the public relay uses the role only
 /// to choose the provider sandbox and approval policy for the thread it starts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TeamRole {
     Tl,
     Dev,
@@ -667,6 +667,166 @@ impl TeamRole {
             Self::Dev => "dev",
             Self::Reviewer => "reviewer",
         }
+    }
+}
+
+/// A role inside a pinned team definition.
+///
+/// This is deliberately data, not a new Rust enum variant per team shape. The
+/// runner still has task-team semantic steps (intake, plan, implement, review),
+/// but this record decides which named role owns those steps and which runtime
+/// policy a new thread for that role should use.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TeamStructureRole {
+    pub id: String,
+    pub name: String,
+    /// Runtime policy used when a thread is first opened for this role:
+    /// `tl`, `dev`, or `reviewer`. Unknown values fall back to `dev`, which is
+    /// writable but still non-prompting.
+    pub runtime_role: String,
+    pub blurb: String,
+}
+
+impl Default for TeamStructureRole {
+    fn default() -> Self {
+        Self {
+            id: "dev".to_string(),
+            name: "Developer".to_string(),
+            runtime_role: TeamRole::Dev.as_str().to_string(),
+            blurb: String::new(),
+        }
+    }
+}
+
+impl TeamStructureRole {
+    pub fn runtime_team_role(&self) -> TeamRole {
+        match self.runtime_role.as_str() {
+            "tl" | "lead" => TeamRole::Tl,
+            "reviewer" => TeamRole::Reviewer,
+            _ => TeamRole::Dev,
+        }
+    }
+}
+
+/// Semantic slots in the task runner mapped to role ids.
+///
+/// A flexible team starts here: different structures can share a role across
+/// slots (pair programming: `lead == dev`) or split them apart (Default:
+/// `lead != dev`) without adding another branch to the durable state machine.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TeamRoleBindings {
+    pub lead: String,
+    pub dev: String,
+    pub reviewer: String,
+    pub mr_dev: String,
+    pub reporter: String,
+}
+
+impl Default for TeamRoleBindings {
+    fn default() -> Self {
+        Self {
+            lead: "tl".to_string(),
+            dev: "dev".to_string(),
+            reviewer: "reviewer".to_string(),
+            mr_dev: "dev".to_string(),
+            reporter: "tl".to_string(),
+        }
+    }
+}
+
+/// The role topology a run is pinned to.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TeamStructure {
+    pub roles: Vec<TeamStructureRole>,
+    pub bindings: TeamRoleBindings,
+}
+
+impl Default for TeamStructure {
+    fn default() -> Self {
+        Self::standard()
+    }
+}
+
+impl TeamStructure {
+    pub fn standard() -> Self {
+        Self {
+            roles: vec![
+                TeamStructureRole {
+                    id: "tl".to_string(),
+                    name: "Planner".to_string(),
+                    runtime_role: TeamRole::Tl.as_str().to_string(),
+                    blurb: "Reads the brief, sizes the work, splits it into sub-tasks.".to_string(),
+                },
+                TeamStructureRole {
+                    id: "dev".to_string(),
+                    name: "Implementer".to_string(),
+                    runtime_role: TeamRole::Dev.as_str().to_string(),
+                    blurb: "Builds the sub-tasks.".to_string(),
+                },
+                TeamStructureRole {
+                    id: "reviewer".to_string(),
+                    name: "Reviewer".to_string(),
+                    runtime_role: TeamRole::Reviewer.as_str().to_string(),
+                    blurb: "Checks the work against your scope; read-only sandbox.".to_string(),
+                },
+            ],
+            bindings: TeamRoleBindings::default(),
+        }
+    }
+
+    pub fn pair() -> Self {
+        Self {
+            roles: vec![
+                TeamStructureRole {
+                    id: "pair".to_string(),
+                    name: "Pair programmer".to_string(),
+                    runtime_role: TeamRole::Dev.as_str().to_string(),
+                    blurb: "Plans with you and implements in the same writable session."
+                        .to_string(),
+                },
+                TeamStructureRole {
+                    id: "reviewer".to_string(),
+                    name: "Reviewer".to_string(),
+                    runtime_role: TeamRole::Reviewer.as_str().to_string(),
+                    blurb: "Reviews the pair's work in a read-only session.".to_string(),
+                },
+            ],
+            bindings: TeamRoleBindings {
+                lead: "pair".to_string(),
+                dev: "pair".to_string(),
+                reviewer: "reviewer".to_string(),
+                mr_dev: "pair".to_string(),
+                reporter: "pair".to_string(),
+            },
+        }
+    }
+
+    pub fn for_builtin_team_id(team_id: &str) -> Self {
+        match team_id {
+            BUILTIN_PAIR_TEAM_ID => Self::pair(),
+            _ => Self::standard(),
+        }
+    }
+
+    pub fn role(&self, role_id: &str) -> Option<&TeamStructureRole> {
+        self.roles.iter().find(|role| role.id == role_id)
+    }
+
+    pub fn runtime_role_for(&self, role_id: &str, fallback: TeamRole) -> TeamRole {
+        self.role(role_id)
+            .map(TeamStructureRole::runtime_team_role)
+            .unwrap_or(fallback)
+    }
+
+    pub fn lead_runtime_role(&self) -> TeamRole {
+        self.runtime_role_for(&self.bindings.lead, TeamRole::Tl)
+    }
+
+    pub fn lead_and_dev_share_thread(&self) -> bool {
+        !self.bindings.lead.is_empty() && self.bindings.lead == self.bindings.dev
     }
 }
 
@@ -687,10 +847,9 @@ pub enum TeamTurnOutcome {
     ReviewStale(String),
 }
 
-/// Identity of the fixed three-seat pipeline that ships today (TL / Dev /
-/// Reviewer). Configurable teams will add user-defined rows beside this; until
-/// then every new [`TeamRun`] pins these ids so the token ledger's `team_id`
-/// is populated rather than always `NULL`.
+/// Identity of the default three-role pipeline (Planner / Implementer /
+/// Reviewer). Additional structures live beside it and are pinned onto each
+/// run as data rather than another Rust enum branch.
 pub const BUILTIN_TEAM_ID: &str = "builtin";
 /// Immutable version of [`BUILTIN_TEAM_ID`]. A live run must keep this pin for
 /// its whole life — see `orchestrator-teams-budget-design.md` §6.3.
@@ -698,6 +857,12 @@ pub const BUILTIN_TEAM_VERSION_ID: &str = "builtin-v1";
 /// Display name for the builtin team. Not persisted on the run; the catalog
 /// (when it lands) is the source of truth for names.
 pub const BUILTIN_TEAM_NAME: &str = "Default";
+/// Builtin two-role shape: one writable pair-programming seat plus reviewer.
+pub const BUILTIN_PAIR_TEAM_ID: &str = "pair";
+/// Immutable version of [`BUILTIN_PAIR_TEAM_ID`].
+pub const BUILTIN_PAIR_TEAM_VERSION_ID: &str = "pair-v1";
+/// Display name for the builtin pair team.
+pub const BUILTIN_PAIR_TEAM_NAME: &str = "Pair";
 
 /// One execution of the team pipeline.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -762,6 +927,16 @@ pub struct TeamRun {
     /// Immutable team definition this run is pinned to. Drivers must resolve
     /// roles through this id, never through a mutable "current version".
     pub team_version_id: Option<String>,
+    /// Display name captured at start for task history. The durable execution
+    /// contract is still `team_structure`.
+    #[serde(default)]
+    pub team_name: String,
+    /// The concrete team structure this run is pinned to.
+    ///
+    /// `team_id` is useful attribution; this is execution. Persisting the
+    /// snapshot keeps a running task from following a catalog edit mid-run.
+    #[serde(default)]
+    pub team_structure: TeamStructure,
 
     /// Whether the TL judged the task complex enough to need a design phase.
     /// `None` until intake answers it.
@@ -945,6 +1120,41 @@ impl TeamRun {
             requested_at: now,
             updated_at: now,
             ..Self::default()
+        }
+    }
+
+    pub fn lead_runtime_role(&self) -> TeamRole {
+        self.team_structure.lead_runtime_role()
+    }
+
+    pub fn lead_and_dev_share_thread(&self) -> bool {
+        self.team_structure.lead_and_dev_share_thread()
+    }
+
+    pub fn role_id_for_turn(&self, slot: TeamThreadSlot, runtime_role: TeamRole) -> String {
+        let bound = match slot {
+            TeamThreadSlot::Tl => &self.team_structure.bindings.lead,
+            TeamThreadSlot::SubTaskDev(_) => &self.team_structure.bindings.dev,
+            TeamThreadSlot::SubTaskReviewer(_) => &self.team_structure.bindings.reviewer,
+            TeamThreadSlot::MrDev => &self.team_structure.bindings.mr_dev,
+            TeamThreadSlot::RunOwned(index)
+                if runtime_role == TeamRole::Dev
+                    && self.mr_dev_thread_id.as_deref().is_some_and(|mr_dev| {
+                        self.run_owned_thread_ids.get(index).map(String::as_str) == Some(mr_dev)
+                    }) =>
+            {
+                &self.team_structure.bindings.mr_dev
+            }
+            TeamThreadSlot::RunOwned(_) => match runtime_role {
+                TeamRole::Tl => &self.team_structure.bindings.lead,
+                TeamRole::Reviewer => &self.team_structure.bindings.reviewer,
+                TeamRole::Dev => &self.team_structure.bindings.dev,
+            },
+        };
+        if bound.trim().is_empty() {
+            runtime_role.as_str().to_string()
+        } else {
+            bound.clone()
         }
     }
 
@@ -1996,6 +2206,81 @@ mod tests {
             digested,
             ..SubTask::default()
         }
+    }
+
+    #[test]
+    fn pair_structure_binds_planning_and_implementation_to_one_role() {
+        let structure = TeamStructure::pair();
+        assert_eq!(structure.roles.len(), 2);
+        assert_eq!(structure.bindings.lead, "pair");
+        assert_eq!(structure.bindings.dev, "pair");
+        assert_eq!(structure.bindings.mr_dev, "pair");
+        assert_eq!(structure.bindings.reporter, "pair");
+        assert_eq!(structure.bindings.reviewer, "reviewer");
+        assert_eq!(structure.lead_runtime_role(), TeamRole::Dev);
+        assert!(structure.lead_and_dev_share_thread());
+
+        let mut run = run_with(TeamPhase::SubTasks, vec![]);
+        run.team_structure = structure;
+        assert_eq!(
+            run.role_id_for_turn(TeamThreadSlot::Tl, TeamRole::Dev),
+            "pair"
+        );
+        assert_eq!(
+            run.role_id_for_turn(TeamThreadSlot::SubTaskDev(0), TeamRole::Dev),
+            "pair"
+        );
+        assert_eq!(
+            run.role_id_for_turn(TeamThreadSlot::SubTaskReviewer(0), TeamRole::Reviewer),
+            "reviewer"
+        );
+    }
+
+    #[test]
+    fn run_owned_mr_dev_thread_uses_mr_dev_binding_when_it_differs_from_dev() {
+        let mut run = run_with(TeamPhase::MrGate, vec![]);
+        run.team_structure = TeamStructure {
+            roles: vec![
+                TeamStructureRole {
+                    id: "implementer".to_string(),
+                    name: "Implementer".to_string(),
+                    runtime_role: TeamRole::Dev.as_str().to_string(),
+                    blurb: String::new(),
+                },
+                TeamStructureRole {
+                    id: "fixer".to_string(),
+                    name: "Fixer".to_string(),
+                    runtime_role: TeamRole::Dev.as_str().to_string(),
+                    blurb: String::new(),
+                },
+            ],
+            bindings: TeamRoleBindings {
+                lead: "planner".to_string(),
+                dev: "implementer".to_string(),
+                reviewer: "reviewer".to_string(),
+                mr_dev: "fixer".to_string(),
+                reporter: "planner".to_string(),
+            },
+        };
+        run.run_owned_thread_ids.push("mr-dev-thread".to_string());
+        run.mr_dev_thread_id = Some("mr-dev-thread".to_string());
+
+        assert_eq!(
+            run.role_id_for_turn(TeamThreadSlot::RunOwned(0), TeamRole::Dev),
+            "fixer"
+        );
+    }
+
+    #[test]
+    fn out_of_bounds_run_owned_dev_does_not_match_absent_mr_dev_thread() {
+        let mut run = run_with(TeamPhase::MrGate, vec![]);
+        run.team_structure.bindings.dev = "implementer".to_string();
+        run.team_structure.bindings.mr_dev = "fixer".to_string();
+
+        assert_eq!(
+            run.role_id_for_turn(TeamThreadSlot::RunOwned(0), TeamRole::Dev),
+            "implementer"
+        );
     }
 
     #[test]

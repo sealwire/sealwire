@@ -1,5 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use relay_api::team::TeamStructure;
 use relay_util::sha256_hex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -3183,6 +3184,9 @@ pub struct StartTeamInput {
     /// Branch to fork from; defaults to the main worktree's current branch.
     #[serde(default)]
     pub target_branch: Option<String>,
+    /// Team definition to pin. Omitted means the builtin Default structure.
+    #[serde(default)]
+    pub team_id: Option<String>,
     #[serde(default)]
     pub tl_provider: Option<String>,
     #[serde(default)]
@@ -3291,7 +3295,12 @@ pub struct TeamRunView {
     pub cwd: String,
     pub branch: String,
     pub target_ref: String,
+    pub team_id: Option<String>,
+    pub team_version_id: Option<String>,
+    pub team_name: Option<String>,
+    pub team_structure: TeamStructure,
     pub tl_thread_id: String,
+    pub reviewer_thread_id: Option<String>,
     /// How many team leads this run has had. Anything above 1 means a re-seed.
     pub tl_generations: usize,
     /// Times this run finished and was put back to work. Above 0, "Done" is a

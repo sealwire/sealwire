@@ -3,7 +3,10 @@
 use serde::Serialize;
 
 use crate::usage::store::UsageStore;
-use relay_api::team::{BUILTIN_TEAM_ID, BUILTIN_TEAM_NAME, BUILTIN_TEAM_VERSION_ID};
+use relay_api::team::{
+    TeamStructure, BUILTIN_PAIR_TEAM_ID, BUILTIN_PAIR_TEAM_NAME, BUILTIN_PAIR_TEAM_VERSION_ID,
+    BUILTIN_TEAM_ID, BUILTIN_TEAM_NAME, BUILTIN_TEAM_VERSION_ID,
+};
 
 /// One role inside a pinned team version.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -43,6 +46,7 @@ pub(crate) struct TeamCatalogTeam {
     pub(crate) focus: Option<String>,
     pub(crate) current_version_id: String,
     pub(crate) roles: Vec<TeamCatalogRole>,
+    pub(crate) structure: TeamStructure,
     pub(crate) stats: TeamCatalogStats,
 }
 
@@ -64,7 +68,7 @@ pub(crate) fn build_catalog(store: &UsageStore, now: u64) -> TeamCatalogReport {
             enabled: false,
             // Soft fallback: the Teams shell still needs a Default row to talk
             // about. Numbers stay empty rather than inventing spend.
-            teams: vec![builtin_fallback()],
+            teams: builtin_fallbacks(),
         };
     }
 
@@ -73,7 +77,7 @@ pub(crate) fn build_catalog(store: &UsageStore, now: u64) -> TeamCatalogReport {
         // A migrated DB should always have the seed; an empty list means the
         // seed failed silently somehow. Surface the builtin so the screen is
         // never blank for a reason the user cannot act on.
-        teams.push(builtin_fallback());
+        teams.extend(builtin_fallbacks());
     }
 
     let since = now.saturating_sub(7 * 24 * 60 * 60);
@@ -94,6 +98,10 @@ pub(crate) fn build_catalog(store: &UsageStore, now: u64) -> TeamCatalogReport {
         enabled: true,
         teams,
     }
+}
+
+fn builtin_fallbacks() -> Vec<TeamCatalogTeam> {
+    vec![builtin_fallback(), builtin_pair_fallback()]
 }
 
 fn builtin_fallback() -> TeamCatalogTeam {
@@ -129,6 +137,44 @@ fn builtin_fallback() -> TeamCatalogTeam {
                 estimate_label: None,
             },
         ],
+        structure: TeamStructure::standard(),
+        stats: TeamCatalogStats {
+            tasks_7d: None,
+            avg_tokens: None,
+            passed: None,
+            total: None,
+        },
+    }
+}
+
+pub(crate) fn builtin_pair_fallback() -> TeamCatalogTeam {
+    TeamCatalogTeam {
+        id: BUILTIN_PAIR_TEAM_ID.to_string(),
+        name: BUILTIN_PAIR_TEAM_NAME.to_string(),
+        persistent: true,
+        role_count: 2,
+        focus: Some(
+            "Pair programming — one writable planning/implementation session plus reviewer."
+                .to_string(),
+        ),
+        current_version_id: BUILTIN_PAIR_TEAM_VERSION_ID.to_string(),
+        roles: vec![
+            TeamCatalogRole {
+                id: "pair".into(),
+                name: "Pair programmer".into(),
+                seat: Some("dev".into()),
+                blurb: "Plans with you and implements in the same writable session.".into(),
+                estimate_label: None,
+            },
+            TeamCatalogRole {
+                id: "reviewer".into(),
+                name: "Reviewer".into(),
+                seat: Some("reviewer".into()),
+                blurb: "Reviews the pair's work in a read-only session.".into(),
+                estimate_label: None,
+            },
+        ],
+        structure: TeamStructure::pair(),
         stats: TeamCatalogStats {
             tasks_7d: None,
             avg_tokens: None,
@@ -151,11 +197,14 @@ mod tests {
         let store = UsageStore::open(&dir.path().join("token-usage.db"));
         let report = build_catalog(&store, 1_700_000_000);
         assert!(report.enabled);
-        assert_eq!(report.teams.len(), 1);
+        assert_eq!(report.teams.len(), 2);
         assert_eq!(report.teams[0].id, BUILTIN_TEAM_ID);
         assert_eq!(report.teams[0].name, BUILTIN_TEAM_NAME);
         assert_eq!(report.teams[0].roles.len(), 3);
         assert_eq!(report.teams[0].roles[0].name, "Planner");
+        assert_eq!(report.teams[1].id, BUILTIN_PAIR_TEAM_ID);
+        assert_eq!(report.teams[1].structure.bindings.lead, "pair");
+        assert_eq!(report.teams[1].structure.bindings.dev, "pair");
         assert!(report.teams[0].stats.tasks_7d.is_none());
     }
 
