@@ -16135,6 +16135,21 @@ resurrected into a turn that never completes: {:?}",
             job.candidate_sha.is_some(),
             "a checkpoint candidate must be recorded even though HEAD never advanced"
         );
+        // The checkpoint never moves HEAD by design, so a stale-approval check that
+        // compares HEAD against the CANDIDATE (the checkpoint's own, HEAD-unreachable
+        // sha) would misfire on every checkpoint approval. Prove it didn't: the verdict
+        // must survive as an actual approval, not get silently downgraded.
+        assert_eq!(
+            job.verdict.as_deref(),
+            Some("approve"),
+            "an APPROVE of a checkpoint must not be treated as stale just because HEAD \
+never moved to the checkpoint's own sha"
+        );
+        assert_eq!(
+            job.verdict_candidate_sha.as_deref(),
+            job.candidate_sha.as_deref(),
+            "the approved candidate must be recorded, not cleared by a false staleness hit"
+        );
 
         let turns = provider.turns.lock().await.clone();
         assert!(
@@ -16142,6 +16157,10 @@ resurrected into a turn that never completes: {:?}",
                 thread != &parent.id || !text.contains("needs a committed candidate")
             }),
             "an author who will not commit must never be asked to: {turns:?}"
+        );
+        assert!(
+            turns.iter().all(|(_, text)| !text.contains("is stale")),
+            "a checkpoint approval must never be rewritten as stale: {turns:?}"
         );
         let prompt = turns
             .iter()
@@ -16153,6 +16172,53 @@ resurrected into a turn that never completes: {:?}",
         assert!(
             prompt.contains("seed.txt"),
             "the author's changed file must reach the reviewer via the manifest: {prompt}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dirty_git_review_via_checkpoint_completes_on_approve_in_a_multi_round_review() {
+        // The false-staleness bug hit multi-round reviews hardest: a true APPROVE got
+        // silently downgraded to NeedsChanges, which (with rounds remaining) sent the
+        // author a "fix" turn for findings that were never real — the review could
+        // never actually finish. Prove round 1 approves outright.
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        init_git_seed(cwd);
+        std::fs::write(
+            std::path::Path::new(cwd).join("seed.txt"),
+            "line1\nline2\nDIRTY_MULTI_ROUND\n",
+        )
+        .unwrap();
+
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let provider = providers.get("codex").unwrap();
+        provider
+            .auto_commit_author_changes
+            .store(false, Ordering::Relaxed);
+        queue_verdicts(provider, &["APPROVE"]).await;
+        start_parent(&app, cwd, "codex").await;
+
+        let receipt = app
+            .request_review(RequestReviewInput {
+                max_rounds: Some(3),
+                ..review_input("codex")
+            })
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
+        assert_eq!(
+            job.round, 1,
+            "a true APPROVE must complete on round 1, not loop into a fix turn"
+        );
+        assert_eq!(job.verdict.as_deref(), Some("approve"));
+
+        let turns = provider.turns.lock().await.clone();
+        assert!(
+            turns
+                .iter()
+                .all(|(_, text)| !text.contains("Address the findings below")),
+            "an approved checkpoint must never be sent back for a fix round: {turns:?}"
         );
     }
 
