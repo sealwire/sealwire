@@ -42,6 +42,7 @@ let counter = 0;
 let threadListMode = "normal";
 let threadListDelayMs = 0;
 let rejectTurnStart = false;
+let dropTurnStart = false;
 
 function send(obj) {
   process.stdout.write(`${JSON.stringify(obj)}\n`);
@@ -88,6 +89,7 @@ function handle(payload) {
       threadListMode = params?.threadListMode ?? "normal";
       threadListDelayMs = Math.max(0, Number(params?.threadListDelayMs) || 0);
       rejectTurnStart = Boolean(params?.rejectTurnStart);
+      dropTurnStart = Boolean(params?.dropTurnStart);
       return ok(id, {});
 
     case "thread/start": {
@@ -183,6 +185,11 @@ function handle(payload) {
     }
 
     case "turn/start": {
+      if (dropTurnStart) {
+        // Lost/hung response: accept the request but never reply so the bridge
+        // times out and must clear its send-boundary reservation.
+        return;
+      }
       if (rejectTurnStart) {
         return fail(id, "turn rejected by test policy");
       }

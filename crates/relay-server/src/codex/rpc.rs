@@ -1,4 +1,7 @@
-use std::sync::{atomic::Ordering, Arc};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 
 use serde_json::{json, Value};
 use tokio::{
@@ -14,6 +17,21 @@ use crate::state::{BrokerPendingMessage, PendingTranscriptDelta, RelayState, Tra
 use super::*;
 
 const CODEX_REQUEST_TIMEOUT_SECS: u64 = 30;
+
+/// When non-zero in tests, overrides the JSON-RPC request timeout (milliseconds).
+#[cfg(test)]
+pub(crate) static TEST_CODEX_REQUEST_TIMEOUT_MS: AtomicU64 = AtomicU64::new(0);
+
+fn codex_request_timeout() -> Duration {
+    #[cfg(test)]
+    {
+        let ms = TEST_CODEX_REQUEST_TIMEOUT_MS.load(Ordering::Relaxed);
+        if ms > 0 {
+            return Duration::from_millis(ms);
+        }
+    }
+    Duration::from_secs(CODEX_REQUEST_TIMEOUT_SECS)
+}
 
 impl CodexBridge {
     pub(super) async fn initialize(&self) -> Result<(), String> {
@@ -35,12 +53,8 @@ impl CodexBridge {
     }
 
     pub(super) async fn send_request(&self, method: &str, params: Value) -> Result<Value, String> {
-        self.send_request_with_timeout(
-            method,
-            params,
-            Duration::from_secs(CODEX_REQUEST_TIMEOUT_SECS),
-        )
-        .await
+        self.send_request_with_timeout(method, params, codex_request_timeout())
+            .await
     }
 
     pub(super) async fn send_request_with_timeout(
@@ -443,6 +457,14 @@ async fn handle_notification_for_provider(
                     (Some(completed), Some(active)) if completed != active
                 );
                 if !superseded {
+                    // Bind only while this completion still matches the thread's
+                    // live turn. After active is cleared, a duplicate/stale
+                    // completion must not stamp the next send's unbound pending.
+                    if let Some(turn_id) = completed_turn.as_deref() {
+                        if current_turn.as_deref() == Some(turn_id) {
+                            relay.bind_pending_codex_user_reservation(&bg_thread_id, turn_id);
+                        }
+                    }
                     relay.bg_set_active_turn(&bg_thread_id, None, now);
                     // Settle the background thread to idle on completion, mirroring
                     // the active/Claude paths. Otherwise a background thread whose
@@ -523,6 +545,21 @@ async fn handle_notification_for_provider(
                     (Some(completed), Some(active)) if completed != active
                 );
                 if !superseded {
+                    // Bind only while this completion still matches the live active
+                    // turn. `superseded` is false when active_turn_id is None, so a
+                    // late duplicate completion must not bind the next send's pending.
+                    if let (Some(turn_id), Some(active)) =
+                        (completed_turn.as_deref(), relay.active_turn_id.as_deref())
+                    {
+                        if active == turn_id {
+                            if let Some(thread_id) = notification_thread_id
+                                .clone()
+                                .or_else(|| relay.active_thread_id.clone())
+                            {
+                                relay.bind_pending_codex_user_reservation(&thread_id, turn_id);
+                            }
+                        }
+                    }
                     relay.set_active_turn(None);
                     // Match the Claude completion path: a completed turn idles the
                     // active thread. Codex otherwise relies on a follow-up

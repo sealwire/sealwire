@@ -476,29 +476,15 @@ impl RelayState {
         }
     }
 
-    /// Retire reservation metadata for a completed turn without removing the
-    /// user transcript entry (terminal-without-echo / lost-echo cleanup).
+    /// Retire reservation map entries already bound to `turn_id`.
+    ///
+    /// Never stamps or clears an unbound pending-bind slot: a stale/lost
+    /// completion for a prior turn must not retire the next turn's placeholder.
+    /// The transcript user entry is kept so a late echo can still merge in place.
     pub fn settle_codex_user_reservation_for_turn(&mut self, thread_id: &str, turn_id: &str) {
         let Some(runtime) = self.runtimes.get_mut(thread_id) else {
             return;
         };
-        // If the in-flight pending slot never got a turn id, this completion is
-        // the provider turn that owned it — stamp then retire.
-        if let Some(pending_id) = runtime.codex_pending_bind_reservation_id.clone() {
-            if let Some(reservation) = runtime.codex_user_reservations.get_mut(&pending_id) {
-                if reservation.turn_id.is_none() {
-                    reservation.turn_id = Some(turn_id.to_string());
-                    if let Some(entry) = runtime
-                        .transcript
-                        .iter_mut()
-                        .find(|entry| entry.item_id == pending_id)
-                    {
-                        entry.turn_id = Some(turn_id.to_string());
-                    }
-                }
-            }
-            runtime.codex_pending_bind_reservation_id = None;
-        }
         let retired: Vec<String> = runtime
             .codex_user_reservations
             .iter()
@@ -506,8 +492,11 @@ impl RelayState {
                 (reservation.turn_id.as_deref() == Some(turn_id)).then(|| id.clone())
             })
             .collect();
-        for id in retired {
-            runtime.codex_user_reservations.remove(&id);
+        for id in &retired {
+            if runtime.codex_pending_bind_reservation_id.as_deref() == Some(id.as_str()) {
+                runtime.codex_pending_bind_reservation_id = None;
+            }
+            runtime.codex_user_reservations.remove(id);
         }
     }
 
@@ -540,6 +529,18 @@ impl RelayState {
                 }
             }
         }
+        // Reservation metadata already settled after terminal-without-echo: merge
+        // into the leftover placeholder for this turn instead of appending.
+        if local_id.is_none() {
+            if let Some(runtime) = self.runtimes.get(thread_id) {
+                local_id = runtime.transcript.iter().find_map(|entry| {
+                    (entry.kind == TranscriptEntryKind::UserText
+                        && entry.turn_id.as_deref() == Some(turn_id.as_str())
+                        && entry.item_id.starts_with("codex:user-reserve:"))
+                    .then(|| entry.item_id.clone())
+                });
+            }
+        }
         let Some(local_id) = local_id else {
             return false;
         };
@@ -555,23 +556,24 @@ impl RelayState {
         let Some(runtime) = self.runtimes.get_mut(thread_id) else {
             return false;
         };
-        let Some(reservation) = runtime.codex_user_reservations.remove(&local_id) else {
-            return false;
-        };
+        let reserved_text = runtime
+            .codex_user_reservations
+            .remove(&local_id)
+            .map(|reservation| reservation.text);
         if runtime.codex_pending_bind_reservation_id.as_deref() == Some(local_id.as_str()) {
             runtime.codex_pending_bind_reservation_id = None;
         }
         let Some(entry) = runtime
             .transcript
             .iter_mut()
-            .find(|entry| entry.item_id == reservation.item_id)
+            .find(|entry| entry.item_id == local_id)
         else {
             return false;
         };
         entry.item_id = item_id;
         entry.kind = TranscriptEntryKind::UserText;
         entry.text = if text.is_empty() {
-            Some(reservation.text)
+            reserved_text.or(entry.text.take())
         } else {
             Some(text)
         };
