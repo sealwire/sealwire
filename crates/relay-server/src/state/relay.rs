@@ -436,6 +436,10 @@ pub struct RelayState {
     /// The run phase each team seat's turn STARTED in. Stamped at turn start
     /// because the TL is one session crossing every phase; not persisted.
     team_turn_phases: HashMap<String, String>,
+    /// The role id each team seat's turn STARTED as. Flexible team structures can
+    /// let one thread play multiple roles, so attribution cannot be permanently
+    /// inferred from thread ownership alone.
+    team_turn_roles: HashMap<String, String>,
     /// Surface ids that are broker peer ids, so peer-presence pruning touches only
     /// those and never a local tab's subscription.
     broker_surface_ids: HashSet<String>,
@@ -626,6 +630,7 @@ impl RelayState {
             codex_usage: crate::usage::CodexUsageTracker::new(),
             claude_usage: crate::usage::ClaudeUsageTracker::new(),
             team_turn_phases: HashMap::new(),
+            team_turn_roles: HashMap::new(),
             broker_surface_ids: HashSet::new(),
             surface_generations: HashMap::new(),
             pending_pairings: HashMap::new(),
@@ -2214,9 +2219,14 @@ impl RelayState {
         &mut self,
         thread_id: &str,
         phase: relay_api::team::TeamPhase,
+        role_id: &str,
     ) {
         self.team_turn_phases
             .insert(thread_id.to_string(), phase.as_str().to_string());
+        if !role_id.trim().is_empty() {
+            self.team_turn_roles
+                .insert(thread_id.to_string(), role_id.to_string());
+        }
     }
 
     /// Whether `note_team_turn_phase` was ever called for this thread — proves
@@ -2248,32 +2258,43 @@ impl RelayState {
                         || task.owned_thread_ids.iter().any(|owned| owned == thread_id)
                 })
                 .map(|task| task.id.clone());
-            let role = if run.tl_thread_id == thread_id
+            let role = if let Some(role) = self.team_turn_roles.get(thread_id) {
+                Some(role.as_str())
+            } else if run.tl_thread_id == thread_id
                 || run
                     .tl_succession
                     .iter()
                     .any(|generation| generation.thread_id == thread_id)
             {
-                Some("tl")
+                Some(run.team_structure.bindings.lead.as_str())
+            } else if run.mr_dev_thread_id.as_deref() == Some(thread_id) {
+                Some(run.team_structure.bindings.mr_dev.as_str())
+            } else if run.reviewer_thread_id.as_deref() == Some(thread_id) {
+                Some(run.team_structure.bindings.reviewer.as_str())
             } else if run
                 .sub_tasks
                 .iter()
                 .any(|task| task.dev_thread_id.as_deref() == Some(thread_id))
             {
-                Some("dev")
+                Some(run.team_structure.bindings.dev.as_str())
             } else if run
                 .sub_tasks
                 .iter()
                 .any(|task| task.reviewer_thread_id.as_deref() == Some(thread_id))
             {
-                Some("reviewer")
+                Some(run.team_structure.bindings.reviewer.as_str())
             } else {
                 // A run-owned thread: the design reviewer, an MR-gate reviewer,
                 // or the dev that addresses MR findings. Recorded at start where
                 // the seat is known; still `None` rather than a guess when not.
                 run.run_owned_thread_roles
                     .get(thread_id)
-                    .map(String::as_str)
+                    .map(|role| match role.as_str() {
+                        "reviewer" => run.team_structure.bindings.reviewer.as_str(),
+                        "tl" | "lead" => run.team_structure.bindings.lead.as_str(),
+                        "dev" => run.team_structure.bindings.dev.as_str(),
+                        other => other,
+                    })
             };
             return TeamAttribution {
                 team_run_id: Some(run.id.clone()),
@@ -5935,6 +5956,22 @@ mod tests {
             driver_version: relay_api::orchestration::DriverVersion::new("driver.1").unwrap(),
             cloud_run_id: relay_api::orchestration::DriverRunId::new("cloud-run-1").unwrap(),
         }
+    }
+
+    #[test]
+    fn unstamped_pair_lead_thread_attributes_to_pair_role() {
+        let mut relay = test_relay();
+        let mut run = team_run_with_status("pair-run", TeamRunStatus::Running);
+        run.team_id = Some(relay_api::team::BUILTIN_PAIR_TEAM_ID.to_string());
+        run.team_structure = relay_api::team::TeamStructure::pair();
+        relay.insert_team_run(run);
+
+        let attribution = relay.thread_attribution("tl-1");
+        assert_eq!(attribution.role.as_deref(), Some("pair"));
+        assert_eq!(
+            attribution.team_id.as_deref(),
+            Some(relay_api::team::BUILTIN_PAIR_TEAM_ID)
+        );
     }
 
     fn inert_team_run_with_status(id: &str, status: TeamRunStatus) -> TeamRun {

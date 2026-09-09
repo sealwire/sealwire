@@ -18,12 +18,29 @@ const TERMINAL_STATUSES = new Set([
 // `TeamRunStatus::is_settled_without_driver`.
 const SETTLED_WITHOUT_DRIVER = new Set(["paused", "blocked", "resolving"]);
 
-export const TEAM_ROLES = Object.freeze(["lead", "dev", "reviewer"]);
+export const TEAM_ROLES = Object.freeze(["tl", "dev", "reviewer"]);
 
 export const TEAM_ROLE_LABELS = Object.freeze({
+  tl: "Team lead",
   lead: "Team lead",
   dev: "Developer",
   reviewer: "Reviewer",
+  pair: "Pair programmer",
+});
+
+const DEFAULT_TEAM_STRUCTURE = Object.freeze({
+  roles: Object.freeze([
+    Object.freeze({ id: "tl", name: "Team lead", runtimeRole: "tl", blurb: "" }),
+    Object.freeze({ id: "dev", name: "Developer", runtimeRole: "dev", blurb: "" }),
+    Object.freeze({ id: "reviewer", name: "Reviewer", runtimeRole: "reviewer", blurb: "" }),
+  ]),
+  bindings: Object.freeze({
+    lead: "tl",
+    dev: "dev",
+    reviewer: "reviewer",
+    mrDev: "dev",
+    reporter: "tl",
+  }),
 });
 
 // Every way a task can end up wanting a person, collapsed into one bucket.
@@ -218,45 +235,43 @@ export function teamRunProgress(run) {
 // where the work is, so reading it is mirroring rather than guessing. During
 // `sub_tasks` the phase alone is not enough — the sub-task's own status decides
 // whether the developer or the reviewer holds it.
-function activeRoleForPhase(run) {
+function activeRoleForPhase(run, structure = teamStructure(run)) {
+  const bindings = structure.bindings;
   switch (run?.phase) {
     case "intake":
     case "design":
     case "planning":
     case "wrapping":
-      return "lead";
+      return bindings.lead;
     case "design_review":
     case "mr_gate":
-      return "reviewer";
+      return bindings.reviewer;
     case "sub_tasks":
-      return currentSubTask(run)?.status === "implementing" ? "dev" : "reviewer";
+      return currentSubTask(run)?.status === "implementing" ? bindings.dev : bindings.reviewer;
     default:
       return null;
   }
 }
 
 /**
- * The three seats, in diagram order, each with the thread it can open.
+ * The pinned team roles, in diagram order, each with the thread it can open.
  *
- * The developer and reviewer are FRESH per sub-task (and per review round), so
- * their thread is the current sub-task's, not the run's. `threadId` is null when
- * nobody has been seated yet — the node must then be unopenable rather than
- * linking somewhere plausible.
+ * A role can own more than one semantic slot. Pair programming is just
+ * `lead == dev`, so the single Pair node opens the same thread during planning
+ * and implementation.
  */
 export function teamSeats(run) {
   const task = currentSubTask(run);
-  const activeRole = activeRoleForPhase(run);
+  const structure = teamStructure(run);
+  const activeRole = activeRoleForPhase(run, structure);
+  const bindings = structure.bindings;
   // A run with no driver is not working, whatever its phase last recorded.
   const driverless = SETTLED_WITHOUT_DRIVER.has(run?.status) || isTerminalTeamStatus(run?.status);
-  const awaitingRole = normalizeAwaitingRole(run?.awaiting?.role);
+  const awaitingRole = normalizeAwaitingRole(run?.awaiting?.role, structure);
 
-  return TEAM_ROLES.map((role) => {
-    const threadId =
-      role === "lead"
-        ? run?.tl_thread_id || null
-        : role === "dev"
-          ? task?.dev_thread_id || null
-          : task?.reviewer_thread_id || null;
+  return structure.roles.map((roleDef) => {
+    const role = roleDef.id;
+    const threadId = threadIdForRole(run, task, structure, role);
 
     let state = null;
     if (awaitingRole === role) {
@@ -265,25 +280,85 @@ export function teamSeats(run) {
       // NOT stopped — it is blocked inside the provider's tool callback.
       state = "needs_input";
     } else if (!driverless && activeRole === role) {
-      state = role === "reviewer" ? "reviewing" : "working";
+      state = role === bindings.reviewer ? "reviewing" : "working";
     }
 
     return {
       role,
-      label: TEAM_ROLE_LABELS[role],
+      label: roleDef.name || TEAM_ROLE_LABELS[role] || role,
       threadId,
       state,
-      subTaskTitle: role === "lead" ? null : task?.title || null,
+      subTaskTitle:
+        role === bindings.dev || role === bindings.reviewer ? task?.title || null : null,
     };
   });
 }
 
-// The backend records `tl` or `dev`; the reviewer never asks. Map onto seat roles
-// so a rename on either side surfaces here rather than silently never matching.
-function normalizeAwaitingRole(role) {
-  if (role === "tl" || role === "lead") return "lead";
-  if (role === "dev") return "dev";
+export function teamStructure(run) {
+  const raw = run?.team_structure;
+  if (!raw || typeof raw !== "object") {
+    return {
+      roles: DEFAULT_TEAM_STRUCTURE.roles.map((role) => ({ ...role })),
+      bindings: { ...DEFAULT_TEAM_STRUCTURE.bindings },
+    };
+  }
+  const rawRoles = Array.isArray(raw.roles) && raw.roles.length
+    ? raw.roles
+    : DEFAULT_TEAM_STRUCTURE.roles;
+  const roles = rawRoles
+    .map((role) => ({
+      id: String(role?.id || "").trim(),
+      name: String(role?.name || TEAM_ROLE_LABELS[role?.id] || role?.id || "Role"),
+      runtimeRole: String(role?.runtime_role ?? role?.runtimeRole ?? "dev"),
+      blurb: String(role?.blurb || ""),
+    }))
+    .filter((role) => role.id);
+  const bindings = raw.bindings || {};
+  const resolved = {
+    lead: bindings.lead || DEFAULT_TEAM_STRUCTURE.bindings.lead,
+    dev: bindings.dev || DEFAULT_TEAM_STRUCTURE.bindings.dev,
+    reviewer: bindings.reviewer || DEFAULT_TEAM_STRUCTURE.bindings.reviewer,
+    mrDev: bindings.mr_dev ?? bindings.mrDev ?? DEFAULT_TEAM_STRUCTURE.bindings.mrDev,
+    reporter: bindings.reporter || DEFAULT_TEAM_STRUCTURE.bindings.reporter,
+  };
+  return {
+    roles: roles.length ? roles : DEFAULT_TEAM_STRUCTURE.roles.map((role) => ({ ...role })),
+    bindings: resolved,
+  };
+}
+
+function threadIdForRole(run, task, structure, role) {
+  const bindings = structure.bindings;
+  if (role === bindings.reviewer) {
+    return task?.reviewer_thread_id || run?.reviewer_thread_id || null;
+  }
+  if (role === bindings.dev) {
+    return task?.dev_thread_id || (bindings.dev === bindings.lead ? run?.tl_thread_id || null : null);
+  }
+  if (role === bindings.mrDev) {
+    return run?.mr_dev_thread_id || null;
+  }
+  if (role === bindings.lead) {
+    return run?.tl_thread_id || null;
+  }
   return null;
+}
+
+// The backend records runtime roles (`tl` or `dev`) for parked questions.
+// Resolve those through this run's bindings so a pair-programming run highlights
+// the Pair node instead of a non-existent Developer node.
+function normalizeAwaitingRole(role, structure) {
+  if (!role) return null;
+  if (structure.roles.some((candidate) => candidate.id === role)) return role;
+  if (role === "tl" || role === "lead") return structure.bindings.lead;
+  if (role === "dev") return structure.bindings.dev;
+  if (role === "reviewer") return structure.bindings.reviewer;
+  return null;
+}
+
+function roleAttentionName(run, roleId) {
+  const role = teamStructure(run).roles.find((candidate) => candidate.id === roleId);
+  return String(role?.name || TEAM_ROLE_LABELS[roleId] || roleId || "team").toLowerCase();
 }
 
 /**
@@ -296,7 +371,7 @@ function normalizeAwaitingRole(role) {
 export function teamAttention(run, seenAt = {}) {
   if (!run) return null;
   if (run.awaiting) {
-    const who = normalizeAwaitingRole(run.awaiting.role) === "dev" ? "developer" : "team lead";
+    const who = roleAttentionName(run, normalizeAwaitingRole(run.awaiting.role, teamStructure(run)));
     return {
       kind: "needs_input",
       reason: "question",

@@ -40,7 +40,10 @@ use crate::provider::ProviderBridge;
 use crate::state::{
     TaskSpec, TeamPauseKind, TeamRun, TeamRunStatus, TeamThreadSlot, TurnFailureKind,
 };
-use relay_api::team::{SubTaskStatus, TeamRole, TeamTurnOutcome};
+use relay_api::team::{
+    SubTaskStatus, TeamRole, TeamStructure, TeamTurnOutcome, BUILTIN_TEAM_ID, BUILTIN_TEAM_NAME,
+    BUILTIN_TEAM_VERSION_ID,
+};
 use relay_api::TeamPortError;
 
 use super::review::{
@@ -279,6 +282,10 @@ pub(crate) struct TeamStartRequest {
     pub(crate) reviewer_effort: String,
     /// How many dev sessions the sub-tasks may share. `None` is one shared session.
     pub(crate) dev_agents: Option<u32>,
+    pub(crate) team_id: String,
+    pub(crate) team_version_id: String,
+    pub(crate) team_name: String,
+    pub(crate) team_structure: TeamStructure,
     /// When this start came from a scheduled proposal claim, the parked armed
     /// copy under `starting_scheduled_proposals` must die in the SAME write that
     /// records the run — otherwise a save between the two restarts into a
@@ -362,11 +369,13 @@ locally and trust it before starting a task team there"
         run.dev_effort = input.dev_effort;
         run.reviewer_effort = input.reviewer_effort;
         run.dev_agents = input.dev_agents;
-        // Pin the builtin Default team until configurable teams land. The
-        // ledger's `team_id` is only knowable while the run exists, so this
-        // has to be set at start — not joined at report time.
-        run.team_id = Some(relay_api::team::BUILTIN_TEAM_ID.to_string());
-        run.team_version_id = Some(relay_api::team::BUILTIN_TEAM_VERSION_ID.to_string());
+        // Pin the resolved team definition. The ledger's `team_id` is only
+        // knowable while the run exists, and the runnable structure must not
+        // follow a catalog edit mid-run.
+        run.team_id = Some(input.team_id);
+        run.team_version_id = Some(input.team_version_id);
+        run.team_name = input.team_name;
+        run.team_structure = input.team_structure;
 
         {
             let mut relay = self.relay.write().await;
@@ -874,6 +883,8 @@ over on resume"
         // be gone by then; `start_team_thread` resolves and clamps against the
         // live catalogue, which is the only place the answer is true.
         let asked = |value: Option<String>| non_empty(value).unwrap_or_default();
+        let (team_id, team_version_id, team_name, team_structure) =
+            self.resolve_team_definition(input.team_id.as_deref()).await;
 
         let run_id = self
             .start_team_run(TeamStartRequest {
@@ -894,6 +905,10 @@ over on resume"
                 dev_effort: asked(input.dev_effort),
                 reviewer_effort: asked(input.reviewer_effort),
                 dev_agents: input.dev_agents,
+                team_id,
+                team_version_id,
+                team_name,
+                team_structure,
                 starting_proposal_id: input.starting_proposal_id,
                 tl_provider,
                 dev_provider,
@@ -911,6 +926,30 @@ over on resume"
             status: run.status.as_str().to_string(),
             message: format!("Task started on {}.", run.branch),
         })
+    }
+
+    pub(super) async fn resolve_team_definition(
+        &self,
+        requested: Option<&str>,
+    ) -> (String, String, String, TeamStructure) {
+        let requested = requested
+            .and_then(|value| non_empty(Some(value.to_string())))
+            .unwrap_or_else(|| BUILTIN_TEAM_ID.to_string());
+        let catalog = self.team_catalog().await;
+        if let Some(team) = catalog.teams.iter().find(|team| team.id == requested) {
+            return (
+                team.id.clone(),
+                team.current_version_id.clone(),
+                team.name.clone(),
+                team.structure.clone(),
+            );
+        }
+        (
+            BUILTIN_TEAM_ID.to_string(),
+            BUILTIN_TEAM_VERSION_ID.to_string(),
+            BUILTIN_TEAM_NAME.to_string(),
+            TeamStructure::standard(),
+        )
     }
 
     /// Every whole-run action, behind one entry point.
@@ -3049,8 +3088,10 @@ request and did not confirm stopping: {why}"
         // provider baseline read above is in flight.
         {
             let mut relay = self.relay.write().await;
-            let status_and_phase = relay.team_run(run_id).map(|run| (run.status, run.phase));
-            if let Some((status, _)) = status_and_phase {
+            let status_phase_role = relay
+                .team_run(run_id)
+                .map(|run| (run.status, run.phase, run.role_id_for_turn(slot, role)));
+            if let Some((status, _, _)) = status_phase_role.as_ref() {
                 if status.is_terminal() || status.is_settled_without_driver() {
                     return TeamTurnOutcome::Failed(format!(
                         "task run {run_id} settled as {} before this turn started",
@@ -3058,8 +3099,8 @@ request and did not confirm stopping: {why}"
                     ));
                 }
             }
-            if let Some((_, phase)) = status_and_phase {
-                relay.note_team_turn_phase(&thread_id, phase);
+            if let Some((_, phase, role_id)) = status_phase_role {
+                relay.note_team_turn_phase(&thread_id, phase, &role_id);
             }
         }
 
@@ -3834,8 +3875,13 @@ its turn cannot continue",
             return Ok(existing);
         }
         let workspace = self.require_team_workspace(run_id).await?;
+        let role = self
+            .team_run_snapshot(run_id)
+            .await
+            .map(|run| run.lead_runtime_role())
+            .unwrap_or(TeamRole::Tl);
         match self
-            .start_team_thread(run_id, TeamRole::Tl, &workspace.as_dir())
+            .start_team_thread(run_id, role, &workspace.as_dir())
             .await
         {
             Ok(started) => {
@@ -3859,7 +3905,7 @@ its turn cannot continue",
                 Ok(thread_id)
             }
             Err(error) => Err(TeamPortError::Failed(format!(
-                "could not start the team lead: {error}"
+                "could not start the lead role: {error}"
             ))),
         }
     }
@@ -3875,8 +3921,13 @@ its turn cannot continue",
                 }
             };
         }
+        let role = self
+            .team_run_snapshot(run_id)
+            .await
+            .map(|run| run.lead_runtime_role())
+            .unwrap_or(TeamRole::Tl);
         let outcome = self
-            .team_turn(run_id, TeamThreadSlot::Tl, TeamRole::Tl, &prompt)
+            .team_turn(run_id, TeamThreadSlot::Tl, role, &prompt)
             .await;
         {
             let mut relay = self.relay.write().await;
@@ -3966,11 +4017,16 @@ its turn cannot continue",
         }
 
         self.ensure_tl_thread(run_id).await?;
+        let role = self
+            .team_run_snapshot(run_id)
+            .await
+            .map(|run| run.lead_runtime_role())
+            .unwrap_or(TeamRole::Tl);
         // The handover turn is the successor's first. Its reply is an
         // acknowledgement we do not read: what matters is that the context is in
         // its session before it is asked to decide anything.
         match self
-            .team_turn(run_id, TeamThreadSlot::Tl, TeamRole::Tl, &handover_prompt)
+            .team_turn(run_id, TeamThreadSlot::Tl, role, &handover_prompt)
             .await
         {
             TeamTurnOutcome::Blocked(error) => Err(TeamPortError::Blocked(error)),
@@ -4478,7 +4534,12 @@ pub(crate) fn team_run_view(run: &TeamRun) -> TeamRunView {
         cwd: run.cwd.clone(),
         branch: run.branch.clone(),
         target_ref: run.target_ref.clone(),
+        team_id: run.team_id.clone(),
+        team_version_id: run.team_version_id.clone(),
+        team_name: non_empty(Some(run.team_name.clone())),
+        team_structure: run.team_structure.clone(),
         tl_thread_id: run.tl_thread_id.clone(),
+        reviewer_thread_id: run.reviewer_thread_id.clone(),
         reopened_count: run.reopened_count,
         tl_generations: run.tl_generation_count(),
         sub_tasks: run

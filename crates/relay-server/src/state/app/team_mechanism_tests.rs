@@ -222,6 +222,10 @@ fn team_input(cwd: &str) -> crate::state::app::team::TeamStartRequest {
         dev_effort: String::new(),
         reviewer_effort: String::new(),
         dev_agents: None,
+        team_id: relay_api::team::BUILTIN_TEAM_ID.to_string(),
+        team_version_id: relay_api::team::BUILTIN_TEAM_VERSION_ID.to_string(),
+        team_name: relay_api::team::BUILTIN_TEAM_NAME.to_string(),
+        team_structure: relay_api::team::TeamStructure::standard(),
         starting_proposal_id: None,
         tl_provider: "codex".to_string(),
         dev_provider: "codex".to_string(),
@@ -2902,6 +2906,7 @@ async fn a_team_turn_stamps_the_phase_it_ran_in_not_the_phase_it_ended_in() {
         relay.note_team_turn_phase(
             "design-reviewer-1",
             relay_api::team::TeamPhase::DesignReview,
+            "reviewer",
         );
         // The driver moves on while the reviewer's `done` is still in flight.
         relay.update_team_run(&run_id, |run| {

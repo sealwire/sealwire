@@ -16,6 +16,7 @@ import {
   teamListMeta,
   teamRunProgress,
   teamSeats,
+  teamStructure,
   teamStatusTone,
   teamsRevisionOf,
   teamNeedsYouNow,
@@ -53,6 +54,22 @@ function subTask(overrides = {}) {
     dev_thread_id: "dev-1",
     reviewer_thread_id: "rev-1",
     ...overrides,
+  };
+}
+
+function pairStructure() {
+  return {
+    roles: [
+      { id: "pair", name: "Pair programmer", runtime_role: "dev", blurb: "" },
+      { id: "reviewer", name: "Reviewer", runtime_role: "reviewer", blurb: "" },
+    ],
+    bindings: {
+      lead: "pair",
+      dev: "pair",
+      reviewer: "reviewer",
+      mr_dev: "pair",
+      reporter: "pair",
+    },
   };
 }
 
@@ -122,7 +139,7 @@ test("the developer and reviewer seats follow the CURRENT sub-task, not the run"
       ],
     })
   );
-  assert.deepEqual(seats.map((seat) => seat.role), ["lead", "dev", "reviewer"]);
+  assert.deepEqual(seats.map((seat) => seat.role), ["tl", "dev", "reviewer"]);
   assert.equal(seats[0].threadId, "tl-1");
   assert.equal(seats[1].threadId, "dev-new");
   assert.equal(seats[2].threadId, "rev-new");
@@ -139,10 +156,10 @@ test("the phase decides which seat is working", () => {
   const at = (phase, tasks = []) =>
     teamSeats(run({ phase, sub_tasks: tasks })).filter((seat) => seat.state);
 
-  assert.deepEqual(at("intake").map((s) => [s.role, s.state]), [["lead", "working"]]);
-  assert.deepEqual(at("planning").map((s) => [s.role, s.state]), [["lead", "working"]]);
+  assert.deepEqual(at("intake").map((s) => [s.role, s.state]), [["tl", "working"]]);
+  assert.deepEqual(at("planning").map((s) => [s.role, s.state]), [["tl", "working"]]);
   assert.deepEqual(at("mr_gate").map((s) => [s.role, s.state]), [["reviewer", "reviewing"]]);
-  assert.deepEqual(at("wrapping").map((s) => [s.role, s.state]), [["lead", "working"]]);
+  assert.deepEqual(at("wrapping").map((s) => [s.role, s.state]), [["tl", "working"]]);
   assert.deepEqual(
     at("sub_tasks", [subTask({ status: "implementing" })]).map((s) => [s.role, s.state]),
     [["dev", "working"]]
@@ -192,6 +209,46 @@ test("the team lead's question is recognised under the backend's own role name",
   assert.equal(seats[0].state, "needs_input");
 });
 
+test("a pair team is rendered from role bindings, not from fixed seats", () => {
+  const seats = teamSeats(
+    run({
+      phase: "sub_tasks",
+      team_structure: pairStructure(),
+      sub_tasks: [subTask({ dev_thread_id: "tl-1", reviewer_thread_id: "rev-1" })],
+    })
+  );
+  assert.deepEqual(seats.map((seat) => [seat.role, seat.label]), [
+    ["pair", "Pair programmer"],
+    ["reviewer", "Reviewer"],
+  ]);
+  assert.equal(seats[0].threadId, "tl-1");
+  assert.equal(seats[0].state, "working");
+  assert.equal(seats[0].subTaskTitle, "Write the parser");
+  assert.equal(seats[1].threadId, "rev-1");
+});
+
+test("runtime dev questions highlight the pair role when lead and dev are bound together", () => {
+  const seats = teamSeats(
+    run({
+      status: "awaiting_user",
+      team_structure: pairStructure(),
+      awaiting: { thread_id: "tl-1", request_id: "ask:3", role: "dev", asked_at: 5 },
+    })
+  );
+  assert.equal(seats[0].role, "pair");
+  assert.equal(seats[0].state, "needs_input");
+});
+
+test("missing team structure falls back to the default bindings", () => {
+  assert.deepEqual(teamStructure(run()).bindings, {
+    lead: "tl",
+    dev: "dev",
+    reviewer: "reviewer",
+    mrDev: "dev",
+    reporter: "tl",
+  });
+});
+
 // ---- attention and ordering ------------------------------------------------
 
 test("a parked question is the loudest thing on a card", () => {
@@ -201,6 +258,17 @@ test("a parked question is the loudest thing on a card", () => {
   assert.equal(attention.kind, "needs_input");
   assert.equal(attention.reason, "question");
   assert.match(attention.text, /developer/);
+});
+
+test("a pair programmer question names the pair role", () => {
+  const attention = teamAttention(
+    run({
+      status: "awaiting_user",
+      team_structure: pairStructure(),
+      awaiting: { role: "dev", request_id: "ask:1" },
+    })
+  );
+  assert.match(attention.text, /pair programmer/);
 });
 
 test("every way a task ends up wanting a person is ONE bucket", () => {
