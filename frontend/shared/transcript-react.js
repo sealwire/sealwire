@@ -803,26 +803,36 @@ function findPinnedAskUserItemIds(entries, pendingList) {
   return pinned || EMPTY_PINNED_ASK_USER_IDS;
 }
 
-// The same card AskUserEntry renders, built from the request rather than the row.
+// THE card for a question the turn is parked on — the only one, for the whole life
+// of the request.
 //
-// The relay drops transcript entries from the head under snapshot pressure and a
-// switched-to thread hydrates in pages, so a request can be live while its row is
-// not here. Keyed only off the row, the turn would park on a question the reader
-// is never shown and cannot answer.
+// Driven by the REQUEST, with the transcript row as an optional prop, because the
+// row is the part that comes and goes: the relay drops entries from the head under
+// snapshot pressure and a switched-to thread hydrates in pages. Rendering a
+// request-shaped card and then swapping to a row-shaped one changes the component
+// identity, and React replaces the subtree — which restores the draft but drops
+// focus, the caret, and any in-flight IME composition. So the row arriving is a
+// prop change here, never a remount.
 //
-// The draft key is derived identically to the row-backed card's, so a pick made
-// before the row loads is still there once it does.
+// `itemId` is derived from the request for the same reason: it keys the question
+// step, so letting it change when the row lands would remount the notes field on
+// its own.
 //
-// Callers must hand in a THREAD-FILTERED pending list: with no row to match
-// against there is nothing else stopping a background thread's question being
-// answered here.
-function AskUserRequestCard({ request, options }) {
+// Callers must hand in a THREAD-FILTERED pending list: a card built without a row
+// has no entry to say which conversation it belongs to.
+function AskUserPendingCard({ request, entry = null, isJustPrepended = false, options }) {
   const requestId = request.request_id;
-  const questions = normalizeAskUserQuestions(request.questions);
   const itemId = `ask:${requestId}`;
+  const detailEntry = entry ? resolveTranscriptDetailEntry(entry, options) : null;
+  const tool = (detailEntry || entry)?.tool || {};
+  // The request is authoritative; the row's input_preview is the fallback for a
+  // pending list that arrived without inline questions.
+  const questions =
+    normalizeAskUserQuestions(request.questions) || parseAskUserQuestions(tool.input_preview);
   if (!questions) {
     return h(AskUserDetailPendingCard, {
-      entry: null,
+      entry,
+      isJustPrepended,
       itemId,
       questionCount: request.question_count || 0,
       detailLoading: Boolean(options?.askUserDetailLoadingRequestIds?.has?.(requestId)),
@@ -833,7 +843,8 @@ function AskUserRequestCard({ request, options }) {
     });
   }
   return h(AskUserWizard, {
-    entry: null,
+    entry,
+    isJustPrepended,
     itemId,
     questions,
     requestId,
@@ -892,97 +903,37 @@ export function buildAskUserAnswersPayload(questions, perQuestionState) {
   return payload;
 }
 
-// Render Claude's AskUserQuestion as a wizard:
-//   - Read-only (no pending request, or status==completed): every question
-//     stacked, recorded answers highlighted (used for past planning entries).
-//   - Interactive: one question at a time with progress + Back/Continue/Send.
-//     Each question card has option buttons AND an optional notes textarea.
-//   - Quick path: a SINGLE single-select question with empty notes submits
-//     immediately on option click — same one-tap feel as before for the
-//     common "pick one of N" prompt.
-// Final answer per question is built by buildAskUserAnswerValue: when notes
-// are present we collapse to free-text ("<label> — <notes>") so the model
-// reads both the structured pick and the user's elaboration.
+// An AskUserQuestion row that is NOT still waiting for an answer: every question
+// stacked, with the recorded answers highlighted.
+//
+// The live, answerable card is not rendered here at all — it is AskUserPendingCard
+// in the pinned footer, driven by the request. A matching pending request is the
+// authoritative signal for which of the two applies: the relay drops the request
+// the moment it is answered, whereas the row's own `status` can desync (on the
+// remote surface a snapshot can show `completed` while the question is genuinely
+// still pending, which would mislabel it "Answered" and make the options dead).
 function AskUserEntry({ entry, isJustPrepended = false, options = null }) {
   const itemId = entry.item_id || "";
   const detailEntry = resolveTranscriptDetailEntry(entry, options);
   const toolEntry = detailEntry || entry;
   const tool = toolEntry.tool || entry.tool || {};
-  const status = entry.status || "running";
-  const pendingRequest = findPendingAskUserRequest(itemId, options?.pendingAskUserQuestions);
-  const questions =
-    normalizeAskUserQuestions(pendingRequest?.questions)
-    || parseAskUserQuestions(tool.input_preview);
-  const requestId = pendingRequest?.request_id || "";
-  const detailIncomplete = Boolean(
-    pendingRequest
-    && pendingRequest.questions_inline_complete === false
-    && !questions
-  );
-  const detailLoading = Boolean(
-    requestId
-    && options?.askUserDetailLoadingRequestIds instanceof Set
-    && options.askUserDetailLoadingRequestIds.has(requestId)
-  );
-  const detailError =
-    requestId && options?.askUserDetailErrors instanceof Map
-      ? options.askUserDetailErrors.get(requestId) || ""
-      : "";
-  if (!questions && detailIncomplete) {
-    return h(AskUserDetailPendingCard, {
-      entry,
-      isJustPrepended,
-      itemId,
-      questionCount: pendingRequest?.question_count || 0,
-      detailLoading,
-      detailError,
-      onRetryDetail:
-        requestId && options?.onRetryAskUserDetail
-          ? () => options.onRetryAskUserDetail(requestId)
-          : null,
-    });
+  // Still parked: the footer owns it, and TranscriptContent holds this row back.
+  // Reaching here means the hold-back did not match, so render nothing rather than
+  // a second live copy of a question already on screen.
+  if (findPendingAskUserRequest(itemId, options?.pendingAskUserQuestions)) {
+    return null;
   }
+  const questions = parseAskUserQuestions(tool.input_preview);
   if (!questions) {
     return h(GenericToolEntry, { entry, isJustPrepended, options });
   }
-  const answers = parseAskUserAnswers(tool.result_preview);
-  // A matching pending request (live relay state) is the authoritative signal
-  // that the question is still waiting for an answer — the relay drops it the
-  // moment it's answered. The transcript entry's own `status` is secondary and
-  // can desync: on the remote surface the entry arrives via snapshots and can
-  // show up as `completed` while the question is genuinely still pending. We
-  // must NOT let that stale status downgrade a pending question to the
-  // read-only card, which makes the options unclickable and mislabels it
-  // "Answered" even though the user never picked anything.
-  const interactive = Boolean(pendingRequest);
-  const isSubmitting =
-    Boolean(requestId) && Boolean(options?.askUserSubmittingRequestIds?.has?.(requestId));
-  const submitAnswers = options?.onSubmitAskUserAnswers || null;
-  const askUserError =
-    requestId && options?.askUserErrors instanceof Map
-      ? options.askUserErrors.get(requestId) || ""
-      : "";
-
-  if (!interactive) {
-    return h(AskUserReadOnlyCard, {
-      entry,
-      isJustPrepended,
-      itemId,
-      questions,
-      answers,
-      status,
-    });
-  }
-  return h(AskUserWizard, {
+  return h(AskUserReadOnlyCard, {
     entry,
     isJustPrepended,
     itemId,
     questions,
-    requestId,
-    threadId: pendingRequest?.thread_id || "",
-    isSubmitting,
-    submitAnswers,
-    askUserError,
+    answers: parseAskUserAnswers(tool.result_preview),
+    status: entry.status || "running",
   });
 }
 
@@ -2464,7 +2415,7 @@ export function TranscriptContent({
     () => findPinnedAskUserItemIds(entries, options?.pendingAskUserQuestions),
     [entries, options?.pendingAskUserQuestions]
   );
-  const pinnedAskUserNodes = new Map();
+  const pinnedAskUserEntries = new Map();
   const nodes = [];
 
   // Top sentinel: the IntersectionObserver in render-session.js / react-app.js
@@ -2550,23 +2501,24 @@ export function TranscriptContent({
     }
 
     const entryId = item.item_id || item.id || "";
-    const node = h(TranscriptEntry, {
-      entry: item,
-      isJustPrepended: Boolean(entryId && justPrependedItemIds.has(entryId)),
-      isLatestUser:
-        item.kind === "user_text" && entryId && entryId === latestUserEntryId,
-      key: entryId || `${item.kind || "entry"}:${index}`,
-      options: effectiveOptions,
-    });
     const pinnedRequestId = entryId ? pinnedAskUserItemIds.get(entryId) : null;
     if (pinnedRequestId) {
-      // Hold it back — it is re-emitted at the bottom below. Skipping the push
-      // here is what keeps it a MOVE rather than a duplicate. Keyed by request so
-      // the footer can be assembled in the relay's order rather than this one.
-      pinnedAskUserNodes.set(pinnedRequestId, node);
+      // Hold the ROW back and hand it to the footer's card as a prop. Holding back
+      // a built node instead would mean the footer swaps one component for another
+      // the moment the row hydrates, remounting the form being typed into.
+      pinnedAskUserEntries.set(pinnedRequestId, item);
       return;
     }
-    nodes.push(node);
+    nodes.push(
+      h(TranscriptEntry, {
+        entry: item,
+        isJustPrepended: Boolean(entryId && justPrependedItemIds.has(entryId)),
+        isLatestUser:
+          item.kind === "user_text" && entryId && entryId === latestUserEntryId,
+        key: entryId || `${item.kind || "entry"}:${index}`,
+        options: effectiveOptions,
+      })
+    );
   });
 
   if (approval) {
@@ -2604,10 +2556,15 @@ export function TranscriptContent({
       if (!requestId) {
         return null;
       }
-      return (
-        pinnedAskUserNodes.get(requestId)
-        || h(AskUserRequestCard, { key: `ask:${requestId}`, request, options: effectiveOptions })
-      );
+      const pinnedEntry = pinnedAskUserEntries.get(requestId) || null;
+      const pinnedId = pinnedEntry?.item_id || "";
+      return h(AskUserPendingCard, {
+        key: `ask:${requestId}`,
+        request,
+        entry: pinnedEntry,
+        isJustPrepended: Boolean(pinnedId && justPrependedItemIds.has(pinnedId)),
+        options: effectiveOptions,
+      });
     })
     .filter(Boolean);
   const askUserFooter = askUserCards.length

@@ -280,6 +280,56 @@ test("an answer given before the row hydrates survives the row arriving", async 
   container.remove();
 });
 
+// React's own value setter, so a controlled textarea sees a real edit.
+function typeInto(textarea, value) {
+  const setter = Object.getOwnPropertyDescriptor(
+    dom.window.HTMLTextAreaElement.prototype,
+    "value"
+  ).set;
+  setter.call(textarea, value);
+  textarea.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+}
+
+// Hydration must not remount the form under the cursor.
+//
+// Restoring the draft is not enough: focus, caret position and — the one that
+// actually loses text — an in-flight IME composition all live in the DOM node, not
+// in the draft store. Replacing the node mid-word drops whatever is being composed,
+// which is every Chinese, Japanese or Korean answer.
+test("the row arriving does not remount the form being typed into", async () => {
+  const { container, root } = mount();
+  const pending = twoPendingRequests().slice(0, 1);
+  const notes = () => container.querySelector(".ask-user-notes-input");
+
+  await paint(root, [], options({ pendingAskUserQuestions: pending }));
+
+  const before = notes();
+  assert.ok(before, "precondition: the request-backed card has a notes field");
+  before.focus();
+  await act(async () => typeInto(before, "half-typed answ"));
+  // assert.ok on an identity comparison, never assert.equal: comparing two DOM
+  // nodes that differ makes node:assert deep-serialize both to build a diff, and
+  // the runner wedges instead of reporting.
+  assert.ok(document.activeElement === before, "precondition: the reader is typing in it");
+
+  // The row lands mid-word.
+  await paint(
+    root,
+    [toolEntry("ask-first", pending[0].questions)],
+    options({ pendingAskUserQuestions: pending })
+  );
+
+  assert.ok(
+    notes() === before,
+    "the notes field must be the SAME node — replacing it drops an IME composition"
+  );
+  assert.ok(document.activeElement === before, "and must still hold focus");
+  assert.equal(notes().value, "half-typed answ", "with what was typed still in it");
+
+  await act(async () => root.unmount());
+  container.remove();
+});
+
 // The hazard the dock was built to dodge: virtualization owns every row, so the
 // card holding a half-finished answer is unmounted the moment the reader scrolls
 // up to re-read what they are answering about.
