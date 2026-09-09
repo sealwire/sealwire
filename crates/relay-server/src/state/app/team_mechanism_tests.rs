@@ -402,6 +402,49 @@ async fn start_team_run_records_legacy_backend_before_driver_spawn() {
 }
 
 #[tokio::test]
+async fn start_team_pins_the_requested_pair_structure() {
+    let (_repo, root) = init_team_repo().await;
+    let (app, _) = build_review_app(&root, &["codex"]).await;
+    let app = app.with_team_driver(std::sync::Arc::new(ReturningTeamDriver));
+
+    let receipt = app
+        .start_team(crate::protocol::StartTeamInput {
+            title: "Pair on the parser".to_string(),
+            cwd: Some(root),
+            team_id: Some(relay_api::team::BUILTIN_PAIR_TEAM_ID.to_string()),
+            device_id: Some("device-1".to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("pair team should start");
+    let run = wait_for_team_status(
+        &app,
+        &receipt.team_run_id,
+        crate::state::TeamRunStatus::Interrupted,
+    )
+    .await;
+
+    assert_eq!(
+        run.team_id.as_deref(),
+        Some(relay_api::team::BUILTIN_PAIR_TEAM_ID)
+    );
+    assert_eq!(
+        run.team_version_id.as_deref(),
+        Some(relay_api::team::BUILTIN_PAIR_TEAM_VERSION_ID)
+    );
+    assert_eq!(run.team_name, relay_api::team::BUILTIN_PAIR_TEAM_NAME);
+    assert_eq!(run.team_structure, relay_api::team::TeamStructure::pair());
+    assert!(run.lead_and_dev_share_thread());
+    assert_eq!(
+        run.role_id_for_turn(
+            relay_api::team::TeamThreadSlot::Tl,
+            relay_api::team::TeamRole::Dev
+        ),
+        "pair"
+    );
+}
+
+#[tokio::test]
 async fn resume_team_run_refuses_non_embedded_backend_before_status_flip() {
     let (_repo, root) = init_team_repo().await;
     let (app, _) = build_review_app(&root, &["codex"]).await;

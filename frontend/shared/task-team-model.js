@@ -30,8 +30,8 @@ export const TEAM_ROLE_LABELS = Object.freeze({
 
 const DEFAULT_TEAM_STRUCTURE = Object.freeze({
   roles: Object.freeze([
-    Object.freeze({ id: "tl", name: "Team lead", runtimeRole: "tl", blurb: "" }),
-    Object.freeze({ id: "dev", name: "Developer", runtimeRole: "dev", blurb: "" }),
+    Object.freeze({ id: "tl", name: "Planner", runtimeRole: "tl", blurb: "" }),
+    Object.freeze({ id: "dev", name: "Implementer", runtimeRole: "dev", blurb: "" }),
     Object.freeze({ id: "reviewer", name: "Reviewer", runtimeRole: "reviewer", blurb: "" }),
   ]),
   bindings: Object.freeze({
