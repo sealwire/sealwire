@@ -158,6 +158,20 @@ impl RoundEvidence {
             Self::WorkspaceDiff(_) => None,
         }
     }
+
+    /// The sha `HEAD` must still equal for an approval of this round to remain valid —
+    /// NOT the same as `candidate_sha` for a checkpoint. A checkpoint never moves `HEAD`
+    /// by construction, so `HEAD` staying at `base_sha` is the expected, non-stale
+    /// outcome; comparing it against the checkpoint's own (HEAD-unreachable) sha would
+    /// mark every checkpoint approval stale. A real commit's `candidate_sha` IS `HEAD`
+    /// as of collection, so that one still checks against itself.
+    fn expected_head_sha(&self) -> Option<&str> {
+        match self {
+            Self::Committed(target) => Some(target.candidate_sha.as_str()),
+            Self::Checkpoint(target) => Some(target.base_sha.as_str()),
+            Self::WorkspaceDiff(_) => None,
+        }
+    }
 }
 
 /// Failure to drive a provider thread, separated by whether the thread's immutable
@@ -1127,6 +1141,7 @@ reviewer ({error}); re-resolving the workspace and retrying the round."
                 }
             };
             let prompt_candidate_sha = evidence.candidate_sha().map(str::to_string);
+            let expected_head_sha = evidence.expected_head_sha().map(str::to_string);
             let reviewer_baseline = self
                 .latest_assistant_entry(&this_reviewer_id)
                 .await
@@ -1224,9 +1239,18 @@ started ({error}); re-resolving the workspace and retrying the round."
             let mut verdict = parse_verdict(&review);
             let mut stale_approval = false;
             if verdict.is_approved() {
-                if let Some(candidate_sha) = prompt_candidate_sha.as_deref() {
+                // Checked against `expected_head_sha`, NOT `prompt_candidate_sha`: a
+                // checkpoint deliberately never moves HEAD, so HEAD staying at its
+                // `base_sha` is the non-stale outcome even though it differs from the
+                // checkpoint's own (HEAD-unreachable) candidate sha. The two only
+                // coincide for a real committed candidate. Both are `Some`/`None`
+                // together (see `RoundEvidence`), so destructuring the pair is safe.
+                if let (Some(candidate_sha), Some(expected_head)) = (
+                    prompt_candidate_sha.as_deref(),
+                    expected_head_sha.as_deref(),
+                ) {
                     match self.current_head_for_review_cwd(&round_cwd).await {
-                        Ok(Some(head)) if head != candidate_sha => {
+                        Ok(Some(head)) if head != expected_head => {
                             review = format!(
                                 "The reviewer approved committed candidate `{candidate_sha}`, \
 but the reviewed workspace is now at `{head}`. That approval is stale and cannot \
