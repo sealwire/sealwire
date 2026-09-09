@@ -722,6 +722,16 @@ impl CodexBridge {
         let policy = policy
             .as_ref()
             .map(|(approval, sandbox)| (approval.as_str(), sandbox.as_str()));
+
+        // Reserve the user slot under the relay lock before any provider input
+        // can emit same-turn output. turn/start's response (and interleaved
+        // notifications) must not be able to append ahead of this placeholder.
+        {
+            let mut relay = self.state.write().await;
+            relay.reserve_codex_user_message(thread_id, text);
+            relay.notify();
+        }
+
         let params = if images.is_empty() {
             codex_turn_start_params(thread_id, text, model, effort, policy)
         } else {
@@ -767,6 +777,7 @@ impl CodexBridge {
                     .await
                 {
                     let mut relay = self.state.write().await;
+                    relay.clear_codex_user_reservation(thread_id);
                     relay.push_log(
                         "warn",
                         format!(
@@ -816,14 +827,37 @@ read-only with approvals required. Change File access if this turn needs to writ
                 } else {
                     params
                 };
-                self.send_request("turn/start", params).await?
+                match self.send_request("turn/start", params).await {
+                    Ok(result) => result,
+                    Err(error) => {
+                        let mut relay = self.state.write().await;
+                        relay.clear_codex_user_reservation(thread_id);
+                        relay.notify();
+                        return Err(error);
+                    }
+                }
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                let mut relay = self.state.write().await;
+                relay.clear_codex_user_reservation(thread_id);
+                relay.notify();
+                return Err(error);
+            }
         };
 
-        Ok(value_at(&result, &["turn", "id"])
+        let turn_id = value_at(&result, &["turn", "id"])
             .and_then(Value::as_str)
-            .map(ToOwned::to_owned))
+            .map(ToOwned::to_owned);
+        {
+            let mut relay = self.state.write().await;
+            if let Some(turn_id) = turn_id.as_deref() {
+                relay.bind_codex_user_reservation(thread_id, turn_id);
+            } else {
+                relay.clear_codex_user_reservation(thread_id);
+            }
+            relay.notify();
+        }
+        Ok(turn_id)
     }
 
     pub async fn interrupt_turn(&self, thread_id: &str, turn_id: &str) -> Result<(), String> {

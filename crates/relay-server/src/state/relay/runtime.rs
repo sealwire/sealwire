@@ -100,6 +100,19 @@ impl TurnFailureKind {
     }
 }
 
+/// Relay-owned slot for the user message of an in-flight Codex turn.
+///
+/// Installed under the relay lock before `turn/start` so same-turn provider
+/// output cannot append ahead of the user prompt. `turn_id` is filled when the
+/// provider turn id is known; the provider `userMessage` echo reconciles into
+/// `item_id` even when its opaque id differs.
+#[derive(Debug, Clone)]
+pub(crate) struct CodexUserReservation {
+    pub(crate) item_id: String,
+    pub(crate) text: String,
+    pub(crate) turn_id: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ThreadRuntime {
     pub(crate) summary: Option<ThreadSummaryView>,
@@ -143,6 +156,8 @@ pub(crate) struct ThreadRuntime {
     /// Written by `RelayState::record_token_usage` for the turn it is billing;
     /// never cleared — see [`TurnSpend`] on matching `turn_id`.
     pub(crate) last_turn_spend: Option<TurnSpend>,
+    /// Transient Codex send-boundary user reservation. Never persisted.
+    pub(crate) codex_user_reservation: Option<CodexUserReservation>,
 }
 
 impl ThreadRuntime {
@@ -192,6 +207,7 @@ impl ThreadRuntime {
             workspace_missing: None,
             last_turn_failure: None,
             last_turn_spend: None,
+            codex_user_reservation: None,
         }
     }
 
@@ -232,6 +248,7 @@ impl ThreadRuntime {
             workspace_missing: None,
             last_turn_failure: None,
             last_turn_spend: None,
+            codex_user_reservation: None,
         }
     }
 
@@ -304,6 +321,7 @@ impl ThreadRuntime {
             workspace_missing: None,
             last_turn_failure: None,
             last_turn_spend: None,
+            codex_user_reservation: None,
         }
     }
 

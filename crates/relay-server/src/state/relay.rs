@@ -38,7 +38,9 @@ pub(crate) use self::push::{
     is_acceptable_push_endpoint, load_or_generate_vapid, vapid_key_path, PushAttentionTracker,
     PushDispatcher, PushJob, PushKind, PushSubscription, PushSubscriptionInput,
 };
-pub(crate) use self::runtime::{ThreadRuntime, TurnFailure, TurnFailureKind, TurnSpend};
+pub(crate) use self::runtime::{
+    CodexUserReservation, ThreadRuntime, TurnFailure, TurnFailureKind, TurnSpend,
+};
 pub(crate) use self::transcript::TranscriptRecord;
 
 const REMOTE_ACTION_REPLAY_TTL_SECS: u64 = 600;
