@@ -1,7 +1,4 @@
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc,
-};
+use std::sync::{atomic::Ordering, Arc};
 
 use serde_json::{json, Value};
 use tokio::{
@@ -18,22 +15,26 @@ use super::*;
 
 const CODEX_REQUEST_TIMEOUT_SECS: u64 = 30;
 
-/// When non-zero in tests, overrides the JSON-RPC request timeout (milliseconds).
-#[cfg(test)]
-pub(crate) static TEST_CODEX_REQUEST_TIMEOUT_MS: AtomicU64 = AtomicU64::new(0);
-
-fn codex_request_timeout() -> Duration {
-    #[cfg(test)]
-    {
-        let ms = TEST_CODEX_REQUEST_TIMEOUT_MS.load(Ordering::Relaxed);
-        if ms > 0 {
-            return Duration::from_millis(ms);
-        }
-    }
-    Duration::from_secs(CODEX_REQUEST_TIMEOUT_SECS)
-}
-
 impl CodexBridge {
+    #[cfg(test)]
+    pub(crate) fn set_test_request_timeout_ms(&self, ms: u64) {
+        self.test_request_timeout_ms
+            .store(ms, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn request_timeout(&self) -> Duration {
+        #[cfg(test)]
+        {
+            let ms = self
+                .test_request_timeout_ms
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if ms > 0 {
+                return Duration::from_millis(ms);
+            }
+        }
+        Duration::from_secs(CODEX_REQUEST_TIMEOUT_SECS)
+    }
+
     pub(super) async fn initialize(&self) -> Result<(), String> {
         self.send_request(
             "initialize",
@@ -53,7 +54,7 @@ impl CodexBridge {
     }
 
     pub(super) async fn send_request(&self, method: &str, params: Value) -> Result<Value, String> {
-        self.send_request_with_timeout(method, params, codex_request_timeout())
+        self.send_request_with_timeout(method, params, self.request_timeout())
             .await
     }
 

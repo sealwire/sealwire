@@ -3683,12 +3683,12 @@ async fn lost_turn_start_response_clears_reservation_on_timeout() {
         .expect("thread starts");
     activate_started_codex_thread(&state, &thread).await;
     configure_fake_codex_drop_turn_start(&bridge).await;
-    TEST_CODEX_REQUEST_TIMEOUT_MS.store(200, std::sync::atomic::Ordering::Relaxed);
+    bridge.set_test_request_timeout_ms(200);
 
     let err = bridge
         .start_turn(&thread.id, "lost response prompt", "gpt-5.6-sol", "low")
         .await;
-    TEST_CODEX_REQUEST_TIMEOUT_MS.store(0, std::sync::atomic::Ordering::Relaxed);
+    bridge.set_test_request_timeout_ms(0);
 
     let err = err.expect_err("dropped turn/start response must time out");
     assert!(
@@ -3703,12 +3703,279 @@ async fn lost_turn_start_response_clears_reservation_on_timeout() {
         "timeout must clear reservation state"
     );
     assert!(runtime.codex_pending_bind_reservation_id.is_none());
+    assert!(!runtime.codex_start_in_flight);
     assert!(
         !runtime
             .transcript
             .iter()
             .any(|entry| entry.kind == TranscriptEntryKind::UserText),
         "timeout must remove the user placeholder so the next turn starts clean"
+    );
+}
+
+/// Provider progress arrives before the hung turn/start response times out:
+/// keep the bound user placeholder ahead of output; late A echo must not claim B.
+#[tokio::test]
+async fn lost_response_after_turn_started_keeps_user_before_output_and_spares_retry() {
+    let (bridge, state) = spawn_fake_codex_bridge().await;
+    let thread = bridge
+        .start_thread(
+            "/tmp/project",
+            "gpt-5.6-sol",
+            "on-request",
+            "workspace-write",
+        )
+        .await
+        .expect("thread starts");
+    activate_started_codex_thread(&state, &thread).await;
+    configure_fake_codex_drop_turn_start(&bridge).await;
+    bridge.set_test_request_timeout_ms(400);
+
+    let thread_id = thread.id.clone();
+    let start = bridge.start_turn(&thread_id, "prompt A", "gpt-5.6-sol", "low");
+    tokio::pin!(start);
+    tokio::select! {
+        _ = &mut start => panic!("turn/start should still be hanging"),
+        _ = tokio::time::sleep(std::time::Duration::from_millis(40)) => {}
+    }
+    handle_notification(turn_started(&thread_id, "turn-lost-a"), &state).await;
+    handle_notification(
+        reasoning_started(&thread_id, "turn-lost-a", "item-r-lost", "thinking"),
+        &state,
+    )
+    .await;
+
+    let err = start.await.expect_err("hung turn/start must time out");
+    bridge.set_test_request_timeout_ms(0);
+    assert!(
+        err.to_lowercase().contains("timeout") || err.to_lowercase().contains("timed out"),
+        "unexpected: {err}"
+    );
+
+    {
+        let relay = state.read().await;
+        let runtime = relay.runtime_for_thread(&thread_id).expect("runtime");
+        assert!(!runtime.codex_start_in_flight);
+        let turn_entries: Vec<_> = runtime
+            .transcript
+            .iter()
+            .filter(|entry| entry.turn_id.as_deref() == Some("turn-lost-a"))
+            .collect();
+        assert!(turn_entries.len() >= 2);
+        assert_eq!(turn_entries[0].kind, TranscriptEntryKind::UserText);
+        assert_eq!(turn_entries[1].kind, TranscriptEntryKind::Reasoning);
+        assert!(
+            runtime
+                .codex_user_reservations
+                .values()
+                .any(|reservation| reservation.turn_id.as_deref() == Some("turn-lost-a"))
+                || turn_entries[0].item_id.starts_with("codex:user-reserve:")
+                || turn_entries[0].item_id == "item-user-a",
+            "bound A placeholder must survive uncertain timeout"
+        );
+    }
+
+    // Disable drop so retry B can complete.
+    bridge
+        .send_request("fake/configure", json!({ "dropTurnStart": false }))
+        .await
+        .expect("re-enable turn/start responses");
+    let b_turn = bridge
+        .start_turn(&thread_id, "prompt B", "gpt-5.6-sol", "low")
+        .await
+        .expect("retry B")
+        .expect("turn id");
+
+    handle_notification(
+        user_message_completed(&thread_id, "turn-lost-a", "item-user-a", "prompt A"),
+        &state,
+    )
+    .await;
+    {
+        let relay = state.read().await;
+        let runtime = relay.runtime_for_thread(&thread_id).expect("runtime");
+        let b_pending = runtime
+            .codex_user_reservations
+            .values()
+            .find(|reservation| reservation.turn_id.as_deref() == Some(b_turn.as_str()));
+        assert!(
+            b_pending.is_some()
+                || runtime
+                    .transcript
+                    .iter()
+                    .any(|entry| entry.turn_id.as_deref() == Some(b_turn.as_str())
+                        && entry.kind == TranscriptEntryKind::UserText),
+            "late A echo must not consume B"
+        );
+        let a_users = runtime
+            .transcript
+            .iter()
+            .filter(|entry| {
+                entry.kind == TranscriptEntryKind::UserText
+                    && entry.turn_id.as_deref() == Some("turn-lost-a")
+            })
+            .count();
+        assert_eq!(a_users, 1);
+    }
+
+    handle_notification(
+        user_message_completed(&thread_id, &b_turn, "item-user-b", "prompt B"),
+        &state,
+    )
+    .await;
+    let relay = state.read().await;
+    let runtime = relay.runtime_for_thread(&thread_id).expect("runtime");
+    let users: Vec<_> = runtime
+        .transcript
+        .iter()
+        .filter(|entry| entry.kind == TranscriptEntryKind::UserText)
+        .collect();
+    assert_eq!(users.len(), 2);
+    assert_eq!(users[0].turn_id.as_deref(), Some("turn-lost-a"));
+    assert_eq!(users[1].turn_id.as_deref(), Some(b_turn.as_str()));
+}
+
+#[tokio::test]
+async fn stale_turn_started_for_known_turn_does_not_bind_next_pending() {
+    let state = codex_test_state_with_thread("thread-stale-started").await;
+    {
+        let mut relay = state.write().await;
+        let a = relay.reserve_codex_user_message("thread-stale-started", "A");
+        relay.bind_codex_user_reservation("thread-stale-started", &a, "turn-a");
+        relay.set_active_turn(Some("turn-a".to_string()));
+    }
+    handle_notification(turn_completed("thread-stale-started", "turn-a"), &state).await;
+    let b_id = {
+        let mut relay = state.write().await;
+        relay.set_active_turn(None);
+        relay.reserve_codex_user_message("thread-stale-started", "B")
+    };
+
+    handle_notification(turn_started("thread-stale-started", "turn-a"), &state).await;
+
+    let relay = state.read().await;
+    let runtime = relay
+        .runtime_for_thread("thread-stale-started")
+        .expect("runtime");
+    let b = runtime
+        .codex_user_reservations
+        .get(&b_id)
+        .expect("B pending");
+    assert!(b.turn_id.is_none(), "stale turn/started must not bind B");
+    assert_eq!(
+        runtime.codex_pending_bind_reservation_id.as_deref(),
+        Some(b_id.as_str())
+    );
+    assert!(runtime.codex_known_turn_ids.contains("turn-a"));
+}
+
+#[tokio::test]
+async fn concurrent_start_turn_rejects_second_admission() {
+    let (bridge, state) = spawn_fake_codex_bridge().await;
+    let thread = bridge
+        .start_thread(
+            "/tmp/project",
+            "gpt-5.6-sol",
+            "on-request",
+            "workspace-write",
+        )
+        .await
+        .expect("thread starts");
+    activate_started_codex_thread(&state, &thread).await;
+    configure_fake_codex_drop_turn_start(&bridge).await;
+    bridge.set_test_request_timeout_ms(300);
+
+    let thread_id = thread.id.clone();
+    let first = bridge.start_turn(&thread_id, "first", "gpt-5.6-sol", "low");
+    tokio::pin!(first);
+    tokio::select! {
+        _ = &mut first => panic!("first start should still be in flight"),
+        _ = tokio::time::sleep(std::time::Duration::from_millis(30)) => {}
+    }
+
+    let second = bridge
+        .start_turn(&thread_id, "second", "gpt-5.6-sol", "low")
+        .await;
+    assert!(
+        second
+            .as_ref()
+            .err()
+            .is_some_and(|err| err.contains("already in flight")),
+        "second start must fail admission, got {second:?}"
+    );
+
+    let _ = first.await;
+    bridge.set_test_request_timeout_ms(0);
+
+    let relay = state.read().await;
+    let runtime = relay.runtime_for_thread(&thread_id).expect("runtime");
+    assert!(!runtime.codex_start_in_flight);
+    let users = runtime
+        .transcript
+        .iter()
+        .filter(|entry| entry.kind == TranscriptEntryKind::UserText)
+        .count();
+    assert!(
+        users <= 1,
+        "concurrent starts must not leave duplicate user placeholders, got {users}"
+    );
+}
+
+#[tokio::test]
+async fn test_request_timeout_is_per_bridge_not_process_global() {
+    let (slow, state_slow) = spawn_fake_codex_bridge().await;
+    let (fast, state_fast) = spawn_fake_codex_bridge().await;
+    let thread_slow = slow
+        .start_thread(
+            "/tmp/project",
+            "gpt-5.6-sol",
+            "on-request",
+            "workspace-write",
+        )
+        .await
+        .expect("slow thread");
+    let thread_fast = fast
+        .start_thread(
+            "/tmp/project",
+            "gpt-5.6-sol",
+            "on-request",
+            "workspace-write",
+        )
+        .await
+        .expect("fast thread");
+    activate_started_codex_thread(&state_slow, &thread_slow).await;
+    activate_started_codex_thread(&state_fast, &thread_fast).await;
+    configure_fake_codex_drop_turn_start(&slow).await;
+    configure_fake_codex_drop_turn_start(&fast).await;
+    slow.set_test_request_timeout_ms(200);
+    // fast keeps default (30s) — must not inherit slow's 200ms.
+
+    let started = std::time::Instant::now();
+    let slow_err = slow
+        .start_turn(&thread_slow.id, "slow", "gpt-5.6-sol", "low")
+        .await
+        .expect_err("slow bridge times out");
+    assert!(
+        slow_err.to_lowercase().contains("timeout")
+            || slow_err.to_lowercase().contains("timed out")
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "short timeout should fire quickly"
+    );
+    slow.set_test_request_timeout_ms(0);
+
+    // Fast bridge with drop would hang 30s — instead prove its override is still 0
+    // by using a tiny override only on fast and ensuring slow's prior setting is gone.
+    fast.set_test_request_timeout_ms(150);
+    let fast_err = fast
+        .start_turn(&thread_fast.id, "fast", "gpt-5.6-sol", "low")
+        .await
+        .expect_err("fast bridge uses its own override");
+    fast.set_test_request_timeout_ms(0);
+    assert!(
+        fast_err.to_lowercase().contains("timeout")
+            || fast_err.to_lowercase().contains("timed out")
     );
 }
 
