@@ -2235,8 +2235,10 @@ pub(crate) async fn collect_git_review_target(
     base_sha: &str,
     candidate_sha: &str,
 ) -> Result<relay_api::GitReviewTarget, String> {
-    let base_sha = verify_commit(workspace, base_sha).await?;
+    // Candidate integrity is authoritative; resolve it first so a missing
+    // candidate is never misdiagnosed as a bad advisory baseline.
     let candidate_sha = verify_commit(workspace, candidate_sha).await?;
+    let base_sha = verify_commit(workspace, base_sha).await?;
     let generated_at = unix_now();
 
     let manifest = run_git_capture(
