@@ -1529,6 +1529,7 @@ export function TaskTeamScreen({
   viewMode = "list",
   onChangeViewMode = null,
   onOpenReview = null,
+  onOpenTicket = null,
   /** Injectable clock, like the card helpers in `remote/utils.js`. */
   nowSeconds = undefined,
 }) {
@@ -1665,9 +1666,14 @@ export function TaskTeamScreen({
         error,
         capacity,
         ...(nowSeconds === undefined ? {} : { nowSeconds }),
-        // The board has no detail pane, so opening a card has to land somewhere
-        // that does. Without this the click sets a selection nothing renders.
+        // A card opens the run's own page (17b). The fallback matters: without
+        // a ticket route the click would set a selection board mode has nowhere
+        // to draw, so it drops back to List, which does.
         onOpenTask: (teamRunId) => {
+          if (onOpenTicket) {
+            onOpenTicket(teamRunId);
+            return;
+          }
           onChangeViewMode?.("list");
           onOpenTask?.(teamRunId);
         },

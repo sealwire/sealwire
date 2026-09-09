@@ -601,6 +601,8 @@ function ChatShell() {
     // screen, not a wider panel inside task detail, which is what the columns in
     // the mockup require.
     h("section", { className: "review-screen-mount", id: "review-screen" }),
+    // One run's ticket page (17b). Full-area, same pattern again.
+    h("section", { className: "ticket-screen-mount", id: "ticket-screen" }),
     // The Usage report. Same full-area pattern as Tasks.
     h("section", { className: "usage-report-mount", id: "usage-report" }),
     h(ConsoleGrid),

@@ -662,12 +662,15 @@ body.sidebar-collapsed .icon-rail {
 .app-shell[data-view="teams"],
 .app-shell-with-rail[data-view="teams"],
 .app-shell[data-view="review"],
-.app-shell-with-rail[data-view="review"] {
+.app-shell-with-rail[data-view="review"],
+.app-shell[data-view="ticket"],
+.app-shell-with-rail[data-view="ticket"] {
   grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
 }
 .app-shell[data-view="tasks"] .right-rail,
 .app-shell[data-view="teams"] .right-rail,
-.app-shell[data-view="review"] .right-rail {
+.app-shell[data-view="review"] .right-rail,
+.app-shell[data-view="ticket"] .right-rail {
   /* Tasks/teams/review own their secondary panes; the session Changes/Reviewer
    * rail must not keep a grid track. `display: none` (not visibility) so the
    * collapsed-sidebar templates below can drop to two columns cleanly. */
@@ -1981,6 +1984,30 @@ input:focus, textarea:focus, select:focus {
   /* Size container for stacking when the workspace (not the viewport) is narrow. */
   container-type: inline-size;
   container-name: task-main;
+}
+
+/* ===== Ticket page — full-area (data-view="ticket", mockup 17b) =====
+   The screen's own rules ship with the private module (`task-ticket.css`); this
+   is only the full-area frame, which a public checkout still needs to build. */
+.chat-shell[data-view="ticket"] {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+.chat-shell[data-view="ticket"] > * {
+  display: none;
+}
+.ticket-screen-mount {
+  display: none;
+}
+.chat-shell[data-view="ticket"] > .ticket-screen-mount {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
 }
 
 /* ===== Merge review — full-area (data-view="review", mockup 15a) ===== */
@@ -5936,6 +5963,8 @@ body.sidebar-collapsed .app-shell[data-view="teams"],
 body.sidebar-collapsed .app-shell-with-rail[data-view="teams"],
 body.sidebar-collapsed .app-shell[data-view="review"],
 body.sidebar-collapsed .app-shell-with-rail[data-view="review"],
+body.sidebar-collapsed .app-shell[data-view="ticket"],
+body.sidebar-collapsed .app-shell-with-rail[data-view="ticket"],
 body.sidebar-collapsed .app-shell[data-view="usage"],
 body.sidebar-collapsed .app-shell-with-rail[data-view="usage"] {
   grid-template-columns: 0 minmax(0, 1fr);
@@ -5960,12 +5989,14 @@ body.rail-collapsed.sidebar-collapsed .app-shell-with-rail[data-view="conversati
 body.rail-collapsed .app-shell-with-rail[data-view="tasks"],
 body.rail-collapsed .app-shell-with-rail[data-view="teams"],
 body.rail-collapsed .app-shell-with-rail[data-view="review"],
+body.rail-collapsed .app-shell-with-rail[data-view="ticket"],
 body.rail-collapsed .app-shell-with-rail[data-view="usage"] {
   grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
 }
 body.rail-collapsed.sidebar-collapsed .app-shell-with-rail[data-view="tasks"],
 body.rail-collapsed.sidebar-collapsed .app-shell-with-rail[data-view="teams"],
 body.rail-collapsed.sidebar-collapsed .app-shell-with-rail[data-view="review"],
+body.rail-collapsed.sidebar-collapsed .app-shell-with-rail[data-view="ticket"],
 body.rail-collapsed.sidebar-collapsed .app-shell-with-rail[data-view="usage"] {
   grid-template-columns: 0 minmax(0, 1fr);
 }
@@ -6937,6 +6968,8 @@ body.is-resizing-panel {
   body.sidebar-collapsed .app-shell-with-rail[data-view="teams"],
   body.sidebar-collapsed .app-shell[data-view="review"],
   body.sidebar-collapsed .app-shell-with-rail[data-view="review"],
+  body.sidebar-collapsed .app-shell[data-view="ticket"],
+  body.sidebar-collapsed .app-shell-with-rail[data-view="ticket"],
   body.sidebar-collapsed .app-shell[data-view="usage"],
   body.sidebar-collapsed .app-shell-with-rail[data-view="usage"],
   body.rail-collapsed .app-shell-with-rail,
@@ -6944,12 +6977,14 @@ body.is-resizing-panel {
   body.rail-collapsed .app-shell-with-rail[data-view="tasks"],
   body.rail-collapsed .app-shell-with-rail[data-view="teams"],
   body.rail-collapsed .app-shell-with-rail[data-view="review"],
+  body.rail-collapsed .app-shell-with-rail[data-view="ticket"],
   body.rail-collapsed .app-shell-with-rail[data-view="usage"],
   body.sidebar-collapsed.rail-collapsed .app-shell-with-rail,
   body.sidebar-collapsed.rail-collapsed .app-shell-with-rail[data-view="conversation"],
   body.rail-collapsed.sidebar-collapsed .app-shell-with-rail[data-view="tasks"],
   body.rail-collapsed.sidebar-collapsed .app-shell-with-rail[data-view="teams"],
   body.rail-collapsed.sidebar-collapsed .app-shell-with-rail[data-view="review"],
+  body.rail-collapsed.sidebar-collapsed .app-shell-with-rail[data-view="ticket"],
   body.rail-collapsed.sidebar-collapsed .app-shell-with-rail[data-view="usage"] {
     grid-template-columns: 1fr;
   }
@@ -7865,6 +7900,7 @@ body.is-resizing-panel {
    drawer belong to Sessions; the task list belongs to Tasks. */
 .sidebar-task-list { display: none; }
 .sidebar-teams-list { display: none; }
+.app-shell[data-view="ticket"] .sidebar-task-list,
 .app-shell[data-view="tasks"] .sidebar-task-list {
   display: block;
   flex: 1 1 auto;
@@ -7886,6 +7922,11 @@ body.is-resizing-panel {
 /* Both of these are session-scoped — "Search sessions", "Filter by activity".
    Leaving them up on the Tasks tab offers two controls that would act on a list
    that is not on screen; the search one would toggle a field this rule hides. */
+.app-shell[data-view="ticket"] .sidebar-drawer,
+.app-shell[data-view="ticket"] .launch-panel,
+.app-shell[data-view="ticket"] .sidebar-search,
+.app-shell[data-view="ticket"] .sidebar-search-toggle,
+.app-shell[data-view="ticket"] .sidebar-bell-toggle,
 .app-shell[data-view="tasks"] .sidebar-search-toggle,
 .app-shell[data-view="tasks"] .sidebar-bell-toggle,
 .app-shell[data-view="teams"] .sidebar-search-toggle,

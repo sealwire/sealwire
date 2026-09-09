@@ -274,6 +274,7 @@ import {
 } from "./shared/session-view-controller.js";
 import {
   openReviewDestination,
+  openTicketDestination,
   openSessionsDestination,
   openTasksDestination,
   openTeamsDestination,
@@ -1212,6 +1213,14 @@ const renderer = createSessionRenderer({
   // The full-screen merge review (15a). Routed through the same controller as
   // every other destination so Back leaves it the way it leaves a project, and
   // a reload lands on the run rather than on the task list.
+  // One run's ticket page (17b), entered from a board card. Routed through the
+  // same controller as every other destination so Back and a reload behave.
+  onOpenTicketScreen(teamRunId) {
+    if (!teamRunId) {
+      return;
+    }
+    void openTicketDestination(sessionViewController, teamRunId);
+  },
   onOpenReviewScreen(teamRunId) {
     if (!teamRunId) {
       return;
