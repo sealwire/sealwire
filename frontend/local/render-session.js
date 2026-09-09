@@ -1496,12 +1496,18 @@ export function createSessionRenderer({
       onEnsureFileChangeDetail: handleEnsureFileChangeDetail,
       // Suppress the answer entry while the active thread is owned by
       // review/workflow; these orchestrators are non-interactive.
+      //
+      // Thread-filtered at the source, like the Orchestrator pane: a question
+      // whose row has not loaded is rendered from the REQUEST, and that card has
+      // no transcript entry to imply which conversation it belongs to. Unfiltered,
+      // a background thread's question would surface here and answering it would
+      // resume a turn the reader cannot see.
       pendingAskUserQuestions: isReviewInProgressForThread(
         session,
         session.active_thread_id
       ) || isWorkflowInProgressForThread(session, session.active_thread_id)
         ? []
-        : session?.pending_ask_user_questions || [],
+        : pendingAskUserQuestionsForThread(session, session.active_thread_id || null),
       onSubmitAskUserAnswers: handleSubmitAskUserAnswers,
       askUserSubmittingRequestIds:
         localUi.askUserSubmittingRequestIds instanceof Set

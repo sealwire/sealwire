@@ -3172,7 +3172,8 @@ function RemoteThreadPanel({
   // rule drift, and the drift shows up as a card you can tap but not submit.
   const visibleAskUserQuestions = visiblePendingAskUserQuestions(
     sessionView,
-    pendingAskUserQuestions
+    pendingAskUserQuestions,
+    session?.active_thread_id || null
   );
   return h(
     "section",

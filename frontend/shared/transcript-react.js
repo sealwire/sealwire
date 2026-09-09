@@ -798,6 +798,65 @@ function findPinnedAskUserItemIds(entries, pendingList) {
   return pinned || EMPTY_PINNED_ASK_USER_IDS;
 }
 
+// Pending questions whose tool call is NOT among the loaded entries.
+//
+// The relay drops transcript entries from the head under snapshot pressure and a
+// switched-to thread hydrates in pages, so a request can be live while its row is
+// not here. Keyed only off the row, the turn would park on a question the reader
+// is never shown. These get a card built from the request itself.
+//
+// Callers must hand in a THREAD-FILTERED list: with no row to match against there
+// is nothing else stopping a background thread's question being answered here.
+const EMPTY_ASK_USER_REQUESTS = [];
+
+function findUnrenderedAskUserRequests(entries, pendingList) {
+  if (!Array.isArray(pendingList) || !pendingList.length) {
+    return EMPTY_ASK_USER_REQUESTS;
+  }
+  const rendered = new Set();
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    const itemId = entry?.item_id || "";
+    if (itemId.startsWith("tool:") && isAskUserQuestionTool(entry?.tool)) {
+      rendered.add(itemId.slice(5));
+    }
+  }
+  const orphans = pendingList.filter(
+    (request) => request?.request_id && !rendered.has(request.tool_use_id)
+  );
+  return orphans.length ? orphans : EMPTY_ASK_USER_REQUESTS;
+}
+
+// The same card AskUserEntry renders, built from the request rather than the row.
+// The draft key is derived identically, so a pick made before the row loads is
+// still there once it does.
+function AskUserRequestCard({ request, options }) {
+  const requestId = request.request_id;
+  const questions = normalizeAskUserQuestions(request.questions);
+  const itemId = `ask:${requestId}`;
+  if (!questions) {
+    return h(AskUserDetailPendingCard, {
+      entry: null,
+      itemId,
+      questionCount: request.question_count || 0,
+      detailLoading: Boolean(options?.askUserDetailLoadingRequestIds?.has?.(requestId)),
+      detailError: options?.askUserDetailErrors?.get?.(requestId) || "",
+      onRetryDetail: options?.onRetryAskUserDetail
+        ? () => options.onRetryAskUserDetail(requestId)
+        : null,
+    });
+  }
+  return h(AskUserWizard, {
+    entry: null,
+    itemId,
+    questions,
+    requestId,
+    threadId: request.thread_id || "",
+    isSubmitting: Boolean(options?.askUserSubmittingRequestIds?.has?.(requestId)),
+    submitAnswers: options?.onSubmitAskUserAnswers || null,
+    askUserError: options?.askUserErrors?.get?.(requestId) || "",
+  });
+}
+
 // Build the answer value the SDK should see for a single question. We support
 // three shapes (the SDK accepts string | string[] | free-text):
 //   - label only          → "<label>"
@@ -2418,6 +2477,10 @@ export function TranscriptContent({
     () => findPinnedAskUserItemIds(entries, options?.pendingAskUserQuestions),
     [entries, options?.pendingAskUserQuestions]
   );
+  const unrenderedAskUserRequests = React.useMemo(
+    () => findUnrenderedAskUserRequests(entries, options?.pendingAskUserQuestions),
+    [entries, options?.pendingAskUserQuestions]
+  );
   const pinnedAskUserNodes = [];
   const nodes = [];
 
@@ -2544,8 +2607,30 @@ export function TranscriptContent({
   // is mounted for as long as the question is pending, while still scrolling with
   // the conversation rather than in a pane of its own. (An approval and a question
   // can both be pending; the questions sit below the approval card.)
-  const askUserFooter = pinnedAskUserNodes.length
-    ? h("div", { className: "transcript-ask-user-pinned" }, ...pinnedAskUserNodes)
+  const askUserCards = [
+    ...pinnedAskUserNodes,
+    ...unrenderedAskUserRequests.map((request) =>
+      h(AskUserRequestCard, {
+        key: `ask:${request.request_id}`,
+        request,
+        options: effectiveOptions,
+      })
+    ),
+  ];
+  const askUserFooter = askUserCards.length
+    ? h(
+        "div",
+        {
+          className: "transcript-ask-user-pinned",
+          role: "region",
+          "aria-label": "Question waiting for your answer",
+          // The turn is parked on this. Announced because a reader who is not
+          // watching the screen otherwise gets nothing: the card arrives far below
+          // the fold of a long conversation, and nothing else says the agent stopped.
+          "aria-live": "polite",
+        },
+        ...askUserCards
+      )
     : null;
 
   if (!virtualized) {
