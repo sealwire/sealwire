@@ -2760,8 +2760,9 @@ impl SeatAgentView {
     }
 }
 
-/// A task's three seats, each already merged from the task-wide ask and any
-/// per-seat override. What the card shows is what the run will use.
+/// Legacy semantic settings for the three pipeline slots. Team structures may
+/// bind multiple slots to one visible role, so proposal cards should render
+/// `OrchestratorProposalView::agent_rows` instead of these raw slots.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaskSeatAgentsView {
     #[serde(default)]
@@ -2782,6 +2783,15 @@ impl TaskSeatAgentsView {
         self.dev.merge(&next.dev);
         self.reviewer.merge(&next.reviewer);
     }
+}
+
+/// One visible proposal row, after the chosen team structure has mapped the
+/// fixed pipeline slots onto the roles that will actually run.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProposalAgentRowView {
+    pub role_id: String,
+    pub label: String,
+    pub agent: SeatAgentView,
 }
 
 /// A held Orchestrator proposal waiting for the user to confirm or dismiss.
@@ -2818,6 +2828,11 @@ pub struct OrchestratorProposalView {
     /// relay default.
     #[serde(default, skip_serializing_if = "TaskSeatAgentsView::is_empty")]
     pub agents: TaskSeatAgentsView,
+    /// Visible agent rows for the selected team structure. A Pair proposal has
+    /// one writable pair-programmer row plus the reviewer, not a separate
+    /// planner row.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agent_rows: Vec<ProposalAgentRowView>,
     pub created_at: u64,
     /// Whether this card is allowed to confirm itself when its time comes.
     /// Default OFF: a card only ever starts by hand unless asked otherwise.

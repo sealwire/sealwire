@@ -16,6 +16,7 @@ import { createVerbCycler, progressPhaseLabel, VERB_CYCLE_MS } from "../progress
 // clock, which is the only reason a scheduled card is testable at a fixed hour.
 import { formatRelativeTime, formatTimestamp } from "../remote/utils.js";
 import { ToggleLeftPanelIcon } from "./panel-icons.js";
+import { TaskBoard } from "./task-board-react.js";
 import { bindTaskWorkspaceResizeHandle } from "./task-workspace-resize.js";
 import { TranscriptPane } from "./transcript-pane.js";
 import {
@@ -29,6 +30,7 @@ import {
   teamAttention,
   teamListMeta,
   teamPhaseLabel,
+  teamRunIsWorking,
   teamRunProgress,
   teamSeats,
   teamStatusLabel,
@@ -485,6 +487,11 @@ const PROPOSAL_SEATS = [
   ["reviewer", "Reviewer"],
 ];
 
+const PAIR_PROPOSAL_SEATS = [
+  ["dev", "Pair programmer"],
+  ["reviewer", "Reviewer"],
+];
+
 // "codex \u00b7 gpt-5.6-codex \u00b7 max", skipping whatever was not chosen.
 // An empty seat renders nothing at all rather than the word "default": the
 // relay's default can move, and naming it here would claim a guarantee the
@@ -516,19 +523,36 @@ function rewrittenFields(proposal) {
   );
 }
 
-function ProposalAgentSummary({ agents }) {
-  const rows = PROPOSAL_SEATS.map(([seat, label]) => [label, seatAgentLabel(agents?.[seat])]).filter(
-    ([, value]) => value,
-  );
+function proposalAgentRows(proposal) {
+  const structured = Array.isArray(proposal?.agent_rows) ? proposal.agent_rows : [];
+  if (structured.length > 0) {
+    return structured
+      .map((row) => [
+        row.role_id || row.label,
+        row.label || row.role_id || "Agent",
+        seatAgentLabel(row.agent),
+      ])
+      .filter(([, , value]) => value);
+  }
+
+  const seats = proposal?.team_id === "pair" ? PAIR_PROPOSAL_SEATS : PROPOSAL_SEATS;
+  return seats
+    .map(([seat, label]) => [label, label, seatAgentLabel(proposal?.agents?.[seat])])
+    .filter(([, , value]) => value);
+}
+
+function ProposalAgentSummary({ proposal }) {
+  const rows = proposalAgentRows(proposal);
   if (rows.length === 0) return null;
   return h(
     "ul",
     { className: "task-orch-proposal-agents" },
-    rows.map(([label, value]) =>
+    rows.map(([key, label, value]) =>
       h(
         "li",
-        { key: label, className: "task-orch-proposal-agent" },
-        h("span", { className: "task-orch-proposal-agent-seat" }, label),
+        { key, className: "task-orch-proposal-agent" },
+        h("span", { className: "task-orch-proposal-agent-seat" }, `${label}:`),
+        " ",
         h("span", { className: "task-orch-proposal-agent-value" }, value),
       ),
     ),
@@ -625,7 +649,7 @@ function OrchestratorProposalCard({
           `Rewrites the ${rewrittenFields(proposal).join(", ")} for this run.`
         )
       : null,
-    h(ProposalAgentSummary, { agents: proposal.agents }),
+    h(ProposalAgentSummary, { proposal }),
     schedule ? h("p", { className: "task-orch-card-note task-orch-card-schedule" }, schedule) : null,
     h(
       "div",
@@ -1433,6 +1457,68 @@ function TaskWorkspaceResizeHandle() {
   });
 }
 
+export const TASK_VIEW_MODES = Object.freeze(["list", "board"]);
+
+/**
+ * The Tasks header strip (16a): title, the list/board switch, and the two live
+ * numbers. Sits above both modes so switching does not move it.
+ *
+ * 16a also carries a Usage tab and two filter dropdowns. Usage is already its own
+ * sidebar destination, and both filters would filter on the team a run belongs
+ * to — a field `TeamRunView` does not carry — so neither is here yet.
+ */
+function TasksToolbar({ viewMode, onChangeViewMode, runningCount, capacity, onStartTask }) {
+  return h(
+    "header",
+    { className: "task-surface-toolbar" },
+    h("h2", { className: "task-surface-title" }, "Tasks"),
+    h(
+      "div",
+      { className: "task-surface-modes", role: "tablist", "aria-label": "Task view" },
+      ...TASK_VIEW_MODES.map((mode) =>
+        h(
+          "button",
+          {
+            key: mode,
+            type: "button",
+            role: "tab",
+            "aria-selected": viewMode === mode ? "true" : "false",
+            className: `task-surface-mode${viewMode === mode ? " is-active" : ""}`,
+            onClick: () => onChangeViewMode?.(mode),
+          },
+          mode === "list" ? "List" : "Board"
+        )
+      )
+    ),
+    h("div", { className: "task-surface-toolbar-spacer" }),
+    h(
+      "span",
+      { className: "task-surface-stat" },
+      h("span", { className: "task-surface-stat-dot" }),
+      `${runningCount} running`
+    ),
+    // `todayLabel` is the WHOLE label ("Today 42%"), as TaskDetail's capacity
+    // line consumes it. Only the empty case supplies the word.
+    capacity?.todayLabel
+      ? h("span", { className: "task-surface-stat" }, h("strong", null, capacity.todayLabel))
+      : h(
+          "span",
+          { className: "task-surface-stat" },
+          "Today ",
+          h(
+            "span",
+            { className: "task-surface-unknown", title: "Today's spend is not reported yet" },
+            "—"
+          )
+        ),
+    h(
+      "button",
+      { type: "button", className: "task-surface-new", onClick: () => onStartTask?.() },
+      "New task"
+    )
+  );
+}
+
 export function TaskTeamScreen({
   runs,
   selectedRunId,
@@ -1453,6 +1539,11 @@ export function TaskTeamScreen({
   waitingCount = 0,
   capacity = null,
   orchestrator = null,
+  viewMode = "list",
+  onChangeViewMode = null,
+  onOpenReview = null,
+  /** Injectable clock, like the card helpers in `remote/utils.js`. */
+  nowSeconds = undefined,
 }) {
   // Before the loading and not-found branches: nothing was ever fetched.
   if (locked) {
@@ -1557,6 +1648,52 @@ export function TaskTeamScreen({
     })
   );
 
+  const toolbar = h(TasksToolbar, {
+    viewMode,
+    onChangeViewMode,
+    // The In-progress bucket MINUS the ones holding a worktree with no driver.
+    // Both halves are needed: the bucket alone counted `paused` as running, and
+    // `teamRunIsWorking` alone would pull in a parked question, whose turn is
+    // genuinely still open but which lives in Needs you.
+    runningCount: (groupTeamRuns(runs || [], seenAt).in_progress || []).filter(teamRunIsWorking)
+      .length,
+    capacity,
+    onStartTask,
+  });
+
+  // Board mode takes the whole area: it is five columns wide, and 16a has no
+  // Orchestrator rail. Clicking a card returns to list mode with that task open,
+  // which is the only detail view that exists.
+  if (viewMode === "board") {
+    return h(
+      "div",
+      { className: "task-surface" },
+      toolbar,
+      h(TaskBoard, {
+        runs,
+        seenAt,
+        selectedRunId,
+        loading,
+        error,
+        capacity,
+        ...(nowSeconds === undefined ? {} : { nowSeconds }),
+        // The board has no detail pane, so opening a card has to land somewhere
+        // that does. Without this the click sets a selection nothing renders.
+        onOpenTask: (teamRunId) => {
+          onChangeViewMode?.("list");
+          onOpenTask?.(teamRunId);
+        },
+        onOpenThread,
+        onOpenReview,
+      })
+    );
+  }
+
   // Detail in the middle (1fr), Orchestrator on the right (resizable width).
-  return h("div", { className: "task-workspace" }, detailPane, orchPane);
+  return h(
+    "div",
+    { className: "task-surface" },
+    toolbar,
+    h("div", { className: "task-workspace" }, detailPane, orchPane)
+  );
 }
