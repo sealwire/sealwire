@@ -12663,6 +12663,7 @@ tree; got {}",
 
 #[cfg(test)]
 mod review_tests {
+    use super::super::checkpoint::{build_review_checkpoint, checkpoint_ref_name};
     use super::super::*;
     use super::require_live_test_cwd;
     use crate::protocol::{
@@ -15766,8 +15767,300 @@ resurrected into a turn that never completes: {:?}",
         );
     }
 
+    #[test]
+    fn a_non_utf8_path_is_not_dropped_from_status_parsing() {
+        // A real Unix path can be non-UTF-8; `-z` output carries those bytes raw. Silently
+        // dropping the record (rather than degrading it) would make a genuinely dirty repo
+        // (a tracked change here) look clean whenever its path isn't valid UTF-8.
+        let stdout = b" M bad-\xFF-name\0";
+        let entries = parse_status_z(stdout);
+        assert_eq!(
+            entries,
+            vec![(" M".to_string(), "bad-\u{FFFD}-name".to_string())],
+            "a non-UTF-8 path must still be parsed, not dropped"
+        );
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
-    async fn dirty_only_after_author_turn_does_not_review_historical_head() {
+    async fn symlinked_node_modules_alone_is_not_treated_as_uncommitted_work() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        init_git_seed(cwd);
+        let base = git_head(cwd);
+        // The trailing slash in a `node_modules/` ignore pattern matches directories
+        // only; a worktree that links `node_modules` in as a SYMLINK is never matched
+        // by it, so `git status` reports the symlink untracked forever.
+        std::fs::write(
+            std::path::Path::new(cwd).join(".gitignore"),
+            "node_modules/\n",
+        )
+        .unwrap();
+        let candidate = git_commit_all(cwd, "add gitignore");
+        let link_target = TempDir::new().expect("link target");
+        std::os::unix::fs::symlink(
+            link_target.path(),
+            std::path::Path::new(cwd).join("node_modules"),
+        )
+        .expect("symlink");
+
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let provider = providers.get("codex").unwrap();
+        // If the (buggy) code asks the author to commit anyway, nobody must silently
+        // resolve that by committing the symlink itself — the assertions below need to
+        // see the ask, not a phantom commit papering over it.
+        provider
+            .auto_commit_author_changes
+            .store(false, Ordering::Relaxed);
+        queue_verdicts(provider, &["APPROVE"]).await;
+        start_parent(&app, cwd, "codex").await;
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
+        assert_eq!(job.base_sha.as_deref(), Some(base.as_str()));
+        assert_eq!(job.candidate_sha.as_deref(), Some(candidate.as_str()));
+
+        let turns = provider.turns.lock().await.clone();
+        assert!(
+            turns
+                .iter()
+                .all(|(_, text)| !text.contains("needs a committed candidate")),
+            "an untracked symlink alone must never trigger the commit-nudge turn: {turns:?}"
+        );
+        let prompt = turns
+            .iter()
+            .find(|(_, text)| text.contains("Committed review target"))
+            .map(|(_, text)| text)
+            .expect("reviewer prompt");
+        assert!(prompt.contains(&format!("Range: {base}..{candidate}")));
+    }
+
+    /// Independently re-derives the real index path the way a git user would (`git
+    /// rev-parse --git-path index`), rather than reusing the production helper — the
+    /// "index untouched" assertion needs to check the SAME thing an outside observer
+    /// would, not agree with the implementation about where to look.
+    fn real_index_path_for_test(cwd: &str) -> std::path::PathBuf {
+        let raw = git_stdout(cwd, &["rev-parse", "--git-path", "index"]);
+        let path = std::path::Path::new(&raw);
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::path::Path::new(cwd).join(path)
+        }
+    }
+
+    /// Every entry in the worktree (path relative to `cwd` -> content), excluding
+    /// `.git/`. For the "no repo mutation" proof: re-reading one hand-picked file only
+    /// shows that file didn't change, not that nothing in the tree did.
+    ///
+    /// `symlink_metadata`, never `metadata` or a followed read: a symlink's identity
+    /// for this comparison is its OWN target path, not whatever that target's content
+    /// is (which lives outside this repo and can change for unrelated reasons) — and
+    /// blindly following one pointed outside the repo would walk this straight out of
+    /// the fixture.
+    fn worktree_files_snapshot(
+        cwd: &str,
+    ) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+        fn walk(
+            dir: &std::path::Path,
+            root: &std::path::Path,
+            out: &mut std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
+        ) {
+            for entry in std::fs::read_dir(dir).expect("read_dir") {
+                let path = entry.expect("dir entry").path();
+                if path.file_name() == Some(std::ffi::OsStr::new(".git")) {
+                    continue;
+                }
+                let metadata = std::fs::symlink_metadata(&path).expect("symlink_metadata");
+                let rel = path.strip_prefix(root).expect("under root").to_path_buf();
+                if metadata.file_type().is_symlink() {
+                    let target = std::fs::read_link(&path).expect("read_link");
+                    out.insert(rel, target.to_string_lossy().into_owned().into_bytes());
+                } else if metadata.is_dir() {
+                    walk(&path, root, out);
+                } else {
+                    out.insert(rel, std::fs::read(&path).expect("read file"));
+                }
+            }
+        }
+        let mut out = std::collections::BTreeMap::new();
+        walk(
+            std::path::Path::new(cwd),
+            std::path::Path::new(cwd),
+            &mut out,
+        );
+        out
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn checkpoint_snapshots_dirty_work_without_moving_head_index_or_branches() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        init_git_seed(cwd);
+        std::fs::write(
+            std::path::Path::new(cwd).join(".gitignore"),
+            "node_modules/\n",
+        )
+        .unwrap();
+        git_commit_all(cwd, "add gitignore");
+        let base = git_head(cwd);
+
+        // Genuine dirt: a tracked edit and an untracked file, which the checkpoint must
+        // include, plus an untracked symlink that `.gitignore` fails to match (same
+        // trailing-slash bug as Defect A), which it must exclude.
+        std::fs::write(
+            std::path::Path::new(cwd).join("seed.txt"),
+            "line1\nline2\ndirty edit\n",
+        )
+        .unwrap();
+        std::fs::write(
+            std::path::Path::new(cwd).join("scratch.txt"),
+            "untracked work\n",
+        )
+        .unwrap();
+        let link_target = TempDir::new().expect("link target");
+        std::os::unix::fs::symlink(
+            link_target.path(),
+            std::path::Path::new(cwd).join("node_modules"),
+        )
+        .expect("symlink");
+
+        let workspace = TrustedWorkspace::granted_for_test(cwd).expect("cwd exists");
+        let symlinks = incidental_untracked_symlinks(&workspace)
+            .await
+            .expect("git status should run");
+        assert_eq!(symlinks, vec!["node_modules".to_string()]);
+
+        let status_before = git_stdout(cwd, &["status", "--porcelain=v1", "-uall"]);
+        let branches_before = git_stdout(cwd, &["branch", "--list"]);
+        let index_path = real_index_path_for_test(cwd);
+        let index_before = std::fs::read(&index_path).expect("index exists");
+
+        let checkpoint = build_review_checkpoint(&workspace, &base, "job-checkpoint-1", &symlinks)
+            .await
+            .expect("checkpoint should build");
+
+        // Nothing the user can see moved.
+        assert_eq!(git_head(cwd), base, "checkpoint must not move HEAD");
+        assert_eq!(
+            git_stdout(cwd, &["branch", "--list"]),
+            branches_before,
+            "checkpoint must not create/move/delete a branch"
+        );
+        assert_eq!(
+            std::fs::read(&index_path).expect("index still exists"),
+            index_before,
+            "checkpoint must not touch the user's real index"
+        );
+        assert_eq!(
+            git_stdout(cwd, &["status", "--porcelain=v1", "-uall"]),
+            status_before,
+            "the worktree's observable git status must be unchanged"
+        );
+
+        // The checkpoint itself: reachable via the ref, parented on `base`, contains the
+        // dirty content, excludes the symlink even though `.gitignore` fails to match it.
+        assert_eq!(
+            git_stdout(
+                cwd,
+                &["rev-parse", &checkpoint_ref_name("job-checkpoint-1")]
+            ),
+            checkpoint
+        );
+        assert_eq!(
+            git_stdout(cwd, &["rev-parse", &format!("{checkpoint}^")]),
+            base
+        );
+        let changed = git_stdout(cwd, &["diff", "--name-only", &base, &checkpoint]);
+        assert!(changed.contains("seed.txt"), "changed files: {changed}");
+        assert!(changed.contains("scratch.txt"), "changed files: {changed}");
+        assert!(
+            !changed.contains("node_modules"),
+            "the symlink must be excluded even though .gitignore fails to match it: {changed}"
+        );
+        // Name-only presence isn't enough proof — a checkpoint that staged either file
+        // empty or with the wrong bytes would still pass the assertions above.
+        assert_eq!(
+            git_stdout(cwd, &["show", &format!("{checkpoint}:seed.txt")]),
+            "line1\nline2\ndirty edit",
+            "the checkpoint must carry the actual dirty content, not just touch the file"
+        );
+        assert_eq!(
+            git_stdout(cwd, &["show", &format!("{checkpoint}:scratch.txt")]),
+            "untracked work",
+            "the checkpoint must carry the actual untracked content, not just touch the file"
+        );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_succeeds_with_no_git_identity_configured() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        init_git_seed(cwd);
+        let base = git_head(cwd);
+        // A repo with no identity configured must not hard-fail: `commit-tree` here must
+        // succeed via the EXPLICIT env vars this code sets, never by depending on the
+        // repository's own config (which `init_git_seed` set, and which we now remove).
+        git_stdout(cwd, &["config", "--unset", "user.email"]);
+        git_stdout(cwd, &["config", "--unset", "user.name"]);
+        std::fs::write(
+            std::path::Path::new(cwd).join("seed.txt"),
+            "line1\nline2\ndirty edit\n",
+        )
+        .unwrap();
+
+        let workspace = TrustedWorkspace::granted_for_test(cwd).expect("cwd exists");
+        let checkpoint = build_review_checkpoint(&workspace, &base, "job-checkpoint-2", &[])
+            .await
+            .expect("a repo with no configured identity must not hard-fail the checkpoint");
+
+        let identity = git_stdout(
+            cwd,
+            &["log", "-1", "--format=%an <%ae>%n%cn <%ce>", &checkpoint],
+        );
+        assert_eq!(
+            identity,
+            "sealwire-review <sealwire-review@localhost>\nsealwire-review <sealwire-review@localhost>",
+            "the checkpoint must carry its own fixed identity, never an ambient one: {identity}"
+        );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_ref_is_overwritten_across_rounds_not_accumulated() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        init_git_seed(cwd);
+        let base = git_head(cwd);
+        std::fs::write(std::path::Path::new(cwd).join("seed.txt"), "round one\n").unwrap();
+
+        let workspace = TrustedWorkspace::granted_for_test(cwd).expect("cwd exists");
+        let first = build_review_checkpoint(&workspace, &base, "job-checkpoint-3", &[])
+            .await
+            .expect("round one checkpoint");
+
+        std::fs::write(std::path::Path::new(cwd).join("seed.txt"), "round two\n").unwrap();
+        let second = build_review_checkpoint(&workspace, &base, "job-checkpoint-3", &[])
+            .await
+            .expect("round two checkpoint");
+
+        assert_ne!(first, second, "the two rounds produced different content");
+        assert_eq!(
+            git_stdout(
+                cwd,
+                &["rev-parse", &checkpoint_ref_name("job-checkpoint-3")]
+            ),
+            second,
+            "the SAME job's ref must be overwritten to the latest round, not accumulated"
+        );
+    }
+
+    #[tokio::test]
+    async fn dirty_only_after_author_turn_is_reviewed_via_checkpoint_not_the_historical_head() {
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();
         init_git_seed(cwd);
@@ -15780,6 +16073,7 @@ resurrected into a turn that never completes: {:?}",
         provider
             .auto_commit_author_changes
             .store(false, Ordering::Relaxed);
+        queue_verdicts(provider, &["APPROVE"]).await;
         let parent = start_parent(&app, cwd, "codex").await;
         app.send_message(crate::protocol::SendMessageInput {
             text: "try to fix it".to_string(),
@@ -15807,41 +16101,51 @@ resurrected into a turn that never completes: {:?}",
             .await
             .expect("review should start");
         let job = wait_for_review(&app, &receipt.review_job_id).await;
-        assert_eq!(job.status, "failed");
+        assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
         assert_eq!(job.base_sha.as_deref(), Some(round_base.as_str()));
-        assert!(job.candidate_sha.is_none());
         assert!(
-            job.error
-                .as_deref()
-                .unwrap_or_default()
-                .contains("did not create a commit"),
-            "failure should explain the missing committed candidate: {:?}",
-            job.error
+            job.candidate_sha.is_some(),
+            "a checkpoint candidate must be recorded even though HEAD never advanced"
         );
 
         let turns = provider.turns.lock().await.clone();
         assert!(
-            turns.iter().any(|(thread, text)| {
-                thread == &parent.id && text.contains("needs a committed candidate")
+            turns.iter().all(|(thread, text)| {
+                thread != &parent.id || !text.contains("needs a committed candidate")
             }),
-            "the same parent session must be asked to commit dirty-only work: {turns:?}"
+            "the parent must never be asked to commit dirty-only work: {turns:?}"
         );
         assert!(
             turns
                 .iter()
                 .all(|(_, text)| !text.contains("Committed review target")),
-            "reviewer must not inspect an unrelated historical HEAD: {turns:?}"
+            "this is a checkpoint, not a real committed candidate: {turns:?}"
         );
+        // THE SURVIVING GUARD (the reason this test exists): dirty-only work must never
+        // fall back to reviewing the unrelated historical HEAD^..HEAD range. That was
+        // the original bug — reviewing a historical commit while the real work sits in
+        // the worktree — and it is worse than the "fails, demands a commit" bug the
+        // checkpoint mechanism replaces. Only the MECHANISM changed here (checkpoint
+        // instead of fail); this invariant did not.
         assert!(
             turns.iter().all(|(_, text)| {
                 !text.contains(&format!("Range: {historical_base}..{round_base}"))
             }),
             "the historical HEAD^..HEAD range must not be reviewed: {turns:?}"
         );
+        let prompt = turns
+            .iter()
+            .find(|(_, text)| text.contains("Uncommitted worktree snapshot"))
+            .map(|(_, text)| text)
+            .expect("reviewer prompt should mark this as an uncommitted snapshot");
+        assert!(
+            prompt.contains(&format!("Range: {round_base}..")),
+            "the checkpoint must be parented on the round base, not the historical one: {prompt}"
+        );
     }
 
     #[tokio::test]
-    async fn dirty_git_review_requires_the_parent_session_to_commit_before_reviewing() {
+    async fn dirty_git_review_without_a_commit_is_reviewed_via_checkpoint() {
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();
         init_git_seed(cwd);
@@ -15854,9 +16158,13 @@ resurrected into a turn that never completes: {:?}",
 
         let (app, providers) = build_review_app(cwd, &["codex"]).await;
         let provider = providers.get("codex").unwrap();
+        // The author never commits, ever — not even if asked. If production code
+        // regresses back to asking, this proves the review still can't fall back on
+        // an obliging author to paper over it.
         provider
             .auto_commit_author_changes
             .store(false, Ordering::Relaxed);
+        queue_verdicts(provider, &["APPROVE"]).await;
         let parent = start_parent(&app, cwd, "codex").await;
 
         let receipt = app
@@ -15864,38 +16172,162 @@ resurrected into a turn that never completes: {:?}",
             .await
             .expect("review should start");
         let job = wait_for_review(&app, &receipt.review_job_id).await;
-        assert_eq!(job.status, "failed");
+        assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
         assert_eq!(job.base_sha.as_deref(), Some(base.as_str()));
         assert!(
-            job.candidate_sha.is_none(),
-            "no candidate can be persisted until HEAD advances"
+            job.candidate_sha.is_some(),
+            "a checkpoint candidate must be recorded even though HEAD never advanced"
         );
-        assert!(
-            job.error
-                .as_deref()
-                .unwrap_or_default()
-                .contains("did not create a commit"),
-            "failure should explain the invariant: {:?}",
-            job.error
+        // The checkpoint never moves HEAD by design, so a stale-approval check that
+        // compares HEAD against the CANDIDATE (the checkpoint's own, HEAD-unreachable
+        // sha) would misfire on every checkpoint approval. Prove it didn't: the verdict
+        // must survive as an actual approval, not get silently downgraded.
+        assert_eq!(
+            job.verdict.as_deref(),
+            Some("approve"),
+            "an APPROVE of a checkpoint must not be treated as stale just because HEAD \
+never moved to the checkpoint's own sha"
+        );
+        assert_eq!(
+            job.verdict_candidate_sha.as_deref(),
+            job.candidate_sha.as_deref(),
+            "the approved candidate must be recorded, not cleared by a false staleness hit"
         );
 
         let turns = provider.turns.lock().await.clone();
         assert!(
-            turns.iter().any(|(thread, text)| {
-                thread == &parent.id && text.contains("needs a committed candidate")
+            turns.iter().all(|(thread, text)| {
+                thread != &parent.id || !text.contains("needs a committed candidate")
             }),
-            "the same parent session must be asked to commit: {turns:?}"
+            "an author who will not commit must never be asked to: {turns:?}"
+        );
+        assert!(
+            turns.iter().all(|(_, text)| !text.contains("is stale")),
+            "a checkpoint approval must never be rewritten as stale: {turns:?}"
+        );
+        let prompt = turns
+            .iter()
+            .find(|(_, text)| text.contains("Uncommitted worktree snapshot"))
+            .map(|(_, text)| text)
+            .expect("reviewer prompt should mark this as an uncommitted snapshot");
+        // Names and manifest/stat only, same as the committed-candidate path — not raw
+        // patch content (see `dirty_git_review_persists_the_parent_commit_as_the_candidate`).
+        assert!(
+            prompt.contains("seed.txt"),
+            "the author's changed file must reach the reviewer via the manifest: {prompt}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dirty_git_review_via_checkpoint_completes_on_approve_in_a_multi_round_review() {
+        // The false-staleness bug hit multi-round reviews hardest: a true APPROVE got
+        // silently downgraded to NeedsChanges, which (with rounds remaining) sent the
+        // author a "fix" turn for findings that were never real — the review could
+        // never actually finish. Prove round 1 approves outright.
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        init_git_seed(cwd);
+        std::fs::write(
+            std::path::Path::new(cwd).join("seed.txt"),
+            "line1\nline2\nDIRTY_MULTI_ROUND\n",
+        )
+        .unwrap();
+
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let provider = providers.get("codex").unwrap();
+        provider
+            .auto_commit_author_changes
+            .store(false, Ordering::Relaxed);
+        queue_verdicts(provider, &["APPROVE"]).await;
+        start_parent(&app, cwd, "codex").await;
+
+        let receipt = app
+            .request_review(RequestReviewInput {
+                max_rounds: Some(3),
+                ..review_input("codex")
+            })
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
+        assert_eq!(
+            job.round, 1,
+            "a true APPROVE must complete on round 1, not loop into a fix turn"
+        );
+        assert_eq!(job.verdict.as_deref(), Some("approve"));
+
+        let turns = provider.turns.lock().await.clone();
+        assert!(
+            turns
+                .iter()
+                .all(|(_, text)| !text.contains("Address the findings below")),
+            "an approved checkpoint must never be sent back for a fix round: {turns:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_marker_survives_a_forced_workspace_gone_retry() {
+        // Regression for the mislabeling bug: a retried round used to read the
+        // already-persisted checkpoint sha back as a REAL candidate, routing the
+        // reviewer through the committed-candidate prompt and losing the "uncommitted
+        // worktree snapshot" marker (AC7). Forces exactly one retry deterministically —
+        // see `force_reviewer_creation_workspace_gone_once` — rather than racing a real
+        // directory disappearance against the background review task.
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        init_git_seed(cwd);
+        std::fs::write(
+            std::path::Path::new(cwd).join("seed.txt"),
+            "line1\nline2\nDIRTY_RETRY_PAYLOAD\n",
+        )
+        .unwrap();
+
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let provider = providers.get("codex").unwrap();
+        provider
+            .auto_commit_author_changes
+            .store(false, Ordering::Relaxed);
+        queue_verdicts(provider, &["APPROVE"]).await;
+        start_parent(&app, cwd, "codex").await;
+
+        app.force_reviewer_creation_workspace_gone_once();
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
+
+        let retried = app.relay.read().await.snapshot().logs.iter().any(|log| {
+            log.message
+                .contains("disappeared while starting the reviewer")
+        });
+        assert!(
+            retried,
+            "the forced WorkspaceGone must actually have triggered the retry path, \
+not just been ignored"
+        );
+
+        let turns = provider.turns.lock().await.clone();
+        assert!(
+            turns
+                .iter()
+                .any(|(_, text)| text.contains("Uncommitted worktree snapshot")),
+            "the reviewer prompt must still mark this as an uncommitted snapshot after \
+a retry: {turns:?}"
         );
         assert!(
             turns
                 .iter()
                 .all(|(_, text)| !text.contains("Committed review target")),
-            "the reviewer must not run before a candidate commit exists: {turns:?}"
+            "a retried checkpoint round must never fall through to the \
+committed-candidate prompt: {turns:?}"
         );
     }
 
     #[tokio::test]
-    async fn dirty_git_review_persists_the_parent_commit_as_the_candidate() {
+    async fn dirty_git_review_via_checkpoint_leaves_no_repo_mutation() {
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();
         init_git_seed(cwd);
@@ -15908,8 +16340,19 @@ resurrected into a turn that never completes: {:?}",
 
         let (app, providers) = build_review_app(cwd, &["codex"]).await;
         let provider = providers.get("codex").unwrap();
+        // No auto-commit either way: the point here is that the repo is untouched
+        // regardless of whether an obliging author would have committed.
+        provider
+            .auto_commit_author_changes
+            .store(false, Ordering::Relaxed);
         queue_verdicts(provider, &["APPROVE"]).await;
         let parent = start_parent(&app, cwd, "codex").await;
+
+        let status_before = git_stdout(cwd, &["status", "--porcelain=v1", "-uall"]);
+        let branches_before = git_stdout(cwd, &["branch", "--list"]);
+        let index_path = real_index_path_for_test(cwd);
+        let index_before = std::fs::read(&index_path).expect("index exists");
+        let worktree_before = worktree_files_snapshot(cwd);
 
         let receipt = app
             .request_review(review_input("codex"))
@@ -15917,35 +16360,59 @@ resurrected into a turn that never completes: {:?}",
             .expect("review should start");
         let job = wait_for_review(&app, &receipt.review_job_id).await;
         assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
-        let head = git_head(cwd);
-        assert_ne!(head, base, "the author commit should advance HEAD");
-        assert_eq!(job.base_sha.as_deref(), Some(base.as_str()));
-        assert_eq!(job.candidate_sha.as_deref(), Some(head.as_str()));
-        assert_eq!(job.verdict_candidate_sha.as_deref(), Some(head.as_str()));
+
+        // No repo mutation — asserted directly against `git`, not relay state.
+        assert_eq!(git_head(cwd), base, "checkpoint review must not move HEAD");
+        assert_eq!(
+            git_stdout(cwd, &["branch", "--list"]),
+            branches_before,
+            "checkpoint review must not create/move/delete a branch"
+        );
+        assert_eq!(
+            std::fs::read(&index_path).expect("index still exists"),
+            index_before,
+            "checkpoint review must not touch the user's real index"
+        );
+        assert_eq!(
+            git_stdout(cwd, &["status", "--porcelain=v1", "-uall"]),
+            status_before,
+            "the worktree's observable git status must be unchanged"
+        );
+        assert_eq!(
+            worktree_files_snapshot(cwd),
+            worktree_before,
+            "every worktree file must be byte-identical after the review, not just the \
+one that was dirty going in"
+        );
 
         let turns = provider.turns.lock().await.clone();
         assert!(
-            turns.iter().any(|(thread, text)| {
-                thread == &parent.id && text.contains("needs a committed candidate")
+            turns.iter().all(|(thread, text)| {
+                thread != &parent.id || !text.contains("needs a committed candidate")
             }),
-            "a dirty workspace must be sent back to the parent for a commit: {turns:?}"
+            "the author must never be asked to commit: {turns:?}"
         );
         let reviewer_thread = job.reviewer_thread_id.clone().expect("reviewer thread");
         let reviewer_prompt = turns
             .iter()
             .find(|(thread, text)| {
-                thread == &reviewer_thread && text.contains("Committed review target")
+                thread == &reviewer_thread && text.contains("Uncommitted worktree snapshot")
             })
             .map(|(_, text)| text)
-            .expect("reviewer prompt");
+            .expect(
+                "reviewer prompt should mark this as an uncommitted snapshot, not a branch commit",
+            );
         assert!(
-            reviewer_prompt.contains(&format!("Base commit: {base}"))
-                && reviewer_prompt.contains(&format!("Candidate commit: {head}")),
-            "reviewer prompt must bind to the commit the parent created: {reviewer_prompt}"
+            reviewer_prompt.contains(&format!("Base commit: {base}")),
+            "reviewer prompt must bind to the checkpoint's base: {reviewer_prompt}"
+        );
+        assert!(
+            !reviewer_prompt.contains("Committed review target"),
+            "an APPROVE here must never be misread as approving committed history: {reviewer_prompt}"
         );
         assert!(
             !reviewer_prompt.contains("DIRTY_CANDIDATE_PAYLOAD"),
-            "the committed prompt names objects and manifest/stat only, not raw patch content"
+            "the checkpoint prompt names objects and manifest/stat only, not raw patch content"
         );
     }
 
