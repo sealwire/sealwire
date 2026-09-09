@@ -80,6 +80,14 @@ function renderEntryMarkup(entry, options = null) {
   return renderToStaticMarkup(h(TranscriptEntry, { entry, options }));
 }
 
+// A question the turn is still PARKED on is not rendered by its row: the row is
+// held back and the live card is composed by TranscriptContent into the pinned
+// footer, driven by the pending request. Anything asserting on the answerable card
+// has to render at that level or it is testing a component the app never mounts.
+function renderPendingAskUserMarkup(entry, options = null) {
+  return renderToStaticMarkup(h(TranscriptContent, { entries: [entry], options }));
+}
+
 function renderApprovalMarkup(approval, options = null) {
   return renderToStaticMarkup(h(ApprovalCard, { approval, options }));
 }
@@ -2428,13 +2436,13 @@ test("renderEntryMarkup marks running AskUserQuestion as waiting for an answer",
   assert.doesNotMatch(markup, /ask-user-option is-chosen/);
 });
 
-test("renderEntryMarkup switches AskUserQuestion to interactive buttons + notes when a matching pending request is in the snapshot", () => {
+test("the pinned question card switches AskUserQuestion to interactive buttons + notes when a matching pending request is in the snapshot", () => {
   const entry = makeAskUserEntry({
     item_id: "tool:toolu_abc",
     status: "running",
     tool: { result_preview: null },
   });
-  const markup = renderEntryMarkup(entry, {
+  const markup = renderPendingAskUserMarkup(entry, {
     pendingAskUserQuestions: [
       { request_id: "ask:1", tool_use_id: "toolu_abc", thread_id: "t" },
     ],
@@ -2453,7 +2461,7 @@ test("renderEntryMarkup switches AskUserQuestion to interactive buttons + notes 
   assert.match(markup, /ask-user-status[^>]*>Tap an option or add a note</);
 });
 
-test("renderEntryMarkup stays interactive when a pending request matches even if the entry status is completed (status can desync on the remote surface)", () => {
+test("the pinned question card stays interactive when a pending request matches even if the entry status is completed (status can desync on the remote surface)", () => {
   const entry = makeAskUserEntry({
     item_id: "tool:toolu_abc",
     // A stale/desynced `completed` status must not downgrade a still-pending
@@ -2461,7 +2469,7 @@ test("renderEntryMarkup stays interactive when a pending request matches even if
     status: "completed",
     tool: { result_preview: null },
   });
-  const markup = renderEntryMarkup(entry, {
+  const markup = renderPendingAskUserMarkup(entry, {
     pendingAskUserQuestions: [
       { request_id: "ask:1", tool_use_id: "toolu_abc", thread_id: "t" },
     ],
@@ -2472,13 +2480,13 @@ test("renderEntryMarkup stays interactive when a pending request matches even if
   assert.doesNotMatch(markup, /ask-user-status[^>]*>Answered</);
 });
 
-test("renderEntryMarkup disables AskUserQuestion buttons while a submission is in flight", () => {
+test("the pinned question card disables AskUserQuestion buttons while a submission is in flight", () => {
   const entry = makeAskUserEntry({
     item_id: "tool:toolu_abc",
     status: "running",
     tool: { result_preview: null },
   });
-  const markup = renderEntryMarkup(entry, {
+  const markup = renderPendingAskUserMarkup(entry, {
     pendingAskUserQuestions: [
       { request_id: "ask:1", tool_use_id: "toolu_abc", thread_id: "t" },
     ],
@@ -2489,14 +2497,14 @@ test("renderEntryMarkup disables AskUserQuestion buttons while a submission is i
   assert.match(markup, /<button[^>]*class="ask-user-option[^"]*ask-user-option-button[^"]*"[^>]*disabled=""[^>]*>/);
 });
 
-test("renderEntryMarkup surfaces ask-user submission errors keyed by request_id", () => {
+test("the pinned question card surfaces ask-user submission errors keyed by request_id", () => {
   const entry = makeAskUserEntry({
     item_id: "tool:toolu_abc",
     status: "running",
     tool: { result_preview: null },
   });
   const errors = new Map([["ask:1", "Server said: no pending question"]]);
-  const markup = renderEntryMarkup(entry, {
+  const markup = renderPendingAskUserMarkup(entry, {
     pendingAskUserQuestions: [
       { request_id: "ask:1", tool_use_id: "toolu_abc", thread_id: "t" },
     ],
@@ -2505,7 +2513,7 @@ test("renderEntryMarkup surfaces ask-user submission errors keyed by request_id"
   assert.match(markup, /ask-user-error[^>]*>Server said: no pending question</);
 });
 
-test("renderEntryMarkup shows the wizard footer with Send to Claude on a multi-select question", () => {
+test("the pinned question card shows the wizard footer with Send to Claude on a multi-select question", () => {
   const entry = makeAskUserEntry({
     item_id: "tool:toolu_abc",
     status: "running",
@@ -2526,7 +2534,7 @@ test("renderEntryMarkup shows the wizard footer with Send to Claude on a multi-s
       }),
     },
   });
-  const markup = renderEntryMarkup(entry, {
+  const markup = renderPendingAskUserMarkup(entry, {
     pendingAskUserQuestions: [
       { request_id: "ask:1", tool_use_id: "toolu_abc", thread_id: "t" },
     ],
@@ -2541,7 +2549,7 @@ test("renderEntryMarkup shows the wizard footer with Send to Claude on a multi-s
   assert.match(markup, /aria-pressed="false"/);
 });
 
-test("renderEntryMarkup wizard shows one question at a time with progress + Back/Continue for multi-question prompts", () => {
+test("the pinned question card wizard shows one question at a time with progress + Back/Continue for multi-question prompts", () => {
   const entry = makeAskUserEntry({
     item_id: "tool:toolu_abc",
     status: "running",
@@ -2556,7 +2564,7 @@ test("renderEntryMarkup wizard shows one question at a time with progress + Back
       }),
     },
   });
-  const markup = renderEntryMarkup(entry, {
+  const markup = renderPendingAskUserMarkup(entry, {
     pendingAskUserQuestions: [
       { request_id: "ask:1", tool_use_id: "toolu_abc", thread_id: "t" },
     ],
@@ -2575,7 +2583,7 @@ test("renderEntryMarkup wizard shows one question at a time with progress + Back
   assert.match(markup, /ask-user-wizard-back[^>]*disabled=""[^>]*>Back</);
 });
 
-test("renderEntryMarkup wizard renders a notes textarea on every interactive step so users can elaborate", () => {
+test("the pinned question card wizard renders a notes textarea on every interactive step so users can elaborate", () => {
   const entry = makeAskUserEntry({
     item_id: "tool:toolu_abc",
     status: "running",
@@ -2588,7 +2596,7 @@ test("renderEntryMarkup wizard renders a notes textarea on every interactive ste
       }),
     },
   });
-  const markup = renderEntryMarkup(entry, {
+  const markup = renderPendingAskUserMarkup(entry, {
     pendingAskUserQuestions: [
       { request_id: "ask:1", tool_use_id: "toolu_abc", thread_id: "t" },
     ],
@@ -2629,7 +2637,7 @@ test("renderEntryMarkup falls back to generic tool rendering when AskUserQuestio
   assert.match(markup, /tool-log-name[^>]*>AskUserQuestion</);
 });
 
-test("renderEntryMarkup uses pending AskUserQuestion data when the tool input preview is truncated", () => {
+test("the pinned question card uses pending AskUserQuestion data when the tool input preview is truncated", () => {
   const entry = makeAskUserEntry({
     item_id: "tool:toolu_abc",
     status: "running",
@@ -2638,7 +2646,7 @@ test("renderEntryMarkup uses pending AskUserQuestion data when the tool input pr
       result_preview: null,
     },
   });
-  const markup = renderEntryMarkup(entry, {
+  const markup = renderPendingAskUserMarkup(entry, {
     pendingAskUserQuestions: [
       {
         request_id: "ask:1",
@@ -2677,7 +2685,7 @@ test("renderEntryMarkup uses pending AskUserQuestion data when the tool input pr
   assert.match(markup, /ask-user-wizard-next[^>]*disabled=""[^>]*>Continue</);
 });
 
-test("renderEntryMarkup renders incomplete pending AskUserQuestion as a loading card", () => {
+test("the pinned question card renders incomplete pending AskUserQuestion as a loading card", () => {
   const entry = makeAskUserEntry({
     item_id: "tool:toolu_large",
     status: "running",
@@ -2686,7 +2694,7 @@ test("renderEntryMarkup renders incomplete pending AskUserQuestion as a loading 
       result_preview: null,
     },
   });
-  const markup = renderEntryMarkup(entry, {
+  const markup = renderPendingAskUserMarkup(entry, {
     pendingAskUserQuestions: [
       {
         request_id: "ask:large",
@@ -2709,7 +2717,7 @@ test("renderEntryMarkup renders incomplete pending AskUserQuestion as a loading 
   assert.doesNotMatch(markup, /Send to Claude/);
 });
 
-test("renderEntryMarkup surfaces pending AskUserQuestion detail load errors", () => {
+test("the pinned question card surfaces pending AskUserQuestion detail load errors", () => {
   const entry = makeAskUserEntry({
     item_id: "tool:toolu_large",
     status: "running",
@@ -2718,7 +2726,7 @@ test("renderEntryMarkup surfaces pending AskUserQuestion detail load errors", ()
       result_preview: null,
     },
   });
-  const markup = renderEntryMarkup(entry, {
+  const markup = renderPendingAskUserMarkup(entry, {
     pendingAskUserQuestions: [
       {
         request_id: "ask:large",
