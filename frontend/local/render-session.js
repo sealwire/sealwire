@@ -221,8 +221,6 @@ import {
   isDocumentForeground,
 } from "../shared/thread-notify.js";
 import { LocalTranscriptPanel } from "./local-transcript-panel.js";
-import { AskUserDock } from "../shared/ask-user-dock.js";
-import { publishLocalAskUserDockContent } from "./ask-user-dock-slot.js";
 import { retainAskUserDraftsForPending } from "../shared/ask-user-draft-store.js";
 import { publishLocalTranscriptSlotContent } from "./transcript-slot.js";
 
@@ -498,12 +496,6 @@ export function createSessionRenderer({
     );
     const threadListUi = readThreadListUi(state.threadListStore);
     state.currentApprovalId = approval?.request_id || null;
-    // Published from the one place every render passes through, so leaving the
-    // conversation clears it. The card the turn is parked on is mounted beside
-    // the composer, not inside the transcript that scrolls and re-renders.
-    publishLocalAskUserDockContent(
-      buildAskUserDockContent(session, { viewingConversation, activeThreadFrozen })
-    );
 
     const activeProjectId = readActiveProjectId(state.threadListStore);
 
@@ -1480,34 +1472,6 @@ export function createSessionRenderer({
     void state.controller?.submitAskUserQuestionAnswer?.(requestId, answers);
   }
 
-  function buildAskUserDockContent(session, { viewingConversation, activeThreadFrozen }) {
-    // Review/Code Flow own the thread and answer nothing, and off the
-    // conversation there is no composer to dock above.
-    if (!viewingConversation || activeThreadFrozen) {
-      return null;
-    }
-    // Thread-filtered at the source, like the Orchestrator pane: the snapshot
-    // carries every thread's questions and the dock has no transcript entry to
-    // match them against.
-    const pending = pendingAskUserQuestionsForThread(session, session?.active_thread_id || null);
-    if (!pending.length) {
-      return null;
-    }
-    const localUi = readLocalUiState(state.localUiStore);
-    return h(AskUserDock, {
-      pendingAskUserQuestions: pending,
-      threadId: session?.active_thread_id || null,
-      options: {
-        onSubmitAskUserAnswers: handleSubmitAskUserAnswers,
-        askUserSubmittingRequestIds:
-          localUi.askUserSubmittingRequestIds instanceof Set
-            ? localUi.askUserSubmittingRequestIds
-            : new Set(),
-        askUserErrors: localUi.askUserErrors instanceof Map ? localUi.askUserErrors : new Map(),
-      },
-    });
-  }
-
   // Hoisted once per renderer instance for the same reason as
   // handleEnsureFileChangeDetail above: LocalTranscriptPanel calls this only
   // in its entries branch and owns the stableTranscriptOptions cache itself,
@@ -1543,21 +1507,24 @@ export function createSessionRenderer({
       onEnsureFileChangeDetail: handleEnsureFileChangeDetail,
       // Suppress the answer entry while the active thread is owned by
       // review/workflow; these orchestrators are non-interactive.
+      //
+      // Thread-filtered at the source, like the Orchestrator pane: a question
+      // whose row has not loaded is rendered from the REQUEST, and that card has
+      // no transcript entry to imply which conversation it belongs to. Unfiltered,
+      // a background thread's question would surface here and answering it would
+      // resume a turn the reader cannot see.
       pendingAskUserQuestions: isReviewInProgressForThread(
         session,
         session.active_thread_id
       ) || isWorkflowInProgressForThread(session, session.active_thread_id)
         ? []
-        : session?.pending_ask_user_questions || [],
+        : pendingAskUserQuestionsForThread(session, session.active_thread_id || null),
       onSubmitAskUserAnswers: handleSubmitAskUserAnswers,
       askUserSubmittingRequestIds:
         localUi.askUserSubmittingRequestIds instanceof Set
           ? localUi.askUserSubmittingRequestIds
           : new Set(),
       askUserErrors: localUi.askUserErrors instanceof Map ? localUi.askUserErrors : new Map(),
-      // The live card is docked beside the composer on this surface, so in the
-      // transcript an unanswered question renders as the record of the ask.
-      askUserDocked: true,
     };
   }
 
@@ -2298,7 +2265,6 @@ export function createSessionRenderer({
               // Orchestrator does not edit files, and the apply endpoint
               // resolves an item against the relay's ACTIVE thread, so acting
               // from this pane could mutate a different one.
-              askUserThreadId: orchId || null,
               transcriptOptions: {
                 currentCwd: session?.current_cwd || state.selectedCwd || "",
                 expandedKeys: localUi.transcriptExpandedItemIds,
@@ -2320,9 +2286,6 @@ export function createSessionRenderer({
                 pendingAskUserQuestions: orchId
                   ? pendingAskUserQuestionsForThread(session, orchId)
                   : [],
-                // Docked above this pane's composer like every other
-                // conversation, so in its transcript the question is a record.
-                askUserDocked: true,
                 onSubmitAskUserAnswers: (requestId, answers) => {
                   void state.controller?.submitAskUserQuestionAnswer?.(requestId, answers);
                 },

@@ -547,3 +547,24 @@ test("visiblePendingAskUserQuestions hides questions while the active thread is 
     questions
   );
 });
+
+// A snapshot carries every thread's questions. The transcript used to filter them
+// implicitly, by only ever rendering one it could match to a loaded row; now that
+// a question with no row is rendered from the request itself, that implicit filter
+// is gone and answering here would resume a turn the reader cannot see.
+test("visiblePendingAskUserQuestions keeps only the thread on screen", () => {
+  const questions = [
+    { request_id: "req-mine", thread_id: "thread-1" },
+    { request_id: "req-other", thread_id: "thread-2" },
+    // No thread_id at all: the relay omits it for the active thread's own
+    // question, so this one belongs here.
+    { request_id: "req-implicit" },
+  ];
+
+  assert.deepEqual(
+    visiblePendingAskUserQuestions({ activeThreadFrozen: false }, questions, "thread-1").map(
+      (r) => r.request_id
+    ),
+    ["req-mine", "req-implicit"]
+  );
+});

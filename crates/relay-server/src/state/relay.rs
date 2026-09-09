@@ -38,7 +38,9 @@ pub(crate) use self::push::{
     is_acceptable_push_endpoint, load_or_generate_vapid, vapid_key_path, PushAttentionTracker,
     PushDispatcher, PushJob, PushKind, PushSubscription, PushSubscriptionInput,
 };
-pub(crate) use self::runtime::{ThreadRuntime, TurnFailure, TurnFailureKind, TurnSpend};
+pub(crate) use self::runtime::{
+    CodexStartReservation, ThreadRuntime, TurnFailure, TurnFailureKind, TurnSpend,
+};
 pub(crate) use self::transcript::TranscriptRecord;
 
 const REMOTE_ACTION_REPLAY_TTL_SECS: u64 = 600;
@@ -4645,6 +4647,7 @@ impl RelayState {
         let now = unix_now();
         if let Some(thread_id) = self.active_thread_id.clone() {
             let runtime = self.ensure_runtime_for_thread(&thread_id);
+            runtime.clear_codex_reservation_for_active_turn(turn_id.as_deref());
             runtime.active_turn_id = turn_id;
             runtime.liveness_timed_out = false;
             runtime.liveness_stop_requested = false;
@@ -4688,6 +4691,26 @@ impl RelayState {
             // A running turn died — notify remote devices (and suppress the
             // work→idle "completed" the snapshot diff would otherwise emit).
             self.enqueue_error_push(&thread_id, "stopped unexpectedly — the agent exited.");
+        }
+        // Once this process is gone, an unresolved Codex start can no longer emit
+        // the notification that owns its placeholder. Release that fail-closed
+        // fence so a replacement provider can accept another turn.
+        let codex_threads: Vec<String> = self
+            .runtimes
+            .iter()
+            .filter(|(thread_id, runtime)| {
+                runtime.codex_start_reservation.is_some()
+                    && (runtime
+                        .summary
+                        .as_ref()
+                        .is_some_and(|summary| summary.provider == provider)
+                        || (self.active_thread_id.as_deref() == Some(thread_id.as_str())
+                            && self.provider_name == provider))
+            })
+            .map(|(thread_id, _)| thread_id.clone())
+            .collect();
+        for thread_id in codex_threads {
+            self.abandon_codex_start_reservation(&thread_id);
         }
     }
 

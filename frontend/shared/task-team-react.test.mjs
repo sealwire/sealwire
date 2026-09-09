@@ -226,13 +226,13 @@ test("the diagram renders exactly three seats, in team order", () => {
   const html = renderToStaticMarkup(
     h(TeamDiagram, { run: run({ sub_tasks: [subTask()] }) })
   );
-  assert.match(html, /Team lead/);
-  assert.match(html, /Developer/);
+  assert.match(html, /Planner/);
+  assert.match(html, /Implementer/);
   assert.match(html, /Reviewer/);
   // Anchored on a word boundary: `team-seat-head` and friends share the prefix.
   assert.equal(html.match(/class="team-seat[ "]/g).length, 3);
-  assert.ok(html.indexOf("Team lead") < html.indexOf("Developer"));
-  assert.ok(html.indexOf("Developer") < html.indexOf("Reviewer"));
+  assert.ok(html.indexOf("Planner") < html.indexOf("Implementer"));
+  assert.ok(html.indexOf("Implementer") < html.indexOf("Reviewer"));
 });
 
 test("an unseated role renders a disabled node rather than a dead link", () => {

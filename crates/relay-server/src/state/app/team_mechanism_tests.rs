@@ -349,6 +349,18 @@ async fn wait_for_team_status(
     panic!("task {run_id} never reached {expected:?}");
 }
 
+async fn wait_for_team_to_settle(app: &AppState, run_id: &str) -> crate::state::TeamRun {
+    for _ in 0..600 {
+        if let Some(run) = app.relay.read().await.team_run(run_id).cloned() {
+            if run.status.is_terminal() || run.status.is_settled_without_driver() {
+                return run;
+            }
+        }
+        sleep(Duration::from_millis(5)).await;
+    }
+    panic!("task {run_id} never settled");
+}
+
 async fn wait_until_condition(label: &str, mut ready: impl FnMut() -> bool) {
     tokio::time::timeout(Duration::from_secs(5), async {
         while !ready() {
@@ -398,6 +410,45 @@ async fn start_team_run_records_legacy_backend_before_driver_spawn() {
     assert_eq!(
         run.orchestration_backend,
         relay_api::orchestration::OrchestrationBackendRef::LegacyEmbedded
+    );
+    assert_eq!(
+        run.cycle_base_sha, run.base_commit,
+        "the first cycle must pin the worktree fork point instead of recalculating it later"
+    );
+}
+
+#[tokio::test]
+async fn reopen_pins_a_new_cycle_base_without_rewriting_the_original_fork_point() {
+    let (_repo, root) = init_team_repo().await;
+    let (app, _) = build_review_app(&root, &["codex"]).await;
+    let app = app.with_team_driver(std::sync::Arc::new(ReturningTeamDriver));
+
+    let run_id = app.start_team_run(team_input(&root)).await.expect("start");
+    let first = wait_for_team_status(&app, &run_id, crate::state::TeamRunStatus::Interrupted).await;
+    let original_fork = first.base_commit.clone();
+    std::fs::write(
+        std::path::Path::new(&first.cwd).join("between-cycles.rs"),
+        "pub fn between_cycles() {}\n",
+    )
+    .expect("between-cycle change");
+    let reopened_at = team_git_commit_all(&first.cwd, "between cycles");
+
+    app.reopen_team_run(
+        Some(run_id.clone()),
+        "continue from here",
+        &relay_api::team::TaskSpecUpdates::default(),
+        Some("device-1".to_string()),
+    )
+    .await
+    .expect("reopen");
+    let reopened =
+        wait_for_team_status(&app, &run_id, crate::state::TeamRunStatus::Interrupted).await;
+
+    assert_eq!(reopened.reopened_count, 1);
+    assert_eq!(reopened.base_commit, original_fork);
+    assert_eq!(
+        reopened.cycle_base_sha, reopened_at,
+        "the new cycle starts at the worktree HEAD that existed when it reopened"
     );
 }
 
@@ -2147,6 +2198,85 @@ async fn team_collect_diff_renders_only_the_committed_candidate_range() {
 }
 
 #[tokio::test]
+async fn head_movement_keeps_approval_bound_to_the_reviewed_candidate_without_blocking() {
+    let (_repo, root) = init_team_repo().await;
+    let reviewed_candidate = team_git_stdout(&root, &["rev-parse", "HEAD"]);
+    let (app, providers) = build_review_app(&root, &["codex"]).await;
+    providers
+        .get("codex")
+        .unwrap()
+        .scripted_replies
+        .lock()
+        .await
+        .push_back("VERDICT: APPROVED".to_string());
+
+    std::fs::write(
+        std::path::Path::new(&root).join("arrived-after-review.rs"),
+        "pub fn arrived_after_review() {}\n",
+    )
+    .expect("post-review change");
+    let newer_head = team_git_commit_all(&root, "change after review");
+    assert_ne!(reviewed_candidate, newer_head);
+
+    let run_id = "team-informational-review-staleness".to_string();
+    let mut run = crate::state::TeamRun::new(
+        run_id.clone(),
+        crate::state::TaskSpec::default(),
+        root.clone(),
+        "device-1".to_string(),
+    );
+    run.status = crate::state::TeamRunStatus::Running;
+    run.phase = relay_api::team::TeamPhase::MrGate;
+    run.reviewer_provider = "codex".to_string();
+    run.mr_candidate_sha = reviewed_candidate.clone();
+    app.relay.write().await.insert_team_run(run);
+
+    let reviewer =
+        relay_api::TeamPort::start_thread(&app, &run_id, relay_api::team::TeamRole::Reviewer)
+            .await
+            .expect("reviewer thread");
+    let outcome = relay_api::TeamPort::turn(
+        &app,
+        &run_id,
+        reviewer.slot,
+        relay_api::team::TeamRole::Reviewer,
+        "You are reviewing another agent's work.\n\nCommitted review target",
+    )
+    .await;
+
+    assert!(
+        matches!(outcome, relay_api::team::TeamTurnOutcome::Replied(_)),
+        "HEAD movement may make coverage informationally outdated, but must not emit a control-flow failure: {outcome:?}"
+    );
+    if let relay_api::team::TeamTurnOutcome::Replied(review) = &outcome {
+        assert!(
+            review.contains("VERDICT: APPROVED"),
+            "the fixture must exercise an approving verdict: {review:?}"
+        );
+    }
+    let run = app
+        .relay
+        .read()
+        .await
+        .team_run(&run_id)
+        .cloned()
+        .expect("run");
+    assert_eq!(
+        run.mr_candidate_sha, reviewed_candidate,
+        "the review record must keep the exact snapshot that was actually inspected"
+    );
+    assert_eq!(
+        run.mr_verdict_candidate_sha, reviewed_candidate,
+        "approval remains bound to the inspected candidate rather than being rebound to an unreviewed HEAD"
+    );
+    assert_eq!(
+        team_git_stdout(&root, &["rev-parse", "HEAD"]),
+        newer_head,
+        "recording review coverage must not rewrite the worktree"
+    );
+}
+
+#[tokio::test]
 async fn a_task_cannot_fork_from_a_worktree_outside_the_allowed_roots() {
     // Guarding only the DESTINATION is not enough. Provisioning reads and
     // MUTATES the origin's repository — it writes info/exclude in the common
@@ -3078,8 +3208,8 @@ struct DevThenReviewDriver {
     /// the reviewer thread) entirely — the sane thing a real driver does after
     /// a dev turn that did not land.
     reviewer_rounds: u32,
-    /// Test fixture for review-open paths: create work the port can ask the
-    /// same developer session to commit before review.
+    /// Test fixture for review-open paths: create work the port can freeze as
+    /// an immutable checkpoint before review.
     write_work_before_dev: bool,
     dev_outcome: std::sync::Arc<Mutex<Option<relay_api::team::TeamTurnOutcome>>>,
     reviewer_outcomes: std::sync::Arc<Mutex<Vec<relay_api::team::TeamTurnOutcome>>>,
@@ -3198,8 +3328,8 @@ impl relay_api::TeamDriver for DevThenReviewDriver {
 }
 
 /// Same as [`DevThenReviewDriver`], but writes an uncommitted file in the task
-/// worktree before the dev turn so the same-session commit retry can be
-/// exercised without a usage figure.
+/// worktree before the dev turn so hidden-checkpoint evidence can be exercised
+/// without a usage figure.
 struct UncommittedWorkThenReviewDriver {
     app: AppState,
     dev_outcome: std::sync::Arc<Mutex<Option<relay_api::team::TeamTurnOutcome>>>,
@@ -4243,13 +4373,18 @@ async fn a_spend_figure_from_another_turn_is_empty_output() {
     );
 }
 
-/// Uncommitted work relative to the checkpoint can land only after the relay
-/// sends the same developer session back to commit it.
+/// Uncommitted work is frozen into a hidden review checkpoint. The candidate is
+/// immutable for the reviewer without forcing a user-visible branch commit.
 #[tokio::test]
-async fn a_dev_turn_with_an_uncommitted_diff_commits_before_review() {
+async fn a_dev_turn_with_an_uncommitted_diff_reaches_review_via_checkpoint() {
     let (_repo, root) = init_team_repo().await;
     let (app, providers) = build_review_app(&root, &["codex"]).await;
-    let _ = &providers;
+    let initial_head = team_git_stdout(&root, &["rev-parse", "HEAD"]);
+    providers
+        .get("codex")
+        .unwrap()
+        .auto_commit_author_changes
+        .store(false, Ordering::Relaxed);
 
     let dev_outcome = std::sync::Arc::new(Mutex::new(None));
     let reviewer_outcomes = std::sync::Arc::new(Mutex::new(Vec::new()));
@@ -4263,17 +4398,22 @@ async fn a_dev_turn_with_an_uncommitted_diff_commits_before_review() {
     let mut input = team_input(&root);
     input.dev_provider = "codex".to_string();
     let run_id = app.start_team_run(input).await.expect("start");
-    let run = wait_for_team_status(&app, &run_id, crate::state::TeamRunStatus::Failed).await;
+    let run = wait_for_team_to_settle(&app, &run_id).await;
+    assert_eq!(
+        run.status,
+        crate::state::TeamRunStatus::Failed,
+        "checkpoint evidence should let the reviewer run before this fixture performs its final test failure"
+    );
 
     assert_eq!(
         run.sub_tasks[0].dev_turns_landed, 1,
-        "a nonempty diff relative to the checkpoint lands only as a committed candidate"
+        "a nonempty checkpoint diff is landed work even when HEAD does not move"
     );
     assert!(
         !run.sub_tasks[0].round_base_sha.is_empty()
             && !run.sub_tasks[0].candidate_sha.is_empty()
             && run.sub_tasks[0].candidate_sha != run.sub_tasks[0].round_base_sha,
-        "the dev round must record both its base and the committed candidate"
+        "the dev round must record both its base and its immutable checkpoint candidate"
     );
     assert!(
         !run.sub_tasks[0].base_commit.is_empty(),
@@ -4285,23 +4425,30 @@ async fn a_dev_turn_with_an_uncommitted_diff_commits_before_review() {
             Some(relay_api::team::TeamTurnOutcome::Failed(reason))
                 if reason == "This step hasn't produced any work yet. You can resume to run it again."
         ),
-        "the gate must not refuse the committed candidate made from dirty work"
+        "the gate must not refuse a checkpoint candidate made from dirty work"
     );
-    let dev_thread = run.sub_tasks[0]
-        .dev_thread_id
-        .as_deref()
-        .expect("dev thread");
+    assert_eq!(
+        team_git_stdout(&root, &["rev-parse", "HEAD"]),
+        initial_head,
+        "building review evidence must not commit onto the user's branch"
+    );
+    let checkpoint = run.sub_tasks[0].candidate_sha.clone();
+    let checkpoint_path = format!("{checkpoint}:parser.rs");
+    assert!(
+        team_git_stdout(&root, &["show", &checkpoint_path]).contains("pub fn parse()"),
+        "the hidden candidate must contain the uncommitted work"
+    );
     let turns = providers.get("codex").unwrap().turns.lock().await.clone();
     assert!(
-        turns.iter().any(|(thread, text)| {
-            thread == dev_thread && text.contains("needs a committed candidate")
-        }),
-        "the same developer session must be asked to commit before review: {turns:?}"
+        turns
+            .iter()
+            .all(|(_, text)| !text.contains("needs a committed candidate")),
+        "checkpointing must not spend an extra developer turn asking for a commit: {turns:?}"
     );
 }
 
 #[tokio::test]
-async fn a_later_sub_task_correction_with_no_commit_keeps_the_reviewer_gate_shut() {
+async fn a_later_sub_task_correction_with_uncommitted_changes_reaches_review() {
     let (_repo, root) = init_team_repo().await;
     let prior_candidate = team_git_stdout(&root, &["rev-parse", "HEAD"]);
     let (app, providers) = build_review_app(&root, &["codex"]).await;
@@ -4360,13 +4507,13 @@ async fn a_later_sub_task_correction_with_no_commit_keeps_the_reviewer_gate_shut
         "address the review finding",
     )
     .await;
-    match dev_outcome {
-        relay_api::team::TeamTurnOutcome::Blocked(reason) => assert!(
-            reason.contains("did not create a commit"),
-            "blocked reason should ask for a commit: {reason}"
+    assert!(
+        matches!(
+            dev_outcome,
+            relay_api::team::TeamTurnOutcome::Replied(_) | relay_api::team::TeamTurnOutcome::Silent
         ),
-        other => panic!("dirty-only correction must not look successful: {other:?}"),
-    }
+        "dirty-only correction should produce a checkpoint candidate: {dev_outcome:?}"
+    );
 
     let reviewer_seat =
         relay_api::TeamPort::start_thread(&app, &run_id, relay_api::team::TeamRole::Reviewer)
@@ -4387,13 +4534,14 @@ async fn a_later_sub_task_correction_with_no_commit_keeps_the_reviewer_gate_shut
         "review the correction",
     )
     .await;
-    match reviewer_outcome {
-        relay_api::team::TeamTurnOutcome::Failed(reason) => assert!(
-            reason.contains("current developer correction round has no new committed candidate"),
-            "reviewer refusal should be round-local: {reason}"
+    assert!(
+        !matches!(
+            reviewer_outcome,
+            relay_api::team::TeamTurnOutcome::Failed(_)
+                | relay_api::team::TeamTurnOutcome::Blocked(_)
         ),
-        other => panic!("reviewer must be refused before provider dispatch: {other:?}"),
-    }
+        "a checkpoint candidate must reach the reviewer: {reviewer_outcome:?}"
+    );
 
     let run = app
         .relay
@@ -4404,27 +4552,139 @@ async fn a_later_sub_task_correction_with_no_commit_keeps_the_reviewer_gate_shut
         .expect("run");
     assert_eq!(run.sub_tasks[0].round_base_sha, prior_candidate);
     assert!(
-        run.sub_tasks[0].candidate_sha.is_empty(),
-        "the stale prior candidate must be cleared for the correction round"
+        !run.sub_tasks[0].candidate_sha.is_empty()
+            && run.sub_tasks[0].candidate_sha != run.sub_tasks[0].round_base_sha,
+        "the dirty correction must be frozen as a distinct candidate"
+    );
+    assert_eq!(
+        team_git_stdout(&root, &["rev-parse", "HEAD"]),
+        run.sub_tasks[0].round_base_sha,
+        "the hidden correction candidate must not move HEAD"
+    );
+    let checkpoint_path = format!("{}:dirty-only.rs", run.sub_tasks[0].candidate_sha);
+    assert!(
+        team_git_stdout(&root, &["show", &checkpoint_path]).contains("pub fn dirty_only()"),
+        "the candidate must contain the uncommitted correction"
     );
     assert_eq!(run.sub_tasks[0].rounds_used, 1);
     let turns = codex.turns.lock().await.clone();
     assert!(
-        turns.iter().any(|(thread, text)| {
-            thread == &dev_thread && text.contains("needs a committed candidate")
-        }),
-        "the same dev must be asked to commit: {turns:?}"
+        turns
+            .iter()
+            .all(|(_, text)| !text.contains("needs a committed candidate")),
+        "checkpointing must not ask the dev to commit: {turns:?}"
     );
     assert!(
         turns
             .iter()
-            .all(|(_, text)| text != "review the correction"),
-        "a refused reviewer turn must not reach the provider: {turns:?}"
+            .any(|(_, text)| text == "review the correction"),
+        "the reviewer turn must reach the provider: {turns:?}"
     );
 }
 
 #[tokio::test]
-async fn a_later_mr_correction_with_no_commit_keeps_the_reviewer_gate_shut() {
+async fn an_unchanged_dirty_tree_does_not_fake_progress_after_checkpoint_review() {
+    let (_repo, root) = init_team_repo().await;
+    let (app, providers) = build_review_app(&root, &["codex"]).await;
+    providers
+        .get("codex")
+        .unwrap()
+        .auto_commit_author_changes
+        .store(false, Ordering::Relaxed);
+
+    let run_id = "team-checkpoint-no-op-correction".to_string();
+    let mut run = crate::state::TeamRun::new(
+        run_id.clone(),
+        crate::state::TaskSpec::default(),
+        root.clone(),
+        "device-1".to_string(),
+    );
+    run.status = crate::state::TeamRunStatus::Running;
+    run.phase = relay_api::team::TeamPhase::SubTasks;
+    run.dev_provider = "codex".to_string();
+    run.sub_tasks.push(crate::state::SubTask {
+        id: "st-1".to_string(),
+        status: crate::state::SubTaskStatus::Pending,
+        ..Default::default()
+    });
+    app.relay.write().await.insert_team_run(run);
+    let dev = relay_api::TeamPort::start_thread(&app, &run_id, relay_api::team::TeamRole::Dev)
+        .await
+        .expect("dev thread");
+    app.test_update_team_run(&run_id, {
+        let thread_id = dev.thread_id;
+        move |run| run.sub_tasks[0].dev_thread_id = Some(thread_id)
+    })
+    .await;
+    std::fs::write(
+        std::path::Path::new(&root).join("still-dirty.rs"),
+        "pub fn still_dirty() {}\n",
+    )
+    .expect("dirty work");
+
+    let first = relay_api::TeamPort::turn(
+        &app,
+        &run_id,
+        relay_api::team::TeamThreadSlot::SubTaskDev(0),
+        relay_api::team::TeamRole::Dev,
+        "produce the first candidate",
+    )
+    .await;
+    assert!(matches!(
+        first,
+        relay_api::team::TeamTurnOutcome::Replied(_) | relay_api::team::TeamTurnOutcome::Silent
+    ));
+    let first_candidate = app.relay.read().await.team_run(&run_id).unwrap().sub_tasks[0]
+        .candidate_sha
+        .clone();
+    assert!(!first_candidate.is_empty());
+    app.test_update_team_run(&run_id, |run| run.sub_tasks[0].rounds_used = 1)
+        .await;
+
+    let second = relay_api::TeamPort::turn(
+        &app,
+        &run_id,
+        relay_api::team::TeamThreadSlot::SubTaskDev(0),
+        relay_api::team::TeamRole::Dev,
+        "address findings without changing anything",
+    )
+    .await;
+    assert!(
+        matches!(second, relay_api::team::TeamTurnOutcome::Blocked(_)),
+        "the same dirty tree must compare equal to the previously reviewed checkpoint: {second:?}"
+    );
+    let run = app
+        .relay
+        .read()
+        .await
+        .team_run(&run_id)
+        .cloned()
+        .expect("run");
+    assert_eq!(run.sub_tasks[0].round_base_sha, first_candidate);
+    assert!(run.sub_tasks[0].candidate_sha.is_empty());
+
+    // The no-op capture has already advanced the one checkpoint ref. The
+    // candidate still recorded as this round's base must remain reachable
+    // through that ref, even under immediate pruning.
+    let checkpoint_ref = checkpoint_ref_name(&format!("team-{run_id}-sub-task-0"));
+    team_git_stdout(
+        &root,
+        &[
+            "merge-base",
+            "--is-ancestor",
+            &first_candidate,
+            &checkpoint_ref,
+        ],
+    );
+    team_git_stdout(&root, &["gc", "--prune=now"]);
+    team_git_stdout(
+        &root,
+        &["cat-file", "-e", &format!("{first_candidate}^{{commit}}")],
+    );
+}
+
+#[tokio::test]
+async fn a_later_mr_correction_with_uncommitted_changes_reaches_review() {
     let (_repo, root) = init_team_repo().await;
     let prior_candidate = team_git_stdout(&root, &["rev-parse", "HEAD"]);
     let (app, providers) = build_review_app(&root, &["codex"]).await;
@@ -4479,13 +4739,13 @@ async fn a_later_mr_correction_with_no_commit_keeps_the_reviewer_gate_shut() {
         "address final review findings",
     )
     .await;
-    match dev_outcome {
-        relay_api::team::TeamTurnOutcome::Blocked(reason) => assert!(
-            reason.contains("did not create a commit"),
-            "blocked reason should ask for a commit: {reason}"
+    assert!(
+        matches!(
+            dev_outcome,
+            relay_api::team::TeamTurnOutcome::Replied(_) | relay_api::team::TeamTurnOutcome::Silent
         ),
-        other => panic!("dirty-only MR correction must not look successful: {other:?}"),
-    }
+        "dirty-only MR correction should produce a checkpoint candidate: {dev_outcome:?}"
+    );
 
     let reviewer_seat =
         relay_api::TeamPort::start_thread(&app, &run_id, relay_api::team::TeamRole::Reviewer)
@@ -4499,13 +4759,14 @@ async fn a_later_mr_correction_with_no_commit_keeps_the_reviewer_gate_shut() {
         "review final candidate",
     )
     .await;
-    match reviewer_outcome {
-        relay_api::team::TeamTurnOutcome::Failed(reason) => assert!(
-            reason.contains("current developer correction round has no new committed candidate"),
-            "reviewer refusal should be round-local: {reason}"
+    assert!(
+        !matches!(
+            reviewer_outcome,
+            relay_api::team::TeamTurnOutcome::Failed(_)
+                | relay_api::team::TeamTurnOutcome::Blocked(_)
         ),
-        other => panic!("MR reviewer must be refused before provider dispatch: {other:?}"),
-    }
+        "an MR checkpoint candidate must reach the reviewer: {reviewer_outcome:?}"
+    );
 
     let run = app
         .relay
@@ -4516,22 +4777,32 @@ async fn a_later_mr_correction_with_no_commit_keeps_the_reviewer_gate_shut() {
         .expect("run");
     assert_eq!(run.mr_round_base_sha, prior_candidate);
     assert!(
-        run.mr_candidate_sha.is_empty(),
-        "the stale prior MR candidate must be cleared for the correction round"
+        !run.mr_candidate_sha.is_empty() && run.mr_candidate_sha != run.mr_round_base_sha,
+        "the dirty MR correction must be frozen as a distinct candidate"
+    );
+    assert_eq!(
+        team_git_stdout(&root, &["rev-parse", "HEAD"]),
+        run.mr_round_base_sha,
+        "the hidden MR candidate must not move HEAD"
+    );
+    let checkpoint_path = format!("{}:dirty-mr-only.rs", run.mr_candidate_sha);
+    assert!(
+        team_git_stdout(&root, &["show", &checkpoint_path]).contains("pub fn dirty_mr_only()"),
+        "the MR candidate must contain the uncommitted correction"
     );
     assert_eq!(run.mr_rounds_used, 1);
     let turns = codex.turns.lock().await.clone();
     assert!(
-        turns.iter().any(|(thread, text)| {
-            thread == &dev_thread && text.contains("needs a committed candidate")
-        }),
-        "the same MR dev must be asked to commit: {turns:?}"
+        turns
+            .iter()
+            .all(|(_, text)| !text.contains("needs a committed candidate")),
+        "checkpointing must not ask the MR dev to commit: {turns:?}"
     );
     assert!(
         turns
             .iter()
-            .all(|(_, text)| text != "review final candidate"),
-        "a refused MR reviewer turn must not reach the provider: {turns:?}"
+            .any(|(_, text)| text == "review final candidate"),
+        "the MR reviewer turn must reach the provider: {turns:?}"
     );
 }
 
@@ -5893,11 +6164,17 @@ impl relay_api::TeamDriver for ActionTableDriver {
             match run.sub_tasks[0].status {
                 crate::state::SubTaskStatus::Pending => {
                     let dev_attempt = self.dev_outcomes.lock().await.len();
-                    std::fs::write(
-                        std::path::Path::new(&run.cwd).join(format!("parser-{dev_attempt}.rs")),
-                        format!("pub fn parse_{dev_attempt}() {{}}\n"),
-                    )
-                    .expect("candidate work for the dev turn");
+                    // Attempt zero deliberately produces no repository change,
+                    // so the reviewer refusal path below is exercised. The
+                    // resumed attempt writes real work and therefore creates a
+                    // reviewable candidate even if it remains uncommitted.
+                    if dev_attempt > 0 {
+                        std::fs::write(
+                            std::path::Path::new(&run.cwd).join(format!("parser-{dev_attempt}.rs")),
+                            format!("pub fn parse_{dev_attempt}() {{}}\n"),
+                        )
+                        .expect("candidate work for the resumed dev turn");
+                    }
                     let outcome = port
                         .turn(
                             &run_id,
@@ -5964,9 +6241,9 @@ async fn a_refused_review_resets_the_sub_task_so_a_resume_drives_dev_not_review(
     let (_repo, root) = init_team_repo().await;
     let (app, providers) = build_review_app(&root, &["codex"]).await;
     let codex = providers.get("codex").unwrap().clone();
-    // Round one's dev turn completes but emits no assistant text (Silent) —
-    // the shape `dev_turns_landed` must not count — so the reviewer gate
-    // refuses it.
+    // Round one's dev turn completes but emits no assistant text and produces
+    // no repository change, so the reviewer gate refuses it. A dirty change
+    // would now be a legitimate hidden-checkpoint candidate and must count.
     codex.emit_assistant.store(false, Ordering::Relaxed);
     codex
         .auto_commit_author_changes
@@ -6176,6 +6453,15 @@ async fn delete_task_drops_a_finished_run_and_its_seat_threads() {
         crate::state::TeamRunStatus::Done,
     )
     .await;
+    let head = team_git_stdout(&root, &["rev-parse", "HEAD"]);
+    let owned_checkpoint_prefix = "refs/sealwire/reviews/team-team-done-a-";
+    for reference in [
+        "refs/sealwire/reviews/team-team-done-a-mr",
+        "refs/sealwire/reviews/team-team-done-a-future-slot-shape",
+        "refs/sealwire/reviews/team-team-done-b-mr",
+    ] {
+        team_git_stdout(&root, &["update-ref", reference, &head]);
+    }
     let before = app.list_threads(50, None).await.expect("list before");
     assert!(
         thread_ids_present(&before, &[&tl_a, &dev_a, &rev_a]),
@@ -6204,6 +6490,25 @@ async fn delete_task_drops_a_finished_run_and_its_seat_threads() {
             "provider storage must drop seat {id}"
         );
     }
+    drop(stored);
+    let remaining_refs = team_git_stdout(
+        &root,
+        &[
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/sealwire/reviews/",
+        ],
+    );
+    assert!(
+        remaining_refs
+            .lines()
+            .all(|reference| !reference.starts_with(owned_checkpoint_prefix)),
+        "deleting a task must remove every current or future checkpoint shape under its prefix: {remaining_refs}"
+    );
+    assert!(
+        remaining_refs.contains("refs/sealwire/reviews/team-team-done-b-mr"),
+        "prefix cleanup must leave another task's checkpoints alone: {remaining_refs}"
+    );
 }
 
 #[tokio::test]

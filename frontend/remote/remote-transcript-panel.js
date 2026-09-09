@@ -25,6 +25,7 @@ export function RemoteTranscriptPanel({
   onToggleExpandableBlock,
   onSubmitDecision,
   onSubmitAskUserAnswers,
+  onRetryAskUserDetail,
   onToggleTranscriptItem,
   onEnsureFileChangeDetail,
   pendingAskUserQuestions,
@@ -89,9 +90,9 @@ export function RemoteTranscriptPanel({
       askUserDetailLoadingRequestIds instanceof Set
         ? askUserDetailLoadingRequestIds
         : new Set(),
-    // The live card is docked beside the composer on this surface too, so here
-    // an unanswered question renders as the record of the ask.
-    askUserDocked: true,
+    // Re-fetching a question whose text was too big to inline. Only this surface
+    // externalizes it, and without the retry a failed fetch is a dead card.
+    onRetryAskUserDetail,
   });
   const transcriptOptions = transcriptOptionsRef.current;
 

@@ -2749,6 +2749,259 @@ fn agent_completed(thread_id: &str, turn_id: &str, item_id: &str, text: &str) ->
     })
 }
 
+fn user_message_completed(
+    thread_id: &str,
+    turn_id: &str,
+    item_id: &str,
+    text: &str,
+) -> serde_json::Value {
+    json!({
+        "method": "item/completed",
+        "params": {
+            "threadId": thread_id,
+            "turnId": turn_id,
+            "item": {
+                "id": item_id,
+                "type": "userMessage",
+                "content": [{ "type": "inputText", "text": text }]
+            }
+        }
+    })
+}
+
+async fn activate_fake_codex_thread(
+    bridge: &CodexBridge,
+    state: &std::sync::Arc<RwLock<RelayState>>,
+) -> String {
+    let thread = bridge
+        .start_thread(
+            "/tmp/project",
+            "gpt-5-codex",
+            "on-request",
+            "workspace-write",
+        )
+        .await
+        .expect("start fake Codex thread");
+    let thread_id = thread.id.clone();
+    let mut relay = state.write().await;
+    relay.upsert_thread(thread.clone());
+    relay.active_thread_id = Some(thread_id.clone());
+    relay.ensure_runtime_for_thread(&thread_id).summary = Some(thread);
+    thread_id
+}
+
+#[tokio::test]
+async fn codex_reservation_keeps_late_user_echo_before_output() {
+    let (bridge, state) = spawn_fake_codex_bridge().await;
+    let thread_id = activate_fake_codex_thread(&bridge, &state).await;
+    let turn_id = bridge
+        .start_turn(&thread_id, "first question", "gpt-5-codex", "medium")
+        .await
+        .expect("start turn")
+        .expect("turn id");
+    let overlap = bridge
+        .start_turn(&thread_id, "overlap", "gpt-5-codex", "medium")
+        .await
+        .expect_err("the response-to-app handoff must remain an admission fence");
+    assert!(overlap.contains("still unresolved"), "{overlap}");
+    state.write().await.set_active_turn(Some(turn_id.clone()));
+
+    handle_notification(agent_started(&thread_id, &turn_id, "agent-1"), &state).await;
+    handle_notification(
+        agent_delta(&thread_id, &turn_id, "agent-1", "working"),
+        &state,
+    )
+    .await;
+    handle_notification(
+        user_message_completed(&thread_id, &turn_id, "provider-user-1", "first question"),
+        &state,
+    )
+    .await;
+
+    let relay = state.read().await;
+    let runtime = relay
+        .runtime_for_thread(&thread_id)
+        .expect("thread runtime");
+    let turn_entries = runtime
+        .transcript
+        .iter()
+        .filter(|entry| entry.turn_id.as_deref() == Some(turn_id.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(turn_entries.len(), 2);
+    assert_eq!(turn_entries[0].kind, TranscriptEntryKind::UserText);
+    assert_eq!(turn_entries[0].item_id, "provider-user-1");
+    assert_eq!(turn_entries[1].kind, TranscriptEntryKind::AgentText);
+}
+
+#[tokio::test]
+async fn uncertain_codex_start_blocks_retry_until_late_turn_is_identified() {
+    let (bridge, state) = spawn_fake_codex_bridge().await;
+    let thread_id = activate_fake_codex_thread(&bridge, &state).await;
+    configure_fake_codex_drop_turn_start(&bridge).await;
+    bridge.set_test_request_timeout_ms(100);
+    let bridge = std::sync::Arc::new(bridge);
+
+    let first = {
+        let bridge = bridge.clone();
+        let thread_id = thread_id.clone();
+        tokio::spawn(async move {
+            bridge
+                .start_turn(&thread_id, "prompt A", "gpt-5-codex", "medium")
+                .await
+        })
+    };
+    wait_for_codex_method_count(&state, "turn/start", 1).await;
+
+    let retry_error = bridge
+        .start_turn(&thread_id, "prompt B", "gpt-5-codex", "medium")
+        .await
+        .expect_err("a concurrent retry must not replace A's reservation");
+    assert!(retry_error.contains("still unresolved"), "{retry_error}");
+    let timeout_error = first
+        .await
+        .expect("join first start")
+        .expect_err("the fake drops A's response");
+    assert!(timeout_error.contains("timed out"), "{timeout_error}");
+
+    {
+        let relay = state.read().await;
+        let runtime = relay
+            .runtime_for_thread(&thread_id)
+            .expect("thread runtime");
+        let reservation = runtime
+            .codex_start_reservation
+            .as_ref()
+            .expect("uncertain A must retain its admission fence");
+        assert!(reservation.turn_id.is_none());
+        assert_eq!(
+            runtime
+                .transcript
+                .iter()
+                .filter(|entry| entry.kind == TranscriptEntryKind::UserText)
+                .count(),
+            1
+        );
+    }
+
+    // Codex can expose accepted work before either the response or
+    // `turn/started`. Any item carrying the id must identify A without moving
+    // its placeholder.
+    handle_notification(
+        agent_started(&thread_id, "turn-late-a", "agent-late-a"),
+        &state,
+    )
+    .await;
+    handle_notification(
+        agent_delta(&thread_id, "turn-late-a", "agent-late-a", "late output"),
+        &state,
+    )
+    .await;
+    handle_notification(
+        user_message_completed(&thread_id, "turn-late-a", "provider-user-a", "prompt A"),
+        &state,
+    )
+    .await;
+    handle_notification(turn_completed(&thread_id, "turn-late-a"), &state).await;
+
+    configure_fake_codex(&bridge, "normal", 0).await;
+    let second_turn = bridge
+        .start_turn(&thread_id, "prompt B", "gpt-5-codex", "medium")
+        .await
+        .expect("B may start after A is identified and settled")
+        .expect("B turn id");
+    state
+        .write()
+        .await
+        .set_active_turn(Some(second_turn.clone()));
+    let relay = state.read().await;
+    let runtime = relay
+        .runtime_for_thread(&thread_id)
+        .expect("thread runtime");
+    assert!(runtime.codex_start_reservation.is_none());
+    assert!(runtime.transcript.iter().any(|entry| {
+        entry.kind == TranscriptEntryKind::UserText
+            && entry.text.as_deref() == Some("prompt A")
+            && entry.turn_id.as_deref() == Some("turn-late-a")
+    }));
+    assert!(runtime.transcript.iter().any(|entry| {
+        entry.kind == TranscriptEntryKind::UserText
+            && entry.text.as_deref() == Some("prompt B")
+            && entry.turn_id.as_deref() == Some(second_turn.as_str())
+    }));
+    let a_entries = runtime
+        .transcript
+        .iter()
+        .filter(|entry| entry.turn_id.as_deref() == Some("turn-late-a"))
+        .collect::<Vec<_>>();
+    assert_eq!(a_entries[0].kind, TranscriptEntryKind::UserText);
+    assert_eq!(a_entries[1].kind, TranscriptEntryKind::AgentText);
+}
+
+#[tokio::test]
+async fn stale_codex_turn_started_cannot_claim_the_next_reservation() {
+    let state = codex_test_state_with_thread("thread-stale-start").await;
+    {
+        let mut relay = state.write().await;
+        relay
+            .begin_codex_user_turn("thread-stale-start", "prompt A")
+            .expect("reserve A");
+    }
+    handle_notification(turn_started("thread-stale-start", "turn-a"), &state).await;
+    handle_notification(turn_completed("thread-stale-start", "turn-a"), &state).await;
+    let b_reservation = {
+        state
+            .write()
+            .await
+            .begin_codex_user_turn("thread-stale-start", "prompt B")
+            .expect("reserve B")
+    };
+
+    handle_notification(turn_started("thread-stale-start", "turn-a"), &state).await;
+    {
+        let relay = state.read().await;
+        let runtime = relay
+            .runtime_for_thread("thread-stale-start")
+            .expect("thread runtime");
+        assert!(runtime.active_turn_id.is_none());
+        let reservation = runtime
+            .codex_start_reservation
+            .as_ref()
+            .expect("B reservation must survive stale A");
+        assert_eq!(reservation.item_id, b_reservation);
+        assert!(reservation.turn_id.is_none());
+    }
+
+    handle_notification(turn_started("thread-stale-start", "turn-b"), &state).await;
+    let relay = state.read().await;
+    let runtime = relay
+        .runtime_for_thread("thread-stale-start")
+        .expect("thread runtime");
+    assert_eq!(runtime.active_turn_id.as_deref(), Some("turn-b"));
+    assert!(runtime.codex_start_reservation.is_none());
+}
+
+#[tokio::test]
+async fn rejected_codex_start_removes_its_placeholder() {
+    let (bridge, state) = spawn_fake_codex_bridge().await;
+    let thread_id = activate_fake_codex_thread(&bridge, &state).await;
+    configure_fake_codex_reject_turn_start(&bridge).await;
+
+    let error = bridge
+        .start_turn(&thread_id, "rejected prompt", "gpt-5-codex", "medium")
+        .await
+        .expect_err("fake policy rejects turn/start");
+    assert_eq!(error, "turn rejected by test policy");
+    let relay = state.read().await;
+    let runtime = relay
+        .runtime_for_thread(&thread_id)
+        .expect("thread runtime");
+    assert!(runtime.codex_start_reservation.is_none());
+    assert!(!runtime.transcript.iter().any(|entry| {
+        entry.kind == TranscriptEntryKind::UserText
+            && entry.text.as_deref() == Some("rejected prompt")
+    }));
+}
+
 #[tokio::test]
 async fn replay_harness_prevents_stuck_state_after_background_completion() {
     let harness = CodexReplayHarness::new("thread-A").await;
@@ -3656,6 +3909,30 @@ async fn configure_fake_codex(bridge: &CodexBridge, mode: &str, delay_ms: u64) {
         )
         .await
         .expect("configure fake Codex app-server");
+}
+
+async fn configure_fake_codex_reject_turn_start(bridge: &CodexBridge) {
+    bridge
+        .send_request(
+            "fake/configure",
+            json!({
+                "rejectTurnStart": true,
+            }),
+        )
+        .await
+        .expect("configure fake Codex to reject turn/start");
+}
+
+async fn configure_fake_codex_drop_turn_start(bridge: &CodexBridge) {
+    bridge
+        .send_request(
+            "fake/configure",
+            json!({
+                "dropTurnStart": true,
+            }),
+        )
+        .await
+        .expect("configure fake Codex to drop turn/start responses");
 }
 
 /// The JSON-RPC methods the fake app-server actually received, oldest first.

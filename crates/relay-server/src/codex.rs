@@ -73,6 +73,9 @@ pub struct CodexBridge {
     next_request_id: AtomicU64,
     state: Arc<RwLock<RelayState>>,
     provider_name: &'static str,
+    /// Test-only per-bridge JSON-RPC timeout override (milliseconds). Zero = default.
+    #[cfg(test)]
+    test_request_timeout_ms: AtomicU64,
 }
 
 #[async_trait]
@@ -374,6 +377,8 @@ impl CodexBridge {
             next_request_id: AtomicU64::new(1),
             state,
             provider_name: provider_key,
+            #[cfg(test)]
+            test_request_timeout_ms: AtomicU64::new(0),
         };
 
         bridge.initialize().await?;
@@ -722,6 +727,24 @@ impl CodexBridge {
         let policy = policy
             .as_ref()
             .map(|(approval, sandbox)| (approval.as_str(), sandbox.as_str()));
+
+        // Reserve under the relay lock so concurrent starts cannot share one user slot.
+        let reservation_id = {
+            let transcript_text = user_message_transcript_text(text, images.len())
+                .unwrap_or_else(|| text.to_string());
+            let mut relay = self.state.write().await;
+            match relay.begin_codex_user_turn(thread_id, &transcript_text) {
+                Ok(reservation_id) => {
+                    relay.notify();
+                    reservation_id
+                }
+                Err(error) => {
+                    relay.notify();
+                    return Err(error);
+                }
+            }
+        };
+
         let params = if images.is_empty() {
             codex_turn_start_params(thread_id, text, model, effort, policy)
         } else {
@@ -767,6 +790,7 @@ impl CodexBridge {
                     .await
                 {
                     let mut relay = self.state.write().await;
+                    relay.fail_codex_user_turn_definitive(thread_id, &reservation_id);
                     relay.push_log(
                         "warn",
                         format!(
@@ -816,14 +840,42 @@ read-only with approvals required. Change File access if this turn needs to writ
                 } else {
                     params
                 };
-                self.send_request("turn/start", params).await?
+                match self.send_request("turn/start", params).await {
+                    Ok(result) => result,
+                    Err(error) => {
+                        let mut relay = self.state.write().await;
+                        finish_codex_turn_start_error(
+                            &mut relay,
+                            thread_id,
+                            &reservation_id,
+                            &error,
+                        );
+                        relay.notify();
+                        return Err(error);
+                    }
+                }
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                let mut relay = self.state.write().await;
+                finish_codex_turn_start_error(&mut relay, thread_id, &reservation_id, &error);
+                relay.notify();
+                return Err(error);
+            }
         };
 
-        Ok(value_at(&result, &["turn", "id"])
+        let turn_id = value_at(&result, &["turn", "id"])
             .and_then(Value::as_str)
-            .map(ToOwned::to_owned))
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| {
+                "Codex app-server returned `turn/start` without a turn id; the start remains unresolved"
+                    .to_string()
+            })?;
+        {
+            let mut relay = self.state.write().await;
+            relay.bind_codex_user_reservation(thread_id, &reservation_id, &turn_id);
+            relay.notify();
+        }
+        Ok(Some(turn_id))
     }
 
     pub async fn interrupt_turn(&self, thread_id: &str, turn_id: &str) -> Result<(), String> {
@@ -865,6 +917,25 @@ read-only with approvals required. Change File access if this turn needs to writ
 /// thread up, so this fallback must never drift to a relay-level word.
 const STRICTEST_APPROVAL_POLICY: &str = "untrusted";
 const STRICTEST_SANDBOX: &str = "read-only";
+
+fn is_uncertain_turn_start_error(error: &str) -> bool {
+    error.contains("timed out waiting for `turn/start`")
+        || error.contains("dropped the response channel for `turn/start`")
+        || error.contains("failed to write to codex app-server stdin")
+        || error.contains("failed to finalize codex app-server message")
+        || error.contains("failed to flush codex app-server stdin")
+}
+
+fn finish_codex_turn_start_error(
+    relay: &mut RelayState,
+    thread_id: &str,
+    reservation_id: &str,
+    error: &str,
+) {
+    if !is_uncertain_turn_start_error(error) {
+        relay.fail_codex_user_turn_definitive(thread_id, reservation_id);
+    }
+}
 
 /// Does this `turn/start` failure mean "codex has no live handle for this
 /// thread" (as opposed to a genuine turn error)? Codex serves `thread/read` off

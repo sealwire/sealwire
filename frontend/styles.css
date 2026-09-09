@@ -2368,6 +2368,26 @@ body.sidebar-collapsed .app-shell[data-view="tasks"] #tasks-sidebar-toggle {
   color: var(--text-3);
   line-height: var(--leading-relaxed);
 }
+.task-orch-proposal-agents {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 0 12px;
+  padding: 0;
+  list-style: none;
+}
+.task-orch-proposal-agent {
+  margin: 0;
+  font-size: var(--text-xs);
+  line-height: var(--leading-relaxed);
+  color: var(--text-2);
+}
+.task-orch-proposal-agent-seat {
+  color: var(--text-3);
+}
+.task-orch-proposal-agent-value {
+  color: var(--text-1);
+}
 .task-orch-card-action {
   display: inline-flex;
   margin-bottom: 10px;

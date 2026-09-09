@@ -572,59 +572,79 @@ async function exerciseAskUserPin(page, label) {
   );
   await delay(700);
 
-  const docked = await page.evaluate((needle) => {
+  const parked = await page.evaluate((needle) => {
     const scroller = document.querySelector(".chat-thread");
     const live = document.querySelector(".chat-message-ask-user-interactive");
-    const record = document.querySelector(".chat-thread .chat-message-ask-user");
     const trailing = [...document.querySelectorAll(".chat-thread .chat-message")].find((node) =>
       (node.textContent || "").includes(needle)
     );
-    if (!scroller || !live || !record || !trailing) return null;
+    if (!scroller || !live || !trailing) return null;
     const l = live.getBoundingClientRect();
     const s = scroller.getBoundingClientRect();
+      // Content-independent form of "no second scroller": the card's nearest
+      // scrollable ancestor must BE the conversation. Counting elements that
+      // currently overflow depends on how much text the fixture happens to have.
+      const scrollParentOf = (el) => {
+        for (let p = el?.parentElement; p; p = p.parentElement) {
+          if (/(auto|scroll)/.test(getComputedStyle(p).overflowY)) return p;
+        }
+        return null;
+      };
+
     return {
       liveCards: document.querySelectorAll(".chat-message-ask-user-interactive").length,
       liveInScroller: scroller.contains(live),
-      liveInDock: Boolean(live.closest(".ask-user-dock")),
+      liveInPinned: Boolean(live.closest(".transcript-ask-user-pinned")),
+      liveVirtualized: Boolean(live.closest(".transcript-virtual-spacer")),
       liveTop: Math.round(l.top),
       liveBottom: Math.round(l.bottom),
-      recordTop: Math.round(record.getBoundingClientRect().top),
       trailingTop: Math.round(trailing.getBoundingClientRect().top),
       optionsInScroller: scroller.querySelectorAll(".ask-user-option-button").length,
+      viewTop: Math.round(s.top),
       viewBottom: Math.round(s.bottom),
+      cardScrollParentIsTranscript: scrollParentOf(live) === scroller,
       distance: Math.round(
         Math.max(0, scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop)
       ),
     };
   }, ASK_USER_TRAILING);
-  assert.ok(docked, `${label}: the live card, the record and the scroller must all exist`);
-  console.log(`[${label}] docked ${JSON.stringify(docked)}`);
+  assert.ok(parked, `${label}: the live card, the trailing message and the scroller must all exist`);
+  console.log(`[${label}] parked ${JSON.stringify(parked)}`);
 
-  // Exactly one live card: two of them is one the reader can click and one they
-  // cannot, which is the confusion the dock removes.
-  assert.equal(docked.liveCards, 1, `${label}: the question must be live in exactly one place`);
-  assert.equal(
-    docked.liveInScroller,
-    false,
-    `${label}: inside the scroller the card is still virtualized away and rebuilt`
+  // Exactly one card: a record plus a live copy is one the reader can click and
+  // one they cannot, which is the confusion this removes.
+  assert.equal(parked.liveCards, 1, `${label}: the question must be live in exactly one place`);
+  assert.ok(
+    parked.liveInScroller,
+    `${label}: the question is answered in the conversation, not in a pane of its own`
   );
-  assert.ok(docked.liveInDock, `${label}: the live card belongs to the dock`);
+  assert.ok(parked.liveInPinned, `${label}: and it is the pinned card at the end of it`);
   assert.equal(
-    docked.optionsInScroller,
-    0,
-    `${label}: the record in the conversation must not show options that do nothing`
+    parked.liveVirtualized,
+    false,
+    `${label}: inside the virtualized range the card is unmounted out from under a `
+    + `half-finished answer`
+  );
+  assert.ok(
+    parked.optionsInScroller > 0,
+    `${label}: the options must be tappable in the conversation itself`
+  );
+  assert.ok(
+    parked.cardScrollParentIsTranscript,
+    `${label}: the card must scroll with the conversation — its own scroller is what `
+    + `stopped the conversation behind it from being scrolled back through`
   );
   // Geometry, never DOM index — above the virtualization threshold rows are
   // absolutely positioned, so DOM order and visual order are different things.
   assert.ok(
-    docked.recordTop < docked.trailingTop,
-    `${label}: the record stays where the question was asked, above what followed `
-    + `it (record ${docked.recordTop}, trailing ${docked.trailingTop})`
+    parked.liveTop > parked.trailingTop,
+    `${label}: the question the turn is parked on is pinned past what it said `
+    + `afterwards (card ${parked.liveTop}, trailing ${parked.trailingTop})`
   );
   assert.ok(
-    docked.liveTop >= docked.viewBottom - 4,
-    `${label}: the live card sits below the conversation, next to the composer `
-    + `(card top ${docked.liveTop}, conversation bottom ${docked.viewBottom})`
+    parked.liveTop < parked.viewBottom && parked.liveBottom > parked.viewTop,
+    `${label}: and it is on screen, not below the fold `
+    + `(card ${parked.liveTop}-${parked.liveBottom}, view ${parked.viewTop}-${parked.viewBottom})`
   );
 
   // The reader may still leave, and must be left alone while it stays pending.
@@ -637,16 +657,17 @@ async function exerciseAskUserPin(page, label) {
     `${label}: a pending question must fire once, not re-yank the reader `
     + `(distances: ${samples.map((s) => s.distance).join(", ")})`
   );
-  // And scrolling away must not take the question with it — the whole point of
-  // docking it.
+  // And scrolling away must not unmount it. This is the property that replaces
+  // the dock: out of the virtualized range, no scroll position can take the card
+  // — and a half-finished answer inside it — off the page.
   assert.equal(
-    await page.locator(".ask-user-dock .ask-user-option-button").count() > 0,
+    await page.locator(".transcript-ask-user-pinned .ask-user-option-button").count() > 0,
     true,
-    `${label}: the docked question stays reachable after the reader scrolls away`
+    `${label}: the question stays mounted after the reader scrolls away`
   );
 
   // Answer it (single-select quick path: one option click submits).
-  await page.click(".ask-user-dock .ask-user-option-button");
+  await page.click(".transcript-ask-user-pinned .ask-user-option-button");
   await page.waitForFunction(
     () => !document.querySelector(".chat-message-ask-user-interactive"),
     null,
@@ -664,7 +685,7 @@ async function exerciseAskUserPin(page, label) {
     if (!card || !trailing) return null;
     return {
       cards: document.querySelectorAll(".chat-message-ask-user").length,
-      docks: document.querySelectorAll(".ask-user-dock").length,
+      pinned: document.querySelectorAll(".transcript-ask-user-pinned").length,
       cardTop: Math.round(card.getBoundingClientRect().top),
       trailingTop: Math.round(trailing.getBoundingClientRect().top),
     };
@@ -672,7 +693,11 @@ async function exerciseAskUserPin(page, label) {
   assert.ok(answered, `${label}: the answered question must still be in the transcript`);
   console.log(`[${label}] answered ${JSON.stringify(answered)}`);
   assert.equal(answered.cards, 1, `${label}: exactly one question card after answering`);
-  assert.equal(answered.docks, 0, `${label}: the dock empties once nothing is pending`);
+  assert.equal(
+    answered.pinned,
+    0,
+    `${label}: the pin is released once nothing is pending, so the card can go back`
+  );
   assert.ok(
     answered.cardTop < answered.trailingTop,
     `${label}: the answered question is still where it was asked, above the `

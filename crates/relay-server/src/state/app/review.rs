@@ -22,13 +22,15 @@ use crate::protocol::{
     TranscriptEntryView,
 };
 use crate::state::{
-    handoff_review_prompt, handoff_review_prompt_for_target, parent_commit_prompt,
-    parent_fix_prompt, parent_recap_prompt, parse_verdict, post_back_message, re_review_prompt,
-    re_review_prompt_for_target, review_approved_message, review_escalated_message,
-    reviewer_prompt, reviewer_prompt_for_target, ReviewJob, ReviewJobStatus, ReviewMode,
-    ReviewRecapSource, MAX_REVIEWERS_PER_PARENT,
+    handoff_review_prompt, handoff_review_prompt_for_checkpoint, handoff_review_prompt_for_target,
+    parent_commit_prompt, parent_fix_prompt, parent_recap_prompt, parse_verdict, post_back_message,
+    re_review_prompt, re_review_prompt_for_checkpoint, re_review_prompt_for_target,
+    review_approved_message, review_escalated_message, reviewer_prompt,
+    reviewer_prompt_for_checkpoint, reviewer_prompt_for_target, ReviewJob, ReviewJobStatus,
+    ReviewMode, ReviewRecapSource, MAX_REVIEWERS_PER_PARENT,
 };
 
+use super::checkpoint::{build_review_checkpoint, checkpoint_ref_name};
 use super::*;
 
 /// How often to re-issue an interrupt while draining a turn that wouldn't stop.
@@ -83,6 +85,9 @@ impl Drop for ReviewJobLifeguard {
         let job_id = self.job_id.clone();
         tokio::spawn(async move {
             app.fail_job_if_stranded(&job_id).await;
+            // Runs on every exit, not just a checkpoint-using one — a job that never
+            // built a checkpoint just no-ops here (`update-ref -d` on an absent ref).
+            app.delete_review_checkpoint_ref(&job_id).await;
         });
     }
 }
@@ -115,29 +120,55 @@ enum AuthorTurnOutcome {
     Aborted,
 }
 
+/// What `collect_committed_round_evidence` found: a real commit already on the branch,
+/// or a hidden checkpoint the relay built because the tree is dirty and nobody is asked
+/// to commit (see `checkpoint.rs`). Kept distinct from a plain `GitReviewTarget` so the
+/// prompt built from it can say plainly which one the reviewer is looking at.
+enum CommittedEvidence {
+    Real(relay_api::GitReviewTarget),
+    Checkpoint(relay_api::GitReviewTarget),
+}
+
 enum RoundEvidence {
     Committed(relay_api::GitReviewTarget),
+    Checkpoint(relay_api::GitReviewTarget),
     WorkspaceDiff(crate::protocol::WorkspaceDiffResponse),
 }
 
 impl RoundEvidence {
     fn generated_at(&self) -> u64 {
         match self {
-            Self::Committed(target) => target.generated_at,
+            Self::Committed(target) | Self::Checkpoint(target) => target.generated_at,
             Self::WorkspaceDiff(diff) => diff.generated_at,
         }
     }
 
     fn truncated(&self) -> bool {
         match self {
-            Self::Committed(_) => false,
+            Self::Committed(_) | Self::Checkpoint(_) => false,
             Self::WorkspaceDiff(diff) => diff.truncated,
         }
     }
 
     fn candidate_sha(&self) -> Option<&str> {
         match self {
+            Self::Committed(target) | Self::Checkpoint(target) => {
+                Some(target.candidate_sha.as_str())
+            }
+            Self::WorkspaceDiff(_) => None,
+        }
+    }
+
+    /// The sha `HEAD` must still equal for an approval of this round to remain valid —
+    /// NOT the same as `candidate_sha` for a checkpoint. A checkpoint never moves `HEAD`
+    /// by construction, so `HEAD` staying at `base_sha` is the expected, non-stale
+    /// outcome; comparing it against the checkpoint's own (HEAD-unreachable) sha would
+    /// mark every checkpoint approval stale. A real commit's `candidate_sha` IS `HEAD`
+    /// as of collection, so that one still checks against itself.
+    fn expected_head_sha(&self) -> Option<&str> {
+        match self {
             Self::Committed(target) => Some(target.candidate_sha.as_str()),
+            Self::Checkpoint(target) => Some(target.base_sha.as_str()),
             Self::WorkspaceDiff(_) => None,
         }
     }
@@ -684,6 +715,14 @@ to this thread."
             .store(ms, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Arms the next clean-reviewer-creation attempt to report `WorkspaceGone`, once,
+    /// without touching the filesystem — see the field doc in `mod.rs`.
+    #[cfg(test)]
+    pub(crate) fn force_reviewer_creation_workspace_gone_once(&self) {
+        self.force_reviewer_creation_workspace_gone_once
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
     // Test-only label wrapper for the private wait outcome, so tests can exercise the
     // stall-timeout behavior of `wait_for_thread_idle_outcome` without exposing the
     // internal `WaitOutcome` enum.
@@ -969,20 +1008,37 @@ review ({round_cwd}); starting a clean reviewer there instead."
                     // file tools land there. Construct the live handle immediately before
                     // crossing into the provider; if cleanup won the race, use the same
                     // typed retry path as a provider-side ENOENT.
-                    let started = match LiveDir::from_path(&round_cwd) {
-                        Some(workspace) => {
-                            self.start_background_reviewer_thread(
-                                &job_id,
-                                &workspace,
-                                &reviewer_provider,
-                                reviewer_model.as_deref(),
-                                reviewer_effort.as_deref(),
-                            )
-                            .await
-                        }
-                        None => Err(ThreadDriveError::WorkspaceGone {
+                    //
+                    // Test-only escape hatch: a forced miss takes the exact same
+                    // `WorkspaceGone` path as a real one, so a test can exercise
+                    // `workspace_retries` deterministically instead of racing the
+                    // filesystem.
+                    #[cfg(test)]
+                    let forced_gone = self
+                        .force_reviewer_creation_workspace_gone_once
+                        .swap(false, std::sync::atomic::Ordering::Relaxed);
+                    #[cfg(not(test))]
+                    let forced_gone = false;
+                    let started = if forced_gone {
+                        Err(ThreadDriveError::WorkspaceGone {
                             recorded: round_cwd.clone(),
-                        }),
+                        })
+                    } else {
+                        match LiveDir::from_path(&round_cwd) {
+                            Some(workspace) => {
+                                self.start_background_reviewer_thread(
+                                    &job_id,
+                                    &workspace,
+                                    &reviewer_provider,
+                                    reviewer_model.as_deref(),
+                                    reviewer_effort.as_deref(),
+                                )
+                                .await
+                            }
+                            None => Err(ThreadDriveError::WorkspaceGone {
+                                recorded: round_cwd.clone(),
+                            }),
+                        }
                     };
                     match started {
                         Ok((thread_id, resolved_model, resolved_effort)) => {
@@ -1070,6 +1126,29 @@ reviewer ({error}); re-resolving the workspace and retrying the round."
                     instructions.as_deref(),
                     &workspace_line,
                 ),
+                // Same three shapes again, for a checkpoint instead of a real commit —
+                // the prompt text is what tells the reviewer which one it's looking at.
+                (RoundEvidence::Checkpoint(target), true, _) => re_review_prompt_for_checkpoint(
+                    &recap,
+                    target,
+                    instructions.as_deref(),
+                    &workspace_line,
+                ),
+                (RoundEvidence::Checkpoint(target), false, Some(previous)) => {
+                    handoff_review_prompt_for_checkpoint(
+                        &recap,
+                        target,
+                        instructions.as_deref(),
+                        &workspace_line,
+                        previous,
+                    )
+                }
+                (RoundEvidence::Checkpoint(target), false, None) => reviewer_prompt_for_checkpoint(
+                    &recap,
+                    target,
+                    instructions.as_deref(),
+                    &workspace_line,
+                ),
                 (RoundEvidence::WorkspaceDiff(diff), true, _) => {
                     re_review_prompt(&recap, diff, instructions.as_deref(), &workspace_line)
                 }
@@ -1087,6 +1166,7 @@ reviewer ({error}); re-resolving the workspace and retrying the round."
                 }
             };
             let prompt_candidate_sha = evidence.candidate_sha().map(str::to_string);
+            let expected_head_sha = evidence.expected_head_sha().map(str::to_string);
             let reviewer_baseline = self
                 .latest_assistant_entry(&this_reviewer_id)
                 .await
@@ -1184,9 +1264,18 @@ started ({error}); re-resolving the workspace and retrying the round."
             let mut verdict = parse_verdict(&review);
             let mut stale_approval = false;
             if verdict.is_approved() {
-                if let Some(candidate_sha) = prompt_candidate_sha.as_deref() {
+                // Checked against `expected_head_sha`, NOT `prompt_candidate_sha`: a
+                // checkpoint deliberately never moves HEAD, so HEAD staying at its
+                // `base_sha` is the non-stale outcome even though it differs from the
+                // checkpoint's own (HEAD-unreachable) candidate sha. The two only
+                // coincide for a real committed candidate. Both are `Some`/`None`
+                // together (see `RoundEvidence`), so destructuring the pair is safe.
+                if let (Some(candidate_sha), Some(expected_head)) = (
+                    prompt_candidate_sha.as_deref(),
+                    expected_head_sha.as_deref(),
+                ) {
                     match self.current_head_for_review_cwd(&round_cwd).await {
-                        Ok(Some(head)) if head != candidate_sha => {
+                        Ok(Some(head)) if head != expected_head => {
                             review = format!(
                                 "The reviewer approved committed candidate `{candidate_sha}`, \
 but the reviewed workspace is now at `{head}`. That approval is stale and cannot \
@@ -1196,7 +1285,10 @@ complete this review; the new `HEAD` must be reviewed as a fresh committed candi
                             stale_approval = true;
                             verdict = crate::state::Verdict::NeedsChanges;
                             self.update_job(&job_id, |job| {
+                                // `head` is always a real `HEAD` value here, never a
+                                // checkpoint sha — checkpoints never move `HEAD`.
                                 job.candidate_sha = Some(head);
+                                job.candidate_is_checkpoint = false;
                                 job.verdict_candidate_sha = None;
                             })
                             .await;
@@ -1714,10 +1806,15 @@ tree would review commits this thread never made"
     ) -> Result<(RoundEvidence, ReviewWorkspace, String), String> {
         let cwd = workspace.cwd.clone();
         match self
-            .collect_committed_round_evidence(job_id, &workspace, parent_thread_id, device_id)
+            .collect_committed_round_evidence(job_id, &workspace)
             .await
         {
-            Ok(Some(target)) => Ok((RoundEvidence::Committed(target), workspace, cwd)),
+            Ok(Some(CommittedEvidence::Real(target))) => {
+                Ok((RoundEvidence::Committed(target), workspace, cwd))
+            }
+            Ok(Some(CommittedEvidence::Checkpoint(target))) => {
+                Ok((RoundEvidence::Checkpoint(target), workspace, cwd))
+            }
             Ok(None) => self
                 .collect_round_diff(workspace, parent_thread_id, device_id)
                 .await
@@ -1728,10 +1825,15 @@ tree would review commits this thread never made"
                     .await?;
                 let cwd = retried.cwd.clone();
                 match self
-                    .collect_committed_round_evidence(job_id, &retried, parent_thread_id, device_id)
+                    .collect_committed_round_evidence(job_id, &retried)
                     .await
                 {
-                    Ok(Some(target)) => Ok((RoundEvidence::Committed(target), retried, cwd)),
+                    Ok(Some(CommittedEvidence::Real(target))) => {
+                        Ok((RoundEvidence::Committed(target), retried, cwd))
+                    }
+                    Ok(Some(CommittedEvidence::Checkpoint(target))) => {
+                        Ok((RoundEvidence::Checkpoint(target), retried, cwd))
+                    }
                     Ok(None) => self
                         .collect_round_diff(retried, parent_thread_id, device_id)
                         .await
@@ -1747,13 +1849,17 @@ tree would review commits this thread never made"
         }
     }
 
+    /// Read this round's committed (or checkpointed) evidence for a git workspace.
+    /// `None` means the workspace is not a git repo at all — the caller falls back to
+    /// `collect_round_diff`. A dirty tree with no committed candidate no longer asks the
+    /// author to commit (see `checkpoint.rs`): it is snapshotted and returned as
+    /// `CommittedEvidence::Checkpoint` instead, so the round never fails just because
+    /// nobody committed.
     async fn collect_committed_round_evidence(
         &self,
         job_id: &str,
         workspace: &ReviewWorkspace,
-        parent_thread_id: &mut String,
-        device_id: &str,
-    ) -> Result<Option<relay_api::GitReviewTarget>, String> {
+    ) -> Result<Option<CommittedEvidence>, String> {
         let grants = { self.relay.read().await.trust_grants() };
         let Some(trusted) = grants.admit(&workspace.cwd).await.trusted().cloned() else {
             return Err(format!(
@@ -1777,14 +1883,24 @@ tree would review commits this thread never made"
             .await
             .review_job(job_id)
             .and_then(|job| job.candidate_sha.clone());
+        // `candidate_sha` alone can't say whether it names a real commit or a hidden
+        // checkpoint — both are persisted in that one field — so a retried evidence
+        // collection (e.g. the `workspace_retries` paths in `run_review_job`) needs
+        // this to correctly re-tag what it reads back, not assume `Real`.
+        let existing_candidate_is_checkpoint = self
+            .relay
+            .read()
+            .await
+            .review_job(job_id)
+            .is_some_and(|job| job.candidate_is_checkpoint);
         let current_head = current_head_sha(&trusted).await?;
         let dirty = has_uncommitted_changes(&trusted).await?;
-        let mut target_workspace = trusted.clone();
-        let (base_sha, candidate_sha) = if let Some(base_sha) = existing_base.clone() {
+        let (base_sha, candidate_sha, is_checkpoint) = if let Some(base_sha) = existing_base.clone()
+        {
             if let Some(candidate_sha) = existing_candidate.clone() {
-                (base_sha, candidate_sha)
+                (base_sha, candidate_sha, existing_candidate_is_checkpoint)
             } else if current_head != base_sha {
-                (base_sha, current_head)
+                (base_sha, current_head, false)
             } else if dirty {
                 let round_base = base_sha;
                 self.update_job(job_id, |job| {
@@ -1793,44 +1909,14 @@ tree would review commits this thread never made"
                     job.candidate_sha = None;
                 })
                 .await;
-                match self
-                    .drive_parent_commit_prompt(job_id, parent_thread_id, &round_base)
-                    .await
-                {
-                    AuthorTurnOutcome::Completed(promoted) => {
-                        *parent_thread_id = promoted;
-                    }
-                    AuthorTurnOutcome::WorkspaceGone => {}
-                    AuthorTurnOutcome::Aborted => {
-                        return Err("the author commit turn aborted".into());
-                    }
-                }
-                let refreshed = self
-                    .resolve_review_workspace(parent_thread_id, device_id)
-                    .await?;
-                let Some(refreshed_trusted) = grants.admit(&refreshed.cwd).await.trusted().cloned()
-                else {
-                    return Err(format!(
-                        "{} is not a granted workspace, so it cannot be reviewed",
-                        refreshed.cwd
-                    ));
-                };
-                if !is_git_work_tree(&refreshed_trusted).await? {
-                    return Ok(None);
-                }
-                let candidate = current_head_sha(&refreshed_trusted).await?;
-                if candidate == round_base {
-                    return Err(format!(
-                        "the author did not create a commit after `{round_base}`; review requires a committed candidate"
-                    ));
-                }
-                target_workspace = refreshed_trusted;
-                (round_base, candidate)
+                let checkpoint_sha =
+                    build_checkpoint_candidate(&trusted, &round_base, job_id).await?;
+                (round_base, checkpoint_sha, true)
             } else {
                 let base = first_parent_sha(&trusted, &current_head)
                     .await?
                     .unwrap_or_else(|| current_head.clone());
-                (base, current_head)
+                (base, current_head, false)
             }
         } else if dirty {
             let round_base = current_head;
@@ -1840,52 +1926,27 @@ tree would review commits this thread never made"
                 job.candidate_sha = None;
             })
             .await;
-            match self
-                .drive_parent_commit_prompt(job_id, parent_thread_id, &round_base)
-                .await
-            {
-                AuthorTurnOutcome::Completed(promoted) => {
-                    *parent_thread_id = promoted;
-                }
-                AuthorTurnOutcome::WorkspaceGone => {}
-                AuthorTurnOutcome::Aborted => return Err("the author commit turn aborted".into()),
-            }
-            let refreshed = self
-                .resolve_review_workspace(parent_thread_id, device_id)
-                .await?;
-            let Some(refreshed_trusted) = grants.admit(&refreshed.cwd).await.trusted().cloned()
-            else {
-                return Err(format!(
-                    "{} is not a granted workspace, so it cannot be reviewed",
-                    refreshed.cwd
-                ));
-            };
-            if !is_git_work_tree(&refreshed_trusted).await? {
-                return Ok(None);
-            }
-            let candidate = current_head_sha(&refreshed_trusted).await?;
-            if candidate == round_base {
-                return Err(format!(
-                    "the author did not create a commit after `{round_base}`; review requires a committed candidate"
-                ));
-            }
-            target_workspace = refreshed_trusted;
-            (round_base, candidate)
+            let checkpoint_sha = build_checkpoint_candidate(&trusted, &round_base, job_id).await?;
+            (round_base, checkpoint_sha, true)
         } else {
             let base = first_parent_sha(&trusted, &current_head)
                 .await?
                 .unwrap_or_else(|| current_head.clone());
-            (base, current_head)
+            (base, current_head, false)
         };
 
-        let target =
-            collect_git_review_target(&target_workspace, &base_sha, &candidate_sha).await?;
+        let target = collect_git_review_target(&trusted, &base_sha, &candidate_sha).await?;
         self.update_job(job_id, |job| {
             job.base_sha = Some(base_sha.clone());
             job.candidate_sha = Some(candidate_sha.clone());
+            job.candidate_is_checkpoint = is_checkpoint;
         })
         .await;
-        Ok(Some(target))
+        Ok(Some(if is_checkpoint {
+            CommittedEvidence::Checkpoint(target)
+        } else {
+            CommittedEvidence::Real(target)
+        }))
     }
 
     async fn record_review_round_base(
@@ -1951,6 +2012,10 @@ tree would review commits this thread never made"
         }
         self.update_job(job_id, |job| {
             job.candidate_sha = Some(candidate);
+            // This path only ever asks for and records a real commit — clear the flag
+            // explicitly so a checkpoint from an earlier round can't leak forward as
+            // stale `true` onto this real candidate.
+            job.candidate_is_checkpoint = false;
         })
         .await;
         Ok(true)
@@ -2578,6 +2643,30 @@ tree would review commits this thread never made"
         }
     }
 
+    /// Best-effort: a checkpoint ref whose workspace can no longer be resolved, or whose
+    /// delete fails, is left for a human to prune — never worth failing an
+    /// already-settled review over.
+    async fn delete_review_checkpoint_ref(&self, job_id: &str) {
+        let Some(cwd) = self
+            .relay
+            .read()
+            .await
+            .review_job(job_id)
+            .map(|job| job.cwd.clone())
+        else {
+            return;
+        };
+        let grants = { self.relay.read().await.trust_grants() };
+        let Some(trusted) = grants.admit(&cwd).await.trusted().cloned() else {
+            return;
+        };
+        let _ = run_git_capture(
+            &trusted,
+            &["update-ref", "-d", &checkpoint_ref_name(job_id)],
+        )
+        .await;
+    }
+
     /// Wait until the given thread's in-flight turn settles. Returns
     /// `FailedApproval` if an approval appears mid-turn (v1 cannot continue), or
     /// `TimedOut` after `REVIEW_STEP_TIMEOUT`.
@@ -3174,6 +3263,19 @@ pub(super) fn reviewer_thread_settings(
 /// otherwise edit?", shared by workflow validation so the two cannot drift.
 pub(super) fn reviewer_read_only_is_enforced(provider: &str) -> bool {
     reviewer_thread_settings(provider, "on-request", "workspace-write").2
+}
+
+/// Snapshot `trusted`'s current dirty state as a hidden checkpoint commit (see
+/// `checkpoint.rs`), for reviewing work the author will not commit. A checkpoint that
+/// fails to build (e.g. git itself failing) surfaces as this round's own failure — never
+/// silently downgraded back to asking for a commit.
+async fn build_checkpoint_candidate(
+    trusted: &TrustedWorkspace,
+    round_base: &str,
+    job_id: &str,
+) -> Result<String, String> {
+    let excluded = incidental_untracked_symlinks(trusted).await?;
+    build_review_checkpoint(trusted, round_base, job_id, &excluded).await
 }
 
 fn reviewer_failure_message(outcome: &WaitOutcome) -> &'static str {

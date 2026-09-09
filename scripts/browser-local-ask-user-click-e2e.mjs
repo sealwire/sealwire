@@ -222,10 +222,10 @@ async function main() {
       "with a pick made, Continue must be live"
     );
 
-    // The dock is a layout claim, so leave a way to actually look at it.
+    // Where the card sits is a layout claim, so leave a way to actually look at it.
     if (process.env.ASK_USER_E2E_SHOT) {
       await page.screenshot({ path: process.env.ASK_USER_E2E_SHOT });
-      console.log(`[ask-user-dock] screenshot ${process.env.ASK_USER_E2E_SHOT}`);
+      console.log(`[ask-user-inline] screenshot ${process.env.ASK_USER_E2E_SHOT}`);
     }
 
     assert.deepEqual(pageErrors, [], "answering a question must not raise browser errors");
@@ -291,8 +291,8 @@ async function clickTheInstantItAppears(page) {
             shell: rect(".chat-shell"),
             scroller: rect(".chat-thread"),
             stack: rect(".composer-dock-stack"),
-            dock: rect(".ask-user-dock"),
-            option: rect(".ask-user-dock .ask-user-option-button"),
+            pinned: rect(".transcript-ask-user-pinned"),
+            option: rect(".transcript-ask-user-pinned .ask-user-option-button"),
             composer: rect("#message-form"),
           };
         })

@@ -499,6 +499,20 @@ pub trait TeamPort: Send + Sync {
         ))
     }
 
+    /// Freeze the worktree state that should be reviewed after a developer
+    /// round. Implementations may return HEAD or an immutable hidden checkpoint
+    /// when the worktree is dirty; neither choice may mutate branch history.
+    async fn capture_review_candidate(
+        &self,
+        run_id: &str,
+        slot: team::TeamThreadSlot,
+        round_base_sha: &str,
+    ) -> Result<Option<String>, TeamPortError> {
+        let _ = slot;
+        let head = self.current_head_sha(run_id).await?;
+        Ok((head != round_base_sha).then_some(head))
+    }
+
     async fn collect_review_target(
         &self,
         run_id: &str,

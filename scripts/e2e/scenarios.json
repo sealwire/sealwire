@@ -76,7 +76,7 @@
       "public-revoke",
       "public-reclaim",
       "public-settings-load",
-      "remote-ask-user-dock"
+      "remote-ask-user-inline"
     ],
     "public-full": [
       "public-enrollment",
@@ -98,7 +98,7 @@
       "public-remote-follow",
       "public-multi-remote-follow",
       "public-settings-load",
-      "remote-ask-user-dock"
+      "remote-ask-user-inline"
     ],
     "self-hosted": [
       "self-hosted-pairing"
@@ -651,14 +651,14 @@
         "ask-user-click"
       ]
     },
-    "remote-ask-user-dock": {
-      "script": "browser-remote-ask-user-dock-e2e.mjs",
+    "remote-ask-user-inline": {
+      "script": "browser-remote-ask-user-inline-e2e.mjs",
       "tier": "core",
       "provider": "fake-compatible",
       "transport": "remote",
       "coverage": [
         "ask-user-question",
-        "ask-user-dock",
+        "ask-user-inline",
         "mobile-layout"
       ]
     }

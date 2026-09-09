@@ -358,6 +358,243 @@ impl RelayState {
         self.upsert_user_message_legacy(item_id, text, turn_id);
     }
 
+    /// Install the user entry before Codex can emit output for this start.
+    ///
+    /// The reservation is also the per-thread admission fence. In particular, an
+    /// unbound reservation survives an uncertain RPC timeout: until Codex emits a
+    /// turn id or disconnects, a retry would make an unknown notification
+    /// impossible to attribute to the old or new request.
+    pub fn begin_codex_user_turn(&mut self, thread_id: &str, text: &str) -> Result<String, String> {
+        let item_id = {
+            let runtime = self.ensure_runtime_for_thread(thread_id);
+            if runtime.active_turn_id.is_some() {
+                return Err("Codex already has an active turn for this thread".to_string());
+            }
+            if runtime.codex_start_reservation.is_some() {
+                return Err(
+                    "the previous Codex turn/start is still unresolved for this thread".to_string(),
+                );
+            }
+            runtime.codex_user_reservation_seq =
+                runtime.codex_user_reservation_seq.saturating_add(1);
+            format!(
+                "codex:user-reserve:{thread_id}:{}",
+                runtime.codex_user_reservation_seq
+            )
+        };
+        self.upsert_transcript_item_for_thread(
+            thread_id,
+            item_id.clone(),
+            TranscriptEntryKind::UserText,
+            Some(text.to_string()),
+            "completed".to_string(),
+            None,
+            None,
+        );
+        if let Some(runtime) = self.runtimes.get_mut(thread_id) {
+            runtime.codex_start_reservation = Some(super::CodexStartReservation {
+                item_id: item_id.clone(),
+                turn_id: None,
+            });
+        }
+        Ok(item_id)
+    }
+
+    /// Bind the RPC result to the exact reservation created by that request.
+    pub fn bind_codex_user_reservation(
+        &mut self,
+        thread_id: &str,
+        reservation_id: &str,
+        turn_id: &str,
+    ) {
+        let Some(runtime) = self.runtimes.get_mut(thread_id) else {
+            return;
+        };
+        let Some(reservation) = runtime.codex_start_reservation.as_mut() else {
+            return;
+        };
+        if reservation.item_id != reservation_id {
+            return;
+        }
+        if reservation.turn_id.is_some() {
+            return;
+        }
+        reservation.turn_id = Some(turn_id.to_string());
+        if let Some(entry) = runtime
+            .transcript
+            .iter_mut()
+            .find(|entry| entry.item_id == reservation_id)
+        {
+            entry.turn_id = Some(turn_id.to_string());
+        }
+        let _ = self.bump_thread_transcript_revision(thread_id);
+        if self.active_thread_id.as_deref() == Some(thread_id) {
+            self.sync_selected_runtime_to_fields();
+        }
+    }
+
+    /// Observe a provider lifecycle event. A known, inactive turn is stale and
+    /// must not claim the current reservation or become active again.
+    pub fn bind_pending_codex_user_reservation(&mut self, thread_id: &str, turn_id: &str) -> bool {
+        let Some(runtime) = self.runtimes.get(thread_id) else {
+            return true;
+        };
+        if runtime.active_turn_id.as_deref() == Some(turn_id) {
+            return true;
+        }
+        if let Some(reservation) = runtime.codex_start_reservation.as_ref() {
+            if runtime.active_turn_id.is_some() {
+                return false;
+            }
+            if !reservation.can_claim_turn(&runtime.transcript, turn_id) {
+                return false;
+            }
+            if reservation.turn_id.is_some() {
+                return true;
+            }
+            let reservation_id = reservation.item_id.clone();
+            self.bind_codex_user_reservation(thread_id, &reservation_id, turn_id);
+            return true;
+        }
+        !runtime
+            .transcript
+            .iter()
+            .any(|entry| entry.turn_id.as_deref() == Some(turn_id))
+    }
+
+    /// Remove a reservation only when Codex definitively rejected its start.
+    /// A provider event may beat that response; in that case the bound user entry
+    /// is real and must be retained.
+    pub fn fail_codex_user_turn_definitive(&mut self, thread_id: &str, reservation_id: &str) {
+        let Some(runtime) = self.runtimes.get_mut(thread_id) else {
+            return;
+        };
+        let Some(reservation) = runtime.codex_start_reservation.as_ref() else {
+            return;
+        };
+        if reservation.item_id != reservation_id {
+            return;
+        }
+        // A lifecycle event outranks a contradictory error response: Codex has
+        // already demonstrated that work exists, so keep blocking until its
+        // terminal event or provider disconnect.
+        if reservation.turn_id.is_some() {
+            return;
+        }
+        runtime.codex_start_reservation = None;
+        runtime
+            .transcript
+            .retain(|entry| entry.item_id != reservation_id);
+        let _ = self.bump_thread_transcript_revision(thread_id);
+        if self.active_thread_id.as_deref() == Some(thread_id) {
+            self.sync_selected_runtime_to_fields();
+        }
+    }
+
+    /// The provider process ended, so an unbound request can no longer emit a
+    /// notification. This is the one safe recovery point for its admission fence.
+    pub fn abandon_codex_start_reservation(&mut self, thread_id: &str) {
+        let reservation = self
+            .runtimes
+            .get_mut(thread_id)
+            .and_then(|runtime| runtime.codex_start_reservation.take());
+        let Some(reservation) = reservation else {
+            return;
+        };
+        if reservation.turn_id.is_none() {
+            if let Some(runtime) = self.runtimes.get_mut(thread_id) {
+                runtime
+                    .transcript
+                    .retain(|entry| entry.item_id != reservation.item_id);
+            }
+            let _ = self.bump_thread_transcript_revision(thread_id);
+            if self.active_thread_id.as_deref() == Some(thread_id) {
+                self.sync_selected_runtime_to_fields();
+            }
+        }
+    }
+
+    /// A terminal event identifies and settles a response-first reservation even
+    /// when `turn/started` was omitted.
+    pub fn finish_codex_start_reservation(&mut self, thread_id: &str, turn_id: &str) {
+        let matches = self
+            .runtimes
+            .get(thread_id)
+            .and_then(|runtime| runtime.codex_start_reservation.as_ref())
+            .is_some_and(|reservation| reservation.turn_id.as_deref() == Some(turn_id));
+        if matches {
+            if let Some(runtime) = self.runtimes.get_mut(thread_id) {
+                runtime.codex_start_reservation = None;
+            }
+        }
+    }
+
+    fn reconcile_codex_user_reservation(
+        &mut self,
+        thread_id: &str,
+        item_id: String,
+        text: String,
+        turn_id: String,
+    ) -> bool {
+        // A bound or already-reconciled user entry is authoritative for this
+        // turn, including a late echo after terminal settlement.
+        let mut local_id = self.runtimes.get(thread_id).and_then(|runtime| {
+            runtime
+                .transcript
+                .iter()
+                .find(|entry| {
+                    entry.kind == TranscriptEntryKind::UserText
+                        && entry.turn_id.as_deref() == Some(turn_id.as_str())
+                })
+                .map(|entry| entry.item_id.clone())
+        });
+
+        // An early echo may provide the first identity for the sole outstanding
+        // start. Never let a turn represented before this placeholder claim it.
+        if local_id.is_none() {
+            if let Some(runtime) = self.runtimes.get(thread_id) {
+                if let Some(reservation) = runtime.codex_start_reservation.as_ref() {
+                    if reservation.can_claim_turn(&runtime.transcript, &turn_id) {
+                        local_id = Some(reservation.item_id.clone());
+                    }
+                }
+            }
+        }
+        let Some(local_id) = local_id else {
+            return false;
+        };
+        let Some(runtime) = self.runtimes.get_mut(thread_id) else {
+            return false;
+        };
+        if let Some(reservation) = runtime.codex_start_reservation.as_mut() {
+            if reservation.item_id == local_id && reservation.turn_id.is_none() {
+                reservation.turn_id = Some(turn_id.clone());
+            }
+        }
+        let Some(entry) = runtime
+            .transcript
+            .iter_mut()
+            .find(|entry| entry.item_id == local_id)
+        else {
+            return false;
+        };
+        entry.item_id = item_id;
+        entry.kind = TranscriptEntryKind::UserText;
+        entry.text = if text.is_empty() {
+            entry.text.take()
+        } else {
+            Some(text)
+        };
+        entry.status = "completed".to_string();
+        entry.turn_id = Some(turn_id.clone());
+        entry.tool = None;
+        let _ = self.bump_thread_transcript_revision(thread_id);
+        if self.active_thread_id.as_deref() == Some(thread_id) {
+            self.sync_selected_runtime_to_fields();
+        }
+        true
+    }
+
     pub fn upsert_user_message_for_thread(
         &mut self,
         thread_id: &str,
@@ -365,6 +602,14 @@ impl RelayState {
         text: String,
         turn_id: String,
     ) {
+        if self.reconcile_codex_user_reservation(
+            thread_id,
+            item_id.clone(),
+            text.clone(),
+            turn_id.clone(),
+        ) {
+            return;
+        }
         self.upsert_transcript_item_for_thread(
             thread_id,
             item_id,
