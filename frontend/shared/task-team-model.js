@@ -64,6 +64,22 @@ export function needsYou(status) {
   return NEEDS_YOU_STATUSES.has(status);
 }
 
+/**
+ * Whether a driver is entitled to move this run right now.
+ *
+ * The list view groups `paused` and `resolving` under "In progress" — right for
+ * a bucket that means "started and not finished", wrong for any count that says
+ * "running", because both hold the worktree with nothing working it. Anything
+ * reporting activity or slot occupancy must ask this, not the bucket size.
+ */
+export function teamRunIsWorking(run) {
+  const status = run?.status;
+  return Boolean(status)
+    && !SETTLED_WITHOUT_DRIVER.has(status)
+    && !TERMINAL_STATUSES.has(status)
+    && status !== "queued";
+}
+
 const STATUS_LABELS = Object.freeze({
   queued: "Queued",
   running: "Running",
