@@ -358,6 +358,130 @@ impl RelayState {
         self.upsert_user_message_legacy(item_id, text, turn_id);
     }
 
+    /// Install a Codex user-message placeholder before `turn/start`.
+    ///
+    /// At most one live reservation per thread. Replaces any prior unbound
+    /// reservation for that thread so a retry cannot leave two placeholders.
+    pub fn reserve_codex_user_message(&mut self, thread_id: &str, text: &str) {
+        let item_id = format!("codex:user-reserve:{thread_id}");
+        if let Some(runtime) = self.runtimes.get_mut(thread_id) {
+            if let Some(prior) = runtime.codex_user_reservation.take() {
+                runtime
+                    .transcript
+                    .retain(|entry| entry.item_id != prior.item_id);
+            }
+        }
+        self.upsert_transcript_item_for_thread(
+            thread_id,
+            item_id.clone(),
+            TranscriptEntryKind::UserText,
+            Some(text.to_string()),
+            "completed".to_string(),
+            None,
+            None,
+        );
+        if let Some(runtime) = self.runtimes.get_mut(thread_id) {
+            runtime.codex_user_reservation = Some(super::CodexUserReservation {
+                item_id,
+                text: text.to_string(),
+                turn_id: None,
+            });
+        }
+    }
+
+    /// Stamp the provider turn id onto the live reservation and its transcript entry.
+    pub fn bind_codex_user_reservation(&mut self, thread_id: &str, turn_id: &str) {
+        let Some(runtime) = self.runtimes.get_mut(thread_id) else {
+            return;
+        };
+        let Some(reservation) = runtime.codex_user_reservation.as_mut() else {
+            return;
+        };
+        reservation.turn_id = Some(turn_id.to_string());
+        let reserved_item_id = reservation.item_id.clone();
+        if let Some(entry) = runtime
+            .transcript
+            .iter_mut()
+            .find(|entry| entry.item_id == reserved_item_id)
+        {
+            entry.turn_id = Some(turn_id.to_string());
+        }
+        let _ = self.bump_thread_transcript_revision(thread_id);
+        if self.active_thread_id.as_deref() == Some(thread_id) {
+            self.sync_selected_runtime_to_fields();
+        }
+    }
+
+    /// Drop a live reservation and its placeholder entry (failed / rejected start).
+    pub fn clear_codex_user_reservation(&mut self, thread_id: &str) {
+        let Some(runtime) = self.runtimes.get_mut(thread_id) else {
+            return;
+        };
+        let Some(reservation) = runtime.codex_user_reservation.take() else {
+            return;
+        };
+        runtime
+            .transcript
+            .retain(|entry| entry.item_id != reservation.item_id);
+        let _ = self.bump_thread_transcript_revision(thread_id);
+        if self.active_thread_id.as_deref() == Some(thread_id) {
+            self.sync_selected_runtime_to_fields();
+        }
+    }
+
+    fn reconcile_codex_user_reservation(
+        &mut self,
+        thread_id: &str,
+        item_id: String,
+        text: String,
+        turn_id: String,
+    ) -> bool {
+        let matches = self
+            .runtimes
+            .get(thread_id)
+            .and_then(|runtime| runtime.codex_user_reservation.as_ref())
+            .is_some_and(|reservation| match reservation.turn_id.as_deref() {
+                Some(reserved_turn) => reserved_turn == turn_id,
+                // Turn id not bound yet (echo raced the RPC response): the live
+                // per-thread reservation is still the only candidate.
+                None => true,
+            });
+        if !matches {
+            return false;
+        }
+        let Some(runtime) = self.runtimes.get_mut(thread_id) else {
+            return false;
+        };
+        let Some(reservation) = runtime.codex_user_reservation.take() else {
+            return false;
+        };
+        let Some(entry) = runtime
+            .transcript
+            .iter_mut()
+            .find(|entry| entry.item_id == reservation.item_id)
+        else {
+            // Placeholder missing; fall through to a normal append.
+            return false;
+        };
+        entry.item_id = item_id;
+        entry.kind = TranscriptEntryKind::UserText;
+        // Prefer the provider echo; fall back to the reserved send text if the
+        // echo somehow arrives empty (image-only turns still keep the prompt).
+        entry.text = if text.is_empty() {
+            Some(reservation.text)
+        } else {
+            Some(text)
+        };
+        entry.status = "completed".to_string();
+        entry.turn_id = Some(turn_id);
+        entry.tool = None;
+        let _ = self.bump_thread_transcript_revision(thread_id);
+        if self.active_thread_id.as_deref() == Some(thread_id) {
+            self.sync_selected_runtime_to_fields();
+        }
+        true
+    }
+
     pub fn upsert_user_message_for_thread(
         &mut self,
         thread_id: &str,
@@ -365,6 +489,14 @@ impl RelayState {
         text: String,
         turn_id: String,
     ) {
+        if self.reconcile_codex_user_reservation(
+            thread_id,
+            item_id.clone(),
+            text.clone(),
+            turn_id.clone(),
+        ) {
+            return;
+        }
         self.upsert_transcript_item_for_thread(
             thread_id,
             item_id,
