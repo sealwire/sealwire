@@ -16266,6 +16266,67 @@ never moved to the checkpoint's own sha"
     }
 
     #[tokio::test]
+    async fn checkpoint_marker_survives_a_forced_workspace_gone_retry() {
+        // Regression for the mislabeling bug: a retried round used to read the
+        // already-persisted checkpoint sha back as a REAL candidate, routing the
+        // reviewer through the committed-candidate prompt and losing the "uncommitted
+        // worktree snapshot" marker (AC7). Forces exactly one retry deterministically —
+        // see `force_reviewer_creation_workspace_gone_once` — rather than racing a real
+        // directory disappearance against the background review task.
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        init_git_seed(cwd);
+        std::fs::write(
+            std::path::Path::new(cwd).join("seed.txt"),
+            "line1\nline2\nDIRTY_RETRY_PAYLOAD\n",
+        )
+        .unwrap();
+
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let provider = providers.get("codex").unwrap();
+        provider
+            .auto_commit_author_changes
+            .store(false, Ordering::Relaxed);
+        queue_verdicts(provider, &["APPROVE"]).await;
+        start_parent(&app, cwd, "codex").await;
+
+        app.force_reviewer_creation_workspace_gone_once();
+
+        let receipt = app
+            .request_review(review_input("codex"))
+            .await
+            .expect("review should start");
+        let job = wait_for_review(&app, &receipt.review_job_id).await;
+        assert_eq!(job.status, "complete", "job failed: {:?}", job.error);
+
+        let retried = app.relay.read().await.snapshot().logs.iter().any(|log| {
+            log.message
+                .contains("disappeared while starting the reviewer")
+        });
+        assert!(
+            retried,
+            "the forced WorkspaceGone must actually have triggered the retry path, \
+not just been ignored"
+        );
+
+        let turns = provider.turns.lock().await.clone();
+        assert!(
+            turns
+                .iter()
+                .any(|(_, text)| text.contains("Uncommitted worktree snapshot")),
+            "the reviewer prompt must still mark this as an uncommitted snapshot after \
+a retry: {turns:?}"
+        );
+        assert!(
+            turns
+                .iter()
+                .all(|(_, text)| !text.contains("Committed review target")),
+            "a retried checkpoint round must never fall through to the \
+committed-candidate prompt: {turns:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn dirty_git_review_via_checkpoint_leaves_no_repo_mutation() {
         let dir = TempDir::new().expect("tmpdir");
         let cwd = dir.path().to_str().unwrap();

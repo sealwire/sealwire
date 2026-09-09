@@ -715,6 +715,14 @@ to this thread."
             .store(ms, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Arms the next clean-reviewer-creation attempt to report `WorkspaceGone`, once,
+    /// without touching the filesystem — see the field doc in `mod.rs`.
+    #[cfg(test)]
+    pub(crate) fn force_reviewer_creation_workspace_gone_once(&self) {
+        self.force_reviewer_creation_workspace_gone_once
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
     // Test-only label wrapper for the private wait outcome, so tests can exercise the
     // stall-timeout behavior of `wait_for_thread_idle_outcome` without exposing the
     // internal `WaitOutcome` enum.
@@ -1000,20 +1008,37 @@ review ({round_cwd}); starting a clean reviewer there instead."
                     // file tools land there. Construct the live handle immediately before
                     // crossing into the provider; if cleanup won the race, use the same
                     // typed retry path as a provider-side ENOENT.
-                    let started = match LiveDir::from_path(&round_cwd) {
-                        Some(workspace) => {
-                            self.start_background_reviewer_thread(
-                                &job_id,
-                                &workspace,
-                                &reviewer_provider,
-                                reviewer_model.as_deref(),
-                                reviewer_effort.as_deref(),
-                            )
-                            .await
-                        }
-                        None => Err(ThreadDriveError::WorkspaceGone {
+                    //
+                    // Test-only escape hatch: a forced miss takes the exact same
+                    // `WorkspaceGone` path as a real one, so a test can exercise
+                    // `workspace_retries` deterministically instead of racing the
+                    // filesystem.
+                    #[cfg(test)]
+                    let forced_gone = self
+                        .force_reviewer_creation_workspace_gone_once
+                        .swap(false, std::sync::atomic::Ordering::Relaxed);
+                    #[cfg(not(test))]
+                    let forced_gone = false;
+                    let started = if forced_gone {
+                        Err(ThreadDriveError::WorkspaceGone {
                             recorded: round_cwd.clone(),
-                        }),
+                        })
+                    } else {
+                        match LiveDir::from_path(&round_cwd) {
+                            Some(workspace) => {
+                                self.start_background_reviewer_thread(
+                                    &job_id,
+                                    &workspace,
+                                    &reviewer_provider,
+                                    reviewer_model.as_deref(),
+                                    reviewer_effort.as_deref(),
+                                )
+                                .await
+                            }
+                            None => Err(ThreadDriveError::WorkspaceGone {
+                                recorded: round_cwd.clone(),
+                            }),
+                        }
                     };
                     match started {
                         Ok((thread_id, resolved_model, resolved_effort)) => {
