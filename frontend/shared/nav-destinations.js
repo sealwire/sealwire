@@ -58,6 +58,11 @@ export function openTeamsDestination(controller, teamId = null) {
  * it is reached from a task's changes summary, which is why it takes an id and
  * the three above do not.
  */
+/** One run's ticket page (17b). Entered from a board card, not the sidebar. */
+export function openTicketDestination(controller, teamRunId) {
+  return controller.showOverview({ kind: "ticket", teamRunId });
+}
+
 export function openReviewDestination(controller, teamRunId) {
   return controller.showOverview({ kind: "review", teamRunId });
 }

@@ -32,6 +32,7 @@ import {
   taskTeamMount,
   teamsLibraryMount,
   reviewScreenMount,
+  ticketScreenMount,
   usageReportMount,
   sidebarTaskListMount,
   sidebarTeamsListMount,
@@ -129,6 +130,7 @@ import {
 import { createWorkflowsCache } from "../shared/workflows-cache.js";
 import { createTeamsCache } from "../shared/teams-cache.js";
 import {
+  selectTeamRun,
   sortTeamRuns,
   teamsNeedingYou,
   teamsRevisionOf,
@@ -141,6 +143,7 @@ import { createOrchestratorChatActions } from "../shared/orchestrator-chat.js";
 import { orchestratorCanWrite } from "../shared/orchestrator-write-gate.js";
 import { TaskDiffPane } from "../shared/task-diff-react.js";
 import { TaskReviewScreen } from "../shared/task-review-screen.js";
+import { TaskTicketScreen } from "../shared/task-ticket-screen.js";
 import {
   BUILTIN_TEAM_ID,
   listLibraryTeams,
@@ -362,6 +365,7 @@ export function createSessionRenderer({
   // Reached from a task's changes summary rather than from the sidebar, so it
   // carries the run id the other destinations do not need.
   onOpenReviewScreen = null,
+  onOpenTicketScreen = null,
   // The sidebar's narrowing controls. Injected because each carries a TRANSPORT: the
   // search field's debounce plus its HTTP query, and the bell's re-render of the list.
   // The components see neither — only these callbacks.
@@ -554,13 +558,16 @@ export function createSessionRenderer({
     const onTeamsScreen = viewKind === "teams";
     const onUsageScreen = viewKind === "usage";
     const onReviewScreen = viewKind === "review";
+    const onTicketScreen = viewKind === "ticket";
     const mainView = onUsageScreen
       ? "usage"
       : onTeamsScreen
         ? "teams"
         : onReviewScreen
           ? "review"
-          : onTaskScreen
+          : onTicketScreen
+            ? "ticket"
+            : onTaskScreen
             ? "tasks"
             : viewingConversation
               ? "conversation"
@@ -683,6 +690,9 @@ export function createSessionRenderer({
     }
     if (onReviewScreen) {
       renderReviewScreen();
+    }
+    if (onTicketScreen) {
+      renderTicketScreen();
     }
     if (onUsageScreen) {
       if (!state.usageReport && !state.usageLoading && !state.usageError) {
@@ -1957,7 +1967,10 @@ export function createSessionRenderer({
       // the same reason Teams does — the nav names where you came from, and
       // going one level deeper is not leaving.
       current:
-        context.kind === "tasks" || context.kind === "teams" || context.kind === "review"
+        context.kind === "tasks"
+        || context.kind === "teams"
+        || context.kind === "review"
+        || context.kind === "ticket"
           ? "tasks"
           : context.kind === "usage"
             ? "usage"
@@ -1999,7 +2012,7 @@ export function createSessionRenderer({
         // The review screen is about one run, so its row stays selected in it —
         // otherwise opening the changes reads as navigating away from the task.
         selectedRunId:
-          context.kind === "tasks" || context.kind === "review"
+          context.kind === "tasks" || context.kind === "review" || context.kind === "ticket"
             ? context.teamRunId || null
             : null,
         locked: tasksLocked(state.session),
@@ -2249,6 +2262,9 @@ export function createSessionRenderer({
           renderTaskTeam(state.session);
         },
         onOpenReview: onOpenReviewScreen ? (teamRunId) => onOpenReviewScreen(teamRunId) : null,
+        // A board card opens the run's own page (17b). Without this the click
+        // only selects a run that board mode has nowhere to draw.
+        onOpenTicket: onOpenTicketScreen ? (teamRunId) => onOpenTicketScreen(teamRunId) : null,
         orchestrator: locked
           ? null
           : {
@@ -2899,6 +2915,44 @@ export function createSessionRenderer({
       h(TaskReviewScreen, {
         ...taskReviewProps(teamRunId, () => renderReviewScreen()),
         onBack: () => onOpenTask?.(teamRunId),
+      })
+    );
+  }
+
+  /**
+   * One run's ticket page (17b). Reads its run id from the CONTEXT, like the
+   * review screen, so a reload lands on the run the history entry names.
+   */
+  function renderTicketScreen() {
+    if (!ticketScreenMount) {
+      return;
+    }
+    const teamRunId = getViewContext()?.teamRunId || null;
+    const loaded = teamsCache.hasData();
+    const teams = loaded ? teamsCache.current().teams : null;
+    const run = teamRunId ? selectTeamRun(teams || [], teamRunId) : null;
+    renderReactContent(
+      ticketScreenMount,
+      h(TaskTicketScreen, {
+        run,
+        loading: !loaded,
+        error: state.teamsError || null,
+        changesPanel: taskDiffPanel(teamRunId),
+        actionPending: state.teamActionPending || null,
+        actionError: state.teamActionError || null,
+        onBack: () => onBackToTasks?.(),
+        onAction: (action) => onTeamAction?.(action, teamRunId),
+        onOpenThread: (threadId) => {
+          if (!threadId || typeof viewThread !== "function") {
+            return;
+          }
+          viewThread(threadId, {
+            context: selectOwningContext({
+              threadId,
+              threadProjectId: state.threadProjectId || {},
+            }),
+          });
+        },
       })
     );
   }

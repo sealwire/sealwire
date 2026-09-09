@@ -62,6 +62,7 @@ export const projectOverviewMount = document.querySelector("#project-overview");
 export const taskTeamMount = document.querySelector("#task-team");
 export const teamsLibraryMount = document.querySelector("#teams-library");
 export const reviewScreenMount = document.querySelector("#review-screen");
+export const ticketScreenMount = document.querySelector("#ticket-screen");
 export const usageReportMount = document.querySelector("#usage-report");
 // The sidebar's destinations, in both forms, are one shared prop-driven component
 // (shared/sidebar-nav.js) rendered into these two mounts. That replaced SIX handles —

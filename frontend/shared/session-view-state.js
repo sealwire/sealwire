@@ -81,6 +81,13 @@ export function normalizeSessionViewContext(context) {
     const teamRunId = stringId(context.teamRunId);
     return teamRunId ? { kind: "review", teamRunId } : { kind: "tasks", teamRunId: null };
   }
+  // The ticket page (17b) — one run's own screen, entered from the board. Same
+  // shape as `review`: a null id is not a list state, so it falls back rather
+  // than landing a truncated history entry on a blank screen.
+  if (context?.kind === "ticket") {
+    const teamRunId = stringId(context.teamRunId);
+    return teamRunId ? { kind: "ticket", teamRunId } : { kind: "tasks", teamRunId: null };
+  }
   return { kind: "sessions" };
 }
 
