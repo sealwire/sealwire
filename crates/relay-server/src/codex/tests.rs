@@ -3273,6 +3273,11 @@ async fn terminal_without_echo_settles_reservation_and_does_not_contaminate_next
             .collect();
         assert_eq!(users.len(), 1, "placeholder user entry must remain visible");
         assert_eq!(users[0].text.as_deref(), Some(FIRST));
+        assert!(
+            users[0].item_id.starts_with("codex:user-reserve:"),
+            "settled placeholder must keep reserve id until a late echo merges"
+        );
+        assert_eq!(users[0].turn_id.as_deref(), Some(first_turn.as_str()));
     }
 
     const SECOND: &str = "second turn prompt";
@@ -3281,12 +3286,42 @@ async fn terminal_without_echo_settles_reservation_and_does_not_contaminate_next
         .await
         .expect("second send")
         .expect("turn id");
-    // Late echo for the settled first turn must not steal the second reservation.
+    // Late echo for the settled first turn must merge in place, not append, and
+    // must not steal the second reservation.
     handle_notification(
         user_message_completed(&thread.id, &first_turn, "item-user-late-first", FIRST),
         &state,
     )
     .await;
+    {
+        let relay = state.read().await;
+        let runtime = relay.runtime_for_thread(&thread.id).expect("runtime");
+        let first_users: Vec<_> = runtime
+            .transcript
+            .iter()
+            .filter(|entry| {
+                entry.kind == TranscriptEntryKind::UserText
+                    && entry.turn_id.as_deref() == Some(first_turn.as_str())
+            })
+            .collect();
+        assert_eq!(
+            first_users.len(),
+            1,
+            "late echo after settle must not duplicate the first user entry"
+        );
+        assert_eq!(first_users[0].item_id, "item-user-late-first");
+        assert!(
+            runtime
+                .codex_user_reservations
+                .values()
+                .any(
+                    |reservation| reservation.turn_id.as_deref() == Some(second_turn.as_str())
+                        || (reservation.turn_id.is_none()
+                            && runtime.codex_pending_bind_reservation_id.is_some())
+                ),
+            "second-turn reservation must survive late first-turn echo"
+        );
+    }
     handle_notification(
         reasoning_started(
             &thread.id,
@@ -3416,6 +3451,159 @@ async fn unloaded_thread_retry_binds_reservation_after_heal() {
     .await;
 
     assert_user_then_reasoning_projections(&state, "thread-cold-lifecycle", &turn_id).await;
+}
+
+#[tokio::test]
+async fn stale_completion_does_not_retire_next_turn_pending_reservation() {
+    let state = codex_test_state_with_thread("thread-stale-complete").await;
+    let first_id = {
+        let mut relay = state.write().await;
+        let id = relay.reserve_codex_user_message("thread-stale-complete", "first");
+        relay.bind_codex_user_reservation("thread-stale-complete", &id, "turn-first");
+        relay.set_active_turn(Some("turn-first".to_string()));
+        id
+    };
+    let next_id = {
+        let mut relay = state.write().await;
+        // Simulate the next send's unbound pending after the prior turn idled.
+        relay.set_active_turn(None);
+        relay.reserve_codex_user_message("thread-stale-complete", "next prompt")
+    };
+
+    // Late/duplicate completion for the prior turn while active_turn_id is None.
+    handle_notification(
+        turn_completed("thread-stale-complete", "turn-first"),
+        &state,
+    )
+    .await;
+
+    let relay = state.read().await;
+    let runtime = relay
+        .runtime_for_thread("thread-stale-complete")
+        .expect("runtime");
+    assert!(
+        !runtime.codex_user_reservations.contains_key(&first_id),
+        "prior turn's bound reservation must settle"
+    );
+    let next = runtime
+        .codex_user_reservations
+        .get(&next_id)
+        .expect("next pending reservation must survive stale completion");
+    assert!(
+        next.turn_id.is_none(),
+        "stale completion must not stamp the next unbound pending"
+    );
+    assert_eq!(
+        runtime.codex_pending_bind_reservation_id.as_deref(),
+        Some(next_id.as_str())
+    );
+}
+
+#[tokio::test]
+async fn late_echo_after_terminal_settlement_merges_placeholder_without_duplicate() {
+    let state = codex_test_state_with_thread("thread-late-echo-settle").await;
+    let reservation_id = {
+        let mut relay = state.write().await;
+        let id = relay.reserve_codex_user_message("thread-late-echo-settle", "settled prompt");
+        relay.bind_codex_user_reservation("thread-late-echo-settle", &id, "turn-settled");
+        relay.set_active_turn(Some("turn-settled".to_string()));
+        id
+    };
+
+    handle_notification(
+        turn_completed("thread-late-echo-settle", "turn-settled"),
+        &state,
+    )
+    .await;
+    {
+        let relay = state.read().await;
+        let runtime = relay
+            .runtime_for_thread("thread-late-echo-settle")
+            .expect("runtime");
+        assert!(!runtime
+            .codex_user_reservations
+            .contains_key(&reservation_id));
+        assert_eq!(
+            runtime
+                .transcript
+                .iter()
+                .filter(|entry| entry.kind == TranscriptEntryKind::UserText)
+                .count(),
+            1
+        );
+    }
+
+    handle_notification(
+        user_message_completed(
+            "thread-late-echo-settle",
+            "turn-settled",
+            "item-user-settled",
+            "settled prompt",
+        ),
+        &state,
+    )
+    .await;
+
+    let relay = state.read().await;
+    let runtime = relay
+        .runtime_for_thread("thread-late-echo-settle")
+        .expect("runtime");
+    let users: Vec<_> = runtime
+        .transcript
+        .iter()
+        .filter(|entry| entry.kind == TranscriptEntryKind::UserText)
+        .collect();
+    assert_eq!(
+        users.len(),
+        1,
+        "late echo must merge into the settled placeholder, not append"
+    );
+    assert_eq!(users[0].item_id, "item-user-settled");
+    assert_eq!(users[0].turn_id.as_deref(), Some("turn-settled"));
+    assert_eq!(users[0].text.as_deref(), Some("settled prompt"));
+}
+
+#[tokio::test]
+async fn lost_turn_start_response_clears_reservation_on_timeout() {
+    let (bridge, state) = spawn_fake_codex_bridge().await;
+    let thread = bridge
+        .start_thread(
+            "/tmp/project",
+            "gpt-5.6-sol",
+            "on-request",
+            "workspace-write",
+        )
+        .await
+        .expect("thread starts");
+    activate_started_codex_thread(&state, &thread).await;
+    configure_fake_codex_drop_turn_start(&bridge).await;
+    TEST_CODEX_REQUEST_TIMEOUT_MS.store(200, std::sync::atomic::Ordering::Relaxed);
+
+    let err = bridge
+        .start_turn(&thread.id, "lost response prompt", "gpt-5.6-sol", "low")
+        .await;
+    TEST_CODEX_REQUEST_TIMEOUT_MS.store(0, std::sync::atomic::Ordering::Relaxed);
+
+    let err = err.expect_err("dropped turn/start response must time out");
+    assert!(
+        err.to_lowercase().contains("timeout") || err.to_lowercase().contains("timed out"),
+        "unexpected error: {err}"
+    );
+
+    let relay = state.read().await;
+    let runtime = relay.runtime_for_thread(&thread.id).expect("runtime");
+    assert!(
+        runtime.codex_user_reservations.is_empty(),
+        "timeout must clear reservation state"
+    );
+    assert!(runtime.codex_pending_bind_reservation_id.is_none());
+    assert!(
+        !runtime
+            .transcript
+            .iter()
+            .any(|entry| entry.kind == TranscriptEntryKind::UserText),
+        "timeout must remove the user placeholder so the next turn starts clean"
+    );
 }
 
 #[tokio::test]
@@ -4337,6 +4525,18 @@ async fn configure_fake_codex_reject_turn_start(bridge: &CodexBridge) {
         )
         .await
         .expect("configure fake Codex to reject turn/start");
+}
+
+async fn configure_fake_codex_drop_turn_start(bridge: &CodexBridge) {
+    bridge
+        .send_request(
+            "fake/configure",
+            json!({
+                "dropTurnStart": true,
+            }),
+        )
+        .await
+        .expect("configure fake Codex to drop turn/start responses");
 }
 
 /// The JSON-RPC methods the fake app-server actually received, oldest first.

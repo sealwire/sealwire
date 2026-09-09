@@ -38,6 +38,9 @@ use rpc::{spawn_stderr_reader, spawn_stdout_reader};
 use rpc::{handle_notification, handle_server_request};
 
 #[cfg(test)]
+pub(crate) use rpc::TEST_CODEX_REQUEST_TIMEOUT_MS;
+
+#[cfg(test)]
 mod tests;
 
 type PendingResponses = Arc<Mutex<HashMap<String, oneshot::Sender<Result<Value, String>>>>>;
