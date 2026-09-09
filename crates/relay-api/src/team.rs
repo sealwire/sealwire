@@ -834,6 +834,15 @@ pub struct TeamRun {
     #[serde(default)]
     pub mr_dev_thread_id: Option<String>,
 
+    /// The single reviewer session this run reuses across design review,
+    /// per-sub-task review, and the MR gate.
+    ///
+    /// Remembered rather than derived: `run_owned_thread_ids` would answer with
+    /// the oldest seat, and sub-task attaches are for UI/gates, not the reuse
+    /// source of truth. Kept across a reopen: same standards, same session.
+    #[serde(default)]
+    pub reviewer_thread_id: Option<String>,
+
     /// Instructions left for the team to pick up on its next turn. The driver
     /// drains these; they are notes TO the team, never from it.
     #[serde(default)]
@@ -952,6 +961,7 @@ impl TeamRun {
             || !self.run_owned_thread_ids.is_empty()
             || !self.owned_thread_providers.is_empty()
             || self.mr_dev_thread_id.is_some()
+            || self.reviewer_thread_id.is_some()
             || !self.sub_tasks.is_empty()
             || self.driver_progress.state_revision != 0
             || self.driver_progress.last_command_seq != 0
@@ -1712,6 +1722,9 @@ impl TeamRun {
         if let Some(mr_dev) = self.mr_dev_thread_id.as_mut() {
             swap(mr_dev);
         }
+        if let Some(reviewer) = self.reviewer_thread_id.as_mut() {
+            swap(reviewer);
+        }
         for task in self.sub_tasks.iter_mut() {
             if let Some(dev) = task.dev_thread_id.as_mut() {
                 swap(dev);
@@ -1827,6 +1840,7 @@ impl TeamRun {
             // This seat WRITES, so a drain that missed it would keep changing
             // files after the run's locks were released.
             .chain(self.mr_dev_thread_id.as_deref())
+            .chain(self.reviewer_thread_id.as_deref())
             .chain(self.sub_tasks.iter().flat_map(|task| {
                 task.owned_thread_ids
                     .iter()
@@ -1871,6 +1885,9 @@ impl TeamRun {
         }
         if self.mr_dev_thread_id.as_deref() == Some(thread_id) {
             return named(&self.dev_provider);
+        }
+        if self.reviewer_thread_id.as_deref() == Some(thread_id) {
+            return named(&self.reviewer_provider);
         }
         if let Some(role) = self.run_owned_thread_roles.get(thread_id) {
             return match role.as_str() {
@@ -1929,6 +1946,10 @@ impl TeamRun {
         }
         if self.mr_dev_thread_id.as_deref() == Some(thread_id) {
             self.mr_dev_thread_id = None;
+            changed = true;
+        }
+        if self.reviewer_thread_id.as_deref() == Some(thread_id) {
+            self.reviewer_thread_id = None;
             changed = true;
         }
         for task in &mut self.sub_tasks {

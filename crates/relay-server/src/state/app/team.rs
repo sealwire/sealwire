@@ -4239,9 +4239,32 @@ impl relay_api::TeamPort for AppState {
         // replay of an already-rejected `AttachSubTaskThread` means the
         // release already ran the first time; running it again would be
         // harmless but redundant, not a second thread to hand back.
+        //
+        // Do NOT release a seat the run already keeps for another reason: a
+        // shared reviewer (or an inherited shared Dev) is attached to a
+        // sub-task after it is already run-owned / remembered. Refusing that
+        // attach must not tear down the session later phases still name.
         if wrote && matches!(receipt.status, TeamCommandStatus::Rejected(_)) {
             if let Some(thread_id) = attach_thread_id {
-                self.release_team_thread_by_id(&thread_id).await;
+                let still_referenced = {
+                    let relay = self.relay.read().await;
+                    relay.team_run(run_id).is_some_and(|run| {
+                        run.reviewer_thread_id.as_deref() == Some(thread_id.as_str())
+                            || run.mr_dev_thread_id.as_deref() == Some(thread_id.as_str())
+                            || run.sub_tasks.iter().any(|task| {
+                                task.dev_thread_id.as_deref() == Some(thread_id.as_str())
+                                    || task.reviewer_thread_id.as_deref()
+                                        == Some(thread_id.as_str())
+                                    || task
+                                        .owned_thread_ids
+                                        .iter()
+                                        .any(|owned| owned == &thread_id)
+                            })
+                    })
+                };
+                if !still_referenced {
+                    self.release_team_thread_by_id(&thread_id).await;
+                }
             }
         }
 

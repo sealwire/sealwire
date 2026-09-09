@@ -1586,6 +1586,7 @@ pub enum TeamCommandKind {
     PauseMrWithoutCandidate,
     RecordMrStaleReview,
     RecordMrDevThread,
+    RecordReviewerThread,
     FinishRun,
     TakeUserNotes,
     /// The lifecycle family (`.sealwire/DESIGN.md` D14). These carry the run's
@@ -3592,6 +3593,10 @@ mod tests {
                 (
                     TeamCommandKind::RecordMrDevThread,
                     r#""record_mr_dev_thread""#
+                ),
+                (
+                    TeamCommandKind::RecordReviewerThread,
+                    r#""record_reviewer_thread""#
                 ),
                 (TeamCommandKind::FinishRun, r#""finish_run""#),
                 (TeamCommandKind::TakeUserNotes, r#""take_user_notes""#),
