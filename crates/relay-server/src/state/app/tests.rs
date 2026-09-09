@@ -15853,6 +15853,49 @@ resurrected into a turn that never completes: {:?}",
         }
     }
 
+    /// Every entry in the worktree (path relative to `cwd` -> content), excluding
+    /// `.git/`. For the "no repo mutation" proof: re-reading one hand-picked file only
+    /// shows that file didn't change, not that nothing in the tree did.
+    ///
+    /// `symlink_metadata`, never `metadata` or a followed read: a symlink's identity
+    /// for this comparison is its OWN target path, not whatever that target's content
+    /// is (which lives outside this repo and can change for unrelated reasons) — and
+    /// blindly following one pointed outside the repo would walk this straight out of
+    /// the fixture.
+    fn worktree_files_snapshot(
+        cwd: &str,
+    ) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+        fn walk(
+            dir: &std::path::Path,
+            root: &std::path::Path,
+            out: &mut std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
+        ) {
+            for entry in std::fs::read_dir(dir).expect("read_dir") {
+                let path = entry.expect("dir entry").path();
+                if path.file_name() == Some(std::ffi::OsStr::new(".git")) {
+                    continue;
+                }
+                let metadata = std::fs::symlink_metadata(&path).expect("symlink_metadata");
+                let rel = path.strip_prefix(root).expect("under root").to_path_buf();
+                if metadata.file_type().is_symlink() {
+                    let target = std::fs::read_link(&path).expect("read_link");
+                    out.insert(rel, target.to_string_lossy().into_owned().into_bytes());
+                } else if metadata.is_dir() {
+                    walk(&path, root, out);
+                } else {
+                    out.insert(rel, std::fs::read(&path).expect("read file"));
+                }
+            }
+        }
+        let mut out = std::collections::BTreeMap::new();
+        walk(
+            std::path::Path::new(cwd),
+            std::path::Path::new(cwd),
+            &mut out,
+        );
+        out
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn checkpoint_snapshots_dirty_work_without_moving_head_index_or_branches() {
@@ -16248,8 +16291,7 @@ never moved to the checkpoint's own sha"
         let branches_before = git_stdout(cwd, &["branch", "--list"]);
         let index_path = real_index_path_for_test(cwd);
         let index_before = std::fs::read(&index_path).expect("index exists");
-        let seed_path = std::path::Path::new(cwd).join("seed.txt");
-        let seed_before = std::fs::read(&seed_path).expect("seed.txt exists");
+        let worktree_before = worktree_files_snapshot(cwd);
 
         let receipt = app
             .request_review(review_input("codex"))
@@ -16276,9 +16318,10 @@ never moved to the checkpoint's own sha"
             "the worktree's observable git status must be unchanged"
         );
         assert_eq!(
-            std::fs::read(&seed_path).expect("seed.txt still exists"),
-            seed_before,
-            "the dirty worktree file must be byte-identical after the review"
+            worktree_files_snapshot(cwd),
+            worktree_before,
+            "every worktree file must be byte-identical after the review, not just the \
+one that was dirty going in"
         );
 
         let turns = provider.turns.lock().await.clone();

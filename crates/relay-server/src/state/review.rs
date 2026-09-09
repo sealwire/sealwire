@@ -164,6 +164,12 @@ pub(crate) struct ReviewJob {
     pub(crate) base_sha: Option<String>,
     pub(crate) round_base_sha: Option<String>,
     pub(crate) candidate_sha: Option<String>,
+    /// Whether `candidate_sha` names a hidden checkpoint commit (see `checkpoint.rs`)
+    /// rather than a real commit reachable from `HEAD`. Persisted alongside
+    /// `candidate_sha` in every write, not derived — a checkpoint and a real commit
+    /// share the one field, and re-reading it later without this flag has no way to
+    /// tell them apart.
+    pub(crate) candidate_is_checkpoint: bool,
     pub(crate) verdict_candidate_sha: Option<String>,
     pub(crate) review_text: Option<String>,
     pub(crate) posted_back_turn_id: Option<String>,
@@ -213,6 +219,7 @@ impl ReviewJob {
             base_sha: None,
             round_base_sha: None,
             candidate_sha: None,
+            candidate_is_checkpoint: false,
             verdict_candidate_sha: None,
             review_text: None,
             posted_back_turn_id: None,
