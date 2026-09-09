@@ -882,11 +882,6 @@ function AskUserEntry({ entry, isJustPrepended = false, options = null }) {
     requestId && options?.askUserDetailErrors instanceof Map
       ? options.askUserDetailErrors.get(requestId) || ""
       : "";
-  // Docked, the waiting/failed detail is the dock's to report — and the dock is
-  // the only one of the two that can offer a retry.
-  if (!questions && detailIncomplete && options?.askUserDocked) {
-    return h(AskUserAwaitingCard, { entry, isJustPrepended, questions: [] });
-  }
   if (!questions && detailIncomplete) {
     return h(AskUserDetailPendingCard, {
       entry,
@@ -895,6 +890,10 @@ function AskUserEntry({ entry, isJustPrepended = false, options = null }) {
       questionCount: pendingRequest?.question_count || 0,
       detailLoading,
       detailError,
+      onRetryDetail:
+        requestId && options?.onRetryAskUserDetail
+          ? () => options.onRetryAskUserDetail(requestId)
+          : null,
     });
   }
   if (!questions) {
@@ -918,12 +917,6 @@ function AskUserEntry({ entry, isJustPrepended = false, options = null }) {
       ? options.askUserErrors.get(requestId) || ""
       : "";
 
-  // Docked: the live card is mounted outside the transcript, so in place this is
-  // only the record that the question was asked. It must not show options —
-  // options here would be a second set the reader can see but not use.
-  if (interactive && options?.askUserDocked) {
-    return h(AskUserAwaitingCard, { entry, isJustPrepended, questions });
-  }
   if (!interactive) {
     return h(AskUserReadOnlyCard, {
       entry,
@@ -1008,41 +1001,6 @@ export function AskUserDetailPendingCard({
               detailLoading ? "Loading…" : "Try again"
             )
           : null
-      )
-    )
-  );
-}
-
-function AskUserAwaitingCard({ entry, isJustPrepended, questions }) {
-  return h(
-    "article",
-    transcriptEntryDomAttrs(
-      entry,
-      "chat-message chat-message-system chat-message-ask-user chat-message-ask-user-awaiting",
-      null,
-      { justPrepended: isJustPrepended }
-    ),
-    h(
-      "div",
-      { className: "message-card message-card-system message-card-ask-user" },
-      h(
-        "div",
-        { className: "ask-user-meta" },
-        h("span", { className: "ask-user-tag" }, "Claude asked"),
-        h("span", { className: "ask-user-status" }, "Waiting for your answer")
-      ),
-      ...questions.map((q, qIndex) =>
-        h(
-          "section",
-          { className: "ask-user-question", key: `awaiting:q:${qIndex}` },
-          q.header ? h("div", { className: "ask-user-question-header" }, q.header) : null,
-          h("p", { className: "ask-user-question-text" }, q.question || "(no question)")
-        )
-      ),
-      h(
-        "p",
-        { className: "ask-user-awaiting-hint" },
-        "The options are waiting below the conversation."
       )
     )
   );
@@ -2456,14 +2414,9 @@ export function TranscriptContent({
   // `isGroupableCompletedTool` excludes them — so the pinned entry is always a
   // plain item in `groupedItems`; if that ever changed, the id simply would not
   // match and it would render in place, which is the safe degradation.)
-  // Docked surfaces do not pin: the live card is mounted outside this list, so
-  // the record stays where the question was actually asked.
   const pinnedAskUserItemIds = React.useMemo(
-    () =>
-      options?.askUserDocked
-        ? EMPTY_PINNED_ASK_USER_IDS
-        : findPinnedAskUserItemIds(entries, options?.pendingAskUserQuestions),
-    [entries, options?.askUserDocked, options?.pendingAskUserQuestions]
+    () => findPinnedAskUserItemIds(entries, options?.pendingAskUserQuestions),
+    [entries, options?.pendingAskUserQuestions]
   );
   const pinnedAskUserNodes = [];
   const nodes = [];
@@ -2573,14 +2526,6 @@ export function TranscriptContent({
     nodes.push(h(ApprovalCard, { approval, key: "approval", options: effectiveOptions }));
   }
 
-  // Last of all: every question the agent is blocked on. (An approval and a
-  // question can in principle both be pending; the questions sit below the
-  // approval card. Nothing enforces mutual exclusion — a turn blocks on one
-  // thing in practice — and this ordering is the deliberate default.)
-  for (const pinnedNode of pinnedAskUserNodes) {
-    nodes.push(pinnedNode);
-  }
-
   // Bottom-follow: no top-anchor, so there is no bottom spacer and no
   // scroll-the-sent-message-to-top effect. A new user message locks the
   // transcript to the bottom (decideTranscriptScrollAction -> jump-bottom) and
@@ -2593,8 +2538,18 @@ export function TranscriptContent({
     ref: virtualizer.scrollTargetRef,
   };
 
+  // Every question the agent is blocked on, last and OUTSIDE the virtualized
+  // range. Inside it, the row holding a half-finished answer is unmounted as soon
+  // as the reader scrolls up to re-read what they are answering about; out here it
+  // is mounted for as long as the question is pending, while still scrolling with
+  // the conversation rather than in a pane of its own. (An approval and a question
+  // can both be pending; the questions sit below the approval card.)
+  const askUserFooter = pinnedAskUserNodes.length
+    ? h("div", { className: "transcript-ask-user-pinned" }, ...pinnedAskUserNodes)
+    : null;
+
   if (!virtualized) {
-    return h("div", contentProps, sentinel, ...nodes);
+    return h("div", contentProps, sentinel, ...nodes, askUserFooter);
   }
 
   return h(
@@ -2626,7 +2581,8 @@ export function TranscriptContent({
           node
         );
       })
-    )
+    ),
+    askUserFooter
   );
 }
 

@@ -18,7 +18,6 @@ import { formatRelativeTime, formatTimestamp } from "../remote/utils.js";
 import { ToggleLeftPanelIcon } from "./panel-icons.js";
 import { bindTaskWorkspaceResizeHandle } from "./task-workspace-resize.js";
 import { TranscriptPane } from "./transcript-pane.js";
-import { AskUserDock } from "./ask-user-dock.js";
 import {
   availableTeamActions,
   canTalkToTeamLead,
@@ -242,7 +241,6 @@ export function OrchestratorPane({
   // The thread whose questions this pane may answer. Its own — the Orchestrator
   // is a conversation like any other, and the session's questions belong to the
   // session's composer.
-  askUserThreadId = null,
   runs,
   selectedRun = null,
   seenAt = {},
@@ -419,13 +417,6 @@ export function OrchestratorPane({
     // Between the transcript and the composer, exactly where the session
     // conversation puts it.
     h(OrchestratorWorkingIndicator, { activity }),
-    // And the question it is parked on goes here, for the same reason it does
-    // there: as a transcript row it lives and dies with the list it is in.
-    h(AskUserDock, {
-      pendingAskUserQuestions: transcriptOptions?.pendingAskUserQuestions || [],
-      threadId: askUserThreadId,
-      options: transcriptOptions,
-    }),
     h(OrchestratorComposer, {
       // `canWrite` too, not only for the transcript's copy: announcing that
       // another device has control above a live textarea whose Send silently
@@ -1540,7 +1531,6 @@ export function TaskTeamScreen({
       waitingCount,
       onStartTask,
       onOpenThread,
-      askUserThreadId: orchestrator?.askUserThreadId ?? null,
       transcriptEntries: orchestrator?.entries ?? null,
       transcriptLoading: Boolean(orchestrator?.loading),
       onTranscriptInteract: orchestrator?.onTranscriptInteract || null,

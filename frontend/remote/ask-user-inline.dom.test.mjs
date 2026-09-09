@@ -1,8 +1,9 @@
-// The phone gets the same split as the desktop: the transcript keeps the record
-// that a question was asked, and the live card — the one you actually tap — is
-// mounted beside the composer, where scrolling and virtualization cannot reach
-// it. Two live copies, or a set of options in the transcript that look tappable
-// and are not, is exactly the confusion this removes.
+// The phone answers the question in the conversation, not in a pane of its own.
+//
+// A dock above the composer took up to 45vh of a phone screen and scrolled
+// separately, so the transcript behind it could not be read back through. In the
+// transcript the card has to earn that place: last, below anything the turn said
+// after asking, and holding the pick across the snapshots that keep arriving.
 //
 // Imports the panel module directly rather than react-app.js, for the reason
 // spelled out in remote-transcript-panel-empty-states.test.mjs.
@@ -37,7 +38,6 @@ const React = (await import("react")).default;
 const { act } = await import("react");
 const { createRoot } = await import("react-dom/client");
 const { RemoteTranscriptPanel } = await import("./remote-transcript-panel.js");
-const { AskUserDock } = await import("../shared/ask-user-dock.js");
 
 const h = React.createElement;
 
@@ -124,7 +124,7 @@ function panelProps(overrides = {}) {
   };
 }
 
-test("the remote transcript keeps the record and leaves the live card to the dock", () => {
+test("the live question is the last thing in the conversation, and the only copy", () => {
   const host = document.createElement("div");
   document.body.appendChild(host);
   const root = createRoot(host);
@@ -132,61 +132,50 @@ test("the remote transcript keeps the record and leaves the live card to the doc
     root.render(h(RemoteTranscriptPanel, panelProps()));
   });
 
-  assert.equal(
-    host.querySelectorAll(".chat-message-ask-user-interactive").length,
-    0,
-    "the transcript must not render its own live copy of the question"
+  const cards = host.querySelectorAll(".chat-message-ask-user");
+  assert.equal(cards.length, 1, "one card, not a record and a live copy competing for the tap");
+  assert.ok(
+    cards[0].classList.contains("chat-message-ask-user-interactive"),
+    "and it is the answerable one"
   );
-  assert.equal(
-    host.querySelectorAll(".ask-user-option-button").length,
-    0,
-    "nor options in the conversation that cannot be tapped"
+
+  // The turn kept talking after it asked, so in document order the question
+  // would sit above that text; pinned, it is below it.
+  const rendered = host.textContent;
+  assert.ok(
+    rendered.indexOf(TRAILING_TEXT) < rendered.indexOf("Which approach?"),
+    "the question the turn is parked on is pinned past what it said afterwards"
   );
-  assert.match(
-    host.textContent,
-    /Waiting for your answer/,
-    "the record still says the question is open"
-  );
+
+  // No scroller of its own — that is what made the conversation behind it
+  // unreadable on a phone.
+  const scroller = host.querySelector(".thread-content");
+  assert.ok(scroller?.contains(cards[0]), "the card scrolls with the conversation");
 
   act(() => root.unmount());
   host.remove();
 });
 
-test("the remote dock takes the answer and holds the pick", () => {
+test("the phone holds the pick across the snapshots that keep arriving", () => {
   const host = document.createElement("div");
   document.body.appendChild(host);
   const root = createRoot(host);
-  const submitted = [];
+  // Fresh props each time, the way a delivered snapshot rebuilds them.
   const render = () => {
     act(() => {
-      root.render(
-        h(
-          React.Fragment,
-          null,
-          h(RemoteTranscriptPanel, panelProps()),
-          h(AskUserDock, {
-            pendingAskUserQuestions: pendingList(),
-            options: {
-              onSubmitAskUserAnswers: (requestId, answers) => submitted.push({ requestId, answers }),
-              askUserSubmittingRequestIds: new Set(),
-              askUserErrors: new Map(),
-            },
-          })
-        )
-      );
+      root.render(h(RemoteTranscriptPanel, panelProps()));
     });
   };
 
   render();
-  const buttons = () => [...host.querySelectorAll(".ask-user-dock .ask-user-option-button")];
-  assert.ok(buttons().length, "the dock renders the question the turn is parked on");
+  const buttons = () => [...host.querySelectorAll(".ask-user-option-button")];
+  assert.ok(buttons().length, "the question the turn is parked on is answerable");
 
   act(() => {
     buttons()[0].dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
   });
   assert.equal(buttons()[0].getAttribute("aria-pressed"), "true");
 
-  // A snapshot lands while the reader is still on question one.
   render();
   assert.equal(
     buttons()[0].getAttribute("aria-pressed"),

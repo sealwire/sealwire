@@ -1,0 +1,167 @@
+// The question you are being asked must be answerable where it is shown, and it
+// must stay on screen without a scroller of its own.
+//
+// Docking it above the composer bought "never unmounted" by giving the card a
+// second scroll region that ate up to 55vh of the column — so the transcript
+// behind it could no longer be scrolled back through. These two drive the
+// properties that replace it: the live card renders in the transcript, and the
+// virtualizer cannot unmount it out from under a half-finished answer.
+import test from "node:test";
+import assert from "node:assert/strict";
+import { JSDOM } from "jsdom";
+
+const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost/" });
+global.window = dom.window;
+global.document = dom.window.document;
+global.HTMLElement = dom.window.HTMLElement;
+global.Node = dom.window.Node;
+global.CustomEvent = dom.window.CustomEvent;
+global.MouseEvent = dom.window.MouseEvent;
+global.ResizeObserver = class {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+};
+global.IS_REACT_ACT_ENVIRONMENT = true;
+
+const React = (await import("react")).default;
+const { act } = await import("react");
+const { createRoot } = await import("react-dom/client");
+const { TranscriptContent } = await import("./shared/transcript-react.js");
+
+const h = React.createElement;
+
+const TOOL_USE_ID = "askuser-inline-1";
+const ITEM_ID = `tool:${TOOL_USE_ID}`;
+const REQUEST_ID = "req-inline-1";
+
+function questions() {
+  return [
+    {
+      question: "Which approach?",
+      header: "Approach",
+      multiSelect: false,
+      options: [{ label: "Option A" }, { label: "Option B" }],
+    },
+    {
+      question: "Which surface?",
+      header: "Surface",
+      multiSelect: false,
+      options: [{ label: "Local" }, { label: "Remote" }],
+    },
+  ];
+}
+
+function pendingList() {
+  return JSON.parse(
+    JSON.stringify([
+      {
+        request_id: REQUEST_ID,
+        tool_use_id: TOOL_USE_ID,
+        thread_id: "thread-1",
+        questions: questions(),
+      },
+    ])
+  );
+}
+
+const askEntry = () => ({
+  item_id: ITEM_ID,
+  kind: "tool_call",
+  status: "running",
+  tool: {
+    name: "AskUserQuestion",
+    input_preview: JSON.stringify({ questions: questions() }),
+  },
+});
+
+function options(extra = {}) {
+  return {
+    detailEntries: new Map(),
+    expandedKeys: new Set(),
+    loadingItemIds: new Set(),
+    pendingAskUserQuestions: pendingList(),
+    onSubmitAskUserAnswers: () => {},
+    askUserSubmittingRequestIds: new Set(),
+    askUserErrors: new Map(),
+    ...extra,
+  };
+}
+
+async function paint(root, entries, opts) {
+  await act(async () => {
+    root.render(h(TranscriptContent, { entries, options: opts }));
+  });
+}
+
+function mount() {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  return { container, root: createRoot(container) };
+}
+
+// Every surface used to pass askUserDocked, which downgraded the in-place card
+// to a record with no options — a live question the reader could read and not
+// answer, with the real one in a scroller of its own outside the transcript.
+test("the transcript never renders a live question the reader cannot answer", async () => {
+  const { container, root } = mount();
+
+  await paint(
+    root,
+    [
+      { item_id: "msg-1", kind: "agent_text", text: "Working on it.", status: "completed" },
+      askEntry(),
+    ],
+    options({ askUserDocked: true })
+  );
+
+  assert.ok(
+    container.querySelector(".chat-message-ask-user"),
+    "precondition: the pending question is in the transcript at all"
+  );
+  // The wizard shows one question at a time, so this is the first question's two.
+  assert.deepEqual(
+    [...container.querySelectorAll(".ask-user-option-button")].map((b) => b.textContent),
+    ["Option A", "Option B"],
+    "the options must be tappable in the transcript itself"
+  );
+
+  await act(async () => root.unmount());
+  container.remove();
+});
+
+// The hazard the dock was built to dodge: virtualization owns every row, so the
+// card holding a half-finished answer is unmounted the moment the reader scrolls
+// up to re-read what they are answering about.
+test("scrolling history cannot unmount the question waiting for an answer", async () => {
+  const { container, root } = mount();
+
+  const filler = Array.from({ length: 60 }, (_, index) => ({
+    item_id: `msg-${index}`,
+    kind: "agent_text",
+    text: `Line ${index}`,
+    status: "completed",
+  }));
+
+  await paint(root, [...filler, askEntry()], options());
+
+  assert.ok(
+    container.querySelector(".transcript-virtual-spacer"),
+    "precondition: this many rows virtualizes"
+  );
+
+  const card = container.querySelector(".chat-message-ask-user-interactive");
+  assert.ok(card, "the live card is rendered");
+  assert.equal(
+    card.closest(".transcript-virtual-spacer"),
+    null,
+    "it must sit outside the virtualized range, so no scroll position can unmount it"
+  );
+  assert.ok(
+    card.closest(".thread-content"),
+    "and still inside the transcript, so it scrolls with the conversation rather than in its own pane"
+  );
+
+  await act(async () => root.unmount());
+  container.remove();
+});
