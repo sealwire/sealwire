@@ -16,6 +16,7 @@ import { createVerbCycler, progressPhaseLabel, VERB_CYCLE_MS } from "../progress
 // clock, which is the only reason a scheduled card is testable at a fixed hour.
 import { formatRelativeTime, formatTimestamp } from "../remote/utils.js";
 import { ToggleLeftPanelIcon } from "./panel-icons.js";
+import { TaskBoard } from "./task-board-react.js";
 import { bindTaskWorkspaceResizeHandle } from "./task-workspace-resize.js";
 import { TranscriptPane } from "./transcript-pane.js";
 import { AskUserDock } from "./ask-user-dock.js";
@@ -1442,6 +1443,66 @@ function TaskWorkspaceResizeHandle() {
   });
 }
 
+export const TASK_VIEW_MODES = Object.freeze(["list", "board"]);
+
+/**
+ * The Tasks header strip (16a): title, the list/board switch, and the two live
+ * numbers. Sits above both modes so switching does not move it.
+ *
+ * 16a also carries a Usage tab and two filter dropdowns. Usage is already its own
+ * sidebar destination, and both filters would filter on the team a run belongs
+ * to — a field `TeamRunView` does not carry — so neither is here yet.
+ */
+function TasksToolbar({ viewMode, onChangeViewMode, runningCount, capacity, onStartTask }) {
+  return h(
+    "header",
+    { className: "task-surface-toolbar" },
+    h("h2", { className: "task-surface-title" }, "Tasks"),
+    h(
+      "div",
+      { className: "task-surface-modes", role: "tablist", "aria-label": "Task view" },
+      ...TASK_VIEW_MODES.map((mode) =>
+        h(
+          "button",
+          {
+            key: mode,
+            type: "button",
+            role: "tab",
+            "aria-selected": viewMode === mode ? "true" : "false",
+            className: `task-surface-mode${viewMode === mode ? " is-active" : ""}`,
+            onClick: () => onChangeViewMode?.(mode),
+          },
+          mode === "list" ? "List" : "Board"
+        )
+      )
+    ),
+    h("div", { className: "task-surface-toolbar-spacer" }),
+    h(
+      "span",
+      { className: "task-surface-stat" },
+      h("span", { className: "task-surface-stat-dot" }),
+      `${runningCount} running`
+    ),
+    h(
+      "span",
+      { className: "task-surface-stat" },
+      "Today ",
+      capacity?.todayLabel
+        ? h("strong", null, capacity.todayLabel)
+        : h(
+            "span",
+            { className: "task-surface-unknown", title: "Today's spend is not reported yet" },
+            "—"
+          )
+    ),
+    h(
+      "button",
+      { type: "button", className: "task-surface-new", onClick: () => onStartTask?.() },
+      "New task"
+    )
+  );
+}
+
 export function TaskTeamScreen({
   runs,
   selectedRunId,
@@ -1462,6 +1523,11 @@ export function TaskTeamScreen({
   waitingCount = 0,
   capacity = null,
   orchestrator = null,
+  viewMode = "list",
+  onChangeViewMode = null,
+  onOpenReview = null,
+  /** Injectable clock, like the card helpers in `remote/utils.js`. */
+  nowSeconds = undefined,
 }) {
   // Before the loading and not-found branches: nothing was ever fetched.
   if (locked) {
@@ -1567,6 +1633,48 @@ export function TaskTeamScreen({
     })
   );
 
+  const toolbar = h(TasksToolbar, {
+    viewMode,
+    onChangeViewMode,
+    // The count the board's own column header shows, so the two never disagree.
+    runningCount: (groupTeamRuns(runs || [], seenAt).in_progress || []).length,
+    capacity,
+    onStartTask,
+  });
+
+  // Board mode takes the whole area: it is five columns wide, and 16a has no
+  // Orchestrator rail. Clicking a card returns to list mode with that task open,
+  // which is the only detail view that exists.
+  if (viewMode === "board") {
+    return h(
+      "div",
+      { className: "task-surface" },
+      toolbar,
+      h(TaskBoard, {
+        runs,
+        seenAt,
+        selectedRunId,
+        loading,
+        error,
+        capacity,
+        ...(nowSeconds === undefined ? {} : { nowSeconds }),
+        // The board has no detail pane, so opening a card has to land somewhere
+        // that does. Without this the click sets a selection nothing renders.
+        onOpenTask: (teamRunId) => {
+          onChangeViewMode?.("list");
+          onOpenTask?.(teamRunId);
+        },
+        onOpenThread,
+        onOpenReview,
+      })
+    );
+  }
+
   // Detail in the middle (1fr), Orchestrator on the right (resizable width).
-  return h("div", { className: "task-workspace" }, detailPane, orchPane);
+  return h(
+    "div",
+    { className: "task-surface" },
+    toolbar,
+    h("div", { className: "task-workspace" }, detailPane, orchPane)
+  );
 }
