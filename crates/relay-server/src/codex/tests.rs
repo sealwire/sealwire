@@ -2814,14 +2814,74 @@ fn assert_turn_order_is_user_then_reasoning(entries: &[TranscriptEntryView], tur
     );
 }
 
+async fn activate_started_codex_thread(
+    state: &std::sync::Arc<RwLock<RelayState>>,
+    thread: &ThreadSummaryView,
+) {
+    let mut relay = state.write().await;
+    relay.upsert_thread(thread.clone());
+    relay.active_thread_id = Some(thread.id.clone());
+    relay.remember_thread_settings(
+        &thread.id,
+        "on-request",
+        "workspace-write",
+        "low",
+        "gpt-5.6-sol",
+    );
+}
+
+async fn assert_user_then_reasoning_projections(
+    state: &std::sync::Arc<RwLock<RelayState>>,
+    thread_id: &str,
+    turn_id: &str,
+) {
+    let relay = state.read().await;
+    let runtime = relay
+        .runtime_for_thread(thread_id)
+        .expect("thread runtime should exist after the send + late echo");
+    let runtime_views: Vec<TranscriptEntryView> = runtime
+        .transcript
+        .iter()
+        .map(|record| record.to_view())
+        .collect();
+    assert_turn_order_is_user_then_reasoning(&runtime_views, turn_id);
+
+    let snapshot = relay.snapshot();
+    assert_turn_order_is_user_then_reasoning(&snapshot.transcript, turn_id);
+
+    let display_snapshot = snapshot.compact_for(SessionSnapshotCompactProfile::LocalWeb);
+    assert_turn_order_is_user_then_reasoning(&display_snapshot.transcript, turn_id);
+}
+
+// Codex's first prompt never rides `consumed_initial_prompt`; start_session
+// creates the thread then calls start_turn. Reproduce that send boundary here
+// so a reservation installed before turn/start has a real placeholder to use.
 #[tokio::test]
 async fn first_turn_orders_user_before_reasoning_when_echo_arrives_late() {
-    let state = codex_test_state_with_thread("thread-new").await;
+    let (bridge, state) = spawn_fake_codex_bridge().await;
+    let thread = bridge
+        .start_thread(
+            "/tmp/project",
+            "gpt-5.6-sol",
+            "on-request",
+            "workspace-write",
+        )
+        .await
+        .expect("brand-new Codex session must start a thread");
+    activate_started_codex_thread(&state, &thread).await;
 
+    const USER_TEXT: &str = "hello from first turn";
+    let turn_id = bridge
+        .start_turn(&thread.id, USER_TEXT, "gpt-5.6-sol", "low")
+        .await
+        .expect("first send must reach turn/start")
+        .expect("turn/start must return a turn id");
+
+    // Same-turn provider output arrives before the userMessage echo.
     handle_notification(
         reasoning_started(
-            "thread-new",
-            "turn-first",
+            &thread.id,
+            &turn_id,
             "item-reasoning-first",
             "Thinking before the echo arrives",
         ),
@@ -2829,52 +2889,52 @@ async fn first_turn_orders_user_before_reasoning_when_echo_arrives_late() {
     )
     .await;
     handle_notification(
-        user_message_completed(
-            "thread-new",
-            "turn-first",
-            "item-user-first",
-            "hello from first turn",
-        ),
+        user_message_completed(&thread.id, &turn_id, "item-user-first", USER_TEXT),
         &state,
     )
     .await;
 
-    let relay = state.read().await;
-    let runtime = relay
-        .runtime_for_thread("thread-new")
-        .expect("thread runtime should exist after notifications");
-    let runtime_views: Vec<TranscriptEntryView> = runtime
-        .transcript
-        .iter()
-        .map(|record| record.to_view())
-        .collect();
-    assert_turn_order_is_user_then_reasoning(&runtime_views, "turn-first");
-
-    let snapshot = relay.snapshot();
-    assert_turn_order_is_user_then_reasoning(&snapshot.transcript, "turn-first");
-
-    let display_snapshot = snapshot.compact_for(SessionSnapshotCompactProfile::LocalWeb);
-    assert_turn_order_is_user_then_reasoning(&display_snapshot.transcript, "turn-first");
+    assert_user_then_reasoning_projections(&state, &thread.id, &turn_id).await;
 }
 
 #[tokio::test]
 async fn existing_thread_next_turn_orders_user_before_reasoning_when_echo_arrives_late() {
-    let state = codex_test_state_with_thread("thread-existing").await;
+    let (bridge, state) = spawn_fake_codex_bridge().await;
+    let thread = bridge
+        .start_thread(
+            "/tmp/project",
+            "gpt-5.6-sol",
+            "on-request",
+            "workspace-write",
+        )
+        .await
+        .expect("existing-thread case still starts from a real Codex thread");
+    activate_started_codex_thread(&state, &thread).await;
 
+    const PREV_TEXT: &str = "previous turn user prompt";
+    let prev_turn_id = bridge
+        .start_turn(&thread.id, PREV_TEXT, "gpt-5.6-sol", "low")
+        .await
+        .expect("prior send must reach turn/start")
+        .expect("prior turn/start must return a turn id");
     handle_notification(
-        user_message_completed(
-            "thread-existing",
-            "turn-prev",
-            "item-user-prev",
-            "previous turn user prompt",
-        ),
+        user_message_completed(&thread.id, &prev_turn_id, "item-user-prev", PREV_TEXT),
         &state,
     )
     .await;
+    handle_notification(turn_completed(&thread.id, &prev_turn_id), &state).await;
+
+    const USER_TEXT: &str = "current turn user prompt";
+    let turn_id = bridge
+        .start_turn(&thread.id, USER_TEXT, "gpt-5.6-sol", "low")
+        .await
+        .expect("next send must reach turn/start")
+        .expect("next turn/start must return a turn id");
+
     handle_notification(
         reasoning_started(
-            "thread-existing",
-            "turn-next",
+            &thread.id,
+            &turn_id,
             "item-reasoning-next",
             "Reasoning starts before user echo",
         ),
@@ -2882,32 +2942,12 @@ async fn existing_thread_next_turn_orders_user_before_reasoning_when_echo_arrive
     )
     .await;
     handle_notification(
-        user_message_completed(
-            "thread-existing",
-            "turn-next",
-            "item-user-next",
-            "current turn user prompt",
-        ),
+        user_message_completed(&thread.id, &turn_id, "item-user-next", USER_TEXT),
         &state,
     )
     .await;
 
-    let relay = state.read().await;
-    let runtime = relay
-        .runtime_for_thread("thread-existing")
-        .expect("thread runtime should exist after notifications");
-    let runtime_views: Vec<TranscriptEntryView> = runtime
-        .transcript
-        .iter()
-        .map(|record| record.to_view())
-        .collect();
-    assert_turn_order_is_user_then_reasoning(&runtime_views, "turn-next");
-
-    let snapshot = relay.snapshot();
-    assert_turn_order_is_user_then_reasoning(&snapshot.transcript, "turn-next");
-
-    let display_snapshot = snapshot.compact_for(SessionSnapshotCompactProfile::LocalWeb);
-    assert_turn_order_is_user_then_reasoning(&display_snapshot.transcript, "turn-next");
+    assert_user_then_reasoning_projections(&state, &thread.id, &turn_id).await;
 }
 
 #[tokio::test]
