@@ -358,38 +358,30 @@ impl RelayState {
         self.upsert_user_message_legacy(item_id, text, turn_id);
     }
 
-    /// Claim per-thread start admission and install the user placeholder.
-    /// Fails if another Codex `start_turn` already holds admission on this thread.
-    pub fn begin_codex_user_turn(&mut self, thread_id: &str, text: &str) -> Result<String, String> {
-        {
-            let runtime = self.ensure_runtime_for_thread(thread_id);
-            if runtime.codex_start_in_flight {
-                return Err("Codex turn already in flight for this thread".to_string());
-            }
-            runtime.codex_start_in_flight = true;
-        }
-        Ok(self.reserve_codex_user_message(thread_id, text))
-    }
-
-    pub fn release_codex_start_admission(&mut self, thread_id: &str) {
-        if let Some(runtime) = self.runtimes.get_mut(thread_id) {
-            runtime.codex_start_in_flight = false;
-        }
-    }
-
-    /// Install a Codex user-message placeholder before `turn/start`.
+    /// Install the user entry before Codex can emit output for this start.
     ///
-    /// Returns the local reservation id and marks it as the sole in-flight
-    /// pending-bind slot for this thread. Prior reservations for other turns
-    /// stay in the map until settled; they are never rebound by a later start.
-    pub fn reserve_codex_user_message(&mut self, thread_id: &str, text: &str) -> String {
-        let seq = {
+    /// The reservation is also the per-thread admission fence. In particular, an
+    /// unbound reservation survives an uncertain RPC timeout: until Codex emits a
+    /// turn id or disconnects, a retry would make an unknown notification
+    /// impossible to attribute to the old or new request.
+    pub fn begin_codex_user_turn(&mut self, thread_id: &str, text: &str) -> Result<String, String> {
+        let item_id = {
             let runtime = self.ensure_runtime_for_thread(thread_id);
+            if runtime.active_turn_id.is_some() {
+                return Err("Codex already has an active turn for this thread".to_string());
+            }
+            if runtime.codex_start_reservation.is_some() {
+                return Err(
+                    "the previous Codex turn/start is still unresolved for this thread".to_string(),
+                );
+            }
             runtime.codex_user_reservation_seq =
                 runtime.codex_user_reservation_seq.saturating_add(1);
-            runtime.codex_user_reservation_seq
+            format!(
+                "codex:user-reserve:{thread_id}:{}",
+                runtime.codex_user_reservation_seq
+            )
         };
-        let item_id = format!("codex:user-reserve:{thread_id}:{seq}");
         self.upsert_transcript_item_for_thread(
             thread_id,
             item_id.clone(),
@@ -400,20 +392,15 @@ impl RelayState {
             None,
         );
         if let Some(runtime) = self.runtimes.get_mut(thread_id) {
-            runtime.codex_user_reservations.insert(
-                item_id.clone(),
-                super::CodexUserReservation {
-                    item_id: item_id.clone(),
-                    text: text.to_string(),
-                    turn_id: None,
-                },
-            );
-            runtime.codex_pending_bind_reservation_id = Some(item_id.clone());
+            runtime.codex_start_reservation = Some(super::CodexStartReservation {
+                item_id: item_id.clone(),
+                turn_id: None,
+            });
         }
-        item_id
+        Ok(item_id)
     }
 
-    /// Bind a specific reservation to a provider turn id (the `start_turn` path).
+    /// Bind the RPC result to the exact reservation created by that request.
     pub fn bind_codex_user_reservation(
         &mut self,
         thread_id: &str,
@@ -423,28 +410,15 @@ impl RelayState {
         let Some(runtime) = self.runtimes.get_mut(thread_id) else {
             return;
         };
-        let already_held = runtime
-            .codex_user_reservations
-            .values()
-            .any(|reservation| reservation.turn_id.as_deref() == Some(turn_id));
-        let known = runtime.codex_known_turn_ids.contains(turn_id) || already_held;
-        if known {
-            // RPC confirmation after a suppressed notification: the pending unbound
-            // slot may still claim this turn_id if no reservation already holds it.
-            let rpc_claim = !already_held
-                && runtime.codex_pending_bind_reservation_id.as_deref() == Some(reservation_id)
-                && runtime
-                    .codex_user_reservations
-                    .get(reservation_id)
-                    .is_some_and(|reservation| reservation.turn_id.is_none());
-            if !rpc_claim {
-                runtime.codex_known_turn_ids.insert(turn_id.to_string());
-                return;
-            }
-        }
-        let Some(reservation) = runtime.codex_user_reservations.get_mut(reservation_id) else {
+        let Some(reservation) = runtime.codex_start_reservation.as_mut() else {
             return;
         };
+        if reservation.item_id != reservation_id {
+            return;
+        }
+        if reservation.turn_id.is_some() {
+            return;
+        }
         reservation.turn_id = Some(turn_id.to_string());
         if let Some(entry) = runtime
             .transcript
@@ -453,148 +427,105 @@ impl RelayState {
         {
             entry.turn_id = Some(turn_id.to_string());
         }
-        runtime.codex_known_turn_ids.insert(turn_id.to_string());
-        runtime.codex_block_notification_bind = false;
-        if runtime.codex_pending_bind_reservation_id.as_deref() == Some(reservation_id) {
-            runtime.codex_pending_bind_reservation_id = None;
-        }
         let _ = self.bump_thread_transcript_revision(thread_id);
         if self.active_thread_id.as_deref() == Some(thread_id) {
             self.sync_selected_runtime_to_fields();
         }
     }
 
-    /// Bind only the in-flight pending reservation (from `turn/started`).
-    /// Never attaches to an older unbound leftover or a known/stale turn id.
-    ///
-    /// Returns `true` when this turn should become the thread's active turn
-    /// (newly bound, already held by this start, or a first observation with
-    /// no pending slot). Returns `false` when the notification is suppressed
-    /// as blocked/stale — callers must not `set_active_turn` in that case.
+    /// Observe a provider lifecycle event. A known, inactive turn is stale and
+    /// must not claim the current reservation or become active again.
     pub fn bind_pending_codex_user_reservation(&mut self, thread_id: &str, turn_id: &str) -> bool {
         let Some(runtime) = self.runtimes.get(thread_id) else {
-            // No runtime yet: still allow turn/started to activate (legacy/orphan).
             return true;
         };
-        let already_held = runtime
-            .codex_user_reservations
-            .values()
-            .any(|reservation| reservation.turn_id.as_deref() == Some(turn_id));
-        if already_held {
-            // RPC already bound this turn — still activate on the notification.
+        if runtime.active_turn_id.as_deref() == Some(turn_id) {
             return true;
         }
-        if runtime.codex_known_turn_ids.contains(turn_id) {
-            // Known but not held: stale/settled/previously suppressed.
-            return false;
-        }
-        // Unbound-uncertain abandon: late A turn/started must not bind retry B.
-        // Record the id as known and wait for B's turn/start RPC to bind.
-        if runtime.codex_block_notification_bind {
-            if let Some(runtime) = self.runtimes.get_mut(thread_id) {
-                runtime.codex_known_turn_ids.insert(turn_id.to_string());
+        if let Some(reservation) = runtime.codex_start_reservation.as_ref() {
+            if runtime.active_turn_id.is_some() {
+                return false;
             }
-            return false;
-        }
-        let pending_id = runtime.codex_pending_bind_reservation_id.clone();
-        let Some(pending_id) = pending_id else {
-            if let Some(runtime) = self.runtimes.get_mut(thread_id) {
-                runtime.codex_known_turn_ids.insert(turn_id.to_string());
+            if !reservation.can_claim_turn(&runtime.transcript, turn_id) {
+                return false;
             }
-            // No pending start: still allow activating (orphan turn/started).
+            if reservation.turn_id.is_some() {
+                return true;
+            }
+            let reservation_id = reservation.item_id.clone();
+            self.bind_codex_user_reservation(thread_id, &reservation_id, turn_id);
             return true;
-        };
-        self.bind_codex_user_reservation(thread_id, &pending_id, turn_id);
-        true
+        }
+        !runtime
+            .transcript
+            .iter()
+            .any(|entry| entry.turn_id.as_deref() == Some(turn_id))
     }
 
-    /// Drop one reservation and its placeholder (failed / rejected start).
-    pub fn clear_codex_user_reservation(&mut self, thread_id: &str, reservation_id: &str) {
+    /// Remove a reservation only when Codex definitively rejected its start.
+    /// A provider event may beat that response; in that case the bound user entry
+    /// is real and must be retained.
+    pub fn fail_codex_user_turn_definitive(&mut self, thread_id: &str, reservation_id: &str) {
         let Some(runtime) = self.runtimes.get_mut(thread_id) else {
             return;
         };
-        let Some(reservation) = runtime.codex_user_reservations.remove(reservation_id) else {
-            runtime.codex_start_in_flight = false;
+        let Some(reservation) = runtime.codex_start_reservation.as_ref() else {
             return;
         };
-        if runtime.codex_pending_bind_reservation_id.as_deref() == Some(reservation_id) {
-            runtime.codex_pending_bind_reservation_id = None;
+        if reservation.item_id != reservation_id {
+            return;
         }
-        runtime.codex_start_in_flight = false;
+        // A lifecycle event outranks a contradictory error response: Codex has
+        // already demonstrated that work exists, so keep blocking until its
+        // terminal event or provider disconnect.
+        if reservation.turn_id.is_some() {
+            return;
+        }
+        runtime.codex_start_reservation = None;
         runtime
             .transcript
-            .retain(|entry| entry.item_id != reservation.item_id);
+            .retain(|entry| entry.item_id != reservation_id);
         let _ = self.bump_thread_transcript_revision(thread_id);
         if self.active_thread_id.as_deref() == Some(thread_id) {
             self.sync_selected_runtime_to_fields();
         }
     }
 
-    /// Definitive start failure: remove placeholder and release admission.
-    pub fn fail_codex_user_turn_definitive(&mut self, thread_id: &str, reservation_id: &str) {
-        self.clear_codex_user_reservation(thread_id, reservation_id);
-    }
-
-    /// Uncertain start failure (timeout / lost response).
-    ///
-    /// If the reservation is already bound (e.g. `turn/started` won the race),
-    /// keep the placeholder so user-before-output survives. If still unbound,
-    /// abandon it so a later start cannot share the pending slot, and block
-    /// notification binds until the next start's RPC confirms ownership.
-    pub fn fail_codex_user_turn_uncertain(&mut self, thread_id: &str, reservation_id: &str) {
-        let bound = self.runtimes.get(thread_id).and_then(|runtime| {
-            runtime
-                .codex_user_reservations
-                .get(reservation_id)
-                .and_then(|reservation| reservation.turn_id.clone())
-        });
-        if let Some(turn_id) = bound {
-            if let Some(runtime) = self.runtimes.get_mut(thread_id) {
-                runtime.codex_known_turn_ids.insert(turn_id);
-                if runtime.codex_pending_bind_reservation_id.as_deref() == Some(reservation_id) {
-                    runtime.codex_pending_bind_reservation_id = None;
-                }
-                runtime.codex_start_in_flight = false;
-            }
-            return;
-        }
-        if let Some(runtime) = self.runtimes.get_mut(thread_id) {
-            runtime.codex_block_notification_bind = true;
-        }
-        self.clear_codex_user_reservation(thread_id, reservation_id);
-    }
-
-    /// Detach the pending-bind pointer without removing the reservation entry.
-    /// Used by tests to leave a stale unbound leftover on the thread.
-    #[cfg(test)]
-    pub(crate) fn clear_codex_pending_bind_reservation(&mut self, thread_id: &str) {
-        if let Some(runtime) = self.runtimes.get_mut(thread_id) {
-            runtime.codex_pending_bind_reservation_id = None;
-        }
-    }
-
-    /// Retire reservation map entries already bound to `turn_id`.
-    ///
-    /// Never stamps or clears an unbound pending-bind slot: a stale/lost
-    /// completion for a prior turn must not retire the next turn's placeholder.
-    /// The transcript user entry is kept so a late echo can still merge in place.
-    pub fn settle_codex_user_reservation_for_turn(&mut self, thread_id: &str, turn_id: &str) {
-        let Some(runtime) = self.runtimes.get_mut(thread_id) else {
+    /// The provider process ended, so an unbound request can no longer emit a
+    /// notification. This is the one safe recovery point for its admission fence.
+    pub fn abandon_codex_start_reservation(&mut self, thread_id: &str) {
+        let reservation = self
+            .runtimes
+            .get_mut(thread_id)
+            .and_then(|runtime| runtime.codex_start_reservation.take());
+        let Some(reservation) = reservation else {
             return;
         };
-        runtime.codex_known_turn_ids.insert(turn_id.to_string());
-        let retired: Vec<String> = runtime
-            .codex_user_reservations
-            .iter()
-            .filter_map(|(id, reservation)| {
-                (reservation.turn_id.as_deref() == Some(turn_id)).then(|| id.clone())
-            })
-            .collect();
-        for id in &retired {
-            if runtime.codex_pending_bind_reservation_id.as_deref() == Some(id.as_str()) {
-                runtime.codex_pending_bind_reservation_id = None;
+        if reservation.turn_id.is_none() {
+            if let Some(runtime) = self.runtimes.get_mut(thread_id) {
+                runtime
+                    .transcript
+                    .retain(|entry| entry.item_id != reservation.item_id);
             }
-            runtime.codex_user_reservations.remove(id);
+            let _ = self.bump_thread_transcript_revision(thread_id);
+            if self.active_thread_id.as_deref() == Some(thread_id) {
+                self.sync_selected_runtime_to_fields();
+            }
+        }
+    }
+
+    /// A terminal event identifies and settles a response-first reservation even
+    /// when `turn/started` was omitted.
+    pub fn finish_codex_start_reservation(&mut self, thread_id: &str, turn_id: &str) {
+        let matches = self
+            .runtimes
+            .get(thread_id)
+            .and_then(|runtime| runtime.codex_start_reservation.as_ref())
+            .is_some_and(|reservation| reservation.turn_id.as_deref() == Some(turn_id));
+        if matches {
+            if let Some(runtime) = self.runtimes.get_mut(thread_id) {
+                runtime.codex_start_reservation = None;
+            }
         }
     }
 
@@ -605,89 +536,40 @@ impl RelayState {
         text: String,
         turn_id: String,
     ) -> bool {
-        // Prefer an already-bound reservation for this turn.
+        // A bound or already-reconciled user entry is authoritative for this
+        // turn, including a late echo after terminal settlement.
         let mut local_id = self.runtimes.get(thread_id).and_then(|runtime| {
             runtime
-                .codex_user_reservations
-                .values()
-                .find(|reservation| reservation.turn_id.as_deref() == Some(turn_id.as_str()))
-                .map(|reservation| reservation.item_id.clone())
-        });
-        // Settled leftover after terminal-without-echo: merge into that turn's
-        // placeholder before any unbound pending for a newer start can claim it.
-        if local_id.is_none() {
-            if let Some(runtime) = self.runtimes.get(thread_id) {
-                local_id = runtime.transcript.iter().find_map(|entry| {
-                    (entry.kind == TranscriptEntryKind::UserText
+                .transcript
+                .iter()
+                .find(|entry| {
+                    entry.kind == TranscriptEntryKind::UserText
                         && entry.turn_id.as_deref() == Some(turn_id.as_str())
-                        && entry.item_id.starts_with("codex:user-reserve:"))
-                    .then(|| entry.item_id.clone())
-                });
-            }
-        }
-        // Already reconciled for a known turn: update that user entry in place.
-        // Never fall through to pending — a duplicate A echo must not rewrite B.
+                })
+                .map(|entry| entry.item_id.clone())
+        });
+
+        // An early echo may provide the first identity for the sole outstanding
+        // start. Never let a turn represented before this placeholder claim it.
         if local_id.is_none() {
             if let Some(runtime) = self.runtimes.get(thread_id) {
-                if runtime.codex_known_turn_ids.contains(turn_id.as_str()) {
-                    local_id = runtime.transcript.iter().find_map(|entry| {
-                        (entry.kind == TranscriptEntryKind::UserText
-                            && entry.turn_id.as_deref() == Some(turn_id.as_str()))
-                        .then(|| entry.item_id.clone())
-                    });
-                }
-            }
-        }
-        // Echo arrived before bind: only the in-flight pending slot may claim it,
-        // and only when this turn id is not already known/reconciled and
-        // notification binds are not blocked after an unbound-uncertain abandon.
-        if local_id.is_none() {
-            if let Some(runtime) = self.runtimes.get(thread_id) {
-                if !runtime.codex_block_notification_bind
-                    && !runtime.codex_known_turn_ids.contains(turn_id.as_str())
-                {
-                    if let Some(pending_id) = runtime.codex_pending_bind_reservation_id.as_deref() {
-                        if runtime
-                            .codex_user_reservations
-                            .get(pending_id)
-                            .is_some_and(|reservation| reservation.turn_id.is_none())
-                        {
-                            local_id = Some(pending_id.to_string());
-                        }
+                if let Some(reservation) = runtime.codex_start_reservation.as_ref() {
+                    if reservation.can_claim_turn(&runtime.transcript, &turn_id) {
+                        local_id = Some(reservation.item_id.clone());
                     }
-                }
-            }
-        }
-        // Blocked unknown echo: record the turn id so a retry cannot later treat
-        // it as a fresh claimable identity, then fall through to a normal append.
-        if local_id.is_none() {
-            if let Some(runtime) = self.runtimes.get_mut(thread_id) {
-                if runtime.codex_block_notification_bind {
-                    runtime.codex_known_turn_ids.insert(turn_id.clone());
                 }
             }
         }
         let Some(local_id) = local_id else {
             return false;
         };
-        // Early echo path: bind pending to this turn before merging.
-        if self
-            .runtimes
-            .get(thread_id)
-            .and_then(|runtime| runtime.codex_user_reservations.get(&local_id))
-            .is_some_and(|reservation| reservation.turn_id.is_none())
-        {
-            self.bind_codex_user_reservation(thread_id, &local_id, &turn_id);
-        }
         let Some(runtime) = self.runtimes.get_mut(thread_id) else {
             return false;
         };
-        let reserved_text = runtime
-            .codex_user_reservations
-            .remove(&local_id)
-            .map(|reservation| reservation.text);
-        if runtime.codex_pending_bind_reservation_id.as_deref() == Some(local_id.as_str()) {
-            runtime.codex_pending_bind_reservation_id = None;
+        if let Some(reservation) = runtime.codex_start_reservation.as_mut() {
+            if reservation.item_id == local_id && reservation.turn_id.is_none() {
+                reservation.turn_id = Some(turn_id.clone());
+            }
         }
         let Some(entry) = runtime
             .transcript
@@ -699,14 +581,13 @@ impl RelayState {
         entry.item_id = item_id;
         entry.kind = TranscriptEntryKind::UserText;
         entry.text = if text.is_empty() {
-            reserved_text.or(entry.text.take())
+            entry.text.take()
         } else {
             Some(text)
         };
         entry.status = "completed".to_string();
         entry.turn_id = Some(turn_id.clone());
         entry.tool = None;
-        runtime.codex_known_turn_ids.insert(turn_id);
         let _ = self.bump_thread_transcript_revision(thread_id);
         if self.active_thread_id.as_deref() == Some(thread_id) {
             self.sync_selected_runtime_to_fields();

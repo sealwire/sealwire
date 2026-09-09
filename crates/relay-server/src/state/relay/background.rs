@@ -261,6 +261,7 @@ impl RelayState {
         // thread never starts. (All provider `done` arms route here for background threads.)
         let turn_ended = turn_id.is_none();
         let runtime = self.ensure_runtime_for_thread(thread_id);
+        runtime.clear_codex_reservation_for_active_turn(turn_id.as_deref());
         runtime.active_turn_id = turn_id;
         runtime.liveness_timed_out = false;
         runtime.liveness_stop_requested = false;

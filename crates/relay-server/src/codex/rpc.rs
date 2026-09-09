@@ -328,6 +328,17 @@ async fn handle_notification_for_provider(
             active_turn_id = relay.active_turn_id.as_deref().unwrap_or("-"),
             "received codex session notification"
         );
+        if let (Some(thread_id), Some(turn_id)) = (
+            notification_thread_id.as_deref(),
+            string_at(&params, &["turnId"]),
+        ) {
+            if !matches!(
+                thread_route(&relay, Some(thread_id), provider_key),
+                ThreadRoute::Drop
+            ) {
+                relay.bind_pending_codex_user_reservation(thread_id, &turn_id);
+            }
+        }
     }
 
     match method {
@@ -412,8 +423,7 @@ async fn handle_notification_for_provider(
                 return;
             }
             if let Some(turn_id) = string_at(&params, &["turn", "id"]) {
-                // Bind only the in-flight pending reservation for this start —
-                // never the oldest unbound leftover on the thread.
+                // Bind only the reservation for the currently admitted start.
                 let bind_thread_id = match &route {
                     ThreadRoute::Background(bg_thread_id) => Some(bg_thread_id.clone()),
                     ThreadRoute::Active => notification_thread_id
@@ -456,19 +466,18 @@ async fn handle_notification_for_provider(
                 let current_turn = relay
                     .runtime_for_thread(&bg_thread_id)
                     .and_then(|runtime| runtime.active_turn_id.clone());
-                let superseded = matches!(
-                    (completed_turn.as_deref(), current_turn.as_deref()),
-                    (Some(completed), Some(active)) if completed != active
-                );
+                let observed_current = completed_turn
+                    .as_deref()
+                    .map(|turn_id| {
+                        relay.bind_pending_codex_user_reservation(&bg_thread_id, turn_id)
+                    })
+                    .unwrap_or(true);
+                let superseded = !observed_current
+                    || matches!(
+                        (completed_turn.as_deref(), current_turn.as_deref()),
+                        (Some(completed), Some(active)) if completed != active
+                    );
                 if !superseded {
-                    // Bind only while this completion still matches the thread's
-                    // live turn. After active is cleared, a duplicate/stale
-                    // completion must not stamp the next send's unbound pending.
-                    if let Some(turn_id) = completed_turn.as_deref() {
-                        if current_turn.as_deref() == Some(turn_id) {
-                            relay.bind_pending_codex_user_reservation(&bg_thread_id, turn_id);
-                        }
-                    }
                     relay.bg_set_active_turn(&bg_thread_id, None, now);
                     // Settle the background thread to idle on completion, mirroring
                     // the active/Claude paths. Otherwise a background thread whose
@@ -532,9 +541,7 @@ async fn handle_notification_for_provider(
                         "completed",
                         now,
                     );
-                    // Retire reservation metadata; keep any user placeholder in
-                    // the transcript (terminal-without-echo must not linger).
-                    relay.settle_codex_user_reservation_for_turn(&bg_thread_id, turn_id);
+                    relay.finish_codex_start_reservation(&bg_thread_id, turn_id);
                 }
                 changed = true;
             } else {
@@ -544,26 +551,22 @@ async fn handle_notification_for_provider(
                 // A's completion arrives late) must NOT clear the newer turn or idle
                 // a working thread — that would also let the server permit an
                 // overlapping turn.
-                let superseded = matches!(
-                    (completed_turn.as_deref(), relay.active_turn_id.as_deref()),
-                    (Some(completed), Some(active)) if completed != active
-                );
-                if !superseded {
-                    // Bind only while this completion still matches the live active
-                    // turn. `superseded` is false when active_turn_id is None, so a
-                    // late duplicate completion must not bind the next send's pending.
-                    if let (Some(turn_id), Some(active)) =
-                        (completed_turn.as_deref(), relay.active_turn_id.as_deref())
-                    {
-                        if active == turn_id {
-                            if let Some(thread_id) = notification_thread_id
-                                .clone()
-                                .or_else(|| relay.active_thread_id.clone())
-                            {
-                                relay.bind_pending_codex_user_reservation(&thread_id, turn_id);
-                            }
+                let completed_thread = notification_thread_id
+                    .clone()
+                    .or_else(|| relay.active_thread_id.clone());
+                let observed_current =
+                    match (completed_thread.as_deref(), completed_turn.as_deref()) {
+                        (Some(thread_id), Some(turn_id)) => {
+                            relay.bind_pending_codex_user_reservation(thread_id, turn_id)
                         }
-                    }
+                        _ => true,
+                    };
+                let superseded = !observed_current
+                    || matches!(
+                        (completed_turn.as_deref(), relay.active_turn_id.as_deref()),
+                        (Some(completed), Some(active)) if completed != active
+                    );
+                if !superseded {
                     relay.set_active_turn(None);
                     // Match the Claude completion path: a completed turn idles the
                     // active thread. Codex otherwise relies on a follow-up
@@ -631,11 +634,8 @@ async fn handle_notification_for_provider(
                 if let Some(turn_id) = completed_turn.as_deref() {
                     changed |= relay
                         .set_transcript_item_status(&format!("turn-diff:{turn_id}"), "completed");
-                    let settle_thread = notification_thread_id
-                        .clone()
-                        .or_else(|| relay.active_thread_id.clone());
-                    if let Some(settle_thread) = settle_thread {
-                        relay.settle_codex_user_reservation_for_turn(&settle_thread, turn_id);
+                    if let Some(completed_thread) = completed_thread {
+                        relay.finish_codex_start_reservation(&completed_thread, turn_id);
                         changed = true;
                     }
                 }
@@ -1207,9 +1207,17 @@ mod disconnect_tests {
             renamed: false,
             flagged: false,
         };
+        let mut unresolved_summary = summary.clone();
+        unresolved_summary.id = "codex-starting".to_string();
+        unresolved_summary.status = "idle".to_string();
         relay.upsert_thread(summary.clone());
         relay.bg_set_active_turn("codex-thread", Some("turn-1".to_string()), 1);
         relay.ensure_runtime_for_thread("codex-thread").summary = Some(summary);
+        relay.upsert_thread(unresolved_summary.clone());
+        relay.ensure_runtime_for_thread("codex-starting").summary = Some(unresolved_summary);
+        let reservation_id = relay
+            .begin_codex_user_turn("codex-starting", "unresolved prompt")
+            .expect("reserve unresolved start");
         let state = Arc::new(RwLock::new(relay));
 
         let mut child = Command::new("sh")
@@ -1224,13 +1232,14 @@ mod disconnect_tests {
 
         timeout(Duration::from_secs(2), async {
             loop {
-                if state
-                    .read()
-                    .await
+                let relay = state.read().await;
+                let settled = relay
                     .runtime_for_thread("codex-thread")
-                    .and_then(|runtime| runtime.active_turn_id.as_deref())
-                    .is_none()
-                {
+                    .is_some_and(|runtime| runtime.active_turn_id.is_none())
+                    && relay
+                        .runtime_for_thread("codex-starting")
+                        .is_some_and(|runtime| runtime.codex_start_reservation.is_none());
+                if settled {
                     break;
                 }
                 sleep(Duration::from_millis(10)).await;
@@ -1238,5 +1247,16 @@ mod disconnect_tests {
         })
         .await
         .expect("stdout close should settle the turn");
+        let relay = state.read().await;
+        let runtime = relay
+            .runtime_for_thread("codex-starting")
+            .expect("codex runtime");
+        assert!(
+            runtime
+                .transcript
+                .iter()
+                .all(|entry| entry.item_id != reservation_id),
+            "provider exit must remove an unbound placeholder before admitting a retry"
+        );
     }
 }
