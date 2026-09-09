@@ -3208,6 +3208,9 @@ struct DevThenReviewDriver {
     /// the reviewer thread) entirely — the sane thing a real driver does after
     /// a dev turn that did not land.
     reviewer_rounds: u32,
+    /// Existing review rounds when the fixture creates the sub-task. Nonzero
+    /// exercises correction-round candidate requirements.
+    initial_rounds_used: u32,
     /// Test fixture for review-open paths: create work the port can freeze as
     /// an immutable checkpoint before review.
     write_work_before_dev: bool,
@@ -3227,11 +3230,13 @@ impl relay_api::TeamDriver for DevThenReviewDriver {
             .await
             .expect("dev seat thread")
             .thread_id;
+        let initial_rounds_used = self.initial_rounds_used;
         self.app
             .test_update_team_run(&run_id, move |run| {
                 run.sub_tasks.push(crate::state::SubTask {
                     id: "st-1".to_string(),
                     dev_thread_id: Some(dev_thread),
+                    rounds_used: initial_rounds_used,
                     ..Default::default()
                 });
             })
@@ -3510,6 +3515,7 @@ async fn a_dev_turn_that_hits_a_usage_limit_halts_the_run_before_any_review() {
         app: app_for_driver.clone(),
         request_stop_before_review: false,
         reviewer_rounds: 0,
+        initial_rounds_used: 0,
         write_work_before_dev: false,
         dev_outcome: dev_outcome.clone(),
         reviewer_outcomes: reviewer_outcomes.clone(),
@@ -3577,6 +3583,7 @@ async fn an_unrecognised_failure_kind_fails_the_turn_without_pausing_the_run() {
         app: app_for_driver.clone(),
         request_stop_before_review: false,
         reviewer_rounds: 0,
+        initial_rounds_used: 0,
         write_work_before_dev: false,
         dev_outcome: dev_outcome.clone(),
         reviewer_outcomes: reviewer_outcomes.clone(),
@@ -3640,6 +3647,7 @@ async fn a_dev_turn_that_exhausts_the_session_budget_halts_the_run_before_any_re
         app: app_for_driver.clone(),
         request_stop_before_review: false,
         reviewer_rounds: 0,
+        initial_rounds_used: 0,
         write_work_before_dev: false,
         dev_outcome: dev_outcome.clone(),
         reviewer_outcomes: reviewer_outcomes.clone(),
@@ -3720,6 +3728,7 @@ async fn a_dev_turn_that_hits_session_capacity_halts_the_run_before_any_review()
         app: app_for_driver.clone(),
         request_stop_before_review: false,
         reviewer_rounds: 0,
+        initial_rounds_used: 0,
         write_work_before_dev: false,
         dev_outcome: dev_outcome.clone(),
         reviewer_outcomes: reviewer_outcomes.clone(),
@@ -4195,6 +4204,7 @@ async fn a_dev_turn_that_replies_but_bills_nothing_leaves_the_gate_shut() {
         app: app_for_driver.clone(),
         request_stop_before_review: false,
         reviewer_rounds: 1,
+        initial_rounds_used: 0,
         write_work_before_dev: false,
         dev_outcome: dev_outcome.clone(),
         reviewer_outcomes: reviewer_outcomes.clone(),
@@ -4235,6 +4245,171 @@ async fn a_dev_turn_that_replies_but_bills_nothing_leaves_the_gate_shut() {
     );
 }
 
+/// Billing proves that a provider turn ran, not that the implementation role
+/// intentionally submitted a verification-only result. Ordinary prose remains
+/// non-reviewable without the explicit no-change marker.
+#[tokio::test]
+async fn a_billed_plain_no_change_reply_does_not_become_a_claim() {
+    let (_repo, root) = init_team_repo().await;
+    let (app, providers) = build_review_app(&root, &["codex"]).await;
+    providers
+        .get("codex")
+        .unwrap()
+        .report_turn_usage
+        .lock()
+        .await
+        .replace((1_200, None, false));
+    let dev_outcome = std::sync::Arc::new(Mutex::new(None));
+    let reviewer_outcomes = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let app_for_driver = app.clone();
+    let app = app.with_team_driver(std::sync::Arc::new(DevThenReviewDriver {
+        app: app_for_driver.clone(),
+        request_stop_before_review: false,
+        reviewer_rounds: 1,
+        initial_rounds_used: 0,
+        write_work_before_dev: false,
+        dev_outcome: dev_outcome.clone(),
+        reviewer_outcomes: reviewer_outcomes.clone(),
+    }));
+
+    let mut input = team_input(&root);
+    input.dev_provider = "codex".to_string();
+    let run_id = app.start_team_run(input).await.expect("start");
+    let run = wait_for_team_status(&app, &run_id, crate::state::TeamRunStatus::Paused).await;
+
+    let task = &run.sub_tasks[0];
+    assert_eq!(task.dev_turns_landed, 0);
+    assert_eq!(task.review_claim, None);
+    match reviewer_outcomes.lock().await.first() {
+        Some(relay_api::team::TeamTurnOutcome::Failed(reason)) => assert_eq!(
+            reason,
+            "This step hasn't produced any work yet. You can resume to run it again."
+        ),
+        other => panic!("unmarked billed prose must not reach the reviewer: {other:?}"),
+    };
+}
+
+/// A verification-only sub-task can legitimately complete without touching the
+/// repository. Matching successful usage plus an explicit no-change marker is
+/// reviewable evidence; arbitrary billed prose remains refused above.
+#[tokio::test]
+async fn a_billed_no_change_reply_records_a_claim_and_opens_the_reviewer_gate() {
+    let (_repo, root) = init_team_repo().await;
+    let (app, providers) = build_review_app(&root, &["codex"]).await;
+    providers
+        .get("codex")
+        .unwrap()
+        .report_turn_usage
+        .lock()
+        .await
+        .replace((1_200, None, false));
+    providers
+        .get("codex")
+        .unwrap()
+        .scripted_replies
+        .lock()
+        .await
+        .push_back("NO_CHANGE_REVIEW_CLAIM: cargo test focused passed 18/18".to_string());
+
+    let dev_outcome = std::sync::Arc::new(Mutex::new(None));
+    let reviewer_outcomes = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let app_for_driver = app.clone();
+    let app = app.with_team_driver(std::sync::Arc::new(DevThenReviewDriver {
+        app: app_for_driver.clone(),
+        request_stop_before_review: false,
+        reviewer_rounds: 1,
+        initial_rounds_used: 0,
+        write_work_before_dev: false,
+        dev_outcome: dev_outcome.clone(),
+        reviewer_outcomes: reviewer_outcomes.clone(),
+    }));
+
+    let mut input = team_input(&root);
+    input.dev_provider = "codex".to_string();
+    let run_id = app.start_team_run(input).await.expect("start");
+    let run = wait_for_team_to_settle(&app, &run_id).await;
+    let observed_dev_outcome = dev_outcome.lock().await.clone();
+    let observed_reviewer_outcomes = reviewer_outcomes.lock().await.clone();
+    assert_eq!(
+        run.status,
+        crate::state::TeamRunStatus::Failed,
+        "the explicit claim must reach the reviewer instead of pausing the run; \
+         dev={observed_dev_outcome:?}, reviewers={observed_reviewer_outcomes:?}, task={:?}",
+        run.sub_tasks.first()
+    );
+
+    let task = &run.sub_tasks[0];
+    assert_eq!(
+        task.dev_turns_landed, 1,
+        "a billed claim is completed work even when it deliberately has no patch"
+    );
+    assert!(
+        task.candidate_sha.is_empty(),
+        "claim review must not manufacture a Git candidate"
+    );
+    assert_eq!(
+        task.review_claim.as_deref(),
+        Some("cargo test focused passed 18/18"),
+        "only the explicit marker payload becomes reviewer evidence"
+    );
+    match reviewer_outcomes.lock().await.first() {
+        Some(relay_api::team::TeamTurnOutcome::Replied(reply)) => {
+            assert_eq!(reply, REVIEW_REPLY, "the reviewer turn must actually run")
+        }
+        other => panic!("a persisted explicit claim must open the reviewer gate: {other:?}"),
+    }
+    assert_eq!(task.rounds_used, 1, "one real reviewer round was spent");
+}
+
+/// Once a reviewer has requested changes, prose evidence cannot replace the
+/// new candidate needed to prove those findings were addressed.
+#[tokio::test]
+async fn an_explicit_no_change_claim_cannot_bypass_the_correction_candidate() {
+    let (_repo, root) = init_team_repo().await;
+    let (app, providers) = build_review_app(&root, &["codex"]).await;
+    let codex = providers.get("codex").unwrap();
+    codex
+        .report_turn_usage
+        .lock()
+        .await
+        .replace((1_200, None, false));
+    codex
+        .scripted_replies
+        .lock()
+        .await
+        .push_back("NO_CHANGE_REVIEW_CLAIM: prior findings are already handled".to_string());
+
+    let dev_outcome = std::sync::Arc::new(Mutex::new(None));
+    let reviewer_outcomes = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let app_for_driver = app.clone();
+    let app = app.with_team_driver(std::sync::Arc::new(DevThenReviewDriver {
+        app: app_for_driver.clone(),
+        request_stop_before_review: false,
+        reviewer_rounds: 0,
+        initial_rounds_used: 1,
+        write_work_before_dev: false,
+        dev_outcome: dev_outcome.clone(),
+        reviewer_outcomes: reviewer_outcomes.clone(),
+    }));
+
+    let mut input = team_input(&root);
+    input.dev_provider = "codex".to_string();
+    let run_id = app.start_team_run(input).await.expect("start");
+    let run = wait_for_team_status(&app, &run_id, crate::state::TeamRunStatus::Failed).await;
+
+    match dev_outcome.lock().await.as_ref() {
+        Some(relay_api::team::TeamTurnOutcome::Blocked(reason)) => assert!(
+            reason.contains("did not produce reviewable changes"),
+            "the correction refusal should explain that a new candidate is required: {reason}"
+        ),
+        other => panic!("a no-change correction must be blocked: {other:?}"),
+    }
+    let task = &run.sub_tasks[0];
+    assert_eq!(task.review_claim, None);
+    assert_eq!(task.dev_turns_landed, 0);
+    assert!(reviewer_outcomes.lock().await.is_empty());
+}
+
 /// The other half: real spend plus a committed candidate opens the gate, so
 /// ordinary work still reviews.
 #[tokio::test]
@@ -4256,6 +4431,7 @@ async fn a_dev_turn_that_bills_tokens_and_commits_opens_the_reviewer_gate() {
         app: app_for_driver.clone(),
         request_stop_before_review: false,
         reviewer_rounds: 1,
+        initial_rounds_used: 0,
         write_work_before_dev: true,
         dev_outcome: dev_outcome.clone(),
         reviewer_outcomes: reviewer_outcomes.clone(),
@@ -4295,6 +4471,7 @@ async fn a_dev_turn_with_no_usage_figure_at_all_leaves_the_gate_shut() {
         app: app_for_driver.clone(),
         request_stop_before_review: false,
         reviewer_rounds: 1,
+        initial_rounds_used: 0,
         write_work_before_dev: false,
         dev_outcome: dev_outcome.clone(),
         reviewer_outcomes: reviewer_outcomes.clone(),
@@ -4345,6 +4522,7 @@ async fn a_spend_figure_from_another_turn_is_empty_output() {
         app: app_for_driver.clone(),
         request_stop_before_review: false,
         reviewer_rounds: 1,
+        initial_rounds_used: 0,
         write_work_before_dev: false,
         dev_outcome: dev_outcome.clone(),
         reviewer_outcomes: reviewer_outcomes.clone(),
@@ -4828,6 +5006,7 @@ async fn a_dev_turn_with_billed_but_failed_usage_leaves_the_gate_shut() {
         app: app_for_driver.clone(),
         request_stop_before_review: false,
         reviewer_rounds: 1,
+        initial_rounds_used: 0,
         write_work_before_dev: false,
         dev_outcome: dev_outcome.clone(),
         reviewer_outcomes: reviewer_outcomes.clone(),
@@ -4931,6 +5110,7 @@ async fn a_reviewer_turn_is_refused_without_a_landed_dev_turn() {
         app: app_for_driver.clone(),
         request_stop_before_review: false,
         reviewer_rounds: 1,
+        initial_rounds_used: 0,
         write_work_before_dev: false,
         dev_outcome: dev_outcome.clone(),
         reviewer_outcomes: reviewer_outcomes.clone(),
@@ -4986,6 +5166,7 @@ async fn a_stop_mid_run_refuses_the_next_reviewer_turn() {
         app: app_for_driver.clone(),
         request_stop_before_review: true,
         reviewer_rounds: 1,
+        initial_rounds_used: 0,
         write_work_before_dev: true,
         dev_outcome: dev_outcome.clone(),
         reviewer_outcomes: reviewer_outcomes.clone(),
@@ -5572,6 +5753,7 @@ async fn a_stop_racing_the_atomic_refusal_cannot_land_between_its_decision_and_i
         app: app_for_driver.clone(),
         request_stop_before_review: false,
         reviewer_rounds: 1,
+        initial_rounds_used: 0,
         write_work_before_dev: false,
         dev_outcome: dev_outcome.clone(),
         reviewer_outcomes: reviewer_outcomes.clone(),
@@ -5876,6 +6058,7 @@ async fn a_refused_reviewer_turn_that_settles_the_run_releases_its_seats() {
         app: app_for_driver.clone(),
         request_stop_before_review: false,
         reviewer_rounds: 1,
+        initial_rounds_used: 0,
         write_work_before_dev: false,
         dev_outcome: dev_outcome.clone(),
         reviewer_outcomes: reviewer_outcomes.clone(),
@@ -5928,6 +6111,7 @@ async fn a_landed_dev_turn_and_two_reviewer_rejections_still_escalate() {
         app: app_for_driver.clone(),
         request_stop_before_review: false,
         reviewer_rounds: crate::state::MAX_SUBTASK_REVIEW_ROUNDS,
+        initial_rounds_used: 0,
         write_work_before_dev: true,
         dev_outcome: dev_outcome.clone(),
         reviewer_outcomes: reviewer_outcomes.clone(),

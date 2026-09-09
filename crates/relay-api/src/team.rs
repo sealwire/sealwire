@@ -571,6 +571,16 @@ pub struct SubTask {
     /// Candidate commit that the latest approving verdict reviewed.
     #[serde(default)]
     pub verdict_candidate_sha: String,
+    /// Explicit implementation-role claim reviewed when a completed first round
+    /// legitimately produced no repository changes (for example, an overall
+    /// verification sub-task). `None` means review is still change-based.
+    ///
+    /// This is accepted only through the no-change claim marker and bounded
+    /// before storage by the relay host. It is deliberately the claim itself
+    /// rather than another synthetic Git object: the reviewer is judging
+    /// reported evidence, not pretending an empty patch is a change.
+    #[serde(default)]
+    pub review_claim: Option<String>,
     /// Stale approving reviews already rebound for this candidate cycle.
     #[serde(default)]
     pub stale_review_retries: u32,
@@ -588,8 +598,8 @@ pub struct SubTask {
     pub digested: bool,
     pub error: Option<String>,
     /// Legacy landed-work counter kept for existing persisted state and
-    /// diagnostics. The current reviewer gate is the committed candidate pair:
-    /// `candidate_sha` must be nonempty and differ from `round_base_sha`.
+    /// diagnostics. The current reviewer gate accepts either a changed immutable
+    /// candidate or a nonempty [`Self::review_claim`].
     #[serde(default)]
     pub dev_turns_landed: u32,
     /// Which reopen cycle is WORKING this sub-task, from `reopened_count`.
@@ -598,6 +608,26 @@ pub struct SubTask {
     /// say whose work a session holds. Legacy 0 costs sharing, not correctness.
     #[serde(default)]
     pub cycle: u32,
+}
+
+impl SubTask {
+    /// Whether this round has an immutable repository change to review.
+    pub fn has_change_candidate(&self) -> bool {
+        !self.candidate_sha.trim().is_empty() && self.candidate_sha != self.round_base_sha
+    }
+
+    /// Whether the reviewer has anything explicit to judge this round.
+    ///
+    /// A claim is only written by the relay after a matching billed developer
+    /// turn returns a nonempty reply, so this does not make silent/no-work turns
+    /// reviewable.
+    pub fn has_review_subject(&self) -> bool {
+        self.has_change_candidate()
+            || self
+                .review_claim
+                .as_deref()
+                .is_some_and(|claim| !claim.trim().is_empty())
+    }
 }
 
 /// Replay payload for one `TakeUserNotes` command. See the field doc on
@@ -1822,6 +1852,7 @@ impl TeamRun {
                 task.round_base_sha.clear();
                 task.candidate_sha.clear();
                 task.verdict_candidate_sha.clear();
+                task.review_claim = None;
                 task.stale_review_retries = 0;
                 task.dev_turns_landed = 0;
                 // The session holds the attempt being rejected. Dropped from the
@@ -3609,6 +3640,7 @@ mod tests {
         run.sub_tasks[0].round_base_sha = "base-1".to_string();
         run.sub_tasks[0].candidate_sha = "candidate-1".to_string();
         run.sub_tasks[0].verdict_candidate_sha = "candidate-1".to_string();
+        run.sub_tasks[0].review_claim = Some("old verification claim".to_string());
         run.sub_tasks[0].stale_review_retries = 1;
         run.sub_tasks[1].dev_turns_landed = 1;
         run.sub_tasks[1].round_base_sha = "base-2".to_string();
@@ -3627,6 +3659,7 @@ mod tests {
         assert_eq!(run.sub_tasks[0].round_base_sha, "");
         assert_eq!(run.sub_tasks[0].candidate_sha, "");
         assert_eq!(run.sub_tasks[0].verdict_candidate_sha, "");
+        assert_eq!(run.sub_tasks[0].review_claim, None);
         assert_eq!(run.sub_tasks[0].stale_review_retries, 0);
         assert_eq!(
             run.sub_tasks[1].dev_turns_landed, 1,
@@ -3640,6 +3673,25 @@ mod tests {
         assert_eq!(
             run.mr_stale_review_retries, 0,
             "a reopened run must not inherit the previous MR stale budget"
+        );
+    }
+
+    #[test]
+    fn a_nonempty_claim_is_a_review_subject_without_a_git_candidate() {
+        let mut task = SubTask {
+            round_base_sha: "same-head".to_string(),
+            ..SubTask::default()
+        };
+        assert!(!task.has_review_subject());
+
+        task.review_claim = Some("  focused and full suites passed  ".to_string());
+        assert!(task.has_review_subject());
+        assert!(!task.has_change_candidate());
+
+        task.review_claim = Some("   ".to_string());
+        assert!(
+            !task.has_review_subject(),
+            "whitespace cannot open the reviewer gate"
         );
     }
 
