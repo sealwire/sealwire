@@ -2152,11 +2152,57 @@ pub(crate) async fn first_parent_sha(
 }
 
 pub(crate) async fn has_uncommitted_changes(workspace: &TrustedWorkspace) -> Result<bool, String> {
-    let output = run_git_capture(workspace, &["status", "--porcelain=v1", "-uall"]).await?;
-    if !output.status.success() {
-        return Err(git_failure("git status --porcelain=v1 -uall", &output));
+    for (status, path) in status_entries(workspace).await? {
+        if status != "??" || !is_symlink(workspace, &path).await {
+            return Ok(true);
+        }
     }
-    Ok(!output.stdout.is_empty())
+    Ok(false)
+}
+
+/// Untracked paths that are symlinks — worktree plumbing (e.g. a `node_modules` link
+/// into the main checkout), not agent work. A trailing-slash `.gitignore` pattern never
+/// matches a symlink even when it targets an ignored directory, so `git status` reports
+/// these forever; the checkpoint builder excludes this same list from its snapshot.
+pub(crate) async fn incidental_untracked_symlinks(
+    workspace: &TrustedWorkspace,
+) -> Result<Vec<String>, String> {
+    let mut symlinks = Vec::new();
+    for (status, path) in status_entries(workspace).await? {
+        if status == "??" && is_symlink(workspace, &path).await {
+            symlinks.push(path);
+        }
+    }
+    Ok(symlinks)
+}
+
+/// One `git status --porcelain=v1 -uall -z` call, parsed into `(XY, path)` pairs. `-z`
+/// NUL-separates records with no C-style quoting, so paths with spaces/unicode parse
+/// exactly — `has_uncommitted_changes` and `incidental_untracked_symlinks` need the
+/// literal path to stat, not just a non-empty-output signal.
+async fn status_entries(workspace: &TrustedWorkspace) -> Result<Vec<(String, String)>, String> {
+    let output = run_git_capture(workspace, &["status", "--porcelain=v1", "-uall", "-z"]).await?;
+    if !output.status.success() {
+        return Err(git_failure("git status --porcelain=v1 -uall -z", &output));
+    }
+    Ok(output
+        .stdout
+        .split(|&byte| byte == 0)
+        .filter(|record| record.len() > 3)
+        .filter_map(|record| {
+            let status = std::str::from_utf8(&record[..2]).ok()?;
+            let path = std::str::from_utf8(&record[3..]).ok()?;
+            Some((status.to_string(), path.to_string()))
+        })
+        .collect())
+}
+
+async fn is_symlink(workspace: &TrustedWorkspace, path: &str) -> bool {
+    let full = std::path::Path::new(workspace.as_str()).join(path);
+    tokio::fs::symlink_metadata(&full)
+        .await
+        .map(|metadata| metadata.is_symlink())
+        .unwrap_or(false)
 }
 
 pub(crate) async fn collect_git_review_target(
