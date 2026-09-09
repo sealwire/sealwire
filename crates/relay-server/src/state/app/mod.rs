@@ -254,6 +254,11 @@ pub struct AppState {
     workspace_resolve_writeback_barrier: Arc<tokio::sync::Mutex<()>>,
     #[cfg(test)]
     workspace_resolve_writeback_arrivals: Arc<std::sync::atomic::AtomicU64>,
+    /// Test-only: force exactly one `WorkspaceGone` on the next clean-reviewer-creation
+    /// attempt, without touching the filesystem — lets a test deterministically exercise
+    /// `run_review_job`'s `workspace_retries` retry path.
+    #[cfg(test)]
+    force_reviewer_creation_workspace_gone_once: Arc<std::sync::atomic::AtomicBool>,
     /// How long (ms) to watch a thread for signs of a turn after a start request
     /// failed, before concluding the provider never began one. Overridable in
     /// tests.
@@ -466,6 +471,10 @@ impl AppState {
             workspace_resolve_writeback_barrier: Arc::new(tokio::sync::Mutex::new(())),
             #[cfg(test)]
             workspace_resolve_writeback_arrivals: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            #[cfg(test)]
+            force_reviewer_creation_workspace_gone_once: Arc::new(
+                std::sync::atomic::AtomicBool::new(false),
+            ),
             team_step_stall_ms: Arc::new(std::sync::atomic::AtomicU64::new(600_000)),
             scheduled_proposal_tick_ms: Arc::new(std::sync::atomic::AtomicU64::new(
                 SCHEDULED_PROPOSAL_TICK_MS,
@@ -651,6 +660,10 @@ impl AppState {
             workspace_resolve_writeback_barrier: Arc::new(tokio::sync::Mutex::new(())),
             #[cfg(test)]
             workspace_resolve_writeback_arrivals: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            #[cfg(test)]
+            force_reviewer_creation_workspace_gone_once: Arc::new(
+                std::sync::atomic::AtomicBool::new(false),
+            ),
             team_step_stall_ms: Arc::new(std::sync::atomic::AtomicU64::new(600_000)),
             scheduled_proposal_tick_ms: Arc::new(std::sync::atomic::AtomicU64::new(
                 SCHEDULED_PROPOSAL_TICK_MS,
