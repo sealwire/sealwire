@@ -31,6 +31,7 @@ import {
   teamAttention,
   teamListMeta,
   teamPhaseLabel,
+  teamRunIsWorking,
   teamRunProgress,
   teamSeats,
   teamStatusLabel,
@@ -1483,18 +1484,20 @@ function TasksToolbar({ viewMode, onChangeViewMode, runningCount, capacity, onSt
       h("span", { className: "task-surface-stat-dot" }),
       `${runningCount} running`
     ),
-    h(
-      "span",
-      { className: "task-surface-stat" },
-      "Today ",
-      capacity?.todayLabel
-        ? h("strong", null, capacity.todayLabel)
-        : h(
+    // `todayLabel` is the WHOLE label ("Today 42%"), as TaskDetail's capacity
+    // line consumes it. Only the empty case supplies the word.
+    capacity?.todayLabel
+      ? h("span", { className: "task-surface-stat" }, h("strong", null, capacity.todayLabel))
+      : h(
+          "span",
+          { className: "task-surface-stat" },
+          "Today ",
+          h(
             "span",
             { className: "task-surface-unknown", title: "Today's spend is not reported yet" },
             "—"
           )
-    ),
+        ),
     h(
       "button",
       { type: "button", className: "task-surface-new", onClick: () => onStartTask?.() },
@@ -1636,8 +1639,12 @@ export function TaskTeamScreen({
   const toolbar = h(TasksToolbar, {
     viewMode,
     onChangeViewMode,
-    // The count the board's own column header shows, so the two never disagree.
-    runningCount: (groupTeamRuns(runs || [], seenAt).in_progress || []).length,
+    // The In-progress bucket MINUS the ones holding a worktree with no driver.
+    // Both halves are needed: the bucket alone counted `paused` as running, and
+    // `teamRunIsWorking` alone would pull in a parked question, whose turn is
+    // genuinely still open but which lives in Needs you.
+    runningCount: (groupTeamRuns(runs || [], seenAt).in_progress || []).filter(teamRunIsWorking)
+      .length,
     capacity,
     onStartTask,
   });

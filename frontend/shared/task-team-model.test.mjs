@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { teamAttention } from "./task-team-model.js";
+import { teamAttention, teamRunIsWorking } from "./task-team-model.js";
 
 function run(overrides = {}) {
   return {
@@ -107,4 +107,24 @@ test("a boundary-paused task keeps exactly today's attention", () => {
 test("a run with no pause_kind at all degrades to today's behaviour", () => {
   const attention = teamAttention(run({ pause_reason: "you paused it" }));
   assert.deepEqual(attention, { kind: "paused", reason: "paused", text: "you paused it" });
+});
+
+// The In-progress bucket means "started and not finished", which is not the same
+// as "working": `paused` and `resolving` hold the worktree with no driver. Any
+// count that says "running" or claims a slot has to ask this instead.
+test("teamRunIsWorking separates a live driver from a held worktree", () => {
+  // `awaiting_user` is working: its turn is NOT stopped, it is blocked inside
+  // the provider's tool callback, so it still holds a driver and a worktree.
+  const working = ["running", "pause_pending", "awaiting_user"];
+  const idle = ["queued", "paused", "resolving", "blocked"];
+  const terminal = ["done", "escalated", "failed", "interrupted", "cancelled"];
+
+  for (const status of working) {
+    assert.equal(teamRunIsWorking(run({ status })), true, status);
+  }
+  for (const status of [...idle, ...terminal]) {
+    assert.equal(teamRunIsWorking(run({ status })), false, status);
+  }
+  assert.equal(teamRunIsWorking(null), false);
+  assert.equal(teamRunIsWorking({}), false);
 });

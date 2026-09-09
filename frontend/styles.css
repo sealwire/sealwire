@@ -2179,6 +2179,23 @@ body.is-resizing-panel .task-workspace-resize {
   font-size: var(--text-2xs);
   color: var(--text-faint);
 }
+/* Narrow: the two readouts are the first thing to go. They wrapped out of the
+   fixed-height bar, and both are placeholders until capacity is on the wire —
+   the switch and New task are what the strip is actually for. */
+@media (max-width: 600px) {
+  .task-surface-stat {
+    display: none;
+  }
+  .task-surface-toolbar {
+    gap: 8px;
+    padding: 0 10px;
+  }
+  .task-surface-title,
+  .task-surface-mode,
+  .task-surface-new {
+    white-space: nowrap;
+  }
+}
 
 
 /* Teams library still uses the older centre/right class names. */
