@@ -330,6 +330,74 @@ test("the row arriving does not remount the form being typed into", async () => 
   container.remove();
 });
 
+// The card is the LAST child of a variable-length list of rows. Unkeyed, its
+// sibling index moves whenever any ordinary row is added or removed, and React
+// replaces it — so history paging in behind a parked question destroys the form
+// even though nothing about the question changed.
+test("history arriving behind the question does not remount the form", async () => {
+  const { container, root } = mount();
+  const pending = twoPendingRequests().slice(0, 1);
+  const notes = () => container.querySelector(".ask-user-notes-input");
+  const row = (id) => ({ item_id: id, kind: "agent_text", text: `Row ${id}`, status: "completed" });
+
+  await paint(root, [row("msg-1")], options({ pendingAskUserQuestions: pending }));
+
+  const before = notes();
+  before.focus();
+  await act(async () => typeInto(before, "mid-word"));
+  assert.ok(document.activeElement === before, "precondition: the reader is typing in it");
+
+  // One unrelated row pages in above the question.
+  await paint(root, [row("msg-0"), row("msg-1")], options({ pendingAskUserQuestions: pending }));
+
+  assert.ok(notes() === before, "an unrelated row must not replace the notes field");
+  assert.ok(document.activeElement === before, "and must not steal focus from it");
+  assert.equal(notes().value, "mid-word", "with what was typed still in it");
+
+  await act(async () => root.unmount());
+  container.remove();
+});
+
+// Crossing the virtualization threshold restructures every sibling before the
+// card — the rows stop being direct children and become one absolutely-positioned
+// spacer. The card must survive that too.
+test("crossing the virtualization threshold does not remount the form", async () => {
+  const { container, root } = mount();
+  const pending = twoPendingRequests().slice(0, 1);
+  const notes = () => container.querySelector(".ask-user-notes-input");
+  const rows = (count) =>
+    Array.from({ length: count }, (_, i) => ({
+      item_id: `msg-${i}`,
+      kind: "agent_text",
+      text: `Row ${i}`,
+      status: "completed",
+    }));
+
+  await paint(root, rows(3), options({ pendingAskUserQuestions: pending }));
+  assert.equal(
+    container.querySelector(".transcript-virtual-spacer"),
+    null,
+    "precondition: this few rows do not virtualize"
+  );
+
+  const before = notes();
+  before.focus();
+  await act(async () => typeInto(before, "mid-word"));
+
+  await paint(root, rows(40), options({ pendingAskUserQuestions: pending }));
+  assert.ok(
+    container.querySelector(".transcript-virtual-spacer"),
+    "precondition: this many rows do virtualize"
+  );
+
+  assert.ok(notes() === before, "the notes field must survive the transcript restructuring");
+  assert.ok(document.activeElement === before, "and must keep focus across it");
+  assert.equal(notes().value, "mid-word", "with what was typed still in it");
+
+  await act(async () => root.unmount());
+  container.remove();
+});
+
 // The hazard the dock was built to dodge: virtualization owns every row, so the
 // card holding a half-finished answer is unmounted the moment the reader scrolls
 // up to re-read what they are answering about.
