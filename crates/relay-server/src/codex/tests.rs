@@ -3869,6 +3869,127 @@ async fn stale_turn_started_for_known_turn_does_not_bind_next_pending() {
     assert!(runtime.codex_known_turn_ids.contains("turn-a"));
 }
 
+/// A times out with no identifying notification, then B is pending: A's late
+/// turn/started must not bind B (unknown id is still not proof of ownership).
+#[tokio::test]
+async fn unbound_uncertain_abandon_blocks_late_turn_started_from_binding_retry() {
+    let state = codex_test_state_with_thread("thread-abandon-a").await;
+    let a_id = {
+        let mut relay = state.write().await;
+        relay
+            .begin_codex_user_turn("thread-abandon-a", "prompt A")
+            .expect("admit A")
+    };
+    {
+        let mut relay = state.write().await;
+        relay.fail_codex_user_turn_uncertain("thread-abandon-a", &a_id);
+    }
+    let b_id = {
+        let mut relay = state.write().await;
+        relay
+            .begin_codex_user_turn("thread-abandon-a", "prompt B")
+            .expect("admit B")
+    };
+
+    handle_notification(turn_started("thread-abandon-a", "turn-late-a"), &state).await;
+
+    {
+        let relay = state.read().await;
+        let runtime = relay
+            .runtime_for_thread("thread-abandon-a")
+            .expect("runtime");
+        let b = runtime
+            .codex_user_reservations
+            .get(&b_id)
+            .expect("B pending must survive late A turn/started");
+        assert!(b.turn_id.is_none());
+        assert_eq!(
+            runtime.codex_pending_bind_reservation_id.as_deref(),
+            Some(b_id.as_str())
+        );
+        assert!(
+            runtime.codex_known_turn_ids.contains("turn-late-a"),
+            "late A turn id must be recorded as known without binding B"
+        );
+        assert!(runtime.codex_block_notification_bind);
+    }
+
+    // B's RPC response may still bind even if turn/started was suppressed.
+    {
+        let mut relay = state.write().await;
+        relay.bind_codex_user_reservation("thread-abandon-a", &b_id, "turn-b");
+        relay.release_codex_start_admission("thread-abandon-a");
+    }
+    let relay = state.read().await;
+    let runtime = relay
+        .runtime_for_thread("thread-abandon-a")
+        .expect("runtime");
+    assert_eq!(
+        runtime
+            .codex_user_reservations
+            .get(&b_id)
+            .and_then(|reservation| reservation.turn_id.as_deref()),
+        Some("turn-b")
+    );
+    assert!(!runtime.codex_block_notification_bind);
+}
+
+/// After A has reconciled, a duplicate A userMessage must not rewrite B's pending.
+#[tokio::test]
+async fn duplicate_echo_for_reconciled_turn_does_not_claim_unbound_pending() {
+    let state = codex_test_state_with_thread("thread-dup-echo").await;
+    let a_id = {
+        let mut relay = state.write().await;
+        let id = relay.reserve_codex_user_message("thread-dup-echo", "prompt A");
+        relay.bind_codex_user_reservation("thread-dup-echo", &id, "turn-a");
+        id
+    };
+    handle_notification(
+        user_message_completed("thread-dup-echo", "turn-a", "item-user-a", "prompt A"),
+        &state,
+    )
+    .await;
+    let b_id = {
+        let mut relay = state.write().await;
+        relay.reserve_codex_user_message("thread-dup-echo", "prompt B")
+    };
+
+    handle_notification(
+        user_message_completed("thread-dup-echo", "turn-a", "item-user-a-dup", "prompt A"),
+        &state,
+    )
+    .await;
+
+    let relay = state.read().await;
+    let runtime = relay
+        .runtime_for_thread("thread-dup-echo")
+        .expect("runtime");
+    let b = runtime
+        .codex_user_reservations
+        .get(&b_id)
+        .expect("B pending must remain");
+    assert!(b.turn_id.is_none());
+    assert_eq!(b.text, "prompt B");
+    assert_eq!(
+        runtime.codex_pending_bind_reservation_id.as_deref(),
+        Some(b_id.as_str())
+    );
+    let a_users: Vec<_> = runtime
+        .transcript
+        .iter()
+        .filter(|entry| {
+            entry.kind == TranscriptEntryKind::UserText
+                && entry.turn_id.as_deref() == Some("turn-a")
+        })
+        .collect();
+    assert_eq!(a_users.len(), 1);
+    assert_eq!(a_users[0].item_id, "item-user-a-dup");
+    assert!(
+        !runtime.codex_user_reservations.contains_key(&a_id),
+        "A reservation metadata stays retired"
+    );
+}
+
 #[tokio::test]
 async fn concurrent_start_turn_rejects_second_admission() {
     let (bridge, state) = spawn_fake_codex_bridge().await;
