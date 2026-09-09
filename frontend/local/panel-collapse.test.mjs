@@ -258,7 +258,7 @@ test("mobile media query overrides view-scoped collapsed Tasks/Teams/Review grid
   // reset. Without matching view selectors inside the mobile block, a phone
   // inherits `0 1fr` / `sidebar 1fr` instead of a single column.
   const block = extractMobileMediaBlock();
-  for (const view of ["tasks", "teams", "review", "usage"]) {
+  for (const view of ["tasks", "teams", "review", "ticket", "usage"]) {
     assert.match(
       block,
       new RegExp(

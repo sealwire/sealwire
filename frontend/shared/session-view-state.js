@@ -159,6 +159,7 @@ export const USAGE_KEY = "__usage__";
 // are two destinations for the same run, and a shared key would make Back unable
 // to tell them apart.
 export const REVIEW_KEY = "__review__";
+export const TICKET_KEY = "__ticket__";
 
 /**
  * The full-area, non-chat screens.
@@ -176,7 +177,7 @@ export const REVIEW_KEY = "__review__";
  * sites reintroduces that, invisibly. Adding another such screen should be one
  * entry here, not an audit.
  */
-const FULL_AREA_KINDS = new Set(["tasks", "teams", "usage", "review"]);
+const FULL_AREA_KINDS = new Set(["tasks", "teams", "usage", "review", "ticket"]);
 
 export function isFullAreaContext(context) {
   return FULL_AREA_KINDS.has(context?.kind);
@@ -204,11 +205,16 @@ export function isReviewWorkspaceKey(key) {
   return key === REVIEW_KEY || (typeof key === "string" && key.startsWith(`${REVIEW_KEY}:`));
 }
 
+export function isTicketWorkspaceKey(key) {
+  return key === TICKET_KEY || (typeof key === "string" && key.startsWith(`${TICKET_KEY}:`));
+}
+
 export function isFullAreaWorkspaceKey(key) {
   return (
     isTasksWorkspaceKey(key)
     || isTeamsWorkspaceKey(key)
     || isReviewWorkspaceKey(key)
+    || isTicketWorkspaceKey(key)
     || key === USAGE_KEY
   );
 }
@@ -229,6 +235,9 @@ export function sessionViewContextKey(context) {
   }
   if (normalized.kind === "review") {
     return `${REVIEW_KEY}:${normalized.teamRunId}`;
+  }
+  if (normalized.kind === "ticket") {
+    return `${TICKET_KEY}:${normalized.teamRunId}`;
   }
   return normalized.projectId;
 }

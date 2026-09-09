@@ -2899,6 +2899,9 @@ export function createSessionRenderer({
       h(TaskTicketScreen, {
         run,
         loading: !loaded,
+        // A refetch over a cache that predates this run: without it a task you
+        // just started reads as "that task is gone".
+        syncing: teamsCache.isSyncing(),
         error: state.teamsError || null,
         changesPanel: taskDiffPanel(teamRunId),
         actionPending: state.teamActionPending || null,

@@ -1210,17 +1210,28 @@ const renderer = createSessionRenderer({
     state.teamActionError = null;
     void sessionViewController.showOverview({ kind: "tasks", teamRunId: null });
   },
-  // The full-screen merge review (15a). Routed through the same controller as
-  // every other destination so Back leaves it the way it leaves a project, and
-  // a reload lands on the run rather than on the task list.
-  // One run's ticket page (17b), entered from a board card. Routed through the
-  // same controller as every other destination so Back and a reload behave.
+  // One run's ticket page (17b), entered from a board card.
+  //
+  // Carries the SAME side effects as `onOpenTask`, deliberately: this is the
+  // other way of opening a task, so a badge must discharge and a stale action
+  // error must clear here too. Diverging made a finished task keep its unread
+  // mark when opened from the board, and let task A's error surface on task B.
   onOpenTicketScreen(teamRunId) {
     if (!teamRunId) {
       return;
     }
+    state.teamActionError = null;
+    const opened = (teamsCache.current().teams || []).find(
+      (run) => run?.team_run_id === teamRunId
+    );
+    if (opened) {
+      markTaskSeen(opened.team_run_id, opened.updated_at);
+    }
     void openTicketDestination(sessionViewController, teamRunId);
   },
+  // The full-screen merge review (15a). Routed through the same controller as
+  // every other destination so Back leaves it the way it leaves a project, and
+  // a reload lands on the run rather than on the task list.
   onOpenReviewScreen(teamRunId) {
     if (!teamRunId) {
       return;
