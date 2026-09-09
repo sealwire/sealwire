@@ -1142,6 +1142,7 @@ mod disconnect_tests {
             provider: "codex".to_string(),
             forked_from: None,
             renamed: false,
+            flagged: false,
         };
         relay.upsert_thread(summary.clone());
         relay.bg_set_active_turn("codex-thread", Some("turn-1".to_string()), 1);

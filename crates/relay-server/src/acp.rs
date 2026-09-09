@@ -827,6 +827,7 @@ impl AcpBridge {
             provider: "cursor".to_string(),
             forked_from: None,
             renamed: false,
+            flagged: false,
         };
         absorb_thread_cwds(&mut *self.sessions.lock().await, &[listed]);
     }
@@ -1042,6 +1043,7 @@ fn empty_thread_sync(thread_id: &str, cwd: &str, provider_key: &'static str) -> 
             provider: provider_key.to_string(),
             forked_from: None,
             renamed: false,
+            flagged: false,
         },
         status: "idle".to_string(),
         active_flags: Vec::new(),
@@ -1256,6 +1258,7 @@ impl ProviderBridge for AcpBridge {
                 provider: self.provider_name.to_string(),
                 forked_from: None,
                 renamed: false,
+                flagged: false,
             },
             consumed_initial_prompt: false,
             initial_user_message: None,
@@ -1450,6 +1453,7 @@ impl ProviderBridge for AcpBridge {
                 provider: self.provider_name.to_string(),
                 forked_from: None,
                 renamed: false,
+                flagged: false,
             },
             status: "idle".to_string(),
             active_flags: Vec::new(),

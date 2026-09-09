@@ -10,11 +10,12 @@ use crate::{
         ModelOptionView, ProjectActionInput, ProjectsResponse, ReadThreadEntriesInput,
         ReadThreadEntryDetailInput, ReadThreadTranscriptInput, RenameThreadInput,
         RepairWorkspaceInput, RequestReviewInput, ResolvedWorkspace, ResumeSessionInput,
-        ReviewsResponse, SendMessageInput, SessionSnapshot, StartSessionInput, StartWorkflowInput,
-        StopTurnInput, SubmitAskUserAnswerInput, TakeOverInput, ThreadEntriesResponse,
-        ThreadEntryDetailResponse, ThreadSettingsView, ThreadTranscriptResponse, ThreadsQuery,
-        ThreadsResponse, UpdateSessionSettingsInput, WatchThreadsInput, WorkflowActionInput,
-        WorkflowsResponse, WorkspaceDiffResponse, WorkspaceGitContextView,
+        ReviewsResponse, SendMessageInput, SessionSnapshot, SetThreadFlagInput, StartSessionInput,
+        StartWorkflowInput, StopTurnInput, SubmitAskUserAnswerInput, TakeOverInput,
+        ThreadEntriesResponse, ThreadEntryDetailResponse, ThreadSettingsView,
+        ThreadTranscriptResponse, ThreadsQuery, ThreadsResponse, UpdateSessionSettingsInput,
+        WatchThreadsInput, WorkflowActionInput, WorkflowsResponse, WorkspaceDiffResponse,
+        WorkspaceGitContextView,
     },
     state::{
         AppState, ApprovalError, AskUserAnswerError, CachedRemoteActionResult,
@@ -126,6 +127,14 @@ pub(super) enum RemoteActionRequest {
     RenameThread {
         thread_id: String,
         input: RenameThreadInput,
+    },
+    /// Set or clear a session's follow-up flag. Relay-owned metadata, like
+    /// `RenameThread` — it never reaches a provider, never runs a turn, so no
+    /// session claim: flagging a session must not fight the active controller for
+    /// the relay-wide lease, and must work while that session is mid-turn.
+    SetThreadFlag {
+        thread_id: String,
+        input: SetThreadFlagInput,
     },
     /// Re-create a session's vanished workspace. Relay-owned like `RenameThread`: it
     /// creates a directory (or runs `git worktree add`) on the host and never reaches a
@@ -261,6 +270,7 @@ impl RemoteActionRequest {
             Self::ApplyFileChange { .. } => RemoteActionKind::ApplyFileChange,
             Self::ProjectAction { .. } => RemoteActionKind::ProjectAction,
             Self::RenameThread { .. } => RemoteActionKind::RenameThread,
+            Self::SetThreadFlag { .. } => RemoteActionKind::SetThreadFlag,
             Self::RepairWorkspace { .. } => RemoteActionKind::RepairWorkspace,
             Self::FetchWorkspaceDiff { .. } => RemoteActionKind::FetchWorkspaceDiff,
             Self::FetchThreadWorkspace { .. } => RemoteActionKind::FetchThreadWorkspace,
@@ -368,6 +378,13 @@ impl RemoteActionRequest {
             } => {
                 input.device_id = Some(device_id);
                 Self::RenameThread { thread_id, input }
+            }
+            Self::SetThreadFlag {
+                thread_id,
+                mut input,
+            } => {
+                input.device_id = Some(device_id);
+                Self::SetThreadFlag { thread_id, input }
             }
             Self::RepairWorkspace {
                 thread_id,
@@ -497,6 +514,7 @@ pub(super) enum RemoteActionKind {
     ApplyFileChange,
     ProjectAction,
     RenameThread,
+    SetThreadFlag,
     RepairWorkspace,
     FetchWorkspaceDiff,
     FetchWorkspaceGitContext,
@@ -542,6 +560,7 @@ impl RemoteActionKind {
             Self::ApplyFileChange => "apply_file_change",
             Self::ProjectAction => "project_action",
             Self::RenameThread => "rename_thread",
+            Self::SetThreadFlag => "set_thread_flag",
             Self::RepairWorkspace => "repair_workspace",
             Self::FetchWorkspaceDiff => "fetch_workspace_diff",
             Self::FetchWorkspaceGitContext => "fetch_workspace_git_context",
@@ -1442,6 +1461,13 @@ async fn execute_remote_action(
         // about the rename from the bumped `threads_revision` on the next snapshot.
         RemoteActionRequest::RenameThread { thread_id, input } => state
             .rename_thread(&thread_id, input)
+            .await
+            .map(|_| RemoteActionOutcome::default()),
+        // Ack-only, like RenameThread: the phone repaints from its own optimistic
+        // update, and every other client learns about the flag from the bumped
+        // threads_revision on the next snapshot.
+        RemoteActionRequest::SetThreadFlag { thread_id, input } => state
+            .set_thread_flag(&thread_id, input)
             .await
             .map(|_| RemoteActionOutcome::default()),
         // Ack-only, like RenameThread: the repair's own receipt is the fresh snapshot,
@@ -2893,6 +2919,7 @@ fn remote_action_result_kind(action: RemoteActionKind) -> RemoteActionResultKind
         | RemoteActionKind::ApplyFileChange
         | RemoteActionKind::ProjectAction
         | RemoteActionKind::RenameThread
+        | RemoteActionKind::SetThreadFlag
         | RemoteActionKind::RepairWorkspace
         | RemoteActionKind::RequestReview
         | RemoteActionKind::StartWorkflow

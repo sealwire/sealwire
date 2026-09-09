@@ -1453,6 +1453,17 @@ input:focus, textarea:focus, select:focus {
   width: 14px;
   height: 14px;
 }
+/* Persistent "flagged for follow-up" mark — independent of the activity dot, so
+   it shows up whether or not the row also has a dot for a live state. */
+.conversation-flag-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 12px;
+  flex: none;
+  color: var(--err-fg);
+}
 .conversation-item::before {
   content: "";
   position: absolute;

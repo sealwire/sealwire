@@ -230,6 +230,7 @@ import {
   fetchRemoteWorkspaceGitContext,
   renameRemoteProject,
   renameRemoteThread,
+  setRemoteThreadFlag,
   deleteRemoteProject,
   unassignRemoteThread,
 } from "./project-actions.js";
@@ -1787,6 +1788,7 @@ function RemoteApp() {
       threadId,
       projects: before,
       currentName: threadCustomName(sheetThread),
+      currentFlagged: Boolean(sheetThread?.flagged),
       deps: {
         assign: assignRemoteThreadToProject,
         unassign: unassignRemoteThread,
@@ -1808,8 +1810,11 @@ function RemoteApp() {
           );
           return answer === null ? undefined : normalizeThreadName(answer);
         },
+        // Shared with the flag branch below, so the reason stays generic rather than
+        // naming just one of the two actions that can trigger it.
         refreshThreads: () =>
-          runThreadRefresh("session renamed", { silent: true, fresh: true }),
+          runThreadRefresh("session action", { silent: true, fresh: true }),
+        setFlag: setRemoteThreadFlag,
       },
     });
   }
@@ -2691,6 +2696,9 @@ function RemoteSidebar({
       activity: threadActivityMap.get(thread.id) || null,
       attentionKind: threadAttentionMap.get(thread.id) || null,
       reviewing: threadReviewingSet.has?.(thread.id),
+      // Durable server state (like `renamed`), not an SSE-derived signal — read
+      // straight off the row rather than threaded through a fourth map.
+      flagged: Boolean(thread.flagged),
     });
   // Search swaps the SOURCE of the rows; the bell narrows whatever that source is. Same
   // composition as local, which is what lets the two controls coexist instead of

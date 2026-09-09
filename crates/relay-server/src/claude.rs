@@ -520,6 +520,7 @@ impl ProviderBridge for ClaudeCodeBridge {
                 provider: "claude_code".to_string(),
                 forked_from: None,
                 renamed: false,
+                flagged: false,
             };
             return Ok(StartThreadResult {
                 thread,
@@ -629,6 +630,7 @@ impl ProviderBridge for ClaudeCodeBridge {
             provider: self.provider_name().to_string(),
             forked_from: None,
             renamed: false,
+            flagged: false,
         };
 
         Ok(Some(StartThreadResult {
@@ -689,6 +691,7 @@ impl ProviderBridge for ClaudeCodeBridge {
                     provider: "claude_code".to_string(),
                     forked_from: None,
                     renamed: false,
+                    flagged: false,
                 },
                 status: "idle".to_string(),
                 active_flags: Vec::new(),
@@ -1318,6 +1321,7 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                 provider: "claude_code".to_string(),
                 forked_from: None,
                 renamed: false,
+                flagged: false,
             });
             relay.notify();
         }
@@ -2482,6 +2486,7 @@ mod tests {
             provider: "claude_code".to_string(),
             forked_from: None,
             renamed: false,
+            flagged: false,
         }
     }
 
@@ -4148,6 +4153,7 @@ mod tests {
                     provider: "codex".to_string(),
                     forked_from: None,
                     renamed: false,
+                    flagged: false,
                 },
                 "/tmp/codex",
                 "gpt-5.5",

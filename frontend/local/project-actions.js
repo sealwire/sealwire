@@ -62,6 +62,16 @@ export async function renameThread(apiFetch, threadId, name) {
   return unwrap(response);
 }
 
+/** Set or clear a session's follow-up flag. */
+export async function setThreadFlag(apiFetch, threadId, flagged) {
+  const response = await apiFetch(`/api/threads/${encodeURIComponent(threadId)}/flag`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ flagged: Boolean(flagged) }),
+  });
+  return unwrap(response);
+}
+
 /** GET the dedicated Projects payload ({ projects_revision, projects, thread_project_id }). */
 export async function fetchProjectsPayload(apiFetch) {
   const response = await apiFetch("/api/projects", { method: "GET" });

@@ -52,6 +52,25 @@ function renameGlyph() {
   );
 }
 
+// Filled, unlike the stroked glyphs above — it needs to read as a persistent
+// "starred" mark rather than an outline action icon, since it sits on the row
+// whether or not the row is being interacted with.
+function flagGlyph() {
+  return h(
+    "svg",
+    {
+      "aria-hidden": "true",
+      width: "12",
+      height: "12",
+      viewBox: "0 0 16 16",
+      fill: "currentColor",
+    },
+    h("path", {
+      d: "M3 1.5a.75.75 0 0 1 .75.75V2h7.5a.75.75 0 0 1 .6 1.2L10.1 5l1.75 2.3a.75.75 0 0 1-.6 1.2h-7.5v5a.75.75 0 0 1-1.5 0v-11A.75.75 0 0 1 3 1.5Z",
+    })
+  );
+}
+
 function deleteGlyph() {
   return h(
     "svg",
@@ -765,6 +784,22 @@ export function ThreadGroupItem({
       { className: "conversation-lead", "aria-hidden": "true" },
       providerMark(thread.provider)
     ),
+    // Independent of `dot`/bucket, deliberately: a flagged session that is also
+    // working/needs-input/reviewing/done keeps showing both. This is the row's
+    // half of the flag — the bell's "Follow up" bucket is the other half, for
+    // when nothing else keeps the row visible.
+    thread.flagged
+      ? h(
+          "span",
+          {
+            className: "conversation-flag-mark",
+            role: "img",
+            "aria-label": "Flagged for follow-up",
+            title: "Flagged for follow-up",
+          },
+          flagGlyph()
+        )
+      : null,
     h(
       "span",
       { className: "conversation-title-row" },

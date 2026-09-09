@@ -1703,6 +1703,9 @@ export function createSessionRenderer({
         activity: threadActivityMap.get(thread.id) || null,
         attentionKind: threadAttentionMap.get(thread.id) || null,
         reviewing: threadReviewingSet.has?.(thread.id),
+        // Durable server state (like `renamed`), not an SSE-derived signal — read
+        // straight off the row rather than threaded through a fourth map.
+        flagged: Boolean(thread.flagged),
       });
     // Monotonic accumulator, not derived state: it only ever grows while the filter is
     // on, so computing it here cannot cause a re-render loop.

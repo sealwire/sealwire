@@ -58,6 +58,7 @@ export function providerSupportsArchive({ provider = "", capabilities = [] } = {
 export function buildThreadSheetSections({
   forkBlocked = false,
   renamed = false,
+  flagged = false,
   projects = [],
   currentProjectId = null,
   projectsLoaded = false,
@@ -83,6 +84,12 @@ export function buildThreadSheetSections({
           // session is mid-turn.
           kind: "rename",
           label: "Rename session…",
+        },
+        {
+          // Same transport rule as rename (`set_thread_flag` has a real broker
+          // action) and the same reasoning for never being disabled.
+          kind: "flag",
+          label: flagged ? "Unflag" : "Flag for follow-up",
         },
       ],
     },
@@ -157,6 +164,7 @@ export function selectThreadSheet({
     // The relay's own flag, not `name`: the latter is the merged title, so it is set on
     // every session the agent has titled and would advertise a reset on all of them.
     renamed: Boolean(thread.renamed),
+    flagged: Boolean(thread.flagged),
     projects,
     currentProjectId: threadProjectId?.[threadId] || null,
     projectsLoaded,

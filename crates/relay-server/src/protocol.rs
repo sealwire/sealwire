@@ -2162,6 +2162,12 @@ pub struct ThreadSummaryView {
     /// title to PIN it against future drift.
     #[serde(default, skip_serializing_if = "is_false")]
     pub renamed: bool,
+    /// Whether the user flagged this session for follow-up — the "Follow up" bell
+    /// bucket, and a persistent mark on the row independent of that bucket. Same
+    /// budget treatment as `renamed`/`workspace_trusted` above: omitted when false
+    /// so the overwhelming majority (unflagged) rows cost nothing on the wire.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub flagged: bool,
 }
 
 /// A persisted, named grouping of sessions — the user-facing "Project". Orthogonal
@@ -2373,6 +2379,28 @@ impl<'de> Deserialize<'de> for RenameThreadInput {
 pub struct ThreadRenameReceipt {
     pub thread_id: String,
     pub name: Option<String>,
+    pub message: String,
+}
+
+/// Body of the session flag-toggle endpoint. Unlike `RenameThreadInput`, `flagged`
+/// is a plain (non-`Option`) `bool`, so a derived `Deserialize` already fails closed
+/// on a missing key — there is no `Option<String>`-style ambiguity to hand-roll
+/// around here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetThreadFlagInput {
+    pub flagged: bool,
+    /// Actor for the log line. Stamped SERVER-side on the broker path (a paired
+    /// device cannot claim to be another device); client-supplied only on the
+    /// local surface. Mirrors `RenameThreadInput::device_id`.
+    #[serde(default)]
+    pub device_id: Option<String>,
+}
+
+/// Post-flag-toggle state, echoed so the calling client repaints without a refetch.
+#[derive(Debug, Clone, Serialize)]
+pub struct ThreadFlagReceipt {
+    pub thread_id: String,
+    pub flagged: bool,
     pub message: String,
 }
 

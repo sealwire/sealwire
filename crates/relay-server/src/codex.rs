@@ -993,6 +993,7 @@ fn parse_thread_summary(thread: &Value) -> Result<ThreadSummaryView, String> {
         provider: String::new(),
         forked_from: None,
         renamed: false,
+        flagged: false,
     })
 }
 

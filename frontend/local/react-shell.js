@@ -285,6 +285,7 @@ function ThreadContextMenu() {
       { className: "context-menu", hidden: true, id: "thread-context-menu" },
       h("button", { className: "context-menu-button", id: "fork-thread-button", type: "button" }, "Fork session"),
       h("button", { className: "context-menu-button", id: "rename-thread-button", type: "button" }, "Rename session…"),
+      h("button", { className: "context-menu-button", id: "flag-thread-button", type: "button" }, "Flag for follow-up"),
       h("button", { className: "context-menu-button", id: "archive-thread-button", type: "button" }, "Archive session"),
       h("button", {
         className: "context-menu-button context-menu-button-danger",

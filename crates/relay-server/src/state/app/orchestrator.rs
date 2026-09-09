@@ -842,6 +842,7 @@ loser of a race keeps an id that is not the pin and silently loses its toolset"
                 provider: "fake".to_string(),
                 forked_from: None,
                 renamed: false,
+                flagged: false,
             };
             relay.register_background_thread(
                 thread,
@@ -908,6 +909,7 @@ loser of a race keeps an id that is not the pin and silently loses its toolset"
                 provider: "fake".to_string(),
                 forked_from: None,
                 renamed: false,
+                flagged: false,
             };
             relay.register_background_thread(
                 thread,

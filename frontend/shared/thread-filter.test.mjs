@@ -80,6 +80,27 @@ test("buckets keep ladder order regardless of recency", () => {
   assert.deepEqual(view.groups.map((g) => g.state), ["needs_input", "completed"]);
 });
 
+// follow_up is a fifth bucket, reached only for a flagged-but-otherwise-idle thread.
+// It sorts LAST — lowest urgency, since flagging something is "not urgent, don't lose
+// it" rather than "look at this now".
+test("a flagged thread gets its own bucket, after Done", () => {
+  const flaggedGroups = [
+    {
+      key: "x",
+      cwd: "x",
+      label: "x",
+      threads: [
+        { id: "done", updated_at: 2 },
+        { id: "flagged", updated_at: 1 },
+      ],
+    },
+  ];
+  const flaggedStateOf = (thread) => (thread.id === "flagged" ? "follow_up" : "completed");
+  const view = selectThreadFilterView({ groups: flaggedGroups, filter: ON, stateOf: flaggedStateOf });
+  assert.deepEqual(view.groups.map((g) => g.state), ["completed", "follow_up"]);
+  assert.deepEqual(view.groups.map((g) => g.label), ["Done", "Follow up"]);
+});
+
 // The bell is ON or OFF. There is no per-state selection to be in: a pill row above the
 // list would only restate the bucket headers under it. A `states` field left on a filter
 // by a stale caller must therefore narrow NOTHING — silently honouring it would hide

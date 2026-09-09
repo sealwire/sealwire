@@ -165,6 +165,7 @@ impl ThreadRuntime {
                 provider: String::new(),
                 forked_from: None,
                 renamed: false,
+                flagged: false,
             }),
             active_turn_id: None,
             turn_revision: 0,
@@ -657,6 +658,7 @@ mod tests {
             provider: "fake".to_string(),
             forked_from: None,
             renamed: false,
+            flagged: false,
         }
     }
 

@@ -54,15 +54,15 @@ use protocol::{
     ReadThreadTranscriptInput, RenameThreadInput, RepairWorkspaceInput, RequestReviewInput,
     RequestReviewReceipt, ResolvedWorkspace, ResumeSessionInput, ReviewActionInput,
     ReviewDeleteReceipt, ReviewsResponse, RevokeDeviceReceipt, SendMessageInput, SessionSnapshot,
-    SessionSnapshotCompactProfile, StartSessionInput, StartTeamInput, StartTeamReceipt,
-    StartWorkflowInput, StartWorkflowReceipt, StopTurnInput, SubmitAskUserAnswerInput,
-    TakeOverInput, TeamActionInput, TeamActionReceipt, TeamFileResponse, TeamMarkInput,
-    TeamsResponse, ThreadArchiveReceipt, ThreadDeleteReceipt, ThreadEntryDetailResponse,
-    ThreadRenameReceipt, ThreadSettingsView, ThreadTranscriptResponse, ThreadWorkspaceInput,
-    ThreadsQuery, ThreadsResponse, TickReviewFileInput, TranscriptDeltaEvent,
-    UpdateSessionSettingsInput, WatchThreadsInput, WorkflowActionInput, WorkflowActionReceipt,
-    WorkflowsResponse, WorkspaceDiffResponse, WorkspaceGitContextView, WorkspaceTrustInput,
-    WorkspaceTrustReceipt,
+    SessionSnapshotCompactProfile, SetThreadFlagInput, StartSessionInput, StartTeamInput,
+    StartTeamReceipt, StartWorkflowInput, StartWorkflowReceipt, StopTurnInput,
+    SubmitAskUserAnswerInput, TakeOverInput, TeamActionInput, TeamActionReceipt, TeamFileResponse,
+    TeamMarkInput, TeamsResponse, ThreadArchiveReceipt, ThreadDeleteReceipt,
+    ThreadEntryDetailResponse, ThreadFlagReceipt, ThreadRenameReceipt, ThreadSettingsView,
+    ThreadTranscriptResponse, ThreadWorkspaceInput, ThreadsQuery, ThreadsResponse,
+    TickReviewFileInput, TranscriptDeltaEvent, UpdateSessionSettingsInput, WatchThreadsInput,
+    WorkflowActionInput, WorkflowActionReceipt, WorkflowsResponse, WorkspaceDiffResponse,
+    WorkspaceGitContextView, WorkspaceTrustInput, WorkspaceTrustReceipt,
 };
 use provider::ProviderImage;
 use relay_http::{
@@ -408,6 +408,7 @@ fn build_router(context: AppContext, web_assets: WebAssets) -> Router {
             post(repair_thread_workspace),
         )
         .route("/api/threads/:thread_id/rename", post(rename_thread))
+        .route("/api/threads/:thread_id/flag", post(flag_thread))
         .route("/api/threads/:thread_id/archive", post(archive_thread))
         .route(
             "/api/threads/:thread_id/delete",
@@ -1323,6 +1324,27 @@ async fn rename_thread(
         // Every failure here is a rejected REQUEST (name too long, reviewer thread,
         // limit reached) — the rename never touches a provider, so there is no upstream
         // to blame with a 502.
+        .map_err(bad_request)
+}
+
+/// Toggle a session's follow-up flag. `flagged` is a plain `bool`, not `Option<T>`,
+/// so — unlike `rename_thread` — a derived `Deserialize` already fails closed on a
+/// missing key; no hand-rolled parsing needed here.
+async fn flag_thread(
+    State(context): State<AppContext>,
+    headers: HeaderMap,
+    uri: Uri,
+    Path(thread_id): Path<String>,
+    Json(input): Json<SetThreadFlagInput>,
+) -> Result<Json<ApiEnvelope<ThreadFlagReceipt>>, (StatusCode, Json<ApiError>)> {
+    authorize_api(&context, &headers, &uri)?;
+    context
+        .app
+        .set_thread_flag(&thread_id, input)
+        .await
+        .map(|receipt| Json(ApiEnvelope::ok(receipt)))
+        // Same reasoning as rename_thread: every failure here is a rejected REQUEST,
+        // never a provider error.
         .map_err(bad_request)
 }
 

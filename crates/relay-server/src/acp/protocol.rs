@@ -449,6 +449,7 @@ pub(crate) fn thread_summary(
         provider: provider_key.to_string(),
         forked_from: None,
         renamed: false,
+        flagged: false,
     })
 }
 
