@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::{
     protocol::{
@@ -100,6 +100,33 @@ impl TurnFailureKind {
     }
 }
 
+/// The one Codex `turn/start` whose ownership is not yet represented by a live
+/// turn. `turn_id == None` also means an uncertain request must keep blocking a
+/// retry: without provider-side request correlation, its next notification
+/// cannot safely be distinguished from a newer start.
+#[derive(Debug, Clone)]
+pub(crate) struct CodexStartReservation {
+    pub(crate) item_id: String,
+    pub(crate) turn_id: Option<String>,
+}
+
+impl CodexStartReservation {
+    pub(crate) fn can_claim_turn(&self, transcript: &[TranscriptRecord], turn_id: &str) -> bool {
+        if let Some(bound) = self.turn_id.as_deref() {
+            return bound == turn_id;
+        }
+        let reservation_index = transcript
+            .iter()
+            .position(|entry| entry.item_id == self.item_id)
+            .unwrap_or(transcript.len());
+        !transcript.iter().enumerate().any(|(index, entry)| {
+            entry.turn_id.as_deref() == Some(turn_id)
+                && (entry.kind == crate::protocol::TranscriptEntryKind::UserText
+                    || index < reservation_index)
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ThreadRuntime {
     pub(crate) summary: Option<ThreadSummaryView>,
@@ -143,9 +170,24 @@ pub(crate) struct ThreadRuntime {
     /// Written by `RelayState::record_token_usage` for the turn it is billing;
     /// never cleared — see [`TurnSpend`] on matching `turn_id`.
     pub(crate) last_turn_spend: Option<TurnSpend>,
+    /// Transient Codex send-boundary state. Never persisted.
+    pub(crate) codex_user_reservation_seq: u64,
+    pub(crate) codex_start_reservation: Option<CodexStartReservation>,
 }
 
 impl ThreadRuntime {
+    pub(crate) fn clear_codex_reservation_for_active_turn(&mut self, turn_id: Option<&str>) {
+        if let Some(turn_id) = turn_id {
+            if self
+                .codex_start_reservation
+                .as_ref()
+                .is_some_and(|reservation| reservation.turn_id.as_deref() == Some(turn_id))
+            {
+                self.codex_start_reservation = None;
+            }
+        }
+    }
+
     /// `transcript_revision` is a value the caller drew from
     /// `RelayState::next_transcript_revision`, never a literal. Seeding a rebuilt
     /// runtime at 0 is what used to rewind a thread under a live client and make
@@ -192,6 +234,8 @@ impl ThreadRuntime {
             workspace_missing: None,
             last_turn_failure: None,
             last_turn_spend: None,
+            codex_user_reservation_seq: 0,
+            codex_start_reservation: None,
         }
     }
 
@@ -232,6 +276,8 @@ impl ThreadRuntime {
             workspace_missing: None,
             last_turn_failure: None,
             last_turn_spend: None,
+            codex_user_reservation_seq: 0,
+            codex_start_reservation: None,
         }
     }
 
@@ -304,6 +350,8 @@ impl ThreadRuntime {
             workspace_missing: None,
             last_turn_failure: None,
             last_turn_spend: None,
+            codex_user_reservation_seq: 0,
+            codex_start_reservation: None,
         }
     }
 

@@ -19,7 +19,6 @@ import { ToggleLeftPanelIcon } from "./panel-icons.js";
 import { TaskBoard } from "./task-board-react.js";
 import { bindTaskWorkspaceResizeHandle } from "./task-workspace-resize.js";
 import { TranscriptPane } from "./transcript-pane.js";
-import { AskUserDock } from "./ask-user-dock.js";
 import {
   availableTeamActions,
   canTalkToTeamLead,
@@ -244,7 +243,6 @@ export function OrchestratorPane({
   // The thread whose questions this pane may answer. Its own — the Orchestrator
   // is a conversation like any other, and the session's questions belong to the
   // session's composer.
-  askUserThreadId = null,
   runs,
   selectedRun = null,
   seenAt = {},
@@ -421,13 +419,6 @@ export function OrchestratorPane({
     // Between the transcript and the composer, exactly where the session
     // conversation puts it.
     h(OrchestratorWorkingIndicator, { activity }),
-    // And the question it is parked on goes here, for the same reason it does
-    // there: as a transcript row it lives and dies with the list it is in.
-    h(AskUserDock, {
-      pendingAskUserQuestions: transcriptOptions?.pendingAskUserQuestions || [],
-      threadId: askUserThreadId,
-      options: transcriptOptions,
-    }),
     h(OrchestratorComposer, {
       // `canWrite` too, not only for the transcript's copy: announcing that
       // another device has control above a live textarea whose Send silently
@@ -496,6 +487,11 @@ const PROPOSAL_SEATS = [
   ["reviewer", "Reviewer"],
 ];
 
+const PAIR_PROPOSAL_SEATS = [
+  ["dev", "Pair programmer"],
+  ["reviewer", "Reviewer"],
+];
+
 // "codex \u00b7 gpt-5.6-codex \u00b7 max", skipping whatever was not chosen.
 // An empty seat renders nothing at all rather than the word "default": the
 // relay's default can move, and naming it here would claim a guarantee the
@@ -527,19 +523,36 @@ function rewrittenFields(proposal) {
   );
 }
 
-function ProposalAgentSummary({ agents }) {
-  const rows = PROPOSAL_SEATS.map(([seat, label]) => [label, seatAgentLabel(agents?.[seat])]).filter(
-    ([, value]) => value,
-  );
+function proposalAgentRows(proposal) {
+  const structured = Array.isArray(proposal?.agent_rows) ? proposal.agent_rows : [];
+  if (structured.length > 0) {
+    return structured
+      .map((row) => [
+        row.role_id || row.label,
+        row.label || row.role_id || "Agent",
+        seatAgentLabel(row.agent),
+      ])
+      .filter(([, , value]) => value);
+  }
+
+  const seats = proposal?.team_id === "pair" ? PAIR_PROPOSAL_SEATS : PROPOSAL_SEATS;
+  return seats
+    .map(([seat, label]) => [label, label, seatAgentLabel(proposal?.agents?.[seat])])
+    .filter(([, , value]) => value);
+}
+
+function ProposalAgentSummary({ proposal }) {
+  const rows = proposalAgentRows(proposal);
   if (rows.length === 0) return null;
   return h(
     "ul",
     { className: "task-orch-proposal-agents" },
-    rows.map(([label, value]) =>
+    rows.map(([key, label, value]) =>
       h(
         "li",
-        { key: label, className: "task-orch-proposal-agent" },
-        h("span", { className: "task-orch-proposal-agent-seat" }, label),
+        { key, className: "task-orch-proposal-agent" },
+        h("span", { className: "task-orch-proposal-agent-seat" }, `${label}:`),
+        " ",
         h("span", { className: "task-orch-proposal-agent-value" }, value),
       ),
     ),
@@ -636,7 +649,7 @@ function OrchestratorProposalCard({
           `Rewrites the ${rewrittenFields(proposal).join(", ")} for this run.`
         )
       : null,
-    h(ProposalAgentSummary, { agents: proposal.agents }),
+    h(ProposalAgentSummary, { proposal }),
     schedule ? h("p", { className: "task-orch-card-note task-orch-card-schedule" }, schedule) : null,
     h(
       "div",
@@ -1610,7 +1623,6 @@ export function TaskTeamScreen({
       waitingCount,
       onStartTask,
       onOpenThread,
-      askUserThreadId: orchestrator?.askUserThreadId ?? null,
       transcriptEntries: orchestrator?.entries ?? null,
       transcriptLoading: Boolean(orchestrator?.loading),
       onTranscriptInteract: orchestrator?.onTranscriptInteract || null,

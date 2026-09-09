@@ -41,6 +41,8 @@ const threadListPageLimit = 100;
 let counter = 0;
 let threadListMode = "normal";
 let threadListDelayMs = 0;
+let rejectTurnStart = false;
+let dropTurnStart = false;
 
 function send(obj) {
   process.stdout.write(`${JSON.stringify(obj)}\n`);
@@ -86,6 +88,8 @@ function handle(payload) {
     case "fake/configure":
       threadListMode = params?.threadListMode ?? "normal";
       threadListDelayMs = Math.max(0, Number(params?.threadListDelayMs) || 0);
+      rejectTurnStart = Boolean(params?.rejectTurnStart);
+      dropTurnStart = Boolean(params?.dropTurnStart);
       return ok(id, {});
 
     case "thread/start": {
@@ -181,6 +185,14 @@ function handle(payload) {
     }
 
     case "turn/start": {
+      if (dropTurnStart) {
+        // Lost/hung response: accept the request but never reply so the bridge
+        // must retain its send-boundary reservation after timing out.
+        return;
+      }
+      if (rejectTurnStart) {
+        return fail(id, "turn rejected by test policy");
+      }
       if (!loaded.has(threadId)) {
         // The exact shape of the production error the relay surfaced as a 400.
         return fail(id, `thread not found: ${threadId}`);

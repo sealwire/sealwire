@@ -773,13 +773,17 @@ function findPendingAskUserRequest(itemId, pendingList) {
   return pendingList.find((pending) => pending?.tool_use_id === toolUseId) || null;
 }
 
-// Item ids of EVERY question the session is currently blocked on. Nothing
-// guarantees there is only one: the relay and the worker both key pending
+// Item id -> request id, for EVERY question the session is currently blocked on.
+// Nothing guarantees there is only one: the relay and the worker both key pending
 // questions by id, and a turn can issue several AskUserQuestion tool uses in
-// parallel. All of them get pinned, in their original relative order, so a
-// second question can never end up buried in history behind the first.
+// parallel. All of them get pinned, so a second question can never end up buried
+// in history behind the first.
+//
+// The request id is the value rather than the key because the footer is assembled
+// in the RELAY's order, not the transcript's: it is the relay that stamps arrival
+// order, and rows hydrate in whatever order they arrive.
 // Already-answered ask-user entries are not in the pending list and stay put.
-const EMPTY_PINNED_ASK_USER_IDS = new Set();
+const EMPTY_PINNED_ASK_USER_IDS = new Map();
 
 function findPinnedAskUserItemIds(entries, pendingList) {
   if (!Array.isArray(pendingList) || !pendingList.length || !Array.isArray(entries)) {
@@ -791,11 +795,64 @@ function findPinnedAskUserItemIds(entries, pendingList) {
       continue;
     }
     const itemId = entry.item_id || "";
-    if (itemId && findPendingAskUserRequest(itemId, pendingList)) {
-      (pinned ||= new Set()).add(itemId);
+    const request = itemId && findPendingAskUserRequest(itemId, pendingList);
+    if (request?.request_id) {
+      (pinned ||= new Map()).set(itemId, request.request_id);
     }
   }
   return pinned || EMPTY_PINNED_ASK_USER_IDS;
+}
+
+// THE card for a question the turn is parked on — the only one, for the whole life
+// of the request.
+//
+// Driven by the REQUEST, with the transcript row as an optional prop, because the
+// row is the part that comes and goes: the relay drops entries from the head under
+// snapshot pressure and a switched-to thread hydrates in pages. Rendering a
+// request-shaped card and then swapping to a row-shaped one changes the component
+// identity, and React replaces the subtree — which restores the draft but drops
+// focus, the caret, and any in-flight IME composition. So the row arriving is a
+// prop change here, never a remount.
+//
+// `itemId` is derived from the request for the same reason: it keys the question
+// step, so letting it change when the row lands would remount the notes field on
+// its own.
+//
+// Callers must hand in a THREAD-FILTERED pending list: a card built without a row
+// has no entry to say which conversation it belongs to.
+function AskUserPendingCard({ request, entry = null, isJustPrepended = false, options }) {
+  const requestId = request.request_id;
+  const itemId = `ask:${requestId}`;
+  const detailEntry = entry ? resolveTranscriptDetailEntry(entry, options) : null;
+  const tool = (detailEntry || entry)?.tool || {};
+  // The request is authoritative; the row's input_preview is the fallback for a
+  // pending list that arrived without inline questions.
+  const questions =
+    normalizeAskUserQuestions(request.questions) || parseAskUserQuestions(tool.input_preview);
+  if (!questions) {
+    return h(AskUserDetailPendingCard, {
+      entry,
+      isJustPrepended,
+      itemId,
+      questionCount: request.question_count || 0,
+      detailLoading: Boolean(options?.askUserDetailLoadingRequestIds?.has?.(requestId)),
+      detailError: options?.askUserDetailErrors?.get?.(requestId) || "",
+      onRetryDetail: options?.onRetryAskUserDetail
+        ? () => options.onRetryAskUserDetail(requestId)
+        : null,
+    });
+  }
+  return h(AskUserWizard, {
+    entry,
+    isJustPrepended,
+    itemId,
+    questions,
+    requestId,
+    threadId: request.thread_id || "",
+    isSubmitting: Boolean(options?.askUserSubmittingRequestIds?.has?.(requestId)),
+    submitAnswers: options?.onSubmitAskUserAnswers || null,
+    askUserError: options?.askUserErrors?.get?.(requestId) || "",
+  });
 }
 
 // Build the answer value the SDK should see for a single question. We support
@@ -846,104 +903,37 @@ export function buildAskUserAnswersPayload(questions, perQuestionState) {
   return payload;
 }
 
-// Render Claude's AskUserQuestion as a wizard:
-//   - Read-only (no pending request, or status==completed): every question
-//     stacked, recorded answers highlighted (used for past planning entries).
-//   - Interactive: one question at a time with progress + Back/Continue/Send.
-//     Each question card has option buttons AND an optional notes textarea.
-//   - Quick path: a SINGLE single-select question with empty notes submits
-//     immediately on option click — same one-tap feel as before for the
-//     common "pick one of N" prompt.
-// Final answer per question is built by buildAskUserAnswerValue: when notes
-// are present we collapse to free-text ("<label> — <notes>") so the model
-// reads both the structured pick and the user's elaboration.
+// An AskUserQuestion row that is NOT still waiting for an answer: every question
+// stacked, with the recorded answers highlighted.
+//
+// The live, answerable card is not rendered here at all — it is AskUserPendingCard
+// in the pinned footer, driven by the request. A matching pending request is the
+// authoritative signal for which of the two applies: the relay drops the request
+// the moment it is answered, whereas the row's own `status` can desync (on the
+// remote surface a snapshot can show `completed` while the question is genuinely
+// still pending, which would mislabel it "Answered" and make the options dead).
 function AskUserEntry({ entry, isJustPrepended = false, options = null }) {
   const itemId = entry.item_id || "";
   const detailEntry = resolveTranscriptDetailEntry(entry, options);
   const toolEntry = detailEntry || entry;
   const tool = toolEntry.tool || entry.tool || {};
-  const status = entry.status || "running";
-  const pendingRequest = findPendingAskUserRequest(itemId, options?.pendingAskUserQuestions);
-  const questions =
-    normalizeAskUserQuestions(pendingRequest?.questions)
-    || parseAskUserQuestions(tool.input_preview);
-  const requestId = pendingRequest?.request_id || "";
-  const detailIncomplete = Boolean(
-    pendingRequest
-    && pendingRequest.questions_inline_complete === false
-    && !questions
-  );
-  const detailLoading = Boolean(
-    requestId
-    && options?.askUserDetailLoadingRequestIds instanceof Set
-    && options.askUserDetailLoadingRequestIds.has(requestId)
-  );
-  const detailError =
-    requestId && options?.askUserDetailErrors instanceof Map
-      ? options.askUserDetailErrors.get(requestId) || ""
-      : "";
-  // Docked, the waiting/failed detail is the dock's to report — and the dock is
-  // the only one of the two that can offer a retry.
-  if (!questions && detailIncomplete && options?.askUserDocked) {
-    return h(AskUserAwaitingCard, { entry, isJustPrepended, questions: [] });
+  // Still parked: the footer owns it, and TranscriptContent holds this row back.
+  // Reaching here means the hold-back did not match, so render nothing rather than
+  // a second live copy of a question already on screen.
+  if (findPendingAskUserRequest(itemId, options?.pendingAskUserQuestions)) {
+    return null;
   }
-  if (!questions && detailIncomplete) {
-    return h(AskUserDetailPendingCard, {
-      entry,
-      isJustPrepended,
-      itemId,
-      questionCount: pendingRequest?.question_count || 0,
-      detailLoading,
-      detailError,
-    });
-  }
+  const questions = parseAskUserQuestions(tool.input_preview);
   if (!questions) {
     return h(GenericToolEntry, { entry, isJustPrepended, options });
   }
-  const answers = parseAskUserAnswers(tool.result_preview);
-  // A matching pending request (live relay state) is the authoritative signal
-  // that the question is still waiting for an answer — the relay drops it the
-  // moment it's answered. The transcript entry's own `status` is secondary and
-  // can desync: on the remote surface the entry arrives via snapshots and can
-  // show up as `completed` while the question is genuinely still pending. We
-  // must NOT let that stale status downgrade a pending question to the
-  // read-only card, which makes the options unclickable and mislabels it
-  // "Answered" even though the user never picked anything.
-  const interactive = Boolean(pendingRequest);
-  const isSubmitting =
-    Boolean(requestId) && Boolean(options?.askUserSubmittingRequestIds?.has?.(requestId));
-  const submitAnswers = options?.onSubmitAskUserAnswers || null;
-  const askUserError =
-    requestId && options?.askUserErrors instanceof Map
-      ? options.askUserErrors.get(requestId) || ""
-      : "";
-
-  // Docked: the live card is mounted outside the transcript, so in place this is
-  // only the record that the question was asked. It must not show options —
-  // options here would be a second set the reader can see but not use.
-  if (interactive && options?.askUserDocked) {
-    return h(AskUserAwaitingCard, { entry, isJustPrepended, questions });
-  }
-  if (!interactive) {
-    return h(AskUserReadOnlyCard, {
-      entry,
-      isJustPrepended,
-      itemId,
-      questions,
-      answers,
-      status,
-    });
-  }
-  return h(AskUserWizard, {
+  return h(AskUserReadOnlyCard, {
     entry,
     isJustPrepended,
     itemId,
     questions,
-    requestId,
-    threadId: pendingRequest?.thread_id || "",
-    isSubmitting,
-    submitAnswers,
-    askUserError,
+    answers: parseAskUserAnswers(tool.result_preview),
+    status: entry.status || "running",
   });
 }
 
@@ -1008,41 +998,6 @@ export function AskUserDetailPendingCard({
               detailLoading ? "Loading…" : "Try again"
             )
           : null
-      )
-    )
-  );
-}
-
-function AskUserAwaitingCard({ entry, isJustPrepended, questions }) {
-  return h(
-    "article",
-    transcriptEntryDomAttrs(
-      entry,
-      "chat-message chat-message-system chat-message-ask-user chat-message-ask-user-awaiting",
-      null,
-      { justPrepended: isJustPrepended }
-    ),
-    h(
-      "div",
-      { className: "message-card message-card-system message-card-ask-user" },
-      h(
-        "div",
-        { className: "ask-user-meta" },
-        h("span", { className: "ask-user-tag" }, "Claude asked"),
-        h("span", { className: "ask-user-status" }, "Waiting for your answer")
-      ),
-      ...questions.map((q, qIndex) =>
-        h(
-          "section",
-          { className: "ask-user-question", key: `awaiting:q:${qIndex}` },
-          q.header ? h("div", { className: "ask-user-question-header" }, q.header) : null,
-          h("p", { className: "ask-user-question-text" }, q.question || "(no question)")
-        )
-      ),
-      h(
-        "p",
-        { className: "ask-user-awaiting-hint" },
-        "The options are waiting below the conversation."
       )
     )
   );
@@ -2456,16 +2411,11 @@ export function TranscriptContent({
   // `isGroupableCompletedTool` excludes them — so the pinned entry is always a
   // plain item in `groupedItems`; if that ever changed, the id simply would not
   // match and it would render in place, which is the safe degradation.)
-  // Docked surfaces do not pin: the live card is mounted outside this list, so
-  // the record stays where the question was actually asked.
   const pinnedAskUserItemIds = React.useMemo(
-    () =>
-      options?.askUserDocked
-        ? EMPTY_PINNED_ASK_USER_IDS
-        : findPinnedAskUserItemIds(entries, options?.pendingAskUserQuestions),
-    [entries, options?.askUserDocked, options?.pendingAskUserQuestions]
+    () => findPinnedAskUserItemIds(entries, options?.pendingAskUserQuestions),
+    [entries, options?.pendingAskUserQuestions]
   );
-  const pinnedAskUserNodes = [];
+  const pinnedAskUserEntries = new Map();
   const nodes = [];
 
   // Top sentinel: the IntersectionObserver in render-session.js / react-app.js
@@ -2551,34 +2501,28 @@ export function TranscriptContent({
     }
 
     const entryId = item.item_id || item.id || "";
-    const node = h(TranscriptEntry, {
-      entry: item,
-      isJustPrepended: Boolean(entryId && justPrependedItemIds.has(entryId)),
-      isLatestUser:
-        item.kind === "user_text" && entryId && entryId === latestUserEntryId,
-      key: entryId || `${item.kind || "entry"}:${index}`,
-      options: effectiveOptions,
-    });
-    if (entryId && pinnedAskUserItemIds.has(entryId)) {
-      // Hold it back — it is re-emitted at the bottom below. Skipping the push
-      // here is what keeps it a MOVE rather than a duplicate. Collected in
-      // iteration order, so several pending questions keep their relative order.
-      pinnedAskUserNodes.push(node);
+    const pinnedRequestId = entryId ? pinnedAskUserItemIds.get(entryId) : null;
+    if (pinnedRequestId) {
+      // Hold the ROW back and hand it to the footer's card as a prop. Holding back
+      // a built node instead would mean the footer swaps one component for another
+      // the moment the row hydrates, remounting the form being typed into.
+      pinnedAskUserEntries.set(pinnedRequestId, item);
       return;
     }
-    nodes.push(node);
+    nodes.push(
+      h(TranscriptEntry, {
+        entry: item,
+        isJustPrepended: Boolean(entryId && justPrependedItemIds.has(entryId)),
+        isLatestUser:
+          item.kind === "user_text" && entryId && entryId === latestUserEntryId,
+        key: entryId || `${item.kind || "entry"}:${index}`,
+        options: effectiveOptions,
+      })
+    );
   });
 
   if (approval) {
     nodes.push(h(ApprovalCard, { approval, key: "approval", options: effectiveOptions }));
-  }
-
-  // Last of all: every question the agent is blocked on. (An approval and a
-  // question can in principle both be pending; the questions sit below the
-  // approval card. Nothing enforces mutual exclusion — a turn blocks on one
-  // thing in practice — and this ordering is the deliberate default.)
-  for (const pinnedNode of pinnedAskUserNodes) {
-    nodes.push(pinnedNode);
   }
 
   // Bottom-follow: no top-anchor, so there is no bottom spacer and no
@@ -2593,8 +2537,60 @@ export function TranscriptContent({
     ref: virtualizer.scrollTargetRef,
   };
 
+  // Every question the agent is blocked on, last and OUTSIDE the virtualized
+  // range. Inside it, the row holding a half-finished answer is unmounted as soon
+  // as the reader scrolls up to re-read what they are answering about; out here it
+  // is mounted for as long as the question is pending, while still scrolling with
+  // the conversation rather than in a pane of its own. (An approval and a question
+  // can both be pending; the questions sit below the approval card.)
+  //
+  // Assembled in the RELAY's order, not the transcript's. The relay stamps arrival
+  // order on these; rows hydrate in whatever order they arrive, so emitting the
+  // row-backed cards first would sort an older question below a newer one and then
+  // move it as its row landed — under a reader part-way through answering it.
+  const askUserCards = (
+    Array.isArray(options?.pendingAskUserQuestions) ? options.pendingAskUserQuestions : []
+  )
+    .map((request) => {
+      const requestId = request?.request_id;
+      if (!requestId) {
+        return null;
+      }
+      const pinnedEntry = pinnedAskUserEntries.get(requestId) || null;
+      const pinnedId = pinnedEntry?.item_id || "";
+      return h(AskUserPendingCard, {
+        key: `ask:${requestId}`,
+        request,
+        entry: pinnedEntry,
+        isJustPrepended: Boolean(pinnedId && justPrependedItemIds.has(pinnedId)),
+        options: effectiveOptions,
+      });
+    })
+    .filter(Boolean);
+  const askUserFooter = askUserCards.length
+    ? h(
+        "div",
+        {
+          // Keyed, and the same key in both the virtualized and plain branches.
+          // Unkeyed it is matched by sibling INDEX, and it sits after a
+          // variable-length row list — so one history page arriving behind the
+          // question, or crossing the virtualization threshold, replaces the whole
+          // footer and remounts the form being typed into.
+          key: "transcript-ask-user-pinned",
+          className: "transcript-ask-user-pinned",
+          role: "region",
+          "aria-label": "Question waiting for your answer",
+          // The turn is parked on this. Announced because a reader who is not
+          // watching the screen otherwise gets nothing: the card arrives far below
+          // the fold of a long conversation, and nothing else says the agent stopped.
+          "aria-live": "polite",
+        },
+        ...askUserCards
+      )
+    : null;
+
   if (!virtualized) {
-    return h("div", contentProps, sentinel, ...nodes);
+    return h("div", contentProps, sentinel, ...nodes, askUserFooter);
   }
 
   return h(
@@ -2604,6 +2600,7 @@ export function TranscriptContent({
     h(
       "div",
       {
+        key: "transcript-virtual-spacer",
         className: "transcript-virtual-spacer",
         style: { height: `${virtualizer.getTotalSize()}px` },
       },
@@ -2626,7 +2623,8 @@ export function TranscriptContent({
           node
         );
       })
-    )
+    ),
+    askUserFooter
   );
 }
 
