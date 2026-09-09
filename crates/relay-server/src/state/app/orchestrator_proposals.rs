@@ -343,6 +343,7 @@ impl AppState {
                 quality_rules: proposal.quality_rules.clone(),
                 cwd: None,
                 target_branch: None,
+                team_id: Some(proposal.team_id.clone()),
                 // The card's whole point is that what the user confirmed is
                 // what runs. Dropping these here would start every task on the
                 // relay default while the card said otherwise.

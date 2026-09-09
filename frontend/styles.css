@@ -7544,6 +7544,56 @@ body.is-resizing-panel {
   outline: none;
   border-color: var(--accent);
 }
+.start-task-team-field {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.start-task-team-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+}
+.start-task-team-option {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px;
+  align-items: center;
+  min-height: 46px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-sm);
+  background: var(--surface-1);
+  color: var(--text-2);
+  cursor: pointer;
+}
+.start-task-team-option.is-selected {
+  border-color: var(--accent);
+  color: var(--text-1);
+  background: var(--surface-2);
+}
+.start-task-team-option input {
+  width: auto;
+  margin: 0;
+  padding: 0;
+}
+.start-task-team-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+.start-task-team-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+}
+.start-task-team-meta {
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
 .start-task-required {
   margin-left: 6px;
   font-size: var(--text-xs);

@@ -5,21 +5,81 @@
 // wire, camelCase in the React tree).
 
 export const BUILTIN_TEAM_ID = "builtin";
+export const BUILTIN_PAIR_TEAM_ID = "pair";
 
-/** The fixed three-seat pipeline every TeamRun uses today — offline fallback. */
+function standardTeamStructure() {
+  return {
+    roles: [
+      {
+        id: "tl",
+        name: "Planner",
+        runtimeRole: "tl",
+        blurb: "Reads the brief, sizes the work, splits it into sub-tasks.",
+      },
+      {
+        id: "dev",
+        name: "Implementer",
+        runtimeRole: "dev",
+        blurb: "Builds the sub-tasks.",
+      },
+      {
+        id: "reviewer",
+        name: "Reviewer",
+        runtimeRole: "reviewer",
+        blurb: "Checks the work against your scope; read-only sandbox.",
+      },
+    ],
+    bindings: {
+      lead: "tl",
+      dev: "dev",
+      reviewer: "reviewer",
+      mrDev: "dev",
+      reporter: "tl",
+    },
+  };
+}
+
+function pairTeamStructure() {
+  return {
+    roles: [
+      {
+        id: "pair",
+        name: "Pair programmer",
+        runtimeRole: "dev",
+        blurb: "Plans with you and implements in the same writable session.",
+      },
+      {
+        id: "reviewer",
+        name: "Reviewer",
+        runtimeRole: "reviewer",
+        blurb: "Reviews the pair's work in a read-only session.",
+      },
+    ],
+    bindings: {
+      lead: "pair",
+      dev: "pair",
+      reviewer: "reviewer",
+      mrDev: "pair",
+      reporter: "pair",
+    },
+  };
+}
+
+/** The default three-role pipeline — offline fallback. */
 export function builtinTeam() {
+  const structure = standardTeamStructure();
   return {
     id: BUILTIN_TEAM_ID,
     name: "Default",
     persistent: true,
     roleCount: 3,
-    focus: "General coding — the fixed Planner / Implementer / Reviewer pipeline",
+    focus: "General coding — Planner / Implementer / Reviewer",
     currentVersionId: "builtin-v1",
     roles: [
       {
         id: "tl",
         name: "Planner",
-        seat: "lead",
+        seat: "tl",
         blurb: "Reads the brief, sizes the work, splits it into sub-tasks.",
         estimateLabel: null,
       },
@@ -38,6 +98,43 @@ export function builtinTeam() {
         estimateLabel: null,
       },
     ],
+    structure,
+    stats: {
+      tasks7d: null,
+      avgTokens: null,
+      passed: null,
+      total: null,
+    },
+  };
+}
+
+/** Two-role pair-programming team — offline fallback. */
+export function pairTeam() {
+  const structure = pairTeamStructure();
+  return {
+    id: BUILTIN_PAIR_TEAM_ID,
+    name: "Pair",
+    persistent: true,
+    roleCount: 2,
+    focus: "Pair programming — one writable planning/implementation session plus reviewer",
+    currentVersionId: "pair-v1",
+    roles: [
+      {
+        id: "pair",
+        name: "Pair programmer",
+        seat: "dev",
+        blurb: "Plans with you and implements in the same writable session.",
+        estimateLabel: null,
+      },
+      {
+        id: "reviewer",
+        name: "Reviewer",
+        seat: "reviewer",
+        blurb: "Reviews the pair's work in a read-only session.",
+        estimateLabel: null,
+      },
+    ],
+    structure,
     stats: {
       tasks7d: null,
       avgTokens: null,
@@ -49,7 +146,7 @@ export function builtinTeam() {
 
 /** Every team the library can show without the network. */
 export function listLibraryTeams() {
-  return [builtinTeam()];
+  return [builtinTeam(), pairTeam()];
 }
 
 /**
@@ -78,11 +175,43 @@ export function normalizeCatalogTeam(raw) {
     focus: raw.focus || null,
     currentVersionId: raw.current_version_id || raw.currentVersionId || null,
     roles,
+    structure: normalizeTeamStructure(raw.structure, roles, raw.id),
     stats: {
       tasks7d: stats.tasks_7d ?? stats.tasks7d ?? null,
       avgTokens: stats.avg_tokens ?? stats.avgTokens ?? null,
       passed: stats.passed ?? null,
       total: stats.total ?? null,
+    },
+  };
+}
+
+function normalizeTeamStructure(raw, fallbackRoles, teamId = null) {
+  const roles = Array.isArray(raw?.roles)
+    ? raw.roles.map((role) => ({
+        id: role.id,
+        name: role.name,
+        runtimeRole: role.runtime_role ?? role.runtimeRole ?? role.seat ?? "dev",
+        blurb: role.blurb || "",
+      }))
+    : fallbackRoles.map((role) => ({
+        id: role.id,
+        name: role.name,
+        runtimeRole: role.seat === "tl" || role.seat === "lead" ? "tl" : role.seat || "dev",
+        blurb: role.blurb || "",
+      }));
+  const bindings = raw?.bindings || {};
+  const fallback =
+    teamId === BUILTIN_PAIR_TEAM_ID
+      ? pairTeamStructure().bindings
+      : standardTeamStructure().bindings;
+  return {
+    roles,
+    bindings: {
+      lead: bindings.lead || fallback.lead,
+      dev: bindings.dev || fallback.dev,
+      reviewer: bindings.reviewer || fallback.reviewer,
+      mrDev: bindings.mr_dev ?? bindings.mrDev ?? fallback.mrDev,
+      reporter: bindings.reporter || fallback.reporter,
     },
   };
 }

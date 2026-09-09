@@ -4,6 +4,7 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import {
+  BUILTIN_PAIR_TEAM_ID,
   BUILTIN_TEAM_ID,
   builtinTeam,
   listLibraryTeams,
@@ -16,11 +17,14 @@ import {
 
 const h = React.createElement;
 
-test("the library ships exactly one builtin team until M3", () => {
+test("the library ships default and pair builtin teams", () => {
   const teams = listLibraryTeams();
-  assert.equal(teams.length, 1);
+  assert.equal(teams.length, 2);
   assert.equal(teams[0].id, BUILTIN_TEAM_ID);
   assert.equal(teams[0].roles.length, 3);
+  assert.equal(teams[1].id, BUILTIN_PAIR_TEAM_ID);
+  assert.equal(teams[1].structure.bindings.lead, "pair");
+  assert.equal(teams[1].structure.bindings.dev, "pair");
   assert.equal(teams[0].stats.tasks7d, null);
 });
 
