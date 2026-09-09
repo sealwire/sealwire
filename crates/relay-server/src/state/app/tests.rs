@@ -15940,6 +15940,18 @@ resurrected into a turn that never completes: {:?}",
             !changed.contains("node_modules"),
             "the symlink must be excluded even though .gitignore fails to match it: {changed}"
         );
+        // Name-only presence isn't enough proof — a checkpoint that staged either file
+        // empty or with the wrong bytes would still pass the assertions above.
+        assert_eq!(
+            git_stdout(cwd, &["show", &format!("{checkpoint}:seed.txt")]),
+            "line1\nline2\ndirty edit",
+            "the checkpoint must carry the actual dirty content, not just touch the file"
+        );
+        assert_eq!(
+            git_stdout(cwd, &["show", &format!("{checkpoint}:scratch.txt")]),
+            "untracked work",
+            "the checkpoint must carry the actual untracked content, not just touch the file"
+        );
     }
 
     #[tokio::test]
