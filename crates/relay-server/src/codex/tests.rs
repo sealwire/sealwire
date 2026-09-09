@@ -3606,6 +3606,364 @@ async fn lost_turn_start_response_clears_reservation_on_timeout() {
     );
 }
 
+fn history_user_entry(item_id: &str, text: &str, turn_id: &str) -> TranscriptEntryView {
+    TranscriptEntryView {
+        item_id: Some(item_id.to_string()),
+        kind: TranscriptEntryKind::UserText,
+        text: Some(text.to_string()),
+        status: "completed".to_string(),
+        turn_id: Some(turn_id.to_string()),
+        tool: None,
+        content_state: crate::protocol::TranscriptContentState::Full,
+    }
+}
+
+fn history_reasoning_entry(item_id: &str, text: &str, turn_id: &str) -> TranscriptEntryView {
+    TranscriptEntryView {
+        item_id: Some(item_id.to_string()),
+        kind: TranscriptEntryKind::Reasoning,
+        text: Some(text.to_string()),
+        status: "completed".to_string(),
+        turn_id: Some(turn_id.to_string()),
+        tool: None,
+        content_state: crate::protocol::TranscriptContentState::Full,
+    }
+}
+
+fn count_user_text(entries: &[TranscriptEntryView]) -> usize {
+    entries
+        .iter()
+        .filter(|entry| entry.kind == TranscriptEntryKind::UserText)
+        .count()
+}
+
+/// After reservation reconcile, a provider history re-read must keep one user
+/// entry, refuse text rollback, and leave user-before-output order intact.
+#[tokio::test]
+async fn reconciled_reservation_survives_history_reread_without_duplicate_or_rollback() {
+    let state = codex_test_state_with_thread("thread-hydrate-reread").await;
+    const FULL_TEXT: &str = "full hydrated prompt text";
+    {
+        let mut relay = state.write().await;
+        let id = relay.reserve_codex_user_message("thread-hydrate-reread", FULL_TEXT);
+        relay.bind_codex_user_reservation("thread-hydrate-reread", &id, "turn-hydrate");
+    }
+    handle_notification(
+        user_message_completed(
+            "thread-hydrate-reread",
+            "turn-hydrate",
+            "item-user-hydrate",
+            FULL_TEXT,
+        ),
+        &state,
+    )
+    .await;
+    handle_notification(
+        reasoning_started(
+            "thread-hydrate-reread",
+            "turn-hydrate",
+            "item-reasoning-hydrate",
+            "live reasoning body",
+        ),
+        &state,
+    )
+    .await;
+    handle_notification(
+        agent_started(
+            "thread-hydrate-reread",
+            "turn-hydrate",
+            "item-agent-hydrate",
+        ),
+        &state,
+    )
+    .await;
+    handle_notification(
+        agent_delta(
+            "thread-hydrate-reread",
+            "turn-hydrate",
+            "item-agent-hydrate",
+            "Hello from the live stream",
+        ),
+        &state,
+    )
+    .await;
+
+    // Switch away, then re-read history with matching ids but shorter texts —
+    // merge must not duplicate the user or roll live text back.
+    {
+        let mut relay = state.write().await;
+        relay.load_thread_data(
+            ThreadSyncData {
+                thread: test_thread_summary("thread-other-hydrate"),
+                status: "idle".to_string(),
+                active_flags: Vec::new(),
+                transcript: Vec::new(),
+            },
+            "on-request",
+            "workspace-write",
+            "low",
+            "gpt-5.6-sol",
+            "device-a",
+        );
+        relay.load_thread_data(
+            ThreadSyncData {
+                thread: test_thread_summary("thread-hydrate-reread"),
+                status: "idle".to_string(),
+                active_flags: Vec::new(),
+                transcript: vec![
+                    // History order is deliberately agent-first; live order must win.
+                    history_reasoning_entry("item-reasoning-hydrate", "short", "turn-hydrate"),
+                    history_user_entry("item-user-hydrate", "full", "turn-hydrate"),
+                    agent_entry("item-agent-hydrate", "Hello", "completed", "turn-hydrate"),
+                ],
+            },
+            "on-request",
+            "workspace-write",
+            "low",
+            "gpt-5.6-sol",
+            "device-a",
+        );
+    }
+
+    let relay = state.read().await;
+    let runtime = relay
+        .runtime_for_thread("thread-hydrate-reread")
+        .expect("runtime");
+    let users: Vec<_> = runtime
+        .transcript
+        .iter()
+        .filter(|entry| entry.kind == TranscriptEntryKind::UserText)
+        .collect();
+    assert_eq!(
+        users.len(),
+        1,
+        "history re-read must not duplicate the user"
+    );
+    assert_eq!(users[0].item_id, "item-user-hydrate");
+    assert_eq!(
+        users[0].text.as_deref(),
+        Some(FULL_TEXT),
+        "shorter history text must not roll back the live user prompt"
+    );
+    assert!(
+        !users[0].item_id.starts_with("codex:user-reserve:"),
+        "reconciled entry must keep the provider item id across re-read"
+    );
+    assert!(
+        runtime.codex_user_reservations.is_empty(),
+        "reservation metadata must stay retired after reconcile + re-read"
+    );
+
+    let turn_entries: Vec<_> = runtime
+        .transcript
+        .iter()
+        .filter(|entry| entry.turn_id.as_deref() == Some("turn-hydrate"))
+        .collect();
+    assert!(
+        turn_entries.len() >= 2,
+        "expected user + at least one output entry"
+    );
+    assert_eq!(turn_entries[0].kind, TranscriptEntryKind::UserText);
+    assert_eq!(
+        turn_entries[0].text.as_deref(),
+        Some(FULL_TEXT),
+        "append-only merge must not reorder user behind history-first output"
+    );
+    let agent = turn_entries
+        .iter()
+        .find(|entry| entry.item_id == "item-agent-hydrate")
+        .expect("agent entry");
+    assert_eq!(
+        agent.text.as_deref(),
+        Some("Hello from the live stream"),
+        "shorter history agent text must not roll back the live stream"
+    );
+
+    let snapshot = relay.snapshot();
+    assert_eq!(count_user_text(&snapshot.transcript), 1);
+    let local = snapshot
+        .clone()
+        .compact_for(SessionSnapshotCompactProfile::LocalWeb);
+    let remote = snapshot.compact_for(SessionSnapshotCompactProfile::RemoteSurface);
+    assert_eq!(count_user_text(&local.transcript), 1);
+    assert_eq!(count_user_text(&remote.transcript), 1);
+    assert_eq!(
+        local
+            .transcript
+            .iter()
+            .find(|entry| entry.kind == TranscriptEntryKind::UserText)
+            .and_then(|entry| entry.text.as_deref()),
+        Some(FULL_TEXT)
+    );
+}
+
+/// Unreconciled reserve placeholder + provider history user (different item_id,
+/// same text) must still hydrate as a single user entry.
+#[tokio::test]
+async fn unreconciled_placeholder_dedupes_equivalent_history_user_on_reread() {
+    let state = codex_test_state_with_thread("thread-hydrate-equiv").await;
+    const TEXT: &str = "equivalent prompt";
+    {
+        let mut relay = state.write().await;
+        let id = relay.reserve_codex_user_message("thread-hydrate-equiv", TEXT);
+        relay.bind_codex_user_reservation("thread-hydrate-equiv", &id, "turn-equiv");
+        relay.load_thread_data(
+            ThreadSyncData {
+                thread: test_thread_summary("thread-hydrate-equiv"),
+                status: "idle".to_string(),
+                active_flags: Vec::new(),
+                transcript: vec![history_user_entry(
+                    "provider-user-equiv",
+                    TEXT,
+                    "turn-equiv",
+                )],
+            },
+            "on-request",
+            "workspace-write",
+            "low",
+            "gpt-5.6-sol",
+            "device-a",
+        );
+    }
+
+    let relay = state.read().await;
+    let runtime = relay
+        .runtime_for_thread("thread-hydrate-equiv")
+        .expect("runtime");
+    let users: Vec<_> = runtime
+        .transcript
+        .iter()
+        .filter(|entry| entry.kind == TranscriptEntryKind::UserText)
+        .collect();
+    assert_eq!(
+        users.len(),
+        1,
+        "equivalent history user must not append beside the reserve placeholder"
+    );
+    assert_eq!(users[0].text.as_deref(), Some(TEXT));
+}
+
+/// Cold hydrate installs history once; a second reconnect-shaped hydrate must
+/// not invent a second user entry or corrupt stream order.
+#[test]
+fn hydrate_background_runtime_keeps_single_user_and_append_order() {
+    let (change_tx, _) = watch::channel(0_u64);
+    let mut relay = RelayState::new(
+        "/tmp/project".to_string(),
+        change_tx,
+        SecurityProfile::private(),
+    );
+    let data = ThreadSyncData {
+        thread: test_thread_summary("thread-cold-hydrate"),
+        status: "idle".to_string(),
+        active_flags: Vec::new(),
+        transcript: vec![
+            history_user_entry("item-user-cold", "cold prompt", "turn-cold"),
+            history_reasoning_entry("item-reasoning-cold", "cold reasoning", "turn-cold"),
+            agent_entry("item-agent-cold", "cold agent", "completed", "turn-cold"),
+        ],
+    };
+    relay.hydrate_background_runtime(
+        data.clone(),
+        "on-request",
+        "workspace-write",
+        "low",
+        "gpt-5.6-sol",
+    );
+    // Second call is a no-op when the runtime already exists (reconnect path).
+    relay.hydrate_background_runtime(data, "on-request", "workspace-write", "low", "gpt-5.6-sol");
+
+    let runtime = relay
+        .runtime_for_thread("thread-cold-hydrate")
+        .expect("hydrated runtime");
+    assert_eq!(runtime.transcript.len(), 3);
+    assert_eq!(runtime.transcript[0].kind, TranscriptEntryKind::UserText);
+    assert_eq!(runtime.transcript[1].kind, TranscriptEntryKind::Reasoning);
+    assert_eq!(runtime.transcript[2].kind, TranscriptEntryKind::AgentText);
+    assert_eq!(
+        runtime
+            .transcript
+            .iter()
+            .filter(|entry| entry.kind == TranscriptEntryKind::UserText)
+            .count(),
+        1
+    );
+}
+
+/// Compaction must keep the authoritative tail's single reconciled user entry
+/// for both local and remote snapshot profiles (no stream corruption).
+#[tokio::test]
+async fn compact_profiles_keep_reconciled_user_in_authoritative_tail() {
+    let state = codex_test_state_with_thread("thread-hydrate-tail").await;
+    const TEXT: &str = "tail prompt";
+    {
+        let mut relay = state.write().await;
+        // Pad with older turns so compact may truncate the head.
+        for i in 0..40 {
+            relay.upsert_transcript_item_for_thread(
+                "thread-hydrate-tail",
+                format!("pad-user-{i}"),
+                TranscriptEntryKind::UserText,
+                Some(format!("pad {i}")),
+                "completed".to_string(),
+                Some(format!("turn-pad-{i}")),
+                None,
+            );
+            relay.upsert_transcript_item_for_thread(
+                "thread-hydrate-tail",
+                format!("pad-agent-{i}"),
+                TranscriptEntryKind::AgentText,
+                Some(format!("pad reply {i}")),
+                "completed".to_string(),
+                Some(format!("turn-pad-{i}")),
+                None,
+            );
+        }
+        let id = relay.reserve_codex_user_message("thread-hydrate-tail", TEXT);
+        relay.bind_codex_user_reservation("thread-hydrate-tail", &id, "turn-tail");
+    }
+    handle_notification(
+        user_message_completed("thread-hydrate-tail", "turn-tail", "item-user-tail", TEXT),
+        &state,
+    )
+    .await;
+    handle_notification(
+        reasoning_started(
+            "thread-hydrate-tail",
+            "turn-tail",
+            "item-reasoning-tail",
+            "tail reasoning",
+        ),
+        &state,
+    )
+    .await;
+
+    let relay = state.read().await;
+    let snapshot = relay.snapshot();
+    let local = snapshot
+        .clone()
+        .compact_for(SessionSnapshotCompactProfile::LocalWeb);
+    let remote = snapshot.compact_for(SessionSnapshotCompactProfile::RemoteSurface);
+    for (label, compacted) in [("local", &local), ("remote", &remote)] {
+        let tail_users: Vec<_> = compacted
+            .transcript
+            .iter()
+            .filter(|entry| {
+                entry.kind == TranscriptEntryKind::UserText
+                    && entry.turn_id.as_deref() == Some("turn-tail")
+            })
+            .collect();
+        assert_eq!(
+            tail_users.len(),
+            1,
+            "{label} compact must keep exactly one tail user entry"
+        );
+        assert_eq!(tail_users[0].item_id.as_deref(), Some("item-user-tail"));
+        assert_eq!(tail_users[0].text.as_deref(), Some(TEXT));
+        assert_turn_order_is_user_then_reasoning(&compacted.transcript, "turn-tail");
+    }
+}
+
 #[tokio::test]
 async fn replay_harness_prevents_stuck_state_after_background_completion() {
     let harness = CodexReplayHarness::new("thread-A").await;
