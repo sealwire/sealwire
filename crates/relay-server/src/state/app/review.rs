@@ -1260,7 +1260,10 @@ complete this review; the new `HEAD` must be reviewed as a fresh committed candi
                             stale_approval = true;
                             verdict = crate::state::Verdict::NeedsChanges;
                             self.update_job(&job_id, |job| {
+                                // `head` is always a real `HEAD` value here, never a
+                                // checkpoint sha — checkpoints never move `HEAD`.
                                 job.candidate_sha = Some(head);
+                                job.candidate_is_checkpoint = false;
                                 job.verdict_candidate_sha = None;
                             })
                             .await;
@@ -1855,12 +1858,22 @@ tree would review commits this thread never made"
             .await
             .review_job(job_id)
             .and_then(|job| job.candidate_sha.clone());
+        // `candidate_sha` alone can't say whether it names a real commit or a hidden
+        // checkpoint — both are persisted in that one field — so a retried evidence
+        // collection (e.g. the `workspace_retries` paths in `run_review_job`) needs
+        // this to correctly re-tag what it reads back, not assume `Real`.
+        let existing_candidate_is_checkpoint = self
+            .relay
+            .read()
+            .await
+            .review_job(job_id)
+            .is_some_and(|job| job.candidate_is_checkpoint);
         let current_head = current_head_sha(&trusted).await?;
         let dirty = has_uncommitted_changes(&trusted).await?;
         let (base_sha, candidate_sha, is_checkpoint) = if let Some(base_sha) = existing_base.clone()
         {
             if let Some(candidate_sha) = existing_candidate.clone() {
-                (base_sha, candidate_sha, false)
+                (base_sha, candidate_sha, existing_candidate_is_checkpoint)
             } else if current_head != base_sha {
                 (base_sha, current_head, false)
             } else if dirty {
@@ -1901,6 +1914,7 @@ tree would review commits this thread never made"
         self.update_job(job_id, |job| {
             job.base_sha = Some(base_sha.clone());
             job.candidate_sha = Some(candidate_sha.clone());
+            job.candidate_is_checkpoint = is_checkpoint;
         })
         .await;
         Ok(Some(if is_checkpoint {
@@ -1973,6 +1987,10 @@ tree would review commits this thread never made"
         }
         self.update_job(job_id, |job| {
             job.candidate_sha = Some(candidate);
+            // This path only ever asks for and records a real commit — clear the flag
+            // explicitly so a checkpoint from an earlier round can't leak forward as
+            // stale `true` onto this real candidate.
+            job.candidate_is_checkpoint = false;
         })
         .await;
         Ok(true)
