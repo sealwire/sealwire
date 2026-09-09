@@ -1,13 +1,19 @@
-// The phone half of the docked question card.
+// The phone half of the pinned question card.
 //
-// On a 390x844 screen the card has to be reachable without scrolling and must
-// not eat the composer: the transcript gives way, not the input. Docking it also
-// has to survive this surface's own layout, which is a different flex column
-// from the desktop one — so this is measured in a real browser rather than
-// argued from the cascade.
+// On a 390x844 screen the card has to be reachable without scrolling and must not
+// eat the composer, and it must scroll with the conversation rather than in a pane
+// of its own — measured in a real browser rather than argued from the cascade.
+//
+// Three phases, in one page because each needs the one before it:
+//   1. layout: one card, pinned last, inside the conversation's own scroller
+//   2. a REAL IME composition survives history paging in behind it (CDP, not a
+//      synthetic input event — a synthetic one has no composition state to lose)
+//   3. a question too large to inline: fetch fails, retry re-fetches, answer sends
 //
 // Lightweight like browser-remote-mobile-header-e2e.mjs: the built web/ bundle
 // over a static server with a stubbed relay socket — no relay, broker or worker.
+// The stub must stay faithful to the wire types (see `error` below, which is a
+// plain String on the relay); an unfaithful stub is how an e2e passes on a bug.
 import assert from "node:assert/strict";
 import path from "node:path";
 import process from "node:process";
@@ -208,8 +214,49 @@ async function main() {
         };
 
         let answered = false;
-        const currentSnapshot = () =>
-          answered ? { ...snapshot, pending_ask_user_questions: [], active_flags: [] } : snapshot;
+        // History paging in behind a parked question is the reconciliation path
+        // that used to replace the answer form. The test drives it by pushing a
+        // snapshot with one more row while the reader is mid-composition.
+        let extraRows = [];
+        // A question too big to inline: the relay externalizes it and the surface
+        // has to fetch the text separately. Failing that fetch once is the only way
+        // to reach the retry, which had no end-to-end coverage at all.
+        let externalized = false;
+        let detailFetchAttempts = 0;
+        const bigQuestions = [
+          {
+            question: "Which of these very long options?",
+            header: "Externalized",
+            multi_select: false,
+            options: [
+              { label: "Big A", description: "x".repeat(200) },
+              { label: "Big B", description: "y".repeat(200) },
+            ],
+          },
+        ];
+        const externalizedPending = {
+          request_id: "ask-external-e2e",
+          tool_use_id: "toolu-external-e2e",
+          thread_id: threadId,
+          requested_at: 2,
+          question_count: 1,
+          questions_inline_complete: false,
+          detail_available: true,
+          content_hash: "hash-external",
+          questions: [],
+        };
+        const withRows = (snap) =>
+          extraRows.length
+            ? { ...snap, transcript: [...extraRows, ...snap.transcript] }
+            : snap;
+        const currentSnapshot = () => {
+          if (externalized) {
+            return withRows({ ...snapshot, pending_ask_user_questions: [externalizedPending] });
+          }
+          return withRows(
+            answered ? { ...snapshot, pending_ask_user_questions: [], active_flags: [] } : snapshot
+          );
+        };
 
         const BROKER_PROTOCOL_VERSION = 1;
         const RELAY_PROTOCOL_VERSION = 2;
@@ -220,6 +267,39 @@ async function main() {
             super();
             this.url = url;
             this.readyState = FakeWebSocket.OPEN;
+            window.__detailFetchAttempts = () => detailFetchAttempts;
+            window.__pushExternalizedQuestion = () => {
+              externalized = true;
+              this.#emit({
+                type: "message",
+                payload: {
+                  protocol_version: RELAY_PROTOCOL_VERSION,
+                  kind: "session_snapshot",
+                  snapshot: currentSnapshot(),
+                },
+              });
+            };
+            window.__pushHistoryRow = (itemId) => {
+              extraRows = [
+                ...extraRows,
+                {
+                  item_id: itemId,
+                  kind: "agent_text",
+                  text: `Older history ${itemId}`,
+                  status: "completed",
+                  turn_id: "turn-older",
+                  tool: null,
+                },
+              ];
+              this.#emit({
+                type: "message",
+                payload: {
+                  protocol_version: RELAY_PROTOCOL_VERSION,
+                  kind: "session_snapshot",
+                  snapshot: currentSnapshot(),
+                },
+              });
+            };
             queueMicrotask(() => {
               this.dispatchEvent(new Event("open"));
               this.#emit({
@@ -239,7 +319,7 @@ async function main() {
                 payload: {
                   protocol_version: RELAY_PROTOCOL_VERSION,
                   kind: "session_snapshot",
-                  snapshot,
+                  snapshot: currentSnapshot(),
                 },
               });
             });
@@ -266,6 +346,33 @@ async function main() {
                   protocol_version: RELAY_PROTOCOL_VERSION,
                   kind: "session_snapshot",
                   snapshot: currentSnapshot(),
+                },
+              });
+              return;
+            }
+            if (request.type === "fetch_ask_user_question_detail") {
+              detailFetchAttempts += 1;
+              // First attempt fails, the way a too-large payload does over the
+              // broker; the retry is what has to work.
+              if (detailFetchAttempts === 1) {
+                this.#respond(payload.action_id, {
+                  action: "fetch_ask_user_question_detail",
+                  ok: false,
+                  // A plain string, like the relay's `error: Option<String>`.
+                  // An object here renders as "[object Object]" — the stub being
+                  // unfaithful, which is the failure mode that makes a passing e2e
+                  // worthless.
+                  error: "Question detail is too large to load remotely.",
+                  snapshot: currentSnapshot(),
+                });
+                return;
+              }
+              this.#respond(payload.action_id, {
+                action: "fetch_ask_user_question_detail",
+                ok: true,
+                snapshot: currentSnapshot(),
+                ask_user_question_detail: {
+                  request: { ...externalizedPending, questions_inline_complete: true, questions: bigQuestions },
                 },
               });
               return;
@@ -418,6 +525,102 @@ async function main() {
       `the conversation must keep usable height while the question is parked (got ${layout.scroller.h})`
     );
 
+    // ---- A REAL IME composition must survive history paging in behind it. ----
+    //
+    // Node identity and focus were already asserted in jsdom, but neither proves
+    // the thing that actually loses text: Chromium aborts an in-flight composition
+    // when the element it is composing into is replaced. This drives a genuine
+    // composition through CDP — the same path a pinyin IME uses — rather than a
+    // synthetic input event, which has no composition state to lose.
+    const cdp = await page.context().newCDPSession(page);
+    try {
+      await page.click(".transcript-ask-user-pinned .ask-user-notes-input");
+      await page.evaluate(() => {
+        window.__composition = { updates: [], ends: [] };
+        const el = document.querySelector(".ask-user-notes-input");
+        window.__notesNode = el;
+        el.addEventListener("compositionupdate", (e) => window.__composition.updates.push(e.data));
+        el.addEventListener("compositionend", (e) => window.__composition.ends.push(e.data));
+      });
+
+      // Mid-word: composing, not yet committed.
+      await cdp.send("Input.imeSetComposition", {
+        text: "ni hao",
+        selectionStart: 6,
+        selectionEnd: 6,
+      });
+      const composing = await page.evaluate(() => ({
+        value: document.querySelector(".ask-user-notes-input")?.value,
+        updates: window.__composition.updates.length,
+        ends: window.__composition.ends.length,
+      }));
+      console.log(`[remote-ask-user-inline] composing ${JSON.stringify(composing)}`);
+      assert.equal(composing.ends, 0, "precondition: the composition is still open");
+
+      // One page of history arrives while the candidate window is up.
+      await page.evaluate(() => window.__pushHistoryRow("older-1"));
+      await page.waitForFunction(
+        () => (document.querySelector(".chat-thread")?.textContent || "").includes("Older history"),
+        null,
+        { timeout: TIMEOUT_MS }
+      );
+
+      const survived = await page.evaluate(() => ({
+        sameNode: document.querySelector(".ask-user-notes-input") === window.__notesNode,
+        focused: document.activeElement === window.__notesNode,
+        activeTag: document.activeElement?.tagName,
+        ends: window.__composition.ends.length,
+      }));
+      console.log(`[remote-ask-user-inline] after history ${JSON.stringify(survived)}`);
+      assert.ok(survived.sameNode, "the notes field must be the same node after history paged in");
+      assert.ok(
+        survived.focused,
+        `and must still hold focus (focus went to ${survived.activeTag})`
+      );
+
+      // The assertion that actually bites, and it is not the obvious one.
+      // Replacing the node does NOT wipe what was already composed — the draft
+      // store puts that back — and Chromium fires no compositionend either, so
+      // neither is a usable signal. What breaks is that focus lands on <body>, so
+      // every character chosen AFTER the interruption goes nowhere: the reader
+      // keeps typing and none of it arrives. Measured against the unkeyed footer,
+      // this assertion and the two above are the ones that failed; `ends` stayed 0
+      // either way, which is why it is logged and not asserted on.
+      await cdp.send("Input.imeSetComposition", {
+        text: "你好",
+        selectionStart: 2,
+        selectionEnd: 2,
+      });
+      await cdp.send("Input.insertText", { text: "你好" });
+      await page.waitForFunction(
+        () => (document.querySelector(".ask-user-notes-input")?.value || "").includes("你好"),
+        null,
+        { timeout: TIMEOUT_MS }
+      );
+      const committed = await page.evaluate(
+        () => document.querySelector(".ask-user-notes-input").value
+      );
+      console.log(`[remote-ask-user-inline] committed ${JSON.stringify(committed)}`);
+      assert.match(
+        committed,
+        /你好/,
+        "the characters chosen after the interruption must reach the answer"
+      );
+    } finally {
+      await cdp.detach().catch(() => {});
+    }
+
+    // Clear the note so the answer below is the tapped options alone.
+    await page.evaluate(() => {
+      const el = document.querySelector(".ask-user-notes-input");
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype,
+        "value"
+      ).set;
+      setter.call(el, "");
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
     // A real tap, not a synthetic click: this is the gesture that was being lost.
     await page.tap(".transcript-ask-user-pinned .ask-user-option-button");
     await page.waitForFunction(
@@ -464,6 +667,76 @@ async function main() {
       1,
       "the answered question stays in the conversation as a record"
     );
+
+    // ---- A question too large to inline: fetch, fail, retry, answer. ----
+    //
+    // Only this surface externalizes question text, and the retry button existed
+    // solely on the removed dock. Carried into the pinned card it had unit
+    // coverage but had never been driven end to end, so a broken fetch or a
+    // mis-wired retry would have looked exactly like a question that was still
+    // loading.
+    await page.evaluate(() => window.__pushExternalizedQuestion());
+
+    await page.waitForFunction(
+      () => document.querySelector(".ask-user-detail-retry"),
+      null,
+      { timeout: TIMEOUT_MS }
+    );
+    const failedState = await page.evaluate(() => ({
+      attempts: window.__detailFetchAttempts(),
+      inPinned: Boolean(
+        document.querySelector(".ask-user-detail-retry")?.closest(".transcript-ask-user-pinned")
+      ),
+      alert: document.querySelector(".ask-user-error[role=alert]")?.textContent || "",
+      options: document.querySelectorAll(
+        ".transcript-ask-user-pinned .ask-user-option-button"
+      ).length,
+    }));
+    console.log(`[remote-ask-user-inline] detail failed ${JSON.stringify(failedState)}`);
+    assert.equal(failedState.attempts, 1, "the surface fetched the externalized detail once");
+    assert.ok(failedState.inPinned, "the retry lives on the pinned card, where the question is");
+    assert.match(
+      failedState.alert,
+      /too large to load remotely/,
+      "and the reader is told why there is nothing to answer yet"
+    );
+    assert.equal(failedState.options, 0, "with no options, because none arrived");
+
+    await page.tap(".ask-user-detail-retry");
+    await page.waitForFunction(
+      () =>
+        document.querySelectorAll(".transcript-ask-user-pinned .ask-user-option-button").length > 0,
+      null,
+      { timeout: TIMEOUT_MS }
+    );
+    const retried = await page.evaluate(() => ({
+      attempts: window.__detailFetchAttempts(),
+      // Scoped to the pinned footer and read off the LABEL element: the answered
+      // question's read-only card carries option labels too, and the button here
+      // also carries the very long description that made this one externalized.
+      labels: [
+        ...document.querySelectorAll(".transcript-ask-user-pinned .ask-user-option-label"),
+      ].map((el) => el.textContent.replace(/^✓\s*/, "").trim()),
+    }));
+    console.log(`[remote-ask-user-inline] detail retried ${JSON.stringify(retried)}`);
+    assert.equal(retried.attempts, 2, "the retry actually re-fetched");
+    assert.deepEqual(retried.labels, ["Big A", "Big B"], "and the question became answerable");
+
+    // Answerable means answerable: one tap must submit it, not just render it.
+    await page.tap(".transcript-ask-user-pinned .ask-user-option-button");
+    await page.waitForFunction(
+      () => window.__askUserSubmissions.length > 1,
+      null,
+      { timeout: TIMEOUT_MS }
+    );
+    const externalSubmission = await page.evaluate(
+      () => window.__askUserSubmissions[window.__askUserSubmissions.length - 1]
+    );
+    console.log(`[remote-ask-user-inline] external answer ${JSON.stringify(externalSubmission)}`);
+    assert.equal(externalSubmission.request_id, "ask-external-e2e");
+    assert.deepEqual(externalSubmission.input?.answers, {
+      "Which of these very long options?": "Big A",
+    });
 
     if (process.env.REMOTE_ASK_USER_E2E_SHOT) {
       await page.screenshot({ path: process.env.REMOTE_ASK_USER_E2E_SHOT });
