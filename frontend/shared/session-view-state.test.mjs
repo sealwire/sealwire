@@ -997,3 +997,38 @@ test("the Sessions return memory survives every transition made while Tasks is s
   assert.deepEqual(returned.location.context, owning);
   assert.equal(returned.location.threadId, "thread-in-project");
 });
+
+// ── The ticket page (17b) ───────────────────────────────────────────────────
+// A new full-area screen has to be REGISTERED, not just normalised. The module
+// doc says so: "Adding another such screen should be one entry here, not an
+// audit." Missing it is invisible in the markup and breaks navigation — the
+// Sessions button stops returning, and every ticket collapses onto one
+// undefined workspace key.
+const ticket = (teamRunId) => ({ kind: "ticket", teamRunId });
+
+test("a ticket context is a full-area screen", () => {
+  assert.equal(isFullAreaContext(ticket("t1")), true);
+});
+
+test("each ticket gets its own workspace key, and it is a full-area one", () => {
+  const one = sessionViewContextKey(ticket("t1"));
+  const two = sessionViewContextKey(ticket("t2"));
+  assert.ok(one, "a ticket context must produce a key");
+  assert.notEqual(one, two, "two tickets must not share a workspace");
+  assert.notEqual(one, undefined);
+  assert.equal(isFullAreaWorkspaceKey(one), true);
+});
+
+// `validHistoryWorkspaces` is an allowlist and everything it omits is DELETED on
+// restore, so an unrecognised shape silently drops the screen's stored state.
+test("a ticket workspace key survives the persistence allowlist", () => {
+  assert.equal(isFullAreaWorkspaceKey(sessionViewContextKey(ticket("t9"))), true);
+});
+
+test("Sessions returns from a ticket rather than staying on it", () => {
+  assert.deepEqual(selectContextAfterProjectDelete
+    ? normalizeSessionViewContext(ticket("t1"))
+    : null, { kind: "ticket", teamRunId: "t1" });
+  // The predicate is what every return site consults.
+  assert.equal(isFullAreaContext(normalizeSessionViewContext(ticket("t1"))), true);
+});
