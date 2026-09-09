@@ -18169,6 +18169,61 @@ settings update: {error}"
             }
     }
 
+    // The same substitution wearing a different badge. Agent worktrees live INSIDE the repo
+    // (`<repo>/.claude/worktrees/<name>`), so once one is deleted it drops out of the
+    // enumerated roots and every write the thread recorded inside it still prefix-matches
+    // the repo above — which the resolver reports as `Proven`, not `Substituted`. Refusing
+    // only `Substituted` therefore leaves the wrong-repo approval reachable for any thread
+    // that edited a file, which is every real one.
+    #[tokio::test]
+    async fn review_refuses_a_deleted_worktree_that_write_evidence_maps_up_to_its_repo() {
+        let dir = TempDir::new().expect("tmpdir");
+        let main_dir = dir.path().join("mainwt");
+        std::fs::create_dir_all(&main_dir).unwrap();
+        let main_cwd = main_dir.to_str().unwrap().to_string();
+        init_git_seed(&main_cwd);
+        let nested = main_dir.join(".claude").join("worktrees").join("wt-gone");
+        std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+        let nested_cwd = nested.to_str().unwrap().to_string();
+        add_worktree(&main_cwd, &nested_cwd, "worktree-wt-gone");
+
+        let (app, providers) = build_review_app(&nested_cwd, &["codex"]).await;
+        grant_workspace(&app, &main_cwd).await;
+        let parent = start_parent(&app, &nested_cwd, "codex").await;
+        // What every real coding thread has: a landed edit, recorded inside its own worktree.
+        seed_landed_edit(&app, &parent.id, &format!("{nested_cwd}/seed.txt")).await;
+        std::fs::remove_dir_all(&nested_cwd).unwrap();
+        // Someone else's work, sitting at the repo's HEAD.
+        std::fs::write(
+            main_dir.join("seed.txt"),
+            "line1\nline2\nUNRELATED_MAIN_TREE_WORK\n",
+        )
+        .unwrap();
+        let unrelated_candidate = git_commit_all(&main_cwd, "unrelated main tree work");
+
+        let error = app
+            .request_review(review_input("codex"))
+            .await
+            .expect_err("write evidence inside a deleted worktree must not license its repo");
+        assert!(
+            error.contains(&nested_cwd) && error.contains("no longer exists"),
+            "the refusal must name the tree that is gone: {error}"
+        );
+
+        let turns = providers.get("codex").unwrap().turns.lock().await.clone();
+        assert!(
+            !turns
+                .iter()
+                .any(|(_, prompt)| prompt
+                    .contains(&format!("Candidate commit: {unrelated_candidate}"))),
+            "no reviewer may be handed the repo's unrelated commit: {turns:?}"
+        );
+        assert!(
+            app.list_review_jobs().await.is_empty(),
+            "a refused review must not leave a card behind"
+        );
+    }
+
     // Substituting the owning repo for a deleted worktree reviews commits the reviewed
     // thread never made: the repo's HEAD is whatever else landed there. Refusing is the
     // only answer that cannot silently approve the wrong work.
@@ -18406,6 +18461,49 @@ settings update: {error}"
         let linked_cwd = linked.to_str().unwrap().to_string();
         add_worktree(&main_cwd, &linked_cwd, "feature-branch");
         (main_cwd, linked_cwd)
+    }
+
+    // The deliberate edge of the deleted-workspace refusal, kept explicit so it is not
+    // "fixed" back later: the work provably moved to a live SIBLING tree, but the thread's
+    // own directory is gone. Following it would be reviewing a tree while unable to drive
+    // the author in it at all — no recap, no fix round, no post-back — so the review is
+    // refused even though a live root could be named.
+    #[tokio::test]
+    async fn review_refuses_a_deleted_birth_tree_even_when_the_work_moved_to_a_live_sibling() {
+        let dir = TempDir::new().expect("tmpdir");
+        let (main_cwd, linked_cwd) = init_repo_with_sibling_worktree(dir.path());
+        std::fs::write(
+            std::path::Path::new(&main_cwd).join("seed.txt"),
+            "line1\nline2\nMAIN_TREE_EDIT\n",
+        )
+        .unwrap();
+
+        let (app, providers) = build_review_app(&linked_cwd, &["codex"]).await;
+        grant_workspace(&app, &main_cwd).await;
+        let parent = start_parent(&app, &linked_cwd, "codex").await;
+        // The work moved to the main tree, which is alive and enumerable…
+        seed_landed_edit(&app, &parent.id, &format!("{main_cwd}/seed.txt")).await;
+        // …but the thread's own tree is gone, so it can no longer be driven.
+        std::fs::remove_dir_all(&linked_cwd).unwrap();
+
+        let error = app
+            .request_review(review_input("codex"))
+            .await
+            .expect_err("a thread whose own tree is gone cannot be reviewed");
+        assert!(
+            error.contains(&linked_cwd) && error.contains("no longer exists"),
+            "the refusal must name the thread's own tree: {error}"
+        );
+        assert!(
+            providers
+                .get("codex")
+                .unwrap()
+                .turns
+                .lock()
+                .await
+                .is_empty(),
+            "a refused review must drive no turn at all"
+        );
     }
 
     // Switching, direction 1 — the thread STARTED in the main tree and has since been
