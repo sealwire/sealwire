@@ -650,6 +650,7 @@ fn apply_effects(
                 task.status = SubTaskStatus::Pending;
                 task.candidate_sha.clear();
                 task.verdict_candidate_sha.clear();
+                task.review_claim = None;
             }
         }
         TeamStateCommand::RecordSubTaskStaleReview { index } => {

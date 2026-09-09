@@ -80,6 +80,38 @@ const TEAM_ASK_USER_MAX_SECS: u64 = 24 * 60 * 60;
 /// indefinitely.
 const TASK_SEAT_DELETE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// An explicitly marked no-change developer claim is persisted as reviewer
+/// evidence. Long enough for commands and results, short enough that one runaway
+/// final line cannot bloat every saved task snapshot and reviewer prompt.
+const TEAM_REVIEW_CLAIM_MAX_BYTES: usize = 4_000;
+const TEAM_REVIEW_CLAIM_MARKER: &str = "NO_CHANGE_REVIEW_CLAIM:";
+const TEAM_REVIEW_CLAIM_TRUNCATED: &str = " …[claim truncated]";
+
+fn bounded_team_review_claim(text: &str) -> Option<String> {
+    let claim = text
+        .trim()
+        .lines()
+        .next_back()?
+        .trim()
+        .strip_prefix(TEAM_REVIEW_CLAIM_MARKER)?
+        .trim();
+    if claim.is_empty() {
+        return None;
+    }
+    if claim.len() <= TEAM_REVIEW_CLAIM_MAX_BYTES {
+        return Some(claim.to_string());
+    }
+
+    let body_limit = TEAM_REVIEW_CLAIM_MAX_BYTES.saturating_sub(TEAM_REVIEW_CLAIM_TRUNCATED.len());
+    let end = (0..=body_limit.min(claim.len()))
+        .rev()
+        .find(|index| claim.is_char_boundary(*index))
+        .unwrap_or(0);
+    let mut bounded = claim[..end].trim_end().to_string();
+    bounded.push_str(TEAM_REVIEW_CLAIM_TRUNCATED);
+    Some(bounded)
+}
+
 /// Ceiling on a rendered review diff.
 ///
 /// The per-file caps upstream do not bound the TOTAL: tracked output is capped
@@ -2413,8 +2445,8 @@ over on resume"
     /// under ONE write-lock hold. `None` for any slot that may proceed.
     ///
     /// Refuses if the run is pausing/stopping, or the current review slot has no
-    /// immutable candidate for this round. The current candidate is authoritative:
-    /// `candidate_sha` must be nonempty and differ from `round_base_sha`.
+    /// explicit subject for this round. A subject is either an immutable changed
+    /// candidate or a billed implementation claim from a no-change round.
     ///
     /// Deciding and acting used to be two steps — a read here, then a separate
     /// reset/settle after. That gap is exactly what a concurrent `request_stop`/
@@ -2470,13 +2502,7 @@ over on resume"
                 TeamThreadSlot::SubTaskReviewer(index) => run
                     .sub_tasks
                     .get(index)
-                    .map(|task| {
-                        (
-                            !task.candidate_sha.is_empty()
-                                && task.candidate_sha != task.round_base_sha,
-                            task.rounds_used > 0,
-                        )
-                    })
+                    .map(|task| (task.has_review_subject(), task.rounds_used > 0))
                     .unwrap_or((false, false)),
                 TeamThreadSlot::RunOwned(_) if run.phase == relay_api::team::TeamPhase::MrGate => (
                     !run.mr_candidate_sha.is_empty()
@@ -2615,6 +2641,7 @@ over on resume"
                         task.round_base_sha = round_base_for_update;
                         task.candidate_sha.clear();
                         task.verdict_candidate_sha.clear();
+                        task.review_claim = None;
                         task.stale_review_retries = 0;
                     }
                 }
@@ -2643,8 +2670,10 @@ over on resume"
         &self,
         run_id: &str,
         slot: TeamThreadSlot,
-        _thread_id: &mut String,
+        thread_id: &mut String,
         round_base_sha: &str,
+        sent_turn_id: Option<&str>,
+        no_op_claim: Option<String>,
     ) -> Result<bool, TeamTurnOutcome> {
         let candidate = match self
             .capture_team_review_candidate(run_id, slot, round_base_sha)
@@ -2668,6 +2697,26 @@ over on resume"
                         "the developer did not produce reviewable changes after `{round_base_sha}`; resume the same developer session before review"
                     )));
                 }
+                if let (TeamThreadSlot::SubTaskDev(index), Some(claim)) = (slot, no_op_claim) {
+                    if self.turn_billed_work(thread_id, sent_turn_id).await {
+                        let updated = self
+                            .mutate_team_run(run_id, move |run| {
+                                if let Some(task) = run.sub_tasks.get_mut(index) {
+                                    task.review_claim = Some(claim);
+                                    task.candidate_sha.clear();
+                                    task.verdict_candidate_sha.clear();
+                                    task.stale_review_retries = 0;
+                                }
+                            })
+                            .await;
+                        if !updated {
+                            return Err(TeamTurnOutcome::Failed(format!(
+                                "task run {run_id} vanished before the review claim could be recorded"
+                            )));
+                        }
+                        return Ok(true);
+                    }
+                }
                 return Ok(false);
             }
             Err(error) => {
@@ -2686,6 +2735,7 @@ over on resume"
                     if let Some(task) = run.sub_tasks.get_mut(index) {
                         task.candidate_sha = candidate;
                         task.verdict_candidate_sha.clear();
+                        task.review_claim = None;
                     }
                 }
                 TeamThreadSlot::MrDev => {
@@ -2903,6 +2953,7 @@ over on resume"
                     let task = &mut run.sub_tasks[index];
                     task.candidate_sha = candidate;
                     task.verdict_candidate_sha.clear();
+                    task.review_claim = None;
                     task.stale_review_retries = 0;
                 }
             })
@@ -3192,16 +3243,27 @@ over on resume"
                 }
             }
         }
-        let mut review_candidate = true;
-        if role == TeamRole::Dev
+        let completed_dev_turn = role == TeamRole::Dev
             && matches!(
                 outcome,
                 TeamTurnOutcome::Replied(_) | TeamTurnOutcome::Silent
-            )
-        {
+            );
+        let no_op_claim = match &outcome {
+            TeamTurnOutcome::Replied(text) => bounded_team_review_claim(text),
+            _ => None,
+        };
+        let mut review_candidate = true;
+        if completed_dev_turn {
             if let Some(round_base_sha) = round_base_sha {
                 match self
-                    .ensure_team_dev_candidate(run_id, slot, &mut thread_id, &round_base_sha)
+                    .ensure_team_dev_candidate(
+                        run_id,
+                        slot,
+                        &mut thread_id,
+                        &round_base_sha,
+                        sent_turn_id.as_deref(),
+                        no_op_claim,
+                    )
                     .await
                 {
                     Ok(value) => review_candidate = value,
@@ -3210,18 +3272,15 @@ over on resume"
             }
         }
         // The independent review gate's other half: count a Dev turn as "landed"
-        // only when it produced an immutable candidate and matching successful
-        // usage or nonempty work vs the checkpoint. `Silent` with checkpointed
-        // dirty work still counts (tool-only edits); a reply with neither spend nor a
-        // candidate diff does not.
-        if role == TeamRole::Dev
-            && review_candidate
-            && matches!(
-                outcome,
-                TeamTurnOutcome::Replied(_) | TeamTurnOutcome::Silent
-            )
-        {
+        // only when it produced an immutable change candidate or an explicitly
+        // marked, billed claim. `Silent` with checkpointed dirty work still
+        // counts (tool-only edits); ordinary prose with neither a candidate diff
+        // nor checkpoint work does not.
+        if completed_dev_turn && review_candidate {
             if let TeamThreadSlot::SubTaskDev(index) = slot {
+                // Read usage after candidate capture. Some providers publish the
+                // matching spend just after their reply settles; the intervening
+                // Git work gives that bookkeeping a chance to land.
                 let billed = self
                     .turn_billed_work(&thread_id, sent_turn_id.as_deref())
                     .await;
@@ -4646,5 +4705,39 @@ fn parse_team_mark_status(raw: &str) -> Result<TeamRunStatus, String> {
         "done" => Ok(TeamRunStatus::Done),
         "cancelled" => Ok(TeamRunStatus::Cancelled),
         other => Err(format!("status must be done or cancelled, not {other}")),
+    }
+}
+
+#[cfg(test)]
+mod no_op_review_claim_tests {
+    use super::{
+        bounded_team_review_claim, TEAM_REVIEW_CLAIM_MARKER, TEAM_REVIEW_CLAIM_MAX_BYTES,
+        TEAM_REVIEW_CLAIM_TRUNCATED,
+    };
+
+    #[test]
+    fn claims_are_trimmed_bounded_and_keep_a_utf8_boundary() {
+        assert_eq!(bounded_team_review_claim("   \n"), None);
+        assert_eq!(bounded_team_review_claim("tests passed"), None);
+        assert_eq!(
+            bounded_team_review_claim(&format!("{TEAM_REVIEW_CLAIM_MARKER}   ")),
+            None
+        );
+        assert_eq!(
+            bounded_team_review_claim(&format!(
+                "ordinary explanation\n{TEAM_REVIEW_CLAIM_MARKER} cargo test passed"
+            )),
+            Some("cargo test passed".to_string())
+        );
+
+        let claim = bounded_team_review_claim(&format!(
+            "preface\n{TEAM_REVIEW_CLAIM_MARKER}   {}  ",
+            "验".repeat(2_000)
+        ))
+        .expect("explicit nonempty claim");
+        assert!(claim.len() <= TEAM_REVIEW_CLAIM_MAX_BYTES);
+        assert!(claim.is_char_boundary(claim.len()));
+        assert!(!claim.chars().next().unwrap().is_whitespace());
+        assert!(claim.ends_with(TEAM_REVIEW_CLAIM_TRUNCATED));
     }
 }
