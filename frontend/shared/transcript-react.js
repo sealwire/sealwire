@@ -773,13 +773,17 @@ function findPendingAskUserRequest(itemId, pendingList) {
   return pendingList.find((pending) => pending?.tool_use_id === toolUseId) || null;
 }
 
-// Item ids of EVERY question the session is currently blocked on. Nothing
-// guarantees there is only one: the relay and the worker both key pending
+// Item id -> request id, for EVERY question the session is currently blocked on.
+// Nothing guarantees there is only one: the relay and the worker both key pending
 // questions by id, and a turn can issue several AskUserQuestion tool uses in
-// parallel. All of them get pinned, in their original relative order, so a
-// second question can never end up buried in history behind the first.
+// parallel. All of them get pinned, so a second question can never end up buried
+// in history behind the first.
+//
+// The request id is the value rather than the key because the footer is assembled
+// in the RELAY's order, not the transcript's: it is the relay that stamps arrival
+// order, and rows hydrate in whatever order they arrive.
 // Already-answered ask-user entries are not in the pending list and stay put.
-const EMPTY_PINNED_ASK_USER_IDS = new Set();
+const EMPTY_PINNED_ASK_USER_IDS = new Map();
 
 function findPinnedAskUserItemIds(entries, pendingList) {
   if (!Array.isArray(pendingList) || !pendingList.length || !Array.isArray(entries)) {
@@ -791,44 +795,27 @@ function findPinnedAskUserItemIds(entries, pendingList) {
       continue;
     }
     const itemId = entry.item_id || "";
-    if (itemId && findPendingAskUserRequest(itemId, pendingList)) {
-      (pinned ||= new Set()).add(itemId);
+    const request = itemId && findPendingAskUserRequest(itemId, pendingList);
+    if (request?.request_id) {
+      (pinned ||= new Map()).set(itemId, request.request_id);
     }
   }
   return pinned || EMPTY_PINNED_ASK_USER_IDS;
 }
 
-// Pending questions whose tool call is NOT among the loaded entries.
+// The same card AskUserEntry renders, built from the request rather than the row.
 //
 // The relay drops transcript entries from the head under snapshot pressure and a
 // switched-to thread hydrates in pages, so a request can be live while its row is
 // not here. Keyed only off the row, the turn would park on a question the reader
-// is never shown. These get a card built from the request itself.
+// is never shown and cannot answer.
 //
-// Callers must hand in a THREAD-FILTERED list: with no row to match against there
-// is nothing else stopping a background thread's question being answered here.
-const EMPTY_ASK_USER_REQUESTS = [];
-
-function findUnrenderedAskUserRequests(entries, pendingList) {
-  if (!Array.isArray(pendingList) || !pendingList.length) {
-    return EMPTY_ASK_USER_REQUESTS;
-  }
-  const rendered = new Set();
-  for (const entry of Array.isArray(entries) ? entries : []) {
-    const itemId = entry?.item_id || "";
-    if (itemId.startsWith("tool:") && isAskUserQuestionTool(entry?.tool)) {
-      rendered.add(itemId.slice(5));
-    }
-  }
-  const orphans = pendingList.filter(
-    (request) => request?.request_id && !rendered.has(request.tool_use_id)
-  );
-  return orphans.length ? orphans : EMPTY_ASK_USER_REQUESTS;
-}
-
-// The same card AskUserEntry renders, built from the request rather than the row.
-// The draft key is derived identically, so a pick made before the row loads is
-// still there once it does.
+// The draft key is derived identically to the row-backed card's, so a pick made
+// before the row loads is still there once it does.
+//
+// Callers must hand in a THREAD-FILTERED pending list: with no row to match
+// against there is nothing else stopping a background thread's question being
+// answered here.
 function AskUserRequestCard({ request, options }) {
   const requestId = request.request_id;
   const questions = normalizeAskUserQuestions(request.questions);
@@ -2477,11 +2464,7 @@ export function TranscriptContent({
     () => findPinnedAskUserItemIds(entries, options?.pendingAskUserQuestions),
     [entries, options?.pendingAskUserQuestions]
   );
-  const unrenderedAskUserRequests = React.useMemo(
-    () => findUnrenderedAskUserRequests(entries, options?.pendingAskUserQuestions),
-    [entries, options?.pendingAskUserQuestions]
-  );
-  const pinnedAskUserNodes = [];
+  const pinnedAskUserNodes = new Map();
   const nodes = [];
 
   // Top sentinel: the IntersectionObserver in render-session.js / react-app.js
@@ -2575,11 +2558,12 @@ export function TranscriptContent({
       key: entryId || `${item.kind || "entry"}:${index}`,
       options: effectiveOptions,
     });
-    if (entryId && pinnedAskUserItemIds.has(entryId)) {
+    const pinnedRequestId = entryId ? pinnedAskUserItemIds.get(entryId) : null;
+    if (pinnedRequestId) {
       // Hold it back — it is re-emitted at the bottom below. Skipping the push
-      // here is what keeps it a MOVE rather than a duplicate. Collected in
-      // iteration order, so several pending questions keep their relative order.
-      pinnedAskUserNodes.push(node);
+      // here is what keeps it a MOVE rather than a duplicate. Keyed by request so
+      // the footer can be assembled in the relay's order rather than this one.
+      pinnedAskUserNodes.set(pinnedRequestId, node);
       return;
     }
     nodes.push(node);
@@ -2607,16 +2591,25 @@ export function TranscriptContent({
   // is mounted for as long as the question is pending, while still scrolling with
   // the conversation rather than in a pane of its own. (An approval and a question
   // can both be pending; the questions sit below the approval card.)
-  const askUserCards = [
-    ...pinnedAskUserNodes,
-    ...unrenderedAskUserRequests.map((request) =>
-      h(AskUserRequestCard, {
-        key: `ask:${request.request_id}`,
-        request,
-        options: effectiveOptions,
-      })
-    ),
-  ];
+  //
+  // Assembled in the RELAY's order, not the transcript's. The relay stamps arrival
+  // order on these; rows hydrate in whatever order they arrive, so emitting the
+  // row-backed cards first would sort an older question below a newer one and then
+  // move it as its row landed — under a reader part-way through answering it.
+  const askUserCards = (
+    Array.isArray(options?.pendingAskUserQuestions) ? options.pendingAskUserQuestions : []
+  )
+    .map((request) => {
+      const requestId = request?.request_id;
+      if (!requestId) {
+        return null;
+      }
+      return (
+        pinnedAskUserNodes.get(requestId)
+        || h(AskUserRequestCard, { key: `ask:${requestId}`, request, options: effectiveOptions })
+      );
+    })
+    .filter(Boolean);
   const askUserFooter = askUserCards.length
     ? h(
         "div",

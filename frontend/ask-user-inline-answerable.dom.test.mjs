@@ -173,6 +173,113 @@ test("a pending question with no transcript row of its own is still answerable",
   container.remove();
 });
 
+// Two questions can be parked at once, and the relay stamps arrival order so
+// same-second cards keep the order they were asked in. Rendering the ones with a
+// row first and the ones without after throws that away: mid-hydration the older
+// question sorts below the newer one, and then jumps as its row arrives — under a
+// reader who is part-way through answering it.
+function twoPendingRequests() {
+  const q = (label) => [
+    {
+      question: `Question ${label}?`,
+      header: label,
+      multiSelect: false,
+      options: [{ label: `${label}-A` }, { label: `${label}-B` }],
+    },
+    // A second question keeps this off the one-tap quick path, so a click records
+    // a pick instead of submitting.
+    {
+      question: `Follow-up ${label}?`,
+      header: label,
+      multiSelect: false,
+      options: [{ label: `${label}-C` }],
+    },
+  ];
+  return [
+    { request_id: "req-first", tool_use_id: "ask-first", thread_id: "thread-1", questions: q("FIRST") },
+    { request_id: "req-second", tool_use_id: "ask-second", thread_id: "thread-1", questions: q("SECOND") },
+  ];
+}
+
+const toolEntry = (toolUseId, questions) => ({
+  item_id: `tool:${toolUseId}`,
+  kind: "tool_call",
+  status: "running",
+  tool: { name: "AskUserQuestion", input_preview: JSON.stringify({ questions }) },
+});
+
+const headerOrder = (container) =>
+  [...container.querySelectorAll(".ask-user-question-header")].map((el) => el.textContent);
+
+test("parked questions keep the order the relay asked them in, however they hydrate", async () => {
+  const { container, root } = mount();
+  const pending = twoPendingRequests();
+
+  // Mid-hydration: only the SECOND question's row has loaded.
+  await paint(
+    root,
+    [toolEntry("ask-second", pending[1].questions)],
+    options({ pendingAskUserQuestions: pending })
+  );
+  assert.deepEqual(
+    headerOrder(container),
+    ["FIRST", "SECOND"],
+    "the question asked first stays first even while its row is still missing"
+  );
+
+  // The older row arrives. Nothing may reshuffle under the reader.
+  await paint(
+    root,
+    [toolEntry("ask-first", pending[0].questions), toolEntry("ask-second", pending[1].questions)],
+    options({ pendingAskUserQuestions: pending })
+  );
+  assert.deepEqual(
+    headerOrder(container),
+    ["FIRST", "SECOND"],
+    "and still first once its row hydrates"
+  );
+
+  await act(async () => root.unmount());
+  container.remove();
+});
+
+test("an answer given before the row hydrates survives the row arriving", async () => {
+  const { container, root } = mount();
+  const pending = twoPendingRequests();
+  // A chosen option gains a "✓ " prefix, so match on the label with it stripped.
+  const firstOptions = () =>
+    [...container.querySelectorAll(".ask-user-option-button")].filter((b) =>
+      b.textContent.replace(/^✓\s*/, "").startsWith("FIRST-")
+    );
+
+  // No rows at all yet: both cards are built from the requests.
+  await paint(root, [], options({ pendingAskUserQuestions: pending }));
+  await act(async () => {
+    firstOptions()[0].dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+  });
+  assert.equal(
+    firstOptions()[0].getAttribute("aria-pressed"),
+    "true",
+    "precondition: the pick registers on the request-backed card"
+  );
+
+  // The row hydrates and takes the card over. The draft key is derived the same
+  // way on both sides, so the pick must ride across the swap.
+  await paint(
+    root,
+    [toolEntry("ask-first", pending[0].questions)],
+    options({ pendingAskUserQuestions: pending })
+  );
+  assert.equal(
+    firstOptions()[0].getAttribute("aria-pressed"),
+    "true",
+    "the pick made before the row loaded is still made after it does"
+  );
+
+  await act(async () => root.unmount());
+  container.remove();
+});
+
 // The hazard the dock was built to dodge: virtualization owns every row, so the
 // card holding a half-finished answer is unmounted the moment the reader scrolls
 // up to re-read what they are answering about.
