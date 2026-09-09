@@ -1653,10 +1653,17 @@ started ({error}); finishing with round {round}'s findings."
 
     /// Per-round so a moved worktree does not strand the loop. Delegates to `resolve_thread_workspace`.
     ///
-    /// A DELETED tree is refused, not substituted. The only stand-in on offer is the repo the
-    /// worktree was cut from, whose HEAD is whatever else landed there — so a substituted
-    /// review reads commits the reviewed thread never made and can approve them. A tree that
-    /// merely MOVED is still followed (`Proven`): that is the same work, elsewhere.
+    /// A DELETED tree is refused, not stood in for. The stand-in on offer is the repo the
+    /// worktree was cut from, whose HEAD is whatever else landed there — so reviewing it
+    /// reads commits the reviewed thread never made and can approve them. A tree that merely
+    /// MOVED is still followed: that is the same work, elsewhere.
+    ///
+    /// Keyed on whether the thread's OWN directory survives, not on the resolver's badge.
+    /// Agent worktrees live inside the repo (`<repo>/.claude/worktrees/<name>`), so a deleted
+    /// one drops out of the enumerated roots while the writes recorded inside it still
+    /// prefix-match the repo above — arriving as `Proven`, not `Substituted`. Refusing only
+    /// the latter left the wrong-repo approval reachable for any thread that had edited a
+    /// file, which is every real one.
     pub(super) async fn resolve_review_workspace(
         &self,
         parent_thread_id: &str,
@@ -1666,10 +1673,15 @@ started ({error}); finishing with round {round}'s findings."
             .resolve_thread_workspace(parent_thread_id, Some(device_id))
             .await
             .map_err(ThreadWorkspaceError::into_message)?;
-        if let WorkspaceOrigin::Substituted { gone } = &resolved.origin {
+        let gone = match &resolved.origin {
+            WorkspaceOrigin::Substituted { gone } => Some(gone.as_str()),
+            _ if !dir_exists(&resolved.birth_cwd) => Some(resolved.birth_cwd.as_str()),
+            _ => None,
+        };
+        if let Some(gone) = gone {
             return Err(format!(
-                "the workspace this thread ran in ({gone}) no longer exists; reviewing the \
-repository it was cut from would review commits this thread never made"
+                "the workspace this thread ran in ({gone}) no longer exists; reviewing another \
+tree would review commits this thread never made"
             ));
         }
         Ok(ReviewWorkspace {
