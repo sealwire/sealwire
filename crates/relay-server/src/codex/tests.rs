@@ -1,5 +1,8 @@
 use super::*;
-use crate::{protocol::SessionSnapshot, state::SecurityProfile};
+use crate::{
+    protocol::{SessionSnapshot, SessionSnapshotCompactProfile},
+    state::SecurityProfile,
+};
 use tokio::sync::{watch, RwLock};
 
 #[test]
@@ -2747,6 +2750,164 @@ fn agent_completed(thread_id: &str, turn_id: &str, item_id: &str, text: &str) ->
             }
         }
     })
+}
+
+fn reasoning_started(
+    thread_id: &str,
+    turn_id: &str,
+    item_id: &str,
+    text: &str,
+) -> serde_json::Value {
+    json!({
+        "method": "item/started",
+        "params": {
+            "threadId": thread_id,
+            "turnId": turn_id,
+            "item": {
+                "id": item_id,
+                "type": "reasoning",
+                "text": text
+            }
+        }
+    })
+}
+
+fn user_message_completed(
+    thread_id: &str,
+    turn_id: &str,
+    item_id: &str,
+    text: &str,
+) -> serde_json::Value {
+    json!({
+        "method": "item/completed",
+        "params": {
+            "threadId": thread_id,
+            "turnId": turn_id,
+            "item": {
+                "id": item_id,
+                "type": "userMessage",
+                "content": [{ "text": text }]
+            }
+        }
+    })
+}
+
+fn assert_turn_order_is_user_then_reasoning(entries: &[TranscriptEntryView], turn_id: &str) {
+    let turn_entries: Vec<&TranscriptEntryView> = entries
+        .iter()
+        .filter(|entry| entry.turn_id.as_deref() == Some(turn_id))
+        .collect();
+    assert_eq!(
+        turn_entries.len(),
+        2,
+        "expected exactly user+reasoning entries for {turn_id}, got {turn_entries:?}"
+    );
+    assert_eq!(
+        turn_entries[0].kind,
+        TranscriptEntryKind::UserText,
+        "the first visible entry for {turn_id} must be the user message"
+    );
+    assert_eq!(
+        turn_entries[1].kind,
+        TranscriptEntryKind::Reasoning,
+        "reasoning should remain after the user entry for {turn_id}"
+    );
+}
+
+#[tokio::test]
+async fn first_turn_orders_user_before_reasoning_when_echo_arrives_late() {
+    let state = codex_test_state_with_thread("thread-new").await;
+
+    handle_notification(
+        reasoning_started(
+            "thread-new",
+            "turn-first",
+            "item-reasoning-first",
+            "Thinking before the echo arrives",
+        ),
+        &state,
+    )
+    .await;
+    handle_notification(
+        user_message_completed(
+            "thread-new",
+            "turn-first",
+            "item-user-first",
+            "hello from first turn",
+        ),
+        &state,
+    )
+    .await;
+
+    let relay = state.read().await;
+    let runtime = relay
+        .runtime_for_thread("thread-new")
+        .expect("thread runtime should exist after notifications");
+    let runtime_views: Vec<TranscriptEntryView> = runtime
+        .transcript
+        .iter()
+        .map(|record| record.to_view())
+        .collect();
+    assert_turn_order_is_user_then_reasoning(&runtime_views, "turn-first");
+
+    let snapshot = relay.snapshot();
+    assert_turn_order_is_user_then_reasoning(&snapshot.transcript, "turn-first");
+
+    let display_snapshot = snapshot.compact_for(SessionSnapshotCompactProfile::LocalWeb);
+    assert_turn_order_is_user_then_reasoning(&display_snapshot.transcript, "turn-first");
+}
+
+#[tokio::test]
+async fn existing_thread_next_turn_orders_user_before_reasoning_when_echo_arrives_late() {
+    let state = codex_test_state_with_thread("thread-existing").await;
+
+    handle_notification(
+        user_message_completed(
+            "thread-existing",
+            "turn-prev",
+            "item-user-prev",
+            "previous turn user prompt",
+        ),
+        &state,
+    )
+    .await;
+    handle_notification(
+        reasoning_started(
+            "thread-existing",
+            "turn-next",
+            "item-reasoning-next",
+            "Reasoning starts before user echo",
+        ),
+        &state,
+    )
+    .await;
+    handle_notification(
+        user_message_completed(
+            "thread-existing",
+            "turn-next",
+            "item-user-next",
+            "current turn user prompt",
+        ),
+        &state,
+    )
+    .await;
+
+    let relay = state.read().await;
+    let runtime = relay
+        .runtime_for_thread("thread-existing")
+        .expect("thread runtime should exist after notifications");
+    let runtime_views: Vec<TranscriptEntryView> = runtime
+        .transcript
+        .iter()
+        .map(|record| record.to_view())
+        .collect();
+    assert_turn_order_is_user_then_reasoning(&runtime_views, "turn-next");
+
+    let snapshot = relay.snapshot();
+    assert_turn_order_is_user_then_reasoning(&snapshot.transcript, "turn-next");
+
+    let display_snapshot = snapshot.compact_for(SessionSnapshotCompactProfile::LocalWeb);
+    assert_turn_order_is_user_then_reasoning(&display_snapshot.transcript, "turn-next");
 }
 
 #[tokio::test]
