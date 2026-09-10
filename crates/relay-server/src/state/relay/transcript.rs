@@ -11,6 +11,8 @@ pub(crate) struct TranscriptMutationMeta {
     pub(crate) base_revision: u64,
     pub(crate) revision: u64,
     pub(crate) entry_seq: u64,
+    /// The mutated row's birth-time order key (see `TranscriptRecord::order_seq`).
+    pub(crate) order_seq: i64,
     pub(crate) server_time: u64,
     /// Length (in UTF-16 code units, matching JS `String.length`) of the
     /// entry's text *before* this delta was appended. Only set for pure-append
@@ -68,6 +70,7 @@ impl TranscriptRecord {
     pub(crate) fn to_view(&self) -> TranscriptEntryView {
         TranscriptEntryView {
             item_id: Some(self.item_id.clone()),
+            order_seq: Some(self.order_seq),
             kind: self.kind,
             text: self.text.clone(),
             status: self.status.clone(),
@@ -121,7 +124,7 @@ impl RelayState {
         tool: Option<ToolCallView>,
     ) -> TranscriptMutationMeta {
         let stamp_id = item_id.clone();
-        let entry_seq = {
+        let (entry_seq, order_seq) = {
             let runtime = self.ensure_runtime_for_thread(thread_id);
             if let Some(index) = runtime
                 .transcript
@@ -138,7 +141,7 @@ impl RelayState {
                 } else {
                     tool
                 };
-                index as u64 + 1
+                (index as u64 + 1, entry.order_seq)
             } else {
                 let entry_seq = runtime.transcript.len() as u64 + 1;
                 let order_seq = runtime.alloc_tail_order_seq();
@@ -152,7 +155,7 @@ impl RelayState {
                     order_seq,
                     last_live_upsert_revision: None,
                 });
-                entry_seq
+                (entry_seq, order_seq)
             }
         };
         let (base_revision, revision) = self.bump_thread_transcript_revision(thread_id);
@@ -160,7 +163,7 @@ impl RelayState {
         if self.active_thread_id.as_deref() == Some(thread_id) {
             self.sync_selected_runtime_to_fields();
         }
-        transcript_mutation_meta(base_revision, revision, entry_seq)
+        transcript_mutation_meta(base_revision, revision, entry_seq, order_seq)
     }
 
     fn upsert_transcript_item_legacy(
@@ -189,7 +192,8 @@ impl RelayState {
                 tool
             };
             entry.last_live_upsert_revision = Some(revision);
-            return transcript_mutation_meta(base_revision, revision, index as u64 + 1);
+            let order_seq = entry.order_seq;
+            return transcript_mutation_meta(base_revision, revision, index as u64 + 1, order_seq);
         }
 
         let entry_seq = self.transcript.len() as u64 + 1;
@@ -205,7 +209,7 @@ impl RelayState {
             order_seq,
             last_live_upsert_revision: Some(revision),
         });
-        transcript_mutation_meta(base_revision, revision, entry_seq)
+        transcript_mutation_meta(base_revision, revision, entry_seq, order_seq)
     }
 
     pub fn push_log(&mut self, kind: &str, message: impl Into<String>) {
@@ -286,7 +290,7 @@ impl RelayState {
         delta: &str,
         turn_id: &str,
     ) -> TranscriptMutationMeta {
-        let (entry_seq, text_offset) = {
+        let (entry_seq, order_seq, text_offset) = {
             let runtime = self.ensure_runtime_for_thread(thread_id);
             if let Some(index) = runtime
                 .transcript
@@ -301,7 +305,7 @@ impl RelayState {
                 entry.status = "streaming".to_string();
                 entry.turn_id.get_or_insert_with(|| turn_id.to_string());
                 entry.tool = None;
-                (index as u64 + 1, text_offset)
+                (index as u64 + 1, entry.order_seq, text_offset)
             } else {
                 let entry_seq = runtime.transcript.len() as u64 + 1;
                 let order_seq = runtime.alloc_tail_order_seq();
@@ -315,14 +319,20 @@ impl RelayState {
                     order_seq,
                     last_live_upsert_revision: None,
                 });
-                (entry_seq, 0)
+                (entry_seq, order_seq, 0)
             }
         };
         let (base_revision, revision) = self.bump_thread_transcript_revision(thread_id);
         if self.active_thread_id.as_deref() == Some(thread_id) {
             self.sync_selected_runtime_to_fields();
         }
-        transcript_mutation_meta_with_text_offset(base_revision, revision, entry_seq, text_offset)
+        transcript_mutation_meta_with_text_offset(
+            base_revision,
+            revision,
+            entry_seq,
+            order_seq,
+            text_offset,
+        )
     }
 
     fn append_agent_delta_legacy(
@@ -344,10 +354,12 @@ impl RelayState {
             text.push_str(delta);
             entry.status = "streaming".to_string();
             entry.tool = None;
+            let order_seq = entry.order_seq;
             return transcript_mutation_meta_with_text_offset(
                 base_revision,
                 revision,
                 index as u64 + 1,
+                order_seq,
                 text_offset,
             );
         }
@@ -851,7 +863,7 @@ impl RelayState {
         delta: &str,
     ) -> TranscriptMutationMeta {
         let mut separator_inserted = false;
-        let entry_seq = {
+        let (entry_seq, order_seq) = {
             let runtime = self.ensure_runtime_for_thread(thread_id);
             if let Some(index) = runtime
                 .transcript
@@ -870,7 +882,7 @@ impl RelayState {
                     entry.status = "running".to_string();
                 }
                 entry.tool = None;
-                index as u64 + 1
+                (index as u64 + 1, entry.order_seq)
             } else {
                 let entry_seq = runtime.transcript.len() as u64 + 1;
                 let order_seq = runtime.alloc_tail_order_seq();
@@ -884,7 +896,7 @@ impl RelayState {
                     order_seq,
                     last_live_upsert_revision: None,
                 });
-                entry_seq
+                (entry_seq, order_seq)
             }
         };
         let (base_revision, revision) = self.bump_thread_transcript_revision(thread_id);
@@ -893,7 +905,7 @@ impl RelayState {
         }
         TranscriptMutationMeta {
             separator_inserted,
-            ..transcript_mutation_meta(base_revision, revision, entry_seq)
+            ..transcript_mutation_meta(base_revision, revision, entry_seq, order_seq)
         }
     }
 
@@ -919,7 +931,8 @@ impl RelayState {
                 entry.status = "running".to_string();
             }
             entry.tool = None;
-            return transcript_mutation_meta(base_revision, revision, index as u64 + 1);
+            let order_seq = entry.order_seq;
+            return transcript_mutation_meta(base_revision, revision, index as u64 + 1, order_seq);
         }
 
         self.upsert_transcript_item(
@@ -1159,11 +1172,13 @@ fn transcript_mutation_meta(
     base_revision: u64,
     revision: u64,
     entry_seq: u64,
+    order_seq: i64,
 ) -> TranscriptMutationMeta {
     TranscriptMutationMeta {
         base_revision,
         revision,
         entry_seq,
+        order_seq,
         server_time: super::super::unix_now(),
         text_offset: None,
         separator_inserted: false,
@@ -1174,12 +1189,14 @@ fn transcript_mutation_meta_with_text_offset(
     base_revision: u64,
     revision: u64,
     entry_seq: u64,
+    order_seq: i64,
     text_offset: u64,
 ) -> TranscriptMutationMeta {
     TranscriptMutationMeta {
         base_revision,
         revision,
         entry_seq,
+        order_seq,
         server_time: super::super::unix_now(),
         text_offset: Some(text_offset),
         separator_inserted: false,

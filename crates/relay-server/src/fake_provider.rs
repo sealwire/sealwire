@@ -897,6 +897,8 @@ impl ProviderBridge for FakeProviderBridge {
 
         tokio::spawn(async move {
             let user_entry = TranscriptEntryView {
+                // Numbered when it becomes a runtime record; raw provider parses carry none.
+                order_seq: None,
                 item_id: Some(user_item_id.clone()),
                 kind: TranscriptEntryKind::UserText,
                 text: Some(prompt.clone()),
@@ -916,6 +918,8 @@ impl ProviderBridge for FakeProviderBridge {
                     .await;
             }
             let assistant_entry = TranscriptEntryView {
+                // Numbered when it becomes a runtime record; raw provider parses carry none.
+                order_seq: None,
                 item_id: Some(assistant_item_id.clone()),
                 kind: TranscriptEntryKind::AgentText,
                 text: Some(reply.clone()),
@@ -1270,6 +1274,8 @@ impl ProviderBridge for FakeProviderBridge {
                     // which is what makes "returns to its original position"
                     // true beyond the live snapshot.
                     ask_user_entries.push(TranscriptEntryView {
+                        // Numbered when it becomes a runtime record; raw provider parses carry none.
+                        order_seq: None,
                         item_id: Some(ask_item_id.clone()),
                         kind: TranscriptEntryKind::ToolCall,
                         text: None,
@@ -1280,6 +1286,8 @@ impl ProviderBridge for FakeProviderBridge {
                     });
                     if let Some(text) = ask_user_trailing_text.clone() {
                         ask_user_entries.push(TranscriptEntryView {
+                            // Numbered when it becomes a runtime record; raw provider parses carry none.
+                            order_seq: None,
                             item_id: Some(ask_user_trailing_item_id.clone()),
                             kind: TranscriptEntryKind::AgentText,
                             text: Some(text),
@@ -1406,6 +1414,8 @@ impl ProviderBridge for FakeProviderBridge {
                 )
                 .await;
                 tool_entries.push(TranscriptEntryView {
+                    // Numbered when it becomes a runtime record; raw provider parses carry none.
+                    order_seq: None,
                     item_id: Some(tool_item_id),
                     kind: entry_kind,
                     text: if is_command {
@@ -1441,6 +1451,8 @@ impl ProviderBridge for FakeProviderBridge {
                         relay.notify();
                     }
                     tool_entries.push(TranscriptEntryView {
+                        // Numbered when it becomes a runtime record; raw provider parses carry none.
+                        order_seq: None,
                         item_id: Some(reasoning_item_id),
                         kind: TranscriptEntryKind::Reasoning,
                         text: Some(reasoning_text),
@@ -1503,6 +1515,7 @@ impl ProviderBridge for FakeProviderBridge {
                         base_revision: mutation.base_revision,
                         revision: mutation.revision,
                         entry_seq: mutation.entry_seq,
+                        order_seq: mutation.order_seq,
                         server_time: mutation.server_time,
                         item_id: assistant_item_id.clone(),
                         turn_id: Some(turn_id_for_task.clone()),
@@ -1595,6 +1608,8 @@ impl ProviderBridge for FakeProviderBridge {
                 FakeTerminalBehavior::Error => {
                     settle_fake_turn(&state, &thread_id, &turn_id_for_task, "idle").await;
                     let error_entry = TranscriptEntryView {
+                        // Numbered when it becomes a runtime record; raw provider parses carry none.
+                        order_seq: None,
                         item_id: Some(format!("fake-error:{turn_id_for_task}")),
                         kind: TranscriptEntryKind::Error,
                         text: Some(error_message.clone()),

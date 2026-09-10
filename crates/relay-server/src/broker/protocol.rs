@@ -54,6 +54,7 @@ pub(super) enum OutboundBrokerPayload {
         base_revision: u64,
         revision: u64,
         entry_seq: u64,
+        order_seq: i64,
         server_time: u64,
         item_id: String,
         turn_id: Option<String>,

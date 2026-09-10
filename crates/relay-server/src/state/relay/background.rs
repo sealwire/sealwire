@@ -29,6 +29,7 @@ impl RelayState {
                 base_revision: mutation.base_revision,
                 revision: mutation.revision,
                 entry_seq: mutation.entry_seq,
+                order_seq: mutation.order_seq,
                 server_time: mutation.server_time,
                 item_id: item_id.to_string(),
                 turn_id: turn_id.map(|id| id.to_string()),

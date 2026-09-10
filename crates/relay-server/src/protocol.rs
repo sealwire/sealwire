@@ -1963,6 +1963,11 @@ pub enum FileChangeApplyState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscriptEntryView {
     pub item_id: Option<String>,
+    /// Where this row sorts within its thread, for the run named by
+    /// `transcript_generation`. Absent only on entries a relay this old never
+    /// numbered; clients fall back to array order then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_seq: Option<i64>,
     pub kind: TranscriptEntryKind,
     pub text: Option<String>,
     pub status: String,
@@ -2951,6 +2956,8 @@ pub struct TranscriptDeltaEvent {
     pub base_revision: u64,
     pub revision: u64,
     pub entry_seq: u64,
+    /// Birth-time order key of the row this delta appends to.
+    pub order_seq: i64,
     pub server_time: u64,
     pub item_id: String,
     pub turn_id: Option<String>,

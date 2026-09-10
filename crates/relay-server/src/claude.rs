@@ -1417,6 +1417,7 @@ async fn handle_worker_event(payload: Value, state: &Arc<RwLock<RelayState>>) {
                                 base_revision: mutation.base_revision,
                                 revision: mutation.revision,
                                 entry_seq: mutation.entry_seq,
+                                order_seq: mutation.order_seq,
                                 server_time: mutation.server_time,
                                 item_id,
                                 turn_id: Some(turn_id),
@@ -3694,6 +3695,8 @@ mod tests {
             status: &str,
         ) -> TranscriptEntryView {
             TranscriptEntryView {
+                // Numbered when it becomes a runtime record; raw provider parses carry none.
+                order_seq: None,
                 item_id: Some(item_id.to_string()),
                 kind: TranscriptEntryKind::ToolCall,
                 text: None,

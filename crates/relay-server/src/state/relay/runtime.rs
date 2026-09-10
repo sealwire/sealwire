@@ -513,12 +513,16 @@ impl ThreadRuntime {
             .unwrap_or(-step);
     }
 
+    /// Returns the page MATERIALIZED from this runtime's records, in the page's own
+    /// order — ids assigned, order keys issued, duplicates merged. Callers must ship
+    /// these views, never the raw provider entries, or id-less rows bypass the
+    /// numberer entirely.
     pub(crate) fn prepend_provider_history(
         &mut self,
         entries: Vec<TranscriptEntryView>,
         requested_cursor: Option<usize>,
         prev_cursor: Option<usize>,
-    ) {
+    ) -> Vec<TranscriptEntryView> {
         let fallback_page = requested_cursor
             .map(|cursor| cursor.to_string())
             .unwrap_or_else(|| "tail".to_string());
@@ -538,6 +542,12 @@ impl ThreadRuntime {
                 order_seq: 0,
                 last_live_upsert_revision: None,
             })
+            .collect::<Vec<_>>();
+        // In page order, with assigned ids — a merged duplicate resolves to the
+        // existing record that absorbed it.
+        let page_item_ids = records
+            .iter()
+            .map(|record| record.item_id.clone())
             .collect::<Vec<_>>();
         // Paging can split a tool's request from its result across pages. The newer page
         // then holds a RESULT-only stub (no path, no diff) while the older page holds the
@@ -574,6 +584,15 @@ impl ThreadRuntime {
         records.extend(std::mem::take(&mut self.transcript));
         self.transcript = records;
         self.provider_history_cursor = prev_cursor;
+        page_item_ids
+            .iter()
+            .filter_map(|item_id| {
+                self.transcript
+                    .iter()
+                    .find(|record| &record.item_id == item_id)
+                    .map(TranscriptRecord::to_view)
+            })
+            .collect()
     }
 
     pub(crate) fn touch(&mut self, now: u64) {
@@ -999,6 +1018,7 @@ mod tests {
             last_live_upsert_revision: None,
         });
         let older = vec![TranscriptEntryView {
+            order_seq: None,
             item_id: Some("older".to_string()),
             kind: crate::protocol::TranscriptEntryKind::UserText,
             text: Some("older".to_string()),
@@ -1074,6 +1094,7 @@ mod tests {
         let issued_tail = issued;
 
         let page = |id: &str| TranscriptEntryView {
+            order_seq: None,
             item_id: Some(id.to_string()),
             kind: crate::protocol::TranscriptEntryKind::UserText,
             text: Some(id.to_string()),

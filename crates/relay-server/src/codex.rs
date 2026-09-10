@@ -1228,6 +1228,8 @@ fn parse_transcript(thread: &Value) -> Vec<TranscriptEntryView> {
         // push). Same stable id as the live path, so no duplication when both run.
         if let Some(reason) = codex_turn_failure_reason(turn) {
             transcript.push(TranscriptEntryView {
+                // Numbered when it becomes a runtime record; raw provider parses carry none.
+                order_seq: None,
                 item_id: Some(codex_turn_error_item_id(turn_id.as_deref())),
                 kind: TranscriptEntryKind::Error,
                 text: Some(reason),
@@ -1325,6 +1327,8 @@ fn parse_transcript_item(
     let text = transcript_item_text(item, &item_type, tool.as_ref());
 
     Some(TranscriptEntryView {
+        // Numbered when it becomes a runtime record; raw provider parses carry none.
+        order_seq: None,
         item_id: Some(item_id),
         kind,
         text,
@@ -1349,6 +1353,8 @@ fn parse_transcript_detail_item(
     let text = transcript_item_detail_text(item, &item_type);
 
     Some(TranscriptEntryView {
+        // Numbered when it becomes a runtime record; raw provider parses carry none.
+        order_seq: None,
         item_id: Some(item_id),
         kind,
         text,
@@ -1619,6 +1625,8 @@ pub(crate) fn build_turn_diff_entry_with_fallback(
     let detail = file_change_detail(&paths);
 
     TranscriptEntryView {
+        // Numbered when it becomes a runtime record; raw provider parses carry none.
+        order_seq: None,
         item_id: Some(format!("turn-diff:{turn_id}")),
         kind: TranscriptEntryKind::ToolCall,
         text: Some(format!("Changed files in turn {turn_id}")),

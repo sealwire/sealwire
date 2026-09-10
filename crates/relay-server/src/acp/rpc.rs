@@ -595,6 +595,8 @@ fn tool_view(
 pub(crate) fn capture_op(buffer: &mut Vec<TranscriptEntryView>, op: TranscriptOp) {
     let entry = match op {
         TranscriptOp::User { item_id, text } => TranscriptEntryView {
+            // Numbered when it becomes a runtime record; raw provider parses carry none.
+            order_seq: None,
             item_id: Some(item_id),
             kind: TranscriptEntryKind::UserText,
             text: Some(text),
@@ -604,6 +606,8 @@ pub(crate) fn capture_op(buffer: &mut Vec<TranscriptEntryView>, op: TranscriptOp
             content_state: TranscriptContentState::Full,
         },
         TranscriptOp::AgentChunk { item_id, text, .. } => TranscriptEntryView {
+            // Numbered when it becomes a runtime record; raw provider parses carry none.
+            order_seq: None,
             item_id: Some(item_id),
             kind: TranscriptEntryKind::AgentText,
             text: Some(text),
@@ -613,6 +617,8 @@ pub(crate) fn capture_op(buffer: &mut Vec<TranscriptEntryView>, op: TranscriptOp
             content_state: TranscriptContentState::Full,
         },
         TranscriptOp::ThoughtChunk { item_id, text, .. } => TranscriptEntryView {
+            // Numbered when it becomes a runtime record; raw provider parses carry none.
+            order_seq: None,
             item_id: Some(item_id),
             kind: TranscriptEntryKind::Reasoning,
             text: Some(text),
@@ -630,6 +636,8 @@ pub(crate) fn capture_op(buffer: &mut Vec<TranscriptEntryView>, op: TranscriptOp
             output,
             status,
         } => TranscriptEntryView {
+            // Numbered when it becomes a runtime record; raw provider parses carry none.
+            order_seq: None,
             item_id: Some(item_id),
             kind: TranscriptEntryKind::ToolCall,
             text: Some(title.clone()),
@@ -699,6 +707,7 @@ pub(crate) fn apply_op(
                         base_revision: mutation.base_revision,
                         revision: mutation.revision,
                         entry_seq: mutation.entry_seq,
+                        order_seq: mutation.order_seq,
                         server_time: mutation.server_time,
                         item_id: item_id.clone(),
                         turn_id: Some(turn.clone()),

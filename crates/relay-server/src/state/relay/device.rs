@@ -197,6 +197,7 @@ pub(crate) struct PendingTranscriptDelta {
     pub(crate) base_revision: u64,
     pub(crate) revision: u64,
     pub(crate) entry_seq: u64,
+    pub(crate) order_seq: i64,
     pub(crate) server_time: u64,
     pub(crate) item_id: String,
     pub(crate) turn_id: Option<String>,
