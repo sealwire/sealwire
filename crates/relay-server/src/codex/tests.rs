@@ -2829,7 +2829,13 @@ async fn codex_reservation_keeps_late_user_echo_before_output() {
         .collect::<Vec<_>>();
     assert_eq!(turn_entries.len(), 2);
     assert_eq!(turn_entries[0].kind, TranscriptEntryKind::UserText);
-    assert_eq!(turn_entries[0].item_id, "provider-user-1");
+    // The relay's own id, not Codex's: the row was published under it at the send
+    // boundary and is never renamed.
+    assert!(
+        turn_entries[0].item_id.starts_with("codex:user-reserve:"),
+        "{}",
+        turn_entries[0].item_id
+    );
     assert_eq!(turn_entries[1].kind, TranscriptEntryKind::AgentText);
 }
 
@@ -4618,4 +4624,228 @@ async fn a_billed_codex_turn_records_what_it_spent() {
     let spend = relay.last_turn_spend("thread-1").expect("a billed turn");
     assert_eq!(spend.turn_id, "turn-1");
     assert!(spend.billed > 0, "got {}", spend.billed);
+}
+
+/// One send is one row, under the id the relay published at the send boundary.
+///
+/// Asserted after `item/started` ALONE, because that is the event that used to mint a
+/// second row through the generic item path — checking only after `item/completed`
+/// would let the transient twin clients actually saw slip through.
+#[tokio::test]
+async fn codex_user_message_started_then_completed_stays_one_row_under_the_relay_id() {
+    let state = codex_test_state_with_thread("thread-dup").await;
+    let reservation = {
+        let mut relay = state.write().await;
+        relay
+            .begin_codex_user_turn("thread-dup", "啥叫snapshot SHA？")
+            .expect("reserve the send")
+    };
+    {
+        let mut relay = state.write().await;
+        relay.bind_codex_user_reservation("thread-dup", &reservation, "turn-dup");
+    }
+
+    let user_message = |method: &str, content: Value| {
+        json!({
+            "method": method,
+            "params": {
+                "turnId": "turn-dup",
+                "item": { "id": "item-user-dup", "type": "userMessage", "content": content }
+            }
+        })
+    };
+    let only_user_row = |state: &std::sync::Arc<RwLock<RelayState>>| {
+        let state = state.clone();
+        async move {
+            let relay = state.read().await;
+            let runtime = relay
+                .runtime_for_thread("thread-dup")
+                .expect("thread runtime");
+            let rows = runtime
+                .transcript
+                .iter()
+                .filter(|entry| entry.kind == TranscriptEntryKind::UserText)
+                .cloned()
+                .collect::<Vec<_>>();
+            assert_eq!(
+                rows.len(),
+                1,
+                "one send must be one row, got {:?}",
+                rows.iter()
+                    .map(|entry| (entry.item_id.clone(), entry.status.clone()))
+                    .collect::<Vec<_>>()
+            );
+            let mut ids = runtime
+                .transcript
+                .iter()
+                .map(|entry| entry.item_id.clone())
+                .collect::<Vec<_>>();
+            let total = ids.len();
+            ids.sort();
+            ids.dedup();
+            assert_eq!(ids.len(), total, "item ids must stay unique: {ids:?}");
+            rows.into_iter().next().expect("the user row")
+        }
+    };
+
+    handle_notification(
+        user_message("item/started", json!([{ "text": "啥叫snapshot SHA？" }])),
+        &state,
+    )
+    .await;
+    let started = only_user_row(&state).await;
+    assert_eq!(
+        started.item_id, reservation,
+        "the published id must not change"
+    );
+    assert_eq!(started.text.as_deref(), Some("啥叫snapshot SHA？"));
+
+    // A started event carrying no content must not blank the text already on screen.
+    handle_notification(user_message("item/started", json!([])), &state).await;
+    let contentless = only_user_row(&state).await;
+    assert_eq!(contentless.text.as_deref(), Some("啥叫snapshot SHA？"));
+
+    handle_notification(
+        user_message("item/completed", json!([{ "text": "啥叫snapshot SHA？" }])),
+        &state,
+    )
+    .await;
+    let settled = only_user_row(&state).await;
+    assert_eq!(
+        settled.item_id, reservation,
+        "the published id must not change"
+    );
+    assert_eq!(settled.status, "completed");
+    assert_eq!(settled.text.as_deref(), Some("啥叫snapshot SHA？"));
+    assert_eq!(settled.turn_id.as_deref(), Some("turn-dup"));
+}
+
+/// The reservation's id stays the settled row's id, so the id alone no longer says
+/// whether a cleanup path is looking at a live message or a placeholder. Both
+/// withdrawal paths must refuse a row Codex has already answered for.
+#[tokio::test]
+async fn a_settled_user_row_survives_a_late_definitive_start_failure() {
+    let state = codex_test_state_with_thread("thread-late-fail").await;
+    let reservation = {
+        let mut relay = state.write().await;
+        relay
+            .begin_codex_user_turn("thread-late-fail", "prompt")
+            .expect("reserve the send")
+    };
+
+    handle_notification(
+        json!({
+            "method": "item/completed",
+            "params": {
+                "turnId": "turn-late",
+                "item": { "id": "provider-user-1", "type": "userMessage",
+                          "content": [{ "text": "prompt" }] }
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    // The start's own RPC answer loses the race and reports failure.
+    {
+        let mut relay = state.write().await;
+        relay.fail_codex_user_turn_definitive("thread-late-fail", &reservation);
+    }
+
+    let relay = state.read().await;
+    let runtime = relay
+        .runtime_for_thread("thread-late-fail")
+        .expect("thread runtime");
+    let rows = runtime
+        .transcript
+        .iter()
+        .filter(|entry| entry.kind == TranscriptEntryKind::UserText)
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 1, "the answered send must not be withdrawn");
+    assert_eq!(rows[0].turn_id.as_deref(), Some("turn-late"));
+}
+
+#[tokio::test]
+async fn a_settled_user_row_survives_a_provider_disconnect() {
+    let state = codex_test_state_with_thread("thread-late-drop").await;
+    {
+        let mut relay = state.write().await;
+        relay
+            .begin_codex_user_turn("thread-late-drop", "prompt")
+            .expect("reserve the send");
+    }
+
+    handle_notification(
+        json!({
+            "method": "item/completed",
+            "params": {
+                "turnId": "turn-drop",
+                "item": { "id": "provider-user-1", "type": "userMessage",
+                          "content": [{ "text": "prompt" }] }
+            }
+        }),
+        &state,
+    )
+    .await;
+
+    {
+        let mut relay = state.write().await;
+        relay.abandon_codex_start_reservation("thread-late-drop");
+    }
+
+    let relay = state.read().await;
+    let runtime = relay
+        .runtime_for_thread("thread-late-drop")
+        .expect("thread runtime");
+    let rows = runtime
+        .transcript
+        .iter()
+        .filter(|entry| entry.kind == TranscriptEntryKind::UserText)
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 1, "the answered send must not be withdrawn");
+    assert_eq!(rows[0].turn_id.as_deref(), Some("turn-drop"));
+}
+
+/// The reservation id is the row's PERMANENT id now, so it has to be unique for as
+/// long as any client might still hold it — which outlives this run of the relay. The
+/// per-thread counter is rebuilt at 0 from provider history, so on its own a restart
+/// reissues `...:1`; a client whose cached page still held the old one merged the two
+/// sends into a single row by id and the new message silently vanished.
+///
+/// Deterministic on purpose: the generation is injected, so this proves the id is
+/// DERIVED from it rather than relying on two random draws differing.
+#[tokio::test]
+async fn a_reservation_id_is_never_reissued_by_the_next_relay_generation() {
+    async fn mint(generation: &str) -> String {
+        let state = codex_test_state_with_thread("thread-generations").await;
+        let mut relay = state.write().await;
+        relay.transcript_generation = generation.to_string();
+        relay
+            .begin_codex_user_turn("thread-generations", "same prompt both runs")
+            .expect("reserve the send")
+    }
+
+    let first = mint("gen-a").await;
+    let second = mint("gen-b").await;
+
+    assert_ne!(
+        first, second,
+        "a restart must not reissue an id a client may still be holding"
+    );
+    assert!(first.contains("gen-a"), "{first}");
+    assert!(second.contains("gen-b"), "{second}");
+
+    // Within ONE run the counter still separates sends, so ids stay readable.
+    let state = codex_test_state_with_thread("thread-generations").await;
+    let mut relay = state.write().await;
+    relay.transcript_generation = "gen-a".to_string();
+    let one = relay
+        .begin_codex_user_turn("thread-generations", "first")
+        .expect("reserve");
+    relay.bind_codex_user_reservation("thread-generations", &one, "turn-1");
+    relay.finish_codex_start_reservation("thread-generations", "turn-1");
+    let two = relay
+        .begin_codex_user_turn("thread-generations", "second")
+        .expect("reserve");
+    assert_ne!(one, two);
 }

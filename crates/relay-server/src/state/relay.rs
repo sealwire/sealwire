@@ -261,6 +261,14 @@ pub(crate) struct WatchedSurface {
 }
 
 pub struct RelayState {
+    /// Which run of the relay minted the transcript item ids currently in memory.
+    ///
+    /// A restart rebuilds every thread from provider history, and that renumbers item
+    /// ids — so ids from an earlier run name the same messages differently. Clients
+    /// carry this on their caches and their loaded window and refuse to mix the two.
+    /// One value per relay, so a reservation id derived from it is unique across runs
+    /// without re-randomising per message. Tests assign it directly.
+    pub(crate) transcript_generation: String,
     change_tx: watch::Sender<u64>,
     /// Live transcript appends for LOCAL SSE subscribers.
     ///
@@ -575,6 +583,7 @@ impl RelayState {
         // slow SSE reader pin delta history in memory.
         let (delta_tx, _) = broadcast::channel(1024);
         let mut state = Self {
+            transcript_generation: super::new_uuid_v4(),
             change_tx,
             delta_tx,
             revision: 0,
@@ -3655,6 +3664,7 @@ impl RelayState {
         crate::protocol::strip_file_change_diffs_for_snapshot(&mut transcript);
 
         SessionSnapshot {
+            transcript_generation: self.transcript_generation.clone(),
             provider_fork_capabilities: self.provider_fork_capabilities.clone(),
             provider_archive_capabilities: self.provider_archive_capabilities.clone(),
             provider_status: self.provider_status_view(),

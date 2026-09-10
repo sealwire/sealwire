@@ -1,7 +1,22 @@
 use super::*;
 
 impl AppState {
+    /// Stamps the generation on every page, whichever branch below produced it.
+    ///
+    /// A wrapper rather than four call sites: the point of the field is that a client
+    /// can always tell which run of the relay a page came from, and a branch that
+    /// forgot to set it would silently look like "same run as whatever you have".
     pub async fn read_thread_transcript(
+        &self,
+        input: ReadThreadTranscriptInput,
+    ) -> Result<ThreadTranscriptResponse, String> {
+        let generation = self.relay.read().await.transcript_generation.clone();
+        self.read_thread_transcript_page_unstamped(input)
+            .await
+            .map(|page| page.stamp_generation(generation))
+    }
+
+    async fn read_thread_transcript_page_unstamped(
         &self,
         input: ReadThreadTranscriptInput,
     ) -> Result<ThreadTranscriptResponse, String> {

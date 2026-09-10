@@ -136,6 +136,27 @@ pub(crate) fn assert_settings_invariants(snap: &crate::protocol::SessionSnapshot
     );
 }
 
+/// A fresh RFC 4122 v4 UUID.
+///
+/// For ids that must not repeat across relay processes. Counters cannot do that:
+/// they are rebuilt from provider history and restart at zero, while the clients
+/// holding the previous process's ids — and their persisted caches — outlive it.
+pub(crate) fn new_uuid_v4() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    // Version (4) and variant (RFC 4122) bits.
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3],
+        bytes[4], bytes[5], bytes[6], bytes[7],
+        bytes[8], bytes[9], bytes[10], bytes[11],
+        bytes[12], bytes[13], bytes[14], bytes[15],
+    )
+}
+
 fn non_empty(value: Option<String>) -> Option<String> {
     value.and_then(|item| {
         let trimmed = item.trim().to_string();

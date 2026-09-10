@@ -112,19 +112,7 @@ pub(super) fn claude_permission_mode(approval_policy: &str, _sandbox: &str) -> &
 /// per-process turn counter resets to 1 on restart, so it is unsafe to reuse
 /// as a session-wide message id) and a valid UUID so the SDK accepts it.
 pub(super) fn new_user_message_uuid() -> String {
-    use rand::RngCore;
-    let mut bytes = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut bytes);
-    // Set the version (4) and variant (RFC 4122) bits.
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0], bytes[1], bytes[2], bytes[3],
-        bytes[4], bytes[5], bytes[6], bytes[7],
-        bytes[8], bytes[9], bytes[10], bytes[11],
-        bytes[12], bytes[13], bytes[14], bytes[15],
-    )
+    crate::state::new_uuid_v4()
 }
 
 pub(super) fn value_at<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {

@@ -73,6 +73,7 @@
         "turn_id": "turn-preview"
       }
     ],
+    "transcript_generation": "",
     "transcript_revision": 3,
     "transcript_truncated": true,
     "workflows_revision": 0,
@@ -180,6 +181,7 @@
         "turn_id": "turn-omitted"
       }
     ],
+    "transcript_generation": "",
     "transcript_revision": 3,
     "transcript_truncated": true,
     "workflows_revision": 0,

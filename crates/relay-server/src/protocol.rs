@@ -83,6 +83,15 @@ pub struct SessionSnapshot {
     pub revision: u64,
     pub transcript_revision: u64,
     pub server_time: u64,
+    /// Which relay process minted the transcript item ids a client is holding.
+    ///
+    /// A restart rebuilds a thread from provider history, and that history renumbers
+    /// item ids — so ids from an earlier process name the same messages differently.
+    /// Clients key their persisted page cache and their hydration window on this, so
+    /// pages from a previous process are never merged with this one's. Merged, one
+    /// message renders twice under its two names.
+    #[serde(default)]
+    pub transcript_generation: String,
     pub provider: String,
     /// Static per relay process; rides the snapshot so both surfaces get it
     /// through the channel they already consume (no extra remote action).
@@ -1997,6 +2006,15 @@ pub struct ReadThreadEntryDetailInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreadTranscriptResponse {
     pub thread_id: String,
+    /// Which run of the relay minted these item ids — see
+    /// `SessionSnapshot::transcript_generation`.
+    ///
+    /// Rides the page, not just the snapshot, because a page can be in flight ACROSS a
+    /// restart: requested under one run, delivered after the client already moved to
+    /// the next. Without it on the response there is nothing to compare, and the stale
+    /// page merges ids that name the same messages differently.
+    #[serde(default)]
+    pub transcript_generation: String,
     pub revision: u64,
     pub server_time: u64,
     pub entry_seq_start: Option<u64>,
@@ -3469,11 +3487,20 @@ const THREAD_TRANSCRIPT_RESPONSE_TARGET_BYTES: usize = 20_000;
 // sizing in `build_reverse_thread_transcript_page`. It must be >= the real
 // envelope for any cursor/seq values so the running estimate never under-counts
 // and a page can never exceed the byte budget. The real worst case is ~242 bytes
-// (all u64/usize fields at 20 digits, both cursors present); 320 leaves margin.
-// `thread_id` length is added on top at the call site.
-const THREAD_TRANSCRIPT_ENVELOPE_UPPER_BOUND_BYTES: usize = 320;
+// (all u64/usize fields at 20 digits, both cursors present) plus
+// `"transcript_generation":"<uuid>",` at 62 — the pages sized here are built
+// UNSTAMPED, so that field is empty while sizing and paid for after. `thread_id`
+// length is added on top at the call site.
+const THREAD_TRANSCRIPT_ENVELOPE_UPPER_BOUND_BYTES: usize = 384;
 
 impl ThreadTranscriptResponse {
+    /// Name the run that minted these ids. Called once, at the API boundary, by the
+    /// only layer that holds the relay.
+    pub(crate) fn stamp_generation(mut self, generation: String) -> Self {
+        self.transcript_generation = generation;
+        self
+    }
+
     pub(crate) fn from_provider_page(
         thread_id: String,
         mut entries: Vec<TranscriptEntryView>,
@@ -3483,6 +3510,8 @@ impl ThreadTranscriptResponse {
         strip_file_change_diffs_for_transport(&mut entries);
         ThreadTranscriptResponse {
             thread_id,
+            // Stamped by the caller that holds the relay (see `stamp_generation`).
+            transcript_generation: String::new(),
             revision,
             server_time: unix_now_secs(),
             entry_seq_start: None,
@@ -3701,6 +3730,7 @@ fn build_thread_transcript_page(
 ) -> ThreadTranscriptResponse {
     ThreadTranscriptResponse {
         thread_id: thread_id.to_string(),
+        transcript_generation: String::new(),
         revision,
         server_time: unix_now_secs(),
         entry_seq_start: (!entries.is_empty()).then_some(start_index as u64 + 1),
@@ -3779,11 +3809,16 @@ where
     // ThreadTranscriptResponse pushes the real envelope past the constant, this
     // fires in tests (debug builds) rather than silently shipping over-budget
     // pages. Compiled out of release builds.
+    // Measured AS SENT. Pages are built here unstamped and given their generation at
+    // the API boundary, so measuring `page` as-is would under-count by exactly the
+    // field that is added afterwards.
     debug_assert!(
-        page.entries.len() <= 1 || serialized_len(&page) <= THREAD_TRANSCRIPT_RESPONSE_TARGET_BYTES,
+        page.entries.len() <= 1
+            || serialized_len(&page.clone().stamp_generation("0".repeat(36)))
+                <= THREAD_TRANSCRIPT_RESPONSE_TARGET_BYTES,
         "multi-entry transcript page exceeded budget ({} bytes); \
          THREAD_TRANSCRIPT_ENVELOPE_UPPER_BOUND_BYTES may be too small",
-        serialized_len(&page),
+        serialized_len(&page.clone().stamp_generation("0".repeat(36))),
     );
     page
 }

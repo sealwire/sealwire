@@ -277,6 +277,7 @@ fn test_cached_remote_action_result(action_kind: &str, ok: bool) -> CachedRemote
         action_kind: action_kind.to_string(),
         ok,
         snapshot: Some(SessionSnapshot {
+            transcript_generation: String::new(),
             provider_fork_capabilities: Vec::new(),
             provider_archive_capabilities: Vec::new(),
             provider_status: Vec::new(),
