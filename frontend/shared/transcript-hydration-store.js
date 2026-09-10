@@ -882,6 +882,11 @@ function toTranscriptEntry(entry) {
     turn_id: entry.turn_id || null,
     tool: entry.tool || null,
     content_state: contentStateOf(entry),
+    // An explicit field list DROPS what it does not name. These two carry the
+    // ordering and withdrawal contracts — losing them here silently un-numbers
+    // and resurrects rows arriving via pages.
+    ...(Number.isSafeInteger(entry.order_seq) ? { order_seq: entry.order_seq } : {}),
+    ...(entry.withdrawn === true ? { withdrawn: true } : {}),
   };
 }
 

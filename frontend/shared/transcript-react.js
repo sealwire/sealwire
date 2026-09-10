@@ -2433,6 +2433,8 @@ function mergeDuplicateTranscriptRow(kept, repeat) {
     text: repeatText.length >= keptText.length ? repeat.text : kept.text,
     tool: mergeDuplicateToolPayload(kept?.tool, repeat?.tool),
     turn_id: repeat?.turn_id || kept?.turn_id || null,
+    // Absorbing: a withdrawn copy poisons the id, whichever copy wins.
+    ...(kept?.withdrawn === true || repeat?.withdrawn === true ? { withdrawn: true } : {}),
   };
 }
 

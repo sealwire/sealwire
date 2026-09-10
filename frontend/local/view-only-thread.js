@@ -15,6 +15,7 @@
 // applies projectViewOnlySession() to the rendered session only — state.session
 // always stays the REAL session so heartbeat/lease/controller logic is untouched.
 
+import { absorbWithdrawnById } from "../shared/withdrawn-transcript.js";
 import {
   isReviewInProgress,
   isReviewInProgressForThread,
@@ -286,9 +287,13 @@ export function mergeOlderViewOnlyPage(pin, page) {
   const older = (page.entries || []).filter(
     (entry) => !entry?.item_id || !existingIds.has(entry.item_id)
   );
+  // A dropped duplicate may carry the tombstone the pin's copy predates.
+  const overlapping = (page.entries || []).filter(
+    (entry) => entry?.item_id && existingIds.has(entry.item_id)
+  );
   return {
     ...pin,
-    entries: [...older, ...(pin.entries || [])],
+    entries: [...older, ...absorbWithdrawnById(pin.entries || [], overlapping)],
     historyExtended: true,
     olderCursor: page.prev_cursor ?? null,
   };
@@ -331,6 +336,8 @@ export function mergeRefreshedViewOnlyPage(pin, page) {
     // Nothing retained, so no history is being held open any more.
     return { entries: freshEntries, historyExtended: false, olderCursor: page.prev_cursor ?? null };
   }
+  // The page's copies replace the pin's; a tombstone only the pin knows must ride along.
+  const freshAbsorbed = absorbWithdrawnById(freshEntries, priorEntries);
 
   // Split what the pin holds around the window this page covers. The page is
   // authoritative INSIDE its window and says nothing outside it, so entries the
@@ -357,7 +364,11 @@ export function mergeRefreshedViewOnlyPage(pin, page) {
       // Cannot prove where the pin's entries sit relative to this page, so take
       // the authoritative tail alone and let the top loader rebuild history
       // from its cursor. Nothing is retained, so history is no longer extended.
-      return { entries: freshEntries, historyExtended: false, olderCursor: page.prev_cursor ?? null };
+      return {
+        entries: freshAbsorbed,
+        historyExtended: false,
+        olderCursor: page.prev_cursor ?? null,
+      };
     }
     prefix = priorEntries.filter((entry) => entrySeq(entry) != null && entrySeq(entry) < freshMinSeq);
     tail = priorEntries.filter((entry) => entrySeq(entry) != null && entrySeq(entry) > freshMaxSeq);
@@ -377,7 +388,7 @@ export function mergeRefreshedViewOnlyPage(pin, page) {
   // Trimming the new end instead is what dropped the reader's own message: the
   // tail is exactly what the stream appended since this page was built.
   return {
-    entries: [...(historyExtended ? prefix : []), ...freshEntries, ...tail],
+    entries: [...(historyExtended ? prefix : []), ...freshAbsorbed, ...tail],
     historyExtended: historyExtended && prefix.length > 0,
     olderCursor: historyExtended ? pin?.olderCursor ?? null : page.prev_cursor ?? null,
   };

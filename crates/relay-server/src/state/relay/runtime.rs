@@ -545,8 +545,27 @@ impl ThreadRuntime {
                 last_live_upsert_revision: None,
             })
             .collect::<Vec<_>>();
+        // One provider page can name an id twice (a tool's request and its result).
+        // Merge those FIRST — the against-existing pass below assumes unique page ids.
+        let mut first_by_id: HashMap<String, usize> = HashMap::new();
+        let mut deduped: Vec<TranscriptRecord> = Vec::with_capacity(records.len());
+        for record in records {
+            match first_by_id.get(&record.item_id) {
+                Some(&kept_index) => {
+                    let kept = &mut deduped[kept_index];
+                    kept.tool =
+                        super::transcript::merge_tool_call_view(kept.tool.take(), record.tool);
+                    kept.withdrawn |= record.withdrawn;
+                }
+                None => {
+                    first_by_id.insert(record.item_id.clone(), deduped.len());
+                    deduped.push(record);
+                }
+            }
+        }
+        let mut records = deduped;
         // In page order, with assigned ids — a merged duplicate resolves to the
-        // existing record that absorbed it.
+        // record that absorbed it.
         let page_item_ids = records
             .iter()
             .map(|record| record.item_id.clone())
@@ -557,7 +576,7 @@ impl ThreadRuntime {
         // duplicate loses that edit outright. Merge into the existing entry instead: the
         // older page supplies the tool metadata, the newer one keeps the settled status
         // it already recorded.
-        let mut index_by_item_id = self
+        let index_by_item_id = self
             .transcript
             .iter()
             .enumerate()
@@ -570,12 +589,10 @@ impl ThreadRuntime {
                     existing.tool.take(),
                     record.tool.clone(),
                 );
+                existing.withdrawn |= record.withdrawn;
                 false
             }
-            None => {
-                index_by_item_id.insert(record.item_id.clone(), usize::MAX);
-                true
-            }
+            None => true,
         });
         // Numbered AFTER the merge-away pass, so merged duplicates consume no keys.
         // Issued keys on existing rows never move — that is the whole contract.
@@ -649,29 +666,77 @@ impl ThreadRuntime {
     #[must_use]
     pub(crate) fn merge_transcript_records(&mut self, records: Vec<TranscriptRecord>) -> bool {
         let mut changed = false;
+        // Unknown rows are held until the next incoming row that IS known — that
+        // anchor says where they belong. Tail keys here would re-order history the
+        // moment anything sorts by key: fresh [A, B, C] into a runtime holding only
+        // C must not key A and B past C.
+        let mut pending: Vec<TranscriptRecord> = Vec::new();
         for record in records {
             match self
                 .transcript
                 .iter()
                 .position(|entry| entry.item_id == record.item_id)
             {
-                Some(index) => {
+                Some(_) => {
+                    if !pending.is_empty() {
+                        let anchor = self
+                            .transcript
+                            .iter()
+                            .position(|entry| entry.item_id == record.item_id)
+                            .expect("anchor located above");
+                        self.insert_records_before(anchor, std::mem::take(&mut pending));
+                        changed = true;
+                    }
+                    let index = self
+                        .transcript
+                        .iter()
+                        .position(|entry| entry.item_id == record.item_id)
+                        .expect("anchor survives the insert");
                     if merge_runtime_entry(&mut self.transcript[index], record) {
                         changed = true;
                     }
                 }
                 None if self.has_equivalent_user_message(&record) => {}
-                None => {
-                    let mut record = record;
-                    // The incoming record was numbered by ANOTHER runtime's counters
-                    // (a fresh history read); only this runtime's keys are valid here.
-                    record.order_seq = self.alloc_tail_order_seq();
-                    self.transcript.push(record);
-                    changed = true;
-                }
+                None => pending.push(record),
             }
         }
+        // No later anchor: these genuinely extend the tail.
+        for mut record in pending {
+            record.order_seq = self.alloc_tail_order_seq();
+            self.transcript.push(record);
+            changed = true;
+        }
         changed
+    }
+
+    /// Insert a run of rows immediately before `index`, keyed strictly between the
+    /// Vec neighbours — Vec order and key order stay one and the same. This is what
+    /// the 2^20 spacing exists for; running a gap dry is a loud failure, never a
+    /// silent collision.
+    fn insert_records_before(&mut self, index: usize, mut records: Vec<TranscriptRecord>) {
+        let step = super::transcript::ORDER_SEQ_STEP;
+        if index == 0 {
+            let base = self.alloc_head_order_seq_block(records.len());
+            for (offset, record) in records.iter_mut().enumerate() {
+                record.order_seq = base + (offset as i64) * step;
+            }
+        } else {
+            let prev_key = self.transcript[index - 1].order_seq;
+            let next_key = self.transcript[index].order_seq;
+            let count = records.len() as i64;
+            let gap = next_key.checked_sub(prev_key).expect("order keys overflow");
+            assert!(
+                gap > count,
+                "order_seq gap exhausted between {prev_key} and {next_key} for {count} rows"
+            );
+            let spacing = gap / (count + 1);
+            for (offset, record) in records.iter_mut().enumerate() {
+                record.order_seq = prev_key + spacing * (offset as i64 + 1);
+            }
+        }
+        for (offset, record) in records.into_iter().enumerate() {
+            self.transcript.insert(index + offset, record);
+        }
     }
 
     fn has_equivalent_user_message(&self, entry: &TranscriptRecord) -> bool {
@@ -1190,6 +1255,104 @@ mod tests {
         assert!(
             rt.transcript[1].order_seq > issued,
             "the appended row takes this runtime's next tail key"
+        );
+    }
+    /// Fresh history knows where a row belongs; a tail key would re-order it the
+    /// moment anything sorts by key. Keys must be issued BETWEEN the neighbours.
+    #[test]
+    fn merge_places_prefix_and_interior_rows_between_their_neighbours() {
+        let record = |id: &str| TranscriptRecord {
+            item_id: id.to_string(),
+            kind: crate::protocol::TranscriptEntryKind::AgentText,
+            text: Some(id.to_string()),
+            status: "completed".to_string(),
+            turn_id: None,
+            tool: None,
+            order_seq: 0,
+            withdrawn: false,
+            last_live_upsert_revision: None,
+        };
+
+        // Prefix: runtime holds only C; fresh history is [A, B, C].
+        let mut rt = runtime("t1", "idle");
+        let c_key = rt.alloc_tail_order_seq();
+        rt.transcript.push(TranscriptRecord {
+            order_seq: c_key,
+            ..record("C")
+        });
+        assert!(rt.merge_transcript_records(vec![record("A"), record("B"), record("C")]));
+        let ids: Vec<&str> = rt.transcript.iter().map(|r| r.item_id.as_str()).collect();
+        assert_eq!(ids, ["A", "B", "C"], "Vec order must match history order");
+        let keys: Vec<i64> = rt.transcript.iter().map(|r| r.order_seq).collect();
+        assert!(
+            keys[0] < keys[1] && keys[1] < keys[2],
+            "keys must sort like history: {keys:?}"
+        );
+        assert_eq!(keys[2], c_key, "the anchored row keeps its issued key");
+
+        // Interior: runtime holds [A, C]; fresh history is [A, B, C].
+        let mut rt = runtime("t2", "idle");
+        let a_key = rt.alloc_tail_order_seq();
+        let c_key = rt.alloc_tail_order_seq();
+        rt.transcript.push(TranscriptRecord {
+            order_seq: a_key,
+            ..record("A")
+        });
+        rt.transcript.push(TranscriptRecord {
+            order_seq: c_key,
+            ..record("C")
+        });
+        assert!(rt.merge_transcript_records(vec![record("A"), record("B"), record("C")]));
+        let ids: Vec<&str> = rt.transcript.iter().map(|r| r.item_id.as_str()).collect();
+        assert_eq!(ids, ["A", "B", "C"]);
+        let keys: Vec<i64> = rt.transcript.iter().map(|r| r.order_seq).collect();
+        assert!(
+            keys[0] < keys[1] && keys[1] < keys[2],
+            "B lands between its neighbours: {keys:?}"
+        );
+        assert_eq!(
+            (keys[0], keys[2]),
+            (a_key, c_key),
+            "anchors keep their keys"
+        );
+    }
+
+    /// One provider page can carry the same id twice. That must merge, not panic —
+    /// and the returned page must name each row once.
+    #[test]
+    fn prepend_merges_in_page_duplicate_ids() {
+        let mut rt = runtime("t1", "idle");
+        let page_entry = |id: &str, text: &str| TranscriptEntryView {
+            order_seq: None,
+            withdrawn: false,
+            item_id: Some(id.to_string()),
+            kind: crate::protocol::TranscriptEntryKind::AgentText,
+            text: Some(text.to_string()),
+            status: "completed".to_string(),
+            turn_id: None,
+            tool: None,
+            content_state: crate::protocol::TranscriptContentState::Full,
+        };
+        let views = rt.prepend_provider_history(
+            vec![
+                page_entry("dup", "first"),
+                page_entry("dup", "second"),
+                page_entry("solo", "x"),
+            ],
+            Some(3),
+            None,
+        );
+        assert_eq!(
+            views
+                .iter()
+                .filter(|v| v.item_id.as_deref() == Some("dup"))
+                .count(),
+            1,
+            "duplicates merged, named once"
+        );
+        assert_eq!(
+            rt.transcript.iter().filter(|r| r.item_id == "dup").count(),
+            1
         );
     }
 }

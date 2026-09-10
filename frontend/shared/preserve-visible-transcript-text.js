@@ -71,7 +71,12 @@ export function preserveVisibleTranscriptText(currentSession, snapshot) {
   let changed = false;
   const transcript = snapshot.transcript.map((entry) => {
     const current = currentByItemId.get(entry?.item_id);
-    const resolved = selectVisibleSnapshotEntry(current, entry);
+    let resolved = selectVisibleSnapshotEntry(current, entry);
+    // Absorbing: an out-of-order snapshot serialized before the withdrawal must
+    // not resurrect a row this client already saw withdrawn.
+    if (current?.withdrawn === true && resolved.withdrawn !== true) {
+      resolved = { ...resolved, withdrawn: true };
+    }
     if (resolved === entry) {
       return entry;
     }
