@@ -2483,6 +2483,7 @@ is also what keeps the refusal from confirming it exists: {error}"
                     status: status.to_string(),
                     turn_id: Some("turn-1".to_string()),
                     tool: Some(tool),
+                    order_seq: 0,
                     last_live_upsert_revision: None,
                 });
         }
@@ -2504,6 +2505,7 @@ is also what keeps the refusal from confirming it exists: {error}"
                     status: "completed".to_string(),
                     turn_id: Some("turn-1".to_string()),
                     tool: Some(tool),
+                    order_seq: 0,
                     last_live_upsert_revision: None,
                 });
         }
@@ -2850,6 +2852,7 @@ is also what keeps the refusal from confirming it exists: {error}"
                         status: "completed".to_string(),
                         turn_id: Some("turn-old".to_string()),
                         tool: None,
+                        order_seq: 0,
                         last_live_upsert_revision: None,
                     });
             }
@@ -3116,6 +3119,7 @@ is also what keeps the refusal from confirming it exists: {error}"
                     status: "completed".to_string(),
                     turn_id: Some("turn-1".to_string()),
                     tool: Some(file_tool(&[&linked_edit])),
+                    order_seq: 0,
                     last_live_upsert_revision: Some(20),
                 });
             runtime
@@ -3127,6 +3131,7 @@ is also what keeps the refusal from confirming it exists: {error}"
                     status: "completed".to_string(),
                     turn_id: Some("turn-1".to_string()),
                     tool: Some(file_tool(&[&main_edit])),
+                    order_seq: 0,
                     last_live_upsert_revision: Some(10),
                 });
         }
@@ -3472,6 +3477,7 @@ is also what keeps the refusal from confirming it exists: {error}"
                         status: "completed".to_string(),
                         turn_id: Some("turn-chatter".to_string()),
                         tool: None,
+                        order_seq: 0,
                         last_live_upsert_revision: None,
                     });
             }
@@ -19301,6 +19307,7 @@ settings update: {error}"
                 status: "completed".to_string(),
                 turn_id: Some("turn-evidence".to_string()),
                 tool: Some(tool),
+                order_seq: 0,
                 last_live_upsert_revision: None,
             });
     }
@@ -19334,6 +19341,7 @@ settings update: {error}"
                     status: "completed".to_string(),
                     turn_id: Some("turn-chatter".to_string()),
                     tool: None,
+                    order_seq: 0,
                     last_live_upsert_revision: None,
                 });
         }

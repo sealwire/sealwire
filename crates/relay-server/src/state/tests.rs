@@ -1981,6 +1981,7 @@ fn persisted_state_round_trip_drops_ephemeral_fields() {
         status: "completed".to_string(),
         turn_id: Some("turn-1".to_string()),
         tool: None,
+        order_seq: 0,
         last_live_upsert_revision: None,
     });
     relay
@@ -6691,6 +6692,7 @@ fn promoting_a_background_thread_does_not_rewind_the_real_threads_revision() {
             status: "completed".to_string(),
             turn_id: None,
             tool: None,
+            order_seq: 0,
             last_live_upsert_revision: None,
         },
         TranscriptRecord {
@@ -6700,6 +6702,7 @@ fn promoting_a_background_thread_does_not_rewind_the_real_threads_revision() {
             status: "completed".to_string(),
             turn_id: None,
             tool: None,
+            order_seq: 0,
             last_live_upsert_revision: None,
         },
     ];
@@ -6914,5 +6917,66 @@ fn a_crash_before_the_first_save_after_a_restore_does_not_replay() {
         !issued_by_second.contains(&first_after_second_crash),
         "the third run re-issued revision {first_after_second_crash}, which the \
          second run had already handed out ({issued_by_second:?})"
+    );
+}
+
+/// Order keys are issued once and never reissued — including across the one path that
+/// still deletes a row (a definitively rejected Codex send). A client may hold the
+/// withdrawn row; reissuing its key would silently merge a NEW message into it.
+#[test]
+fn order_seq_appends_increase_and_survive_withdrawal() {
+    let mut relay = test_state();
+    let thread = "order-seq-thread";
+
+    let meta_a = relay.upsert_transcript_item_for_thread(
+        thread,
+        "a".to_string(),
+        crate::protocol::TranscriptEntryKind::AgentText,
+        Some("a".to_string()),
+        "completed".to_string(),
+        None,
+        None,
+    );
+    let _ = meta_a;
+    let seq_of = |relay: &RelayState, id: &str| {
+        relay
+            .runtimes
+            .get(thread)
+            .unwrap()
+            .transcript
+            .iter()
+            .find(|r| r.item_id == id)
+            .map(|r| r.order_seq)
+    };
+    let seq_a = seq_of(&relay, "a").expect("row a");
+
+    // A delta for an unknown id creates a row; it must take the next tail key.
+    relay.append_agent_delta_for_thread(thread, "b", "turn-1", "hello");
+    let seq_b = seq_of(&relay, "b").expect("row b");
+    assert!(
+        seq_b > seq_a,
+        "delta-created row continues the tail: {seq_a} -> {seq_b}"
+    );
+
+    // Withdraw a rejected send; its key must leave a hole, never be reissued.
+    let reservation = relay
+        .begin_codex_user_turn(thread, "doomed send")
+        .expect("reservation");
+    let withdrawn_seq = seq_of(&relay, &reservation).expect("reservation row");
+    assert!(withdrawn_seq > seq_b);
+    relay.fail_codex_user_turn_definitive(thread, &reservation);
+    assert_eq!(
+        seq_of(&relay, &reservation),
+        None,
+        "the row is withdrawn today"
+    );
+
+    let survivor = relay
+        .begin_codex_user_turn(thread, "the send that goes through")
+        .expect("second reservation");
+    let survivor_seq = seq_of(&relay, &survivor).expect("second row");
+    assert!(
+        survivor_seq > withdrawn_seq,
+        "the withdrawn key {withdrawn_seq} must not be reissued (got {survivor_seq})"
     );
 }
