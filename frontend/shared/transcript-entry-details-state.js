@@ -1,9 +1,38 @@
+import { transcriptPageMatchesGeneration } from "./transcript-generation.js";
+
 const TRANSCRIPT_ENTRY_DETAIL_INLINE_CACHE_MAX_BYTES = 64 * 1024;
 const TRANSCRIPT_ENTRY_DETAIL_CACHE_MAX_BYTES = 256 * 1024;
 const COMMAND_PREVIEW_CHAR_THRESHOLD = 140;
 
 function transcriptEntryCacheKey(threadId, itemId) {
   return `${threadId || "-"}:${itemId || "-"}`;
+}
+
+function sessionGeneration(state) {
+  return state?.session?.transcript_generation || "";
+}
+
+function detailsMatchGeneration(state, generation) {
+  return transcriptPageMatchesGeneration(generation, state?.transcriptEntryDetailsGeneration || "");
+}
+
+/**
+ * What a write may build on. Across a restart `history-3` can name a different
+ * message, so a store owned by another run is restarted from empty — BOTH stores at
+ * once, since the inline cache and the live map hold the same ids and go stale
+ * together.
+ */
+function rebasedDetailStores(state, generation) {
+  if (detailsMatchGeneration(state, generation)) {
+    return {
+      cache: state.transcriptEntryDetailCache,
+      order: state.transcriptEntryDetailOrder,
+      live: state.transcriptLiveEntryDetails,
+      liveThreadId: state.transcriptLiveEntryThreadId,
+      crossedRun: false,
+    };
+  }
+  return { cache: new Map(), order: [], live: new Map(), liveThreadId: null, crossedRun: true };
 }
 
 function truncateCommandPreview(text) {
@@ -141,13 +170,14 @@ export function createClearedTranscriptEntryDetailsPatch() {
   return {
     transcriptEntryDetailCache: new Map(),
     transcriptEntryDetailOrder: [],
+    transcriptEntryDetailsGeneration: "",
     transcriptLiveEntryDetails: new Map(),
     transcriptLiveEntryThreadId: null,
   };
 }
 
 export function getCachedTranscriptEntryDetail(state, threadId, itemId) {
-  if (!threadId || !itemId) {
+  if (!threadId || !itemId || !detailsMatchGeneration(state, sessionGeneration(state))) {
     return null;
   }
 
@@ -156,7 +186,12 @@ export function getCachedTranscriptEntryDetail(state, threadId, itemId) {
 }
 
 export function getLiveTranscriptEntryDetail(state, threadId, itemId) {
-  if (!threadId || !itemId || state.transcriptLiveEntryThreadId !== threadId) {
+  if (
+    !threadId
+    || !itemId
+    || state.transcriptLiveEntryThreadId !== threadId
+    || !detailsMatchGeneration(state, sessionGeneration(state))
+  ) {
     return null;
   }
 
@@ -174,9 +209,11 @@ export function cacheTranscriptEntryDetail(state, threadId, entry) {
     return { cached: false, patch: null };
   }
 
+  const generation = sessionGeneration(state);
+  const base = rebasedDetailStores(state, generation);
   const key = transcriptEntryCacheKey(threadId, itemId);
-  const nextCache = new Map(state.transcriptEntryDetailCache);
-  const nextOrder = state.transcriptEntryDetailOrder.filter((value) => value !== key);
+  const nextCache = new Map(base.cache);
+  const nextOrder = base.order.filter((value) => value !== key);
   nextCache.set(key, {
     entry,
     size,
@@ -201,6 +238,10 @@ export function cacheTranscriptEntryDetail(state, threadId, entry) {
     patch: {
       transcriptEntryDetailCache: nextCache,
       transcriptEntryDetailOrder: nextOrder,
+      transcriptEntryDetailsGeneration: generation,
+      ...(base.crossedRun
+        ? { transcriptLiveEntryDetails: base.live, transcriptLiveEntryThreadId: base.liveThreadId }
+        : {}),
     },
   };
 }
@@ -211,9 +252,9 @@ export function setLiveTranscriptEntryDetail(state, threadId, entry) {
     return { stored: false, patch: null };
   }
 
-  const nextDetails = state.transcriptLiveEntryThreadId === threadId
-    ? new Map(state.transcriptLiveEntryDetails)
-    : new Map();
+  const generation = sessionGeneration(state);
+  const base = rebasedDetailStores(state, generation);
+  const nextDetails = base.liveThreadId === threadId ? new Map(base.live) : new Map();
   const previousEntry = nextDetails.get(itemId);
   nextDetails.set(itemId, mergeTranscriptEntryDetail(previousEntry, entry));
 
@@ -222,6 +263,10 @@ export function setLiveTranscriptEntryDetail(state, threadId, entry) {
     patch: {
       transcriptLiveEntryDetails: nextDetails,
       transcriptLiveEntryThreadId: threadId,
+      transcriptEntryDetailsGeneration: generation,
+      ...(base.crossedRun
+        ? { transcriptEntryDetailCache: base.cache, transcriptEntryDetailOrder: base.order }
+        : {}),
     },
   };
 }
@@ -232,10 +277,12 @@ export function syncLiveTranscriptEntryDetailsFromSnapshot(state, snapshot) {
     return { changed: false, patch: null };
   }
 
-  let changed = state.transcriptLiveEntryThreadId !== threadId;
-  const nextDetails = state.transcriptLiveEntryThreadId === threadId
-    ? new Map(state.transcriptLiveEntryDetails)
-    : new Map();
+  // The snapshot's OWN generation, not the session's: this runs while the snapshot
+  // is being applied, so `state.session` may still be the previous run's.
+  const generation = snapshot?.transcript_generation || "";
+  const base = rebasedDetailStores(state, generation);
+  let changed = base.crossedRun || base.liveThreadId !== threadId;
+  const nextDetails = base.liveThreadId === threadId ? new Map(base.live) : new Map();
 
   for (const entry of snapshot.transcript || []) {
     if (!shouldRetainLiveTranscriptEntry(entry)) {
@@ -259,6 +306,10 @@ export function syncLiveTranscriptEntryDetailsFromSnapshot(state, snapshot) {
     patch: {
       transcriptLiveEntryDetails: nextDetails,
       transcriptLiveEntryThreadId: threadId,
+      transcriptEntryDetailsGeneration: generation,
+      ...(base.crossedRun
+        ? { transcriptEntryDetailCache: base.cache, transcriptEntryDetailOrder: base.order }
+        : {}),
     },
   };
 }

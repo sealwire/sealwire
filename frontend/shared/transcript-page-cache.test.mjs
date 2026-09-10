@@ -301,3 +301,52 @@ test("a non-IDBFactory (no cmp) disables the cache entirely", async () => {
   await cache.writePage({ scope: "relayA", threadId: "t1", before: 10, page: olderPage("t1", 10) });
   assert.equal(await cache.readPage({ scope: "relayA", threadId: "t1", before: 10 }), null);
 });
+
+// A relay restart rebuilds every thread from provider history, which renumbers item
+// ids. Pages cached by the previous run therefore name the same messages differently,
+// and serving them beside this run's pages shows each message twice.
+test("a page cached by one relay generation is not served to the next", async () => {
+  const cache = makeCache();
+  const page = olderPage("t1", 10);
+  await cache.writePage({ scope: "relayA", threadId: "t1", before: 10, page, generation: "gen-a" });
+
+  assert.equal(
+    await cache.readPage({ scope: "relayA", threadId: "t1", before: 10, generation: "gen-b" }),
+    null
+  );
+  assert.deepEqual(
+    await cache.readPage({ scope: "relayA", threadId: "t1", before: 10, generation: "gen-a" }),
+    page,
+    "the run that wrote it still reads it"
+  );
+});
+
+// The generation lives in the KEY, not in `scope` — `scope` is the relay identity that
+// "forget this relay" wipes by, and forgetting must not leave a generation behind.
+test("forgetting a relay clears every generation of its cached history", async () => {
+  const cache = makeCache();
+  await cache.writePage({
+    scope: "relayA", threadId: "t1", before: 10, page: olderPage("t1", 10), generation: "gen-a",
+  });
+  await cache.writePage({
+    scope: "relayA", threadId: "t1", before: 20, page: olderPage("t1", 20), generation: "gen-b",
+  });
+  await cache.writePage({
+    scope: "relayB", threadId: "t1", before: 30, page: olderPage("t1", 30), generation: "gen-b",
+  });
+
+  await cache.clearScope("relayA");
+
+  assert.equal(
+    await cache.readPage({ scope: "relayA", threadId: "t1", before: 10, generation: "gen-a" }),
+    null
+  );
+  assert.equal(
+    await cache.readPage({ scope: "relayA", threadId: "t1", before: 20, generation: "gen-b" }),
+    null
+  );
+  assert.ok(
+    await cache.readPage({ scope: "relayB", threadId: "t1", before: 30, generation: "gen-b" }),
+    "another relay's history is untouched"
+  );
+});

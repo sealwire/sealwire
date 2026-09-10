@@ -4,6 +4,7 @@ import { fetchTranscriptEntryDetailViaRequester } from "../../shared/transcript-
 import { normalizeThreadTranscriptPage } from "../../shared/transcript-page.js";
 import {
   createThreadTranscriptPageQueryOptions,
+  dropTranscriptPageQueriesFromOtherGenerations,
   fetchThreadTranscriptPageFresh,
 } from "../../shared/thread-queries.js";
 import { createCachingTranscriptPageFetcher } from "../../shared/caching-transcript-fetcher.js";
@@ -54,6 +55,8 @@ export function createTranscriptController(ctx) {
 
   async function fetchTranscriptEntryDetail(threadId, itemId) {
     return fetchTranscriptEntryDetailViaRequester({
+      // Checked per response: the chunk loop can span a relay restart.
+      currentGeneration: () => state.session?.transcript_generation || "",
       itemId,
       requestDetail: ({ cursor, field, itemId: requestItemId, threadId: requestThreadId }) =>
         requestTranscriptEntryDetail(requestThreadId, requestItemId, { cursor, field }),
@@ -90,14 +93,33 @@ export function createTranscriptController(ctx) {
     cache: localTranscriptPageCache,
     fetchPage: fetchRawTranscriptPage,
     getScope: () => "local",
+    // Pages belong to the relay process that minted their item ids: a restart
+    // rebuilds threads from provider history and renumbers them.
+    getGeneration: () => state.session?.transcript_generation || "",
   });
 
+  // `gcTime: Infinity` (shared/query-client.js) keeps every past run's pages for the
+  // life of the tab, and their in-flight requests with them. Sweep them once, when the
+  // run actually changes, rather than on every page load.
+  let sweptGeneration = null;
+  function dropOtherGenerations(generation) {
+    if (!queryClient || sweptGeneration === generation) {
+      return;
+    }
+    sweptGeneration = generation;
+    dropTranscriptPageQueriesFromOtherGenerations(queryClient, generation);
+  }
+
   async function fetchTranscriptPage(threadId, { before = null } = {}) {
+    dropOtherGenerations(state.session?.transcript_generation || "");
     const page = queryClient
       ? await queryClient.fetchQuery(
         createThreadTranscriptPageQueryOptions({
           before,
           fetchPage: fetchCachedTranscriptPage,
+          // Keyed by the run, so a request made after a restart cannot dedupe onto
+          // the identical one still in flight from before it.
+          generation: state.session?.transcript_generation || "",
           scope: "local",
           surface: "local",
           threadId,
@@ -119,6 +141,7 @@ export function createTranscriptController(ctx) {
     return fetchThreadTranscriptPageFresh({
       before,
       fetchPage: fetchRawTranscriptPage,
+      generation: state.session?.transcript_generation || "",
       queryClient,
       scope: "local",
       surface: "local",

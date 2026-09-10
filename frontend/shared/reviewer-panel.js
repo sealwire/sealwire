@@ -1,6 +1,7 @@
 import React from "react";
 
 import { renderMarkdown } from "./markdown.js";
+import { transcriptPageIsFromAnotherGeneration } from "./transcript-generation.js";
 import { ReviewLauncher } from "./review-panel.js";
 import { CodeFlowLauncher, WorkflowRunCard } from "./workflow-panel.js";
 import {
@@ -11,6 +12,20 @@ import {
 import { CODE_FLOW_ENABLED } from "./workflow-state.js";
 
 const h = React.createElement;
+
+/**
+ * The one place both surfaces strip a transcript page down to the entries the
+ * reviewer preview reads. The page's envelope is what names the run its ids came
+ * from, so the strip is where that has to be checked — after it, nothing can.
+ */
+export function reviewerPreviewEntriesFromPage(session, page) {
+  // Thrown, not emptied: the panel's catch keeps the last good preview, and a
+  // terminal review fetches once — a stale page would freeze on the card forever.
+  if (transcriptPageIsFromAnotherGeneration(session, page)) {
+    throw new Error("reviewer preview page is from another relay run");
+  }
+  return page?.entries || (Array.isArray(page) ? page : []);
+}
 
 // While a review is still running, re-fetch the reviewer's latest message on this
 // cadence so the user can watch an in-progress (or stuck) reviewer. Terminal reviews

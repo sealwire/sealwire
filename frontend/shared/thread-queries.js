@@ -11,8 +11,16 @@ export function threadListQueryKey({
   ];
 }
 
+/**
+ * `generation` names the run of the relay whose item ids the page will carry.
+ *
+ * Without it in the key, a request issued after a restart DEDUPES onto the identical
+ * request still in flight from before it, and the caller is handed a page full of the
+ * previous run's ids.
+ */
 export function threadTranscriptPageQueryKey({
   before = null,
+  generation = "",
   scope = "default",
   surface,
   threadId,
@@ -21,6 +29,7 @@ export function threadTranscriptPageQueryKey({
     "thread-transcript",
     surface,
     scope,
+    generation || "",
     threadId || "",
     before ?? null,
   ];
@@ -83,6 +92,7 @@ export async function fetchThreadListFresh({
 export function createThreadTranscriptPageQueryOptions({
   before = null,
   fetchPage,
+  generation = "",
   scope = "default",
   surface,
   threadId,
@@ -90,6 +100,7 @@ export function createThreadTranscriptPageQueryOptions({
   return {
     queryKey: threadTranscriptPageQueryKey({
       before,
+      generation,
       scope,
       surface,
       threadId,
@@ -132,16 +143,45 @@ export function createThreadTranscriptPageQueryOptions({
 export async function fetchThreadTranscriptPageFresh({
   before = null,
   fetchPage,
+  generation = "",
   queryClient = null,
   scope = "default",
   surface,
   threadId,
 }) {
-  const queryKey = threadTranscriptPageQueryKey({ before, scope, surface, threadId });
+  // MUST be the same key ordinary paging uses, generation included. Evicting a key
+  // built without it leaves the current run's in-flight request registered, so the
+  // repair below is not fresh at all — it attaches to the request it meant to replace.
+  const queryKey = threadTranscriptPageQueryKey({ before, generation, scope, surface, threadId });
   // Before the request, so a request racing this one cannot dedupe onto a
   // request that predates it.
   queryClient?.removeQueries({ queryKey, exact: true });
   const page = await fetchPage({ before, threadId });
   queryClient?.setQueryData(queryKey, page);
   return page;
+}
+
+/**
+ * Drop every cached transcript page query that is not from `generation`.
+ *
+ * `gcTime: Infinity` (shared/query-client.js) means nothing ever expires on its own,
+ * so without this the previous run's pages sit in the cache for the life of the tab —
+ * and any of them can still be handed to a caller. Removing them also cancels the
+ * requests still in flight from that run, which is the other half of the problem.
+ *
+ * Returns how many were removed, so a caller can log or assert on it.
+ */
+export function dropTranscriptPageQueriesFromOtherGenerations(queryClient, generation) {
+  if (!queryClient || typeof queryClient.getQueryCache !== "function") {
+    return 0;
+  }
+  const current = generation || "";
+  const stale = queryClient
+    .getQueryCache()
+    .findAll({ queryKey: ["thread-transcript"] })
+    .filter((query) => (query.queryKey?.[3] || "") !== current);
+  stale.forEach((query) => {
+    queryClient.removeQueries({ queryKey: query.queryKey, exact: true });
+  });
+  return stale.length;
 }

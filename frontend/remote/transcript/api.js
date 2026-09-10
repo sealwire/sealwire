@@ -32,9 +32,10 @@ export function createTranscriptEntriesFetcher(dispatchOrRecover) {
   };
 }
 
-export function createTranscriptEntryDetailFetcher(dispatchOrRecover) {
+export function createTranscriptEntryDetailFetcher(dispatchOrRecover, { currentGeneration } = {}) {
   return async function fetchTranscriptEntryDetail({ threadId, itemId }) {
     return fetchTranscriptEntryDetailViaRequester({
+      currentGeneration,
       itemId,
       requestDetail: async ({ cursor, field, itemId: requestItemId, threadId: requestThreadId }) => {
         const result = await dispatchOrRecover("fetch_thread_entry_detail", {

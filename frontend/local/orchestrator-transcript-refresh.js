@@ -1,3 +1,4 @@
+import { transcriptPageIsFromAnotherGeneration } from "../shared/transcript-generation.js";
 import { threadActivityFor } from "../shared/thread-activity.js";
 import { shouldRefreshViewedThread } from "../shared/viewed-thread-refresh.js";
 import { refreshedPinPage } from "./pin-page.js";
@@ -172,10 +173,22 @@ export function applyRefreshedOrchestratorPage(state, prior, page, threadId) {
   state.orchestratorOlderCursor = refreshed.olderCursor;
   state.orchestratorHistoryExtended = refreshed.historyExtended;
   state.orchestratorEntriesThreadId = threadId;
+  // These entries are only mergeable by the run whose ids they carry. Stamped on
+  // every write, so a later delta or older page can tell whether it belongs.
+  state.orchestratorEntriesGeneration = state.session?.transcript_generation || "";
   return refreshed;
 }
 
 export function applyOlderOrchestratorPage(state, threadId, page) {
+  // The buffer this prepends to belongs to the run that minted its ids; a page from
+  // another run prepends a second copy of every message it overlaps.
+  if (
+    (state.orchestratorEntriesGeneration || "")
+    !== (state.session?.transcript_generation || "")
+    || transcriptPageIsFromAnotherGeneration(state.session, page)
+  ) {
+    return null;
+  }
   const merged = mergeOlderViewOnlyPage(
     {
       threadId,

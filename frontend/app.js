@@ -98,6 +98,7 @@ import React from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import { StartSessionSplitButton } from "./shared/start-session-split-button.js";
+import { reviewerPreviewEntriesFromPage } from "./shared/reviewer-panel.js";
 import {
   createApiFetch,
   createAuthSession,
@@ -711,7 +712,7 @@ const reviewerActions = {
   onDeleteReview: (reviewId) => state.controller?.deleteReview(reviewId),
   fetchReviewerTranscript: (threadId) =>
     Promise.resolve(state.controller?.fetchTranscriptPage(threadId, {})).then(
-      (page) => page?.entries || (Array.isArray(page) ? page : [])
+      (page) => reviewerPreviewEntriesFromPage(state.session, page)
     ),
 };
 
@@ -1309,6 +1310,7 @@ renderer.renderSession = function wrappedRenderSession(session) {
     const summary =
       findVisible(state.viewThreadId);
     state.viewOnlyThread = buildViewOnlyPin({
+      relayGeneration: previousLiveSession?.transcript_generation || "",
       threadId: state.viewThreadId,
       priorEntries: previousLiveSession.transcript || [],
       cwd: summary?.cwd ?? previousLiveSession.current_cwd ?? null,

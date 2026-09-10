@@ -1,3 +1,4 @@
+import { transcriptPageIsFromAnotherGeneration } from "../shared/transcript-generation.js";
 import { refreshedPinPage } from "./pin-page.js";
 import {
   buildViewOnlyPin,
@@ -55,10 +56,20 @@ export function createViewOnlyRefreshOps({
     const summary = findVisible(threadId);
     const cwd = summary?.cwd ?? null;
     const provider = summary?.provider ?? null;
-    const prior = state.viewOnlyThread?.threadId === threadId ? state.viewOnlyThread : null;
+    const liveGeneration = session?.transcript_generation || "";
+    const sameThreadPin =
+      state.viewOnlyThread?.threadId === threadId ? state.viewOnlyThread : null;
+    // A pin from another run of the relay is not a starting point to refresh FROM: its
+    // ids name these messages differently, so carrying its entries forward under this
+    // run's label is just relabelling stale data. Drop it and load the thread cold.
+    const prior =
+      sameThreadPin && (sameThreadPin.relayGeneration || "") !== liveGeneration
+        ? null
+        : sameThreadPin;
     const isWorking = viewOnlyThreadIsWorking(session, threadId);
     const status = !isWorking && prior?.wasWorking ? "idle" : summary?.status ?? null;
     const loadingPin = buildViewOnlyPin({
+      relayGeneration: liveGeneration,
       threadId,
       generation,
       review,
@@ -90,11 +101,19 @@ export function createViewOnlyRefreshOps({
     try {
       const page = await fetchTranscriptPage(threadId, {});
       if (generation !== state.viewOnlyGeneration) return;
+      if (transcriptPageIsFromAnotherGeneration(session, page)) {
+        // The relay restarted mid-fetch: these ids are from the previous run. Settle
+        // through the error path rather than returning — a bare return leaves
+        // `loading: true`, and the self-heal reads that as "a request is still in
+        // flight" and refuses to retry, so the pin would stay blank for good.
+        throw new Error("transcript page came from another relay generation");
+      }
       const livePin = pinForGeneration(state, threadId, generation, prior);
       const { page: normalized, ...refreshed } = refreshedPinPage(livePin, page, threadId);
       const exactReview = Boolean(normalized.thread_state?.review_locked ?? review);
       const isWorkingNow = viewOnlyThreadIsWorking(session, threadId);
       const built = buildViewOnlyPin({
+        relayGeneration: liveGeneration,
         threadId,
         page: {
           ...normalized,
@@ -146,6 +165,7 @@ export function createViewOnlyRefreshOps({
       const livePin = pinForGeneration(state, threadId, generation, prior);
       const isWorkingNow = viewOnlyThreadIsWorking(session, threadId);
       const built = buildViewOnlyPin({
+        relayGeneration: liveGeneration,
         threadId,
         generation,
         review,
@@ -256,6 +276,18 @@ export function createViewOnlyRefreshOps({
       const page = await fetchTranscriptPage(pin.threadId, { before: pin.olderCursor });
       const current = state.viewOnlyThread;
       if (!current || current.generation !== generation || current.threadId !== pin.threadId) {
+        return null;
+      }
+      // `mergeOlderViewOnlyPage` dedupes by item id alone, so it cannot tell that a
+      // page and a pin describe the same messages under two runs' names — it just
+      // prepends. Both sides have to be from the live run: the pin (the relay may have
+      // restarted since it was built) and the page (it may have been answered by the
+      // new run before this client saw its first snapshot).
+      const liveGeneration = state.session?.transcript_generation || "";
+      if (
+        (current.relayGeneration || "") !== liveGeneration
+        || transcriptPageIsFromAnotherGeneration(state.session, page)
+      ) {
         return null;
       }
       state.viewOnlyThread = mergeOlderViewOnlyPage(current, page);

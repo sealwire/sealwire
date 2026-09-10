@@ -77,11 +77,11 @@ export function createTranscriptPageCache({
     return Boolean(webCrypto?.subtle && webCrypto?.getRandomValues);
   }
 
-  async function readPage({ scope, threadId, before }) {
+  async function readPage({ scope, threadId, before, generation }) {
     if (!isAvailable() || before == null || !threadId) {
       return null;
     }
-    const key = cacheKey(scope, threadId, before);
+    const key = cacheKey(scope, threadId, before, generation);
     const record = await withStores([PAGES_STORE], "readonly", (tx) =>
       wrapRequest(tx.objectStore(PAGES_STORE).get(key))
     );
@@ -124,11 +124,11 @@ export function createTranscriptPageCache({
     return page;
   }
 
-  async function writePage({ scope, threadId, before, page }) {
+  async function writePage({ scope, threadId, before, page, generation }) {
     if (!isAvailable() || before == null || !threadId || !page) {
       return;
     }
-    const key = cacheKey(scope, threadId, before);
+    const key = cacheKey(scope, threadId, before, generation);
     const json = JSON.stringify(page);
     const bytes = json.length;
 
@@ -318,8 +318,41 @@ async function evictUntilUnderQuota(pages, total, quotaBytes, protectKey) {
   return running;
 }
 
-function cacheKey(scope, threadId, before) {
-  return [scope || "default", threadId, String(before)].join(KEY_DELIMITER);
+/**
+ * Bump when a relay change alters what a cached page MEANS, so old pages are read
+ * under a key nothing asks for and fall out under quota instead of being served.
+ *
+ * `DB_VERSION` cannot do this: the upgrade handler only creates missing stores, it
+ * never clears existing pages. And this cache is read-first with no TTL, and a read
+ * refreshes LRU recency — so a page the reader keeps visiting is never evicted on its
+ * own.
+ *
+ * 2: Codex user rows keep the relay's own item id instead of being renamed to the
+ *    provider's, so a page cached before that can hold both ids for one send.
+ *
+ * This is a one-time migration guard, NOT a per-restart discriminator. A relay
+ * rebuilds a thread from provider history on restart, and that history renumbers item
+ * ids, so a page cached by one relay process can still describe the same messages
+ * under different ids than the next one serves. That predates this constant and
+ * applies to agent rows too; fixing it needs a server-supplied generation in `scope`.
+ */
+const CACHE_EPOCH = "2";
+
+/**
+ * `generation` names the relay process that minted the item ids in the page.
+ *
+ * It belongs in the KEY, not in `scope`: `scope` is the relay identity and is what
+ * `clearScope` indexes on, so forgetting a relay must still wipe every generation of
+ * its cached history.
+ */
+function cacheKey(scope, threadId, before, generation) {
+  return [
+    CACHE_EPOCH,
+    scope || "default",
+    generation || "any",
+    threadId,
+    String(before),
+  ].join(KEY_DELIMITER);
 }
 
 function defaultIndexedDb() {

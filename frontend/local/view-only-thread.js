@@ -161,12 +161,18 @@ export function buildViewOnlyPin({
   historyExtended = false,
   loading = false,
   error = false,
+  relayGeneration = "",
 }) {
   const pin = {
     threadId,
     entries: page ? page.entries || [] : priorEntries,
     olderCursor: page ? page.prev_cursor ?? null : priorOlderCursor,
     generation,
+    // Which RUN of the relay these item ids came from — distinct from `generation`
+    // above, which counts this client's own navigations. A restart renumbers ids, so
+    // a pin built under an earlier run describes these messages under names the relay
+    // no longer uses.
+    relayGeneration,
     review,
     workflowLocked,
     reviewSig,
@@ -449,6 +455,16 @@ export function projectViewOnlySession(realSession, { viewThreadId, viewOnlyThre
 export function viewOnlyPinNextAction(session, pin, { viewThreadId, reviewSignature } = {}) {
   if (!pin || !session) {
     return { kind: "none" };
+  }
+  // Built under a different run of the relay: its ids name these messages differently
+  // now, so refetch rather than keep merging into it. Checked before everything below,
+  // because a stale pin is stale whatever else is true of it.
+  //
+  // Strict, like the page rule — including "one side has a value and the other does
+  // not", which is the old-relay-to-new-relay upgrade. It terminates: the refresh it
+  // asks for rebuilds the pin stamped with the live generation, and that pin matches.
+  if ((pin.relayGeneration || "") !== (session.transcript_generation || "")) {
+    return viewThreadId === pin.threadId ? { kind: "refresh" } : { kind: "release" };
   }
   if (pin.threadId === session.active_thread_id) {
     return { kind: "release" };
