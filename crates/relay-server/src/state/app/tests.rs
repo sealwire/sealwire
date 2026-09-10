@@ -2483,7 +2483,7 @@ is also what keeps the refusal from confirming it exists: {error}"
                     status: status.to_string(),
                     turn_id: Some("turn-1".to_string()),
                     tool: Some(tool),
-                    seq: None,
+                    last_live_upsert_revision: None,
                 });
         }
     }
@@ -2504,7 +2504,7 @@ is also what keeps the refusal from confirming it exists: {error}"
                     status: "completed".to_string(),
                     turn_id: Some("turn-1".to_string()),
                     tool: Some(tool),
-                    seq: None,
+                    last_live_upsert_revision: None,
                 });
         }
     }
@@ -2850,7 +2850,7 @@ is also what keeps the refusal from confirming it exists: {error}"
                         status: "completed".to_string(),
                         turn_id: Some("turn-old".to_string()),
                         tool: None,
-                        seq: None,
+                        last_live_upsert_revision: None,
                     });
             }
             relay.observe_thread_cwd("thread-a", &linked_cwd);
@@ -3116,7 +3116,7 @@ is also what keeps the refusal from confirming it exists: {error}"
                     status: "completed".to_string(),
                     turn_id: Some("turn-1".to_string()),
                     tool: Some(file_tool(&[&linked_edit])),
-                    seq: Some(20),
+                    last_live_upsert_revision: Some(20),
                 });
             runtime
                 .transcript
@@ -3127,7 +3127,7 @@ is also what keeps the refusal from confirming it exists: {error}"
                     status: "completed".to_string(),
                     turn_id: Some("turn-1".to_string()),
                     tool: Some(file_tool(&[&main_edit])),
-                    seq: Some(10),
+                    last_live_upsert_revision: Some(10),
                 });
         }
 
@@ -3472,7 +3472,7 @@ is also what keeps the refusal from confirming it exists: {error}"
                         status: "completed".to_string(),
                         turn_id: Some("turn-chatter".to_string()),
                         tool: None,
-                        seq: None,
+                        last_live_upsert_revision: None,
                     });
             }
         }
@@ -19301,7 +19301,7 @@ settings update: {error}"
                 status: "completed".to_string(),
                 turn_id: Some("turn-evidence".to_string()),
                 tool: Some(tool),
-                seq: None,
+                last_live_upsert_revision: None,
             });
     }
 
@@ -19334,7 +19334,7 @@ settings update: {error}"
                     status: "completed".to_string(),
                     turn_id: Some("turn-chatter".to_string()),
                     tool: None,
-                    seq: None,
+                    last_live_upsert_revision: None,
                 });
         }
     }

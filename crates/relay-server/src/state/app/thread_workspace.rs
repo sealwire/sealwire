@@ -374,7 +374,10 @@ fn thread_write_evidence(transcript: &[crate::state::relay::TranscriptRecord]) -
             if chunk.is_empty() {
                 continue;
             }
-            let take = match (best.and_then(|current| current.seq), record.seq) {
+            let take = match (
+                best.and_then(|current| current.last_live_upsert_revision),
+                record.last_live_upsert_revision,
+            ) {
                 (None, _) if best.is_none() => true,
                 (None, Some(_)) => true,
                 (Some(current), Some(seq)) => seq > current,
@@ -387,7 +390,7 @@ fn thread_write_evidence(transcript: &[crate::state::relay::TranscriptRecord]) -
         match best {
             Some(record) => WriteEvidence {
                 paths: landed(record),
-                newest_seq: record.seq,
+                newest_seq: record.last_live_upsert_revision,
             },
             None => WriteEvidence::default(),
         }

@@ -1981,7 +1981,7 @@ fn persisted_state_round_trip_drops_ephemeral_fields() {
         status: "completed".to_string(),
         turn_id: Some("turn-1".to_string()),
         tool: None,
-        seq: None,
+        last_live_upsert_revision: None,
     });
     relay
         .pending_approvals
@@ -6691,7 +6691,7 @@ fn promoting_a_background_thread_does_not_rewind_the_real_threads_revision() {
             status: "completed".to_string(),
             turn_id: None,
             tool: None,
-            seq: None,
+            last_live_upsert_revision: None,
         },
         TranscriptRecord {
             item_id: "b".to_string(),
@@ -6700,7 +6700,7 @@ fn promoting_a_background_thread_does_not_rewind_the_real_threads_revision() {
             status: "completed".to_string(),
             turn_id: None,
             tool: None,
-            seq: None,
+            last_live_upsert_revision: None,
         },
     ];
 
