@@ -38,8 +38,8 @@ pub(crate) use self::review::{
     parent_commit_prompt, parent_fix_prompt, parent_recap_prompt, parse_verdict, post_back_message,
     re_review_prompt, re_review_prompt_for_checkpoint, re_review_prompt_for_target,
     review_approved_message, review_escalated_message, reviewer_prompt,
-    reviewer_prompt_for_checkpoint, reviewer_prompt_for_target, ReviewJob, ReviewJobStatus,
-    ReviewMode, ReviewRecapSource,
+    reviewer_prompt_for_checkpoint, reviewer_prompt_for_no_change, reviewer_prompt_for_target,
+    ReviewJob, ReviewJobStatus, ReviewMode, ReviewRecapSource,
 };
 // `Verdict` is consumed only by tests today; the workflow runner that will use it in
 // a live path isn't wired up yet, so keep the re-export without an unused-import

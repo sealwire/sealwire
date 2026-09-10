@@ -26,8 +26,8 @@ use crate::state::{
     parent_commit_prompt, parent_fix_prompt, parent_recap_prompt, parse_verdict, post_back_message,
     re_review_prompt, re_review_prompt_for_checkpoint, re_review_prompt_for_target,
     review_approved_message, review_escalated_message, reviewer_prompt,
-    reviewer_prompt_for_checkpoint, reviewer_prompt_for_target, ReviewJob, ReviewJobStatus,
-    ReviewMode, ReviewRecapSource, MAX_REVIEWERS_PER_PARENT,
+    reviewer_prompt_for_checkpoint, reviewer_prompt_for_no_change, reviewer_prompt_for_target,
+    ReviewJob, ReviewJobStatus, ReviewMode, ReviewRecapSource, MAX_REVIEWERS_PER_PARENT,
 };
 
 use super::checkpoint::{build_review_checkpoint, checkpoint_ref_name};
@@ -127,12 +127,14 @@ enum AuthorTurnOutcome {
 enum CommittedEvidence {
     Real(relay_api::GitReviewTarget),
     Checkpoint(relay_api::GitReviewTarget),
+    NoChange(u64),
 }
 
 enum RoundEvidence {
     Committed(relay_api::GitReviewTarget),
     Checkpoint(relay_api::GitReviewTarget),
     WorkspaceDiff(crate::protocol::WorkspaceDiffResponse),
+    NoChange(u64),
 }
 
 impl RoundEvidence {
@@ -140,6 +142,7 @@ impl RoundEvidence {
         match self {
             Self::Committed(target) | Self::Checkpoint(target) => target.generated_at,
             Self::WorkspaceDiff(diff) => diff.generated_at,
+            Self::NoChange(generated_at) => *generated_at,
         }
     }
 
@@ -147,6 +150,7 @@ impl RoundEvidence {
         match self {
             Self::Committed(_) | Self::Checkpoint(_) => false,
             Self::WorkspaceDiff(diff) => diff.truncated,
+            Self::NoChange(_) => false,
         }
     }
 
@@ -155,7 +159,7 @@ impl RoundEvidence {
             Self::Committed(target) | Self::Checkpoint(target) => {
                 Some(target.candidate_sha.as_str())
             }
-            Self::WorkspaceDiff(_) => None,
+            Self::WorkspaceDiff(_) | Self::NoChange(_) => None,
         }
     }
 
@@ -169,7 +173,7 @@ impl RoundEvidence {
         match self {
             Self::Committed(target) => Some(target.candidate_sha.as_str()),
             Self::Checkpoint(target) => Some(target.base_sha.as_str()),
-            Self::WorkspaceDiff(_) => None,
+            Self::WorkspaceDiff(_) | Self::NoChange(_) => None,
         }
     }
 }
@@ -617,6 +621,43 @@ to this thread."
         Ok(Some((base, Some(candidate))))
     }
 
+    /// A missing `LastMessage` is recovered by driving the author once. That
+    /// recovery turn is the subject of the review, so pin its resulting state;
+    /// otherwise a clean tree would be retargeted to an unrelated `HEAD^` commit.
+    async fn repin_review_target_after_recovery(
+        &self,
+        job_id: &str,
+        parent_thread_id: &str,
+        device_id: &str,
+        recovery_base_sha: Option<&str>,
+    ) -> Result<(), String> {
+        let workspace = self
+            .resolve_review_workspace(parent_thread_id, device_id)
+            .await?;
+        let grants = { self.relay.read().await.trust_grants() };
+        let Some(trusted) = grants.admit(&workspace.cwd).await.trusted().cloned() else {
+            return Ok(());
+        };
+        if !is_git_work_tree(&trusted).await? {
+            return Ok(());
+        }
+        let current_head = current_head_sha(&trusted).await?;
+        let base = match recovery_base_sha {
+            Some(base) => verify_commit(&trusted, base).await?,
+            None => current_head.clone(),
+        };
+        let candidate = (current_head != base).then_some(current_head);
+        self.update_job(job_id, move |job| {
+            job.base_sha = Some(base.clone());
+            job.round_base_sha = Some(base);
+            job.candidate_sha = candidate;
+            job.candidate_is_checkpoint = false;
+            job.verdict_candidate_sha = None;
+        })
+        .await;
+        Ok(())
+    }
+
     #[cfg(test)]
     pub async fn list_review_jobs(&self) -> Vec<ReviewJobView> {
         let relay = self.relay.read().await;
@@ -778,6 +819,8 @@ max_rounds={max_rounds}). Step 1: asking the author to recap its changes."
         // turn so the reviewer is still briefed. Every attempted parent turn goes
         // through `drivable_thread`; `WorkspaceGone` switches the review to the same
         // read-only behavior without a separate check-then-use window.
+        let mut recovered_missing_last_message = false;
+        let mut recovery_base_sha: Option<String> = None;
         let recap = match recap_source {
             ReviewRecapSource::LastMessage => {
                 match self.latest_assistant_entry(&parent_thread_id).await {
@@ -792,14 +835,21 @@ last message (no recap turn)."
                         .await;
                         text
                     }
-                    _ => match self.drive_parent_recap(&job_id, &parent_thread_id).await {
-                        RecapOutcome::Text(promoted, text) => {
-                            parent_thread_id = promoted;
-                            text
+                    _ => {
+                        recovered_missing_last_message = true;
+                        recovery_base_sha =
+                            self.relay.read().await.review_job(&job_id).and_then(|job| {
+                                job.candidate_sha.clone().or_else(|| job.base_sha.clone())
+                            });
+                        match self.drive_parent_recap(&job_id, &parent_thread_id).await {
+                            RecapOutcome::Text(promoted, text) => {
+                                parent_thread_id = promoted;
+                                text
+                            }
+                            RecapOutcome::WorkspaceGone => workspace_gone_recap(),
+                            RecapOutcome::Aborted => return,
                         }
-                        RecapOutcome::WorkspaceGone => workspace_gone_recap(),
-                        RecapOutcome::Aborted => return,
-                    },
+                    }
                 }
             }
             ReviewRecapSource::Recap => {
@@ -818,6 +868,25 @@ last message (no recap turn)."
                 }
             }
         };
+        if recovered_missing_last_message {
+            if let Err(error) = self
+                .repin_review_target_after_recovery(
+                    &job_id,
+                    &parent_thread_id,
+                    &device_id,
+                    recovery_base_sha.as_deref(),
+                )
+                .await
+            {
+                self.push_runtime_log(
+                    "warn",
+                    format!(
+                        "Review {job_id}: could not refresh the target after the fallback recap: {error}"
+                    ),
+                )
+                .await;
+            }
+        }
         {
             let recap = recap.clone();
             self.update_job(&job_id, |job| job.recap_text = Some(recap))
@@ -1164,6 +1233,13 @@ reviewer ({error}); re-resolving the workspace and retrying the round."
                 (RoundEvidence::WorkspaceDiff(diff), false, None) => {
                     reviewer_prompt(&recap, diff, instructions.as_deref(), &workspace_line)
                 }
+                (RoundEvidence::NoChange(_), reused, prior) => reviewer_prompt_for_no_change(
+                    &recap,
+                    instructions.as_deref(),
+                    &workspace_line,
+                    reused,
+                    prior,
+                ),
             };
             let prompt_candidate_sha = evidence.candidate_sha().map(str::to_string);
             let expected_head_sha = evidence.expected_head_sha().map(str::to_string);
@@ -1815,6 +1891,9 @@ tree would review commits this thread never made"
             Ok(Some(CommittedEvidence::Checkpoint(target))) => {
                 Ok((RoundEvidence::Checkpoint(target), workspace, cwd))
             }
+            Ok(Some(CommittedEvidence::NoChange(generated_at))) => {
+                Ok((RoundEvidence::NoChange(generated_at), workspace, cwd))
+            }
             Ok(None) => self
                 .collect_round_diff(workspace, parent_thread_id, device_id)
                 .await
@@ -1834,6 +1913,9 @@ tree would review commits this thread never made"
                     Ok(Some(CommittedEvidence::Checkpoint(target))) => {
                         Ok((RoundEvidence::Checkpoint(target), retried, cwd))
                     }
+                    Ok(Some(CommittedEvidence::NoChange(generated_at))) => {
+                        Ok((RoundEvidence::NoChange(generated_at), retried, cwd))
+                    }
                     Ok(None) => self
                         .collect_round_diff(retried, parent_thread_id, device_id)
                         .await
@@ -1849,7 +1931,8 @@ tree would review commits this thread never made"
         }
     }
 
-    /// Read this round's committed (or checkpointed) evidence for a git workspace.
+    /// Read this round's committed, checkpointed, or explicit no-change evidence
+    /// for a git workspace.
     /// `None` means the workspace is not a git repo at all — the caller falls back to
     /// `collect_round_diff`. A dirty tree with no committed candidate no longer asks the
     /// author to commit (see `checkpoint.rs`): it is snapshotted and returned as
@@ -1913,10 +1996,7 @@ tree would review commits this thread never made"
                     build_checkpoint_candidate(&trusted, &round_base, job_id).await?;
                 (round_base, checkpoint_sha, true)
             } else {
-                let base = first_parent_sha(&trusted, &current_head)
-                    .await?
-                    .unwrap_or_else(|| current_head.clone());
-                (base, current_head, false)
+                return Ok(Some(CommittedEvidence::NoChange(unix_now())));
             }
         } else if dirty {
             let round_base = current_head;
