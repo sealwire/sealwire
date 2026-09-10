@@ -1271,6 +1271,7 @@ fn device_claim_proof_rejects_different_peer() {
 #[test]
 fn summarize_thread_transcript_response_reports_entry_and_char_counts() {
     let summary = summarize_thread_transcript_response(&ThreadTranscriptResponse {
+        transcript_generation: String::new(),
         thread_id: "thread-1".to_string(),
         revision: 5,
         server_time: 6,

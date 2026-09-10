@@ -679,6 +679,21 @@ async fn handle_notification_for_provider(
             }
         }
         "item/started" => match string_at(&params, &["item", "type"]).as_deref() {
+            // Ahead of the generic arm below on purpose: that one would mint a SECOND
+            // row under the provider's id, knowing nothing about the send-boundary
+            // reservation that already has one. It also labels progress as a tool call.
+            Some("userMessage") => {
+                let route = thread_route(&relay, notification_thread_id.as_deref(), provider_key);
+                if matches!(route, ThreadRoute::Drop) {
+                    log_ignored_session_notification(
+                        method,
+                        notification_thread_id.as_deref(),
+                        &relay,
+                    );
+                    return;
+                }
+                changed |= apply_codex_user_message(&mut relay, &params, route);
+            }
             Some("agentMessage") => {
                 let route = thread_route(&relay, notification_thread_id.as_deref(), provider_key);
                 if matches!(route, ThreadRoute::Drop) {
@@ -862,25 +877,7 @@ async fn handle_notification_for_provider(
                     );
                     return;
                 }
-                if let (Some(item_id), Some(turn_id), Some(text)) = (
-                    string_at(&params, &["item", "id"]),
-                    string_at(&params, &["turnId"]),
-                    parse_user_text(value_at(&params, &["item"])),
-                ) {
-                    if let ThreadRoute::Background(bg_thread_id) = route {
-                        relay.bg_upsert_user_message(
-                            &bg_thread_id,
-                            item_id,
-                            text,
-                            turn_id,
-                            crate::state::unix_now(),
-                        );
-                    } else {
-                        relay.upsert_user_message(item_id, text, turn_id);
-                        relay.touch_progress(Some("thinking"), None);
-                    }
-                    changed = true;
-                }
+                changed |= apply_codex_user_message(&mut relay, &params, route);
             }
             Some("agentMessage") => {
                 let route = thread_route(&relay, notification_thread_id.as_deref(), provider_key);
@@ -1136,6 +1133,37 @@ enum ThreadRoute {
     Background(String),
     /// No active thread at all — drop.
     Drop,
+}
+
+/// Fold a `userMessage` notification into the one row the send already has.
+///
+/// Shared by `item/started` and `item/completed` so a send can never end up as two
+/// rows. Text is optional: a started event may carry none, and an empty string must
+/// not overwrite the text the reserved row is already showing.
+///
+/// Returns whether clients need to be told — the reservation binding this drives can
+/// mutate state on its own, and a silent `false` would leave that unpublished.
+fn apply_codex_user_message(relay: &mut RelayState, params: &Value, route: ThreadRoute) -> bool {
+    let (Some(item_id), Some(turn_id)) = (
+        string_at(params, &["item", "id"]),
+        string_at(params, &["turnId"]),
+    ) else {
+        return false;
+    };
+    let text = parse_user_text(value_at(params, &["item"])).unwrap_or_default();
+    if let ThreadRoute::Background(bg_thread_id) = route {
+        relay.bg_upsert_user_message(
+            &bg_thread_id,
+            item_id,
+            text,
+            turn_id,
+            crate::state::unix_now(),
+        );
+    } else {
+        relay.upsert_user_message(item_id, text, turn_id);
+        relay.touch_progress(Some("thinking"), None);
+    }
+    true
 }
 
 fn thread_route(relay: &RelayState, thread_id: Option<&str>, provider_key: &str) -> ThreadRoute {

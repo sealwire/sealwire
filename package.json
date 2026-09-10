@@ -117,6 +117,7 @@
     "test:browser:local-file-diff-cards": "npm run build && AGENT_PROVIDERS=fake node scripts/browser-local-file-diff-cards-e2e.mjs",
     "test:browser:local-file-diff-path": "npm run build && node scripts/browser-local-file-diff-path-e2e.mjs",
     "test:browser:local-command-group": "npm run build && AGENT_PROVIDERS=fake node scripts/browser-local-command-group-e2e.mjs",
+    "test:browser:view-only-transcript-overlap": "npm run build && AGENT_PROVIDERS=fake node scripts/browser-local-view-only-transcript-overlap-e2e.mjs",
     "test:browser:ask-user-click": "npm run build && AGENT_PROVIDERS=fake node scripts/browser-local-ask-user-click-e2e.mjs",
     "test:browser:remote-ask-user-inline": "npm run build && node scripts/browser-remote-ask-user-inline-e2e.mjs",
     "test:browser:local-auth": "npm run build && node scripts/browser-local-auth-e2e.mjs",

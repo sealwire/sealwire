@@ -7,6 +7,7 @@ use crate::protocol::{
 
 fn make_snapshot() -> SessionSnapshot {
     SessionSnapshot {
+        transcript_generation: String::new(),
         provider_fork_capabilities: Vec::new(),
         provider_archive_capabilities: Vec::new(),
         provider_status: Vec::new(),
@@ -579,6 +580,7 @@ fn cached_remote_action_result_keeps_canonical_threads() {
 #[test]
 fn remote_action_result_size_breakdown_reports_large_thread_transcript_payloads() {
     let thread_transcript = ThreadTranscriptResponse {
+        transcript_generation: String::new(),
         thread_id: "thread-1".to_string(),
         revision: 9,
         server_time: 12,
@@ -666,6 +668,7 @@ fn make_large_thread_transcript_plaintext() -> RemoteActionResultPlaintext {
         thread_entries: None,
         thread_entry_detail: None,
         thread_transcript: Some(ThreadTranscriptResponse {
+            transcript_generation: String::new(),
             thread_id: "thread-1".to_string(),
             revision: 9,
             server_time: 12,

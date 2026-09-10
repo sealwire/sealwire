@@ -2366,12 +2366,132 @@ function useJustPrependedItemIds(entries) {
   }, [entries]);
 }
 
+const TERMINAL_ENTRY_STATUSES = new Set(["completed", "complete", "failed", "error", "cancelled"]);
+
+// Repeated ids are a server-side defect. Say so ONCE per page — a render-loop log
+// would be noise, and silence lets a future regression hide behind this guard forever.
+let warnedAboutDuplicateRows = false;
+
+function noteDuplicateTranscriptRow(itemId) {
+  if (warnedAboutDuplicateRows || typeof console === "undefined") {
+    return;
+  }
+  warnedAboutDuplicateRows = true;
+  console.warn(
+    `[transcript] item id ${itemId} names more than one row; collapsing. `
+      + "An item id is the transcript's primary key — this is a relay-side defect."
+  );
+}
+
+/**
+ * Union of two copies of one tool call, field by field.
+ *
+ * Picking one object wholesale drops whatever only the other had: a command's
+ * `result_preview` and its `diff` can arrive on different copies of the same id.
+ * The repeat wins per field, but only where it actually carries something.
+ */
+function mergeDuplicateToolPayload(kept, repeat) {
+  if (!kept) return repeat || null;
+  if (!repeat) return kept;
+  const merged = { ...kept };
+  Object.keys(repeat).forEach((key) => {
+    const value = repeat[key];
+    const isEmpty =
+      value == null
+      || value === ""
+      || (Array.isArray(value) && value.length === 0);
+    if (!isEmpty) {
+      merged[key] = value;
+    }
+  });
+  return merged;
+}
+
+/**
+ * Fold a repeat into the row already holding that id.
+ *
+ * Position comes from the FIRST copy — that is where the message belongs — but the
+ * content comes from the most settled one. Keeping the first copy wholesale would
+ * freeze the row on the earlier, less-complete version, which is the exact shape the
+ * relay served: a "running" copy beside a "completed" one.
+ */
+function mergeDuplicateTranscriptRow(kept, repeat) {
+  const keptSettled = TERMINAL_ENTRY_STATUSES.has(kept?.status);
+  const repeatSettled = TERMINAL_ENTRY_STATUSES.has(repeat?.status);
+  const keptText = typeof kept?.text === "string" ? kept.text : "";
+  const repeatText = typeof repeat?.text === "string" ? repeat.text : "";
+  // Prefer the settled copy; between two of the same standing, prefer the fuller text.
+  const preferRepeat = repeatSettled === keptSettled
+    ? repeatText.length > keptText.length
+    : repeatSettled;
+  const base = preferRepeat ? { ...kept, ...repeat } : { ...repeat, ...kept };
+  return {
+    ...base,
+    // Field-wise, never trade content for the absence of it. A row's payload does
+    // not all live in `text`: a tool call's result and diff hang off `tool`, and the
+    // copy with the longer title is not necessarily the one that has them.
+    text: repeatText.length >= keptText.length ? repeat.text : kept.text,
+    tool: mergeDuplicateToolPayload(kept?.tool, repeat?.tool),
+    turn_id: repeat?.turn_id || kept?.turn_id || null,
+  };
+}
+
+/**
+ * One row per item id.
+ *
+ * The id is the transcript's primary key and is used directly as the React key and
+ * the virtual row key below, so a repeat gives two siblings one key — which collapses
+ * the virtualizer's per-key size cache and paints the rows on top of each other.
+ *
+ * Collapsed rather than asserted: bad data from an older relay should degrade, not
+ * blank the transcript. The defect is prevented server-side; this is the last-line
+ * guard, and it warns once so it cannot hide a regression indefinitely.
+ *
+ * Returns the input array unchanged when there is nothing to collapse.
+ */
+export function collapseDuplicateTranscriptRows(entries) {
+  if (!Array.isArray(entries)) {
+    return [];
+  }
+  let indexById = null;
+  let collapsed = null;
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    const itemId = entry?.item_id || entry?.id || "";
+    if (!itemId) {
+      if (collapsed) collapsed.push(entry);
+      continue;
+    }
+    if (!indexById) indexById = new Map();
+    const seenAt = indexById.get(itemId);
+    if (seenAt === undefined) {
+      if (!collapsed) {
+        indexById.set(itemId, index);
+      } else {
+        indexById.set(itemId, collapsed.length);
+        collapsed.push(entry);
+      }
+      continue;
+    }
+    noteDuplicateTranscriptRow(itemId);
+    if (!collapsed) {
+      collapsed = entries.slice(0, index);
+    }
+    collapsed[seenAt] = mergeDuplicateTranscriptRow(collapsed[seenAt], entry);
+  }
+  return collapsed || entries;
+}
+
 export function TranscriptContent({
   approval = null,
-  entries = [],
+  entries: rawEntries = [],
   hydrationLoading = false,
   options = null,
 }) {
+  const entries = React.useMemo(
+    () => collapseDuplicateTranscriptRows(rawEntries),
+    [rawEntries]
+  );
   const groupedItems = React.useMemo(() => groupToolEntries(entries), [entries]);
   const latestUserEntryId = React.useMemo(() => {
     for (let index = entries.length - 1; index >= 0; index -= 1) {

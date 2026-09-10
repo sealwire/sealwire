@@ -365,6 +365,7 @@ impl RelayState {
     /// turn id or disconnects, a retry would make an unknown notification
     /// impossible to attribute to the old or new request.
     pub fn begin_codex_user_turn(&mut self, thread_id: &str, text: &str) -> Result<String, String> {
+        let generation = self.transcript_generation.clone();
         let item_id = {
             let runtime = self.ensure_runtime_for_thread(thread_id);
             if runtime.active_turn_id.is_some() {
@@ -377,8 +378,14 @@ impl RelayState {
             }
             runtime.codex_user_reservation_seq =
                 runtime.codex_user_reservation_seq.saturating_add(1);
+            // The generation is what makes this safe to keep FOREVER as the row's id.
+            // The counter is rebuilt at zero from provider history, so across a restart
+            // it alone would reissue `...:1` — and a client still holding the previous
+            // run's `...:1` (in a persisted page) merges the two sends into one row by
+            // id, losing the new message with no error. The counter stays for readable
+            // ordering within a run.
             format!(
-                "codex:user-reserve:{thread_id}:{}",
+                "codex:user-reserve:{generation}:{thread_id}:{}",
                 runtime.codex_user_reservation_seq
             )
         };
@@ -484,7 +491,7 @@ impl RelayState {
         runtime.codex_start_reservation = None;
         runtime
             .transcript
-            .retain(|entry| entry.item_id != reservation_id);
+            .retain(|entry| !is_withdrawable_reservation_row(entry, reservation_id));
         let _ = self.bump_thread_transcript_revision(thread_id);
         if self.active_thread_id.as_deref() == Some(thread_id) {
             self.sync_selected_runtime_to_fields();
@@ -505,7 +512,7 @@ impl RelayState {
             if let Some(runtime) = self.runtimes.get_mut(thread_id) {
                 runtime
                     .transcript
-                    .retain(|entry| entry.item_id != reservation.item_id);
+                    .retain(|entry| !is_withdrawable_reservation_row(entry, &reservation.item_id));
             }
             let _ = self.bump_thread_transcript_revision(thread_id);
             if self.active_thread_id.as_deref() == Some(thread_id) {
@@ -532,7 +539,6 @@ impl RelayState {
     fn reconcile_codex_user_reservation(
         &mut self,
         thread_id: &str,
-        item_id: String,
         text: String,
         turn_id: String,
     ) -> bool {
@@ -578,7 +584,10 @@ impl RelayState {
         else {
             return false;
         };
-        entry.item_id = item_id;
+        // The relay's own id STAYS this row's id. It was published to clients the
+        // moment the send was accepted, and a snapshot merge can only add and update —
+        // it cannot express a rename, so every client already holding the old id would
+        // keep it beside the new one and show one send twice.
         entry.kind = TranscriptEntryKind::UserText;
         entry.text = if text.is_empty() {
             entry.text.take()
@@ -602,19 +611,17 @@ impl RelayState {
         text: String,
         turn_id: String,
     ) {
-        if self.reconcile_codex_user_reservation(
-            thread_id,
-            item_id.clone(),
-            text.clone(),
-            turn_id.clone(),
-        ) {
+        if self.reconcile_codex_user_reservation(thread_id, text.clone(), turn_id.clone()) {
             return;
         }
         self.upsert_transcript_item_for_thread(
             thread_id,
             item_id,
             TranscriptEntryKind::UserText,
-            Some(text),
+            // `item/started` can carry no content. Empty must not overwrite the text
+            // this row already has — `upsert` treats `Some("")` as a real value. NOT
+            // `non_empty`, which trims: a message's own leading/trailing space is text.
+            if text.is_empty() { None } else { Some(text) },
             "completed".to_string(),
             Some(turn_id),
             None,
@@ -1099,6 +1106,20 @@ pub(super) fn merge_tool_call_view(
             })
         }
     }
+}
+
+/// Whether a reservation's row may still be withdrawn.
+///
+/// The reservation's id STAYS the settled row's id — there is no rename — so the id
+/// alone no longer separates "still only a placeholder" from "Codex has answered for
+/// this". Both callers already refuse once `reservation.turn_id` is set, and binding
+/// stamps the reservation and the row together, so this is belt-and-braces rather than
+/// the load-bearing check: it keeps the rule on the ROW, where a future caller that
+/// forgets the reservation-side guard still cannot delete a real message.
+fn is_withdrawable_reservation_row(entry: &TranscriptRecord, reservation_id: &str) -> bool {
+    entry.item_id == reservation_id
+        && entry.kind == TranscriptEntryKind::UserText
+        && entry.turn_id.is_none()
 }
 
 fn transcript_mutation_meta(

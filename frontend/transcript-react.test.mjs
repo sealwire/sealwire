@@ -10,6 +10,7 @@ import {
   TranscriptEntry,
   buildAskUserAnswerValue,
   buildAskUserAnswersPayload,
+  collapseDuplicateTranscriptRows,
   diffPrependedItemIds,
   findTranscriptScrollElement,
   findTranscriptEntryNodeIndex,
@@ -3044,4 +3045,152 @@ test("answering ONE of two questions un-pins only that one", () => {
     stillPendingIndex > trailingIndex,
     "the still-unanswered question stays pinned at the bottom"
   );
+});
+
+test("a repeated item id is one row, not two — the relay has served the same user send twice", () => {
+  const send = {
+    item_id: "01a08843-612f-7593-88d6-169aae77ead7",
+    kind: "user_text",
+    text: "啥叫snapshot SHA？",
+    turn_id: "01a08843-60e0-7f73-86df-d9e6a35ddc06",
+  };
+  const deduped = collapseDuplicateTranscriptRows([
+    { item_id: "agent-before", kind: "agent_text", text: "before" },
+    { ...send, status: "completed" },
+    { ...send, status: "running" },
+    { item_id: "agent-after", kind: "agent_text", text: "after" },
+  ]);
+
+  assert.deepEqual(
+    deduped.map((entry) => entry.item_id),
+    ["agent-before", send.item_id, "agent-after"]
+  );
+  // The first copy wins: it is the settled one, at the position the send happened.
+  assert.equal(deduped[1].status, "completed");
+});
+
+test("entries with no item id are all kept — they have no identity to collide on", () => {
+  const entries = [
+    { kind: "agent_text", text: "one" },
+    { kind: "agent_text", text: "two" },
+  ];
+  assert.equal(collapseDuplicateTranscriptRows(entries).length, 2);
+});
+
+test("a transcript with unique ids is returned as-is, so React sees no new array", () => {
+  const entries = [
+    { item_id: "a", kind: "user_text", text: "a" },
+    { item_id: "b", kind: "agent_text", text: "b" },
+  ];
+  assert.equal(collapseDuplicateTranscriptRows(entries), entries);
+});
+// Keeping the first copy and silently dropping the rest can freeze a row on the
+// EARLIER, less-settled version — which is exactly the shape the relay served: a
+// "running" copy beside a "completed" one. Position comes from the first copy, but
+// the content has to come from the most settled one.
+test("a duplicated id keeps its first position but the more settled content", () => {
+  const collapsed = collapseDuplicateTranscriptRows([
+    { item_id: "before", kind: "agent_text", text: "before" },
+    { item_id: "dup", kind: "user_text", text: "half", status: "running", turn_id: null },
+    { item_id: "dup", kind: "user_text", text: "the whole message", status: "completed", turn_id: "turn-1" },
+    { item_id: "after", kind: "agent_text", text: "after" },
+  ]);
+
+  assert.deepEqual(
+    collapsed.map((entry) => entry.item_id),
+    ["before", "dup", "after"]
+  );
+  assert.equal(collapsed[1].status, "completed");
+  assert.equal(collapsed[1].text, "the whole message");
+  assert.equal(collapsed[1].turn_id, "turn-1");
+});
+
+test("a duplicated id does not lose content when the LATER copy is the emptier one", () => {
+  const collapsed = collapseDuplicateTranscriptRows([
+    { item_id: "dup", kind: "user_text", text: "the whole message", status: "completed" },
+    { item_id: "dup", kind: "user_text", text: "", status: "running" },
+  ]);
+
+  assert.equal(collapsed.length, 1);
+  assert.equal(collapsed[0].text, "the whole message");
+  assert.equal(collapsed[0].status, "completed");
+});
+
+// The merge is a generic last-line guard, so it must not trade away nested content
+// either: a tool row's result/diff lives under `tool`, not in `text`.
+test("a duplicated tool row does not lose its richer tool payload to an emptier copy", () => {
+  const collapsed = collapseDuplicateTranscriptRows([
+    {
+      item_id: "tool-1",
+      kind: "tool_call",
+      text: "Bash",
+      status: "completed",
+      tool: { item_type: "command_execution", command: "cargo test", result_preview: "ok" },
+    },
+    { item_id: "tool-1", kind: "tool_call", text: "Bash", status: "running", tool: null },
+  ]);
+
+  assert.equal(collapsed.length, 1);
+  assert.equal(collapsed[0].status, "completed");
+  assert.equal(collapsed[0].tool?.result_preview, "ok");
+});
+
+test("a duplicated tool row takes the LATER copy's richer payload when that one is settled", () => {
+  const collapsed = collapseDuplicateTranscriptRows([
+    { item_id: "tool-1", kind: "tool_call", text: "Bash", status: "running", tool: null },
+    {
+      item_id: "tool-1",
+      kind: "tool_call",
+      text: "Bash",
+      status: "completed",
+      tool: { item_type: "command_execution", command: "cargo test", result_preview: "ok" },
+    },
+  ]);
+
+  assert.equal(collapsed.length, 1);
+  assert.equal(collapsed[0].tool?.result_preview, "ok");
+});
+
+// The tie-break between two copies of equal standing looked only at `text`, so a
+// copy with a longer title but no payload could win and drop the tool result.
+test("between two equally-settled copies, a tool payload is not dropped for a longer title", () => {
+  const collapsed = collapseDuplicateTranscriptRows([
+    {
+      item_id: "tool-1",
+      kind: "tool_call",
+      text: "Bash",
+      status: "running",
+      tool: { item_type: "command_execution", command: "cargo test", result_preview: "ok" },
+    },
+    { item_id: "tool-1", kind: "tool_call", text: "Bash (longer title)", status: "running", tool: null },
+  ]);
+
+  assert.equal(collapsed.length, 1);
+  assert.equal(collapsed[0].tool?.result_preview, "ok", "the payload must survive");
+});
+
+// `repeat.tool || kept.tool` picks one object wholesale, so when both copies carry a
+// tool with COMPLEMENTARY fields the loser's result/diff is dropped.
+test("two duplicated tool payloads are merged field-wise, not picked wholesale", () => {
+  const collapsed = collapseDuplicateTranscriptRows([
+    {
+      item_id: "tool-1",
+      kind: "tool_call",
+      text: "Bash",
+      status: "completed",
+      tool: { item_type: "command_execution", command: "cargo test", diff: "@@ -1 +1 @@" },
+    },
+    {
+      item_id: "tool-1",
+      kind: "tool_call",
+      text: "Bash",
+      status: "completed",
+      tool: { item_type: "command_execution", command: "cargo test", result_preview: "ok" },
+    },
+  ]);
+
+  assert.equal(collapsed.length, 1);
+  assert.equal(collapsed[0].tool.result_preview, "ok");
+  assert.equal(collapsed[0].tool.diff, "@@ -1 +1 @@", "the other copy's diff must survive");
+  assert.equal(collapsed[0].tool.command, "cargo test");
 });
